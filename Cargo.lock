@@ -425,7 +425,13 @@ dependencies = [
  "hickory-resolver",
  "hickory-server",
  "parking_lot",
+ "rustls",
+ "rustls-pemfile",
+ "tempfile",
  "tokio",
+ "tokio-rustls",
+ "tokio-util",
+ "toml",
  "tracing",
  "tracing-subscriber",
 ]
@@ -434,6 +440,7 @@ dependencies = [
 name = "daygle-api"
 version = "0.1.0"
 dependencies = [
+ "arc-swap",
  "axum",
  "chrono",
  "daygle-authoritative",
@@ -2079,6 +2086,7 @@ dependencies = [
  "bytes",
  "futures-core",
  "futures-sink",
+ "futures-util",
  "pin-project-lite",
  "tokio",
 ]

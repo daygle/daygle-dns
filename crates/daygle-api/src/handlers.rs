@@ -49,15 +49,16 @@ pub async fn status(State(state): State<AppState>) -> Response {
         Ok(n) => n,
         Err(e) => return map_err(e),
     };
+    let config = state.config.load_full();
     Json(serde_json::json!({
         "version": VERSION,
         "uptime_secs": state.started_at.elapsed().as_secs(),
         "zones": zones,
         "records": records,
-        "recursion": state.resolver.is_some(),
-        "dnssec": state.config.recursive.dnssec_validate,
-        "dot_enabled": state.config.dot.enabled,
-        "api_enabled": state.config.api.enabled,
+        "recursion": state.resolver.load_full().is_some(),
+        "dnssec": config.recursive.dnssec_validate,
+        "dot_enabled": config.dot.enabled,
+        "api_enabled": config.api.enabled,
     }))
     .into_response()
 }
@@ -80,7 +81,26 @@ pub async fn logs(
 }
 
 pub async fn config(State(state): State<AppState>) -> Response {
-    Json((&*state.config).clone()).into_response()
+    Json((*state.config.load_full()).clone()).into_response()
+}
+
+/// Re-read the configuration file and apply policy/upstream/listener changes
+/// immediately.
+pub async fn reload_config(State(state): State<AppState>) -> Response {
+    if state.config_path.is_none() || state.reload_notify.is_none() {
+        return error_response(
+            StatusCode::CONFLICT,
+            "live reload is unavailable (no config file or reload disabled)",
+        );
+    }
+    // Wake the watcher; it performs the actual reload and reports failures in
+    // the logs. The re-read is asynchronous by design.
+    state.reload_notify.as_ref().unwrap().notify_waiters();
+    (
+        StatusCode::ACCEPTED,
+        Json(serde_json::json!({ "status": "reload requested" })),
+    )
+        .into_response()
 }
 
 // ---- Zones --------------------------------------------------------------
@@ -234,7 +254,7 @@ pub async fn unsign_zone(State(state): State<AppState>, Path(id): Path<String>) 
 // ---- Cache --------------------------------------------------------------
 
 pub async fn clear_cache(State(state): State<AppState>) -> Response {
-    if let Some(resolver) = &state.resolver {
+    if let Some(resolver) = state.resolver.load_full() {
         resolver.clear_cache();
     }
     StatusCode::NO_CONTENT.into_response()

@@ -84,7 +84,6 @@ impl RecursiveResolver {
             .map_err(|e| DaygleError::Resolution(format!("invalid name '{name}': {e}")))?;
         match self.inner.lookup(name, record_type).await {
             Ok(lookup) => {
-                self.metrics.inc(&self.metrics.recursive);
                 self.metrics.inc(&self.metrics.cache_misses);
                 debug!(query = %lookup.query().name(), rtype = ?record_type, "resolved recursively");
                 Ok(lookup)

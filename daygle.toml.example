@@ -1,0 +1,87 @@
+# Daygle DNS — example configuration
+# Copy to /etc/daygle/daygle.toml and adjust as needed.
+
+# Plaintext DNS listeners (UDP/TCP on port 53).
+[server]
+listen = "0.0.0.0"
+port = 53
+udp_enabled = true
+tcp_enabled = true
+tcp_timeout_ms = 5000
+response_buffer_size = 4096
+# Watch this file and apply policy/upstream/listener edits without restarting.
+reload_enabled = true
+reload_interval_ms = 2000
+
+# Recursive resolution (root -> TLD -> authoritative) with caching,
+# negative caching, retries and timeouts.
+[recursive]
+enabled = true
+# Empty list + use_system_config = use /etc/resolv.conf.
+# Supported upstream forms:
+#   8.8.8.8             plaintext UDP+TCP, port 53
+#   1.1.1.1:5353        plaintext UDP+TCP, custom port
+#   tls://1.1.1.1:853@cloudflare-dns.com   DNS over TLS
+upstreams = []
+use_system_config = true
+cache_size = 8192
+timeout_secs = 5
+attempts = 3
+dnssec_validate = true
+min_cache_ttl = 0
+negative_cache_ttl = 3600
+
+# Authoritative zone storage (SQLite).
+[authoritative]
+database = "/var/lib/daygle/daygle.db"
+# Optional: import BIND zone files (*.zone, *.db, *.txt) from this directory.
+zones_dir = "/etc/daygle/zones"
+default_primary_ns = "ns1.daygle.test."
+default_admin_mailbox = "admin.daygle.test."
+dnssec_enabled = true
+
+# DNS over TLS (RFC 7858) using rustls.
+[dot]
+enabled = true
+listen = "0.0.0.0"
+port = 853
+cert_path = "/etc/daygle/certs/server.crt"
+key_path = "/etc/daygle/certs/server.key"
+# Generate a self-signed certificate when none is present.
+self_signed = true
+server_name = "dns.example.com"
+
+# REST API + embedded web GUI.
+[api]
+enabled = true
+listen = "127.0.0.1"
+port = 5380
+# Bearer token required by mutating endpoints. Leave empty to disable auth.
+api_token = ""
+gui_enabled = true
+cors_origins = []
+
+# Policy engine: blocklists, ACLs and per-client rules.
+[policy]
+enabled = true
+blocklist = ["*.doubleclick.net", "*.ads.example.com"]
+blocklist_files = ["/etc/daygle/blocklist.txt"]
+denied_networks = []
+allowed_networks = []
+
+# Ordered per-client rules. `clients` defaults to everyone when empty.
+# action: allow | block | redirect
+[[policy.rules]]
+clients = ["192.168.1.0/24"]
+domains = ["*.internal.test"]
+action = "redirect"
+redirect = "0.0.0.0"
+
+[[policy.rules]]
+clients = ["10.0.0.0/8"]
+domains = []
+action = "block"
+
+[logging]
+level = "info"
+ring_buffer = 2000

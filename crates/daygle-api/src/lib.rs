@@ -11,6 +11,7 @@
 //! | `GET`    | `/api/metrics`                    | runtime metrics |
 //! | `GET`    | `/api/logs?limit=N`               | recent log entries |
 //! | `GET`    | `/api/config`                     | effective configuration |
+//! | `POST`   | `/api/config/reload`              | re-read the config file (live reload) |
 //! | `GET`    | `/api/zones`                      | list zones |
 //! | `POST`   | `/api/zones`                      | create a zone |
 //! | `DELETE` | `/api/zones/:id`                  | delete a zone |
@@ -24,12 +25,18 @@
 //!
 //! Mutating endpoints require a `Authorization: Bearer <token>` header when
 //! [`daygle_core::config::ApiSettings::api_token`] is configured.
+//!
+//! The [`AppState`] holds the effective configuration and the recursive
+//! resolver in `ArcSwap` containers so the live-reload machinery can publish
+//! new values without locking or restarting.
 
 mod handlers;
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
+use arc_swap::{ArcSwap, ArcSwapOption};
 use axum::extract::Request;
 use axum::http::StatusCode;
 use axum::middleware::{self, Next};
@@ -42,14 +49,22 @@ use daygle_core::{LogStore, Metrics};
 use daygle_recursive::RecursiveResolver;
 
 /// Shared state for the API and the DNS dispatcher.
+///
+/// `config` and `resolver` are atomic-swap containers so the live-reload
+/// machinery can publish updates that every in-flight request observes.
 #[derive(Clone)]
 pub struct AppState {
     pub catalog: Arc<AuthorityCatalog>,
-    pub resolver: Option<Arc<RecursiveResolver>>,
+    pub resolver: Arc<ArcSwapOption<RecursiveResolver>>,
     pub metrics: Arc<Metrics>,
     pub logs: Arc<LogStore>,
-    pub config: Arc<DaygleConfig>,
+    pub config: Arc<ArcSwap<DaygleConfig>>,
     pub started_at: Instant,
+    /// Path of the config file to re-read on `POST /api/config/reload`.
+    pub config_path: Option<Arc<PathBuf>>,
+    /// Notify handle that wakes the config-file watcher for an immediate
+    /// reload; `None` when live reload is unavailable.
+    pub reload_notify: Option<Arc<tokio::sync::Notify>>,
 }
 
 /// Build the API router (REST endpoints plus the embedded GUI).
@@ -58,7 +73,7 @@ pub fn router(state: AppState) -> Router {
         .route("/status", get(handlers::status))
         .route("/metrics", get(handlers::metrics))
         .route("/logs", get(handlers::logs))
-        .route("/config", get(handlers::config))
+        .route("/config", get(handlers::config).post(handlers::reload_config))
         .route("/zones", get(handlers::list_zones).post(handlers::create_zone))
         .route("/zones/import", post(handlers::import_zone))
         .route("/zones/{id}", delete(handlers::delete_zone))
@@ -78,7 +93,7 @@ pub fn router(state: AppState) -> Router {
 
     let mut app = Router::new().nest("/api", api);
 
-    if state.config.api.gui_enabled {
+    if state.config.load().api.gui_enabled {
         app = app
             .route("/", get(handlers::gui_index))
             .route("/{*path}", get(handlers::gui_asset));
@@ -96,7 +111,7 @@ async fn require_auth(
     if req.method() == axum::http::Method::GET || req.method() == axum::http::Method::OPTIONS {
         return next.run(req).await;
     }
-    let configured = state.config.api.api_token.trim();
+    let configured = state.config.load().api.api_token.trim().to_string();
     if configured.is_empty() {
         return next.run(req).await;
     }

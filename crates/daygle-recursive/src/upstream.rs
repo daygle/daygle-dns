@@ -142,7 +142,7 @@ mod tests {
 
     #[test]
     fn plain_custom_port() {
-        let (ip, port) = split_host_port("8.8.8.8:5353").unwrap();
+        let (_ip, port) = split_host_port("8.8.8.8:5353").unwrap();
         assert_eq!(port, 5353);
     }
 

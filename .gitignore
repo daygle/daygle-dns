@@ -1,11 +1,21 @@
 # Rust
 /target
+**/*.rs.bk
 
-# Freebuff app data
-.freebuff/
+# Frontend dependencies only (the built bundle in web/dist is committed so the
+# server embeds a working dashboard without requiring Node).
+web/node_modules
 
-# Web build output
-web/dist/
+# Runtime artifacts
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
 
-# Node
-node_modules/
+# Local configuration / certificates
+daygle.toml
+certs/
+
+# OS / editor
+.DS_Store
+*.swp

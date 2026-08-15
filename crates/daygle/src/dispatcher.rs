@@ -3,6 +3,7 @@
 use std::net::IpAddr;
 use std::sync::Arc;
 
+use arc_swap::{ArcSwap, ArcSwapOption};
 use async_trait::async_trait;
 use daygle_authoritative::AuthorityCatalog;
 use daygle_core::{DaygleError, LogStore, Metrics};
@@ -27,17 +28,19 @@ use tracing::{debug, warn};
 ///    [`RecursiveResolver`].
 pub struct DnsDispatcher {
     catalog: Arc<AuthorityCatalog>,
-    resolver: Option<Arc<RecursiveResolver>>,
-    policy: Arc<PolicyEngine>,
+    resolver: Arc<ArcSwapOption<RecursiveResolver>>,
+    policy: Arc<ArcSwap<PolicyEngine>>,
     metrics: Arc<Metrics>,
     logs: Arc<LogStore>,
 }
 
 impl DnsDispatcher {
+    /// Build a dispatcher whose policy and recursive resolver can be swapped
+    /// at runtime (live reload).
     pub fn new(
         catalog: Arc<AuthorityCatalog>,
-        resolver: Option<Arc<RecursiveResolver>>,
-        policy: Arc<PolicyEngine>,
+        resolver: Arc<ArcSwapOption<RecursiveResolver>>,
+        policy: Arc<ArcSwap<PolicyEngine>>,
         metrics: Arc<Metrics>,
         logs: Arc<LogStore>,
     ) -> Self {
@@ -48,6 +51,24 @@ impl DnsDispatcher {
             metrics,
             logs,
         }
+    }
+
+    /// Convenience constructor for callers that do not need live reload (e.g.
+    /// tests and simple embeddings).
+    pub fn from_components(
+        catalog: Arc<AuthorityCatalog>,
+        resolver: Option<Arc<RecursiveResolver>>,
+        policy: PolicyEngine,
+        metrics: Arc<Metrics>,
+        logs: Arc<LogStore>,
+    ) -> Self {
+        Self::new(
+            catalog,
+            Arc::new(ArcSwapOption::from(resolver)),
+            Arc::new(ArcSwap::from_pointee(policy)),
+            metrics,
+            logs,
+        )
     }
 
     fn log_error(&self, component: &str, message: impl Into<String>) {
@@ -87,8 +108,10 @@ impl RequestHandler for DnsDispatcher {
         let rtype = info.query.query_type().to_string();
         let client = info.src.ip();
 
-        // 1. Policy.
-        let decision = self.policy.evaluate(client, &qname, &rtype).await;
+        // 1. Policy. The engine is swapped atomically on reload; clone out the
+        // current one so a single query sees one consistent snapshot.
+        let policy = self.policy.load_full();
+        let decision = policy.evaluate(client, &qname, &rtype).await;
         match &decision.action {
             Action::Allow => {}
             Action::Refused => {
@@ -117,8 +140,10 @@ impl RequestHandler for DnsDispatcher {
             return self.catalog.read().lookup(request, edns, now, response_handle).await;
         }
 
-        // 3. Recursive resolution.
-        let Some(resolver) = &self.resolver else {
+        // 3. Recursive resolution. The resolver is swapped atomically on
+        // reload; clone out the current one for this query.
+        let resolver = self.resolver.load_full();
+        let Some(resolver) = resolver else {
             // Recursion disabled and not authoritative: REFUSED.
             return send_error(&mut response_handle, request, ResponseCode::Refused).await;
         };

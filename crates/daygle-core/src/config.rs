@@ -5,6 +5,7 @@
 
 use std::collections::BTreeSet;
 use std::net::IpAddr;
+use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
@@ -54,9 +55,11 @@ impl DaygleConfig {
     }
 
     /// Load and parse a configuration file from disk.
-    pub fn load(path: &str) -> Result<Self> {
-        let text = std::fs::read_to_string(path)
-            .map_err(|e| DaygleError::Config(format!("cannot read {path}: {e}")))?;
+    pub fn load(path: impl AsRef<Path>) -> Result<Self> {
+        let path = path.as_ref();
+        let text = std::fs::read_to_string(path).map_err(|e| {
+            DaygleError::Config(format!("cannot read {}: {e}", path.display()))
+        })?;
         Self::parse(&text)
     }
 
@@ -115,6 +118,12 @@ pub struct ServerSettings {
     pub tcp_timeout_ms: u64,
     /// Outbound response buffer size (bytes).
     pub response_buffer_size: usize,
+    /// Watch the configuration file and apply policy, upstream and listener
+    /// changes without restarting.
+    pub reload_enabled: bool,
+    /// How often the configuration file is polled for changes, in
+    /// milliseconds.
+    pub reload_interval_ms: u64,
 }
 
 impl Default for ServerSettings {
@@ -126,6 +135,8 @@ impl Default for ServerSettings {
             tcp_enabled: true,
             tcp_timeout_ms: 5000,
             response_buffer_size: 4096,
+            reload_enabled: true,
+            reload_interval_ms: 2000,
         }
     }
 }

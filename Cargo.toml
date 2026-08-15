@@ -31,6 +31,7 @@ hickory-server = { version = "0.26", features = [
 hickory-resolver = { version = "0.26", features = ["dnssec-ring", "tls-ring"] }
 
 tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["rt"] }
 tokio-rustls = "0.26"
 rustls = "0.23"
 rustls-pemfile = "2"

@@ -34,16 +34,18 @@ pub fn lookup(path: &str) -> Option<Asset> {
     };
 
     // SPA fallback: unknown paths without a file extension serve the shell.
-    let file = GuiAssets::get(path).or_else(|| {
-        if path.contains('.') {
-            None
-        } else {
-            GuiAssets::get("index.html")
+    let (served, file) = match GuiAssets::get(path) {
+        Some(file) => (path, file),
+        None => {
+            if path.contains('.') {
+                return None;
+            }
+            ("index.html", GuiAssets::get("index.html")?)
         }
-    })?;
+    };
 
     Some(Asset {
-        content_type: content_type(path),
+        content_type: content_type(served),
         bytes: file.data.to_vec(),
     })
 }

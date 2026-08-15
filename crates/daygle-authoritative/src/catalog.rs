@@ -60,9 +60,10 @@ impl AuthorityCatalog {
         self.catalog.load_full()
     }
 
-    /// Whether a zone apex is present in the catalog.
+    /// Whether `name` falls inside an authoritative zone (recursive search
+    /// from the name up to the root).
     pub fn contains(&self, name: &LowerName) -> bool {
-        self.catalog.load().contains(name)
+        self.catalog.load().find(name).is_some()
     }
 
     /// Rebuild the catalog from the database, applying DNSSEC signing when
