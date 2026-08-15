@@ -2,7 +2,6 @@
 
 #![allow(dead_code)]
 
-use std::io::BufReader;
 use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
@@ -19,6 +18,7 @@ use daygle_policy::PolicyEngine;
 use hickory_proto::op::{Message, MessageType, OpCode, Query};
 use hickory_proto::rr::{Name, RecordType};
 use hickory_server::server::Server;
+use rustls_pki_types::pem::PemObject;
 
 /// A configuration with ephemeral ports and no recursion, bound to loopback.
 pub fn base_config(db: &Path) -> DaygleConfig {
@@ -106,9 +106,9 @@ pub async fn dot_query(
         .expect("connect DoT");
 
     let mut roots = rustls::RootCertStore::empty();
-    let cert_pem = std::fs::read(cert_path).expect("read cert");
-    let mut reader = BufReader::new(cert_pem.as_slice());
-    for cert in rustls_pemfile::certs(&mut reader) {
+    for cert in rustls::pki_types::CertificateDer::<'_>::pem_file_iter(cert_path)
+        .expect("open cert file")
+    {
         roots.add(cert.expect("parse cert")).expect("add root");
     }
 

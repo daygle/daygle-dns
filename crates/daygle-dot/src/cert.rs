@@ -1,13 +1,13 @@
 //! TLS certificate loading and self-signed generation.
 
 use std::fs;
-use std::io::BufReader;
 use std::path::Path;
 use std::sync::Arc;
 
 use daygle_core::config::DotSettings;
 use daygle_core::error::{DaygleError, Result};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+use rustls_pki_types::pem::PemObject;
 use tracing::info;
 
 /// Ensure the configured certificate/key exist, generating a self-signed pair
@@ -81,9 +81,8 @@ pub fn load_tls_config(cert_path: &str, key_path: &str) -> Result<rustls::Server
 }
 
 fn read_certs(path: &str) -> Result<Vec<CertificateDer<'static>>> {
-    let data = fs::read(path).map_err(DaygleError::Io)?;
-    let mut reader = BufReader::new(data.as_slice());
-    let certs = rustls_pemfile::certs(&mut reader)
+    let certs = CertificateDer::pem_file_iter(path)
+        .map_err(|e| DaygleError::Tls(format!("cannot open cert file '{path}': {e}")))?
         .collect::<std::result::Result<Vec<_>, _>>()
         .map_err(|e| DaygleError::Tls(format!("cannot parse certificate '{path}': {e}")))?;
     if certs.is_empty() {
@@ -95,11 +94,11 @@ fn read_certs(path: &str) -> Result<Vec<CertificateDer<'static>>> {
 }
 
 fn read_key(path: &str) -> Result<PrivateKeyDer<'static>> {
-    let data = fs::read(path).map_err(DaygleError::Io)?;
-    let mut reader = BufReader::new(data.as_slice());
-    rustls_pemfile::private_key(&mut reader)
-        .map_err(|e| DaygleError::Tls(format!("cannot parse key '{path}': {e}")))?
-        .ok_or_else(|| DaygleError::Tls(format!("no private key found in '{path}'")))
+    PrivateKeyDer::pem_file_iter(path)
+        .map_err(|e| DaygleError::Tls(format!("cannot open key file '{path}': {e}")))?
+        .next()
+        .ok_or_else(|| DaygleError::Tls(format!("no private key found in '{path}'")))?
+        .map_err(|e| DaygleError::Tls(format!("cannot parse key '{path}': {e}")))
 }
 
 #[cfg(test)]

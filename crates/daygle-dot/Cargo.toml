@@ -13,7 +13,7 @@ hickory-server.workspace = true
 tokio.workspace = true
 tokio-rustls.workspace = true
 rustls.workspace = true
-rustls-pemfile.workspace = true
+rustls-pki-types.workspace = true
 rcgen.workspace = true
 tracing.workspace = true
 

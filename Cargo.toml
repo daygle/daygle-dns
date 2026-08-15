@@ -34,7 +34,6 @@ tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 tokio-rustls = "0.26"
 rustls = "0.23"
-rustls-pemfile = "2"
 rustls-pki-types = "1"
 rcgen = "0.13"
 async-trait = "0.1"
