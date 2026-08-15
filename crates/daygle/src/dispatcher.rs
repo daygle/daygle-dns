@@ -1,0 +1,257 @@
+//! The combined DNS dispatcher: policy → authoritative → recursive.
+
+use std::net::IpAddr;
+use std::sync::Arc;
+
+use async_trait::async_trait;
+use daygle_authoritative::AuthorityCatalog;
+use daygle_core::{DaygleError, LogStore, Metrics};
+use daygle_policy::{Action, PolicyEngine};
+use daygle_recursive::RecursiveResolver;
+use hickory_proto::op::{MessageType, OpCode, ResponseCode};
+use hickory_proto::rr::{Name, RData, Record, RecordType};
+use hickory_server::net::runtime::Time;
+use hickory_server::server::{Request, RequestHandler, ResponseHandler, ResponseInfo};
+use hickory_server::zone_handler::MessageResponseBuilder;
+use tracing::{debug, warn};
+
+/// The single [`RequestHandler`] used by every listener (UDP, TCP, DoT).
+///
+/// Query flow:
+/// 1. **Policy** — ACLs, blocklists, per-client rules and plugins decide
+///    whether to allow, refuse, block, or redirect the query.
+/// 2. **Authoritative** — if the query name falls inside a hosted zone, the
+///    Hickory [`hickory_server::zone_handler::Catalog`] answers (with DNSSEC
+///    signing when enabled).
+/// 3. **Recursive** — otherwise the query is resolved through
+///    [`RecursiveResolver`].
+pub struct DnsDispatcher {
+    catalog: Arc<AuthorityCatalog>,
+    resolver: Option<Arc<RecursiveResolver>>,
+    policy: Arc<PolicyEngine>,
+    metrics: Arc<Metrics>,
+    logs: Arc<LogStore>,
+}
+
+impl DnsDispatcher {
+    pub fn new(
+        catalog: Arc<AuthorityCatalog>,
+        resolver: Option<Arc<RecursiveResolver>>,
+        policy: Arc<PolicyEngine>,
+        metrics: Arc<Metrics>,
+        logs: Arc<LogStore>,
+    ) -> Self {
+        Self {
+            catalog,
+            resolver,
+            policy,
+            metrics,
+            logs,
+        }
+    }
+
+    fn log_error(&self, component: &str, message: impl Into<String>) {
+        self.logs.error(component, message.into());
+    }
+}
+
+#[async_trait]
+impl RequestHandler for DnsDispatcher {
+    async fn handle_request<R: ResponseHandler, T: Time>(
+        &self,
+        request: &Request,
+        mut response_handle: R,
+    ) -> ResponseInfo {
+        self.metrics.inc(&self.metrics.total_queries);
+        self.metrics
+            .add(&self.metrics.bytes_in, request.as_slice().len() as u64);
+
+        // RFC 2136 dynamic updates are delegated straight to the catalog.
+        if request.metadata.op_code == OpCode::Update {
+            let now = unix_now();
+            let edns = request.edns.as_ref();
+            return self.catalog.read().update(request, edns, now, response_handle).await;
+        }
+
+        let info = match request.request_info() {
+            Ok(info) => info,
+            Err(e) => {
+                warn!("malformed request from {}: {e}", request.src());
+                self.metrics.inc(&self.metrics.errors);
+                return send_error(&mut response_handle, request, ResponseCode::FormErr).await;
+            }
+        };
+
+        let query_name = info.query.name().to_string();
+        let qname = query_name.trim_end_matches('.').to_ascii_lowercase();
+        let rtype = info.query.query_type().to_string();
+        let client = info.src.ip();
+
+        // 1. Policy.
+        let decision = self.policy.evaluate(client, &qname, &rtype).await;
+        match &decision.action {
+            Action::Allow => {}
+            Action::Refused => {
+                debug!(query = %qname, reason = %decision.reason, "refused by policy");
+                self.metrics.inc(&self.metrics.blocked);
+                return send_error(&mut response_handle, request, ResponseCode::Refused).await;
+            }
+            Action::Block => {
+                debug!(query = %qname, reason = %decision.reason, "blocked by policy");
+                self.metrics.inc(&self.metrics.blocked);
+                return send_error(&mut response_handle, request, ResponseCode::NXDomain).await;
+            }
+            Action::Redirect(ip) => {
+                debug!(query = %qname, %ip, "redirected by policy");
+                self.metrics.inc(&self.metrics.blocked);
+                return send_redirect(&mut response_handle, request, info.query.query_type(), *ip)
+                    .await;
+            }
+        }
+
+        // 2. Authoritative zones.
+        if self.catalog.contains(info.query.name()) {
+            self.metrics.inc(&self.metrics.authoritative);
+            let now = unix_now();
+            let edns = request.edns.as_ref();
+            return self.catalog.read().lookup(request, edns, now, response_handle).await;
+        }
+
+        // 3. Recursive resolution.
+        let Some(resolver) = &self.resolver else {
+            // Recursion disabled and not authoritative: REFUSED.
+            return send_error(&mut response_handle, request, ResponseCode::Refused).await;
+        };
+
+        self.metrics.inc(&self.metrics.recursive);
+        match resolver.lookup(&qname, info.query.query_type()).await {
+            Ok(lookup) => {
+                let answers = lookup.answers().to_vec();
+                let authorities = lookup.authorities().to_vec();
+                let additionals = lookup.additionals().to_vec();
+                let validated = lookup.message().authentic_data;
+                if validated {
+                    self.metrics.inc(&self.metrics.dnssec_validated);
+                }
+
+                let mut metadata = request.metadata;
+                metadata.message_type = MessageType::Response;
+                metadata.response_code = lookup.message().response_code;
+                metadata.recursion_available = true;
+                metadata.recursion_desired = request.metadata.recursion_desired;
+                metadata.authentic_data = validated;
+
+                let response = MessageResponseBuilder::from_message_request(request).build(
+                    metadata,
+                    answers.iter(),
+                    authorities.iter(),
+                    std::iter::empty(),
+                    additionals.iter(),
+                );
+                match response_handle.send_response(response).await {
+                    Ok(info) => info,
+                    Err(e) => {
+                        self.log_error("dispatcher", format!("send failure: {e}"));
+                        fallback_response()
+                    }
+                }
+            }
+            Err(e) => {
+                debug!(query = %qname, error = %e, "recursive resolution failed");
+                self.metrics.inc(&self.metrics.errors);
+                send_error(&mut response_handle, request, ResponseCode::ServFail).await
+            }
+        }
+    }
+}
+
+/// Send a response with only an error code.
+async fn send_error<R: ResponseHandler>(
+    handle: &mut R,
+    request: &Request,
+    code: ResponseCode,
+) -> ResponseInfo {
+    let response = MessageResponseBuilder::from_message_request(request)
+        .error_msg(&request.metadata, code);
+    match handle.send_response(response).await {
+        Ok(info) => info,
+        Err(e) => {
+            warn!("failed to send error response: {e}");
+            fallback_response()
+        }
+    }
+}
+
+/// Synthesize an A/AAAA redirect answer.
+async fn send_redirect<R: ResponseHandler>(
+    handle: &mut R,
+    request: &Request,
+    rtype: RecordType,
+    ip: IpAddr,
+) -> ResponseInfo {
+    // Redirect only makes sense for A/AAAA queries; others are blocked.
+    let is_relevant = match ip {
+        IpAddr::V4(_) => rtype == RecordType::A || rtype == RecordType::ANY,
+        IpAddr::V6(_) => rtype == RecordType::AAAA || rtype == RecordType::ANY,
+    };
+    if !is_relevant {
+        return send_error(handle, request, ResponseCode::NXDomain).await;
+    }
+
+    let qname = request
+        .request_info()
+        .map(|i| i.query.name().to_string())
+        .unwrap_or_else(|_| ".".to_string());
+    let name = match Name::from_utf8(&format!("{}.", qname.trim_end_matches('.'))) {
+        Ok(n) => n,
+        Err(_) => return send_error(handle, request, ResponseCode::ServFail).await,
+    };
+
+    let rdata: RData = match ip {
+        IpAddr::V4(v4) => RData::A(v4.into()),
+        IpAddr::V6(v6) => RData::AAAA(v6.into()),
+    };
+    let record = Record::from_rdata(name, 60, rdata);
+
+    let mut metadata = request.metadata;
+    metadata.message_type = MessageType::Response;
+    metadata.response_code = ResponseCode::NoError;
+    metadata.authoritative = true;
+    metadata.recursion_available = true;
+
+    let response = MessageResponseBuilder::from_message_request(request).build(
+        metadata,
+        std::iter::once(&record),
+        std::iter::empty(),
+        std::iter::empty(),
+        std::iter::empty(),
+    );
+    match handle.send_response(response).await {
+        Ok(info) => info,
+        Err(e) => {
+            warn!("failed to send redirect: {e}");
+            fallback_response()
+        }
+    }
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// A minimal `ResponseInfo` used when the transport failed entirely.
+fn fallback_response() -> ResponseInfo {
+    ResponseInfo::from(hickory_proto::op::Header {
+        metadata: hickory_proto::op::Metadata::new(0, MessageType::Response, OpCode::Query),
+        counts: hickory_proto::op::HeaderCounts::default(),
+    })
+}
+
+/// Convert a [`DaygleError`] into a log line (helper for callers).
+#[allow(dead_code)]
+pub fn log_daygle_error(logs: &LogStore, component: &str, e: &DaygleError) {
+    logs.error(component, e.to_string());
+}

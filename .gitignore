@@ -1,0 +1,11 @@
+# Rust
+/target
+
+# Freebuff app data
+.freebuff/
+
+# Web build output
+web/dist/
+
+# Node
+node_modules/

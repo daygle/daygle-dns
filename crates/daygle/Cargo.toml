@@ -1,0 +1,32 @@
+[package]
+name = "daygle"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Daygle DNS server binary"
+default-run = "daygle"
+
+[[bin]]
+name = "daygle"
+path = "src/main.rs"
+
+[dependencies]
+daygle-core = { path = "../daygle-core" }
+daygle-policy = { path = "../daygle-policy" }
+daygle-authoritative = { path = "../daygle-authoritative" }
+daygle-recursive = { path = "../daygle-recursive" }
+daygle-dot = { path = "../daygle-dot" }
+daygle-api = { path = "../daygle-api" }
+hickory-proto.workspace = true
+hickory-server.workspace = true
+hickory-resolver.workspace = true
+axum.workspace = true
+tokio.workspace = true
+async-trait.workspace = true
+futures-util.workspace = true
+arc-swap.workspace = true
+parking_lot.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+clap.workspace = true

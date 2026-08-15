@@ -1,0 +1,21 @@
+[package]
+name = "daygle-dot"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "DNS over TLS (DoT) using rustls"
+
+[dependencies]
+daygle-core = { path = "../daygle-core" }
+hickory-proto.workspace = true
+hickory-server.workspace = true
+tokio.workspace = true
+tokio-rustls.workspace = true
+rustls.workspace = true
+rustls-pemfile.workspace = true
+rcgen.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

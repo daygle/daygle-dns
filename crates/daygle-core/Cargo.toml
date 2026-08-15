@@ -1,0 +1,18 @@
+[package]
+name = "daygle-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Shared types, configuration, metrics and error handling for Daygle DNS"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+thiserror.workspace = true
+chrono.workspace = true
+ipnet.workspace = true
+tracing.workspace = true
+parking_lot.workspace = true
+rusqlite.workspace = true
