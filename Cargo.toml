@@ -25,6 +25,7 @@ hickory-proto = { version = "0.26", features = ["dnssec-ring"] }
 hickory-server = { version = "0.26", features = [
     "dnssec-ring",
     "tls-ring",
+    "https-ring",
     "metrics",
     "testing",
 ] }

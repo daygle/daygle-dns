@@ -6,7 +6,7 @@ use std::sync::Arc;
 use arc_swap::{ArcSwap, ArcSwapOption};
 use async_trait::async_trait;
 use daygle_authoritative::AuthorityCatalog;
-use daygle_core::{DaygleError, LogStore, Metrics};
+use daygle_core::{DaygleError, LogStore, Metrics, RateLimiter};
 use daygle_policy::{Action, PolicyEngine};
 use daygle_recursive::RecursiveResolver;
 use hickory_proto::op::{MessageType, OpCode, ResponseCode};
@@ -30,17 +30,21 @@ pub struct DnsDispatcher {
     catalog: Arc<AuthorityCatalog>,
     resolver: Arc<ArcSwapOption<RecursiveResolver>>,
     policy: Arc<ArcSwap<PolicyEngine>>,
+    rate_limiter: Arc<RateLimiter>,
     metrics: Arc<Metrics>,
     logs: Arc<LogStore>,
 }
 
 impl DnsDispatcher {
     /// Build a dispatcher whose policy and recursive resolver can be swapped
-    /// at runtime (live reload).
+    /// at runtime (live reload). The rate limiter reads its limits from the
+    /// shared [`RateLimiter`], which reload swaps in place, so the dispatcher
+    /// itself never needs rebuilding for rate-limit changes.
     pub fn new(
         catalog: Arc<AuthorityCatalog>,
         resolver: Arc<ArcSwapOption<RecursiveResolver>>,
         policy: Arc<ArcSwap<PolicyEngine>>,
+        rate_limiter: Arc<RateLimiter>,
         metrics: Arc<Metrics>,
         logs: Arc<LogStore>,
     ) -> Self {
@@ -48,6 +52,7 @@ impl DnsDispatcher {
             catalog,
             resolver,
             policy,
+            rate_limiter,
             metrics,
             logs,
         }
@@ -66,6 +71,7 @@ impl DnsDispatcher {
             catalog,
             Arc::new(ArcSwapOption::from(resolver)),
             Arc::new(ArcSwap::from_pointee(policy)),
+            Arc::new(RateLimiter::default()),
             metrics,
             logs,
         )
@@ -164,11 +170,29 @@ impl RequestHandler for DnsDispatcher {
         self.metrics
             .add(&self.metrics.bytes_in, request.as_slice().len() as u64);
 
-        // RFC 2136 dynamic updates are delegated straight to the catalog.
+        // 0. Rate limiting (per client). Applied before anything else so a
+        // flooding client cannot even reach the update/policy/recursive
+        // machinery. Loopback may be exempt via `rate_limit.exempt_loopback`.
+        let client = request.src().ip();
+        if !self.rate_limiter.check_client(client) {
+            debug!(%client, "query rate-limited by client");
+            self.metrics.inc(&self.metrics.rate_limited);
+            return send_error(&mut response_handle, request, ResponseCode::ServFail).await;
+        }
+
+        // RFC 2136 dynamic updates are handled with write-through to SQLite:
+        // the catalog is reloaded after each successful update, so changes
+        // are immediately live and survive restarts. `allow_dynamic_updates`
+        // and `update_networks` gate who may update.
         if request.metadata.op_code == OpCode::Update {
-            let now = unix_now();
             let edns = request.edns.as_ref();
-            return self.catalog.read().update(request, edns, now, response_handle).await;
+            return daygle_authoritative::handle_update(
+                &self.catalog,
+                request,
+                edns,
+                response_handle,
+            )
+            .await;
         }
 
         let info = match request.request_info() {
@@ -184,6 +208,15 @@ impl RequestHandler for DnsDispatcher {
         let qname = query_name.trim_end_matches('.').to_ascii_lowercase();
         let rtype = info.query.query_type().to_string();
         let client = info.src.ip();
+
+        // 0b. Rate limiting (per domain). Tracked independently of the client
+        // counter: a client may legitimately ask about many domains, and a hot
+        // domain must not be hammered by one client's retries.
+        if !self.rate_limiter.check_domain(&qname) {
+            debug!(query = %qname, "query rate-limited by domain");
+            self.metrics.inc(&self.metrics.rate_limited);
+            return send_error(&mut response_handle, request, ResponseCode::ServFail).await;
+        }
 
         // 1. Policy. The engine is swapped atomically on reload; clone out the
         // current one so a single query sees one consistent snapshot.

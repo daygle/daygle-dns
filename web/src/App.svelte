@@ -2,6 +2,7 @@
   import Status from './views/Status.svelte';
   import Zones from './views/Zones.svelte';
   import Logs from './views/Logs.svelte';
+  import Blocklists from './views/Blocklists.svelte';
   import Settings from './views/Settings.svelte';
 
   let view = $state('status');
@@ -9,6 +10,7 @@
   const tabs = [
     { id: 'status', label: 'Status' },
     { id: 'zones', label: 'Zones & Records' },
+    { id: 'blocklists', label: 'Blocklists' },
     { id: 'logs', label: 'Logs' },
     { id: 'settings', label: 'Settings' },
   ];
@@ -41,6 +43,8 @@
       <Status />
     {:else if view === 'zones'}
       <Zones />
+    {:else if view === 'blocklists'}
+      <Blocklists />
     {:else if view === 'logs'}
       <Logs />
     {:else}

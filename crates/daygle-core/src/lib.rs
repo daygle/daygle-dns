@@ -10,11 +10,13 @@ pub mod config;
 pub mod error;
 pub mod logs;
 pub mod metrics;
+pub mod rate_limit;
 
 pub use config::*;
 pub use error::{DaygleError, Result};
 pub use logs::{LogEntry, LogLevel, LogStore};
 pub use metrics::Metrics;
+pub use rate_limit::RateLimiter;
 
 /// Current version of the Daygle DNS server.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

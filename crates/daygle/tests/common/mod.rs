@@ -30,6 +30,9 @@ pub fn base_config(db: &Path) -> DaygleConfig {
     cfg.dot.enabled = false;
     cfg.dot.listen = "127.0.0.1".to_string();
     cfg.dot.port = 0;
+    cfg.doh.enabled = false;
+    cfg.doh.listen = "127.0.0.1".to_string();
+    cfg.doh.port = 0;
     cfg.api.listen = "127.0.0.1".to_string();
     cfg.api.port = 0;
     cfg.api.api_token = String::new();

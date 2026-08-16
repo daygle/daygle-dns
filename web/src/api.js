@@ -38,4 +38,6 @@ export const api = {
   unsignZone: (zoneId) => request('POST', `/zones/${zoneId}/unsign`),
   clearCache: () => request('POST', '/cache/clear'),
   importZone: (name, text) => request('POST', '/zones/import', { name, text }),
+  blocklistSources: () => request('GET', '/policy/blocklist/sources'),
+  refreshBlocklistSources: () => request('POST', '/policy/blocklist/sources'),
 };

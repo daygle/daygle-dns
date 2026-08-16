@@ -20,7 +20,7 @@ use arc_swap::{ArcSwap, ArcSwapOption};
 use daygle_authoritative::AuthorityCatalog;
 use daygle_core::config::DaygleConfig;
 use daygle_core::error::Result;
-use daygle_core::{LogStore, Metrics};
+use daygle_core::{LogStore, Metrics, RateLimiter};
 use daygle_policy::{BlocklistSourceManager, PolicyEngine};
 use daygle_recursive::RecursiveResolver;
 use tokio::sync::{mpsc, oneshot};
@@ -34,6 +34,7 @@ pub struct Shared {
     pub policy: Arc<ArcSwap<PolicyEngine>>,
     pub resolver: Arc<ArcSwapOption<RecursiveResolver>>,
     pub config: Arc<ArcSwap<DaygleConfig>>,
+    pub rate_limiter: Arc<RateLimiter>,
     pub metrics: Arc<Metrics>,
     pub logs: Arc<LogStore>,
 }
@@ -44,6 +45,7 @@ pub struct ListenerAddrs {
     pub udp: Option<std::net::SocketAddr>,
     pub tcp: Option<std::net::SocketAddr>,
     pub dot: Option<std::net::SocketAddr>,
+    pub doh: Option<std::net::SocketAddr>,
 }
 
 /// Commands sent to the DNS listener supervisor.
@@ -62,7 +64,7 @@ pub enum ReloadCommand {
 pub fn apply_config(shared: &Shared, new: Arc<DaygleConfig>) -> bool {
     let old = shared.config.load_full();
 
-    let listeners_changed = old.server != new.server || old.dot != new.dot;
+    let listeners_changed = old.server != new.server || old.dot != new.dot || old.doh != new.doh;
 
     // Publish the new configuration first so the API token, `/api/config` and
     // the listener supervisor all observe the requested state immediately.
@@ -92,6 +94,18 @@ pub fn apply_config(shared: &Shared, new: Arc<DaygleConfig>) -> bool {
         } else {
             shared.resolver.store(None);
             info!("recursion disabled by reload");
+        }
+    }
+
+    // Rate limiting. The shared limiter holds its own settings snapshot and
+    // keeps its buckets, so a reload applies new limits (or disables the
+    // limiter) without dropping in-flight window state.
+    if old.rate_limit != new.rate_limit {
+        shared.rate_limiter.set_settings(&new.rate_limit);
+        if new.rate_limit.enabled {
+            info!("rate limiting reloaded");
+        } else {
+            info!("rate limiting disabled by reload");
         }
     }
 
@@ -246,6 +260,7 @@ mod tests {
             policy: Arc::new(ArcSwap::from_pointee(PolicyEngine::new(false))),
             resolver: Arc::new(ArcSwapOption::empty()),
             config: Arc::new(ArcSwap::from(Arc::new(cfg))),
+            rate_limiter: Arc::new(RateLimiter::default()),
             metrics: Arc::new(Metrics::default()),
             logs: Arc::new(LogStore::new(16)),
         }

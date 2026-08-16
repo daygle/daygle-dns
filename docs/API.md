@@ -50,6 +50,7 @@ Returns a flat snapshot of the atomic counters:
   "cache_hits": 0,
   "cache_misses": 700,
   "blocked": 12,
+  "rate_limited": 3,
   "errors": 0,
   "dnssec_validated": 500,
   "bytes_in": 45056,
@@ -138,6 +139,15 @@ listener — not over HTTP — gated by `authoritative.axfr_enabled` and the
 replicated from remote masters on a refresh interval) are also configured in
 `daygle.toml` under `[[authoritative.secondary_zones]]`; each replicated zone
 appears in `GET /api/zones` like any other zone, but is served read-only.
+
+RFC 2136 dynamic updates are also a DNS-protocol feature (over UDP/TCP/DoT,
+not HTTP): `UPDATE` messages for hosted primary zones are applied atomically
+with write-through to SQLite and served immediately after a catalog reload.
+They are gated by `authoritative.allow_dynamic_updates` (default off) and the
+`authoritative.update_networks` client allow-list, and are always refused for
+secondary zones. Prerequisites (value-dependent / value-independent /
+not-exists forms) are fully checked; failed updates return their RFC 2136
+RCODE (YXDOMAIN, YXRRSet, NXDOMAIN, NXRRSet, NOTAUTH, …).
 
 ### Records
 

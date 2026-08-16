@@ -13,23 +13,35 @@ use tracing::info;
 /// Ensure the configured certificate/key exist, generating a self-signed pair
 /// when `settings.self_signed` is enabled.
 pub fn ensure_certificate(settings: &DotSettings) -> Result<()> {
-    let have_cert = Path::new(&settings.cert_path).exists();
-    let have_key = Path::new(&settings.key_path).exists();
+    ensure_certificate_paths(
+        &settings.cert_path,
+        &settings.key_path,
+        settings.self_signed,
+        &settings.server_name,
+    )
+}
+
+/// Ensure the given certificate/key exist, generating a self-signed pair when
+/// `self_signed` is enabled. Shared by DoT and DoH (both may reuse the same
+/// certificate files).
+pub fn ensure_certificate_paths(
+    cert_path: &str,
+    key_path: &str,
+    self_signed: bool,
+    server_name: &str,
+) -> Result<()> {
+    let have_cert = Path::new(cert_path).exists();
+    let have_key = Path::new(key_path).exists();
 
     if have_cert && have_key {
         return Ok(());
     }
-    if !settings.self_signed {
+    if !self_signed {
         return Err(DaygleError::Tls(format!(
-            "certificate '{}' or key '{}' is missing (set dot.self_signed = true to generate one)",
-            settings.cert_path, settings.key_path
+            "certificate '{cert_path}' or key '{key_path}' is missing (set self_signed = true to generate one)"
         )));
     }
-    generate_self_signed(
-        &settings.cert_path,
-        &settings.key_path,
-        &settings.server_name,
-    )
+    generate_self_signed(cert_path, key_path, server_name)
 }
 
 /// Generate a self-signed ECDSA certificate and write PEM files to disk.
@@ -60,8 +72,9 @@ fn write_if_parent_exists(path: &str, bytes: &[u8]) -> Result<()> {
     fs::write(path, bytes).map_err(DaygleError::Io)
 }
 
-/// Load a PEM certificate chain + private key into a rustls server config.
-pub fn load_tls_config(cert_path: &str, key_path: &str) -> Result<rustls::ServerConfig> {
+/// Load a PEM certificate chain + private key into a rustls server config
+/// advertising the given ALPN protocol (e.g. `dot` for DoT, `h2` for DoH).
+pub fn load_tls_config(cert_path: &str, key_path: &str, alpn: &[u8]) -> Result<rustls::ServerConfig> {
     let certs = read_certs(cert_path)?;
     let key = read_key(key_path)?;
 
@@ -76,7 +89,7 @@ pub fn load_tls_config(cert_path: &str, key_path: &str) -> Result<rustls::Server
         .with_single_cert(certs, key)
         .map_err(|e| DaygleError::Tls(format!("invalid TLS material: {e}")))?;
 
-    config.alpn_protocols = vec![crate::DOT_ALPN.to_vec()];
+    config.alpn_protocols = vec![alpn.to_vec()];
     Ok(config)
 }
 
@@ -118,7 +131,7 @@ mod tests {
         assert!(Path::new(&cert).exists());
         assert!(Path::new(&key).exists());
 
-        let config = load_tls_config(&cert, &key).unwrap();
+        let config = load_tls_config(&cert, &key, crate::DOT_ALPN).unwrap();
         assert_eq!(config.alpn_protocols, vec![crate::DOT_ALPN.to_vec()]);
     }
 
@@ -143,6 +156,6 @@ mod tests {
         fs::write(&cert, b"not a certificate").unwrap();
         let key = dir.path().join("bad.key");
         fs::write(&key, b"not a key").unwrap();
-        assert!(load_tls_config(cert.to_str().unwrap(), key.to_str().unwrap()).is_err());
+        assert!(load_tls_config(cert.to_str().unwrap(), key.to_str().unwrap(), crate::DOT_ALPN).is_err());
     }
 }

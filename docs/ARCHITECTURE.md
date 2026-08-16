@@ -40,18 +40,27 @@ API/GUI.
   Conditional forwarding zones each get their own resolver built from the
   zone's dedicated upstreams; routing happens at lookup time by longest
   label-aligned suffix match.
-- **`daygle-dot`** produces a rustls `ServerConfig` with the `dot` ALPN and
-  generates self-signed certificates when configured.
+- **`daygle-dot`** produces rustls `ServerConfig`s for both encrypted DNS
+  protocols — the `dot` ALPN for DoT (RFC 7858) and the `h2` ALPN for DoH
+  (RFC 8484) — and generates self-signed certificates when configured.
 - **`daygle-api`** serves the REST API and the embedded GUI.
 - **`daygle-gui`** embeds the compiled Svelte bundle via `rust-embed`.
-- **`daygle`** (binary) binds UDP/TCP/DoT listeners onto one Hickory `Server`
-  driven by `DnsDispatcher`.
+- **`daygle`** (binary) binds UDP/TCP/DoT/DoH listeners onto one Hickory
+  `Server` driven by `DnsDispatcher`.
 
 ## Query flow
 
 `DnsDispatcher` implements Hickory's `RequestHandler` and is used by every
 listener:
 
+0. **Rate limiting.** Before anything else, the request counts against two
+   fixed-window budgets: one per client (source IP) and one per query name.
+   Requests over either limit get SERVFAIL and increment the `rate_limited`
+   metric. The client check also covers RFC 2136 UPDATEs and zone transfers,
+   which never reach `request_info`. Loopback is exempt when
+   `rate_limit.exempt_loopback` is set (the default). Limits live in a shared
+   [`RateLimiter`](crates/daygle-core/src/rate_limit.rs) that reload swaps in
+   place, so tightening/relaxing them never drops in-flight windows.
 1. **Policy.** The query name/type and the client IP are passed to the policy
    engine. `Block` → NXDOMAIN, `Refused` → REFUSED, `Redirect(ip)` → a
    synthesized A/AAAA answer.
@@ -71,15 +80,25 @@ listener:
    upstream's RCODE and the AD bit when DNSSEC validation succeeded.
    Negative answers (NXDOMAIN/NODATA) carry their response code through the
    error type so they are returned as-is instead of SERVFAIL.
-5. RFC 2136 `UPDATE` messages are delegated directly to the catalog.
+5. **Dynamic updates.** RFC 2136 `UPDATE` messages are handled by
+   `daygle-authoritative`'s update handler (`handle_update`), not the
+   catalog. It validates the zone section, checks prerequisites (NXDOMAIN /
+   NXRRSet / YXDomain / YXRRSet), builds an atomic add/delete plan, writes it
+   through to SQLite (bumping the SOA serial unless the update rewrites the
+   SOA), and reloads the catalog so the change is served immediately. Gated
+   by `authoritative.allow_dynamic_updates` and the `update_networks` client
+   allow-list; secondary zones are always refused.
 
 ## Concurrency model
 
 - The Hickory `Catalog` is shared through `arc_swap::ArcSwap`, so the
   dispatcher clones an owned `Arc<Catalog>` per query rather than holding a
   non-`Send` lock guard across `.await`.
-- Zone mutations go through the REST API, which updates SQLite and then calls
-  `AuthorityCatalog::reload()` to atomically swap in a fresh catalog.
+- Zone mutations go through the REST API (updates SQLite, then calls
+  `AuthorityCatalog::reload()`) or through RFC 2136 dynamic updates, which
+  apply their changes in a single SQLite transaction via
+  `ZoneStore::apply_dynamic_updates` and then reload the catalog the same
+  way — either path atomically swaps in a fresh catalog.
 - Secondary zones are driven by `daygle-authoritative`'s `SecondaryRefresher`,
   which compares each zone's SOA serial against its master on a refresh
   interval and runs a full AXFR/IXFR pull when the master is newer (or the
@@ -95,10 +114,15 @@ listener:
 without a restart. The policy engine, the recursive resolver and the effective
 config are each published through `arc_swap::ArcSwap` containers shared by the
 dispatcher and the REST API, so every query observes one consistent snapshot.
-When the `server`/`dot` sections change, a listener supervisor gracefully
+When the `server`/`dot`/`doh` sections change, a listener supervisor gracefully
 stops the current sockets and rebinds new ones, self-healing back to the last
 good configuration if a bind fails. Reload can also be triggered on demand via
 `POST /api/config/reload` or `BoundServer::reload()`.
+
+The DoH listener (hickory's h2 server) serves POST requests carrying
+`application/dns-message` bodies at the configured `endpoint` (default
+`/dns-query`); GET requests are not implemented by Hickory 0.26, so clients
+must use POST.
 
 ### Remote blocklist sources
 

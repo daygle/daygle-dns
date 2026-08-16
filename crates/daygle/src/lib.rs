@@ -16,7 +16,7 @@ use daygle_api::{router, AppState};
 use daygle_authoritative::AuthorityCatalog;
 use daygle_core::config::DaygleConfig;
 use daygle_core::error::{DaygleError, Result};
-use daygle_core::{LogLevel, LogStore, Metrics};
+use daygle_core::{LogLevel, LogStore, Metrics, RateLimiter};
 use daygle_policy::BlocklistSourceManager;
 use daygle_recursive::RecursiveResolver;
 use dispatcher::DnsDispatcher;
@@ -38,6 +38,8 @@ pub struct BoundServer {
     pub tcp_addr: Option<std::net::SocketAddr>,
     /// The initially bound DNS-over-TLS address, if DoT is enabled.
     pub dot_addr: Option<std::net::SocketAddr>,
+    /// The initially bound DNS-over-HTTPS address, if DoH is enabled.
+    pub doh_addr: Option<std::net::SocketAddr>,
     /// The REST API + GUI address.
     pub api_addr: std::net::SocketAddr,
     /// Shared runtime metrics.
@@ -182,12 +184,16 @@ pub async fn bind_with(
     // Policy.
     let policy = daygle_policy::build_engine(&config.policy)?;
 
+    // Rate limiting (per client + per domain).
+    let rate_limiter = Arc::new(RateLimiter::new(&config.rate_limit));
+
     // Shared, atomically-swappable runtime state.
     let shared = Arc::new(Shared {
         catalog: catalog.clone(),
         policy: Arc::new(ArcSwap::from_pointee(policy)),
         resolver: Arc::new(arc_swap::ArcSwapOption::from(resolver.clone())),
         config: Arc::new(ArcSwap::from(config.clone())),
+        rate_limiter: rate_limiter.clone(),
         metrics: metrics.clone(),
         logs: logs.clone(),
     });
@@ -197,6 +203,7 @@ pub async fn bind_with(
         catalog.clone(),
         shared.resolver.clone(),
         shared.policy.clone(),
+        rate_limiter.clone(),
         metrics.clone(),
         logs.clone(),
     );
@@ -270,6 +277,7 @@ pub async fn bind_with(
         udp_addr: initial_addrs.udp,
         tcp_addr: initial_addrs.tcp,
         dot_addr: initial_addrs.dot,
+        doh_addr: initial_addrs.doh,
         api_addr,
         metrics,
         logs,
@@ -329,6 +337,7 @@ async fn start_listeners(
         shared.catalog.clone(),
         shared.resolver.clone(),
         shared.policy.clone(),
+        shared.rate_limiter.clone(),
         shared.metrics.clone(),
         shared.logs.clone(),
     );
@@ -415,6 +424,7 @@ async fn start_listeners_with(
         shared.catalog.clone(),
         shared.resolver.clone(),
         shared.policy.clone(),
+        shared.rate_limiter.clone(),
         shared.metrics.clone(),
         shared.logs.clone(),
     );
@@ -467,6 +477,24 @@ async fn bind_listeners(
             Duration::from_secs(10),
         )?;
         info!(addr = %addrs.dot.unwrap(), "DNS over TLS listening");
+    }
+
+    if config.doh.enabled {
+        let addr: std::net::SocketAddr = format!("{}:{}", config.doh.listen, config.doh.port)
+            .parse()
+            .map_err(|e| DaygleError::Config(format!("bad DoH listen address: {e}")))?;
+        let listener = tokio::net::TcpListener::bind(addr).await?;
+        addrs.doh = Some(listener.local_addr()?);
+        let tls_config = daygle_dot::build_doh_tls_config(&config.doh)?;
+        daygle_dot::register_doh(
+            server,
+            listener,
+            tls_config,
+            Duration::from_secs(10),
+            None,
+            &config.doh.endpoint,
+        )?;
+        info!(addr = %addrs.doh.unwrap(), endpoint = %config.doh.endpoint, "DNS over HTTPS listening");
     }
 
     Ok(())

@@ -23,10 +23,14 @@ pub struct DaygleConfig {
     pub authoritative: AuthoritativeSettings,
     /// DNS over TLS listener.
     pub dot: DotSettings,
+    /// DNS over HTTPS listener.
+    pub doh: DohSettings,
     /// HTTP REST API + embedded web GUI.
     pub api: ApiSettings,
     /// Policy / filtering engine.
     pub policy: PolicySettings,
+    /// Per-client and per-domain query rate limiting.
+    pub rate_limit: RateLimitSettings,
     /// Logging.
     pub logging: LoggingSettings,
 }
@@ -38,8 +42,10 @@ impl Default for DaygleConfig {
             recursive: RecursiveSettings::default(),
             authoritative: AuthoritativeSettings::default(),
             dot: DotSettings::default(),
+            doh: DohSettings::default(),
             api: ApiSettings::default(),
             policy: PolicySettings::default(),
+            rate_limit: RateLimitSettings::default(),
             logging: LoggingSettings::default(),
         }
     }
@@ -68,6 +74,7 @@ impl DaygleConfig {
         for (name, port) in [
             ("server.port", self.server.port),
             ("dot.port", self.dot.port),
+            ("doh.port", self.doh.port),
             ("api.port", self.api.port),
         ] {
             if port == 0 {
@@ -77,6 +84,17 @@ impl DaygleConfig {
         if self.recursive.attempts == 0 {
             return Err(DaygleError::Config(
                 "recursive.attempts must be >= 1".to_string(),
+            ));
+        }
+        let rl = &self.rate_limit;
+        if rl.client_max_queries == 0 || rl.domain_max_queries == 0 {
+            return Err(DaygleError::Config(
+                "rate_limit.*_max_queries must be >= 1".to_string(),
+            ));
+        }
+        if rl.client_window_secs == 0 || rl.domain_window_secs == 0 {
+            return Err(DaygleError::Config(
+                "rate_limit.*_window_secs must be >= 1".to_string(),
             ));
         }
         for upstream in &self.recursive.upstreams {
@@ -111,6 +129,7 @@ impl DaygleConfig {
             ("policy.denied_networks", &self.policy.denied_networks),
             ("policy.allowed_networks", &self.policy.allowed_networks),
             ("authoritative.axfr_networks", &self.authoritative.axfr_networks),
+            ("authoritative.update_networks", &self.authoritative.update_networks),
         ] {
             for net in networks {
                 if net.parse::<ipnet::IpNet>().is_err() {
@@ -304,6 +323,12 @@ pub struct AuthoritativeSettings {
     /// Client networks allowed to request zone transfers. When empty, any
     /// client may transfer (subject to `axfr_enabled`).
     pub axfr_networks: Vec<String>,
+    /// Accept RFC 2136 dynamic updates (UPDATE messages) for primary zones.
+    /// Updates are written through to SQLite and applied live.
+    pub allow_dynamic_updates: bool,
+    /// Client networks allowed to send dynamic updates. When empty, any
+    /// client may update (subject to `allow_dynamic_updates`).
+    pub update_networks: Vec<String>,
     /// Secondary zones replicated from remote masters via AXFR/IXFR.
     pub secondary_zones: Vec<SecondaryZoneConfig>,
 }
@@ -318,6 +343,8 @@ impl Default for AuthoritativeSettings {
             dnssec_enabled: true,
             axfr_enabled: false,
             axfr_networks: vec![],
+            allow_dynamic_updates: false,
+            update_networks: vec![],
             secondary_zones: vec![],
         }
     }
@@ -382,6 +409,44 @@ impl Default for DotSettings {
             key_path: "/etc/daygle/certs/server.key".to_string(),
             self_signed: true,
             server_name: "daygle.local".to_string(),
+        }
+    }
+}
+
+/// DNS over HTTPS settings (RFC 8484).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct DohSettings {
+    /// Serve DNS over HTTPS.
+    pub enabled: bool,
+    /// Address the DoH listener binds to.
+    pub listen: String,
+    /// DoH port (default 443).
+    pub port: u16,
+    /// TLS certificate (PEM, certificate chain first).
+    pub cert_path: String,
+    /// TLS private key (PEM).
+    pub key_path: String,
+    /// When the certificate/key are absent, generate a self-signed one for
+    /// this name and write it to `cert_path`/`key_path`.
+    pub self_signed: bool,
+    /// Subject name used for the generated self-signed certificate.
+    pub server_name: String,
+    /// HTTP path that serves DNS messages, e.g. `/dns-query`.
+    pub endpoint: String,
+}
+
+impl Default for DohSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            listen: "0.0.0.0".to_string(),
+            port: 443,
+            cert_path: "/etc/daygle/certs/server.crt".to_string(),
+            key_path: "/etc/daygle/certs/server.key".to_string(),
+            self_signed: true,
+            server_name: "daygle.local".to_string(),
+            endpoint: "/dns-query".to_string(),
         }
     }
 }
@@ -523,6 +588,42 @@ impl Default for PolicyRule {
     }
 }
 
+/// Per-client and per-domain query rate limiting.
+///
+/// Limits are fixed windows: a client (source IP) or domain (query name) may
+/// send at most `*_max_queries` requests per `*_window_secs`. Requests over
+/// the limit receive SERVFAIL and are counted in the `rate_limited` metric.
+/// Each counter is tracked independently.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct RateLimitSettings {
+    /// Enforce the limits below.
+    pub enabled: bool,
+    /// Max queries per client (source IP) per window.
+    pub client_max_queries: u32,
+    /// Per-client window length in seconds.
+    pub client_window_secs: u64,
+    /// Max queries per domain (query name) per window.
+    pub domain_max_queries: u32,
+    /// Per-domain window length in seconds.
+    pub domain_window_secs: u64,
+    /// Never rate-limit loopback clients (127.0.0.0/8, ::1).
+    pub exempt_loopback: bool,
+}
+
+impl Default for RateLimitSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            client_max_queries: 100,
+            client_window_secs: 60,
+            domain_max_queries: 600,
+            domain_window_secs: 60,
+            exempt_loopback: true,
+        }
+    }
+}
+
 /// Logging settings.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
@@ -633,6 +734,87 @@ refresh_secs = 600
         assert_eq!(zone.name, "example.com");
         assert_eq!(zone.masters.len(), 2);
         assert_eq!(zone.refresh_secs, 600);
+    }
+
+    #[test]
+    fn parses_dynamic_update_settings() {
+        let text = r#"
+[authoritative]
+allow_dynamic_updates = true
+update_networks = ["192.0.2.0/24", "2001:db8::/32"]
+"#;
+        let cfg = DaygleConfig::parse(text).unwrap();
+        assert!(cfg.authoritative.allow_dynamic_updates);
+        assert_eq!(cfg.authoritative.update_networks.len(), 2);
+        assert!(DaygleConfig::default()
+            .authoritative
+            .update_networks
+            .is_empty());
+        assert!(!DaygleConfig::default()
+            .authoritative
+            .allow_dynamic_updates);
+
+        // Invalid networks are rejected like the other network lists.
+        let bad = r#"
+[authoritative]
+allow_dynamic_updates = true
+update_networks = ["nope"]
+"#;
+        assert!(DaygleConfig::parse(bad).is_err());
+    }
+
+    #[test]
+    fn parses_rate_limit_settings() {
+        let text = r#"
+[rate_limit]
+enabled = true
+client_max_queries = 50
+client_window_secs = 10
+domain_max_queries = 2000
+domain_window_secs = 30
+exempt_loopback = false
+"#;
+        let cfg = DaygleConfig::parse(text).unwrap();
+        assert!(cfg.rate_limit.enabled);
+        assert_eq!(cfg.rate_limit.client_max_queries, 50);
+        assert_eq!(cfg.rate_limit.client_window_secs, 10);
+        assert_eq!(cfg.rate_limit.domain_max_queries, 2000);
+        assert_eq!(cfg.rate_limit.domain_window_secs, 30);
+        assert!(!cfg.rate_limit.exempt_loopback);
+
+        // Disabled by default, loopback exempt by default.
+        assert!(!DaygleConfig::default().rate_limit.enabled);
+        assert!(DaygleConfig::default().rate_limit.exempt_loopback);
+
+        // Zero limits / windows are rejected.
+        assert!(DaygleConfig::parse("[rate_limit]\nclient_max_queries = 0\n").is_err());
+        assert!(DaygleConfig::parse("[rate_limit]\nclient_window_secs = 0\n").is_err());
+    }
+
+    #[test]
+    fn parses_doh_section() {
+        let text = r#"
+[doh]
+enabled = true
+listen = "127.0.0.1"
+port = 8443
+endpoint = "/dns-query"
+self_signed = true
+server_name = "dns.example.com"
+"#;
+        let cfg = DaygleConfig::parse(text).unwrap();
+        assert!(cfg.doh.enabled);
+        assert_eq!(cfg.doh.port, 8443);
+        assert_eq!(cfg.doh.endpoint, "/dns-query");
+        assert_eq!(cfg.doh.server_name, "dns.example.com");
+    }
+
+    #[test]
+    fn doh_defaults_to_disabled_on_port_443() {
+        let cfg = DaygleConfig::parse("").unwrap();
+        assert!(!cfg.doh.enabled);
+        assert_eq!(cfg.doh.port, 443);
+        assert_eq!(cfg.doh.endpoint, "/dns-query");
     }
 
     #[test]

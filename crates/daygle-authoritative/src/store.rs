@@ -7,7 +7,7 @@ use chrono::Utc;
 use rusqlite::{params, Connection, OptionalExtension};
 use uuid::Uuid;
 
-use crate::model::{Record, RecordInput, Zone, ZoneInput};
+use crate::model::{DynamicUpdate, Record, RecordInput, Zone, ZoneInput};
 use crate::validate_name;
 use daygle_core::error::{DaygleError, Result};
 
@@ -356,6 +356,79 @@ impl ZoneStore {
         Ok(changed > 0)
     }
 
+    /// Apply a batch of RFC 2136 dynamic-update changes to a zone atomically.
+    ///
+    /// All additions, deletions, and the optional SOA rewrite happen in one
+    /// transaction: either every change lands or none do. When no explicit
+    /// SOA is supplied, the zone serial is bumped (RFC 2136 §3.4.2.2 requires
+    /// the serial to increase on any successful update).
+    pub fn apply_dynamic_updates(
+        &self,
+        zone_id: &str,
+        update: &DynamicUpdate,
+    ) -> Result<()> {
+        let zone = self
+            .get_zone(zone_id)?
+            .ok_or_else(|| DaygleError::NotFound(format!("zone {zone_id}")))?;
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+
+        for del in &update.deletes {
+            let name = normalize_fqdn(&del.name);
+            let mut sql =
+                "DELETE FROM records WHERE zone_id = ?1 AND name = ?2".to_string();
+            let mut values: Vec<Box<dyn rusqlite::ToSql>> =
+                vec![Box::new(zone_id.to_string()), Box::new(name)];
+            if let Some(rtype) = &del.rtype {
+                sql.push_str(" AND rtype = ?");
+                values.push(Box::new(rtype.to_ascii_uppercase()));
+            }
+            if let Some(content) = &del.content {
+                sql.push_str(" AND content = ?");
+                values.push(Box::new(content.clone()));
+            }
+            let mut stmt = tx.prepare(&sql)?;
+            stmt.execute(rusqlite::params_from_iter(values.iter().map(|v| v.as_ref())))?;
+        }
+
+        for add in &update.adds {
+            insert_record_in_tx(&tx, zone_id, &zone.name, add)?;
+        }
+
+        match &update.soa {
+            Some(soa) => {
+                let changed = tx.execute(
+                    "UPDATE zones SET primary_ns = ?2, admin_mailbox = ?3, serial = ?4,
+                                     refresh = ?5, retry = ?6, expire = ?7, minimum = ?8
+                     WHERE id = ?1",
+                    params![
+                        zone_id,
+                        soa.primary_ns,
+                        soa.admin_mailbox,
+                        soa.serial,
+                        soa.refresh,
+                        soa.retry,
+                        soa.expire,
+                        soa.minimum,
+                    ],
+                )?;
+                if changed == 0 {
+                    return Err(DaygleError::NotFound(format!("zone {zone_id}")));
+                }
+            }
+            None => {
+                let next = zone.serial.wrapping_add(1).max(1);
+                tx.execute(
+                    "UPDATE zones SET serial = ?2 WHERE id = ?1",
+                    params![zone_id, next],
+                )?;
+            }
+        }
+
+        tx.commit()?;
+        Ok(())
+    }
+
     /// Bulk import: replace all records of a zone (keeping the zone row).
     pub fn replace_records(&self, zone_id: &str, records: &[RecordInput]) -> Result<()> {
         let zone = self
@@ -650,6 +723,132 @@ mod tests {
             )
             .unwrap_err();
         assert!(matches!(err, DaygleError::InvalidRecord(_)));
+    }
+
+    #[test]
+    fn applies_dynamic_updates_atomically() {
+        use crate::model::{DeleteSpec, SoaUpdate};
+
+        let s = store();
+        let zone = s
+            .create_zone(&ZoneInput {
+                name: "example.com".to_string(),
+                ..zone_input_defaults()
+            })
+            .unwrap();
+        let serial_before = zone.serial;
+
+        let mut plan = DynamicUpdate {
+            adds: vec![RecordInput {
+                name: "host.example.com.".to_string(),
+                rtype: "A".to_string(),
+                content: "192.0.2.55".to_string(),
+                ttl: 120,
+                priority: 0,
+                disabled: false,
+            }],
+            deletes: vec![DeleteSpec {
+                name: "www.example.com".to_string(),
+                rtype: Some("TXT".to_string()),
+                content: None,
+            }],
+            soa: None,
+        };
+
+        // Deleting a non-existent RRset is fine; the add lands and serial bumps.
+        s.apply_dynamic_updates(&zone.id, &plan).unwrap();
+        let records = s.list_records(&zone.id).unwrap();
+        assert!(records.iter().any(|r| {
+            r.name == "host.example.com" && r.rtype == "A" && r.content == "192.0.2.55"
+        }));
+        assert_eq!(
+            s.get_zone(&zone.id).unwrap().unwrap().serial,
+            serial_before + 1
+        );
+
+        // Deleting the RRset we just added works and bumps the serial again.
+        plan.deletes = vec![DeleteSpec {
+            name: "host.example.com".to_string(),
+            rtype: Some("A".to_string()),
+            content: None,
+        }];
+        plan.adds.clear();
+        s.apply_dynamic_updates(&zone.id, &plan).unwrap();
+        let records = s.list_records(&zone.id).unwrap();
+        assert!(!records
+            .iter()
+            .any(|r| r.name == "host.example.com" && r.rtype == "A"));
+
+        // An explicit SOA rewrite is applied and keeps its serial.
+        let soa = SoaUpdate {
+            primary_ns: "ns1.example.com.".to_string(),
+            admin_mailbox: "admin.example.com.".to_string(),
+            serial: 42,
+            refresh: 3600,
+            retry: 600,
+            expire: 86400,
+            minimum: 300,
+        };
+        s.apply_dynamic_updates(
+            &zone.id,
+            &DynamicUpdate {
+                adds: vec![],
+                deletes: vec![],
+                soa: Some(soa),
+            },
+        )
+        .unwrap();
+        let zone = s.get_zone(&zone.id).unwrap().unwrap();
+        assert_eq!(zone.serial, 42);
+        assert_eq!(zone.primary_ns, "ns1.example.com.");
+        assert_eq!(zone.minimum, 300);
+    }
+
+    #[test]
+    fn dynamic_update_failure_rolls_back() {
+        use crate::model::DeleteSpec;
+
+        let s = store();
+        let zone = s
+            .create_zone(&ZoneInput {
+                name: "example.com".to_string(),
+                ..zone_input_defaults()
+            })
+            .unwrap();
+        let serial_before = s.get_zone(&zone.id).unwrap().unwrap().serial;
+
+        // A valid add followed by an invalid add must leave no trace.
+        let plan = DynamicUpdate {
+            adds: vec![
+                RecordInput {
+                    name: "ok.example.com.".to_string(),
+                    rtype: "A".to_string(),
+                    content: "192.0.2.10".to_string(),
+                    ttl: 60,
+                    priority: 0,
+                    disabled: false,
+                },
+                RecordInput {
+                    name: "bad.example.com.".to_string(),
+                    rtype: "BOGUS".to_string(),
+                    content: "x".to_string(),
+                    ttl: 60,
+                    priority: 0,
+                    disabled: false,
+                },
+            ],
+            deletes: vec![],
+            soa: None,
+        };
+        assert!(s.apply_dynamic_updates(&zone.id, &plan).is_err());
+
+        let records = s.list_records(&zone.id).unwrap();
+        assert!(!records.iter().any(|r| r.name == "ok.example.com"));
+        assert_eq!(
+            s.get_zone(&zone.id).unwrap().unwrap().serial,
+            serial_before
+        );
+        let _ = DeleteSpec::default();
     }
 
     #[test]

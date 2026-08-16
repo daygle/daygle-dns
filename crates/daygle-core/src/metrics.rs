@@ -20,6 +20,8 @@ pub struct Metrics {
     pub cache_misses: AtomicU64,
     /// Queries blocked or refused by the policy engine.
     pub blocked: AtomicU64,
+    /// Queries rejected by the rate limiter.
+    pub rate_limited: AtomicU64,
     /// Queries that resulted in an error.
     pub errors: AtomicU64,
     /// DNSSEC-validated answers (recursive path).
@@ -52,6 +54,7 @@ impl Metrics {
             cache_hits: self.get(&self.cache_hits),
             cache_misses: self.get(&self.cache_misses),
             blocked: self.get(&self.blocked),
+            rate_limited: self.get(&self.rate_limited),
             errors: self.get(&self.errors),
             dnssec_validated: self.get(&self.dnssec_validated),
             bytes_in: self.get(&self.bytes_in),
@@ -69,6 +72,7 @@ pub struct MetricSnapshot {
     pub cache_hits: u64,
     pub cache_misses: u64,
     pub blocked: u64,
+    pub rate_limited: u64,
     pub errors: u64,
     pub dnssec_validated: u64,
     pub bytes_in: u64,

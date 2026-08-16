@@ -12,14 +12,21 @@ Daygle combines, in a single process:
   import, and **DNSSEC zone signing**.
 - **Zone transfers**: serve **AXFR/IXFR** (RFC 5936, with per-network ACLs)
   and replicate **secondary zones** from remote masters on a refresh interval.
+- **Dynamic updates**: RFC 2136 UPDATE messages with write-through to SQLite,
+  prerequisite checking, and atomic apply — records added over the wire
+  persist and go live immediately (gated by `allow_dynamic_updates`).
 - **Recursive resolution** (root → TLD → authoritative) with **caching**,
   **negative caching**, **retries**, **timeouts**, and **DNSSEC validation**,
   plus **conditional forwarding** so specific zones resolve via dedicated
   upstreams.
-- **DNS over TLS (DoT)** using **rustls**.
+- **DNS over TLS (DoT)** and **DNS over HTTPS (DoH, RFC 8484)** using
+  **rustls**.
 - A **plugin-style policy engine** for blocklists, ACLs, and per-client rules,
   including **remote blocklist sources** (hosts files, AdGuard lists, plain
   domain lists) fetched over HTTP(S) and refreshed on a schedule.
+- **Rate limiting** per client (source IP) and per domain (query name) with
+  configurable fixed windows, loopback exemption, and live reload — queries
+  over the limit get SERVFAIL and are counted in the `rate_limited` metric.
 - A **REST API** (tower/axum) for configuration, zone management, logs, and
   metrics.
 - An embedded **Svelte** web GUI for zones, records, status, logs, and
@@ -52,7 +59,7 @@ dig @127.0.0.1 -p 853 example.com A +tls   # DNS over TLS
 | `daygle-policy`         | Plugin-style policy engine (blocklists, ACLs, per-client rules) |
 | `daygle-authoritative`  | SQLite zone storage, zone-file parser, Hickory catalog + DNSSEC signing |
 | `daygle-recursive`      | Recursive resolver (caching, negative caching, retries, timeouts, DNSSEC) |
-| `daygle-dot`            | DNS over TLS via rustls + certificate management |
+| `daygle-dot`            | DoT (RFC 7858) + DoH (RFC 8484) via rustls + certificate management |
 | `daygle-api`            | REST API (axum) + embedded GUI serving |
 | `daygle-gui`            | Embedded web GUI assets (Svelte build output) |
 | `daygle`                | The server binary: UDP/TCP/DoT listeners + the combined dispatcher |
@@ -84,6 +91,12 @@ database = "/var/lib/daygle/daygle.db"
 [dot]
 port = 853
 self_signed = true
+
+[doh]
+enabled = true
+port = 443
+self_signed = true
+endpoint = "/dns-query"
 
 [api]
 port = 5380

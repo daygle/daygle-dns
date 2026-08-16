@@ -59,6 +59,7 @@ async fn reloads_policy_and_listeners_without_restart() {
     cfg.server.reload_enabled = false;
     cfg.recursive.enabled = false;
     cfg.dot.port = free_port().await;
+    cfg.doh.port = free_port().await;
     cfg.api.port = free_port().await;
     write_config(&cfg_path, &cfg);
 
@@ -114,6 +115,7 @@ async fn reloads_recursive_upstreams() {
     cfg.recursive.upstreams = vec![up_a.to_string()];
     cfg.recursive.dnssec_validate = false;
     cfg.dot.port = free_port().await;
+    cfg.doh.port = free_port().await;
     cfg.api.port = free_port().await;
     write_config(&cfg_path, &cfg);
 
@@ -152,6 +154,7 @@ async fn watches_config_file_and_applies_edits() {
     cfg.server.reload_interval_ms = 50;
     cfg.recursive.enabled = false;
     cfg.dot.port = free_port().await;
+    cfg.doh.port = free_port().await;
     cfg.api.port = free_port().await;
     write_config(&cfg_path, &cfg);
 

@@ -87,6 +87,43 @@ pub const KNOWN_RECORD_TYPES: &[&str] = &[
     "A", "AAAA", "CNAME", "MX", "TXT", "NS", "SOA", "SRV", "PTR", "CAA",
 ];
 
+/// One deletion in an RFC 2136 dynamic update: an RRset (name + type), a
+/// single RR (name + type + content), or everything at a name (type `None`).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct DeleteSpec {
+    /// Fully qualified owner name, no trailing dot.
+    pub name: String,
+    /// Record type to delete; `None` deletes every type at `name`.
+    pub rtype: Option<String>,
+    /// Exact RDATA (canonical content string) to delete; `None` deletes the
+    /// whole RRset.
+    pub content: Option<String>,
+}
+
+/// A new SOA to write when a dynamic update explicitly sets one.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SoaUpdate {
+    pub primary_ns: String,
+    pub admin_mailbox: String,
+    pub serial: u32,
+    pub refresh: u32,
+    pub retry: u32,
+    pub expire: u32,
+    pub minimum: u32,
+}
+
+/// The parsed contents of an RFC 2136 UPDATE message, ready to be applied to
+/// a zone in a single transaction.
+#[derive(Debug, Clone, Default)]
+pub struct DynamicUpdate {
+    /// Records to add (class IN), with absolute owner names.
+    pub adds: Vec<RecordInput>,
+    /// Records/RRsets to delete.
+    pub deletes: Vec<DeleteSpec>,
+    /// Explicit SOA rewrite for the zone apex, if the update carried one.
+    pub soa: Option<SoaUpdate>,
+}
+
 /// Secondary-zone metadata: which masters a zone replicates from and when the
 /// last successful transfer happened.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

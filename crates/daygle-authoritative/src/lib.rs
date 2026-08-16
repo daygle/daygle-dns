@@ -14,6 +14,7 @@
 //!   DNSSEC signing when keys are present.
 //! - [`transfer`] — an AXFR/IXFR transfer client for secondary zones.
 //! - [`secondary`] — periodic refresh of secondary zones from their masters.
+//! - [`update`] — RFC 2136 dynamic updates with write-through to SQLite.
 
 pub mod catalog;
 pub mod model;
@@ -21,12 +22,14 @@ pub mod parse;
 pub mod secondary;
 pub mod store;
 pub mod transfer;
+pub mod update;
 
 pub use catalog::AuthorityCatalog;
 pub use model::{Record, RecordInput, Zone, ZoneInput};
 pub use secondary::SecondaryRefresher;
 pub use store::ZoneStore;
 pub use transfer::XfrClient;
+pub use update::handle_update;
 
 use daygle_core::error::{DaygleError, Result};
 

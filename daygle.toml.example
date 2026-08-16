@@ -54,6 +54,13 @@ dnssec_enabled = true
 axfr_enabled = false
 axfr_networks = ["10.0.0.0/8", "192.168.0.0/16"]
 
+# Accept RFC 2136 dynamic updates (UPDATE messages) for primary zones.
+# Changes are written through to SQLite and go live immediately. Off by
+# default: anyone who can reach the server could otherwise add records.
+# update_networks limits which clients may update (empty = anyone).
+allow_dynamic_updates = false
+update_networks = ["10.0.0.0/8", "192.168.0.0/16"]
+
 # Secondary zones: replicated from a master via AXFR/IXFR. The zone's
 # records and SOA are re-pulled from the first reachable master on
 # refresh_secs. Master entries accept IP, IP:port, or [IPv6]:port.
@@ -74,6 +81,20 @@ key_path = "/etc/daygle/certs/server.key"
 # Generate a self-signed certificate when none is present.
 self_signed = true
 server_name = "dns.example.com"
+
+# DNS over HTTPS (RFC 8484). Disabled by default; serve on 443 with a real
+# certificate for public use. Clients POST application/dns-message bodies to
+# `endpoint` (default /dns-query).
+[doh]
+enabled = false
+listen = "0.0.0.0"
+port = 443
+# May reuse the same certificate as DoT.
+cert_path = "/etc/daygle/certs/server.crt"
+key_path = "/etc/daygle/certs/server.key"
+self_signed = true
+server_name = "dns.example.com"
+endpoint = "/dns-query"
 
 # REST API + embedded web GUI.
 [api]
@@ -123,6 +144,20 @@ redirect = "0.0.0.0"
 clients = ["10.0.0.0/8"]
 domains = []
 action = "block"
+
+# Per-client and per-domain query rate limiting.
+# Fixed windows: a client (source IP) or domain (query name) may send at
+# most *_max_queries requests per *_window_secs; requests over the limit
+# get SERVFAIL and count toward the `rate_limited` metric. Each counter is
+# independent. Off by default.
+[rate_limit]
+enabled = false
+client_max_queries = 100
+client_window_secs = 60
+domain_max_queries = 600
+domain_window_secs = 60
+# Loopback clients (127.0.0.0/8, ::1) are never rate-limited.
+exempt_loopback = true
 
 [logging]
 level = "info"
