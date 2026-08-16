@@ -221,7 +221,7 @@ impl SecondaryRefresher {
 }
 
 /// Convert transfer records into store inputs, extracting the SOA separately.
-/// DNSSEC records (RRSIG, NSEC, DNSKEY, …) and OPT are dropped — the local
+/// DNSSEC records (RRSIG, NSEC, DNSKEY, …) and OPT are dropped - the local
 /// catalog re-signs zones that have signing keys.
 fn records_to_inputs(
     zone: &Name,

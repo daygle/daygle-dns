@@ -4,17 +4,17 @@
 //!
 //! The crate is split into:
 //!
-//! - [`model`] — serializable `Zone`/`Record` data structures shared with the
+//! - [`model`] - serializable `Zone`/`Record` data structures shared with the
 //!   REST API and GUI.
-//! - [`store`] — a SQLite-backed [`ZoneStore`] with full CRUD and schema
+//! - [`store`] - a SQLite-backed [`ZoneStore`] with full CRUD and schema
 //!   management.
-//! - [`parse`] — a BIND-style zone file parser for imports.
-//! - [`catalog`] — converts stored zones into Hickory [`Record`]s/`RecordSet`s
+//! - [`parse`] - a BIND-style zone file parser for imports.
+//! - [`catalog`] - converts stored zones into Hickory [`Record`]s/`RecordSet`s
 //!   and assembles them into a [`Catalog`] ready for serving, including
 //!   DNSSEC signing when keys are present.
-//! - [`transfer`] — an AXFR/IXFR transfer client for secondary zones.
-//! - [`secondary`] — periodic refresh of secondary zones from their masters.
-//! - [`update`] — RFC 2136 dynamic updates with write-through to SQLite.
+//! - [`transfer`] - an AXFR/IXFR transfer client for secondary zones.
+//! - [`secondary`] - periodic refresh of secondary zones from their masters.
+//! - [`update`] - RFC 2136 dynamic updates with write-through to SQLite.
 
 pub mod catalog;
 pub mod model;

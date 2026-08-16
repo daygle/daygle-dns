@@ -19,12 +19,12 @@ use tracing::{debug, warn};
 /// The single [`RequestHandler`] used by every listener (UDP, TCP, DoT).
 ///
 /// Query flow:
-/// 1. **Policy** — ACLs, blocklists, per-client rules and plugins decide
+/// 1. **Policy** - ACLs, blocklists, per-client rules and plugins decide
 ///    whether to allow, refuse, block, or redirect the query.
-/// 2. **Authoritative** — if the query name falls inside a hosted zone, the
+/// 2. **Authoritative** - if the query name falls inside a hosted zone, the
 ///    Hickory [`hickory_server::zone_handler::Catalog`] answers (with DNSSEC
 ///    signing when enabled).
-/// 3. **Recursive** — otherwise the query is resolved through
+/// 3. **Recursive** - otherwise the query is resolved through
 ///    [`RecursiveResolver`].
 pub struct DnsDispatcher {
     catalog: Arc<AuthorityCatalog>,

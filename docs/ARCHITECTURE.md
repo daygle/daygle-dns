@@ -41,8 +41,8 @@ API/GUI.
   zone's dedicated upstreams; routing happens at lookup time by longest
   label-aligned suffix match.
 - **`daygle-dot`** produces rustls `ServerConfig`s for both encrypted DNS
-  protocols — the `dot` ALPN for DoT (RFC 7858) and the `h2` ALPN for DoH
-  (RFC 8484) — and generates self-signed certificates when configured.
+  protocols - the `dot` ALPN for DoT (RFC 7858) and the `h2` ALPN for DoH
+  (RFC 8484) - and generates self-signed certificates when configured.
 - **`daygle-api`** serves the REST API and the embedded GUI.
 - **`daygle-gui`** embeds the compiled Svelte bundle via `rust-embed`.
 - **`daygle`** (binary) binds UDP/TCP/DoT/DoH listeners onto one Hickory
@@ -73,7 +73,7 @@ listener:
    answered with the full zone record set (`SOA, records…, SOA` per RFC 5936;
    IXFR always gets a full transfer, which RFC 1995 permits).
 4. **Recursive.** Otherwise the query goes to `daygle-recursive`; the
-   `RecursiveResolver` routes by name — the most specific configured
+   `RecursiveResolver` routes by name - the most specific configured
    conditional zone (longest label-aligned suffix) is resolved by its own
    dedicated resolver/upstreams, everything else by the default ones. The
    resulting `Lookup` is converted into a `MessageResponse` with the
@@ -98,7 +98,7 @@ listener:
   `AuthorityCatalog::reload()`) or through RFC 2136 dynamic updates, which
   apply their changes in a single SQLite transaction via
   `ZoneStore::apply_dynamic_updates` and then reload the catalog the same
-  way — either path atomically swaps in a fresh catalog.
+  way - either path atomically swaps in a fresh catalog.
 - Secondary zones are driven by `daygle-authoritative`'s `SecondaryRefresher`,
   which compares each zone's SOA serial against its master on a refresh
   interval and runs a full AXFR/IXFR pull when the master is newer (or the
@@ -132,7 +132,7 @@ cap, redirects, 30 s timeout) and parses the body in its declared format
 (`domains`, `hosts`, or `adblock`). A background task in `daygle` polls on the
 smallest configured refresh interval and, when a source is due, swaps the
 merged remote blocklist into the shared `PolicyEngine` via
-`set_remote_blocklist` — the static blocklist from config/files is never
+`set_remote_blocklist` - the static blocklist from config/files is never
 discarded, and a failed/empty fetch leaves the previous domains in place.
 `POST /api/policy/blocklist/sources` forces an immediate refresh; `GET` the
 same path for per-source status.

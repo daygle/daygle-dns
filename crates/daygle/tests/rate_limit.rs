@@ -47,7 +47,7 @@ async fn limits_queries_per_client() {
     let udp = server.udp_addr.expect("UDP is enabled");
 
     // 3 distinct domains allowed, then the 4th from the same source IP is
-    // SERVFAIL — the client counter is per-IP, not per-name.
+    // SERVFAIL - the client counter is per-IP, not per-name.
     for i in 0..3 {
         let msg = udp_query(udp, &format!("a{i}.client.test."), RecordType::A).await;
         assert_ne!(msg.response_code, ResponseCode::ServFail);
@@ -159,7 +159,7 @@ async fn rate_limit_settings_reload_live() {
     let limited = udp_query(udp, "z.rl.test.", RecordType::A).await;
     assert_eq!(limited.response_code, ResponseCode::ServFail);
 
-    // Relax the limits in the file and reload — the change applies live.
+    // Relax the limits in the file and reload - the change applies live.
     cfg.rate_limit.client_max_queries = 100;
     cfg.rate_limit.domain_max_queries = 100;
     let toml = toml::to_string(&cfg).unwrap();

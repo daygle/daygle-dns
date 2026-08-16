@@ -4,12 +4,12 @@
 //!
 //! The engine combines, in evaluation order:
 //!
-//! 1. **ACLs** — allow/deny client networks (`ipnet::IpNet`).
-//! 2. **Blocklists** — exact and wildcard domain matches.
-//! 3. **Per-client rules** — ordered rules that match a client network and an
+//! 1. **ACLs** - allow/deny client networks (`ipnet::IpNet`).
+//! 2. **Blocklists** - exact and wildcard domain matches.
+//! 3. **Per-client rules** - ordered rules that match a client network and an
 //!    optional domain set, producing [`Action::Allow`], [`Action::Block`] or
 //!    [`Action::Redirect`].
-//! 4. **Plugins** — user-defined [`PolicyPlugin`]s evaluated last; the first
+//! 4. **Plugins** - user-defined [`PolicyPlugin`]s evaluated last; the first
 //!    plugin returning `Some(action)` wins.
 //!
 //! A [`Decision`] carries the action plus a human-readable reason, which the

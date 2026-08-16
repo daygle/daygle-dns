@@ -1,4 +1,4 @@
-//! Daygle DNS — the server binary.
+//! Daygle DNS - the server binary.
 //!
 //! A thin CLI wrapper around [`daygle::bind`] / [`daygle::BoundServer`].
 
@@ -11,7 +11,7 @@ use daygle_core::DEFAULT_CONFIG_PATH;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
-/// Daygle DNS — a modern, combined DNS server.
+/// Daygle DNS - a modern, combined DNS server.
 #[derive(Parser, Debug)]
 #[command(name = "daygle", version, about)]
 struct Args {

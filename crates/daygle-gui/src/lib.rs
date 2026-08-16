@@ -3,7 +3,7 @@
 //! Embeds the compiled web GUI (a Svelte app) into the server binary so the
 //! REST API can serve the dashboard with no external web server.
 //!
-//! The build output lives in `web/dist`; building the Svelte app is optional —
+//! The build output lives in `web/dist`; building the Svelte app is optional -
 //! a minimal fallback `index.html` is committed so the workspace always
 //! compiles. Run `npm install && npm run build` in `web/` to refresh the
 //! embedded bundle.

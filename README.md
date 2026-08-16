@@ -2,7 +2,7 @@
 
 A modern, combined DNS server written entirely in Rust and built on
 [Hickory DNS](https://github.com/hickory-dns/hickory-dns) (the actively
-maintained continuation of the `trust-dns` crates — `trust-dns-proto`,
+maintained continuation of the `trust-dns` crates - `trust-dns-proto`,
 `trust-dns-server`, and `trust-dns-resolver` were rebranded to `hickory-*` and
 the old names are deprecated per RUSTSEC-2025-0017).
 
@@ -13,7 +13,7 @@ Daygle combines, in a single process:
 - **Zone transfers**: serve **AXFR/IXFR** (RFC 5936, with per-network ACLs)
   and replicate **secondary zones** from remote masters on a refresh interval.
 - **Dynamic updates**: RFC 2136 UPDATE messages with write-through to SQLite,
-  prerequisite checking, and atomic apply — records added over the wire
+  prerequisite checking, and atomic apply - records added over the wire
   persist and go live immediately (gated by `allow_dynamic_updates`).
 - **Recursive resolution** (root → TLD → authoritative) with **caching**,
   **negative caching**, **retries**, **timeouts**, and **DNSSEC validation**,
@@ -25,7 +25,7 @@ Daygle combines, in a single process:
   including **remote blocklist sources** (hosts files, AdGuard lists, plain
   domain lists) fetched over HTTP(S) and refreshed on a schedule.
 - **Rate limiting** per client (source IP) and per domain (query name) with
-  configurable fixed windows, loopback exemption, and live reload — queries
+  configurable fixed windows, loopback exemption, and live reload - queries
   over the limit get SERVFAIL and are counted in the `rate_limited` metric.
 - A **REST API** (tower/axum) for configuration, zone management, logs, and
   metrics.
@@ -114,7 +114,7 @@ port = 5380
 
 With `server.reload_enabled = true` (the default), Daygle polls the config
 file (every `server.reload_interval_ms`, default 2000) and applies edits
-**without restarting** — policy rules and blocklists, recursive upstreams, and
+**without restarting** - policy rules and blocklists, recursive upstreams, and
 the UDP/TCP/DoT listeners all update in place. A bad config is rejected and
 the previous configuration stays active. You can also trigger an immediate
 re-read with `POST /api/config/reload` (see [`docs/API.md`](docs/API.md)).
@@ -153,7 +153,7 @@ real server on ephemeral ports and exercise:
 
 ### Installer-based installs (systemd)
 
-The one-line installer is **idempotent** — re-running it is the supported
+The one-line installer is **idempotent** - re-running it is the supported
 upgrade path. It fetches the latest `main`, rebuilds the release binary,
 replaces `/usr/local/bin/daygle`, and restarts the service:
 
@@ -190,7 +190,7 @@ sudo install -m 0755 target/release/daygle /usr/local/bin/daygle
   validated at startup, so an invalid config aborts cleanly instead of
   silently corrupting state.
 - If you changed nothing about listeners, upstreams, or policy, your running
-  config still applies — no restart is needed for `daygle.toml` edits thanks
+  config still applies - no restart is needed for `daygle.toml` edits thanks
   to [live reload](#live-reload). Only the binary itself requires the restart
   above.
 
