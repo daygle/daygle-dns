@@ -15,6 +15,10 @@ Daygle combines, in a single process:
 - **Dynamic updates**: RFC 2136 UPDATE messages with write-through to SQLite,
   prerequisite checking, and atomic apply — records added over the wire
   persist and go live immediately (gated by `allow_dynamic_updates`).
+- **Split horizon**: serve different answers for the same domain depending
+  on the client's network (named client groups like `LAN`/`VPN`/`IoT` or
+  literal CIDRs), managed from the GUI — internal clients see internal
+  addresses, everyone else gets the public view.
 - **Recursive resolution** (root → TLD → authoritative) with **caching**,
   **negative caching**, **retries**, **timeouts**, and **DNSSEC validation**,
   plus **conditional forwarding** so specific zones resolve via dedicated
@@ -29,8 +33,8 @@ Daygle combines, in a single process:
   over the limit get SERVFAIL and are counted in the `rate_limited` metric.
 - A **REST API** (tower/axum) for configuration, zone management, logs, and
   metrics.
-- An embedded **Svelte** web GUI for zones, records, status, logs, and
-  settings.
+- An embedded **Svelte** web GUI for zones, records, split horizon, status,
+  logs, and settings.
 
 ## Quick start
 
@@ -142,6 +146,7 @@ parsing, TLS certificates, and the GUI, plus integration tests that spin up a
 real server on ephemeral ports and exercise:
 
 - authoritative answers over **UDP** and **TCP**,
+- **split-horizon** synthetic answers per client network,
 - **policy** blocking,
 - **DNS over TLS** against a self-signed certificate,
 - full **recursive** resolution through a local stub upstream (no internet

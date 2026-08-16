@@ -15,6 +15,7 @@ use hickory_server::zone_handler::{AxfrPolicy, Catalog, ZoneHandler, ZoneType};
 use tracing::{info, warn};
 
 use crate::model::Record as DbRecord;
+use crate::split_horizon::SplitHorizonIndex;
 use crate::store::ZoneStore;
 use daygle_core::config::AuthoritativeSettings;
 use daygle_core::error::{DaygleError, Result};
@@ -34,16 +35,21 @@ pub struct AuthorityCatalog {
     // `ArcSwap` lets readers clone out an owned `Arc<Catalog>` (which is `Send`)
     // instead of holding a lock guard across an `.await` in the dispatcher.
     catalog: arc_swap::ArcSwap<Catalog>,
+    /// Pre-resolved split-horizon rules (client network → synthetic answer),
+    /// rebuilt alongside the catalog so DNS and API changes stay in sync.
+    split_horizon: arc_swap::ArcSwap<SplitHorizonIndex>,
 }
 
 impl AuthorityCatalog {
     /// Build a catalog from the store without any DNSSEC signing.
     pub fn new(store: ZoneStore, settings: AuthoritativeSettings) -> Result<Self> {
         let catalog = build_catalog(&store, &settings, false)?;
+        let split_horizon = Arc::new(build_split_horizon(&store)?);
         Ok(Self {
             store,
             settings,
             catalog: arc_swap::ArcSwap::from_pointee(catalog),
+            split_horizon: arc_swap::ArcSwap::from(split_horizon),
         })
     }
 
@@ -66,13 +72,20 @@ impl AuthorityCatalog {
         self.catalog.load().find(name).is_some()
     }
 
-    /// Rebuild the catalog from the database, applying DNSSEC signing when
-    /// keys are present and signing is enabled.
+    /// Rebuild the catalog and split-horizon index from the database,
+    /// applying DNSSEC signing when keys are present and signing is enabled.
     pub fn reload(&self) -> Result<()> {
         let catalog = build_catalog(&self.store, &self.settings, self.settings.dnssec_enabled)?;
         self.catalog.store(Arc::new(catalog));
+        let split_horizon = Arc::new(build_split_horizon(&self.store)?);
+        self.split_horizon.store(split_horizon);
         info!("authoritative catalog reloaded");
         Ok(())
+    }
+
+    /// Clone out the current split-horizon index (cheap `Arc` bump).
+    pub fn split_horizon(&self) -> Arc<SplitHorizonIndex> {
+        self.split_horizon.load_full()
     }
 
     /// Generate (if necessary) a DNSSEC signing key for `zone_id`, sign the
@@ -128,6 +141,13 @@ fn generate_signing_key() -> Result<(u8, Vec<u8>)> {
     let der = EcdsaSigningKey::generate_pkcs8(Algorithm::ECDSAP256SHA256)
         .map_err(|e| DaygleError::Internal(format!("key generation failed: {e}")))?;
     Ok((u8::from(Algorithm::ECDSAP256SHA256), der.secret_pkcs8_der().to_vec()))
+}
+
+/// Build the split-horizon index from the store's networks and entries.
+fn build_split_horizon(store: &ZoneStore) -> Result<SplitHorizonIndex> {
+    let networks = store.list_split_horizon_networks()?;
+    let entries = store.list_split_horizon_entries()?;
+    Ok(SplitHorizonIndex::build(&networks, &entries))
 }
 
 /// Build a fresh Hickory `Catalog` from the store.

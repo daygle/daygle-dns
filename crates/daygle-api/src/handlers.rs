@@ -6,7 +6,9 @@ use axum::extract::{Path, Query, State};
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use daygle_authoritative::model::{RecordInput, ZoneInput};
+use daygle_authoritative::model::{
+    RecordInput, SplitHorizonEntryInput, SplitHorizonNetworkInput, ZoneInput,
+};
 use daygle_core::VERSION;
 use serde::{Deserialize, Serialize};
 
@@ -307,6 +309,93 @@ pub async fn sign_zone(State(state): State<AppState>, Path(id): Path<String>) ->
 pub async fn unsign_zone(State(state): State<AppState>, Path(id): Path<String>) -> Response {
     match state.catalog.unsign_zone(&id) {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => map_err(e),
+    }
+}
+
+// ---- Split horizon ------------------------------------------------------
+
+/// All split-horizon networks and domain entries.
+pub async fn get_split_horizon(State(state): State<AppState>) -> Response {
+    let networks = match state.catalog.store().list_split_horizon_networks() {
+        Ok(n) => n,
+        Err(e) => return map_err(e),
+    };
+    let entries = match state.catalog.store().list_split_horizon_entries() {
+        Ok(e) => e,
+        Err(e) => return map_err(e),
+    };
+    Json(serde_json::json!({ "networks": networks, "entries": entries })).into_response()
+}
+
+/// Create a network, or update the CIDRs of an existing one (matched by name).
+pub async fn upsert_split_horizon_network(
+    State(state): State<AppState>,
+    Json(input): Json<SplitHorizonNetworkInput>,
+) -> Response {
+    match state.catalog.store().upsert_split_horizon_network(&input) {
+        Ok(network) => {
+            let _ = state.catalog.reload();
+            Json(network).into_response()
+        }
+        Err(e) => map_err(e),
+    }
+}
+
+pub async fn delete_split_horizon_network(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> Response {
+    match state.catalog.store().delete_split_horizon_network(&name) {
+        Ok(true) => {
+            let _ = state.catalog.reload();
+            StatusCode::NO_CONTENT.into_response()
+        }
+        Ok(false) => error_response(StatusCode::NOT_FOUND, "network not found"),
+        Err(e) => map_err(e),
+    }
+}
+
+/// Create a split-horizon entry (appended after existing entries for the
+/// same domain; first match wins).
+pub async fn create_split_horizon_entry(
+    State(state): State<AppState>,
+    Json(input): Json<SplitHorizonEntryInput>,
+) -> Response {
+    match state.catalog.store().create_split_horizon_entry(&input) {
+        Ok(entry) => {
+            let _ = state.catalog.reload();
+            (StatusCode::CREATED, Json(entry)).into_response()
+        }
+        Err(e) => map_err(e),
+    }
+}
+
+pub async fn update_split_horizon_entry(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(input): Json<SplitHorizonEntryInput>,
+) -> Response {
+    match state.catalog.store().update_split_horizon_entry(&id, &input) {
+        Ok(Some(entry)) => {
+            let _ = state.catalog.reload();
+            Json(entry).into_response()
+        }
+        Ok(None) => error_response(StatusCode::NOT_FOUND, "entry not found"),
+        Err(e) => map_err(e),
+    }
+}
+
+pub async fn delete_split_horizon_entry(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Response {
+    match state.catalog.store().delete_split_horizon_entry(&id) {
+        Ok(true) => {
+            let _ = state.catalog.reload();
+            StatusCode::NO_CONTENT.into_response()
+        }
+        Ok(false) => error_response(StatusCode::NOT_FOUND, "entry not found"),
         Err(e) => map_err(e),
     }
 }

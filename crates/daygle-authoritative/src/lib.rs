@@ -20,12 +20,14 @@ pub mod catalog;
 pub mod model;
 pub mod parse;
 pub mod secondary;
+pub mod split_horizon;
 pub mod store;
 pub mod transfer;
 pub mod update;
 
 pub use catalog::AuthorityCatalog;
 pub use model::{Record, RecordInput, Zone, ZoneInput};
+pub use split_horizon::{SplitHorizonIndex, SplitHorizonMatch};
 pub use secondary::SecondaryRefresher;
 pub use store::ZoneStore;
 pub use transfer::XfrClient;
