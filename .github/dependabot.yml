@@ -1,0 +1,32 @@
+# Dependabot update configuration.
+#
+# - cargo:  the Rust workspace (Cargo.toml / Cargo.lock at the repository root)
+# - npm:    the web GUI (web/package.json / web/package-lock.json)
+#
+# Both run weekly; individual PRs can be rebased/merged from the Dependabot
+# tab on GitHub.
+version: 2
+updates:
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "UTC"
+    open-pull-requests-limit: 10
+    labels:
+      - "dependencies"
+      - "rust"
+
+  - package-ecosystem: "npm"
+    directory: "/web"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "UTC"
+    open-pull-requests-limit: 10
+    labels:
+      - "dependencies"
+      - "javascript"
