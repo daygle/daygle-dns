@@ -7,7 +7,10 @@ use chrono::Utc;
 use rusqlite::{params, Connection, OptionalExtension};
 use uuid::Uuid;
 
-use crate::model::{DynamicUpdate, Record, RecordInput, Zone, ZoneInput};
+use crate::model::{
+    DynamicUpdate, Record, RecordInput, SplitHorizonEntry, SplitHorizonEntryInput,
+    SplitHorizonNetwork, SplitHorizonNetworkInput, Zone, ZoneInput,
+};
 use crate::validate_name;
 use daygle_core::error::{DaygleError, Result};
 
@@ -52,6 +55,24 @@ CREATE TABLE IF NOT EXISTS secondary_zones (
     refresh_secs INTEGER NOT NULL DEFAULT 3600,
     last_transfer TEXT
 );
+
+CREATE TABLE IF NOT EXISTS split_horizon_networks (
+    id    TEXT PRIMARY KEY,
+    name  TEXT NOT NULL UNIQUE,
+    cidrs TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS split_horizon_entries (
+    id       TEXT PRIMARY KEY,
+    domain   TEXT NOT NULL,
+    networks TEXT NOT NULL,
+    ips      TEXT NOT NULL,
+    ttl      INTEGER NOT NULL DEFAULT 60,
+    disabled INTEGER NOT NULL DEFAULT 0,
+    position INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS idx_split_horizon_domain ON split_horizon_entries(domain);
 "#;
 
 /// SQLite-backed storage for zones and records.
@@ -446,12 +467,188 @@ impl ZoneStore {
 
     pub fn count_zones(&self) -> Result<u64> {
         let conn = self.conn.lock().unwrap();
-        Ok(conn.query_row("SELECT COUNT(*) FROM zones", [], |r| r.get(0))?)
+        Ok(conn.query_row("SELECT COUNT(*) FROM zones", [], |r| Ok(r.get::<_, i64>(0)? as u64))?)
     }
 
     pub fn count_records(&self) -> Result<u64> {
         let conn = self.conn.lock().unwrap();
-        Ok(conn.query_row("SELECT COUNT(*) FROM records", [], |r| r.get(0))?)
+        Ok(conn.query_row("SELECT COUNT(*) FROM records", [], |r| Ok(r.get::<_, i64>(0)? as u64))?)
+    }
+
+    // ---- Split horizon ---------------------------------------------------
+
+    /// List all split-horizon networks ordered by name.
+    pub fn list_split_horizon_networks(&self) -> Result<Vec<SplitHorizonNetwork>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt =
+            conn.prepare("SELECT id, name, cidrs FROM split_horizon_networks ORDER BY name")?;
+        let rows = stmt.query_map([], |row| {
+            let cidrs: Vec<String> =
+                serde_json::from_str(&row.get::<_, String>(2)?).unwrap_or_default();
+            Ok(SplitHorizonNetwork {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                cidrs,
+            })
+        })?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    /// Create a split-horizon network, or update the CIDRs of an existing
+    /// network with the same name (the id is kept stable on update).
+    pub fn upsert_split_horizon_network(
+        &self,
+        input: &SplitHorizonNetworkInput,
+    ) -> Result<SplitHorizonNetwork> {
+        validate_split_horizon_network(input)?;
+        let name = input.name.trim().to_string();
+        if name.is_empty() {
+            return Err(DaygleError::InvalidRecord(
+                "split-horizon network name is empty".to_string(),
+            ));
+        }
+        let cidrs = serde_json::to_string(&input.cidrs)
+            .map_err(|e| DaygleError::Database(format!("encode cidrs: {e}")))?;
+        let id = Uuid::new_v4().to_string();
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO split_horizon_networks (id, name, cidrs)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(name) DO UPDATE SET cidrs = ?3",
+            params![id, name, cidrs],
+        )?;
+        drop(conn);
+        self.list_split_horizon_networks()?
+            .into_iter()
+            .find(|n| n.name == name)
+            .ok_or_else(|| DaygleError::Internal("network vanished after upsert".to_string()))
+    }
+
+    /// Delete a split-horizon network by name. Entries that referenced it are
+    /// kept but simply never match until the name is recreated.
+    pub fn delete_split_horizon_network(&self, name: &str) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let changed = conn.execute(
+            "DELETE FROM split_horizon_networks WHERE name = ?1",
+            [name],
+        )?;
+        Ok(changed > 0)
+    }
+
+    /// List all split-horizon entries ordered by domain then position.
+    pub fn list_split_horizon_entries(&self) -> Result<Vec<SplitHorizonEntry>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, domain, networks, ips, ttl, disabled, position
+             FROM split_horizon_entries ORDER BY domain, position",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            let networks: Vec<String> =
+                serde_json::from_str(&row.get::<_, String>(2)?).unwrap_or_default();
+            let ips: Vec<String> =
+                serde_json::from_str(&row.get::<_, String>(3)?).unwrap_or_default();
+            Ok(SplitHorizonEntry {
+                id: row.get(0)?,
+                domain: row.get(1)?,
+                networks,
+                ips,
+                ttl: row.get(4)?,
+                disabled: row.get::<_, i64>(5)? != 0,
+                position: row.get(6)?,
+            })
+        })?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    /// Create a split-horizon entry. Entries for the same domain are ordered
+    /// by position (first match wins), so new entries go to the end.
+    pub fn create_split_horizon_entry(
+        &self,
+        input: &SplitHorizonEntryInput,
+    ) -> Result<SplitHorizonEntry> {
+        let domain = normalize_fqdn(&input.domain);
+        validate_split_horizon_entry(&domain, input)?;
+        let networks = serde_json::to_string(&input.networks)
+            .map_err(|e| DaygleError::Database(format!("encode networks: {e}")))?;
+        let ips = serde_json::to_string(&input.ips)
+            .map_err(|e| DaygleError::Database(format!("encode ips: {e}")))?;
+
+        let conn = self.conn.lock().unwrap();
+        let next_position: i64 = conn
+            .query_row(
+                "SELECT COALESCE(MAX(position), -1) + 1 FROM split_horizon_entries
+                 WHERE domain = ?1",
+                [&domain],
+                |r| r.get(0),
+            )?;
+        let entry = SplitHorizonEntry {
+            id: Uuid::new_v4().to_string(),
+            domain,
+            networks: input.networks.clone(),
+            ips: input.ips.clone(),
+            ttl: input.ttl,
+            disabled: input.disabled,
+            position: next_position,
+        };
+        conn.execute(
+            "INSERT INTO split_horizon_entries
+                (id, domain, networks, ips, ttl, disabled, position)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                entry.id,
+                entry.domain,
+                networks,
+                ips,
+                entry.ttl as i64,
+                entry.disabled as i64,
+                entry.position,
+            ],
+        )?;
+        Ok(entry)
+    }
+
+    /// Update an existing split-horizon entry by id, keeping its position.
+    pub fn update_split_horizon_entry(
+        &self,
+        id: &str,
+        input: &SplitHorizonEntryInput,
+    ) -> Result<Option<SplitHorizonEntry>> {
+        let domain = normalize_fqdn(&input.domain);
+        validate_split_horizon_entry(&domain, input)?;
+        let networks = serde_json::to_string(&input.networks)
+            .map_err(|e| DaygleError::Database(format!("encode networks: {e}")))?;
+        let ips = serde_json::to_string(&input.ips)
+            .map_err(|e| DaygleError::Database(format!("encode ips: {e}")))?;
+        let conn = self.conn.lock().unwrap();
+        let changed = conn.execute(
+            "UPDATE split_horizon_entries
+             SET domain = ?2, networks = ?3, ips = ?4, ttl = ?5, disabled = ?6
+             WHERE id = ?1",
+            params![
+                id,
+                domain,
+                networks,
+                ips,
+                input.ttl as i64,
+                input.disabled as i64,
+            ],
+        )?;
+        if changed == 0 {
+            return Ok(None);
+        }
+        drop(conn);
+        self.list_split_horizon_entries()?
+            .into_iter()
+            .find(|e| e.id == id)
+            .ok_or_else(|| DaygleError::Internal("entry vanished after update".to_string()))
+            .map(Some)
+    }
+
+    /// Delete a split-horizon entry by id.
+    pub fn delete_split_horizon_entry(&self, id: &str) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let changed = conn.execute("DELETE FROM split_horizon_entries WHERE id = ?1", [id])?;
+        Ok(changed > 0)
     }
 
     // ---- DNSSEC signing keys --------------------------------------------
@@ -602,6 +799,28 @@ pub fn normalize_fqdn(name: &str) -> String {
     name.trim()
         .trim_end_matches('.')
         .to_ascii_lowercase()
+}
+
+/// Validate a split-horizon network payload: every CIDR must parse.
+fn validate_split_horizon_network(input: &SplitHorizonNetworkInput) -> Result<()> {
+    for cidr in &input.cidrs {
+        cidr.parse::<ipnet::IpNet>().map_err(|e| {
+            DaygleError::InvalidRecord(format!("split-horizon CIDR '{cidr}': {e}"))
+        })?;
+    }
+    Ok(())
+}
+
+/// Validate a split-horizon entry payload. `domain` must already be
+/// normalized (lowercase, no trailing dot); every IP must parse.
+fn validate_split_horizon_entry(domain: &str, input: &SplitHorizonEntryInput) -> Result<()> {
+    validate_name(domain, false)?;
+    for ip in &input.ips {
+        ip.parse::<std::net::IpAddr>().map_err(|e| {
+            DaygleError::InvalidRecord(format!("split-horizon IP '{ip}': {e}"))
+        })?;
+    }
+    Ok(())
 }
 
 fn map_unique_violation(e: rusqlite::Error) -> DaygleError {
@@ -863,6 +1082,115 @@ mod tests {
             qualify_name("WWW", "EXAMPLE.COM").unwrap(),
             "www.example.com"
         );
+    }
+
+    #[test]
+    fn split_horizon_network_crud() {
+        let s = store();
+        let net = s
+            .upsert_split_horizon_network(&SplitHorizonNetworkInput {
+                name: "LAN".to_string(),
+                cidrs: vec!["192.168.20.0/24".to_string(), "10.0.0.0/8".to_string()],
+            })
+            .unwrap();
+        assert_eq!(net.name, "LAN");
+        assert_eq!(net.cidrs.len(), 2);
+
+        // Upsert by name updates the CIDRs but keeps the id stable.
+        let updated = s
+            .upsert_split_horizon_network(&SplitHorizonNetworkInput {
+                name: "LAN".to_string(),
+                cidrs: vec!["192.168.20.0/24".to_string()],
+            })
+            .unwrap();
+        assert_eq!(updated.id, net.id);
+        assert_eq!(updated.cidrs, vec!["192.168.20.0/24".to_string()]);
+
+        // A malformed CIDR is rejected.
+        assert!(matches!(
+            s.upsert_split_horizon_network(&SplitHorizonNetworkInput {
+                name: "Bad".to_string(),
+                cidrs: vec!["not-a-cidr".to_string()],
+            }),
+            Err(DaygleError::InvalidRecord(_))
+        ));
+
+        assert!(s.delete_split_horizon_network("LAN").unwrap());
+        assert!(!s.delete_split_horizon_network("LAN").unwrap());
+        assert!(s.list_split_horizon_networks().unwrap().is_empty());
+    }
+
+    #[test]
+    fn split_horizon_entry_crud() {
+        let s = store();
+        let a = s
+            .create_split_horizon_entry(&SplitHorizonEntryInput {
+                domain: "www.example.com.".to_string(),
+                networks: vec!["LAN".to_string()],
+                ips: vec!["10.0.0.5".to_string()],
+                ttl: 30,
+                disabled: false,
+            })
+            .unwrap();
+        assert_eq!(a.domain, "www.example.com");
+        assert_eq!(a.position, 0);
+
+        let b = s
+            .create_split_horizon_entry(&SplitHorizonEntryInput {
+                domain: "www.example.com".to_string(),
+                networks: vec![],
+                ips: vec!["10.0.0.6".to_string(), "fd00::1".to_string()],
+                ttl: 60,
+                disabled: false,
+            })
+            .unwrap();
+        assert_eq!(b.position, 1);
+
+        // Update by id keeps position and rewrites the fields.
+        let updated = s
+            .update_split_horizon_entry(
+                &a.id,
+                &SplitHorizonEntryInput {
+                    domain: "www.example.com".to_string(),
+                    networks: vec!["VPN".to_string()],
+                    ips: vec!["10.0.0.7".to_string()],
+                    ttl: 120,
+                    disabled: true,
+                },
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(updated.position, 0);
+        assert_eq!(updated.ips, vec!["10.0.0.7".to_string()]);
+        assert!(updated.disabled);
+
+        // A malformed IP is rejected; a missing id yields None.
+        assert!(matches!(
+            s.create_split_horizon_entry(&SplitHorizonEntryInput {
+                domain: "x.example.com".to_string(),
+                networks: vec![],
+                ips: vec!["999.1.1.1".to_string()],
+                ttl: 60,
+                disabled: false,
+            }),
+            Err(DaygleError::InvalidRecord(_))
+        ));
+        assert!(s
+            .update_split_horizon_entry(
+                "missing",
+                &SplitHorizonEntryInput {
+                    domain: "x.example.com".to_string(),
+                    networks: vec![],
+                    ips: vec!["10.0.0.1".to_string()],
+                    ttl: 60,
+                    disabled: false,
+                },
+            )
+            .unwrap()
+            .is_none());
+
+        assert!(s.delete_split_horizon_entry(&a.id).unwrap());
+        assert_eq!(s.list_split_horizon_entries().unwrap().len(), 1);
     }
 
     fn zone_input_defaults() -> ZoneInput {

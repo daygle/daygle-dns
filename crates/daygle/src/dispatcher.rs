@@ -242,6 +242,34 @@ impl RequestHandler for DnsDispatcher {
             }
         }
 
+        // 1c. Split horizon: per-client synthetic A/AAAA answers. This runs
+        // after policy (blocklists/redirects win) and before the authoritative
+        // catalog, so internal clients see internal addresses even for hosted
+        // zones. Only the requested address family is synthesized; an entry
+        // with no address of that family falls through to normal resolution.
+        if matches!(rtype.as_str(), "A" | "AAAA" | "ANY") {
+            let index = self.catalog.split_horizon();
+            if let Some(m) = index.lookup(client, &qname) {
+                let filtered: Vec<IpAddr> = match rtype.as_str() {
+                    "A" => m.ips.iter().filter(|ip| ip.is_ipv4()).copied().collect(),
+                    "AAAA" => m.ips.iter().filter(|ip| ip.is_ipv6()).copied().collect(),
+                    _ => m.ips.clone(),
+                };
+                if !filtered.is_empty() {
+                    debug!(query = %qname, %client, "split-horizon answer");
+                    self.metrics.inc(&self.metrics.split_horizon);
+                    return send_address_answer(
+                        &mut response_handle,
+                        request,
+                        info.query.query_type(),
+                        &filtered,
+                        m.ttl,
+                    )
+                    .await;
+                }
+            }
+        }
+
         // 2a. Zone transfers (AXFR/IXFR). These are served from the stored
         // zone data (not the in-memory catalog) so we can enforce the
         // transfer ACL and answer IXFR with a full transfer, which is always
@@ -334,22 +362,15 @@ async fn send_error<R: ResponseHandler>(
     }
 }
 
-/// Synthesize an A/AAAA redirect answer.
-async fn send_redirect<R: ResponseHandler>(
+/// Synthesize an A/AAAA answer carrying `ips` (used by the policy `redirect`
+/// action and by split-horizon responses).
+async fn send_address_answer<R: ResponseHandler>(
     handle: &mut R,
     request: &Request,
     rtype: RecordType,
-    ip: IpAddr,
+    ips: &[IpAddr],
+    ttl: u32,
 ) -> ResponseInfo {
-    // Redirect only makes sense for A/AAAA queries; others are blocked.
-    let is_relevant = match ip {
-        IpAddr::V4(_) => rtype == RecordType::A || rtype == RecordType::ANY,
-        IpAddr::V6(_) => rtype == RecordType::AAAA || rtype == RecordType::ANY,
-    };
-    if !is_relevant {
-        return send_error(handle, request, ResponseCode::NXDomain).await;
-    }
-
     let qname = request
         .request_info()
         .map(|i| i.query.name().to_string())
@@ -359,11 +380,27 @@ async fn send_redirect<R: ResponseHandler>(
         Err(_) => return send_error(handle, request, ResponseCode::ServFail).await,
     };
 
-    let rdata: RData = match ip {
-        IpAddr::V4(v4) => RData::A(v4.into()),
-        IpAddr::V6(v6) => RData::AAAA(v6.into()),
-    };
-    let record = Record::from_rdata(name, 60, rdata);
+    let records: Vec<Record> = ips
+        .iter()
+        .filter_map(|ip| {
+            let rdata = match (ip, rtype) {
+                (IpAddr::V4(v4), RecordType::A | RecordType::ANY) => {
+                    Some(RData::A((*v4).into()))
+                }
+                (IpAddr::V6(v6), RecordType::AAAA | RecordType::ANY) => {
+                    Some(RData::AAAA((*v6).into()))
+                }
+                _ => None,
+            };
+            rdata.map(|rdata| Record::from_rdata(name.clone(), ttl, rdata))
+        })
+        .collect();
+
+    // No address of the requested family: treat as NXDOMAIN (policy) or fall
+    // through (split horizon) - the caller decides which by pre-filtering.
+    if records.is_empty() {
+        return send_error(handle, request, ResponseCode::NXDomain).await;
+    }
 
     let mut metadata = request.metadata;
     metadata.message_type = MessageType::Response;
@@ -373,7 +410,7 @@ async fn send_redirect<R: ResponseHandler>(
 
     let response = MessageResponseBuilder::from_message_request(request).build(
         metadata,
-        std::iter::once(&record),
+        records.iter(),
         std::iter::empty(),
         std::iter::empty(),
         std::iter::empty(),
@@ -381,10 +418,20 @@ async fn send_redirect<R: ResponseHandler>(
     match handle.send_response(response).await {
         Ok(info) => info,
         Err(e) => {
-            warn!("failed to send redirect: {e}");
+            warn!("failed to send address answer: {e}");
             fallback_response()
         }
     }
+}
+
+/// Synthesize a single-address redirect answer (policy `redirect` action).
+async fn send_redirect<R: ResponseHandler>(
+    handle: &mut R,
+    request: &Request,
+    rtype: RecordType,
+    ip: IpAddr,
+) -> ResponseInfo {
+    send_address_answer(handle, request, rtype, std::slice::from_ref(&ip), 60).await
 }
 
 fn unix_now() -> u64 {

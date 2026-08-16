@@ -137,3 +137,59 @@ pub struct SecondaryZone {
     /// RFC 3339 timestamp of the last successful transfer, if any.
     pub last_transfer: Option<String>,
 }
+
+/// A named client network group used by split-horizon views, e.g.
+/// `LAN = ["192.168.20.0/24"]`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SplitHorizonNetwork {
+    /// Primary key (UUID).
+    pub id: String,
+    /// Human-readable network name, e.g. `LAN`.
+    pub name: String,
+    /// CIDR ranges belonging to this network, e.g. `192.168.20.0/24`.
+    pub cidrs: Vec<String>,
+}
+
+/// Payload to create or update a split-horizon network.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SplitHorizonNetworkInput {
+    pub name: String,
+    pub cidrs: Vec<String>,
+}
+
+/// One split-horizon view rule: clients in `networks` receive `ips` for
+/// `domain` instead of the normal answer.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SplitHorizonEntry {
+    /// Primary key (UUID).
+    pub id: String,
+    /// Fully qualified domain name, no trailing dot, e.g. `www.example.com`.
+    pub domain: String,
+    /// Network names and/or literal CIDRs (e.g. `["LAN", "10.0.0.0/8"]`);
+    /// empty means every client.
+    pub networks: Vec<String>,
+    /// IPv4/IPv6 addresses returned to matching clients.
+    pub ips: Vec<String>,
+    /// TTL of synthesized answers.
+    pub ttl: u32,
+    /// When true the entry is skipped (kept for later use).
+    pub disabled: bool,
+    /// Ordering for entries of the same domain (first match wins on ties).
+    pub position: i64,
+}
+
+/// Payload to create or update a split-horizon entry.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SplitHorizonEntryInput {
+    pub domain: String,
+    pub networks: Vec<String>,
+    pub ips: Vec<String>,
+    #[serde(default = "default_split_horizon_ttl")]
+    pub ttl: u32,
+    #[serde(default)]
+    pub disabled: bool,
+}
+
+fn default_split_horizon_ttl() -> u32 {
+    60
+}

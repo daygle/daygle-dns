@@ -36,20 +36,20 @@ tokio-util = { version = "0.7", features = ["rt"] }
 tokio-rustls = "0.26"
 rustls = "0.23"
 rustls-pki-types = "1"
-rcgen = "0.13"
+rcgen = "0.14"
 async-trait = "0.1"
 futures-util = "0.3"
 bytes = "1"
 
 axum = "0.8"
 tower = { version = "0.5", features = ["util"] }
-tower-http = { version = "0.6", features = ["fs", "cors", "trace"] }
+tower-http = { version = "0.7", features = ["fs", "cors", "trace"] }
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-toml = "0.8"
+toml = "1.1"
 
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
 ipnet = "2"
 uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }

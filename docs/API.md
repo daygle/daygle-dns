@@ -50,6 +50,7 @@ Returns a flat snapshot of the atomic counters:
   "cache_hits": 0,
   "cache_misses": 700,
   "blocked": 12,
+  "split_horizon": 4,
   "rate_limited": 3,
   "errors": 0,
   "dnssec_validated": 500,
@@ -176,6 +177,74 @@ PUT /api/zones/{id}/records
 
 Supported `rtype` values: `A`, `AAAA`, `CNAME`, `MX`, `TXT`, `NS`, `SOA`,
 `SRV`, `PTR`, `CAA`.
+
+### Split horizon
+
+```
+GET    /api/split-horizon
+POST   /api/split-horizon/networks
+DELETE /api/split-horizon/networks/{name}
+POST   /api/split-horizon/entries
+PUT    /api/split-horizon/entries/{id}
+DELETE /api/split-horizon/entries/{id}
+```
+
+Split horizon serves different answers for the same domain depending on the
+client's network. A **network** is a named group of CIDRs (e.g. `LAN =
+["192.168.20.0/24"]`); an **entry** maps a domain to a list of IPs for a set
+of networks (network names and/or literal CIDRs; empty = every client).
+
+`GET` returns everything:
+
+```json
+{
+  "networks": [
+    { "id": "…", "name": "LAN", "cidrs": ["192.168.20.0/24"] }
+  ],
+  "entries": [
+    {
+      "id": "…",
+      "domain": "www.example.com",
+      "networks": ["LAN"],
+      "ips": ["10.0.0.5"],
+      "ttl": 60,
+      "disabled": false,
+      "position": 0
+    }
+  ]
+}
+```
+
+Create or update a network (matched by `name`; the `id` is kept stable on
+update):
+
+```json
+POST /api/split-horizon/networks
+{
+  "name": "LAN",
+  "cidrs": ["192.168.20.0/24", "10.0.0.0/8"]
+}
+```
+
+Create an entry (appended after existing entries for the same domain):
+
+```json
+POST /api/split-horizon/entries
+{
+  "domain": "www.example.com",
+  "networks": ["LAN", "VPN"],
+  "ips": ["10.0.0.5"],
+  "ttl": 60,
+  "disabled": false
+}
+```
+
+`PUT /api/split-horizon/entries/{id}` updates an entry in place (keeping its
+ordering position). Entries are evaluated in order; the first one whose domain
+matches and whose networks contain the client wins, so a catch-all entry with
+no networks acts as the public fallback behind the specific internal ones.
+Matching applies to A/AAAA queries; an entry with no address of the requested
+family falls through to normal resolution.
 
 ### DNSSEC signing
 

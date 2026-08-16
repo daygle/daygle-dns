@@ -20,6 +20,8 @@ pub struct Metrics {
     pub cache_misses: AtomicU64,
     /// Queries blocked or refused by the policy engine.
     pub blocked: AtomicU64,
+    /// Queries answered with a split-horizon synthetic response.
+    pub split_horizon: AtomicU64,
     /// Queries rejected by the rate limiter.
     pub rate_limited: AtomicU64,
     /// Queries that resulted in an error.
@@ -54,6 +56,7 @@ impl Metrics {
             cache_hits: self.get(&self.cache_hits),
             cache_misses: self.get(&self.cache_misses),
             blocked: self.get(&self.blocked),
+            split_horizon: self.get(&self.split_horizon),
             rate_limited: self.get(&self.rate_limited),
             errors: self.get(&self.errors),
             dnssec_validated: self.get(&self.dnssec_validated),
@@ -72,6 +75,7 @@ pub struct MetricSnapshot {
     pub cache_hits: u64,
     pub cache_misses: u64,
     pub blocked: u64,
+    pub split_horizon: u64,
     pub rate_limited: u64,
     pub errors: u64,
     pub dnssec_validated: u64,

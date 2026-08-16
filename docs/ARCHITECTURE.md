@@ -33,7 +33,10 @@ API/GUI.
   callback; the first plugin returning `Some(Decision)` wins.
 - **`daygle-authoritative`** persists zones/records/DNSSEC keys in SQLite and
   rebuilds an in-memory Hickory `Catalog` (`InMemoryZoneHandler` per zone). The
-  hot query path never touches SQLite.
+  hot query path never touches SQLite. It also owns the split-horizon index
+  (`SplitHorizonIndex`): stored client networks + domain entries are
+  pre-resolved into a per-query lookup structure that maps `(client IP,
+  qname)` to the synthetic answer to serve.
 - **`daygle-recursive`** wraps `hickory_resolver::TokioResolver`, configuring
   cache size, per-server timeouts, attempts, and DNSSEC validation. Negative
   caching is Hickory's built-in behavior, bounded by `negative_cache_ttl`.
@@ -64,6 +67,13 @@ listener:
 1. **Policy.** The query name/type and the client IP are passed to the policy
    engine. `Block` → NXDOMAIN, `Refused` → REFUSED, `Redirect(ip)` → a
    synthesized A/AAAA answer.
+1. **Split horizon.** For A/AAAA queries, the client IP is looked up in the
+   split-horizon index. The first entry whose domain matches and whose
+   networks contain the client wins; a matching entry synthesizes an A/AAAA
+   answer (TTL from the entry) instead of the normal one. Entries with no
+   networks match every client, and an entry with no address of the requested
+   family falls through - so an internal `10.x` view can sit behind a public
+   fallback, and an IPv4-only entry never swallows AAAA queries.
 2. **Authoritative.** If the query name falls inside a hosted zone
    (`Catalog::find`), the Hickory catalog answers. Signed zones carry DNSSEC
    signatures and NSEC proofs.
@@ -98,7 +108,9 @@ listener:
   `AuthorityCatalog::reload()`) or through RFC 2136 dynamic updates, which
   apply their changes in a single SQLite transaction via
   `ZoneStore::apply_dynamic_updates` and then reload the catalog the same
-  way - either path atomically swaps in a fresh catalog.
+  way - either path atomically swaps in a fresh catalog. Split-horizon
+  changes (networks/entries, via the REST API) rebuild the split-horizon
+  index on the same `reload()`, so DNS and API views stay in sync.
 - Secondary zones are driven by `daygle-authoritative`'s `SecondaryRefresher`,
   which compares each zone's SOA serial against its master on a refresh
   interval and runs a full AXFR/IXFR pull when the master is newer (or the

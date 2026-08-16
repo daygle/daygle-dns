@@ -40,4 +40,13 @@ export const api = {
   importZone: (name, text) => request('POST', '/zones/import', { name, text }),
   blocklistSources: () => request('GET', '/policy/blocklist/sources'),
   refreshBlocklistSources: () => request('POST', '/policy/blocklist/sources'),
+  splitHorizon: () => request('GET', '/split-horizon'),
+  saveSplitHorizonNetwork: (body) => request('POST', '/split-horizon/networks', body),
+  deleteSplitHorizonNetwork: (name) =>
+    request('DELETE', `/split-horizon/networks/${encodeURIComponent(name)}`),
+  createSplitHorizonEntry: (body) => request('POST', '/split-horizon/entries', body),
+  updateSplitHorizonEntry: (id, body) =>
+    request('PUT', `/split-horizon/entries/${id}`, body),
+  deleteSplitHorizonEntry: (id) =>
+    request('DELETE', `/split-horizon/entries/${id}`),
 };

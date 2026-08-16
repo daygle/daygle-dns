@@ -55,7 +55,7 @@ pub fn generate_self_signed(
         .map_err(|e| DaygleError::Tls(format!("certificate generation failed: {e}")))?;
 
     let cert_pem = certified.cert.pem();
-    let key_pem = certified.key_pair.serialize_pem();
+    let key_pem = certified.signing_key.serialize_pem();
 
     write_if_parent_exists(cert_path, cert_pem.as_bytes())?;
     write_if_parent_exists(key_path, key_pem.as_bytes())?;

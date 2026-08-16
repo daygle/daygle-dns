@@ -21,6 +21,12 @@
 //! | `POST`   | `/api/zones/:id/sign`             | DNSSEC-sign a zone |
 //! | `POST`   | `/api/zones/:id/unsign`           | remove DNSSEC signing |
 //! | `POST`   | `/api/zones/import`               | import a BIND zone file |
+//! | `GET`    | `/api/split-horizon`              | list split-horizon networks and entries |
+//! | `POST`   | `/api/split-horizon/networks`     | create/update a network (by name) |
+//! | `DELETE` | `/api/split-horizon/networks/:name` | delete a network |
+//! | `POST`   | `/api/split-horizon/entries`      | create a split-horizon entry |
+//! | `PUT`    | `/api/split-horizon/entries/:id`  | update a split-horizon entry |
+//! | `DELETE` | `/api/split-horizon/entries/:id`  | delete a split-horizon entry |
 //! | `POST`   | `/api/cache/clear`                | flush the recursive cache |
 //!
 //! Mutating endpoints require a `Authorization: Bearer <token>` header when
@@ -41,7 +47,7 @@ use axum::extract::Request;
 use axum::http::StatusCode;
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{delete, get, post};
+use axum::routing::{delete, get, post, put};
 use axum::Router;
 use daygle_authoritative::AuthorityCatalog;
 use daygle_core::config::DaygleConfig;
@@ -89,6 +95,24 @@ pub fn router(state: AppState) -> Router {
         .route("/zones/{id}/sign", post(handlers::sign_zone))
         .route("/zones/{id}/unsign", post(handlers::unsign_zone))
         .route("/cache/clear", post(handlers::clear_cache))
+        .route("/split-horizon", get(handlers::get_split_horizon))
+        .route(
+            "/split-horizon/networks",
+            post(handlers::upsert_split_horizon_network),
+        )
+        .route(
+            "/split-horizon/networks/{name}",
+            delete(handlers::delete_split_horizon_network),
+        )
+        .route(
+            "/split-horizon/entries",
+            post(handlers::create_split_horizon_entry),
+        )
+        .route(
+            "/split-horizon/entries/{id}",
+            put(handlers::update_split_horizon_entry)
+                .delete(handlers::delete_split_horizon_entry),
+        )
         .route(
             "/policy/blocklist/sources",
             get(handlers::blocklist_sources).post(handlers::refresh_blocklist_sources),
