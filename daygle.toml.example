@@ -31,6 +31,15 @@ dnssec_validate = true
 min_cache_ttl = 0
 negative_cache_ttl = 3600
 
+# Conditional forwarding: queries for these zones are resolved by the zone's
+# own upstreams instead of the defaults above. Useful for split-horizon DNS,
+# e.g. forwarding an internal domain to the company AD DNS servers. The most
+# specific (deepest) zone wins; upstreams accept the same forms as above.
+#
+# [[recursive.conditional_zones]]
+# name = "corp.internal"
+# upstreams = ["192.0.2.10", "192.0.2.11:5353"]
+
 # Authoritative zone storage (SQLite).
 [authoritative]
 database = "/var/lib/daygle/daygle.db"
@@ -39,6 +48,21 @@ zones_dir = "/etc/daygle/zones"
 default_primary_ns = "ns1.daygle.test."
 default_admin_mailbox = "admin.daygle.test."
 dnssec_enabled = true
+
+# Serve AXFR/IXFR zone transfers (RFC 5936) for hosted zones.
+# axfr_networks limits which clients may transfer (empty = anyone).
+axfr_enabled = false
+axfr_networks = ["10.0.0.0/8", "192.168.0.0/16"]
+
+# Secondary zones: replicated from a master via AXFR/IXFR. The zone's
+# records and SOA are re-pulled from the first reachable master on
+# refresh_secs. Master entries accept IP, IP:port, or [IPv6]:port.
+#
+# [[authoritative.secondary_zones]]
+# name = "internal.example.com"
+# masters = ["192.0.2.1", "192.0.2.2:5353"]
+# refresh_secs = 600
+# enabled = true
 
 # DNS over TLS (RFC 7858) using rustls.
 [dot]
@@ -66,6 +90,24 @@ cors_origins = []
 enabled = true
 blocklist = ["*.doubleclick.net", "*.ads.example.com"]
 blocklist_files = ["/etc/daygle/blocklist.txt"]
+
+# Remote blocklist sources: fetched over HTTP(S) and merged into the
+# blocklist, refreshed on a schedule (like Technitium's blocklist manager).
+# format: "domains" (one per line) | "hosts" (hosts file, e.g. StevenBlack)
+#         | "adblock" (AdGuard/uBlock syntax).
+#
+# [[policy.blocklist_sources]]
+# name = "StevenBlack hosts"
+# url = "https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts"
+# format = "hosts"
+# refresh_secs = 86400
+#
+# [[policy.blocklist_sources]]
+# name = "AdGuard DNS filter"
+# url = "https://adguardteam.github.io/AdGuardSDNSFilter/Filters/filter.txt"
+# format = "adblock"
+# refresh_secs = 43200
+
 denied_networks = []
 allowed_networks = []
 

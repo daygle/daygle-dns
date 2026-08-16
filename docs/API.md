@@ -132,6 +132,13 @@ POST /api/zones/import
 }
 ```
 
+Zone transfers (AXFR/IXFR, RFC 5936) are served over the plaintext TCP
+listener — not over HTTP — gated by `authoritative.axfr_enabled` and the
+`axfr_networks` client allow-list in `daygle.toml`. Secondary zones (zones
+replicated from remote masters on a refresh interval) are also configured in
+`daygle.toml` under `[[authoritative.secondary_zones]]`; each replicated zone
+appears in `GET /api/zones` like any other zone, but is served read-only.
+
 ### Records
 
 ```
@@ -177,6 +184,40 @@ POST /api/cache/clear
 ```
 
 Flushes the recursive resolver cache.
+
+### Blocklist sources
+
+```
+GET  /api/policy/blocklist/sources
+POST /api/policy/blocklist/sources
+```
+
+`GET` returns per-source status for the remote blocklist sources configured
+under `[[policy.blocklist_sources]]`: name, URL, format, refresh interval,
+last-fetch age, and the number of domains each source contributed.
+
+`POST` forces an immediate refresh of every source and applies the merged
+result, returning the new total domain count.
+
+```json
+{
+  "sources": [
+    {
+      "name": "StevenBlack hosts",
+      "url": "https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts",
+      "enabled": true,
+      "format": "hosts",
+      "refresh_secs": 43200,
+      "last_fetch": 3600,
+      "domains": 182344,
+      "last_error": null
+    }
+  ],
+  "total_domains": 182344
+}
+```
+
+Returns `404` when no sources are configured.
 
 ## Errors
 

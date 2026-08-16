@@ -45,6 +45,13 @@ CREATE TABLE IF NOT EXISTS dnssec_keys (
     key_der    BLOB NOT NULL,
     created_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS secondary_zones (
+    zone_id      TEXT PRIMARY KEY REFERENCES zones(id) ON DELETE CASCADE,
+    masters      TEXT NOT NULL,
+    refresh_secs INTEGER NOT NULL DEFAULT 3600,
+    last_transfer TEXT
+);
 "#;
 
 /// SQLite-backed storage for zones and records.
@@ -214,6 +221,85 @@ impl ZoneStore {
         let next = current.wrapping_add(1).max(1);
         conn.execute("UPDATE zones SET serial = ?2 WHERE id = ?1", params![id, next])?;
         Ok(next)
+    }
+
+    /// Replace the SOA metadata (mname, rname, serial, and timers) of a zone
+    /// with values learned from a zone transfer.
+    pub fn set_zone_soa(
+        &self,
+        id: &str,
+        primary_ns: &str,
+        admin_mailbox: &str,
+        serial: u32,
+        refresh: u32,
+        retry: u32,
+        expire: u32,
+        minimum: u32,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let changed = conn.execute(
+            "UPDATE zones SET primary_ns = ?2, admin_mailbox = ?3, serial = ?4,
+                             refresh = ?5, retry = ?6, expire = ?7, minimum = ?8
+             WHERE id = ?1",
+            params![id, primary_ns, admin_mailbox, serial, refresh, retry, expire, minimum],
+        )?;
+        if changed == 0 {
+            return Err(DaygleError::NotFound(format!("zone {id}")));
+        }
+        Ok(())
+    }
+
+    // ---- Secondary zones --------------------------------------------------
+
+    /// Mark a zone as secondary, replacing its master list and refresh interval.
+    pub fn set_secondary(&self, zone_id: &str, masters: &[String], refresh_secs: u64) -> Result<()> {
+        let masters = serde_json::to_string(masters)
+            .map_err(|e| DaygleError::Database(format!("encode masters: {e}")))?;
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO secondary_zones (zone_id, masters, refresh_secs, last_transfer)
+             VALUES (?1, ?2, ?3, NULL)
+             ON CONFLICT(zone_id) DO UPDATE SET masters = ?2, refresh_secs = ?3",
+            params![zone_id, masters, refresh_secs as i64],
+        )?;
+        Ok(())
+    }
+
+    /// List all secondary zones with their metadata.
+    pub fn list_secondary(&self) -> Result<Vec<crate::model::SecondaryZone>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT zone_id, masters, refresh_secs, last_transfer
+             FROM secondary_zones ORDER BY zone_id",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            let masters_json: String = row.get(1)?;
+            let masters: Vec<String> = serde_json::from_str(&masters_json).unwrap_or_default();
+            Ok(crate::model::SecondaryZone {
+                zone_id: row.get(0)?,
+                masters,
+                refresh_secs: row.get::<_, i64>(2)? as u64,
+                last_transfer: row.get(3)?,
+            })
+        })?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    /// Record a successful transfer timestamp for a secondary zone.
+    pub fn touch_secondary(&self, zone_id: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE secondary_zones SET last_transfer = ?2 WHERE zone_id = ?1",
+            params![zone_id, Utc::now().to_rfc3339()],
+        )?;
+        Ok(())
+    }
+
+    /// Remove secondary metadata (the zone itself is kept).
+    pub fn unset_secondary(&self, zone_id: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM secondary_zones WHERE zone_id = ?1", [zone_id])?;
+        Ok(())
     }
 
     // ---- Records ---------------------------------------------------------

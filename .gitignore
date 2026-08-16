@@ -19,3 +19,6 @@ certs/
 # OS / editor
 .DS_Store
 *.swp
+
+# Local app state
+.freebuff/

@@ -37,6 +37,9 @@ API/GUI.
 - **`daygle-recursive`** wraps `hickory_resolver::TokioResolver`, configuring
   cache size, per-server timeouts, attempts, and DNSSEC validation. Negative
   caching is Hickory's built-in behavior, bounded by `negative_cache_ttl`.
+  Conditional forwarding zones each get their own resolver built from the
+  zone's dedicated upstreams; routing happens at lookup time by longest
+  label-aligned suffix match.
 - **`daygle-dot`** produces a rustls `ServerConfig` with the `dot` ALPN and
   generates self-signed certificates when configured.
 - **`daygle-api`** serves the REST API and the embedded GUI.
@@ -55,10 +58,20 @@ listener:
 2. **Authoritative.** If the query name falls inside a hosted zone
    (`Catalog::find`), the Hickory catalog answers. Signed zones carry DNSSEC
    signatures and NSEC proofs.
-3. **Recursive.** Otherwise the query goes to `daygle-recursive`; the resulting
-   `Lookup` is converted into a `MessageResponse` with the upstream's RCODE and
-   the AD bit when DNSSEC validation succeeded.
-4. RFC 2136 `UPDATE` messages are delegated directly to the catalog.
+3. **Zone transfers.** AXFR/IXFR queries are intercepted before the normal
+   lookup path (`DnsDispatcher::handle_transfer`). Transfers are gated by
+   `authoritative.axfr_enabled` and the `axfr_networks` client allow-list, and
+   answered with the full zone record set (`SOA, records…, SOA` per RFC 5936;
+   IXFR always gets a full transfer, which RFC 1995 permits).
+4. **Recursive.** Otherwise the query goes to `daygle-recursive`; the
+   `RecursiveResolver` routes by name — the most specific configured
+   conditional zone (longest label-aligned suffix) is resolved by its own
+   dedicated resolver/upstreams, everything else by the default ones. The
+   resulting `Lookup` is converted into a `MessageResponse` with the
+   upstream's RCODE and the AD bit when DNSSEC validation succeeded.
+   Negative answers (NXDOMAIN/NODATA) carry their response code through the
+   error type so they are returned as-is instead of SERVFAIL.
+5. RFC 2136 `UPDATE` messages are delegated directly to the catalog.
 
 ## Concurrency model
 
@@ -67,6 +80,13 @@ listener:
   non-`Send` lock guard across `.await`.
 - Zone mutations go through the REST API, which updates SQLite and then calls
   `AuthorityCatalog::reload()` to atomically swap in a fresh catalog.
+- Secondary zones are driven by `daygle-authoritative`'s `SecondaryRefresher`,
+  which compares each zone's SOA serial against its master on a refresh
+  interval and runs a full AXFR/IXFR pull when the master is newer (or the
+  local zone has never been transferred). Transferred records replace the
+  stored set via `ZoneStore::replace_records`, and the catalog is reloaded so
+  updates are served immediately. Secondary zones are served read-only: the
+  Hickory catalog marks them `ZoneType::Secondary`.
 - `Metrics` uses lock-free atomics; `LogStore` is a mutex-guarded ring buffer.
 
 ## Live configuration reload
@@ -79,6 +99,19 @@ When the `server`/`dot` sections change, a listener supervisor gracefully
 stops the current sockets and rebinds new ones, self-healing back to the last
 good configuration if a bind fails. Reload can also be triggered on demand via
 `POST /api/config/reload` or `BoundServer::reload()`.
+
+### Remote blocklist sources
+
+`daygle-policy`'s `BlocklistSourceManager` fetches each configured
+`[[policy.blocklist_sources]]` URL over HTTP(S) (reqwest/rustls, 32 MiB body
+cap, redirects, 30 s timeout) and parses the body in its declared format
+(`domains`, `hosts`, or `adblock`). A background task in `daygle` polls on the
+smallest configured refresh interval and, when a source is due, swaps the
+merged remote blocklist into the shared `PolicyEngine` via
+`set_remote_blocklist` — the static blocklist from config/files is never
+discarded, and a failed/empty fetch leaves the previous domains in place.
+`POST /api/policy/blocklist/sources` forces an immediate refresh; `GET` the
+same path for per-source status.
 
 ## DNSSEC
 

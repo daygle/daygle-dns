@@ -9,6 +9,7 @@ description = "REST API for configuration, zones, logs and metrics, plus the emb
 [dependencies]
 daygle-core = { path = "../daygle-core" }
 daygle-authoritative = { path = "../daygle-authoritative" }
+daygle-policy = { path = "../daygle-policy" }
 daygle-recursive = { path = "../daygle-recursive" }
 daygle-gui = { path = "../daygle-gui" }
 axum.workspace = true

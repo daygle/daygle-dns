@@ -17,10 +17,13 @@ use daygle_authoritative::AuthorityCatalog;
 use daygle_core::config::DaygleConfig;
 use daygle_core::error::{DaygleError, Result};
 use daygle_core::{LogLevel, LogStore, Metrics};
+use daygle_policy::BlocklistSourceManager;
 use daygle_recursive::RecursiveResolver;
 use dispatcher::DnsDispatcher;
 use hickory_server::server::Server;
-use reload::{apply_config, spawn_watcher, ListenerAddrs, ReloadCommand, Shared};
+use reload::{
+    apply_config, spawn_blocklist_refresh, spawn_watcher, ListenerAddrs, ReloadCommand, Shared,
+};
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
@@ -46,6 +49,9 @@ pub struct BoundServer {
     /// The recursive resolver as built at startup (superseded on reload; see
     /// [`BoundServer::reload`]).
     pub resolver: Option<Arc<RecursiveResolver>>,
+    /// Remote blocklist source manager (fetches and status; `None` when no
+    /// sources are configured).
+    pub blocklist_sources: Option<Arc<BlocklistSourceManager>>,
 
     shared: Arc<Shared>,
     addrs: Arc<ArcSwap<ListenerAddrs>>,
@@ -139,11 +145,28 @@ pub async fn bind_with(
     // Authoritative.
     let store = daygle_authoritative::ZoneStore::open(&config.authoritative.database)?;
     let catalog = Arc::new(AuthorityCatalog::new(
-        store,
+        store.clone(),
         config.authoritative.clone(),
     )?);
     catalog.reload()?;
     import_zone_files(&catalog, &config, &logs)?;
+
+    // Secondary zone refreshers (AXFR/IXFR from configured masters).
+    let shutdown = CancellationToken::new();
+    if !config.authoritative.secondary_zones.is_empty() {
+        let refresher = daygle_authoritative::SecondaryRefresher::new(
+            store,
+            catalog.clone(),
+            config.authoritative.secondary_zones.clone(),
+            daygle_authoritative::XfrClient::default(),
+        );
+        tokio::spawn({
+            let shutdown = shutdown.clone();
+            async move {
+                refresher.run_forever(shutdown).await;
+            }
+        });
+    }
 
     // Recursive.
     let resolver = if config.recursive.enabled {
@@ -183,7 +206,6 @@ pub async fn bind_with(
     let addrs = Arc::new(ArcSwap::from_pointee(initial_addrs));
 
     // DNS supervisor: owns the listeners and rebinds them on command.
-    let shutdown = CancellationToken::new();
     let (reload_tx, reload_rx) = mpsc::channel(16);
     let dns_task = tokio::spawn(run_dns_supervisor(
         shared.clone(),
@@ -212,6 +234,13 @@ pub async fn bind_with(
         _ => None,
     };
 
+    // Remote blocklist sources: fetch on schedule, expose status via the API.
+    let blocklist_sources = spawn_blocklist_refresh(
+        shared.clone(),
+        config.policy.blocklist_sources.clone(),
+        shutdown.clone(),
+    );
+
     // REST API.
     let api_addr: std::net::SocketAddr = format!("{}:{}", config.api.listen, config.api.port)
         .parse()
@@ -224,6 +253,8 @@ pub async fn bind_with(
         metrics: metrics.clone(),
         logs: logs.clone(),
         config: shared.config.clone(),
+        policy: shared.policy.clone(),
+        blocklist_sources: blocklist_sources.clone(),
         started_at,
         config_path: config_path.clone().map(Arc::new),
         reload_notify,
@@ -244,6 +275,7 @@ pub async fn bind_with(
         logs,
         catalog,
         resolver,
+        blocklist_sources,
         shared,
         addrs,
         shutdown,

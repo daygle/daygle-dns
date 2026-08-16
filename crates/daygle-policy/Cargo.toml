@@ -12,6 +12,5 @@ ipnet.workspace = true
 serde.workspace = true
 async-trait.workspace = true
 tracing.workspace = true
-
-[dev-dependencies]
+reqwest.workspace = true
 tokio.workspace = true

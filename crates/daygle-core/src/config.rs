@@ -86,9 +86,31 @@ impl DaygleConfig {
                 ));
             }
         }
+        for zone in &self.recursive.conditional_zones {
+            if zone.name.trim().is_empty() {
+                return Err(DaygleError::Config(
+                    "recursive.conditional_zones contains a zone with an empty name".to_string(),
+                ));
+            }
+            if zone.upstreams.is_empty() {
+                return Err(DaygleError::Config(format!(
+                    "conditional zone '{}' has no upstreams",
+                    zone.name
+                )));
+            }
+            for upstream in &zone.upstreams {
+                if upstream.trim().is_empty() {
+                    return Err(DaygleError::Config(format!(
+                        "conditional zone '{}' contains an empty upstream",
+                        zone.name
+                    )));
+                }
+            }
+        }
         for (label, networks) in [
             ("policy.denied_networks", &self.policy.denied_networks),
             ("policy.allowed_networks", &self.policy.allowed_networks),
+            ("authoritative.axfr_networks", &self.authoritative.axfr_networks),
         ] {
             for net in networks {
                 if net.parse::<ipnet::IpNet>().is_err() {
@@ -98,8 +120,60 @@ impl DaygleConfig {
                 }
             }
         }
+        for source in &self.policy.blocklist_sources {
+            if source.name.trim().is_empty() {
+                return Err(DaygleError::Config(
+                    "policy.blocklist_sources contains a source with an empty name".to_string(),
+                ));
+            }
+            url::Url::parse(&source.url).map_err(|e| {
+                DaygleError::Config(format!(
+                    "blocklist source '{}' has invalid URL '{}': {e}",
+                    source.name, source.url
+                ))
+            })?;
+            if source.refresh_secs == 0 {
+                return Err(DaygleError::Config(format!(
+                    "blocklist source '{}' has refresh_secs = 0",
+                    source.name
+                )));
+            }
+        }
+        for zone in &self.authoritative.secondary_zones {
+            if zone.name.trim().is_empty() {
+                return Err(DaygleError::Config(
+                    "authoritative.secondary_zones contains a zone with an empty name".to_string(),
+                ));
+            }
+            if zone.masters.is_empty() {
+                return Err(DaygleError::Config(format!(
+                    "secondary zone '{}' has no masters",
+                    zone.name
+                )));
+            }
+            for master in &zone.masters {
+                parse_master_addr(master).map_err(|e| {
+                    DaygleError::Config(format!(
+                        "secondary zone '{}' has invalid master '{master}': {e}",
+                        zone.name
+                    ))
+                })?;
+            }
+        }
         Ok(())
     }
+}
+
+/// Parse a master address of the form `IP`, `IP:port`, or `[IPv6]:port`
+/// (port defaults to 53).
+pub fn parse_master_addr(entry: &str) -> std::result::Result<std::net::SocketAddr, String> {
+    let entry = entry.trim();
+    if let Ok(ip) = entry.parse::<std::net::IpAddr>() {
+        return Ok(std::net::SocketAddr::new(ip, 53));
+    }
+    entry
+        .parse::<std::net::SocketAddr>()
+        .map_err(|e| format!("cannot parse as IP[:port]: {e}"))
 }
 
 /// Core UDP/TCP DNS listener settings.
@@ -167,6 +241,10 @@ pub struct RecursiveSettings {
     /// Upper bound, in seconds, for caching negative (NXDOMAIN/NODATA) answers.
     /// Hickory derives the authoritative TTL from the SOA; this caps it.
     pub negative_cache_ttl: u32,
+    /// Conditional forwarding: queries for these zones are resolved by the
+    /// zone's dedicated upstreams instead of the default ones. The most
+    /// specific (deepest) matching zone wins.
+    pub conditional_zones: Vec<ConditionalZoneConfig>,
 }
 
 impl Default for RecursiveSettings {
@@ -181,6 +259,28 @@ impl Default for RecursiveSettings {
             dnssec_validate: true,
             min_cache_ttl: 0,
             negative_cache_ttl: 3600,
+            conditional_zones: vec![],
+        }
+    }
+}
+
+/// A conditional forwarding zone: `name` is resolved via `upstreams` instead
+/// of the global `recursive.upstreams`. Accepts the same upstream forms
+/// (plain IP, `tls://IP:port@hostname`, …).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct ConditionalZoneConfig {
+    /// Zone apex to forward, e.g. `corp.internal`.
+    pub name: String,
+    /// Dedicated upstreams for this zone (same forms as `recursive.upstreams`).
+    pub upstreams: Vec<String>,
+}
+
+impl Default for ConditionalZoneConfig {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            upstreams: vec![],
         }
     }
 }
@@ -199,6 +299,13 @@ pub struct AuthoritativeSettings {
     pub default_admin_mailbox: String,
     /// Whether zones with signing keys are DNSSEC-signed on reload.
     pub dnssec_enabled: bool,
+    /// Serve AXFR/IXFR zone transfers for hosted zones.
+    pub axfr_enabled: bool,
+    /// Client networks allowed to request zone transfers. When empty, any
+    /// client may transfer (subject to `axfr_enabled`).
+    pub axfr_networks: Vec<String>,
+    /// Secondary zones replicated from remote masters via AXFR/IXFR.
+    pub secondary_zones: Vec<SecondaryZoneConfig>,
 }
 
 impl Default for AuthoritativeSettings {
@@ -209,6 +316,37 @@ impl Default for AuthoritativeSettings {
             default_primary_ns: "ns1.daygle.test.".to_string(),
             default_admin_mailbox: "admin.daygle.test.".to_string(),
             dnssec_enabled: true,
+            axfr_enabled: false,
+            axfr_networks: vec![],
+            secondary_zones: vec![],
+        }
+    }
+}
+
+/// A secondary zone: a zone replicated from one or more masters via
+/// AXFR/IXFR. The first reachable master is used; the zone's records and SOA
+/// are refreshed from it on `refresh_secs`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct SecondaryZoneConfig {
+    /// Zone apex, e.g. `example.com`.
+    pub name: String,
+    /// Master servers, each `IP`, `IP:port`, or `[IPv6]:port` (port 53 when
+    /// omitted).
+    pub masters: Vec<String>,
+    /// How often to check the master for updates, in seconds.
+    pub refresh_secs: u64,
+    /// Whether this secondary zone is active.
+    pub enabled: bool,
+}
+
+impl Default for SecondaryZoneConfig {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            masters: vec![],
+            refresh_secs: 3600,
+            enabled: true,
         }
     }
 }
@@ -289,6 +427,10 @@ pub struct PolicySettings {
     pub blocklist: Vec<String>,
     /// Files containing one domain per line, merged into the blocklist.
     pub blocklist_files: Vec<String>,
+    /// Remote blocklist sources fetched over HTTP(S) and refreshed on a
+    /// schedule, like Technitium's blocklist management. Domains from all
+    /// sources are merged into the blocklist.
+    pub blocklist_sources: Vec<BlocklistSourceConfig>,
     /// Client networks denied entirely (REFUSED).
     pub denied_networks: Vec<String>,
     /// Client networks allowed; when non-empty, all others are denied.
@@ -303,11 +445,57 @@ impl Default for PolicySettings {
             enabled: true,
             blocklist: vec![],
             blocklist_files: vec![],
+            blocklist_sources: vec![],
             denied_networks: vec![],
             allowed_networks: vec![],
             rules: vec![],
         }
     }
+}
+
+/// A remote blocklist source: a URL fetched over HTTP(S) whose contents are
+/// merged into the blocklist and re-fetched every `refresh_secs`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct BlocklistSourceConfig {
+    /// Human-readable name, used in logs and status output.
+    pub name: String,
+    /// HTTP(S) URL of the blocklist.
+    pub url: String,
+    /// Content format: `domains` (one domain per line), `hosts` (a hosts
+    /// file, e.g. StevenBlack), or `adblock` (AdGuard/uBlock syntax).
+    pub format: BlocklistFormat,
+    /// How often to re-fetch the source, in seconds (default 24 h).
+    pub refresh_secs: u64,
+    /// Whether this source is fetched at all.
+    pub enabled: bool,
+}
+
+impl Default for BlocklistSourceConfig {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            url: String::new(),
+            format: BlocklistFormat::Domains,
+            refresh_secs: 86400,
+            enabled: true,
+        }
+    }
+}
+
+/// The wire format of a remote blocklist source.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum BlocklistFormat {
+    /// One domain per line; comments (`#`, `!`) are skipped.
+    #[default]
+    Domains,
+    /// A hosts file: lines like `0.0.0.0 example.com`. The hostname column is
+    /// used; localhost/loopback entries are ignored.
+    Hosts,
+    /// AdGuard/uBlock origin syntax: `||example.com^`, `@@` exceptions are
+    /// ignored (treated as not-blocked).
+    Adblock,
 }
 
 /// A single ordered policy rule.
@@ -423,5 +611,134 @@ action = "block"
     #[test]
     fn rejects_unknown_field() {
         assert!(DaygleConfig::parse("[server]\nport = 53\nbogus = 1\n").is_err());
+    }
+
+    #[test]
+    fn parses_axfr_and_secondary_zones() {
+        let text = r#"
+[authoritative]
+axfr_enabled = true
+axfr_networks = ["192.0.2.0/24"]
+
+[[authoritative.secondary_zones]]
+name = "example.com"
+masters = ["192.0.2.1", "192.0.2.2:5353"]
+refresh_secs = 600
+"#;
+        let cfg = DaygleConfig::parse(text).unwrap();
+        assert!(cfg.authoritative.axfr_enabled);
+        assert_eq!(cfg.authoritative.axfr_networks.len(), 1);
+        assert_eq!(cfg.authoritative.secondary_zones.len(), 1);
+        let zone = &cfg.authoritative.secondary_zones[0];
+        assert_eq!(zone.name, "example.com");
+        assert_eq!(zone.masters.len(), 2);
+        assert_eq!(zone.refresh_secs, 600);
+    }
+
+    #[test]
+    fn parses_blocklist_sources() {
+        let text = r#"
+[policy]
+
+[[policy.blocklist_sources]]
+name = "StevenBlack hosts"
+url = "https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts"
+format = "hosts"
+refresh_secs = 43200
+
+[[policy.blocklist_sources]]
+name = "AdGuard DNS filter"
+url = "https://adguardteam.github.io/AdGuardSDNSFilter/Filters/filter.txt"
+format = "adblock"
+"#;
+        let cfg = DaygleConfig::parse(text).unwrap();
+        assert_eq!(cfg.policy.blocklist_sources.len(), 2);
+        assert_eq!(cfg.policy.blocklist_sources[0].format, BlocklistFormat::Hosts);
+        assert_eq!(cfg.policy.blocklist_sources[0].refresh_secs, 43200);
+        assert_eq!(cfg.policy.blocklist_sources[1].format, BlocklistFormat::Adblock);
+        assert_eq!(cfg.policy.blocklist_sources[1].refresh_secs, 86400);
+    }
+
+    #[test]
+    fn rejects_bad_blocklist_source_url() {
+        let text = r#"
+[[policy.blocklist_sources]]
+name = "bad"
+url = "not a url"
+"#;
+        assert!(DaygleConfig::parse(text).is_err());
+    }
+
+    #[test]
+    fn rejects_zero_refresh_blocklist_source() {
+        let text = r#"
+[[policy.blocklist_sources]]
+name = "bad"
+url = "https://example.com/list.txt"
+refresh_secs = 0
+"#;
+        assert!(DaygleConfig::parse(text).is_err());
+    }
+
+    #[test]
+    fn parses_conditional_zones() {
+        let text = r#"
+[recursive]
+upstreams = ["8.8.8.8"]
+
+[[recursive.conditional_zones]]
+name = "corp.internal"
+upstreams = ["192.0.2.10", "tls://192.0.2.11:853@corp-dns.internal"]
+
+[[recursive.conditional_zones]]
+name = "lab.internal"
+upstreams = ["192.0.2.20:5353"]
+"#;
+        let cfg = DaygleConfig::parse(text).unwrap();
+        assert_eq!(cfg.recursive.conditional_zones.len(), 2);
+        assert_eq!(cfg.recursive.conditional_zones[0].name, "corp.internal");
+        assert_eq!(cfg.recursive.conditional_zones[0].upstreams.len(), 2);
+    }
+
+    #[test]
+    fn rejects_conditional_zone_without_upstreams() {
+        let text = r#"
+[[recursive.conditional_zones]]
+name = "corp.internal"
+upstreams = []
+"#;
+        assert!(DaygleConfig::parse(text).is_err());
+    }
+
+    #[test]
+    fn rejects_secondary_zone_without_masters() {
+        let text = r#"
+[[authoritative.secondary_zones]]
+name = "example.com"
+masters = []
+"#;
+        assert!(DaygleConfig::parse(text).is_err());
+    }
+
+    #[test]
+    fn rejects_bad_master_addr() {
+        let text = r#"
+[[authoritative.secondary_zones]]
+name = "example.com"
+masters = ["not-an-addr"]
+"#;
+        assert!(DaygleConfig::parse(text).is_err());
+    }
+
+    #[test]
+    fn master_addr_defaults_to_port_53() {
+        assert_eq!(
+            parse_master_addr("192.0.2.1").unwrap(),
+            "192.0.2.1:53".parse().unwrap()
+        );
+        assert_eq!(
+            parse_master_addr("[2001:db8::1]:5353").unwrap(),
+            "[2001:db8::1]:5353".parse().unwrap()
+        );
     }
 }

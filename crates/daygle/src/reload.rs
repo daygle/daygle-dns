@@ -21,7 +21,7 @@ use daygle_authoritative::AuthorityCatalog;
 use daygle_core::config::DaygleConfig;
 use daygle_core::error::Result;
 use daygle_core::{LogStore, Metrics};
-use daygle_policy::PolicyEngine;
+use daygle_policy::{BlocklistSourceManager, PolicyEngine};
 use daygle_recursive::RecursiveResolver;
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
@@ -164,6 +164,65 @@ fn last_modified(path: &Path) -> Option<std::time::SystemTime> {
     std::fs::metadata(path)
         .and_then(|m| m.modified())
         .ok()
+}
+
+/// Spawn the remote blocklist source refresher.
+///
+/// Polls the sources on the smallest configured refresh interval and, when
+/// anything is due, swaps the merged remote blocklist into the shared policy
+/// engine without touching the static (config + files) blocklist.
+///
+/// Returns the [`BlocklistSourceManager`] so the API can expose source status
+/// and trigger manual refreshes.
+pub fn spawn_blocklist_refresh(
+    shared: Arc<Shared>,
+    sources: Vec<daygle_core::config::BlocklistSourceConfig>,
+    shutdown: CancellationToken,
+) -> Option<Arc<BlocklistSourceManager>> {
+    let manager = match BlocklistSourceManager::new(sources) {
+        Ok(m) => m,
+        Err(e) => {
+            warn!("blocklist sources disabled: {e}");
+            return None;
+        }
+    };
+    if manager.is_empty() {
+        return Some(Arc::new(manager));
+    }
+
+    let manager = Arc::new(manager);
+    let refresh_manager = Arc::clone(&manager);
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(refresh_manager.min_refresh());
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tokio::select! {
+                _ = shutdown.cancelled() => return,
+                _ = ticker.tick() => {}
+            }
+            match refresh_manager.refresh_due().await {
+                Ok(Some(list)) => {
+                    // Apply only when the fetched set differs from what the
+                    // engine already has, so failed/empty fetches don't wipe
+                    // previously loaded domains.
+                    let mut engine = shared.policy.load_full().as_ref().clone();
+                    let current: std::collections::BTreeSet<String> = engine
+                        .remote_blocklist_snapshot()
+                        .map(|b| b.domains())
+                        .unwrap_or_default();
+                    let fetched: std::collections::BTreeSet<String> = list.domains();
+                    if current != fetched {
+                        engine.set_remote_blocklist(list);
+                        shared.policy.store(std::sync::Arc::new(engine));
+                        info!(domains = fetched.len(), "remote blocklist refreshed");
+                    }
+                }
+                Ok(None) => {}
+                Err(e) => warn!("blocklist refresh failed: {e}"),
+            }
+        }
+    });
+    Some(manager)
 }
 
 #[cfg(test)]

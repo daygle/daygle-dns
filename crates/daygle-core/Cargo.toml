@@ -16,3 +16,4 @@ ipnet.workspace = true
 tracing.workspace = true
 parking_lot.workspace = true
 rusqlite.workspace = true
+url.workspace = true

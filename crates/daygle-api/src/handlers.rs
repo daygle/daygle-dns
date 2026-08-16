@@ -1,5 +1,7 @@
 //! HTTP handlers for the REST API.
 
+use std::sync::Arc;
+
 use axum::extract::{Path, Query, State};
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -59,12 +61,70 @@ pub async fn status(State(state): State<AppState>) -> Response {
         "dnssec": config.recursive.dnssec_validate,
         "dot_enabled": config.dot.enabled,
         "api_enabled": config.api.enabled,
+        "blocklist_sources": config.policy.blocklist_sources.len(),
+        "remote_blocklist_domains": state.policy.load_full().remote_blocklist_len(),
     }))
     .into_response()
 }
 
 pub async fn metrics(State(state): State<AppState>) -> Response {
     Json(state.metrics.snapshot()).into_response()
+}
+
+/// Per-source status for remote blocklist sources.
+pub async fn blocklist_sources(State(state): State<AppState>) -> Response {
+    let Some(manager) = &state.blocklist_sources else {
+        return error_response(
+            StatusCode::NOT_FOUND,
+            "no blocklist sources configured (add [[policy.blocklist_sources]])",
+        );
+    };
+    let sources: Vec<serde_json::Value> = manager
+        .status()
+        .into_iter()
+        .map(|s| {
+            serde_json::json!({
+                "name": s.name,
+                "url": s.url,
+                "enabled": s.enabled,
+                "format": format!("{:?}", s.format).to_ascii_lowercase(),
+                "refresh_secs": s.refresh_secs,
+                "last_fetch": s.last_fetch.map(|t| t.elapsed().as_secs()),
+                "domains": s.domains,
+                "last_error": s.last_error,
+            })
+        })
+        .collect();
+    Json(serde_json::json!({
+        "sources": sources,
+        "total_domains": state.policy.load_full().remote_blocklist_len(),
+    }))
+    .into_response()
+}
+
+/// Force an immediate refresh of every remote blocklist source.
+pub async fn refresh_blocklist_sources(State(state): State<AppState>) -> Response {
+    let Some(manager) = &state.blocklist_sources else {
+        return error_response(
+            StatusCode::NOT_FOUND,
+            "no blocklist sources configured (add [[policy.blocklist_sources]])",
+        );
+    };
+    match manager.refresh_all().await {
+        Ok(Some(list)) => {
+            let mut engine = state.policy.load_full().as_ref().clone();
+            engine.set_remote_blocklist(list);
+            state.policy.store(Arc::new(engine));
+            let total = state.policy.load_full().remote_blocklist_len();
+            Json(serde_json::json!({
+                "refreshed": true,
+                "total_domains": total,
+            }))
+            .into_response()
+        }
+        Ok(None) => Json(serde_json::json!({"refreshed": true, "total_domains": 0})).into_response(),
+        Err(e) => error_response(StatusCode::BAD_GATEWAY, format!("refresh failed: {e}")),
+    }
 }
 
 #[derive(Deserialize)]

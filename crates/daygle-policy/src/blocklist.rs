@@ -49,6 +49,13 @@ impl Blocklist {
         self.exact.len() + self.suffixes.len()
     }
 
+    /// The full set of entries, `*.` wildcards included, as a `BTreeSet`.
+    pub fn domains(&self) -> std::collections::BTreeSet<String> {
+        let mut all = self.exact.clone();
+        all.extend(self.suffixes.iter().map(|s| format!("*.{s}")));
+        all
+    }
+
     /// Whether `domain` (already normalized, no trailing dot) is blocked.
     pub fn contains(&self, domain: &str) -> bool {
         if self.exact.contains(domain) {

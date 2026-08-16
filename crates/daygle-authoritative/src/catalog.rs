@@ -91,6 +91,36 @@ impl AuthorityCatalog {
         self.store.delete_signing_key(zone_id)?;
         self.reload()
     }
+
+    /// Build the record list for a zone transfer (AXFR/IXFR response): the
+    /// synthesized SOA, plus every other record in the zone. The caller is
+    /// responsible for placing the SOA at both the start and end of the
+    /// answer section, as RFC 5936 requires.
+    ///
+    /// Returns `None` when no zone with exactly `zone_name` exists.
+    pub fn transfer_records(&self, zone_name: &str) -> Result<Option<(Record, Vec<Record>)>> {
+        let Some(zone) = self.store.find_zone_by_name(zone_name)? else {
+            return Ok(None);
+        };
+        let records = self.store.list_records(&zone.id)?;
+        let map = zone_rrsets(&zone, &records)?;
+
+        let mut soa = None;
+        let mut others = Vec::with_capacity(map.len() * 2);
+        for set in map.values() {
+            for record in set.records_without_rrsigs() {
+                if record.record_type() == RecordType::SOA {
+                    soa = Some(record.clone());
+                } else {
+                    others.push(record.clone());
+                }
+            }
+        }
+        let Some(soa) = soa else {
+            return Ok(None);
+        };
+        Ok(Some((soa, others)))
+    }
 }
 
 /// Generate an ECDSA P-256 signing key, returning `(algorithm, pkcs8_der)`.
@@ -108,39 +138,20 @@ fn build_catalog(
 ) -> Result<Catalog> {
     let mut catalog = Catalog::new();
     let data = store.load_catalog_data()?;
+    let secondary_ids: std::collections::HashSet<String> = store
+        .list_secondary()?
+        .into_iter()
+        .map(|s| s.zone_id)
+        .collect();
 
     for (zone, records, key) in data {
         let origin = fqdn_name(&zone.name)?;
-
-        let mut map: BTreeMap<RrKey, RecordSet> = BTreeMap::new();
-
-        // Synthesize the SOA record from zone metadata.
-        let soa_rdata = RData::try_from_str(
-            RecordType::SOA,
-            &format!(
-                "{} {} {} {} {} {} {}",
-                zone.primary_ns,
-                zone.admin_mailbox,
-                zone.serial,
-                zone.refresh,
-                zone.retry,
-                zone.expire,
-                zone.minimum,
-            ),
-        )
-        .map_err(|e| DaygleError::InvalidRecord(format!("SOA for {}: {e}", zone.name)))?;
-        insert_record(&mut map, &origin, zone.minimum.max(300), soa_rdata)?;
-
-        // Insert every enabled record.
-        for record in &records {
-            if record.disabled {
-                continue;
-            }
-            match record_to_hickory(record) {
-                Ok(rec) => insert_record_set(&mut map, rec)?,
-                Err(e) => warn!("skipping record {} ({}): {e}", record.name, record.rtype),
-            }
-        }
+        let zone_type = if secondary_ids.contains(&zone.id) {
+            ZoneType::Secondary
+        } else {
+            ZoneType::Primary
+        };
+        let map = zone_rrsets(&zone, &records)?;
 
         let nx_proof_kind = if sign_zones && key.is_some() {
             Some(NxProofKind::Nsec)
@@ -151,7 +162,7 @@ fn build_catalog(
         let mut handler: InMemoryZoneHandler = InMemoryZoneHandler::new(
             origin.clone(),
             map,
-            ZoneType::Primary,
+            zone_type,
             AxfrPolicy::Deny,
             nx_proof_kind,
         )
@@ -182,6 +193,45 @@ fn build_catalog(
     // Silence the unused-variable warning when settings is only used above.
     let _ = settings;
     Ok(catalog)
+}
+
+/// Build the full set of `RrKey -> RecordSet` for one zone, including the
+/// synthesized SOA record. Shared by the catalog builder and zone transfers.
+fn zone_rrsets(
+    zone: &crate::model::Zone,
+    records: &[DbRecord],
+) -> Result<BTreeMap<RrKey, RecordSet>> {
+    let origin = fqdn_name(&zone.name)?;
+    let mut map: BTreeMap<RrKey, RecordSet> = BTreeMap::new();
+
+    // Synthesize the SOA record from zone metadata.
+    let soa_rdata = RData::try_from_str(
+        RecordType::SOA,
+        &format!(
+            "{} {} {} {} {} {} {}",
+            zone.primary_ns,
+            zone.admin_mailbox,
+            zone.serial,
+            zone.refresh,
+            zone.retry,
+            zone.expire,
+            zone.minimum,
+        ),
+    )
+    .map_err(|e| DaygleError::InvalidRecord(format!("SOA for {}: {e}", zone.name)))?;
+    insert_record(&mut map, &origin, zone.minimum.max(300), soa_rdata)?;
+
+    // Insert every enabled record.
+    for record in records {
+        if record.disabled {
+            continue;
+        }
+        match record_to_hickory(record) {
+            Ok(rec) => insert_record_set(&mut map, rec)?,
+            Err(e) => warn!("skipping record {} ({}): {e}", record.name, record.rtype),
+        }
+    }
+    Ok(map)
 }
 
 /// Parse a domain string as an absolute Hickory [`Name`].

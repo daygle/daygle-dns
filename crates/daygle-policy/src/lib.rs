@@ -17,12 +17,14 @@
 
 mod acl;
 mod blocklist;
+mod blocklist_source;
 mod engine;
 mod plugin;
 mod rule;
 
 pub use acl::Acl;
 pub use blocklist::Blocklist;
+pub use blocklist_source::{parse_blocklist, BlocklistSourceManager, SourceStatus};
 pub use engine::{Decision, PolicyEngine};
 pub use plugin::{PolicyContext, PolicyPlugin, PluginRegistry};
 pub use rule::PerClientRule;

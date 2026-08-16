@@ -31,6 +31,10 @@ pub struct PolicyEngine {
     enabled: bool,
     acl: Option<std::sync::Arc<Acl>>,
     blocklist: Option<std::sync::Arc<Blocklist>>,
+    /// Domains pulled from remote blocklist sources. Kept separate from
+    /// `blocklist` (config + files) so the source refresher can swap just the
+    /// remote set without touching user-configured entries.
+    remote_blocklist: Option<std::sync::Arc<Blocklist>>,
     rules: std::sync::Arc<Vec<PerClientRule>>,
     plugins: std::sync::Arc<PluginRegistry>,
 }
@@ -49,6 +53,24 @@ impl PolicyEngine {
 
     pub fn set_blocklist(&mut self, blocklist: Blocklist) {
         self.blocklist = Some(std::sync::Arc::new(blocklist));
+    }
+
+    /// Replace the remote blocklist (from URL sources). The static blocklist
+    /// from configuration is left untouched, so refreshing sources never
+    /// discards user-configured entries.
+    pub fn set_remote_blocklist(&mut self, blocklist: Blocklist) {
+        self.remote_blocklist = Some(std::sync::Arc::new(blocklist));
+    }
+
+    /// The number of domains currently blocked by remote sources (0 when
+    /// none are configured or fetched yet).
+    pub fn remote_blocklist_len(&self) -> usize {
+        self.remote_blocklist.as_ref().map(|l| l.len()).unwrap_or(0)
+    }
+
+    /// The current remote blocklist, for comparison on refresh.
+    pub fn remote_blocklist_snapshot(&self) -> Option<std::sync::Arc<Blocklist>> {
+        self.remote_blocklist.clone()
     }
 
     pub fn add_rule(&mut self, rule: PerClientRule) {
@@ -87,11 +109,19 @@ impl PolicyEngine {
             }
         }
 
-        // 2. Blocklists.
+        // 2. Blocklists (static config + remote sources).
         if let Some(list) = &self.blocklist {
             if list.contains(query_name) {
                 return Decision::new(
                     format!("'{query_name}' matched blocklist"),
+                    Action::Block,
+                );
+            }
+        }
+        if let Some(list) = &self.remote_blocklist {
+            if list.contains(query_name) {
+                return Decision::new(
+                    format!("'{query_name}' matched remote blocklist source"),
                     Action::Block,
                 );
             }

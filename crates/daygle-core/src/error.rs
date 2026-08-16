@@ -35,9 +35,17 @@ pub enum DaygleError {
     #[error("dns protocol error: {0}")]
     Proto(String),
 
-    /// The recursive resolver failed to produce an answer.
-    #[error("resolution failed: {0}")]
-    Resolution(String),
+    /// The recursive resolver failed to produce an answer. When the upstream
+    /// returned an explicit DNS error (e.g. NXDOMAIN), `response_code` carries
+    /// it so the dispatcher can pass it through instead of SERVFAIL.
+    #[error("resolution failed: {message}")]
+    Resolution {
+        /// Human-readable error detail.
+        message: String,
+        /// The upstream's response code, when the failure is a negative
+        /// answer rather than a transport/protocol failure.
+        response_code: Option<u16>,
+    },
 
     /// A zone/record was not found.
     #[error("not found: {0}")]

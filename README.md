@@ -10,10 +10,16 @@ Daygle combines, in a single process:
 
 - **Authoritative DNS** with zone storage backed by **SQLite**, BIND zone-file
   import, and **DNSSEC zone signing**.
+- **Zone transfers**: serve **AXFR/IXFR** (RFC 5936, with per-network ACLs)
+  and replicate **secondary zones** from remote masters on a refresh interval.
 - **Recursive resolution** (root → TLD → authoritative) with **caching**,
-  **negative caching**, **retries**, **timeouts**, and **DNSSEC validation**.
+  **negative caching**, **retries**, **timeouts**, and **DNSSEC validation**,
+  plus **conditional forwarding** so specific zones resolve via dedicated
+  upstreams.
 - **DNS over TLS (DoT)** using **rustls**.
-- A **plugin-style policy engine** for blocklists, ACLs, and per-client rules.
+- A **plugin-style policy engine** for blocklists, ACLs, and per-client rules,
+  including **remote blocklist sources** (hosts files, AdGuard lists, plain
+  domain lists) fetched over HTTP(S) and refreshed on a schedule.
 - A **REST API** (tower/axum) for configuration, zone management, logs, and
   metrics.
 - An embedded **Svelte** web GUI for zones, records, status, logs, and
@@ -67,6 +73,10 @@ port = 53
 [recursive]
 upstreams = ["1.1.1.1", "tls://8.8.8.8:853@dns.google"]
 dnssec_validate = true
+# Conditional forwarding: resolve corp.internal via the office DNS servers.
+# [[recursive.conditional_zones]]
+# name = "corp.internal"
+# upstreams = ["192.0.2.10"]
 
 [authoritative]
 database = "/var/lib/daygle/daygle.db"
@@ -77,6 +87,14 @@ self_signed = true
 
 [api]
 port = 5380
+
+[policy]
+# Fetch a remote blocklist (hosts file) every 12 hours.
+# [[policy.blocklist_sources]]
+# name = "StevenBlack hosts"
+# url = "https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts"
+# format = "hosts"
+# refresh_secs = 43200
 ```
 
 ### Live reload
@@ -117,6 +135,51 @@ real server on ephemeral ports and exercise:
   required), and
 - **live config reload** of policy, upstreams and listeners, both via the
   reload API and the file watcher.
+
+## Upgrading
+
+### Installer-based installs (systemd)
+
+The one-line installer is **idempotent** — re-running it is the supported
+upgrade path. It fetches the latest `main`, rebuilds the release binary,
+replaces `/usr/local/bin/daygle`, and restarts the service:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/daygle/daygle-dns/main/install.sh | sh
+```
+
+The installer never overwrites an existing `/etc/daygle/daygle.toml`, and your
+zones, certificates, and SQLite database under `/var/lib/daygle` are left
+untouched. Before upgrading, back up the database just in case:
+
+```bash
+sudo cp /var/lib/daygle/daygle.db /var/lib/daygle/daygle.db.bak
+```
+
+### Source builds
+
+If you cloned the repository, pull, rebuild, and restart:
+
+```bash
+git pull
+cargo build --release -p daygle
+sudo systemctl restart daygle   # systemd installs
+# …or copy the binary over your existing one:
+sudo install -m 0755 target/release/daygle /usr/local/bin/daygle
+```
+
+### After upgrading
+
+- Confirm the new version with `daygle --version` (or check the dashboard's
+  Status page).
+- New configuration options appear in
+  [`daygle.toml.example`](daygle.toml.example); existing settings are
+  validated at startup, so an invalid config aborts cleanly instead of
+  silently corrupting state.
+- If you changed nothing about listeners, upstreams, or policy, your running
+  config still applies — no restart is needed for `daygle.toml` edits thanks
+  to [live reload](#live-reload). Only the binary itself requires the restart
+  above.
 
 ## License
 

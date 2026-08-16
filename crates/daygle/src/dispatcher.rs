@@ -74,6 +74,83 @@ impl DnsDispatcher {
     fn log_error(&self, component: &str, message: impl Into<String>) {
         self.logs.error(component, message.into());
     }
+
+    /// Serve an AXFR/IXFR zone transfer from the stored zone data.
+    ///
+    /// The response answer section is `SOA, records…, SOA` as RFC 5936
+    /// requires. IXFR is answered with a full transfer, which RFC 1995 always
+    /// permits (a server may answer IXFR with the full zone when it does not
+    /// implement incremental deltas).
+    async fn handle_transfer<R: ResponseHandler>(
+        &self,
+        request: &Request,
+        qname: &str,
+        client: IpAddr,
+        mut response_handle: R,
+    ) -> ResponseInfo {
+        let settings = self.catalog.settings();
+        if !settings.axfr_enabled || !transfer_client_allowed(&settings.axfr_networks, client) {
+            debug!(query = %qname, %client, "zone transfer refused by policy");
+            return send_error(&mut response_handle, request, ResponseCode::Refused).await;
+        }
+
+        match self.catalog.transfer_records(qname) {
+            Ok(Some((soa, records))) => {
+                let mut metadata = request.metadata;
+                metadata.message_type = MessageType::Response;
+                metadata.response_code = ResponseCode::NoError;
+                metadata.authoritative = true;
+                metadata.recursion_available = false;
+
+                // RFC 5936: the answer must begin and end with the zone SOA.
+                let mut answers = Vec::with_capacity(records.len() + 2);
+                answers.push(soa.clone());
+                answers.extend(records);
+                answers.push(soa);
+
+                let response = MessageResponseBuilder::from_message_request(request).build(
+                    metadata,
+                    answers.iter(),
+                    std::iter::empty(),
+                    std::iter::empty(),
+                    std::iter::empty(),
+                );
+                match response_handle.send_response(response).await {
+                    Ok(info) => info,
+                    Err(e) => {
+                        warn!("failed to send zone transfer: {e}");
+                        fallback_response()
+                    }
+                }
+            }
+            Ok(None) => {
+                debug!(query = %qname, "zone transfer for unknown zone");
+                send_error(&mut response_handle, request, ResponseCode::Refused).await
+            }
+            Err(e) => {
+                warn!(query = %qname, error = %e, "zone transfer failed");
+                self.log_error("transfer", format!("transfer for {qname} failed: {e}"));
+                send_error(&mut response_handle, request, ResponseCode::ServFail).await
+            }
+        }
+    }
+}
+
+/// True when the query type is a zone transfer (AXFR or IXFR).
+fn rtype_is_transfer(rtype: &str) -> bool {
+    rtype.eq_ignore_ascii_case("AXFR") || rtype.eq_ignore_ascii_case("IXFR")
+}
+
+/// Enforce the `axfr_networks` allow-list (empty = allow everyone).
+fn transfer_client_allowed(networks: &[String], client: IpAddr) -> bool {
+    if networks.is_empty() {
+        return true;
+    }
+    networks.iter().any(|net| {
+        net.parse::<ipnet::IpNet>()
+            .map(|ipnet| ipnet.contains(&client))
+            .unwrap_or(false)
+    })
 }
 
 #[async_trait]
@@ -132,7 +209,15 @@ impl RequestHandler for DnsDispatcher {
             }
         }
 
-        // 2. Authoritative zones.
+        // 2a. Zone transfers (AXFR/IXFR). These are served from the stored
+        // zone data (not the in-memory catalog) so we can enforce the
+        // transfer ACL and answer IXFR with a full transfer, which is always
+        // valid per RFC 1995.
+        if rtype_is_transfer(&rtype) {
+            return self.handle_transfer(request, &qname, info.src.ip(), response_handle).await;
+        }
+
+        // 2b. Authoritative zones.
         if self.catalog.contains(info.query.name()) {
             self.metrics.inc(&self.metrics.authoritative);
             let now = unix_now();
@@ -184,7 +269,16 @@ impl RequestHandler for DnsDispatcher {
             Err(e) => {
                 debug!(query = %qname, error = %e, "recursive resolution failed");
                 self.metrics.inc(&self.metrics.errors);
-                send_error(&mut response_handle, request, ResponseCode::ServFail).await
+                // Negative answers (NXDOMAIN, NODATA) carry their response
+                // code so they pass through instead of SERVFAIL.
+                let code = match &e {
+                    DaygleError::Resolution {
+                        response_code: Some(code),
+                        ..
+                    } => <ResponseCode as From<u16>>::from(*code),
+                    _ => ResponseCode::ServFail,
+                };
+                send_error(&mut response_handle, request, code).await
             }
         }
     }

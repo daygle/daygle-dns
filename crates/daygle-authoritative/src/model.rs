@@ -86,3 +86,17 @@ fn default_ttl() -> u32 {
 pub const KNOWN_RECORD_TYPES: &[&str] = &[
     "A", "AAAA", "CNAME", "MX", "TXT", "NS", "SOA", "SRV", "PTR", "CAA",
 ];
+
+/// Secondary-zone metadata: which masters a zone replicates from and when the
+/// last successful transfer happened.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SecondaryZone {
+    /// Owning zone id.
+    pub zone_id: String,
+    /// Master addresses as configured (`IP`, `IP:port`, or `[IPv6]:port`).
+    pub masters: Vec<String>,
+    /// Refresh interval in seconds.
+    pub refresh_secs: u64,
+    /// RFC 3339 timestamp of the last successful transfer, if any.
+    pub last_transfer: Option<String>,
+}

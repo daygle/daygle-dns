@@ -46,6 +46,7 @@ use axum::Router;
 use daygle_authoritative::AuthorityCatalog;
 use daygle_core::config::DaygleConfig;
 use daygle_core::{LogStore, Metrics};
+use daygle_policy::BlocklistSourceManager;
 use daygle_recursive::RecursiveResolver;
 
 /// Shared state for the API and the DNS dispatcher.
@@ -59,6 +60,9 @@ pub struct AppState {
     pub metrics: Arc<Metrics>,
     pub logs: Arc<LogStore>,
     pub config: Arc<ArcSwap<DaygleConfig>>,
+    pub policy: Arc<ArcSwap<daygle_policy::PolicyEngine>>,
+    /// Remote blocklist source manager; `None` when no sources are configured.
+    pub blocklist_sources: Option<Arc<BlocklistSourceManager>>,
     pub started_at: Instant,
     /// Path of the config file to re-read on `POST /api/config/reload`.
     pub config_path: Option<Arc<PathBuf>>,
@@ -85,6 +89,10 @@ pub fn router(state: AppState) -> Router {
         .route("/zones/{id}/sign", post(handlers::sign_zone))
         .route("/zones/{id}/unsign", post(handlers::unsign_zone))
         .route("/cache/clear", post(handlers::clear_cache))
+        .route(
+            "/policy/blocklist/sources",
+            get(handlers::blocklist_sources).post(handlers::refresh_blocklist_sources),
+        )
         .layer(middleware::from_fn_with_state(
             state.clone(),
             require_auth,

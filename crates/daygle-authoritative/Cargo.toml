@@ -18,6 +18,8 @@ uuid.workspace = true
 chrono.workspace = true
 tracing.workspace = true
 arc-swap.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

@@ -12,15 +12,21 @@
 //! - [`catalog`] — converts stored zones into Hickory [`Record`]s/`RecordSet`s
 //!   and assembles them into a [`Catalog`] ready for serving, including
 //!   DNSSEC signing when keys are present.
+//! - [`transfer`] — an AXFR/IXFR transfer client for secondary zones.
+//! - [`secondary`] — periodic refresh of secondary zones from their masters.
 
 pub mod catalog;
 pub mod model;
 pub mod parse;
+pub mod secondary;
 pub mod store;
+pub mod transfer;
 
 pub use catalog::AuthorityCatalog;
 pub use model::{Record, RecordInput, Zone, ZoneInput};
+pub use secondary::SecondaryRefresher;
 pub use store::ZoneStore;
+pub use transfer::XfrClient;
 
 use daygle_core::error::{DaygleError, Result};
 
