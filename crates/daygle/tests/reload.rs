@@ -1,7 +1,7 @@
 //! Integration test: live configuration reload.
 //!
-//! Exercises the three reloadable subsystems — policy, upstreams and
-//! listeners — both through the synchronous [`daygle::BoundServer::reload`]
+//! Exercises the three reloadable subsystems - policy, upstreams and
+//! listeners - both through the synchronous [`daygle::BoundServer::reload`]
 //! API and through the background file watcher.
 
 mod common;

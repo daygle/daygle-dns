@@ -2,9 +2,9 @@
 //!
 //! Encrypted DNS listeners built on `rustls` and Hickory's [`Server`]:
 //!
-//! - **DNS over TLS (RFC 7858)** — the `dot` ALPN protocol on a plain TCP
+//! - **DNS over TLS (RFC 7858)** - the `dot` ALPN protocol on a plain TCP
 //!   listener ([`register_dot`]).
-//! - **DNS over HTTPS (RFC 8484)** — the `h2` ALPN protocol on a TLS listener
+//! - **DNS over HTTPS (RFC 8484)** - the `h2` ALPN protocol on a TLS listener
 //!   serving POST requests at a configurable path, e.g. `/dns-query`
 //!   ([`register_doh`]).
 //!

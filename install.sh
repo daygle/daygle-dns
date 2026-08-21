@@ -1,5 +1,5 @@
 #!/usr/bin/env sh
-# Daygle DNS — one-line installer.
+# Daygle DNS - one-line installer.
 #
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/daygle/daygle-dns/main/install.sh | sh

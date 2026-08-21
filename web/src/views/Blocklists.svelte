@@ -29,7 +29,7 @@
     notice = null;
     try {
       const data = await api.refreshBlocklistSources();
-      notice = `Refreshed — ${data.total_domains ?? 0} domains from remote sources.`;
+      notice = `Refreshed - ${data.total_domains ?? 0} domains from remote sources.`;
       await load();
     } catch (e) {
       error = String(e.message || e);

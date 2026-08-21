@@ -208,7 +208,7 @@ pub fn parse_blocklist(text: &str, format: BlocklistFormat) -> BTreeSet<String> 
                 if line.is_empty() || line.starts_with('#') {
                     continue;
                 }
-                // `0.0.0.0 example.com` — take the hostname column.
+                // `0.0.0.0 example.com` - take the hostname column.
                 let mut fields = line.split_whitespace();
                 let _ip = fields.next();
                 if let Some(host) = fields.next() {

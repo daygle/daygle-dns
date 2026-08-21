@@ -135,7 +135,7 @@ POST /api/zones/import
 ```
 
 Zone transfers (AXFR/IXFR, RFC 5936) are served over the plaintext TCP
-listener — not over HTTP — gated by `authoritative.axfr_enabled` and the
+listener - not over HTTP - gated by `authoritative.axfr_enabled` and the
 `axfr_networks` client allow-list in `daygle.toml`. Secondary zones (zones
 replicated from remote masters on a refresh interval) are also configured in
 `daygle.toml` under `[[authoritative.secondary_zones]]`; each replicated zone

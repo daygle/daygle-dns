@@ -157,7 +157,7 @@
 <h1>Split horizon</h1>
 <p class="muted">
   Serve different answers for the same domain depending on the client's
-  network — e.g. clients on <code>LAN</code> get
+  network - e.g. clients on <code>LAN</code> get
   <code>10.0.0.5</code> for <code>intranet.example.com</code> while everyone
   else gets the public address. Entries are matched in order: the first entry
   whose domain matches and whose networks contain the client wins, so the

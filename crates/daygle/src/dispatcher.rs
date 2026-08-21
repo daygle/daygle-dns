@@ -20,12 +20,12 @@ use tracing::{debug, warn};
 /// The single [`RequestHandler`] used by every listener (UDP, TCP, DoT).
 ///
 /// Query flow:
-/// 1. **Policy** — ACLs, blocklists, per-client rules and plugins decide
+/// 1. **Policy** - ACLs, blocklists, per-client rules and plugins decide
 ///    whether to allow, refuse, block, or redirect the query.
-/// 2. **Authoritative** — if the query name falls inside a hosted zone, the
+/// 2. **Authoritative** - if the query name falls inside a hosted zone, the
 ///    Hickory [`hickory_server::zone_handler::Catalog`] answers (with DNSSEC
 ///    signing when enabled).
-/// 3. **Recursive** — otherwise the query is resolved through
+/// 3. **Recursive** - otherwise the query is resolved through
 ///    [`RecursiveResolver`].
 pub struct DnsDispatcher {
     catalog: Arc<AuthorityCatalog>,
@@ -419,7 +419,7 @@ async fn send_address_answer<R: ResponseHandler>(
         .collect();
 
     // No address of the requested family: the redirect target cannot answer
-    // this query, so block it.
+    // this query, so send NXDOMAIN.
     if records.is_empty() {
         return send_error(handle, request, ResponseCode::NXDomain).await;
     }

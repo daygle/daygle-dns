@@ -3,10 +3,10 @@
 //! Daygle watches its TOML configuration file and applies changes without a
 //! restart:
 //!
-//! - **policy** — the [`PolicyEngine`] is rebuilt and swapped atomically.
-//! - **upstreams / recursion** — the [`RecursiveResolver`] is rebuilt when the
+//! - **policy** - the [`PolicyEngine`] is rebuilt and swapped atomically.
+//! - **upstreams / recursion** - the [`RecursiveResolver`] is rebuilt when the
 //!   `recursive` section changes.
-//! - **listeners** — UDP/TCP/DoT listeners are gracefully rebound when the
+//! - **listeners** - UDP/TCP/DoT listeners are gracefully rebound when the
 //!   `server` or `dot` sections change.
 //!
 //! Everything is published through [`arc_swap`] containers so the dispatcher

@@ -471,12 +471,12 @@ impl ZoneStore {
 
     pub fn count_zones(&self) -> Result<u64> {
         let conn = self.conn.lock().unwrap();
-        Ok(conn.query_row("SELECT COUNT(*) FROM zones", [], |r| r.get(0))?)
+        Ok(conn.query_row("SELECT COUNT(*) FROM zones", [], |r| Ok(r.get::<_, i64>(0)? as u64))?)
     }
 
     pub fn count_records(&self) -> Result<u64> {
         let conn = self.conn.lock().unwrap();
-        Ok(conn.query_row("SELECT COUNT(*) FROM records", [], |r| r.get(0))?)
+        Ok(conn.query_row("SELECT COUNT(*) FROM records", [], |r| Ok(r.get::<_, i64>(0)? as u64))?)
     }
 
     // ---- Split horizon ---------------------------------------------------
