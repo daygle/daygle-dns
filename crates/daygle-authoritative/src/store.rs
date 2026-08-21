@@ -4,12 +4,14 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use chrono::Utc;
+use hickory_proto::rr::{RData, RecordType};
 use rusqlite::{params, Connection, OptionalExtension};
 use uuid::Uuid;
 
 use crate::model::{
-    DynamicUpdate, Record, RecordInput, SplitHorizonEntry, SplitHorizonEntryInput,
-    SplitHorizonNetwork, SplitHorizonNetworkInput, Zone, ZoneInput,
+    DynamicUpdate, MoveDirection, Record, RecordInput, SplitHorizonEntry,
+    SplitHorizonEntryInput, SplitHorizonNetwork, SplitHorizonNetworkInput,
+    SplitHorizonRecord, Zone, ZoneInput,
 };
 use crate::validate_name;
 use daygle_core::error::{DaygleError, Result};
@@ -67,6 +69,7 @@ CREATE TABLE IF NOT EXISTS split_horizon_entries (
     domain   TEXT NOT NULL,
     networks TEXT NOT NULL,
     ips      TEXT NOT NULL,
+    records  TEXT NOT NULL DEFAULT '[]',
     ttl      INTEGER NOT NULL DEFAULT 60,
     disabled INTEGER NOT NULL DEFAULT 0,
     position INTEGER NOT NULL DEFAULT 0
@@ -116,6 +119,7 @@ impl ZoneStore {
     fn init(&self) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute_batch(SCHEMA)?;
+        migrate_split_horizon_records(&conn)?;
         Ok(())
     }
 
@@ -539,7 +543,7 @@ impl ZoneStore {
     pub fn list_split_horizon_entries(&self) -> Result<Vec<SplitHorizonEntry>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, domain, networks, ips, ttl, disabled, position
+            "SELECT id, domain, networks, ips, records, ttl, disabled, position
              FROM split_horizon_entries ORDER BY domain, position",
         )?;
         let rows = stmt.query_map([], |row| {
@@ -547,14 +551,22 @@ impl ZoneStore {
                 serde_json::from_str(&row.get::<_, String>(2)?).unwrap_or_default();
             let ips: Vec<String> =
                 serde_json::from_str(&row.get::<_, String>(3)?).unwrap_or_default();
+            let mut records: Vec<SplitHorizonRecord> =
+                serde_json::from_str(&row.get::<_, String>(4)?).unwrap_or_default();
+            // Rows written before typed records existed carry ips only;
+            // derive the A/AAAA records so callers always see both in sync.
+            if records.is_empty() && !ips.is_empty() {
+                records = ips_to_records(&ips);
+            }
             Ok(SplitHorizonEntry {
                 id: row.get(0)?,
                 domain: row.get(1)?,
                 networks,
                 ips,
-                ttl: row.get(4)?,
-                disabled: row.get::<_, i64>(5)? != 0,
-                position: row.get(6)?,
+                records,
+                ttl: row.get(5)?,
+                disabled: row.get::<_, i64>(6)? != 0,
+                position: row.get(7)?,
             })
         })?;
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
@@ -568,10 +580,13 @@ impl ZoneStore {
     ) -> Result<SplitHorizonEntry> {
         let domain = normalize_fqdn(&input.domain);
         validate_split_horizon_entry(&domain, input)?;
+        let (ips, records) = canonicalize_split_horizon_records(input)?;
         let networks = serde_json::to_string(&input.networks)
             .map_err(|e| DaygleError::Database(format!("encode networks: {e}")))?;
-        let ips = serde_json::to_string(&input.ips)
+        let ips_json = serde_json::to_string(&ips)
             .map_err(|e| DaygleError::Database(format!("encode ips: {e}")))?;
+        let records_json = serde_json::to_string(&records)
+            .map_err(|e| DaygleError::Database(format!("encode records: {e}")))?;
 
         let conn = self.conn.lock().unwrap();
         let next_position: i64 = conn
@@ -585,20 +600,22 @@ impl ZoneStore {
             id: Uuid::new_v4().to_string(),
             domain,
             networks: input.networks.clone(),
-            ips: input.ips.clone(),
+            ips,
+            records,
             ttl: input.ttl,
             disabled: input.disabled,
             position: next_position,
         };
         conn.execute(
             "INSERT INTO split_horizon_entries
-                (id, domain, networks, ips, ttl, disabled, position)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                (id, domain, networks, ips, records, ttl, disabled, position)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 entry.id,
                 entry.domain,
                 networks,
-                ips,
+                ips_json,
+                records_json,
                 entry.ttl as i64,
                 entry.disabled as i64,
                 entry.position,
@@ -615,20 +632,24 @@ impl ZoneStore {
     ) -> Result<Option<SplitHorizonEntry>> {
         let domain = normalize_fqdn(&input.domain);
         validate_split_horizon_entry(&domain, input)?;
+        let (ips, records) = canonicalize_split_horizon_records(input)?;
         let networks = serde_json::to_string(&input.networks)
             .map_err(|e| DaygleError::Database(format!("encode networks: {e}")))?;
-        let ips = serde_json::to_string(&input.ips)
+        let ips_json = serde_json::to_string(&ips)
             .map_err(|e| DaygleError::Database(format!("encode ips: {e}")))?;
+        let records_json = serde_json::to_string(&records)
+            .map_err(|e| DaygleError::Database(format!("encode records: {e}")))?;
         let conn = self.conn.lock().unwrap();
         let changed = conn.execute(
             "UPDATE split_horizon_entries
-             SET domain = ?2, networks = ?3, ips = ?4, ttl = ?5, disabled = ?6
+             SET domain = ?2, networks = ?3, ips = ?4, records = ?5, ttl = ?6, disabled = ?7
              WHERE id = ?1",
             params![
                 id,
                 domain,
                 networks,
-                ips,
+                ips_json,
+                records_json,
                 input.ttl as i64,
                 input.disabled as i64,
             ],
@@ -649,6 +670,61 @@ impl ZoneStore {
         let conn = self.conn.lock().unwrap();
         let changed = conn.execute("DELETE FROM split_horizon_entries WHERE id = ?1", [id])?;
         Ok(changed > 0)
+    }
+
+    /// Move a split-horizon entry one position up or down within the ordering
+    /// of its domain by swapping its `position` with the adjacent entry's.
+    ///
+    /// The caller must reload the catalog afterwards for the change to take
+    /// effect. Entries of other domains are never affected.
+    pub fn move_split_horizon_entry(
+        &self,
+        id: &str,
+        direction: MoveDirection,
+    ) -> Result<MoveResult> {
+        let conn = self.conn.lock().unwrap();
+        let domain: Option<String> = conn
+            .query_row(
+                "SELECT domain FROM split_horizon_entries WHERE id = ?1",
+                [id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let Some(domain) = domain else {
+            return Ok(MoveResult::NotFound);
+        };
+
+        let mut stmt = conn.prepare(
+            "SELECT id, position FROM split_horizon_entries WHERE domain = ?1
+             ORDER BY position, id",
+        )?;
+        let rows: Vec<(String, i64)> = stmt
+            .query_map([&domain], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<std::result::Result<_, _>>()?;
+
+        let Some(idx) = rows.iter().position(|(rid, _)| rid == id) else {
+            return Ok(MoveResult::NotFound);
+        };
+        let swap_idx = match direction {
+            MoveDirection::Up => idx.checked_sub(1),
+            MoveDirection::Down => Some(idx + 1),
+        };
+        let Some(swap_idx) = swap_idx else {
+            return Ok(MoveResult::AtBoundary);
+        };
+        if swap_idx >= rows.len() {
+            return Ok(MoveResult::AtBoundary);
+        }
+
+        conn.execute(
+            "UPDATE split_horizon_entries SET position = ?2 WHERE id = ?1",
+            params![rows[idx].0, rows[swap_idx].1],
+        )?;
+        conn.execute(
+            "UPDATE split_horizon_entries SET position = ?2 WHERE id = ?1",
+            params![rows[swap_idx].0, rows[idx].1],
+        )?;
+        Ok(MoveResult::Moved)
     }
 
     // ---- DNSSEC signing keys --------------------------------------------
@@ -801,6 +877,17 @@ pub fn normalize_fqdn(name: &str) -> String {
         .to_ascii_lowercase()
 }
 
+/// Result of [`ZoneStore::move_split_horizon_entry`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MoveResult {
+    /// The entry was swapped with its neighbour.
+    Moved,
+    /// The entry is already at the edge of its domain's ordering.
+    AtBoundary,
+    /// No entry with the given id exists.
+    NotFound,
+}
+
 /// Validate a split-horizon network payload: every CIDR must parse.
 fn validate_split_horizon_network(input: &SplitHorizonNetworkInput) -> Result<()> {
     for cidr in &input.cidrs {
@@ -812,13 +899,101 @@ fn validate_split_horizon_network(input: &SplitHorizonNetworkInput) -> Result<()
 }
 
 /// Validate a split-horizon entry payload. `domain` must already be
-/// normalized (lowercase, no trailing dot); every IP must parse.
-fn validate_split_horizon_entry(domain: &str, input: &SplitHorizonEntryInput) -> Result<()> {
-    validate_name(domain, false)?;
-    for ip in &input.ips {
-        ip.parse::<std::net::IpAddr>().map_err(|e| {
-            DaygleError::InvalidRecord(format!("split-horizon IP '{ip}': {e}"))
+/// normalized (lowercase, no trailing dot). Record content validation happens
+/// in [`canonicalize_split_horizon_records`].
+fn validate_split_horizon_entry(domain: &str, _input: &SplitHorizonEntryInput) -> Result<()> {
+    validate_name(domain, false)
+}
+
+/// Convert an `ips`-style list (IPv4/IPv6 addresses) into A/AAAA records.
+fn ips_to_records(ips: &[String]) -> Vec<SplitHorizonRecord> {
+    ips.iter()
+        .filter_map(|ip| {
+            if let Ok(v4) = ip.parse::<std::net::Ipv4Addr>() {
+                Some(SplitHorizonRecord {
+                    rtype: "A".to_string(),
+                    content: v4.to_string(),
+                })
+            } else if let Ok(v6) = ip.parse::<std::net::Ipv6Addr>() {
+                Some(SplitHorizonRecord {
+                    rtype: "AAAA".to_string(),
+                    content: v6.to_string(),
+                })
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+/// Build the canonical `(ips, records)` pair for an entry input. `records` is
+/// authoritative when provided; otherwise `ips` is converted to A/AAAA
+/// records. Every record is validated: the type must be supported and the
+/// content must parse as that type's RDATA in zone-file presentation format
+/// (TXT values are auto-quoted). The returned `ips` is always the A/AAAA
+/// subset of the canonical records.
+fn canonicalize_split_horizon_records(
+    input: &SplitHorizonEntryInput,
+) -> Result<(Vec<String>, Vec<SplitHorizonRecord>)> {
+    let records = if input.records.is_empty() {
+        // The legacy `ips` path: every address must parse — reject junk
+        // instead of silently dropping it.
+        for ip in &input.ips {
+            ip.parse::<std::net::IpAddr>().map_err(|e| {
+                DaygleError::InvalidRecord(format!("split-horizon IP '{ip}': {e}"))
+            })?;
+        }
+        ips_to_records(&input.ips)
+    } else {
+        input.records.clone()
+    };
+
+    let mut canonical = Vec::with_capacity(records.len());
+    for record in &records {
+        let rtype = record.rtype.trim().to_ascii_uppercase();
+        if !crate::model::SPLIT_HORIZON_RECORD_TYPES.contains(&rtype.as_str()) {
+            return Err(DaygleError::InvalidRecord(format!(
+                "unsupported split-horizon record type '{rtype}'"
+            )));
+        }
+        let rr_type = rtype
+            .parse::<RecordType>()
+            .map_err(|e| DaygleError::InvalidRecord(format!("record type '{rtype}': {e}")))?;
+        let content = if rtype == "TXT" && !record.content.trim_start().starts_with('"') {
+            format!("\"{}\"", record.content.trim())
+        } else {
+            record.content.trim().to_string()
+        };
+        RData::try_from_str(rr_type, &content).map_err(|e| {
+            DaygleError::InvalidRecord(format!("invalid {rtype} record '{content}': {e}"))
         })?;
+        canonical.push(SplitHorizonRecord { rtype, content });
+    }
+
+    let ips = canonical
+        .iter()
+        .filter(|r| r.rtype == "A" || r.rtype == "AAAA")
+        .map(|r| r.content.clone())
+        .collect();
+    Ok((ips, canonical))
+}
+
+/// Add the `records` column to `split_horizon_entries` for databases created
+/// before typed records existed. Rows written with only `ips` keep working:
+/// the A/AAAA records are derived on read.
+fn migrate_split_horizon_records(conn: &Connection) -> Result<()> {
+    let has_records: bool = conn.query_row(
+        "SELECT EXISTS(
+            SELECT 1 FROM pragma_table_info('split_horizon_entries') WHERE name = 'records'
+         )",
+        [],
+        |r| r.get(0),
+    )?;
+    if !has_records {
+        conn.execute(
+            "ALTER TABLE split_horizon_entries ADD COLUMN records TEXT NOT NULL DEFAULT '[]'",
+            [],
+        )?;
     }
     Ok(())
 }
@@ -1128,6 +1303,7 @@ mod tests {
                 domain: "www.example.com.".to_string(),
                 networks: vec!["LAN".to_string()],
                 ips: vec!["10.0.0.5".to_string()],
+                records: vec![],
                 ttl: 30,
                 disabled: false,
             })
@@ -1140,6 +1316,7 @@ mod tests {
                 domain: "www.example.com".to_string(),
                 networks: vec![],
                 ips: vec!["10.0.0.6".to_string(), "fd00::1".to_string()],
+                records: vec![],
                 ttl: 60,
                 disabled: false,
             })
@@ -1154,6 +1331,7 @@ mod tests {
                     domain: "www.example.com".to_string(),
                     networks: vec!["VPN".to_string()],
                     ips: vec!["10.0.0.7".to_string()],
+                records: vec![],
                     ttl: 120,
                     disabled: true,
                 },
@@ -1170,6 +1348,7 @@ mod tests {
                 domain: "x.example.com".to_string(),
                 networks: vec![],
                 ips: vec!["999.1.1.1".to_string()],
+                records: vec![],
                 ttl: 60,
                 disabled: false,
             }),
@@ -1182,6 +1361,7 @@ mod tests {
                     domain: "x.example.com".to_string(),
                     networks: vec![],
                     ips: vec!["10.0.0.1".to_string()],
+                records: vec![],
                     ttl: 60,
                     disabled: false,
                 },
@@ -1191,6 +1371,175 @@ mod tests {
 
         assert!(s.delete_split_horizon_entry(&a.id).unwrap());
         assert_eq!(s.list_split_horizon_entries().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn split_horizon_typed_records_are_canonicalized() {
+        use crate::model::SplitHorizonRecord;
+
+        let s = store();
+        let entry = s
+            .create_split_horizon_entry(&SplitHorizonEntryInput {
+                domain: "mail.example.com".to_string(),
+                networks: vec![],
+                ips: vec![],
+                records: vec![
+                    SplitHorizonRecord {
+                        rtype: "mx".to_string(),
+                        content: "10 mailhost.example.com.".to_string(),
+                    },
+                    SplitHorizonRecord {
+                        rtype: "TXT".to_string(),
+                        content: "v=spf1 -all".to_string(), // auto-quoted below
+                    },
+                    SplitHorizonRecord {
+                        rtype: "A".to_string(),
+                        content: "10.0.0.5".to_string(),
+                    },
+                    SplitHorizonRecord {
+                        rtype: "SRV".to_string(),
+                        content: "0 5 5060 sip.example.com.".to_string(),
+                    },
+                    SplitHorizonRecord {
+                        rtype: "CNAME".to_string(),
+                        content: "target.example.com.".to_string(),
+                    },
+                ],
+                ttl: 60,
+                disabled: false,
+            })
+            .unwrap();
+
+        // `ips` holds only the A/AAAA subset of the canonical records.
+        assert_eq!(entry.ips, vec!["10.0.0.5".to_string()]);
+        assert_eq!(entry.records.len(), 5);
+        let mx = entry.records.iter().find(|r| r.rtype == "MX").unwrap();
+        assert_eq!(mx.content, "10 mailhost.example.com.");
+        let txt = entry.records.iter().find(|r| r.rtype == "TXT").unwrap();
+        assert_eq!(txt.content, "\"v=spf1 -all\""); // auto-quoted
+
+        // Relisted from the database: both stay in sync.
+        let listed = s.list_split_horizon_entries().unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].records, entry.records);
+        assert_eq!(listed[0].ips, entry.ips);
+
+        // Unsupported types and malformed content are rejected.
+        assert!(matches!(
+            s.create_split_horizon_entry(&SplitHorizonEntryInput {
+                domain: "x.example.com".to_string(),
+                networks: vec![],
+                ips: vec![],
+                records: vec![SplitHorizonRecord {
+                    rtype: "BOGUS".to_string(),
+                    content: "x".to_string(),
+                }],
+                ttl: 60,
+                disabled: false,
+            }),
+            Err(DaygleError::InvalidRecord(_))
+        ));
+        assert!(matches!(
+            s.create_split_horizon_entry(&SplitHorizonEntryInput {
+                domain: "x.example.com".to_string(),
+                networks: vec![],
+                ips: vec![],
+                records: vec![SplitHorizonRecord {
+                    rtype: "A".to_string(),
+                    content: "not-an-ip".to_string(),
+                }],
+                ttl: 60,
+                disabled: false,
+            }),
+            Err(DaygleError::InvalidRecord(_))
+        ));
+
+        // An ips-only input still works and is converted to A/AAAA records.
+        let legacy = s
+            .create_split_horizon_entry(&SplitHorizonEntryInput {
+                domain: "legacy.example.com".to_string(),
+                networks: vec![],
+                ips: vec!["10.0.0.9".to_string()],
+                records: vec![],
+                ttl: 60,
+                disabled: false,
+            })
+            .unwrap();
+        assert_eq!(legacy.records.len(), 1);
+        assert_eq!(legacy.records[0].rtype, "A");
+        assert_eq!(legacy.records[0].content, "10.0.0.9");
+    }
+
+    #[test]
+    fn split_horizon_entry_reorder_swaps_positions() {
+        use crate::model::MoveDirection;
+        use crate::store::MoveResult;
+
+        let s = store();
+        let mk = |ip: &str, domain: &str| {
+            s.create_split_horizon_entry(&SplitHorizonEntryInput {
+                domain: domain.to_string(),
+                networks: vec![],
+                ips: vec![ip.to_string()],
+                records: vec![],
+                ttl: 60,
+                disabled: false,
+            })
+            .unwrap()
+        };
+        let a = mk("10.0.0.1", "a.example.com");
+        let b = mk("10.0.0.2", "a.example.com");
+        let c = mk("10.0.0.3", "a.example.com");
+        let other = mk("10.0.0.9", "b.example.com");
+
+        let pos = |id: &str| {
+            s.list_split_horizon_entries()
+                .unwrap()
+                .into_iter()
+                .find(|e| e.id == id)
+                .unwrap()
+                .position
+        };
+        assert_eq!(pos(&a.id), 0);
+        assert_eq!(pos(&b.id), 1);
+        assert_eq!(pos(&c.id), 2);
+        assert_eq!(pos(&other.id), 0); // separate ordering per domain
+
+        // Move the middle entry up: b,a,c.
+        assert_eq!(
+            s.move_split_horizon_entry(&b.id, MoveDirection::Up).unwrap(),
+            MoveResult::Moved
+        );
+        assert!(pos(&b.id) < pos(&a.id));
+        assert!(pos(&a.id) < pos(&c.id));
+
+        // The other domain is untouched.
+        assert_eq!(pos(&other.id), 0);
+
+        // Edges report AtBoundary without changing anything.
+        assert_eq!(
+            s.move_split_horizon_entry(&b.id, MoveDirection::Up).unwrap(),
+            MoveResult::AtBoundary
+        );
+        assert_eq!(
+            s.move_split_horizon_entry(&c.id, MoveDirection::Down).unwrap(),
+            MoveResult::AtBoundary
+        );
+        assert_eq!(pos(&b.id), 0);
+        assert_eq!(pos(&c.id), 2);
+
+        // Move the last entry up: b,c,a.
+        assert_eq!(
+            s.move_split_horizon_entry(&c.id, MoveDirection::Up).unwrap(),
+            MoveResult::Moved
+        );
+        assert!(pos(&c.id) < pos(&a.id));
+
+        // Unknown ids are reported as NotFound.
+        assert_eq!(
+            s.move_split_horizon_entry("nope", MoveDirection::Up).unwrap(),
+            MoveResult::NotFound
+        );
     }
 
     fn zone_input_defaults() -> ZoneInput {

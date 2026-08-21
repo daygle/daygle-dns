@@ -26,6 +26,7 @@
 //! | `DELETE` | `/api/split-horizon/networks/:name` | delete a network |
 //! | `POST`   | `/api/split-horizon/entries`      | create a split-horizon entry |
 //! | `PUT`    | `/api/split-horizon/entries/:id`  | update a split-horizon entry |
+//! | `POST`   | `/api/split-horizon/entries/:id/move` | move an entry up/down in its domain's order |
 //! | `DELETE` | `/api/split-horizon/entries/:id`  | delete a split-horizon entry |
 //! | `POST`   | `/api/cache/clear`                | flush the recursive cache |
 //!
@@ -112,6 +113,10 @@ pub fn router(state: AppState) -> Router {
             "/split-horizon/entries/{id}",
             put(handlers::update_split_horizon_entry)
                 .delete(handlers::delete_split_horizon_entry),
+        )
+        .route(
+            "/split-horizon/entries/{id}/move",
+            post(handlers::move_split_horizon_entry),
         )
         .route(
             "/policy/blocklist/sources",

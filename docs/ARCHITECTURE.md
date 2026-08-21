@@ -36,7 +36,7 @@ API/GUI.
   hot query path never touches SQLite. It also owns the split-horizon index
   (`SplitHorizonIndex`): stored client networks + domain entries are
   pre-resolved into a per-query lookup structure that maps `(client IP,
-  qname)` to the synthetic answer to serve.
+  qname, query type)` to the synthetic records to serve.
 - **`daygle-recursive`** wraps `hickory_resolver::TokioResolver`, configuring
   cache size, per-server timeouts, attempts, and DNSSEC validation. Negative
   caching is Hickory's built-in behavior, bounded by `negative_cache_ttl`.
@@ -67,13 +67,14 @@ listener:
 1. **Policy.** The query name/type and the client IP are passed to the policy
    engine. `Block` → NXDOMAIN, `Refused` → REFUSED, `Redirect(ip)` → a
    synthesized A/AAAA answer.
-1. **Split horizon.** For A/AAAA queries, the client IP is looked up in the
-   split-horizon index. The first entry whose domain matches and whose
-   networks contain the client wins; a matching entry synthesizes an A/AAAA
-   answer (TTL from the entry) instead of the normal one. Entries with no
-   networks match every client, and an entry with no address of the requested
-   family falls through — so an internal `10.x` view can sit behind a public
-   fallback, and an IPv4-only entry never swallows AAAA queries.
+1. **Split horizon.** For A/AAAA/MX/TXT/CNAME/SRV (and ANY) queries, the
+   client IP is looked up in the split-horizon index. The first entry whose
+   domain matches and whose networks contain the client wins; a matching
+   entry synthesizes records of the queried type (TTL from the entry) instead
+   of the normal ones. A CNAME answers every query type (RFC 1034 §3.6.2),
+   and an entry with nothing for the queried type falls through — so an
+   internal `10.x` view can sit behind a public fallback, and a TXT-only
+   entry never swallows A queries.
 2. **Authoritative.** If the query name falls inside a hosted zone
    (`Catalog::find`), the Hickory catalog answers. Signed zones carry DNSSEC
    signatures and NSEC proofs.

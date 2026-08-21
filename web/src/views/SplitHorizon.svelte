@@ -12,6 +12,8 @@
   // entry form
   let edit = $state(null);
 
+  const RECORD_TYPES = ['A', 'AAAA', 'MX', 'TXT', 'CNAME', 'SRV'];
+
   async function load() {
     error = null;
     try {
@@ -62,7 +64,15 @@
           id: entry.id,
           domain: entry.domain,
           networks: entry.networks.join(', '),
-          ips: entry.ips.join(', '),
+          // The store keeps ips and records in sync; fall back to deriving
+          // A/AAAA records for legacy entries that only carry ips.
+          records: (entry.records.length
+            ? entry.records
+            : entry.ips.map((ip) => ({
+                rtype: ip.includes(':') ? 'AAAA' : 'A',
+                content: ip,
+              }))
+          ).map((r) => ({ rtype: r.rtype, content: r.content })),
           ttl: entry.ttl,
           disabled: entry.disabled,
           isNew: false,
@@ -71,11 +81,19 @@
           id: null,
           domain: '',
           networks: '',
-          ips: '',
+          records: [{ rtype: 'A', content: '' }],
           ttl: 60,
           disabled: false,
           isNew: true,
         };
+  }
+
+  function addRecord() {
+    edit.records = [...edit.records, { rtype: 'A', content: '' }];
+  }
+
+  function removeRecordAt(i) {
+    edit.records = edit.records.filter((_, idx) => idx !== i);
   }
 
   async function saveEntry() {
@@ -83,7 +101,9 @@
     const body = {
       domain: edit.domain.trim(),
       networks: parseList(edit.networks),
-      ips: parseList(edit.ips),
+      records: edit.records
+        .filter((r) => r.rtype && r.content.trim())
+        .map((r) => ({ rtype: r.rtype, content: r.content.trim() })),
       ttl: Number(edit.ttl) || 60,
       disabled: edit.disabled,
     };
@@ -106,6 +126,29 @@
     }
   }
 
+  async function moveEntry(entry, direction) {
+    try {
+      await api.moveSplitHorizonEntry(entry.id, direction);
+      await load();
+    } catch (e) {
+      notice = `Error: ${e.message || e}`;
+    }
+  }
+
+  // Entries arrive ordered by (domain, position); a button is only usable
+  // when a same-domain neighbour exists on that side.
+  function indexOf(entry) {
+    return entries.findIndex((e) => e.id === entry.id);
+  }
+  function canMoveUp(entry) {
+    const i = indexOf(entry);
+    return i > 0 && entries[i - 1].domain === entry.domain;
+  }
+  function canMoveDown(entry) {
+    const i = indexOf(entry);
+    return i >= 0 && i < entries.length - 1 && entries[i + 1].domain === entry.domain;
+  }
+
   $effect(() => {
     load();
   });
@@ -117,9 +160,12 @@
   network — e.g. clients on <code>LAN</code> get
   <code>10.0.0.5</code> for <code>intranet.example.com</code> while everyone
   else gets the public address. Entries are matched in order: the first entry
-  whose domain matches and whose networks contain the client wins. An entry
-  with no networks matches every client, so it can act as the public
-  fallback.
+  whose domain matches and whose networks contain the client wins, so the
+  specific internal views must come before the public fallback. Use the
+  ↑/↓ buttons to reorder entries for the same domain. Each entry serves
+  typed answers (A, AAAA, MX, TXT, CNAME, SRV) to queries of the matching
+  type — a CNAME answers every type — and an entry with no networks matches
+  every client, so the public fallback needs no network list.
 </p>
 
 {#if notice}
@@ -184,7 +230,7 @@
         <tr>
           <th>Domain</th>
           <th>Networks</th>
-          <th>IPs</th>
+          <th>Answers</th>
           <th>TTL</th>
           <th>Status</th>
           <th></th>
@@ -207,8 +253,9 @@
             </td>
             <td>
               <div class="row" style="gap: 6px">
-                {#each entry.ips as ip (ip)}
-                  <code>{ip}</code>
+                {#each entry.records as r (r.rtype + r.content)}
+                  <span class="pill">{r.rtype}</span>
+                  <code>{r.content}</code>
                 {/each}
               </div>
             </td>
@@ -220,6 +267,18 @@
             </td>
             <td>
               <div class="row" style="gap: 6px">
+                <button
+                  class="secondary"
+                  title="Move up (higher precedence)"
+                  onclick={() => moveEntry(entry, 'up')}
+                  disabled={!canMoveUp(entry)}
+                >↑</button>
+                <button
+                  class="secondary"
+                  title="Move down (lower precedence)"
+                  onclick={() => moveEntry(entry, 'down')}
+                  disabled={!canMoveDown(entry)}
+                >↓</button>
                 <button class="secondary" onclick={() => startEdit(entry)}>Edit</button>
                 <button class="danger" onclick={() => removeEntry(entry)}>✕</button>
               </div>
@@ -248,14 +307,36 @@
             <input placeholder="LAN, VPN, 10.0.0.0/8" bind:value={edit.networks} />
           </label>
           <label>
-            IPs (comma-separated)
-            <input placeholder="10.0.0.5, fd00::1" bind:value={edit.ips} />
-          </label>
-          <label>
             TTL
             <input type="number" bind:value={edit.ttl} />
           </label>
         </div>
+
+        <label style="margin-top: 10px">Answers (one per type; a CNAME answers every type)</label>
+        {#each edit.records as rec, i (i)}
+          <div class="row" style="gap: 6px; margin-top: 6px">
+            <select bind:value={rec.rtype} style="width: 110px">
+              {#each RECORD_TYPES as t (t)}
+                <option value={t}>{t}</option>
+              {/each}
+            </select>
+            <input
+              placeholder={rec.rtype === 'MX'
+                ? '10 mail.example.com.'
+                : rec.rtype === 'TXT'
+                  ? 'hello world'
+                  : rec.rtype === 'CNAME'
+                    ? 'target.example.com.'
+                    : rec.rtype === 'SRV'
+                      ? '0 5 5060 sip.example.com.'
+                      : '10.0.0.5'}
+              bind:value={rec.content}
+              style="flex: 1"
+            />
+            <button class="danger" onclick={() => removeRecordAt(i)}>✕</button>
+          </div>
+        {/each}
+        <button class="secondary" onclick={addRecord} style="margin-top: 6px">+ Add record</button>
         <label style="margin-top: 8px; flex-direction: row; align-items: center">
           <input type="checkbox" bind:checked={edit.disabled} />
           Disabled (keep for later)
@@ -263,7 +344,10 @@
         <div class="row" style="margin-top: 10px">
           <button
             onclick={saveEntry}
-            disabled={!edit.domain.trim() || parseList(edit.ips).length === 0}
+            disabled={
+              !edit.domain.trim() ||
+              edit.records.filter((r) => r.rtype && r.content.trim()).length === 0
+            }
           >
             Save
           </button>

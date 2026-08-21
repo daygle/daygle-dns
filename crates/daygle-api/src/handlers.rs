@@ -7,8 +7,9 @@ use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use daygle_authoritative::model::{
-    RecordInput, SplitHorizonEntryInput, SplitHorizonNetworkInput, ZoneInput,
+    MoveDirection, RecordInput, SplitHorizonEntryInput, SplitHorizonNetworkInput, ZoneInput,
 };
+use daygle_authoritative::store::MoveResult;
 use daygle_core::VERSION;
 use serde::{Deserialize, Serialize};
 
@@ -396,6 +397,37 @@ pub async fn delete_split_horizon_entry(
             StatusCode::NO_CONTENT.into_response()
         }
         Ok(false) => error_response(StatusCode::NOT_FOUND, "entry not found"),
+        Err(e) => map_err(e),
+    }
+}
+
+/// Body for `POST /api/split-horizon/entries/{id}/move`.
+#[derive(Deserialize)]
+pub struct MoveSplitHorizonEntryInput {
+    direction: MoveDirection,
+}
+
+/// Move an entry one position up or down within its domain's ordering.
+/// Returns `{"moved": true}` when the entry was swapped, `{"moved": false}`
+/// when it is already at the edge, and 404 when the entry does not exist.
+pub async fn move_split_horizon_entry(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(input): Json<MoveSplitHorizonEntryInput>,
+) -> Response {
+    match state
+        .catalog
+        .store()
+        .move_split_horizon_entry(&id, input.direction)
+    {
+        Ok(MoveResult::Moved) => {
+            let _ = state.catalog.reload();
+            Json(serde_json::json!({ "moved": true })).into_response()
+        }
+        Ok(MoveResult::AtBoundary) => {
+            Json(serde_json::json!({ "moved": false })).into_response()
+        }
+        Ok(MoveResult::NotFound) => error_response(StatusCode::NOT_FOUND, "entry not found"),
         Err(e) => map_err(e),
     }
 }

@@ -157,7 +157,20 @@ pub struct SplitHorizonNetworkInput {
     pub cidrs: Vec<String>,
 }
 
-/// One split-horizon view rule: clients in `networks` receive `ips` for
+/// One typed answer value for a split-horizon entry, in zone-file
+/// presentation format: `A` → `10.0.0.5`, `AAAA` → `fd00::1`, `MX` →
+/// `10 mail.example.com.`, `TXT` → `"hello world"` (quoted),
+/// `CNAME` → `target.example.com.`, `SRV` → `0 5 5060 sip.example.com.`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SplitHorizonRecord {
+    pub rtype: String,
+    pub content: String,
+}
+
+/// Record types a split-horizon entry can synthesize.
+pub const SPLIT_HORIZON_RECORD_TYPES: &[&str] = &["A", "AAAA", "MX", "TXT", "CNAME", "SRV"];
+
+/// One split-horizon view rule: clients in `networks` receive `records` for
 /// `domain` instead of the normal answer.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SplitHorizonEntry {
@@ -168,8 +181,13 @@ pub struct SplitHorizonEntry {
     /// Network names and/or literal CIDRs (e.g. `["LAN", "10.0.0.0/8"]`);
     /// empty means every client.
     pub networks: Vec<String>,
-    /// IPv4/IPv6 addresses returned to matching clients.
+    /// IPv4/IPv6 addresses returned to matching clients. Kept for backward
+    /// compatibility: it is always the A/AAAA subset of `records`.
     pub ips: Vec<String>,
+    /// Typed answers (A, AAAA, MX, TXT, CNAME, SRV) served to matching
+    /// clients for queries of the matching type.
+    #[serde(default)]
+    pub records: Vec<SplitHorizonRecord>,
     /// TTL of synthesized answers.
     pub ttl: u32,
     /// When true the entry is skipped (kept for later use).
@@ -179,11 +197,18 @@ pub struct SplitHorizonEntry {
 }
 
 /// Payload to create or update a split-horizon entry.
+///
+/// `records` is the canonical form. For compatibility, `ips` alone still
+/// works and is converted to A/AAAA records; when both are present `records`
+/// wins.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SplitHorizonEntryInput {
     pub domain: String,
     pub networks: Vec<String>,
+    #[serde(default)]
     pub ips: Vec<String>,
+    #[serde(default)]
+    pub records: Vec<SplitHorizonRecord>,
     #[serde(default = "default_split_horizon_ttl")]
     pub ttl: u32,
     #[serde(default)]
@@ -192,4 +217,13 @@ pub struct SplitHorizonEntryInput {
 
 fn default_split_horizon_ttl() -> u32 {
     60
+}
+
+/// Direction to move a split-horizon entry within its domain's ordering.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum MoveDirection {
+    /// Move earlier (higher precedence).
+    Up,
+    /// Move later (lower precedence).
+    Down,
 }

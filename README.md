@@ -18,7 +18,7 @@ Daygle combines, in a single process:
 - **Split horizon**: serve different answers for the same domain depending
   on the client's network (named client groups like `LAN`/`VPN`/`IoT` or
   literal CIDRs), managed from the GUI — internal clients see internal
-  addresses, everyone else gets the public view.
+  answers (A, AAAA, MX, TXT, CNAME, SRV), everyone else gets the public view.
 - **Recursive resolution** (root → TLD → authoritative) with **caching**,
   **negative caching**, **retries**, **timeouts**, and **DNSSEC validation**,
   plus **conditional forwarding** so specific zones resolve via dedicated

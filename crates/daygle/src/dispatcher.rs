@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use arc_swap::{ArcSwap, ArcSwapOption};
 use async_trait::async_trait;
+use daygle_authoritative::model::SPLIT_HORIZON_RECORD_TYPES;
 use daygle_authoritative::AuthorityCatalog;
 use daygle_core::{DaygleError, LogStore, Metrics, RateLimiter};
 use daygle_policy::{Action, PolicyEngine};
@@ -242,31 +243,20 @@ impl RequestHandler for DnsDispatcher {
             }
         }
 
-        // 1c. Split horizon: per-client synthetic A/AAAA answers. This runs
-        // after policy (blocklists/redirects win) and before the authoritative
-        // catalog, so internal clients see internal addresses even for hosted
-        // zones. Only the requested address family is synthesized; an entry
-        // with no address of that family falls through to normal resolution.
-        if matches!(rtype.as_str(), "A" | "AAAA" | "ANY") {
+        // 1c. Split horizon: per-client synthetic answers. This runs after
+        // policy (blocklists/redirects win) and before the authoritative
+        // catalog, so internal clients see internal answers even for hosted
+        // zones. Entries carry typed records (A, AAAA, MX, TXT, CNAME, SRV);
+        // a query is answered only by records of its own type (a CNAME
+        // answers every type, per RFC 1034 §3.6.2). When the matching entry
+        // has nothing for the queried type the lookup returns `None` and the
+        // query falls through to normal resolution.
+        if rtype.as_str() == "ANY" || SPLIT_HORIZON_RECORD_TYPES.contains(&rtype.as_str()) {
             let index = self.catalog.split_horizon();
-            if let Some(m) = index.lookup(client, &qname) {
-                let filtered: Vec<IpAddr> = match rtype.as_str() {
-                    "A" => m.ips.iter().filter(|ip| ip.is_ipv4()).copied().collect(),
-                    "AAAA" => m.ips.iter().filter(|ip| ip.is_ipv6()).copied().collect(),
-                    _ => m.ips.clone(),
-                };
-                if !filtered.is_empty() {
-                    debug!(query = %qname, %client, "split-horizon answer");
-                    self.metrics.inc(&self.metrics.split_horizon);
-                    return send_address_answer(
-                        &mut response_handle,
-                        request,
-                        info.query.query_type(),
-                        &filtered,
-                        m.ttl,
-                    )
-                    .await;
-                }
+            if let Some(m) = index.lookup(client, &qname, info.query.query_type()) {
+                debug!(query = %qname, %client, "split-horizon answer");
+                self.metrics.inc(&self.metrics.split_horizon);
+                return send_records(&mut response_handle, request, &m.records).await;
             }
         }
 
@@ -362,8 +352,40 @@ async fn send_error<R: ResponseHandler>(
     }
 }
 
+/// Send a response whose answer section is exactly `records`.
+async fn send_records<R: ResponseHandler>(
+    handle: &mut R,
+    request: &Request,
+    records: &[Record],
+) -> ResponseInfo {
+    if records.is_empty() {
+        return send_error(handle, request, ResponseCode::NXDomain).await;
+    }
+
+    let mut metadata = request.metadata;
+    metadata.message_type = MessageType::Response;
+    metadata.response_code = ResponseCode::NoError;
+    metadata.authoritative = true;
+    metadata.recursion_available = true;
+
+    let response = MessageResponseBuilder::from_message_request(request).build(
+        metadata,
+        records.iter(),
+        std::iter::empty(),
+        std::iter::empty(),
+        std::iter::empty(),
+    );
+    match handle.send_response(response).await {
+        Ok(info) => info,
+        Err(e) => {
+            warn!("failed to send answer: {e}");
+            fallback_response()
+        }
+    }
+}
+
 /// Synthesize an A/AAAA answer carrying `ips` (used by the policy `redirect`
-/// action and by split-horizon responses).
+/// action).
 async fn send_address_answer<R: ResponseHandler>(
     handle: &mut R,
     request: &Request,
@@ -396,32 +418,13 @@ async fn send_address_answer<R: ResponseHandler>(
         })
         .collect();
 
-    // No address of the requested family: treat as NXDOMAIN (policy) or fall
-    // through (split horizon) — the caller decides which by pre-filtering.
+    // No address of the requested family: the redirect target cannot answer
+    // this query, so block it.
     if records.is_empty() {
         return send_error(handle, request, ResponseCode::NXDomain).await;
     }
 
-    let mut metadata = request.metadata;
-    metadata.message_type = MessageType::Response;
-    metadata.response_code = ResponseCode::NoError;
-    metadata.authoritative = true;
-    metadata.recursion_available = true;
-
-    let response = MessageResponseBuilder::from_message_request(request).build(
-        metadata,
-        records.iter(),
-        std::iter::empty(),
-        std::iter::empty(),
-        std::iter::empty(),
-    );
-    match handle.send_response(response).await {
-        Ok(info) => info,
-        Err(e) => {
-            warn!("failed to send address answer: {e}");
-            fallback_response()
-        }
-    }
+    send_records(handle, request, &records).await
 }
 
 /// Synthesize a single-address redirect answer (policy `redirect` action).

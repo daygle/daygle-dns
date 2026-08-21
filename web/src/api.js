@@ -49,4 +49,6 @@ export const api = {
     request('PUT', `/split-horizon/entries/${id}`, body),
   deleteSplitHorizonEntry: (id) =>
     request('DELETE', `/split-horizon/entries/${id}`),
+  moveSplitHorizonEntry: (id, direction) =>
+    request('POST', `/split-horizon/entries/${id}/move`, { direction }),
 };

@@ -186,15 +186,18 @@ POST   /api/split-horizon/networks
 DELETE /api/split-horizon/networks/{name}
 POST   /api/split-horizon/entries
 PUT    /api/split-horizon/entries/{id}
+POST   /api/split-horizon/entries/{id}/move
 DELETE /api/split-horizon/entries/{id}
 ```
 
 Split horizon serves different answers for the same domain depending on the
 client's network. A **network** is a named group of CIDRs (e.g. `LAN =
-["192.168.20.0/24"]`); an **entry** maps a domain to a list of IPs for a set
-of networks (network names and/or literal CIDRs; empty = every client).
+["192.168.20.0/24"]`); an **entry** maps a domain to a list of typed records
+for a set of networks (network names and/or literal CIDRs; empty = every
+client).
 
-`GET` returns everything:
+`GET` returns everything. `ips` is kept for backward compatibility and always
+holds the A/AAAA subset of `records`:
 
 ```json
 {
@@ -207,6 +210,10 @@ of networks (network names and/or literal CIDRs; empty = every client).
       "domain": "www.example.com",
       "networks": ["LAN"],
       "ips": ["10.0.0.5"],
+      "records": [
+        { "rtype": "A", "content": "10.0.0.5" },
+        { "rtype": "TXT", "content": "\"internal only\"" }
+      ],
       "ttl": 60,
       "disabled": false,
       "position": 0
@@ -226,7 +233,12 @@ POST /api/split-horizon/networks
 }
 ```
 
-Create an entry (appended after existing entries for the same domain):
+Create an entry (appended after existing entries for the same domain).
+`records` entries hold the query type and its RDATA in zone-file presentation
+format — supported types are `A`, `AAAA`, `MX`, `TXT`, `CNAME`, and `SRV`
+(e.g. `MX` → `"10 mail.example.com."`, `TXT` → `"\"hello\""`, `CNAME` →
+`"target.example.com."`, `SRV` → `"0 5 5060 sip.example.com."`). TXT values
+are auto-quoted when no quotes are present:
 
 ```json
 POST /api/split-horizon/entries
@@ -234,10 +246,17 @@ POST /api/split-horizon/entries
   "domain": "www.example.com",
   "networks": ["LAN", "VPN"],
   "ips": ["10.0.0.5"],
+  "records": [
+    { "rtype": "A", "content": "10.0.0.5" },
+    { "rtype": "MX", "content": "10 mail.example.com." }
+  ],
   "ttl": 60,
   "disabled": false
 }
 ```
+
+For compatibility, `ips` alone is also accepted and converted to A/AAAA
+records; when both are present `records` wins.
 
 `PUT /api/split-horizon/entries/{id}` updates an entry in place (keeping its
 ordering position). Entries are evaluated in order; the first one whose domain
@@ -245,6 +264,26 @@ matches and whose networks contain the client wins, so a catch-all entry with
 no networks acts as the public fallback behind the specific internal ones.
 Matching applies to A/AAAA queries; an entry with no address of the requested
 family falls through to normal resolution.
+
+Move an entry one position up or down within its domain's ordering:
+
+```json
+POST /api/split-horizon/entries/{id}/move
+{
+  "direction": "up"
+}
+```
+
+`direction` is `"up"` (higher precedence) or `"down"` (lower precedence).
+Returns `{"moved": true}` when the entry was swapped with its neighbour,
+`{"moved": false}` when it is already at the edge of its domain (a no-op),
+and `404` when the entry does not exist. Entries of other domains are never
+affected.
+
+A matching entry answers queries of the same record type — a CNAME answers
+every query type (RFC 1034 §3.6.2), and `ANY` queries receive all records.
+When the entry has no record for the queried type the query falls through to
+normal resolution, so an entry holding only a TXT never swallows A queries.
 
 ### DNSSEC signing
 
