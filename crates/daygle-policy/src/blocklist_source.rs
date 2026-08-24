@@ -161,7 +161,7 @@ impl BlocklistSourceManager {
 
     /// Fetch and parse one source into its normalized domain set.
     async fn fetch(&self, source: &BlocklistSourceConfig) -> Result<BTreeSet<String>> {
-        let response = self
+        let mut response = self
             .client
             .get(&source.url)
             .send()
@@ -174,15 +174,31 @@ impl BlocklistSourceManager {
                 response.status()
             )));
         }
-        let bytes = response
-            .bytes()
+        // Reject over-large bodies up front when the server advertises a length.
+        if let Some(len) = response.content_length() {
+            if len > MAX_BODY_BYTES as u64 {
+                return Err(DaygleError::Proto(format!(
+                    "blocklist {} advertises {len} bytes, over the {MAX_BODY_BYTES} limit",
+                    source.url
+                )));
+            }
+        }
+        // Stream the body chunk by chunk, aborting as soon as the cap is
+        // exceeded so a server that lies about (or omits) Content-Length cannot
+        // force us to buffer an unbounded amount into memory.
+        let mut bytes: Vec<u8> = Vec::new();
+        while let Some(chunk) = response
+            .chunk()
             .await
-            .map_err(|e| DaygleError::Proto(format!("read {}: {e}", source.url)))?;
-        if bytes.len() > MAX_BODY_BYTES {
-            return Err(DaygleError::Proto(format!(
-                "blocklist {} exceeds {} bytes",
-                source.url, MAX_BODY_BYTES
-            )));
+            .map_err(|e| DaygleError::Proto(format!("read {}: {e}", source.url)))?
+        {
+            if bytes.len() + chunk.len() > MAX_BODY_BYTES {
+                return Err(DaygleError::Proto(format!(
+                    "blocklist {} exceeds {} bytes",
+                    source.url, MAX_BODY_BYTES
+                )));
+            }
+            bytes.extend_from_slice(&chunk);
         }
         let text = String::from_utf8_lossy(&bytes);
         Ok(parse_blocklist(&text, source.format))

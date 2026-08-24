@@ -307,7 +307,10 @@ fn would_remove_last_apex_ns(
             Some("NS") => {
                 if let Some(content) = &del.content {
                     if apex_ns.iter().any(|r| &r.content == content) {
-                        remaining -= 1;
+                        // saturating: duplicate delete specs for the same NS
+                        // must not underflow (which would wrap and bypass the
+                        // last-NS guard in release builds).
+                        remaining = remaining.saturating_sub(1);
                     }
                 } else {
                     remaining = 0;

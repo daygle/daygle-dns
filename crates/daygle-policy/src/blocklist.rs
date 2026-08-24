@@ -8,8 +8,9 @@ use daygle_core::config::normalize_domains;
 ///
 /// Entries are stored without a trailing dot and lower-cased. An entry may be
 /// either an exact name (`ads.example.com`) or a wildcard suffix prefixed with
-/// `*.` (`*.example.com`). A wildcard matches the suffix itself and any deeper
-/// subdomain, but not the bare parent (`example.com`).
+/// `*.` (`*.example.com`). A wildcard matches any strict subdomain of the
+/// suffix (`a.example.com`, `a.b.example.com`) but not the bare suffix itself
+/// (`example.com`); block that with a separate exact entry if needed.
 #[derive(Debug, Clone, Default)]
 pub struct Blocklist {
     exact: BTreeSet<String>,
