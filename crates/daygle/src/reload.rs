@@ -151,14 +151,13 @@ pub fn spawn_watcher(
             };
 
             let changed = apply_config(&shared, Arc::new(new));
-            if changed {
-                if reload_tx
+            if changed
+                && reload_tx
                     .send(ReloadCommand::Rebuild { ack: None })
                     .await
                     .is_err()
-                {
-                    warn!("DNS supervisor is gone; cannot apply listener changes");
-                }
+            {
+                warn!("DNS supervisor is gone; cannot apply listener changes");
             }
         }
     })

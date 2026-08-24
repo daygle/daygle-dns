@@ -285,11 +285,12 @@ pub async fn upsert_record(
 
 pub async fn delete_record(
     State(state): State<AppState>,
-    Path((id, rid)): Path<(String, String)>,
+    // The zone id (`_zone_id`) only scopes the route; `delete_record` bumps the
+    // zone serial in its own transaction, so no separate bump is needed here.
+    Path((_zone_id, rid)): Path<(String, String)>,
 ) -> Response {
     match state.catalog.store().delete_record(&rid) {
         Ok(true) => {
-            let _ = state.catalog.store().bump_serial(&id);
             let _ = state.catalog.reload();
             StatusCode::NO_CONTENT.into_response()
         }

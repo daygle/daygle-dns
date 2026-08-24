@@ -237,15 +237,7 @@ impl ZoneStore {
     /// Update the SOA serial (and refresh/retry timers if provided).
     pub fn bump_serial(&self, id: &str) -> Result<u32> {
         let conn = self.conn.lock().unwrap();
-        let current: u32 =
-            conn.query_row("SELECT serial FROM zones WHERE id = ?1", [id], |r| {
-                r.get(0)
-            })
-            .optional()?
-            .ok_or_else(|| DaygleError::NotFound(format!("zone {id}")))?;
-        let next = current.wrapping_add(1).max(1);
-        conn.execute("UPDATE zones SET serial = ?2 WHERE id = ?1", params![id, next])?;
-        Ok(next)
+        bump_serial_in(&conn, id)
     }
 
     /// Replace the SOA metadata (mname, rname, serial, and timers) of a zone
@@ -363,7 +355,9 @@ impl ZoneStore {
         .map_err(Into::into)
     }
 
-    /// Insert or update a record, returning the stored record.
+    /// Insert or update a record, returning the stored record. The zone serial
+    /// is bumped in the same transaction so secondaries and IXFR/AXFR clients
+    /// detect the change.
     pub fn upsert_record(&self, zone_id: &str, input: &RecordInput) -> Result<Record> {
         let zone = self
             .get_zone(zone_id)?
@@ -371,14 +365,29 @@ impl ZoneStore {
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction()?;
         let record = insert_record_in_tx(&tx, zone_id, &zone.name, input)?;
+        bump_serial_in(&tx, zone_id)?;
         tx.commit()?;
         Ok(record)
     }
 
+    /// Delete a record by id. When a record is removed, the owning zone's
+    /// serial is bumped in the same transaction (matching [`Self::upsert_record`]),
+    /// so callers no longer need a separate [`Self::bump_serial`].
     pub fn delete_record(&self, id: &str) -> Result<bool> {
-        let conn = self.conn.lock().unwrap();
-        let changed = conn.execute("DELETE FROM records WHERE id = ?1", [id])?;
-        Ok(changed > 0)
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        let zone_id: Option<String> = tx
+            .query_row("SELECT zone_id FROM records WHERE id = ?1", [id], |r| {
+                r.get(0)
+            })
+            .optional()?;
+        let Some(zone_id) = zone_id else {
+            return Ok(false);
+        };
+        tx.execute("DELETE FROM records WHERE id = ?1", [id])?;
+        bump_serial_in(&tx, &zone_id)?;
+        tx.commit()?;
+        Ok(true)
     }
 
     /// Apply a batch of RFC 2136 dynamic-update changes to a zone atomically.
@@ -810,6 +819,24 @@ fn row_to_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<Record> {
     })
 }
 
+/// Increment a zone's SOA serial by one (wrapping, never landing on 0).
+/// Works against either a plain [`Connection`] or a transaction (which derefs
+/// to `Connection`), so the bump can share the caller's transaction.
+fn bump_serial_in(conn: &Connection, zone_id: &str) -> Result<u32> {
+    let current: u32 = conn
+        .query_row("SELECT serial FROM zones WHERE id = ?1", [zone_id], |r| {
+            r.get(0)
+        })
+        .optional()?
+        .ok_or_else(|| DaygleError::NotFound(format!("zone {zone_id}")))?;
+    let next = current.wrapping_add(1).max(1);
+    conn.execute(
+        "UPDATE zones SET serial = ?2 WHERE id = ?1",
+        params![zone_id, next],
+    )?;
+    Ok(next)
+}
+
 fn insert_record_in_tx(
     tx: &rusqlite::Transaction<'_>,
     zone_id: &str,
@@ -1078,6 +1105,42 @@ mod tests {
 
         assert!(s.delete_record(&record.id).unwrap());
         assert_eq!(s.list_records(&zone.id).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn record_changes_bump_the_zone_serial() {
+        let s = store();
+        let zone = s
+            .create_zone(&ZoneInput {
+                name: "example.com".to_string(),
+                serial: Some(10),
+                ..zone_input_defaults()
+            })
+            .unwrap();
+
+        let record = s
+            .upsert_record(
+                &zone.id,
+                &RecordInput {
+                    name: "www".to_string(),
+                    rtype: "A".to_string(),
+                    content: "192.0.2.1".to_string(),
+                    ttl: 300,
+                    priority: 0,
+                    disabled: false,
+                },
+            )
+            .unwrap();
+        // Adding a record must advance the serial so secondaries notice.
+        assert_eq!(s.get_zone(&zone.id).unwrap().unwrap().serial, 11);
+
+        // Deleting a record advances it again, in the delete's own transaction.
+        assert!(s.delete_record(&record.id).unwrap());
+        assert_eq!(s.get_zone(&zone.id).unwrap().unwrap().serial, 12);
+
+        // Deleting a non-existent record neither succeeds nor bumps the serial.
+        assert!(!s.delete_record("does-not-exist").unwrap());
+        assert_eq!(s.get_zone(&zone.id).unwrap().unwrap().serial, 12);
     }
 
     #[test]
