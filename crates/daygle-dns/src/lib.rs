@@ -1,8 +1,8 @@
-//! # daygle
+//! # daygle_dns
 //!
 //! Library surface of the Daygle DNS server binary: the combined
 //! [`DnsDispatcher`] and a [`bind`] helper that wires every subsystem into a
-//! runnable server. The `daygle` binary is a thin CLI wrapper around this.
+//! runnable server. The `daygle-dns` binary is a thin CLI wrapper around this.
 
 pub mod dispatcher;
 pub mod reload;
@@ -143,6 +143,7 @@ pub async fn bind_with(
     let metrics = Arc::new(Metrics::default());
     let logs = Arc::new(LogStore::new(config.logging.ring_buffer));
     let started_at = std::time::Instant::now();
+    let shutdown = CancellationToken::new();
 
     // Authoritative.
     let store = daygle_authoritative::ZoneStore::open(&config.authoritative.database)?;
@@ -153,22 +154,78 @@ pub async fn bind_with(
     catalog.reload()?;
     import_zone_files(&catalog, &config, &logs)?;
 
-    // Secondary zone refreshers (AXFR/IXFR from configured masters).
-    let shutdown = CancellationToken::new();
-    if !config.authoritative.secondary_zones.is_empty() {
-        let refresher = daygle_authoritative::SecondaryRefresher::new(
+    // DNSSEC maintenance: renews RRSIGs before they expire and rolls keys
+    // on schedule, so signed zones never go bogus.
+    if config.authoritative.dnssec_enabled {
+        let maintenance = daygle_authoritative::DnssecMaintenance::new(
+            store.clone(),
+            catalog.clone(),
+            &config.authoritative,
+        );
+        tokio::spawn({
+            let shutdown = shutdown.clone();
+            async move {
+                maintenance.run_forever(shutdown).await;
+            }
+        });
+    }
+
+    // Secondary zone refreshers (AXFR/IXFR from configured masters). The
+    // refresher is shared with the NOTIFY listener so inbound NOTIFYs can
+    // trigger immediate refreshes (RFC 1996).
+    let refresher = if !config.authoritative.secondary_zones.is_empty() {
+        let refresher = Arc::new(daygle_authoritative::SecondaryRefresher::new(
             store,
             catalog.clone(),
             config.authoritative.secondary_zones.clone(),
             daygle_authoritative::XfrClient::default(),
-        );
+        ));
         tokio::spawn({
+            let refresher = refresher.clone();
             let shutdown = shutdown.clone();
             async move {
                 refresher.run_forever(shutdown).await;
             }
         });
-    }
+        Some(refresher)
+    } else {
+        None
+    };
+
+    // Outbound NOTIFY: sent to secondaries when a primary zone changes.
+    let notify_sender = if config.authoritative.notify_enabled {
+        match daygle_authoritative::NotifySender::new(&config.authoritative.notify_targets) {
+            Ok(sender) => Some(Arc::new(sender)),
+            Err(e) => {
+                warn!(error = %e, "disabling outbound NOTIFY");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    // Inbound NOTIFY: masters trigger an immediate secondary-zone refresh.
+    // Handled on the regular DNS listeners (OpCode::Notify interception), so
+    // no extra socket is bound.
+    let notify_inbound = match (config.authoritative.notify_listen_enabled, refresher.clone()) {
+        (true, Some(refresher)) => Some(Arc::new(daygle_authoritative::notify::NotifyInbound::new(
+            config.authoritative.secondary_zones.clone(),
+            refresher,
+        ))),
+        (true, None) => {
+            warn!(
+                "notify_listen_enabled is set but no secondary zones are configured; \
+                 inbound NOTIFY disabled"
+            );
+            None
+        }
+        _ => None,
+    };
+    let notify_hooks = daygle_authoritative::notify::NotifyHooks {
+        sender: notify_sender,
+        inbound: notify_inbound,
+    };
 
     // Recursive.
     let resolver = if config.recursive.enabled {
@@ -198,14 +255,23 @@ pub async fn bind_with(
         logs: logs.clone(),
     });
 
+    // TSIG keys (RFC 8945) for transfer/update authentication. Key
+    // construction errors are configuration errors: fail fast at startup.
+    let tsig_keys = Arc::new(
+        daygle_authoritative::tsig::TsigKeyRing::from_configs(&config.authoritative.tsig_keys)
+            .map_err(|e| DaygleError::Config(e))?,
+    );
+
     // DNS listeners (bound immediately so the server serves right away).
-    let dispatcher = DnsDispatcher::new(
+    let dispatcher = DnsDispatcher::with_notify(
         catalog.clone(),
         shared.resolver.clone(),
         shared.policy.clone(),
         rate_limiter.clone(),
         metrics.clone(),
         logs.clone(),
+        notify_hooks,
+        tsig_keys,
     );
     let mut server = Server::new(dispatcher);
     let mut initial_addrs = ListenerAddrs::default();

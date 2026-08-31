@@ -13,7 +13,7 @@ async fn recursively_resolves_through_local_upstream() {
     let upstream_db = dir.path().join("upstream.db");
     let upstream = spawn_upstream(&upstream_db, "upstream.test", "198.51.100.9").await;
 
-    let mut config = base_config(&dir.path().join("daygle.db"));
+    let mut config = base_config(&dir.path().join("daygle-dns.db"));
     config.recursive.enabled = true;
     config.recursive.use_system_config = false;
     config.recursive.upstreams = vec![upstream.to_string()];

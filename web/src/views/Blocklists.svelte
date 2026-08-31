@@ -80,7 +80,7 @@
   <div class="card">
     <h3 style="margin-top: 0">No remote blocklist sources configured</h3>
     <p class="muted">
-      Add sources to <code>daygle.toml</code> and reload (or restart) the server.
+      Add sources to <code>daygle-dns.toml</code> and reload (or restart) the server.
       They are fetched over HTTP(S) and refreshed automatically.
     </p>
     <pre><code>[[policy.blocklist_sources]]

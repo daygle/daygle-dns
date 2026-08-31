@@ -10,7 +10,7 @@ use hickory_proto::rr::RecordType;
 #[tokio::test]
 async fn serves_queries_over_dot() {
     let dir = tempfile::tempdir().unwrap();
-    let db = dir.path().join("daygle.db");
+    let db = dir.path().join("daygle-dns.db");
     let cert = dir.path().join("server.crt");
     let key = dir.path().join("server.key");
 

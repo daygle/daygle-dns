@@ -449,39 +449,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4583a4551df46e2792f82ceeac45e850d2e2d5debba0b91f102385cda5b11f06"
 
 [[package]]
-name = "daygle"
-version = "0.1.0"
-dependencies = [
- "arc-swap",
- "async-trait",
- "axum",
- "clap",
- "daygle-api",
- "daygle-authoritative",
- "daygle-core",
- "daygle-dot",
- "daygle-policy",
- "daygle-recursive",
- "futures-util",
- "hickory-proto",
- "hickory-resolver",
- "hickory-server",
- "ipnet",
- "parking_lot",
- "reqwest",
- "rustls",
- "rustls-pki-types",
- "serde_json",
- "tempfile",
- "tokio",
- "tokio-rustls",
- "tokio-util",
- "toml",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "daygle-api"
 version = "0.1.0"
 dependencies = [
@@ -508,6 +475,7 @@ name = "daygle-authoritative"
 version = "0.1.0"
 dependencies = [
  "arc-swap",
+ "base64",
  "chrono",
  "daygle-core",
  "hickory-proto",
@@ -528,6 +496,7 @@ dependencies = [
 name = "daygle-core"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "chrono",
  "ipnet",
  "parking_lot",
@@ -538,6 +507,40 @@ dependencies = [
  "toml",
  "tracing",
  "url",
+]
+
+[[package]]
+name = "daygle-dns"
+version = "0.1.0"
+dependencies = [
+ "arc-swap",
+ "async-trait",
+ "axum",
+ "chrono",
+ "clap",
+ "daygle-api",
+ "daygle-authoritative",
+ "daygle-core",
+ "daygle-dot",
+ "daygle-policy",
+ "daygle-recursive",
+ "futures-util",
+ "hickory-proto",
+ "hickory-resolver",
+ "hickory-server",
+ "ipnet",
+ "parking_lot",
+ "reqwest",
+ "rustls",
+ "rustls-pki-types",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-rustls",
+ "tokio-util",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

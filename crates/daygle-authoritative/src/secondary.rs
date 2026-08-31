@@ -210,6 +210,30 @@ fn zone_has_no_data(store: &ZoneStore, zone_id: &str) -> Result<bool> {
 }
 
 impl SecondaryRefresher {
+    /// The current stored SOA record for `zone` (answer section form for a
+    /// NOTIFY acknowledgment), or `None` when the zone is unknown.
+    pub async fn current_soa(&self, zone: &str) -> Option<hickory_proto::rr::Record> {
+        let name = match fqdn(zone) {
+            Ok(name) => name,
+            Err(_) => return None,
+        };
+        let zone = self.store.find_zone_by_name(zone).ok().flatten()?;
+        let soa = hickory_proto::rr::rdata::SOA::new(
+            Name::from_utf8(zone.primary_ns.clone()).unwrap_or_else(|_| name.clone()),
+            Name::from_utf8(zone.admin_mailbox.clone()).unwrap_or_else(|_| name.clone()),
+            zone.serial,
+            zone.refresh as i32,
+            zone.retry as i32,
+            zone.expire as i32,
+            zone.minimum,
+        );
+        Some(hickory_proto::rr::Record::from_rdata(
+            name,
+            0,
+            RData::SOA(soa),
+        ))
+    }
+
     /// True when the zone row has a recorded successful transfer.
     fn store_has_transferred(&self, zone_id: &str) -> Result<bool> {
         Ok(self

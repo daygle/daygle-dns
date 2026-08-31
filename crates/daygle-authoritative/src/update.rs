@@ -31,6 +31,19 @@ pub async fn handle_update<R: ResponseHandler>(
     response_edns: Option<&Edns>,
     response_handle: R,
 ) -> ResponseInfo {
+    handle_update_with_notify(catalog, update, response_edns, response_handle, None).await
+}
+
+/// Like [`handle_update`], but sends RFC 1996 NOTIFY to `notify` targets when
+/// the update is applied successfully. Passing `None` keeps the update silent
+/// (used by tests and deployments without configured secondaries).
+pub async fn handle_update_with_notify<R: ResponseHandler>(
+    catalog: &AuthorityCatalog,
+    update: &Request,
+    response_edns: Option<&Edns>,
+    response_handle: R,
+    notify: Option<&crate::notify::NotifySender>,
+) -> ResponseInfo {
     let store = catalog.store();
     let settings = catalog.settings();
 
@@ -63,6 +76,34 @@ pub async fn handle_update<R: ResponseHandler>(
             "dynamic update refused by policy"
         );
         return respond(update, response_edns, response_handle, ResponseCode::Refused).await;
+    }
+
+    // -- TSIG gate (RFC 8945) ---------------------------------------------
+    // When the zone requires a signed update, verify the request signature
+    // before any zone state is read or modified.
+    if let Some(required) = catalog.tsig_update_key(&zone_name) {
+        match crate::tsig::verify_request(
+            &crate::tsig::TsigKeyRing::from_configs(&settings.tsig_keys)
+                .unwrap_or_default(),
+            update.as_slice(),
+            update.metadata.id,
+        ) {
+            crate::tsig::TsigVerifyOutcome::Valid { key, .. } if key.name == required.name => {
+                debug!(zone = %zone_name, "dynamic update TSIG verified");
+            }
+            crate::tsig::TsigVerifyOutcome::Valid { .. } => {
+                debug!(zone = %zone_name, "dynamic update signed with wrong TSIG key");
+                return respond(update, response_edns, response_handle, ResponseCode::Refused).await;
+            }
+            crate::tsig::TsigVerifyOutcome::Invalid(failure) => {
+                debug!(zone = %zone_name, ?failure, "dynamic update TSIG verification failed");
+                return respond(update, response_edns, response_handle, ResponseCode::Refused).await;
+            }
+            crate::tsig::TsigVerifyOutcome::Unsigned => {
+                debug!(zone = %zone_name, "dynamic update requires TSIG");
+                return respond(update, response_edns, response_handle, ResponseCode::Refused).await;
+            }
+        }
     }
 
     // -- Zone must exist and be a primary zone ----------------------------
@@ -155,6 +196,15 @@ pub async fn handle_update<R: ResponseHandler>(
         soa = plan.soa.is_some(),
         "dynamic update applied"
     );
+    if let Some(sender) = notify {
+        // Fire-and-forget: NOTIFYs must not delay the update response (a
+        // dead secondary can cost up to the NOTIFY timeout per target).
+        let sender = sender.clone();
+        let zone_name = zone.name.clone();
+        tokio::spawn(async move {
+            sender.notify_zone(&zone_name).await;
+        });
+    }
     respond(update, response_edns, response_handle, ResponseCode::NoError).await
 }
 

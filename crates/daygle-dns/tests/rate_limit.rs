@@ -26,7 +26,7 @@ fn rate_limited_config(
     cfg
 }
 
-async fn setup_zone(server: &daygle::BoundServer, name: &str) {
+async fn setup_zone(server: &daygle_dns::BoundServer, name: &str) {
     let store = server.catalog.store();
     store
         .create_zone(&ZoneInput {
@@ -40,7 +40,7 @@ async fn setup_zone(server: &daygle::BoundServer, name: &str) {
 #[tokio::test]
 async fn limits_queries_per_client() {
     let dir = tempfile::tempdir().unwrap();
-    let db = dir.path().join("daygle.db");
+    let db = dir.path().join("daygle-dns.db");
     // Domain budget is large so only the per-client counter matters.
     let server = spawn(rate_limited_config(&db, 3, 1000)).await;
     setup_zone(&server, "client.test").await;
@@ -68,7 +68,7 @@ async fn limits_queries_per_client() {
 #[tokio::test]
 async fn limits_queries_per_domain() {
     let dir = tempfile::tempdir().unwrap();
-    let db = dir.path().join("daygle.db");
+    let db = dir.path().join("daygle-dns.db");
     // Client budget is large so only the per-domain counter matters.
     let server = spawn(rate_limited_config(&db, 1000, 2)).await;
     setup_zone(&server, "domain.test").await;
@@ -94,7 +94,7 @@ async fn limits_queries_per_domain() {
 #[tokio::test]
 async fn loopback_is_exempt_by_default() {
     let dir = tempfile::tempdir().unwrap();
-    let db = dir.path().join("daygle.db");
+    let db = dir.path().join("daygle-dns.db");
     let mut cfg = rate_limited_config(&db, 1, 1000);
     // Re-enable the default exemption: 127.0.0.1 is never limited.
     cfg.rate_limit.exempt_loopback = true;
@@ -114,7 +114,7 @@ async fn loopback_is_exempt_by_default() {
 #[tokio::test]
 async fn disabled_by_default() {
     let dir = tempfile::tempdir().unwrap();
-    let db = dir.path().join("daygle.db");
+    let db = dir.path().join("daygle-dns.db");
     // `base_config` leaves rate limiting off.
     let server = spawn(base_config(&db)).await;
     setup_zone(&server, "open.test").await;
@@ -132,8 +132,8 @@ async fn disabled_by_default() {
 #[tokio::test]
 async fn rate_limit_settings_reload_live() {
     let dir = tempfile::tempdir().unwrap();
-    let db = dir.path().join("daygle.db");
-    let cfg_path = dir.path().join("daygle.toml");
+    let db = dir.path().join("daygle-dns.db");
+    let cfg_path = dir.path().join("daygle-dns.toml");
 
     // Start with a strict limit, then relax it via reload. The config file
     // must pass validation, so give every listener a real (non-zero) port;
@@ -146,7 +146,7 @@ async fn rate_limit_settings_reload_live() {
     let toml = toml::to_string(&cfg).unwrap();
     std::fs::write(&cfg_path, &toml).unwrap();
 
-    let server = daygle::bind_with(std::sync::Arc::new(cfg.clone()), Some(cfg_path.clone()))
+    let server = daygle_dns::bind_with(std::sync::Arc::new(cfg.clone()), Some(cfg_path.clone()))
         .await
         .expect("bind");
     setup_zone(&server, "rl.test").await;

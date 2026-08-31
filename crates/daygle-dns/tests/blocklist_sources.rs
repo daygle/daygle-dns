@@ -63,7 +63,7 @@ async fn blocklist_source_blocks_domains_and_refreshes() {
     )
     .await;
 
-    let mut config = base_config(&dir.path().join("daygle.db"));
+    let mut config = base_config(&dir.path().join("daygle-dns.db"));
     config.policy.enabled = true;
     config.policy.blocklist_sources = vec![BlocklistSourceConfig {
         name: "test-list".to_string(),

@@ -23,7 +23,7 @@ fn config_with_zone(db: &std::path::Path, upstream: Option<String>) -> DaygleCon
 #[tokio::test]
 async fn serves_authoritative_a_record_over_udp() {
     let dir = tempfile::tempdir().unwrap();
-    let db = dir.path().join("daygle.db");
+    let db = dir.path().join("daygle-dns.db");
     let config = config_with_zone(&db, None);
 
     let server = spawn(config).await;
@@ -62,7 +62,7 @@ async fn serves_authoritative_a_record_over_udp() {
 #[tokio::test]
 async fn serves_authoritative_over_tcp() {
     let dir = tempfile::tempdir().unwrap();
-    let db = dir.path().join("daygle.db");
+    let db = dir.path().join("daygle-dns.db");
     let server = spawn(config_with_zone(&db, None)).await;
 
     let zone = server
@@ -101,7 +101,7 @@ async fn serves_authoritative_over_tcp() {
 #[tokio::test]
 async fn policy_blocklist_returns_nxdomain() {
     let dir = tempfile::tempdir().unwrap();
-    let db = dir.path().join("daygle.db");
+    let db = dir.path().join("daygle-dns.db");
     let mut config = base_config(&db);
     config.policy.blocklist = vec!["*.ads.example".to_string()];
 

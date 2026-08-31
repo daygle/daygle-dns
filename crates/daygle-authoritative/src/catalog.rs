@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use hickory_proto::dnssec::crypto::EcdsaSigningKey;
 use hickory_proto::dnssec::rdata::dnskey::DNSKEY;
+use hickory_proto::dnssec::rdata::DNSSECRData;
 use hickory_proto::dnssec::{Algorithm, DnssecSigner, SigningKey};
 use hickory_proto::rr::{LowerName, Name, RData, RrKey, Record, RecordSet, RecordType};
 use hickory_server::dnssec::NxProofKind;
@@ -15,13 +16,16 @@ use hickory_server::zone_handler::{AxfrPolicy, Catalog, ZoneHandler, ZoneType};
 use tracing::{info, warn};
 
 use crate::model::Record as DbRecord;
+use crate::model::SigningKeyRecord;
 use crate::split_horizon::SplitHorizonIndex;
 use crate::store::ZoneStore;
 use daygle_core::config::AuthoritativeSettings;
 use daygle_core::error::{DaygleError, Result};
 
-/// Signature validity window for DNSSEC signing (14 days).
-const SIG_DURATION: Duration = Duration::from_secs(60 * 60 * 24 * 14);
+/// Signature validity derived from the configured day count.
+pub(crate) fn sig_duration(settings: &AuthoritativeSettings) -> Duration {
+    Duration::from_secs(u64::from(settings.dnssec_sig_validity_days) * 60 * 60 * 24)
+}
 
 /// An authoritative catalog backed by a [`ZoneStore`].
 ///
@@ -61,6 +65,46 @@ impl AuthorityCatalog {
         &self.settings
     }
 
+    /// The TSIG key ring built from the authoritative settings. Keys are
+    /// validated at load time; an invalid key is a configuration error that
+    /// surfaces at startup/reload rather than at first use.
+    pub fn tsig_key_ring(&self) -> std::sync::Arc<crate::tsig::TsigKeyRing> {
+        use std::sync::OnceLock;
+        static CACHE_INVALID: OnceLock<()> = OnceLock::new();
+        let _ = CACHE_INVALID;
+        let ring = crate::tsig::TsigKeyRing::from_configs(&self.settings.tsig_keys)
+            .unwrap_or_default();
+        std::sync::Arc::new(ring)
+    }
+
+    /// The TSIG key (if any) required for transfers of `zone_name`.
+    pub fn tsig_transfer_key(&self, zone_name: &str) -> Option<crate::tsig::TsigKey> {
+        let ring = crate::tsig::TsigKeyRing::from_configs(&self.settings.tsig_keys)
+            .unwrap_or_default();
+        for binding in &self.settings.tsig_transfer_zones {
+            if let Some((zone, key)) = binding.split_once('=') {
+                if zone.trim_end_matches('.').eq_ignore_ascii_case(&zone_name.trim_end_matches('.')) {
+                    return ring.get_by_config_name(key).cloned();
+                }
+            }
+        }
+        None
+    }
+
+    /// The TSIG key (if any) required for updates to `zone_name`.
+    pub fn tsig_update_key(&self, zone_name: &str) -> Option<crate::tsig::TsigKey> {
+        let ring = crate::tsig::TsigKeyRing::from_configs(&self.settings.tsig_keys)
+            .unwrap_or_default();
+        for binding in &self.settings.tsig_update_zones {
+            if let Some((zone, key)) = binding.split_once('=') {
+                if zone.trim_end_matches('.').eq_ignore_ascii_case(&zone_name.trim_end_matches('.')) {
+                    return ring.get_by_config_name(key).cloned();
+                }
+            }
+        }
+        None
+    }
+
     /// Clone out the current catalog for serving (cheap `Arc` bump).
     pub fn read(&self) -> Arc<Catalog> {
         self.catalog.load_full()
@@ -91,7 +135,7 @@ impl AuthorityCatalog {
     /// Generate (if necessary) a DNSSEC signing key for `zone_id`, sign the
     /// zone, and reload the catalog.
     pub fn sign_zone(&self, zone_id: &str) -> Result<()> {
-        if self.store.get_signing_key(zone_id)?.is_none() {
+        if self.store.list_signing_keys(zone_id)?.is_empty() {
             let (algorithm, der) = generate_signing_key()?;
             self.store.store_signing_key(zone_id, algorithm, &der)?;
             info!("generated DNSSEC signing key for zone {zone_id}");
@@ -137,7 +181,7 @@ impl AuthorityCatalog {
 }
 
 /// Generate an ECDSA P-256 signing key, returning `(algorithm, pkcs8_der)`.
-fn generate_signing_key() -> Result<(u8, Vec<u8>)> {
+pub fn generate_signing_key() -> Result<(u8, Vec<u8>)> {
     let der = EcdsaSigningKey::generate_pkcs8(Algorithm::ECDSAP256SHA256)
         .map_err(|e| DaygleError::Internal(format!("key generation failed: {e}")))?;
     Ok((u8::from(Algorithm::ECDSAP256SHA256), der.secret_pkcs8_der().to_vec()))
@@ -164,16 +208,39 @@ fn build_catalog(
         .map(|s| s.zone_id)
         .collect();
 
-    for (zone, records, key) in data {
+    let sig_validity = sig_duration(settings);
+
+    for (zone, records, keys) in data {
         let origin = fqdn_name(&zone.name)?;
         let zone_type = if secondary_ids.contains(&zone.id) {
             ZoneType::Secondary
         } else {
             ZoneType::Primary
         };
-        let map = zone_rrsets(&zone, &records)?;
+        let active: Vec<&SigningKeyRecord> = keys.iter().filter(|k| k.is_active()).collect();
+        let retired: Vec<&SigningKeyRecord> = keys.iter().filter(|k| k.is_retired()).collect();
+        let mut map = zone_rrsets(&zone, &records)?;
 
-        let nx_proof_kind = if sign_zones && key.is_some() {
+        // Retired keys no longer sign, but their DNSKEY stays published for
+        // the retirement grace period so validators holding cached RRSIGs
+        // made by the old key can still build a chain of trust (RFC 6781).
+        if sign_zones {
+            for key in &retired {
+                match build_dnskey_record(&origin, key.algorithm, &key.key_der, zone.minimum.max(300))
+                {
+                    Ok(record) => {
+                        insert_record_set(&mut map, record)?;
+                    }
+                    Err(e) => warn!(
+                        zone = %zone.name,
+                        error = %e,
+                        "cannot publish retired DNSKEY"
+                    ),
+                }
+            }
+        }
+
+        let nx_proof_kind = if sign_zones && !active.is_empty() {
             Some(NxProofKind::Nsec)
         } else {
             None
@@ -188,20 +255,29 @@ fn build_catalog(
         )
         .map_err(DaygleError::InvalidRecord)?;
 
-        // Apply DNSSEC signing when a key is present.
+        // Apply DNSSEC signing: every active key signs every RRset (and the
+        // DNSKEY RRset), which is what makes pre-publish/double-sign rollover
+        // work - validators can pick either key while both are published.
         if sign_zones {
-            if let Some((algorithm, der)) = key {
-                match build_signer(origin.clone(), algorithm, &der) {
-                    Ok(signer) => {
-                        if let Err(e) = handler.add_zone_signing_key_mut(signer) {
-                            warn!("failed to add signing key for {}: {e}", zone.name);
-                        } else if let Err(e) = handler.secure_zone_mut() {
-                            warn!("failed to sign zone {}: {e}", zone.name);
-                        } else {
-                            info!("zone {} signed with DNSSEC", zone.name);
-                        }
-                    }
+            let mut added = 0usize;
+            for key in &active {
+                match build_signer(origin.clone(), key.algorithm, &key.key_der, sig_validity) {
+                    Ok(signer) => match handler.add_zone_signing_key_mut(signer) {
+                        Ok(()) => added += 1,
+                        Err(e) => warn!("failed to add signing key for {}: {e}", zone.name),
+                    },
                     Err(e) => warn!("cannot reconstruct signing key for {}: {e}", zone.name),
+                }
+            }
+            if added > 0 {
+                match handler.secure_zone_mut() {
+                    Ok(()) => info!(
+                        zone = %zone.name,
+                        keys = added,
+                        retired = retired.len(),
+                        "zone signed with DNSSEC"
+                    ),
+                    Err(e) => warn!("failed to sign zone {}: {e}", zone.name),
                 }
             }
         }
@@ -210,8 +286,6 @@ fn build_catalog(
         catalog.upsert(lower, vec![Arc::new(handler) as Arc<dyn ZoneHandler>]);
     }
 
-    // Silence the unused-variable warning when settings is only used above.
-    let _ = settings;
     Ok(catalog)
 }
 
@@ -300,7 +374,12 @@ fn insert_record_set(map: &mut BTreeMap<RrKey, RecordSet>, record: Record) -> Re
 }
 
 /// Reconstruct a [`DnssecSigner`] from stored PKCS#8 key material.
-fn build_signer(origin: Name, algorithm: u8, der: &[u8]) -> Result<DnssecSigner> {
+pub(crate) fn build_signer(
+    origin: Name,
+    algorithm: u8,
+    der: &[u8],
+    sig_duration: Duration,
+) -> Result<DnssecSigner> {
     let algorithm = Algorithm::from_u8(algorithm);
     let key_der = rustls_pki_types::PrivatePkcs8KeyDer::from(der);
     let key = EcdsaSigningKey::from_pkcs8(&key_der, algorithm)
@@ -313,7 +392,30 @@ fn build_signer(origin: Name, algorithm: u8, der: &[u8]) -> Result<DnssecSigner>
         dnskey,
         Box::new(key),
         origin,
-        SIG_DURATION,
+        sig_duration,
+    ))
+}
+
+/// Build the DNSKEY record for a stored key without a signer (used to keep
+/// retired keys published during the rollover grace period).
+pub(crate) fn build_dnskey_record(
+    origin: &Name,
+    algorithm: u8,
+    der: &[u8],
+    ttl: u32,
+) -> Result<Record> {
+    let algorithm = Algorithm::from_u8(algorithm);
+    let key_der = rustls_pki_types::PrivatePkcs8KeyDer::from(der);
+    let key = EcdsaSigningKey::from_pkcs8(&key_der, algorithm)
+        .map_err(|e| DaygleError::Internal(format!("invalid signing key: {e}")))?;
+    let public = key
+        .to_public_key()
+        .map_err(|e| DaygleError::Internal(format!("cannot derive public key: {e}")))?;
+    let dnskey = DNSKEY::new(true, true, false, public);
+    Ok(Record::from_rdata(
+        origin.clone(),
+        ttl,
+        RData::DNSSEC(DNSSECRData::DNSKEY(dnskey)),
     ))
 }
 

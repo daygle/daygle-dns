@@ -34,6 +34,10 @@ pub struct DnsDispatcher {
     rate_limiter: Arc<RateLimiter>,
     metrics: Arc<Metrics>,
     logs: Arc<LogStore>,
+    /// Optional NOTIFY hooks (outbound sender + inbound handler).
+    notify: daygle_authoritative::notify::NotifyHooks,
+    /// TSIG keys (RFC 8945) for transfer/update authentication.
+    tsig_keys: Arc<daygle_authoritative::tsig::TsigKeyRing>,
 }
 
 impl DnsDispatcher {
@@ -49,6 +53,32 @@ impl DnsDispatcher {
         metrics: Arc<Metrics>,
         logs: Arc<LogStore>,
     ) -> Self {
+        Self::with_notify(
+            catalog,
+            resolver,
+            policy,
+            rate_limiter,
+            metrics,
+            logs,
+            daygle_authoritative::notify::NotifyHooks::default(),
+            Arc::new(daygle_authoritative::tsig::TsigKeyRing::default()),
+        )
+    }
+
+    /// Like [`Self::new`], with NOTIFY hooks (RFC 1996): the sender is used
+    /// after successful dynamic updates, the inbound handler processes
+    /// OpCode::Notify requests for configured secondary zones. `tsig_keys`
+    /// authenticates TSIG-signed transfers and updates (RFC 8945).
+    pub fn with_notify(
+        catalog: Arc<AuthorityCatalog>,
+        resolver: Arc<ArcSwapOption<RecursiveResolver>>,
+        policy: Arc<ArcSwap<PolicyEngine>>,
+        rate_limiter: Arc<RateLimiter>,
+        metrics: Arc<Metrics>,
+        logs: Arc<LogStore>,
+        notify: daygle_authoritative::notify::NotifyHooks,
+        tsig_keys: Arc<daygle_authoritative::tsig::TsigKeyRing>,
+    ) -> Self {
         Self {
             catalog,
             resolver,
@@ -56,6 +86,8 @@ impl DnsDispatcher {
             rate_limiter,
             metrics,
             logs,
+            notify,
+            tsig_keys,
         }
     }
 
@@ -101,6 +133,44 @@ impl DnsDispatcher {
             return send_error(&mut response_handle, request, ResponseCode::Refused).await;
         }
 
+        // TSIG gate (RFC 8945): when the zone requires a signed transfer,
+        // verify the request signature first. The response is signed with
+        // the same key, chaining the request MAC.
+        let tsig = match self.catalog.tsig_transfer_key(qname) {
+            Some(required) => {
+                match daygle_authoritative::tsig::verify_request(
+                    &self.tsig_keys,
+                    request.as_slice(),
+                    request.metadata.id,
+                ) {
+                    daygle_authoritative::tsig::TsigVerifyOutcome::Valid {
+                        key,
+                        response_context,
+                        ..
+                    } if key.name == required.name => {
+                        Some((key, Some(response_context)))
+                    }
+                    daygle_authoritative::tsig::TsigVerifyOutcome::Valid { .. } => {
+                        debug!(query = %qname, %client, "zone transfer signed with wrong TSIG key");
+                        return send_error(&mut response_handle, request, ResponseCode::Refused).await;
+                    }
+                    daygle_authoritative::tsig::TsigVerifyOutcome::Invalid(failure) => {
+                        debug!(query = %qname, %client, ?failure, "zone transfer TSIG verification failed");
+                        return send_error(&mut response_handle, request, ResponseCode::Refused).await;
+                    }
+                    daygle_authoritative::tsig::TsigVerifyOutcome::Unsigned => {
+                        debug!(query = %qname, %client, "zone transfer requires TSIG");
+                        return send_error(&mut response_handle, request, ResponseCode::Refused).await;
+                    }
+                }
+            }
+            None => None,
+        }
+        .map(|(key, context)| {
+            let context = context.unwrap_or_else(|| daygle_authoritative::tsig::response_context_for(&key));
+            (key, context)
+        });
+
         match self.catalog.transfer_records(qname) {
             Ok(Some((soa, records))) => {
                 let mut metadata = request.metadata;
@@ -115,13 +185,38 @@ impl DnsDispatcher {
                 answers.extend(records);
                 answers.push(soa);
 
-                let response = MessageResponseBuilder::from_message_request(request).build(
+                let mut response = MessageResponseBuilder::from_message_request(request).build(
                     metadata,
                     answers.iter(),
                     std::iter::empty(),
                     std::iter::empty(),
                     std::iter::empty(),
                 );
+                // TSIG-signed transfer: sign the response with the request
+                // MAC chained (RFC 8945 §5.4.2), following the same pattern
+                // as hickory's own catalog zone-transfer path.
+                if let Some((_, context)) = tsig {
+                    let mut tbs_buf = Vec::with_capacity(1024);
+                    let mut encoder = hickory_proto::serialize::binary::BinEncoder::new(&mut tbs_buf);
+                    let tbs_response = MessageResponseBuilder::from_message_request(request).build(
+                        metadata,
+                        answers.iter(),
+                        std::iter::empty(),
+                        std::iter::empty(),
+                        std::iter::empty(),
+                    );
+                    if let Err(e) = tbs_response.destructive_emit(&mut encoder) {
+                        warn!(query = %qname, error = %e, "failed to encode signed transfer");
+                        return send_error(&mut response_handle, request, ResponseCode::ServFail).await;
+                    }
+                    match context.sign(&tbs_buf) {
+                        Ok(signature) => response.set_signature(signature),
+                        Err(e) => {
+                            warn!(query = %qname, error = %e, "failed to sign zone transfer");
+                            return send_error(&mut response_handle, request, ResponseCode::ServFail).await;
+                        }
+                    }
+                }
                 match response_handle.send_response(response).await {
                     Ok(info) => info,
                     Err(e) => {
@@ -187,13 +282,25 @@ impl RequestHandler for DnsDispatcher {
         // and `update_networks` gate who may update.
         if request.metadata.op_code == OpCode::Update {
             let edns = request.edns.as_ref();
-            return daygle_authoritative::handle_update(
+            return daygle_authoritative::handle_update_with_notify(
                 &self.catalog,
                 request,
                 edns,
                 response_handle,
+                self.notify.sender.as_deref(),
             )
             .await;
+        }
+
+        // RFC 1996 NOTIFY (OpCode 4): a master's hint that a secondary zone
+        // changed. Handled like updates - before policy/rate limiting per
+        // domain - so masters are never refused for asking us to sync.
+        if request.metadata.op_code == OpCode::Notify {
+            return match &self.notify.inbound {
+                Some(inbound) => inbound.handle(request, response_handle).await,
+                // No inbound NOTIFY configured: NOTIMP, per RFC 1996 §3.9.
+                None => send_error(&mut response_handle, request, ResponseCode::NotImp).await,
+            };
         }
 
         let info = match request.request_info() {

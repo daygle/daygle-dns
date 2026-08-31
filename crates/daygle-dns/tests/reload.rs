@@ -1,7 +1,7 @@
 //! Integration test: live configuration reload.
 //!
 //! Exercises the three reloadable subsystems - policy, upstreams and
-//! listeners - both through the synchronous [`daygle::BoundServer::reload`]
+//! listeners - both through the synchronous [`daygle_dns::BoundServer::reload`]
 //! API and through the background file watcher.
 
 mod common;
@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use common::*;
-use daygle::bind_with;
+use daygle_dns::bind_with;
 use daygle_core::config::DaygleConfig;
 use hickory_proto::op::ResponseCode;
 use hickory_proto::rr::RecordType;
@@ -48,8 +48,8 @@ async fn expect_no_udp_response(addr: SocketAddr, wait: Duration) -> bool {
 #[tokio::test]
 async fn reloads_policy_and_listeners_without_restart() {
     let dir = tempfile::tempdir().unwrap();
-    let db = dir.path().join("daygle.db");
-    let cfg_path = dir.path().join("daygle.toml");
+    let db = dir.path().join("daygle-dns.db");
+    let cfg_path = dir.path().join("daygle-dns.toml");
 
     let port_a = free_port().await;
     let port_b = free_port().await;
@@ -101,8 +101,8 @@ async fn reloads_policy_and_listeners_without_restart() {
 #[tokio::test]
 async fn reloads_recursive_upstreams() {
     let dir = tempfile::tempdir().unwrap();
-    let db = dir.path().join("daygle.db");
-    let cfg_path = dir.path().join("daygle.toml");
+    let db = dir.path().join("daygle-dns.db");
+    let cfg_path = dir.path().join("daygle-dns.toml");
 
     let up_a = spawn_upstream(&dir.path().join("up-a.db"), "a.test", "198.51.100.1").await;
     let up_b = spawn_upstream(&dir.path().join("up-b.db"), "b.test", "198.51.100.2").await;
@@ -145,8 +145,8 @@ async fn reloads_recursive_upstreams() {
 #[tokio::test]
 async fn watches_config_file_and_applies_edits() {
     let dir = tempfile::tempdir().unwrap();
-    let db = dir.path().join("daygle.db");
-    let cfg_path = dir.path().join("daygle.toml");
+    let db = dir.path().join("daygle-dns.db");
+    let cfg_path = dir.path().join("daygle-dns.toml");
 
     let mut cfg = base_config(&db);
     cfg.server.port = free_port().await;

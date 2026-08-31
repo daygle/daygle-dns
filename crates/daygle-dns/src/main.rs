@@ -1,11 +1,11 @@
 //! Daygle DNS - the server binary.
 //!
-//! A thin CLI wrapper around [`daygle::bind`] / [`daygle::BoundServer`].
+//! A thin CLI wrapper around [`daygle_dns::bind`] / [`daygle_dns::BoundServer`].
 
 use std::sync::Arc;
 
 use clap::Parser;
-use daygle::bind_with;
+use daygle_dns::bind_with;
 use daygle_core::config::DaygleConfig;
 use daygle_core::DEFAULT_CONFIG_PATH;
 use tracing::info;
@@ -13,7 +13,7 @@ use tracing_subscriber::EnvFilter;
 
 /// Daygle DNS - a modern, combined DNS server.
 #[derive(Parser, Debug)]
-#[command(name = "daygle", version, about)]
+#[command(name = "daygle-dns", version, about)]
 struct Args {
     /// Path to the TOML configuration file.
     #[arg(short, long, default_value = DEFAULT_CONFIG_PATH)]
@@ -31,7 +31,7 @@ fn main() {
     let config = match DaygleConfig::load(&args.config) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("daygle: failed to load configuration: {e}");
+            eprintln!("daygle-dns: failed to load configuration: {e}");
             std::process::exit(1);
         }
     };
@@ -48,7 +48,7 @@ fn main() {
 
     let config_path = args.config.clone();
     if let Err(e) = run(config, config_path) {
-        eprintln!("daygle: fatal error: {e}");
+        eprintln!("daygle-dns: fatal error: {e}");
         std::process::exit(1);
     }
 }

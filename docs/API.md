@@ -136,9 +136,9 @@ POST /api/zones/import
 
 Zone transfers (AXFR/IXFR, RFC 5936) are served over the plaintext TCP
 listener - not over HTTP - gated by `authoritative.axfr_enabled` and the
-`axfr_networks` client allow-list in `daygle.toml`. Secondary zones (zones
+`axfr_networks` client allow-list in `daygle-dns.toml`. Secondary zones (zones
 replicated from remote masters on a refresh interval) are also configured in
-`daygle.toml` under `[[authoritative.secondary_zones]]`; each replicated zone
+`daygle-dns.toml` under `[[authoritative.secondary_zones]]`; each replicated zone
 appears in `GET /api/zones` like any other zone, but is served read-only.
 
 RFC 2136 dynamic updates are also a DNS-protocol feature (over UDP/TCP/DoT,
@@ -149,6 +149,16 @@ They are gated by `authoritative.allow_dynamic_updates` (default off) and the
 secondary zones. Prerequisites (value-dependent / value-independent /
 not-exists forms) are fully checked; failed updates return their RFC 2136
 RCODE (YXDOMAIN, YXRRSet, NXDOMAIN, NXRRSet, NOTAUTH, …).
+
+NOTIFY (RFC 1996) is likewise a DNS-protocol feature. When
+`authoritative.notify_enabled` is set, a successful dynamic update sends a
+NOTIFY (OpCode 4, QTYPE SOA, UDP) to every address in
+`authoritative.notify_targets`; secondaries that receive it immediately query
+our SOA and pull an IXFR/AXFR when the serial advanced. When
+`authoritative.notify_listen_enabled` is set, the server also accepts
+NOTIFYs for its configured secondary zones on the main UDP port, replies with
+the current SOA, and refreshes that zone immediately (the refresh interval
+remains the fallback and serials are always compared before a transfer).
 
 ### Records
 
@@ -294,6 +304,13 @@ POST /api/zones/{id}/unsign
 
 `sign` generates a signing key (if absent), signs the zone, and reloads the
 catalog. `unsign` removes the key.
+
+Once signed, a zone is maintained automatically: RRSIGs are renewed before
+they expire and keys are rolled over on schedule (double-signing during the
+overlap, the old key retired and eventually removed) - see the `dnssec_*`
+settings under `authoritative` in `daygle-dns.toml`. Manual `unsign` removes all
+keys (including any mid-rollover ones) and stops the maintenance for that
+zone.
 
 ### Cache
 

@@ -46,7 +46,7 @@ fn zone_with_www(store: &daygle_authoritative::ZoneStore, zone_name: &str, ip: &
 #[tokio::test]
 async fn matching_client_gets_synthetic_answer_over_authoritative() {
     let dir = tempfile::tempdir().unwrap();
-    let db = dir.path().join("daygle.db");
+    let db = dir.path().join("daygle-dns.db");
     let server = spawn(config_with_zone(&db)).await;
     let store = server.catalog.store();
 
@@ -96,7 +96,7 @@ async fn matching_client_gets_synthetic_answer_over_authoritative() {
 #[tokio::test]
 async fn non_matching_client_falls_through_to_authoritative() {
     let dir = tempfile::tempdir().unwrap();
-    let db = dir.path().join("daygle.db");
+    let db = dir.path().join("daygle-dns.db");
     let server = spawn(config_with_zone(&db)).await;
     let store = server.catalog.store();
 
@@ -138,7 +138,7 @@ async fn catch_all_entry_serves_both_families() {
     // so without the catch-all these queries would be REFUSED; with it the
     // synthetic answers come back.
     let dir = tempfile::tempdir().unwrap();
-    let db = dir.path().join("daygle.db");
+    let db = dir.path().join("daygle-dns.db");
     let server = spawn(config_with_zone(&db)).await;
     let store = server.catalog.store();
 
@@ -174,7 +174,7 @@ async fn ipv4_only_entry_does_not_swallow_aaaa_queries() {
     // An IPv4-only entry must fall through (to authoritative here) for AAAA
     // queries rather than answering NODATA/NXDOMAIN.
     let dir = tempfile::tempdir().unwrap();
-    let db = dir.path().join("daygle.db");
+    let db = dir.path().join("daygle-dns.db");
     let server = spawn(config_with_zone(&db)).await;
     let store = server.catalog.store();
 
@@ -212,7 +212,7 @@ async fn reorder_changes_which_view_wins() {
     // the fallback answers everyone (including the loopback client); after
     // the move the loopback client gets the internal address.
     let dir = tempfile::tempdir().unwrap();
-    let db = dir.path().join("daygle.db");
+    let db = dir.path().join("daygle-dns.db");
     let server = spawn(config_with_zone(&db)).await;
     let store = server.catalog.store();
 
@@ -280,7 +280,7 @@ async fn reorder_changes_which_view_wins() {
 #[tokio::test]
 async fn split_horizon_serves_mx_txt_srv_records() {
     let dir = tempfile::tempdir().unwrap();
-    let db = dir.path().join("daygle.db");
+    let db = dir.path().join("daygle-dns.db");
     let server = spawn(config_with_zone(&db)).await;
     let store = server.catalog.store();
 
@@ -340,7 +340,7 @@ async fn split_horizon_serves_mx_txt_srv_records() {
 #[tokio::test]
 async fn split_horizon_cname_answers_all_types() {
     let dir = tempfile::tempdir().unwrap();
-    let db = dir.path().join("daygle.db");
+    let db = dir.path().join("daygle-dns.db");
     let server = spawn(config_with_zone(&db)).await;
     let store = server.catalog.store();
 

@@ -1,6 +1,6 @@
 # Daygle DNS architecture
 
-Daygle is a Cargo workspace of eight crates. One binary (`daygle`) composes
+Daygle is a Cargo workspace of eight crates. One binary (`daygle-dns`) composes
 them into a single process that serves plaintext DNS, DNS over TLS, and an HTTP
 API/GUI.
 
@@ -8,7 +8,7 @@ API/GUI.
 
 ```
                           ┌──────────────────────────────┐
-                          │           daygle (bin)       │
+                          │           daygle-dns (bin)       │
                           │  DnsDispatcher + listeners   │
                           └──────┬──────┬──────┬─────────┘
                                  │      │      │
@@ -98,7 +98,9 @@ listener:
    through to SQLite (bumping the SOA serial unless the update rewrites the
    SOA), and reloads the catalog so the change is served immediately. Gated
    by `authoritative.allow_dynamic_updates` and the `update_networks` client
-   allow-list; secondary zones are always refused.
+   allow-list; secondary zones are always refused. When outbound NOTIFY is
+   configured, a successful update also sends an RFC 1996 NOTIFY to every
+   configured target so secondaries pull immediately.
 
 ## Concurrency model
 
@@ -119,6 +121,16 @@ listener:
   stored set via `ZoneStore::replace_records`, and the catalog is reloaded so
   updates are served immediately. Secondary zones are served read-only: the
   Hickory catalog marks them `ZoneType::Secondary`.
+- NOTIFY (RFC 1996) closes the loop in both directions. Outbound: the
+  `NotifySender` sends a NOTIFY (OpCode 4, QTYPE SOA, UDP) to each configured
+  `notify_targets` after a successful dynamic update on a primary zone.
+  Inbound: the dispatcher intercepts OpCode::Notify on the regular DNS
+  listeners (no extra socket) and `NotifyInbound` answers NOTIFYs for
+  configured secondary zones with the current SOA, then triggers an
+  immediate serial check + IXFR/AXFR pull through the `SecondaryRefresher`.
+  NOTIFYs are only accepted from one of the zone's configured masters and
+  are treated as hints only - serials are still compared before any
+  transfer, so replayed or spoofed NOTIFYs are harmless.
 - `Metrics` uses lock-free atomics; `LogStore` is a mutex-guarded ring buffer.
 
 ## Live configuration reload
@@ -156,7 +168,29 @@ same path for per-source status.
   Hickory validates the chain and sets the AD bit; bogus chains fail the query.
 - **Signing** (authoritative path) is per-zone: `POST /api/zones/:id/sign`
   generates an ECDSA P-256 key (stored as PKCS#8 in SQLite) and signs the zone
-  with NSEC non-existence proofs on the next catalog reload.
+  with NSEC non-existence proofs on the next catalog reload. Signatures are
+  valid for `dnssec_sig_validity_days` (default 14) from their inception.
+- **Maintenance** (`daygle-authoritative`'s `DnssecMaintenance`, spawned when
+  `dnssec_enabled`) keeps signed zones valid forever. Every
+  `dnssec_maintenance_secs` it checks two things: when signatures are older
+  than half their validity window it reloads the catalog, which re-signs
+  every zone with fresh inceptions (so signatures always have at least half
+  their validity left); and it advances the automatic key rollover state
+  machine (see below). Key state changes are stored in SQLite (`dnssec_keys`:
+  `active`/`retired`, with creation timestamps) so rollover survives restarts.
+- **Automatic key rollover**: when the active key reaches
+  `dnssec_rollover_days` (default 90), a new key is generated and both keys
+  sign every RRset (double-signing) with both DNSKEYs published. After
+  `dnssec_rollover_overlap_days` (default 30) the old key is retired: it
+  stops signing but its DNSKEY stays published for a further
+  `dnssec_rollover_retire_days` (default 14) so validators holding cached
+  RRSIGs can still build a chain (RFC 6781 pre-publish rollover), then the
+  key is deleted and its DNSKEY disappears. A rollover never removes the
+  only active key, does not stack a third key while one is in flight, and
+  skips secondary zones. Caveat: automatic rollover cannot update the
+  parent's DS record - submit the new DS (or CDS/CDNSKEY) to the registrar
+  during the overlap window; Daygle keeps the old key published long enough
+  for that exchange.
 
 ## Extensibility points
 

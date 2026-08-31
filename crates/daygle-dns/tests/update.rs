@@ -92,7 +92,7 @@ fn prereq_rrset_exists(name: &str, rtype: RecordType) -> Record {
     record
 }
 
-async fn setup_zone(server: &daygle::BoundServer, name: &str) -> String {
+async fn setup_zone(server: &daygle_dns::BoundServer, name: &str) -> String {
     let store = server.catalog.store();
     let zone = store
         .create_zone(&ZoneInput {
@@ -107,7 +107,7 @@ async fn setup_zone(server: &daygle::BoundServer, name: &str) -> String {
 #[tokio::test]
 async fn update_adds_record_and_answers_live() {
     let dir = tempfile::tempdir().unwrap();
-    let db = dir.path().join("daygle.db");
+    let db = dir.path().join("daygle-dns.db");
     let server = spawn(config_with_updates(&db)).await;
     let zone_id = setup_zone(&server, "upd.test").await;
     let udp = server.udp_addr.expect("UDP is enabled");
@@ -136,7 +136,7 @@ async fn update_adds_record_and_answers_live() {
 #[tokio::test]
 async fn update_prerequisite_failures_return_rcodes() {
     let dir = tempfile::tempdir().unwrap();
-    let db = dir.path().join("daygle.db");
+    let db = dir.path().join("daygle-dns.db");
     let server = spawn(config_with_updates(&db)).await;
     setup_zone(&server, "prereq.test").await;
     let udp = server.udp_addr.expect("UDP is enabled");
@@ -178,7 +178,7 @@ async fn update_prerequisite_failures_return_rcodes() {
 #[tokio::test]
 async fn update_delete_rrset_and_persistence_across_restart() {
     let dir = tempfile::tempdir().unwrap();
-    let db = dir.path().join("daygle.db");
+    let db = dir.path().join("daygle-dns.db");
     let server = spawn(config_with_updates(&db)).await;
     let zone_id = setup_zone(&server, "persist.test").await;
     let udp = server.udp_addr.expect("UDP is enabled");
@@ -248,7 +248,7 @@ async fn update_delete_rrset_and_persistence_across_restart() {
 #[tokio::test]
 async fn update_refused_when_disabled() {
     let dir = tempfile::tempdir().unwrap();
-    let db = dir.path().join("daygle.db");
+    let db = dir.path().join("daygle-dns.db");
     // `base_config` leaves allow_dynamic_updates off.
     let server = spawn(base_config(&db)).await;
     setup_zone(&server, "locked.test").await;
@@ -272,7 +272,7 @@ async fn update_refused_when_disabled() {
 #[tokio::test]
 async fn update_unknown_zone_is_not_auth() {
     let dir = tempfile::tempdir().unwrap();
-    let db = dir.path().join("daygle.db");
+    let db = dir.path().join("daygle-dns.db");
     let server = spawn(config_with_updates(&db)).await;
     let udp = server.udp_addr.expect("UDP is enabled");
 
@@ -290,7 +290,7 @@ async fn update_unknown_zone_is_not_auth() {
 #[tokio::test]
 async fn update_with_explicit_soa_writes_metadata() {
     let dir = tempfile::tempdir().unwrap();
-    let db = dir.path().join("daygle.db");
+    let db = dir.path().join("daygle-dns.db");
     let server = spawn(config_with_updates(&db)).await;
     let zone_id = setup_zone(&server, "soa.test").await;
     let udp = server.udp_addr.expect("UDP is enabled");
@@ -322,7 +322,7 @@ async fn update_with_explicit_soa_writes_metadata() {
 #[tokio::test]
 async fn update_refuses_deleting_last_apex_ns() {
     let dir = tempfile::tempdir().unwrap();
-    let db = dir.path().join("daygle.db");
+    let db = dir.path().join("daygle-dns.db");
     let server = spawn(config_with_updates(&db)).await;
     setup_zone(&server, "ns.test").await;
     let udp = server.udp_addr.expect("UDP is enabled");

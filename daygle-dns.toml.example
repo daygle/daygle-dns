@@ -1,5 +1,5 @@
 # Daygle DNS - example configuration
-# Copy to /etc/daygle/daygle.toml and adjust as needed.
+# Copy to /etc/daygle-dns/daygle.toml and adjust as needed.
 
 # Plaintext DNS listeners (UDP/TCP on port 53).
 [server]
@@ -42,12 +42,29 @@ negative_cache_ttl = 3600
 
 # Authoritative zone storage (SQLite).
 [authoritative]
-database = "/var/lib/daygle/daygle.db"
+database = "/var/lib/daygle-dns/daygle.db"
 # Optional: import BIND zone files (*.zone, *.db, *.txt) from this directory.
-zones_dir = "/etc/daygle/zones"
+zones_dir = "/etc/daygle-dns/zones"
 default_primary_ns = "ns1.daygle.test."
 default_admin_mailbox = "admin.daygle.test."
 dnssec_enabled = true
+
+# DNSSEC maintenance: a background task re-signs zones before their RRSIGs
+# expire (at half the validity window) and rolls keys automatically. During
+# a rollover the zone is double-signed by the old and new key while both
+# DNSKEYs are published; after the overlap the old key is retired (stops
+# signing, DNSKEY stays published) and finally removed.
+dnssec_sig_validity_days = 14
+# Key lifetime before rollover starts; 0 disables rollover entirely.
+dnssec_rollover_days = 90
+# How long both keys sign and are published before the old key retires.
+# Use this window to submit the new DS record to your registrar - automatic
+# rollover cannot update the parent's DS for you.
+dnssec_rollover_overlap_days = 30
+# How long a retired key's DNSKEY stays published after it stops signing.
+dnssec_rollover_retire_days = 14
+# How often the maintenance task checks signatures and key ages.
+dnssec_maintenance_secs = 3600
 
 # Serve AXFR/IXFR zone transfers (RFC 5936) for hosted zones.
 # axfr_networks limits which clients may transfer (empty = anyone).
@@ -71,13 +88,27 @@ update_networks = ["10.0.0.0/8", "192.168.0.0/16"]
 # refresh_secs = 600
 # enabled = true
 
+# RFC 1996 NOTIFY.
+#
+# Outbound: when a primary zone changes (e.g. a dynamic update is applied),
+# send a NOTIFY to each target so secondaries pull immediately instead of
+# waiting out their refresh interval. Requires at least one target.
+notify_enabled = false
+notify_targets = ["192.0.2.20", "192.0.2.21:5353"]
+#
+# Inbound: accept NOTIFYs from masters for the secondary zones above and
+# refresh the affected zone immediately. The NOTIFY is answered with the
+# current SOA; serials are still compared before any transfer, so replayed
+# or spoofed NOTIFYs cannot corrupt zone data.
+notify_listen_enabled = false
+
 # DNS over TLS (RFC 7858) using rustls.
 [dot]
 enabled = true
 listen = "0.0.0.0"
 port = 853
-cert_path = "/etc/daygle/certs/server.crt"
-key_path = "/etc/daygle/certs/server.key"
+cert_path = "/etc/daygle-dns/certs/server.crt"
+key_path = "/etc/daygle-dns/certs/server.key"
 # Generate a self-signed certificate when none is present.
 self_signed = true
 server_name = "dns.example.com"
@@ -90,8 +121,8 @@ enabled = false
 listen = "0.0.0.0"
 port = 443
 # May reuse the same certificate as DoT.
-cert_path = "/etc/daygle/certs/server.crt"
-key_path = "/etc/daygle/certs/server.key"
+cert_path = "/etc/daygle-dns/certs/server.crt"
+key_path = "/etc/daygle-dns/certs/server.key"
 self_signed = true
 server_name = "dns.example.com"
 endpoint = "/dns-query"
@@ -110,7 +141,7 @@ cors_origins = []
 [policy]
 enabled = true
 blocklist = ["*.doubleclick.net", "*.ads.example.com"]
-blocklist_files = ["/etc/daygle/blocklist.txt"]
+blocklist_files = ["/etc/daygle-dns/blocklist.txt"]
 
 # Remote blocklist sources: fetched over HTTP(S) and merged into the
 # blocklist, refreshed on a schedule (like Technitium's blocklist manager).

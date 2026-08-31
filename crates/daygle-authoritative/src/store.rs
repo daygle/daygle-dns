@@ -9,7 +9,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use uuid::Uuid;
 
 use crate::model::{
-    DynamicUpdate, MoveDirection, Record, RecordInput, SplitHorizonEntry,
+    DynamicUpdate, MoveDirection, Record, RecordInput, SigningKeyRecord, SplitHorizonEntry,
     SplitHorizonEntryInput, SplitHorizonNetwork, SplitHorizonNetworkInput,
     SplitHorizonRecord, Zone, ZoneInput,
 };
@@ -45,11 +45,15 @@ CREATE INDEX IF NOT EXISTS idx_records_zone ON records(zone_id);
 CREATE INDEX IF NOT EXISTS idx_records_name ON records(name);
 
 CREATE TABLE IF NOT EXISTS dnssec_keys (
-    zone_id    TEXT PRIMARY KEY REFERENCES zones(id) ON DELETE CASCADE,
+    id         TEXT PRIMARY KEY,
+    zone_id    TEXT NOT NULL REFERENCES zones(id) ON DELETE CASCADE,
     algorithm  INTEGER NOT NULL,
     key_der    BLOB NOT NULL,
+    state      TEXT NOT NULL DEFAULT 'active',
     created_at TEXT NOT NULL
 );
+
+CREATE INDEX IF NOT EXISTS idx_dnssec_keys_zone ON dnssec_keys(zone_id);
 
 CREATE TABLE IF NOT EXISTS secondary_zones (
     zone_id      TEXT PRIMARY KEY REFERENCES zones(id) ON DELETE CASCADE,
@@ -76,6 +80,13 @@ CREATE TABLE IF NOT EXISTS split_horizon_entries (
 );
 
 CREATE INDEX IF NOT EXISTS idx_split_horizon_domain ON split_horizon_entries(domain);
+
+CREATE TABLE IF NOT EXISTS tsig_keys (
+    name       TEXT PRIMARY KEY,
+    algorithm  TEXT NOT NULL,
+    secret     TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
 "#;
 
 /// SQLite-backed storage for zones and records.
@@ -120,6 +131,7 @@ impl ZoneStore {
         let conn = self.conn.lock().unwrap();
         conn.execute_batch(SCHEMA)?;
         migrate_split_horizon_records(&conn)?;
+        migrate_dnssec_keys(&conn)?;
         Ok(())
     }
 
@@ -736,45 +748,150 @@ impl ZoneStore {
         Ok(MoveResult::Moved)
     }
 
-    // ---- DNSSEC signing keys --------------------------------------------
+    // ---- TSIG keys (RFC 8945) -------------------------------------------
 
-    /// A stored signing key: `(algorithm, pkcs8_der_bytes)`.
-    pub fn get_signing_key(&self, zone_id: &str) -> Result<Option<(u8, Vec<u8>)>> {
+    /// List all stored TSIG keys, oldest first.
+    pub fn list_tsig_keys(&self) -> Result<Vec<crate::model::TsigKeyRecord>> {
         let conn = self.conn.lock().unwrap();
-        conn.query_row(
-            "SELECT algorithm, key_der FROM dnssec_keys WHERE zone_id = ?1",
-            [zone_id],
-            |row| Ok((row.get::<_, i64>(0)? as u8, row.get::<_, Vec<u8>>(1)?)),
-        )
-        .optional()
-        .map_err(Into::into)
+        let mut stmt = conn.prepare(
+            "SELECT name, algorithm, secret, created_at FROM tsig_keys ORDER BY created_at",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(crate::model::TsigKeyRecord {
+                name: row.get(0)?,
+                algorithm: row.get(1)?,
+                secret: row.get(2)?,
+                created_at: row.get(3)?,
+            })
+        })?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
+    /// Store or replace a TSIG key.
+    pub fn store_tsig_key(
+        &self,
+        name: &str,
+        algorithm: &str,
+        secret_b64: &str,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO tsig_keys (name, algorithm, secret, created_at)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(name) DO UPDATE SET algorithm = ?2, secret = ?3",
+            params![
+                name,
+                algorithm,
+                secret_b64,
+                Utc::now().to_rfc3339()
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Delete a TSIG key.
+    pub fn delete_tsig_key(&self, name: &str) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let changed = conn.execute("DELETE FROM tsig_keys WHERE name = ?1", [name])?;
+        Ok(changed > 0)
+    }
+
+    // ---- DNSSEC signing keys --------------------------------------------
+
+    /// List every stored signing key for a zone (active and retired), oldest
+    /// first.
+    pub fn list_signing_keys(&self, zone_id: &str) -> Result<Vec<SigningKeyRecord>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, zone_id, algorithm, key_der, state, created_at
+             FROM dnssec_keys WHERE zone_id = ?1 ORDER BY created_at",
+        )?;
+        let rows = stmt.query_map([zone_id], row_to_key)?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    /// Store a new signing key created now; returns its id.
     pub fn store_signing_key(
         &self,
         zone_id: &str,
         algorithm: u8,
         key_der: &[u8],
-    ) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
-        conn.execute(
-            "INSERT INTO dnssec_keys (zone_id, algorithm, key_der, created_at)
-             VALUES (?1, ?2, ?3, ?4)
-             ON CONFLICT(zone_id) DO UPDATE SET algorithm = ?2, key_der = ?3",
-            params![zone_id, algorithm as i64, key_der, Utc::now().to_rfc3339()],
-        )?;
-        Ok(())
+    ) -> Result<String> {
+        self.store_signing_key_created(zone_id, algorithm, key_der, Utc::now())
     }
 
+    /// Store a new signing key with an explicit creation timestamp (used for
+    /// rollover bookkeeping and imports); returns its id.
+    pub fn store_signing_key_created(
+        &self,
+        zone_id: &str,
+        algorithm: u8,
+        key_der: &[u8],
+        created_at: chrono::DateTime<Utc>,
+    ) -> Result<String> {
+        let id = Uuid::new_v4().to_string();
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO dnssec_keys (id, zone_id, algorithm, key_der, state, created_at)
+             VALUES (?1, ?2, ?3, ?4, 'active', ?5)",
+            params![id, zone_id, algorithm as i64, key_der, created_at.to_rfc3339()],
+        )?;
+        Ok(id)
+    }
+
+    /// Move a key between states (`active` <-> `retired`).
+    pub fn set_key_state(&self, key_id: &str, state: &str) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let changed = conn.execute(
+            "UPDATE dnssec_keys SET state = ?2 WHERE id = ?1",
+            params![key_id, state],
+        )?;
+        Ok(changed > 0)
+    }
+
+    /// Rewrite a key's creation timestamp (used to backfill/import keys with
+    /// known creation dates).
+    pub fn set_key_created_at(
+        &self,
+        key_id: &str,
+        created_at: chrono::DateTime<Utc>,
+    ) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let changed = conn.execute(
+            "UPDATE dnssec_keys SET created_at = ?2 WHERE id = ?1",
+            params![key_id, created_at.to_rfc3339()],
+        )?;
+        Ok(changed > 0)
+    }
+
+    /// Delete a single key row.
+    pub fn delete_key(&self, key_id: &str) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let changed = conn.execute("DELETE FROM dnssec_keys WHERE id = ?1", [key_id])?;
+        Ok(changed > 0)
+    }
+
+    /// True when the zone has at least one signing key (of any state).
+    pub fn get_signing_key(&self, zone_id: &str) -> Result<Option<(u8, Vec<u8>)>> {
+        Ok(self
+            .list_signing_keys(zone_id)?
+            .into_iter()
+            .next()
+            .map(|k| (k.algorithm, k.key_der)))
+    }
+
+    /// Delete every signing key for a zone (used by "unsign zone").
     pub fn delete_signing_key(&self, zone_id: &str) -> Result<bool> {
         let conn = self.conn.lock().unwrap();
         let changed = conn.execute("DELETE FROM dnssec_keys WHERE zone_id = ?1", [zone_id])?;
         Ok(changed > 0)
     }
 
-    /// All zones paired with their records and optional signing key, for the
+    /// All zones paired with their records and every signing key, for the
     /// catalog builder.
-    pub fn load_catalog_data(&self) -> Result<Vec<(Zone, Vec<Record>, Option<(u8, Vec<u8>)>)>> {
+    pub fn load_catalog_data(
+        &self,
+    ) -> Result<Vec<(Zone, Vec<Record>, Vec<SigningKeyRecord>)>> {
         let zones = self.list_zones()?;
         let records = self.list_all_records()?;
         let mut out = Vec::with_capacity(zones.len());
@@ -784,8 +901,8 @@ impl ZoneStore {
                 .filter(|r| r.zone_id == zone.id)
                 .cloned()
                 .collect::<Vec<_>>();
-            let key = self.get_signing_key(&zone.id)?;
-            out.push((zone, recs, key));
+            let keys = self.list_signing_keys(&zone.id)?;
+            out.push((zone, recs, keys));
         }
         Ok(out)
     }
@@ -816,6 +933,17 @@ fn row_to_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<Record> {
         ttl: row.get(5)?,
         priority: row.get(6)?,
         disabled: row.get::<_, i64>(7)? != 0,
+    })
+}
+
+fn row_to_key(row: &rusqlite::Row<'_>) -> rusqlite::Result<SigningKeyRecord> {
+    Ok(SigningKeyRecord {
+        id: row.get(0)?,
+        zone_id: row.get(1)?,
+        algorithm: row.get::<_, i64>(2)? as u8,
+        key_der: row.get(3)?,
+        state: row.get(4)?,
+        created_at: row.get(5)?,
     })
 }
 
@@ -1022,6 +1150,44 @@ fn migrate_split_horizon_records(conn: &Connection) -> Result<()> {
             [],
         )?;
     }
+    Ok(())
+}
+
+/// Convert a pre-rollover `dnssec_keys` table (one key per zone, `zone_id`
+/// primary key) to the multi-key schema. Existing keys are kept as `active`;
+/// their ids are synthesized and their original `created_at` is preserved so
+/// rollover timing continues from the key's real age.
+fn migrate_dnssec_keys(conn: &Connection) -> Result<()> {
+    let has_id: bool = conn.query_row(
+        "SELECT EXISTS(
+            SELECT 1 FROM pragma_table_info('dnssec_keys') WHERE name = 'id'
+         )",
+        [],
+        |r| r.get(0),
+    )?;
+    if has_id {
+        return Ok(());
+    }
+    conn.execute_batch(
+        "BEGIN;
+         ALTER TABLE dnssec_keys RENAME TO dnssec_keys_legacy;
+         DROP INDEX IF EXISTS idx_dnssec_keys_zone;
+         CREATE TABLE dnssec_keys (
+             id         TEXT PRIMARY KEY,
+             zone_id    TEXT NOT NULL REFERENCES zones(id) ON DELETE CASCADE,
+             algorithm  INTEGER NOT NULL,
+             key_der    BLOB NOT NULL,
+             state      TEXT NOT NULL DEFAULT 'active',
+             created_at TEXT NOT NULL
+         );
+         CREATE INDEX idx_dnssec_keys_zone ON dnssec_keys(zone_id);
+         INSERT INTO dnssec_keys (id, zone_id, algorithm, key_der, state, created_at)
+             SELECT lower(hex(randomblob(16))), zone_id, algorithm, key_der,
+                    'active', created_at
+             FROM dnssec_keys_legacy;
+         DROP TABLE dnssec_keys_legacy;
+         COMMIT;",
+    )?;
     Ok(())
 }
 
@@ -1603,6 +1769,106 @@ mod tests {
             s.move_split_horizon_entry("nope", MoveDirection::Up).unwrap(),
             MoveResult::NotFound
         );
+    }
+
+    #[test]
+    fn signing_key_lifecycle_and_legacy_migration() {
+        let s = store();
+        let zone = s
+            .create_zone(&ZoneInput {
+                name: "example.com".to_string(),
+                ..zone_input_defaults()
+            })
+            .unwrap();
+
+        // No keys yet.
+        assert!(s.list_signing_keys(&zone.id).unwrap().is_empty());
+
+        // Two keys can coexist (rollover double-signing state).
+        let k1 = s.store_signing_key(&zone.id, 13, b"der-1").unwrap();
+        let k2 = s
+            .store_signing_key_created(
+                &zone.id,
+                13,
+                b"der-2",
+                Utc::now() - chrono::Duration::hours(48),
+            )
+            .unwrap();
+        assert_ne!(k1, k2);
+
+        let keys = s.list_signing_keys(&zone.id).unwrap();
+        assert_eq!(keys.len(), 2);
+        // Oldest first: the backdated key is returned first.
+        assert_eq!(keys[0].id, k2);
+        assert!(keys[0].is_active());
+
+        // State transitions.
+        assert!(s.set_key_state(&k2, "retired").unwrap());
+        let keys = s.list_signing_keys(&zone.id).unwrap();
+        assert!(keys.iter().find(|k| k.id == k2).unwrap().is_retired());
+
+        // Timestamp rewrite (import/backfill).
+        assert!(s
+            .set_key_created_at(&k2, Utc::now() - chrono::Duration::hours(96))
+            .unwrap());
+
+        // Single-key deletion leaves the other key.
+        assert!(s.delete_key(&k2).unwrap());
+        let keys = s.list_signing_keys(&zone.id).unwrap();
+        assert_eq!(keys.len(), 1);
+        assert_eq!(keys[0].id, k1);
+
+        // Deleting every key for the zone ("unsign").
+        assert!(s.delete_signing_key(&zone.id).unwrap());
+        assert!(s.list_signing_keys(&zone.id).unwrap().is_empty());
+    }
+
+    #[test]
+    fn legacy_single_key_schema_is_migrated() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("legacy.db");
+
+        // Build a database with the pre-rollover schema: one key per zone,
+        // keyed by zone_id, no id/state columns.
+        {
+            let conn = rusqlite::Connection::open(&db).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE zones (
+                     id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE,
+                     primary_ns TEXT NOT NULL, admin_mailbox TEXT NOT NULL,
+                     serial INTEGER NOT NULL, refresh INTEGER NOT NULL,
+                     retry INTEGER NOT NULL, expire INTEGER NOT NULL,
+                     minimum INTEGER NOT NULL, created_at TEXT NOT NULL
+                 );
+                 CREATE TABLE dnssec_keys (
+                     zone_id TEXT PRIMARY KEY REFERENCES zones(id) ON DELETE CASCADE,
+                     algorithm INTEGER NOT NULL, key_der BLOB NOT NULL,
+                     created_at TEXT NOT NULL
+                 );
+                 INSERT INTO zones VALUES ('z1', 'example.com', 'ns1.example.com.',
+                     'admin.example.com.', 1, 3600, 600, 86400, 300, '2024-01-01T00:00:00Z');
+                 INSERT INTO dnssec_keys VALUES ('z1', 13, x'de726572',
+                     '2020-05-05T00:00:00+00:00');",
+            )
+            .unwrap();
+        }
+
+        // Opening through ZoneStore migrates in place.
+        let s = ZoneStore::open(db.to_string_lossy().as_ref()).unwrap();
+        let keys = s.list_signing_keys("z1").unwrap();
+        assert_eq!(keys.len(), 1, "legacy key preserved");
+        let key = &keys[0];
+        assert_eq!(key.algorithm, 13);
+        assert_eq!(key.key_der, b"\xde\x72\x65\x72");
+        assert!(key.is_active(), "legacy key imported as active");
+        // The original creation timestamp survives so rollover timing
+        // continues from the key's real age.
+        assert_eq!(key.created_at, "2020-05-05T00:00:00+00:00");
+        assert!(key.id.len() == 32, "synthesized hex id");
+
+        // The migrated store accepts new keys immediately.
+        let _ = s.store_signing_key("z1", 13, b"der-new").unwrap();
+        assert_eq!(s.list_signing_keys("z1").unwrap().len(), 2);
     }
 
     fn zone_input_defaults() -> ZoneInput {

@@ -43,6 +43,53 @@ pub struct ZoneInput {
     pub minimum: Option<u32>,
 }
 
+/// A DNSSEC signing key for a zone, persisted in SQLite.
+///
+/// A zone normally has one `active` key; during an automatic rollover it has
+/// two `active` keys (double-signing) and/or a `retired` key that is still
+/// published (its DNSKEY stays in the zone) but no longer signs.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SigningKeyRecord {
+    pub id: String,
+    /// Owning zone id.
+    pub zone_id: String,
+    /// DNSSEC algorithm number (e.g. 13 = ECDSAP256SHA256).
+    pub algorithm: u8,
+    /// PKCS#8 DER private key bytes.
+    pub key_der: Vec<u8>,
+    /// `active` (signs the zone) or `retired` (published but not signing).
+    pub state: String,
+    /// RFC 3339 creation timestamp.
+    pub created_at: String,
+}
+
+/// A TSIG shared secret key (RFC 8945) stored in SQLite for API visibility.
+/// Runtime signing uses [`crate::tsig::TsigKey`]; this row is the persisted
+/// copy so keys survive restarts and can be inspected via the API.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TsigKeyRecord {
+    /// Key name in DNS name syntax (e.g. `daygle-transfer.`).
+    pub name: String,
+    /// HMAC algorithm name (e.g. `hmac-sha256`).
+    pub algorithm: String,
+    /// Shared secret, base64-encoded.
+    pub secret: String,
+    /// RFC 3339 creation timestamp.
+    pub created_at: String,
+}
+
+impl SigningKeyRecord {
+    /// True when the key is in the `active` state.
+    pub fn is_active(&self) -> bool {
+        self.state == "active"
+    }
+
+    /// True when the key is in the `retired` state.
+    pub fn is_retired(&self) -> bool {
+        self.state == "retired"
+    }
+}
+
 /// A DNS resource record, persisted in SQLite.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Record {

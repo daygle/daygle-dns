@@ -1,12 +1,13 @@
 //! The Daygle DNS configuration model, serialized from TOML.
 //!
 //! A single [`DaygleConfig`] describes every subsystem of the server. The
-//! installer writes the example file to `/etc/daygle/daygle.toml`.
+//! installer writes the example file to `/etc/daygle-dns/daygle-dns.toml`.
 
 use std::collections::BTreeSet;
 use std::net::IpAddr;
 use std::path::Path;
 
+use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{DaygleError, Result};
@@ -86,6 +87,24 @@ impl DaygleConfig {
                 "recursive.attempts must be >= 1".to_string(),
             ));
         }
+        let dnssec = &self.authoritative;
+        if dnssec.dnssec_sig_validity_days == 0 {
+            return Err(DaygleError::Config(
+                "authoritative.dnssec_sig_validity_days must be >= 1".to_string(),
+            ));
+        }
+        if dnssec.dnssec_rollover_overlap_days == 0
+            || dnssec.dnssec_rollover_retire_days == 0
+        {
+            return Err(DaygleError::Config(
+                "authoritative.dnssec_rollover_{overlap,retire}_days must be >= 1".to_string(),
+            ));
+        }
+        if dnssec.dnssec_maintenance_secs < 60 {
+            return Err(DaygleError::Config(
+                "authoritative.dnssec_maintenance_secs must be >= 60".to_string(),
+            ));
+        }
         let rl = &self.rate_limit;
         if rl.client_max_queries == 0 || rl.domain_max_queries == 0 {
             return Err(DaygleError::Config(
@@ -125,6 +144,25 @@ impl DaygleConfig {
                 }
             }
         }
+        if self.authoritative.notify_enabled && self.authoritative.notify_targets.is_empty() {
+            return Err(DaygleError::Config(
+                "authoritative.notify_enabled requires notify_targets".to_string(),
+            ));
+        }
+        for target in &self.authoritative.notify_targets {
+            if parse_master_addr(target).is_err() {
+                return Err(DaygleError::Config(format!(
+                    "authoritative.notify_targets contains invalid address '{target}'"
+                )));
+            }
+        }
+        if self.authoritative.notify_listen_enabled
+            && self.authoritative.secondary_zones.is_empty()
+        {
+            return Err(DaygleError::Config(
+                "authoritative.notify_listen_enabled requires secondary_zones".to_string(),
+            ));
+        }
         for (label, networks) in [
             ("policy.denied_networks", &self.policy.denied_networks),
             ("policy.allowed_networks", &self.policy.allowed_networks),
@@ -155,6 +193,60 @@ impl DaygleConfig {
                 return Err(DaygleError::Config(format!(
                     "blocklist source '{}' has refresh_secs = 0",
                     source.name
+                )));
+            }
+        }
+        let tsig_names: std::collections::HashSet<String> = self
+            .authoritative
+            .tsig_keys
+            .iter()
+            .map(|k| k.name.trim_end_matches('.').to_ascii_lowercase())
+            .collect();
+        if tsig_names.len() != self.authoritative.tsig_keys.len() {
+            return Err(DaygleError::Config(
+                "authoritative.tsig_keys contains duplicate names".to_string(),
+            ));
+        }
+        for key in &self.authoritative.tsig_keys {
+            if key.name.trim().is_empty() {
+                return Err(DaygleError::Config(
+                    "authoritative.tsig_keys contains a key with an empty name".to_string(),
+                ));
+            }
+            let algorithm = key.algorithm.trim();
+            if !matches!(algorithm, "hmac-sha256" | "hmac-sha384" | "hmac-sha512") {
+                return Err(DaygleError::Config(format!(
+                    "tsig key '{}' uses unsupported algorithm '{algorithm}' (supported: hmac-sha256, hmac-sha384, hmac-sha512)",
+                    key.name
+                )));
+            }
+            if key.secret.trim().is_empty() {
+                return Err(DaygleError::Config(format!(
+                    "tsig key '{}' has an empty secret",
+                    key.name
+                )));
+            }
+            if base64::engine::general_purpose::STANDARD.decode(key.secret.trim()).is_err() {
+                return Err(DaygleError::Config(format!(
+                    "tsig key '{}' secret is not valid base64",
+                    key.name
+                )));
+            }
+        }
+        for binding in self
+            .authoritative
+            .tsig_transfer_zones
+            .iter()
+            .chain(&self.authoritative.tsig_update_zones)
+        {
+            let Some((_zone, key)) = binding.split_once('=') else {
+                return Err(DaygleError::Config(format!(
+                    "tsig zone binding '{binding}' must be 'zone=key-name'"
+                )));
+            };
+            if !tsig_names.contains(key.trim_end_matches('.').to_ascii_lowercase().as_str()) {
+                return Err(DaygleError::Config(format!(
+                    "tsig zone binding '{binding}' references unknown key '{key}'"
                 )));
             }
         }
@@ -264,6 +356,23 @@ pub struct RecursiveSettings {
     /// zone's dedicated upstreams instead of the default ones. The most
     /// specific (deepest) matching zone wins.
     pub conditional_zones: Vec<ConditionalZoneConfig>,
+    /// Refresh popular cached names in the background as their TTLs near
+    /// expiry, so repeated lookups never wait on an upstream round trip.
+    pub prefetch_enabled: bool,
+    /// Refresh a popular cached name when its remaining TTL drops below this
+    /// fraction of the original TTL (e.g. 10 refreshes when 10% is left).
+    /// Requires `prefetch_enabled`.
+    pub prefetch_ttl_fraction_pct: u32,
+    /// Minimum number of queries for a name within the window before it
+    /// counts as popular and becomes prefetch-eligible.
+    pub prefetch_min_queries: u32,
+    /// Sliding window in seconds used to count queries per name for
+    /// prefetch popularity.
+    pub prefetch_window_secs: u64,
+    /// Serve expired cache entries for up to this many seconds when all
+    /// upstreams fail, so popular domains keep resolving during upstream
+    /// outages. 0 disables serve-stale.
+    pub serve_stale_secs: u64,
 }
 
 impl Default for RecursiveSettings {
@@ -279,6 +388,11 @@ impl Default for RecursiveSettings {
             min_cache_ttl: 0,
             negative_cache_ttl: 3600,
             conditional_zones: vec![],
+            prefetch_enabled: true,
+            prefetch_ttl_fraction_pct: 10,
+            prefetch_min_queries: 5,
+            prefetch_window_secs: 600,
+            serve_stale_secs: 86400,
         }
     }
 }
@@ -318,6 +432,23 @@ pub struct AuthoritativeSettings {
     pub default_admin_mailbox: String,
     /// Whether zones with signing keys are DNSSEC-signed on reload.
     pub dnssec_enabled: bool,
+    /// RRSIG validity window in days. The DNSSEC maintenance task re-signs
+    /// zones at half this age so signatures never expire in service.
+    pub dnssec_sig_validity_days: u32,
+    /// DNSSEC key lifetime in days before a rollover starts (0 disables
+    /// rollover). During a rollover the zone is double-signed by the old and
+    /// the new key while both DNSKEYs are published.
+    pub dnssec_rollover_days: u32,
+    /// How long (days) old and new keys are both active (double-signing)
+    /// before the old key is retired.
+    pub dnssec_rollover_overlap_days: u32,
+    /// How long (days) a retired key stays published (its DNSKEY stays in the
+    /// zone) after it stops signing, so validators with cached RRSIGs can
+    /// still verify, before the key is removed entirely.
+    pub dnssec_rollover_retire_days: u32,
+    /// How often (seconds) the DNSSEC maintenance task checks signature age
+    /// and key rollover state.
+    pub dnssec_maintenance_secs: u64,
     /// Serve AXFR/IXFR zone transfers for hosted zones.
     pub axfr_enabled: bool,
     /// Client networks allowed to request zone transfers. When empty, any
@@ -331,21 +462,80 @@ pub struct AuthoritativeSettings {
     pub update_networks: Vec<String>,
     /// Secondary zones replicated from remote masters via AXFR/IXFR.
     pub secondary_zones: Vec<SecondaryZoneConfig>,
+    /// Send RFC 1996 NOTIFY to `notify_targets` when a primary zone changes.
+    pub notify_enabled: bool,
+    /// NOTIFY targets (secondaries), each `IP`, `IP:port`, or `[IPv6]:port`
+    /// (port defaults to 53). Requires `notify_enabled`.
+    pub notify_targets: Vec<String>,
+    /// Accept inbound NOTIFY from masters for secondary zones and refresh
+    /// immediately instead of waiting for the refresh interval.
+    pub notify_listen_enabled: bool,
+    /// TSIG keys (RFC 8945). Referenced by name from `tsig_transfer_zones`,
+    /// `tsig_update_zones`, and secondary-zone master keys.
+    pub tsig_keys: Vec<TsigKeyConfig>,
+    /// Zones whose AXFR/IXFR responses must be TSIG-signed with the named
+    /// key; requests from other clients are refused. Each entry is
+    /// `zone=key-name`.
+    pub tsig_transfer_zones: Vec<String>,
+    /// Zones whose RFC 2136 updates must be TSIG-signed with the named key;
+    /// unsigned updates are refused. Each entry is `zone=key-name`.
+    pub tsig_update_zones: Vec<String>,
+    /// When true, a TSIG-signed request must also carry a valid signature on
+    /// our response (request MAC inclusion) per RFC 8945 §5. Always enabled
+    /// for responses we sign.
+    pub tsig_require_request_mac: bool,
 }
 
 impl Default for AuthoritativeSettings {
     fn default() -> Self {
         Self {
-            database: "daygle.db".to_string(),
+            database: "daygle-dns.db".to_string(),
             zones_dir: None,
             default_primary_ns: "ns1.daygle.test.".to_string(),
             default_admin_mailbox: "admin.daygle.test.".to_string(),
             dnssec_enabled: true,
+            dnssec_sig_validity_days: 14,
+            dnssec_rollover_days: 90,
+            dnssec_rollover_overlap_days: 30,
+            dnssec_rollover_retire_days: 14,
+            dnssec_maintenance_secs: 3600,
             axfr_enabled: false,
             axfr_networks: vec![],
             allow_dynamic_updates: false,
             update_networks: vec![],
             secondary_zones: vec![],
+            notify_enabled: false,
+            notify_targets: vec![],
+            notify_listen_enabled: false,
+            tsig_keys: vec![],
+            tsig_transfer_zones: vec![],
+            tsig_update_zones: vec![],
+            tsig_require_request_mac: true,
+        }
+    }
+}
+
+/// A TSIG shared secret (RFC 8945). The secret is base64 (standard
+/// alphabet, padding optional), matching BIND's `secret` file format.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct TsigKeyConfig {
+    /// Key name in DNS name syntax, e.g. `daygle-transfer.`. The remote peer
+    /// must reference the same name.
+    pub name: String,
+    /// HMAC algorithm name (RFC 8945 §6): `hmac-sha256`, `hmac-sha384`, or
+    /// `hmac-sha512`.
+    pub algorithm: String,
+    /// Shared secret, base64-encoded.
+    pub secret: String,
+}
+
+impl Default for TsigKeyConfig {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            algorithm: "hmac-sha256".to_string(),
+            secret: String::new(),
         }
     }
 }
@@ -365,6 +555,9 @@ pub struct SecondaryZoneConfig {
     pub refresh_secs: u64,
     /// Whether this secondary zone is active.
     pub enabled: bool,
+    /// TSIG key name (from `authoritative.tsig_keys`) used to sign transfer
+    /// requests to this zone's masters. Empty disables TSIG for this zone.
+    pub tsig_key: String,
 }
 
 impl Default for SecondaryZoneConfig {
@@ -374,6 +567,7 @@ impl Default for SecondaryZoneConfig {
             masters: vec![],
             refresh_secs: 3600,
             enabled: true,
+            tsig_key: String::new(),
         }
     }
 }
@@ -405,8 +599,8 @@ impl Default for DotSettings {
             enabled: true,
             listen: "0.0.0.0".to_string(),
             port: 853,
-            cert_path: "/etc/daygle/certs/server.crt".to_string(),
-            key_path: "/etc/daygle/certs/server.key".to_string(),
+            cert_path: "/etc/daygle-dns/certs/server.crt".to_string(),
+            key_path: "/etc/daygle-dns/certs/server.key".to_string(),
             self_signed: true,
             server_name: "daygle.local".to_string(),
         }
@@ -442,8 +636,8 @@ impl Default for DohSettings {
             enabled: false,
             listen: "0.0.0.0".to_string(),
             port: 443,
-            cert_path: "/etc/daygle/certs/server.crt".to_string(),
-            key_path: "/etc/daygle/certs/server.key".to_string(),
+            cert_path: "/etc/daygle-dns/certs/server.crt".to_string(),
+            key_path: "/etc/daygle-dns/certs/server.key".to_string(),
             self_signed: true,
             server_name: "daygle.local".to_string(),
             endpoint: "/dns-query".to_string(),
@@ -679,7 +873,7 @@ attempts = 2
 dnssec_validate = true
 
 [authoritative]
-database = "/tmp/daygle.db"
+database = "/tmp/daygle-dns.db"
 
 [dot]
 enabled = false
@@ -734,6 +928,85 @@ refresh_secs = 600
         assert_eq!(zone.name, "example.com");
         assert_eq!(zone.masters.len(), 2);
         assert_eq!(zone.refresh_secs, 600);
+    }
+
+    #[test]
+    fn parses_notify_settings() {
+        let text = r#"
+[authoritative]
+notify_enabled = true
+notify_targets = ["192.0.2.20", "192.0.2.21:5353", "[2001:db8::20]:53"]
+notify_listen_enabled = true
+
+[[authoritative.secondary_zones]]
+name = "example.com"
+masters = ["192.0.2.1"]
+"#;
+        let cfg = DaygleConfig::parse(text).unwrap();
+        assert!(cfg.authoritative.notify_enabled);
+        assert_eq!(cfg.authoritative.notify_targets.len(), 3);
+        assert!(cfg.authoritative.notify_listen_enabled);
+
+        // Disabled by default.
+        let defaults = DaygleConfig::default().authoritative;
+        assert!(!defaults.notify_enabled);
+        assert!(defaults.notify_targets.is_empty());
+        assert!(!defaults.notify_listen_enabled);
+
+        // notify_enabled without targets is rejected.
+        assert!(DaygleConfig::parse("[authoritative]\nnotify_enabled = true\n").is_err());
+        // Bad target addresses are rejected.
+        assert!(DaygleConfig::parse(
+            "[authoritative]\nnotify_enabled = true\nnotify_targets = [\"nope\"]\n"
+        )
+        .is_err());
+        // Inbound NOTIFY without any secondary zone is rejected.
+        assert!(DaygleConfig::parse(
+            "[authoritative]\nnotify_listen_enabled = true\n"
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn parses_dnssec_maintenance_settings() {
+        let text = r#"
+[authoritative]
+dnssec_enabled = true
+dnssec_sig_validity_days = 30
+dnssec_rollover_days = 0
+dnssec_rollover_overlap_days = 7
+dnssec_rollover_retire_days = 3
+dnssec_maintenance_secs = 600
+"#;
+        let cfg = DaygleConfig::parse(text).unwrap();
+        assert_eq!(cfg.authoritative.dnssec_sig_validity_days, 30);
+        assert_eq!(cfg.authoritative.dnssec_rollover_days, 0);
+        assert_eq!(cfg.authoritative.dnssec_rollover_overlap_days, 7);
+        assert_eq!(cfg.authoritative.dnssec_rollover_retire_days, 3);
+        assert_eq!(cfg.authoritative.dnssec_maintenance_secs, 600);
+
+        // Sensible defaults: 14-day signatures, 90-day keys, 30d overlap,
+        // 14d retirement, hourly maintenance.
+        let defaults = DaygleConfig::default().authoritative;
+        assert_eq!(defaults.dnssec_sig_validity_days, 14);
+        assert_eq!(defaults.dnssec_rollover_days, 90);
+        assert_eq!(defaults.dnssec_rollover_overlap_days, 30);
+        assert_eq!(defaults.dnssec_rollover_retire_days, 14);
+        assert_eq!(defaults.dnssec_maintenance_secs, 3600);
+
+        // Nonsensical values are rejected.
+        assert!(DaygleConfig::parse(
+            "[authoritative]\ndnssec_sig_validity_days = 0\n"
+        )
+        .is_err());
+        assert!(DaygleConfig::parse(
+            "[authoritative]\ndnssec_rollover_overlap_days = 0\n"
+        )
+        .is_err());
+        assert!(DaygleConfig::parse(
+            "[authoritative]\ndnssec_maintenance_secs = 10\n"
+        )
+        .is_err());
     }
 
     #[test]

@@ -8,7 +8,7 @@ members = [
     "crates/daygle-dot",
     "crates/daygle-api",
     "crates/daygle-gui",
-    "crates/daygle",
+    "crates/daygle-dns",
 ]
 
 [workspace.package]
@@ -51,6 +51,7 @@ toml = "1.1"
 
 rusqlite = { version = "0.40", features = ["bundled"] }
 ipnet = "2"
+base64 = "0.22"
 uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 thiserror = "2"

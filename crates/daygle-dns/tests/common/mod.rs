@@ -7,9 +7,9 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use daygle::bind;
-use daygle::dispatcher::DnsDispatcher;
-use daygle::BoundServer;
+use daygle_dns::bind;
+use daygle_dns::dispatcher::DnsDispatcher;
+use daygle_dns::BoundServer;
 use daygle_authoritative::model::{RecordInput, ZoneInput};
 use daygle_authoritative::{AuthorityCatalog, ZoneStore};
 use daygle_core::config::{AuthoritativeSettings, DaygleConfig};

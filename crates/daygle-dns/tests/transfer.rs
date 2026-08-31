@@ -43,7 +43,7 @@ fn config_with_axfr(db: &std::path::Path, axfr: bool, networks: Vec<String>) -> 
 }
 
 /// Seed a zone with an A and an MX record on a bound server.
-async fn seed_zone(server: &daygle::BoundServer, name: &str) -> String {
+async fn seed_zone(server: &daygle_dns::BoundServer, name: &str) -> String {
     let store = server.catalog.store();
     let zone = store
         .create_zone(&ZoneInput {
@@ -84,7 +84,7 @@ async fn seed_zone(server: &daygle::BoundServer, name: &str) -> String {
 #[tokio::test]
 async fn axfr_serves_full_zone_over_tcp() {
     let dir = tempfile::tempdir().unwrap();
-    let db = dir.path().join("daygle.db");
+    let db = dir.path().join("daygle-dns.db");
     let server = spawn(config_with_axfr(&db, true, vec![])).await;
     seed_zone(&server, "example.test").await;
 
@@ -115,7 +115,7 @@ async fn axfr_serves_full_zone_over_tcp() {
 #[tokio::test]
 async fn ixfr_returns_full_zone() {
     let dir = tempfile::tempdir().unwrap();
-    let db = dir.path().join("daygle.db");
+    let db = dir.path().join("daygle-dns.db");
     let server = spawn(config_with_axfr(&db, true, vec![])).await;
     seed_zone(&server, "ixfr.test").await;
 
@@ -134,7 +134,7 @@ async fn ixfr_returns_full_zone() {
 #[tokio::test]
 async fn axfr_refused_when_disabled() {
     let dir = tempfile::tempdir().unwrap();
-    let db = dir.path().join("daygle.db");
+    let db = dir.path().join("daygle-dns.db");
     let server = spawn(config_with_axfr(&db, false, vec![])).await;
     seed_zone(&server, "locked.test").await;
 
@@ -148,7 +148,7 @@ async fn axfr_refused_when_disabled() {
 #[tokio::test]
 async fn axfr_acl_restricts_clients() {
     let dir = tempfile::tempdir().unwrap();
-    let db = dir.path().join("daygle.db");
+    let db = dir.path().join("daygle-dns.db");
     // Only 10.0.0.0/8 may transfer; 127.0.0.1 must be refused.
     let server = spawn(config_with_axfr(&db, true, vec!["10.0.0.0/8".to_string()])).await;
     seed_zone(&server, "acl.test").await;
@@ -179,6 +179,7 @@ async fn secondary_replicates_zone_from_master() {
         masters: vec![master_tcp.to_string()],
         refresh_secs: 1,
         enabled: true,
+        tsig_key: String::new(),
     }];
     let secondary = spawn(config).await;
 
@@ -242,7 +243,7 @@ async fn secondary_replicates_zone_from_master() {
 #[tokio::test]
 async fn xfr_client_transfers_zone() {
     let dir = tempfile::tempdir().unwrap();
-    let db = dir.path().join("daygle.db");
+    let db = dir.path().join("daygle-dns.db");
     let server = spawn(config_with_axfr(&db, true, vec![])).await;
     seed_zone(&server, "client.test").await;
 

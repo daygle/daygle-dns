@@ -22,4 +22,4 @@ pub use rate_limit::RateLimiter;
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Default configuration file name searched by the installer and binary.
-pub const DEFAULT_CONFIG_PATH: &str = "/etc/daygle/daygle.toml";
+pub const DEFAULT_CONFIG_PATH: &str = "/etc/daygle-dns/daygle-dns.toml";

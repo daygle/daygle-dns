@@ -4,18 +4,18 @@
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/daygle/daygle-dns/main/install.sh | sh
 #
-# The script installs the `daygle` binary to /usr/local/bin, a configuration
+# The script installs the `daygle-dns` binary to /usr/local/bin, a configuration
 # file and a systemd unit (systemd-based Linux only). It requires Rust and
 # Cargo; install them first with https://rustup.rs.
 
 set -eu
 
 PREFIX="${PREFIX:-/usr/local}"
-CONFIG_DIR="${CONFIG_DIR:-/etc/daygle}"
-DATA_DIR="${DATA_DIR:-/var/lib/daygle}"
-SERVICE_USER="${SERVICE_USER:-daygle}"
+CONFIG_DIR="${CONFIG_DIR:-/etc/daygle-dns}"
+DATA_DIR="${DATA_DIR:-/var/lib/daygle-dns}"
+SERVICE_USER="${SERVICE_USER:-daygle-dns}"
 
-log() { printf '\033[1;32m[daygle-install]\033[0m %s\n' "$1"; }
+log() { printf '\033[1;32m[daygle-dns-install]\033[0m %s\n' "$1"; }
 
 command -v cargo >/dev/null 2>&1 || {
     printf 'error: cargo was not found. Install Rust first: https://rustup.rs\n' >&2
@@ -35,22 +35,22 @@ fi
 cd "$SRC_DIR"
 
 log "Building release binary (this may take a few minutes)…"
-cargo build --release -p daygle
+cargo build --release -p daygle-dns
 
-log "Installing binary to $PREFIX/bin/daygle…"
+log "Installing binary to $PREFIX/bin/daygle-dns…"
 install -d "$PREFIX/bin"
-install -m 0755 target/release/daygle "$PREFIX/bin/daygle"
+install -m 0755 target/release/daygle-dns-dns "$PREFIX/bin/daygle-dns"
 
 log "Installing configuration to $CONFIG_DIR…"
 install -d "$CONFIG_DIR" "$CONFIG_DIR/zones" "$CONFIG_DIR/certs" "$DATA_DIR"
-if [ ! -f "$CONFIG_DIR/daygle.toml" ]; then
-    install -m 0644 daygle.toml.example "$CONFIG_DIR/daygle.toml"
+if [ ! -f "$CONFIG_DIR/daygle-dns.toml" ]; then
+    install -m 0644 daygle-dns.toml.example "$CONFIG_DIR/daygle-dns.toml"
 fi
 
 # ---- systemd unit (Linux with systemd only) -----------------------------
 if [ -d /etc/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
     log "Installing systemd unit…"
-    cat > /etc/systemd/system/daygle.service <<EOF
+    cat > /etc/systemd/system/daygle-dns.service <<EOF
 [Unit]
 Description=Daygle DNS server
 After=network-online.target
@@ -59,7 +59,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=${SERVICE_USER}
-ExecStart=${PREFIX}/bin/daygle --config ${CONFIG_DIR}/daygle.toml
+ExecStart=${PREFIX}/bin/daygle-dns --config ${CONFIG_DIR}/daygle-dns.toml
 Restart=on-failure
 RestartSec=3
 # DNS on port 53 needs privileges; drop to a dedicated user after binding.
@@ -73,12 +73,12 @@ EOF
     id "$SERVICE_USER" >/dev/null 2>&1 || useradd --system --no-create-home "$SERVICE_USER"
     chown -R "$SERVICE_USER":"$SERVICE_USER" "$CONFIG_DIR" "$DATA_DIR"
     systemctl daemon-reload
-    systemctl enable --now daygle
+    systemctl enable --now daygle-dns
     log "Daygle DNS started via systemd."
 else
     log "No systemd detected. Start the server manually:"
-    log "  $PREFIX/bin/daygle --config $CONFIG_DIR/daygle.toml"
+    log "  $PREFIX/bin/daygle-dns --config $CONFIG_DIR/daygle-dns.toml"
 fi
 
 log "Done! Web GUI: http://127.0.0.1:5380"
-log "Configuration: $CONFIG_DIR/daygle.toml"
+log "Configuration: $CONFIG_DIR/daygle-dns.toml"

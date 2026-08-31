@@ -14,24 +14,32 @@
 //!   DNSSEC signing when keys are present.
 //! - [`transfer`] - an AXFR/IXFR transfer client for secondary zones.
 //! - [`secondary`] - periodic refresh of secondary zones from their masters.
+//! - [`notify`] - RFC 1996 NOTIFY: outbound to secondaries, inbound from masters.
+//! - [`dnssec`] - background RRSIG renewal and automatic DNSSEC key rollover.
 //! - [`update`] - RFC 2136 dynamic updates with write-through to SQLite.
 
 pub mod catalog;
+pub mod dnssec;
 pub mod model;
+pub mod notify;
 pub mod parse;
 pub mod secondary;
 pub mod split_horizon;
 pub mod store;
 pub mod transfer;
+pub mod tsig;
 pub mod update;
 
-pub use catalog::AuthorityCatalog;
-pub use model::{Record, RecordInput, Zone, ZoneInput};
+pub use catalog::{generate_signing_key, AuthorityCatalog};
+pub use model::{Record, RecordInput, SigningKeyRecord, Zone, ZoneInput};
 pub use split_horizon::{SplitHorizonIndex, SplitHorizonMatch};
+pub use dnssec::{DnssecMaintenance, MaintenanceConfig};
+pub use notify::{NotifyHooks, NotifyInbound, NotifySender};
 pub use secondary::SecondaryRefresher;
 pub use store::ZoneStore;
 pub use transfer::XfrClient;
-pub use update::handle_update;
+pub use tsig::{TsigKey, TsigKeyRing};
+pub use update::{handle_update, handle_update_with_notify};
 
 use daygle_core::error::{DaygleError, Result};
 

@@ -9,9 +9,15 @@ the old names are deprecated per RUSTSEC-2025-0017).
 Daygle combines, in a single process:
 
 - **Authoritative DNS** with zone storage backed by **SQLite**, BIND zone-file
-  import, and **DNSSEC zone signing**.
+  import, and **DNSSEC zone signing** with **automatic key rollover** and
+  **background RRSIG renewal**, so signed zones never go bogus after the
+  signature window passes.
 - **Zone transfers**: serve **AXFR/IXFR** (RFC 5936, with per-network ACLs)
   and replicate **secondary zones** from remote masters on a refresh interval.
+- **NOTIFY (RFC 1996)**: primary zones send NOTIFY to configured secondaries
+  when they change (e.g. after a dynamic update), and secondary zones accept
+  NOTIFYs from their masters to pull immediately instead of waiting out the
+  refresh interval.
 - **Dynamic updates**: RFC 2136 UPDATE messages with write-through to SQLite,
   prerequisite checking, and atomic apply - records added over the wire
   persist and go live immediately (gated by `allow_dynamic_updates`).
@@ -43,7 +49,7 @@ Daygle combines, in a single process:
 curl -fsSL https://raw.githubusercontent.com/daygle/daygle-dns/main/install.sh | sh
 
 # …or build and run directly from source
-cargo run --release -p daygle -- --config daygle.toml.example
+cargo run --release -p daygle-dns -- --config daygle.toml.example
 ```
 
 Then open the dashboard at <http://127.0.0.1:5380>.
@@ -66,7 +72,7 @@ dig @127.0.0.1 -p 853 example.com A +tls   # DNS over TLS
 | `daygle-dot`            | DoT (RFC 7858) + DoH (RFC 8484) via rustls + certificate management |
 | `daygle-api`            | REST API (axum) + embedded GUI serving |
 | `daygle-gui`            | Embedded web GUI assets (Svelte build output) |
-| `daygle`                | The server binary: UDP/TCP/DoT listeners + the combined dispatcher |
+| `daygle-dns`             | The server binary: UDP/TCP/DoT listeners + the combined dispatcher |
 
 See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for how the pieces fit
 together and [`docs/API.md`](docs/API.md) for the REST API reference.
@@ -74,8 +80,8 @@ together and [`docs/API.md`](docs/API.md) for the REST API reference.
 ## Configuration
 
 The server is configured with a single TOML file (default
-`/etc/daygle/daygle.toml`). A fully commented example lives in
-[`daygle.toml.example`](daygle.toml.example).
+`/etc/daygle-dns/daygle-dns.toml`). A fully commented example lives in
+[`daygle-dns.toml.example`](daygle-dns.toml.example).
 
 ```toml
 [server]
@@ -90,7 +96,7 @@ dnssec_validate = true
 # upstreams = ["192.0.2.10"]
 
 [authoritative]
-database = "/var/lib/daygle/daygle.db"
+database = "/var/lib/daygle-dns/daygle.db"
 
 [dot]
 port = 853
@@ -132,7 +138,7 @@ build the full Svelte GUI:
 cd web
 npm install
 npm run build     # outputs to web/dist, embedded by daygle-gui
-cargo build --release -p daygle
+cargo build --release -p daygle-dns
 ```
 
 ## Testing
@@ -160,18 +166,18 @@ real server on ephemeral ports and exercise:
 
 The one-line installer is **idempotent** - re-running it is the supported
 upgrade path. It fetches the latest `main`, rebuilds the release binary,
-replaces `/usr/local/bin/daygle`, and restarts the service:
+replaces `/usr/local/bin/daygle-dns`, and restarts the service:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/daygle/daygle-dns/main/install.sh | sh
 ```
 
-The installer never overwrites an existing `/etc/daygle/daygle.toml`, and your
-zones, certificates, and SQLite database under `/var/lib/daygle` are left
+The installer never overwrites an existing `/etc/daygle-dns/daygle-dns.toml`, and your
+zones, certificates, and SQLite database under `/var/lib/daygle-dns` are left
 untouched. Before upgrading, back up the database just in case:
 
 ```bash
-sudo cp /var/lib/daygle/daygle.db /var/lib/daygle/daygle.db.bak
+sudo cp /var/lib/daygle-dns/daygle.db /var/lib/daygle-dns/daygle.db.bak
 ```
 
 ### Source builds
@@ -180,22 +186,22 @@ If you cloned the repository, pull, rebuild, and restart:
 
 ```bash
 git pull
-cargo build --release -p daygle
-sudo systemctl restart daygle   # systemd installs
+cargo build --release -p daygle-dns
+sudo systemctl restart daygle-dns   # systemd installs
 # …or copy the binary over your existing one:
-sudo install -m 0755 target/release/daygle /usr/local/bin/daygle
+sudo install -m 0755 target/release/daygle-dns /usr/local/bin/daygle-dns
 ```
 
 ### After upgrading
 
-- Confirm the new version with `daygle --version` (or check the dashboard's
+- Confirm the new version with `daygle-dns --version` (or check the dashboard's
   Status page).
 - New configuration options appear in
-  [`daygle.toml.example`](daygle.toml.example); existing settings are
+  [`daygle-dns.toml.example`](daygle-dns.toml.example); existing settings are
   validated at startup, so an invalid config aborts cleanly instead of
   silently corrupting state.
 - If you changed nothing about listeners, upstreams, or policy, your running
-  config still applies - no restart is needed for `daygle.toml` edits thanks
+  config still applies - no restart is needed for `daygle-dns.toml` edits thanks
   to [live reload](#live-reload). Only the binary itself requires the restart
   above.
 

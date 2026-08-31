@@ -8,6 +8,7 @@ description = "Authoritative serving with SQLite-backed zone storage and DNSSEC 
 
 [dependencies]
 daygle-core = { path = "../daygle-core" }
+base64.workspace = true
 hickory-proto.workspace = true
 hickory-server.workspace = true
 rustls-pki-types.workspace = true

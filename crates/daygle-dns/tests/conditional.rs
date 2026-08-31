@@ -65,7 +65,7 @@ async fn conditional_zone_resolves_via_dedicated_upstream() {
 
     // The main server forwards everything to stub_a by default, except
     // zoneb.test, which must go to stub_b.
-    let mut config = base_config(&tempfile::tempdir().unwrap().path().join("daygle.db"));
+    let mut config = base_config(&tempfile::tempdir().unwrap().path().join("daygle-dns.db"));
     config.recursive.enabled = true;
     config.recursive.use_system_config = false;
     config.recursive.upstreams = vec![stub_a.to_string()];
