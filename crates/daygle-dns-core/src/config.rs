@@ -334,6 +334,32 @@ impl DaygleConfig {
                 })?;
             }
         }
+        for zone in &self.authoritative.stub_zones {
+            if zone.name.trim().is_empty() {
+                return Err(DaygleError::Config(
+                    "authoritative.stub_zones contains a zone with an empty name".to_string(),
+                ));
+            }
+            if zone.nss.is_empty() && zone.enabled {
+                return Err(DaygleError::Config(format!(
+                    "stub zone '{}' has no nameservers (learn them with the DNS client tool or set them manually)",
+                    zone.name
+                )));
+            }
+        }
+        let log = &self.logging;
+        if log.query_log_enabled {
+            if log.query_log_dir.trim().is_empty() {
+                return Err(DaygleError::Config(
+                    "logging.query_log_dir must not be empty when query_log_enabled".to_string(),
+                ));
+            }
+            if log.query_log_retention_days > 3650 {
+                return Err(DaygleError::Config(
+                    "logging.query_log_retention_days must be <= 3650".to_string(),
+                ));
+            }
+        }
         Ok(())
     }
 }
@@ -543,6 +569,10 @@ pub struct AuthoritativeSettings {
     /// Zones whose RFC 2136 updates must be TSIG-signed with the named key;
     /// unsigned updates are refused. Each entry is `zone=key-name`.
     pub tsig_update_zones: Vec<String>,
+    /// Stub zones: zones whose nameservers we track and forward to directly
+    /// (see [`StubZoneConfig`]). Managed at runtime through the API as well;
+    /// entries here are merged with the database list at startup.
+    pub stub_zones: Vec<StubZoneConfig>,
     /// When true, a TSIG-signed request must also carry a valid signature on
     /// our response (request MAC inclusion) per RFC 8945 §5. Always enabled
     /// for responses we sign.
@@ -574,6 +604,7 @@ impl Default for AuthoritativeSettings {
             tsig_transfer_zones: vec![],
             tsig_update_zones: vec![],
             tsig_require_request_mac: true,
+            stub_zones: vec![],
         }
     }
 }
@@ -976,6 +1007,15 @@ pub struct LoggingSettings {
     /// Keep at most this many entries in the in-memory log ring buffer
     /// (exposed through the API).
     pub ring_buffer: usize,
+    /// Persist every served query to a daily JSON-lines file under
+    /// `query_log_dir` (like Technitium's query logs).
+    pub query_log_enabled: bool,
+    /// Directory for the daily query-log files
+    /// (`queries-YYYY-MM-DD.log`, one JSON object per line).
+    pub query_log_dir: String,
+    /// Delete query-log files older than this many days at rotation
+    /// (0 keeps every file).
+    pub query_log_retention_days: u32,
 }
 
 impl Default for LoggingSettings {
@@ -983,6 +1023,43 @@ impl Default for LoggingSettings {
         Self {
             level: "info".to_string(),
             ring_buffer: 2000,
+            query_log_enabled: false,
+            query_log_dir: "/var/log/daygle-dns".to_string(),
+            query_log_retention_days: 30,
+        }
+    }
+}
+
+/// A stub zone: keep track of another zone's nameservers without hosting it.
+///
+/// Queries for names inside a stub zone are resolved directly against the
+/// zone's NS servers (learned from the zone's SOA/NS records when the stub is
+/// created or refreshed), instead of walking the root → TLD → authoritative
+/// chain. This is the lightweight equivalent of BIND's stub zones and
+/// Technitium's stub zones: useful when you know a sibling nameserver hosts
+/// `internal.example.com` and want queries for it to go straight there.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct StubZoneConfig {
+    /// Zone apex the stub covers, e.g. `branch.example.com`.
+    pub name: String,
+    /// The zone's nameservers. Bare IPs are used as-is; hostnames are
+    /// resolved through the default upstreams when the stub refreshes.
+    pub nss: Vec<String>,
+    /// How often to re-check the zone's SOA/NS on its nameservers, in
+    /// seconds, so newly added nameservers are picked up.
+    pub refresh_secs: u64,
+    /// Whether this stub zone is active.
+    pub enabled: bool,
+}
+
+impl Default for StubZoneConfig {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            nss: vec![],
+            refresh_secs: 3600,
+            enabled: true,
         }
     }
 }

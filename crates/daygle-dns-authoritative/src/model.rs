@@ -185,6 +185,45 @@ pub struct SecondaryZone {
     pub last_transfer: Option<String>,
 }
 
+/// Stub-zone metadata: which nameservers a zone's queries are forwarded to
+/// (learned from the zone's own NS records) and when they were last verified.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct StubZone {
+    /// The zone apex this stub covers.
+    pub name: String,
+    /// Nameservers of the zone (IPs or hostnames).
+    pub nss: Vec<String>,
+    /// Refresh interval in seconds.
+    pub refresh_secs: u64,
+    /// Whether the stub is active.
+    pub enabled: bool,
+    /// RFC 3339 timestamp of the last successful NS refresh, if any.
+    pub last_refresh: Option<String>,
+}
+
+/// Payload to create or update a stub zone (matched by zone name).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct StubZoneInput {
+    /// Zone apex the stub covers, e.g. `branch.example.com`.
+    pub name: String,
+    /// Nameservers (IPs or hostnames). Empty when they should be learned
+    /// automatically from the zone's SOA/NS.
+    #[serde(default)]
+    pub nss: Vec<String>,
+    #[serde(default = "default_stub_refresh")]
+    pub refresh_secs: u64,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+fn default_stub_refresh() -> u64 {
+    3600
+}
+
+fn default_true() -> bool {
+    true
+}
+
 /// A named client network group used by split-horizon views, e.g.
 /// `LAN = ["192.168.20.0/24"]`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

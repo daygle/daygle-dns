@@ -10,6 +10,8 @@ description = "DNS over TLS (DoT) using rustls"
 daygle-dns-core = { path = "../daygle-dns-core" }
 hickory-proto.workspace = true
 hickory-server.workspace = true
+webpki-roots = "1"
+hickory-net = { version = "0.26", features = ["tls-ring", "https-ring"] }
 tokio.workspace = true
 tokio-rustls.workspace = true
 rustls.workspace = true

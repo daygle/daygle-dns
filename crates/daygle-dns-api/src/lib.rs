@@ -173,6 +173,11 @@ pub fn router(state: AppState) -> Router {
             "/zones/{id}/records",
             get(handlers::list_records).put(handlers::upsert_record),
         )
+        .route(
+            "/zones/{id}/records/{rid}/disabled",
+            put(handlers::set_record_disabled),
+        )
+        .route("/zones/{id}/export", get(handlers::export_zone))
         .route("/zones/{id}/records/{rid}", delete(handlers::delete_record))
         .route("/zones/{id}/sign", post(handlers::sign_zone))
         .route("/zones/{id}/unsign", post(handlers::unsign_zone))

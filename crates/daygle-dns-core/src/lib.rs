@@ -11,6 +11,7 @@ pub mod config;
 pub mod error;
 pub mod logs;
 pub mod metrics;
+pub mod query_log;
 pub mod rate_limit;
 pub mod stats;
 
@@ -19,6 +20,7 @@ pub use config::*;
 pub use error::{DaygleError, Result};
 pub use logs::{LogEntry, LogLevel, LogStore};
 pub use metrics::Metrics;
+pub use query_log::{QueryLogEntry, QueryLogger};
 pub use rate_limit::RateLimiter;
 pub use stats::{Outcome, QueryStats, SeriesPoint, TopEntry};
 

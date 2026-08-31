@@ -360,6 +360,61 @@ pub async fn delete_record(
     }
 }
 
+/// Body for the per-record enable/disable toggle (Technitium-style staging:
+/// a disabled record stays in the zone for later re-enable but stops being
+/// served).
+#[derive(Deserialize)]
+pub struct RecordDisabledInput {
+    disabled: bool,
+}
+
+/// `PUT /api/zones/{id}/records/{rid}/disabled` - stage or re-enable a
+/// single record without deleting it. The zone serial is bumped and the
+/// catalog reloaded, so the change is live immediately.
+pub async fn set_record_disabled(
+    State(state): State<AppState>,
+    Path((_zone_id, rid)): Path<(String, String)>,
+    axum::Json(input): axum::Json<RecordDisabledInput>,
+) -> Response {
+    match state.catalog.store().set_record_disabled(&rid, input.disabled) {
+        Ok(true) => {
+            let _ = state.catalog.reload();
+            Json(serde_json::json!({ "id": rid, "disabled": input.disabled })).into_response()
+        }
+        Ok(false) => error_response(StatusCode::NOT_FOUND, "record not found"),
+        Err(e) => map_err(e),
+    }
+}
+
+/// `GET /api/zones/{id}/export` - the zone as a BIND-style zone file
+/// (`text/plain`), including SOA and every record. Disabled records are
+/// included as `; disabled:` comments, so an export doubles as a full-zone
+/// backup that round-trips through the import endpoint.
+pub async fn export_zone(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Response {
+    match state.catalog.store().export_zone_file(&id) {
+        Ok(text) => {
+            let name = state
+                .catalog
+                .store()
+                .get_zone(&id)
+                .ok()
+                .flatten()
+                .map(|z| z.name)
+                .unwrap_or_else(|| "zone".to_string());
+            let filename = format!("attachment; filename=\"{}.zone\"", name);
+            let headers = [
+                (header::CONTENT_TYPE, "text/plain; charset=utf-8"),
+                (header::CONTENT_DISPOSITION, filename.as_str()),
+            ];
+            (headers, text).into_response()
+        }
+        Err(e) => map_err(e),
+    }
+}
+
 // ---- DNSSEC -------------------------------------------------------------
 
 pub async fn sign_zone(State(state): State<AppState>, Path(id): Path<String>) -> Response {

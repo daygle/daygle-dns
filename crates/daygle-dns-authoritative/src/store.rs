@@ -87,6 +87,14 @@ CREATE TABLE IF NOT EXISTS tsig_keys (
     secret     TEXT NOT NULL,
     created_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS stub_zones (
+    name         TEXT PRIMARY KEY,
+    nss          TEXT NOT NULL DEFAULT '[]',
+    refresh_secs INTEGER NOT NULL DEFAULT 3600,
+    enabled      INTEGER NOT NULL DEFAULT 1,
+    last_refresh TEXT
+);
 "#;
 
 /// SQLite-backed storage for zones and records.
@@ -331,6 +339,62 @@ impl ZoneStore {
         Ok(())
     }
 
+    // ---- Stub zones -------------------------------------------------------
+
+    /// Insert or update a stub zone. `nss` may be empty while the
+    /// nameservers are still being learned.
+    pub fn set_stub(&self, name: &str, nss: &[String], refresh_secs: u64, enabled: bool) -> Result<()> {
+        let nss = serde_json::to_string(nss)
+            .map_err(|e| DaygleError::Database(format!("encode nss: {e}")))?;
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO stub_zones (name, nss, refresh_secs, enabled, last_refresh)
+             VALUES (?1, ?2, ?3, ?4, NULL)
+             ON CONFLICT(name) DO UPDATE SET nss = ?2, refresh_secs = ?3, enabled = ?4",
+            params![name, nss, refresh_secs as i64, enabled as i64],
+        )?;
+        Ok(())
+    }
+
+    /// All stub zones with their metadata.
+    pub fn list_stubs(&self) -> Result<Vec<crate::model::StubZone>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT name, nss, refresh_secs, enabled, last_refresh
+             FROM stub_zones ORDER BY name",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            let nss_json: String = row.get(1)?;
+            Ok(crate::model::StubZone {
+                name: row.get(0)?,
+                nss: serde_json::from_str(&nss_json).unwrap_or_default(),
+                refresh_secs: row.get::<_, i64>(2)? as u64,
+                enabled: row.get::<_, i64>(3)? != 0,
+                last_refresh: row.get(4)?,
+            })
+        })?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    /// Record a successful NS refresh for a stub zone.
+    pub fn touch_stub(&self, name: &str, nss: &[String]) -> Result<()> {
+        let nss = serde_json::to_string(nss)
+            .map_err(|e| DaygleError::Database(format!("encode nss: {e}")))?;
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE stub_zones SET nss = ?2, last_refresh = ?3 WHERE name = ?1",
+            params![name, nss, Utc::now().to_rfc3339()],
+        )?;
+        Ok(())
+    }
+
+    /// Remove a stub zone entirely (stub rows are standalone; nothing else
+    /// references them).
+    pub fn unset_stub(&self, name: &str) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        Ok(conn.execute("DELETE FROM stub_zones WHERE name = ?1", [name])? > 0)
+    }
+
     // ---- Records ---------------------------------------------------------
 
     /// List records for a zone.
@@ -380,6 +444,38 @@ impl ZoneStore {
         bump_serial_in(&tx, zone_id)?;
         tx.commit()?;
         Ok(record)
+    }
+
+    /// Enable or disable an existing record (Technitium-style staging):
+    /// disabled records stay in the database for later re-enable but are
+    /// skipped when the serving catalog is rebuilt. The zone serial is bumped
+    /// in the same transaction.
+    pub fn set_record_disabled(&self, id: &str, disabled: bool) -> Result<bool> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        let zone_id: Option<String> = tx
+            .query_row("SELECT zone_id FROM records WHERE id = ?1", [id], |r| r.get(0))
+            .optional()?;
+        let Some(zone_id) = zone_id else {
+            return Ok(false);
+        };
+        tx.execute(
+            "UPDATE records SET disabled = ?2 WHERE id = ?1",
+            params![id, disabled as i64],
+        )?;
+        bump_serial_in(&tx, &zone_id)?;
+        tx.commit()?;
+        Ok(true)
+    }
+
+    /// Render a zone (SOA + every record, including disabled ones marked with
+    /// a `; disabled` comment) as a BIND-style zone file.
+    pub fn export_zone_file(&self, zone_id: &str) -> Result<String> {
+        let zone = self
+            .get_zone(zone_id)?
+            .ok_or_else(|| DaygleError::NotFound(format!("zone {zone_id}")))?;
+        let records = self.list_records(zone_id)?;
+        Ok(render_zone_file(&zone, &records))
     }
 
     /// Delete a record by id. When a record is removed, the owning zone's
@@ -950,6 +1046,51 @@ fn row_to_key(row: &rusqlite::Row<'_>) -> rusqlite::Result<SigningKeyRecord> {
 /// Increment a zone's SOA serial by one (wrapping, never landing on 0).
 /// Works against either a plain [`Connection`] or a transaction (which derefs
 /// to `Connection`), so the bump can share the caller's transaction.
+/// Render a zone as a BIND-style zone file (used by the export API).
+///
+/// The SOA is emitted from the zone row; every record follows in
+/// presentation format. Disabled records are included as comments (with a
+/// `; disabled` marker) so an export captures the *full* zone state and can
+/// be re-imported as a backup.
+fn render_zone_file(zone: &Zone, records: &[Record]) -> String {
+    let mut out = String::with_capacity(1024 + records.len() * 64);
+    out.push_str(&format!(
+        "; zone file exported by daygle-dns for {}\n",
+        zone.name
+    ));
+    out.push_str(&format!("$ORIGIN {}.\n", zone.name));
+    out.push_str(&format!("$TTL {}\n", zone.minimum.max(300)));
+
+    out.push_str(&format!(
+        "{}. {} IN SOA {} {} (\n\t{}\t; serial\n\t{}\t; refresh\n\t{}\t; retry\n\t{}\t; expire\n\t{}\t; minimum\n)\n",
+        zone.name,
+        zone.minimum.max(300),
+        zone.primary_ns,
+        zone.admin_mailbox,
+        zone.serial,
+        zone.refresh,
+        zone.retry,
+        zone.expire,
+        zone.minimum,
+    ));
+
+    for record in records {
+        let name = format!("{}.", record.name.trim_end_matches('.'));
+        let line = format!(
+            "{} {} IN {} {}\n",
+            name, record.ttl, record.rtype, record.content
+        );
+        if record.disabled {
+            out.push_str("; disabled: ");
+            out.push_str(line.trim_end());
+            out.push('\n');
+        } else {
+            out.push_str(&line);
+        }
+    }
+    out
+}
+
 fn bump_serial_in(conn: &Connection, zone_id: &str) -> Result<u32> {
     let current: u32 = conn
         .query_row("SELECT serial FROM zones WHERE id = ?1", [zone_id], |r| {

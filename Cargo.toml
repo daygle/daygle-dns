@@ -30,7 +30,14 @@ hickory-server = { version = "0.26", features = [
     "metrics",
     "testing",
 ] }
-hickory-resolver = { version = "0.26", features = ["dnssec-ring", "tls-ring"] }
+hickory-resolver = { version = "0.26", features = [
+    "dnssec-ring",
+    "tls-ring",
+    "https-ring",
+    "quic-ring",
+    "webpki-roots",
+    "serde",
+] }
 
 tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["rt"] }
@@ -69,7 +76,7 @@ mime_guess = "2"
 rand = "0.8"
 tempfile = "3"
 url = "2"
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "http2", "json"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "http2", "json", "socks"] }
 
 [profile.release]
 lto = "thin"

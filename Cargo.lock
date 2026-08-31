@@ -587,6 +587,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "tempfile",
  "thiserror",
  "toml",
  "tracing",
@@ -598,6 +599,7 @@ name = "daygle-dns-dot"
 version = "0.1.0"
 dependencies = [
  "daygle-dns-core",
+ "hickory-net",
  "hickory-proto",
  "hickory-server",
  "rcgen",
@@ -607,6 +609,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tracing",
+ "webpki-roots",
 ]
 
 [[package]]
@@ -966,6 +969,7 @@ dependencies = [
  "tokio-rustls",
  "tracing",
  "url",
+ "webpki-roots",
 ]
 
 [[package]]
@@ -1021,6 +1025,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tracing",
+ "webpki-roots",
 ]
 
 [[package]]
