@@ -244,6 +244,12 @@ pub async fn bind_with(
     // Policy.
     let policy = daygle_dns_policy::build_engine(&config.policy)?;
 
+    // Advanced Blocking groups (per-client allow/block policies) built from
+    // the store; swapped atomically when the groups change via the API.
+    let advanced_blocking = Arc::new(ArcSwap::from_pointee(
+        daygle_dns_policy::AdvancedBlocking::build(&catalog.store().list_blocking_groups()?),
+    ));
+
     // Rate limiting (per client + per domain).
     let rate_limiter = Arc::new(RateLimiter::new(&config.rate_limit));
 
@@ -251,6 +257,7 @@ pub async fn bind_with(
     let shared = Arc::new(Shared {
         catalog: catalog.clone(),
         policy: Arc::new(ArcSwap::from_pointee(policy)),
+        advanced_blocking: advanced_blocking.clone(),
         resolver: Arc::new(arc_swap::ArcSwapOption::from(resolver.clone())),
         config: Arc::new(ArcSwap::from(config.clone())),
         rate_limiter: rate_limiter.clone(),
@@ -277,7 +284,8 @@ pub async fn bind_with(
         notify_hooks,
         tsig_keys,
         stats.clone(),
-    );
+    )
+    .with_advanced_blocking(shared.advanced_blocking.clone());
     let mut server = Server::new(dispatcher);
     let mut initial_addrs = ListenerAddrs::default();
     bind_listeners(&config, &mut server, &mut initial_addrs).await?;
@@ -337,6 +345,7 @@ pub async fn bind_with(
         logs: logs.clone(),
         config: shared.config.clone(),
         policy: shared.policy.clone(),
+        advanced_blocking: shared.advanced_blocking.clone(),
         blocklist_sources: blocklist_sources.clone(),
         started_at,
         config_path: config_path.clone().map(Arc::new),
@@ -424,7 +433,8 @@ async fn start_listeners(
         daygle_dns_authoritative::notify::NotifyHooks::default(),
         Arc::new(daygle_dns_authoritative::tsig::TsigKeyRing::default()),
         shared.stats.clone(),
-    );
+    )
+    .with_advanced_blocking(shared.advanced_blocking.clone());
     let mut server = Server::new(dispatcher);
     let mut snapshot = ListenerAddrs::default();
     bind_listeners(&config, &mut server, &mut snapshot).await?;
@@ -514,7 +524,8 @@ async fn start_listeners_with(
         daygle_dns_authoritative::notify::NotifyHooks::default(),
         Arc::new(daygle_dns_authoritative::tsig::TsigKeyRing::default()),
         shared.stats.clone(),
-    );
+    )
+    .with_advanced_blocking(shared.advanced_blocking.clone());
     let mut server = Server::new(dispatcher);
     let mut snapshot = ListenerAddrs::default();
     bind_listeners(config, &mut server, &mut snapshot).await?;

@@ -16,6 +16,7 @@
 //! dispatcher records in the logs.
 
 mod acl;
+mod advanced;
 mod blocklist;
 mod blocklist_source;
 mod engine;
@@ -23,6 +24,7 @@ mod plugin;
 mod rule;
 
 pub use acl::Acl;
+pub use advanced::{validate_regex, AdvancedBlocking};
 pub use blocklist::Blocklist;
 pub use blocklist_source::{parse_blocklist, BlocklistSourceManager, SourceStatus};
 pub use engine::{Decision, PolicyEngine};

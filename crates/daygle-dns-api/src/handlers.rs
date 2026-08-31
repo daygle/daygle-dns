@@ -1,5 +1,6 @@
 //! HTTP handlers for the REST API.
 
+use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -415,6 +416,112 @@ pub async fn export_zone(
     }
 }
 
+// ---- Advanced blocking --------------------------------------------------
+
+/// Rebuild the shared Advanced Blocking engine from the stored groups and
+/// publish it to the dispatcher. Best-effort: a store read failure leaves the
+/// previous engine in place and is logged.
+fn rebuild_advanced_blocking(state: &AppState) {
+    match state.catalog.store().list_blocking_groups() {
+        Ok(groups) => state
+            .advanced_blocking
+            .store(Arc::new(daygle_dns_policy::AdvancedBlocking::build(&groups))),
+        Err(e) => tracing::warn!("failed to rebuild advanced blocking: {e}"),
+    }
+}
+
+/// Reject invalid regex patterns before they reach the store, so a bad pattern
+/// is a clear 400 rather than a rule silently dropped at engine-build time.
+fn validate_group_regexes(input: &daygle_dns_core::blocking::BlockingGroupInput) -> Result<(), String> {
+    for pattern in input.allow_regex.iter().chain(input.block_regex.iter()) {
+        daygle_dns_policy::validate_regex(pattern)
+            .map_err(|e| format!("invalid regex '{pattern}': {e}"))?;
+    }
+    Ok(())
+}
+
+/// `GET /api/policy/blocking` - list all Advanced Blocking groups.
+pub async fn list_blocking_groups(State(state): State<AppState>) -> Response {
+    match state.catalog.store().list_blocking_groups() {
+        Ok(groups) => Json(groups).into_response(),
+        Err(e) => map_err(e),
+    }
+}
+
+/// `POST /api/policy/blocking` - create a group, or update the one with the
+/// same name. The dispatcher's blocking engine is rebuilt immediately.
+pub async fn upsert_blocking_group(
+    State(state): State<AppState>,
+    Json(input): Json<daygle_dns_core::blocking::BlockingGroupInput>,
+) -> Response {
+    if let Err(msg) = validate_group_regexes(&input) {
+        return error_response(StatusCode::BAD_REQUEST, msg);
+    }
+    match state.catalog.store().upsert_blocking_group(&input) {
+        Ok(group) => {
+            rebuild_advanced_blocking(&state);
+            Json(group).into_response()
+        }
+        Err(e) => map_err(e),
+    }
+}
+
+/// `DELETE /api/policy/blocking/{id}` - remove a group and rebuild the engine.
+pub async fn delete_blocking_group(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Response {
+    match state.catalog.store().delete_blocking_group(&id) {
+        Ok(true) => {
+            rebuild_advanced_blocking(&state);
+            StatusCode::NO_CONTENT.into_response()
+        }
+        Ok(false) => error_response(StatusCode::NOT_FOUND, "blocking group not found"),
+        Err(e) => map_err(e),
+    }
+}
+
+/// Body for the Advanced Blocking tester.
+#[derive(Deserialize)]
+pub struct BlockingTestInput {
+    /// Client IP to evaluate as.
+    client: String,
+    /// Domain to test.
+    domain: String,
+}
+
+/// `POST /api/policy/blocking/test` - evaluate a `{client, domain}` pair
+/// against the live blocking groups and report whether (and why) it is
+/// blocked, so an operator can verify rules before relying on them.
+pub async fn test_blocking(
+    State(state): State<AppState>,
+    Json(input): Json<BlockingTestInput>,
+) -> Response {
+    let client: IpAddr = match input.client.trim().parse() {
+        Ok(ip) => ip,
+        Err(_) => {
+            return error_response(StatusCode::BAD_REQUEST, "client must be an IP address")
+        }
+    };
+    let domain = input.domain.trim().trim_end_matches('.').to_ascii_lowercase();
+    let (blocked, action, reason) = match state.advanced_blocking.load().evaluate(client, &domain) {
+        Some(d) => (true, d.action.as_str().to_string(), d.reason),
+        None => (
+            false,
+            "allow".to_string(),
+            "no group blocked this query".to_string(),
+        ),
+    };
+    Json(serde_json::json!({
+        "client": client.to_string(),
+        "domain": domain,
+        "blocked": blocked,
+        "action": action,
+        "reason": reason,
+    }))
+    .into_response()
+}
+
 // ---- DNSSEC -------------------------------------------------------------
 
 pub async fn sign_zone(State(state): State<AppState>, Path(id): Path<String>) -> Response {
@@ -680,6 +787,16 @@ pub struct SettingsUpdate {
     pub doh: Option<DohUpdate>,
     pub doq: Option<ListenerUpdate>,
     pub api: Option<ApiUpdate>,
+    pub policy: Option<PolicyUpdate>,
+}
+
+/// Partial update for policy-engine settings surfaced in the console (only the
+/// fields the UI edits; blocklists/rules are managed through their own APIs).
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PolicyUpdate {
+    pub filter_aaaa: Option<bool>,
+    pub filter_aaaa_except: Option<Vec<String>>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -847,6 +964,17 @@ pub async fn update_settings(
             config.api.cors_origins = v.clone();
         }
     }
+    let mut policy_changed = false;
+    if let Some(p) = &update.policy {
+        if let Some(v) = p.filter_aaaa {
+            config.policy.filter_aaaa = v;
+            policy_changed = true;
+        }
+        if let Some(v) = &p.filter_aaaa_except {
+            config.policy.filter_aaaa_except = v.clone();
+            policy_changed = true;
+        }
+    }
 
     // Validate before applying anything. A validation failure is rejected
     // only when this update introduces a *new* error: if the pre-update
@@ -899,6 +1027,14 @@ pub async fn update_settings(
     if listeners_affected {
         if let Some(rebuild) = &state.request_dns_rebuild {
             rebuild();
+        }
+    }
+    // Rebuild the policy engine so a Filter-AAAA change applies immediately,
+    // regardless of whether the config-file watcher is enabled.
+    if policy_changed {
+        match daygle_dns_policy::build_engine(&config.policy) {
+            Ok(engine) => state.policy.store(Arc::new(engine)),
+            Err(e) => tracing::warn!("policy rebuild after settings update failed: {e}"),
         }
     }
     state.logs.push(

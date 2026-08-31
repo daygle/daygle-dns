@@ -9,7 +9,7 @@ use daygle_dns_authoritative::model::SPLIT_HORIZON_RECORD_TYPES;
 use daygle_dns_authoritative::AuthorityCatalog;
 use daygle_dns_core::stats::Outcome;
 use daygle_dns_core::{DaygleError, LogStore, Metrics, RateLimiter};
-use daygle_dns_policy::{Action, PolicyEngine};
+use daygle_dns_policy::{Action, AdvancedBlocking, PolicyEngine};
 use daygle_dns_recursive::RecursiveResolver;
 use hickory_proto::op::{MessageType, OpCode, ResponseCode};
 use hickory_proto::rr::{Name, RData, Record, RecordType};
@@ -33,6 +33,10 @@ pub struct DnsDispatcher {
     catalog: Arc<AuthorityCatalog>,
     resolver: Arc<ArcSwapOption<RecursiveResolver>>,
     policy: Arc<ArcSwap<PolicyEngine>>,
+    /// Advanced Blocking groups, swapped atomically when the stored groups
+    /// change. Defaults to an empty set (no groups) so tests and simple
+    /// embeddings need not supply it.
+    advanced_blocking: Arc<ArcSwap<AdvancedBlocking>>,
     rate_limiter: Arc<RateLimiter>,
     metrics: Arc<Metrics>,
     logs: Arc<LogStore>,
@@ -88,6 +92,7 @@ impl DnsDispatcher {
             catalog,
             resolver,
             policy,
+            advanced_blocking: Arc::new(ArcSwap::from_pointee(AdvancedBlocking::default())),
             rate_limiter,
             metrics,
             logs,
@@ -114,6 +119,7 @@ impl DnsDispatcher {
             catalog,
             resolver,
             policy,
+            advanced_blocking: Arc::new(ArcSwap::from_pointee(AdvancedBlocking::default())),
             rate_limiter,
             metrics,
             logs,
@@ -121,6 +127,14 @@ impl DnsDispatcher {
             tsig_keys,
             stats: Some(stats),
         }
+    }
+
+    /// Attach a shared Advanced Blocking set. The same `Arc` is held by the
+    /// API layer so CRUD changes are published to the dispatcher by swapping
+    /// its contents; the dispatcher never needs rebuilding.
+    pub fn with_advanced_blocking(mut self, advanced_blocking: Arc<ArcSwap<AdvancedBlocking>>) -> Self {
+        self.advanced_blocking = advanced_blocking;
+        self
     }
 
     /// Convenience constructor for callers that do not need live reload (e.g.
@@ -400,6 +414,27 @@ impl RequestHandler for DnsDispatcher {
                 self.record_stats(client, &qname, Outcome::Blocked);
                 return send_empty(&mut response_handle, request).await;
             }
+        }
+
+        // 1b. Advanced Blocking: per-client-group allow/block policies. Runs
+        // after the base policy engine (an explicit allow list inside a group
+        // can still let a name through) and before split-horizon/authoritative
+        // resolution. `evaluate` only ever returns a blocking action.
+        if let Some(decision) = self.advanced_blocking.load().evaluate(client, &qname) {
+            debug!(query = %qname, reason = %decision.reason, "blocked by advanced blocking");
+            self.metrics.inc(&self.metrics.blocked);
+            self.record_stats(client, &qname, Outcome::Blocked);
+            return match decision.action {
+                Action::Refused => {
+                    send_error(&mut response_handle, request, ResponseCode::Refused).await
+                }
+                Action::Redirect(ip) => {
+                    send_redirect(&mut response_handle, request, info.query.query_type(), ip).await
+                }
+                Action::NoData => send_empty(&mut response_handle, request).await,
+                // Block (NXDOMAIN) and any future action default to NXDOMAIN.
+                _ => send_error(&mut response_handle, request, ResponseCode::NXDomain).await,
+            };
         }
 
         // 1c. Split horizon: per-client synthetic answers. This runs after

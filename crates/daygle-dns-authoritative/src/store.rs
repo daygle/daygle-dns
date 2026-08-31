@@ -14,6 +14,7 @@ use crate::model::{
     SplitHorizonRecord, Zone, ZoneInput,
 };
 use crate::validate_name;
+use daygle_dns_core::blocking::{BlockingGroup, BlockingGroupInput};
 use daygle_dns_core::error::{DaygleError, Result};
 
 const SCHEMA: &str = r#"
@@ -94,6 +95,19 @@ CREATE TABLE IF NOT EXISTS stub_zones (
     refresh_secs INTEGER NOT NULL DEFAULT 3600,
     enabled      INTEGER NOT NULL DEFAULT 1,
     last_refresh TEXT
+);
+
+CREATE TABLE IF NOT EXISTS blocking_groups (
+    id          TEXT PRIMARY KEY,
+    name        TEXT NOT NULL UNIQUE,
+    enabled     INTEGER NOT NULL DEFAULT 1,
+    clients     TEXT NOT NULL DEFAULT '[]',
+    allow       TEXT NOT NULL DEFAULT '[]',
+    block       TEXT NOT NULL DEFAULT '[]',
+    allow_regex TEXT NOT NULL DEFAULT '[]',
+    block_regex TEXT NOT NULL DEFAULT '[]',
+    response    TEXT NOT NULL DEFAULT '{"kind":"nx_domain"}',
+    position    INTEGER NOT NULL DEFAULT 0
 );
 "#;
 
@@ -393,6 +407,88 @@ impl ZoneStore {
     pub fn unset_stub(&self, name: &str) -> Result<bool> {
         let conn = self.conn.lock().unwrap();
         Ok(conn.execute("DELETE FROM stub_zones WHERE name = ?1", [name])? > 0)
+    }
+
+    // ---- Advanced blocking groups ----------------------------------------
+
+    /// All Advanced Blocking groups, ordered by `position` then name.
+    pub fn list_blocking_groups(&self) -> Result<Vec<BlockingGroup>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, name, enabled, clients, allow, block, allow_regex, block_regex,
+                    response, position
+             FROM blocking_groups ORDER BY position, name",
+        )?;
+        let rows = stmt.query_map([], row_to_blocking_group)?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    /// Fetch a single blocking group by id.
+    pub fn get_blocking_group(&self, id: &str) -> Result<Option<BlockingGroup>> {
+        let conn = self.conn.lock().unwrap();
+        let group = conn
+            .query_row(
+                "SELECT id, name, enabled, clients, allow, block, allow_regex, block_regex,
+                        response, position
+                 FROM blocking_groups WHERE id = ?1",
+                [id],
+                row_to_blocking_group,
+            )
+            .optional()?;
+        Ok(group)
+    }
+
+    /// Create a blocking group, or update the one with the same name in place
+    /// (its id and position are preserved on update).
+    pub fn upsert_blocking_group(&self, input: &BlockingGroupInput) -> Result<BlockingGroup> {
+        let name = input.name.trim().to_string();
+        if name.is_empty() {
+            return Err(DaygleError::InvalidRecord(
+                "blocking group name is empty".to_string(),
+            ));
+        }
+        let clients = encode_json(&input.clients, "clients")?;
+        let allow = encode_json(&input.allow, "allow")?;
+        let block = encode_json(&input.block, "block")?;
+        let allow_regex = encode_json(&input.allow_regex, "allow_regex")?;
+        let block_regex = encode_json(&input.block_regex, "block_regex")?;
+        let response = serde_json::to_string(&input.response)
+            .map_err(|e| DaygleError::Database(format!("encode response: {e}")))?;
+        let id = Uuid::new_v4().to_string();
+        let conn = self.conn.lock().unwrap();
+        // New rows land after every existing group; updates keep their spot.
+        conn.execute(
+            "INSERT INTO blocking_groups
+                (id, name, enabled, clients, allow, block, allow_regex, block_regex,
+                 response, position)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9,
+                 (SELECT COALESCE(MAX(position), -1) + 1 FROM blocking_groups))
+             ON CONFLICT(name) DO UPDATE SET
+                enabled = ?3, clients = ?4, allow = ?5, block = ?6,
+                allow_regex = ?7, block_regex = ?8, response = ?9",
+            params![
+                id,
+                name,
+                input.enabled as i64,
+                clients,
+                allow,
+                block,
+                allow_regex,
+                block_regex,
+                response,
+            ],
+        )?;
+        drop(conn);
+        self.list_blocking_groups()?
+            .into_iter()
+            .find(|g| g.name == name)
+            .ok_or_else(|| DaygleError::Internal("blocking group vanished after upsert".to_string()))
+    }
+
+    /// Delete a blocking group by id. Returns whether a row was removed.
+    pub fn delete_blocking_group(&self, id: &str) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        Ok(conn.execute("DELETE FROM blocking_groups WHERE id = ?1", [id])? > 0)
     }
 
     // ---- Records ---------------------------------------------------------
@@ -1043,6 +1139,35 @@ fn row_to_key(row: &rusqlite::Row<'_>) -> rusqlite::Result<SigningKeyRecord> {
     })
 }
 
+/// JSON-encode a list column, mapping serialization errors to `DaygleError`.
+fn encode_json(value: &[String], field: &str) -> Result<String> {
+    serde_json::to_string(value)
+        .map_err(|e| DaygleError::Database(format!("encode {field}: {e}")))
+}
+
+/// Decode a JSON string list column, falling back to empty on malformed data.
+fn decode_list(row: &rusqlite::Row<'_>, idx: usize) -> rusqlite::Result<Vec<String>> {
+    Ok(serde_json::from_str(&row.get::<_, String>(idx)?).unwrap_or_default())
+}
+
+/// Build a [`BlockingGroup`] from a `blocking_groups` row. Malformed JSON
+/// list/response columns fall back to safe defaults rather than erroring.
+fn row_to_blocking_group(row: &rusqlite::Row<'_>) -> rusqlite::Result<BlockingGroup> {
+    let response = serde_json::from_str(&row.get::<_, String>(8)?).unwrap_or_default();
+    Ok(BlockingGroup {
+        id: row.get(0)?,
+        name: row.get(1)?,
+        enabled: row.get::<_, i64>(2)? != 0,
+        clients: decode_list(row, 3)?,
+        allow: decode_list(row, 4)?,
+        block: decode_list(row, 5)?,
+        allow_regex: decode_list(row, 6)?,
+        block_regex: decode_list(row, 7)?,
+        response,
+        position: row.get(9)?,
+    })
+}
+
 /// Increment a zone's SOA serial by one (wrapping, never landing on 0).
 /// Works against either a plain [`Connection`] or a transaction (which derefs
 /// to `Connection`), so the bump can share the caller's transaction.
@@ -1361,6 +1486,50 @@ mod tests {
 
     fn store() -> ZoneStore {
         ZoneStore::open(":memory:").unwrap()
+    }
+
+    #[test]
+    fn blocking_group_crud_roundtrip() {
+        use daygle_dns_core::blocking::{BlockResponse, BlockingGroupInput};
+        let s = store();
+        let created = s
+            .upsert_blocking_group(&BlockingGroupInput {
+                name: "  Kids  ".to_string(),
+                enabled: true,
+                clients: vec!["192.168.1.0/24".to_string()],
+                allow: vec!["school.test".to_string()],
+                block: vec!["*.games.test".to_string()],
+                allow_regex: vec![],
+                block_regex: vec![r"^ad".to_string()],
+                response: BlockResponse::Redirect("0.0.0.0".parse().unwrap()),
+            })
+            .unwrap();
+        assert_eq!(created.name, "Kids");
+        assert_eq!(created.block, vec!["*.games.test".to_string()]);
+        assert_eq!(created.response, BlockResponse::Redirect("0.0.0.0".parse().unwrap()));
+
+        // Upsert by the same name updates in place (id and position preserved).
+        let updated = s
+            .upsert_blocking_group(&BlockingGroupInput {
+                name: "Kids".to_string(),
+                enabled: false,
+                clients: vec![],
+                allow: vec![],
+                block: vec!["*.social.test".to_string()],
+                allow_regex: vec![],
+                block_regex: vec![],
+                response: BlockResponse::NxDomain,
+            })
+            .unwrap();
+        assert_eq!(updated.id, created.id);
+        assert_eq!(updated.position, created.position);
+        assert!(!updated.enabled);
+        assert_eq!(s.list_blocking_groups().unwrap().len(), 1);
+
+        assert_eq!(s.get_blocking_group(&created.id).unwrap().unwrap().id, created.id);
+        assert!(s.delete_blocking_group(&created.id).unwrap());
+        assert!(s.list_blocking_groups().unwrap().is_empty());
+        assert!(!s.delete_blocking_group(&created.id).unwrap());
     }
 
     #[test]

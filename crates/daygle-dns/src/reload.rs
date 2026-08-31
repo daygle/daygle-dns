@@ -21,7 +21,7 @@ use daygle_dns_authoritative::AuthorityCatalog;
 use daygle_dns_core::config::DaygleConfig;
 use daygle_dns_core::error::Result;
 use daygle_dns_core::{LogStore, Metrics, RateLimiter};
-use daygle_dns_policy::{BlocklistSourceManager, PolicyEngine};
+use daygle_dns_policy::{AdvancedBlocking, BlocklistSourceManager, PolicyEngine};
 use daygle_dns_recursive::RecursiveResolver;
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
@@ -32,6 +32,8 @@ use tracing::{info, warn};
 pub struct Shared {
     pub catalog: Arc<AuthorityCatalog>,
     pub policy: Arc<ArcSwap<PolicyEngine>>,
+    /// Advanced Blocking groups (built from the store, swapped on CRUD).
+    pub advanced_blocking: Arc<ArcSwap<AdvancedBlocking>>,
     pub resolver: Arc<ArcSwapOption<RecursiveResolver>>,
     pub config: Arc<ArcSwap<DaygleConfig>>,
     pub rate_limiter: Arc<RateLimiter>,
@@ -260,6 +262,7 @@ mod tests {
         Shared {
             catalog,
             policy: Arc::new(ArcSwap::from_pointee(PolicyEngine::new(false))),
+            advanced_blocking: Arc::new(ArcSwap::from_pointee(AdvancedBlocking::default())),
             resolver: Arc::new(ArcSwapOption::empty()),
             config: Arc::new(ArcSwap::from(Arc::new(cfg))),
             rate_limiter: Arc::new(RateLimiter::default()),
