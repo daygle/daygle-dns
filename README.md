@@ -21,6 +21,10 @@ Daygle combines, in a single process:
 - **Dynamic updates**: RFC 2136 UPDATE messages with write-through to SQLite,
   prerequisite checking, and atomic apply - records added over the wire
   persist and go live immediately (gated by `allow_dynamic_updates`).
+- **TSIG authentication** (RFC 8945): protect zone transfers and dynamic
+  updates with HMAC-signed requests (HMAC-MD5, HMAC-SHA1, HMAC-SHA256,
+  HMAC-SHA512). Per-zone key binding, signed responses, and request-MAC
+  chaining.
 - **Split horizon**: serve different answers for the same domain depending
   on the client's network (named client groups like `LAN`/`VPN`/`IoT` or
   literal CIDRs), managed from the GUI - internal clients see internal
@@ -49,7 +53,7 @@ Daygle combines, in a single process:
 curl -fsSL https://raw.githubusercontent.com/daygle/daygle-dns/main/install.sh | sh
 
 # …or build and run directly from source
-cargo run --release -p daygle-dns -- --config daygle.toml.example
+cargo run --release -p daygle-dns -- --config daygle-dns.toml.example
 ```
 
 Then open the dashboard at <http://127.0.0.1:5380>.
@@ -83,6 +87,27 @@ The server is configured with a single TOML file (default
 `/etc/daygle-dns/daygle-dns.toml`). A fully commented example lives in
 [`daygle-dns.toml.example`](daygle-dns.toml.example).
 
+### TSIG authentication
+
+Zone transfers (AXFR/IXFR) and RFC 2136 dynamic updates can be protected
+with **TSIG** (RFC 8945). Define HMAC keys in the config and bind them to
+specific zones:
+
+```toml
+[authoritative]
+tsig_keys = [
+  { name = "transfer-key", algorithm = "hmac-sha256", secret = "<base64>" },
+]
+
+[[authoritative.zones]]
+name = "internal.example.com"
+tsig_key = "transfer-key"
+```
+
+When a TSIG key is bound to a zone, unsigned transfer/update requests are
+refused and all responses are signed. TSIG also covers secondaries pulling
+from masters — see [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for details.
+
 ```toml
 [server]
 port = 53
@@ -96,7 +121,7 @@ dnssec_validate = true
 # upstreams = ["192.0.2.10"]
 
 [authoritative]
-database = "/var/lib/daygle-dns/daygle.db"
+database = "/var/lib/daygle-dns/daygle-dns.db"
 
 [dot]
 port = 853
@@ -156,9 +181,11 @@ real server on ephemeral ports and exercise:
 - **policy** blocking,
 - **DNS over TLS** against a self-signed certificate,
 - full **recursive** resolution through a local stub upstream (no internet
-  required), and
+  required),
 - **live config reload** of policy, upstreams and listeners, both via the
-  reload API and the file watcher.
+  reload API and the file watcher, and
+- **TSIG** unit tests covering HMAC-SHA256 request/response round-trips
+  with request-MAC chaining.
 
 ## Upgrading
 
@@ -177,7 +204,7 @@ zones, certificates, and SQLite database under `/var/lib/daygle-dns` are left
 untouched. Before upgrading, back up the database just in case:
 
 ```bash
-sudo cp /var/lib/daygle-dns/daygle.db /var/lib/daygle-dns/daygle.db.bak
+sudo cp /var/lib/daygle-dns/daygle-dns.db /var/lib/daygle-dns/daygle-dns.db.bak
 ```
 
 ### Source builds
