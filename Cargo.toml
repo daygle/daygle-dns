@@ -1,13 +1,13 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/daygle-core",
-    "crates/daygle-policy",
-    "crates/daygle-authoritative",
-    "crates/daygle-recursive",
-    "crates/daygle-dot",
-    "crates/daygle-api",
-    "crates/daygle-gui",
+    "crates/daygle-dns-core",
+    "crates/daygle-dns-policy",
+    "crates/daygle-dns-authoritative",
+    "crates/daygle-dns-recursive",
+    "crates/daygle-dns-dot",
+    "crates/daygle-dns-api",
+    "crates/daygle-dns-gui",
     "crates/daygle-dns",
 ]
 

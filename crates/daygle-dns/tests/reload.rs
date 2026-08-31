@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 use common::*;
 use daygle_dns::bind_with;
-use daygle_core::config::DaygleConfig;
+use daygle_dns_core::config::DaygleConfig;
 use hickory_proto::op::ResponseCode;
 use hickory_proto::rr::RecordType;
 

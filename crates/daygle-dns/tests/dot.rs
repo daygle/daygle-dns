@@ -3,7 +3,7 @@
 mod common;
 
 use common::*;
-use daygle_authoritative::model::{RecordInput, ZoneInput};
+use daygle_dns_authoritative::model::{RecordInput, ZoneInput};
 use hickory_proto::op::ResponseCode;
 use hickory_proto::rr::RecordType;
 

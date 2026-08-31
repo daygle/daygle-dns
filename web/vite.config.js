@@ -3,7 +3,7 @@ import { svelte } from '@sveltejs/vite-plugin-svelte';
 
 export default defineConfig({
   plugins: [svelte()],
-  // Output directly into the directory embedded by the daygle-gui crate.
+  // Output directly into the directory embedded by the daygle-dns-gui crate.
   build: {
     outDir: 'dist',
     emptyOutDir: true,

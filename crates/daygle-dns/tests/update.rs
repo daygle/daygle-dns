@@ -7,8 +7,8 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use common::*;
-use daygle_authoritative::model::{RecordInput, ZoneInput};
-use daygle_core::config::DaygleConfig;
+use daygle_dns_authoritative::model::{RecordInput, ZoneInput};
+use daygle_dns_core::config::DaygleConfig;
 use hickory_proto::op::update_message::UpdateMessage;
 use hickory_proto::op::{Message, MessageType, OpCode, Query, ResponseCode};
 use hickory_proto::rr::rdata::A;

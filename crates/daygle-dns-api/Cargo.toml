@@ -1,0 +1,25 @@
+[package]
+name = "daygle-dns-api"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "REST API for configuration, zones, logs and metrics, plus the embedded GUI"
+
+[dependencies]
+daygle-dns-core = { path = "../daygle-dns-core" }
+daygle-dns-authoritative = { path = "../daygle-dns-authoritative" }
+daygle-dns-policy = { path = "../daygle-dns-policy" }
+daygle-dns-recursive = { path = "../daygle-dns-recursive" }
+daygle-dns-gui = { path = "../daygle-dns-gui" }
+axum.workspace = true
+tower.workspace = true
+tower-http.workspace = true
+tokio.workspace = true
+arc-swap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+mime_guess.workspace = true
+tracing.workspace = true

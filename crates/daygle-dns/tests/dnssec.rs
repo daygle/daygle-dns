@@ -8,9 +8,9 @@ mod common;
 use std::time::Duration;
 
 use common::*;
-use daygle_core::config::DaygleConfig;
-use daygle_authoritative::DnssecMaintenance;
-use daygle_authoritative::model::{RecordInput, ZoneInput};
+use daygle_dns_core::config::DaygleConfig;
+use daygle_dns_authoritative::DnssecMaintenance;
+use daygle_dns_authoritative::model::{RecordInput, ZoneInput};
 use hickory_proto::op::{Edns, Message, ResponseCode};
 use hickory_proto::rr::RecordType;
 
@@ -150,7 +150,7 @@ async fn rollover_transitions_are_served() {
 
     // The first key is backdated 2 days (past the 1-day rollover threshold)
     // and the zone is signed with it.
-    let (algorithm, der) = daygle_authoritative::generate_signing_key().unwrap();
+    let (algorithm, der) = daygle_dns_authoritative::generate_signing_key().unwrap();
     store
         .store_signing_key_created(
             &zone_id,

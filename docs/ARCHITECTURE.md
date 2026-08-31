@@ -15,39 +15,39 @@ API/GUI.
               ┌──────────────────┘      │      └──────────────────┐
               ▼                         ▼                         ▼
    ┌───────────────────┐    ┌────────────────────┐    ┌──────────────────┐
-   │ daygle-policy     │    │ daygle-authoritative│    │ daygle-recursive │
+   │ daygle-dns-policy     │    │ daygle-dns-authoritative│    │ daygle-dns-recursive │
    │ ACLs, blocklists, │    │ SQLite store,       │    │ hickory-resolver │
    │ per-client rules  │    │ zone catalog,       │    │ caching, DNSSEC  │
    └─────────┬─────────┘    │ DNSSEC signing      │    └────────┬─────────┘
              │              └─────────┬───────────┘             │
              ▼                        ▼                         ▼
-        daygle-core             daygle-dot (rustls DoT)     hickory-proto
-   (config/error/metrics/logs)  daygle-api (axum)          hickory-server
-                                 daygle-gui (assets)
+        daygle-dns-core             daygle-dns-dot (rustls DoT)     hickory-proto
+   (config/error/metrics/logs)  daygle-dns-api (axum)          hickory-server
+                                 daygle-dns-gui (assets)
 ```
 
-- **`daygle-core`** is dependency-free of the DNS stack: the TOML configuration
+- **`daygle-dns-core`** is dependency-free of the DNS stack: the TOML configuration
   model, the shared `DaygleError`, atomic `Metrics`, and a bounded `LogStore`.
-- **`daygle-policy`** evaluates a query in order: ACLs → blocklists →
+- **`daygle-dns-policy`** evaluates a query in order: ACLs → blocklists →
   ordered per-client rules → user plugins. A `PolicyPlugin` is a boxed async
   callback; the first plugin returning `Some(Decision)` wins.
-- **`daygle-authoritative`** persists zones/records/DNSSEC keys in SQLite and
+- **`daygle-dns-authoritative`** persists zones/records/DNSSEC keys in SQLite and
   rebuilds an in-memory Hickory `Catalog` (`InMemoryZoneHandler` per zone). The
   hot query path never touches SQLite. It also owns the split-horizon index
   (`SplitHorizonIndex`): stored client networks + domain entries are
   pre-resolved into a per-query lookup structure that maps `(client IP,
   qname, query type)` to the synthetic records to serve.
-- **`daygle-recursive`** wraps `hickory_resolver::TokioResolver`, configuring
+- **`daygle-dns-recursive`** wraps `hickory_resolver::TokioResolver`, configuring
   cache size, per-server timeouts, attempts, and DNSSEC validation. Negative
   caching is Hickory's built-in behavior, bounded by `negative_cache_ttl`.
   Conditional forwarding zones each get their own resolver built from the
   zone's dedicated upstreams; routing happens at lookup time by longest
   label-aligned suffix match.
-- **`daygle-dot`** produces rustls `ServerConfig`s for both encrypted DNS
+- **`daygle-dns-dot`** produces rustls `ServerConfig`s for both encrypted DNS
   protocols - the `dot` ALPN for DoT (RFC 7858) and the `h2` ALPN for DoH
   (RFC 8484) - and generates self-signed certificates when configured.
-- **`daygle-api`** serves the REST API and the embedded GUI.
-- **`daygle-gui`** embeds the compiled Svelte bundle via `rust-embed`.
+- **`daygle-dns-api`** serves the REST API and the embedded GUI.
+- **`daygle-dns-gui`** embeds the compiled Svelte bundle via `rust-embed`.
 - **`daygle`** (binary) binds UDP/TCP/DoT/DoH listeners onto one Hickory
   `Server` driven by `DnsDispatcher`.
 
@@ -62,7 +62,7 @@ listener:
    metric. The client check also covers RFC 2136 UPDATEs and zone transfers,
    which never reach `request_info`. Loopback is exempt when
    `rate_limit.exempt_loopback` is set (the default). Limits live in a shared
-   [`RateLimiter`](crates/daygle-core/src/rate_limit.rs) that reload swaps in
+   [`RateLimiter`](crates/daygle-dns-core/src/rate_limit.rs) that reload swaps in
    place, so tightening/relaxing them never drops in-flight windows.
 1. **Policy.** The query name/type and the client IP are passed to the policy
    engine. `Block` → NXDOMAIN, `Refused` → REFUSED, `Redirect(ip)` → a
@@ -83,7 +83,7 @@ listener:
    `authoritative.axfr_enabled` and the `axfr_networks` client allow-list, and
    answered with the full zone record set (`SOA, records…, SOA` per RFC 5936;
    IXFR always gets a full transfer, which RFC 1995 permits).
-4. **Recursive.** Otherwise the query goes to `daygle-recursive`; the
+4. **Recursive.** Otherwise the query goes to `daygle-dns-recursive`; the
    `RecursiveResolver` routes by name - the most specific configured
    conditional zone (longest label-aligned suffix) is resolved by its own
    dedicated resolver/upstreams, everything else by the default ones. The
@@ -92,7 +92,7 @@ listener:
    Negative answers (NXDOMAIN/NODATA) carry their response code through the
    error type so they are returned as-is instead of SERVFAIL.
 5. **Dynamic updates.** RFC 2136 `UPDATE` messages are handled by
-   `daygle-authoritative`'s update handler (`handle_update`), not the
+   `daygle-dns-authoritative`'s update handler (`handle_update`), not the
    catalog. It validates the zone section, checks prerequisites (NXDOMAIN /
    NXRRSet / YXDomain / YXRRSet), builds an atomic add/delete plan, writes it
    through to SQLite (bumping the SOA serial unless the update rewrites the
@@ -114,7 +114,7 @@ listener:
   way - either path atomically swaps in a fresh catalog. Split-horizon
   changes (networks/entries, via the REST API) rebuild the split-horizon
   index on the same `reload()`, so DNS and API views stay in sync.
-- Secondary zones are driven by `daygle-authoritative`'s `SecondaryRefresher`,
+- Secondary zones are driven by `daygle-dns-authoritative`'s `SecondaryRefresher`,
   which compares each zone's SOA serial against its master on a refresh
   interval and runs a full AXFR/IXFR pull when the master is newer (or the
   local zone has never been transferred). Transferred records replace the
@@ -151,7 +151,7 @@ must use POST.
 
 ### Remote blocklist sources
 
-`daygle-policy`'s `BlocklistSourceManager` fetches each configured
+`daygle-dns-policy`'s `BlocklistSourceManager` fetches each configured
 `[[policy.blocklist_sources]]` URL over HTTP(S) (reqwest/rustls, 32 MiB body
 cap, redirects, 30 s timeout) and parses the body in its declared format
 (`domains`, `hosts`, or `adblock`). A background task in `daygle` polls on the
@@ -170,7 +170,7 @@ same path for per-source status.
   generates an ECDSA P-256 key (stored as PKCS#8 in SQLite) and signs the zone
   with NSEC non-existence proofs on the next catalog reload. Signatures are
   valid for `dnssec_sig_validity_days` (default 14) from their inception.
-- **Maintenance** (`daygle-authoritative`'s `DnssecMaintenance`, spawned when
+- **Maintenance** (`daygle-dns-authoritative`'s `DnssecMaintenance`, spawned when
   `dnssec_enabled`) keeps signed zones valid forever. Every
   `dnssec_maintenance_secs` it checks two things: when signatures are older
   than half their validity window it reloads the catalog, which re-signs

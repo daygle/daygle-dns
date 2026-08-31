@@ -12,13 +12,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use arc_swap::ArcSwap;
-use daygle_api::{router, AppState};
-use daygle_authoritative::AuthorityCatalog;
-use daygle_core::config::DaygleConfig;
-use daygle_core::error::{DaygleError, Result};
-use daygle_core::{LogLevel, LogStore, Metrics, RateLimiter};
-use daygle_policy::BlocklistSourceManager;
-use daygle_recursive::RecursiveResolver;
+use daygle_dns_api::{router, AppState};
+use daygle_dns_authoritative::AuthorityCatalog;
+use daygle_dns_core::config::DaygleConfig;
+use daygle_dns_core::error::{DaygleError, Result};
+use daygle_dns_core::{LogLevel, LogStore, Metrics, RateLimiter};
+use daygle_dns_policy::BlocklistSourceManager;
+use daygle_dns_recursive::RecursiveResolver;
 use dispatcher::DnsDispatcher;
 use hickory_server::server::Server;
 use reload::{
@@ -146,7 +146,7 @@ pub async fn bind_with(
     let shutdown = CancellationToken::new();
 
     // Authoritative.
-    let store = daygle_authoritative::ZoneStore::open(&config.authoritative.database)?;
+    let store = daygle_dns_authoritative::ZoneStore::open(&config.authoritative.database)?;
     let catalog = Arc::new(AuthorityCatalog::new(
         store.clone(),
         config.authoritative.clone(),
@@ -157,7 +157,7 @@ pub async fn bind_with(
     // DNSSEC maintenance: renews RRSIGs before they expire and rolls keys
     // on schedule, so signed zones never go bogus.
     if config.authoritative.dnssec_enabled {
-        let maintenance = daygle_authoritative::DnssecMaintenance::new(
+        let maintenance = daygle_dns_authoritative::DnssecMaintenance::new(
             store.clone(),
             catalog.clone(),
             &config.authoritative,
@@ -174,11 +174,11 @@ pub async fn bind_with(
     // refresher is shared with the NOTIFY listener so inbound NOTIFYs can
     // trigger immediate refreshes (RFC 1996).
     let refresher = if !config.authoritative.secondary_zones.is_empty() {
-        let refresher = Arc::new(daygle_authoritative::SecondaryRefresher::new(
+        let refresher = Arc::new(daygle_dns_authoritative::SecondaryRefresher::new(
             store,
             catalog.clone(),
             config.authoritative.secondary_zones.clone(),
-            daygle_authoritative::XfrClient::default(),
+            daygle_dns_authoritative::XfrClient::default(),
         ));
         tokio::spawn({
             let refresher = refresher.clone();
@@ -194,7 +194,7 @@ pub async fn bind_with(
 
     // Outbound NOTIFY: sent to secondaries when a primary zone changes.
     let notify_sender = if config.authoritative.notify_enabled {
-        match daygle_authoritative::NotifySender::new(&config.authoritative.notify_targets) {
+        match daygle_dns_authoritative::NotifySender::new(&config.authoritative.notify_targets) {
             Ok(sender) => Some(Arc::new(sender)),
             Err(e) => {
                 warn!(error = %e, "disabling outbound NOTIFY");
@@ -209,7 +209,7 @@ pub async fn bind_with(
     // Handled on the regular DNS listeners (OpCode::Notify interception), so
     // no extra socket is bound.
     let notify_inbound = match (config.authoritative.notify_listen_enabled, refresher.clone()) {
-        (true, Some(refresher)) => Some(Arc::new(daygle_authoritative::notify::NotifyInbound::new(
+        (true, Some(refresher)) => Some(Arc::new(daygle_dns_authoritative::notify::NotifyInbound::new(
             config.authoritative.secondary_zones.clone(),
             refresher,
         ))),
@@ -222,7 +222,7 @@ pub async fn bind_with(
         }
         _ => None,
     };
-    let notify_hooks = daygle_authoritative::notify::NotifyHooks {
+    let notify_hooks = daygle_dns_authoritative::notify::NotifyHooks {
         sender: notify_sender,
         inbound: notify_inbound,
     };
@@ -239,7 +239,7 @@ pub async fn bind_with(
     };
 
     // Policy.
-    let policy = daygle_policy::build_engine(&config.policy)?;
+    let policy = daygle_dns_policy::build_engine(&config.policy)?;
 
     // Rate limiting (per client + per domain).
     let rate_limiter = Arc::new(RateLimiter::new(&config.rate_limit));
@@ -258,7 +258,7 @@ pub async fn bind_with(
     // TSIG keys (RFC 8945) for transfer/update authentication. Key
     // construction errors are configuration errors: fail fast at startup.
     let tsig_keys = Arc::new(
-        daygle_authoritative::tsig::TsigKeyRing::from_configs(&config.authoritative.tsig_keys)
+        daygle_dns_authoritative::tsig::TsigKeyRing::from_configs(&config.authoritative.tsig_keys)
             .map_err(|e| DaygleError::Config(e))?,
     );
 
@@ -535,8 +535,8 @@ async fn bind_listeners(
             .map_err(|e| DaygleError::Config(format!("bad DoT listen address: {e}")))?;
         let listener = tokio::net::TcpListener::bind(addr).await?;
         addrs.dot = Some(listener.local_addr()?);
-        let tls_config = daygle_dot::build_tls_config(&config.dot)?;
-        daygle_dot::register_dot(
+        let tls_config = daygle_dns_dot::build_tls_config(&config.dot)?;
+        daygle_dns_dot::register_dot(
             server,
             listener,
             tls_config,
@@ -551,8 +551,8 @@ async fn bind_listeners(
             .map_err(|e| DaygleError::Config(format!("bad DoH listen address: {e}")))?;
         let listener = tokio::net::TcpListener::bind(addr).await?;
         addrs.doh = Some(listener.local_addr()?);
-        let tls_config = daygle_dot::build_doh_tls_config(&config.doh)?;
-        daygle_dot::register_doh(
+        let tls_config = daygle_dns_dot::build_doh_tls_config(&config.doh)?;
+        daygle_dns_dot::register_doh(
             server,
             listener,
             tls_config,
@@ -593,13 +593,13 @@ fn import_zone_files(
             .unwrap_or("imported");
         let text = std::fs::read_to_string(&path)
             .map_err(|e| DaygleError::Config(format!("cannot read zone file: {e}")))?;
-        let records = daygle_authoritative::parse::parse_zone_file(&text)?;
+        let records = daygle_dns_authoritative::parse::parse_zone_file(&text)?;
 
         let zone = match catalog.store().find_zone_by_name(name) {
             Ok(Some(z)) => z,
             Ok(None) => catalog
                 .store()
-                .create_zone(&daygle_authoritative::model::ZoneInput {
+                .create_zone(&daygle_dns_authoritative::model::ZoneInput {
                     name: name.to_string(),
                     ..Default::default()
                 })?,

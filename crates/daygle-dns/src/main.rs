@@ -6,8 +6,8 @@ use std::sync::Arc;
 
 use clap::Parser;
 use daygle_dns::bind_with;
-use daygle_core::config::DaygleConfig;
-use daygle_core::DEFAULT_CONFIG_PATH;
+use daygle_dns_core::config::DaygleConfig;
+use daygle_dns_core::DEFAULT_CONFIG_PATH;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
@@ -54,7 +54,7 @@ fn main() {
 }
 
 #[tokio::main]
-async fn run(config: DaygleConfig, config_path: String) -> daygle_core::error::Result<()> {
+async fn run(config: DaygleConfig, config_path: String) -> daygle_dns_core::error::Result<()> {
     let config = Arc::new(config);
     let bound = bind_with(config, Some(config_path.into())).await?;
 

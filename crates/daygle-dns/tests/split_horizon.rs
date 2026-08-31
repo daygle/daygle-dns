@@ -8,12 +8,12 @@
 mod common;
 
 use common::*;
-use daygle_authoritative::model::{
+use daygle_dns_authoritative::model::{
     MoveDirection, RecordInput, SplitHorizonEntryInput, SplitHorizonNetworkInput,
     SplitHorizonRecord, ZoneInput,
 };
-use daygle_authoritative::store::MoveResult;
-use daygle_core::config::DaygleConfig;
+use daygle_dns_authoritative::store::MoveResult;
+use daygle_dns_core::config::DaygleConfig;
 use hickory_proto::op::ResponseCode;
 use hickory_proto::rr::RecordType;
 
@@ -21,7 +21,7 @@ fn config_with_zone(db: &std::path::Path) -> DaygleConfig {
     base_config(db)
 }
 
-fn zone_with_www(store: &daygle_authoritative::ZoneStore, zone_name: &str, ip: &str) {
+fn zone_with_www(store: &daygle_dns_authoritative::ZoneStore, zone_name: &str, ip: &str) {
     let zone = store
         .create_zone(&ZoneInput {
             name: zone_name.to_string(),

@@ -12,12 +12,12 @@ name = "daygle-dns"
 path = "src/main.rs"
 
 [dependencies]
-daygle-core = { path = "../daygle-core" }
-daygle-policy = { path = "../daygle-policy" }
-daygle-authoritative = { path = "../daygle-authoritative" }
-daygle-recursive = { path = "../daygle-recursive" }
-daygle-dot = { path = "../daygle-dot" }
-daygle-api = { path = "../daygle-api" }
+daygle-dns-core = { path = "../daygle-dns-core" }
+daygle-dns-policy = { path = "../daygle-dns-policy" }
+daygle-dns-authoritative = { path = "../daygle-dns-authoritative" }
+daygle-dns-recursive = { path = "../daygle-dns-recursive" }
+daygle-dns-dot = { path = "../daygle-dns-dot" }
+daygle-dns-api = { path = "../daygle-dns-api" }
 hickory-proto.workspace = true
 hickory-server.workspace = true
 hickory-resolver.workspace = true
@@ -43,8 +43,8 @@ rustls-pki-types.workspace = true
 tokio.workspace = true
 hickory-proto.workspace = true
 hickory-server.workspace = true
-daygle-core = { path = "../daygle-core" }
-daygle-authoritative = { path = "../daygle-authoritative" }
-daygle-policy = { path = "../daygle-policy" }
+daygle-dns-core = { path = "../daygle-dns-core" }
+daygle-dns-authoritative = { path = "../daygle-dns-authoritative" }
+daygle-dns-policy = { path = "../daygle-dns-policy" }
 reqwest.workspace = true
 serde_json.workspace = true

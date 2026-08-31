@@ -6,9 +6,9 @@ mod common;
 use std::time::Duration;
 
 use common::*;
-use daygle_authoritative::model::{RecordInput, ZoneInput};
-use daygle_authoritative::XfrClient;
-use daygle_core::config::{DaygleConfig, SecondaryZoneConfig};
+use daygle_dns_authoritative::model::{RecordInput, ZoneInput};
+use daygle_dns_authoritative::XfrClient;
+use daygle_dns_core::config::{DaygleConfig, SecondaryZoneConfig};
 use hickory_proto::op::{Message, MessageType, OpCode, Query, ResponseCode};
 use hickory_proto::rr::{Name, RecordType};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};

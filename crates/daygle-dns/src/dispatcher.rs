@@ -5,11 +5,11 @@ use std::sync::Arc;
 
 use arc_swap::{ArcSwap, ArcSwapOption};
 use async_trait::async_trait;
-use daygle_authoritative::model::SPLIT_HORIZON_RECORD_TYPES;
-use daygle_authoritative::AuthorityCatalog;
-use daygle_core::{DaygleError, LogStore, Metrics, RateLimiter};
-use daygle_policy::{Action, PolicyEngine};
-use daygle_recursive::RecursiveResolver;
+use daygle_dns_authoritative::model::SPLIT_HORIZON_RECORD_TYPES;
+use daygle_dns_authoritative::AuthorityCatalog;
+use daygle_dns_core::{DaygleError, LogStore, Metrics, RateLimiter};
+use daygle_dns_policy::{Action, PolicyEngine};
+use daygle_dns_recursive::RecursiveResolver;
 use hickory_proto::op::{MessageType, OpCode, ResponseCode};
 use hickory_proto::rr::{Name, RData, Record, RecordType};
 use hickory_server::net::runtime::Time;
@@ -35,9 +35,9 @@ pub struct DnsDispatcher {
     metrics: Arc<Metrics>,
     logs: Arc<LogStore>,
     /// Optional NOTIFY hooks (outbound sender + inbound handler).
-    notify: daygle_authoritative::notify::NotifyHooks,
+    notify: daygle_dns_authoritative::notify::NotifyHooks,
     /// TSIG keys (RFC 8945) for transfer/update authentication.
-    tsig_keys: Arc<daygle_authoritative::tsig::TsigKeyRing>,
+    tsig_keys: Arc<daygle_dns_authoritative::tsig::TsigKeyRing>,
 }
 
 impl DnsDispatcher {
@@ -60,8 +60,8 @@ impl DnsDispatcher {
             rate_limiter,
             metrics,
             logs,
-            daygle_authoritative::notify::NotifyHooks::default(),
-            Arc::new(daygle_authoritative::tsig::TsigKeyRing::default()),
+            daygle_dns_authoritative::notify::NotifyHooks::default(),
+            Arc::new(daygle_dns_authoritative::tsig::TsigKeyRing::default()),
         )
     }
 
@@ -76,8 +76,8 @@ impl DnsDispatcher {
         rate_limiter: Arc<RateLimiter>,
         metrics: Arc<Metrics>,
         logs: Arc<LogStore>,
-        notify: daygle_authoritative::notify::NotifyHooks,
-        tsig_keys: Arc<daygle_authoritative::tsig::TsigKeyRing>,
+        notify: daygle_dns_authoritative::notify::NotifyHooks,
+        tsig_keys: Arc<daygle_dns_authoritative::tsig::TsigKeyRing>,
     ) -> Self {
         Self {
             catalog,
@@ -138,27 +138,27 @@ impl DnsDispatcher {
         // the same key, chaining the request MAC.
         let tsig = match self.catalog.tsig_transfer_key(qname) {
             Some(required) => {
-                match daygle_authoritative::tsig::verify_request(
+                match daygle_dns_authoritative::tsig::verify_request(
                     &self.tsig_keys,
                     request.as_slice(),
                     request.metadata.id,
                 ) {
-                    daygle_authoritative::tsig::TsigVerifyOutcome::Valid {
+                    daygle_dns_authoritative::tsig::TsigVerifyOutcome::Valid {
                         key,
                         response_context,
                         ..
                     } if key.name == required.name => {
                         Some((key, Some(response_context)))
                     }
-                    daygle_authoritative::tsig::TsigVerifyOutcome::Valid { .. } => {
+                    daygle_dns_authoritative::tsig::TsigVerifyOutcome::Valid { .. } => {
                         debug!(query = %qname, %client, "zone transfer signed with wrong TSIG key");
                         return send_error(&mut response_handle, request, ResponseCode::Refused).await;
                     }
-                    daygle_authoritative::tsig::TsigVerifyOutcome::Invalid(failure) => {
+                    daygle_dns_authoritative::tsig::TsigVerifyOutcome::Invalid(failure) => {
                         debug!(query = %qname, %client, ?failure, "zone transfer TSIG verification failed");
                         return send_error(&mut response_handle, request, ResponseCode::Refused).await;
                     }
-                    daygle_authoritative::tsig::TsigVerifyOutcome::Unsigned => {
+                    daygle_dns_authoritative::tsig::TsigVerifyOutcome::Unsigned => {
                         debug!(query = %qname, %client, "zone transfer requires TSIG");
                         return send_error(&mut response_handle, request, ResponseCode::Refused).await;
                     }
@@ -167,7 +167,7 @@ impl DnsDispatcher {
             None => None,
         }
         .map(|(key, context)| {
-            let context = context.unwrap_or_else(|| daygle_authoritative::tsig::response_context_for(&key));
+            let context = context.unwrap_or_else(|| daygle_dns_authoritative::tsig::response_context_for(&key));
             (key, context)
         });
 
@@ -282,7 +282,7 @@ impl RequestHandler for DnsDispatcher {
         // and `update_networks` gate who may update.
         if request.metadata.op_code == OpCode::Update {
             let edns = request.edns.as_ref();
-            return daygle_authoritative::handle_update_with_notify(
+            return daygle_dns_authoritative::handle_update_with_notify(
                 &self.catalog,
                 request,
                 edns,

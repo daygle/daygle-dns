@@ -65,13 +65,13 @@ dig @127.0.0.1 -p 853 example.com A +tls   # DNS over TLS
 
 | Crate                   | Purpose |
 |-------------------------|---------|
-| `daygle-core`           | Configuration model, shared error type, metrics, log store |
-| `daygle-policy`         | Plugin-style policy engine (blocklists, ACLs, per-client rules) |
-| `daygle-authoritative`  | SQLite zone storage, zone-file parser, Hickory catalog + DNSSEC signing |
-| `daygle-recursive`      | Recursive resolver (caching, negative caching, retries, timeouts, DNSSEC) |
-| `daygle-dot`            | DoT (RFC 7858) + DoH (RFC 8484) via rustls + certificate management |
-| `daygle-api`            | REST API (axum) + embedded GUI serving |
-| `daygle-gui`            | Embedded web GUI assets (Svelte build output) |
+| `daygle-dns-core`           | Configuration model, shared error type, metrics, log store |
+| `daygle-dns-policy`         | Plugin-style policy engine (blocklists, ACLs, per-client rules) |
+| `daygle-dns-authoritative`  | SQLite zone storage, zone-file parser, Hickory catalog + DNSSEC signing |
+| `daygle-dns-recursive`      | Recursive resolver (caching, negative caching, retries, timeouts, DNSSEC) |
+| `daygle-dns-dot`            | DoT (RFC 7858) + DoH (RFC 8484) via rustls + certificate management |
+| `daygle-dns-api`            | REST API (axum) + embedded GUI serving |
+| `daygle-dns-gui`            | Embedded web GUI assets (Svelte build output) |
 | `daygle-dns`             | The server binary: UDP/TCP/DoT listeners + the combined dispatcher |
 
 See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for how the pieces fit
@@ -137,7 +137,7 @@ build the full Svelte GUI:
 ```bash
 cd web
 npm install
-npm run build     # outputs to web/dist, embedded by daygle-gui
+npm run build     # outputs to web/dist, embedded by daygle-dns-gui
 cargo build --release -p daygle-dns
 ```
 

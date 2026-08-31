@@ -5,7 +5,7 @@
 mod common;
 
 use common::*;
-use daygle_core::config::ConditionalZoneConfig;
+use daygle_dns_core::config::ConditionalZoneConfig;
 use hickory_proto::op::{Message, MessageType, ResponseCode};
 use hickory_proto::rr::{RData, Record, RecordType};
 

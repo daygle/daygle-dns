@@ -449,67 +449,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4583a4551df46e2792f82ceeac45e850d2e2d5debba0b91f102385cda5b11f06"
 
 [[package]]
-name = "daygle-api"
-version = "0.1.0"
-dependencies = [
- "arc-swap",
- "axum",
- "chrono",
- "daygle-authoritative",
- "daygle-core",
- "daygle-gui",
- "daygle-policy",
- "daygle-recursive",
- "mime_guess",
- "serde",
- "serde_json",
- "tokio",
- "tower",
- "tower-http 0.7.0",
- "tracing",
- "uuid",
-]
-
-[[package]]
-name = "daygle-authoritative"
-version = "0.1.0"
-dependencies = [
- "arc-swap",
- "base64",
- "chrono",
- "daygle-core",
- "hickory-proto",
- "hickory-server",
- "ipnet",
- "rusqlite",
- "rustls-pki-types",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "tokio-util",
- "tracing",
- "uuid",
-]
-
-[[package]]
-name = "daygle-core"
-version = "0.1.0"
-dependencies = [
- "base64",
- "chrono",
- "ipnet",
- "parking_lot",
- "rusqlite",
- "serde",
- "serde_json",
- "thiserror",
- "toml",
- "tracing",
- "url",
-]
-
-[[package]]
 name = "daygle-dns"
 version = "0.1.0"
 dependencies = [
@@ -518,12 +457,12 @@ dependencies = [
  "axum",
  "chrono",
  "clap",
- "daygle-api",
- "daygle-authoritative",
- "daygle-core",
- "daygle-dot",
- "daygle-policy",
- "daygle-recursive",
+ "daygle-dns-api",
+ "daygle-dns-authoritative",
+ "daygle-dns-core",
+ "daygle-dns-dot",
+ "daygle-dns-policy",
+ "daygle-dns-recursive",
  "futures-util",
  "hickory-proto",
  "hickory-resolver",
@@ -544,10 +483,71 @@ dependencies = [
 ]
 
 [[package]]
-name = "daygle-dot"
+name = "daygle-dns-api"
 version = "0.1.0"
 dependencies = [
- "daygle-core",
+ "arc-swap",
+ "axum",
+ "chrono",
+ "daygle-dns-authoritative",
+ "daygle-dns-core",
+ "daygle-dns-gui",
+ "daygle-dns-policy",
+ "daygle-dns-recursive",
+ "mime_guess",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tower",
+ "tower-http 0.7.0",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "daygle-dns-authoritative"
+version = "0.1.0"
+dependencies = [
+ "arc-swap",
+ "base64",
+ "chrono",
+ "daygle-dns-core",
+ "hickory-proto",
+ "hickory-server",
+ "ipnet",
+ "rusqlite",
+ "rustls-pki-types",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "daygle-dns-core"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "chrono",
+ "ipnet",
+ "parking_lot",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "toml",
+ "tracing",
+ "url",
+]
+
+[[package]]
+name = "daygle-dns-dot"
+version = "0.1.0"
+dependencies = [
+ "daygle-dns-core",
  "hickory-proto",
  "hickory-server",
  "rcgen",
@@ -560,18 +560,18 @@ dependencies = [
 ]
 
 [[package]]
-name = "daygle-gui"
+name = "daygle-dns-gui"
 version = "0.1.0"
 dependencies = [
  "rust-embed",
 ]
 
 [[package]]
-name = "daygle-policy"
+name = "daygle-dns-policy"
 version = "0.1.0"
 dependencies = [
  "async-trait",
- "daygle-core",
+ "daygle-dns-core",
  "ipnet",
  "reqwest",
  "serde",
@@ -580,10 +580,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "daygle-recursive"
+name = "daygle-dns-recursive"
 version = "0.1.0"
 dependencies = [
- "daygle-core",
+ "daygle-dns-core",
  "hickory-proto",
  "hickory-resolver",
  "tokio",

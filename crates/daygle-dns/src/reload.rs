@@ -17,12 +17,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use arc_swap::{ArcSwap, ArcSwapOption};
-use daygle_authoritative::AuthorityCatalog;
-use daygle_core::config::DaygleConfig;
-use daygle_core::error::Result;
-use daygle_core::{LogStore, Metrics, RateLimiter};
-use daygle_policy::{BlocklistSourceManager, PolicyEngine};
-use daygle_recursive::RecursiveResolver;
+use daygle_dns_authoritative::AuthorityCatalog;
+use daygle_dns_core::config::DaygleConfig;
+use daygle_dns_core::error::Result;
+use daygle_dns_core::{LogStore, Metrics, RateLimiter};
+use daygle_dns_policy::{BlocklistSourceManager, PolicyEngine};
+use daygle_dns_recursive::RecursiveResolver;
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
@@ -72,7 +72,7 @@ pub fn apply_config(shared: &Shared, new: Arc<DaygleConfig>) -> bool {
 
     // Policy engine.
     if old.policy != new.policy {
-        match daygle_policy::build_engine(&new.policy) {
+        match daygle_dns_policy::build_engine(&new.policy) {
             Ok(engine) => {
                 shared.policy.store(Arc::new(engine));
                 info!("policy engine reloaded");
@@ -189,7 +189,7 @@ fn last_modified(path: &Path) -> Option<std::time::SystemTime> {
 /// and trigger manual refreshes.
 pub fn spawn_blocklist_refresh(
     shared: Arc<Shared>,
-    sources: Vec<daygle_core::config::BlocklistSourceConfig>,
+    sources: Vec<daygle_dns_core::config::BlocklistSourceConfig>,
     shutdown: CancellationToken,
 ) -> Option<Arc<BlocklistSourceManager>> {
     let manager = match BlocklistSourceManager::new(sources) {
@@ -250,7 +250,7 @@ mod tests {
     }
 
     fn shared(cfg: DaygleConfig) -> Shared {
-        let store = daygle_authoritative::ZoneStore::open(":memory:").unwrap();
+        let store = daygle_dns_authoritative::ZoneStore::open(":memory:").unwrap();
         let catalog = Arc::new(
             AuthorityCatalog::new(store, cfg.authoritative.clone()).unwrap(),
         );

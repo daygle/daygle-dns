@@ -1,0 +1,10 @@
+[package]
+name = "daygle-dns-gui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Embedded web GUI (Svelte build output) for Daygle DNS"
+
+[dependencies]
+rust-embed.workspace = true

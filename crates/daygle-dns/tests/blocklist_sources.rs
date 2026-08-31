@@ -4,7 +4,7 @@
 mod common;
 
 use common::*;
-use daygle_core::config::{BlocklistFormat, BlocklistSourceConfig};
+use daygle_dns_core::config::{BlocklistFormat, BlocklistSourceConfig};
 use hickory_proto::op::ResponseCode;
 use hickory_proto::rr::RecordType;
 

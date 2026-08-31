@@ -1,0 +1,14 @@
+[package]
+name = "daygle-dns-recursive"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Recursive resolver with caching, negative caching, retries and DNSSEC validation"
+
+[dependencies]
+daygle-dns-core = { path = "../daygle-dns-core" }
+hickory-resolver.workspace = true
+hickory-proto.workspace = true
+tokio.workspace = true
+tracing.workspace = true
