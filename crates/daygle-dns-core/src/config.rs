@@ -850,6 +850,13 @@ pub struct PolicySettings {
     pub allowed_networks: Vec<String>,
     /// Per-client / per-domain rules, evaluated in order.
     pub rules: Vec<PolicyRule>,
+    /// Filter AAAA (IPv6) answers: when true, AAAA queries are answered with an
+    /// empty NODATA response so dual-stack clients fall back to IPv4 (the
+    /// equivalent of Technitium's "Block AAAA" app).
+    pub filter_aaaa: bool,
+    /// Names (or `*.suffix` wildcards) exempt from `filter_aaaa`, i.e. hosts
+    /// that must stay reachable over IPv6.
+    pub filter_aaaa_except: Vec<String>,
 }
 
 impl Default for PolicySettings {
@@ -862,6 +869,8 @@ impl Default for PolicySettings {
             denied_networks: vec![],
             allowed_networks: vec![],
             rules: vec![],
+            filter_aaaa: false,
+            filter_aaaa_except: vec![],
         }
     }
 }

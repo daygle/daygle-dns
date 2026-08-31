@@ -45,6 +45,9 @@ pub enum Action {
     Block,
     /// Synthesize a redirect answer with the given address.
     Redirect(IpAddr),
+    /// Answer with an empty NODATA response (NOERROR, no records). Used by the
+    /// AAAA filter to force dual-stack clients onto IPv4.
+    NoData,
 }
 
 impl Action {
@@ -54,6 +57,7 @@ impl Action {
             Action::Refused => "refused",
             Action::Block => "block",
             Action::Redirect(_) => "redirect",
+            Action::NoData => "nodata",
         }
     }
 }
@@ -107,6 +111,14 @@ pub fn build_engine(settings: &PolicySettings) -> Result<PolicyEngine> {
     // Ordered per-client rules.
     for rule in &settings.rules {
         engine.add_rule(PerClientRule::from_config(rule)?);
+    }
+
+    // Filter AAAA (Technitium-style "Block AAAA"): answer AAAA with NODATA so
+    // dual-stack clients fall back to IPv4. Names on the bypass list keep IPv6.
+    if settings.filter_aaaa {
+        let bypass = normalize_domains(settings.filter_aaaa_except.iter().cloned());
+        let bypass = (!bypass.is_empty()).then(|| Blocklist::from_set(bypass));
+        engine.set_filter_aaaa(true, bypass);
     }
 
     Ok(engine)

@@ -393,6 +393,13 @@ impl RequestHandler for DnsDispatcher {
                 return send_redirect(&mut response_handle, request, info.query.query_type(), *ip)
                     .await;
             }
+            Action::NoData => {
+                // Filter AAAA: NODATA (empty NOERROR) forces IPv4 fallback.
+                debug!(query = %qname, reason = %decision.reason, "AAAA filtered");
+                self.metrics.inc(&self.metrics.blocked);
+                self.record_stats(client, &qname, Outcome::Blocked);
+                return send_empty(&mut response_handle, request).await;
+            }
         }
 
         // 1c. Split horizon: per-client synthetic answers. This runs after
@@ -509,6 +516,31 @@ async fn send_error<R: ResponseHandler>(
 }
 
 /// Send a response whose answer section is exactly `records`.
+/// Send an empty NODATA response: NOERROR with no answer records, echoing the
+/// question. Used by the AAAA filter so dual-stack clients fall back to IPv4
+/// (an NXDOMAIN would wrongly claim the whole name does not exist).
+async fn send_empty<R: ResponseHandler>(handle: &mut R, request: &Request) -> ResponseInfo {
+    let mut metadata = request.metadata;
+    metadata.message_type = MessageType::Response;
+    metadata.response_code = ResponseCode::NoError;
+    metadata.recursion_available = true;
+
+    let response = MessageResponseBuilder::from_message_request(request).build(
+        metadata,
+        std::iter::empty(),
+        std::iter::empty(),
+        std::iter::empty(),
+        std::iter::empty(),
+    );
+    match handle.send_response(response).await {
+        Ok(info) => info,
+        Err(e) => {
+            warn!("failed to send empty answer: {e}");
+            fallback_response()
+        }
+    }
+}
+
 async fn send_records<R: ResponseHandler>(
     handle: &mut R,
     request: &Request,

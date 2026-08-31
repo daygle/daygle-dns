@@ -37,6 +37,13 @@ pub struct PolicyEngine {
     remote_blocklist: Option<std::sync::Arc<Blocklist>>,
     rules: std::sync::Arc<Vec<PerClientRule>>,
     plugins: std::sync::Arc<PluginRegistry>,
+    /// When set, AAAA queries are answered with an empty NODATA response
+    /// (Technitium-style "Filter AAAA") so dual-stack clients fall back to
+    /// IPv4. Names matching `filter_aaaa_bypass` are exempt.
+    filter_aaaa: bool,
+    /// Names (and `*.suffix` wildcards) exempt from the AAAA filter, e.g.
+    /// hosts that must remain reachable over IPv6.
+    filter_aaaa_bypass: Option<std::sync::Arc<Blocklist>>,
 }
 
 impl PolicyEngine {
@@ -71,6 +78,24 @@ impl PolicyEngine {
     /// The current remote blocklist, for comparison on refresh.
     pub fn remote_blocklist_snapshot(&self) -> Option<std::sync::Arc<Blocklist>> {
         self.remote_blocklist.clone()
+    }
+
+    /// Enable or disable the AAAA filter. When enabled, AAAA queries return an
+    /// empty NODATA answer unless the name matches `bypass`.
+    pub fn set_filter_aaaa(&mut self, enabled: bool, bypass: Option<Blocklist>) {
+        self.filter_aaaa = enabled;
+        self.filter_aaaa_bypass = bypass.map(std::sync::Arc::new);
+    }
+
+    /// Whether the AAAA filter would suppress a query for `query_name` of the
+    /// given `record_type` (used by the dispatcher and tests).
+    fn aaaa_filtered(&self, query_name: &str, record_type: &str) -> bool {
+        self.filter_aaaa
+            && record_type.eq_ignore_ascii_case("AAAA")
+            && !self
+                .filter_aaaa_bypass
+                .as_ref()
+                .is_some_and(|b| b.contains(query_name))
     }
 
     pub fn add_rule(&mut self, rule: PerClientRule) {
@@ -137,7 +162,17 @@ impl PolicyEngine {
             }
         }
 
-        // 4. Plugins.
+        // 4. Filter AAAA: after explicit blocklists/rules (so an outright
+        // block still wins with NXDOMAIN) but before plugins, suppress IPv6
+        // answers by returning NODATA, forcing dual-stack clients to IPv4.
+        if self.aaaa_filtered(query_name, record_type) {
+            return Decision::new(
+                format!("AAAA filtered for '{query_name}'"),
+                Action::NoData,
+            );
+        }
+
+        // 5. Plugins.
         if !self.plugins.is_empty() {
             let ctx = crate::PolicyContext {
                 client,
@@ -212,5 +247,65 @@ mod tests {
         e.enabled = false;
         let d = e.evaluate(ip("10.99.1.1"), "ads.example.com", "A").await;
         assert_eq!(d.action, Action::Allow);
+    }
+
+    #[tokio::test]
+    async fn filter_aaaa_returns_nodata_for_aaaa_only() {
+        let mut e = PolicyEngine::new(true);
+        e.set_filter_aaaa(true, None);
+        // AAAA is filtered...
+        assert_eq!(
+            e.evaluate(ip("8.8.8.8"), "example.org", "AAAA").await.action,
+            Action::NoData
+        );
+        // ...but A (and other types) pass through untouched.
+        assert_eq!(
+            e.evaluate(ip("8.8.8.8"), "example.org", "A").await.action,
+            Action::Allow
+        );
+        assert_eq!(
+            e.evaluate(ip("8.8.8.8"), "example.org", "MX").await.action,
+            Action::Allow
+        );
+    }
+
+    #[tokio::test]
+    async fn filter_aaaa_bypass_keeps_ipv6() {
+        let mut e = PolicyEngine::new(true);
+        e.set_filter_aaaa(true, Some(Blocklist::from_lines(["*.v6.test", "host.test"])));
+        // Bypassed names keep their AAAA answers (fall through to Allow).
+        assert_eq!(
+            e.evaluate(ip("8.8.8.8"), "a.v6.test", "AAAA").await.action,
+            Action::Allow
+        );
+        assert_eq!(
+            e.evaluate(ip("8.8.8.8"), "host.test", "AAAA").await.action,
+            Action::Allow
+        );
+        // Everything else is still filtered.
+        assert_eq!(
+            e.evaluate(ip("8.8.8.8"), "other.test", "AAAA").await.action,
+            Action::NoData
+        );
+    }
+
+    #[tokio::test]
+    async fn filter_aaaa_off_by_default() {
+        let e = PolicyEngine::new(true);
+        assert_eq!(
+            e.evaluate(ip("8.8.8.8"), "example.org", "AAAA").await.action,
+            Action::Allow
+        );
+    }
+
+    #[tokio::test]
+    async fn explicit_block_wins_over_aaaa_filter() {
+        // A blocklisted name must still return NXDOMAIN for AAAA, not NODATA.
+        let mut e = engine();
+        e.set_filter_aaaa(true, None);
+        assert_eq!(
+            e.evaluate(ip("1.1.1.1"), "ads.example.com", "AAAA").await.action,
+            Action::Block
+        );
     }
 }
