@@ -94,6 +94,11 @@ export const api = {
   importZone: (name, text) => request('POST', '/zones/import', { name, text }),
   blocklistSources: () => request('GET', '/policy/blocklist/sources'),
   refreshBlocklistSources: () => request('POST', '/policy/blocklist/sources'),
+  blockingGroups: () => request('GET', '/policy/blocking'),
+  saveBlockingGroup: (body) => request('POST', '/policy/blocking', body),
+  deleteBlockingGroup: (id) => request('DELETE', `/policy/blocking/${id}`),
+  testBlocking: (client, domain) =>
+    request('POST', '/policy/blocking/test', { client, domain }),
   splitHorizon: () => request('GET', '/split-horizon'),
   saveSplitHorizonNetwork: (body) => request('POST', '/split-horizon/networks', body),
   deleteSplitHorizonNetwork: (name) =>

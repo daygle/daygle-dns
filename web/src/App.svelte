@@ -6,6 +6,7 @@
   import SplitHorizon from './views/SplitHorizon.svelte';
   import Logs from './views/Logs.svelte';
   import Blocklists from './views/Blocklists.svelte';
+  import AdvancedBlocking from './views/AdvancedBlocking.svelte';
   import Settings from './views/Settings.svelte';
 
   let view = $state('status');
@@ -38,6 +39,7 @@
     { id: 'zones', label: 'Zones & Records', viewer: true },
     { id: 'split-horizon', label: 'Split Horizon', viewer: true },
     { id: 'blocklists', label: 'Blocklists', viewer: true },
+    { id: 'advanced-blocking', label: 'Advanced Blocking', viewer: true },
     { id: 'logs', label: 'Logs' },
     { id: 'settings', label: 'Settings', viewer: true },
   ].filter((t) => !isViewer || !t.viewer);
@@ -87,6 +89,8 @@
         <SplitHorizon />
       {:else if view === 'blocklists'}
         <Blocklists />
+      {:else if view === 'advanced-blocking'}
+        <AdvancedBlocking />
       {:else if view === 'logs'}
         <Logs />
       {:else}
