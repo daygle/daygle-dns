@@ -45,7 +45,12 @@ pub struct QueryLogEntry {
 struct Inner {
     dir: PathBuf,
     retention_days: u32,
-    /// `None` once a write/open has failed (logger disabled).
+    /// Set once a write/open has failed: the logger stays disabled for the
+    /// rest of the process so a broken log directory can't spam warnings or
+    /// re-attempt a failing open on every query.
+    disabled: bool,
+    /// The current day's file, or `None` before the first write. Distinct
+    /// from `disabled`: `None` here just means "not opened yet".
     writer: Option<(String, BufWriter<File>)>,
 }
 
@@ -72,6 +77,7 @@ impl QueryLogger {
             inner: Mutex::new(Inner {
                 dir: dir.to_path_buf(),
                 retention_days,
+                disabled: false,
                 writer: None,
             }),
         }
@@ -84,9 +90,8 @@ impl QueryLogger {
             Ok(g) => g,
             Err(_) => return,
         };
-        if inner.writer.is_none() {
-            // First log or the logger was disabled by a previous failure:
-            // (re)open today's file below.
+        if inner.disabled {
+            return;
         }
 
         let today = Utc::now().format("%Y-%m-%d").to_string();
@@ -112,6 +117,7 @@ impl QueryLogger {
                         "query log open failed; persistent query logging disabled"
                     );
                     inner.writer = None;
+                    inner.disabled = true;
                     return;
                 }
             }
@@ -123,6 +129,7 @@ impl QueryLogger {
         if let Err(e) = write_line(writer, entry) {
             warn!(error = %e, "query log write failed; persistent query logging disabled");
             inner.writer = None;
+            inner.disabled = true;
         }
     }
 
@@ -144,8 +151,12 @@ fn open_log_file(dir: &Path, day: &str) -> std::io::Result<File> {
 fn write_line(w: &mut BufWriter<File>, entry: &QueryLogEntry) -> std::io::Result<()> {
     let mut line = serde_json::to_vec(entry)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    // A query name never exceeds 255 bytes, so a serialized entry is normally
+    // well under the cap. If some field is pathologically large, drop the
+    // whole line rather than truncate it into invalid JSON that would break
+    // any consumer parsing the file line by line.
     if line.len() > MAX_LINE_BYTES {
-        line.truncate(MAX_LINE_BYTES);
+        return Ok(());
     }
     line.push(b'\n');
     w.write_all(&line)?;
@@ -183,8 +194,6 @@ fn sweep_old_logs(dir: &Path, retention_days: u32) {
         ) else {
             continue;
         };
-        #[allow(clippy::type_complexity)]
-        let _ = (&y, &m, &d);
         let days = chrono::NaiveDate::from_ymd_opt(y, m, d)
             .map(|date| date.num_days_from_ce())
             .unwrap_or(i32::MAX);
