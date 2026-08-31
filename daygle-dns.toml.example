@@ -177,6 +177,13 @@ enabled = true
 blocklist = ["*.doubleclick.net", "*.ads.example.com"]
 blocklist_files = ["/etc/daygle-dns/blocklist.txt"]
 
+# Filter AAAA (IPv6): answer AAAA queries with an empty NODATA response so
+# dual-stack clients fall back to IPv4 (the equivalent of Technitium's
+# "Block AAAA" app). `filter_aaaa_except` lists names — or `*.suffix`
+# wildcards — that must stay reachable over IPv6.
+filter_aaaa = false
+filter_aaaa_except = ["*.ipv6.example.com", "nas.home.arpa"]
+
 # Remote blocklist sources: fetched over HTTP(S) and merged into the
 # blocklist, refreshed on a schedule (like Technitium's blocklist manager).
 # format: "domains" (one per line) | "hosts" (hosts file, e.g. StevenBlack)

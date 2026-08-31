@@ -74,6 +74,7 @@ parking_lot = "0.12"
 rust-embed = "8"
 mime_guess = "2"
 rand = "0.8"
+regex = "1"
 tempfile = "3"
 url = "2"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "http2", "json", "socks"] }

@@ -42,9 +42,15 @@
   ]);
 
   // ---- chart geometry ------------------------------------------------------
-  const W = 720;
+  // The SVG is drawn at the container's real pixel width (measured via
+  // `bind:clientWidth`) so a 1:1 viewBox keeps strokes crisp and markers round
+  // — a fixed viewBox with `preserveAspectRatio="none"` would stretch them.
+  let cw = $state(720); // measured container width in px
+  let hover = $state(null); // nearest-point readout under the cursor
   const H = 190;
-  const PAD = 8;
+  const PAD = 10; // top / right / bottom padding
+  const PAD_L = 40; // left padding — room for the y-axis labels
+  const W = $derived(Math.max(320, Math.round(cw)));
 
   const series = $derived(stats?.series ?? []);
   const totals = $derived({
@@ -56,18 +62,20 @@
 
   const chart = $derived.by(() => {
     if (!series.length) return null;
+    const n = series.length;
     const maxQ = Math.max(4, ...series.map((p) => p.queries));
     const maxB = Math.max(4, ...series.map((p) => p.blocked));
     const maxY = Math.max(maxQ, maxB * 2);
-    const step = (W - 2 * PAD) / Math.max(1, series.length - 1);
-    const y = (v) => H - PAD - (v / maxY) * (H - 2 * PAD);
-    const x = (i) => PAD + i * step;
+    const innerH = H - 2 * PAD;
+    const step = (W - PAD_L - PAD) / Math.max(1, n - 1);
+    const y = (v) => H - PAD - (v / maxY) * innerH;
+    const x = (i) => PAD_L + i * step;
     const pts = (key) =>
       series.map((p, i) => `${x(i).toFixed(1)},${y(p[key]).toFixed(1)}`).join(' ');
     const area = (key) =>
-      `${PAD},${H - PAD} ${pts(key)} ${(W - PAD).toFixed(1)},${H - PAD}`;
+      `${x(0).toFixed(1)},${H - PAD} ${pts(key)} ${x(n - 1).toFixed(1)},${H - PAD}`;
     // Label every sixth point with the wall-clock time.
-    const every = Math.max(1, Math.round(series.length / 6));
+    const every = Math.max(1, Math.round(n / 6));
     const labels = series
       .map((p, i) => ({ i, t: p.t }))
       .filter(({ i }) => i % every === 0)
@@ -82,11 +90,53 @@
       y: y(maxY * f),
       label: Math.round(maxY * f),
     }));
-    return { queriesPts: pts('queries'), blockedPts: pts('blocked'), queriesArea: area('queries'), labels, grid };
+    return {
+      n,
+      step,
+      x,
+      y,
+      queriesPts: pts('queries'),
+      blockedPts: pts('blocked'),
+      queriesArea: area('queries'),
+      labels,
+      grid,
+    };
   });
+
+  // Map the cursor to the nearest bucket and record its values for the tooltip.
+  function onMove(ev) {
+    const c = chart;
+    if (!c) return;
+    const rect = ev.currentTarget.getBoundingClientRect();
+    const px = ((ev.clientX - rect.left) / rect.width) * W;
+    let i = Math.round((px - PAD_L) / c.step);
+    i = Math.max(0, Math.min(c.n - 1, i));
+    const p = series[i];
+    const xi = c.x(i);
+    const ratio = xi / W;
+    hover = {
+      x: xi,
+      qy: c.y(p.queries),
+      by: c.y(p.blocked),
+      t: p.t,
+      queries: p.queries,
+      blocked: p.blocked,
+      authoritative: p.authoritative,
+      recursive: p.recursive,
+      errors: p.errors,
+      rate_limited: p.rate_limited,
+      align: ratio < 0.18 ? 'l' : ratio > 0.82 ? 'r' : 'c',
+    };
+  }
+  function onLeave() {
+    hover = null;
+  }
 
   function fmt(n) {
     return n.toLocaleString();
+  }
+  function clockLabel(t) {
+    return new Date(t * 1000).toLocaleTimeString();
   }
 </script>
 
@@ -130,14 +180,49 @@
     </div>
 
     {#if chart}
-      <svg viewBox="0 0 {W} {H}" preserveAspectRatio="none" class="chart" role="img" aria-label="Queries per minute">
-        {#each chart.grid as g (g.y)}
-          <line x1={PAD} x2={W - PAD} y1={g.y} y2={g.y} class="gridline"></line>
-        {/each}
-        <polygon points={chart.queriesArea} class="fill"></polygon>
-        <polyline points={chart.queriesPts} class="line queries"></polyline>
-        <polyline points={chart.blockedPts} class="line blocked"></polyline>
-      </svg>
+      <div class="chart-wrap" bind:clientWidth={cw}>
+        <svg
+          viewBox="0 0 {W} {H}"
+          class="chart"
+          role="img"
+          aria-label="Queries per minute"
+          onpointermove={onMove}
+          onpointerleave={onLeave}
+        >
+          <defs>
+            <linearGradient id="qfill" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" class="grad-top" />
+              <stop offset="100%" class="grad-bottom" />
+            </linearGradient>
+          </defs>
+          {#each chart.grid as g (g.y)}
+            <line x1={PAD_L} x2={W - PAD} y1={g.y} y2={g.y} class="gridline"></line>
+            <text x={PAD_L - 8} y={g.y} class="ylabel">{fmt(g.label)}</text>
+          {/each}
+          <polygon points={chart.queriesArea} class="fill"></polygon>
+          <polyline points={chart.queriesPts} class="line queries"></polyline>
+          <polyline points={chart.blockedPts} class="line blocked"></polyline>
+          {#if hover}
+            <line x1={hover.x} x2={hover.x} y1={PAD} y2={H - PAD} class="crosshair"></line>
+            <circle cx={hover.x} cy={hover.by} r="3.5" class="marker blocked"></circle>
+            <circle cx={hover.x} cy={hover.qy} r="3.5" class="marker queries"></circle>
+          {/if}
+        </svg>
+        {#if hover}
+          <div
+            class="tip"
+            class:tl={hover.align === 'l'}
+            class:tr={hover.align === 'r'}
+            style="left: {(hover.x / W) * 100}%"
+          >
+            <div class="tip-t">{clockLabel(hover.t)}</div>
+            <div class="tip-row"><span class="dot accent"></span> Queries <b>{fmt(hover.queries)}</b></div>
+            <div class="tip-row"><span class="dot danger"></span> Blocked <b>{fmt(hover.blocked)}</b></div>
+            <div class="tip-sub">{fmt(hover.authoritative)} auth · {fmt(hover.recursive)} recursive</div>
+            <div class="tip-sub">{fmt(hover.errors)} errors · {fmt(hover.rate_limited)} rate-limited</div>
+          </div>
+        {/if}
+      </div>
       <div class="axis">
         {#each chart.labels as l (l.x)}
           <span style="left: {(l.x / W) * 100}%">{l.label}</span>
@@ -238,12 +323,47 @@
   }
   .stat .big { font-size: 1.6rem; font-weight: 700; margin-top: 6px; }
 
-  .chart { width: 100%; height: 190px; display: block; }
+  .chart-wrap { position: relative; }
+  .chart { width: 100%; height: 190px; display: block; touch-action: none; }
   .gridline { stroke: var(--border); stroke-width: 1; }
-  .fill { fill: var(--accent); opacity: 0.12; }
-  .line { fill: none; stroke-width: 2; }
+  .ylabel {
+    fill: var(--muted);
+    font-size: 9px;
+    text-anchor: end;
+    dominant-baseline: middle;
+  }
+  .fill { fill: url(#qfill); }
+  .grad-top { stop-color: var(--accent); stop-opacity: 0.28; }
+  .grad-bottom { stop-color: var(--accent); stop-opacity: 0; }
+  .line { fill: none; stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
   .line.queries { stroke: var(--accent); }
   .line.blocked { stroke: var(--danger); }
+  .crosshair { stroke: var(--muted); stroke-width: 1; stroke-dasharray: 3 3; opacity: 0.65; }
+  .marker { stroke: var(--panel); stroke-width: 1.5; }
+  .marker.queries { fill: var(--accent); }
+  .marker.blocked { fill: var(--danger); }
+
+  .tip {
+    position: absolute;
+    top: 8px;
+    transform: translateX(-50%);
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 6px 9px;
+    font-size: 0.72rem;
+    line-height: 1.35;
+    pointer-events: none;
+    white-space: nowrap;
+    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.32);
+    z-index: 2;
+  }
+  .tip.tl { transform: translateX(0); }
+  .tip.tr { transform: translateX(-100%); }
+  .tip-t { color: var(--muted); margin-bottom: 3px; }
+  .tip-row { display: flex; align-items: center; gap: 6px; }
+  .tip-row b { margin-left: auto; padding-left: 12px; font-variant-numeric: tabular-nums; }
+  .tip-sub { color: var(--muted); margin-top: 2px; }
 
   .axis { position: relative; height: 18px; font-size: 0.7rem; color: var(--muted); }
   .axis span { position: absolute; transform: translateX(-50%); }

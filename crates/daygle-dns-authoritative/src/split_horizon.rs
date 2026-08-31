@@ -134,7 +134,7 @@ impl SplitHorizonIndex {
         rtype: RecordType,
     ) -> Option<SplitHorizonMatch> {
         let qname = qname.trim().trim_end_matches('.').to_ascii_lowercase();
-        let name = Name::from_utf8(&format!("{qname}.")).ok()?;
+        let name = Name::from_utf8(format!("{qname}.")).ok()?;
         for entry in &self.entries {
             if entry.domain != qname {
                 continue;

@@ -140,6 +140,10 @@ impl TsigKeyRing {
 }
 
 /// The outcome of verifying an inbound TSIG-signed request.
+// `Valid` is deliberately the large variant: it is the success path returned
+// once per verified transfer/update and consumed immediately, so boxing its
+// fields would add an allocation on the hot path to shrink a short-lived value.
+#[allow(clippy::large_enum_variant)]
 pub enum TsigVerifyOutcome {
     /// The message carries a valid TSIG from a known key.
     Valid {
@@ -241,7 +245,8 @@ pub fn verify_request(
         Err(_) => return TsigVerifyOutcome::Invalid(TsigFailure::Malformed),
     };
     let request_mac = tsig_rr.data.mac.clone();
-    let outcome = TsigVerifyOutcome::Valid {
+    
+    TsigVerifyOutcome::Valid {
         key: key.clone(),
         request_mac: request_mac.clone(),
         request_tsig: tsig_rr,
@@ -252,8 +257,7 @@ pub fn verify_request(
             request_mac,
             None,
         ),
-    };
-    outcome
+    }
 }
 
 /// Read the TSIG record's key name from a wire message without verifying:

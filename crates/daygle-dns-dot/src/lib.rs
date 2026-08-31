@@ -274,8 +274,7 @@ pub async fn doh_query_message(
     // RFC 8484 §4.1: the DNS message ID is always 0 over DoH.
     query.metadata.id = 0;
     let request = hickory_proto::op::DnsRequest::new(query, DnsRequestOptions::default());
-    let mut exchange = exchange;
-    let response = DnsHandle::send(&mut exchange, request)
+    let response = DnsHandle::send(&exchange, request)
         .first_answer()
         .await
         .map_err(|e| DaygleError::Proto(format!("DoH query failed: {e}")))?;

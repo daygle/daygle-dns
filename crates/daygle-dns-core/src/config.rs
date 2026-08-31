@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::{DaygleError, Result};
 
 /// Root configuration document.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct DaygleConfig {
     /// Core DNS listeners (UDP/TCP on port 53).
@@ -36,23 +36,6 @@ pub struct DaygleConfig {
     pub rate_limit: RateLimitSettings,
     /// Logging.
     pub logging: LoggingSettings,
-}
-
-impl Default for DaygleConfig {
-    fn default() -> Self {
-        Self {
-            server: ServerSettings::default(),
-            recursive: RecursiveSettings::default(),
-            authoritative: AuthoritativeSettings::default(),
-            dot: DotSettings::default(),
-            doh: DohSettings::default(),
-            doq: DoqSettings::default(),
-            api: ApiSettings::default(),
-            policy: PolicySettings::default(),
-            rate_limit: RateLimitSettings::default(),
-            logging: LoggingSettings::default(),
-        }
-    }
 }
 
 impl DaygleConfig {
@@ -489,22 +472,13 @@ impl Default for RecursiveSettings {
 /// A conditional forwarding zone: `name` is resolved via `upstreams` instead
 /// of the global `recursive.upstreams`. Accepts the same upstream forms
 /// (plain IP, `tls://IP:port@hostname`, …).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct ConditionalZoneConfig {
     /// Zone apex to forward, e.g. `corp.internal`.
     pub name: String,
     /// Dedicated upstreams for this zone (same forms as `recursive.upstreams`).
     pub upstreams: Vec<String>,
-}
-
-impl Default for ConditionalZoneConfig {
-    fn default() -> Self {
-        Self {
-            name: String::new(),
-            upstreams: vec![],
-        }
-    }
 }
 
 /// Authoritative zone storage settings.
@@ -876,6 +850,13 @@ pub struct PolicySettings {
     pub allowed_networks: Vec<String>,
     /// Per-client / per-domain rules, evaluated in order.
     pub rules: Vec<PolicyRule>,
+    /// Filter AAAA (IPv6) answers: when true, AAAA queries are answered with an
+    /// empty NODATA response so dual-stack clients fall back to IPv4 (the
+    /// equivalent of Technitium's "Block AAAA" app).
+    pub filter_aaaa: bool,
+    /// Names (or `*.suffix` wildcards) exempt from `filter_aaaa`, i.e. hosts
+    /// that must stay reachable over IPv6.
+    pub filter_aaaa_except: Vec<String>,
 }
 
 impl Default for PolicySettings {
@@ -888,6 +869,8 @@ impl Default for PolicySettings {
             denied_networks: vec![],
             allowed_networks: vec![],
             rules: vec![],
+            filter_aaaa: false,
+            filter_aaaa_except: vec![],
         }
     }
 }

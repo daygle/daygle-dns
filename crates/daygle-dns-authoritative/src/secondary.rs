@@ -247,10 +247,11 @@ impl SecondaryRefresher {
 /// Convert transfer records into store inputs, extracting the SOA separately.
 /// DNSSEC records (RRSIG, NSEC, DNSKEY, …) and OPT are dropped - the local
 /// catalog re-signs zones that have signing keys.
-fn records_to_inputs(
-    zone: &Name,
-    records: &[Record],
-) -> (Option<(String, String, u32, u32, u32, u32, u32)>, Vec<RecordInput>) {
+/// SOA fields extracted from a transferred zone: `(mname, rname, serial,
+/// refresh, retry, expire, minimum)`.
+type SoaFields = (String, String, u32, u32, u32, u32, u32);
+
+fn records_to_inputs(zone: &Name, records: &[Record]) -> (Option<SoaFields>, Vec<RecordInput>) {
     let mut soa = None;
     let mut inputs = Vec::with_capacity(records.len());
     for record in records {
@@ -297,7 +298,7 @@ fn strip_dot(name: &str) -> String {
 }
 
 fn fqdn(name: &str) -> Result<Name> {
-    Name::from_utf8(&format!("{}.", name.trim().trim_end_matches('.')))
+    Name::from_utf8(format!("{}.", name.trim().trim_end_matches('.')))
         .map_err(|e| DaygleError::InvalidRecord(format!("name '{name}': {e}")))
 }
 

@@ -83,7 +83,7 @@ impl AuthorityCatalog {
             .unwrap_or_default();
         for binding in &self.settings.tsig_transfer_zones {
             if let Some((zone, key)) = binding.split_once('=') {
-                if zone.trim_end_matches('.').eq_ignore_ascii_case(&zone_name.trim_end_matches('.')) {
+                if zone.trim_end_matches('.').eq_ignore_ascii_case(zone_name.trim_end_matches('.')) {
                     return ring.get_by_config_name(key).cloned();
                 }
             }
@@ -97,7 +97,7 @@ impl AuthorityCatalog {
             .unwrap_or_default();
         for binding in &self.settings.tsig_update_zones {
             if let Some((zone, key)) = binding.split_once('=') {
-                if zone.trim_end_matches('.').eq_ignore_ascii_case(&zone_name.trim_end_matches('.')) {
+                if zone.trim_end_matches('.').eq_ignore_ascii_case(zone_name.trim_end_matches('.')) {
                     return ring.get_by_config_name(key).cloned();
                 }
             }
@@ -330,7 +330,7 @@ fn zone_rrsets(
 
 /// Parse a domain string as an absolute Hickory [`Name`].
 fn fqdn_name(name: &str) -> Result<Name> {
-    Name::from_utf8(&format!("{}.", name.trim().trim_end_matches('.')))
+    Name::from_utf8(format!("{}.", name.trim().trim_end_matches('.')))
         .map_err(|e| DaygleError::InvalidRecord(format!("name '{name}': {e}")))
 }
 

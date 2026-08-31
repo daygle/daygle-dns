@@ -50,7 +50,7 @@ pub fn parse_zone_file(text: &str) -> Result<Vec<RecordInput>> {
             )));
         }
 
-        let (owner, mut rest) = split_owner(&line, &origin, &last_owner)?;
+        let (owner, mut rest) = split_owner(line, &origin, &last_owner)?;
         last_owner = owner.clone();
 
         // Optional TTL.

@@ -1,0 +1,73 @@
+//! Integration test: persistent query logging writes served queries to the
+//! configured directory when `logging.query_log_enabled` is set.
+
+mod common;
+
+use common::*;
+use daygle_dns_authoritative::model::{RecordInput, ZoneInput};
+use hickory_proto::rr::RecordType;
+
+#[tokio::test]
+async fn logs_served_queries_to_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("daygle-dns.db");
+    let logdir = dir.path().join("qlog");
+
+    let mut config = base_config(&db);
+    config.logging.query_log_enabled = true;
+    config.logging.query_log_dir = logdir.to_string_lossy().to_string();
+    config.logging.query_log_retention_days = 30;
+
+    let server = spawn(config).await;
+    let store = server.catalog.store();
+    let zone = store
+        .create_zone(&ZoneInput {
+            name: "example.test".to_string(),
+            ..Default::default()
+        })
+        .unwrap();
+    store
+        .upsert_record(
+            &zone.id,
+            &RecordInput {
+                name: "www".to_string(),
+                rtype: "A".to_string(),
+                content: "192.0.2.42".to_string(),
+                ttl: 300,
+                priority: 0,
+                disabled: false,
+            },
+        )
+        .unwrap();
+    server.catalog.reload().unwrap();
+
+    let udp = server.udp_addr.expect("UDP is enabled");
+    let _ = udp_query(udp, "www.example.test.", RecordType::A).await;
+
+    // Writes flush eagerly, but the handler runs on the server task, so poll
+    // briefly for the line to appear.
+    let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+    let path = logdir.join(format!("queries-{today}.log"));
+    let mut text = String::new();
+    for _ in 0..50 {
+        if let Ok(contents) = std::fs::read_to_string(&path) {
+            if contents.contains("www.example.test") {
+                text = contents;
+                break;
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+
+    let line = text
+        .lines()
+        .find(|l| l.contains("www.example.test"))
+        .expect("the served query should be logged");
+    let entry: serde_json::Value = serde_json::from_str(line).unwrap();
+    assert_eq!(entry["qname"], "www.example.test");
+    assert_eq!(entry["qtype"], "A");
+    assert_eq!(entry["outcome"], "authoritative");
+    assert!(entry["client"].as_str().unwrap().starts_with("127.0.0.1"));
+
+    shutdown(server).await;
+}

@@ -133,6 +133,9 @@ pub struct AppState {
     pub logs: Arc<LogStore>,
     pub config: Arc<ArcSwap<DaygleConfig>>,
     pub policy: Arc<ArcSwap<daygle_dns_policy::PolicyEngine>>,
+    /// Advanced Blocking groups (per-client allow/block policies). Shared with
+    /// the dispatcher; rebuilt and swapped in place when a group changes.
+    pub advanced_blocking: Arc<ArcSwap<daygle_dns_policy::AdvancedBlocking>>,
     /// Remote blocklist source manager; `None` when no sources are configured.
     pub blocklist_sources: Option<Arc<BlocklistSourceManager>>,
     pub started_at: Instant,
@@ -207,7 +210,17 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/policy/blocklist/sources",
             get(handlers::blocklist_sources).post(handlers::refresh_blocklist_sources),
-        )        .layer(middleware::from_fn_with_state(
+        )
+        .route("/policy/blocking/test", post(handlers::test_blocking))
+        .route(
+            "/policy/blocking",
+            get(handlers::list_blocking_groups).post(handlers::upsert_blocking_group),
+        )
+        .route(
+            "/policy/blocking/{id}",
+            delete(handlers::delete_blocking_group),
+        )
+        .layer(middleware::from_fn_with_state(
             state.clone(),
             require_auth,
         ))

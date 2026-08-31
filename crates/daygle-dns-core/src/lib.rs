@@ -7,6 +7,7 @@
 //! structures plus small runtime helpers that the server crates share.
 
 pub mod auth;
+pub mod blocking;
 pub mod config;
 pub mod error;
 pub mod logs;
@@ -16,6 +17,7 @@ pub mod rate_limit;
 pub mod stats;
 
 pub use auth::{hash_password, verify_password};
+pub use blocking::{BlockResponse, BlockingGroup, BlockingGroupInput};
 pub use config::*;
 pub use error::{DaygleError, Result};
 pub use logs::{LogEntry, LogLevel, LogStore};
