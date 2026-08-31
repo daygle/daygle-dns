@@ -154,7 +154,7 @@ impl DnssecMaintenance {
             if !self.config.rollover_after.is_zero()
                 && active.len() == 1
                 && retired.is_empty()
-                && key_age(&active[0]) >= self.config.rollover_after
+                && key_age(active[0]) >= self.config.rollover_after
             {
                 let (algorithm, der) = generate_signing_key()?;
                 self.store
@@ -178,8 +178,8 @@ impl DnssecMaintenance {
                 .max()
                 .unwrap_or(DateTime::<Utc>::MIN_UTC);
             for key in &active {
-                if key_age(key) >= retire_after && key_created_at(key) < newest_active {
-                    if self.store.set_key_state(&key.id, "retired")? {
+                if key_age(key) >= retire_after && key_created_at(key) < newest_active
+                    && self.store.set_key_state(&key.id, "retired")? {
                         changed = true;
                         events += 1;
                         info!(
@@ -188,19 +188,17 @@ impl DnssecMaintenance {
                              the retirement grace period"
                         );
                     }
-                }
             }
 
             // -- Delete fully aged-out keys ------------------------------
             let delete_after = retire_after + self.config.retire;
             for key in &retired {
-                if key_age(key) >= delete_after {
-                    if self.store.delete_key(&key.id)? {
+                if key_age(key) >= delete_after
+                    && self.store.delete_key(&key.id)? {
                         changed = true;
                         events += 1;
                         info!(zone = %zone.name, "DNSSEC rollover: removed old key");
                     }
-                }
             }
         }
 

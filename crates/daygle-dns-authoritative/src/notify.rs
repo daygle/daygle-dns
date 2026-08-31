@@ -259,7 +259,7 @@ fn normalize(name: String) -> String {
 }
 
 fn fqdn(name: &str) -> Result<Name> {
-    Name::from_utf8(&format!("{}.", name.trim().trim_end_matches('.')))
+    Name::from_utf8(format!("{}.", name.trim().trim_end_matches('.')))
         .map_err(|e| DaygleError::InvalidRecord(format!("name '{name}': {e}")))
 }
 

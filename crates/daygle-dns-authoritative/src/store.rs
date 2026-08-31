@@ -17,6 +17,10 @@ use crate::validate_name;
 use daygle_dns_core::blocking::{BlockingGroup, BlockingGroupInput};
 use daygle_dns_core::error::{DaygleError, Result};
 
+/// Every zone paired with its records and signing keys, as consumed by the
+/// catalog builder.
+pub type CatalogData = Vec<(Zone, Vec<Record>, Vec<SigningKeyRecord>)>;
+
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS zones (
     id             TEXT PRIMARY KEY,
@@ -276,6 +280,9 @@ impl ZoneStore {
 
     /// Replace the SOA metadata (mname, rname, serial, and timers) of a zone
     /// with values learned from a zone transfer.
+    // The parameters are the individual SOA fields; grouping them into a struct
+    // would only add indirection at the single transfer call site.
+    #[allow(clippy::too_many_arguments)]
     pub fn set_zone_soa(
         &self,
         id: &str,
@@ -1081,9 +1088,7 @@ impl ZoneStore {
 
     /// All zones paired with their records and every signing key, for the
     /// catalog builder.
-    pub fn load_catalog_data(
-        &self,
-    ) -> Result<Vec<(Zone, Vec<Record>, Vec<SigningKeyRecord>)>> {
+    pub fn load_catalog_data(&self) -> Result<CatalogData> {
         let zones = self.list_zones()?;
         let records = self.list_all_records()?;
         let mut out = Vec::with_capacity(zones.len());

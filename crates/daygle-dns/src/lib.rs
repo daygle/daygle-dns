@@ -250,6 +250,16 @@ pub async fn bind_with(
         daygle_dns_policy::AdvancedBlocking::build(&catalog.store().list_blocking_groups()?),
     ));
 
+    // Persistent query logging (daily JSON-lines files), when enabled.
+    let query_logger = if config.logging.query_log_enabled {
+        Some(Arc::new(daygle_dns_core::QueryLogger::new(
+            std::path::Path::new(&config.logging.query_log_dir),
+            config.logging.query_log_retention_days,
+        )))
+    } else {
+        None
+    };
+
     // Rate limiting (per client + per domain).
     let rate_limiter = Arc::new(RateLimiter::new(&config.rate_limit));
 
@@ -258,6 +268,7 @@ pub async fn bind_with(
         catalog: catalog.clone(),
         policy: Arc::new(ArcSwap::from_pointee(policy)),
         advanced_blocking: advanced_blocking.clone(),
+        query_logger: query_logger.clone(),
         resolver: Arc::new(arc_swap::ArcSwapOption::from(resolver.clone())),
         config: Arc::new(ArcSwap::from(config.clone())),
         rate_limiter: rate_limiter.clone(),
@@ -270,7 +281,7 @@ pub async fn bind_with(
     // construction errors are configuration errors: fail fast at startup.
     let tsig_keys = Arc::new(
         daygle_dns_authoritative::tsig::TsigKeyRing::from_configs(&config.authoritative.tsig_keys)
-            .map_err(|e| DaygleError::Config(e))?,
+            .map_err(DaygleError::Config)?,
     );
 
     // DNS listeners (bound immediately so the server serves right away).
@@ -285,7 +296,8 @@ pub async fn bind_with(
         tsig_keys,
         stats.clone(),
     )
-    .with_advanced_blocking(shared.advanced_blocking.clone());
+    .with_advanced_blocking(shared.advanced_blocking.clone())
+    .with_query_logger(shared.query_logger.clone());
     let mut server = Server::new(dispatcher);
     let mut initial_addrs = ListenerAddrs::default();
     bind_listeners(&config, &mut server, &mut initial_addrs).await?;
@@ -434,7 +446,8 @@ async fn start_listeners(
         Arc::new(daygle_dns_authoritative::tsig::TsigKeyRing::default()),
         shared.stats.clone(),
     )
-    .with_advanced_blocking(shared.advanced_blocking.clone());
+    .with_advanced_blocking(shared.advanced_blocking.clone())
+    .with_query_logger(shared.query_logger.clone());
     let mut server = Server::new(dispatcher);
     let mut snapshot = ListenerAddrs::default();
     bind_listeners(&config, &mut server, &mut snapshot).await?;
@@ -525,7 +538,8 @@ async fn start_listeners_with(
         Arc::new(daygle_dns_authoritative::tsig::TsigKeyRing::default()),
         shared.stats.clone(),
     )
-    .with_advanced_blocking(shared.advanced_blocking.clone());
+    .with_advanced_blocking(shared.advanced_blocking.clone())
+    .with_query_logger(shared.query_logger.clone());
     let mut server = Server::new(dispatcher);
     let mut snapshot = ListenerAddrs::default();
     bind_listeners(config, &mut server, &mut snapshot).await?;
