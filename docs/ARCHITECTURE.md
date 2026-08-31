@@ -48,7 +48,7 @@ API/GUI.
   (RFC 8484) - and generates self-signed certificates when configured.
 - **`daygle-dns-api`** serves the REST API and the embedded GUI.
 - **`daygle-dns-gui`** embeds the compiled Svelte bundle via `rust-embed`.
-- **`daygle`** (binary) binds UDP/TCP/DoT/DoH listeners onto one Hickory
+- **`daygle-dns`** (binary) binds UDP/TCP/DoT/DoH listeners onto one Hickory
   `Server` driven by `DnsDispatcher`.
 
 ## Query flow
@@ -135,7 +135,7 @@ listener:
 
 ## Live configuration reload
 
-`daygle` watches its TOML config file (mtime polling) and applies changes
+`daygle-dns` watches its TOML config file (mtime polling) and applies changes
 without a restart. The policy engine, the recursive resolver and the effective
 config are each published through `arc_swap::ArcSwap` containers shared by the
 dispatcher and the REST API, so every query observes one consistent snapshot.
@@ -154,7 +154,7 @@ must use POST.
 `daygle-dns-policy`'s `BlocklistSourceManager` fetches each configured
 `[[policy.blocklist_sources]]` URL over HTTP(S) (reqwest/rustls, 32 MiB body
 cap, redirects, 30 s timeout) and parses the body in its declared format
-(`domains`, `hosts`, or `adblock`). A background task in `daygle` polls on the
+(`domains`, `hosts`, or `adblock`). A background task in `daygle-dns` polls on the
 smallest configured refresh interval and, when a source is due, swaps the
 merged remote blocklist into the shared `PolicyEngine` via
 `set_remote_blocklist` - the static blocklist from config/files is never
