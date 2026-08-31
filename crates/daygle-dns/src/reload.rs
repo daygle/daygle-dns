@@ -37,6 +37,8 @@ pub struct Shared {
     pub rate_limiter: Arc<RateLimiter>,
     pub metrics: Arc<Metrics>,
     pub logs: Arc<LogStore>,
+    /// Dashboard time-series + top-N tables.
+    pub stats: Arc<daygle_dns_core::stats::QueryStats>,
 }
 
 /// The currently bound DNS listener addresses.
@@ -46,6 +48,7 @@ pub struct ListenerAddrs {
     pub tcp: Option<std::net::SocketAddr>,
     pub dot: Option<std::net::SocketAddr>,
     pub doh: Option<std::net::SocketAddr>,
+    pub doq: Option<std::net::SocketAddr>,
 }
 
 /// Commands sent to the DNS listener supervisor.
@@ -262,6 +265,7 @@ mod tests {
             rate_limiter: Arc::new(RateLimiter::default()),
             metrics: Arc::new(Metrics::default()),
             logs: Arc::new(LogStore::new(16)),
+            stats: Arc::new(daygle_dns_core::stats::QueryStats::new()),
         }
     }
 

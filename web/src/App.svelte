@@ -1,4 +1,6 @@
 <script>
+  import { api, setUnauthorizedHandler, getStoredUser } from './api.js';
+  import Login from './views/Login.svelte';
   import Status from './views/Status.svelte';
   import Zones from './views/Zones.svelte';
   import SplitHorizon from './views/SplitHorizon.svelte';
@@ -7,55 +9,92 @@
   import Settings from './views/Settings.svelte';
 
   let view = $state('status');
+  // `authed` is optimistic: we assume a session until a 401 says otherwise.
+  let authed = $state(true);
+  let user = $state(getStoredUser());
+  // Viewer accounts are read-only: they never see the write-only views.
+  const isViewer = $derived(user?.role === 'viewer');
+
+  setUnauthorizedHandler(() => {
+    authed = false;
+  });
+
+  function handleLogin() {
+    authed = true;
+    user = getStoredUser();
+    if (isViewer && (view === 'zones' || view === 'split-horizon' || view === 'blocklists')) {
+      view = 'status';
+    }
+  }
+
+  async function handleLogout() {
+    await api.logout();
+    user = null;
+    authed = false;
+  }
 
   const tabs = [
     { id: 'status', label: 'Status' },
-    { id: 'zones', label: 'Zones & Records' },
-    { id: 'split-horizon', label: 'Split Horizon' },
-    { id: 'blocklists', label: 'Blocklists' },
+    { id: 'zones', label: 'Zones & Records', viewer: true },
+    { id: 'split-horizon', label: 'Split Horizon', viewer: true },
+    { id: 'blocklists', label: 'Blocklists', viewer: true },
     { id: 'logs', label: 'Logs' },
-    { id: 'settings', label: 'Settings' },
-  ];
+    { id: 'settings', label: 'Settings', viewer: true },
+  ].filter((t) => !isViewer || !t.viewer);
 </script>
 
-<div class="shell">
-  <aside>
-    <div class="brand">
-      <span class="logo">⬡</span>
-      <div>
-        <strong>Daygle DNS</strong>
-        <div class="muted" style="font-size:0.75rem">Modern DNS server</div>
+{#if !authed}
+  <Login />
+{:else}
+  <div class="shell">
+    <aside>
+      <div class="brand">
+        <span class="logo">⬡</span>
+        <div>
+          <strong>Daygle DNS</strong>
+          <div class="muted" style="font-size:0.75rem">Modern DNS server</div>
+        </div>
       </div>
-    </div>
-    <nav>
-      {#each tabs as tab (tab.id)}
-        <button
-          class="nav-btn"
-          class:active={view === tab.id}
-          onclick={() => (view = tab.id)}
-        >
-          {tab.label}
-        </button>
-      {/each}
-    </nav>
-  </aside>
+      <nav>
+        {#each tabs as tab (tab.id)}
+          <button
+            class="nav-btn"
+            class:active={view === tab.id}
+            onclick={() => (view = tab.id)}
+          >
+            {tab.label}
+          </button>
+        {/each}
+      </nav>
+      {#if user}
+        <div class="user-box">
+          <div class="muted" style="font-size: 0.75rem">Signed in as</div>
+          <div>{user.username}</div>
+          <span class="pill" class:ok={!isViewer} class:err={isViewer}>
+            {isViewer ? 'read-only' : 'admin'}
+          </span>
+          <button class="secondary logout" onclick={handleLogout}>Sign out</button>
+        </div>
+      {/if}
+    </aside>
 
-  <main>
-    {#if view === 'status'}
-      <Status />
-    {:else if view === 'zones'}
-      <Zones />
-    {:else if view === 'split-horizon'}
-      <SplitHorizon />
-    {:else if view === 'blocklists'}
-      <Blocklists />
-    {:else if view === 'logs'}
-      <Logs />
-    {:else}
-      <Settings />
-    {/if}
-  </main>
-</div>
+    <main>
+      {#if view === 'status' || (isViewer && !tabs.some((t) => t.id === view))}
+        <Status />
+      {:else if view === 'zones'}
+        <Zones />
+      {:else if view === 'split-horizon'}
+        <SplitHorizon />
+      {:else if view === 'blocklists'}
+        <Blocklists />
+      {:else if view === 'logs'}
+        <Logs />
+      {:else}
+        <Settings />
+      {/if}
+    </main>
+  </div>
+{/if}
 
 <style>
   .shell { display: flex; min-height: 100vh; }
@@ -86,6 +125,17 @@
   }
   .nav-btn:hover { background: var(--panel-2); color: var(--text); }
   .nav-btn.active { background: var(--accent); color: #fff; }
+
+  .user-box {
+    margin-top: auto;
+    padding: 10px;
+    border-top: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    font-size: 0.85rem;
+  }
+  .logout { margin-top: 8px; }
 
   main { flex: 1; padding: 24px 28px; max-width: 1100px; }
 </style>

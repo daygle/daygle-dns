@@ -1,10 +1,34 @@
 // Thin API client for the Daygle REST API.
+//
+// Auth: when the server has console users configured, a session token from
+// `POST /api/auth/login` is stored and sent as a Bearer token on every call.
+// A 401 response with `login: true` raises `onUnauthorized` so the shell can
+// switch to the login screen.
 
 const BASE = '/api';
+const TOKEN_KEY = 'daygle_token';
+const USER_KEY = 'daygle_user';
 
-async function request(method, path, body) {
+export function getToken() {
+  return localStorage.getItem(TOKEN_KEY) || '';
+}
+
+export function getStoredUser() {
+  try {
+    return JSON.parse(localStorage.getItem(USER_KEY) || 'null');
+  } catch (_) {
+    return null;
+  }
+}
+
+let onUnauthorized = null;
+export function setUnauthorizedHandler(fn) {
+  onUnauthorized = fn;
+}
+
+async function request(method, path, body, opts = {}) {
   const init = { method, headers: {} };
-  const token = localStorage.getItem('daygle_token');
+  const token = getToken();
   if (token) init.headers['Authorization'] = `Bearer ${token}`;
   if (body !== undefined) {
     init.headers['Content-Type'] = 'application/json';
@@ -13,19 +37,49 @@ async function request(method, path, body) {
   const res = await fetch(BASE + path, init);
   if (!res.ok) {
     let detail = res.statusText;
+    let needsLogin = false;
     try {
       const data = await res.json();
       detail = data.error || detail;
+      needsLogin = res.status === 401 && data.login === true;
     } catch (_) { /* ignore */ }
-    throw new Error(detail);
+    if (needsLogin && onUnauthorized && !opts.noLoginRedirect) {
+      onUnauthorized();
+    }
+    const err = new Error(detail);
+    err.status = res.status;
+    err.needsLogin = needsLogin;
+    throw err;
   }
+  if (res.status === 204) return null;
   return res.json();
 }
 
 export const api = {
+  // ---- auth ----
+  login: async (username, password) => {
+    const data = await request('POST', '/auth/login', { username, password }, { noLoginRedirect: true });
+    localStorage.setItem(TOKEN_KEY, data.token);
+    localStorage.setItem(USER_KEY, JSON.stringify({ username: data.username, role: data.role || 'admin' }));
+    return data;
+  },
+  logout: async () => {
+    try { await request('POST', '/auth/logout', {}); } catch (_) { /* ignore */ }
+    localStorage.removeItem(TOKEN_KEY);
+    localStorage.removeItem(USER_KEY);
+  },
+  clearLocalSession: () => {
+    localStorage.removeItem(TOKEN_KEY);
+    localStorage.removeItem(USER_KEY);
+  },
+  me: () => request('GET', '/auth/me'),
+
+  // ---- data ----
   status: () => request('GET', '/status'),
   metrics: () => request('GET', '/metrics'),
+  stats: (window) => request('GET', `/stats?window=${window || '1h'}`),
   config: () => request('GET', '/config'),
+  updateSettings: (body) => request('PUT', '/config', body),
   logs: (n) => request('GET', `/logs?limit=${n || 200}`),
   zones: () => request('GET', '/zones'),
   createZone: (body) => request('POST', '/zones', body),

@@ -9,19 +9,22 @@
 //!   ([`register_doh`]).
 //!
 //! This crate owns TLS certificate loading/generation and produces the
-//! [`rustls::ServerConfig`] for either protocol; socket handling is delegated
-//! to Hickory's [`Server`].
+//! [`rustls::ServerConfig`] for each protocol; socket handling is delegated
+//! to Hickory's [`Server`], including its native DoQ (RFC 9250) listener
+//! (registered from the `daygle-dns` crate via
+//! [`build_doq_tls_config`]).
 
 mod cert;
 
 pub use cert::{
     ensure_certificate, ensure_certificate_paths, generate_self_signed, load_tls_config,
+    load_tls_config_versions,
 };
 
 use std::sync::Arc;
 use std::time::Duration;
 
-use daygle_dns_core::config::{DohSettings, DotSettings};
+use daygle_dns_core::config::{DohSettings, DoqSettings, DotSettings};
 use daygle_dns_core::error::{DaygleError, Result};
 use hickory_server::server::{RequestHandler, Server};
 use rustls::ServerConfig;
@@ -31,6 +34,8 @@ use tokio::net::TcpListener;
 pub const DOT_ALPN: &[u8] = b"dot";
 /// The ALPN protocol identifier for DNS over HTTPS (HTTP/2).
 pub const DOH_ALPN: &[u8] = b"h2";
+/// The ALPN protocol identifier for DNS over QUIC (RFC 9250 §4.3).
+pub const DOQ_ALPN: &[u8] = b"doq";
 
 /// Build the TLS configuration described by `settings`, generating a
 /// self-signed certificate when requested and none is present.
@@ -88,4 +93,20 @@ pub fn register_doh<T: RequestHandler>(
             endpoint.to_string(),
         )
         .map_err(|e| DaygleError::Tls(format!("cannot register DoH listener: {e}")))
+}
+
+/// Build the DoQ TLS configuration (RFC 9250): `doq` ALPN, TLS 1.3 only.
+///
+/// Certificates are loaded from `cert_path`/`key_path`, generating a
+/// self-signed pair first when requested and missing. QUIC mandates TLS 1.3,
+/// so the returned config advertises no older versions.
+pub fn build_doq_tls_config(settings: &DoqSettings) -> Result<Arc<ServerConfig>> {
+    ensure_certificate_paths(
+        &settings.cert_path,
+        &settings.key_path,
+        settings.self_signed,
+        &settings.server_name,
+    )?;
+    let config = load_tls_config_versions(&settings.cert_path, &settings.key_path, DOQ_ALPN)?;
+    Ok(Arc::new(config))
 }

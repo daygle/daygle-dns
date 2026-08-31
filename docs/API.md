@@ -13,6 +13,46 @@ Authorization: Bearer <token>
 
 Missing or invalid tokens receive `401 Unauthorized`.
 
+### Console users and roles
+
+When `[[api.users]]` accounts are configured, the whole API (reads included)
+requires a **login session**. Log in with:
+
+```
+POST /api/auth/login
+{ "username": "admin", "password": "secret" }
+```
+
+```json
+{
+  "token": "1f2e3d4c5b6a7988…",
+  "username": "admin",
+  "role": "admin",
+  "expires_in_secs": 43200
+}
+```
+
+Send the returned token as the `Authorization: Bearer` header on every call.
+Password hashes for the config file are generated with
+`daygle-dns hash-password 'your-password'` (PBKDF2-HMAC-SHA256). Additional
+endpoints:
+
+| Endpoint | Purpose |
+|----------|---------|
+| `GET /api/auth/me` | identity of the presented session (`username`, `role`, `expires_at_secs`) |
+| `POST /api/auth/logout` | revoke the presented token |
+
+Roles:
+
+- `admin` - full access (reads *and* mutations).
+- `viewer` - read-only; every mutating method (`POST`/`PUT`/`DELETE`) is
+  rejected with `403 Forbidden`.
+
+Sensitive values are never echoed back: `GET /api/config` reports
+`api.api_token` and every `api.users[].password_hash` as `"[redacted]"`.
+Failed login attempts are logged and do not reveal whether the username
+exists.
+
 ## Endpoints
 
 ### Status
@@ -59,6 +99,40 @@ Returns a flat snapshot of the atomic counters:
 }
 ```
 
+### Dashboard statistics
+
+```
+GET /api/stats?window=1h
+```
+
+Time-series and top-N tables powering the dashboard. `window` is `1h`
+(default), `6h` or `24h`:
+
+```json
+{
+  "window": 60,
+  "series": [
+    {
+      "t": 1756000000,
+      "queries": 42,
+      "authoritative": 10,
+      "recursive": 30,
+      "blocked": 2,
+      "errors": 0,
+      "rate_limited": 0
+    }
+  ],
+  "top_clients":  [{ "key": "192.168.20.5", "count": 941 }],
+  "top_domains":  [{ "key": "example.com", "count": 412 }],
+  "top_blocked":  [{ "key": "ads.example.com", "count": 87 }]
+}
+```
+
+`series` holds one point per minute (gaps zero-filled) over the requested
+window; the top lists are ranked by query count. All statistics live in a
+bounded in-memory ring (24 h of minute buckets, ≤ 5 000 keys per table) and
+reset on restart.
+
 ### Logs
 
 ```
@@ -86,7 +160,27 @@ POST /api/config/reload
 ```
 
 `GET` returns the effective `DaygleConfig` document (the TOML configuration,
-serialized as JSON).
+serialized as JSON) with secrets redacted (see [Console users and roles](#console-users-and-roles)).
+
+`PUT /api/config` applies a **partial settings update** from the console
+(the Settings page uses this). `null`/absent fields are left unchanged;
+unknown fields are rejected with `400`. The merged configuration is validated
+first (invalid input changes nothing), persisted to the config file, applied
+to the live server, and listeners are rebound when the update touched them:
+
+```json
+PUT /api/config
+{
+  "recursive": { "dnssec_validate": true, "serve_stale_secs": 1800 },
+  "doq": { "enabled": true }
+}
+```
+
+Editable groups: `server` (listen/port/udp_enabled/tcp_enabled), `recursive`
+(enabled/upstreams/dnssec_validate/prefetch_* /serve_stale_secs), `dot`,
+`doh`, `doq` (enabled/port/self_signed/server_name [+ `doh.endpoint`]), and
+`api` (gui_enabled/cors_origins). Login users and the API token are **not**
+editable over the API - edit the config file instead.
 
 `POST /api/config/reload` asks the server to re-read its configuration file and
 apply policy, upstream and listener changes immediately, without waiting for
@@ -362,5 +456,6 @@ Errors use a uniform body and an appropriate status code:
 { "error": "already exists: zone already exists" }
 ```
 
-Status codes: `400` invalid input, `401` unauthorized, `404` not found,
-`409` conflict, `500` internal error.
+Status codes: `400` invalid input, `401` unauthorized, `403` forbidden
+(read-only `viewer` account), `404` not found, `409` conflict, `500`
+internal error.

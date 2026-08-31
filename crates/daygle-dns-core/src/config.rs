@@ -26,6 +26,8 @@ pub struct DaygleConfig {
     pub dot: DotSettings,
     /// DNS over HTTPS listener.
     pub doh: DohSettings,
+    /// DNS over QUIC listener (RFC 9250).
+    pub doq: DoqSettings,
     /// HTTP REST API + embedded web GUI.
     pub api: ApiSettings,
     /// Policy / filtering engine.
@@ -44,6 +46,7 @@ impl Default for DaygleConfig {
             authoritative: AuthoritativeSettings::default(),
             dot: DotSettings::default(),
             doh: DohSettings::default(),
+            doq: DoqSettings::default(),
             api: ApiSettings::default(),
             policy: PolicySettings::default(),
             rate_limit: RateLimitSettings::default(),
@@ -70,16 +73,76 @@ impl DaygleConfig {
         Self::parse(&text)
     }
 
+    /// Serialize this configuration to a TOML document.
+    pub fn to_toml(&self) -> Result<String> {
+        toml::to_string_pretty(self)
+            .map_err(|e| DaygleError::Config(format!("cannot serialize config: {e}")))
+    }
+
     /// Enforce cross-field invariants (ports, upstreams, etc.).
     pub fn validate(&self) -> Result<()> {
-        for (name, port) in [
-            ("server.port", self.server.port),
-            ("dot.port", self.dot.port),
-            ("doh.port", self.doh.port),
-            ("api.port", self.api.port),
+        // Only *enabled* listeners need a concrete port; a disabled service
+        // may keep port 0 (e.g. ephemeral test setups).
+        for (name, port, enabled) in [
+            ("server.port", self.server.port, self.server.udp_enabled || self.server.tcp_enabled),
+            ("dot.port", self.dot.port, self.dot.enabled),
+            ("doh.port", self.doh.port, self.doh.enabled),
+            ("doq.port", self.doq.port, self.doq.enabled),
+            ("api.port", self.api.port, self.api.enabled),
         ] {
-            if port == 0 {
+            if enabled && port == 0 {
                 return Err(DaygleError::Config(format!("{name} must not be 0")));
+            }
+        }
+        if self.doq.enabled && self.doq.idle_timeout_secs < 30 {
+            return Err(DaygleError::Config(
+                "doq.idle_timeout_secs must be >= 30 (RFC 9250 recommends 600)".to_string(),
+            ));
+        }
+        let rec = &self.recursive;
+        if rec.prefetch_enabled {
+            if rec.prefetch_ttl_fraction_pct == 0 || rec.prefetch_ttl_fraction_pct > 100 {
+                return Err(DaygleError::Config(
+                    "recursive.prefetch_ttl_fraction_pct must be 1..=100".to_string(),
+                ));
+            }
+            if rec.prefetch_min_queries == 0 {
+                return Err(DaygleError::Config(
+                    "recursive.prefetch_min_queries must be >= 1".to_string(),
+                ));
+            }
+            if rec.prefetch_window_secs == 0 {
+                return Err(DaygleError::Config(
+                    "recursive.prefetch_window_secs must be >= 1".to_string(),
+                ));
+            }
+        }
+        if rec.serve_stale_secs > 7 * 24 * 3600 {
+            return Err(DaygleError::Config(
+                "recursive.serve_stale_secs must be <= 604800 (7 days)".to_string(),
+            ));
+        }
+        if !self.api.users.is_empty() {
+            for user in &self.api.users {
+                if user.username.trim().is_empty() {
+                    return Err(DaygleError::Config(
+                        "api.users[].username must not be empty".to_string(),
+                    ));
+                }
+                if !crate::auth::is_valid_password_hash(&user.password_hash) {
+                    return Err(DaygleError::Config(format!(
+                        "api.users[{}].password_hash is not a valid pbkdf2-sha256 hash \
+                         (generate one with `daygle-dns hash-password`)",
+                        user.username
+                    )));
+                }
+            }
+            let mut names: Vec<&str> = self.api.users.iter().map(|u| u.username.as_str()).collect();
+            names.sort_unstable();
+            if names.windows(2).any(|w| w[0] == w[1]) {
+                return Err(DaygleError::Config(
+                    "api.users contains duplicate usernames".to_string(),
+                ));
             }
         }
         if self.recursive.attempts == 0 {
@@ -645,6 +708,43 @@ impl Default for DohSettings {
     }
 }
 
+/// Console role: what a logged-in user may do.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Role {
+    /// Full access: reads *and* mutations (zone edits, settings, cache ops).
+    #[default]
+    Admin,
+    /// Read-only: every mutating endpoint is rejected with `403 Forbidden`.
+    Viewer,
+}
+
+impl Role {
+    /// Lowercase name used in JSON responses and the config file.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Role::Admin => "admin",
+            Role::Viewer => "viewer",
+        }
+    }
+}
+
+/// A console user credential. Passwords are stored as PBKDF2-HMAC-SHA256
+/// hashes (`pbkdf2-sha256$<iterations>$<salt>$<hash>`, base64); see
+/// [`hash_password`](crate::auth::hash_password) or
+/// `daygle-dns hash-password` to generate one.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ApiUser {
+    /// Login username.
+    pub username: String,
+    /// PBKDF2 password hash (never a plaintext password).
+    pub password_hash: String,
+    /// What the account may do. Defaults to `admin` for compatibility with
+    /// configuration files written before roles existed.
+    #[serde(default)]
+    pub role: Role,
+}
+
 /// REST API and GUI settings.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
@@ -656,7 +756,15 @@ pub struct ApiSettings {
     /// HTTP port (default 5380).
     pub port: u16,
     /// Bearer token required by mutating endpoints. Empty disables auth.
+    /// Ignored when `users` are configured (username/password login takes
+    /// over, including read endpoints).
     pub api_token: String,
+    /// Console user accounts. When non-empty, the GUI shows a login screen
+    /// and *every* API call requires a session token issued by
+    /// `POST /api/auth/login`.
+    pub users: Vec<ApiUser>,
+    /// Session token lifetime for login sessions, in seconds (default 12h).
+    pub session_ttl_secs: u64,
     /// Serve the embedded web GUI at `/`.
     pub gui_enabled: bool,
     /// Comma-separated list of allowed CORS origins.
@@ -670,8 +778,49 @@ impl Default for ApiSettings {
             listen: "127.0.0.1".to_string(),
             port: 5380,
             api_token: String::new(),
+            users: vec![],
+            session_ttl_secs: 43_200,
             gui_enabled: true,
             cors_origins: vec![],
+        }
+    }
+}
+
+/// DNS over QUIC settings (RFC 9250).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct DoqSettings {
+    /// Serve DNS over QUIC.
+    pub enabled: bool,
+    /// Address the DoQ listener binds to.
+    pub listen: String,
+    /// DoQ port (default 853, per RFC 9250).
+    pub port: u16,
+    /// TLS certificate (PEM, certificate chain first). Defaults to the DoT
+    /// certificate paths so one cert serves both.
+    pub cert_path: String,
+    /// TLS private key (PEM).
+    pub key_path: String,
+    /// When the certificate/key are absent, generate a self-signed one for
+    /// this name and write it to `cert_path`/`key_path`.
+    pub self_signed: bool,
+    /// Subject name used for the generated self-signed certificate.
+    pub server_name: String,
+    /// QUIC idle timeout in seconds. RFC 9250 recommends 600 or larger.
+    pub idle_timeout_secs: u64,
+}
+
+impl Default for DoqSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            listen: "0.0.0.0".to_string(),
+            port: 853,
+            cert_path: "/etc/daygle-dns/certs/server.crt".to_string(),
+            key_path: "/etc/daygle-dns/certs/server.key".to_string(),
+            self_signed: true,
+            server_name: "daygle.local".to_string(),
+            idle_timeout_secs: 600,
         }
     }
 }

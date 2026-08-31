@@ -1,6 +1,7 @@
 //! HTTP handlers for the REST API.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::extract::{Path, Query, State};
 use axum::http::{header, StatusCode};
@@ -63,6 +64,8 @@ pub async fn status(State(state): State<AppState>) -> Response {
         "recursion": state.resolver.load_full().is_some(),
         "dnssec": config.recursive.dnssec_validate,
         "dot_enabled": config.dot.enabled,
+        "doq_enabled": config.doq.enabled,
+        "users_configured": !config.api.users.is_empty(),
         "api_enabled": config.api.enabled,
         "blocklist_sources": config.policy.blocklist_sources.len(),
         "remote_blocklist_domains": state.policy.load_full().remote_blocklist_len(),
@@ -72,6 +75,38 @@ pub async fn status(State(state): State<AppState>) -> Response {
 
 pub async fn metrics(State(state): State<AppState>) -> Response {
     Json(state.metrics.snapshot()).into_response()
+}
+
+/// Dashboard statistics: time-series over a window plus top-N tables.
+/// `?window=1h` (default), `6h` or `24h`.
+#[derive(Deserialize)]
+pub struct StatsQuery {
+    window: Option<String>,
+}
+
+pub async fn stats(
+    State(state): State<AppState>,
+    Query(query): Query<StatsQuery>,
+) -> Response {
+    let window_minutes = match query.window.as_deref() {
+        Some("1h") | None => 60,
+        Some("6h") => 360,
+        Some("24h") => 1440,
+        Some(other) => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                format!("unknown window '{other}' (use 1h, 6h or 24h)"),
+            );
+        }
+    };
+    Json(serde_json::json!({
+        "window": window_minutes,
+        "series": state.stats.series(window_minutes),
+        "top_clients": state.stats.top_clients(10),
+        "top_domains": state.stats.top_domains(10),
+        "top_blocked": state.stats.top_blocked(10),
+    }))
+    .into_response()
 }
 
 /// Per-source status for remote blocklist sources.
@@ -144,7 +179,33 @@ pub async fn logs(
 }
 
 pub async fn config(State(state): State<AppState>) -> Response {
-    Json((*state.config.load_full()).clone()).into_response()
+    // Redact secrets before serving: password hashes and the static API
+    // token must never round-trip to the browser, not even for admins (the
+    // values are only ever written, never echoed back).
+    let mut value = match serde_json::to_value(state.config.load_full().as_ref().clone()) {
+        Ok(v) => v,
+        Err(e) => {
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("cannot serialize config: {e}"),
+            );
+        }
+    };
+    if let Some(api) = value.get_mut("api").and_then(|a| a.as_object_mut()) {
+        let token = api.get("api_token").and_then(|t| t.as_str()).unwrap_or("");
+        api.insert(
+            "api_token".to_string(),
+            serde_json::json!(if token.is_empty() { "" } else { "[redacted]" }),
+        );
+        if let Some(users) = api.get_mut("users").and_then(|u| u.as_array_mut()) {
+            for user in users.iter_mut() {
+                if let Some(obj) = user.as_object_mut() {
+                    obj.insert("password_hash".to_string(), serde_json::json!("[redacted]"));
+                }
+            }
+        }
+    }
+    axum::Json(value).into_response()
 }
 
 /// Re-read the configuration file and apply policy/upstream/listener changes
@@ -440,6 +501,357 @@ pub async fn clear_cache(State(state): State<AppState>) -> Response {
         resolver.clear_cache();
     }
     StatusCode::NO_CONTENT.into_response()
+}
+
+// ---- Auth ----------------------------------------------------------------
+
+/// Login request body.
+#[derive(Deserialize)]
+pub struct LoginInput {
+    username: String,
+    password: String,
+}
+
+/// `POST /api/auth/login` - verify username/password against `api.users`
+/// and return a session token. Always open (unauthenticated by definition).
+pub async fn auth_login(
+    State(state): State<AppState>,
+    axum::Json(input): axum::Json<LoginInput>,
+) -> Response {
+    let config = state.config.load_full();
+    let user = config
+        .api
+        .users
+        .iter()
+        .find(|u| u.username == input.username.trim());
+
+    // Constant-ish response time: verify against a dummy hash when the user
+    // does not exist so timing cannot enumerate accounts.
+    let ok = match user {
+        Some(u) => daygle_dns_core::auth::verify_password(&input.password, &u.password_hash),
+        None => {
+            let _ = daygle_dns_core::auth::verify_password(
+                &input.password,
+                "pbkdf2-sha256$210000$AAAAAAAAAAAAAAAAAAAAAA==$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+            );
+            false
+        }
+    };
+
+    if !ok {
+        state
+            .logs
+            .push(
+                daygle_dns_core::LogLevel::Warn,
+                "api",
+                format!("failed login attempt for user '{}'", input.username),
+            );
+        return error_response(StatusCode::UNAUTHORIZED, "invalid username or password");
+    }
+
+    let ttl = Duration::from_secs(config.api.session_ttl_secs.max(60));
+    let role = user
+        .map(|u| u.role)
+        .unwrap_or(daygle_dns_core::config::Role::Admin);
+    let token = state.sessions.create(
+        user.map(|u| u.username.as_str()).unwrap_or(""),
+        role,
+        ttl,
+    );
+    state.logs.push(
+        daygle_dns_core::LogLevel::Info,
+        "api",
+        format!("user '{}' logged in", input.username),
+    );
+    Json(serde_json::json!({
+        "token": token,
+        "username": input.username,
+        "role": role.as_str(),
+        "expires_in_secs": ttl.as_secs(),
+    }))
+    .into_response()
+}
+
+/// `POST /api/auth/logout` - revoke the presented session token.
+pub async fn auth_logout(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+) -> Response {
+    let token = bearer_token(&headers).unwrap_or_default();
+    state.sessions.revoke(&token);
+    StatusCode::NO_CONTENT.into_response()
+}
+
+/// `GET /api/auth/me` - identity of the presented session.
+pub async fn auth_me(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+) -> Response {
+    let token = bearer_token(&headers).unwrap_or_default();
+    match state.sessions.verify(&token) {
+        Some(session) => Json(serde_json::json!({
+            "username": session.username,
+            "role": session.role.as_str(),
+            "expires_at_secs": session
+                .expires_at
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0),
+        }))
+        .into_response(),
+        None => error_response(StatusCode::UNAUTHORIZED, "not authenticated"),
+    }
+}
+
+fn bearer_token(headers: &axum::http::HeaderMap) -> Option<String> {
+    headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .map(|s| s.to_string())
+}
+
+// ---- Settings update -----------------------------------------------------
+
+/// Partial update of the editable settings. `None` fields are left unchanged.
+/// Applied to the live config, validated, persisted to the config file, and
+/// (when listeners are affected) DNS listeners are rebound.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SettingsUpdate {
+    pub server: Option<ServerUpdate>,
+    pub recursive: Option<RecursiveUpdate>,
+    pub dot: Option<ListenerUpdate>,
+    pub doh: Option<DohUpdate>,
+    pub doq: Option<ListenerUpdate>,
+    pub api: Option<ApiUpdate>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ServerUpdate {
+    pub listen: Option<String>,
+    pub port: Option<u16>,
+    pub udp_enabled: Option<bool>,
+    pub tcp_enabled: Option<bool>,
+    pub reload_enabled: Option<bool>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RecursiveUpdate {
+    pub enabled: Option<bool>,
+    pub upstreams: Option<Vec<String>>,
+    pub dnssec_validate: Option<bool>,
+    pub prefetch_enabled: Option<bool>,
+    pub prefetch_ttl_fraction_pct: Option<u32>,
+    pub prefetch_min_queries: Option<u32>,
+    pub serve_stale_secs: Option<u64>,
+}
+
+/// Fields shared by the DoT and DoQ listeners.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ListenerUpdate {
+    pub enabled: Option<bool>,
+    pub port: Option<u16>,
+    pub self_signed: Option<bool>,
+    pub server_name: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DohUpdate {
+    pub enabled: Option<bool>,
+    pub port: Option<u16>,
+    pub self_signed: Option<bool>,
+    pub server_name: Option<String>,
+    pub endpoint: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ApiUpdate {
+    pub gui_enabled: Option<bool>,
+    pub cors_origins: Option<Vec<String>>,
+}
+
+/// `PUT /api/config` - apply a partial settings update.
+///
+/// The merged configuration is validated first (invalid input is rejected
+/// with 400 and nothing changes), stored in the live `ArcSwap`, persisted to
+/// the config file, and the DNS listeners are rebuilt when needed.
+pub async fn update_settings(
+    State(state): State<AppState>,
+    axum::Json(update): axum::Json<SettingsUpdate>,
+) -> Response {
+    let old_config = (*state.config.load_full()).clone();
+    let mut config = old_config.clone();
+    let mut listeners_affected = false;
+
+    if let Some(s) = &update.server {
+        if let Some(v) = &s.listen {
+            config.server.listen = v.clone();
+            listeners_affected = true;
+        }
+        if let Some(v) = s.port {
+            config.server.port = v;
+            listeners_affected = true;
+        }
+        if let Some(v) = s.udp_enabled {
+            config.server.udp_enabled = v;
+            listeners_affected = true;
+        }
+        if let Some(v) = s.tcp_enabled {
+            config.server.tcp_enabled = v;
+            listeners_affected = true;
+        }
+        if let Some(v) = s.reload_enabled {
+            config.server.reload_enabled = v;
+        }
+    }
+    if let Some(r) = &update.recursive {
+        if let Some(v) = r.enabled {
+            config.recursive.enabled = v;
+        }
+        if let Some(v) = &r.upstreams {
+            config.recursive.upstreams = v.clone();
+        }
+        if let Some(v) = r.dnssec_validate {
+            config.recursive.dnssec_validate = v;
+        }
+        if let Some(v) = r.prefetch_enabled {
+            config.recursive.prefetch_enabled = v;
+        }
+        if let Some(v) = r.prefetch_ttl_fraction_pct {
+            config.recursive.prefetch_ttl_fraction_pct = v;
+        }
+        if let Some(v) = r.prefetch_min_queries {
+            config.recursive.prefetch_min_queries = v;
+        }
+        if let Some(v) = r.serve_stale_secs {
+            config.recursive.serve_stale_secs = v;
+        }
+    }
+    if let Some(d) = &update.dot {
+        if let Some(v) = d.enabled {
+            config.dot.enabled = v;
+            listeners_affected = true;
+        }
+        if let Some(v) = d.port {
+            config.dot.port = v;
+            listeners_affected = true;
+        }
+        if let Some(v) = d.self_signed {
+            config.dot.self_signed = v;
+        }
+        if let Some(v) = &d.server_name {
+            config.dot.server_name = v.clone();
+        }
+    }
+    if let Some(d) = &update.doh {
+        if let Some(v) = d.enabled {
+            config.doh.enabled = v;
+            listeners_affected = true;
+        }
+        if let Some(v) = d.port {
+            config.doh.port = v;
+            listeners_affected = true;
+        }
+        if let Some(v) = d.self_signed {
+            config.doh.self_signed = v;
+        }
+        if let Some(v) = &d.server_name {
+            config.doh.server_name = v.clone();
+        }
+        if let Some(v) = &d.endpoint {
+            config.doh.endpoint = v.clone();
+        }
+    }
+    if let Some(d) = &update.doq {
+        if let Some(v) = d.enabled {
+            config.doq.enabled = v;
+            listeners_affected = true;
+        }
+        if let Some(v) = d.port {
+            config.doq.port = v;
+            listeners_affected = true;
+        }
+        if let Some(v) = d.self_signed {
+            config.doq.self_signed = v;
+        }
+        if let Some(v) = &d.server_name {
+            config.doq.server_name = v.clone();
+        }
+    }
+    if let Some(a) = &update.api {
+        if let Some(v) = a.gui_enabled {
+            config.api.gui_enabled = v;
+        }
+        if let Some(v) = &a.cors_origins {
+            config.api.cors_origins = v.clone();
+        }
+    }
+
+    // Validate before applying anything. A validation failure is rejected
+    // only when this update introduces a *new* error: if the pre-update
+    // configuration already failed validation the same way (possible for
+    // hand-managed config files), the update itself is not at fault and is
+    // still applied.
+    if let Err(e) = config.validate() {
+        let pre_existing = old_config
+            .validate()
+            .err()
+            .map(|old| old.to_string() == e.to_string())
+            .unwrap_or(false);
+        if !pre_existing {
+            return map_err(e);
+        }
+        state.logs.warn(
+            "api",
+            format!("settings applied despite pre-existing validation error: {e}"),
+        );
+    }
+
+    // Persist to the config file when we know its path. The whole document
+    // is rewritten (comments in an edited file are not preserved; the
+    // example file documents every option).
+    if let Some(path) = &state.config_path {
+        match config.to_toml() {
+            Ok(text) => {
+                if let Err(e) = std::fs::write(path.as_ref(), text) {
+                    state.logs.error(
+                        "api",
+                        format!("failed to persist settings to {}: {e}", path.display()),
+                    );
+                    return error_response(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "applied in memory but failed to persist to the config file",
+                    );
+                }
+            }
+            Err(e) => {
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("cannot serialize config: {e}"),
+                );
+            }
+        }
+    }
+
+    // Publish live, then ask for a listener rebuild when needed.
+    state.config.store(Arc::new(config.clone()));
+    if listeners_affected {
+        if let Some(rebuild) = &state.request_dns_rebuild {
+            rebuild();
+        }
+    }
+    state.logs.push(
+        daygle_dns_core::LogLevel::Info,
+        "api",
+        "settings updated via the console".to_string(),
+    );
+    Json((*state.config.load_full()).clone()).into_response()
 }
 
 // ---- GUI ----------------------------------------------------------------

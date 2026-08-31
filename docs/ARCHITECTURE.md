@@ -1,8 +1,8 @@
 # Daygle DNS architecture
 
 Daygle is a Cargo workspace of eight crates. One binary (`daygle-dns`) composes
-them into a single process that serves plaintext DNS, DNS over TLS, and an HTTP
-API/GUI.
+them into a single process that serves plaintext DNS, DNS over TLS,
+DNS over HTTPS, DNS over QUIC, and an HTTP API/GUI.
 
 ## Crate responsibilities
 
@@ -43,13 +43,17 @@ API/GUI.
   Conditional forwarding zones each get their own resolver built from the
   zone's dedicated upstreams; routing happens at lookup time by longest
   label-aligned suffix match.
-- **`daygle-dns-dot`** produces rustls `ServerConfig`s for both encrypted DNS
-  protocols - the `dot` ALPN for DoT (RFC 7858) and the `h2` ALPN for DoH
-  (RFC 8484) - and generates self-signed certificates when configured.
-- **`daygle-dns-api`** serves the REST API and the embedded GUI.
+- **`daygle-dns-dot`** produces rustls TLS configurations for the encrypted
+  DNS protocols - the `dot` ALPN for DoT (RFC 7858), `h2` for DoH (RFC 8484)
+  and a TLS 1.3 + `doq`-ALPN setup for DoQ (RFC 9250, served by Hickory's
+  QUIC listener) - and generates self-signed certificates when configured.
+- **`daygle-dns-api`** serves the REST API and the embedded GUI, including
+  console login (PBKDF2 password verification + in-memory session tokens,
+  `admin`/`viewer` roles enforced in the auth middleware) and the dashboard
+  statistics endpoint backed by `daygle-dns-core`'s bounded `QueryStats`.
 - **`daygle-dns-gui`** embeds the compiled Svelte bundle via `rust-embed`.
-- **`daygle-dns`** (binary) binds UDP/TCP/DoT/DoH listeners onto one Hickory
-  `Server` driven by `DnsDispatcher`.
+- **`daygle-dns`** (binary) binds UDP/TCP/DoT/DoH/DoQ listeners onto one
+  Hickory `Server` driven by `DnsDispatcher`.
 
 ## Query flow
 
@@ -191,6 +195,32 @@ same path for per-source status.
   parent's DS record - submit the new DS (or CDS/CDNSKEY) to the registrar
   during the overlap window; Daygle keeps the old key published long enough
   for that exchange.
+
+## Console, roles and dashboard
+
+- **Login.** `api.users` accounts are verified with PBKDF2-HMAC-SHA256
+  (`daygle-dns-core/src/auth.rs`); generate hashes with
+  `daygle-dns hash-password`. Successful logins mint a 128-bit random session
+  token held in memory with a TTL (`api.session_ttl_secs`); the token is the
+  API bearer credential. Failed logins are logged; a dummy-hash verification
+  keeps the response time constant so usernames cannot be enumerated.
+- **Roles.** Sessions carry the account's role. `viewer` sessions may read
+  everything but any mutating method is rejected with `403` by the auth
+  middleware before a handler runs. `admin` sessions (and the legacy static
+  `api_token`) have full access.
+- **Secret redaction.** `GET /api/config` masks `api.api_token` and every
+  password hash as `[redacted]`, so secrets never round-trip to a browser.
+- **Settings forms.** `PUT /api/config` applies a validated partial update
+  (server/recursive/DoT/DoH/DoQ/API groups), persists it to the config file,
+  and triggers a listener rebuild through `request_dns_rebuild` when
+  listeners were touched - the same mechanism live reload uses.
+- **Dashboard statistics.** `QueryStats` (`daygle-dns-core/src/stats.rs`)
+  records every served query into a 24-hour ring of one-minute buckets plus
+  bounded top-N tables (clients, domains, blocked domains; pruned to 2 000
+  keys at 5 000). `GET /api/stats?window=…` renders the time-series and top
+  tables; the dispatcher tags each query with its outcome (authoritative,
+  recursive, split-horizon, blocked, rate-limited, error) as it is answered.
+  Stats are in-memory only and reset on restart.
 
 ## Extensibility points
 

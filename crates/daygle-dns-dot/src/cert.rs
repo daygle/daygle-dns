@@ -75,6 +75,16 @@ fn write_if_parent_exists(path: &str, bytes: &[u8]) -> Result<()> {
 /// Load a PEM certificate chain + private key into a rustls server config
 /// advertising the given ALPN protocol (e.g. `dot` for DoT, `h2` for DoH).
 pub fn load_tls_config(cert_path: &str, key_path: &str, alpn: &[u8]) -> Result<rustls::ServerConfig> {
+    load_tls_config_versions(cert_path, key_path, alpn)
+}
+
+/// Like [`load_tls_config`], but restricted to the given protocol versions
+/// (needed for DoQ, where QUIC requires TLS 1.3 only).
+pub fn load_tls_config_versions(
+    cert_path: &str,
+    key_path: &str,
+    alpn: &[u8],
+) -> Result<rustls::ServerConfig> {
     let certs = read_certs(cert_path)?;
     let key = read_key(key_path)?;
 

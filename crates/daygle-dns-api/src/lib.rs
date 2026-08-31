@@ -39,9 +39,10 @@
 
 mod handlers;
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant, SystemTime};
 
 use arc_swap::{ArcSwap, ArcSwapOption};
 use axum::extract::Request;
@@ -55,6 +56,70 @@ use daygle_dns_core::config::DaygleConfig;
 use daygle_dns_core::{LogStore, Metrics};
 use daygle_dns_policy::BlocklistSourceManager;
 use daygle_dns_recursive::RecursiveResolver;
+use parking_lot::Mutex;
+
+/// A live login session: the authenticated username, its role and expiry.
+#[derive(Debug, Clone)]
+pub struct Session {
+    pub username: String,
+    pub role: daygle_dns_core::config::Role,
+    pub expires_at: SystemTime,
+}
+
+/// In-memory login-session store (tokens are 128-bit random hex).
+#[derive(Default)]
+pub struct SessionStore {
+    sessions: Mutex<HashMap<String, Session>>,
+}
+
+impl SessionStore {
+    /// Insert a fresh session for `username`, valid for `ttl`.
+    pub fn create(
+        &self,
+        username: &str,
+        role: daygle_dns_core::config::Role,
+        ttl: Duration,
+    ) -> String {
+        let token = new_token();
+        self.sessions.lock().insert(
+            token.clone(),
+            Session {
+                username: username.to_string(),
+                role,
+                expires_at: SystemTime::now() + ttl,
+            },
+        );
+        token
+    }
+
+    /// Return the session for a token if it exists and is unexpired.
+    /// Expired sessions are pruned lazily on access.
+    pub fn verify(&self, token: &str) -> Option<Session> {
+        let mut sessions = self.sessions.lock();
+        prune_expired(&mut sessions);
+        sessions.get(token).cloned()
+    }
+
+    /// Remove a session (logout). Returns whether it existed.
+    pub fn revoke(&self, token: &str) -> bool {
+        self.sessions.lock().remove(token).is_some()
+    }
+}
+
+fn prune_expired(sessions: &mut HashMap<String, Session>) {
+    let now = SystemTime::now();
+    sessions.retain(|_, s| s.expires_at > now);
+}
+
+/// Generate a 128-bit random hex token (from OS entropy via rand's
+/// thread-local generator; collision probability is negligible).
+fn new_token() -> String {
+    use rand::Rng;
+    let mut rng = rand::thread_rng();
+    (0..16)
+        .map(|_| format!("{:02x}", rng.gen::<u8>()))
+        .collect()
+}
 
 /// Shared state for the API and the DNS dispatcher.
 ///
@@ -76,6 +141,13 @@ pub struct AppState {
     /// Notify handle that wakes the config-file watcher for an immediate
     /// reload; `None` when live reload is unavailable.
     pub reload_notify: Option<Arc<tokio::sync::Notify>>,
+    /// Login sessions (only meaningful when `api.users` is configured).
+    pub sessions: Arc<SessionStore>,
+    /// Hook that rebinds DNS listeners after a settings change; `None` when
+    /// the caller does not support live listener rebinding.
+    pub request_dns_rebuild: Option<Arc<dyn Fn() + Send + Sync>>,
+    /// Dashboard time-series + top-N tables.
+    pub stats: Arc<daygle_dns_core::stats::QueryStats>,
 }
 
 /// Build the API router (REST endpoints plus the embedded GUI).
@@ -83,8 +155,17 @@ pub fn router(state: AppState) -> Router {
     let api = Router::new()
         .route("/status", get(handlers::status))
         .route("/metrics", get(handlers::metrics))
+        .route("/stats", get(handlers::stats))
         .route("/logs", get(handlers::logs))
-        .route("/config", get(handlers::config).post(handlers::reload_config))
+        .route(
+            "/config",
+            get(handlers::config)
+                .put(handlers::update_settings)
+                .post(handlers::reload_config),
+        )
+        .route("/auth/login", post(handlers::auth_login))
+        .route("/auth/logout", post(handlers::auth_logout))
+        .route("/auth/me", get(handlers::auth_me))
         .route("/zones", get(handlers::list_zones).post(handlers::create_zone))
         .route("/zones/import", post(handlers::import_zone))
         .route("/zones/{id}", delete(handlers::delete_zone))
@@ -121,8 +202,7 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/policy/blocklist/sources",
             get(handlers::blocklist_sources).post(handlers::refresh_blocklist_sources),
-        )
-        .layer(middleware::from_fn_with_state(
+        )        .layer(middleware::from_fn_with_state(
             state.clone(),
             require_auth,
         ))
@@ -139,29 +219,84 @@ pub fn router(state: AppState) -> Router {
     app
 }
 
-/// Bearer-token authorization for mutating methods.
+/// Authorization for API calls.
+///
+/// - `POST /api/auth/login` is always open (it *is* the login).
+/// - When `api.users` is configured, **every** endpoint requires a valid
+///   session token (from login) or the static `api_token` — the console is
+///   fully authenticated, like Technitium.
+/// - Otherwise (legacy `api_token` mode): GET/OPTIONS stay open, mutating
+///   methods require the `api_token` Bearer header when one is configured.
 async fn require_auth(
     axum::extract::State(state): axum::extract::State<AppState>,
     req: Request,
     next: Next,
 ) -> Response {
-    if req.method() == axum::http::Method::GET || req.method() == axum::http::Method::OPTIONS {
+    // Within the nested router axum strips the `/api` prefix, so match both
+    // the full and stripped forms of the login path.
+    let path = req.uri().path();
+    let is_login = path == "/api/auth/login" || path == "/auth/login";
+    if is_login || req.method() == axum::http::Method::OPTIONS {
         return next.run(req).await;
     }
-    let configured = state.config.load().api.api_token.trim().to_string();
-    if configured.is_empty() {
+
+    let config = state.config.load();
+    let users_configured = !config.api.users.is_empty();
+    let static_token = config.api.api_token.trim().to_string();
+    drop(config);
+
+    if !users_configured && static_token.is_empty() {
+        // No auth configured at all: open access (development mode).
         return next.run(req).await;
     }
-    let authorized = req
+
+    let bearer = req
         .headers()
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
-        .map(|v| v.strip_prefix("Bearer ").unwrap_or(v) == configured)
-        .unwrap_or(false);
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .unwrap_or("")
+        .to_string();
 
-    if authorized {
-        next.run(req).await
-    } else {
-        (StatusCode::UNAUTHORIZED, "missing or invalid bearer token").into_response()
+    // A static api_token always authorizes (backwards compatible).
+    if !static_token.is_empty() && bearer == static_token {
+        return next.run(req).await;
     }
+
+    // When users are configured, a valid login session is required for every
+    // method. In legacy token-only mode, GETs stay open.
+    if users_configured {
+        if let Some(session) = state.sessions.verify(&bearer) {
+            // `viewer` accounts are read-only: any state-changing method is
+            // rejected with 403 even though the session itself is valid.
+            let mutating = !matches!(
+                *req.method(),
+                axum::http::Method::GET | axum::http::Method::HEAD
+            );
+            if mutating && session.role == daygle_dns_core::config::Role::Viewer {
+                return (
+                    StatusCode::FORBIDDEN,
+                    axum::Json(serde_json::json!({
+                        "error": "read-only account: mutations require the admin role",
+                    })),
+                )
+                    .into_response();
+            }
+            return next.run(req).await;
+        }
+        return (
+            StatusCode::UNAUTHORIZED,
+            axum::Json(serde_json::json!({
+                "error": "authentication required",
+                "login": true,
+            })),
+        )
+            .into_response();
+    }
+
+    if req.method() == axum::http::Method::GET {
+        return next.run(req).await;
+    }
+
+    (StatusCode::UNAUTHORIZED, "missing or invalid bearer token").into_response()
 }

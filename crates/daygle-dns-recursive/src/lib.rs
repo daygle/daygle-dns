@@ -19,11 +19,13 @@
 //!   are resolved by that zone's dedicated upstreams instead of the default
 //!   ones (longest-suffix match wins).
 
+mod cache_assist;
 mod upstream;
 
 use std::sync::Arc;
 use std::time::Duration;
 
+use cache_assist::{cache_key, CacheAssistant, PrefetchConfig};
 use daygle_dns_core::config::{ConditionalZoneConfig, RecursiveSettings};
 use daygle_dns_core::error::{DaygleError, Result};
 use daygle_dns_core::Metrics;
@@ -32,21 +34,31 @@ use hickory_resolver::config::{ResolverConfig, ResolverOpts};
 use hickory_resolver::lookup::Lookup;
 use hickory_resolver::net::runtime::TokioRuntimeProvider;
 use hickory_resolver::TokioResolver;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
+pub use cache_assist::STALE_TTL_SECS;
 pub use upstream::parse_upstreams;
 
 /// A thread-safe recursive resolver.
 ///
 /// Queries are routed by name: the most specific configured conditional zone
 /// (longest suffix match) is resolved by its dedicated upstreams, everything
-/// else by the default upstreams.
+/// else by the default upstreams. When `prefetch_enabled` is set, popular
+/// names are refreshed in the background as their TTLs run low; when
+/// `serve_stale_secs` is set, previously-good answers are served during
+/// upstream outages.
+#[derive(Clone)]
 pub struct RecursiveResolver {
-    inner: TokioResolver,
+    inner: Arc<Inner>,
+}
+
+struct Inner {
+    resolver: TokioResolver,
     /// Conditional forwarding zones: `zone suffix` -> dedicated resolver.
     conditional: Vec<ConditionalResolver>,
     settings: RecursiveSettings,
     metrics: Arc<Metrics>,
+    cache_assist: Arc<CacheAssistant>,
 }
 
 /// One conditional forwarding zone: the zone's FQDN suffix (lowercased,
@@ -59,9 +71,11 @@ struct ConditionalResolver {
 impl std::fmt::Debug for RecursiveResolver {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RecursiveResolver")
-            .field("cache_size", &self.settings.cache_size)
-            .field("attempts", &self.settings.attempts)
-            .field("dnssec", &self.settings.dnssec_validate)
+            .field("cache_size", &self.inner.settings.cache_size)
+            .field("attempts", &self.inner.settings.attempts)
+            .field("dnssec", &self.inner.settings.dnssec_validate)
+            .field("prefetch", &self.inner.settings.prefetch_enabled)
+            .field("serve_stale_secs", &self.inner.settings.serve_stale_secs)
             .finish_non_exhaustive()
     }
 }
@@ -110,15 +124,28 @@ impl RecursiveResolver {
             attempts = settings.attempts,
             timeout_secs = settings.timeout_secs,
             dnssec = settings.dnssec_validate,
+            prefetch = settings.prefetch_enabled,
+            serve_stale_secs = settings.serve_stale_secs,
             conditional_zones = conditional.len(),
             "recursive resolver ready"
         );
 
+        let cache_assist = Arc::new(CacheAssistant::new(PrefetchConfig {
+            enabled: settings.prefetch_enabled,
+            ttl_fraction_pct: settings.prefetch_ttl_fraction_pct,
+            min_queries: settings.prefetch_min_queries,
+            window: Duration::from_secs(settings.prefetch_window_secs),
+            serve_stale_secs: settings.serve_stale_secs,
+        }));
+
         Ok(Self {
-            inner,
-            conditional,
-            settings: settings.clone(),
-            metrics,
+            inner: Arc::new(Inner {
+                resolver: inner,
+                conditional,
+                settings: settings.clone(),
+                metrics,
+                cache_assist,
+            }),
         })
     }
 
@@ -126,21 +153,146 @@ impl RecursiveResolver {
     ///
     /// Queries inside a configured conditional zone are answered by that
     /// zone's dedicated resolver; everything else uses the default upstreams.
+    /// On upstream failure, a previously-good answer within the serve-stale
+    /// window is served with a short TTL when `serve_stale_secs` is set.
     pub async fn lookup(&self, name: &str, record_type: RecordType) -> Result<Lookup> {
+        Arc::clone(&self.inner).lookup_owned(name, record_type).await
+    }
+
+    /// Flush the response cache.
+    pub fn clear_cache(&self) {
+        self.inner.resolver.clear_cache();
+        for zone in &self.inner.conditional {
+            zone.resolver.clear_cache();
+        }
+        self.inner.cache_assist.clear();
+        info!("recursive resolver cache cleared");
+    }
+
+    /// The configured cache capacity.
+    pub fn cache_size(&self) -> usize {
+        self.inner.settings.cache_size
+    }
+
+    pub fn dnssec_enabled(&self) -> bool {
+        self.inner.settings.dnssec_validate
+    }
+
+    pub fn metrics(&self) -> &Metrics {
+        &self.inner.metrics
+    }
+
+    /// The configured conditional forwarding zones (for status/metrics).
+    pub fn conditional_zones(&self) -> Vec<String> {
+        self.inner
+            .conditional
+            .iter()
+            .map(|c| c.zone.clone())
+            .collect()
+    }
+
+    /// Number of names tracked for prefetch/serve-stale decisions.
+    pub fn tracked_names(&self) -> usize {
+        self.inner.cache_assist.tracked_names()
+    }
+}
+
+impl Inner {
+    /// Core lookup path used by client queries: records the result in the
+    /// cache assistant and may spawn a prefetch refresh for popular names.
+    /// (The spawned task uses [`Self::refresh`], which never spawns again —
+    /// keeping both futures provably `Send` without recursion.)
+    pub async fn lookup_owned(self: Arc<Self>, name: &str, record_type: RecordType) -> Result<Lookup> {
+        let inner = self;
         let name = Name::from_utf8(name).map_err(|e| DaygleError::Resolution {
             message: format!("invalid name '{name}': {e}"),
             response_code: None,
         })?;
-        let matched = match_conditional_zones(&self.conditional, &name);
+        let key = cache_key(&name, record_type);
+        match Self::resolve(Arc::clone(&inner), name, record_type, true).await {
+            Ok(lookup) => Ok(lookup),
+            Err(e @ DaygleError::Resolution { response_code, .. }) => {
+                // True transport/timeout failures (no response code) may be
+                // covered by a serve-stale snapshot; negative answers
+                // (NXDOMAIN etc.) are real answers, never stale-served.
+                if response_code.is_none() {
+                    if let Some(stale) = inner.cache_assist.on_failure(&key) {
+                        warn!(
+                            name = %key.name,
+                            error = %e,
+                            "upstream failed; serving stale answer"
+                        );
+                        return Ok(stale);
+                    }
+                }
+                Err(e)
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Prefetch refresh: re-resolve a popular name in the background so the
+    /// next client query is answered from cache. Never spawns another task
+    /// (no recursion), and failures are swallowed.
+    pub async fn refresh(self: Arc<Self>, key: cache_assist::CacheKey, record_type: RecordType) {
+        let name = match Name::from_utf8(&key.name) {
+            Ok(n) => n,
+            Err(_) => {
+                self.cache_assist.end_prefetch(&key);
+                return;
+            }
+        };
+        // Clone the routed resolver out of `inner` before awaiting so no
+        // borrow of `Inner` is held across the lookup, and never spawn
+        // again here (acyclic => provably `Send`).
+        let resolver = match match_conditional_zones(&self.conditional, &name) {
+            Some(idx) => self.conditional[idx].resolver.clone(),
+            None => self.resolver.clone(),
+        };
+        match resolver.lookup(name, record_type).await {
+            Ok(lookup) => {
+                self.cache_assist.on_success(&key, &lookup);
+            }
+            Err(e) => {
+                debug!(name = %key.name, error = %e, "prefetch refresh failed");
+            }
+        }
+        self.cache_assist.end_prefetch(&key);
+    }
+
+    /// Shared resolution core: route to the conditional or default resolver,
+    /// record metrics and cache-assistant state, optionally trigger a
+    /// prefetch spawn.
+    ///
+    /// The chosen `TokioResolver` is cloned out of `inner` **before** the
+    /// await so no borrow of `Inner` is held across it (this keeps the
+    /// future `Send` despite the generic Hickory lookup future).
+    async fn resolve(
+        inner: Arc<Self>,
+        name: Name,
+        record_type: RecordType,
+        allow_prefetch: bool,
+    ) -> Result<Lookup> {
+        let matched = match_conditional_zones(&inner.conditional, &name);
         let via_conditional = matched.is_some();
-        let inner = matched
-            .map(|idx| &self.conditional[idx].resolver)
-            .unwrap_or(&self.inner);
+        let resolver = match matched {
+            Some(idx) => inner.conditional[idx].resolver.clone(),
+            None => inner.resolver.clone(),
+        };
+        let key = cache_key(&name, record_type);
         debug!(query = %name, rtype = ?record_type, conditional = via_conditional, "lookup routing");
 
-        match inner.lookup(name, record_type).await {
+        match resolver.lookup(name, record_type).await {
             Ok(lookup) => {
-                self.metrics.inc(&self.metrics.cache_misses);
+                inner.metrics.inc(&inner.metrics.cache_misses);
+                if allow_prefetch && inner.cache_assist.on_success(&key, &lookup) {
+                    if inner.cache_assist.try_begin_prefetch(&key) {
+                        let task_inner = Arc::clone(&inner);
+                        tokio::spawn(task_inner.refresh(key.clone(), record_type));
+                    }
+                } else if !allow_prefetch {
+                    inner.cache_assist.on_success(&key, &lookup);
+                }
                 debug!(
                     query = %lookup.query().name(),
                     rtype = ?record_type,
@@ -150,44 +302,13 @@ impl RecursiveResolver {
                 Ok(lookup)
             }
             Err(e) => {
-                self.metrics.inc(&self.metrics.errors);
+                inner.metrics.inc(&inner.metrics.errors);
                 Err(DaygleError::Resolution {
                     message: e.to_string(),
-                    // Negative answers (NXDOMAIN / no records of the type)
-                    // carry their response code so the server can pass it
-                    // through instead of SERVFAIL. Timeouts and transport
-                    // errors have no code and stay SERVFAIL.
                     response_code: negative_response_code(&e),
                 })
             }
         }
-    }
-
-    /// Flush the response cache.
-    pub fn clear_cache(&self) {
-        self.inner.clear_cache();
-        for zone in &self.conditional {
-            zone.resolver.clear_cache();
-        }
-        info!("recursive resolver cache cleared");
-    }
-
-    /// The configured cache capacity.
-    pub fn cache_size(&self) -> usize {
-        self.settings.cache_size
-    }
-
-    pub fn dnssec_enabled(&self) -> bool {
-        self.settings.dnssec_validate
-    }
-
-    pub fn metrics(&self) -> &Metrics {
-        &self.metrics
-    }
-
-    /// The configured conditional forwarding zones (for status/metrics).
-    pub fn conditional_zones(&self) -> Vec<String> {
-        self.conditional.iter().map(|c| c.zone.clone()).collect()
     }
 }
 

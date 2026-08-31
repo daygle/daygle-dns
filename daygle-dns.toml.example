@@ -30,6 +30,16 @@ attempts = 3
 dnssec_validate = true
 min_cache_ttl = 0
 negative_cache_ttl = 3600
+# Cache prefetch: names asked at least `prefetch_min_queries` times inside the
+# sliding window are refreshed in the background once `prefetch_ttl_fraction_pct`
+# of their TTL has elapsed, so popular answers never wait on an upstream.
+prefetch_enabled = false
+prefetch_ttl_fraction_pct = 50
+prefetch_min_queries = 5
+prefetch_window_secs = 300
+# Serve-stale: keep serving last-known-good answers for up to this long when
+# every upstream is unreachable (0 disables). 1800 = 30 minutes.
+serve_stale_secs = 0
 
 # Conditional forwarding: queries for these zones are resolved by the zone's
 # own upstreams instead of the defaults above. Useful for split-horizon DNS,
@@ -127,13 +137,37 @@ self_signed = true
 server_name = "dns.example.com"
 endpoint = "/dns-query"
 
+# DNS over QUIC (RFC 9250). One bidirectional QUIC stream per query; RFC 9250
+# recommends keeping the connection open (idle timeout >= 600). Defaults to
+# reusing the DoT certificate.
+[doq]
+enabled = false
+listen = "0.0.0.0"
+port = 853
+cert_path = "/etc/daygle-dns/certs/server.crt"
+key_path = "/etc/daygle-dns/certs/server.key"
+self_signed = true
+server_name = "dns.example.com"
+idle_timeout_secs = 600
+
 # REST API + embedded web GUI.
 [api]
 enabled = true
 listen = "127.0.0.1"
 port = 5380
 # Bearer token required by mutating endpoints. Leave empty to disable auth.
+# Ignored once console users are configured below.
 api_token = ""
+# Console login: when users exist, the GUI shows a login screen and EVERY
+# API call (reads included) requires a session token from POST /api/auth/login.
+# Generate a password hash with:  daygle-dns hash-password 'your-password'
+# role = "admin" (full access) or "viewer" (read-only; mutations get 403).
+# Sessions live for session_ttl_secs (default 12 h).
+session_ttl_secs = 43200
+# [[api.users]]
+# username = "admin"
+# password_hash = "pbkdf2-sha256$210000$…$…"
+# role = "admin"
 gui_enabled = true
 cors_origins = []
 

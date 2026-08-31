@@ -7,6 +7,7 @@ use arc_swap::{ArcSwap, ArcSwapOption};
 use async_trait::async_trait;
 use daygle_dns_authoritative::model::SPLIT_HORIZON_RECORD_TYPES;
 use daygle_dns_authoritative::AuthorityCatalog;
+use daygle_dns_core::stats::Outcome;
 use daygle_dns_core::{DaygleError, LogStore, Metrics, RateLimiter};
 use daygle_dns_policy::{Action, PolicyEngine};
 use daygle_dns_recursive::RecursiveResolver;
@@ -27,6 +28,7 @@ use tracing::{debug, warn};
 ///    signing when enabled).
 /// 3. **Recursive** - otherwise the query is resolved through
 ///    [`RecursiveResolver`].
+#[derive(Clone)]
 pub struct DnsDispatcher {
     catalog: Arc<AuthorityCatalog>,
     resolver: Arc<ArcSwapOption<RecursiveResolver>>,
@@ -38,6 +40,9 @@ pub struct DnsDispatcher {
     notify: daygle_dns_authoritative::notify::NotifyHooks,
     /// TSIG keys (RFC 8945) for transfer/update authentication.
     tsig_keys: Arc<daygle_dns_authoritative::tsig::TsigKeyRing>,
+    /// Dashboard time-series + top-N tables (per-minute buckets, top
+    /// clients/domains/blocked). Optional so tests can omit it.
+    stats: Option<Arc<daygle_dns_core::stats::QueryStats>>,
 }
 
 impl DnsDispatcher {
@@ -88,6 +93,33 @@ impl DnsDispatcher {
             logs,
             notify,
             tsig_keys,
+            stats: None,
+        }
+    }
+
+    /// Like [`Self::with_notify`], additionally recording dashboard
+    /// statistics (time-series buckets + top-N tables).
+    pub fn with_stats(
+        catalog: Arc<AuthorityCatalog>,
+        resolver: Arc<ArcSwapOption<RecursiveResolver>>,
+        policy: Arc<ArcSwap<PolicyEngine>>,
+        rate_limiter: Arc<RateLimiter>,
+        metrics: Arc<Metrics>,
+        logs: Arc<LogStore>,
+        notify: daygle_dns_authoritative::notify::NotifyHooks,
+        tsig_keys: Arc<daygle_dns_authoritative::tsig::TsigKeyRing>,
+        stats: Arc<daygle_dns_core::stats::QueryStats>,
+    ) -> Self {
+        Self {
+            catalog,
+            resolver,
+            policy,
+            rate_limiter,
+            metrics,
+            logs,
+            notify,
+            tsig_keys,
+            stats: Some(stats),
         }
     }
 
@@ -112,6 +144,14 @@ impl DnsDispatcher {
 
     fn log_error(&self, component: &str, message: impl Into<String>) {
         self.logs.error(component, message.into());
+    }
+
+    /// Record one query into the dashboard statistics (no-op when stats are
+    /// not attached, e.g. in unit tests).
+    fn record_stats(&self, client: IpAddr, qname: &str, outcome: daygle_dns_core::stats::Outcome) {
+        if let Some(stats) = &self.stats {
+            stats.record(client, qname, outcome);
+        }
     }
 
     /// Serve an AXFR/IXFR zone transfer from the stored zone data.
@@ -273,6 +313,7 @@ impl RequestHandler for DnsDispatcher {
         if !self.rate_limiter.check_client(client) {
             debug!(%client, "query rate-limited by client");
             self.metrics.inc(&self.metrics.rate_limited);
+            self.record_stats(client, "(rate-limited)", Outcome::RateLimited);
             return send_error(&mut response_handle, request, ResponseCode::ServFail).await;
         }
 
@@ -323,6 +364,7 @@ impl RequestHandler for DnsDispatcher {
         if !self.rate_limiter.check_domain(&qname) {
             debug!(query = %qname, "query rate-limited by domain");
             self.metrics.inc(&self.metrics.rate_limited);
+            self.record_stats(client, &qname, Outcome::RateLimited);
             return send_error(&mut response_handle, request, ResponseCode::ServFail).await;
         }
 
@@ -335,16 +377,19 @@ impl RequestHandler for DnsDispatcher {
             Action::Refused => {
                 debug!(query = %qname, reason = %decision.reason, "refused by policy");
                 self.metrics.inc(&self.metrics.blocked);
+                self.record_stats(client, &qname, Outcome::Blocked);
                 return send_error(&mut response_handle, request, ResponseCode::Refused).await;
             }
             Action::Block => {
                 debug!(query = %qname, reason = %decision.reason, "blocked by policy");
                 self.metrics.inc(&self.metrics.blocked);
+                self.record_stats(client, &qname, Outcome::Blocked);
                 return send_error(&mut response_handle, request, ResponseCode::NXDomain).await;
             }
             Action::Redirect(ip) => {
                 debug!(query = %qname, %ip, "redirected by policy");
                 self.metrics.inc(&self.metrics.blocked);
+                self.record_stats(client, &qname, Outcome::Blocked);
                 return send_redirect(&mut response_handle, request, info.query.query_type(), *ip)
                     .await;
             }
@@ -363,6 +408,7 @@ impl RequestHandler for DnsDispatcher {
             if let Some(m) = index.lookup(client, &qname, info.query.query_type()) {
                 debug!(query = %qname, %client, "split-horizon answer");
                 self.metrics.inc(&self.metrics.split_horizon);
+                self.record_stats(client, &qname, Outcome::SplitHorizon);
                 return send_records(&mut response_handle, request, &m.records).await;
             }
         }
@@ -378,6 +424,7 @@ impl RequestHandler for DnsDispatcher {
         // 2b. Authoritative zones.
         if self.catalog.contains(info.query.name()) {
             self.metrics.inc(&self.metrics.authoritative);
+            self.record_stats(client, &qname, Outcome::Authoritative);
             let now = unix_now();
             let edns = request.edns.as_ref();
             return self.catalog.read().lookup(request, edns, now, response_handle).await;
@@ -392,6 +439,7 @@ impl RequestHandler for DnsDispatcher {
         };
 
         self.metrics.inc(&self.metrics.recursive);
+        self.record_stats(client, &qname, Outcome::Recursive);
         match resolver.lookup(&qname, info.query.query_type()).await {
             Ok(lookup) => {
                 let answers = lookup.answers().to_vec();
@@ -427,6 +475,7 @@ impl RequestHandler for DnsDispatcher {
             Err(e) => {
                 debug!(query = %qname, error = %e, "recursive resolution failed");
                 self.metrics.inc(&self.metrics.errors);
+                self.record_stats(client, &qname, Outcome::Error);
                 // Negative answers (NXDOMAIN, NODATA) carry their response
                 // code so they pass through instead of SERVFAIL.
                 let code = match &e {

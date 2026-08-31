@@ -40,6 +40,8 @@ pub struct BoundServer {
     pub dot_addr: Option<std::net::SocketAddr>,
     /// The initially bound DNS-over-HTTPS address, if DoH is enabled.
     pub doh_addr: Option<std::net::SocketAddr>,
+    /// The initially bound DNS-over-QUIC address, if DoQ is enabled.
+    pub doq_addr: Option<std::net::SocketAddr>,
     /// The REST API + GUI address.
     pub api_addr: std::net::SocketAddr,
     /// Shared runtime metrics.
@@ -142,6 +144,7 @@ pub async fn bind_with(
 ) -> Result<BoundServer> {
     let metrics = Arc::new(Metrics::default());
     let logs = Arc::new(LogStore::new(config.logging.ring_buffer));
+    let stats = Arc::new(daygle_dns_core::stats::QueryStats::new());
     let started_at = std::time::Instant::now();
     let shutdown = CancellationToken::new();
 
@@ -253,6 +256,7 @@ pub async fn bind_with(
         rate_limiter: rate_limiter.clone(),
         metrics: metrics.clone(),
         logs: logs.clone(),
+        stats: stats.clone(),
     });
 
     // TSIG keys (RFC 8945) for transfer/update authentication. Key
@@ -263,7 +267,7 @@ pub async fn bind_with(
     );
 
     // DNS listeners (bound immediately so the server serves right away).
-    let dispatcher = DnsDispatcher::with_notify(
+    let dispatcher = DnsDispatcher::with_stats(
         catalog.clone(),
         shared.resolver.clone(),
         shared.policy.clone(),
@@ -272,6 +276,7 @@ pub async fn bind_with(
         logs.clone(),
         notify_hooks,
         tsig_keys,
+        stats.clone(),
     );
     let mut server = Server::new(dispatcher);
     let mut initial_addrs = ListenerAddrs::default();
@@ -320,6 +325,11 @@ pub async fn bind_with(
         .map_err(|e| DaygleError::Config(format!("bad API listen address: {e}")))?;
     let api_listener = tokio::net::TcpListener::bind(api_addr).await?;
     let api_addr = api_listener.local_addr()?;
+    // The API can request a DNS listener rebuild after settings changes.
+    let rebuild_tx = reload_tx.clone();
+    let request_dns_rebuild: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+        let _ = rebuild_tx.try_send(ReloadCommand::Rebuild { ack: None });
+    });
     let app = router(AppState {
         catalog: catalog.clone(),
         resolver: shared.resolver.clone(),
@@ -331,6 +341,9 @@ pub async fn bind_with(
         started_at,
         config_path: config_path.clone().map(Arc::new),
         reload_notify,
+        sessions: Arc::new(daygle_dns_api::SessionStore::default()),
+        request_dns_rebuild: Some(request_dns_rebuild),
+        stats: stats.clone(),
     });
     info!(addr = %api_addr, "REST API and GUI listening");
     let api_task = tokio::spawn(async move {
@@ -344,6 +357,7 @@ pub async fn bind_with(
         tcp_addr: initial_addrs.tcp,
         dot_addr: initial_addrs.dot,
         doh_addr: initial_addrs.doh,
+        doq_addr: initial_addrs.doq,
         api_addr,
         metrics,
         logs,
@@ -365,7 +379,8 @@ pub async fn bind_with(
 struct ListenerGen {
     /// Cancels the serving tasks when this generation is stopped.
     token: CancellationToken,
-    /// The serving task (`Server::block_until_done`).
+    /// The serving task (`Server::block_until_done`). Includes the DoQ
+    /// listener when enabled: Hickory registers QUIC into the same server.
     task: tokio::task::JoinHandle<std::result::Result<(), hickory_server::net::NetError>>,
 }
 
@@ -399,13 +414,16 @@ async fn start_listeners(
     addrs: &Arc<ArcSwap<ListenerAddrs>>,
 ) -> Result<ListenerGen> {
     let config = shared.config.load_full();
-    let dispatcher = DnsDispatcher::new(
+    let dispatcher = DnsDispatcher::with_stats(
         shared.catalog.clone(),
         shared.resolver.clone(),
         shared.policy.clone(),
         shared.rate_limiter.clone(),
         shared.metrics.clone(),
         shared.logs.clone(),
+        daygle_dns_authoritative::notify::NotifyHooks::default(),
+        Arc::new(daygle_dns_authoritative::tsig::TsigKeyRing::default()),
+        shared.stats.clone(),
     );
     let mut server = Server::new(dispatcher);
     let mut snapshot = ListenerAddrs::default();
@@ -486,13 +504,16 @@ async fn start_listeners_with(
     addrs: &Arc<ArcSwap<ListenerAddrs>>,
     config: &DaygleConfig,
 ) -> Result<ListenerGen> {
-    let dispatcher = DnsDispatcher::new(
+    let dispatcher = DnsDispatcher::with_stats(
         shared.catalog.clone(),
         shared.resolver.clone(),
         shared.policy.clone(),
         shared.rate_limiter.clone(),
         shared.metrics.clone(),
         shared.logs.clone(),
+        daygle_dns_authoritative::notify::NotifyHooks::default(),
+        Arc::new(daygle_dns_authoritative::tsig::TsigKeyRing::default()),
+        shared.stats.clone(),
     );
     let mut server = Server::new(dispatcher);
     let mut snapshot = ListenerAddrs::default();
@@ -500,9 +521,6 @@ async fn start_listeners_with(
     addrs.store(Arc::new(snapshot));
     Ok(spawn_listeners(server))
 }
-
-/// Bind every enabled listener from `config` into `server`, recording the
-/// bound addresses in `addrs`.
 async fn bind_listeners(
     config: &DaygleConfig,
     server: &mut Server<DnsDispatcher>,
@@ -561,6 +579,23 @@ async fn bind_listeners(
             &config.doh.endpoint,
         )?;
         info!(addr = %addrs.doh.unwrap(), endpoint = %config.doh.endpoint, "DNS over HTTPS listening");
+    }
+
+    if config.doq.enabled {
+        let addr: std::net::SocketAddr = format!("{}:{}", config.doq.listen, config.doq.port)
+            .parse()
+            .map_err(|e| DaygleError::Config(format!("bad DoQ listen address: {e}")))?;
+        let socket = tokio::net::UdpSocket::bind(addr).await?;
+        addrs.doq = Some(socket.local_addr()?);
+        let tls_config = daygle_dns_dot::build_doq_tls_config(&config.doq)?;
+        server
+            .register_quic_listener_and_tls_config(
+                socket,
+                Duration::from_secs(10),
+                tls_config,
+            )
+            .map_err(|e| DaygleError::Config(format!("cannot register DoQ listener: {e}")))?;
+        info!(addr = %addrs.doq.unwrap(), "DNS over QUIC (RFC 9250) listening");
     }
 
     Ok(())

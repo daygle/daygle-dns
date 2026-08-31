@@ -33,18 +33,27 @@ Daygle combines, in a single process:
   **negative caching**, **retries**, **timeouts**, and **DNSSEC validation**,
   plus **conditional forwarding** so specific zones resolve via dedicated
   upstreams.
-- **DNS over TLS (DoT)** and **DNS over HTTPS (DoH, RFC 8484)** using
-  **rustls**.
+- **DNS over TLS (DoT)**, **DNS over HTTPS (DoH, RFC 8484)**, and
+  **DNS over QUIC (DoQ, RFC 9250)** using **rustls**.
+- **Cache prefetch & serve-stale**: popular names are refreshed in the
+  background as their TTLs near expiry, and the last-known-good answers keep
+  being served during upstream outages (bounded staleness, e.g. 1 h).
+- A **dashboard with charts & top-N tables**: per-minute query time-series
+  (1 h / 6 h / 24 h windows), top clients, top domains, and top blocked
+  domains — all bounded in memory.
+- A **REST API** (tower/axum) for configuration, zone management, logs, and
+  metrics.
+- An embedded **Svelte** web GUI with **username/password login and roles**
+  (`admin` = full access, `viewer` = read-only), editable settings forms for
+  server/recursive/DoT/DoH/DoQ/API, zones, records, split horizon, status,
+  logs, and settings.
 - A **plugin-style policy engine** for blocklists, ACLs, and per-client rules,
   including **remote blocklist sources** (hosts files, AdGuard lists, plain
   domain lists) fetched over HTTP(S) and refreshed on a schedule.
 - **Rate limiting** per client (source IP) and per domain (query name) with
   configurable fixed windows, loopback exemption, and live reload - queries
   over the limit get SERVFAIL and are counted in the `rate_limited` metric.
-- A **REST API** (tower/axum) for configuration, zone management, logs, and
-  metrics.
-- An embedded **Svelte** web GUI for zones, records, split horizon, status,
-  logs, and settings.
+
 
 ## Quick start
 
@@ -73,7 +82,7 @@ dig @127.0.0.1 -p 853 example.com A +tls   # DNS over TLS
 | `daygle-dns-policy`         | Plugin-style policy engine (blocklists, ACLs, per-client rules) |
 | `daygle-dns-authoritative`  | SQLite zone storage, zone-file parser, Hickory catalog + DNSSEC signing |
 | `daygle-dns-recursive`      | Recursive resolver (caching, negative caching, retries, timeouts, DNSSEC) |
-| `daygle-dns-dot`            | DoT (RFC 7858) + DoH (RFC 8484) via rustls + certificate management |
+| `daygle-dns-dot`            | DoT (RFC 7858) + DoH (RFC 8484) + DoQ (RFC 9250) TLS certificates |
 | `daygle-dns-api`            | REST API (axum) + embedded GUI serving |
 | `daygle-dns-gui`            | Embedded web GUI assets (Svelte build output) |
 | `daygle-dns`             | The server binary: UDP/TCP/DoT listeners + the combined dispatcher |
@@ -115,6 +124,10 @@ port = 53
 [recursive]
 upstreams = ["1.1.1.1", "tls://8.8.8.8:853@dns.google"]
 dnssec_validate = true
+# Keep popular answers fresh and survive upstream outages:
+# prefetch_enabled = true      # refresh popular names before their TTL expires
+# serve_stale_secs = 1800      # serve last-known-good answers for up to 30 min
+#                              # when all upstreams are unreachable
 # Conditional forwarding: resolve corp.internal via the office DNS servers.
 # [[recursive.conditional_zones]]
 # name = "corp.internal"
@@ -133,8 +146,22 @@ port = 443
 self_signed = true
 endpoint = "/dns-query"
 
+[doq]
+# DNS over QUIC (RFC 9250), default port 853/udp.
+enabled = true
+port = 853
+self_signed = true
+server_name = "daygle.local"
+
 [api]
 port = 5380
+# Console login with roles. Generate the hash first:
+#   daygle-dns hash-password 'your-password'
+# `viewer` accounts are read-only (403 on every mutation).
+# [[api.users]]
+# username = "admin"
+# password_hash = "pbkdf2-sha256$210000$...$..."
+# role = "admin"
 
 [policy]
 # Fetch a remote blocklist (hosts file) every 12 hours.
@@ -183,7 +210,12 @@ real server on ephemeral ports and exercise:
 - full **recursive** resolution through a local stub upstream (no internet
   required),
 - **live config reload** of policy, upstreams and listeners, both via the
-  reload API and the file watcher, and
+  reload API and the file watcher,
+- **console login, roles and settings**: login flow, read-only `viewer`
+  accounts (403 on mutations), secret redaction in `GET /api/config`,
+  settings updates persisted to the config file, and the dashboard stats
+  endpoint, and
+- **DNS over QUIC** (RFC 9250) against the generated self-signed certificate,
 - **TSIG** unit tests covering HMAC-SHA256 request/response round-trips
   with request-MAC chaining.
 
