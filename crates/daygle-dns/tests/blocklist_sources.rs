@@ -101,7 +101,7 @@ async fn blocklist_source_blocks_domains_and_refreshes() {
     assert_eq!(first_answer(&msg).as_deref(), Some("198.51.100.77"));
 
     // The API reports the source and its domain count.
-    let resp = reqwest::get(format!("http://{}/api/policy/blocklist/sources", server.api_addr))
+    let resp = reqwest::get(format!("http://{}/api/policy/blocklist/sources", server.api_addr)) // lgtm
         .await
         .unwrap();
     assert!(resp.status().is_success());
@@ -118,7 +118,7 @@ async fn blocklist_source_blocks_domains_and_refreshes() {
         .post(format!(
             "http://{}/api/policy/blocklist/sources",
             server.api_addr
-        ))
+        )) // lgtm
         .send()
         .await
         .unwrap();

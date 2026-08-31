@@ -1087,6 +1087,10 @@ fn ips_to_records(ips: &[String]) -> Vec<SplitHorizonRecord> {
 /// content must parse as that type's RDATA in zone-file presentation format
 /// (TXT values are auto-quoted). The returned `ips` is always the A/AAAA
 /// subset of the canonical records.
+/// Maximum number of records allowed in a single split-horizon entry.
+/// Prevents unbounded memory allocation from adversarial input.
+const MAX_SPLIT_HORIZON_RECORDS: usize = 1024;
+
 fn canonicalize_split_horizon_records(
     input: &SplitHorizonEntryInput,
 ) -> Result<(Vec<String>, Vec<SplitHorizonRecord>)> {
@@ -1102,6 +1106,14 @@ fn canonicalize_split_horizon_records(
     } else {
         input.records.clone()
     };
+
+    if records.len() > MAX_SPLIT_HORIZON_RECORDS {
+        return Err(DaygleError::InvalidRecord(format!(
+            "split-horizon entry has {} records, maximum is {}",
+            records.len(),
+            MAX_SPLIT_HORIZON_RECORDS,
+        )));
+    }
 
     let mut canonical = Vec::with_capacity(records.len());
     for record in &records {

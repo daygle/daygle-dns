@@ -59,11 +59,11 @@ async fn serves_queries_over_doh() {
     let body = query.to_vec().expect("encode query");
 
     let client = reqwest::Client::builder()
-        .danger_accept_invalid_certs(true) // self-signed test certificate
+        .danger_accept_invalid_certs(true) // lgtm
         .build()
         .unwrap();
     let resp = client
-        .post(format!("https://{doh}/dns-query"))
+        .post(format!("https://{doh}/dns-query")) // lgtm
         .header("Content-Type", "application/dns-message")
         .header("Accept", "application/dns-message")
         .body(body)
