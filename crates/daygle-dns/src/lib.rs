@@ -263,6 +263,14 @@ pub async fn bind_with(
     // Rate limiting (per client + per domain).
     let rate_limiter = Arc::new(RateLimiter::new(&config.rate_limit));
 
+    // TSIG keys (RFC 8945) for transfer/update authentication. Key
+    // construction errors are configuration errors: fail fast at startup.
+    // Stored in `Shared` so every listener rebuild reuses the same ring.
+    let tsig_keys = Arc::new(
+        daygle_dns_authoritative::tsig::TsigKeyRing::from_configs(&config.authoritative.tsig_keys)
+            .map_err(DaygleError::Config)?,
+    );
+
     // Shared, atomically-swappable runtime state.
     let shared = Arc::new(Shared {
         catalog: catalog.clone(),
@@ -275,14 +283,9 @@ pub async fn bind_with(
         metrics: metrics.clone(),
         logs: logs.clone(),
         stats: stats.clone(),
+        notify_hooks: notify_hooks.clone(),
+        tsig_keys: tsig_keys.clone(),
     });
-
-    // TSIG keys (RFC 8945) for transfer/update authentication. Key
-    // construction errors are configuration errors: fail fast at startup.
-    let tsig_keys = Arc::new(
-        daygle_dns_authoritative::tsig::TsigKeyRing::from_configs(&config.authoritative.tsig_keys)
-            .map_err(DaygleError::Config)?,
-    );
 
     // DNS listeners (bound immediately so the server serves right away).
     let dispatcher = DnsDispatcher::with_stats(
@@ -292,8 +295,8 @@ pub async fn bind_with(
         rate_limiter.clone(),
         metrics.clone(),
         logs.clone(),
-        notify_hooks,
-        tsig_keys,
+        shared.notify_hooks.clone(),
+        shared.tsig_keys.clone(),
         stats.clone(),
     )
     .with_advanced_blocking(shared.advanced_blocking.clone())
@@ -435,6 +438,9 @@ async fn start_listeners(
     addrs: &Arc<ArcSwap<ListenerAddrs>>,
 ) -> Result<ListenerGen> {
     let config = shared.config.load_full();
+    // Reuse the NOTIFY hooks and TSIG keys built at startup: rebuilding them
+    // here (or worse, substituting defaults) would silently drop secondary
+    // replication and transfer/update authentication after any live reload.
     let dispatcher = DnsDispatcher::with_stats(
         shared.catalog.clone(),
         shared.resolver.clone(),
@@ -442,8 +448,8 @@ async fn start_listeners(
         shared.rate_limiter.clone(),
         shared.metrics.clone(),
         shared.logs.clone(),
-        daygle_dns_authoritative::notify::NotifyHooks::default(),
-        Arc::new(daygle_dns_authoritative::tsig::TsigKeyRing::default()),
+        shared.notify_hooks.clone(),
+        shared.tsig_keys.clone(),
         shared.stats.clone(),
     )
     .with_advanced_blocking(shared.advanced_blocking.clone())
@@ -534,8 +540,8 @@ async fn start_listeners_with(
         shared.rate_limiter.clone(),
         shared.metrics.clone(),
         shared.logs.clone(),
-        daygle_dns_authoritative::notify::NotifyHooks::default(),
-        Arc::new(daygle_dns_authoritative::tsig::TsigKeyRing::default()),
+        shared.notify_hooks.clone(),
+        shared.tsig_keys.clone(),
         shared.stats.clone(),
     )
     .with_advanced_blocking(shared.advanced_blocking.clone())

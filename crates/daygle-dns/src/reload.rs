@@ -43,6 +43,13 @@ pub struct Shared {
     pub logs: Arc<LogStore>,
     /// Dashboard time-series + top-N tables.
     pub stats: Arc<daygle_dns_core::stats::QueryStats>,
+    /// NOTIFY hooks (RFC 1996): outbound sender + inbound handler, built once
+    /// at startup and reused verbatim by every listener rebuild so secondary
+    /// replication and NOTIFY-triggered refreshes survive live reloads.
+    pub notify_hooks: daygle_dns_authoritative::notify::NotifyHooks,
+    /// TSIG key ring (RFC 8945) for transfer/update authentication, built
+    /// once at startup and reused verbatim by every listener rebuild.
+    pub tsig_keys: Arc<daygle_dns_authoritative::tsig::TsigKeyRing>,
 }
 
 /// The currently bound DNS listener addresses.
@@ -272,6 +279,8 @@ mod tests {
             metrics: Arc::new(Metrics::default()),
             logs: Arc::new(LogStore::new(16)),
             stats: Arc::new(daygle_dns_core::stats::QueryStats::new()),
+            notify_hooks: Default::default(),
+            tsig_keys: Arc::new(Default::default()),
         }
     }
 

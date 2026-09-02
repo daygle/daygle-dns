@@ -302,7 +302,11 @@ impl Inner {
                 Ok(lookup)
             }
             Err(e) => {
-                inner.metrics.inc(&inner.metrics.errors);
+                // Not counted in `metrics.errors` here: the dispatcher owns
+                // that counter for client-visible failures (this path also
+                // runs for prefetch refreshes and serve-stale fallbacks, which
+                // are not client query errors), so counting in both places
+                // would double-count every failed lookup.
                 Err(DaygleError::Resolution {
                     message: e.to_string(),
                     response_code: negative_response_code(&e),

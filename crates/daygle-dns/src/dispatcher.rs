@@ -550,7 +550,6 @@ impl RequestHandler for DnsDispatcher {
         };
 
         self.metrics.inc(&self.metrics.recursive);
-        self.record_stats(client, &qname, Outcome::Recursive);
         match resolver.lookup(&qname, info.query.query_type()).await {
             Ok(lookup) => {
                 let answers = lookup.answers().to_vec();
@@ -560,6 +559,7 @@ impl RequestHandler for DnsDispatcher {
                 if validated {
                     self.metrics.inc(&self.metrics.dnssec_validated);
                 }
+                self.record_stats(client, &qname, Outcome::Recursive);
 
                 let mut metadata = request.metadata;
                 metadata.message_type = MessageType::Response;
