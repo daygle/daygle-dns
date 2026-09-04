@@ -13,7 +13,9 @@
   import About from './views/About.svelte';
 
   let view = $state('status');
-  // `authed` is optimistic: we assume a session until a 401 says otherwise.
+  // `authed` is optimistic: we assume a session until a 401 says otherwise,
+  // but we still verify the session on mount so a stale token doesn't briefly
+  // render the full authenticated shell before redirecting to login.
   let authed = $state(true);
   let user = $state(getStoredUser());
   // Viewer accounts are read-only: they never see the write-only views.
@@ -21,6 +23,28 @@
 
   setUnauthorizedHandler(() => {
     authed = false;
+  });
+
+  // Confirm the stored session is still live on mount.
+  $effect(() => {
+    if (!user) return;
+    try {
+      const me = api.me();
+      if (!me) {
+        // An in-flight /api/auth/me that returns 204 or null shouldn't
+        // invalidate the session; treat null as "still checking".
+        return;
+      }
+      user = me;
+    } catch (e) {
+      if (e instanceof Response == false) {
+        // If the API says we need to log in, force the shell to the login
+        // screen rather than relying on a later 401 during page interaction.
+        if (e.needsLogin) {
+          authed = false;
+        }
+      }
+    }
   });
 
   function handleLogin() {

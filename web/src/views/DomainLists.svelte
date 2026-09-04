@@ -12,15 +12,24 @@
     error = null;
     try {
       config = await api.config();
+      if (config == null) {
+        trusted = '';
+        blocked = '';
+        return;
+      }
       trusted = (config.policy?.allowlist || []).join('\n');
       blocked = (config.policy?.blocklist || []).join('\n');
     } catch (e) {
-      error = String(e.message || e);
+      error = formatApiError(e);
     }
   }
 
   function parse(text) {
-    return [...new Set((text || '').split(/[\n,]/).map((s) => s.trim().toLowerCase()).filter(Boolean))];
+    // Split on newlines and commas, trim, deduplicate, and keep the original
+    // casing so the editor can round-trip what the user typed. The backend
+    // normalizes domains for comparison, so case here is cosmetic but not
+    // semantically required.
+    return [...new Set((text || '').split(/[\n,]/).map((s) => s.trim()).filter(Boolean))];
   }
 
   async function save() {
@@ -32,7 +41,7 @@
       notice = 'Domain lists saved and applied live.';
       await load();
     } catch (e) {
-      error = String(e.message || e);
+      error = formatApiError(e);
     } finally {
       busy = false;
     }

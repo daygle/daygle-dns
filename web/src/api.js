@@ -58,6 +58,22 @@ async function request(method, path, body, opts = {}) {
   return res.json();
 }
 
+export function formatApiError(e) {
+  // Views currently use `String(e.message || e)` in many places; centralize
+  // here so the display shape is consistent and easy to audit/change later.
+  if (e instanceof Error) return e.message;
+  if (typeof e === 'string') return e;
+  try {
+    return JSON.stringify(e);
+  } catch (_) {
+    return String(e);
+  }
+}
+
+function configOk(cfg) {
+  return cfg != null && typeof cfg === 'object';
+}
+
 export const api = {
   // ---- auth ----
   login: async (username, password) => {

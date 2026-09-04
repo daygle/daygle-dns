@@ -13,6 +13,7 @@
   let doh = $state({});
   let doq = $state({});
   let api_ = $state({});
+  let upstreamText = $state('');
 
   $effect(() => {
     load();
@@ -22,21 +23,28 @@
     error = null;
     try {
       config = await api.config();
+      if (config == null) {
+        server = {};
+        recursive = {};
+        dot = {};
+        doh = {};
+        doq = {};
+        api_ = {};
+        upstreamText = '';
+        return;
+      }
       server = { ...config.server };
       recursive = { ...config.recursive };
-      recursive._upstreamsText = upstreamsText(recursive.upstreams);
       dot = { ...config.dot };
       doh = { ...config.doh };
       doq = { ...config.doq };
       api_ = { ...config.api };
+      upstreamText = (recursive.upstreams || []).join('\n');
     } catch (e) {
-      error = String(e.message || e);
+      error = formatApiError(e);
     }
   }
 
-  function upstreamsText(list) {
-    return (list || []).join('\n');
-  }
   function parseUpstreams(text) {
     return text.split('\n').map((l) => l.trim()).filter(Boolean);
   }
@@ -49,7 +57,7 @@
       await api.clearCache();
       notice = 'Recursive cache flushed.';
     } catch (e) {
-      error = String(e.message || e);
+      error = formatApiError(e);
     } finally {
       busy = false;
     }
@@ -70,7 +78,7 @@
         },
         recursive: {
           enabled: !!recursive.enabled,
-          upstreams: parseUpstreams(recursive._upstreamsText ?? upstreamsText(recursive.upstreams)),
+          upstreams: parseUpstreams(upstreamText),
           dnssec_validate: !!recursive.dnssec_validate,
           prefetch_enabled: !!recursive.prefetch_enabled,
           prefetch_ttl_fraction_pct: Number(recursive.prefetch_ttl_fraction_pct),
@@ -105,7 +113,7 @@
       notice = 'Settings saved: applied live and persisted to the config file.';
       await load();
     } catch (e) {
-      error = String(e.message || e);
+      error = formatApiError(e);
     } finally {
       busy = false;
     }
@@ -145,7 +153,7 @@
       <label class="check"><input type="checkbox" bind:checked={recursive.enabled} /> <span>Recursion enabled</span></label>
       <label class="check"><input type="checkbox" bind:checked={recursive.dnssec_validate} /> <span>DNSSEC validation</span></label>
       <label><span>Upstream servers (one per line; supports <code>tls://</code> and <code>https://</code>)</span>
-        <textarea rows="4" bind:value={recursive._upstreamsText}></textarea>
+        <textarea rows="4" bind:value={upstreamText}></textarea>
       </label>
     </div>
     <h4>Caching</h4>
