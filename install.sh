@@ -18,7 +18,14 @@ SERVICE_USER="${SERVICE_USER:-daygle-dns}"
 log() { printf '\033[1;32m[daygle-dns-install]\033[0m %s\n' "$1"; }
 
 command -v cargo >/dev/null 2>&1 || {
-    printf 'error: cargo was not found. Install Rust first: https://rustup.rs\n' >&2
+    printf '%s\n' \
+        'error: cargo was not found. Daygle is built from source and requires Rust.' \
+        'Install the minimal Rust toolchain non-interactively:' \
+        '' \
+        '    curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal' \
+        '' \
+        'Then open a new shell (or run: source "$HOME/.cargo/env") and re-run the installer.' \
+        'See https://rustup.rs for other installation options.' >&2
     exit 1
 }
 
