@@ -41,6 +41,20 @@
     return text.split('\n').map((l) => l.trim()).filter(Boolean);
   }
 
+  async function clearCache() {
+    busy = true;
+    notice = null;
+    error = null;
+    try {
+      await api.clearCache();
+      notice = 'Recursive cache flushed.';
+    } catch (e) {
+      error = String(e.message || e);
+    } finally {
+      busy = false;
+    }
+  }
+
   async function save() {
     busy = true;
     notice = null;

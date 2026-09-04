@@ -46,7 +46,7 @@
 </script>
 
 {#if !authed}
-  <Login />
+  <Login onLogin={handleLogin} />
 {:else}
   <div class="shell">
     <aside>

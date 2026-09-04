@@ -1,6 +1,8 @@
 <script>
   import { api } from '../api.js';
 
+  let { onLogin = () => {} } = $props();
+
   let username = $state('');
   let password = $state('');
   let error = $state(null);
@@ -14,6 +16,7 @@
     try {
       await api.login(username.trim(), password);
       password = '';
+      onLogin();
     } catch (err) {
       error = String(err.message || err);
     } finally {
