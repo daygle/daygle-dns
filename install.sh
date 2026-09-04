@@ -29,6 +29,22 @@ command -v cargo >/dev/null 2>&1 || {
     exit 1
 }
 
+command -v cc >/dev/null 2>&1 || command -v gcc >/dev/null 2>&1 || command -v clang >/dev/null 2>&1 || {
+    printf '%s\n' \
+        'error: no C compiler (cc/gcc/clang) was found. Daygle also needs a system' \
+        'C toolchain: bundled SQLite and ring are compiled from C source.' \
+        '' \
+        'Install a C toolchain for your system:' \
+        '    Debian/Ubuntu:  apt-get update && apt-get install -y build-essential' \
+        '    RHEL/Fedora:    dnf groupinstall "Development Tools"' \
+        '    Alpine:         apk add build-base' \
+        '    Arch:           pacman -S --needed base-devel' \
+        '    macOS:          xcode-select --install' \
+        '' \
+        'Then re-run this installer.' >&2
+    exit 1
+}
+
 SRC_DIR="$(mktemp -d)"
 trap 'rm -rf "$SRC_DIR"' EXIT
 
