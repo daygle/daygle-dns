@@ -4,9 +4,13 @@
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/daygle/daygle-dns/main/install.sh | sh
 #
-# The script installs the `daygle-dns` binary to /usr/local/bin, a configuration
-# file and a systemd unit (systemd-based Linux only). It requires Rust and
-# Cargo; install them first with https://rustup.rs.
+# The script installs the `daygle-dns` binary to /usr/local/bin, a
+# configuration file and a systemd unit (systemd-based Linux only). Missing
+# prerequisites (Rust, a C compiler, git, a downloader such as curl) are
+# installed automatically when possible via rustup and the detected package
+# manager; DNS test tools (dig) are installed as a convenience. Set
+# DAYGLE_NO_DEPS=1 to skip the automatic installs and get manual
+# instructions instead.
 
 set -eu
 
@@ -17,19 +21,96 @@ SERVICE_USER="${SERVICE_USER:-daygle-dns}"
 
 log() { printf '\033[1;32m[daygle-dns-install]\033[0m %s\n' "$1"; }
 
-command -v cargo >/dev/null 2>&1 || {
-    printf '%s\n' \
-        'error: cargo was not found. Daygle is built from source and requires Rust.' \
-        'Install the minimal Rust toolchain non-interactively:' \
-        '' \
-        '    curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal' \
-        '' \
-        'Then open a new shell (or run: source "$HOME/.cargo/env") and re-run the installer.' \
-        'See https://rustup.rs for other installation options.' >&2
-    exit 1
+have_cmd() { command -v "$1" >/dev/null 2>&1; }
+
+need_cargo() { ! have_cmd cargo; }
+need_git() { ! have_cmd git; }
+need_downloader() { ! { have_cmd curl || have_cmd wget; }; }
+need_dig() { ! have_cmd dig; }
+need_cc() {
+    ! { have_cmd cc || have_cmd gcc || have_cmd clang; }
 }
 
-command -v cc >/dev/null 2>&1 || command -v gcc >/dev/null 2>&1 || command -v clang >/dev/null 2>&1 || {
+run_as_root() {
+    if [ "$(id -u)" -eq 0 ]; then
+        "$@" || return 1
+    elif have_cmd sudo; then
+        sudo "$@" || return 1
+    else
+        return 1
+    fi
+}
+
+install_system_toolchain() {
+    # C compiler, git, and curl via the platform package manager.
+    if have_cmd apt-get; then
+        run_as_root apt-get update || return 1
+        run_as_root apt-get install -y --no-install-recommends build-essential git curl || return 1
+    elif have_cmd dnf; then
+        run_as_root dnf -y group install "Development Tools" || return 1
+        run_as_root dnf -y install git curl || return 1
+    elif have_cmd yum; then
+        run_as_root yum -y groupinstall "Development Tools" || return 1
+        run_as_root yum -y install git curl || return 1
+    elif have_cmd apk; then
+        run_as_root apk add --no-cache build-base git curl || return 1
+    elif have_cmd pacman; then
+        run_as_root pacman -S --needed --noconfirm base-devel git curl || return 1
+    elif have_cmd zypper; then
+        run_as_root zypper -n install -t pattern devel_basis || return 1
+        run_as_root zypper -n install git curl || return 1
+    elif [ "$(uname -s)" = "Darwin" ]; then
+        # Xcode Command Line Tools provide a C compiler (and git); curl ships with macOS.
+        xcode-select --install >/dev/null 2>&1 || true
+    else
+        return 1
+    fi
+}
+
+install_dns_tools() {
+    # Optional: dig for query testing. Best-effort - never fatal.
+    if have_cmd dig; then
+        return 0
+    fi
+    log "Installing DNS test tools (dig)…"
+    if have_cmd apt-get; then
+        run_as_root apt-get install -y --no-install-recommends dnsutils || true
+    elif have_cmd dnf || have_cmd yum; then
+        run_as_root dnf -y install bind-utils || run_as_root yum -y install bind-utils || true
+    elif have_cmd apk; then
+        run_as_root apk add --no-cache bind-tools || true
+    elif have_cmd pacman; then
+        run_as_root pacman -S --needed --noconfirm bind || true
+    elif have_cmd zypper; then
+        run_as_root zypper -n install bind-utils || true
+    fi
+    if have_cmd dig; then
+        log "Installed dig - try: dig @127.0.0.1 example.com A"
+    else
+        log "dig not installed; DNS test tools are optional (dnsutils/bind-utils)."
+    fi
+}
+
+install_rust() {
+    log "Installing Rust via rustup (minimal profile)…"
+    if have_cmd curl; then
+        curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal || return 1
+    elif have_cmd wget; then
+        wget -qO- https://sh.rustup.rs | sh -s -- -y --profile minimal || return 1
+    else
+        return 1
+    fi
+    export PATH="$HOME/.cargo/bin:$PATH"
+}
+
+# ---- prerequisites -----------------------------------------------------
+# System packages first so curl is available for the rustup fetch below.
+if need_cc || need_git || need_downloader; then
+    if [ "${DAYGLE_NO_DEPS:-0}" != "1" ]; then
+        install_system_toolchain || true
+    fi
+fi
+if need_cc; then
     printf '%s\n' \
         'error: no C compiler (cc/gcc/clang) was found. Daygle also needs a system' \
         'C toolchain: bundled SQLite and ring are compiled from C source.' \
@@ -43,15 +124,36 @@ command -v cc >/dev/null 2>&1 || command -v gcc >/dev/null 2>&1 || command -v cl
         '' \
         'Then re-run this installer.' >&2
     exit 1
-}
+fi
+
+if need_dig; then
+    if [ "${DAYGLE_NO_DEPS:-0}" != "1" ]; then
+        install_dns_tools || true
+    fi
+fi
+
+if need_cargo; then
+    if [ "${DAYGLE_NO_DEPS:-0}" != "1" ]; then
+        install_rust || true
+    fi
+    if need_cargo; then
+        printf '%s\n' \
+            'error: cargo was not found. Daygle is built from source and requires Rust.' \
+            'Install the minimal Rust toolchain non-interactively:' \
+            '' \
+            '    curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal' \
+            '' \
+            'Then open a new shell (or run: source "$HOME/.cargo/env") and re-run the installer.' \
+            'See https://rustup.rs for other installation options.' >&2
+        exit 1
+    fi
+fi
 
 SRC_DIR="$(mktemp -d)"
 trap 'rm -rf "$SRC_DIR"' EXIT
 
 log "Downloading Daygle DNS source…"
-if command -v git >/dev/null 2>&1; then
-    git clone --depth 1 https://github.com/daygle/daygle-dns.git "$SRC_DIR"
-else
+if need_git; then
     printf '%s\n' \
         'error: git is required to download the Daygle source.' \
         'Install git for your system:' \
@@ -65,6 +167,7 @@ else
         'Then re-run this installer.' >&2
     exit 1
 fi
+git clone --depth 1 https://github.com/daygle/daygle-dns.git "$SRC_DIR"
 cd "$SRC_DIR"
 
 log "Building release binary (this may take a few minutes)…"

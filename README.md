@@ -58,12 +58,18 @@ Daygle combines, in a single process:
 ## Quick start
 
 ```bash
-# One-line installer (Linux/macOS; requires Rust via https://rustup.rs)
+# One-line installer (Linux/macOS; auto-installs Rust, a C compiler, and git if missing)
 curl -fsSL https://raw.githubusercontent.com/daygle/daygle-dns/main/install.sh | sh
 
 # …or build and run directly from source
 cargo run --release -p daygle-dns -- --config daygle-dns.toml.example
 ```
+
+The installer provisions missing prerequisites itself: Rust via rustup; a C
+compiler, git, and curl via your package manager (apt, dnf/yum, apk, pacman,
+zypper, or Xcode Command Line Tools on macOS); DNS test tools (dig) where
+available. Set `DAYGLE_NO_DEPS=1` to
+skip the automatic installs and get manual instructions instead.
 
 Then open the dashboard at <http://127.0.0.1:5380>.
 
