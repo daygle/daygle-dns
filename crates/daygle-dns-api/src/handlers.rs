@@ -1,6 +1,7 @@
 //! HTTP handlers for the REST API.
 
 use std::net::IpAddr;
+use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -622,6 +623,34 @@ pub struct CreateZoneInput {
 
 fn default_zone_type() -> String {
     "primary".to_string()
+}
+
+/// Canonicalize a policy domain list the same way the policy engine consumes it:
+/// trimmed, trailing-dot removed, lowercased, and deduplicated.
+/// Other DNS identifiers (zone names, TSIG key names, secondary-zone names) are
+/// likewise normalized at their own boundaries, so the stored config reflects the
+/// canonical form rather than whatever casing the last editor used.
+fn normalize_policy_domains(items: &[String]) -> Vec<String> {
+    let mut out: BTreeSet<String> = BTreeSet::new();
+    for raw in items {
+        let d = raw.trim().trim_end_matches('.').to_ascii_lowercase();
+        if !d.is_empty() {
+            let _ = out.insert(d);
+        }
+    }
+    out.into_iter().collect()
+}
+
+/// Canonicalize recursive upstream entries before storing them.
+/// Upstream entries are not DNS domain policies, but they are identifiers that
+/// should be stored in a stable form (empty entries stripped, outer whitespace
+/// trimmed). Transport/TLS schemes remain case-sensitive and are left as-is.
+fn normalize_recursive_upstreams(items: &[String]) -> Vec<String> {
+    items
+        .iter()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
 }
 
 fn date_serial() -> u32 {
@@ -1471,7 +1500,7 @@ pub async fn update_settings(
             config.recursive.cache_size = v;
         }
         if let Some(v) = &r.upstreams {
-            config.recursive.upstreams = v.clone();
+            config.recursive.upstreams = normalize_recursive_upstreams(v);
         }
         if let Some(v) = r.dnssec_validate {
             config.recursive.dnssec_validate = v;
@@ -1551,11 +1580,11 @@ pub async fn update_settings(
     let mut policy_changed = false;
     if let Some(p) = &update.policy {
         if let Some(v) = &p.allowlist {
-            config.policy.allowlist = v.clone();
+            config.policy.allowlist = normalize_policy_domains(v);
             policy_changed = true;
         }
         if let Some(v) = &p.blocklist {
-            config.policy.blocklist = v.clone();
+            config.policy.blocklist = normalize_policy_domains(v);
             policy_changed = true;
         }
         if let Some(v) = p.filter_aaaa {
@@ -1563,7 +1592,7 @@ pub async fn update_settings(
             policy_changed = true;
         }
         if let Some(v) = &p.filter_aaaa_except {
-            config.policy.filter_aaaa_except = v.clone();
+            config.policy.filter_aaaa_except = normalize_policy_domains(v);
             policy_changed = true;
         }
     }

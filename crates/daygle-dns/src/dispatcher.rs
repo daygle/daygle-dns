@@ -392,6 +392,22 @@ impl RequestHandler for DnsDispatcher {
             return send_error(&mut response_handle, request, ResponseCode::ServFail).await;
         }
 
+        // DNS labels are case-insensitive by design, so queries are normalized to
+        // lowercase early. This is the canonical form used by policy evaluation,
+        // authoritative lookup, split-horizon matching, recursive resolution, and the
+        // statistics/logs. Any cookie, header, or other non-DNS identifier layer added
+        // later must not assume this casing contract; cookies in particular have their
+        // own RFC 6265 matching rules and should be normalized separately at the
+        // response layer rather than inheriting DNS lowercasing.
+        let _info = match request.request_info() {
+            Ok(info) => info,
+            Err(e) => {
+                warn!("malformed request from {}: {e}", request.src());
+                self.metrics.inc(&self.metrics.errors);
+                return send_error(&mut response_handle, request, ResponseCode::FormErr).await;
+            }
+        };
+
         // RFC 2136 dynamic updates are handled with write-through to SQLite:
         // the catalog is reloaded after each successful update, so changes
         // are immediately live and survive restarts. `allow_dynamic_updates`
