@@ -57,7 +57,7 @@
       notice = `Refreshed - ${fmt(data.total_domains ?? 0)} domains from remote sources.`;
       await load();
     } catch (e) {
-      error = String(e.message || e);
+      error = formatApiError(e);
     } finally {
       refreshing = false;
     }
@@ -203,9 +203,9 @@
       closeEditor();
       await load();
       notice = `Source "${name}" saved - fetching it now.`;
-      // The save triggers a background fetch; reload again once it has
-      // landed so the domain counts and status are current.
-      setTimeout(load, 2500);
+      // The save triggers a background fetch; poll once until the source's last fetch time updates
+      // or a short timeout passes.
+      await waitForSourceUpdate(name);
     } catch (e) {
       error = String(e.message || e);
     } finally {

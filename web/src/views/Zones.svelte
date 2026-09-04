@@ -125,8 +125,18 @@
       resetZoneForm();
       notice = 'Zone created successfully';
       await loadZones();
+      // Keep the right-hand panel coherent: if a zone with the same name now exists,
+      // select it so the user doesn't have to re-click it after creation.
+      const created = zones.find((z) => z.name === name);
+      if (created) {
+        selected = created;
+        records = await api.records(created.id);
+      } else {
+        selected = null;
+        records = [];
+      }
     } catch (e) {
-      notice = `Error: ${e.message || e}`;
+      notice = formatApiError(e);
     } finally {
       savingZone = false;
     }
@@ -140,7 +150,7 @@
       records = [];
       await loadZones();
     } catch (e) {
-      notice = `Error: ${e.message || e}`;
+      notice = formatApiError(e);
     }
   }
 
@@ -163,7 +173,7 @@
       edit = null;
       records = await api.records(selected.id);
     } catch (e) {
-      notice = `Error: ${e.message || e}`;
+      notice = formatApiError(e);
     }
   }
 
@@ -172,7 +182,7 @@
       await api.deleteRecord(selected.id, record.id);
       records = await api.records(selected.id);
     } catch (e) {
-      notice = `Error: ${e.message || e}`;
+      notice = formatApiError(e);
     }
   }
 
@@ -185,7 +195,7 @@
       const refreshed = zones.find((z) => z.id === selected.id);
       if (refreshed) selected = refreshed;
     } catch (e) {
-      notice = `Error: ${e.message || e}`;
+      notice = formatApiError(e);
     }
   }
 

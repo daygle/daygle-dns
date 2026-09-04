@@ -9,18 +9,25 @@
   let cacheSize = $state(8192);
   let prefetchEnabled = $state(false);
   let serveStale = $state(0);
+  let inFlight = $state(false);
 
   async function load() {
+    if (inFlight) return;
+    inFlight = true;
     error = null;
     try {
       const [status, cfg] = await Promise.all([api.cache(), api.config()]);
       cache = status;
       config = cfg;
-      cacheSize = cfg.recursive.cache_size;
-      prefetchEnabled = !!cfg.recursive.prefetch_enabled;
-      serveStale = cfg.recursive.serve_stale_secs;
+      if (configOk(cfg)) {
+        cacheSize = cfg.recursive.cache_size;
+        prefetchEnabled = !!cfg.recursive.prefetch_enabled;
+        serveStale = cfg.recursive.serve_stale_secs;
+      }
     } catch (e) {
-      error = String(e.message || e);
+      error = formatApiError(e);
+    } finally {
+      inFlight = false;
     }
   }
 
@@ -33,7 +40,7 @@
       notice = 'Recursive cache flushed.';
       await load();
     } catch (e) {
-      error = String(e.message || e);
+      error = formatApiError(e);
     } finally {
       busy = false;
     }
@@ -54,7 +61,7 @@
       notice = 'Cache settings saved and applied live.';
       await load();
     } catch (e) {
-      error = String(e.message || e);
+      error = formatApiError(e);
     } finally {
       busy = false;
     }
@@ -65,6 +72,7 @@
     const id = setInterval(load, 10000);
     return () => clearInterval(id);
   });
+
 
   const total = $derived((cache?.hits || 0) + (cache?.misses || 0));
   const hitRate = $derived(total ? ((cache.hits / total) * 100).toFixed(1) : '0.0');

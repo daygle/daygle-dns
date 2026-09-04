@@ -7,7 +7,13 @@
   let window_ = $state('1h');
   let error = $state(null);
 
+  let inFlight = $state(false);
+
   async function refresh() {
+    // Skip if a previous refresh is still in flight: the interval keeps firing,
+    // but we don't want overlapping requests stacking up if the server stalls.
+    if (inFlight) return;
+    inFlight = true;
     error = null;
     try {
       const [s, m, st] = await Promise.all([
@@ -19,7 +25,9 @@
       metrics = m;
       stats = st;
     } catch (e) {
-      error = String(e.message || e);
+      error = formatApiError(e);
+    } finally {
+      inFlight = false;
     }
   }
 
