@@ -52,7 +52,17 @@ log "Downloading Daygle DNS source…"
 if command -v git >/dev/null 2>&1; then
     git clone --depth 1 https://github.com/daygle/daygle-dns.git "$SRC_DIR"
 else
-    printf 'error: git is required to download the source\n' >&2
+    printf '%s\n' \
+        'error: git is required to download the Daygle source.' \
+        'Install git for your system:' \
+        '' \
+        '    Debian/Ubuntu:  apt-get update && apt-get install -y git' \
+        '    RHEL/Fedora:    dnf install -y git' \
+        '    Alpine:         apk add git' \
+        '    Arch:           pacman -S --needed git' \
+        '    macOS:          xcode-select --install' \
+        '' \
+        'Then re-run this installer.' >&2
     exit 1
 fi
 cd "$SRC_DIR"
@@ -62,7 +72,7 @@ cargo build --release -p daygle-dns
 
 log "Installing binary to $PREFIX/bin/daygle-dns…"
 install -d "$PREFIX/bin"
-install -m 0755 target/release/daygle-dns-dns "$PREFIX/bin/daygle-dns"
+install -m 0755 target/release/daygle-dns "$PREFIX/bin/daygle-dns"
 
 log "Installing configuration to $CONFIG_DIR…"
 install -d "$CONFIG_DIR" "$CONFIG_DIR/zones" "$CONFIG_DIR/certs" "$DATA_DIR"
