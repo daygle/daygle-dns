@@ -208,28 +208,30 @@
       <button onclick={openAddZone}>+ Add zone</button>
     </div>
 
-    <table>
-      <thead>
-        <tr><th>Name</th><th>Type</th><th>DNSSEC</th><th>Serial</th><th></th></tr>
-      </thead>
-      <tbody>
-        {#each zones as zone (zone.id)}
-          <tr
-            style="cursor:pointer"
-            class:active={selected?.id === zone.id}
-            onclick={() => selectZone(zone)}
-          >
-            <td><code>{zone.name}</code></td>
-            <td><span class="pill">{zone.zone_type || 'primary'}</span></td>
-            <td><span class:pill={true} class:ok={zone.dnssec}>{zone.dnssec ? 'signed' : 'unsigned'}</span></td>
-            <td>{zone.serial}</td>
-            <td>
-              <button class="danger" onclick={(e) => { e.stopPropagation(); removeZone(zone); }}>✕</button>
-            </td>
-          </tr>
-        {/each}
-      </tbody>
-    </table>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr><th>Name</th><th>Type</th><th>DNSSEC</th><th>Serial</th><th></th></tr>
+        </thead>
+        <tbody>
+          {#each zones as zone (zone.id)}
+            <tr
+              style="cursor:pointer"
+              class:active={selected?.id === zone.id}
+              onclick={() => selectZone(zone)}
+            >
+              <td><code>{zone.name}</code></td>
+              <td><span class="pill">{zone.zone_type || 'primary'}</span></td>
+              <td><span class:pill={true} class:ok={zone.dnssec}>{zone.dnssec ? 'signed' : 'unsigned'}</span></td>
+              <td>{zone.serial}</td>
+              <td>
+                <button class="danger" onclick={(e) => { e.stopPropagation(); removeZone(zone); }}>✕</button>
+              </td>
+            </tr>
+          {/each}
+        </tbody>
+      </table>
+    </div>
     {#if zones.length === 0}
       <p class="muted">No zones yet. Add a primary or secondary zone to get started.</p>
     {/if}
@@ -350,8 +352,12 @@
 {/if}
 
 <style>
-  .split { display: grid; grid-template-columns: 360px 1fr; gap: 16px; align-items: start; }
+  .split { display: grid; grid-template-columns: 430px minmax(0, 1fr); gap: 16px; align-items: start; }
   @media (max-width: 900px) { .split { grid-template-columns: 1fr; } }
+  .table-wrap { overflow-x: auto; }
+  .table-wrap th, .table-wrap td { padding: 8px 6px; font-size: 0.85rem; }
+  .table-wrap td:last-child { text-align: right; }
+  .table-wrap td:last-child button { padding: 4px 9px; }
   .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
   label { display: flex; flex-direction: column; gap: 4px; font-size: 0.85rem; color: var(--muted); }
   textarea { font: inherit; color: inherit; background: var(--panel-2); border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; resize: vertical; }
