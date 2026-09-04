@@ -22,3 +22,7 @@ certs/
 
 # Local app state
 .freebuff/
+
+# Dev/test stub servers (temporary files used during code review)
+web/stub-server.cjs
+web/src/stub-blocklist.cjs
