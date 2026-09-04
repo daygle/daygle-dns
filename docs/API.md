@@ -63,7 +63,7 @@ GET /api/status
 
 ```json
 {
-  "version": "0.1.0",
+  "version": "1.0.0",
   "uptime_secs": 123,
   "zones": 2,
   "records": 17,
