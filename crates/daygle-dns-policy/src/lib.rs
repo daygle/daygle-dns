@@ -26,7 +26,9 @@ mod rule;
 pub use acl::Acl;
 pub use advanced::{validate_regex, AdvancedBlocking};
 pub use blocklist::Blocklist;
-pub use blocklist_source::{parse_blocklist, BlocklistSourceManager, SourceStatus};
+pub use blocklist_source::{
+    detect_blocklist_format, parse_blocklist, BlocklistSourceManager, SourceStatus,
+};
 pub use engine::{Decision, PolicyEngine};
 pub use plugin::{PolicyContext, PolicyPlugin, PluginRegistry};
 pub use rule::PerClientRule;
@@ -82,6 +84,12 @@ impl std::str::FromStr for Action {
 /// Build a [`PolicyEngine`] from [`PolicySettings`], loading blocklist files.
 pub fn build_engine(settings: &PolicySettings) -> Result<PolicyEngine> {
     let mut engine = PolicyEngine::new(settings.enabled);
+
+    // Trusted domains are checked before every domain-based blocking rule.
+    let allowlist = normalize_domains(settings.allowlist.iter().cloned());
+    if !allowlist.is_empty() {
+        engine.set_allowlist(Blocklist::from_set(allowlist));
+    }
 
     // Blocklists: inline entries first, then files.
     let mut domains = normalize_domains(settings.blocklist.iter().cloned());

@@ -164,7 +164,7 @@
   specific internal views must come before the public fallback. Use the
   ↑/↓ buttons to reorder entries for the same domain. Each entry serves
   typed answers (A, AAAA, MX, TXT, CNAME, SRV) to queries of the matching
-  type — a CNAME answers every type — and an entry with no networks matches
+  type - a CNAME answers every type - and an entry with no networks matches
   every client, so the public fallback needs no network list.
 </p>
 

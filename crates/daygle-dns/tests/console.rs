@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use common::*;
+use chrono::Datelike;
 use daygle_dns_authoritative::model::{RecordInput, ZoneInput};
 use daygle_dns_core::config::DaygleConfig;
 use daygle_dns_core::hash_password;
@@ -290,6 +291,111 @@ async fn settings_update_applies_and_persists() {
         .await
         .unwrap();
     assert_ne!(after["recursive"]["prefetch_ttl_fraction_pct"], json!(0));
+
+    shutdown(server).await;
+}
+
+#[tokio::test]
+async fn zone_form_creates_primary_import_and_secondary_zones() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut cfg = base_config(&dir.path().join("daygle-dns.db"));
+    cfg.server.port = free_tcp_port();
+    cfg.api.port = free_tcp_port();
+    let server = spawn(cfg).await;
+    let client = reqwest::Client::new();
+    let base = api_url(server.api_addr, "");
+
+    let primary = client
+        .post(format!("{base}/api/zones"))
+        .json(&json!({
+            "name": "imported.test",
+            "zone_type": "primary",
+            "primary_ns": "ns1.imported.test.",
+            "admin_mailbox": "admin.imported.test.",
+            "serial": 42,
+            "refresh": 1800,
+            "retry": 300,
+            "expire": 86400,
+            "minimum": 60,
+            "import_text": "$ORIGIN imported.test.\n$TTL 300\n@ IN SOA ns1.imported.test. admin.imported.test. 99 3600 600 86400 300\n@ IN NS ns1.imported.test.\nns1 IN A 192.0.2.10\n"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(primary.status(), 201, "primary body: {}", primary.text().await.unwrap_or_default());
+    let primary: serde_json::Value = client
+        .get(format!("{base}/api/zones"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let imported = primary
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|zone| zone["name"] == "imported.test")
+        .unwrap();
+    assert_eq!(imported["zone_type"], json!("primary"));
+    assert_eq!(imported["serial"], json!(42));
+
+    let records: Vec<serde_json::Value> = client
+        .get(format!("{base}/api/zones/{}/records", imported["id"].as_str().unwrap()))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(records.iter().any(|record| record["rtype"] == "A"));
+
+    let date_based = client
+        .post(format!("{base}/api/zones"))
+        .json(&json!({ "name": "dated.test", "serial_date_scheme": true }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(date_based.status(), 201);
+    let dated: serde_json::Value = date_based.json().await.unwrap();
+    let today = chrono::Utc::now();
+    let date_prefix = (today.year() as u32) * 10_000 + today.month() * 100 + today.day();
+    let serial = dated["serial"].as_u64().unwrap() as u32;
+    assert!((date_prefix * 100 + 1..=date_prefix * 100 + 99).contains(&serial));
+
+    let secondary = client
+        .post(format!("{base}/api/zones"))
+        .json(&json!({
+            "name": "branch.test",
+            "zone_type": "secondary",
+            "masters": ["192.0.2.10", "192.0.2.11:5353"],
+            "refresh_secs": 600
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(secondary.status(), 201, "secondary body: {}", secondary.text().await.unwrap_or_default());
+
+    let zones: Vec<serde_json::Value> = client
+        .get(format!("{base}/api/zones"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let branch = zones.iter().find(|zone| zone["name"] == "branch.test").unwrap();
+    assert_eq!(branch["zone_type"], json!("secondary"));
+    assert_eq!(branch["masters"], json!(["192.0.2.10", "192.0.2.11:5353"]));
+    assert_eq!(branch["refresh_secs"], json!(600));
+
+    let mutation = client
+        .put(format!("{base}/api/zones/{}/records", branch["id"].as_str().unwrap()))
+        .json(&json!({ "name": "host", "rtype": "A", "content": "192.0.2.20" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(mutation.status(), 409);
 
     shutdown(server).await;
 }

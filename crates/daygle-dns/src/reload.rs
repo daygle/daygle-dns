@@ -213,20 +213,24 @@ pub fn spawn_blocklist_refresh(
             return None;
         }
     };
-    if manager.is_empty() {
-        return Some(Arc::new(manager));
-    }
 
+    // The loop runs even with an empty source list (sleeping 24 h, doing
+    // nothing), so sources added later at runtime - a fresh install that
+    // gains its first source through the console - are still auto-refreshed
+    // on their own schedule without a restart.
     let manager = Arc::new(manager);
     let refresh_manager = Arc::clone(&manager);
     tokio::spawn(async move {
-        let mut ticker = tokio::time::interval(refresh_manager.min_refresh());
-        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
-            tokio::select! {
-                _ = shutdown.cancelled() => return,
-                _ = ticker.tick() => {}
-            }
+            // First cycle runs immediately (fetch on startup). Afterwards the
+            // loop sleeps the smallest configured refresh interval, but wakes
+            // immediately when the console replaces the source list, so a
+            // changed schedule takes effect without waiting out the old one.
+            // The notify future is armed before the snapshot so a change
+            // landing anywhere in the cycle is either seen by the snapshot
+            // or completes this future.
+            let changed = refresh_manager.changed_notify().notified();
+            let expected = refresh_manager.sources();
             match refresh_manager.refresh_due().await {
                 Ok(Some(list)) => {
                     // Apply only when the fetched set differs from what the
@@ -246,6 +250,17 @@ pub fn spawn_blocklist_refresh(
                 }
                 Ok(None) => {}
                 Err(e) => warn!("blocklist refresh failed: {e}"),
+            }
+            // The source list changed while the cycle was running (e.g. a
+            // console save): loop again right away instead of resting.
+            if refresh_manager.sources() != expected {
+                continue;
+            }
+            let period = refresh_manager.min_refresh();
+            tokio::select! {
+                _ = shutdown.cancelled() => return,
+                _ = changed => {}
+                _ = tokio::time::sleep(period) => {}
             }
         }
     });

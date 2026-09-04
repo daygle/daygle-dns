@@ -44,12 +44,12 @@
   // ---- chart geometry ------------------------------------------------------
   // The SVG is drawn at the container's real pixel width (measured via
   // `bind:clientWidth`) so a 1:1 viewBox keeps strokes crisp and markers round
-  // — a fixed viewBox with `preserveAspectRatio="none"` would stretch them.
+  // - a fixed viewBox with `preserveAspectRatio="none"` would stretch them.
   let cw = $state(720); // measured container width in px
   let hover = $state(null); // nearest-point readout under the cursor
   const H = 190;
   const PAD = 10; // top / right / bottom padding
-  const PAD_L = 40; // left padding — room for the y-axis labels
+  const PAD_L = 40; // left padding - room for the y-axis labels
   const W = $derived(Math.max(320, Math.round(cw)));
 
   const series = $derived(stats?.series ?? []);
@@ -229,7 +229,7 @@
         {/each}
       </div>
     {:else}
-      <p class="muted">No traffic yet — the chart fills in as queries arrive.</p>
+      <p class="muted">No traffic yet - the chart fills in as queries arrive.</p>
     {/if}
   </div>
 

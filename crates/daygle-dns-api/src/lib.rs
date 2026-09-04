@@ -13,7 +13,7 @@
 //! | `GET`    | `/api/config`                     | effective configuration |
 //! | `POST`   | `/api/config/reload`              | re-read the config file (live reload) |
 //! | `GET`    | `/api/zones`                      | list zones |
-//! | `POST`   | `/api/zones`                      | create a zone |
+//! | `POST`   | `/api/zones`                      | create a primary or secondary zone |
 //! | `DELETE` | `/api/zones/:id`                  | delete a zone |
 //! | `GET`    | `/api/zones/:id/records`          | list records |
 //! | `PUT`    | `/api/zones/:id/records`          | upsert a record |
@@ -21,6 +21,7 @@
 //! | `POST`   | `/api/zones/:id/sign`             | DNSSEC-sign a zone |
 //! | `POST`   | `/api/zones/:id/unsign`           | remove DNSSEC signing |
 //! | `POST`   | `/api/zones/import`               | import a BIND zone file |
+//! |          |                                  | `POST /api/zones` accepts SOA/import/master options for the GUI |
 //! | `GET`    | `/api/split-horizon`              | list split-horizon networks and entries |
 //! | `POST`   | `/api/split-horizon/networks`     | create/update a network (by name) |
 //! | `DELETE` | `/api/split-horizon/networks/:name` | delete a network |
@@ -28,7 +29,12 @@
 //! | `PUT`    | `/api/split-horizon/entries/:id`  | update a split-horizon entry |
 //! | `POST`   | `/api/split-horizon/entries/:id/move` | move an entry up/down in its domain's order |
 //! | `DELETE` | `/api/split-horizon/entries/:id`  | delete a split-horizon entry |
+//! | `GET`    | `/api/cache`                      | recursive cache status |
 //! | `POST`   | `/api/cache/clear`                | flush the recursive cache |
+//! | `GET`    | `/api/policy/blocklist/sources`   | list remote blocklist sources and their status |
+//! | `POST`   | `/api/policy/blocklist/sources`   | force an immediate refresh of every source |
+//! | `PUT`    | `/api/policy/blocklist/sources`   | replace the configured sources (console CRUD) |
+//! | `GET`    | `/api/policy/blocklist/sources/validate` | probe a URL and validate / auto-detect its format |
 //!
 //! Mutating endpoints require a `Authorization: Bearer <token>` header when
 //! [`daygle_dns_core::config::ApiSettings::api_token`] is configured.
@@ -52,6 +58,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post, put};
 use axum::Router;
 use daygle_dns_authoritative::AuthorityCatalog;
+use daygle_dns_authoritative::SecondaryRefresher;
 use daygle_dns_core::config::DaygleConfig;
 use daygle_dns_core::{LogStore, Metrics};
 use daygle_dns_policy::BlocklistSourceManager;
@@ -136,6 +143,9 @@ pub struct AppState {
     /// Advanced Blocking groups (per-client allow/block policies). Shared with
     /// the dispatcher; rebuilt and swapped in place when a group changes.
     pub advanced_blocking: Arc<ArcSwap<daygle_dns_policy::AdvancedBlocking>>,
+    /// Runtime secondary-zone refresher, used by the zone form to apply master
+    /// changes without requiring a process restart.
+    pub secondary_refresher: Option<Arc<SecondaryRefresher>>,
     /// Remote blocklist source manager; `None` when no sources are configured.
     pub blocklist_sources: Option<Arc<BlocklistSourceManager>>,
     pub started_at: Instant,
@@ -184,6 +194,7 @@ pub fn router(state: AppState) -> Router {
         .route("/zones/{id}/records/{rid}", delete(handlers::delete_record))
         .route("/zones/{id}/sign", post(handlers::sign_zone))
         .route("/zones/{id}/unsign", post(handlers::unsign_zone))
+        .route("/cache", get(handlers::cache_status))
         .route("/cache/clear", post(handlers::clear_cache))
         .route("/split-horizon", get(handlers::get_split_horizon))
         .route(
@@ -209,7 +220,13 @@ pub fn router(state: AppState) -> Router {
         )
         .route(
             "/policy/blocklist/sources",
-            get(handlers::blocklist_sources).post(handlers::refresh_blocklist_sources),
+            get(handlers::blocklist_sources)
+                .post(handlers::refresh_blocklist_sources)
+                .put(handlers::replace_blocklist_sources),
+        )
+        .route(
+            "/policy/blocklist/sources/validate",
+            get(handlers::validate_blocklist_source),
         )
         .route("/policy/blocking/test", post(handlers::test_blocking))
         .route(
@@ -241,7 +258,7 @@ pub fn router(state: AppState) -> Router {
 ///
 /// - `POST /api/auth/login` is always open (it *is* the login).
 /// - When `api.users` is configured, **every** endpoint requires a valid
-///   session token (from login) or the static `api_token` — the console is
+///   session token (from login) or the static `api_token` - the console is
 ///   fully authenticated, like Technitium.
 /// - Otherwise (legacy `api_token` mode): GET/OPTIONS stay open, mutating
 ///   methods require the `api_token` Bearer header when one is configured.

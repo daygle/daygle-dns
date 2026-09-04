@@ -194,9 +194,10 @@
       <label class="check"><input type="checkbox" bind:checked={api_.gui_enabled} /> <span>Serve the web GUI</span></label>
     </div>
     <p class="muted" style="font-size: 0.85rem">
-      Login accounts, the API token, zone signing and blocklist sources are
-      edited in <code>daygle-dns.toml</code>; other advanced options likewise.
-      Changes here are validated first — an invalid value is rejected and
+      Login accounts, the API token, zone signing and remote blocklist sources
+      are edited in <code>daygle-dns.toml</code>. Manage trusted and blocked
+      domains from the Domain Lists page. Other advanced options likewise.
+      Changes here are validated first - an invalid value is rejected and
       nothing is applied.
     </p>
   </div>

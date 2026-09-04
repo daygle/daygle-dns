@@ -8,7 +8,7 @@
 //! behind specific internal ones (order is controlled by `position`).
 //!
 //! An entry holds typed records (A, AAAA, MX, TXT, CNAME, SRV). A query is
-//! answered only by records of its own type — except that a CNAME answers
+//! answered only by records of its own type - except that a CNAME answers
 //! every query type, as it does in the real DNS (RFC 1034 §3.6.2). When the
 //! matching entry has nothing for the queried type the lookup returns `None`
 //! and the dispatcher falls through to normal resolution.
@@ -125,7 +125,7 @@ impl SplitHorizonIndex {
     ///
     /// `qname` may carry a trailing dot and any case; it is normalized before
     /// matching. Returns `None` when no entry matches, or when the matching
-    /// entry has no record for `rtype` (and no CNAME) — the caller then falls
+    /// entry has no record for `rtype` (and no CNAME) - the caller then falls
     /// through to normal resolution.
     pub fn lookup(
         &self,

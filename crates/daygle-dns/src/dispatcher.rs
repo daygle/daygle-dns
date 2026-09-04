@@ -481,26 +481,28 @@ impl RequestHandler for DnsDispatcher {
         // after the base policy engine (an explicit allow list inside a group
         // can still let a name through) and before split-horizon/authoritative
         // resolution. `evaluate` only ever returns a blocking action.
-        if let Some(decision) = self.advanced_blocking.load().evaluate(client, &qname) {
-            debug!(query = %qname, reason = %decision.reason, "blocked by advanced blocking");
-            self.metrics.inc(&self.metrics.blocked);
-            let rcode = match decision.action {
-                Action::Refused => "REFUSED",
-                Action::Redirect(_) | Action::NoData => "NOERROR",
-                _ => "NXDOMAIN",
-            };
-            self.observe(client, &qname, &rtype, Outcome::Blocked, Some(rcode), started);
-            return match decision.action {
-                Action::Refused => {
-                    send_error(&mut response_handle, request, ResponseCode::Refused).await
-                }
-                Action::Redirect(ip) => {
-                    send_redirect(&mut response_handle, request, info.query.query_type(), ip).await
-                }
-                Action::NoData => send_empty(&mut response_handle, request).await,
-                // Block (NXDOMAIN) and any future action default to NXDOMAIN.
-                _ => send_error(&mut response_handle, request, ResponseCode::NXDomain).await,
-            };
+        if !policy.is_allowlisted(&qname) {
+            if let Some(decision) = self.advanced_blocking.load().evaluate(client, &qname) {
+                debug!(query = %qname, reason = %decision.reason, "blocked by advanced blocking");
+                self.metrics.inc(&self.metrics.blocked);
+                let rcode = match decision.action {
+                    Action::Refused => "REFUSED",
+                    Action::Redirect(_) | Action::NoData => "NOERROR",
+                    _ => "NXDOMAIN",
+                };
+                self.observe(client, &qname, &rtype, Outcome::Blocked, Some(rcode), started);
+                return match decision.action {
+                    Action::Refused => {
+                        send_error(&mut response_handle, request, ResponseCode::Refused).await
+                    }
+                    Action::Redirect(ip) => {
+                        send_redirect(&mut response_handle, request, info.query.query_type(), ip).await
+                    }
+                    Action::NoData => send_empty(&mut response_handle, request).await,
+                    // Block (NXDOMAIN) and any future action default to NXDOMAIN.
+                    _ => send_error(&mut response_handle, request, ResponseCode::NXDomain).await,
+                };
+            }
         }
 
         // 1c. Split horizon: per-client synthetic answers. This runs after

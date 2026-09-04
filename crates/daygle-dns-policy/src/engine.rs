@@ -30,6 +30,9 @@ impl Decision {
 pub struct PolicyEngine {
     enabled: bool,
     acl: Option<std::sync::Arc<Acl>>,
+    /// Domains explicitly trusted by the operator. This takes precedence over
+    /// all domain blocklists and rules, but not over client ACLs.
+    allowlist: Option<std::sync::Arc<Blocklist>>,
     blocklist: Option<std::sync::Arc<Blocklist>>,
     /// Domains pulled from remote blocklist sources. Kept separate from
     /// `blocklist` (config + files) so the source refresher can swap just the
@@ -58,6 +61,20 @@ impl PolicyEngine {
         self.acl = Some(std::sync::Arc::new(acl));
     }
 
+    pub fn set_allowlist(&mut self, allowlist: Blocklist) {
+        self.allowlist = Some(std::sync::Arc::new(allowlist));
+    }
+
+    pub fn allowlist_len(&self) -> usize {
+        self.allowlist.as_ref().map(|l| l.len()).unwrap_or(0)
+    }
+
+    /// Whether a domain matches an explicitly trusted entry.
+    pub fn is_allowlisted(&self, domain: &str) -> bool {
+        self.allowlist.as_ref().is_some_and(|l| l.contains(domain))
+    }
+
+    /// Replace the configured blocklist.
     pub fn set_blocklist(&mut self, blocklist: Blocklist) {
         self.blocklist = Some(std::sync::Arc::new(blocklist));
     }
@@ -134,7 +151,18 @@ impl PolicyEngine {
             }
         }
 
-        // 2. Blocklists (static config + remote sources).
+        // 2. Explicit trusted domains override domain-based blocking. ACLs
+        // above remain authoritative, so a denied client is never exempt.
+        if let Some(list) = &self.allowlist {
+            if list.contains(query_name) {
+                return Decision::new(
+                    format!("'{query_name}' matched trusted domain allowlist"),
+                    Action::Allow,
+                );
+            }
+        }
+
+        // 3. Blocklists (static config + remote sources).
         if let Some(list) = &self.blocklist {
             if list.contains(query_name) {
                 return Decision::new(
@@ -152,7 +180,7 @@ impl PolicyEngine {
             }
         }
 
-        // 3. Ordered per-client rules.
+        // 4. Ordered per-client rules.
         for rule in self.rules.iter() {
             if rule.matches_client(client) && rule.matches_domain(query_name) {
                 return Decision::new(
@@ -162,7 +190,7 @@ impl PolicyEngine {
             }
         }
 
-        // 4. Filter AAAA: after explicit blocklists/rules (so an outright
+        // 5. Filter AAAA: after explicit blocklists/rules (so an outright
         // block still wins with NXDOMAIN) but before plugins, suppress IPv6
         // answers by returning NODATA, forcing dual-stack clients to IPv4.
         if self.aaaa_filtered(query_name, record_type) {
@@ -172,7 +200,7 @@ impl PolicyEngine {
             );
         }
 
-        // 5. Plugins.
+        // 6. Plugins.
         if !self.plugins.is_empty() {
             let ctx = crate::PolicyContext {
                 client,
@@ -305,6 +333,27 @@ mod tests {
         e.set_filter_aaaa(true, None);
         assert_eq!(
             e.evaluate(ip("1.1.1.1"), "ads.example.com", "AAAA").await.action,
+            Action::Block
+        );
+    }
+
+    #[tokio::test]
+    async fn allowlist_overrides_static_and_remote_blocklists() {
+        let mut e = PolicyEngine::new(true);
+        e.set_allowlist(Blocklist::from_lines(["safe.example.com", "*.trusted.test"]));
+        e.set_blocklist(Blocklist::from_lines(["safe.example.com", "blocked.test"]));
+        e.set_remote_blocklist(Blocklist::from_lines(["remote.test"]));
+
+        assert_eq!(
+            e.evaluate(ip("8.8.8.8"), "safe.example.com", "A").await.action,
+            Action::Allow
+        );
+        assert_eq!(
+            e.evaluate(ip("8.8.8.8"), "a.trusted.test", "A").await.action,
+            Action::Allow
+        );
+        assert_eq!(
+            e.evaluate(ip("8.8.8.8"), "remote.test", "A").await.action,
             Action::Block
         );
     }

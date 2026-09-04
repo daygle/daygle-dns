@@ -40,7 +40,7 @@ Daygle combines, in a single process:
   being served during upstream outages (bounded staleness, e.g. 1 h).
 - A **dashboard with charts & top-N tables**: per-minute query time-series
   (1 h / 6 h / 24 h windows), top clients, top domains, and top blocked
-  domains — all bounded in memory.
+  domains - all bounded in memory.
 - A **REST API** (tower/axum) for configuration, zone management, logs, and
   metrics.
 - An embedded **Svelte** web GUI with **username/password login and roles**
@@ -71,10 +71,19 @@ zypper, or Xcode Command Line Tools on macOS); DNS test tools (dig) where
 available. Set `DAYGLE_NO_DEPS=1` to
 skip the automatic installs and get manual instructions instead.
 
+The installer automatically detects whether it is performing a fresh install
+or upgrading an existing installation. It treats an existing configuration,
+binary, or systemd unit as an upgrade, preserves the configuration and data,
+and restarts an existing service (or enables it if an interrupted installation
+left it stopped). Fresh installs create the default configuration and start the
+service.
+
 The installer also offers to expose the web GUI on your LAN when run
 interactively (adds an admin login and binds the API to 0.0.0.0:5380); for
 scripted installs use `DAYGLE_LAN_GUI=1` with `DAYGLE_ADMIN_USER` and
-`DAYGLE_ADMIN_PASSWORD`. Without either, the GUI stays loopback-only for
+`DAYGLE_ADMIN_PASSWORD`. On upgrades, existing LAN binding and console
+credentials are preserved automatically, and the existing admin password is
+never replaced. Without either, fresh installs keep the GUI loopback-only for
 security.
 
 Then open the dashboard at <http://127.0.0.1:5380>.
@@ -127,7 +136,7 @@ tsig_key = "transfer-key"
 
 When a TSIG key is bound to a zone, unsigned transfer/update requests are
 refused and all responses are signed. TSIG also covers secondaries pulling
-from masters — see [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for details.
+from masters - see [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for details.
 
 ```toml
 [server]
@@ -184,6 +193,11 @@ port = 5380
 # refresh_secs = 43200
 ```
 
+Sources are also manageable from the **Blocklists** page of the web console:
+add, edit, remove and validate (including auto-detecting the format) without
+touching the config file - saved changes are written back to
+`daygle-dns.toml` and applied to the running server immediately.
+
 ### Live reload
 
 With `server.reload_enabled = true` (the default), Daygle polls the config
@@ -236,8 +250,9 @@ real server on ephemeral ports and exercise:
 ### Installer-based installs (systemd)
 
 The one-line installer is **idempotent** - re-running it is the supported
-upgrade path. It fetches the latest `main`, rebuilds the release binary,
-replaces `/usr/local/bin/daygle-dns`, and restarts the service:
+upgrade path. It detects the existing installation, fetches the latest `main`,
+rebuilds the release binary, replaces `/usr/local/bin/daygle-dns`, preserves
+`/etc/daygle-dns/daygle-dns.toml`, and restarts (or re-enables) the service:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/daygle/daygle-dns/main/install.sh | sh

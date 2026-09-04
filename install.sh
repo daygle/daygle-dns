@@ -18,6 +18,16 @@ PREFIX="${PREFIX:-/usr/local}"
 CONFIG_DIR="${CONFIG_DIR:-/etc/daygle-dns}"
 DATA_DIR="${DATA_DIR:-/var/lib/daygle-dns}"
 SERVICE_USER="${SERVICE_USER:-daygle-dns}"
+CONFIG_FILE="$CONFIG_DIR/daygle-dns.toml"
+SERVICE_FILE="/etc/systemd/system/daygle-dns.service"
+
+# Detect the installation mode before changing anything. A config file is the
+# strongest signal, while the binary/unit checks also catch interrupted or
+# partially completed installations that should be repaired as upgrades.
+INSTALL_MODE="install"
+if [ -f "$CONFIG_FILE" ] || [ -x "$PREFIX/bin/daygle-dns" ] || [ -f "$SERVICE_FILE" ]; then
+    INSTALL_MODE="upgrade"
+fi
 
 log() { printf '\033[1;32m[daygle-dns-install]\033[0m %s\n' "$1"; }
 
@@ -29,6 +39,34 @@ need_downloader() { ! { have_cmd curl || have_cmd wget; }; }
 need_dig() { ! have_cmd dig; }
 need_cc() {
     ! { have_cmd cc || have_cmd gcc || have_cmd clang; }
+}
+
+has_configured_api_users() {
+    [ -f "$CONFIG_FILE" ] && grep -q '^[[:space:]]*\[\[api\.users\]\]' "$CONFIG_FILE"
+}
+
+api_listen_address() {
+    awk '
+        /^\[api\][[:space:]]*$/ { in_api = 1; next }
+        /^\[/ { in_api = 0 }
+        in_api && $1 == "listen" {
+            gsub(/["\r]/, "", $3)
+            print $3
+            exit
+        }
+    ' "$CONFIG_FILE" 2>/dev/null || true
+}
+
+first_api_username() {
+    awk '
+        /^\[\[api\.users\]\][[:space:]]*$/ { in_user = 1; next }
+        /^\[/ { in_user = 0 }
+        in_user && $1 == "username" {
+            gsub(/["\r]/, "", $3)
+            print $3
+            exit
+        }
+    ' "$CONFIG_FILE" 2>/dev/null || true
 }
 
 run_as_root() {
@@ -187,6 +225,17 @@ if need_cargo; then
     fi
 fi
 
+if [ "$INSTALL_MODE" = "upgrade" ]; then
+    log "Existing Daygle DNS installation detected - upgrading in place."
+    if [ -x "$PREFIX/bin/daygle-dns" ]; then
+        INSTALLED_VERSION="$($PREFIX/bin/daygle-dns --version 2>/dev/null || true)"
+        [ -n "$INSTALLED_VERSION" ] && log "Installed version: $INSTALLED_VERSION"
+    fi
+    log "Existing configuration, zones, certificates, and database will be preserved."
+else
+    log "No existing Daygle DNS installation detected - performing a fresh install."
+fi
+
 SRC_DIR="$(mktemp -d)"
 trap 'rm -rf "$SRC_DIR"' EXIT
 
@@ -252,8 +301,18 @@ EOF
     id "$SERVICE_USER" >/dev/null 2>&1 || useradd --system --no-create-home "$SERVICE_USER"
     chown -R "$SERVICE_USER":"$SERVICE_USER" "$CONFIG_DIR" "$DATA_DIR"
     systemctl daemon-reload
-    systemctl enable --now daygle-dns
-    log "Daygle DNS started via systemd."
+    if [ "$INSTALL_MODE" = "upgrade" ]; then
+        if systemctl is-active --quiet daygle-dns 2>/dev/null; then
+            systemctl restart daygle-dns
+        else
+            # Also repairs an interrupted or previously disabled installation.
+            systemctl enable --now daygle-dns
+        fi
+        log "Daygle DNS upgraded and started via systemd."
+    else
+        systemctl enable --now daygle-dns
+        log "Daygle DNS started via systemd."
+    fi
 else
     log "No systemd detected. Start the server manually:"
     log "  $PREFIX/bin/daygle-dns --config $CONFIG_DIR/daygle-dns.toml"
@@ -265,12 +324,11 @@ fi
 # it to 0.0.0.0 and create an admin login; non-interactive runs opt in
 # with DAYGLE_LAN_GUI=1 (plus DAYGLE_ADMIN_USER / DAYGLE_ADMIN_PASSWORD)
 # and opt out with DAYGLE_LAN_GUI=0.
-CONFIG_FILE="$CONFIG_DIR/daygle-dns.toml"
 LAN_SETUP=0
 LAN_IP=""
 if [ "${DAYGLE_LAN_GUI:-}" = "1" ]; then
     LAN_SETUP=1
-elif [ "${DAYGLE_LAN_GUI:-}" != "0" ] && : < /dev/tty 2>/dev/null; then
+elif [ "$INSTALL_MODE" = "install" ] && [ "${DAYGLE_LAN_GUI:-}" != "0" ] && : < /dev/tty 2>/dev/null; then
     printf '%s' "[daygle-dns-install] Expose the web GUI to your LAN (adds an admin login, binds 0.0.0.0:5380)? [y/N] "
     ANSWER=
     read -r ANSWER < /dev/tty || true
@@ -279,9 +337,26 @@ elif [ "${DAYGLE_LAN_GUI:-}" != "0" ] && : < /dev/tty 2>/dev/null; then
     esac
 fi
 
+if [ "$INSTALL_MODE" = "upgrade" ] && [ "$LAN_SETUP" = "0" ]; then
+    if [ "$(api_listen_address)" = "0.0.0.0" ]; then
+        LAN_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
+        log "Preserving existing LAN GUI configuration and console credentials."
+    fi
+fi
+
 if [ "$LAN_SETUP" = "1" ]; then
     ADMIN_USER="${DAYGLE_ADMIN_USER:-admin}"
-    if [ -n "${DAYGLE_ADMIN_PASSWORD:-}" ]; then
+    PRESERVE_USERS=0
+    if [ "$INSTALL_MODE" = "upgrade" ] && has_configured_api_users; then
+        PRESERVE_USERS=1
+        EXISTING_USER="$(first_api_username)"
+        [ -n "$EXISTING_USER" ] && ADMIN_USER="$EXISTING_USER"
+        log "Preserving existing console account '$ADMIN_USER'; the installer will not replace its password."
+    fi
+    if [ "$PRESERVE_USERS" = "1" ]; then
+        ADMIN_PASSWORD=""
+        ADMIN_HASH=""
+    elif [ -n "${DAYGLE_ADMIN_PASSWORD:-}" ]; then
         ADMIN_PASSWORD="$DAYGLE_ADMIN_PASSWORD"
     elif : < /dev/tty 2>/dev/null; then
         printf '%s' "[daygle-dns-install] Password for user '$ADMIN_USER': "
@@ -296,14 +371,22 @@ if [ "$LAN_SETUP" = "1" ]; then
         fi
         log "Generated a random admin password (shown at the end of this run)."
     fi
-    if [ -z "${ADMIN_PASSWORD:-}" ]; then
-        log "No password given - leaving the GUI on the loopback interface."
-        LAN_SETUP=0
-    else
-        ADMIN_HASH="$("$PREFIX/bin/daygle-dns" hash-password "$ADMIN_PASSWORD")"
-        # Rebind the API/GUI to all interfaces (portable sed: no -i).
-        sed 's/^listen = "127.0.0.1"/listen = "0.0.0.0"/' "$CONFIG_FILE" > "$CONFIG_FILE.tmp" && mv "$CONFIG_FILE.tmp" "$CONFIG_FILE"
-        if ! grep -q '\[\[api.users\]\]' "$CONFIG_FILE"; then
+    if [ "$PRESERVE_USERS" = "1" ] || [ -n "${ADMIN_PASSWORD:-}" ]; then
+        if [ "$PRESERVE_USERS" != "1" ]; then
+            ADMIN_HASH="$("$PREFIX/bin/daygle-dns" hash-password "$ADMIN_PASSWORD")"
+        fi
+        # Rebind only the API/GUI section (not the DNS or DoT listeners).
+        awk '
+            /^\[api\][[:space:]]*$/ { in_api = 1 }
+            /^\[/ && $0 !~ /^\[api\][[:space:]]*$/ { in_api = 0 }
+            in_api && $1 == "listen" { $0 = "listen = \"0.0.0.0\"" }
+            { print }
+        ' "$CONFIG_FILE" > "$CONFIG_FILE.tmp" && mv "$CONFIG_FILE.tmp" "$CONFIG_FILE"
+        # The mv recreated the file owned by root; give it back to the
+        # service user, which writes the config when settings are saved
+        # from the web console.
+        chown "$SERVICE_USER":"$SERVICE_USER" "$CONFIG_FILE" 2>/dev/null || true
+        if ! has_configured_api_users; then
             cat >> "$CONFIG_FILE" <<EOF
 
 # Added by the installer: LAN web GUI login.
@@ -315,14 +398,25 @@ EOF
         fi
         open_lan_firewall || true
         LAN_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
-        log "Web GUI user '$ADMIN_USER' added and API bound to 0.0.0.0:5380."
+        if [ "$PRESERVE_USERS" = "1" ]; then
+            log "Existing console account '$ADMIN_USER' preserved and API bound to 0.0.0.0:5380."
+        else
+            log "Web GUI user '$ADMIN_USER' added and API bound to 0.0.0.0:5380."
+        fi
         if command -v systemctl >/dev/null 2>&1; then
             systemctl restart daygle-dns 2>/dev/null || true
             log "Restarted daygle-dns to apply the GUI bind."
         fi
         if [ -n "$LAN_IP" ]; then
-            log "Web GUI (LAN): http://$LAN_IP:5380  user: $ADMIN_USER  password: $ADMIN_PASSWORD"
+            if [ "$PRESERVE_USERS" = "1" ]; then
+                log "Web GUI (LAN): http://$LAN_IP:5380  user: $ADMIN_USER  (existing password preserved)"
+            else
+                log "Web GUI (LAN): http://$LAN_IP:5380  user: $ADMIN_USER  password: $ADMIN_PASSWORD"
+            fi
         fi
+    else
+        log "No password given - leaving the GUI on the loopback interface."
+        LAN_SETUP=0
     fi
 fi
 

@@ -83,6 +83,11 @@ impl DaygleConfig {
             ));
         }
         let rec = &self.recursive;
+        if rec.cache_size == 0 {
+            return Err(DaygleError::Config(
+                "recursive.cache_size must be >= 1".to_string(),
+            ));
+        }
         if rec.prefetch_enabled {
             if rec.prefetch_ttl_fraction_pct == 0 || rec.prefetch_ttl_fraction_pct > 100 {
                 return Err(DaygleError::Config(
@@ -221,6 +226,17 @@ impl DaygleConfig {
                         "{label} contains invalid network '{net}'"
                     )));
                 }
+            }
+        }
+        for (label, domains) in [
+            ("policy.allowlist", &self.policy.allowlist),
+            ("policy.blocklist", &self.policy.blocklist),
+            ("policy.filter_aaaa_except", &self.policy.filter_aaaa_except),
+        ] {
+            for domain in domains {
+                validate_domain_pattern(domain).map_err(|e| {
+                    DaygleError::Config(format!("{label} contains invalid domain '{domain}': {e}"))
+                })?;
             }
         }
         for source in &self.policy.blocklist_sources {
@@ -836,7 +852,11 @@ impl Default for DoqSettings {
 pub struct PolicySettings {
     /// Enable policy evaluation.
     pub enabled: bool,
+    /// Domains (or `*.suffix`) always allowed, even when another policy would block them.
+    /// The GUI presents these as trusted domains.
+    pub allowlist: Vec<String>,
     /// Domains (or `*.suffix`) blocked outright.
+    /// The GUI presents these as blocked domains.
     pub blocklist: Vec<String>,
     /// Files containing one domain per line, merged into the blocklist.
     pub blocklist_files: Vec<String>,
@@ -863,6 +883,7 @@ impl Default for PolicySettings {
     fn default() -> Self {
         Self {
             enabled: true,
+            allowlist: vec![],
             blocklist: vec![],
             blocklist_files: vec![],
             blocklist_sources: vec![],
@@ -1047,6 +1068,34 @@ impl Default for StubZoneConfig {
     }
 }
 
+/// Validate an exact domain or a strict-subdomain wildcard (`*.example.com`).
+///
+/// This deliberately accepts ordinary DNS hostnames only. Keeping manually
+/// entered policy lists to DNS label syntax prevents a typo such as a URL or a
+/// hosts-file line from silently becoming a policy entry.
+pub fn validate_domain_pattern(pattern: &str) -> std::result::Result<(), String> {
+    let value = pattern.trim().trim_end_matches('.');
+    let value = value.strip_prefix("*.").unwrap_or(value);
+    if value.is_empty() {
+        return Err("domain must not be empty".to_string());
+    }
+    if value.contains('*') || value.starts_with('.') || value.len() > 253 {
+        return Err("expected a DNS name or *.suffix wildcard".to_string());
+    }
+    for label in value.split('.') {
+        if label.is_empty() || label.len() > 63 {
+            return Err("DNS labels must contain 1 to 63 characters".to_string());
+        }
+        if label.starts_with('-') || label.ends_with('-') {
+            return Err("DNS labels must not start or end with '-'".to_string());
+        }
+        if !label.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-') {
+            return Err("DNS labels may contain only letters, numbers and '-'".to_string());
+        }
+    }
+    Ok(())
+}
+
 /// Helper: expand a list of domain patterns into a normalized set.
 pub fn normalize_domains(entries: impl IntoIterator<Item = String>) -> BTreeSet<String> {
     entries
@@ -1064,6 +1113,7 @@ mod tests {
     fn parses_minimal_config() {
         let cfg = DaygleConfig::parse("").unwrap();
         assert_eq!(cfg.server.port, 53);
+        assert!(cfg.policy.allowlist.is_empty());
         assert_eq!(cfg.dot.port, 853);
         assert!(cfg.recursive.dnssec_validate);
     }
@@ -1110,6 +1160,16 @@ action = "block"
     fn rejects_bad_network() {
         let text = "[policy]\ndenied_networks = [\"not-a-network\"]\n";
         assert!(DaygleConfig::parse(text).is_err());
+    }
+
+    #[test]
+    fn validates_domain_policy_patterns() {
+        assert!(DaygleConfig::parse(
+            "[policy]\nallowlist = [\"Example.COM.\", \"*.trusted.test\"]\n"
+        )
+        .is_ok());
+        assert!(DaygleConfig::parse("[policy]\nallowlist = [\"https://example.com\"]\n").is_err());
+        assert!(DaygleConfig::parse("[policy]\nblocklist = [\"*.\"]\n").is_err());
     }
 
     #[test]

@@ -1,7 +1,7 @@
 //! Password hashing for console user accounts.
 //!
 //! Uses PBKDF2-HMAC-SHA256 (NIST SP 800-132) implemented on top of `sha2`
-//! and `hmac` — no C dependencies, and the primitive is already in the
+//! and `hmac` - no C dependencies, and the primitive is already in the
 //! dependency tree via rustls/ring. Hashes are serialized as
 //!
 //! ```text

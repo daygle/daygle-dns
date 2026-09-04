@@ -205,18 +205,44 @@ Create a zone:
 POST /api/zones
 {
   "name": "example.com",
+  "zone_type": "primary",
   "primary_ns": "ns1.example.com.",
   "admin_mailbox": "admin.example.com.",
   "serial": 1,
   "refresh": 3600,
   "retry": 600,
   "expire": 86400,
-  "minimum": 3600
+  "minimum": 3600,
+  "serial_date_scheme": false,
+  "import_text": null,
+  "masters": [],
+  "refresh_secs": null
 }
 ```
 
-Only `name` is required. Listing returns each zone plus a `dnssec` boolean
-indicating whether a signing key is present.
+Only `name` is required for a primary zone. `zone_type` defaults to `primary`.
+Set `serial_date_scheme` to `true` to generate a `YYYYMMDDnn`-style SOA
+serial. When `import_text` contains a BIND zone file, it is parsed and its
+records are imported; SOA fields from the file supply defaults unless explicit
+request values override them. Listing returns each zone plus `dnssec`,
+`zone_type`, `masters`, and `refresh_secs` fields.
+
+To create a secondary zone, provide at least one IPv4/IPv6 master address:
+
+```json
+POST /api/zones
+{
+  "name": "branch.example.com",
+  "zone_type": "secondary",
+  "masters": ["192.0.2.10", "192.0.2.11:5353"],
+  "refresh_secs": 600
+}
+```
+
+Secondary zones are added to `authoritative.secondary_zones`, persisted to the
+configuration file, applied to the running refresher immediately, and pulled
+over AXFR/IXFR from the first reachable master. Their records are read-only in
+the GUI and record mutation endpoints return `409 Conflict`.
 
 Import a BIND zone file (creates the zone and replaces its records):
 
@@ -339,7 +365,7 @@ POST /api/split-horizon/networks
 
 Create an entry (appended after existing entries for the same domain).
 `records` entries hold the query type and its RDATA in zone-file presentation
-format — supported types are `A`, `AAAA`, `MX`, `TXT`, `CNAME`, and `SRV`
+format - supported types are `A`, `AAAA`, `MX`, `TXT`, `CNAME`, and `SRV`
 (e.g. `MX` → `"10 mail.example.com."`, `TXT` → `"\"hello\""`, `CNAME` →
 `"target.example.com."`, `SRV` → `"0 5 5060 sip.example.com."`). TXT values
 are auto-quoted when no quotes are present:
@@ -384,7 +410,7 @@ Returns `{"moved": true}` when the entry was swapped with its neighbour,
 and `404` when the entry does not exist. Entries of other domains are never
 affected.
 
-A matching entry answers queries of the same record type — a CNAME answers
+A matching entry answers queries of the same record type - a CNAME answers
 every query type (RFC 1034 §3.6.2), and `ANY` queries receive all records.
 When the entry has no record for the queried type the query falls through to
 normal resolution, so an entry holding only a TXT never swallows A queries.
@@ -419,6 +445,8 @@ Flushes the recursive resolver cache.
 ```
 GET  /api/policy/blocklist/sources
 POST /api/policy/blocklist/sources
+PUT  /api/policy/blocklist/sources
+GET  /api/policy/blocklist/sources/validate?url=...&format=...
 ```
 
 `GET` returns per-source status for the remote blocklist sources configured
@@ -447,6 +475,32 @@ result, returning the new total domain count.
 ```
 
 Returns `404` when no sources are configured.
+
+`PUT` replaces the complete source list (body: `{"sources": [...]}` with the
+same fields as the config file) - this is what the console's add / edit /
+remove flow calls. Each source is validated, the list is persisted to
+`daygle-dns.toml`, and the running server swaps its sources and refetches
+them in the background immediately; the change survives a restart.
+Removing the last source (or disabling all of them) clears the remote
+blocklist right away.
+
+`GET /validate` probes a candidate URL **without saving it** and reports
+whether its content matches the declared format, so a mislabeled source is
+caught before it is added:
+
+```json
+{
+  "ok": true,
+  "format": "hosts",
+  "domains": 182344,
+  "sample": ["0.0.0.0", "ads.example.com"]
+}
+```
+
+`format` accepts `domains`, `hosts`, `adblock`, or `auto` (empty = auto) to
+auto-detect the format from the content. `ok: false` with a `reason` means
+the URL fetched fine but the content does not parse as (or does not match)
+`format`; a `502` means the URL itself could not be fetched.
 
 ## Errors
 

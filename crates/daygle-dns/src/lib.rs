@@ -176,7 +176,7 @@ pub async fn bind_with(
     // Secondary zone refreshers (AXFR/IXFR from configured masters). The
     // refresher is shared with the NOTIFY listener so inbound NOTIFYs can
     // trigger immediate refreshes (RFC 1996).
-    let refresher = if !config.authoritative.secondary_zones.is_empty() {
+    let refresher = {
         let refresher = Arc::new(daygle_dns_authoritative::SecondaryRefresher::new(
             store,
             catalog.clone(),
@@ -191,8 +191,6 @@ pub async fn bind_with(
             }
         });
         Some(refresher)
-    } else {
-        None
     };
 
     // Outbound NOTIFY: sent to secondaries when a primary zone changes.
@@ -361,6 +359,7 @@ pub async fn bind_with(
         config: shared.config.clone(),
         policy: shared.policy.clone(),
         advanced_blocking: shared.advanced_blocking.clone(),
+        secondary_refresher: refresher.clone(),
         blocklist_sources: blocklist_sources.clone(),
         started_at,
         config_path: config_path.clone().map(Arc::new),

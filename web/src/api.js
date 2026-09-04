@@ -43,6 +43,9 @@ async function request(method, path, body, opts = {}) {
       detail = data.error || detail;
       needsLogin = res.status === 401 && data.login === true;
     } catch (_) { /* ignore */ }
+    // Present errors sentence-cased: backend messages often start lowercase
+    // (e.g. "not found: zone ...", "failed to persist ...").
+    detail = detail.charAt(0).toUpperCase() + detail.slice(1);
     if (needsLogin && onUnauthorized && !opts.noLoginRedirect) {
       onUnauthorized();
     }
@@ -90,10 +93,18 @@ export const api = {
     request('DELETE', `/zones/${zoneId}/records/${recordId}`),
   signZone: (zoneId) => request('POST', `/zones/${zoneId}/sign`),
   unsignZone: (zoneId) => request('POST', `/zones/${zoneId}/unsign`),
+  cache: () => request('GET', '/cache'),
   clearCache: () => request('POST', '/cache/clear'),
   importZone: (name, text) => request('POST', '/zones/import', { name, text }),
   blocklistSources: () => request('GET', '/policy/blocklist/sources'),
   refreshBlocklistSources: () => request('POST', '/policy/blocklist/sources'),
+  replaceBlocklistSources: (sources) =>
+    request('PUT', '/policy/blocklist/sources', { sources }),
+  validateBlocklistSource: (url, format) =>
+    request(
+      'GET',
+      `/policy/blocklist/sources/validate?url=${encodeURIComponent(url)}&format=${encodeURIComponent(format || 'auto')}`
+    ),
   blockingGroups: () => request('GET', '/policy/blocking'),
   saveBlockingGroup: (body) => request('POST', '/policy/blocking', body),
   deleteBlockingGroup: (id) => request('DELETE', `/policy/blocking/${id}`),

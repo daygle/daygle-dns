@@ -135,7 +135,7 @@
   }
 
   function responseLabel(response) {
-    if (!response) return '—';
+    if (!response) return '-';
     if (response.kind === 'redirect') return `redirect → ${response.address}`;
     return RESPONSES.find((r) => r.value === response.kind)?.label || response.kind;
   }
@@ -171,7 +171,7 @@
   </div>
   <p class="muted" style="margin: 8px 0">
     Answer AAAA (IPv6) queries with an empty response so dual-stack clients fall
-    back to IPv4. List any names — one per line, <code>*.suffix</code> allowed —
+    back to IPv4. List any names - one per line, <code>*.suffix</code> allowed -
     that must keep their IPv6 answers.
   </p>
   <textarea
@@ -236,19 +236,19 @@
         <textarea rows="2" bind:value={edit.clients} placeholder={'192.168.1.0/24\n10.0.0.5'}></textarea>
       </label>
       <label>
-        <span>Allow — domains (override block)</span>
+        <span>Allow - domains (override block)</span>
         <textarea rows="4" bind:value={edit.allow} placeholder={'safe.example.com\n*.work.example'}></textarea>
       </label>
       <label>
-        <span>Block — domains</span>
+        <span>Block - domains</span>
         <textarea rows="4" bind:value={edit.block} placeholder={'*.doubleclick.net\ntracker.test'}></textarea>
       </label>
       <label>
-        <span>Allow — regex (override block)</span>
+        <span>Allow - regex (override block)</span>
         <textarea rows="3" bind:value={edit.allow_regex} placeholder={'^cdn\\d+\\.'}></textarea>
       </label>
       <label>
-        <span>Block — regex</span>
+        <span>Block - regex</span>
         <textarea rows="3" bind:value={edit.block_regex} placeholder={'^ads?[0-9]*\\.'}></textarea>
       </label>
       <label>

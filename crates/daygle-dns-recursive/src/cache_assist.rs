@@ -3,15 +3,15 @@
 //! Hickory's resolver caches internally but has no prefetch or stale-serving
 //! of its own, so this module implements both at the Daygle layer:
 //!
-//! - **Prefetch** — every successful lookup updates a freshness snapshot
+//! - **Prefetch** - every successful lookup updates a freshness snapshot
 //!   (`valid_until` from Hickory, so Hickory's TTL clamping is honored).
 //!   When a *popular* name (queried at least `prefetch_min_queries` times in
 //!   the sliding `prefetch_window_secs` window) is served with less than
 //!   `prefetch_ttl_fraction_pct` of its effective TTL remaining, a background
 //!   task re-resolves it, so the next client never waits on an upstream
 //!   round trip.
-//! - **Serve-stale** — when an upstream lookup *fails* (timeout, transport
-//!   error — not NXDOMAIN, which is a real answer) and a previously-good
+//! - **Serve-stale** - when an upstream lookup *fails* (timeout, transport
+//!   error - not NXDOMAIN, which is a real answer) and a previously-good
 //!   answer for the name exists that expired less than `serve_stale_secs`
 //!   ago, that stale answer is served with a short TTL. "Stale bread is
 //!   better than no bread."
@@ -374,7 +374,7 @@ mod tests {
             s.valid_until = Instant::now() + Duration::from_secs(50);
         }
         // Recompute through on_success path: re-store with a long TTL, then
-        // manually age it — the trigger math is (valid_until - fetched_at) *
+        // manually age it - the trigger math is (valid_until - fetched_at) *
         // pct; emulate by re-storing with fetched_at long past.
         let lk = lookup_a("frac.example.", 1000);
         ca.on_success(&key, &lk); // full TTL again

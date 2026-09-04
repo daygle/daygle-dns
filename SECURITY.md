@@ -10,7 +10,7 @@ surfaces seriously.
 Only the latest release on the `main` branch receives security fixes. There
 are no long-term-support branches yet; upgrading is the supported mitigation
 for any published vulnerability (see [Upgrading](README.md#upgrading) in the
-README — the installer is idempotent and preserves your data).
+README - the installer is idempotent and preserves your data).
 
 ## Reporting a vulnerability
 
@@ -27,13 +27,13 @@ Report privately through one of these channels:
 ### What to include
 
 - A description of the vulnerability and its **impact** (what an attacker
-  gains, and from where — LAN, WAN, a secondary, an API client…).
+  gains, and from where - LAN, WAN, a secondary, an API client…).
 - The affected component and version (`daygle-dns --version`).
 - Reproduction steps or a proof of concept: the config used (with secrets
   redacted), the client commands (`dig`, `curl`, a TSIG/DNSSEC script), and
   the observed vs. expected behavior.
 - Which listener/protocol is involved (UDP/TCP 53, DoT, DoH, DoQ, API/GUI),
-  and whether `api.users`, `api_token`, TSIG keys, or ACLs were configured —
+  and whether `api.users`, `api_token`, TSIG keys, or ACLs were configured -
   many findings depend on the deployment posture.
 
 Please give us a reasonable window (up to 90 days) to fix and publish before
@@ -91,7 +91,7 @@ report immediately if you encounter real user data unintentionally.
 
 ## Deployment hardening checklist
 
-While you're here — the settings that most affect Daygle's security posture:
+While you're here - the settings that most affect Daygle's security posture:
 
 - Put the API on a trusted interface (`api.listen = "127.0.0.1"` by default)
   and configure `[[api.users]]` with `admin`/`viewer` roles instead of a

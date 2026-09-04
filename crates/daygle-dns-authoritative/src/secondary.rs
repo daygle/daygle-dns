@@ -25,7 +25,8 @@ use crate::transfer::XfrClient;
 pub struct SecondaryRefresher {
     store: ZoneStore,
     catalog: Arc<AuthorityCatalog>,
-    zones: Vec<SecondaryZoneConfig>,
+    zones: std::sync::Arc<std::sync::RwLock<Vec<SecondaryZoneConfig>>>,
+    changed: std::sync::Arc<tokio::sync::Notify>,
     client: XfrClient,
 }
 
@@ -39,9 +40,37 @@ impl SecondaryRefresher {
         Self {
             store,
             catalog,
-            zones,
+            zones: std::sync::Arc::new(std::sync::RwLock::new(zones)),
+            changed: std::sync::Arc::new(tokio::sync::Notify::new()),
             client,
         }
+    }
+
+    /// Add or replace a secondary zone configuration and wake the refresh loop.
+    pub fn set_zone(&self, config: SecondaryZoneConfig) {
+        let mut zones = self.zones.write().expect("secondary zone lock poisoned");
+        if let Some(existing) = zones.iter_mut().find(|z| z.name.eq_ignore_ascii_case(&config.name)) {
+            *existing = config;
+        } else {
+            zones.push(config);
+        }
+        drop(zones);
+        self.changed.notify_waiters();
+    }
+
+    /// Remove a secondary zone configuration and wake the refresh loop.
+    pub fn remove_zone(&self, name: &str) {
+        let mut zones = self.zones.write().expect("secondary zone lock poisoned");
+        zones.retain(|z| !z.name.eq_ignore_ascii_case(name));
+        drop(zones);
+        self.changed.notify_waiters();
+    }
+
+    fn zones_snapshot(&self) -> Vec<SecondaryZoneConfig> {
+        self.zones
+            .read()
+            .expect("secondary zone lock poisoned")
+            .clone()
     }
 
     /// Synchronize every enabled zone once, in order.
@@ -50,11 +79,11 @@ impl SecondaryRefresher {
     /// others. Returns the number of zones that changed.
     pub async fn refresh_all(&self) -> usize {
         let mut changed = 0;
-        for zone in &self.zones {
+        for zone in self.zones_snapshot() {
             if !zone.enabled {
                 continue;
             }
-            match self.refresh_zone(zone).await {
+            match self.refresh_zone(&zone).await {
                 Ok(true) => changed += 1,
                 Ok(false) => {}
                 Err(e) => {
@@ -74,14 +103,16 @@ impl SecondaryRefresher {
             }
             // Sleep the smallest configured interval, but check for shutdown.
             let delay = self
-                .zones
+                .zones_snapshot()
                 .iter()
                 .filter(|z| z.enabled)
                 .map(|z| z.refresh_secs)
                 .min()
                 .unwrap_or(3600);
+            let changed = self.changed.notified();
             tokio::select! {
                 _ = shutdown.cancelled() => return,
+                _ = changed => {},
                 _ = tokio::time::sleep(Duration::from_secs(delay)) => {}
             }
         }

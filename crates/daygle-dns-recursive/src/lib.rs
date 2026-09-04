@@ -200,7 +200,7 @@ impl RecursiveResolver {
 impl Inner {
     /// Core lookup path used by client queries: records the result in the
     /// cache assistant and may spawn a prefetch refresh for popular names.
-    /// (The spawned task uses [`Self::refresh`], which never spawns again —
+    /// (The spawned task uses [`Self::refresh`], which never spawns again -
     /// keeping both futures provably `Send` without recursion.)
     pub async fn lookup_owned(self: Arc<Self>, name: &str, record_type: RecordType) -> Result<Lookup> {
         let inner = self;

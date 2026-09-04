@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "address", rename_all = "snake_case")]
 pub enum BlockResponse {
-    /// NXDOMAIN — the name does not exist.
+    /// NXDOMAIN - the name does not exist.
     #[default]
     NxDomain,
     /// REFUSED.
@@ -38,12 +38,12 @@ pub struct BlockingGroup {
     pub enabled: bool,
     /// Client networks (CIDR) this group applies to. Empty means every client.
     pub clients: Vec<String>,
-    /// Allowed domains (exact or `*.suffix`) — a whitelist that overrides the
+    /// Allowed domains (exact or `*.suffix`) - a whitelist that overrides the
     /// block rules for matching names.
     pub allow: Vec<String>,
     /// Blocked domains (exact or `*.suffix`).
     pub block: Vec<String>,
-    /// Allow regex patterns — matched names are never blocked (override).
+    /// Allow regex patterns - matched names are never blocked (override).
     pub allow_regex: Vec<String>,
     /// Block regex patterns.
     pub block_regex: Vec<String>,

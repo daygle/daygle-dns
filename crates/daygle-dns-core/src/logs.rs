@@ -54,12 +54,16 @@ impl LogStore {
     }
 
     /// Append an entry, dropping the oldest entry if the buffer is full.
+    ///
+    /// Messages are stored sentence-cased (first letter capitalized) so the
+    /// Logs page reads consistently no matter how a subsystem phrased its
+    /// message; everything after the first character is left untouched.
     pub fn push(&self, level: LogLevel, component: &str, message: impl Into<String>) {
         let entry = LogEntry {
             timestamp: Utc::now(),
             level,
             component: component.to_string(),
-            message: message.into(),
+            message: sentence_case(&message.into()),
         };
         let mut inner = self.inner.lock();
         if inner.len() >= self.capacity {
@@ -104,6 +108,18 @@ impl LogStore {
     }
 }
 
+/// Uppercase the first alphabetic character of `message`, leaving the rest
+/// untouched (messages often start with an IP, a path or a quote).
+fn sentence_case(message: &str) -> String {
+    let mut chars = message.chars();
+    match chars.next() {
+        Some(first) if first.is_alphabetic() => {
+            first.to_uppercase().collect::<String>() + chars.as_str()
+        }
+        _ => message.to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -115,7 +131,7 @@ mod tests {
         store.warn("b", "second");
         let entries = store.entries();
         assert_eq!(entries.len(), 2);
-        assert_eq!(entries[0].message, "first");
+        assert_eq!(entries[0].message, "First");
         assert_eq!(entries[1].component, "b");
     }
 
@@ -127,8 +143,22 @@ mod tests {
         }
         let entries = store.entries();
         assert_eq!(entries.len(), 3);
-        assert_eq!(entries[0].message, "m2");
-        assert_eq!(entries[2].message, "m4");
+        assert_eq!(entries[0].message, "M2");
+        assert_eq!(entries[2].message, "M4");
+    }
+
+    #[test]
+    fn sentence_cases_messages_on_push() {
+        let store = LogStore::new(10);
+        store.info("api", "settings updated via the console");
+        store.warn("reload", "DNS listeners rebound");
+        store.error("api", "'quoted' message keeps its punctuation");
+        store.info("api", "127.0.0.1:53 does not get capitalized");
+        let entries = store.entries();
+        assert_eq!(entries[0].message, "Settings updated via the console");
+        assert_eq!(entries[1].message, "DNS listeners rebound");
+        assert_eq!(entries[2].message, "'quoted' message keeps its punctuation");
+        assert_eq!(entries[3].message, "127.0.0.1:53 does not get capitalized");
     }
 
     #[test]
@@ -139,6 +169,6 @@ mod tests {
         }
         let tail = store.tail(3);
         assert_eq!(tail.len(), 3);
-        assert_eq!(tail[0].message, "m7");
+        assert_eq!(tail[0].message, "M7");
     }
 }

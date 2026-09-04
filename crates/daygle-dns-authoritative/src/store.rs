@@ -1366,7 +1366,7 @@ fn canonicalize_split_horizon_records(
     input: &SplitHorizonEntryInput,
 ) -> Result<(Vec<String>, Vec<SplitHorizonRecord>)> {
     let records = if input.records.is_empty() {
-        // The legacy `ips` path: every address must parse — reject junk
+        // The legacy `ips` path: every address must parse - reject junk
         // instead of silently dropping it.
         for ip in &input.ips {
             ip.parse::<std::net::IpAddr>().map_err(|e| {

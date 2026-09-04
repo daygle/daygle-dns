@@ -30,6 +30,10 @@ attempts = 3
 dnssec_validate = true
 min_cache_ttl = 0
 negative_cache_ttl = 3600
+# Cache: positive and negative answers are retained in memory up to this many entries.
+# The cache can also be viewed and flushed from the GUI's Cache page.
+# cache_size = 8192
+#
 # Cache prefetch: names asked at least `prefetch_min_queries` times inside the
 # sliding window are refreshed in the background once `prefetch_ttl_fraction_pct`
 # of their TTL has elapsed, so popular answers never wait on an upstream.
@@ -171,9 +175,13 @@ session_ttl_secs = 43200
 gui_enabled = true
 cors_origins = []
 
-# Policy engine: blocklists, ACLs and per-client rules.
+# Policy engine: trusted domains, blocklists, ACLs and per-client rules.
 [policy]
 enabled = true
+# Allowlist / trusted domains are evaluated before every domain block rule.
+# These names are never blocked by the policy engine (ACLs still apply).
+allowlist = ["updates.example.com"]
+# Blocklist / blocked domains are always answered with NXDOMAIN.
 blocklist = ["*.doubleclick.net", "*.ads.example.com"]
 # Optional: extra blocklist files on disk (one domain per line). Only
 # reference files that exist - a missing file aborts startup. You can
@@ -183,8 +191,8 @@ blocklist_files = []
 
 # Filter AAAA (IPv6): answer AAAA queries with an empty NODATA response so
 # dual-stack clients fall back to IPv4 (the equivalent of Technitium's
-# "Block AAAA" app). `filter_aaaa_except` lists names — or `*.suffix`
-# wildcards — that must stay reachable over IPv6.
+# "Block AAAA" app). `filter_aaaa_except` lists names - or `*.suffix`
+# wildcards - that must stay reachable over IPv6.
 filter_aaaa = false
 filter_aaaa_except = ["*.ipv6.example.com", "nas.home.arpa"]
 

@@ -8,6 +8,9 @@
   import Blocklists from './views/Blocklists.svelte';
   import AdvancedBlocking from './views/AdvancedBlocking.svelte';
   import Settings from './views/Settings.svelte';
+  import Cache from './views/Cache.svelte';
+  import DomainLists from './views/DomainLists.svelte';
+  import About from './views/About.svelte';
 
   let view = $state('status');
   // `authed` is optimistic: we assume a session until a 401 says otherwise.
@@ -39,9 +42,12 @@
     { id: 'zones', label: 'Zones & Records', viewer: true },
     { id: 'split-horizon', label: 'Split Horizon', viewer: true },
     { id: 'blocklists', label: 'Blocklists', viewer: true },
+    { id: 'domain-lists', label: 'Domain Lists', viewer: true },
     { id: 'advanced-blocking', label: 'Advanced Blocking', viewer: true },
+    { id: 'cache', label: 'Cache' },
     { id: 'logs', label: 'Logs' },
     { id: 'settings', label: 'Settings', viewer: true },
+    { id: 'about', label: 'About' },
   ].filter((t) => !isViewer || !t.viewer);
 </script>
 
@@ -89,8 +95,14 @@
         <SplitHorizon />
       {:else if view === 'blocklists'}
         <Blocklists />
+      {:else if view === 'domain-lists'}
+        <DomainLists />
+      {:else if view === 'cache'}
+        <Cache />
       {:else if view === 'advanced-blocking'}
         <AdvancedBlocking />
+      {:else if view === 'about'}
+        <About />
       {:else if view === 'logs'}
         <Logs />
       {:else}

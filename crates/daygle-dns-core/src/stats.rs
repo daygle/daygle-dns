@@ -2,9 +2,9 @@
 //!
 //! [`QueryStats`] records every served query into:
 //!
-//! - **Minute buckets** — a bounded ring of per-minute counters (24 h of
+//! - **Minute buckets** - a bounded ring of per-minute counters (24 h of
 //!   history) powering the dashboard's time-series chart.
-//! - **Top-N tables** — bounded counters per client IP, per query domain,
+//! - **Top-N tables** - bounded counters per client IP, per query domain,
 //!   and per *blocked* domain, powering Technitium-style top lists.
 //!
 //! All structures are bounded: at most [`MAX_BUCKETS`] minute buckets and
