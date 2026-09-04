@@ -182,6 +182,11 @@ install -d "$CONFIG_DIR" "$CONFIG_DIR/zones" "$CONFIG_DIR/certs" "$DATA_DIR"
 if [ ! -f "$CONFIG_DIR/daygle-dns.toml" ]; then
     install -m 0644 daygle-dns.toml.example "$CONFIG_DIR/daygle-dns.toml"
 fi
+# Older example configs referenced an optional blocklist file that was
+# never created; keep a placeholder so those configs can start.
+if [ ! -f "$CONFIG_DIR/blocklist.txt" ]; then
+    : > "$CONFIG_DIR/blocklist.txt"
+fi
 
 # ---- systemd unit (Linux with systemd only) -----------------------------
 if [ -d /etc/systemd/system ] && command -v systemctl >/dev/null 2>&1; then

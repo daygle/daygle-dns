@@ -175,7 +175,11 @@ cors_origins = []
 [policy]
 enabled = true
 blocklist = ["*.doubleclick.net", "*.ads.example.com"]
-blocklist_files = ["/etc/daygle-dns/blocklist.txt"]
+# Optional: extra blocklist files on disk (one domain per line). Only
+# reference files that exist - a missing file aborts startup. You can
+# add your own lists here and reload, or fetch remote lists with
+# [[policy.blocklist_sources]] below.
+blocklist_files = []
 
 # Filter AAAA (IPv6): answer AAAA queries with an empty NODATA response so
 # dual-stack clients fall back to IPv4 (the equivalent of Technitium's
