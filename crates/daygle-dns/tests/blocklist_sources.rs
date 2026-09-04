@@ -138,3 +138,35 @@ async fn blocklist_source_blocks_domains_and_refreshes() {
 
     shutdown(server).await;
 }
+
+/// With no `[[policy.blocklist_sources]]` configured, the endpoints report 404
+/// so the console can show "no sources" guidance instead of an empty list.
+#[tokio::test]
+async fn blocklist_sources_404_when_none_configured() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = base_config(&dir.path().join("daygle-dns.db"));
+    let server = spawn(config).await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .get(format!(
+            "http://{}/api/policy/blocklist/sources",
+            server.api_addr
+        )) // lgtm
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::NOT_FOUND);
+
+    let resp = client
+        .post(format!(
+            "http://{}/api/policy/blocklist/sources",
+            server.api_addr
+        )) // lgtm
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::NOT_FOUND);
+
+    shutdown(server).await;
+}

@@ -118,6 +118,15 @@ pub async fn blocklist_sources(State(state): State<AppState>) -> Response {
             "no blocklist sources configured (add [[policy.blocklist_sources]])",
         );
     };
+    // The refresher is spawned even with an empty source list, so an empty
+    // manager still means "nothing configured" - report 404 so the console
+    // shows setup guidance instead of an empty table.
+    if manager.is_empty() {
+        return error_response(
+            StatusCode::NOT_FOUND,
+            "no blocklist sources configured (add [[policy.blocklist_sources]])",
+        );
+    }
     let sources: Vec<serde_json::Value> = manager
         .status()
         .into_iter()
@@ -149,6 +158,12 @@ pub async fn refresh_blocklist_sources(State(state): State<AppState>) -> Respons
             "no blocklist sources configured (add [[policy.blocklist_sources]])",
         );
     };
+    if manager.is_empty() {
+        return error_response(
+            StatusCode::NOT_FOUND,
+            "no blocklist sources configured (add [[policy.blocklist_sources]])",
+        );
+    }
     match manager.refresh_all().await {
         Ok(Some(list)) => {
             let mut engine = state.policy.load_full().as_ref().clone();
@@ -1058,7 +1073,10 @@ pub async fn gui_asset(Path(path): Path<String>) -> Response {
 fn serve_gui(path: &str) -> Response {
     match daygle_dns_gui::lookup(path) {
         Some(asset) => {
-            let headers = [(header::CONTENT_TYPE, asset.content_type)];
+            let headers = [
+                (header::CONTENT_TYPE, asset.content_type),
+                (header::CACHE_CONTROL, asset.cache_control()),
+            ];
             (headers, asset.bytes).into_response()
         }
         None => StatusCode::NOT_FOUND.into_response(),

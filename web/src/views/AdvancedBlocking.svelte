@@ -153,16 +153,16 @@
 </p>
 
 {#if error}
-  <div class="card" style="border-color: var(--danger); color: var(--danger)">
+  <div class="card" style="border-color: var(--danger); color: var(--danger); margin-bottom: 14px">
     Failed to load: {error}
   </div>
 {/if}
 {#if notice}
-  <div class="card" style="border-color: var(--accent)">{notice}</div>
+  <div class="card" style="border-color: var(--accent); margin-bottom: 14px">{notice}</div>
 {/if}
 
 <!-- Filter AAAA -->
-<div class="card">
+<div class="card" style="margin-bottom: 14px">
   <div class="spread">
     <h3 style="margin: 0">Filter AAAA (force IPv4)</h3>
     <label class="check">
@@ -185,7 +185,7 @@
 </div>
 
 <!-- Groups -->
-<div class="card">
+<div class="card" style="margin-bottom: 14px">
   <div class="spread">
     <h3 style="margin: 0">Blocking groups</h3>
     <button onclick={() => startEdit(null)}>New group</button>
@@ -224,7 +224,7 @@
 
 <!-- Editor -->
 {#if edit}
-  <div class="card" style="border-color: var(--accent)">
+  <div class="card" style="border-color: var(--accent); margin-bottom: 14px">
     <h3 style="margin-top: 0">{edit.isNew ? 'New group' : `Edit "${edit.name}"`}</h3>
     <div class="form-grid">
       <label><span>Name</span><input bind:value={edit.name} placeholder="Kids devices" /></label>

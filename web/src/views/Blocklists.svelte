@@ -3,24 +3,30 @@
 
   let sources = $state([]);
   let total = $state(0);
-  let configured = $state(true); // false when the server has no sources configured
+  let configured = $state(false); // false when the server has no sources configured
+  let loading = $state(true);
   let refreshing = $state(false);
   let error = $state(null);
   let notice = $state(null);
 
   async function load() {
+    loading = true;
+    error = null;
     try {
       const data = await api.blocklistSources();
       sources = data.sources || [];
       total = data.total_domains || 0;
-      configured = true;
-      error = null;
+      // The endpoint returns 404 when no [[policy.blocklist_sources]] exist;
+      // some servers answer 200 with an empty list instead - both mean
+      // "nothing configured", never "still loading".
+      configured = sources.length > 0;
     } catch (e) {
-      // The endpoint returns 404 when no [[policy.blocklist_sources]] exist.
       sources = [];
       total = 0;
       configured = false;
-      error = null;
+      error = e.status === 404 ? null : String(e.message || e);
+    } finally {
+      loading = false;
     }
   }
 
@@ -76,7 +82,11 @@
   <div class="card" style="border-color: var(--danger); color: var(--danger); margin-bottom: 14px">{error}</div>
 {/if}
 
-{#if !configured}
+{#if loading}
+  <div class="card">
+    <p class="muted">Loading…</p>
+  </div>
+{:else if !configured}
   <div class="card">
     <h3 style="margin-top: 0">No remote blocklist sources configured</h3>
     <p class="muted">
@@ -88,10 +98,6 @@ name = "StevenBlack hosts"
 url = "https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts"
 format = "hosts"     # domains | hosts | adblock
 refresh_secs = 86400</code></pre>
-  </div>
-{:else if sources.length === 0}
-  <div class="card">
-    <p class="muted">Loading…</p>
   </div>
 {:else}
   <div class="card" style="padding: 0; overflow: auto">

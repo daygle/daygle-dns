@@ -627,6 +627,50 @@ async fn doq_query_end_to_end() {
     shutdown(server).await;
 }
 
+#[tokio::test]
+async fn gui_cache_headers_allow_upgrades_without_hard_refresh() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = spawn_with_users(&dir, None).await;
+    let base = api_url(server.api_addr, "");
+
+    // The HTML shell is served at a stable URL, so it is revalidated on
+    // every load: after an upgrade the embedded shell references new hashed
+    // bundles, and a browser holding a stale shell would request assets the
+    // new binary no longer carries.
+    let resp = reqwest::get(format!("{base}/"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    assert_eq!(
+        resp.headers().get("cache-control").unwrap().to_str().unwrap(),
+        "no-cache"
+    );
+    assert!(resp
+        .headers()
+        .get("content-type")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .starts_with("text/html"));
+
+    // The hashed entry bundle the shell references is immutable-cached.
+    let shell = resp.text().await.unwrap();
+    let src = shell
+        .split("src=\"")
+        .nth(1)
+        .and_then(|s| s.split('"').next())
+        .expect("index.html references an entry script");
+    assert!(src.starts_with("/assets/"), "expected a hashed Vite asset, got {src}");
+    let resp = reqwest::get(format!("{base}{src}")).await.unwrap();
+    assert_eq!(resp.status(), 200);
+    assert_eq!(
+        resp.headers().get("cache-control").unwrap().to_str().unwrap(),
+        "public, max-age=31536000, immutable"
+    );
+
+    shutdown(server).await;
+}
+
 // Keep unused helpers referenced.
 #[allow(unused_imports)]
 use common as _;

@@ -141,5 +141,5 @@
   }
   .logout { margin-top: 8px; }
 
-  main { flex: 1; padding: 24px 28px; max-width: 1100px; }
+  main { flex: 1; padding: 24px 28px; }
 </style>
