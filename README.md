@@ -71,6 +71,12 @@ zypper, or Xcode Command Line Tools on macOS); DNS test tools (dig) where
 available. Set `DAYGLE_NO_DEPS=1` to
 skip the automatic installs and get manual instructions instead.
 
+The installer also offers to expose the web GUI on your LAN when run
+interactively (adds an admin login and binds the API to 0.0.0.0:5380); for
+scripted installs use `DAYGLE_LAN_GUI=1` with `DAYGLE_ADMIN_USER` and
+`DAYGLE_ADMIN_PASSWORD`. Without either, the GUI stays loopback-only for
+security.
+
 Then open the dashboard at <http://127.0.0.1:5380>.
 
 Test a query:

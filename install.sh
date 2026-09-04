@@ -221,5 +221,81 @@ else
     log "  $PREFIX/bin/daygle-dns --config $CONFIG_DIR/daygle-dns.toml"
 fi
 
-log "Done! Web GUI: http://127.0.0.1:5380"
+# ---- optional LAN access for the web GUI ------------------------------
+# The API/GUI binds to 127.0.0.1 by default so an unauthenticated admin
+# console is never exposed. When run interactively the installer can bind
+# it to 0.0.0.0 and create an admin login; non-interactive runs opt in
+# with DAYGLE_LAN_GUI=1 (plus DAYGLE_ADMIN_USER / DAYGLE_ADMIN_PASSWORD)
+# and opt out with DAYGLE_LAN_GUI=0.
+CONFIG_FILE="$CONFIG_DIR/daygle-dns.toml"
+LAN_SETUP=0
+LAN_IP=""
+if [ "${DAYGLE_LAN_GUI:-}" = "1" ]; then
+    LAN_SETUP=1
+elif [ "${DAYGLE_LAN_GUI:-}" != "0" ] && : < /dev/tty 2>/dev/null; then
+    printf '%s' "[daygle-dns-install] Expose the web GUI to your LAN (adds an admin login, binds 0.0.0.0:5380)? [y/N] "
+    ANSWER=
+    read -r ANSWER < /dev/tty || true
+    case "$ANSWER" in
+        y|Y|yes|Yes|YES) LAN_SETUP=1 ;;
+    esac
+fi
+
+if [ "$LAN_SETUP" = "1" ]; then
+    ADMIN_USER="${DAYGLE_ADMIN_USER:-admin}"
+    if [ -n "${DAYGLE_ADMIN_PASSWORD:-}" ]; then
+        ADMIN_PASSWORD="$DAYGLE_ADMIN_PASSWORD"
+    elif : < /dev/tty 2>/dev/null; then
+        printf '%s' "[daygle-dns-install] Password for user '$ADMIN_USER': "
+        ADMIN_PASSWORD=
+        read -r ADMIN_PASSWORD < /dev/tty || true
+        printf '\n'
+    else
+        if command -v openssl >/dev/null 2>&1; then
+            ADMIN_PASSWORD="$(openssl rand -hex 12)"
+        else
+            ADMIN_PASSWORD="daygle-$(date +%s)$$"
+        fi
+        log "Generated a random admin password (shown at the end of this run)."
+    fi
+    if [ -z "${ADMIN_PASSWORD:-}" ]; then
+        log "No password given - leaving the GUI on the loopback interface."
+        LAN_SETUP=0
+    else
+        ADMIN_HASH="$("$PREFIX/bin/daygle-dns" hash-password "$ADMIN_PASSWORD")"
+        # Rebind the API/GUI to all interfaces (portable sed: no -i).
+        sed 's/^listen = "127.0.0.1"/listen = "0.0.0.0"/' "$CONFIG_FILE" > "$CONFIG_FILE.tmp" && mv "$CONFIG_FILE.tmp" "$CONFIG_FILE"
+        if ! grep -q '\[\[api.users\]\]' "$CONFIG_FILE"; then
+            cat >> "$CONFIG_FILE" <<EOF
+
+# Added by the installer: LAN web GUI login.
+[[api.users]]
+username = "$ADMIN_USER"
+password_hash = "$ADMIN_HASH"
+role = "admin"
+EOF
+        fi
+        if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -qi 'Status: active'; then
+            log "Opening ports 53, 853, and 5380 for private LAN ranges in ufw..."
+            for net in 192.168.0.0/16 172.16.0.0/12 10.0.0.0/8; do
+                ufw allow from "$net" to any port 5380 proto tcp >/dev/null 2>&1 || true
+                ufw allow from "$net" to any port 53 >/dev/null 2>&1 || true
+                ufw allow from "$net" to any port 853 proto tcp >/dev/null 2>&1 || true
+            done
+        fi
+        LAN_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
+        log "Web GUI user '$ADMIN_USER' added and API bound to 0.0.0.0:5380."
+        if command -v systemctl >/dev/null 2>&1; then
+            systemctl restart daygle-dns 2>/dev/null || true
+            log "Restarted daygle-dns to apply the GUI bind."
+        fi
+        if [ -n "$LAN_IP" ]; then
+            log "Web GUI (LAN): http://$LAN_IP:5380  user: $ADMIN_USER  password: $ADMIN_PASSWORD"
+        fi
+    fi
+fi
+
+GUI_HOST="$LAN_IP"
+[ -n "$GUI_HOST" ] || GUI_HOST="127.0.0.1"
+log "Done! Web GUI: http://$GUI_HOST:5380"
 log "Configuration: $CONFIG_DIR/daygle-dns.toml"
