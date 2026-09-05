@@ -121,8 +121,8 @@ The server is configured via a TOML file (default
 `/etc/daygle-dns/daygle-dns.toml`) **and** a SQLite database. The TOML file
 is the bootstrap: it seeds runtime settings into the database on first boot,
 then the database is authoritative for policy, blocklists, upstreams, cache,
-and console accounts. Listener addresses and `server.*` options remain
-file-owned so a broken listener config can always be fixed by hand.
+and console accounts. Only the UDP/TCP listener (`[server]`) remains file-owned so a broken
+listener config can always be fixed by hand.
 A fully commented example lives in
 [`daygle-dns.toml.example`](daygle-dns.toml.example).
 
@@ -148,26 +148,9 @@ refused and all responses are signed. TSIG also covers secondaries pulling
 from masters - see [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for details.
 
 ```toml
-# ── File-owned: listener addresses and ports ─────────────────────────
+# ── File-owned: only the UDP/TCP listener ────────────────────────────
 [server]
 port = 53
-
-[dot]
-port = 853
-self_signed = true
-
-[doh]
-enabled = true
-port = 443
-self_signed = true
-endpoint = "/dns-query"
-
-[doq]
-# DNS over QUIC (RFC 9250), default port 853/udp.
-enabled = true
-port = 853
-self_signed = true
-server_name = "daygle.local"
 
 [api]
 port = 5380
@@ -199,6 +182,23 @@ dnssec_validate = true
 [authoritative]
 database = "/var/lib/daygle-dns/daygle-dns.db"
 
+[dot]
+port = 853
+self_signed = true
+
+[doh]
+enabled = true
+port = 443
+self_signed = true
+endpoint = "/dns-query"
+
+[doq]
+# DNS over QUIC (RFC 9250), default port 853/udp.
+enabled = true
+port = 853
+self_signed = true
+server_name = "daygle.local"
+
 [policy]
 # Fetch a remote blocklist (hosts file) every 12 hours.
 # [[policy.blocklist_sources]]
@@ -218,19 +218,18 @@ rewritten).
 
 With `server.reload_enabled = true` (the default), Daygle polls the config
 file (every `server.reload_interval_ms`, default 2000) and applies edits
-**without restarting** - recursive upstreams and the UDP/TCP/DoT listeners
-all update in place. A bad config is rejected and the previous configuration
-stays active. You can also trigger an immediate re-read with
-`POST /api/config/reload` (see [`docs/API.md`](docs/API.md)).
+**without restarting** - the UDP/TCP listener settings update in place.
+A bad config is rejected and the previous configuration stays active. You
+can also trigger an immediate re-read with `POST /api/config/reload` (see
+[`docs/API.md`](docs/API.md)).
 
 Runtime settings (cache size, upstreams, prefetch, serve-stale, policy
-lists, blocklists, feature toggles, and console accounts) live in the
-**SQLite database**: the config file is the bootstrap that seeds them on
-first boot, and after that changes made in the GUI (or `PUT /api/config`)
-are authoritative and survive restarts and config-file edits. Listener
-addresses/ports and `server.*` options are the exception - they are still
-file-owned so a broken listener config can always be fixed by editing the
-file.
+lists, blocklists, DoT/DoH/DoQ, feature toggles, and console accounts)
+live in the **SQLite database**: the config file is the bootstrap that
+seeds them on first boot, and after that changes made in the GUI (or
+`PUT /api/config`) are authoritative and survive restarts and config-file
+edits. The UDP/TCP listener (`[server]`) is the exception - it remains
+file-owned so a broken listener config can always be fixed by hand.
 
 ## Building the web GUI
 
