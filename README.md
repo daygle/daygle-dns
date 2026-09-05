@@ -117,8 +117,13 @@ together and [`docs/API.md`](docs/API.md) for the REST API reference.
 
 ## Configuration
 
-The server is configured with a single TOML file (default
-`/etc/daygle-dns/daygle-dns.toml`). A fully commented example lives in
+The server is configured via a TOML file (default
+`/etc/daygle-dns/daygle-dns.toml`) **and** a SQLite database. The TOML file
+is the bootstrap: it seeds runtime settings into the database on first boot,
+then the database is authoritative for policy, blocklists, upstreams, cache,
+and console accounts. Listener addresses and `server.*` options remain
+file-owned so a broken listener config can always be fixed by hand.
+A fully commented example lives in
 [`daygle-dns.toml.example`](daygle-dns.toml.example).
 
 ### TSIG authentication
@@ -143,23 +148,9 @@ refused and all responses are signed. TSIG also covers secondaries pulling
 from masters - see [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for details.
 
 ```toml
+# ── File-owned: listener addresses and ports ─────────────────────────
 [server]
 port = 53
-
-[recursive]
-upstreams = ["1.1.1.1", "tls://8.8.8.8:853@dns.google"]
-dnssec_validate = true
-# Keep popular answers fresh and survive upstream outages:
-# prefetch_enabled = true      # refresh popular names before their TTL expires
-# serve_stale_secs = 1800      # serve last-known-good answers for up to 30 min
-#                              # when all upstreams are unreachable
-# Conditional forwarding: resolve corp.internal via the office DNS servers.
-# [[recursive.conditional_zones]]
-# name = "corp.internal"
-# upstreams = ["192.0.2.10"]
-
-[authoritative]
-database = "/var/lib/daygle-dns/daygle-dns.db"
 
 [dot]
 port = 853
@@ -190,6 +181,23 @@ port = 5380
 # username = "admin"
 # password_hash = "pbkdf2-sha256$210000$...$..."
 # role = "admin"
+
+# ── DB-seeded: these values seed the database on first boot ──────────
+# After that, changes made in the GUI or via PUT /api/config are
+# authoritative and survive restarts and config-file edits.
+[recursive]
+upstreams = ["1.1.1.1", "tls://8.8.8.8:853@dns.google"]
+dnssec_validate = true
+# prefetch_enabled = true      # refresh popular names before their TTL expires
+# serve_stale_secs = 1800      # serve last-known-good answers for up to 30 min
+#                              # when all upstreams are unreachable
+# Conditional forwarding: resolve corp.internal via the office DNS servers.
+# [[recursive.conditional_zones]]
+# name = "corp.internal"
+# upstreams = ["192.0.2.10"]
+
+[authoritative]
+database = "/var/lib/daygle-dns/daygle-dns.db"
 
 [policy]
 # Fetch a remote blocklist (hosts file) every 12 hours.
