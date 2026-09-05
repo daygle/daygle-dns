@@ -1,5 +1,5 @@
 <script>
-  import { api } from '../api.js';
+  import { api, formatUptime } from '../api.js';
 
   let status = $state(null);
   let error = $state(null);
@@ -24,17 +24,17 @@
     },
     {
       icon: '◌',
-      title: 'Recursive resolution',
+      title: 'Recursive Resolution',
       text: 'Caching, DNSSEC validation, retries, conditional forwarding, prefetch, and serve-stale support.',
     },
     {
       icon: '◈',
-      title: 'Policy controls',
+      title: 'Policy Controls',
       text: 'Trusted domains, blocked domains, remote blocklist sources, client rules, and split horizon DNS.',
     },
     {
       icon: '◇',
-      title: 'Modern protocols',
+      title: 'Modern Protocols',
       text: 'DNS over TLS, DNS over HTTPS, and DNS over QUIC with a built-in management console.',
     },
   ];
@@ -65,7 +65,7 @@
 
 <div class="details-grid">
   <div class="card">
-    <h3>Project details</h3>
+    <h3>Project Details</h3>
     <table>
       <tbody>
         <tr><td class="muted">Version</td><td><code>{status?.version || 'Loading…'}</code></td></tr>
@@ -79,11 +79,11 @@
   </div>
 
   <div class="card">
-    <h3>Runtime status</h3>
+    <h3>Runtime Status</h3>
     {#if status}
       <table>
         <tbody>
-          <tr><td class="muted">Uptime</td><td>{status.uptime_secs}s</td></tr>
+          <tr><td class="muted">Uptime</td><td>{formatUptime(status.uptime_secs)}</td></tr>
           <tr><td class="muted">Zones</td><td>{status.zones}</td></tr>
           <tr><td class="muted">Records</td><td>{status.records}</td></tr>
           <tr><td class="muted">Recursive resolver</td><td>{status.recursion ? 'Enabled' : 'Disabled'}</td></tr>

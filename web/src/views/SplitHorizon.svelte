@@ -154,7 +154,7 @@
   });
 </script>
 
-<h1>Split horizon</h1>
+<h1>Split Horizon</h1>
 <p class="muted">
   Serve different answers for the same domain depending on the client's
   network - e.g. clients on <code>LAN</code> get
@@ -222,7 +222,7 @@
 
   <div class="card">
     <div class="spread" style="margin-bottom: 12px">
-      <strong>Domain entries ({entries.length})</strong>
+      <strong>Domain Entries ({entries.length})</strong>
       <button onclick={() => startEdit(null)}>+ Entry</button>
     </div>
     <table>
@@ -262,7 +262,7 @@
             <td>{entry.ttl}</td>
             <td>
               <span class="pill" class:ok={!entry.disabled}>
-                {entry.disabled ? 'disabled' : 'active'}
+                {entry.disabled ? 'Disabled' : 'Active'}
               </span>
             </td>
             <td>
@@ -296,7 +296,7 @@
 
     {#if edit}
       <div class="card" style="margin-top: 14px; background: var(--panel-2)">
-        <h4 style="margin-top: 0">{edit.isNew ? 'New entry' : 'Edit entry'}</h4>
+        <h4 style="margin-top: 0">{edit.isNew ? 'New Entry' : 'Edit Entry'}</h4>
         <div class="grid2">
           <label>
             Domain
@@ -336,7 +336,7 @@
             <button class="danger" onclick={() => removeRecordAt(i)}>✕</button>
           </div>
         {/each}
-        <button class="secondary" onclick={addRecord} style="margin-top: 6px">+ Add record</button>
+        <button class="secondary" onclick={addRecord} style="margin-top: 6px">+ Add Record</button>
         <label style="margin-top: 8px; flex-direction: row; align-items: center">
           <input type="checkbox" bind:checked={edit.disabled} />
           Disabled (keep for later)
@@ -361,12 +361,9 @@
 <style>
   .split {
     display: grid;
-    grid-template-columns: 340px 1fr;
+    grid-template-columns: 1fr;
     gap: 16px;
     align-items: start;
-  }
-  @media (max-width: 900px) {
-    .split { grid-template-columns: 1fr; }
   }
   .grid2 {
     display: grid;

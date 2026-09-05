@@ -15,6 +15,7 @@
 //! | `GET`    | `/api/zones`                      | list zones |
 //! | `POST`   | `/api/zones`                      | create a primary or secondary zone |
 //! | `DELETE` | `/api/zones/:id`                  | delete a zone |
+//! | `PUT`    | `/api/zones/:id/soa`              | edit a primary zone's SOA metadata |
 //! | `GET`    | `/api/zones/:id/records`          | list records |
 //! | `PUT`    | `/api/zones/:id/records`          | upsert a record |
 //! | `DELETE` | `/api/zones/:id/records/:rid`     | delete a record |
@@ -182,6 +183,7 @@ pub fn router(state: AppState) -> Router {
         .route("/zones", get(handlers::list_zones).post(handlers::create_zone))
         .route("/zones/import", post(handlers::import_zone))
         .route("/zones/{id}", delete(handlers::delete_zone))
+        .route("/zones/{id}/soa", put(handlers::update_zone_soa))
         .route(
             "/zones/{id}/records",
             get(handlers::list_records).put(handlers::upsert_record),

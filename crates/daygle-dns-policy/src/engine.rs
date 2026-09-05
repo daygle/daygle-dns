@@ -9,6 +9,10 @@ use crate::{Acl, Action, Blocklist, PerClientRule, PluginRegistry};
 pub struct Decision {
     pub action: Action,
     pub reason: String,
+    /// The named policy group (e.g. an Advanced Blocking group) that produced
+    /// this decision, when the source has one. Kept separate from `reason` so
+    /// callers can show it as its own element instead of parsing it out.
+    pub group: Option<String>,
 }
 
 impl Decision {
@@ -16,7 +20,14 @@ impl Decision {
         Self {
             action,
             reason: reason.into(),
+            group: None,
         }
+    }
+
+    /// Attach the name of the group that produced this decision.
+    pub fn with_group(mut self, group: impl Into<String>) -> Self {
+        self.group = Some(group.into());
+        self
     }
 
     pub fn allow() -> Self {

@@ -1,5 +1,5 @@
 <script>
-  import { api } from '../api.js';
+  import { api, formatApiError } from '../api.js';
 
   let config = $state(null);
   let trusted = $state('');
@@ -50,7 +50,7 @@
   $effect(() => load());
 </script>
 
-<h1>Domain lists</h1>
+<h1>Domain Lists</h1>
 <p class="muted" style="max-width: 75ch">
   Add domains that should always be trusted or always blocked. Enter one
   domain per line; use <code>*.example.com</code> for subdomains. Trusted
@@ -68,19 +68,19 @@
 {#if config}
   <div class="lists">
     <div class="card">
-      <h3 style="margin-top: 0">Trusted domains (allowlist)</h3>
+      <h3 style="margin-top: 0">Trusted Domains (Allowlist)</h3>
       <p class="muted small">These domains bypass the normal blocklist and remote sources.</p>
       <textarea rows="14" bind:value={trusted} placeholder="updates.example.com\n*.trusted.example"></textarea>
     </div>
     <div class="card">
-      <h3 style="margin-top: 0">Blocked domains (blocklist)</h3>
+      <h3 style="margin-top: 0">Blocked Domains (Blocklist)</h3>
       <p class="muted small">These domains are blocked before normal resolution.</p>
       <textarea rows="14" bind:value={blocked} placeholder="ads.example.com\n*.tracking.example"></textarea>
     </div>
   </div>
   <div class="row" style="margin-top: 14px">
-    <button onclick={save} disabled={busy}>{busy ? 'Saving…' : 'Save domain lists'}</button>
-    <button class="secondary" onclick={load} disabled={busy}>Reload from server</button>
+    <button onclick={save} disabled={busy}>{busy ? 'Saving…' : 'Save'}</button>
+    <button class="secondary" onclick={load} disabled={busy}>Reload</button>
   </div>
 {:else}
   <p class="muted">Loading…</p>

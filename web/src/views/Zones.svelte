@@ -1,14 +1,18 @@
 <script>
-  import { api } from '../api.js';
+  import { api, formatApiError } from '../api.js';
+
+  let { onOpenRecords = () => {} } = $props();
 
   let zones = $state([]);
-  let selected = $state(null);
-  let records = $state([]);
   let error = $state(null);
   let notice = $state(null);
   let showAdd = $state(false);
   let savingZone = $state(false);
   let zoneFileName = $state('');
+
+  // In-progress SOA editor for an existing primary zone, or null when closed.
+  let soaEdit = $state(null);
+  let savingSoa = $state(false);
 
   let newZone = $state({
     name: '',
@@ -26,25 +30,12 @@
     refresh_secs: 3600,
   });
 
-  let edit = $state(null);
-  const TYPES = ['A', 'AAAA', 'CNAME', 'MX', 'TXT', 'NS', 'SRV', 'PTR', 'CAA'];
-
   async function loadZones() {
     error = null;
     try {
       zones = await api.zones();
     } catch (e) {
-      error = String(e.message || e);
-    }
-  }
-
-  async function selectZone(zone) {
-    selected = zone;
-    records = [];
-    try {
-      records = await api.records(zone.id);
-    } catch (e) {
-      error = String(e.message || e);
+      error = formatApiError(e);
     }
   }
 
@@ -75,6 +66,52 @@
 
   function closeAddZone() {
     if (!savingZone) showAdd = false;
+  }
+
+  function openSoa(zone) {
+    notice = null;
+    soaEdit = {
+      zone,
+      primary_ns: zone.primary_ns || '',
+      admin_mailbox: zone.admin_mailbox || '',
+      serial: zone.serial,
+      refresh: zone.refresh,
+      retry: zone.retry,
+      expire: zone.expire,
+      minimum: zone.minimum,
+      bumpSerial: true,
+    };
+  }
+
+  function closeSoa() {
+    if (!savingSoa) soaEdit = null;
+  }
+
+  async function saveSoa() {
+    if (!soaEdit) return;
+    const form = soaEdit;
+    savingSoa = true;
+    notice = null;
+    try {
+      const body = {
+        primary_ns: form.primary_ns.trim(),
+        admin_mailbox: form.admin_mailbox.trim(),
+        refresh: Number(form.refresh) || form.refresh,
+        retry: Number(form.retry) || form.retry,
+        expire: Number(form.expire) || form.expire,
+        minimum: Number(form.minimum) || form.minimum,
+        bump_serial: form.bumpSerial,
+      };
+      if (!form.bumpSerial) body.serial = Number(form.serial) || form.serial;
+      await api.updateZoneSoa(form.zone.id, body);
+      soaEdit = null;
+      notice = 'SOA settings saved and applied live.';
+      await loadZones();
+    } catch (e) {
+      notice = formatApiError(e);
+    } finally {
+      savingSoa = false;
+    }
   }
 
   async function chooseZoneFile(event) {
@@ -125,16 +162,6 @@
       resetZoneForm();
       notice = 'Zone created successfully';
       await loadZones();
-      // Keep the right-hand panel coherent: if a zone with the same name now exists,
-      // select it so the user doesn't have to re-click it after creation.
-      const created = zones.find((z) => z.name === name);
-      if (created) {
-        selected = created;
-        records = await api.records(created.id);
-      } else {
-        selected = null;
-        records = [];
-      }
     } catch (e) {
       notice = formatApiError(e);
     } finally {
@@ -144,56 +171,21 @@
 
   async function removeZone(zone) {
     if (!confirm(`Delete zone ${zone.name} and all its records?`)) return;
+    notice = null;
     try {
       await api.deleteZone(zone.id);
-      selected = null;
-      records = [];
       await loadZones();
     } catch (e) {
       notice = formatApiError(e);
     }
   }
 
-  function startEdit(record) {
-    edit = record
-      ? { ...record, isNew: false }
-      : { name: '', rtype: 'A', content: '', ttl: 3600, priority: 0, isNew: true };
-  }
-
-  async function saveEdit() {
-    if (!edit) return;
+  async function toggleSign(zone) {
+    notice = null;
     try {
-      await api.upsertRecord(selected.id, {
-        name: edit.name,
-        rtype: edit.rtype,
-        content: edit.content,
-        ttl: Number(edit.ttl) || 3600,
-        priority: Number(edit.priority) || 0,
-      });
-      edit = null;
-      records = await api.records(selected.id);
-    } catch (e) {
-      notice = formatApiError(e);
-    }
-  }
-
-  async function removeRecord(record) {
-    try {
-      await api.deleteRecord(selected.id, record.id);
-      records = await api.records(selected.id);
-    } catch (e) {
-      notice = formatApiError(e);
-    }
-  }
-
-  async function toggleSign() {
-    if (!selected) return;
-    try {
-      if (selected.dnssec) await api.unsignZone(selected.id);
-      else await api.signZone(selected.id);
+      if (zone.dnssec) await api.unsignZone(zone.id);
+      else await api.signZone(zone.id);
       await loadZones();
-      const refreshed = zones.find((z) => z.id === selected.id);
-      if (refreshed) selected = refreshed;
     } catch (e) {
       notice = formatApiError(e);
     }
@@ -202,7 +194,12 @@
   $effect(() => { loadZones(); });
 </script>
 
-<h1>Zones &amp; records</h1>
+<h1>Zones</h1>
+<p class="muted" style="max-width: 75ch">
+  Host authoritative zones backed by SQLite. Add a primary zone to serve
+  records directly, or a secondary zone replicated from a master via AXFR/IXFR.
+  Manage a zone's DNS records from the Records page.
+</p>
 
 {#if notice}
   <div class="card notice" class:error={notice.startsWith('Error:')}>{notice}</div>
@@ -211,170 +208,141 @@
   <div class="card notice error">{error}</div>
 {/if}
 
-<div class="split">
-  <div class="card">
-    <div class="spread" style="margin-bottom: 10px">
-      <strong>Zones ({zones.length})</strong>
-      <button onclick={openAddZone}>+ Add zone</button>
-    </div>
+<div class="row" style="margin-bottom: 14px">
+  <button onclick={openAddZone}>+ Add Zone</button>
+  <span class="muted">{zones.length} zone{zones.length === 1 ? '' : 's'}</span>
+</div>
 
-    <div class="table-wrap">
-      <table>
-        <thead>
-          <tr><th>Name</th><th>Type</th><th>DNSSEC</th><th>Serial</th><th></th></tr>
-        </thead>
-        <tbody>
-          {#each zones as zone (zone.id)}
-            <tr
-              style="cursor:pointer"
-              class:active={selected?.id === zone.id}
-              onclick={() => selectZone(zone)}
-            >
-              <td><code>{zone.name}</code></td>
-              <td><span class="pill">{zone.zone_type || 'primary'}</span></td>
-              <td><span class:pill={true} class:ok={zone.dnssec}>{zone.dnssec ? 'signed' : 'unsigned'}</span></td>
-              <td>{zone.serial}</td>
-              <td>
-                <button class="danger" onclick={(e) => { e.stopPropagation(); removeZone(zone); }}>✕</button>
-              </td>
-            </tr>
-          {/each}
-        </tbody>
-      </table>
-    </div>
-    {#if zones.length === 0}
-      <p class="muted">No zones yet. Add a primary or secondary zone to get started.</p>
-    {/if}
-  </div>
-
-  <div class="card">
-    {#if !selected}
-      <p class="muted">Select a zone to manage its records.</p>
-    {:else}
-      <div class="spread" style="margin-bottom: 12px">
-        <strong>Records for <code>{selected.name}</code></strong>
-        <div class="row">
-          {#if selected.zone_type !== 'secondary'}
-            <button class="secondary" onclick={toggleSign}>{selected.dnssec ? 'Unsign' : 'Sign (DNSSEC)'}</button>
-            <button onclick={() => startEdit(null)}>+ Record</button>
-          {/if}
-        </div>
-      </div>
-
-      {#if selected.zone_type === 'secondary'}
-        <p class="muted zone-help">This is a read-only secondary zone. It is refreshed from: {selected.masters?.join(', ') || 'configured masters'}.</p>
-      {/if}
-      <table>
-        <thead><tr><th>Name</th><th>Type</th><th>Value</th><th>TTL</th><th></th></tr></thead>
-        <tbody>
-          {#each records as record (record.id)}
-            <tr>
-              <td><code>{record.name}</code></td>
-              <td>{record.rtype}</td>
-              <td><code>{record.content}</code></td>
-              <td>{record.ttl}</td>
-              <td>
-                {#if selected.zone_type !== 'secondary'}
-                  <div class="row">
-                    <button class="secondary" onclick={() => startEdit(record)}>Edit</button>
-                    <button class="danger" onclick={() => removeRecord(record)}>✕</button>
-                  </div>
-                {:else}
-                  <span class="muted">Read-only</span>
+<div class="card" style="padding: 0; overflow: auto">
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr><th>Name</th><th>Type</th><th>DNSSEC</th><th>Serial</th><th class="num">Actions</th></tr>
+      </thead>
+      <tbody>
+        {#each zones as zone (zone.id)}
+          <tr>
+            <td><code>{zone.name}</code></td>
+            <td><span class="pill">{zone.zone_type === 'secondary' ? 'Secondary' : 'Primary'}</span></td>
+            <td><span class:pill={true} class:ok={zone.dnssec}>{zone.dnssec ? 'Signed' : 'Unsigned'}</span></td>
+            <td>{zone.serial}</td>
+            <td class="num">
+              <div class="row" style="gap: 6px; justify-content: flex-end">
+                <button class="secondary" onclick={() => onOpenRecords(zone.id)}>Records</button>
+                {#if zone.zone_type !== 'secondary'}
+                  <button class="secondary" onclick={() => openSoa(zone)}>SOA</button>
+                  <button class="secondary" onclick={() => toggleSign(zone)}>{zone.dnssec ? 'Unsign' : 'Sign'}</button>
                 {/if}
-              </td>
-            </tr>
-          {/each}
-        </tbody>
-      </table>
-
-      {#if edit}
-        <div class="card" style="margin-top: 14px; background: var(--panel-2)">
-          <h4 style="margin-top: 0">{edit.isNew ? 'New record' : 'Edit record'}</h4>
-          <div class="grid2">
-            <label>Name <input placeholder="www" bind:value={edit.name} /></label>
-            <label>Type<select bind:value={edit.rtype}>{#each TYPES as t (t)}<option value={t}>{t}</option>{/each}</select></label>
-            <label>Value <input placeholder="192.0.2.1" bind:value={edit.content} /></label>
-            <label>TTL <input type="number" bind:value={edit.ttl} /></label>
-            {#if edit.rtype === 'MX' || edit.rtype === 'SRV'}
-              <label>Priority <input type="number" bind:value={edit.priority} /></label>
-            {/if}
-          </div>
-          <div class="row" style="margin-top: 10px">
-            <button onclick={saveEdit}>Save</button>
-            <button class="secondary" onclick={() => (edit = null)}>Cancel</button>
-          </div>
-        </div>
-      {/if}
-    {/if}
+                <button class="danger" onclick={() => removeZone(zone)}>✕</button>
+              </div>
+            </td>
+          </tr>
+        {/each}
+      </tbody>
+    </table>
   </div>
+  {#if zones.length === 0}
+    <p class="muted" style="padding: 14px">No zones yet. Add a primary or secondary zone to get started.</p>
+  {/if}
 </div>
 
 {#if showAdd}
   <div class="modal-backdrop" role="presentation" onclick={(e) => e.target === e.currentTarget && closeAddZone()}>
     <div class="modal card" role="dialog" aria-modal="true" aria-labelledby="add-zone-title">
       <div class="spread modal-title">
-        <h2 id="add-zone-title">Add zone</h2>
+        <h2 id="add-zone-title">Add Zone</h2>
         <button class="secondary" onclick={closeAddZone} aria-label="Close">✕</button>
       </div>
 
       <div class="grid2">
-        <label>Zone name <input placeholder="example.com" bind:value={newZone.name} /></label>
-        <label>Zone type
+        <label>Zone Name <input placeholder="example.com" bind:value={newZone.name} /></label>
+        <label>Zone Type
           <select bind:value={newZone.zone_type}>
-            <option value="primary">Primary zone</option>
-            <option value="secondary">Secondary zone</option>
+            <option value="primary">Primary Zone</option>
+            <option value="secondary">Secondary Zone</option>
           </select>
         </label>
       </div>
 
-      <div class="section-title">SOA settings</div>
+      <div class="section-title">SOA Settings</div>
       <div class="grid2">
-        <label>Primary nameserver <input placeholder="ns1.example.com." bind:value={newZone.primary_ns} /></label>
-        <label>Administrator mailbox <input placeholder="admin.example.com." bind:value={newZone.admin_mailbox} /></label>
+        <label>Primary Nameserver <input placeholder="ns1.example.com." bind:value={newZone.primary_ns} /></label>
+        <label>Administrator Mailbox <input placeholder="admin.example.com." bind:value={newZone.admin_mailbox} /></label>
         <label>Serial <input type="number" min="1" bind:value={newZone.serial} disabled={newZone.serial_date_scheme} /></label>
-        <label class="checkbox"><span>Use SOA serial date scheme</span><input type="checkbox" bind:checked={newZone.serial_date_scheme} /></label>
-        <label>Refresh (seconds) <input type="number" min="1" bind:value={newZone.refresh} /></label>
-        <label>Retry (seconds) <input type="number" min="1" bind:value={newZone.retry} /></label>
-        <label>Expire (seconds) <input type="number" min="1" bind:value={newZone.expire} /></label>
-        <label>Minimum TTL (seconds) <input type="number" min="1" bind:value={newZone.minimum} /></label>
+        <label class="checkbox"><span>Use SOA Serial Date Scheme</span><input type="checkbox" bind:checked={newZone.serial_date_scheme} /></label>
+        <label>Refresh (Seconds) <input type="number" min="1" bind:value={newZone.refresh} /></label>
+        <label>Retry (Seconds) <input type="number" min="1" bind:value={newZone.retry} /></label>
+        <label>Expire (Seconds) <input type="number" min="1" bind:value={newZone.expire} /></label>
+        <label>Minimum TTL (Seconds) <input type="number" min="1" bind:value={newZone.minimum} /></label>
       </div>
 
       {#if newZone.zone_type === 'secondary'}
-        <div class="section-title">Secondary masters</div>
-        <label>Master servers <textarea rows="3" placeholder="192.0.2.10&#10;192.0.2.11:5353" bind:value={newZone.mastersText}></textarea></label>
-        <label>Refresh interval (seconds) <input type="number" min="1" bind:value={newZone.refresh_secs} /></label>
+        <div class="section-title">Secondary Masters</div>
+        <label>Master Servers <textarea rows="3" placeholder="192.0.2.10&#10;192.0.2.11:5353" bind:value={newZone.mastersText}></textarea></label>
+        <label>Refresh Interval (Seconds) <input type="number" min="1" bind:value={newZone.refresh_secs} /></label>
         <p class="muted help">The first reachable master is used for AXFR/IXFR. Secondary records are read-only and refresh automatically.</p>
       {:else}
-        <div class="section-title">Import (optional)</div>
-        <label>Import zone file
+        <div class="section-title">Import (Optional)</div>
+        <label>Import Zone File
           <input type="file" accept=".zone,.db,.txt,text/plain" onchange={chooseZoneFile} />
         </label>
         {#if zoneFileName}<p class="muted help">Selected: {zoneFileName}. SOA values found in the file will be used unless you override them above.</p>{/if}
       {/if}
 
       <div class="row actions">
-        <button onclick={createZone} disabled={savingZone || !newZone.name.trim()}>{savingZone ? 'Creating…' : 'Create zone'}</button>
+        <button onclick={createZone} disabled={savingZone || !newZone.name.trim()}>{savingZone ? 'Creating…' : 'Create Zone'}</button>
         <button class="secondary" onclick={closeAddZone} disabled={savingZone}>Cancel</button>
       </div>
     </div>
   </div>
 {/if}
 
+{#if soaEdit}
+  <div class="modal-backdrop" role="presentation" onclick={(e) => e.target === e.currentTarget && closeSoa()}>
+    <div class="modal card" role="dialog" aria-modal="true" aria-labelledby="edit-soa-title">
+      <div class="spread modal-title">
+        <h2 id="edit-soa-title">Edit SOA - {soaEdit.zone.name}</h2>
+        <button class="secondary" onclick={closeSoa} aria-label="Close">✕</button>
+      </div>
+
+      <div class="section-title">SOA Parameters</div>
+      <div class="grid2">
+        <label>Primary Nameserver <input placeholder="ns1.example.com." bind:value={soaEdit.primary_ns} /></label>
+        <label>Administrator Mailbox <input placeholder="admin.example.com." bind:value={soaEdit.admin_mailbox} /></label>
+        <label>Serial <input type="number" min="1" bind:value={soaEdit.serial} disabled={soaEdit.bumpSerial} /></label>
+        <label class="checkbox"><span>Increment Serial on Save</span><input type="checkbox" bind:checked={soaEdit.bumpSerial} /></label>
+        <label>Refresh (Seconds) <input type="number" min="1" bind:value={soaEdit.refresh} /></label>
+        <label>Retry (Seconds) <input type="number" min="1" bind:value={soaEdit.retry} /></label>
+        <label>Expire (Seconds) <input type="number" min="1" bind:value={soaEdit.expire} /></label>
+        <label>Minimum TTL (Seconds) <input type="number" min="1" bind:value={soaEdit.minimum} /></label>
+      </div>
+      {#if soaEdit.bumpSerial}
+        <p class="muted help">The serial is incremented automatically so downstream secondaries and transfers pick up the change.</p>
+      {:else}
+        <p class="muted help">Serial is set exactly to the value above. Prefer automatic increments unless you know the zone's history.</p>
+      {/if}
+
+      <div class="row actions">
+        <button onclick={saveSoa} disabled={savingSoa}>{savingSoa ? 'Saving…' : 'Save SOA'}</button>
+        <button class="secondary" onclick={closeSoa} disabled={savingSoa}>Cancel</button>
+      </div>
+    </div>
+  </div>
+{/if}
+
 <style>
-  .split { display: grid; grid-template-columns: 430px minmax(0, 1fr); gap: 16px; align-items: start; }
-  @media (max-width: 900px) { .split { grid-template-columns: 1fr; } }
   .table-wrap { overflow-x: auto; }
   .table-wrap th, .table-wrap td { padding: 8px 6px; font-size: 0.85rem; }
-  .table-wrap td:last-child { text-align: right; }
-  .table-wrap td:last-child button { padding: 4px 9px; }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; border-bottom: 1px solid var(--border); vertical-align: middle; }
+  th { font-size: 0.78rem; color: var(--muted); font-weight: 600; }
+  .num { text-align: right; white-space: nowrap; }
+  td.num button { padding: 4px 9px; }
+  .notice { margin-bottom: 14px; }
+  .notice.error { border-color: var(--danger); color: var(--danger); }
   .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
   label { display: flex; flex-direction: column; gap: 4px; font-size: 0.85rem; color: var(--muted); }
   textarea { font: inherit; color: inherit; background: var(--panel-2); border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; resize: vertical; }
-  tr.active { background: var(--panel-2); }
-  .notice { margin-bottom: 14px; }
-  .notice.error { border-color: var(--danger); color: var(--danger); }
-  .zone-help { margin-top: -4px; }
   .modal-backdrop { position: fixed; inset: 0; background: rgb(0 0 0 / 0.65); display: grid; place-items: center; padding: 20px; z-index: 10; }
   .modal { width: min(760px, 100%); max-height: calc(100vh - 40px); overflow: auto; }
   .modal-title { margin-bottom: 18px; }

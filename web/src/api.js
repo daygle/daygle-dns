@@ -70,8 +70,28 @@ export function formatApiError(e) {
   }
 }
 
-function configOk(cfg) {
+export function configOk(cfg) {
   return cfg != null && typeof cfg === 'object';
+}
+
+// Render a seconds count as a compact duration (e.g. 7325 -> "2h 2m 5s",
+// 65 -> "1m 5s", 3600 -> "1h"). Days are included once the server has been
+// up for more than a day.
+export function formatUptime(totalSecs) {
+  if (totalSecs === null || totalSecs === undefined || Number.isNaN(totalSecs)) return '—';
+  const secs = Math.max(0, Math.floor(totalSecs));
+  const units = [
+    ['d', Math.floor(secs / 86400)],
+    ['h', Math.floor((secs % 86400) / 3600)],
+    ['m', Math.floor((secs % 3600) / 60)],
+    ['s', secs % 60],
+  ];
+  // Skip leading zero units, then trim a tail of zeros ("1h 0m 0s" -> "1h").
+  const first = units.findIndex(([, v]) => v > 0);
+  const kept = first === -1 ? [units[3]] : units.slice(first);
+  let end = kept.length;
+  while (end > 1 && kept[end - 1][1] === 0) end -= 1;
+  return kept.slice(0, end).map(([label, v]) => `${v}${label}`).join(' ');
 }
 
 export const api = {
@@ -103,6 +123,7 @@ export const api = {
   zones: () => request('GET', '/zones'),
   createZone: (body) => request('POST', '/zones', body),
   deleteZone: (id) => request('DELETE', `/zones/${id}`),
+  updateZoneSoa: (id, body) => request('PUT', `/zones/${id}/soa`, body),
   records: (zoneId) => request('GET', `/zones/${zoneId}/records`),
   upsertRecord: (zoneId, body) => request('PUT', `/zones/${zoneId}/records`, body),
   deleteRecord: (zoneId, recordId) =>

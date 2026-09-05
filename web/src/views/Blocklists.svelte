@@ -1,5 +1,5 @@
 <script>
-  import { api } from '../api.js';
+  import { api, formatApiError } from '../api.js';
 
   let sources = $state([]);
   let total = $state(0);
@@ -255,9 +255,9 @@
 </p>
 
 <div class="row" style="margin-bottom: 14px">
-  <button onclick={openAdd}>Add source</button>
+  <button onclick={openAdd}>Add Source</button>
   <button class="secondary" onclick={refreshNow} disabled={refreshing || !configured}>
-    {refreshing ? 'Refreshing…' : 'Refresh Now'}
+    {refreshing ? 'Refreshing…' : 'Refresh All'}
   </button>
   <button class="secondary" onclick={load}>Refresh</button>
   {#if configured}
@@ -280,7 +280,7 @@
   </div>
 {:else if !configured}
   <div class="card">
-    <h3 style="margin-top: 0">No remote blocklist sources configured</h3>
+    <h3 style="margin-top: 0">No Remote Blocklist Sources Configured</h3>
     <p class="muted" style="max-width: 70ch">
       Add your first source to start blocking from a remote list. Give it a
       name, paste the URL, and pick the content format - or leave the format
@@ -288,12 +288,8 @@
       fetched content before the source is saved.
     </p>
     <div class="row">
-      <button onclick={openAdd}>Add your first source</button>
+      <button onclick={openAdd}>Add Source</button>
     </div>
-    <pre><code>name        e.g. "StevenBlack hosts"
-url         https://…/hosts
-format      domains | hosts | adblock  (or auto-detect)
-refresh     every 1h … 7d</code></pre>
   </div>
 {:else}
   <div class="card" style="padding: 0; overflow: auto">
@@ -324,11 +320,11 @@ refresh     every 1h … 7d</code></pre>
             <td class="muted">{ago(s.last_fetch)}</td>
             <td>
               {#if s.last_error}
-                <span class="pill err" title={s.last_error}>error</span>
+                <span class="pill err" title={s.last_error}>Error</span>
               {:else if !s.enabled}
-                <span class="pill">disabled</span>
+                <span class="pill">Disabled</span>
               {:else}
-                <span class="pill ok">ok</span>
+                <span class="pill ok">OK</span>
               {/if}
             </td>
             <td class="num">
@@ -342,7 +338,7 @@ refresh     every 1h … 7d</code></pre>
   </div>
 
   <p class="muted" style="font-size: 0.8rem">
-    Refresh Now fetches every source immediately. Sources also refresh
+    Refresh All fetches every source immediately. Sources also refresh
     automatically on their configured interval; a failed fetch is reported
     here and retried on the next cycle.
   </p>
@@ -353,7 +349,7 @@ refresh     every 1h … 7d</code></pre>
   <div class="card" style="border-color: var(--accent); margin-bottom: 14px">
     <div class="spread">
       <h3 style="margin: 0">
-        {draft.originalName ? `Edit "${draft.originalName}"` : 'New source'}
+        {draft.originalName ? `Edit "${draft.originalName}"` : 'New Source'}
       </h3>
       <label class="check">
         <input type="checkbox" bind:checked={draft.enabled} /> <span>Enabled</span>
@@ -411,10 +407,10 @@ refresh     every 1h … 7d</code></pre>
 
     <div class="row" style="margin-top: 12px">
       <button onclick={saveSource} disabled={saving}>
-        {saving ? 'Saving…' : draft.originalName ? 'Save changes' : 'Add source'}
+        {saving ? 'Saving…' : draft.originalName ? 'Save Changes' : 'Add Source'}
       </button>
       <button class="secondary" onclick={validateDraft}>
-        Validate source
+        Validate
       </button>
       <button class="secondary" onclick={closeEditor}>Cancel</button>
     </div>
@@ -447,15 +443,6 @@ refresh     every 1h … 7d</code></pre>
     border: 1px solid var(--border);
     border-radius: 8px;
     padding: 8px 10px;
-  }
-  pre {
-    background: var(--panel-2);
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    padding: 12px;
-    overflow: auto;
-    font-size: 0.8rem;
-    margin-bottom: 0;
   }
   @media (max-width: 640px) {
     .form-grid { grid-template-columns: 1fr; }

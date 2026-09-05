@@ -101,10 +101,13 @@ impl AdvancedBlocking {
                 return None;
             }
             if group.blocks(qname) {
-                return Some(Decision::new(
-                    format!("'{qname}' blocked by group '{}'", group.name),
-                    group.action.clone(),
-                ));
+                return Some(
+                    Decision::new(
+                        format!("'{qname}' blocked by group '{}'", group.name),
+                        group.action.clone(),
+                    )
+                    .with_group(group.name.clone()),
+                );
             }
         }
         None

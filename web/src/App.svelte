@@ -3,6 +3,7 @@
   import Login from './views/Login.svelte';
   import Status from './views/Status.svelte';
   import Zones from './views/Zones.svelte';
+  import Records from './views/Records.svelte';
   import SplitHorizon from './views/SplitHorizon.svelte';
   import Logs from './views/Logs.svelte';
   import Blocklists from './views/Blocklists.svelte';
@@ -13,6 +14,8 @@
   import About from './views/About.svelte';
 
   let view = $state('status');
+  // Zone preselected for the Records page (set when opening records from the Zones page).
+  let recordZoneId = $state(null);
   // `authed` is optimistic: we assume a session until a 401 says otherwise,
   // but we still verify the session on mount so a stale token doesn't briefly
   // render the full authenticated shell before redirecting to login.
@@ -25,32 +28,41 @@
     authed = false;
   });
 
-  // Confirm the stored session is still live on mount.
+  // Confirm the stored session is still live once, on mount. `api.me()` is
+  // async, so its response is handled in a promise callback (never assigned
+  // synchronously); this effect has no reactive dependencies and therefore
+  // cannot loop back into itself.
   $effect(() => {
-    if (!user) return;
-    try {
-      const me = api.me();
-      if (!me) {
-        // An in-flight /api/auth/me that returns 204 or null shouldn't
-        // invalidate the session; treat null as "still checking".
-        return;
-      }
-      user = me;
-    } catch (e) {
-      if (e instanceof Response == false) {
-        // If the API says we need to log in, force the shell to the login
-        // screen rather than relying on a later 401 during page interaction.
-        if (e.needsLogin) {
+    const stored = getStoredUser();
+    if (!stored) return;
+    let cancelled = false;
+    api.me()
+      .then((me) => {
+        if (cancelled || !me) return;
+        // Only write when the profile differs from the stored copy, so a
+        // successful re-verification cannot retrigger this effect.
+        if (me.username !== user?.username || me.role !== user?.role) {
+          user = me;
+        }
+      })
+      .catch((e) => {
+        if (cancelled) return;
+        // A 401 with `login: true` means the session is gone: force the
+        // shell to the login screen rather than relying on a later 401
+        // during page interaction.
+        if (e && e.needsLogin) {
           authed = false;
         }
-      }
-    }
+      });
+    return () => {
+      cancelled = true;
+    };
   });
 
   function handleLogin() {
     authed = true;
     user = getStoredUser();
-    if (isViewer && (view === 'zones' || view === 'split-horizon' || view === 'blocklists')) {
+    if (isViewer && (view === 'zones' || view === 'records' || view === 'split-horizon' || view === 'blocklists')) {
       view = 'status';
     }
   }
@@ -61,9 +73,21 @@
     authed = false;
   }
 
+  // Open the Records page for a given zone (used from the Zones page).
+  function openZoneRecords(zoneId) {
+    recordZoneId = zoneId;
+    view = 'records';
+  }
+
+  // Remember the zone chosen on the Records page so it is restored next visit.
+  function setRecordZone(zoneId) {
+    recordZoneId = zoneId;
+  }
+
   const tabs = [
     { id: 'status', label: 'Status' },
-    { id: 'zones', label: 'Zones & Records', viewer: true },
+    { id: 'zones', label: 'Zones', viewer: true },
+    { id: 'records', label: 'Records', viewer: true },
     { id: 'split-horizon', label: 'Split Horizon', viewer: true },
     { id: 'blocklists', label: 'Blocklists', viewer: true },
     { id: 'domain-lists', label: 'Domain Lists', viewer: true },
@@ -103,7 +127,7 @@
           <div class="muted" style="font-size: 0.75rem">Signed in as</div>
           <div>{user.username}</div>
           <span class="pill" class:ok={!isViewer} class:err={isViewer}>
-            {isViewer ? 'read-only' : 'admin'}
+            {isViewer ? 'Read-Only' : 'Admin'}
           </span>
           <button class="secondary logout" onclick={handleLogout}>Sign out</button>
         </div>
@@ -114,7 +138,9 @@
       {#if view === 'status' || (isViewer && !tabs.some((t) => t.id === view))}
         <Status />
       {:else if view === 'zones'}
-        <Zones />
+        <Zones onOpenRecords={openZoneRecords} />
+      {:else if view === 'records'}
+        <Records zoneId={recordZoneId} onSelectZone={setRecordZone} />
       {:else if view === 'split-horizon'}
         <SplitHorizon />
       {:else if view === 'blocklists'}

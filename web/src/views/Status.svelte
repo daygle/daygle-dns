@@ -1,5 +1,5 @@
 <script>
-  import { api } from '../api.js';
+  import { api, formatApiError, formatUptime } from '../api.js';
 
   let status = $state(null);
   let metrics = $state(null);
@@ -39,13 +39,13 @@
   });
 
   const cards = $derived([
-    { label: 'Total queries', value: metrics?.total_queries ?? 0 },
+    { label: 'Total Queries', value: metrics?.total_queries ?? 0 },
     { label: 'Authoritative', value: metrics?.authoritative ?? 0 },
     { label: 'Recursive', value: metrics?.recursive ?? 0 },
-    { label: 'Cache hits', value: metrics?.cache_hits ?? 0 },
-    { label: 'Cache misses', value: metrics?.cache_misses ?? 0 },
+    { label: 'Cache Hits', value: metrics?.cache_hits ?? 0 },
+    { label: 'Cache Misses', value: metrics?.cache_misses ?? 0 },
     { label: 'Blocked', value: metrics?.blocked ?? 0 },
-    { label: 'DNSSEC validated', value: metrics?.dnssec_validated ?? 0 },
+    { label: 'DNSSEC Validated', value: metrics?.dnssec_validated ?? 0 },
     { label: 'Errors', value: metrics?.errors ?? 0 },
   ]);
 
@@ -148,7 +148,7 @@
   }
 </script>
 
-<h1>Server status</h1>
+<h1>Server Status</h1>
 
 {#if error}
   <div class="card" style="border-color: var(--danger); color: var(--danger)">
@@ -168,7 +168,7 @@
 
   <div class="card" style="margin-top: 18px">
     <div class="spread" style="margin-bottom: 10px">
-      <h3 style="margin: 0">Queries over time</h3>
+      <h3 style="margin: 0">Query Volume</h3>
       <div class="row">
         {#each ['1h', '6h', '24h'] as w (w)}
           <button
@@ -243,7 +243,7 @@
 
   <div class="tops">
     <div class="card">
-      <h3 style="margin-top: 0">Top clients</h3>
+      <h3 style="margin-top: 0">Top Clients</h3>
       {#if stats?.top_clients?.length}
         <table>
           <tbody>
@@ -257,7 +257,7 @@
       {/if}
     </div>
     <div class="card">
-      <h3 style="margin-top: 0">Top domains</h3>
+      <h3 style="margin-top: 0">Top Domains</h3>
       {#if stats?.top_domains?.length}
         <table>
           <tbody>
@@ -271,7 +271,7 @@
       {/if}
     </div>
     <div class="card">
-      <h3 style="margin-top: 0">Top blocked</h3>
+      <h3 style="margin-top: 0">Top Blocked</h3>
       {#if stats?.top_blocked?.length}
         <table>
           <tbody>
@@ -291,31 +291,31 @@
     <table>
       <tbody>
         <tr><td>Version</td><td><code>{status.version}</code></td></tr>
-        <tr><td>Uptime</td><td>{status.uptime_secs}s</td></tr>
+        <tr><td>Uptime</td><td>{formatUptime(status.uptime_secs)}</td></tr>
         <tr><td>Zones</td><td>{status.zones}</td></tr>
         <tr><td>Records</td><td>{status.records}</td></tr>
         <tr>
           <td>Recursion</td>
           <td><span class:pill={true} class:ok={status.recursion} class:err={!status.recursion}>
-            {status.recursion ? 'enabled' : 'disabled'}
+            {status.recursion ? 'Enabled' : 'Disabled'}
           </span></td>
         </tr>
         <tr>
           <td>DNSSEC validation</td>
           <td><span class:pill={true} class:ok={status.dnssec} class:err={!status.dnssec}>
-            {status.dnssec ? 'enabled' : 'disabled'}
+            {status.dnssec ? 'Enabled' : 'Disabled'}
           </span></td>
         </tr>
         <tr>
           <td>DoT</td>
           <td><span class:pill={true} class:ok={status.dot_enabled} class:err={!status.dot_enabled}>
-            {status.dot_enabled ? 'enabled' : 'disabled'}
+            {status.dot_enabled ? 'Enabled' : 'Disabled'}
           </span></td>
         </tr>
         <tr>
           <td>DoQ</td>
           <td><span class:pill={true} class:ok={status.doq_enabled} class:err={!status.doq_enabled}>
-            {status.doq_enabled ? 'enabled' : 'disabled'}
+            {status.doq_enabled ? 'Enabled' : 'Disabled'}
           </span></td>
         </tr>
       </tbody>

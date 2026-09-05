@@ -1,5 +1,5 @@
 <script>
-  import { api } from '../api.js';
+  import { api, formatApiError } from '../api.js';
 
   let config = $state(null);
   let notice = $state(null);
@@ -131,37 +131,37 @@
 
 {#if config}
   <div class="actions">
-    <button onclick={save} disabled={busy}>{busy ? 'Saving…' : 'Save settings'}</button>
-    <button class="secondary" onclick={load} disabled={busy}>Reload from server</button>
-    <button class="secondary" onclick={clearCache}>Flush recursive cache</button>
+    <button onclick={save} disabled={busy}>{busy ? 'Saving…' : 'Save'}</button>
+    <button class="secondary" onclick={load} disabled={busy}>Reload</button>
+    <button class="secondary" onclick={clearCache}>Flush Cache</button>
   </div>
 
   <div class="card" style="margin-bottom: 14px">
-    <h3 style="margin-top: 0">DNS listeners</h3>
+    <h3 style="margin-top: 0">DNS Listeners</h3>
     <div class="form-grid">
-      <label><span>Listen address</span><input bind:value={server.listen} /></label>
-      <label><span>UDP/TCP port</span><input type="number" bind:value={server.port} /></label>
-      <label class="check"><input type="checkbox" bind:checked={server.udp_enabled} /> <span>UDP enabled</span></label>
-      <label class="check"><input type="checkbox" bind:checked={server.tcp_enabled} /> <span>TCP enabled</span></label>
-      <label class="check"><input type="checkbox" bind:checked={server.reload_enabled} /> <span>Live config reload</span></label>
+      <label><span>Listen Address</span><input bind:value={server.listen} /></label>
+      <label><span>UDP/TCP Port</span><input type="number" bind:value={server.port} /></label>
+      <label class="check"><input type="checkbox" bind:checked={server.udp_enabled} /> <span>UDP Enabled</span></label>
+      <label class="check"><input type="checkbox" bind:checked={server.tcp_enabled} /> <span>TCP Enabled</span></label>
+      <label class="check"><input type="checkbox" bind:checked={server.reload_enabled} /> <span>Live Config Reload</span></label>
     </div>
   </div>
 
   <div class="card" style="margin-bottom: 14px">
-    <h3 style="margin-top: 0">Recursive resolver</h3>
+    <h3 style="margin-top: 0">Recursive Resolver</h3>
     <div class="form-grid">
-      <label class="check"><input type="checkbox" bind:checked={recursive.enabled} /> <span>Recursion enabled</span></label>
-      <label class="check"><input type="checkbox" bind:checked={recursive.dnssec_validate} /> <span>DNSSEC validation</span></label>
-      <label><span>Upstream servers (one per line; supports <code>tls://</code> and <code>https://</code>)</span>
+      <label class="check"><input type="checkbox" bind:checked={recursive.enabled} /> <span>Recursion Enabled</span></label>
+      <label class="check"><input type="checkbox" bind:checked={recursive.dnssec_validate} /> <span>DNSSEC Validation</span></label>
+      <label><span>Upstream Servers (one per line; supports <code>tls://</code> and <code>https://</code>)</span>
         <textarea rows="4" bind:value={upstreamText}></textarea>
       </label>
     </div>
     <h4>Caching</h4>
     <div class="form-grid">
-      <label class="check"><input type="checkbox" bind:checked={recursive.prefetch_enabled} /> <span>Prefetch popular names</span></label>
-      <label><span>Prefetch trigger (TTL fraction %)</span><input type="number" bind:value={recursive.prefetch_ttl_fraction_pct} /></label>
-      <label><span>Prefetch minimum queries</span><input type="number" bind:value={recursive.prefetch_min_queries} /></label>
-      <label><span>Serve-stale window (seconds)</span><input type="number" bind:value={recursive.serve_stale_secs} /></label>
+      <label class="check"><input type="checkbox" bind:checked={recursive.prefetch_enabled} /> <span>Refresh Popular Names Early</span></label>
+      <label><span>Prefetch Trigger (TTL Fraction %)</span><input type="number" bind:value={recursive.prefetch_ttl_fraction_pct} /></label>
+      <label><span>Prefetch Minimum Queries</span><input type="number" bind:value={recursive.prefetch_min_queries} /></label>
+      <label><span>Serve-Stale Window (Seconds)</span><input type="number" bind:value={recursive.serve_stale_secs} /></label>
     </div>
   </div>
 
@@ -171,8 +171,8 @@
       <div class="form-grid">
         <label class="check"><input type="checkbox" bind:checked={dot.enabled} /> <span>Enabled</span></label>
         <label><span>Port</span><input type="number" bind:value={dot.port} /></label>
-        <label class="check"><input type="checkbox" bind:checked={dot.self_signed} /> <span>Self-signed certificate</span></label>
-        <label><span>Certificate name</span><input bind:value={dot.server_name} /></label>
+        <label class="check"><input type="checkbox" bind:checked={dot.self_signed} /> <span>Self-Signed Certificate</span></label>
+        <label><span>Certificate Name</span><input bind:value={dot.server_name} /></label>
       </div>
     </div>
     <div class="card" style="flex: 1">
@@ -180,9 +180,9 @@
       <div class="form-grid">
         <label class="check"><input type="checkbox" bind:checked={doh.enabled} /> <span>Enabled</span></label>
         <label><span>Port</span><input type="number" bind:value={doh.port} /></label>
-        <label class="check"><input type="checkbox" bind:checked={doh.self_signed} /> <span>Self-signed certificate</span></label>
-        <label><span>Certificate name</span><input bind:value={doh.server_name} /></label>
-        <label><span>Endpoint path</span><input bind:value={doh.endpoint} /></label>
+        <label class="check"><input type="checkbox" bind:checked={doh.self_signed} /> <span>Self-Signed Certificate</span></label>
+        <label><span>Certificate Name</span><input bind:value={doh.server_name} /></label>
+        <label><span>Endpoint Path</span><input bind:value={doh.endpoint} /></label>
       </div>
     </div>
     <div class="card" style="flex: 1">
@@ -190,8 +190,8 @@
       <div class="form-grid">
         <label class="check"><input type="checkbox" bind:checked={doq.enabled} /> <span>Enabled</span></label>
         <label><span>Port</span><input type="number" bind:value={doq.port} /></label>
-        <label class="check"><input type="checkbox" bind:checked={doq.self_signed} /> <span>Self-signed certificate</span></label>
-        <label><span>Certificate name</span><input bind:value={doq.server_name} /></label>
+        <label class="check"><input type="checkbox" bind:checked={doq.self_signed} /> <span>Self-Signed Certificate</span></label>
+        <label><span>Certificate Name</span><input bind:value={doq.server_name} /></label>
       </div>
     </div>
   </div>
@@ -199,7 +199,7 @@
   <div class="card" style="margin-bottom: 14px">
     <h3 style="margin-top: 0">Console</h3>
     <div class="form-grid">
-      <label class="check"><input type="checkbox" bind:checked={api_.gui_enabled} /> <span>Serve the web GUI</span></label>
+      <label class="check"><input type="checkbox" bind:checked={api_.gui_enabled} /> <span>Serve the Web GUI</span></label>
     </div>
     <p class="muted" style="font-size: 0.85rem">
       Login accounts, the API token, zone signing and remote blocklist sources

@@ -887,6 +887,119 @@ pub struct ImportRequest {
 
 // ---- Records ------------------------------------------------------------
 
+/// Body for `PUT /api/zones/{id}/soa` - edit the SOA metadata of a primary
+/// zone. Every field is optional: omitted fields keep their current value.
+/// `serial` sets the serial explicitly; otherwise, when `bump_serial` is
+/// true the serial is incremented automatically so downstream secondaries
+/// and zone transfers pick up the change. `bump_serial` wins over `serial`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UpdateZoneSoaInput {
+    pub primary_ns: Option<String>,
+    pub admin_mailbox: Option<String>,
+    pub serial: Option<u32>,
+    #[serde(default)]
+    pub bump_serial: bool,
+    pub refresh: Option<u32>,
+    pub retry: Option<u32>,
+    pub expire: Option<u32>,
+    pub minimum: Option<u32>,
+}
+
+pub async fn update_zone_soa(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(input): Json<UpdateZoneSoaInput>,
+) -> Response {
+    let current = match state.catalog.store().get_zone(&id) {
+        Ok(Some(zone)) => zone,
+        Ok(None) => return error_response(StatusCode::NOT_FOUND, "zone not found"),
+        Err(e) => return map_err(e),
+    };
+    if let Some(response) = reject_secondary_mutation(&state, &id) {
+        return response;
+    }
+
+    // SOA values are only meaningful when non-empty / non-zero.
+    let require_non_empty = |raw: Option<String>, label: &str| match raw {
+        Some(value) => {
+            let trimmed = value.trim().to_string();
+            if trimmed.is_empty() {
+                Err(format!("{label} cannot be empty"))
+            } else {
+                Ok(trimmed)
+            }
+        }
+        None => Ok(String::new()),
+    };
+    let require_positive = |value: Option<u32>, label: &str| match value {
+        Some(v) if v > 0 => Ok(v),
+        Some(_) => Err(format!("{label} must be greater than zero")),
+        None => Ok(0),
+    };
+    let primary_ns = match require_non_empty(input.primary_ns, "primary nameserver") {
+        Ok(v) if v.is_empty() => current.primary_ns,
+        Ok(v) => v,
+        Err(msg) => return error_response(StatusCode::BAD_REQUEST, msg),
+    };
+    let admin_mailbox = match require_non_empty(input.admin_mailbox, "administrator mailbox") {
+        Ok(v) if v.is_empty() => current.admin_mailbox,
+        Ok(v) => v,
+        Err(msg) => return error_response(StatusCode::BAD_REQUEST, msg),
+    };
+    let refresh = match require_positive(input.refresh, "refresh") {
+        Ok(v) if v == 0 => current.refresh,
+        Ok(v) => v,
+        Err(msg) => return error_response(StatusCode::BAD_REQUEST, msg),
+    };
+    let retry = match require_positive(input.retry, "retry") {
+        Ok(v) if v == 0 => current.retry,
+        Ok(v) => v,
+        Err(msg) => return error_response(StatusCode::BAD_REQUEST, msg),
+    };
+    let expire = match require_positive(input.expire, "expire") {
+        Ok(v) if v == 0 => current.expire,
+        Ok(v) => v,
+        Err(msg) => return error_response(StatusCode::BAD_REQUEST, msg),
+    };
+    let minimum = match require_positive(input.minimum, "minimum TTL") {
+        Ok(v) if v == 0 => current.minimum,
+        Ok(v) => v,
+        Err(msg) => return error_response(StatusCode::BAD_REQUEST, msg),
+    };
+
+    let serial = if input.bump_serial {
+        current.serial // rewritten by bump_serial below
+    } else {
+        input.serial.unwrap_or(current.serial)
+    };
+
+    if let Err(e) = state.catalog.store().set_zone_soa(
+        &id,
+        &primary_ns,
+        &admin_mailbox,
+        serial,
+        refresh,
+        retry,
+        expire,
+        minimum,
+    ) {
+        return map_err(e);
+    }
+    if input.bump_serial {
+        if let Err(e) = state.catalog.store().bump_serial(&id) {
+            return map_err(e);
+        }
+    }
+
+    let _ = state.catalog.reload();
+    match state.catalog.store().get_zone(&id) {
+        Ok(Some(zone)) => Json(zone).into_response(),
+        Ok(None) => error_response(StatusCode::NOT_FOUND, "zone not found"),
+        Err(e) => map_err(e),
+    }
+}
+
 pub async fn list_records(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -1089,13 +1202,9 @@ pub async fn test_blocking(
         }
     };
     let domain = input.domain.trim().trim_end_matches('.').to_ascii_lowercase();
-    let (blocked, action, reason) = match state.advanced_blocking.load().evaluate(client, &domain) {
-        Some(d) => (true, d.action.as_str().to_string(), d.reason),
-        None => (
-            false,
-            "allow".to_string(),
-            "no group blocked this query".to_string(),
-        ),
+    let (blocked, action, reason, group) = match state.advanced_blocking.load().evaluate(client, &domain) {
+        Some(d) => (true, d.action.as_str().to_string(), d.reason, d.group),
+        None => (false, "allow".to_string(), "no group blocked this query".to_string(), None),
     };
     Json(serde_json::json!({
         "client": client.to_string(),
@@ -1103,6 +1212,7 @@ pub async fn test_blocking(
         "blocked": blocked,
         "action": action,
         "reason": reason,
+        "group": group,
     }))
     .into_response()
 }

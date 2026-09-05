@@ -164,7 +164,7 @@
 <!-- Filter AAAA -->
 <div class="card" style="margin-bottom: 14px">
   <div class="spread">
-    <h3 style="margin: 0">Filter AAAA (force IPv4)</h3>
+    <h3 style="margin: 0">Filter AAAA (Force IPv4)</h3>
     <label class="check">
       <input type="checkbox" bind:checked={filterAaaa} /> <span>Enabled</span>
     </label>
@@ -180,15 +180,15 @@
     bind:value={filterAaaaExcept}
   ></textarea>
   <div class="row" style="margin-top: 8px">
-    <button onclick={saveFilterAaaa}>Save Filter AAAA</button>
+    <button onclick={saveFilterAaaa}>Save</button>
   </div>
 </div>
 
 <!-- Groups -->
 <div class="card" style="margin-bottom: 14px">
   <div class="spread">
-    <h3 style="margin: 0">Blocking groups</h3>
-    <button onclick={() => startEdit(null)}>New group</button>
+    <h3 style="margin: 0">Blocking Groups</h3>
+    <button onclick={() => startEdit(null)}>New Group</button>
   </div>
 
   {#if groups.length === 0}
@@ -203,7 +203,7 @@
           <tr class:disabled={!g.enabled}>
             <td>
               <strong>{g.name}</strong>
-              {#if !g.enabled}<span class="pill">disabled</span>{/if}
+              {#if !g.enabled}<span class="pill">Disabled</span>{/if}
             </td>
             <td class="muted">{g.clients.length ? g.clients.join(', ') : 'all clients'}</td>
             <td class="muted">
@@ -225,7 +225,7 @@
 <!-- Editor -->
 {#if edit}
   <div class="card" style="border-color: var(--accent); margin-bottom: 14px">
-    <h3 style="margin-top: 0">{edit.isNew ? 'New group' : `Edit "${edit.name}"`}</h3>
+    <h3 style="margin-top: 0">{edit.isNew ? 'New Group' : `Edit "${edit.name}"`}</h3>
     <div class="form-grid">
       <label><span>Name</span><input bind:value={edit.name} placeholder="Kids devices" /></label>
       <label class="check" style="align-self: end">
@@ -262,7 +262,7 @@
       {/if}
     </div>
     <div class="row" style="margin-top: 12px">
-      <button onclick={saveGroup}>Save group</button>
+      <button onclick={saveGroup}>Save Group</button>
       <button class="secondary" onclick={() => (edit = null)}>Cancel</button>
     </div>
   </div>
@@ -270,7 +270,7 @@
 
 <!-- Tester -->
 <div class="card">
-  <h3 style="margin-top: 0">Test a query</h3>
+  <h3 style="margin-top: 0">Query Tester</h3>
   <p class="muted" style="margin: 8px 0">
     Check what the live groups would do with a given client and domain.
   </p>
@@ -282,9 +282,13 @@
   {#if testResult}
     <div class="result" class:blocked={testResult.blocked}>
       <span class="pill" class:err={testResult.blocked} class:ok={!testResult.blocked}>
-        {testResult.blocked ? testResult.action : 'allowed'}
+        {testResult.blocked ? 'Blocked' : 'Allowed'}
       </span>
-      <span class="muted">{testResult.reason}</span>
+      {#if testResult.blocked && testResult.group}
+        <span class="pill group" title={testResult.reason}>via {testResult.group}</span>
+      {:else}
+        <span class="muted">{testResult.reason}</span>
+      {/if}
     </div>
   {/if}
 </div>
@@ -299,8 +303,12 @@
   .check { display: inline-flex; align-items: center; gap: 6px; }
   textarea {
     width: 100%;
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size: 0.82rem;
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 6px 8px;
+    font: inherit;
+    color: inherit;
     resize: vertical;
   }
   .form-grid {
@@ -311,7 +319,8 @@
   .form-grid label { display: flex; flex-direction: column; gap: 4px; font-size: 0.85rem; }
   .form-grid label.wide { grid-column: 1 / -1; }
   .form-grid label > span { color: var(--muted); }
-  .result { margin-top: 12px; display: flex; align-items: center; gap: 10px; }
+  .result { margin-top: 12px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .pill.group { border-color: var(--accent); color: var(--accent); }
   @media (max-width: 640px) {
     .form-grid { grid-template-columns: 1fr; }
   }

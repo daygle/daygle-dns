@@ -1,5 +1,5 @@
 <script>
-  import { api } from '../api.js';
+  import { api, configOk, formatApiError } from '../api.js';
 
   let cache = $state(null);
   let config = $state(null);
@@ -94,36 +94,36 @@
 
 {#if cache}
   <div class="grid">
-    <div class="card stat"><div class="muted">Cache hits</div><div class="big">{cache.hits.toLocaleString()}</div></div>
-    <div class="card stat"><div class="muted">Cache misses</div><div class="big">{cache.misses.toLocaleString()}</div></div>
-    <div class="card stat"><div class="muted">Hit rate</div><div class="big">{hitRate}%</div></div>
-    <div class="card stat"><div class="muted">Tracked names</div><div class="big">{cache.tracked_names.toLocaleString()}</div></div>
+    <div class="card stat"><div class="muted">Cache Hits</div><div class="big">{cache.hits.toLocaleString()}</div></div>
+    <div class="card stat"><div class="muted">Cache Misses</div><div class="big">{cache.misses.toLocaleString()}</div></div>
+    <div class="card stat"><div class="muted">Hit Rate</div><div class="big">{hitRate}%</div></div>
+    <div class="card stat"><div class="muted">Tracked Names</div><div class="big">{cache.tracked_names.toLocaleString()}</div></div>
   </div>
 
   <div class="card" style="margin-top: 18px; margin-bottom: 14px">
     <div class="spread">
-      <h3 style="margin-top: 0">Cache controls</h3>
-      <button class="danger" onclick={flush} disabled={busy || !cache.enabled}>Flush cache</button>
+      <h3 style="margin-top: 0">Cache Controls</h3>
+      <button class="danger" onclick={flush} disabled={busy || !cache.enabled}>Flush Cache</button>
     </div>
     {#if !cache.enabled}
       <p class="muted">Recursive resolution is disabled, so there is no active cache.</p>
     {:else}
       <div class="form-grid">
         <label>
-          <span>Cache capacity (entries)</span>
+          <span>Cache Capacity (Entries)</span>
           <input type="number" min="1" bind:value={cacheSize} />
         </label>
         <label>
-          <span>Serve stale for (seconds)</span>
+          <span>Serve-Stale Window (Seconds)</span>
           <input type="number" min="0" bind:value={serveStale} />
         </label>
         <label class="check">
           <input type="checkbox" bind:checked={prefetchEnabled} />
-          <span>Prefetch popular names</span>
+          <span>Refresh Popular Names Early</span>
         </label>
       </div>
       <p class="muted small">Changing capacity rebuilds the resolver and may briefly interrupt recursive lookups.</p>
-      <button onclick={save} disabled={busy}>{busy ? 'Saving…' : 'Save cache settings'}</button>
+      <button onclick={save} disabled={busy}>{busy ? 'Saving…' : 'Save'}</button>
     {/if}
   </div>
 {:else}
