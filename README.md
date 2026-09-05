@@ -202,25 +202,27 @@ port = 5380
 
 Sources are also manageable from the **Blocklists** page of the web console:
 add, edit, remove and validate (including auto-detecting the format) without
-touching the config file - saved changes are written back to
-`daygle-dns.toml` and applied to the running server immediately.
+touching the config file - saved changes are stored in the SQLite database
+and applied to the running server immediately (the config file is no longer
+rewritten).
 
 ### Live reload
 
 With `server.reload_enabled = true` (the default), Daygle polls the config
 file (every `server.reload_interval_ms`, default 2000) and applies edits
-**without restarting** - policy rules and blocklists, recursive upstreams, and
-the UDP/TCP/DoT listeners all update in place. A bad config is rejected and
-the previous configuration stays active. You can also trigger an immediate
-re-read with `POST /api/config/reload` (see [`docs/API.md`](docs/API.md)).
+**without restarting** - recursive upstreams and the UDP/TCP/DoT listeners
+all update in place. A bad config is rejected and the previous configuration
+stays active. You can also trigger an immediate re-read with
+`POST /api/config/reload` (see [`docs/API.md`](docs/API.md)).
 
 Runtime settings (cache size, upstreams, prefetch, serve-stale, policy
-lists, feature toggles) live in the **SQLite database**: the config file is
-the bootstrap that seeds them on first boot, and after that changes made in
-the GUI (or `PUT /api/config`) are authoritative and survive restarts and
-config-file edits. Listener addresses/ports and `server.*` options are the
-exception - they are still file-owned so a broken listener config can always
-be fixed by editing the file.
+lists, blocklists, feature toggles, and console accounts) live in the
+**SQLite database**: the config file is the bootstrap that seeds them on
+first boot, and after that changes made in the GUI (or `PUT /api/config`)
+are authoritative and survive restarts and config-file edits. Listener
+addresses/ports and `server.*` options are the exception - they are still
+file-owned so a broken listener config can always be fixed by editing the
+file.
 
 ## Building the web GUI
 
@@ -302,10 +304,9 @@ sudo install -m 0755 target/release/daygle-dns /usr/local/bin/daygle-dns
   [`daygle-dns.toml.example`](daygle-dns.toml.example); existing settings are
   validated at startup, so an invalid config aborts cleanly instead of
   silently corrupting state.
-- If you changed nothing about listeners, upstreams, or policy, your running
-  config still applies - no restart is needed for `daygle-dns.toml` edits thanks
-  to [live reload](#live-reload). Only the binary itself requires the restart
-  above.
+- If you changed nothing about listeners, your running config still applies -
+  runtime settings live in the [database](#configuration) and are preserved
+  across restarts. Only the binary itself requires the restart above.
 
 ## License
 
