@@ -326,15 +326,27 @@ fi
 # and opt out with DAYGLE_LAN_GUI=0.
 LAN_SETUP=0
 LAN_IP=""
+INTERACTIVE=0
 if [ "${DAYGLE_LAN_GUI:-}" = "1" ]; then
     LAN_SETUP=1
-elif [ "$INSTALL_MODE" = "install" ] && [ "${DAYGLE_LAN_GUI:-}" != "0" ] && : < /dev/tty 2>/dev/null; then
-    printf '%s' "[daygle-dns-install] Expose the web GUI to your LAN (adds an admin login, binds 0.0.0.0:5380)? [y/N] "
-    ANSWER=
-    read -r ANSWER < /dev/tty || true
-    case "$ANSWER" in
-        y|Y|yes|Yes|YES) LAN_SETUP=1 ;;
-    esac
+elif [ "$INSTALL_MODE" = "install" ] && [ "${DAYGLE_LAN_GUI:-}" != "0" ]; then
+    # Detect interactive terminal.  When piped through `curl | sh` the
+    # controlling terminal is still accessible via /dev/tty, but some
+    # environments (containers, CI) do not have one at all.
+    INTERACTIVE=0
+    if [ -t 0 ] 2>/dev/null; then
+        INTERACTIVE=1
+    elif : < /dev/tty 2>/dev/null; then
+        INTERACTIVE=1
+    fi
+    if [ "$INTERACTIVE" = "1" ]; then
+        printf '%s' "[daygle-dns-install] Expose the web GUI to your LAN (adds an admin login, binds 0.0.0.0:5380)? [y/N] "
+        ANSWER=""
+        read -r ANSWER < /dev/tty || true
+        case "$ANSWER" in
+            y|Y|yes|Yes|YES) LAN_SETUP=1 ;;
+        esac
+    fi
 fi
 
 if [ "$INSTALL_MODE" = "upgrade" ] && [ "$LAN_SETUP" = "0" ]; then
@@ -356,20 +368,83 @@ if [ "$LAN_SETUP" = "1" ]; then
     if [ "$PRESERVE_USERS" = "1" ]; then
         ADMIN_PASSWORD=""
         ADMIN_HASH=""
-    elif [ -n "${DAYGLE_ADMIN_PASSWORD:-}" ]; then
-        ADMIN_PASSWORD="$DAYGLE_ADMIN_PASSWORD"
-    elif : < /dev/tty 2>/dev/null; then
-        printf '%s' "[daygle-dns-install] Password for user '$ADMIN_USER': "
-        ADMIN_PASSWORD=
-        read -r ADMIN_PASSWORD < /dev/tty || true
-        printf '\n'
     else
-        if command -v openssl >/dev/null 2>&1; then
-            ADMIN_PASSWORD="$(openssl rand -hex 12)"
-        else
-            ADMIN_PASSWORD="daygle-$(date +%s)$$"
+        # On fresh installs with an interactive terminal, ask for username
+        # and password.  The env vars DAYGLE_ADMIN_USER / DAYGLE_ADMIN_PASSWORD
+        # can override these in non-interactive or automated runs.
+        if [ "$PRESERVE_USERS" != "1" ] && [ -z "${DAYGLE_ADMIN_USER:-}" ] && : < /dev/tty 2>/dev/null; then
+            printf '%s' "[daygle-dns-install] Admin username [$ADMIN_USER]: "
         fi
-        log "Generated a random admin password (shown at the end of this run)."
+        if [ -z "${DAYGLE_ADMIN_USER:-}" ]; then
+            # Validate username interactively.  Allow alphanumeric, hyphens,
+            # underscores, and dots; reject reserved system names.
+            while true; do
+                ADMIN_INPUT=""
+                read -r ADMIN_INPUT < /dev/tty 2>/dev/null || true
+                printf '\n'
+                # Empty input accepts the default.
+                if [ -z "$ADMIN_INPUT" ]; then
+                    break
+                fi
+                case "$ADMIN_INPUT" in
+                    *[!a-zA-Z0-9_.-]*|*..*|*-|-.*)
+                        printf '%s\n' "[daygle-dns-install] Invalid username: only letters, digits, hyphens, underscores, and dots allowed."
+                        printf '%s' "[daygle-dns-install] Admin username [$ADMIN_USER]: "
+                        ;;
+                    root|nobody|daemon|bin|sys|sync|games|man|lp|mail|news|uucp|proxy|www-data|backup|list|irc|gnats|systemd-network|dbus|sshd|daygle-dns)
+                        printf '%s\n' "[daygle-dns-install] '$ADMIN_INPUT' is a reserved system name."
+                        printf '%s' "[daygle-dns-install] Admin username [$ADMIN_USER]: "
+                        ;;
+                    *)
+                        ADMIN_USER="$ADMIN_INPUT"
+                        break
+                        ;;
+                esac
+            done
+        fi
+        if [ -n "${DAYGLE_ADMIN_PASSWORD:-}" ]; then
+            ADMIN_PASSWORD="$DAYGLE_ADMIN_PASSWORD"
+        elif : < /dev/tty 2>/dev/null; then
+            printf '%s' "[daygle-dns-install] Password for user '$ADMIN_USER': "
+            ADMIN_PASSWORD=""
+            read -rs ADMIN_PASSWORD < /dev/tty || true
+            printf '\n'
+        else
+            if command -v openssl >/dev/null 2>&1; then
+                ADMIN_PASSWORD="$(openssl rand -hex 12)"
+            else
+                ADMIN_PASSWORD="daygle-$(date +%s)$$"
+            fi
+            log "Generated a random admin password (shown at the end of this run)."
+        fi
+    fi
+    # ---- summary & confirmation ---------------------------------------
+    if [ "$INTERACTIVE" = "1" ]; then
+        printf '\n'
+        log "──────────────────────────────────────────"
+        log "  Installation summary"
+        log "──────────────────────────────────────────"
+        log "  Mode:            $INSTALL_MODE"
+        log "  Binary:          $PREFIX/bin/daygle-dns"
+        log "  Config dir:      $CONFIG_DIR"
+        log "  LAN GUI:         enabled (0.0.0.0:5380)"
+        if [ "$PRESERVE_USERS" = "1" ]; then
+            log "  Admin user:      $ADMIN_USER (existing)"
+        else
+            log "  Admin user:      $ADMIN_USER"
+        fi
+        log "──────────────────────────────────────────"
+        printf '%s' "[daygle-dns-install] Proceed? [Y/n] "
+        CONFIRM=""
+        read -r CONFIRM < /dev/tty || true
+        printf '\n'
+        case "$CONFIRM" in
+            n|N|no|No|NO)
+                log "Aborted. The binary is installed but LAN access has not been configured."
+                log "Re-run this installer or set DAYGLE_LAN_GUI=1 to retry."
+                exit 0
+                ;;
+        esac
     fi
     if [ "$PRESERVE_USERS" = "1" ] || [ -n "${ADMIN_PASSWORD:-}" ]; then
         if [ "$PRESERVE_USERS" != "1" ]; then
