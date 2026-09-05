@@ -44,22 +44,61 @@ pub fn ensure_certificate_paths(
     generate_self_signed(cert_path, key_path, server_name)
 }
 
-/// Generate a self-signed ECDSA certificate and write PEM files to disk.
-pub fn generate_self_signed(
-    cert_path: &str,
-    key_path: &str,
-    server_name: &str,
-) -> Result<()> {
+/// Generate a self-signed ECDSA certificate for `server_name`, returning the
+/// PEM certificate and private key (no files are touched).
+pub fn generate_self_signed_pem(server_name: &str) -> Result<(String, String)> {
     let subject_alt_names = vec![server_name.to_string(), "localhost".to_string()];
     let certified = rcgen::generate_simple_self_signed(subject_alt_names)
         .map_err(|e| DaygleError::Tls(format!("certificate generation failed: {e}")))?;
 
     let cert_pem = certified.cert.pem();
     let key_pem = certified.signing_key.serialize_pem();
+    Ok((cert_pem, key_pem))
+}
+
+/// Generate a self-signed ECDSA certificate and write PEM files to disk.
+pub fn generate_self_signed(
+    cert_path: &str,
+    key_path: &str,
+    server_name: &str,
+) -> Result<()> {
+    let (cert_pem, key_pem) = generate_self_signed_pem(server_name)?;
 
     write_if_parent_exists(cert_path, cert_pem.as_bytes())?;
     write_if_parent_exists(key_path, key_pem.as_bytes())?;
     info!("generated self-signed certificate for '{server_name}' at '{cert_path}'");
+    Ok(())
+}
+
+/// Validate that the PEM `cert_pem`/`key_pem` pair is well-formed and the key
+/// matches the certificate (by building a rustls server config from them).
+pub fn validate_pem_pair(cert_pem: &str, key_pem: &str) -> Result<()> {
+    let certs = CertificateDer::pem_slice_iter(cert_pem.as_bytes())
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|e| DaygleError::Tls(format!("cannot parse certificate PEM: {e}")))?;
+    if certs.is_empty() {
+        return Err(DaygleError::Tls(
+            "no certificates found in the uploaded PEM".to_string(),
+        ));
+    }
+    let key = PrivateKeyDer::pem_slice_iter(key_pem.as_bytes())
+        .next()
+        .ok_or_else(|| {
+            DaygleError::Tls("no private key found in the uploaded PEM".to_string())
+        })?
+        .map_err(|e| DaygleError::Tls(format!("cannot parse key PEM: {e}")))?;
+
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    rustls::ServerConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .map_err(|e| DaygleError::Tls(format!("TLS protocol setup failed: {e}")))?
+        .with_no_client_auth()
+        .with_single_cert(certs, key)
+        .map_err(|e| {
+            DaygleError::Tls(format!(
+                "invalid TLS material (key does not match the certificate?): {e}"
+            ))
+        })?;
     Ok(())
 }
 

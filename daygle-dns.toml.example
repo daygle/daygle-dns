@@ -125,6 +125,11 @@ notify_listen_enabled = false
 enabled = false
 listen = "0.0.0.0"
 port = 853
+# Instead of file paths / self-signed generation below, a listener can use a
+# certificate stored in the database and managed from the console's
+# Certificates page (set certificate = "<name>"; it overrides cert_path/
+# key_path/self_signed). DoH and DoQ accept the same option.
+# certificate = "lan-dns"
 cert_path = "/etc/daygle-dns/certs/server.crt"
 key_path = "/etc/daygle-dns/certs/server.key"
 # Generate a self-signed certificate when none is present.

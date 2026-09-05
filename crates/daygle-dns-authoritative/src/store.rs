@@ -127,6 +127,14 @@ CREATE TABLE IF NOT EXISTS console_users (
     created_at    TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS tls_certificates (
+    name        TEXT PRIMARY KEY,
+    server_name TEXT NOT NULL DEFAULT '',
+    cert_pem    TEXT NOT NULL,
+    key_pem     TEXT NOT NULL,
+    created_at  TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS runtime_settings (
     name  TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -1271,6 +1279,90 @@ pub struct ConsoleUserInput {
     pub last_name: String,
     #[serde(default)]
     pub email: String,
+}
+
+/// A TLS certificate managed from the console (created as self-signed or
+/// uploaded), stored PEM-encoded in the database. Listeners reference one by
+/// `name`; the server materializes it to disk before binding.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TlsCertificate {
+    pub name: String,
+    /// Subject/display name (the CN / SAN used when generated self-signed).
+    pub server_name: String,
+    /// PEM certificate chain (leaf first).
+    pub cert_pem: String,
+    /// PEM private key.
+    pub key_pem: String,
+    pub created_at: String,
+}
+
+fn row_to_tls_certificate(row: &rusqlite::Row<'_>) -> rusqlite::Result<TlsCertificate> {
+    Ok(TlsCertificate {
+        name: row.get(0)?,
+        server_name: row.get(1)?,
+        cert_pem: row.get(2)?,
+        key_pem: row.get(3)?,
+        created_at: row.get(4)?,
+    })
+}
+
+// ---- TLS certificates (console-managed) ---------------------------------
+
+impl ZoneStore {
+    /// List every managed TLS certificate ordered by name.
+    pub fn list_tls_certificates(&self) -> Result<Vec<TlsCertificate>> {
+        let conn = self.lock_conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT name, server_name, cert_pem, key_pem, created_at
+             FROM tls_certificates ORDER BY name",
+        )?;
+        let rows = stmt.query_map([], row_to_tls_certificate)?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    pub fn get_tls_certificate(&self, name: &str) -> Result<Option<TlsCertificate>> {
+        let conn = self.lock_conn()?;
+        conn.query_row(
+            "SELECT name, server_name, cert_pem, key_pem, created_at
+             FROM tls_certificates WHERE name = ?1",
+            [name],
+            row_to_tls_certificate,
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    /// Insert or replace a managed TLS certificate (keyed by `name`).
+    pub fn put_tls_certificate(&self, cert: &TlsCertificate) -> Result<()> {
+        let conn = self.lock_conn()?;
+        conn.execute(
+            "INSERT INTO tls_certificates (name, server_name, cert_pem, key_pem, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(name) DO UPDATE SET
+                server_name = excluded.server_name,
+                cert_pem    = excluded.cert_pem,
+                key_pem     = excluded.key_pem,
+                created_at  = excluded.created_at",
+            params![
+                cert.name,
+                cert.server_name,
+                cert.cert_pem,
+                cert.key_pem,
+                cert.created_at
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Delete a managed TLS certificate by name. Returns whether one existed.
+    pub fn delete_tls_certificate(&self, name: &str) -> Result<bool> {
+        let conn = self.lock_conn()?;
+        let n = conn.execute(
+            "DELETE FROM tls_certificates WHERE name = ?1",
+            [name],
+        )?;
+        Ok(n > 0)
+    }
 }
 
 // ---- Console users (login accounts) ------------------------------------
@@ -2747,6 +2839,44 @@ mod tests {
         // The migrated store accepts new keys immediately.
         let _ = s.store_signing_key("z1", 13, b"der-new").unwrap();
         assert_eq!(s.list_signing_keys("z1").unwrap().len(), 2);
+    }
+
+    #[test]
+    fn tls_certificate_crud_roundtrip() {
+        let s = store();
+        assert!(s.list_tls_certificates().unwrap().is_empty());
+        assert!(s.get_tls_certificate("lan").unwrap().is_none());
+
+        let cert = TlsCertificate {
+            name: "lan".to_string(),
+            server_name: "dns.home.test".to_string(),
+            cert_pem: "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----".to_string(),
+            key_pem: "-----BEGIN PRIVATE KEY-----\nBBBB\n-----END PRIVATE KEY-----".to_string(),
+            created_at: "2026-09-06T00:00:00+00:00".to_string(),
+        };
+        s.put_tls_certificate(&cert).unwrap();
+
+        let got = s.get_tls_certificate("lan").unwrap().expect("stored");
+        assert_eq!(got.cert_pem, cert.cert_pem);
+        assert_eq!(got.server_name, "dns.home.test");
+        assert_eq!(s.list_tls_certificates().unwrap().len(), 1);
+
+        // Upsert by name replaces the material.
+        let replacement = TlsCertificate {
+            created_at: cert.created_at.clone(),
+            cert_pem: "-----BEGIN CERTIFICATE-----\nCCCC\n-----END CERTIFICATE-----".to_string(),
+            ..cert.clone()
+        };
+        s.put_tls_certificate(&replacement).unwrap();
+        assert_eq!(
+            s.get_tls_certificate("lan").unwrap().unwrap().cert_pem,
+            replacement.cert_pem
+        );
+        assert_eq!(s.list_tls_certificates().unwrap().len(), 1);
+
+        assert!(s.delete_tls_certificate("lan").unwrap());
+        assert!(!s.delete_tls_certificate("lan").unwrap());
+        assert!(s.list_tls_certificates().unwrap().is_empty());
     }
 
     fn zone_input_defaults() -> ZoneInput {

@@ -2063,6 +2063,7 @@ pub struct ListenerUpdate {
     pub server_name: Option<String>,
     pub cert_path: Option<String>,
     pub key_path: Option<String>,
+    pub certificate: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -2075,6 +2076,7 @@ pub struct DohUpdate {
     pub cert_path: Option<String>,
     pub key_path: Option<String>,
     pub endpoint: Option<String>,
+    pub certificate: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -2165,6 +2167,10 @@ pub async fn update_settings(
         if let Some(v) = &d.key_path {
             config.dot.key_path = v.clone();
         }
+        if let Some(v) = &d.certificate {
+            config.dot.certificate = v.clone();
+            listeners_affected = true;
+        }
     }
     if let Some(d) = &update.doh {
         if let Some(v) = d.enabled {
@@ -2190,6 +2196,10 @@ pub async fn update_settings(
         if let Some(v) = &d.endpoint {
             config.doh.endpoint = v.clone();
         }
+        if let Some(v) = &d.certificate {
+            config.doh.certificate = v.clone();
+            listeners_affected = true;
+        }
     }
     if let Some(d) = &update.doq {
         if let Some(v) = d.enabled {
@@ -2211,6 +2221,10 @@ pub async fn update_settings(
         }
         if let Some(v) = &d.key_path {
             config.doq.key_path = v.clone();
+        }
+        if let Some(v) = &d.certificate {
+            config.doq.certificate = v.clone();
+            listeners_affected = true;
         }
     }
     if let Some(a) = &update.api {
@@ -2238,6 +2252,27 @@ pub async fn update_settings(
         if let Some(v) = &p.filter_aaaa_except {
             config.policy.filter_aaaa_except = normalize_policy_domains(v);
             policy_changed = true;
+        }
+    }
+
+    // A selected console-managed certificate must exist in the store.
+    for (label, name) in [
+        ("DoT", &config.dot.certificate),
+        ("DoH", &config.doh.certificate),
+        ("DoQ", &config.doq.certificate),
+    ] {
+        if !name.is_empty()
+            && state
+                .catalog
+                .store()
+                .get_tls_certificate(name)
+                .map(|c| c.is_none())
+                .unwrap_or(true)
+        {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                &format!("unknown certificate '{name}' selected for {label}"),
+            );
         }
     }
 
@@ -2287,6 +2322,199 @@ pub async fn update_settings(
         "settings updated via the console".to_string(),
     );
     Json((*state.config.load_full()).clone()).into_response()
+}
+
+// ---- Managed TLS certificates --------------------------------------------
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CertificateInput {
+    pub name: String,
+    /// Subject name (used when generating a self-signed certificate; the CN/SAN).
+    pub server_name: Option<String>,
+    /// PEM certificate. Omit (together with `key_pem`) to generate self-signed.
+    #[serde(default)]
+    pub cert_pem: Option<String>,
+    /// PEM private key. Must accompany `cert_pem`.
+    #[serde(default)]
+    pub key_pem: Option<String>,
+}
+
+fn validate_certificate_name(name: &str) -> Result<(), String> {
+    let ok = !name.is_empty()
+        && name.len() <= 64
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+        && !name.starts_with('.')
+        && !name.ends_with('.');
+    if ok {
+        Ok(())
+    } else {
+        Err(
+            "name must be 1-64 characters using only letters, digits, '.', '_' or '-' (no leading/trailing dot)"
+                .to_string(),
+        )
+    }
+}
+
+/// Which listeners currently reference a managed certificate (by name).
+fn certificate_references(config: &daygle_dns_core::config::DaygleConfig) -> Vec<(String, &'static str)> {
+    let mut refs = Vec::new();
+    for (name, label) in [
+        (&config.dot.certificate, "DoT"),
+        (&config.doh.certificate, "DoH"),
+        (&config.doq.certificate, "DoQ"),
+    ] {
+        if !name.is_empty() {
+            refs.push((name.clone(), label));
+        }
+    }
+    refs
+}
+
+fn certificate_json(cert: &daygle_dns_authoritative::TlsCertificate, in_use: Vec<&'static str>) -> serde_json::Value {
+    serde_json::json!({
+        "name": cert.name,
+        "server_name": cert.server_name,
+        "created_at": cert.created_at,
+        "in_use": in_use,
+    })
+}
+
+/// `GET /api/certificates` - list console-managed TLS certificates (metadata
+/// only; PEM material is never returned to the GUI).
+#[allow(clippy::unused_async)]
+pub async fn list_certificates(State(state): State<AppState>) -> Response {
+    let refs = certificate_references(&state.config.load_full());
+    let list = match state.catalog.store().list_tls_certificates() {
+        Ok(list) => list,
+        Err(e) => return map_err(e),
+    };
+    let items: Vec<serde_json::Value> = list
+        .iter()
+        .map(|cert| {
+            let in_use: Vec<&'static str> = refs
+                .iter()
+                .filter(|(name, _)| name == &cert.name)
+                .map(|(_, label)| *label)
+                .collect();
+            certificate_json(cert, in_use)
+        })
+        .collect();
+    Json(items).into_response()
+}
+
+/// `POST /api/certificates` - create (self-signed) or upload a TLS
+/// certificate. Uploading with the same `name` replaces the existing entry;
+/// listeners referencing the name are rebuilt so the new material applies.
+#[allow(clippy::unused_async)]
+pub async fn create_certificate(
+    State(state): State<AppState>,
+    axum::Json(input): axum::Json<CertificateInput>,
+) -> Response {
+    let name = input.name.trim().to_string();
+    if let Err(msg) = validate_certificate_name(&name) {
+        return error_response(StatusCode::BAD_REQUEST, msg);
+    }
+    let server_name = input.server_name.unwrap_or_default().trim().to_string();
+
+    let (cert_pem, key_pem, server_name) = match (input.cert_pem, input.key_pem) {
+        (None, None) => {
+            let sn = if server_name.is_empty() {
+                "daygle.local".to_string()
+            } else {
+                server_name.clone()
+            };
+            match daygle_dns_dot::generate_self_signed_pem(&sn) {
+                Ok((c, k)) => (c, k, sn),
+                Err(e) => return map_err(e),
+            }
+        }
+        (Some(cert_pem), Some(key_pem)) => {
+            if let Err(e) = daygle_dns_dot::validate_pem_pair(&cert_pem, &key_pem) {
+                return error_response(StatusCode::BAD_REQUEST, e.to_string());
+            }
+            (cert_pem, key_pem, server_name)
+        }
+        _ => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "provide cert_pem and key_pem together, or neither to generate a self-signed certificate",
+            )
+        }
+    };
+
+    let cert = daygle_dns_authoritative::TlsCertificate {
+        name: name.clone(),
+        server_name,
+        cert_pem,
+        key_pem,
+        created_at: chrono::Utc::now().to_rfc3339(),
+    };
+    if let Err(e) = state.catalog.store().put_tls_certificate(&cert) {
+        return map_err(e);
+    }
+
+    // Refresh listeners that reference this certificate so a replacement
+    // takes effect immediately.
+    let referenced = certificate_references(&state.config.load_full())
+        .into_iter()
+        .any(|(n, _)| n == name);
+    if referenced {
+        if let Some(rebuild) = &state.request_dns_rebuild {
+            rebuild();
+        }
+    }
+    state.logs.push(
+        daygle_dns_core::LogLevel::Info,
+        "api",
+        format!("certificate '{name}' {}", if referenced { "updated (listeners rebuilt)" } else { "saved" }),
+    );
+
+    let in_use: Vec<&'static str> = certificate_references(&state.config.load_full())
+        .into_iter()
+        .filter(|(n, _)| n == &name)
+        .map(|(_, l)| l)
+        .collect();
+    Json(certificate_json(&cert, in_use)).into_response()
+}
+
+/// `DELETE /api/certificates/{name}` - remove a managed certificate. A
+/// certificate still selected by a listener cannot be deleted.
+#[allow(clippy::unused_async)]
+pub async fn delete_certificate(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> Response {
+    let name = name.trim().to_string();
+    let in_use: Vec<&'static str> = certificate_references(&state.config.load_full())
+        .into_iter()
+        .filter(|(n, _)| n == &name)
+        .map(|(_, l)| l)
+        .collect();
+    if !in_use.is_empty() {
+        return error_response(
+            StatusCode::CONFLICT,
+            format!(
+                "certificate '{name}' is in use by {}; change the listener first",
+                in_use.join(" and ")
+            ),
+        );
+    }
+    match state.catalog.store().delete_tls_certificate(&name) {
+        Ok(true) => {}
+        Ok(false) => {
+            return error_response(StatusCode::NOT_FOUND, "certificate not found")
+        }
+        Err(e) => return map_err(e),
+    }
+    state.logs.push(
+        daygle_dns_core::LogLevel::Info,
+        "api",
+        format!("certificate '{name}' deleted"),
+    );
+    StatusCode::NO_CONTENT.into_response()
 }
 
 // ---- GUI ----------------------------------------------------------------

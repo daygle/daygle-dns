@@ -37,7 +37,7 @@ pub use dnssec::{DnssecMaintenance, MaintenanceConfig};
 pub use notify::{NotifyHooks, NotifyInbound, NotifySender};
 pub use secondary::SecondaryRefresher;
 pub use store::{
-    ConsoleUser, ConsoleUserInput, QueryLogFilter, QueryLogRow, ZoneStore,
+    ConsoleUser, ConsoleUserInput, QueryLogFilter, QueryLogRow, TlsCertificate, ZoneStore,
 };
 pub use transfer::XfrClient;
 pub use tsig::{TsigKey, TsigKeyRing};

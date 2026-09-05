@@ -16,6 +16,14 @@
   let api_ = $state({});
   let upstreamText = $state('');
 
+  // Console-managed certificates available for the DoT/DoH/DoQ listeners.
+  let certs = $state([]);
+  // Certificate picker mode per listener: 'self' (auto self-signed), 'custom'
+  // (raw file paths), or the name of a managed certificate.
+  let dotCertMode = $state('self');
+  let dohCertMode = $state('self');
+  let doqCertMode = $state('self');
+
   // Local copies of the display preferences (saved instantly on change).
   let tzDraft = $state(prefs.tz);
   let formatDraft = $state(prefs.format);
@@ -27,7 +35,28 @@
 
   $effect(() => {
     load();
+    api.certificates().then((list) => { certs = list || []; }).catch(() => {});
   });
+
+  // Translate the config's certificate state into a picker value.
+  function certModeOf(listener) {
+    if (listener.certificate) return listener.certificate;
+    if (listener.self_signed) return 'self';
+    return 'custom';
+  }
+
+  function applyCertMode(listener, value) {
+    if (value === 'self') {
+      listener.self_signed = true;
+      listener.certificate = '';
+    } else if (value === 'custom') {
+      listener.self_signed = false;
+      listener.certificate = '';
+    } else {
+      listener.self_signed = false;
+      listener.certificate = value;
+    }
+  }
 
   async function load() {
     error = null;
@@ -49,6 +78,9 @@
       doh = { ...config.doh };
       doq = { ...config.doq };
       api_ = { ...config.api };
+      dotCertMode = certModeOf(dot);
+      dohCertMode = certModeOf(doh);
+      doqCertMode = certModeOf(doq);
       upstreamText = (recursive.upstreams || []).join('\n');
     } catch (e) {
       error = formatApiError(e);
@@ -102,6 +134,7 @@
           server_name: dot.server_name,
           cert_path: dot.cert_path || '',
           key_path: dot.key_path || '',
+          certificate: dot.certificate || '',
         },
         doh: {
           enabled: !!doh.enabled,
@@ -110,6 +143,7 @@
           server_name: doh.server_name,
           cert_path: doh.cert_path || '',
           key_path: doh.key_path || '',
+          certificate: doh.certificate || '',
           endpoint: doh.endpoint,
         },
         doq: {
@@ -119,6 +153,7 @@
           server_name: doq.server_name,
           cert_path: doq.cert_path || '',
           key_path: doq.key_path || '',
+          certificate: doq.certificate || '',
         },
         api: {
           gui_enabled: !!api_.gui_enabled,
@@ -187,10 +222,19 @@
       <div class="form-grid">
         <label class="check"><input type="checkbox" bind:checked={dot.enabled} /> <span>Enabled</span></label>
         <label><span>Port</span><input type="number" bind:value={dot.port} /></label>
-        <label class="check"><input type="checkbox" bind:checked={dot.self_signed} /> <span>Self-Signed Certificate</span></label>
-        {#if dot.self_signed}
-          <label><span>Certificate Name</span><input bind:value={dot.server_name} /></label>
-        {:else}
+        <label>
+          <span>Certificate</span>
+          <select bind:value={dotCertMode} onchange={(e) => applyCertMode(dot, e.currentTarget.value)}>
+            <option value="self">Self-signed (auto)</option>
+            {#each certs as cert (cert.name)}
+              <option value={cert.name}>{cert.name}{cert.server_name ? ` — ${cert.server_name}` : ''}</option>
+            {/each}
+            <option value="custom">Custom files…</option>
+          </select>
+        </label>
+        {#if dotCertMode === 'self'}
+          <label><span>Certificate Name</span><input bind:value={dot.server_name} placeholder="dns.example.com" /></label>
+        {:else if dotCertMode === 'custom'}
           <label><span>Certificate Path</span><input bind:value={dot.cert_path} placeholder="/etc/daygle-dns/certs/server.crt" /></label>
           <label><span>Key Path</span><input bind:value={dot.key_path} placeholder="/etc/daygle-dns/certs/server.key" /></label>
         {/if}
@@ -201,10 +245,19 @@
       <div class="form-grid">
         <label class="check"><input type="checkbox" bind:checked={doh.enabled} /> <span>Enabled</span></label>
         <label><span>Port</span><input type="number" bind:value={doh.port} /></label>
-        <label class="check"><input type="checkbox" bind:checked={doh.self_signed} /> <span>Self-Signed Certificate</span></label>
-        {#if doh.self_signed}
-          <label><span>Certificate Name</span><input bind:value={doh.server_name} /></label>
-        {:else}
+        <label>
+          <span>Certificate</span>
+          <select bind:value={dohCertMode} onchange={(e) => applyCertMode(doh, e.currentTarget.value)}>
+            <option value="self">Self-signed (auto)</option>
+            {#each certs as cert (cert.name)}
+              <option value={cert.name}>{cert.name}{cert.server_name ? ` — ${cert.server_name}` : ''}</option>
+            {/each}
+            <option value="custom">Custom files…</option>
+          </select>
+        </label>
+        {#if dohCertMode === 'self'}
+          <label><span>Certificate Name</span><input bind:value={doh.server_name} placeholder="dns.example.com" /></label>
+        {:else if dohCertMode === 'custom'}
           <label><span>Certificate Path</span><input bind:value={doh.cert_path} placeholder="/etc/daygle-dns/certs/server.crt" /></label>
           <label><span>Key Path</span><input bind:value={doh.key_path} placeholder="/etc/daygle-dns/certs/server.key" /></label>
         {/if}
@@ -216,10 +269,19 @@
       <div class="form-grid">
         <label class="check"><input type="checkbox" bind:checked={doq.enabled} /> <span>Enabled</span></label>
         <label><span>Port</span><input type="number" bind:value={doq.port} /></label>
-        <label class="check"><input type="checkbox" bind:checked={doq.self_signed} /> <span>Self-Signed Certificate</span></label>
-        {#if doq.self_signed}
-          <label><span>Certificate Name</span><input bind:value={doq.server_name} /></label>
-        {:else}
+        <label>
+          <span>Certificate</span>
+          <select bind:value={doqCertMode} onchange={(e) => applyCertMode(doq, e.currentTarget.value)}>
+            <option value="self">Self-signed (auto)</option>
+            {#each certs as cert (cert.name)}
+              <option value={cert.name}>{cert.name}{cert.server_name ? ` — ${cert.server_name}` : ''}</option>
+            {/each}
+            <option value="custom">Custom files…</option>
+          </select>
+        </label>
+        {#if doqCertMode === 'self'}
+          <label><span>Certificate Name</span><input bind:value={doq.server_name} placeholder="dns.example.com" /></label>
+        {:else if doqCertMode === 'custom'}
           <label><span>Certificate Path</span><input bind:value={doq.cert_path} placeholder="/etc/daygle-dns/certs/server.crt" /></label>
           <label><span>Key Path</span><input bind:value={doq.key_path} placeholder="/etc/daygle-dns/certs/server.key" /></label>
         {/if}

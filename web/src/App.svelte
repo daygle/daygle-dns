@@ -11,6 +11,7 @@
   import Settings from './views/Settings.svelte';
   import Cache from './views/Cache.svelte';
   import Users from './views/Users.svelte';
+  import Certificates from './views/Certificates.svelte';
   import DomainLists from './views/DomainLists.svelte';
   import About from './views/About.svelte';
 
@@ -141,6 +142,7 @@
     'domain-lists': 'M12 21s-7.5-4.9-7.5-11a7.5 7.5 0 0 1 15 0c0 6.1-7.5 11-7.5 11zM12 13a3 3 0 1 0 0-6 3 3 0 0 0 0 6z',
     'advanced-blocking': 'M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10zM9 12l2 2 4-4',
     cache: 'M3 3v18h18M7 15l4-6 4 4 5-8',
+    certificates: 'M19 11H5a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7a2 2 0 0 0-2-2zM7 11V7a5 5 0 0 1 10 0v4',
     users: 'M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75',
     logs: 'M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01',
     settings: 'M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6zm7.4-3a7.4 7.4 0 0 0-.1-1.2l2.1-1.6-2-3.5-2.5 1a7.3 7.3 0 0 0-2-1.2L14.4 3h-4l-.5 2.5a7.3 7.3 0 0 0-2 1.2l-2.5-1-2 3.5 2.1 1.6a7.4 7.4 0 0 0 0 2.4L3.4 14.8l2 3.5 2.5-1a7.3 7.3 0 0 0 2 1.2l.5 2.5h4l.5-2.5a7.3 7.3 0 0 0 2-1.2l2.5 1 2-3.5-2.1-1.6c.07-.4.1-.8.1-1.2z',
@@ -157,6 +159,7 @@
     { id: 'advanced-blocking', label: 'Advanced Blocking', icon: icons['advanced-blocking'], viewer: true },
     { id: 'cache', label: 'Cache', icon: icons.cache },
     { id: 'users', label: 'Users', icon: icons.users },
+    { id: 'certificates', label: 'Certificates', icon: icons.certificates },
     { id: 'logs', label: 'Logs', icon: icons.logs },
     { id: 'settings', label: 'Settings', icon: icons.settings, viewer: true },
     { id: 'about', label: 'About', icon: icons.about },
@@ -255,6 +258,8 @@
         <Cache />
       {:else if view === 'users'}
         <Users />
+      {:else if view === 'certificates'}
+        <Certificates />
       {:else if view === 'advanced-blocking'}
         <AdvancedBlocking />
       {:else if view === 'about'}

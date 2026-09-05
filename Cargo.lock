@@ -536,6 +536,7 @@ dependencies = [
  "chrono",
  "daygle-dns-authoritative",
  "daygle-dns-core",
+ "daygle-dns-dot",
  "daygle-dns-gui",
  "daygle-dns-policy",
  "daygle-dns-recursive",

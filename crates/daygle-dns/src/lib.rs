@@ -385,7 +385,7 @@ pub async fn bind_with(
     .with_query_db_logger(shared.query_db_logger.clone());
     let mut server = Server::new(dispatcher);
     let mut initial_addrs = ListenerAddrs::default();
-    bind_listeners(&config, &mut server, &mut initial_addrs).await?;
+    bind_listeners(&config, &store, &mut server, &mut initial_addrs).await?;
     let addrs = Arc::new(ArcSwap::from_pointee(initial_addrs));
 
     // DNS supervisor: owns the listeners and rebinds them on command.
@@ -540,7 +540,7 @@ async fn start_listeners(
     .with_query_db_logger(shared.query_db_logger.clone());
     let mut server = Server::new(dispatcher);
     let mut snapshot = ListenerAddrs::default();
-    bind_listeners(&config, &mut server, &mut snapshot).await?;
+    bind_listeners(&config, &shared.catalog.store(), &mut server, &mut snapshot).await?;
     addrs.store(Arc::new(snapshot));
     Ok(spawn_listeners(server))
 }
@@ -633,15 +633,109 @@ async fn start_listeners_with(
     .with_query_db_logger(shared.query_db_logger.clone());
     let mut server = Server::new(dispatcher);
     let mut snapshot = ListenerAddrs::default();
-    bind_listeners(config, &mut server, &mut snapshot).await?;
+    bind_listeners(config, &shared.catalog.store(), &mut server, &mut snapshot).await?;
     addrs.store(Arc::new(snapshot));
     Ok(spawn_listeners(server))
 }
+/// Materialize the console-managed certificates (stored PEM in the database)
+/// that the DoT/DoH/DoQ listeners reference by name. Each is written next to
+/// the zone database under `<db-dir>/tls/<name>.crt|key`, and the listener's
+/// `cert_path`/`key_path` are pointed at those files (self-signed generation
+/// is disabled for such listeners). Idempotent: files are only rewritten when
+/// their content changed.
+fn materialize_stored_certs(
+    config: &mut DaygleConfig,
+    store: &daygle_dns_authoritative::ZoneStore,
+) -> Result<()> {
+    let db = std::path::Path::new(&config.authoritative.database);
+    let dir = match db.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
+        _ => std::path::PathBuf::from("."),
+    }
+    .join("tls");
+
+    materialize_one(
+        store,
+        &dir,
+        &config.dot.certificate,
+        "DoT",
+        &mut config.dot.cert_path,
+        &mut config.dot.key_path,
+        &mut config.dot.self_signed,
+    )?;
+    materialize_one(
+        store,
+        &dir,
+        &config.doh.certificate,
+        "DoH",
+        &mut config.doh.cert_path,
+        &mut config.doh.key_path,
+        &mut config.doh.self_signed,
+    )?;
+    materialize_one(
+        store,
+        &dir,
+        &config.doq.certificate,
+        "DoQ",
+        &mut config.doq.cert_path,
+        &mut config.doq.key_path,
+        &mut config.doq.self_signed,
+    )?;
+    Ok(())
+}
+
+/// Materialize a single listener's referenced certificate (no-op when
+/// `certificate` is empty, i.e. the listener uses file paths or self-signed).
+fn materialize_one(
+    store: &daygle_dns_authoritative::ZoneStore,
+    dir: &std::path::Path,
+    certificate: &str,
+    label: &str,
+    cert_path: &mut String,
+    key_path: &mut String,
+    self_signed: &mut bool,
+) -> Result<()> {
+    if certificate.is_empty() {
+        return Ok(());
+    }
+    let cert = store
+        .get_tls_certificate(certificate)?
+        .ok_or_else(|| {
+            DaygleError::Config(format!(
+                "{label} references an unknown managed certificate '{certificate}'"
+            ))
+        })?;
+    let crt = dir.join(format!("{certificate}.crt"));
+    let key = dir.join(format!("{certificate}.key"));
+    write_if_changed(&crt, cert.cert_pem.as_bytes())?;
+    write_if_changed(&key, cert.key_pem.as_bytes())?;
+    *cert_path = crt.to_string_lossy().into_owned();
+    *key_path = key.to_string_lossy().into_owned();
+    *self_signed = false;
+    Ok(())
+}
+
+/// Write `bytes` to `path` unless the file already holds the same content.
+fn write_if_changed(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
+    if std::fs::read(path).map(|b| b == bytes).unwrap_or(false) {
+        return Ok(());
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(DaygleError::Io)?;
+    }
+    std::fs::write(path, bytes).map_err(DaygleError::Io)
+}
+
 async fn bind_listeners(
     config: &DaygleConfig,
+    store: &daygle_dns_authoritative::ZoneStore,
     server: &mut Server<DnsDispatcher>,
     addrs: &mut ListenerAddrs,
 ) -> Result<()> {
+    // Console-managed certificates referenced by name are materialized next
+    // to the zone database so the file-based TLS loaders can read them.
+    let mut config = config.clone();
+    materialize_stored_certs(&mut config, store)?;
     let listen: std::net::SocketAddr = format!("{}:{}", config.server.listen, config.server.port)
         .parse()
         .map_err(|e| DaygleError::Config(format!("bad server listen address: {e}")))?;

@@ -220,6 +220,14 @@ pub fn router(state: AppState) -> Router {
             "/users/{username}",
             patch(handlers::update_user).delete(handlers::delete_user),
         )
+        .route(
+            "/certificates",
+            get(handlers::list_certificates).post(handlers::create_certificate),
+        )
+        .route(
+            "/certificates/{name}",
+            delete(handlers::delete_certificate),
+        )
         .route("/zones", get(handlers::list_zones).post(handlers::create_zone))
         .route("/zones/import", post(handlers::import_zone))
         .route("/zones/{id}", delete(handlers::delete_zone))

@@ -119,6 +119,10 @@ export const api = {
   createUser: (payload) => request('POST', '/users', payload),
   updateUser: (username, payload) => request('PATCH', `/users/${encodeURIComponent(username)}`, payload),
   deleteUser: (username) => request('DELETE', `/users/${encodeURIComponent(username)}`),
+  // Console-managed TLS certificates (create self-signed or upload PEM pairs).
+  certificates: () => request('GET', '/certificates'),
+  createCertificate: (payload) => request('POST', '/certificates', payload),
+  deleteCertificate: (name) => request('DELETE', `/certificates/${encodeURIComponent(name)}`),
   // First-run setup: whether the one-time admin account still needs creating.
   authSetupStatus: () => request('GET', '/auth/setup', undefined, { noLoginRedirect: true }),
   // Create the first admin account. Returns a session, stored like a login.

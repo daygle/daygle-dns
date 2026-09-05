@@ -17,8 +17,8 @@
 mod cert;
 
 pub use cert::{
-    ensure_certificate, ensure_certificate_paths, generate_self_signed, load_tls_config,
-    load_tls_config_versions,
+    ensure_certificate, ensure_certificate_paths, generate_self_signed, generate_self_signed_pem,
+    load_tls_config, load_tls_config_versions, validate_pem_pair,
 };
 
 use std::sync::Arc;
