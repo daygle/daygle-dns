@@ -173,7 +173,7 @@
         <label>
           <span>Role</span>
           <select bind:value={newRole}>
-            <option value="admin">Admin</option>
+            <option value="admin">Administrator</option>
             <option value="viewer">Read-Only</option>
           </select>
         </label>
@@ -209,7 +209,7 @@
                 value={user.role}
                 onchange={(e) => setRole(user, e.currentTarget.value)}
               >
-                <option value="admin">Admin</option>
+                <option value="admin">Administrator</option>
                 <option value="viewer">Read-Only</option>
               </select>
             </td>
@@ -219,7 +219,7 @@
               </span>
             </td>
             <td class="muted">{formatDate(user.created_at)}</td>
-            <td class="row" style="justify-content: flex-end; gap: 6px">
+            <td class="row" style="justify-content: flex-end; gap: 6px; white-space: nowrap">
               <button class="secondary" style="padding: 4px 10px" onclick={() => openReset(user)}>Reset Password</button>
               {#if !isLastAdmin(user)}
                 {#if user.enabled}
