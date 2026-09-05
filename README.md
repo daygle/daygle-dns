@@ -120,9 +120,10 @@ together and [`docs/API.md`](docs/API.md) for the REST API reference.
 The server is configured via a TOML file (default
 `/etc/daygle-dns/daygle-dns.toml`) **and** a SQLite database. The TOML file
 is the bootstrap: it seeds runtime settings into the database on first boot,
-then the database is authoritative for policy, blocklists, upstreams, cache,
-and console accounts. Only the UDP/TCP listener (`[server]`) remains file-owned so a broken
-listener config can always be fixed by hand.
+then the database is authoritative for recursive settings, policy
+(allowlist/blocklist), DoT/DoH/DoQ, and console accounts. Listener addresses,
+`[authoritative]`, `[api]`, and `blocklist_sources` remain file-owned so a
+broken config can always be fixed by hand.
 A fully commented example lives in
 [`daygle-dns.toml.example`](daygle-dns.toml.example).
 
@@ -148,7 +149,7 @@ refused and all responses are signed. TSIG also covers secondaries pulling
 from masters - see [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for details.
 
 ```toml
-# ── File-owned: only the UDP/TCP listener ────────────────────────────
+# ── File-owned: bootstrap values and listeners ──────────────────────
 [server]
 port = 53
 
@@ -165,6 +166,9 @@ port = 5380
 # password_hash = "pbkdf2-sha256$210000$...$..."
 # role = "admin"
 
+[authoritative]
+database = "/var/lib/daygle-dns/daygle-dns.db"
+
 # ── DB-seeded: these values seed the database on first boot ──────────
 # After that, changes made in the GUI or via PUT /api/config are
 # authoritative and survive restarts and config-file edits.
@@ -172,15 +176,12 @@ port = 5380
 upstreams = ["1.1.1.1", "tls://8.8.8.8:853@dns.google"]
 dnssec_validate = true
 # prefetch_enabled = true      # refresh popular names before their TTL expires
-# serve_stale_secs = 1800      # serve last-known-good answers for up to 30 min
+# serve_stale_secs = 86400     # serve last-known-good answers for up to 24 h
 #                              # when all upstreams are unreachable
 # Conditional forwarding: resolve corp.internal via the office DNS servers.
 # [[recursive.conditional_zones]]
 # name = "corp.internal"
 # upstreams = ["192.0.2.10"]
-
-[authoritative]
-database = "/var/lib/daygle-dns/daygle-dns.db"
 
 [dot]
 port = 853
@@ -199,6 +200,8 @@ port = 853
 self_signed = true
 server_name = "daygle.local"
 
+# ── Policy: blocklist_sources are file-owned (via file watcher), ─────
+# allowlist/blocklist are DB-backed (GUI or PUT /api/config).
 [policy]
 # Fetch a remote blocklist (hosts file) every 12 hours.
 # [[policy.blocklist_sources]]
@@ -224,12 +227,12 @@ can also trigger an immediate re-read with `POST /api/config/reload` (see
 [`docs/API.md`](docs/API.md)).
 
 Runtime settings (cache size, upstreams, prefetch, serve-stale, policy
-lists, blocklists, DoT/DoH/DoQ, feature toggles, and console accounts)
-live in the **SQLite database**: the config file is the bootstrap that
-seeds them on first boot, and after that changes made in the GUI (or
-`PUT /api/config`) are authoritative and survive restarts and config-file
-edits. The UDP/TCP listener (`[server]`) is the exception - it remains
-file-owned so a broken listener config can always be fixed by hand.
+allowlist/blocklist, DoT/DoH/DoQ, and console accounts) live in the
+**SQLite database**: the config file is the bootstrap that seeds them on
+first boot, and after that changes made in the GUI (or `PUT /api/config`)
+are authoritative and survive restarts and config-file edits. Listener
+addresses, `[authoritative]`, `[api]`, and `blocklist_sources` remain
+file-owned so a broken config can always be fixed by hand.
 
 ## Building the web GUI
 
