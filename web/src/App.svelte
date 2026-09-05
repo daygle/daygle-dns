@@ -131,19 +131,35 @@
     recordZoneId = zoneId;
   }
 
+  // Inline SVG icon paths (24x24 viewBox, stroke style) for the sidebar nav.
+  const icons = {
+    status: 'M13 2 3 14h7l-1 8 10-12h-7l1-8z',
+    zones: 'M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zm0 0v20M2 12h20',
+    records: 'M4 19.5A2.5 2.5 0 0 1 6.5 17H20M4 19.5A2.5 2.5 0 0 0 6.5 22H20V2H6.5A2.5 2.5 0 0 0 4 4.5v15zM9 7h6M9 11h6M9 15h4',
+    'split-horizon': 'M9 9 2 12l7 3 3 7 3-7 7-3-7-3-3-7-3 7zm0 0 5 5M14 14l-5 5',
+    blocklists: 'M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z',
+    'domain-lists': 'M12 21s-7.5-4.9-7.5-11a7.5 7.5 0 0 1 15 0c0 6.1-7.5 11-7.5 11zM12 13a3 3 0 1 0 0-6 3 3 0 0 0 0 6z',
+    'advanced-blocking': 'M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10zM9 12l2 2 4-4',
+    cache: 'M3 3v18h18M7 15l4-6 4 4 5-8',
+    users: 'M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75',
+    logs: 'M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01',
+    settings: 'M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6zm7.4-3a7.4 7.4 0 0 0-.1-1.2l2.1-1.6-2-3.5-2.5 1a7.3 7.3 0 0 0-2-1.2L14.4 3h-4l-.5 2.5a7.3 7.3 0 0 0-2 1.2l-2.5-1-2 3.5 2.1 1.6a7.4 7.4 0 0 0 0 2.4L3.4 14.8l2 3.5 2.5-1a7.3 7.3 0 0 0 2 1.2l.5 2.5h4l.5-2.5a7.3 7.3 0 0 0 2-1.2l2.5 1 2-3.5-2.1-1.6c.07-.4.1-.8.1-1.2z',
+    about: 'M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20zM12 16v-4M12 8h.01',
+  };
+
   const tabs = [
-    { id: 'status', label: 'Status' },
-    { id: 'zones', label: 'Zones', viewer: true },
-    { id: 'records', label: 'Records', viewer: true },
-    { id: 'split-horizon', label: 'Split Horizon', viewer: true },
-    { id: 'blocklists', label: 'Blocklists', viewer: true },
-    { id: 'domain-lists', label: 'Domain Lists', viewer: true },
-    { id: 'advanced-blocking', label: 'Advanced Blocking', viewer: true },
-    { id: 'cache', label: 'Cache' },
-    { id: 'users', label: 'Users' },
-    { id: 'logs', label: 'Logs' },
-    { id: 'settings', label: 'Settings', viewer: true },
-    { id: 'about', label: 'About' },
+    { id: 'status', label: 'Status', icon: icons.status },
+    { id: 'zones', label: 'Zones', icon: icons.zones, viewer: true },
+    { id: 'records', label: 'Records', icon: icons.records, viewer: true },
+    { id: 'split-horizon', label: 'Split Horizon', icon: icons['split-horizon'], viewer: true },
+    { id: 'blocklists', label: 'Blocklists', icon: icons.blocklists, viewer: true },
+    { id: 'domain-lists', label: 'Domain Lists', icon: icons['domain-lists'], viewer: true },
+    { id: 'advanced-blocking', label: 'Advanced Blocking', icon: icons['advanced-blocking'], viewer: true },
+    { id: 'cache', label: 'Cache', icon: icons.cache },
+    { id: 'users', label: 'Users', icon: icons.users },
+    { id: 'logs', label: 'Logs', icon: icons.logs },
+    { id: 'settings', label: 'Settings', icon: icons.settings, viewer: true },
+    { id: 'about', label: 'About', icon: icons.about },
   ].filter((t) => !isViewer || !t.viewer);
 </script>
 
@@ -199,7 +215,10 @@
             class:active={view === tab.id}
             onclick={() => (view = tab.id)}
           >
-            {tab.label}
+            <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d={tab.icon} />
+            </svg>
+            <span>{tab.label}</span>
           </button>
         {/each}
       </nav>
@@ -275,9 +294,17 @@
     text-align: left;
     border-radius: 6px;
     padding: 9px 12px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
   }
   .nav-btn:hover { background: var(--panel-2); color: var(--text); }
   .nav-btn.active { background: var(--accent); color: #fff; }
+  .nav-icon {
+    width: 17px;
+    height: 17px;
+    flex-shrink: 0;
+  }
 
   .user-box {
     margin-top: auto;

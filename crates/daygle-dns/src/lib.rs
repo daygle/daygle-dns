@@ -210,6 +210,9 @@ pub async fn bind_with(
                         password_hash: user.password_hash.clone(),
                         role: user.role,
                         enabled: true,
+                        first_name: String::new(),
+                        last_name: String::new(),
+                        email: String::new(),
                     },
                 )?;
                 seeded += 1;

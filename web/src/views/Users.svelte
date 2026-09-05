@@ -13,10 +13,17 @@
   let newUsername = $state('');
   let newPassword = $state('');
   let newRole = $state('admin');
+  let newFirstName = $state('');
+  let newLastName = $state('');
+  let newEmail = $state('');
   let formError = $state(null);
 
-  // Per-user reset-password dialog.
-  let resetUser = $state(null);
+  // Edit modal (click a row to open).
+  let editUser = $state(null); // draft copy of the selected user
+  let editOriginal = $state(null); // pristine copy for change detection
+  let editError = $state(null);
+  let editSaving = $state(false);
+  // Reset-password section inside the edit modal.
   let resetPassword = $state('');
   let resetError = $state(null);
 
@@ -46,11 +53,21 @@
     }
     busy = true;
     try {
-      await api.createUser({ username: newUsername.trim(), password: newPassword, role: newRole });
+      await api.createUser({
+        username: newUsername.trim(),
+        password: newPassword,
+        role: newRole,
+        first_name: newFirstName.trim(),
+        last_name: newLastName.trim(),
+        email: newEmail.trim(),
+      });
       notice = `Account '${newUsername.trim()}' created.`;
       newUsername = '';
       newPassword = '';
       newRole = 'admin';
+      newFirstName = '';
+      newLastName = '';
+      newEmail = '';
       showForm = false;
       await load();
     } catch (err) {
@@ -60,59 +77,57 @@
     }
   }
 
-  function openReset(user) {
-    resetUser = user;
+  function openEdit(user) {
+    editOriginal = structuredClone(user);
+    editUser = structuredClone(user);
+    editError = null;
     resetPassword = '';
     resetError = null;
   }
 
+  async function saveEdit() {
+    editError = null;
+    const payload = {};
+    if (editUser.first_name !== editOriginal.first_name) payload.first_name = editUser.first_name;
+    if (editUser.last_name !== editOriginal.last_name) payload.last_name = editUser.last_name;
+    if (editUser.email !== editOriginal.email) payload.email = editUser.email;
+    if (editUser.role !== editOriginal.role) payload.role = editUser.role;
+    if (editUser.enabled !== editOriginal.enabled) payload.enabled = editUser.enabled;
+    if (Object.keys(payload).length === 0) {
+      editUser = null;
+      return;
+    }
+    editSaving = true;
+    try {
+      await api.updateUser(editUser.username, payload);
+      notice = `Details for '${editUser.username}' updated.`;
+      editUser = null;
+      await load();
+    } catch (err) {
+      editError = formatApiError(err);
+    } finally {
+      editSaving = false;
+    }
+  }
+
   async function saveReset(e) {
     e.preventDefault();
+    resetError = null;
     if (!resetPassword || resetPassword.length < 8) {
       resetError = 'Password must be at least 8 characters.';
       return;
     }
-    busy = true;
+    editSaving = true;
     try {
-      await api.updateUser(resetUser.username, { password: resetPassword });
-      notice = `Password reset for '${resetUser.username}'. Their sessions were signed out.`;
-      resetUser = null;
+      await api.updateUser(editUser.username, { password: resetPassword });
+      notice = `Password reset for '${editUser.username}'. Their sessions were signed out.`;
       resetPassword = '';
+      resetError = null;
+      editUser = null;
     } catch (err) {
       resetError = formatApiError(err);
     } finally {
-      busy = false;
-    }
-  }
-
-  async function setRole(user, role) {
-    if (user.role === role) return;
-    busy = true;
-    error = null;
-    try {
-      await api.updateUser(user.username, { role });
-      notice = `Role for '${user.username}' set to ${role}.`;
-      await load();
-    } catch (err) {
-      error = formatApiError(err);
-    } finally {
-      busy = false;
-    }
-  }
-
-  async function setEnabled(user, enabled) {
-    busy = true;
-    error = null;
-    try {
-      await api.updateUser(user.username, { enabled });
-      notice = enabled
-        ? `Account '${user.username}' enabled.`
-        : `Account '${user.username}' disabled. Their sessions were signed out.`;
-      await load();
-    } catch (err) {
-      error = formatApiError(err);
-    } finally {
-      busy = false;
+      editSaving = false;
     }
   }
 
@@ -123,6 +138,7 @@
     try {
       await api.deleteUser(user.username);
       notice = `Account '${user.username}' deleted.`;
+      editUser = null;
       await load();
     } catch (err) {
       error = formatApiError(err);
@@ -137,13 +153,22 @@
     const admins = users.filter((u) => u.role === 'admin' && u.enabled);
     return user.role === 'admin' && user.enabled && admins.length <= 1;
   }
+
+  function displayName(user) {
+    const first = (user.first_name || '').trim();
+    const last = (user.last_name || '').trim();
+    if (first && last) return `${first} ${last}`;
+    if (first) return first;
+    if (last) return last;
+    return '—';
+  }
 </script>
 
 <h1>Users</h1>
 <p class="muted" style="max-width: 75ch">
   Console accounts for signing in to this dashboard. Accounts live in the
   server database (not the config file); every change signs out the affected
-  account's sessions immediately.
+  account's sessions immediately. Click a row to edit the account.
 </p>
 
 {#if notice}
@@ -177,6 +202,18 @@
             <option value="viewer">Read-Only</option>
           </select>
         </label>
+        <label>
+          <span>First Name</span>
+          <input type="text" bind:value={newFirstName} placeholder="Jane" autocomplete="off" />
+        </label>
+        <label>
+          <span>Last Name</span>
+          <input type="text" bind:value={newLastName} placeholder="Doe" autocomplete="off" />
+        </label>
+        <label>
+          <span>Email</span>
+          <input type="email" bind:value={newEmail} placeholder="jane@example.com" autocomplete="off" />
+        </label>
       </div>
       {#if formError}<div class="form-error">{formError}</div>{/if}
       <div class="row" style="margin-top: 10px">
@@ -193,25 +230,19 @@
   {:else}
     <table>
       <thead>
-        <tr><th>Username</th><th>Role</th><th>Status</th><th>Created</th><th></th></tr>
+        <tr><th>Name</th><th>Username</th><th>Email</th><th>Role</th><th>Status</th><th>Created</th></tr>
       </thead>
       <tbody>
         {#each users as user (user.username)}
-          <tr>
+          <tr class="clickable" role="button" tabindex="0" onclick={() => openEdit(user)} onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openEdit(user); } }}>
+            <td>{displayName(user)}</td>
             <td>
               {user.username}
               {#if me && user.username === me.username}<span class="muted"> (you)</span>{/if}
             </td>
+            <td class="muted">{user.email || '—'}</td>
             <td>
-              <select
-                disabled={busy || isLastAdmin(user)}
-                title={isLastAdmin(user) ? 'The last enabled admin cannot be changed' : undefined}
-                value={user.role}
-                onchange={(e) => setRole(user, e.currentTarget.value)}
-              >
-                <option value="admin">Administrator</option>
-                <option value="viewer">Read-Only</option>
-              </select>
+              <span class="pill">{user.role === 'admin' ? 'Administrator' : 'Read-Only'}</span>
             </td>
             <td>
               <span class="pill" class:ok={user.enabled} class:err={!user.enabled}>
@@ -219,17 +250,6 @@
               </span>
             </td>
             <td class="muted">{formatDate(user.created_at)}</td>
-            <td class="row" style="justify-content: flex-end; gap: 6px; white-space: nowrap">
-              <button class="secondary" style="padding: 4px 10px" onclick={() => openReset(user)}>Reset Password</button>
-              {#if !isLastAdmin(user)}
-                {#if user.enabled}
-                  <button class="secondary" style="padding: 4px 10px" disabled={busy} onclick={() => setEnabled(user, false)}>Disable</button>
-                {:else}
-                  <button class="secondary" style="padding: 4px 10px" disabled={busy} onclick={() => setEnabled(user, true)}>Enable</button>
-                {/if}
-                <button class="danger" style="padding: 4px 10px" disabled={busy} onclick={() => remove(user)}>Delete</button>
-              {/if}
-            </td>
           </tr>
         {/each}
       </tbody>
@@ -237,27 +257,73 @@
   {/if}
 </div>
 
-{#if resetUser}
-  <div class="modal-backdrop" role="presentation" onclick={(e) => { if (e.target === e.currentTarget) resetUser = null; }}>
-    <form class="card modal" onsubmit={saveReset}>
-      <div class="spread" style="margin-bottom: 10px">
-        <h3 style="margin: 0">Reset Password</h3>
-        <button type="button" class="secondary" style="padding: 2px 10px" onclick={() => (resetUser = null)}>✕</button>
+{#if editUser}
+  <div class="modal-backdrop" role="presentation" onclick={(e) => { if (e.target === e.currentTarget) editUser = null; }}>
+    <div class="card modal">
+      <div class="spread" style="margin-bottom: 4px">
+        <h3 style="margin: 0">Edit Account — {editUser.username}</h3>
+        <button type="button" class="secondary" style="padding: 2px 10px" onclick={() => (editUser = null)}>✕</button>
       </div>
-      <p class="muted" style="margin-top: 0">
-        Set a new password for <strong>{resetUser.username}</strong>. The change
-        applies immediately and signs out their sessions.
-      </p>
-      <label>
-        <span>New Password</span>
-        <input type="password" bind:value={resetPassword} placeholder="At least 8 characters" autocomplete="new-password" />
-      </label>
-      {#if resetError}<div class="form-error">{resetError}</div>{/if}
-      <div class="row" style="margin-top: 12px">
-        <button type="submit" disabled={busy || !resetPassword}>Save Password</button>
-        <button type="button" class="secondary" onclick={() => (resetUser = null)}>Cancel</button>
+
+      <div class="modal-section">
+        <h4>Profile</h4>
+        <div class="form-grid modal-grid">
+          <label>
+            <span>First Name</span>
+            <input type="text" bind:value={editUser.first_name} autocomplete="off" />
+          </label>
+          <label>
+            <span>Last Name</span>
+            <input type="text" bind:value={editUser.last_name} autocomplete="off" />
+          </label>
+        </div>
+        <label>
+          <span>Email</span>
+          <input type="email" bind:value={editUser.email} autocomplete="off" />
+        </label>
       </div>
-    </form>
+
+      <div class="modal-section">
+        <h4>Account</h4>
+        <div class="form-grid modal-grid">
+          <label>
+            <span>Role</span>
+            <select bind:value={editUser.role} disabled={editSaving || isLastAdmin(editUser)} title={isLastAdmin(editUser) ? 'The last enabled admin cannot be changed' : undefined}>
+              <option value="admin">Administrator</option>
+              <option value="viewer">Read-Only</option>
+            </select>
+          </label>
+          <label class="checkbox-row">
+            <input type="checkbox" bind:checked={editUser.enabled} disabled={editSaving || isLastAdmin(editUser)} />
+            <span>Account enabled</span>
+          </label>
+        </div>
+      </div>
+
+      <form class="modal-section" onsubmit={saveReset}>
+        <h4>Reset Password</h4>
+        <p class="muted" style="margin-top: 0">
+          Applies immediately and signs out this account's sessions.
+        </p>
+        <input type="password" bind:value={resetPassword} placeholder="New password (at least 8 characters)" autocomplete="new-password" />
+        {#if resetError}<div class="form-error">{resetError}</div>{/if}
+        <button type="submit" class="secondary" style="margin-top: 8px" disabled={editSaving || !resetPassword}>
+          {editSaving ? 'Saving…' : 'Reset Password'}
+        </button>
+      </form>
+
+      {#if editError}<div class="form-error">{editError}</div>{/if}
+
+      <div class="row" style="margin-top: 4px; justify-content: space-between">
+        <div class="row" style="gap: 8px">
+          <button type="button" disabled={editSaving} onclick={saveEdit}>Save Changes</button>
+          <button type="button" class="secondary" onclick={() => (editUser = null)}>Cancel</button>
+        </div>
+        {#if !isLastAdmin(editUser)}
+          <button type="button" class="danger" disabled={editSaving} onclick={() => remove(editUser)}>Delete Account</button>
+        {/if}
+      </div>
+    </div>
   </div>
 {/if}
 
@@ -265,15 +331,18 @@
   table { width: 100%; border-collapse: collapse; }
   th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--border); }
   th { color: var(--muted); font-size: 0.8rem; font-weight: 600; }
-  select { min-width: 110px; }
+  tr.clickable { cursor: pointer; }
+  tr.clickable:hover td { background: var(--panel-2); }
   .row { display: flex; align-items: center; }
   .form-grid {
     display: grid;
     grid-template-columns: 1fr 1fr 140px;
     gap: 12px;
   }
+  .modal-grid { grid-template-columns: 1fr 1fr; }
   label { display: flex; flex-direction: column; gap: 4px; font-size: 0.85rem; }
   label span { color: var(--muted); }
+  .checkbox-row { flex-direction: row; align-items: center; gap: 8px; margin-top: 18px; }
   .form-error {
     margin-top: 10px;
     color: var(--danger);
@@ -288,5 +357,19 @@
     justify-content: center;
     z-index: 50;
   }
-  .modal { width: 400px; }
+  .modal { width: 460px; }
+  .modal h4 {
+    margin: 0 0 8px 0;
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--muted);
+  }
+  .modal-section {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding: 12px 0;
+    border-bottom: 1px solid var(--border);
+  }
 </style>

@@ -121,6 +121,9 @@ CREATE TABLE IF NOT EXISTS console_users (
     password_hash TEXT NOT NULL,
     role          TEXT NOT NULL DEFAULT 'admin',
     enabled       INTEGER NOT NULL DEFAULT 1,
+    first_name    TEXT NOT NULL DEFAULT '',
+    last_name     TEXT NOT NULL DEFAULT '',
+    email         TEXT NOT NULL DEFAULT '',
     created_at    TEXT NOT NULL
 );
 
@@ -195,6 +198,7 @@ impl ZoneStore {
         conn.execute_batch(SCHEMA)?;
         migrate_split_horizon_records(&conn)?;
         migrate_dnssec_keys(&conn)?;
+        migrate_console_user_profile(&conn)?;
         Ok(())
     }
 
@@ -1224,7 +1228,10 @@ fn row_to_console_user(row: &rusqlite::Row<'_>) -> rusqlite::Result<ConsoleUser>
             _ => Role::Admin,
         },
         enabled: row.get::<_, i64>(3)? != 0,
-        created_at: row.get(4)?,
+        first_name: row.get(4)?,
+        last_name: row.get(5)?,
+        email: row.get(6)?,
+        created_at: row.get(7)?,
     })
 }
 
@@ -1235,6 +1242,9 @@ pub struct ConsoleUser {
     pub password_hash: String,
     pub role: Role,
     pub enabled: bool,
+    pub first_name: String,
+    pub last_name: String,
+    pub email: String,
     pub created_at: String,
 }
 
@@ -1255,6 +1265,12 @@ pub struct ConsoleUserInput {
     pub role: Role,
     #[serde(default)]
     pub enabled: bool,
+    #[serde(default)]
+    pub first_name: String,
+    #[serde(default)]
+    pub last_name: String,
+    #[serde(default)]
+    pub email: String,
 }
 
 // ---- Console users (login accounts) ------------------------------------
@@ -1264,7 +1280,7 @@ impl ZoneStore {
     pub fn list_console_users(&self) -> Result<Vec<ConsoleUser>> {
         let conn = self.lock_conn()?;
         let mut stmt = conn.prepare(
-            "SELECT username, password_hash, role, enabled, created_at
+            "SELECT username, password_hash, role, enabled, first_name, last_name, email, created_at
              FROM console_users ORDER BY username",
         )?;
         let rows = stmt.query_map([], row_to_console_user)?;
@@ -1285,7 +1301,7 @@ impl ZoneStore {
     pub fn get_console_user(&self, username: &str) -> Result<Option<ConsoleUser>> {
         let conn = self.lock_conn()?;
         conn.query_row(
-            "SELECT username, password_hash, role, enabled, created_at
+            "SELECT username, password_hash, role, enabled, first_name, last_name, email, created_at
              FROM console_users WHERE username = ?1",
             [username],
             row_to_console_user,
@@ -1306,22 +1322,31 @@ impl ZoneStore {
             password_hash: input.password_hash.clone(),
             role: input.role,
             enabled: input.enabled,
+            first_name: input.first_name.clone(),
+            last_name: input.last_name.clone(),
+            email: input.email.clone(),
             created_at: Utc::now().to_rfc3339(),
         };
         let conn = self.lock_conn()?;
         conn.execute(
-            "INSERT INTO console_users (username, password_hash, role, enabled, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5)
+            "INSERT INTO console_users (username, password_hash, role, enabled, first_name, last_name, email, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
              ON CONFLICT(username) DO UPDATE SET
                 password_hash = excluded.password_hash,
                 role = excluded.role,
                 enabled = excluded.enabled,
+                first_name = excluded.first_name,
+                last_name = excluded.last_name,
+                email = excluded.email,
                 created_at = excluded.created_at",
             params![
                 user.username,
                 user.password_hash,
                 user.role.as_str(),
                 user.enabled as i64,
+                user.first_name,
+                user.last_name,
+                user.email,
                 user.created_at
             ],
         )?;
@@ -1334,6 +1359,30 @@ impl ZoneStore {
         let n = conn.execute(
             "UPDATE console_users SET password_hash = ?2 WHERE username = ?1",
             params![username, password_hash],
+        )?;
+        if n == 0 {
+            return Err(DaygleError::Config(format!("user '{username}' not found")));
+        }
+        Ok(())
+    }
+
+    /// Update a console account's profile fields (first name, last name,
+    /// email). Pass `None` to leave a field unchanged.
+    pub fn set_console_user_profile(
+        &self,
+        username: &str,
+        first_name: Option<&str>,
+        last_name: Option<&str>,
+        email: Option<&str>,
+    ) -> Result<()> {
+        let conn = self.lock_conn()?;
+        let n = conn.execute(
+            "UPDATE console_users
+             SET first_name = COALESCE(?2, first_name),
+                 last_name  = COALESCE(?3, last_name),
+                 email      = COALESCE(?4, email)
+             WHERE username = ?1",
+            params![username, first_name, last_name, email],
         )?;
         if n == 0 {
             return Err(DaygleError::Config(format!("user '{username}' not found")));
@@ -1909,6 +1958,31 @@ fn migrate_split_horizon_records(conn: &Connection) -> Result<()> {
             "ALTER TABLE split_horizon_entries ADD COLUMN records TEXT NOT NULL DEFAULT '[]'",
             [],
         )?;
+    }
+    Ok(())
+}
+
+/// Add the personal profile columns (`first_name`, `last_name`, `email`) to
+/// `console_users` for databases created before user profiles existed.
+fn migrate_console_user_profile(conn: &Connection) -> Result<()> {
+    for (column, default) in [
+        ("first_name", "''"),
+        ("last_name", "''"),
+        ("email", "''"),
+    ] {
+        let has: bool = conn.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM pragma_table_info('console_users') WHERE name = ?1
+             )",
+            [column],
+            |r| r.get(0),
+        )?;
+        if !has {
+            conn.execute(
+                &format!("ALTER TABLE console_users ADD COLUMN {column} TEXT NOT NULL DEFAULT {default}"),
+                [],
+            )?;
+        }
     }
     Ok(())
 }

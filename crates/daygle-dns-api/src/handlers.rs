@@ -1747,6 +1747,9 @@ pub async fn auth_setup(
             password_hash,
             role: daygle_dns_core::config::Role::Admin,
             enabled: true,
+            first_name: String::new(),
+            last_name: String::new(),
+            email: String::new(),
         },
     ) {
         return map_err(e);
@@ -1822,6 +1825,9 @@ pub struct CreateUserInput {
     username: String,
     password: String,
     role: Option<String>,
+    first_name: Option<String>,
+    last_name: Option<String>,
+    email: Option<String>,
 }
 
 /// `POST /api/users` - create a console account (admin role by default).
@@ -1854,6 +1860,9 @@ pub async fn create_user(
             password_hash: daygle_dns_core::auth::hash_password(&input.password),
             role,
             enabled: true,
+            first_name: input.first_name.unwrap_or_default().trim().to_string(),
+            last_name: input.last_name.unwrap_or_default().trim().to_string(),
+            email: input.email.unwrap_or_default().trim().to_string(),
         },
     ) {
         Ok(u) => u,
@@ -1873,6 +1882,9 @@ pub struct UpdateUserInput {
     password: Option<String>,
     role: Option<String>,
     enabled: Option<bool>,
+    first_name: Option<String>,
+    last_name: Option<String>,
+    email: Option<String>,
 }
 
 /// `PATCH /api/users/{username}` - reset a password, change a role, or
@@ -1931,6 +1943,17 @@ pub async fn update_user(
     }
     if let Some(enabled) = input.enabled {
         if let Err(e) = store.set_console_user_enabled(&username, enabled) {
+            return map_err(e);
+        }
+    }
+    if input.first_name.is_some()
+        || input.last_name.is_some()
+        || input.email.is_some()
+    {
+        let first = input.first_name.as_deref().map(str::trim);
+        let last = input.last_name.as_deref().map(str::trim);
+        let email = input.email.as_deref().map(str::trim);
+        if let Err(e) = store.set_console_user_profile(&username, first, last, email) {
             return map_err(e);
         }
     }
