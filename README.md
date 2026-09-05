@@ -83,9 +83,9 @@ left it stopped). Fresh installs create the default configuration and start the
 service.
 
 The installer also offers to expose the web GUI on your LAN when run
-interactively (adds an admin login and binds the API to 0.0.0.0:5380); for
-scripted installs use `DAYGLE_LAN_GUI=1` with `DAYGLE_ADMIN_USER` and
-`DAYGLE_ADMIN_PASSWORD`. On upgrades, existing LAN binding and console
+interactively (prompts for an admin username and password, then binds the API
+to 0.0.0.0:5380); for scripted installs use `DAYGLE_LAN_GUI=1` with
+`DAYGLE_ADMIN_USER` and `DAYGLE_ADMIN_PASSWORD`. On upgrades, existing LAN binding and console
 credentials are preserved automatically, and the existing admin password is
 never replaced. Without either, fresh installs keep the GUI loopback-only for
 security.
