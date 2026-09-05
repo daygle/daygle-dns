@@ -407,7 +407,13 @@ if [ "$LAN_SETUP" = "1" ]; then
         elif : < /dev/tty 2>/dev/null; then
             printf '%s' "[daygle-dns-install] Password for user '$ADMIN_USER': "
             ADMIN_PASSWORD=""
-            read -rs ADMIN_PASSWORD < /dev/tty || true
+            # -s is a bash extension; use stty for POSIX sh compatibility.
+            if stty -echo 2>/dev/null; then
+                read -r ADMIN_PASSWORD < /dev/tty || true
+                stty echo 2>/dev/null
+            else
+                read -r ADMIN_PASSWORD < /dev/tty || true
+            fi
             printf '\n'
         else
             if command -v openssl >/dev/null 2>&1; then
