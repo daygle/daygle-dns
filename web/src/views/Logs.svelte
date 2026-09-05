@@ -246,7 +246,7 @@
         <button type="submit">Query</button>
         <button type="button" class="secondary" onclick={exportCsv}>Export</button>
         <button type="button" class="secondary" onclick={resetFilters}>Reset</button>
-        <button type="button" class="secondary danger" onclick={clearLog}>Clear Log</button>
+        <button type="button" class="danger" onclick={clearLog}>Clear Log</button>
         <label class="row" style="gap: 6px; align-items: center; margin-left: 8px">
           <input type="checkbox" checked={live} onchange={toggleLive} />
           <span>Live Update</span>
