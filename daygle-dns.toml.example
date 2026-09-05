@@ -122,7 +122,7 @@ notify_listen_enabled = false
 
 # DNS over TLS (RFC 7858) using rustls.
 [dot]
-enabled = true
+enabled = false
 listen = "0.0.0.0"
 port = 853
 cert_path = "/etc/daygle-dns/certs/server.crt"

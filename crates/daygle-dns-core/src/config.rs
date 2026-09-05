@@ -853,7 +853,7 @@ pub struct DotSettings {
 impl Default for DotSettings {
     fn default() -> Self {
         Self {
-            enabled: true,
+            enabled: false,
             listen: "0.0.0.0".to_string(),
             port: 853,
             cert_path: "/etc/daygle-dns/certs/server.crt".to_string(),

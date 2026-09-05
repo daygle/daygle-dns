@@ -184,6 +184,7 @@ dnssec_validate = true
 # upstreams = ["192.0.2.10"]
 
 [dot]
+enabled = false
 port = 853
 self_signed = true
 
