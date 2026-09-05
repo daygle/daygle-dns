@@ -2038,6 +2038,8 @@ pub struct ListenerUpdate {
     pub port: Option<u16>,
     pub self_signed: Option<bool>,
     pub server_name: Option<String>,
+    pub cert_path: Option<String>,
+    pub key_path: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -2047,6 +2049,8 @@ pub struct DohUpdate {
     pub port: Option<u16>,
     pub self_signed: Option<bool>,
     pub server_name: Option<String>,
+    pub cert_path: Option<String>,
+    pub key_path: Option<String>,
     pub endpoint: Option<String>,
 }
 
@@ -2132,6 +2136,12 @@ pub async fn update_settings(
         if let Some(v) = &d.server_name {
             config.dot.server_name = v.clone();
         }
+        if let Some(v) = &d.cert_path {
+            config.dot.cert_path = v.clone();
+        }
+        if let Some(v) = &d.key_path {
+            config.dot.key_path = v.clone();
+        }
     }
     if let Some(d) = &update.doh {
         if let Some(v) = d.enabled {
@@ -2147,6 +2157,12 @@ pub async fn update_settings(
         }
         if let Some(v) = &d.server_name {
             config.doh.server_name = v.clone();
+        }
+        if let Some(v) = &d.cert_path {
+            config.doh.cert_path = v.clone();
+        }
+        if let Some(v) = &d.key_path {
+            config.doh.key_path = v.clone();
         }
         if let Some(v) = &d.endpoint {
             config.doh.endpoint = v.clone();
@@ -2166,6 +2182,12 @@ pub async fn update_settings(
         }
         if let Some(v) = &d.server_name {
             config.doq.server_name = v.clone();
+        }
+        if let Some(v) = &d.cert_path {
+            config.doq.cert_path = v.clone();
+        }
+        if let Some(v) = &d.key_path {
+            config.doq.key_path = v.clone();
         }
     }
     if let Some(a) = &update.api {

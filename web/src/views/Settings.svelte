@@ -100,12 +100,16 @@
           port: Number(dot.port),
           self_signed: !!dot.self_signed,
           server_name: dot.server_name,
+          cert_path: dot.cert_path || '',
+          key_path: dot.key_path || '',
         },
         doh: {
           enabled: !!doh.enabled,
           port: Number(doh.port),
           self_signed: !!doh.self_signed,
           server_name: doh.server_name,
+          cert_path: doh.cert_path || '',
+          key_path: doh.key_path || '',
           endpoint: doh.endpoint,
         },
         doq: {
@@ -113,6 +117,8 @@
           port: Number(doq.port),
           self_signed: !!doq.self_signed,
           server_name: doq.server_name,
+          cert_path: doq.cert_path || '',
+          key_path: doq.key_path || '',
         },
         api: {
           gui_enabled: !!api_.gui_enabled,
@@ -182,7 +188,12 @@
         <label class="check"><input type="checkbox" bind:checked={dot.enabled} /> <span>Enabled</span></label>
         <label><span>Port</span><input type="number" bind:value={dot.port} /></label>
         <label class="check"><input type="checkbox" bind:checked={dot.self_signed} /> <span>Self-Signed Certificate</span></label>
-        <label><span>Certificate Name</span><input bind:value={dot.server_name} /></label>
+        {#if dot.self_signed}
+          <label><span>Certificate Name</span><input bind:value={dot.server_name} /></label>
+        {:else}
+          <label><span>Certificate Path</span><input bind:value={dot.cert_path} placeholder="/etc/daygle-dns/certs/server.crt" /></label>
+          <label><span>Key Path</span><input bind:value={dot.key_path} placeholder="/etc/daygle-dns/certs/server.key" /></label>
+        {/if}
       </div>
     </div>
     <div class="card" style="flex: 1">
@@ -191,7 +202,12 @@
         <label class="check"><input type="checkbox" bind:checked={doh.enabled} /> <span>Enabled</span></label>
         <label><span>Port</span><input type="number" bind:value={doh.port} /></label>
         <label class="check"><input type="checkbox" bind:checked={doh.self_signed} /> <span>Self-Signed Certificate</span></label>
-        <label><span>Certificate Name</span><input bind:value={doh.server_name} /></label>
+        {#if doh.self_signed}
+          <label><span>Certificate Name</span><input bind:value={doh.server_name} /></label>
+        {:else}
+          <label><span>Certificate Path</span><input bind:value={doh.cert_path} placeholder="/etc/daygle-dns/certs/server.crt" /></label>
+          <label><span>Key Path</span><input bind:value={doh.key_path} placeholder="/etc/daygle-dns/certs/server.key" /></label>
+        {/if}
         <label><span>Endpoint Path</span><input bind:value={doh.endpoint} /></label>
       </div>
     </div>
@@ -201,7 +217,12 @@
         <label class="check"><input type="checkbox" bind:checked={doq.enabled} /> <span>Enabled</span></label>
         <label><span>Port</span><input type="number" bind:value={doq.port} /></label>
         <label class="check"><input type="checkbox" bind:checked={doq.self_signed} /> <span>Self-Signed Certificate</span></label>
-        <label><span>Certificate Name</span><input bind:value={doq.server_name} /></label>
+        {#if doq.self_signed}
+          <label><span>Certificate Name</span><input bind:value={doq.server_name} /></label>
+        {:else}
+          <label><span>Certificate Path</span><input bind:value={doq.cert_path} placeholder="/etc/daygle-dns/certs/server.crt" /></label>
+          <label><span>Key Path</span><input bind:value={doq.key_path} placeholder="/etc/daygle-dns/certs/server.key" /></label>
+        {/if}
       </div>
     </div>
   </div>

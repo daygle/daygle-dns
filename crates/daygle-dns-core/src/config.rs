@@ -83,6 +83,10 @@ pub struct ListenerUpdate {
     pub self_signed: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub server_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cert_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub key_path: Option<String>,
 }
 
 /// Partial updates for DoH.
@@ -96,6 +100,10 @@ pub struct DohUpdate {
     pub self_signed: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub server_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cert_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub key_path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub endpoint: Option<String>,
 }
@@ -140,12 +148,16 @@ impl RuntimeSettings {
             if let Some(v) = d.port { config.dot.port = v; }
             if let Some(v) = d.self_signed { config.dot.self_signed = v; }
             if let Some(v) = &d.server_name { config.dot.server_name = v.clone(); }
+            if let Some(v) = &d.cert_path { config.dot.cert_path = v.clone(); }
+            if let Some(v) = &d.key_path { config.dot.key_path = v.clone(); }
         }
         if let Some(d) = &self.doh {
             if let Some(v) = d.enabled { config.doh.enabled = v; }
             if let Some(v) = d.port { config.doh.port = v; }
             if let Some(v) = d.self_signed { config.doh.self_signed = v; }
             if let Some(v) = &d.server_name { config.doh.server_name = v.clone(); }
+            if let Some(v) = &d.cert_path { config.doh.cert_path = v.clone(); }
+            if let Some(v) = &d.key_path { config.doh.key_path = v.clone(); }
             if let Some(v) = &d.endpoint { config.doh.endpoint = v.clone(); }
         }
         if let Some(d) = &self.doq {
@@ -153,6 +165,8 @@ impl RuntimeSettings {
             if let Some(v) = d.port { config.doq.port = v; }
             if let Some(v) = d.self_signed { config.doq.self_signed = v; }
             if let Some(v) = &d.server_name { config.doq.server_name = v.clone(); }
+            if let Some(v) = &d.cert_path { config.doq.cert_path = v.clone(); }
+            if let Some(v) = &d.key_path { config.doq.key_path = v.clone(); }
         }
         if let Some(p) = &self.policy {
             if let Some(v) = &p.allowlist { config.policy.allowlist = v.clone(); }
@@ -182,12 +196,16 @@ impl RuntimeSettings {
                 port: Some(config.dot.port),
                 self_signed: Some(config.dot.self_signed),
                 server_name: Some(config.dot.server_name.clone()),
+                cert_path: Some(config.dot.cert_path.clone()),
+                key_path: Some(config.dot.key_path.clone()),
             }),
             doh: Some(DohUpdate {
                 enabled: Some(config.doh.enabled),
                 port: Some(config.doh.port),
                 self_signed: Some(config.doh.self_signed),
                 server_name: Some(config.doh.server_name.clone()),
+                cert_path: Some(config.doh.cert_path.clone()),
+                key_path: Some(config.doh.key_path.clone()),
                 endpoint: Some(config.doh.endpoint.clone()),
             }),
             doq: Some(ListenerUpdate {
@@ -195,6 +213,8 @@ impl RuntimeSettings {
                 port: Some(config.doq.port),
                 self_signed: Some(config.doq.self_signed),
                 server_name: Some(config.doq.server_name.clone()),
+                cert_path: Some(config.doq.cert_path.clone()),
+                key_path: Some(config.doq.key_path.clone()),
             }),
             policy: Some(PolicyUpdate {
                 allowlist: Some(config.policy.allowlist.clone()),
