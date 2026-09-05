@@ -11,6 +11,8 @@ web/node_modules
 *.db-journal
 *.db-wal
 *.db-shm
+# Server stdout/stderr redirects (created when the binary is launched with output redirection)
+daygle-restart*.log
 
 # Local configuration / certificates
 daygle.toml
