@@ -661,6 +661,35 @@ pub async fn reload_config(State(state): State<AppState>) -> Response {
         .into_response()
 }
 
+/// `GET /api/upgrade` - host-level information relevant to upgrading the server.
+///
+/// The canonical upgrade path for this project is the one-line installer
+/// (`install.sh`). It fetches the latest source, rebuilds the `daygle-dns`
+/// binary, installs it in place, preserves the existing configuration, zones,
+/// certificates and database, and restarts the service when systemd is in use.
+///
+/// This endpoint is informational only. The server process cannot rebuild or
+/// replace itself from the browser; the returned values are intended to help
+/// the console point the operator to the same host-side upgrade they would
+/// already run with `install.sh`.
+pub async fn upgrade_info(State(state): State<AppState>) -> Response {
+    let version = daygle_dns_core::VERSION;
+    let install_script = "https://raw.githubusercontent.com/daygle/daygle-dns/main/install.sh".to_string();
+    let has_config_file = state.config_path.is_some();
+    let has_systemd = std::path::Path::new("/etc/systemd/system/daygle-dns.service").is_file();
+
+    Json(serde_json::json!({
+        "version": version,
+        "install_script": install_script,
+        "has_config_file": has_config_file,
+        "has_systemd": has_systemd,
+        "upgrade_command": format!("curl -fsSL {} | sh", install_script),
+        "preserves": ["configuration", "zones", "certificates", "database"],
+        "note": "Run the upgrade command on the host to update all components in place. The installer rebuilds the server binary and preserves configuration, zones, certificates and the database.".to_string(),
+    }))
+        .into_response()
+}
+
 // ---- Zones --------------------------------------------------------------
 
 #[derive(Serialize)]

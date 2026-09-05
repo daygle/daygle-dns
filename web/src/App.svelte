@@ -14,6 +14,7 @@
   import Certificates from './views/Certificates.svelte';
   import DomainLists from './views/DomainLists.svelte';
   import About from './views/About.svelte';
+  import Upgrade from './views/Upgrade.svelte';
 
   let view = $state('status');
   // Zone preselected for the Records page (set when opening records from the Zones page).
@@ -163,6 +164,7 @@
     { id: 'logs', label: 'Logs', icon: icons.logs },
     { id: 'settings', label: 'Settings', icon: icons.settings, viewer: true },
     { id: 'about', label: 'About', icon: icons.about },
+    { id: 'upgrade', label: 'Upgrade', icon: icons.about },
   ].filter((t) => !isViewer || !t.viewer);
 </script>
 
@@ -264,6 +266,8 @@
         <AdvancedBlocking />
       {:else if view === 'about'}
         <About />
+      {:else if view === 'upgrade'}
+        <Upgrade />
       {:else if view === 'logs'}
         <Logs />
       {:else}

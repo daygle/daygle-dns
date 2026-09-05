@@ -287,6 +287,7 @@ pub fn router(state: AppState) -> Router {
             "/policy/blocking/{id}",
             delete(handlers::delete_blocking_group),
         )
+        .route("/upgrade", get(handlers::upgrade_info))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             require_auth,
