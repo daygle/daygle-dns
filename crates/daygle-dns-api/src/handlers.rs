@@ -84,6 +84,10 @@ fn validate_config_update(
 /// Persist `config` to the config file when its path is known. The whole
 /// document is rewritten (comments in an edited file are not preserved; the
 /// example file documents every option).
+///
+/// No longer used: console-managed settings live in the database overlay
+/// (`runtime_settings`); the file is bootstrap-only.
+#[allow(dead_code)]
 fn persist_config(
     state: &AppState,
     config: &daygle_dns_core::config::DaygleConfig,
@@ -134,6 +138,7 @@ pub async fn status(State(state): State<AppState>) -> Response {
         "dot_enabled": config.dot.enabled,
         "doq_enabled": config.doq.enabled,
         "users_configured": !config.api.users.is_empty(),
+        "setup_pending": setup_pending(&state),
         "api_enabled": config.api.enabled,
         "blocklist_sources": config.policy.blocklist_sources.len(),
         "remote_blocklist_domains": state.policy.load_full().remote_blocklist_len(),
@@ -274,8 +279,14 @@ pub async fn replace_blocklist_sources(
     if let Err(response) = validate_config_update(&state, &old_config, &config, "blocklist sources") {
         return response;
     }
-    if let Err((status, message)) = persist_config(&state, &config) {
-        return error_response(status, message);
+    // Blocklist sources are console-managed runtime settings: store them in
+    // the DB overlay (the config file is no longer rewritten).
+    if let Err(e) = state
+        .catalog
+        .store()
+        .put_runtime_settings(&daygle_dns_core::config::RuntimeSettings::capture(&config))
+    {
+        return map_err(e);
     }
 
     state.config.store(Arc::new(config));
@@ -486,6 +497,119 @@ pub async fn logs(
 ) -> Response {
     let limit = query.limit.unwrap_or(200).min(10_000);
     Json(state.logs.tail(limit)).into_response()
+}
+
+// ---- Query logs (searchable SQLite-backed per-query history) ---------------
+
+#[derive(Deserialize)]
+pub struct QueryLogsQuery {
+    client: Option<String>,
+    qname: Option<String>,
+    qtype: Option<String>,
+    protocol: Option<String>,
+    outcome: Option<String>,
+    rcode: Option<String>,
+    from: Option<String>,
+    to: Option<String>,
+    page: Option<u32>,
+    per_page: Option<u32>,
+    /// `csv` streams the full filtered result set as a download instead of a
+    /// JSON page.
+    format: Option<String>,
+}
+
+fn query_log_filter(query: &QueryLogsQuery) -> daygle_dns_authoritative::QueryLogFilter {
+    daygle_dns_authoritative::QueryLogFilter {
+        client: query.client.clone(),
+        qname: query.qname.clone(),
+        qtype: query.qtype.clone(),
+        protocol: query.protocol.clone(),
+        outcome: query.outcome.clone(),
+        rcode: query.rcode.clone(),
+        from: query.from.clone(),
+        to: query.to.clone(),
+        page: query.page,
+        per_page: query.per_page,
+    }
+}
+
+fn csv_escape(value: &str) -> String {
+    if value.contains(',') || value.contains('"') || value.contains('\n') {
+        format!("\"{}\"", value.replace('"', "\"\""))
+    } else {
+        value.to_string()
+    }
+}
+
+/// `GET /api/querylogs` - search the query log. JSON by default; `?format=csv`
+/// streams every matching row (no pagination) as a CSV download.
+pub async fn query_logs(
+    State(state): State<AppState>,
+    Query(query): Query<QueryLogsQuery>,
+) -> Response {
+    if query.format.as_deref() == Some("csv") {
+        // Export: the full filtered set, capped sanely so a huge retention
+        // window cannot produce an unbounded response.
+        let mut filter = query_log_filter(&query);
+        filter.page = Some(1);
+        filter.per_page = Some(10_000);
+        let rows = match state.catalog.store().search_query_logs(&filter) {
+            Ok((rows, _)) => rows,
+            Err(e) => return map_err(e),
+        };
+        let mut csv = String::from("timestamp,client,qname,qtype,protocol,outcome,rcode,elapsed_ms\n");
+        for r in &rows {
+            csv.push_str(&format!(
+                "{},{},{},{},{},{},{},{}\n",
+                csv_escape(&r.ts),
+                csv_escape(&r.client),
+                csv_escape(&r.qname),
+                csv_escape(&r.qtype),
+                csv_escape(&r.protocol),
+                csv_escape(&r.outcome),
+                r.rcode.as_deref().map(csv_escape).unwrap_or_default(),
+                r.elapsed_ms,
+            ));
+        }
+        let headers = [
+            (header::CONTENT_TYPE, "text/csv; charset=utf-8"),
+            (
+                header::CONTENT_DISPOSITION,
+                "attachment; filename=\"query-logs.csv\"",
+            ),
+        ];
+        return (headers, csv).into_response();
+    }
+
+    match state
+        .catalog
+        .store()
+        .search_query_logs(&query_log_filter(&query))
+    {
+        Ok((rows, total)) => Json(serde_json::json!({
+            "entries": rows,
+            "total": total,
+            "page": query.page.unwrap_or(1).max(1),
+            "per_page": query.per_page.unwrap_or(50).clamp(1, 500),
+        }))
+        .into_response(),
+        Err(e) => map_err(e),
+    }
+}
+
+/// `DELETE /api/querylogs` - clear the whole query log.
+pub async fn clear_query_logs(State(state): State<AppState>) -> Response {
+    match state.catalog.store().clear_query_logs() {
+        Ok(deleted) => {
+            state.logs.push(
+                daygle_dns_core::LogLevel::Info,
+                "api",
+                format!("query log cleared ({deleted} entries)"),
+            );
+            Json(serde_json::json!({"deleted": deleted})).into_response()
+        }
+        Err(e) => map_err(e),
+    }
 }
 
 pub async fn config(State(state): State<AppState>) -> Response {
@@ -764,31 +888,25 @@ pub async fn create_zone(
         }
     }
     let old_config = (*state.config.load_full()).clone();
-    let mut new_config = old_config.clone();
-    if let Some(secondary) = &secondary_input {
-        new_config.authoritative.secondary_zones.push(secondary.clone());
-        if let Err(response) = validate_config_update(&state, &old_config, &new_config, "secondary zone") {
-            let _ = state.catalog.store().delete_zone(&zone.id);
-            return response;
+    let mut new_config = old_config.clone();        if let Some(secondary) = &secondary_input {
+            new_config.authoritative.secondary_zones.push(secondary.clone());
+            if let Err(response) = validate_config_update(&state, &old_config, &new_config, "secondary zone") {
+                let _ = state.catalog.store().delete_zone(&zone.id);
+                return response;
+            }
+            if let Err(e) = state.catalog.store().set_secondary(
+                &zone.id,
+                &secondary.masters,
+                secondary.refresh_secs,
+            ) {
+                let _ = state.catalog.store().delete_zone(&zone.id);
+                return map_err(e);
+            }
+            state.config.store(Arc::new(new_config));
+            if let Some(refresher) = &state.secondary_refresher {
+                refresher.set_zone(secondary.clone());
+            }
         }
-        if let Err((status, message)) = persist_config(&state, &new_config) {
-            let _ = state.catalog.store().delete_zone(&zone.id);
-            return error_response(status, message);
-        }
-        if let Err(e) = state.catalog.store().set_secondary(
-            &zone.id,
-            &secondary.masters,
-            secondary.refresh_secs,
-        ) {
-            let _ = state.catalog.store().delete_zone(&zone.id);
-            let _ = persist_config(&state, &old_config);
-            return map_err(e);
-        }
-        state.config.store(Arc::new(new_config));
-        if let Some(refresher) = &state.secondary_refresher {
-            refresher.set_zone(secondary.clone());
-        }
-    }
 
     if let Err(e) = state.catalog.reload() {
         let _ = state.catalog.store().delete_zone(&zone.id);
@@ -819,9 +937,6 @@ pub async fn delete_zone(
         if let Err(response) = validate_config_update(&state, &old_config, &new_config, "zone deletion") {
             return response;
         }
-        if let Err((status, message)) = persist_config(&state, &new_config) {
-            return error_response(status, message);
-        }
     }
 
     match state.catalog.store().delete_zone(&id) {
@@ -835,18 +950,8 @@ pub async fn delete_zone(
             let _ = state.catalog.reload();
             StatusCode::NO_CONTENT.into_response()
         }
-        Ok(false) => {
-            if secondary.is_some() {
-                let _ = persist_config(&state, &old_config);
-            }
-            error_response(StatusCode::NOT_FOUND, "zone not found")
-        }
-        Err(e) => {
-            if secondary.is_some() {
-                let _ = persist_config(&state, &old_config);
-            }
-            map_err(e)
-        }
+        Ok(false) => error_response(StatusCode::NOT_FOUND, "zone not found"),
+        Err(e) => map_err(e),
     }
 }
 
@@ -1391,28 +1496,28 @@ pub struct LoginInput {
     password: String,
 }
 
-/// `POST /api/auth/login` - verify username/password against `api.users`
-/// and return a session token. Always open (unauthenticated by definition).
+/// `POST /api/auth/login` - verify username/password against the console
+/// accounts in the database and return a session token. Always open
+/// (unauthenticated by definition).
 pub async fn auth_login(
     State(state): State<AppState>,
     axum::Json(input): axum::Json<LoginInput>,
 ) -> Response {
-    let config = state.config.load_full();
-    let user = config
-        .api
-        .users
-        .iter()
-        .find(|u| u.username == input.username.trim());
+    let user = match state.catalog.store().get_console_user(input.username.trim()) {
+        Ok(user) => user,
+        Err(e) => return map_err(e),
+    };
 
     // Constant-ish response time: verify against a dummy hash when the user
-    // does not exist so timing cannot enumerate accounts.
-    let ok = match user {
-        Some(u) => daygle_dns_core::auth::verify_password(&input.password, &u.password_hash),
-        None => {
-            let _ = daygle_dns_core::auth::verify_password(
-                &input.password,
-                "pbkdf2-sha256$210000$AAAAAAAAAAAAAAAAAAAAAA==$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
-            );
+    // does not exist (or is disabled, which is not disclosed) so timing
+    // cannot enumerate accounts.
+    let dummy_hash = "pbkdf2-sha256$210000$AAAAAAAAAAAAAAAAAAAAAA==$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+    let ok = match user.as_ref() {
+        Some(u) if u.enabled => {
+            daygle_dns_core::auth::verify_password(&input.password, &u.password_hash)
+        }
+        _ => {
+            let _ = daygle_dns_core::auth::verify_password(&input.password, dummy_hash);
             false
         }
     };
@@ -1428,24 +1533,18 @@ pub async fn auth_login(
         return error_response(StatusCode::UNAUTHORIZED, "invalid username or password");
     }
 
-    let ttl = Duration::from_secs(config.api.session_ttl_secs.max(60));
-    let role = user
-        .map(|u| u.role)
-        .unwrap_or(daygle_dns_core::config::Role::Admin);
-    let token = state.sessions.create(
-        user.map(|u| u.username.as_str()).unwrap_or(""),
-        role,
-        ttl,
-    );
+    let user = user.expect("checked above");
+    let ttl = Duration::from_secs(state.config.load().api.session_ttl_secs.max(60));
+    let token = state.sessions.create(&user.username, user.role, ttl);
     state.logs.push(
         daygle_dns_core::LogLevel::Info,
         "api",
-        format!("user '{}' logged in", input.username),
+        format!("user '{}' logged in", user.username),
     );
     Json(serde_json::json!({
         "token": token,
-        "username": input.username,
-        "role": role.as_str(),
+        "username": user.username,
+        "role": user.role.as_str(),
         "expires_in_secs": ttl.as_secs(),
     }))
     .into_response()
@@ -1482,12 +1581,402 @@ pub async fn auth_me(
     }
 }
 
+// ---- Self-service password change ---------------------------------------
+
+/// Body of `POST /api/auth/password`.
+#[derive(Deserialize)]
+pub struct ChangePasswordInput {
+    current_password: String,
+    new_password: String,
+}
+
+/// `POST /api/auth/password` - the signed-in user rotates their own password.
+///
+/// Requires the current password. Every other session of the account is
+/// revoked; the session that performed the change stays signed in.
+/// Available to `viewer` accounts too (it is their own credential).
+pub async fn auth_change_password(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    axum::Json(input): axum::Json<ChangePasswordInput>,
+) -> Response {
+    let token = bearer_token(&headers).unwrap_or_default();
+    let session = match state.sessions.verify(&token) {
+        Some(s) => s,
+        None => return error_response(StatusCode::UNAUTHORIZED, "not authenticated"),
+    };
+    let store = state.catalog.store();
+    let user = match store.get_console_user(&session.username) {
+        Ok(u) => u,
+        Err(e) => return map_err(e),
+    };
+    let Some(user) = user else {
+        return error_response(StatusCode::NOT_FOUND, "account no longer exists");
+    };
+    if !user.enabled {
+        return error_response(StatusCode::FORBIDDEN, "account is disabled");
+    }
+    if !daygle_dns_core::auth::verify_password(&input.current_password, &user.password_hash) {
+        state.logs.push(
+            daygle_dns_core::LogLevel::Warn,
+            "api",
+            format!("failed password change for user '{}'", session.username),
+        );
+        return error_response(StatusCode::UNAUTHORIZED, "current password is incorrect");
+    }
+    if input.new_password.chars().count() < 8 {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "new password must be at least 8 characters",
+        );
+    }
+    if input.new_password == input.current_password {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "new password must differ from the current password",
+        );
+    }
+
+    if let Err(e) =
+        store.set_console_user_password(&session.username, &daygle_dns_core::auth::hash_password(&input.new_password))
+    {
+        return map_err(e);
+    }
+    // Other devices are signed out; this session survives.
+    state.sessions.revoke_user_except(&session.username, &token);
+    state.logs.push(
+        daygle_dns_core::LogLevel::Info,
+        "api",
+        format!("user '{}' changed their password", session.username),
+    );
+    StatusCode::NO_CONTENT.into_response()
+}
+
 fn bearer_token(headers: &axum::http::HeaderMap) -> Option<String> {
     headers
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
         .map(|s| s.to_string())
+}
+
+// ---- First-run setup -----------------------------------------------------
+
+/// Whether the one-time admin setup is pending: console auth is on, no
+/// user accounts exist in the database yet, and no legacy static `api_token`
+/// is configured (token-only mode manages auth itself, no setup step).
+fn setup_pending(state: &AppState) -> bool {
+    let config = state.config.load();
+    let users = state.catalog.store().list_console_users().unwrap_or_default();
+    config.api.auth_required && users.is_empty() && config.api.api_token.trim().is_empty()
+}
+
+/// `GET /api/auth/setup` - is the one-time admin setup still pending?
+/// Open endpoint: it only reports a boolean, and must answer before any
+/// account exists to bootstrap the GUI.
+pub async fn auth_setup_status(State(state): State<AppState>) -> Response {
+    let config = state.config.load_full();
+    Json(serde_json::json!({
+        "setup_pending": setup_pending(&state),
+        "auth_required": config.api.auth_required,
+        "token_auth": !config.api.api_token.trim().is_empty(),
+    }))
+    .into_response()
+}
+
+/// Body of `POST /api/auth/setup`.
+#[derive(Deserialize)]
+pub struct SetupInput {
+    username: String,
+    password: String,
+}
+
+/// `POST /api/auth/setup` - one-time creation of the first admin account.
+///
+/// Open endpoint (it runs before any account exists, which is the point).
+/// It refuses to run once any user is configured or when console auth is
+/// disabled. On success the account is persisted to the config file and a
+/// session for it is returned, so the GUI lands straight in the console.
+pub async fn auth_setup(
+    State(state): State<AppState>,
+    axum::Json(input): axum::Json<SetupInput>,
+) -> Response {
+    let config = state.config.load_full();
+    let existing = match state.catalog.store().list_console_users() {
+        Ok(users) => users,
+        Err(e) => return map_err(e),
+    };
+    if !existing.is_empty() {
+        return error_response(
+            StatusCode::CONFLICT,
+            "setup already completed: an account exists; sign in instead",
+        );
+    }
+    if !config.api.auth_required {
+        return error_response(
+            StatusCode::CONFLICT,
+            "console authentication is disabled; enable api.auth_required first",
+        );
+    }
+    if !config.api.api_token.trim().is_empty() {
+        return error_response(
+            StatusCode::CONFLICT,
+            "auth is managed by a static api_token; remove it to use console accounts",
+        );
+    }
+    drop(config);
+
+    let username = input.username.trim().to_string();
+    if username.is_empty() || username.len() > 64 || username.contains(char::is_whitespace) {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "username must be 1-64 characters with no whitespace",
+        );
+    }
+    if input.password.chars().count() < 8 {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "password must be at least 8 characters",
+        );
+    }
+
+    let password_hash = daygle_dns_core::auth::hash_password(&input.password);
+    if let Err(e) = state.catalog.store().create_console_user(
+        &username,
+        &daygle_dns_authoritative::ConsoleUserInput {
+            password_hash,
+            role: daygle_dns_core::config::Role::Admin,
+            enabled: true,
+        },
+    ) {
+        return map_err(e);
+    }
+
+    let ttl = Duration::from_secs(state.config.load().api.session_ttl_secs.max(60));
+    let token = state.sessions.create(&username, daygle_dns_core::config::Role::Admin, ttl);
+    state.logs.push(
+        daygle_dns_core::LogLevel::Info,
+        "api",
+        format!("initial admin account '{username}' created via console setup"),
+    );
+    Json(serde_json::json!({
+        "token": token,
+        "username": username,
+        "role": "admin",
+        "expires_in_secs": ttl.as_secs(),
+    }))
+    .into_response()
+}
+
+// ---- Console user management (admin only) --------------------------------
+
+/// Guards against demoting, disabling, or deleting the last enabled admin
+/// account, which would permanently lock the console.
+fn last_admin_guard(store: &daygle_dns_authoritative::ZoneStore, target: &str) -> Result<(), Response> {
+    let user = match store.get_console_user(target).map_err(map_err)? {
+        Some(u) => u,
+        None => return Err(error_response(StatusCode::NOT_FOUND, "user not found")),
+    };
+    if user.role == daygle_dns_core::config::Role::Admin && user.enabled {
+        let enabled_admins = store.count_enabled_admins().map_err(map_err)?;
+        if enabled_admins <= 1 {
+            return Err(error_response(
+                StatusCode::CONFLICT,
+                "cannot remove the last enabled admin account",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_username_password(username: &str, password: &str) -> Option<Response> {
+    if username.is_empty() || username.len() > 64 || username.contains(char::is_whitespace) {
+        return Some(error_response(
+            StatusCode::BAD_REQUEST,
+            "username must be 1-64 characters with no whitespace",
+        ));
+    }
+    if password.chars().count() < 8 {
+        return Some(error_response(
+            StatusCode::BAD_REQUEST,
+            "password must be at least 8 characters",
+        ));
+    }
+    None
+}
+
+/// `GET /api/users` - list console accounts (password hashes redacted).
+pub async fn list_users(State(state): State<AppState>) -> Response {
+    match state.catalog.store().list_console_users() {
+        Ok(users) => Json(serde_json::json!(
+            users.iter().map(|u| u.redacted()).collect::<Vec<_>>()
+        ))
+        .into_response(),
+        Err(e) => map_err(e),
+    }
+}
+
+/// Body of `POST /api/users`.
+#[derive(Deserialize)]
+pub struct CreateUserInput {
+    username: String,
+    password: String,
+    role: Option<String>,
+}
+
+/// `POST /api/users` - create a console account (admin role by default).
+pub async fn create_user(
+    State(state): State<AppState>,
+    axum::Json(input): axum::Json<CreateUserInput>,
+) -> Response {
+    let username = input.username.trim().to_string();
+    if let Some(resp) = validate_username_password(&username, &input.password) {
+        return resp;
+    }
+    let role = match input.role.as_deref() {
+        None | Some("admin") => daygle_dns_core::config::Role::Admin,
+        Some("viewer") => daygle_dns_core::config::Role::Viewer,
+        Some(other) => {
+            return error_response(StatusCode::BAD_REQUEST, &format!("unknown role '{other}'"))
+        }
+    };
+    let store = state.catalog.store();
+    let existing = match store.get_console_user(&username) {
+        Ok(u) => u,
+        Err(e) => return map_err(e),
+    };
+    if existing.is_some() {
+        return error_response(StatusCode::CONFLICT, "username already exists");
+    }
+    let user = match store.create_console_user(
+        &username,
+        &daygle_dns_authoritative::ConsoleUserInput {
+            password_hash: daygle_dns_core::auth::hash_password(&input.password),
+            role,
+            enabled: true,
+        },
+    ) {
+        Ok(u) => u,
+        Err(e) => return map_err(e),
+    };
+    state.logs.push(
+        daygle_dns_core::LogLevel::Info,
+        "api",
+        format!("console account '{username}' created"),
+    );
+    Json(serde_json::json!(user.redacted())).into_response()
+}
+
+/// Body of `PATCH /api/users/{username}`.
+#[derive(Deserialize, Default)]
+pub struct UpdateUserInput {
+    password: Option<String>,
+    role: Option<String>,
+    enabled: Option<bool>,
+}
+
+/// `PATCH /api/users/{username}` - reset a password, change a role, or
+/// enable/disable an account. Changes to passwords, roles, or the enabled
+/// flag revoke that account's live sessions.
+pub async fn update_user(
+    State(state): State<AppState>,
+    Path(username): Path<String>,
+    axum::Json(input): axum::Json<UpdateUserInput>,
+) -> Response {
+    let username = username.trim().to_string();
+    let store = state.catalog.store();
+    let existing = match store.get_console_user(&username) {
+        Ok(u) => u,
+        Err(e) => return map_err(e),
+    };
+    if existing.is_none() {
+        return error_response(StatusCode::NOT_FOUND, "user not found");
+    }
+
+    if let Some(password) = &input.password {
+        if let Some(resp) = validate_username_password(&username, password) {
+            return resp;
+        }
+    }
+    let new_role = match input.role.as_deref() {
+        None => None,
+        Some("admin") => Some(daygle_dns_core::config::Role::Admin),
+        Some("viewer") => Some(daygle_dns_core::config::Role::Viewer),
+        Some(other) => {
+            return error_response(StatusCode::BAD_REQUEST, &format!("unknown role '{other}'"))
+        }
+    };
+
+    // Demotion to viewer on the last admin is the same lockout risk as a
+    // deletion, so it goes through the same guard.
+    if new_role == Some(daygle_dns_core::config::Role::Viewer)
+        || input.enabled == Some(false)
+    {
+        if let Err(resp) = last_admin_guard(store, &username) {
+            return resp;
+        }
+    }
+
+    if let Some(password) = &input.password {
+        if let Err(e) =
+            store.set_console_user_password(&username, &daygle_dns_core::auth::hash_password(password))
+        {
+            return map_err(e);
+        }
+    }
+    if let Some(role) = new_role {
+        if let Err(e) = store.set_console_user_role(&username, role) {
+            return map_err(e);
+        }
+    }
+    if let Some(enabled) = input.enabled {
+        if let Err(e) = store.set_console_user_enabled(&username, enabled) {
+            return map_err(e);
+        }
+    }
+
+    // The stored credentials/permissions changed: kill the account's live
+    // sessions so the change takes effect immediately.
+    if input.password.is_some() || new_role.is_some() || input.enabled.is_some() {
+        state.sessions.revoke_user(&username);
+    }
+    let user = match store.get_console_user(&username) {
+        Ok(u) => u.expect("existence checked above"),
+        Err(e) => return map_err(e),
+    };
+    state.logs.push(
+        daygle_dns_core::LogLevel::Info,
+        "api",
+        format!("console account '{username}' updated"),
+    );
+    Json(serde_json::json!(user.redacted())).into_response()
+}
+
+/// `DELETE /api/users/{username}` - remove a console account. The last
+/// enabled admin cannot be deleted.
+pub async fn delete_user(
+    State(state): State<AppState>,
+    Path(username): Path<String>,
+) -> Response {
+    let username = username.trim().to_string();
+    let store = state.catalog.store();
+    if let Err(resp) = last_admin_guard(store, &username) {
+        return resp;
+    }
+    let deleted = match store.delete_console_user(&username) {
+        Ok(d) => d,
+        Err(e) => return map_err(e),
+    };
+    if !deleted {
+        return error_response(StatusCode::NOT_FOUND, "user not found");
+    }
+    state.sessions.revoke_user(&username);
+    state.logs.push(
+        daygle_dns_core::LogLevel::Info,
+        "api",
+        format!("console account '{username}' deleted"),
+    );
+    StatusCode::NO_CONTENT.into_response()
 }
 
 // ---- Settings update -----------------------------------------------------
@@ -1713,9 +2202,15 @@ pub async fn update_settings(
         return response;
     }
 
-    // Persist to the config file when its path is known, then publish live.
-    if let Err((status, message)) = persist_config(&state, &config) {
-        return error_response(status, message);
+    // Persist the DB-owned runtime settings to the database, then publish
+    // live. (The config file is no longer rewritten: it holds bootstrap
+    // values only, and the DB overlay wins over it on every boot.)
+    if let Err(e) = state
+        .catalog
+        .store()
+        .put_runtime_settings(&daygle_dns_core::config::RuntimeSettings::capture(&config))
+    {
+        return map_err(e);
     }
 
     // Publish live, then ask for a listener rebuild when needed.

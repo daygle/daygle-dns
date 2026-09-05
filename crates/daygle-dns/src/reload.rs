@@ -36,6 +36,9 @@ pub struct Shared {
     pub advanced_blocking: Arc<ArcSwap<AdvancedBlocking>>,
     /// Persistent query logger; `None` unless `logging.query_log_enabled`.
     pub query_logger: Option<Arc<daygle_dns_core::QueryLogger>>,
+    /// SQLite query-log sink feeding the console's Query Logs view; `None`
+    /// unless `logging.query_db_enabled`.
+    pub query_db_logger: Option<Arc<crate::query_db_log::QueryDbLogger>>,
     pub resolver: Arc<ArcSwapOption<RecursiveResolver>>,
     pub config: Arc<ArcSwap<DaygleConfig>>,
     pub rate_limiter: Arc<RateLimiter>,
@@ -157,7 +160,25 @@ pub fn spawn_watcher(
             last_mtime = mtime;
 
             let new = match DaygleConfig::load(path.as_ref()) {
-                Ok(cfg) => cfg,
+                Ok(mut cfg) => {
+                    // The database overlay owns the console-managed runtime
+                    // settings: re-apply it so an external file edit cannot
+                    // silently revert GUI-made changes.
+                    if let Ok(Some(overlay)) = shared
+                        .catalog
+                        .store()
+                        .get_runtime_settings::<daygle_dns_core::config::RuntimeSettings>()
+                    {
+                        overlay.apply_to(&mut cfg);
+                        if let Err(e) = cfg.validate() {
+                            warn!(
+                                "config reload produced an invalid configuration, keeping previous: {e}"
+                            );
+                            continue;
+                        }
+                    }
+                    cfg
+                }
                 Err(e) => {
                     warn!("config reload failed, keeping previous configuration: {e}");
                     continue;
@@ -288,6 +309,7 @@ mod tests {
             policy: Arc::new(ArcSwap::from_pointee(PolicyEngine::new(false))),
             advanced_blocking: Arc::new(ArcSwap::from_pointee(AdvancedBlocking::default())),
             query_logger: None,
+            query_db_logger: None,
             resolver: Arc::new(ArcSwapOption::empty()),
             config: Arc::new(ArcSwap::from(Arc::new(cfg))),
             rate_limiter: Arc::new(RateLimiter::default()),

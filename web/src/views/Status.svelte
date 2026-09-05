@@ -1,5 +1,6 @@
 <script>
   import { api, formatApiError, formatUptime } from '../api.js';
+  import { formatTime, formatTimeShort } from '../datetime.svelte.js';
 
   let status = $state(null);
   let metrics = $state(null);
@@ -89,10 +90,7 @@
       .filter(({ i }) => i % every === 0)
       .map(({ i, t }) => ({
         x: x(i),
-        label: new Date(t * 1000).toLocaleTimeString([], {
-          hour: '2-digit',
-          minute: '2-digit',
-        }),
+        label: formatTimeShort(t * 1000),
       }));
     const grid = [0, 0.25, 0.5, 0.75, 1].map((f) => ({
       y: y(maxY * f),
@@ -144,7 +142,7 @@
     return n.toLocaleString();
   }
   function clockLabel(t) {
-    return new Date(t * 1000).toLocaleTimeString();
+    return formatTime(t * 1000);
   }
 </script>
 

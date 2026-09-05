@@ -5,6 +5,7 @@
 //! runnable server. The `daygle-dns` binary is a thin CLI wrapper around this.
 
 pub mod dispatcher;
+pub mod query_db_log;
 pub mod reload;
 
 use std::path::PathBuf;
@@ -88,7 +89,18 @@ impl BoundServer {
                 "live reload is unavailable: no config file path".to_string(),
             ));
         };
-        let new = DaygleConfig::load(&path)?;
+        let mut new = DaygleConfig::load(&path)?;
+        // The DB overlay owns the console-managed runtime settings: re-apply
+        // it so a file edit cannot silently revert GUI-made changes.
+        if let Ok(Some(overlay)) = self
+            .shared
+            .catalog
+            .store()
+            .get_runtime_settings::<daygle_dns_core::config::RuntimeSettings>()
+        {
+            overlay.apply_to(&mut new);
+            new.validate()?;
+        }
         let changed = apply_config(&self.shared, Arc::new(new));
 
         if changed {
@@ -157,6 +169,61 @@ pub async fn bind_with(
     catalog.reload()?;
     import_zone_files(&catalog, &config, &logs)?;
 
+    // DB-backed runtime settings: the TOML file supplies bootstrap values
+    // (listeners, addresses, ports, paths); everything the console edits
+    // lives in the database and wins over the file on every boot. On first
+    // boot (nothing stored yet) the file's values are seeded into the DB so
+    // file-based installs transition seamlessly.
+    let mut config = Arc::unwrap_or_clone(config);
+    match store.get_runtime_settings::<daygle_dns_core::config::RuntimeSettings>()? {
+        Some(overlay) => {
+            // No `validate()` here: `bind` accepts pre-validated configs and
+            // test setups legitimately keep ephemeral port 0. The overlay was
+            // validated when it was captured (console saves run validate).
+            overlay.apply_to(&mut config);
+        }
+        None => {
+            store.put_runtime_settings(&daygle_dns_core::config::RuntimeSettings::capture(&config))?;
+            logs.push(
+                daygle_dns_core::LogLevel::Info,
+                "api",
+                "runtime settings seeded into the database from the config file".to_string(),
+            );
+        }
+    }
+    // Note: no `validate()` here - `bind` accepts pre-validated configs, and
+    // test setups legitimately use ephemeral port 0.
+    let config = Arc::new(config);
+
+    // Console accounts live in the database (the GUI manages them at
+    // runtime). `[[api.users]]` entries in the config file are a seed source:
+    // they are imported on startup unless the same username already exists in
+    // the database, so config-managed accounts keep working while DB-created
+    // accounts survive config rewrites.
+    {
+        let mut seeded = 0usize;
+        for user in &config.api.users {
+            if store.get_console_user(&user.username)?.is_none() {
+                store.create_console_user(
+                    &user.username,
+                    &daygle_dns_authoritative::ConsoleUserInput {
+                        password_hash: user.password_hash.clone(),
+                        role: user.role,
+                        enabled: true,
+                    },
+                )?;
+                seeded += 1;
+            }
+        }
+        if seeded > 0 {
+            logs.push(
+                daygle_dns_core::LogLevel::Info,
+                "api",
+                format!("imported {seeded} console account(s) from the config file"),
+            );
+        }
+    }
+
     // DNSSEC maintenance: renews RRSIGs before they expire and rolls keys
     // on schedule, so signed zones never go bogus.
     if config.authoritative.dnssec_enabled {
@@ -178,7 +245,7 @@ pub async fn bind_with(
     // trigger immediate refreshes (RFC 1996).
     let refresher = {
         let refresher = Arc::new(daygle_dns_authoritative::SecondaryRefresher::new(
-            store,
+            store.clone(),
             catalog.clone(),
             config.authoritative.secondary_zones.clone(),
             daygle_dns_authoritative::XfrClient::default(),
@@ -258,6 +325,18 @@ pub async fn bind_with(
         None
     };
 
+    // SQLite-backed query log for the console's Query Logs view (search,
+    // filter, paginate, export). The sink batches writes off the query path.
+    let query_db_logger = if config.logging.query_db_enabled {
+        Some(Arc::new(crate::query_db_log::QueryDbLogger::spawn(
+            store.clone(),
+            config.logging.query_db_max_rows,
+            shutdown.clone(),
+        )))
+    } else {
+        None
+    };
+
     // Rate limiting (per client + per domain).
     let rate_limiter = Arc::new(RateLimiter::new(&config.rate_limit));
 
@@ -275,6 +354,7 @@ pub async fn bind_with(
         policy: Arc::new(ArcSwap::from_pointee(policy)),
         advanced_blocking: advanced_blocking.clone(),
         query_logger: query_logger.clone(),
+        query_db_logger: query_db_logger.clone(),
         resolver: Arc::new(arc_swap::ArcSwapOption::from(resolver.clone())),
         config: Arc::new(ArcSwap::from(config.clone())),
         rate_limiter: rate_limiter.clone(),
@@ -298,7 +378,8 @@ pub async fn bind_with(
         stats.clone(),
     )
     .with_advanced_blocking(shared.advanced_blocking.clone())
-    .with_query_logger(shared.query_logger.clone());
+    .with_query_logger(shared.query_logger.clone())
+    .with_query_db_logger(shared.query_db_logger.clone());
     let mut server = Server::new(dispatcher);
     let mut initial_addrs = ListenerAddrs::default();
     bind_listeners(&config, &mut server, &mut initial_addrs).await?;
@@ -452,7 +533,8 @@ async fn start_listeners(
         shared.stats.clone(),
     )
     .with_advanced_blocking(shared.advanced_blocking.clone())
-    .with_query_logger(shared.query_logger.clone());
+    .with_query_logger(shared.query_logger.clone())
+    .with_query_db_logger(shared.query_db_logger.clone());
     let mut server = Server::new(dispatcher);
     let mut snapshot = ListenerAddrs::default();
     bind_listeners(&config, &mut server, &mut snapshot).await?;
@@ -544,7 +626,8 @@ async fn start_listeners_with(
         shared.stats.clone(),
     )
     .with_advanced_blocking(shared.advanced_blocking.clone())
-    .with_query_logger(shared.query_logger.clone());
+    .with_query_logger(shared.query_logger.clone())
+    .with_query_db_logger(shared.query_db_logger.clone());
     let mut server = Server::new(dispatcher);
     let mut snapshot = ListenerAddrs::default();
     bind_listeners(config, &mut server, &mut snapshot).await?;

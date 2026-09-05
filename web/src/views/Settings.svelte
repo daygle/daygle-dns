@@ -1,5 +1,6 @@
 <script>
   import { api, formatApiError } from '../api.js';
+  import { prefs, setDateTimePrefs, timeZoneOptions, FORMAT_OPTIONS, formatDateTime } from '../datetime.svelte.js';
 
   let config = $state(null);
   let notice = $state(null);
@@ -14,6 +15,15 @@
   let doq = $state({});
   let api_ = $state({});
   let upstreamText = $state('');
+
+  // Local copies of the display preferences (saved instantly on change).
+  let tzDraft = $state(prefs.tz);
+  let formatDraft = $state(prefs.format);
+  const zoneChoices = timeZoneOptions();
+
+  function applyDisplayPrefs() {
+    setDateTimePrefs({ tz: tzDraft, format: formatDraft });
+  }
 
   $effect(() => {
     load();
@@ -110,7 +120,7 @@
         },
       };
       await api.updateSettings(body);
-      notice = 'Settings saved: applied live and persisted to the config file.';
+      notice = 'Settings saved: applied live and stored in the database.';
       await load();
     } catch (e) {
       error = formatApiError(e);
@@ -197,16 +207,36 @@
   </div>
 
   <div class="card" style="margin-bottom: 14px">
+    <h3 style="margin-top: 0">Display</h3>
+    <div class="form-grid">
+      <label><span>Time Zone</span>
+        <select bind:value={tzDraft} onchange={applyDisplayPrefs}>
+          {#each zoneChoices as [value, label]}<option value={value}>{label}</option>{/each}
+        </select>
+      </label>
+      <label><span>Date & Time Format</span>
+        <select bind:value={formatDraft} onchange={applyDisplayPrefs}>
+          {#each FORMAT_OPTIONS as [value, label]}<option value={value}>{label}</option>{/each}
+        </select>
+      </label>
+    </div>
+    <p class="muted" style="font-size: 0.85rem; margin-bottom: 0">
+      Example with the current choice: <strong>{formatDateTime(new Date())}</strong>. Display
+      preferences are per browser and apply everywhere dates and times are shown.
+    </p>
+  </div>
+
+  <div class="card" style="margin-bottom: 14px">
     <h3 style="margin-top: 0">Console</h3>
     <div class="form-grid">
       <label class="check"><input type="checkbox" bind:checked={api_.gui_enabled} /> <span>Serve the Web GUI</span></label>
     </div>
     <p class="muted" style="font-size: 0.85rem">
-      Login accounts, the API token, zone signing and remote blocklist sources
-      are edited in <code>daygle-dns.toml</code>. Manage trusted and blocked
-      domains from the Domain Lists page. Other advanced options likewise.
-      Changes here are validated first - an invalid value is rejected and
-      nothing is applied.
+      The settings on this page are stored in the server database and survive
+      restarts. Bootstrap options (listen addresses, ports, certificate paths,
+      login accounts and zone signing) are edited in
+      <code>daygle-dns.toml</code>. Changes here are validated first - an
+      invalid value is rejected and nothing is applied.
     </p>
   </div>
 {:else}

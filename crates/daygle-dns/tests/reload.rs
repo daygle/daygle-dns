@@ -75,22 +75,23 @@ async fn reloads_policy_and_listeners_without_restart() {
     let msg = udp_query(old_udp, "blocked.example.", RecordType::A).await;
     assert_eq!(msg.response_code, ResponseCode::Refused);
 
-    // Edit the file: new port plus a blocklist entry.
+    // Edit the file: a new listener port (file-owned) plus a blocklist
+    // entry (DB-owned - the overlay must win over the file, so this entry
+    // is expected to be ignored).
     cfg.server.port = port_b;
     cfg.policy.blocklist = vec!["blocked.example".to_string()];
     write_config(&cfg_path, &cfg);
 
     server.reload().await.expect("reload");
 
-    // The new listener is live and the blocklist is in effect.
+    // The new listener is live (listener ports stay file-owned).
     let new_udp = server.addrs().udp.expect("UDP rebound");
     assert_eq!(new_udp.port(), port_b);
-    let blocked = udp_query(new_udp, "blocked.example.", RecordType::A).await;
-    assert_eq!(blocked.response_code, ResponseCode::NXDomain);
 
-    // Unblocked names still fall through (REFUSED, recursion off).
-    let other = udp_query(new_udp, "allowed.example.", RecordType::A).await;
-    assert_eq!(other.response_code, ResponseCode::Refused);
+    // The file's blocklist entry was overridden by the DB overlay (which
+    // holds the blocklist from first boot: empty), so the name is not blocked.
+    let not_blocked = udp_query(new_udp, "blocked.example.", RecordType::A).await;
+    assert_eq!(not_blocked.response_code, ResponseCode::Refused);
 
     // The old listener is gone.
     assert!(expect_no_udp_response(old_udp, Duration::from_millis(400)).await);
@@ -118,6 +119,16 @@ async fn reloads_recursive_upstreams() {
     cfg.doh.port = free_port().await;
     cfg.api.port = free_port().await;
     write_config(&cfg_path, &cfg);
+    // Upstreams are a DB-owned runtime setting: seed the DB with the values
+    // the file would have supplied on first boot.
+    let seed_db = dir.path().join("daygle-dns.db");
+    let store = daygle_dns_authoritative::ZoneStore::open(seed_db.to_string_lossy().as_ref()).unwrap();
+    let mut cfg_for_db = DaygleConfig::load(&cfg_path).unwrap();
+    cfg_for_db.recursive.upstreams = vec![up_a.to_string()];
+    store
+        .put_runtime_settings(&daygle_dns_core::config::RuntimeSettings::capture(&cfg_for_db))
+        .unwrap();
+    drop(store);
 
     let server = bind_with(
         Arc::new(DaygleConfig::load(&cfg_path).unwrap()),
@@ -131,9 +142,18 @@ async fn reloads_recursive_upstreams() {
     let msg = udp_query(udp, "host.a.test.", RecordType::A).await;
     assert_eq!(first_answer(&msg).as_deref(), Some("198.51.100.1"));
 
-    // Switch to upstream B.
+    // Switch to upstream B by updating the DB-owned runtime settings
+    // (as the console does). The file's copy is irrelevant now.
     cfg.recursive.upstreams = vec![up_b.to_string()];
     write_config(&cfg_path, &cfg);
+    let store = daygle_dns_authoritative::ZoneStore::open(
+        dir.path().join("daygle-dns.db").to_string_lossy().as_ref(),
+    )
+    .unwrap();
+    store
+        .put_runtime_settings(&daygle_dns_core::config::RuntimeSettings::capture(&cfg))
+        .unwrap();
+    drop(store);
     server.reload().await.expect("reload");
 
     let msg = udp_query(udp, "host.b.test.", RecordType::A).await;
@@ -170,19 +190,29 @@ async fn watches_config_file_and_applies_edits() {
     let msg = udp_query(udp, "watched.example.", RecordType::A).await;
     assert_eq!(msg.response_code, ResponseCode::Refused);
 
-    // Edit the file: the watcher should pick this up on its own.
+    // Edit the file: change the listener port (file-owned) and add a
+    // blocklist entry (DB-owned, so the watcher must NOT apply it).
+    let port_b = free_port().await;
+    cfg.server.port = port_b;
     cfg.policy.blocklist = vec!["watched.example".to_string()];
     write_config(&cfg_path, &cfg);
 
+    // The watcher picks up the file edit on its own; the listener port
+    // changes once it does.
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
-        let msg = udp_query(udp, "watched.example.", RecordType::A).await;
-        if msg.response_code == ResponseCode::NXDomain {
+        let bound = server.addrs().udp.expect("UDP enabled");
+        if bound.port() == port_b {
             break;
         }
         assert!(Instant::now() < deadline, "watcher did not apply the edit in time");
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
+
+    // The DB overlay wins: the file's blocklist entry is not applied.
+    let new_udp = server.addrs().udp.expect("UDP enabled");
+    let msg = udp_query(new_udp, "watched.example.", RecordType::A).await;
+    assert_eq!(msg.response_code, ResponseCode::Refused);
 
     shutdown(server).await;
 }

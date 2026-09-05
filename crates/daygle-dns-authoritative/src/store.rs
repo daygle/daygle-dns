@@ -3,7 +3,8 @@
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-use chrono::Utc;
+use chrono::{Utc};
+use serde::{Deserialize, Serialize};
 use hickory_proto::rr::{RData, RecordType};
 use rusqlite::{params, Connection, OptionalExtension};
 use uuid::Uuid;
@@ -15,6 +16,7 @@ use crate::model::{
 };
 use crate::validate_name;
 use daygle_dns_core::blocking::{BlockingGroup, BlockingGroupInput};
+use daygle_dns_core::config::Role;
 use daygle_dns_core::error::{DaygleError, Result};
 
 /// Every zone paired with its records and signing keys, as consumed by the
@@ -113,6 +115,35 @@ CREATE TABLE IF NOT EXISTS blocking_groups (
     response    TEXT NOT NULL DEFAULT '{"kind":"nx_domain"}',
     position    INTEGER NOT NULL DEFAULT 0
 );
+
+CREATE TABLE IF NOT EXISTS console_users (
+    username      TEXT PRIMARY KEY,
+    password_hash TEXT NOT NULL,
+    role          TEXT NOT NULL DEFAULT 'admin',
+    enabled       INTEGER NOT NULL DEFAULT 1,
+    created_at    TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS runtime_settings (
+    name  TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS query_logs (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts         TEXT NOT NULL,
+    client     TEXT NOT NULL,
+    qname      TEXT NOT NULL,
+    qtype      TEXT NOT NULL,
+    protocol   TEXT NOT NULL,
+    outcome    TEXT NOT NULL,
+    rcode      TEXT,
+    elapsed_ms INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS idx_query_logs_ts ON query_logs (ts DESC);
+CREATE INDEX IF NOT EXISTS idx_query_logs_qname ON query_logs (qname);
+CREATE INDEX IF NOT EXISTS idx_query_logs_client ON query_logs (client);
 "#;
 
 /// SQLite-backed storage for zones and records.
@@ -1176,6 +1207,446 @@ fn row_to_blocking_group(row: &rusqlite::Row<'_>) -> rusqlite::Result<BlockingGr
 /// Increment a zone's SOA serial by one (wrapping, never landing on 0).
 /// Works against either a plain [`Connection`] or a transaction (which derefs
 /// to `Connection`), so the bump can share the caller's transaction.
+/// Build a [`ConsoleUser`] from a `console_users` row.
+fn row_to_console_user(row: &rusqlite::Row<'_>) -> rusqlite::Result<ConsoleUser> {
+    let role: String = row.get(2)?;
+    Ok(ConsoleUser {
+        username: row.get(0)?,
+        password_hash: row.get(1)?,
+        role: match role.as_str() {
+            "viewer" => Role::Viewer,
+            _ => Role::Admin,
+        },
+        enabled: row.get::<_, i64>(3)? != 0,
+        created_at: row.get(4)?,
+    })
+}
+
+/// A console account (no password): what the admin UI and login responses see.
+#[derive(Debug, Clone, Serialize)]
+pub struct ConsoleUser {
+    pub username: String,
+    pub password_hash: String,
+    pub role: Role,
+    pub enabled: bool,
+    pub created_at: String,
+}
+
+impl ConsoleUser {
+    /// The account as the admin UI should see it: password material redacted.
+    pub fn redacted(&self) -> Self {
+        Self {
+            password_hash: "[redacted]".to_string(),
+            ..self.clone()
+        }
+    }
+}
+
+/// Input for creating or updating a console account.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ConsoleUserInput {
+    pub password_hash: String,
+    pub role: Role,
+    #[serde(default)]
+    pub enabled: bool,
+}
+
+// ---- Console users (login accounts) ------------------------------------
+
+impl ZoneStore {
+    /// List every console account ordered by username.
+    pub fn list_console_users(&self) -> Result<Vec<ConsoleUser>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT username, password_hash, role, enabled, created_at
+             FROM console_users ORDER BY username",
+        )?;
+        let rows = stmt.query_map([], row_to_console_user)?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    /// Count enabled admin accounts (used by the last-admin guard).
+    pub fn count_enabled_admins(&self) -> Result<usize> {
+        let conn = self.conn.lock().unwrap();
+        let n: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM console_users WHERE role = 'admin' AND enabled = 1",
+            [],
+            |r| r.get(0),
+        )?;
+        Ok(n as usize)
+    }
+
+    pub fn get_console_user(&self, username: &str) -> Result<Option<ConsoleUser>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT username, password_hash, role, enabled, created_at
+             FROM console_users WHERE username = ?1",
+            [username],
+            row_to_console_user,
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    /// Create a console account. The password must already be hashed.
+    pub fn create_console_user(
+        &self,
+        username: &str,
+        input: &ConsoleUserInput,
+    ) -> Result<ConsoleUser> {
+        validate_username(username)?;
+        let user = ConsoleUser {
+            username: username.to_string(),
+            password_hash: input.password_hash.clone(),
+            role: input.role,
+            enabled: input.enabled,
+            created_at: Utc::now().to_rfc3339(),
+        };
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO console_users (username, password_hash, role, enabled, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(username) DO UPDATE SET
+                password_hash = excluded.password_hash,
+                role = excluded.role,
+                enabled = excluded.enabled,
+                created_at = excluded.created_at",
+            params![
+                user.username,
+                user.password_hash,
+                user.role.as_str(),
+                user.enabled as i64,
+                user.created_at
+            ],
+        )?;
+        Ok(user)
+    }
+
+    /// Set a console account's stored password hash.
+    pub fn set_console_user_password(&self, username: &str, password_hash: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let n = conn.execute(
+            "UPDATE console_users SET password_hash = ?2 WHERE username = ?1",
+            params![username, password_hash],
+        )?;
+        if n == 0 {
+            return Err(DaygleError::Config(format!("user '{username}' not found")));
+        }
+        Ok(())
+    }
+
+    /// Change a console account's role.
+    pub fn set_console_user_role(&self, username: &str, role: Role) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let n = conn.execute(
+            "UPDATE console_users SET role = ?2 WHERE username = ?1",
+            params![username, role.as_str()],
+        )?;
+        if n == 0 {
+            return Err(DaygleError::Config(format!("user '{username}' not found")));
+        }
+        Ok(())
+    }
+
+    /// Enable or disable a console account. Disabled accounts cannot log in.
+    pub fn set_console_user_enabled(&self, username: &str, enabled: bool) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let n = conn.execute(
+            "UPDATE console_users SET enabled = ?2 WHERE username = ?1",
+            params![username, enabled as i64],
+        )?;
+        if n == 0 {
+            return Err(DaygleError::Config(format!("user '{username}' not found")));
+        }
+        Ok(())
+    }
+
+    /// Delete a console account. Returns whether a row was removed.
+    pub fn delete_console_user(&self, username: &str) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let n = conn.execute("DELETE FROM console_users WHERE username = ?1", [username])?;
+        Ok(n > 0)
+    }
+
+    /// The username of the first enabled admin, or `None` (used to guard
+    /// against demoting/disabling/deleting the last admin).
+    pub fn first_enabled_admin(&self) -> Result<Option<String>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT username FROM console_users
+             WHERE role = 'admin' AND enabled = 1 ORDER BY created_at, username LIMIT 1",
+            [],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+}
+
+fn validate_username(username: &str) -> Result<()> {
+    if username.is_empty() || username.len() > 64 || username.contains(char::is_whitespace) {
+        return Err(DaygleError::Config(
+            "username must be 1-64 characters with no whitespace".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+// ---- Runtime settings (DB-backed overlay) -------------------------------
+
+impl ZoneStore {
+    /// Read the DB-backed runtime settings, deserialized into `T`.
+    /// `Ok(None)` when nothing has been persisted yet (first boot).
+    pub fn get_runtime_settings<T: serde::de::DeserializeOwned>(&self) -> Result<Option<T>> {
+        let conn = self.conn.lock().unwrap();
+        let text: Option<String> = conn
+            .query_row(
+                "SELECT value FROM runtime_settings WHERE name = 'runtime'",
+                [],
+                |r| r.get(0),
+            )
+            .optional()?;
+        match text {
+            None => Ok(None),
+            Some(text) => serde_json::from_str(&text)
+                .map(Some)
+                .map_err(|e| {
+                    DaygleError::Config(format!("stored runtime settings are invalid: {e}"))
+                }),
+        }
+    }
+
+    /// Persist the DB-backed runtime settings, replacing any previous value.
+    pub fn put_runtime_settings<T: serde::Serialize>(&self, settings: &T) -> Result<()> {
+        let text =
+            serde_json::to_string(settings)
+                .map_err(|e| DaygleError::Config(format!("cannot serialize settings: {e}")))?;
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO runtime_settings (name, value) VALUES ('runtime', ?1)
+             ON CONFLICT(name) DO UPDATE SET value = excluded.value",
+            params![text],
+        )?;
+        Ok(())
+    }
+}
+
+// ---- Query logs (searchable per-query history) ---------------------------
+
+/// One recorded query: a row of the searchable query log.
+#[derive(Debug, Clone, Serialize)]
+pub struct QueryLogRow {
+    pub id: i64,
+    /// RFC 3339 timestamp.
+    pub ts: String,
+    pub client: String,
+    pub qname: String,
+    pub qtype: String,
+    /// Transport: `udp`, `tcp`, `tls`, `https`, `quic`, `h3`.
+    pub protocol: String,
+    /// Outcome classification (`authoritative`, `recursive`, `blocked`, ...).
+    pub outcome: String,
+    /// Response code (`NOERROR`, `NXDOMAIN`, ...) when known.
+    pub rcode: Option<String>,
+    pub elapsed_ms: i64,
+}
+
+/// Filters for [`ZoneStore::search_query_logs`]; `None`/empty means unfiltered.
+#[derive(Debug, Clone, Default)]
+pub struct QueryLogFilter {
+    pub client: Option<String>,
+    /// Exact qname, or a `*`-wildcard / substring pattern.
+    pub qname: Option<String>,
+    pub qtype: Option<String>,
+    pub protocol: Option<String>,
+    pub outcome: Option<String>,
+    pub rcode: Option<String>,
+    /// Inclusive lower bound (RFC 3339).
+    pub from: Option<String>,
+    /// Inclusive upper bound (RFC 3339).
+    pub to: Option<String>,
+    /// 1-based page (default 1).
+    pub page: Option<u32>,
+    /// Rows per page (default 50, max 500).
+    pub per_page: Option<u32>,
+}
+
+/// Escape a LIKE pattern so user input matches literally, then translate a
+/// leading or trailing `*` into a `%` wildcard. Plain input becomes a
+/// substring match, matching how the GUI search box feels.
+fn qname_like_pattern(raw: &str) -> String {
+    let trimmed = raw.trim().trim_end_matches('.').to_ascii_lowercase();
+    if trimmed.is_empty() {
+        return "%".to_string();
+    }
+    let escaped = trimmed
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_");
+    if let Some(stripped) = escaped.strip_prefix('*') {
+        format!("%{}", stripped)
+    } else if let Some(stripped) = escaped.strip_suffix('*') {
+        format!("{}%", stripped)
+    } else {
+        format!("%{}%", escaped)
+    }
+}
+
+impl ZoneStore {
+    /// Append one query-log entry.
+    pub fn insert_query_log(&self, entry: &QueryLogRow) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO query_logs (ts, client, qname, qtype, protocol, outcome, rcode, elapsed_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                entry.ts,
+                entry.client,
+                entry.qname,
+                entry.qtype,
+                entry.protocol,
+                entry.outcome,
+                entry.rcode,
+                entry.elapsed_ms,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Append many entries in one transaction (the background writer's bulk path).
+    pub fn insert_query_logs(&self, entries: &[QueryLogRow]) -> Result<()> {
+        if entries.is_empty() {
+            return Ok(());
+        }
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        for entry in entries {
+            tx.execute(
+                "INSERT INTO query_logs (ts, client, qname, qtype, protocol, outcome, rcode, elapsed_ms)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![
+                    entry.ts,
+                    entry.client,
+                    entry.qname,
+                    entry.qtype,
+                    entry.protocol,
+                    entry.outcome,
+                    entry.rcode,
+                    entry.elapsed_ms,
+                ],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Search the query log with filters and pagination. Returns the page of
+    /// rows (newest first) plus the total count under the same filter.
+    pub fn search_query_logs(&self, filter: &QueryLogFilter) -> Result<(Vec<QueryLogRow>, u64)> {
+        let mut wheres: Vec<String> = vec![];
+        let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = vec![];
+        if let Some(client) = filter.client.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            params_vec.push(Box::new(client.to_string()));
+            wheres.push(format!("client = ?{}", params_vec.len()));
+        }
+        if let Some(qname) = filter.qname.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            params_vec.push(Box::new(qname_like_pattern(qname)));
+            wheres.push(format!("qname LIKE ?{} ESCAPE '\\'", params_vec.len()));
+        }
+        for (value, column) in [
+            (filter.qtype.as_deref(), "qtype"),
+            (filter.protocol.as_deref(), "protocol"),
+            (filter.outcome.as_deref(), "outcome"),
+            (filter.rcode.as_deref(), "rcode"),
+        ] {
+            if let Some(v) = value.map(str::trim).filter(|s| !s.is_empty()) {
+                params_vec.push(Box::new(v.to_string()));
+                wheres.push(format!("{column} = ?{}", params_vec.len()));
+            }
+        }
+        if let Some(from) = filter.from.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            params_vec.push(Box::new(from.to_string()));
+            wheres.push(format!("ts >= ?{}", params_vec.len()));
+        }
+        if let Some(to) = filter.to.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            params_vec.push(Box::new(to.to_string()));
+            wheres.push(format!("ts <= ?{}", params_vec.len()));
+        }
+        let where_clause = if wheres.is_empty() {
+            String::new()
+        } else {
+            format!("WHERE {}", wheres.join(" AND "))
+        };
+
+        let per_page = filter.per_page.unwrap_or(50).clamp(1, 500);
+        let page = filter.page.unwrap_or(1).max(1);
+        let offset = (page - 1).saturating_mul(per_page);
+
+        let params_ref: Vec<&dyn rusqlite::ToSql> =
+            params_vec.iter().map(|p| p.as_ref()).collect();
+        let conn = self.conn.lock().unwrap();
+        let count: u64 = conn.query_row(
+            &format!("SELECT COUNT(*) FROM query_logs {where_clause}"),
+            rusqlite::params_from_iter(params_ref.iter().copied()),
+            |r| r.get::<_, i64>(0),
+        )? as u64;
+        let mut stmt = conn.prepare(&format!(
+            "SELECT id, ts, client, qname, qtype, protocol, outcome, rcode, elapsed_ms
+             FROM query_logs {where_clause}
+             ORDER BY id DESC LIMIT {per_page} OFFSET {offset}"
+        ))?;
+        let rows = stmt
+            .query_map(
+                rusqlite::params_from_iter(params_ref.iter().copied()),
+                |r| {
+                    Ok(QueryLogRow {
+                        id: r.get(0)?,
+                        ts: r.get(1)?,
+                        client: r.get(2)?,
+                        qname: r.get(3)?,
+                        qtype: r.get(4)?,
+                        protocol: r.get(5)?,
+                        outcome: r.get(6)?,
+                        rcode: r.get(7)?,
+                        elapsed_ms: r.get(8)?,
+                    })
+                },
+            )?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok((rows, count))
+    }
+
+    /// Delete every query-log row (the console's Clear button). Returns the
+    /// number of deleted rows.
+    pub fn clear_query_logs(&self) -> Result<usize> {
+        let conn = self.conn.lock().unwrap();
+        Ok(conn.execute("DELETE FROM query_logs", [])?)
+    }
+
+    /// Enforce the retention cap by deleting rows beyond the newest `max`
+    /// (0 disables the cap). Called opportunistically by the log writer.
+    pub fn trim_query_logs(&self, max: usize) -> Result<usize> {
+        if max == 0 {
+            return Ok(0);
+        }
+        let conn = self.conn.lock().unwrap();
+        // The id of the row just past the kept window: everything at or below
+        // it is surplus. (A single DELETE with subqueries on the same table is
+        // unsafe here: SQLite may re-evaluate them mid-scan as rows vanish.)
+        let cutoff: Option<i64> = conn
+            .query_row(
+                "SELECT id FROM query_logs ORDER BY id DESC LIMIT 1 OFFSET ?1",
+                [max as i64],
+                |r| r.get(0),
+            )
+            .optional()?;
+        match cutoff {
+            Some(cutoff) => Ok(conn.execute("DELETE FROM query_logs WHERE id <= ?1", [cutoff])?),
+            None => Ok(0),
+        }
+    }
+}
+
 /// Render a zone as a BIND-style zone file (used by the export API).
 ///
 /// The SOA is emitted from the zone row; every record follows in

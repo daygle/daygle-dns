@@ -250,7 +250,7 @@
 <p class="muted" style="max-width: 75ch">
   Fetch remote blocklists (domain lists, hosts files or adblock filters) and
   merge them into the blocklist. Add, edit and remove sources below - changes
-  are saved to <code>daygle-dns.toml</code> and applied to the running server
+  are stored in the server database and applied to the running server
   immediately. Sources are validated before they are saved.
 </p>
 

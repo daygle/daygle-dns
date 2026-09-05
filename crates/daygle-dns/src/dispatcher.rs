@@ -51,6 +51,9 @@ pub struct DnsDispatcher {
     /// Persistent per-query logger (daily JSON-lines files). `None` unless
     /// `logging.query_log_enabled`; best-effort, never blocks a response.
     query_logger: Option<Arc<daygle_dns_core::QueryLogger>>,
+    /// Async SQLite query-log sink feeding the console's searchable Query
+    /// Logs view. `None` unless `logging.query_db_enabled`; best-effort.
+    query_db_logger: Option<Arc<crate::query_db_log::QueryDbLogger>>,
 }
 
 impl DnsDispatcher {
@@ -107,6 +110,7 @@ impl DnsDispatcher {
             tsig_keys,
             stats: None,
             query_logger: None,
+            query_db_logger: None,
         }
     }
 
@@ -136,6 +140,7 @@ impl DnsDispatcher {
             tsig_keys,
             stats: Some(stats),
             query_logger: None,
+            query_db_logger: None,
         }
     }
 
@@ -144,6 +149,17 @@ impl DnsDispatcher {
     /// or fails a response.
     pub fn with_query_logger(mut self, query_logger: Option<Arc<daygle_dns_core::QueryLogger>>) -> Self {
         self.query_logger = query_logger;
+        self
+    }
+
+    /// Attach the async SQLite query-log sink backing the console's Query
+    /// Logs view. Best-effort: a full queue drops entries rather than
+    /// blocking a DNS response.
+    pub fn with_query_db_logger(
+        mut self,
+        query_db_logger: Option<Arc<crate::query_db_log::QueryDbLogger>>,
+    ) -> Self {
+        self.query_db_logger = query_db_logger;
         self
     }
 
@@ -212,20 +228,49 @@ impl DnsDispatcher {
         }
     }
 
-    /// Record a served query into both the dashboard statistics and the
-    /// persistent query log in one call (used by the branches that decide the
-    /// outcome and response code up front).
+    /// Queue one served query into the SQLite-backed query log (no-op when
+    /// the sink is absent). `protocol` labels the transport the query arrived
+    /// on (`udp`, `tcp`, `tls`, `https`, `quic`, `h3`).
+    fn db_log_query(
+        &self,
+        client: IpAddr,
+        qname: &str,
+        qtype: &str,
+        protocol: &str,
+        outcome: Outcome,
+        rcode: Option<&str>,
+        started: Instant,
+    ) {
+        if let Some(logger) = &self.query_db_logger {
+            logger.log(crate::query_db_log::QueryDbEntry {
+                ts: chrono::Utc::now().to_rfc3339(),
+                client: client.to_string(),
+                qname: qname.to_string(),
+                qtype: qtype.to_string(),
+                protocol: protocol.to_string(),
+                outcome: outcome_label(outcome).to_string(),
+                rcode: rcode.map(|r| r.to_string()),
+                elapsed_ms: started.elapsed().as_millis() as u64,
+            });
+        }
+    }
+
+    /// Record a served query into the dashboard statistics, the JSON-lines
+    /// log and the SQLite query log in one call (used by the branches that
+    /// decide the outcome and response code up front).
     fn observe(
         &self,
         client: IpAddr,
         qname: &str,
         qtype: &str,
+        protocol: &str,
         outcome: Outcome,
         rcode: Option<&str>,
         started: Instant,
     ) {
         self.record_stats(client, qname, outcome);
         self.log_query(client, qname, qtype, outcome, rcode, started);
+        self.db_log_query(client, qname, qtype, protocol, outcome, rcode, started);
     }
 
     /// Serve an AXFR/IXFR zone transfer from the stored zone data.
@@ -388,7 +433,11 @@ impl RequestHandler for DnsDispatcher {
         if !self.rate_limiter.check_client(client) {
             debug!(%client, "query rate-limited by client");
             self.metrics.inc(&self.metrics.rate_limited);
-            self.observe(client, "(rate-limited)", "", Outcome::RateLimited, Some("SERVFAIL"), started);
+            let protocol = request
+                .request_info()
+                .map(|i| protocol_label(i.protocol))
+                .unwrap_or("");
+            self.observe(client, "(rate-limited)", "", protocol, Outcome::RateLimited, Some("SERVFAIL"), started);
             return send_error(&mut response_handle, request, ResponseCode::ServFail).await;
         }
 
@@ -448,6 +497,7 @@ impl RequestHandler for DnsDispatcher {
         let qname = query_name.trim_end_matches('.').to_ascii_lowercase();
         let rtype = info.query.query_type().to_string();
         let client = info.src.ip();
+        let protocol = protocol_label(info.protocol);
 
         // 0b. Rate limiting (per domain). Tracked independently of the client
         // counter: a client may legitimately ask about many domains, and a hot
@@ -455,7 +505,7 @@ impl RequestHandler for DnsDispatcher {
         if !self.rate_limiter.check_domain(&qname) {
             debug!(query = %qname, "query rate-limited by domain");
             self.metrics.inc(&self.metrics.rate_limited);
-            self.observe(client, &qname, &rtype, Outcome::RateLimited, Some("SERVFAIL"), started);
+            self.observe(client, &qname, &rtype, &protocol, Outcome::RateLimited, Some("SERVFAIL"), started);
             return send_error(&mut response_handle, request, ResponseCode::ServFail).await;
         }
 
@@ -468,19 +518,19 @@ impl RequestHandler for DnsDispatcher {
             Action::Refused => {
                 debug!(query = %qname, reason = %decision.reason, "refused by policy");
                 self.metrics.inc(&self.metrics.blocked);
-                self.observe(client, &qname, &rtype, Outcome::Blocked, Some("REFUSED"), started);
+                self.observe(client, &qname, &rtype, protocol, Outcome::Blocked, Some("REFUSED"), started);
                 return send_error(&mut response_handle, request, ResponseCode::Refused).await;
             }
             Action::Block => {
                 debug!(query = %qname, reason = %decision.reason, "blocked by policy");
                 self.metrics.inc(&self.metrics.blocked);
-                self.observe(client, &qname, &rtype, Outcome::Blocked, Some("NXDOMAIN"), started);
+                self.observe(client, &qname, &rtype, protocol, Outcome::Blocked, Some("NXDOMAIN"), started);
                 return send_error(&mut response_handle, request, ResponseCode::NXDomain).await;
             }
             Action::Redirect(ip) => {
                 debug!(query = %qname, %ip, "redirected by policy");
                 self.metrics.inc(&self.metrics.blocked);
-                self.observe(client, &qname, &rtype, Outcome::Blocked, Some("NOERROR"), started);
+                self.observe(client, &qname, &rtype, protocol, Outcome::Blocked, Some("NOERROR"), started);
                 return send_redirect(&mut response_handle, request, info.query.query_type(), *ip)
                     .await;
             }
@@ -488,7 +538,7 @@ impl RequestHandler for DnsDispatcher {
                 // Filter AAAA: NODATA (empty NOERROR) forces IPv4 fallback.
                 debug!(query = %qname, reason = %decision.reason, "AAAA filtered");
                 self.metrics.inc(&self.metrics.blocked);
-                self.observe(client, &qname, &rtype, Outcome::Blocked, Some("NOERROR"), started);
+                self.observe(client, &qname, &rtype, protocol, Outcome::Blocked, Some("NOERROR"), started);
                 return send_empty(&mut response_handle, request).await;
             }
         }
@@ -506,7 +556,7 @@ impl RequestHandler for DnsDispatcher {
                     Action::Redirect(_) | Action::NoData => "NOERROR",
                     _ => "NXDOMAIN",
                 };
-                self.observe(client, &qname, &rtype, Outcome::Blocked, Some(rcode), started);
+                self.observe(client, &qname, &rtype, protocol, Outcome::Blocked, Some(rcode), started);
                 return match decision.action {
                     Action::Refused => {
                         send_error(&mut response_handle, request, ResponseCode::Refused).await
@@ -534,7 +584,7 @@ impl RequestHandler for DnsDispatcher {
             if let Some(m) = index.lookup(client, &qname, info.query.query_type()) {
                 debug!(query = %qname, %client, "split-horizon answer");
                 self.metrics.inc(&self.metrics.split_horizon);
-                self.observe(client, &qname, &rtype, Outcome::SplitHorizon, Some("NOERROR"), started);
+                self.observe(client, &qname, &rtype, protocol, Outcome::SplitHorizon, Some("NOERROR"), started);
                 return send_records(&mut response_handle, request, &m.records).await;
             }
         }
@@ -553,7 +603,7 @@ impl RequestHandler for DnsDispatcher {
             // The catalog builds and sends the response itself; its exact
             // rcode is not surfaced here, so the log records the outcome
             // without one.
-            self.observe(client, &qname, &rtype, Outcome::Authoritative, None, started);
+            self.observe(client, &qname, &rtype, protocol, Outcome::Authoritative, None, started);
             let now = unix_now();
             let edns = request.edns.as_ref();
             return self.catalog.read().lookup(request, edns, now, response_handle).await;
@@ -597,6 +647,15 @@ impl RequestHandler for DnsDispatcher {
                     Some(&rcode),
                     started,
                 );
+                self.db_log_query(
+                    client,
+                    &qname,
+                    &rtype,
+                    protocol,
+                    Outcome::Recursive,
+                    Some(&rcode),
+                    started,
+                );
 
                 let response = MessageResponseBuilder::from_message_request(request).build(
                     metadata,
@@ -630,6 +689,15 @@ impl RequestHandler for DnsDispatcher {
                     client,
                     &qname,
                     &rtype,
+                    Outcome::Error,
+                    Some(&rcode_label(code)),
+                    started,
+                );
+                self.db_log_query(
+                    client,
+                    &qname,
+                    &rtype,
+                    protocol,
                     Outcome::Error,
                     Some(&rcode_label(code)),
                     started,
@@ -668,6 +736,19 @@ fn rcode_label(code: ResponseCode) -> String {
         ResponseCode::FormErr => "FORMERR".to_string(),
         ResponseCode::NotImp => "NOTIMP".to_string(),
         other => format!("{other:?}").to_uppercase(),
+    }
+}
+
+/// Transport label for a query, recorded in the SQLite query log.
+fn protocol_label(protocol: hickory_server::net::xfer::Protocol) -> &'static str {
+    use hickory_server::net::xfer::Protocol as P;
+    match protocol {
+        P::Udp => "udp",
+        P::Tcp => "tcp",
+        P::Tls => "tls",
+        P::Https => "https",
+        P::Quic => "quic",
+        _ => "other",
     }
 }
 

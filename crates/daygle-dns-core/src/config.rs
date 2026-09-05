@@ -38,6 +38,174 @@ pub struct DaygleConfig {
     pub logging: LoggingSettings,
 }
 
+/// The runtime-tunable subset of the configuration that lives in the
+/// database rather than the TOML file (everything the console's Settings,
+/// Cache, and Domain Lists pages edit). The file keeps bootstrap-only
+/// values: listeners, addresses, ports, paths, and certificates.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct RuntimeSettings {
+    pub recursive: Option<RecursiveUpdate>,
+    pub dot: Option<ListenerUpdate>,
+    pub doh: Option<DohUpdate>,
+    pub doq: Option<ListenerUpdate>,
+    pub policy: Option<PolicyUpdate>,
+}
+
+/// Partial updates for the recursive resolver (matches the API's shape).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct RecursiveUpdate {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_size: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub upstreams: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dnssec_validate: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prefetch_enabled: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prefetch_ttl_fraction_pct: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prefetch_min_queries: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub serve_stale_secs: Option<u64>,
+}
+
+/// Partial updates for TLS listeners (DoT and DoQ share the shape).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct ListenerUpdate {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub self_signed: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub server_name: Option<String>,
+}
+
+/// Partial updates for DoH.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct DohUpdate {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub self_signed: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub server_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<String>,
+}
+
+/// Partial updates for the policy engine (allow/block lists and Filter AAAA).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct PolicyUpdate {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub allowlist: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub blocklist: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub filter_aaaa: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub filter_aaaa_except: Option<Vec<String>>,
+}
+
+impl RuntimeSettings {
+    /// Whether anything in this overlay would change `config`.
+    pub fn is_empty(&self) -> bool {
+        self.recursive.is_none()
+            && self.dot.is_none()
+            && self.doh.is_none()
+            && self.doq.is_none()
+            && self.policy.is_none()
+    }
+
+    /// Apply the overlay to `config` in place. `None` fields are untouched.
+    pub fn apply_to(&self, config: &mut DaygleConfig) {
+        if let Some(r) = &self.recursive {
+            if let Some(v) = r.enabled { config.recursive.enabled = v; }
+            if let Some(v) = r.cache_size { config.recursive.cache_size = v; }
+            if let Some(v) = &r.upstreams { config.recursive.upstreams = v.clone(); }
+            if let Some(v) = r.dnssec_validate { config.recursive.dnssec_validate = v; }
+            if let Some(v) = r.prefetch_enabled { config.recursive.prefetch_enabled = v; }
+            if let Some(v) = r.prefetch_ttl_fraction_pct { config.recursive.prefetch_ttl_fraction_pct = v; }
+            if let Some(v) = r.prefetch_min_queries { config.recursive.prefetch_min_queries = v; }
+            if let Some(v) = r.serve_stale_secs { config.recursive.serve_stale_secs = v; }
+        }
+        if let Some(d) = &self.dot {
+            if let Some(v) = d.enabled { config.dot.enabled = v; }
+            if let Some(v) = d.port { config.dot.port = v; }
+            if let Some(v) = d.self_signed { config.dot.self_signed = v; }
+            if let Some(v) = &d.server_name { config.dot.server_name = v.clone(); }
+        }
+        if let Some(d) = &self.doh {
+            if let Some(v) = d.enabled { config.doh.enabled = v; }
+            if let Some(v) = d.port { config.doh.port = v; }
+            if let Some(v) = d.self_signed { config.doh.self_signed = v; }
+            if let Some(v) = &d.server_name { config.doh.server_name = v.clone(); }
+            if let Some(v) = &d.endpoint { config.doh.endpoint = v.clone(); }
+        }
+        if let Some(d) = &self.doq {
+            if let Some(v) = d.enabled { config.doq.enabled = v; }
+            if let Some(v) = d.port { config.doq.port = v; }
+            if let Some(v) = d.self_signed { config.doq.self_signed = v; }
+            if let Some(v) = &d.server_name { config.doq.server_name = v.clone(); }
+        }
+        if let Some(p) = &self.policy {
+            if let Some(v) = &p.allowlist { config.policy.allowlist = v.clone(); }
+            if let Some(v) = &p.blocklist { config.policy.blocklist = v.clone(); }
+            if let Some(v) = p.filter_aaaa { config.policy.filter_aaaa = v; }
+            if let Some(v) = &p.filter_aaaa_except { config.policy.filter_aaaa_except = v.clone(); }
+        }
+    }
+
+    /// Capture the DB-owned fields of `config` as a full overlay, so a save
+    /// replaces the whole stored overlay (removed values revert to defaults,
+    /// and a later default change in the app is picked up on next boot).
+    pub fn capture(config: &DaygleConfig) -> Self {
+        Self {
+            recursive: Some(RecursiveUpdate {
+                enabled: Some(config.recursive.enabled),
+                cache_size: Some(config.recursive.cache_size),
+                upstreams: Some(config.recursive.upstreams.clone()),
+                dnssec_validate: Some(config.recursive.dnssec_validate),
+                prefetch_enabled: Some(config.recursive.prefetch_enabled),
+                prefetch_ttl_fraction_pct: Some(config.recursive.prefetch_ttl_fraction_pct),
+                prefetch_min_queries: Some(config.recursive.prefetch_min_queries),
+                serve_stale_secs: Some(config.recursive.serve_stale_secs),
+            }),
+            dot: Some(ListenerUpdate {
+                enabled: Some(config.dot.enabled),
+                port: Some(config.dot.port),
+                self_signed: Some(config.dot.self_signed),
+                server_name: Some(config.dot.server_name.clone()),
+            }),
+            doh: Some(DohUpdate {
+                enabled: Some(config.doh.enabled),
+                port: Some(config.doh.port),
+                self_signed: Some(config.doh.self_signed),
+                server_name: Some(config.doh.server_name.clone()),
+                endpoint: Some(config.doh.endpoint.clone()),
+            }),
+            doq: Some(ListenerUpdate {
+                enabled: Some(config.doq.enabled),
+                port: Some(config.doq.port),
+                self_signed: Some(config.doq.self_signed),
+                server_name: Some(config.doq.server_name.clone()),
+            }),
+            policy: Some(PolicyUpdate {
+                allowlist: Some(config.policy.allowlist.clone()),
+                blocklist: Some(config.policy.blocklist.clone()),
+                filter_aaaa: Some(config.policy.filter_aaaa),
+                filter_aaaa_except: Some(config.policy.filter_aaaa_except.clone()),
+            }),
+        }
+    }
+}
+
 impl DaygleConfig {
     /// Parse a TOML document into a validated configuration.
     pub fn parse(text: &str) -> Result<Self> {
@@ -358,6 +526,11 @@ impl DaygleConfig {
                     "logging.query_log_retention_days must be <= 3650".to_string(),
                 ));
             }
+        }
+        if log.query_db_max_rows != 0 && log.query_db_max_rows < 100 {
+            return Err(DaygleError::Config(
+                "logging.query_db_max_rows must be 0 (unlimited) or >= 100".to_string(),
+            ));
         }
         Ok(())
     }
@@ -784,6 +957,14 @@ pub struct ApiSettings {
     /// and *every* API call requires a session token issued by
     /// `POST /api/auth/login`.
     pub users: Vec<ApiUser>,
+    /// Require login on the console. On by default: with no `users`
+    /// configured, the first GUI visit offers a one-time "create admin
+    /// account" setup and every API call requires a session from then on.
+    /// Set to `false` to serve the console fully open (development only).
+    /// Note: an `api_token` keeps its legacy GETs-open/mutations-tokened
+    /// behavior regardless of this flag, and configured `users` always
+    /// enforce login.
+    pub auth_required: bool,
     /// Session token lifetime for login sessions, in seconds (default 12h).
     pub session_ttl_secs: u64,
     /// Serve the embedded web GUI at `/`.
@@ -800,6 +981,7 @@ impl Default for ApiSettings {
             port: 5380,
             api_token: String::new(),
             users: vec![],
+            auth_required: true,
             session_ttl_secs: 43_200,
             gui_enabled: true,
             cors_origins: vec![],
@@ -1020,6 +1202,12 @@ pub struct LoggingSettings {
     /// Delete query-log files older than this many days at rotation
     /// (0 keeps every file).
     pub query_log_retention_days: u32,
+    /// Record every served query into the SQLite database so the console's
+    /// Query Logs view can search, filter and export them.
+    pub query_db_enabled: bool,
+    /// Retention cap for the database query log: at most this many rows are
+    /// kept (the oldest are deleted opportunistically). 0 keeps everything.
+    pub query_db_max_rows: usize,
 }
 
 impl Default for LoggingSettings {
@@ -1030,6 +1218,8 @@ impl Default for LoggingSettings {
             query_log_enabled: false,
             query_log_dir: "/var/log/daygle-dns".to_string(),
             query_log_retention_days: 30,
+            query_db_enabled: true,
+            query_db_max_rows: 200_000,
         }
     }
 }

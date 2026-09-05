@@ -4,8 +4,16 @@ Base path: `/api`. The web GUI is served at `/`.
 
 ## Authentication
 
-When `api.api_token` is configured, every mutating request (anything other than
-`GET`/`OPTIONS`) must include the header:
+Console authentication is **on by default** (`api.auth_required = true`): every
+API call (reads included) requires a login session. On first run - with no
+accounts configured yet - the GUI shows a one-time setup that creates the
+initial admin account (see `POST /api/auth/setup` below). Set
+`api.auth_required = false` to serve the console fully open (development
+only).
+
+Legacy alternative: when `api.api_token` is configured (and no users exist),
+every mutating request (anything other than `GET`/`OPTIONS`) must include the
+header:
 
 ```
 Authorization: Bearer <token>
@@ -34,13 +42,32 @@ POST /api/auth/login
 
 Send the returned token as the `Authorization: Bearer` header on every call.
 Password hashes for the config file are generated with
-`daygle-dns hash-password 'your-password'` (PBKDF2-HMAC-SHA256). Additional
-endpoints:
+`daygle-dns hash-password 'your-password'` (PBKDF2-HMAC-SHA256).
+
+**Where accounts live.** Console accounts are stored in the SQLite database
+(`authoritative.database`) and managed at runtime from the console's **Users**
+page (or the `/api/users` endpoints below). `[[api.users]]` entries in the
+config file act as a seed: they are imported at startup unless a user with
+the same name already exists, so config-managed accounts keep working while
+accounts created in the GUI survive config rewrites.
+
+Additional endpoints:
 
 | Endpoint | Purpose |
 |----------|---------|
 | `GET /api/auth/me` | identity of the presented session (`username`, `role`, `expires_at_secs`) |
 | `POST /api/auth/logout` | revoke the presented token |
+| `POST /api/auth/password` | signed-in user rotates their own password (current password required; other sessions revoked) |
+| `GET /api/auth/setup` | whether the one-time first-run setup is still pending |
+| `POST /api/auth/setup` | one-time creation of the first admin account (returns a session) |
+| `GET /api/users` | list accounts (password hashes redacted) |
+| `POST /api/users` | create an account (`username`, `password`, optional `role`) |
+| `PATCH /api/users/{username}` | reset password / change role / enable-disable |
+| `DELETE /api/users/{username}` | delete an account |
+
+The last enabled `admin` account cannot be deleted, demoted, or disabled.
+Password, role, and enabled changes (and deletions) immediately revoke the
+affected account's sessions; disabled accounts cannot log in.
 
 Roles:
 
@@ -152,6 +179,27 @@ Returns the most recent `limit` (≤ 10 000) log entries, oldest first:
 ]
 ```
 
+### Query logs
+
+```
+GET    /api/querylogs?client=&qname=&qtype=&protocol=&outcome=&rcode=&from=&to=&page=1&per_page=50
+DELETE /api/querylogs
+```
+
+Every served DNS query is recorded into the SQLite database (when
+`logging.query_db_enabled`, on by default) with its client address, query
+name/type, transport (`udp`, `tcp`, `tls`, `https`, `quic`), outcome
+(`authoritative`, `recursive`, `split_horizon`, `blocked`, `rate_limited`,
+`error`), response code and server-side handling time. The console's
+**Logs → Query Logs** tab searches this history.
+
+`GET` returns a page of entries (newest first) plus the total count under
+the same filter. `qname` accepts `*` wildcards (`*.example.com`, `www.*`)
+and substring matching otherwise; `from`/`to` are RFC 3339 timestamps;
+`per_page` is capped at 500. `format=csv` streams the whole filtered set
+(no pagination) as a CSV download. `DELETE` clears the log (admin only);
+retention is bounded by `logging.query_db_max_rows` (0 = unlimited).
+
 ### Configuration
 
 ```
@@ -165,7 +213,8 @@ serialized as JSON) with secrets redacted (see [Console users and roles](#consol
 `PUT /api/config` applies a **partial settings update** from the console
 (the Settings page uses this). `null`/absent fields are left unchanged;
 unknown fields are rejected with `400`. The merged configuration is validated
-first (invalid input changes nothing), persisted to the config file, applied
+first (invalid input changes nothing), persisted to the **database** (not the
+config file), applied
 to the live server, and listeners are rebound when the update touched them:
 
 ```json
@@ -179,8 +228,11 @@ PUT /api/config
 Editable groups: `server` (listen/port/udp_enabled/tcp_enabled), `recursive`
 (enabled/upstreams/dnssec_validate/prefetch_* /serve_stale_secs), `dot`,
 `doh`, `doq` (enabled/port/self_signed/server_name [+ `doh.endpoint`]), and
-`api` (gui_enabled/cors_origins). Login users and the API token are **not**
-editable over the API - edit the config file instead.
+`api` (gui_enabled/cors_origins). Runtime groups (`recursive`, `dot`, `doh`,
+`doq`, `policy`) are stored in the database and survive restarts and
+config-file edits; `server.*` and `api.*` stay config-file-owned so a broken
+listener can always be fixed by editing the file. Login users are managed
+from the console's **Users** page (see [Console users and roles](#console-users-and-roles)).
 
 `POST /api/config/reload` asks the server to re-read its configuration file and
 apply policy, upstream and listener changes immediately, without waiting for
@@ -243,6 +295,11 @@ Secondary zones are added to `authoritative.secondary_zones`, persisted to the
 configuration file, applied to the running refresher immediately, and pulled
 over AXFR/IXFR from the first reachable master. Their records are read-only in
 the GUI and record mutation endpoints return `409 Conflict`.
+
+> Note: secondary-zone definitions are still config-file-owned (they describe
+> infrastructure that must be available before the database is consulted),
+> unlike runtime settings such as upstreams and policy lists, which live in
+> the database.
 
 Import a BIND zone file (creates the zone and replaces its records):
 

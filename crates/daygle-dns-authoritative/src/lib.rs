@@ -36,7 +36,9 @@ pub use split_horizon::{SplitHorizonIndex, SplitHorizonMatch};
 pub use dnssec::{DnssecMaintenance, MaintenanceConfig};
 pub use notify::{NotifyHooks, NotifyInbound, NotifySender};
 pub use secondary::SecondaryRefresher;
-pub use store::ZoneStore;
+pub use store::{
+    ConsoleUser, ConsoleUserInput, QueryLogFilter, QueryLogRow, ZoneStore,
+};
 pub use transfer::XfrClient;
 pub use tsig::{TsigKey, TsigKeyRing};
 pub use update::{handle_update, handle_update_with_notify};

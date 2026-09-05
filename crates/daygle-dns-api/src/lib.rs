@@ -19,6 +19,11 @@
 //! | `GET`    | `/api/zones/:id/records`          | list records |
 //! | `PUT`    | `/api/zones/:id/records`          | upsert a record |
 //! | `DELETE` | `/api/zones/:id/records/:rid`     | delete a record |
+//! | `POST`   | `/api/auth/password`              | signed-in user rotates their own password |
+//! | `GET`    | `/api/users`                      | list console accounts (hashes redacted) |
+//! | `POST`   | `/api/users`                      | create a console account |
+//! | `PATCH`  | `/api/users/:username`            | reset password / change role / enable-disable |
+//! | `DELETE` | `/api/users/:username`            | delete a console account |
 //! | `POST`   | `/api/zones/:id/sign`             | DNSSEC-sign a zone |
 //! | `POST`   | `/api/zones/:id/unsign`           | remove DNSSEC signing |
 //! | `POST`   | `/api/zones/import`               | import a BIND zone file |
@@ -37,8 +42,11 @@
 //! | `PUT`    | `/api/policy/blocklist/sources`   | replace the configured sources (console CRUD) |
 //! | `GET`    | `/api/policy/blocklist/sources/validate` | probe a URL and validate / auto-detect its format |
 //!
-//! Mutating endpoints require a `Authorization: Bearer <token>` header when
-//! [`daygle_dns_core::config::ApiSettings::api_token`] is configured.
+//! Auth endpoints: `POST /api/auth/login`, `POST /api/auth/logout`,
+//! `GET /api/auth/me`, plus the one-time first-run setup
+//! (`GET/POST /api/auth/setup`). Console authentication is on by default
+//! (`api.auth_required = true`): every endpoint requires a session token
+//! (or the legacy static `api_token`); see `require_auth` below.
 //!
 //! The [`AppState`] holds the effective configuration and the recursive
 //! resolver in `ArcSwap` containers so the live-reload machinery can publish
@@ -56,7 +64,7 @@ use axum::extract::Request;
 use axum::http::StatusCode;
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{delete, get, post, put};
+use axum::routing::{delete, get, patch, post, put};
 use axum::Router;
 use daygle_dns_authoritative::AuthorityCatalog;
 use daygle_dns_authoritative::SecondaryRefresher;
@@ -111,6 +119,21 @@ impl SessionStore {
     /// Remove a session (logout). Returns whether it existed.
     pub fn revoke(&self, token: &str) -> bool {
         self.sessions.lock().remove(token).is_some()
+    }
+
+    /// Drop every session belonging to `username` (used when an account is
+    /// disabled, deleted, or its password/role changes).
+    pub fn revoke_user(&self, username: &str) {
+        self.sessions.lock().retain(|_, s| s.username != username);
+    }
+
+    /// Like [`revoke_user`], but keeps `keep_token` alive - used by the
+    /// self-service password change so the current device stays signed in
+    /// while every other session is signed out.
+    pub fn revoke_user_except(&self, username: &str, keep_token: &str) {
+        self.sessions
+            .lock()
+            .retain(|token, s| s.username != username || token == keep_token);
     }
 }
 
@@ -172,6 +195,10 @@ pub fn router(state: AppState) -> Router {
         .route("/stats", get(handlers::stats))
         .route("/logs", get(handlers::logs))
         .route(
+            "/querylogs",
+            get(handlers::query_logs).delete(handlers::clear_query_logs),
+        )
+        .route(
             "/config",
             get(handlers::config)
                 .put(handlers::update_settings)
@@ -180,6 +207,19 @@ pub fn router(state: AppState) -> Router {
         .route("/auth/login", post(handlers::auth_login))
         .route("/auth/logout", post(handlers::auth_logout))
         .route("/auth/me", get(handlers::auth_me))
+        .route("/auth/password", post(handlers::auth_change_password))
+        .route(
+            "/auth/setup",
+            get(handlers::auth_setup_status).post(handlers::auth_setup),
+        )
+        .route(
+            "/users",
+            get(handlers::list_users).post(handlers::create_user),
+        )
+        .route(
+            "/users/{username}",
+            patch(handlers::update_user).delete(handlers::delete_user),
+        )
         .route("/zones", get(handlers::list_zones).post(handlers::create_zone))
         .route("/zones/import", post(handlers::import_zone))
         .route("/zones/{id}", delete(handlers::delete_zone))
@@ -258,32 +298,46 @@ pub fn router(state: AppState) -> Router {
 
 /// Authorization for API calls.
 ///
-/// - `POST /api/auth/login` is always open (it *is* the login).
-/// - When `api.users` is configured, **every** endpoint requires a valid
-///   session token (from login) or the static `api_token` - the console is
-///   fully authenticated, like Technitium.
-/// - Otherwise (legacy `api_token` mode): GET/OPTIONS stay open, mutating
-///   methods require the `api_token` Bearer header when one is configured.
+/// - `POST /api/auth/login` and the one-time `POST /api/auth/setup` are
+///   always open (they *are* the login).
+/// - Console auth is **on by default**: every endpoint requires a valid
+///   session token (from login) or the static `api_token`. With no `users`
+///   configured yet, `/api/auth/setup` reports that first-run setup is
+///   pending and `POST /api/auth/setup` creates the first admin account.
+/// - `api.auth_required = false` restores the fully-open development mode.
+/// - A static `api_token` alone keeps its legacy GETs-open/mutations-tokened
+///   behavior.
 async fn require_auth(
     axum::extract::State(state): axum::extract::State<AppState>,
     req: Request,
     next: Next,
 ) -> Response {
     // Within the nested router axum strips the `/api` prefix, so match both
-    // the full and stripped forms of the login path.
+    // the full and stripped forms of the login paths.
     let path = req.uri().path();
-    let is_login = path == "/api/auth/login" || path == "/auth/login";
-    if is_login || req.method() == axum::http::Method::OPTIONS {
+    let is_auth_path = path == "/api/auth/login"
+        || path == "/auth/login"
+        || path == "/api/auth/setup"
+        || path == "/auth/setup";
+    if is_auth_path || req.method() == axum::http::Method::OPTIONS {
         return next.run(req).await;
     }
 
     let config = state.config.load();
-    let users_configured = !config.api.users.is_empty();
     let static_token = config.api.api_token.trim().to_string();
+    let auth_required = config.api.auth_required;
     drop(config);
+    // Console accounts live in the database; config-file `[[api.users]]`
+    // entries are only a seed imported at startup.
+    let users_configured = !state
+        .catalog
+        .store()
+        .list_console_users()
+        .unwrap_or_default()
+        .is_empty();
 
-    if !users_configured && static_token.is_empty() {
-        // No auth configured at all: open access (development mode).
+    if !users_configured && static_token.is_empty() && !auth_required {
+        // Auth explicitly disabled (`api.auth_required = false`): open access.
         return next.run(req).await;
     }
 
@@ -310,7 +364,15 @@ async fn require_auth(
                 *req.method(),
                 axum::http::Method::GET | axum::http::Method::HEAD
             );
-            if mutating && session.role == daygle_dns_core::config::Role::Viewer {
+            // The self-service password change is a mutation on the caller's
+            // own credential (the handler re-verifies the current password),
+            // so read-only accounts may use it too.
+            let is_own_password_change =
+                path == "/api/auth/password" || path == "/auth/password";
+            if mutating
+                && session.role == daygle_dns_core::config::Role::Viewer
+                && !is_own_password_change
+            {
                 return (
                     StatusCode::FORBIDDEN,
                     axum::Json(serde_json::json!({
@@ -326,6 +388,21 @@ async fn require_auth(
             axum::Json(serde_json::json!({
                 "error": "authentication required",
                 "login": true,
+            })),
+        )
+            .into_response();
+    }
+
+    // First-run mode: auth is required but no accounts exist yet. Only
+    // `/api/auth/setup` (open above) can bootstrap the console; everything
+    // else is 401 with `setup: true` so the GUI shows the setup screen.
+    if auth_required {
+        return (
+            StatusCode::UNAUTHORIZED,
+            axum::Json(serde_json::json!({
+                "error": "initial setup required",
+                "login": true,
+                "setup": true,
             })),
         )
             .into_response();

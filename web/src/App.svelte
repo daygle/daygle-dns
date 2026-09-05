@@ -10,17 +10,18 @@
   import AdvancedBlocking from './views/AdvancedBlocking.svelte';
   import Settings from './views/Settings.svelte';
   import Cache from './views/Cache.svelte';
+  import Users from './views/Users.svelte';
   import DomainLists from './views/DomainLists.svelte';
   import About from './views/About.svelte';
 
   let view = $state('status');
   // Zone preselected for the Records page (set when opening records from the Zones page).
   let recordZoneId = $state(null);
-  // `authed` is optimistic: we assume a session until a 401 says otherwise,
-  // but we still verify the session on mount so a stale token doesn't briefly
-  // render the full authenticated shell before redirecting to login.
-  let authed = $state(true);
   let user = $state(getStoredUser());
+  // Console auth is on by default, so start at the login/setup screen unless
+  // a stored session says otherwise; the effect below re-verifies it (and a
+  // 401 with `login: true` still forces the login screen at any time).
+  let authed = $state(user !== null);
   // Viewer accounts are read-only: they never see the write-only views.
   const isViewer = $derived(user?.role === 'viewer');
 
@@ -73,6 +74,52 @@
     authed = false;
   }
 
+  // Self-service password change (sidebar user box).
+  let showPassword = $state(false);
+  let currentPassword = $state('');
+  let newPassword = $state('');
+  let newPassword2 = $state('');
+  let passwordError = $state(null);
+  let passwordNotice = $state(null);
+  let changingPassword = $state(false);
+
+  function openPassword() {
+    currentPassword = '';
+    newPassword = '';
+    newPassword2 = '';
+    passwordError = null;
+    passwordNotice = null;
+    showPassword = true;
+  }
+
+  async function submitPassword(e) {
+    e.preventDefault();
+    passwordError = null;
+    if (newPassword.length < 8) {
+      passwordError = 'New password must be at least 8 characters.';
+      return;
+    }
+    if (newPassword !== newPassword2) {
+      passwordError = 'New passwords do not match.';
+      return;
+    }
+    if (newPassword === currentPassword) {
+      passwordError = 'The new password must differ from the current one.';
+      return;
+    }
+    changingPassword = true;
+    try {
+      await api.changePassword(currentPassword, newPassword);
+      showPassword = false;
+      passwordNotice = 'Password changed. Your other sessions were signed out.';
+      setTimeout(() => (passwordNotice = null), 8000);
+    } catch (err) {
+      passwordError = String(err.message || err);
+    } finally {
+      changingPassword = false;
+    }
+  }
+
   // Open the Records page for a given zone (used from the Zones page).
   function openZoneRecords(zoneId) {
     recordZoneId = zoneId;
@@ -93,6 +140,7 @@
     { id: 'domain-lists', label: 'Domain Lists', viewer: true },
     { id: 'advanced-blocking', label: 'Advanced Blocking', viewer: true },
     { id: 'cache', label: 'Cache' },
+    { id: 'users', label: 'Users' },
     { id: 'logs', label: 'Logs' },
     { id: 'settings', label: 'Settings', viewer: true },
     { id: 'about', label: 'About' },
@@ -102,6 +150,39 @@
 {#if !authed}
   <Login onLogin={handleLogin} />
 {:else}
+  {#if showPassword}
+    <div class="modal-backdrop" role="presentation" onclick={(e) => { if (e.target === e.currentTarget) showPassword = false; }}>
+      <form class="card modal" onsubmit={submitPassword}>
+        <div class="spread" style="margin-bottom: 10px">
+          <h3 style="margin: 0">Change Password</h3>
+          <button type="button" class="secondary" style="padding: 2px 10px" onclick={() => (showPassword = false)}>✕</button>
+        </div>
+        <p class="modal-note">
+          Changing your password signs out your other sessions; this device
+          stays signed in.
+        </p>
+        <label>
+          <span>Current Password</span>
+          <input type="password" autocomplete="current-password" bind:value={currentPassword} placeholder="••••••••" />
+        </label>
+        <label>
+          <span>New Password</span>
+          <input type="password" autocomplete="new-password" bind:value={newPassword} placeholder="At least 8 characters" />
+        </label>
+        <label>
+          <span>Confirm New Password</span>
+          <input type="password" autocomplete="new-password" bind:value={newPassword2} placeholder="Repeat the new password" />
+        </label>
+        {#if passwordError}<div class="form-error">{passwordError}</div>{/if}
+        <div class="modal-actions">
+          <button type="submit" disabled={changingPassword || !currentPassword || !newPassword || !newPassword2}>
+            {changingPassword ? 'Saving…' : 'Save Password'}
+          </button>
+          <button type="button" class="secondary" onclick={() => (showPassword = false)}>Cancel</button>
+        </div>
+      </form>
+    </div>
+  {/if}
   <div class="shell">
     <aside>
       <div class="brand">
@@ -129,8 +210,12 @@
           <span class="pill" class:ok={!isViewer} class:err={isViewer}>
             {isViewer ? 'Read-Only' : 'Admin'}
           </span>
+          <button class="secondary logout" onclick={openPassword}>Change Password</button>
           <button class="secondary logout" onclick={handleLogout}>Sign out</button>
         </div>
+      {/if}
+      {#if passwordNotice}
+        <div class="password-notice">{passwordNotice}</div>
       {/if}
     </aside>
 
@@ -149,6 +234,8 @@
         <DomainLists />
       {:else if view === 'cache'}
         <Cache />
+      {:else if view === 'users'}
+        <Users />
       {:else if view === 'advanced-blocking'}
         <AdvancedBlocking />
       {:else if view === 'about'}
@@ -203,5 +290,48 @@
   }
   .logout { margin-top: 8px; }
 
+  .password-notice {
+    margin-top: 10px;
+    padding: 8px 10px;
+    border: 1px solid var(--ok);
+    border-radius: 6px;
+    color: var(--ok);
+    font-size: 0.8rem;
+  }
+
   main { flex: 1; padding: 24px 28px; }
+
+  .modal-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.55);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 50;
+  }
+  .modal {
+    width: 400px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+  .modal-note {
+    margin: 0;
+    font-size: 0.85rem;
+    color: var(--muted);
+    line-height: 1.45;
+  }
+  .modal label {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    font-size: 0.85rem;
+  }
+  .modal label span { color: var(--muted); }
+  .form-error {
+    color: var(--danger);
+    font-size: 0.85rem;
+  }
+  .modal-actions { display: flex; gap: 8px; }
 </style>

@@ -41,6 +41,10 @@ Daygle combines, in a single process:
 - A **dashboard with charts & top-N tables**: per-minute query time-series
   (1 h / 6 h / 24 h windows), top clients, top domains, and top blocked
   domains - all bounded in memory.
+- A **searchable query log**: every served query is recorded into SQLite
+  (client, name, type, transport, outcome, rcode, duration) with retention,
+  and the console's **Logs → Query Logs** tab filters, paginates, live-updates
+  and CSV-exports the history.
 - A **REST API** (tower/axum) for configuration, zone management, logs, and
   metrics.
 - An embedded **Svelte** web GUI with **username/password login and roles**
@@ -176,9 +180,12 @@ server_name = "daygle.local"
 
 [api]
 port = 5380
-# Console login with roles. Generate the hash first:
-#   daygle-dns hash-password 'your-password'
-# `viewer` accounts are read-only (403 on every mutation).
+# Console login is ON by default: the first GUI visit asks you to create the
+# admin account, and every API call needs a session afterwards. Set
+# auth_required = false to serve the console open (development only).
+# Accounts are stored in the database and managed from the console's Users
+# page. Optional config seed entries (roles: admin, or read-only viewer) -
+# hash first with:  daygle-dns hash-password 'your-password'
 # [[api.users]]
 # username = "admin"
 # password_hash = "pbkdf2-sha256$210000$...$..."
@@ -206,6 +213,14 @@ file (every `server.reload_interval_ms`, default 2000) and applies edits
 the UDP/TCP/DoT listeners all update in place. A bad config is rejected and
 the previous configuration stays active. You can also trigger an immediate
 re-read with `POST /api/config/reload` (see [`docs/API.md`](docs/API.md)).
+
+Runtime settings (cache size, upstreams, prefetch, serve-stale, policy
+lists, feature toggles) live in the **SQLite database**: the config file is
+the bootstrap that seeds them on first boot, and after that changes made in
+the GUI (or `PUT /api/config`) are authoritative and survive restarts and
+config-file edits. Listener addresses/ports and `server.*` options are the
+exception - they are still file-owned so a broken listener config can always
+be fixed by editing the file.
 
 ## Building the web GUI
 
@@ -239,7 +254,8 @@ real server on ephemeral ports and exercise:
   reload API and the file watcher,
 - **console login, roles and settings**: login flow, read-only `viewer`
   accounts (403 on mutations), secret redaction in `GET /api/config`,
-  settings updates persisted to the config file, and the dashboard stats
+  settings updates persisted to the database (the config file seeds the
+  first boot), and the dashboard stats
   endpoint, and
 - **DNS over QUIC** (RFC 9250) against the generated self-signed certificate,
 - **TSIG** unit tests covering HMAC-SHA256 request/response round-trips

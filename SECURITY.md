@@ -93,10 +93,13 @@ report immediately if you encounter real user data unintentionally.
 
 While you're here - the settings that most affect Daygle's security posture:
 
-- Put the API on a trusted interface (`api.listen = "127.0.0.1"` by default)
-  and configure `[[api.users]]` with `admin`/`viewer` roles instead of a
-  shared `api_token`. Generate password hashes with
-  `daygle-dns hash-password`.
+- Put the API on a trusted interface (`api.listen = "127.0.0.1"` by default).
+  Console login is already enforced by default - the first GUI visit creates
+  the admin account. Add per-person accounts with `admin`/`viewer` roles from
+  the console's Users page rather than sharing one login (or the legacy
+  shared `api_token`). The last enabled admin is protected from removal, and
+  disabling or deleting an account signs out its sessions immediately.
+  Protect the database file: it stores the password hashes.
 - Gate AXFR/IXFR and dynamic updates with `axfr_networks` /
   `update_networks` allow-lists and bind TSIG keys to sensitive zones.
 - Use real (non-self-signed) certificates for publicly reachable DoT/DoH/DoQ

@@ -36,6 +36,9 @@ pub fn base_config(db: &Path) -> DaygleConfig {
     cfg.api.listen = "127.0.0.1".to_string();
     cfg.api.port = 0;
     cfg.api.api_token = String::new();
+    // Integration tests exercise the API unauthenticated; the console-auth
+    // default (on) is covered by the login/setup tests in console.rs.
+    cfg.api.auth_required = false;
     cfg.recursive.enabled = false;
     cfg.recursive.use_system_config = false;
     cfg.authoritative.database = db.to_string_lossy().to_string();

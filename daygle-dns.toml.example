@@ -10,11 +10,15 @@ tcp_enabled = true
 tcp_timeout_ms = 5000
 response_buffer_size = 4096
 # Watch this file and apply policy/upstream/listener edits without restarting.
+# (listener settings and other bootstrap options stay file-owned)
 reload_enabled = true
 reload_interval_ms = 2000
 
 # Recursive resolution (root -> TLD -> authoritative) with caching,
 # negative caching, retries and timeouts.
+# Runtime settings in this group live in the SQLite database: these values seed
+# the database on first boot, after which changes made in the GUI or via
+# PUT /api/config are authoritative and survive restarts and file edits.
 [recursive]
 enabled = true
 # Empty list + use_system_config = use /etc/resolv.conf.
@@ -159,15 +163,23 @@ idle_timeout_secs = 600
 enabled = true
 listen = "127.0.0.1"
 port = 5380
-# Bearer token required by mutating endpoints. Leave empty to disable auth.
-# Ignored once console users are configured below.
+# Console authentication is ON by default. On first run the GUI offers a
+# one-time "create admin account" setup, and every API call needs a login
+# session afterwards. Set auth_required = false to serve the console fully
+# open (development only).
+auth_required = true
+# Legacy alternative: a shared static bearer token. Leave empty to use the
+# login accounts; when set, it manages auth itself and the setup step is
+# disabled. Ignored once console users are configured below.
 api_token = ""
-# Console login: when users exist, the GUI shows a login screen and EVERY
-# API call (reads included) requires a session token from POST /api/auth/login.
-# Generate a password hash with:  daygle-dns hash-password 'your-password'
-# role = "admin" (full access) or "viewer" (read-only; mutations get 403).
 # Sessions live for session_ttl_secs (default 12 h).
 session_ttl_secs = 43200
+# Console accounts are stored in the DATABASE and managed from the console's
+# Users page. Entries below are a SEED: imported at startup only when no
+# account with the same username exists yet, so GUI-created accounts survive
+# config edits. Generate a password hash with:
+#   daygle-dns hash-password 'your-password'
+# role = "admin" (full access) or "viewer" (read-only; mutations get 403).
 # [[api.users]]
 # username = "admin"
 # password_hash = "pbkdf2-sha256$210000$…$…"
@@ -246,3 +258,8 @@ exempt_loopback = true
 [logging]
 level = "info"
 ring_buffer = 2000
+# Record every served query into the SQLite database so the console's
+# Logs -> Query Logs tab can search, filter, paginate and export them.
+# Retention keeps at most this many rows (0 = unlimited).
+query_db_enabled = true
+query_db_max_rows = 200000

@@ -112,6 +112,22 @@ export const api = {
     localStorage.removeItem(USER_KEY);
   },
   me: () => request('GET', '/auth/me'),
+  // Self-service password rotation (keeps the current session, signs out others).
+  changePassword: (currentPassword, newPassword) =>
+    request('POST', '/auth/password', { current_password: currentPassword, new_password: newPassword }),
+  users: () => request('GET', '/users'),
+  createUser: (payload) => request('POST', '/users', payload),
+  updateUser: (username, payload) => request('PATCH', `/users/${encodeURIComponent(username)}`, payload),
+  deleteUser: (username) => request('DELETE', `/users/${encodeURIComponent(username)}`),
+  // First-run setup: whether the one-time admin account still needs creating.
+  authSetupStatus: () => request('GET', '/auth/setup', undefined, { noLoginRedirect: true }),
+  // Create the first admin account. Returns a session, stored like a login.
+  authSetup: async (username, password) => {
+    const data = await request('POST', '/auth/setup', { username, password }, { noLoginRedirect: true });
+    localStorage.setItem(TOKEN_KEY, data.token);
+    localStorage.setItem(USER_KEY, JSON.stringify({ username: data.username, role: data.role || 'admin' }));
+    return data;
+  },
 
   // ---- data ----
   status: () => request('GET', '/status'),
@@ -120,6 +136,9 @@ export const api = {
   config: () => request('GET', '/config'),
   updateSettings: (body) => request('PUT', '/config', body),
   logs: (n) => request('GET', `/logs?limit=${n || 200}`),
+  // Searchable per-query history (SQLite-backed). `qs` is a raw query string.
+  queryLogs: (qs) => request('GET', `/querylogs?${qs}`),
+  clearQueryLogs: () => request('DELETE', '/querylogs'),
   zones: () => request('GET', '/zones'),
   createZone: (body) => request('POST', '/zones', body),
   deleteZone: (id) => request('DELETE', `/zones/${id}`),
