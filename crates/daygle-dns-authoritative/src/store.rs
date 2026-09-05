@@ -184,8 +184,14 @@ impl ZoneStore {
         Ok(store)
     }
 
+    /// Lock the internal SQLite connection. Converts mutex-poison into
+    /// [`DaygleError::Internal`] so callers never need to handle it.
+    fn lock_conn(&self) -> std::result::Result<std::sync::MutexGuard<'_, Connection>, DaygleError> {
+        self.conn.lock().map_err(|e| DaygleError::Internal(format!("database lock poisoned: {e}")))
+    }
+
     fn init(&self) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         conn.execute_batch(SCHEMA)?;
         migrate_split_horizon_records(&conn)?;
         migrate_dnssec_keys(&conn)?;
@@ -196,7 +202,7 @@ impl ZoneStore {
 
     /// List all zones ordered by name.
     pub fn list_zones(&self) -> Result<Vec<Zone>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         let mut stmt = conn.prepare(
             "SELECT id, name, primary_ns, admin_mailbox, serial, refresh,
                     retry, expire, minimum, created_at
@@ -207,7 +213,7 @@ impl ZoneStore {
     }
 
     pub fn get_zone(&self, id: &str) -> Result<Option<Zone>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         conn.query_row(
             "SELECT id, name, primary_ns, admin_mailbox, serial, refresh,
                     retry, expire, minimum, created_at
@@ -221,7 +227,7 @@ impl ZoneStore {
 
     pub fn find_zone_by_name(&self, name: &str) -> Result<Option<Zone>> {
         let normalized = normalize_fqdn(name);
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         conn.query_row(
             "SELECT id, name, primary_ns, admin_mailbox, serial, refresh,
                     retry, expire, minimum, created_at
@@ -260,7 +266,7 @@ impl ZoneStore {
             created_at: Utc::now().to_rfc3339(),
         };
 
-        let mut conn = self.conn.lock().unwrap();
+        let mut conn = self.lock_conn()?;
         let tx = conn.transaction()?;
         tx.execute(
             "INSERT INTO zones (id, name, primary_ns, admin_mailbox, serial,
@@ -298,14 +304,14 @@ impl ZoneStore {
     }
 
     pub fn delete_zone(&self, id: &str) -> Result<bool> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         let changed = conn.execute("DELETE FROM zones WHERE id = ?1", [id])?;
         Ok(changed > 0)
     }
 
     /// Update the SOA serial (and refresh/retry timers if provided).
     pub fn bump_serial(&self, id: &str) -> Result<u32> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         bump_serial_in(&conn, id)
     }
 
@@ -325,7 +331,7 @@ impl ZoneStore {
         expire: u32,
         minimum: u32,
     ) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         let changed = conn.execute(
             "UPDATE zones SET primary_ns = ?2, admin_mailbox = ?3, serial = ?4,
                              refresh = ?5, retry = ?6, expire = ?7, minimum = ?8
@@ -344,7 +350,7 @@ impl ZoneStore {
     pub fn set_secondary(&self, zone_id: &str, masters: &[String], refresh_secs: u64) -> Result<()> {
         let masters = serde_json::to_string(masters)
             .map_err(|e| DaygleError::Database(format!("encode masters: {e}")))?;
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         conn.execute(
             "INSERT INTO secondary_zones (zone_id, masters, refresh_secs, last_transfer)
              VALUES (?1, ?2, ?3, NULL)
@@ -356,7 +362,7 @@ impl ZoneStore {
 
     /// List all secondary zones with their metadata.
     pub fn list_secondary(&self) -> Result<Vec<crate::model::SecondaryZone>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         let mut stmt = conn.prepare(
             "SELECT zone_id, masters, refresh_secs, last_transfer
              FROM secondary_zones ORDER BY zone_id",
@@ -376,7 +382,7 @@ impl ZoneStore {
 
     /// Record a successful transfer timestamp for a secondary zone.
     pub fn touch_secondary(&self, zone_id: &str) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         conn.execute(
             "UPDATE secondary_zones SET last_transfer = ?2 WHERE zone_id = ?1",
             params![zone_id, Utc::now().to_rfc3339()],
@@ -386,7 +392,7 @@ impl ZoneStore {
 
     /// Remove secondary metadata (the zone itself is kept).
     pub fn unset_secondary(&self, zone_id: &str) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         conn.execute("DELETE FROM secondary_zones WHERE zone_id = ?1", [zone_id])?;
         Ok(())
     }
@@ -398,7 +404,7 @@ impl ZoneStore {
     pub fn set_stub(&self, name: &str, nss: &[String], refresh_secs: u64, enabled: bool) -> Result<()> {
         let nss = serde_json::to_string(nss)
             .map_err(|e| DaygleError::Database(format!("encode nss: {e}")))?;
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         conn.execute(
             "INSERT INTO stub_zones (name, nss, refresh_secs, enabled, last_refresh)
              VALUES (?1, ?2, ?3, ?4, NULL)
@@ -410,7 +416,7 @@ impl ZoneStore {
 
     /// All stub zones with their metadata.
     pub fn list_stubs(&self) -> Result<Vec<crate::model::StubZone>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         let mut stmt = conn.prepare(
             "SELECT name, nss, refresh_secs, enabled, last_refresh
              FROM stub_zones ORDER BY name",
@@ -432,7 +438,7 @@ impl ZoneStore {
     pub fn touch_stub(&self, name: &str, nss: &[String]) -> Result<()> {
         let nss = serde_json::to_string(nss)
             .map_err(|e| DaygleError::Database(format!("encode nss: {e}")))?;
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         conn.execute(
             "UPDATE stub_zones SET nss = ?2, last_refresh = ?3 WHERE name = ?1",
             params![name, nss, Utc::now().to_rfc3339()],
@@ -443,7 +449,7 @@ impl ZoneStore {
     /// Remove a stub zone entirely (stub rows are standalone; nothing else
     /// references them).
     pub fn unset_stub(&self, name: &str) -> Result<bool> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         Ok(conn.execute("DELETE FROM stub_zones WHERE name = ?1", [name])? > 0)
     }
 
@@ -451,7 +457,7 @@ impl ZoneStore {
 
     /// All Advanced Blocking groups, ordered by `position` then name.
     pub fn list_blocking_groups(&self) -> Result<Vec<BlockingGroup>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         let mut stmt = conn.prepare(
             "SELECT id, name, enabled, clients, allow, block, allow_regex, block_regex,
                     response, position
@@ -463,7 +469,7 @@ impl ZoneStore {
 
     /// Fetch a single blocking group by id.
     pub fn get_blocking_group(&self, id: &str) -> Result<Option<BlockingGroup>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         let group = conn
             .query_row(
                 "SELECT id, name, enabled, clients, allow, block, allow_regex, block_regex,
@@ -493,7 +499,7 @@ impl ZoneStore {
         let response = serde_json::to_string(&input.response)
             .map_err(|e| DaygleError::Database(format!("encode response: {e}")))?;
         let id = Uuid::new_v4().to_string();
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         // New rows land after every existing group; updates keep their spot.
         conn.execute(
             "INSERT INTO blocking_groups
@@ -525,7 +531,7 @@ impl ZoneStore {
 
     /// Delete a blocking group by id. Returns whether a row was removed.
     pub fn delete_blocking_group(&self, id: &str) -> Result<bool> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         Ok(conn.execute("DELETE FROM blocking_groups WHERE id = ?1", [id])? > 0)
     }
 
@@ -533,7 +539,7 @@ impl ZoneStore {
 
     /// List records for a zone.
     pub fn list_records(&self, zone_id: &str) -> Result<Vec<Record>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         let mut stmt = conn.prepare(
             "SELECT id, zone_id, name, rtype, content, ttl, priority, disabled
              FROM records WHERE zone_id = ?1 ORDER BY name, rtype",
@@ -544,7 +550,7 @@ impl ZoneStore {
 
     /// All records across all zones (used to rebuild the in-memory catalog).
     pub fn list_all_records(&self) -> Result<Vec<Record>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         let mut stmt = conn.prepare(
             "SELECT id, zone_id, name, rtype, content, ttl, priority, disabled
              FROM records ORDER BY zone_id, name, rtype",
@@ -554,7 +560,7 @@ impl ZoneStore {
     }
 
     pub fn get_record(&self, id: &str) -> Result<Option<Record>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         conn.query_row(
             "SELECT id, zone_id, name, rtype, content, ttl, priority, disabled
              FROM records WHERE id = ?1",
@@ -572,7 +578,7 @@ impl ZoneStore {
         let zone = self
             .get_zone(zone_id)?
             .ok_or_else(|| DaygleError::NotFound(format!("zone {zone_id}")))?;
-        let mut conn = self.conn.lock().unwrap();
+        let mut conn = self.lock_conn()?;
         let tx = conn.transaction()?;
         let record = insert_record_in_tx(&tx, zone_id, &zone.name, input)?;
         bump_serial_in(&tx, zone_id)?;
@@ -585,7 +591,7 @@ impl ZoneStore {
     /// skipped when the serving catalog is rebuilt. The zone serial is bumped
     /// in the same transaction.
     pub fn set_record_disabled(&self, id: &str, disabled: bool) -> Result<bool> {
-        let mut conn = self.conn.lock().unwrap();
+        let mut conn = self.lock_conn()?;
         let tx = conn.transaction()?;
         let zone_id: Option<String> = tx
             .query_row("SELECT zone_id FROM records WHERE id = ?1", [id], |r| r.get(0))
@@ -616,7 +622,7 @@ impl ZoneStore {
     /// serial is bumped in the same transaction (matching [`Self::upsert_record`]),
     /// so callers no longer need a separate [`Self::bump_serial`].
     pub fn delete_record(&self, id: &str) -> Result<bool> {
-        let mut conn = self.conn.lock().unwrap();
+        let mut conn = self.lock_conn()?;
         let tx = conn.transaction()?;
         let zone_id: Option<String> = tx
             .query_row("SELECT zone_id FROM records WHERE id = ?1", [id], |r| {
@@ -646,7 +652,7 @@ impl ZoneStore {
         let zone = self
             .get_zone(zone_id)?
             .ok_or_else(|| DaygleError::NotFound(format!("zone {zone_id}")))?;
-        let mut conn = self.conn.lock().unwrap();
+        let mut conn = self.lock_conn()?;
         let tx = conn.transaction()?;
 
         for del in &update.deletes {
@@ -710,7 +716,7 @@ impl ZoneStore {
         let zone = self
             .get_zone(zone_id)?
             .ok_or_else(|| DaygleError::NotFound(format!("zone {zone_id}")))?;
-        let mut conn = self.conn.lock().unwrap();
+        let mut conn = self.lock_conn()?;
         let tx = conn.transaction()?;
         tx.execute("DELETE FROM records WHERE zone_id = ?1", [zone_id])?;
         for record in records {
@@ -721,12 +727,12 @@ impl ZoneStore {
     }
 
     pub fn count_zones(&self) -> Result<u64> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         Ok(conn.query_row("SELECT COUNT(*) FROM zones", [], |r| Ok(r.get::<_, i64>(0)? as u64))?)
     }
 
     pub fn count_records(&self) -> Result<u64> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         Ok(conn.query_row("SELECT COUNT(*) FROM records", [], |r| Ok(r.get::<_, i64>(0)? as u64))?)
     }
 
@@ -734,7 +740,7 @@ impl ZoneStore {
 
     /// List all split-horizon networks ordered by name.
     pub fn list_split_horizon_networks(&self) -> Result<Vec<SplitHorizonNetwork>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         let mut stmt =
             conn.prepare("SELECT id, name, cidrs FROM split_horizon_networks ORDER BY name")?;
         let rows = stmt.query_map([], |row| {
@@ -765,7 +771,7 @@ impl ZoneStore {
         let cidrs = serde_json::to_string(&input.cidrs)
             .map_err(|e| DaygleError::Database(format!("encode cidrs: {e}")))?;
         let id = Uuid::new_v4().to_string();
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         conn.execute(
             "INSERT INTO split_horizon_networks (id, name, cidrs)
              VALUES (?1, ?2, ?3)
@@ -782,7 +788,7 @@ impl ZoneStore {
     /// Delete a split-horizon network by name. Entries that referenced it are
     /// kept but simply never match until the name is recreated.
     pub fn delete_split_horizon_network(&self, name: &str) -> Result<bool> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         let changed = conn.execute(
             "DELETE FROM split_horizon_networks WHERE name = ?1",
             [name],
@@ -792,7 +798,7 @@ impl ZoneStore {
 
     /// List all split-horizon entries ordered by domain then position.
     pub fn list_split_horizon_entries(&self) -> Result<Vec<SplitHorizonEntry>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         let mut stmt = conn.prepare(
             "SELECT id, domain, networks, ips, records, ttl, disabled, position
              FROM split_horizon_entries ORDER BY domain, position",
@@ -839,7 +845,7 @@ impl ZoneStore {
         let records_json = serde_json::to_string(&records)
             .map_err(|e| DaygleError::Database(format!("encode records: {e}")))?;
 
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         let next_position: i64 = conn
             .query_row(
                 "SELECT COALESCE(MAX(position), -1) + 1 FROM split_horizon_entries
@@ -890,7 +896,7 @@ impl ZoneStore {
             .map_err(|e| DaygleError::Database(format!("encode ips: {e}")))?;
         let records_json = serde_json::to_string(&records)
             .map_err(|e| DaygleError::Database(format!("encode records: {e}")))?;
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         let changed = conn.execute(
             "UPDATE split_horizon_entries
              SET domain = ?2, networks = ?3, ips = ?4, records = ?5, ttl = ?6, disabled = ?7
@@ -918,7 +924,7 @@ impl ZoneStore {
 
     /// Delete a split-horizon entry by id.
     pub fn delete_split_horizon_entry(&self, id: &str) -> Result<bool> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         let changed = conn.execute("DELETE FROM split_horizon_entries WHERE id = ?1", [id])?;
         Ok(changed > 0)
     }
@@ -933,7 +939,7 @@ impl ZoneStore {
         id: &str,
         direction: MoveDirection,
     ) -> Result<MoveResult> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         let domain: Option<String> = conn
             .query_row(
                 "SELECT domain FROM split_horizon_entries WHERE id = ?1",
@@ -982,7 +988,7 @@ impl ZoneStore {
 
     /// List all stored TSIG keys, oldest first.
     pub fn list_tsig_keys(&self) -> Result<Vec<crate::model::TsigKeyRecord>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         let mut stmt = conn.prepare(
             "SELECT name, algorithm, secret, created_at FROM tsig_keys ORDER BY created_at",
         )?;
@@ -1004,7 +1010,7 @@ impl ZoneStore {
         algorithm: &str,
         secret_b64: &str,
     ) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         conn.execute(
             "INSERT INTO tsig_keys (name, algorithm, secret, created_at)
              VALUES (?1, ?2, ?3, ?4)
@@ -1021,7 +1027,7 @@ impl ZoneStore {
 
     /// Delete a TSIG key.
     pub fn delete_tsig_key(&self, name: &str) -> Result<bool> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         let changed = conn.execute("DELETE FROM tsig_keys WHERE name = ?1", [name])?;
         Ok(changed > 0)
     }
@@ -1031,7 +1037,7 @@ impl ZoneStore {
     /// List every stored signing key for a zone (active and retired), oldest
     /// first.
     pub fn list_signing_keys(&self, zone_id: &str) -> Result<Vec<SigningKeyRecord>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         let mut stmt = conn.prepare(
             "SELECT id, zone_id, algorithm, key_der, state, created_at
              FROM dnssec_keys WHERE zone_id = ?1 ORDER BY created_at",
@@ -1060,7 +1066,7 @@ impl ZoneStore {
         created_at: chrono::DateTime<Utc>,
     ) -> Result<String> {
         let id = Uuid::new_v4().to_string();
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         conn.execute(
             "INSERT INTO dnssec_keys (id, zone_id, algorithm, key_der, state, created_at)
              VALUES (?1, ?2, ?3, ?4, 'active', ?5)",
@@ -1071,7 +1077,7 @@ impl ZoneStore {
 
     /// Move a key between states (`active` <-> `retired`).
     pub fn set_key_state(&self, key_id: &str, state: &str) -> Result<bool> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         let changed = conn.execute(
             "UPDATE dnssec_keys SET state = ?2 WHERE id = ?1",
             params![key_id, state],
@@ -1086,7 +1092,7 @@ impl ZoneStore {
         key_id: &str,
         created_at: chrono::DateTime<Utc>,
     ) -> Result<bool> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         let changed = conn.execute(
             "UPDATE dnssec_keys SET created_at = ?2 WHERE id = ?1",
             params![key_id, created_at.to_rfc3339()],
@@ -1096,7 +1102,7 @@ impl ZoneStore {
 
     /// Delete a single key row.
     pub fn delete_key(&self, key_id: &str) -> Result<bool> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         let changed = conn.execute("DELETE FROM dnssec_keys WHERE id = ?1", [key_id])?;
         Ok(changed > 0)
     }
@@ -1112,7 +1118,7 @@ impl ZoneStore {
 
     /// Delete every signing key for a zone (used by "unsign zone").
     pub fn delete_signing_key(&self, zone_id: &str) -> Result<bool> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         let changed = conn.execute("DELETE FROM dnssec_keys WHERE zone_id = ?1", [zone_id])?;
         Ok(changed > 0)
     }
@@ -1256,7 +1262,7 @@ pub struct ConsoleUserInput {
 impl ZoneStore {
     /// List every console account ordered by username.
     pub fn list_console_users(&self) -> Result<Vec<ConsoleUser>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         let mut stmt = conn.prepare(
             "SELECT username, password_hash, role, enabled, created_at
              FROM console_users ORDER BY username",
@@ -1267,7 +1273,7 @@ impl ZoneStore {
 
     /// Count enabled admin accounts (used by the last-admin guard).
     pub fn count_enabled_admins(&self) -> Result<usize> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         let n: i64 = conn.query_row(
             "SELECT COUNT(*) FROM console_users WHERE role = 'admin' AND enabled = 1",
             [],
@@ -1277,7 +1283,7 @@ impl ZoneStore {
     }
 
     pub fn get_console_user(&self, username: &str) -> Result<Option<ConsoleUser>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         conn.query_row(
             "SELECT username, password_hash, role, enabled, created_at
              FROM console_users WHERE username = ?1",
@@ -1302,7 +1308,7 @@ impl ZoneStore {
             enabled: input.enabled,
             created_at: Utc::now().to_rfc3339(),
         };
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         conn.execute(
             "INSERT INTO console_users (username, password_hash, role, enabled, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5)
@@ -1324,7 +1330,7 @@ impl ZoneStore {
 
     /// Set a console account's stored password hash.
     pub fn set_console_user_password(&self, username: &str, password_hash: &str) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         let n = conn.execute(
             "UPDATE console_users SET password_hash = ?2 WHERE username = ?1",
             params![username, password_hash],
@@ -1337,7 +1343,7 @@ impl ZoneStore {
 
     /// Change a console account's role.
     pub fn set_console_user_role(&self, username: &str, role: Role) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         let n = conn.execute(
             "UPDATE console_users SET role = ?2 WHERE username = ?1",
             params![username, role.as_str()],
@@ -1350,7 +1356,7 @@ impl ZoneStore {
 
     /// Enable or disable a console account. Disabled accounts cannot log in.
     pub fn set_console_user_enabled(&self, username: &str, enabled: bool) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         let n = conn.execute(
             "UPDATE console_users SET enabled = ?2 WHERE username = ?1",
             params![username, enabled as i64],
@@ -1363,7 +1369,7 @@ impl ZoneStore {
 
     /// Delete a console account. Returns whether a row was removed.
     pub fn delete_console_user(&self, username: &str) -> Result<bool> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         let n = conn.execute("DELETE FROM console_users WHERE username = ?1", [username])?;
         Ok(n > 0)
     }
@@ -1371,7 +1377,7 @@ impl ZoneStore {
     /// The username of the first enabled admin, or `None` (used to guard
     /// against demoting/disabling/deleting the last admin).
     pub fn first_enabled_admin(&self) -> Result<Option<String>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         conn.query_row(
             "SELECT username FROM console_users
              WHERE role = 'admin' AND enabled = 1 ORDER BY created_at, username LIMIT 1",
@@ -1398,7 +1404,7 @@ impl ZoneStore {
     /// Read the DB-backed runtime settings, deserialized into `T`.
     /// `Ok(None)` when nothing has been persisted yet (first boot).
     pub fn get_runtime_settings<T: serde::de::DeserializeOwned>(&self) -> Result<Option<T>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         let text: Option<String> = conn
             .query_row(
                 "SELECT value FROM runtime_settings WHERE name = 'runtime'",
@@ -1421,7 +1427,7 @@ impl ZoneStore {
         let text =
             serde_json::to_string(settings)
                 .map_err(|e| DaygleError::Config(format!("cannot serialize settings: {e}")))?;
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         conn.execute(
             "INSERT INTO runtime_settings (name, value) VALUES ('runtime', ?1)
              ON CONFLICT(name) DO UPDATE SET value = excluded.value",
@@ -1495,7 +1501,7 @@ fn qname_like_pattern(raw: &str) -> String {
 impl ZoneStore {
     /// Append one query-log entry.
     pub fn insert_query_log(&self, entry: &QueryLogRow) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         conn.execute(
             "INSERT INTO query_logs (ts, client, qname, qtype, protocol, outcome, rcode, elapsed_ms)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
@@ -1518,7 +1524,7 @@ impl ZoneStore {
         if entries.is_empty() {
             return Ok(());
         }
-        let mut conn = self.conn.lock().unwrap();
+        let mut conn = self.lock_conn()?;
         let tx = conn.transaction()?;
         for entry in entries {
             tx.execute(
@@ -1584,7 +1590,7 @@ impl ZoneStore {
 
         let params_ref: Vec<&dyn rusqlite::ToSql> =
             params_vec.iter().map(|p| p.as_ref()).collect();
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         let count: u64 = conn.query_row(
             &format!("SELECT COUNT(*) FROM query_logs {where_clause}"),
             rusqlite::params_from_iter(params_ref.iter().copied()),
@@ -1619,7 +1625,7 @@ impl ZoneStore {
     /// Delete every query-log row (the console's Clear button). Returns the
     /// number of deleted rows.
     pub fn clear_query_logs(&self) -> Result<usize> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         Ok(conn.execute("DELETE FROM query_logs", [])?)
     }
 
@@ -1629,7 +1635,7 @@ impl ZoneStore {
         if max == 0 {
             return Ok(0);
         }
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn()?;
         // The id of the row just past the kept window: everything at or below
         // it is surplus. (A single DELETE with subqueries on the same table is
         // unsafe here: SQLite may re-evaluate them mid-scan as rows vanish.)

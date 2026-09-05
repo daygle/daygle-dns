@@ -647,7 +647,7 @@ async fn bind_listeners(
         let socket = tokio::net::UdpSocket::bind(listen).await?;
         addrs.udp = Some(socket.local_addr()?);
         server.register_socket(socket);
-        info!(addr = %addrs.udp.unwrap(), "plaintext UDP DNS listening");
+        info!(addr = %addrs.udp.expect("addr set above"), "plaintext UDP DNS listening");
     }
     if config.server.tcp_enabled {
         let listener = tokio::net::TcpListener::bind(listen).await?;
@@ -657,7 +657,7 @@ async fn bind_listeners(
             Duration::from_millis(config.server.tcp_timeout_ms),
             config.server.response_buffer_size,
         );
-        info!(addr = %addrs.tcp.unwrap(), "plaintext TCP DNS listening");
+        info!(addr = %addrs.tcp.expect("addr set above"), "plaintext TCP DNS listening");
     }
 
     if config.dot.enabled {
@@ -673,7 +673,7 @@ async fn bind_listeners(
             tls_config,
             Duration::from_secs(10),
         )?;
-        info!(addr = %addrs.dot.unwrap(), "DNS over TLS listening");
+        info!(addr = %addrs.dot.expect("addr set above"), "DNS over TLS listening");
     }
 
     if config.doh.enabled {
@@ -691,7 +691,7 @@ async fn bind_listeners(
             None,
             &config.doh.endpoint,
         )?;
-        info!(addr = %addrs.doh.unwrap(), endpoint = %config.doh.endpoint, "DNS over HTTPS listening");
+        info!(addr = %addrs.doh.expect("addr set above"), endpoint = %config.doh.endpoint, "DNS over HTTPS listening");
     }
 
     if config.doq.enabled {
@@ -708,7 +708,7 @@ async fn bind_listeners(
                 tls_config,
             )
             .map_err(|e| DaygleError::Config(format!("cannot register DoQ listener: {e}")))?;
-        info!(addr = %addrs.doq.unwrap(), "DNS over QUIC (RFC 9250) listening");
+        info!(addr = %addrs.doq.expect("addr set above"), "DNS over QUIC (RFC 9250) listening");
     }
 
     Ok(())

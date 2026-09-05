@@ -653,7 +653,7 @@ pub async fn reload_config(State(state): State<AppState>) -> Response {
     }
     // Wake the watcher; it performs the actual reload and reports failures in
     // the logs. The re-read is asynchronous by design.
-    state.reload_notify.as_ref().unwrap().notify_waiters();
+    state.reload_notify.as_ref().expect("reload_notify checked above").notify_waiters();
     (
         StatusCode::ACCEPTED,
         Json(serde_json::json!({ "status": "reload requested" })),

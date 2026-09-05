@@ -56,13 +56,11 @@ pub fn parse_zone_file(text: &str) -> Result<Vec<RecordInput>> {
         // Optional TTL.
         let mut ttl = default_ttl;
         let (first, remainder) = split_first(&rest);
-        if first
-            .as_deref()
-            .map(|t| t.chars().all(|c| c.is_ascii_digit()))
-            .unwrap_or(false)
-        {
-            ttl = first.unwrap().parse().unwrap_or(default_ttl);
-            rest = remainder;
+        if let Some(f) = first.as_deref() {
+            if f.chars().all(|c| c.is_ascii_digit()) {
+                ttl = f.parse().unwrap_or(default_ttl);
+                rest = remainder;
+            }
         }
 
         // Optional class (IN / CH / HS). Only IN is served; still accept and
