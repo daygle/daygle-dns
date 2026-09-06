@@ -1220,6 +1220,57 @@ async fn gui_cache_headers_allow_upgrades_without_hard_refresh() {
     shutdown(server).await;
 }
 
+#[tokio::test]
+async fn upgrade_endpoints_report_state_and_gate_start() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = spawn(base_config(&dir.path().join("upgrade.db"))).await;
+    let base = api_url(server.api_addr, "");
+
+    // The info endpoint feeds the Upgrade page: version, layout flags, the
+    // host-side command, and the last run's state snapshot.
+    let info: serde_json::Value = reqwest::get(format!("{base}/api/upgrade"))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(info["version"].as_str().unwrap_or("").contains('.'));
+    assert!(info["can_update"].is_boolean());
+    assert!(info["has_config_file"].is_boolean());
+    assert!(info["has_systemd"].is_boolean());
+    assert!(info["upgrade_command"].as_str().unwrap_or("").contains("install.sh"));
+    assert!(info["preserves"].is_array());
+    assert!(info["state"]["phase"].is_string());
+
+    // The status endpoint is safe to poll while an update runs (or after a
+    // restart): it reads the shared state file rather than live state.
+    let status: serde_json::Value = reqwest::get(format!("{base}/api/upgrade/status"))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(status["version"].is_string());
+    assert!(status["state"]["phase"].is_string());
+    assert!(status["log"].is_string());
+
+    // Starting an update is refused unless the host is a real install-managed
+    // Linux host (systemd unit, /usr/local/bin binary, or /etc config). A
+    // test/dep build never qualifies, so expect 409 here.
+    if !info["can_update"].as_bool().unwrap_or(false) {
+        let resp = reqwest::Client::new()
+            .post(format!("{base}/api/upgrade/start"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 409);
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert!(body["error"].as_str().unwrap_or("").contains("update"));
+    }
+
+    shutdown(server).await;
+}
+
 // Keep unused helpers referenced.
 #[allow(unused_imports)]
 use common as _;

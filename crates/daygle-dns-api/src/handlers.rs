@@ -651,26 +651,90 @@ pub async fn reload_config(State(state): State<AppState>) -> Response {
 /// binary, installs it in place, preserves the existing configuration, zones,
 /// certificates and database, and restarts the service when systemd is in use.
 ///
-/// This endpoint is informational only. The server process cannot rebuild or
-/// replace itself from the browser; the returned values are intended to help
-/// the console point the operator to the same host-side upgrade they would
-/// already run with `install.sh`.
+/// On Linux hosts that look like a real install (systemd unit, binary under
+/// `/usr/local/bin`, or a config under `/etc/`) with `git` + `cargo` present,
+/// `can_update` is `true` and the console offers `POST /api/upgrade/start` to
+/// run the same steps in place. Elsewhere this endpoint is guidance-only and
+/// tells the operator to run the `upgrade_command` on the host.
 pub async fn upgrade_info(State(state): State<AppState>) -> Response {
     let version = daygle_dns_core::VERSION;
     let install_script = "https://raw.githubusercontent.com/daygle/daygle-dns/main/install.sh".to_string();
     let has_config_file = state.config_path.is_some();
     let has_systemd = std::path::Path::new("/etc/systemd/system/daygle-dns.service").is_file();
+    let config_dir = state
+        .config_path
+        .as_deref()
+        .and_then(|p| p.parent().map(std::path::Path::to_path_buf));
+    let can_update = crate::upgrade::can_update(config_dir.as_deref());
 
     Json(serde_json::json!({
         "version": version,
         "install_script": install_script,
         "has_config_file": has_config_file,
         "has_systemd": has_systemd,
+        "can_update": can_update,
         "upgrade_command": format!("curl -fsSL {} | sh", install_script),
         "preserves": ["configuration", "zones", "certificates", "database"],
         "note": "Run the upgrade command on the host to update all components in place. The installer rebuilds the server binary and preserves configuration, zones, certificates and the database.".to_string(),
+        "state": crate::upgrade::read_state(),
     }))
         .into_response()
+}
+
+/// `GET /api/upgrade/status` - progress of an in-place update (polls safe).
+///
+/// Returns the updater's state snapshot plus a tail of its output so the
+/// console can show live progress. Status is read from the shared temp-dir
+/// state file, so a poll after the server restarts still reports the outcome
+/// of the run that just restarted it.
+pub async fn upgrade_status(State(state): State<AppState>) -> Response {
+    let config_dir = state
+        .config_path
+        .as_deref()
+        .and_then(|p| p.parent().map(std::path::Path::to_path_buf));
+    Json(serde_json::json!({
+        "version": daygle_dns_core::VERSION,
+        "can_update": crate::upgrade::can_update(config_dir.as_deref()),
+        "state": crate::upgrade::read_state(),
+        "log": crate::upgrade::log_tail(8192),
+    }))
+        .into_response()
+}
+
+/// `POST /api/upgrade/start` - begin an in-place update (admin only).
+///
+/// Only available when the host qualifies (see [`crate::upgrade::can_update`]).
+/// The updater runs detached and the server process is restarted by it, so a
+/// `202` only means the update began; follow `/api/upgrade/status` for
+/// progress and to detect the restart.
+pub async fn upgrade_start(State(state): State<AppState>) -> Response {
+    let config_dir = state
+        .config_path
+        .as_deref()
+        .and_then(|p| p.parent().map(std::path::Path::to_path_buf));
+    let exe = match std::env::current_exe() {
+        Ok(e) => e,
+        Err(_) => {
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "cannot locate the running binary",
+            )
+        }
+    };
+    match crate::upgrade::start(&exe, config_dir.as_deref()) {
+        Ok(pid) => (
+            StatusCode::ACCEPTED,
+            Json(serde_json::json!({ "started": true, "pid": pid })),
+        )
+            .into_response(),
+        Err(e) => {
+            let status = match e {
+                crate::upgrade::StartError::Io(_) => StatusCode::INTERNAL_SERVER_ERROR,
+                _ => StatusCode::CONFLICT,
+            };
+            error_response(status, e.to_string())
+        }
+    }
 }
 
 // ---- Zones --------------------------------------------------------------
