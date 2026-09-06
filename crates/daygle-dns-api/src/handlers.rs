@@ -59,6 +59,10 @@ fn is_http_url(url: &str) -> bool {
 /// update *introduces* reject it: if the pre-update configuration already
 /// failed validation the same way (possible for hand-managed config files),
 /// the update itself is not at fault and is still applied.
+///
+/// Compares on the [`DaygleError::kind`] discriminant instead of the full
+/// `Display` string so cosmetic changes to error messages (paths, line
+/// numbers, capitalization) cannot make the comparison silently disagree.
 fn validate_config_update(
     state: &AppState,
     old: &daygle_dns_core::config::DaygleConfig,
@@ -69,7 +73,7 @@ fn validate_config_update(
         let pre_existing = old
             .validate()
             .err()
-            .map(|old_err| old_err.to_string() == e.to_string())
+            .map(|old_err| old_err.kind() == e.kind())
             .unwrap_or(false);
         if !pre_existing {
             return Err(map_err(e));
@@ -84,9 +88,6 @@ fn validate_config_update(
 /// Persist `config` to the config file when its path is known. The whole
 /// document is rewritten (comments in an edited file are not preserved; the
 /// example file documents every option).
-///
-/// No longer used: console-managed settings live in the database overlay
-/// (`runtime_settings`); the file is bootstrap-only.
 #[allow(dead_code)]
 fn persist_config(
     state: &AppState,
@@ -234,9 +235,10 @@ pub struct BlocklistSourcesInput {
 /// blocklist sources (add / edit / remove through the console).
 ///
 /// The new list is validated, persisted to the config file and applied live:
-/// the running source manager swaps its list and immediately refetches every
-/// enabled source in the background, so a saved source starts blocking (or
-/// unblocking) within seconds and the change survives a restart.
+/// `set_sources` wakes the background refresher (reload.rs), which rebuilds
+/// the remote blocklist from per-source caches and fetches anything new or
+/// changed, so a saved source starts blocking (or unblocking) within seconds
+/// and the change survives a restart.
 ///
 /// Removing the last source (or disabling all of them) clears the remote
 /// blocklist right away, matching a fresh install with no sources.
@@ -299,29 +301,10 @@ pub async fn replace_blocklist_sources(
         let mut engine = state.policy.load_full().as_ref().clone();
         engine.set_remote_blocklist(daygle_dns_policy::Blocklist::new());
         state.policy.store(Arc::new(engine));
-    } else {
-        // Refetch in the background so the response is fast. A result is
-        // applied only if the source list did not change again while the
-        // fetch was in flight, so a stale response can never overwrite a
-        // newer configuration.
-        let manager = manager.clone();
-        let policy = state.policy.clone();
-        tokio::spawn(async move {
-            let expected = manager.sources();
-            match manager.refresh_all().await {
-                Ok(Some(list)) => {
-                    if manager.sources() != expected {
-                        return; // superseded by a newer edit
-                    }
-                    let mut engine = policy.load_full().as_ref().clone();
-                    engine.set_remote_blocklist(list);
-                    policy.store(Arc::new(engine));
-                }
-                Ok(None) => {}
-                Err(e) => tracing::warn!(error = %e, "blocklist refresh after source edit failed"),
-            }
-        });
     }
+    // For one or more enabled sources, `set_sources` above already woke the
+    // background refresher, which rebuilds the remote blocklist from the
+    // per-source caches and fetches anything new or changed.
 
     state.logs.push(
         daygle_dns_core::LogLevel::Info,

@@ -19,7 +19,7 @@ pub mod stats;
 pub use auth::{hash_password, verify_password};
 pub use blocking::{BlockResponse, BlockingGroup, BlockingGroupInput};
 pub use config::*;
-pub use error::{DaygleError, Result};
+pub use error::{DaygleError, DaygleErrorKind, Result};
 pub use logs::{LogEntry, LogLevel, LogStore};
 pub use metrics::Metrics;
 pub use query_log::{QueryLogEntry, QueryLogger};

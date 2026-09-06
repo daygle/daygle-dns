@@ -21,6 +21,7 @@ pub use cert::{
     load_tls_config, load_tls_config_versions, validate_pem_pair,
 };
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -138,7 +139,11 @@ pub fn client_tls_config_with_roots(extra_roots: &[&str]) -> Result<rustls::Clie
                 .map_err(|e| DaygleError::Tls(format!("cannot add root from {path}: {e}")))?;
         }
     }
-    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    // Pick whatever crypto provider is installed rather than hardcoding `ring`,
+    // so binaries built with only `aws-lc-rs` start cleanly.
+    let provider = crate::cert::crypto_provider().ok_or_else(|| {
+        DaygleError::Tls("no rustls crypto provider available".to_string())
+    })?;
     Ok(rustls::ClientConfig::builder_with_provider(provider)
         .with_safe_default_protocol_versions()
         .map_err(|e| DaygleError::Tls(format!("tls versions: {e}")))?
@@ -194,9 +199,14 @@ pub async fn dot_query_message(
         .unwrap_or_else(|| host.clone());
     let addr = resolve_endpoint(&endpoint.server, endpoint.port_or(853)).await?;
 
-    let tcp = tokio::net::TcpStream::connect(addr)
-        .await
-        .map_err(|e| DaygleError::Proto(format!("cannot connect to {addr}: {e}")))?;
+    // Bound the connect so a SYN-blackholed server cannot wedge us forever.
+    let tcp = tokio::time::timeout(
+        Duration::from_secs(5),
+        tokio::net::TcpStream::connect(addr),
+    )
+    .await
+    .map_err(|_| DaygleError::Proto(format!("TCP connect to {addr} timed out")))?
+    .map_err(|e| DaygleError::Proto(format!("cannot connect to {addr}: {e}")))?;
     let tls = Arc::new(client_tls_config()?);
     let connector = tokio_rustls::TlsConnector::from(tls);
     let sni = rustls::pki_types::ServerName::try_from(server_name.clone())
@@ -218,17 +228,24 @@ pub async fn dot_query_message(
         .await
         .map_err(|e| DaygleError::Proto(format!("write query: {e}")))?;
 
-    let mut len_buf = [0u8; 2];
-    stream
-        .read_exact(&mut len_buf)
+    // Bound the read: a stalled peer can otherwise consume a worker forever.
+    let read = async {
+        let mut len_buf = [0u8; 2];
+        stream
+            .read_exact(&mut len_buf)
+            .await
+            .map_err(|e| DaygleError::Proto(format!("read length: {e}")))?;
+        let len = u16::from_be_bytes(len_buf) as usize;
+        let mut body = vec![0u8; len];
+        stream
+            .read_exact(&mut body)
+            .await
+            .map_err(|e| DaygleError::Proto(format!("read message: {e}")))?;
+        Ok::<_, DaygleError>(body)
+    };
+    let body = tokio::time::timeout(Duration::from_secs(10), read)
         .await
-        .map_err(|e| DaygleError::Proto(format!("read length: {e}")))?;
-    let len = u16::from_be_bytes(len_buf) as usize;
-    let mut body = vec![0u8; len];
-    stream
-        .read_exact(&mut body)
-        .await
-        .map_err(|e| DaygleError::Proto(format!("read message: {e}")))?;
+        .map_err(|_| DaygleError::Proto("DoT response timed out".to_string()))??;
     hickory_proto::op::Message::from_vec(&body)
         .map_err(|e| DaygleError::Proto(format!("decode response: {e}")))
 }
@@ -285,24 +302,58 @@ pub async fn doh_query_message(
 /// names are resolved with the system resolver.
 async fn resolve_endpoint(server: &str, port: u16) -> Result<std::net::SocketAddr> {
     let server = server.trim();
+    // Bracketed IPv6: `[::1]` or `[::1]:853`.
     if let Some(stripped) = server.strip_prefix('[') {
-        let host = stripped
-            .split_once(']')
-            .map(|(h, _)| h)
-            .ok_or_else(|| DaygleError::Config(format!("unbalanced '[' in '{server}'")))?;
-        return format!("{host}:{port}")
+        let (host, tail) = stripped.split_once(']').ok_or_else(|| {
+            DaygleError::Config(format!("unbalanced '[' in '{server}'"))
+        })?;
+        // If the user already supplied a port after the brackets, use it
+        // verbatim. Otherwise append the protocol default.
+        let effective_port = tail
+            .strip_prefix(':')
+            .and_then(|p| p.parse::<u16>().ok())
+            .unwrap_or(port);
+        let formatted = if host.contains(':') {
+            // IPv6 literal: must bracket on the way out.
+            format!("[{host}]:{effective_port}")
+        } else {
+            format!("{host}:{effective_port}")
+        };
+        return formatted
             .parse()
             .map_err(|e| DaygleError::Config(format!("bad address '{server}': {e}")));
     }
-    if server.parse::<std::net::IpAddr>().is_ok() {
-        return format!("{server}:{port}")
+    if let Ok(ip) = server.parse::<std::net::IpAddr>() {
+        // IP literal already - append the port. The caller passes a default
+        // port when no `endpoint.port` was specified, so we always use the
+        // supplied `port`.
+        return SocketAddr::new(ip, port)
+            .to_string()
             .parse()
             .map_err(|e| DaygleError::Config(format!("bad address '{server}': {e}")));
     }
-    let resolved = tokio::net::lookup_host((server, port))
-        .await
-        .map_err(|e| DaygleError::Proto(format!("cannot resolve '{server}': {e}")))?
-        .next()
-        .ok_or_else(|| DaygleError::Proto(format!("'{server}' resolved to no addresses")))?;
+    // Hostname without brackets. If the user already appended a port
+    // (`host:853`), honour it; otherwise add the protocol default.
+    let resolved = if let Some((host, p)) = server.rsplit_once(':') {
+        if let Ok(parsed_port) = p.parse::<u16>() {
+            tokio::net::lookup_host((host, parsed_port))
+                .await
+                .map_err(|e| DaygleError::Proto(format!("cannot resolve '{host}': {e}")))?
+                .next()
+                .ok_or_else(|| DaygleError::Proto(format!("'{host}' resolved to no addresses")))?
+        } else {
+            tokio::net::lookup_host((server, port))
+                .await
+                .map_err(|e| DaygleError::Proto(format!("cannot resolve '{server}': {e}")))?
+                .next()
+                .ok_or_else(|| DaygleError::Proto(format!("'{server}' resolved to no addresses")))?
+        }
+    } else {
+        tokio::net::lookup_host((server, port))
+            .await
+            .map_err(|e| DaygleError::Proto(format!("cannot resolve '{server}': {e}")))?
+            .next()
+            .ok_or_else(|| DaygleError::Proto(format!("'{server}' resolved to no addresses")))?
+    };
     Ok(resolved)
 }

@@ -32,6 +32,10 @@ pub struct SourceStatus {
     pub last_fetch: Option<Instant>,
     /// Domains contributed by this source on its last successful fetch.
     pub domains: usize,
+    /// Cached domain set from the last successful fetch. Kept so a source
+    /// removal/disable can rebuild the merged remote blocklist immediately,
+    /// without waiting for the next due refetch.
+    pub cached_domains: BTreeSet<String>,
     /// Human-readable error from the last failed fetch, if any.
     pub last_error: Option<String>,
 }
@@ -46,9 +50,13 @@ pub struct BlocklistSourceManager {
     client: reqwest::Client,
     status: Mutex<Vec<SourceStatus>>,
     /// Wakes the background refresh loop when [`Self::set_sources`] changes
-    /// the list, so a source added while the loop is resting on a long
-    /// interval is picked up on its own schedule without a restart.
+    /// the list. Used together with `changed_flag` so a sleeping loop picks
+    /// up the change after its next tick (notifications alone miss
+    /// notifications issued while the future is not parked on `notified()`).
     changed: tokio::sync::Notify,
+    /// Sticky "sources changed" flag inspected by the refresh loop after
+    /// each tick. Set in `set_sources`; cleared by `take_change`.
+    changed_flag: std::sync::atomic::AtomicBool,
 }
 
 impl BlocklistSourceManager {
@@ -71,6 +79,7 @@ impl BlocklistSourceManager {
                 refresh_secs: s.refresh_secs,
                 last_fetch: None,
                 domains: 0,
+                cached_domains: BTreeSet::new(),
                 last_error: None,
             })
             .collect();
@@ -79,6 +88,7 @@ impl BlocklistSourceManager {
             client,
             status: Mutex::new(status),
             changed: tokio::sync::Notify::new(),
+            changed_flag: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
@@ -97,28 +107,69 @@ impl BlocklistSourceManager {
     /// rebuilt so a removed source disappears and an added or changed one
     /// starts from "not fetched yet". An identical list is a no-op that keeps
     /// the current status and already-fetched domains.
+    ///
+    /// Sources that already had a successful fetch keep their `last_fetch`
+    /// timestamp; only newly-added or changed entries are marked stale. This
+    /// avoids a thundering-herd refetch on every source edit.
     pub fn set_sources(&self, sources: Vec<BlocklistSourceConfig>) {
         let mut guard = self.sources.lock().unwrap();
         if *guard == sources {
             return;
         }
-        let status = sources
+        // Carry forward `last_fetch`, `domains`, and `last_error` for sources
+        // whose identity is unchanged. The (name, url) tuple is the identity.
+        let prev_status = self.status.lock().unwrap();
+        let prev_index: std::collections::HashMap<(String, String), SourceStatus> = prev_status
             .iter()
-            .map(|s| SourceStatus {
-                name: s.name.clone(),
-                url: s.url.clone(),
-                enabled: s.enabled,
-                format: s.format,
-                refresh_secs: s.refresh_secs,
-                last_fetch: None,
-                domains: 0,
-                last_error: None,
+            .map(|s| ((s.name.clone(), s.url.clone()), s.clone()))
+            .collect();
+        drop(prev_status);
+
+        let status: Vec<SourceStatus> = sources
+            .iter()
+            .map(|s| {
+                let carried = prev_index.get(&(s.name.clone(), s.url.clone()));
+                let mut new = SourceStatus {
+                    name: s.name.clone(),
+                    url: s.url.clone(),
+                    enabled: s.enabled,
+                    format: s.format,
+                    refresh_secs: s.refresh_secs,
+                    last_fetch: None,
+                    domains: 0,
+                    cached_domains: BTreeSet::new(),
+                    last_error: None,
+                };
+                if let Some(prev) = carried {
+                    // Only carry forward state if the entry is otherwise
+                    // identical (format, refresh interval, enabled flag).
+                    if prev.format == new.format
+                        && prev.refresh_secs == new.refresh_secs
+                        && prev.enabled == new.enabled
+                    {
+                        new.last_fetch = prev.last_fetch;
+                        new.domains = prev.domains;
+                        new.cached_domains = prev.cached_domains.clone();
+                        new.last_error = prev.last_error.clone();
+                    }
+                }
+                new
             })
             .collect();
         *guard = sources;
         *self.status.lock().unwrap() = status;
-        // Wake the refresh loop so it re-arms on the new schedule promptly.
-        self.changed.notify_waiters();
+        // Wake the refresh loop. `notify_waiters` only wakes tasks currently
+        // parked on `notified()`; to wake one that may be mid-sleep we use
+        // `notify_one` (which is sufficient because there's a single refresh
+        // loop) AND arm a flag the loop inspects after each tick.
+        self.changed.notify_one();
+        self.changed_flag.store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    /// Whether the source list has changed since the last `take_change`.
+    pub fn take_change(&self) -> bool {
+        self.changed_flag
+            .swap(false, std::sync::atomic::Ordering::AcqRel)
     }
 
     /// Notify handle fired when the source list changes (see `changed`).
@@ -147,8 +198,13 @@ impl BlocklistSourceManager {
     /// Fetch every enabled source whose refresh interval has elapsed since
     /// its last successful fetch, and return the merged remote blocklist.
     ///
-    /// A source that fails is logged and skipped; the others still apply.
-    /// Returns `Ok(None)` when no source was due (nothing changed).
+    /// A source that fails is logged and skipped; its previously cached
+    /// domains are kept so a transient error never blanks the list.
+    ///
+    /// The returned set always reflects the *current* enabled sources: fetched
+    /// results are merged with the per-source caches, so removing or disabling
+    /// a source is reflected immediately even when no source was due for a
+    /// refetch. Empty when no source contributes domains.
     pub async fn refresh_due(&self) -> Result<Option<Blocklist>> {
         // Snapshot the list so the fetch cycle never holds the source lock
         // across network I/O, and so a concurrent `set_sources` cannot make
@@ -156,7 +212,6 @@ impl BlocklistSourceManager {
         let sources = self.sources.lock().unwrap().clone();
         let now = Instant::now();
         let mut merged: BTreeSet<String> = BTreeSet::new();
-        let mut any_due = false;
 
         for (i, source) in sources.iter().enumerate() {
             if !source.enabled {
@@ -169,7 +224,6 @@ impl BlocklistSourceManager {
             if !due {
                 continue;
             }
-            any_due = true;
 
             match self.fetch(source).await {
                 Ok(domains) => {
@@ -187,11 +241,11 @@ impl BlocklistSourceManager {
                             if st.name == source.name {
                                 st.last_fetch = Some(now);
                                 st.domains = domains.len();
+                                st.cached_domains = domains;
                                 st.last_error = None;
                             }
                         }
                     }
-                    merged.extend(domains);
                 }
                 Err(e) => {
                     tracing::warn!(source = %source.name, error = %e, "blocklist source fetch failed");
@@ -205,11 +259,26 @@ impl BlocklistSourceManager {
             }
         }
 
-        if any_due {
-            Ok(Some(Blocklist::from_set(merged)))
-        } else {
-            Ok(None)
+        // Merge the per-source caches so the effective set follows the
+        // current source list, not the last fetch cycle. A source removed or
+        // disabled on the latest edit stops contributing here immediately.
+        for (i, source) in sources.iter().enumerate() {
+            if !source.enabled {
+                continue;
+            }
+            let status = self.status.lock().unwrap();
+            if let Some(st) = status.get(i) {
+                if st.name == source.name {
+                    merged.extend(st.cached_domains.iter().cloned());
+                }
+            }
         }
+
+        // Always hand back the current effective set (possibly empty): a
+        // source removed, disabled, or emptied on its last fetch must stop
+        // blocking immediately. Callers persist the engine only when the set
+        // actually differs, so an unchanged result is a no-op.
+        Ok(Some(Blocklist::from_set(merged)))
     }
 
     /// Force a refresh of every enabled source now (used by `POST

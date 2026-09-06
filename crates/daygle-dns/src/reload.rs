@@ -81,7 +81,10 @@ pub enum ReloadCommand {
 pub fn apply_config(shared: &Shared, new: Arc<DaygleConfig>) -> bool {
     let old = shared.config.load_full();
 
-    let listeners_changed = old.server != new.server || old.dot != new.dot || old.doh != new.doh;
+    let listeners_changed = old.server != new.server
+        || old.dot != new.dot
+        || old.doh != new.doh
+        || old.doq != new.doq;
 
     // Publish the new configuration first so the API token, `/api/config` and
     // the listener supervisor all observe the requested state immediately.
@@ -274,7 +277,10 @@ pub fn spawn_blocklist_refresh(
             }
             // The source list changed while the cycle was running (e.g. a
             // console save): loop again right away instead of resting.
-            if refresh_manager.sources() != expected {
+            // `take_change` is the sticky flag set by `set_sources`, which
+            // catches changes whose `Notify` wake was consumed before the
+            // select below re-armed it (rapid back-to-back edits).
+            if refresh_manager.sources() != expected || refresh_manager.take_change() {
                 continue;
             }
             let period = refresh_manager.min_refresh();

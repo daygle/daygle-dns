@@ -88,7 +88,11 @@ pub fn validate_pem_pair(cert_pem: &str, key_pem: &str) -> Result<()> {
         })?
         .map_err(|e| DaygleError::Tls(format!("cannot parse key PEM: {e}")))?;
 
-    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let provider = crypto_provider().ok_or_else(|| {
+        DaygleError::Tls(
+            "no rustls crypto provider available; enable the `ring` or `aws_lc_rs` feature".into(),
+        )
+    })?;
     rustls::ServerConfig::builder_with_provider(provider)
         .with_safe_default_protocol_versions()
         .map_err(|e| DaygleError::Tls(format!("TLS protocol setup failed: {e}")))?
@@ -100,6 +104,25 @@ pub fn validate_pem_pair(cert_pem: &str, key_pem: &str) -> Result<()> {
             ))
         })?;
     Ok(())
+}
+
+/// Return a crypto provider for rustls.
+///
+/// Tries the process-wide default first (set by `rustls::crypto::aws_lc_rs::default_provider`
+/// or `ring::default_provider` depending on which feature the binary was built
+/// with), then falls back to `ring` explicitly. Previously we hardcoded
+/// `ring::default_provider()` which panics at runtime if the binary was built
+/// with only `aws-lc-rs` enabled.
+pub(crate) fn crypto_provider() -> Option<Arc<rustls::crypto::CryptoProvider>> {
+    if let Some(p) = rustls::crypto::CryptoProvider::get_default() {
+        return Some(p.clone());
+    }
+    // Fall back: install ring explicitly. On a race with another thread that
+    // already installed a provider, `install_default` returns it in the Err.
+    match rustls::crypto::ring::default_provider().install_default() {
+        Ok(()) => rustls::crypto::CryptoProvider::get_default().cloned(),
+        Err(installed) => Some(installed),
+    }
 }
 
 fn write_if_parent_exists(path: &str, bytes: &[u8]) -> Result<()> {
@@ -127,10 +150,14 @@ pub fn load_tls_config_versions(
     let certs = read_certs(cert_path)?;
     let key = read_key(key_path)?;
 
-    // Pin the `ring` crypto provider explicitly: hickory's `tls-ring` feature
-    // pulls in rustls/ring, which coexists with rustls' default aws-lc-rs
-    // feature and would otherwise make `builder()` ambiguous.
-    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    // Use whatever crypto provider rustls has installed at runtime. We avoid
+    // hardcoding `ring::default_provider()` so binaries built without the
+    // `ring` feature (e.g. only `aws-lc-rs`) still start cleanly.
+    let provider = crypto_provider().ok_or_else(|| {
+        DaygleError::Tls(
+            "no rustls crypto provider available; enable `ring` or `aws_lc_rs`".into(),
+        )
+    })?;
     let mut config = rustls::ServerConfig::builder_with_provider(provider)
         .with_safe_default_protocol_versions()
         .map_err(|e| DaygleError::Tls(format!("TLS protocol setup failed: {e}")))?

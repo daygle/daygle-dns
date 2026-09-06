@@ -79,3 +79,76 @@ impl From<serde_json::Error> for DaygleError {
         DaygleError::Config(format!("invalid json: {e}"))
     }
 }
+
+/// Coarse classification of a [`DaygleError`]. Two errors with the same
+/// `kind()` are guaranteed to represent the same failure mode regardless of
+/// the human-readable message - useful for comparing validation outcomes
+/// before/after a config edit without depending on `Display` strings (which
+/// may include paths, line numbers, or other cosmetic context).
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum DaygleErrorKind {
+    Config,
+    Io,
+    InvalidRecord,
+    InvalidPolicy,
+    Refused,
+    Proto,
+    Resolution,
+    NotFound,
+    AlreadyExists,
+    Database,
+    Tls,
+    Internal,
+}
+
+impl DaygleError {
+    /// Coarse classification; compare with [`DaygleErrorKind::eq`].
+    pub fn kind(&self) -> DaygleErrorKind {
+        match self {
+            DaygleError::Config(_) => DaygleErrorKind::Config,
+            DaygleError::Io(_) => DaygleErrorKind::Io,
+            DaygleError::InvalidRecord(_) => DaygleErrorKind::InvalidRecord,
+            DaygleError::InvalidPolicy(_) => DaygleErrorKind::InvalidPolicy,
+            DaygleError::Refused(_) => DaygleErrorKind::Refused,
+            DaygleError::Proto(_) => DaygleErrorKind::Proto,
+            DaygleError::Resolution { .. } => DaygleErrorKind::Resolution,
+            DaygleError::NotFound(_) => DaygleErrorKind::NotFound,
+            DaygleError::AlreadyExists(_) => DaygleErrorKind::AlreadyExists,
+            DaygleError::Database(_) => DaygleErrorKind::Database,
+            DaygleError::Tls(_) => DaygleErrorKind::Tls,
+            DaygleError::Internal(_) => DaygleErrorKind::Internal,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn kind_reflects_variant() {
+        assert_eq!(
+            DaygleError::Config("foo".into()).kind(),
+            DaygleErrorKind::Config
+        );
+        assert_eq!(
+            DaygleError::NotFound("bar".into()).kind(),
+            DaygleErrorKind::NotFound
+        );
+        assert_eq!(
+            DaygleError::Resolution {
+                message: "x".into(),
+                response_code: Some(3)
+            }
+            .kind(),
+            DaygleErrorKind::Resolution
+        );
+    }
+
+    #[test]
+    fn kind_is_stable_under_message_changes() {
+        let a = DaygleError::Config("port 53 in use on line 12".into());
+        let b = DaygleError::Config("port 53 in use on line 99".into());
+        assert_eq!(a.kind(), b.kind());
+    }
+}

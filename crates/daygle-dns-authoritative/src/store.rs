@@ -1483,8 +1483,34 @@ impl ZoneStore {
     }
 
     /// Change a console account's role.
+    ///
+    /// Refuses to demote the last enabled admin to a non-admin role, which
+    /// would otherwise lock the operator out of the console.
     pub fn set_console_user_role(&self, username: &str, role: Role) -> Result<()> {
         let conn = self.lock_conn()?;
+        if role != Role::Admin {
+            // Only enforce when demoting FROM admin; other role transitions
+            // (viewer -> editor, etc.) are unaffected.
+            let current: String = conn
+                .query_row(
+                    "SELECT role FROM console_users WHERE username = ?1",
+                    [username],
+                    |r| r.get(0),
+                )
+                .map_err(|_| DaygleError::Config(format!("user '{username}' not found")))?;
+            if current == Role::Admin.as_str() {
+                let count: i64 = conn.query_row(
+                    "SELECT COUNT(*) FROM console_users WHERE role = 'admin' AND enabled = 1",
+                    [],
+                    |r| r.get(0),
+                )?;
+                if count <= 1 {
+                    return Err(DaygleError::Config(
+                        "cannot demote the last enabled admin".to_string(),
+                    ));
+                }
+            }
+        }
         let n = conn.execute(
             "UPDATE console_users SET role = ?2 WHERE username = ?1",
             params![username, role.as_str()],
@@ -1496,8 +1522,31 @@ impl ZoneStore {
     }
 
     /// Enable or disable a console account. Disabled accounts cannot log in.
+    ///
+    /// Refuses to disable an enabled admin when no other enabled admin exists.
     pub fn set_console_user_enabled(&self, username: &str, enabled: bool) -> Result<()> {
         let conn = self.lock_conn()?;
+        if !enabled {
+            let (role, was_enabled): (String, i64) = conn
+                .query_row(
+                    "SELECT role, enabled FROM console_users WHERE username = ?1",
+                    [username],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .map_err(|_| DaygleError::Config(format!("user '{username}' not found")))?;
+            if role == Role::Admin.as_str() && was_enabled != 0 {
+                let count: i64 = conn.query_row(
+                    "SELECT COUNT(*) FROM console_users WHERE role = 'admin' AND enabled = 1",
+                    [],
+                    |r| r.get(0),
+                )?;
+                if count <= 1 {
+                    return Err(DaygleError::Config(
+                        "cannot disable the last enabled admin".to_string(),
+                    ));
+                }
+            }
+        }
         let n = conn.execute(
             "UPDATE console_users SET enabled = ?2 WHERE username = ?1",
             params![username, enabled as i64],
@@ -1509,8 +1558,34 @@ impl ZoneStore {
     }
 
     /// Delete a console account. Returns whether a row was removed.
+    ///
+    /// Refuses to delete the last enabled admin.
     pub fn delete_console_user(&self, username: &str) -> Result<bool> {
         let conn = self.lock_conn()?;
+        let row: Option<(String, i64)> = conn
+            .query_row(
+                "SELECT role, enabled FROM console_users WHERE username = ?1",
+                [username],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        let Some((role, was_enabled)) = row else {
+            return Err(DaygleError::Config(format!(
+                "user '{username}' not found"
+            )));
+        };
+        if role == Role::Admin.as_str() && was_enabled != 0 {
+            let count: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM console_users WHERE role = 'admin' AND enabled = 1",
+                [],
+                |r| r.get(0),
+            )?;
+            if count <= 1 {
+                return Err(DaygleError::Config(
+                    "cannot delete the last enabled admin".to_string(),
+                ));
+            }
+        }
         let n = conn.execute("DELETE FROM console_users WHERE username = ?1", [username])?;
         Ok(n > 0)
     }
@@ -2890,5 +2965,110 @@ mod tests {
             expire: None,
             minimum: None,
         }
+    }
+
+    fn console_admin(_name: &str) -> ConsoleUserInput {
+        ConsoleUserInput {
+            password_hash: "not-a-real-hash".to_string(),
+            role: Role::Admin,
+            enabled: true,
+            first_name: String::new(),
+            last_name: String::new(),
+            email: String::new(),
+        }
+    }
+
+    fn console_viewer(_name: &str) -> ConsoleUserInput {
+        ConsoleUserInput {
+            role: Role::Viewer,
+            enabled: true,
+            first_name: String::new(),
+            last_name: String::new(),
+            email: String::new(),
+            password_hash: "not-a-real-hash".to_string(),
+        }
+    }
+
+    /// The last-enabled-admin store methods used to self-deadlock: they called
+    /// `count_enabled_admins()` while already holding the connection mutex.
+    /// Run each on a helper thread and fail instead of hanging if it regresses.
+    #[test]
+    fn admin_writes_do_not_deadlock_on_the_lock() {
+        let s = store();
+        s.create_console_user("admin", &console_admin("admin")).unwrap();
+        s.create_console_user("root2", &console_admin("root2")).unwrap();
+        s.create_console_user("auditor", &console_viewer("auditor")).unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let s2 = s.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(("delete", s2.delete_console_user("root2")));
+        });
+        match rx.recv_timeout(std::time::Duration::from_secs(10)) {
+            Ok(("delete", Ok(true))) => {}
+            Ok(("delete", Err(e))) => panic!("delete failed: {e:?}"),
+            Ok(_) => panic!("unexpected result"),
+            Err(_) => panic!("delete_console_user deadlocked"),
+        }
+        assert!(s.count_enabled_admins().unwrap() == 1);
+
+        // With only one enabled admin left, disabling it is refused (the
+        // guard must return an error, not deadlock).
+        let (tx, rx) = std::sync::mpsc::channel();
+        let s2 = s.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(("disable", s2.set_console_user_enabled("admin", false)));
+        });
+        match rx.recv_timeout(std::time::Duration::from_secs(10)) {
+            Ok(("disable", Err(_))) => {}
+            Ok(("disable", Ok(()))) => panic!("last enabled admin unexpectedly disabled"),
+            Ok(_) => panic!("unexpected result"),
+            Err(_) => panic!("set_console_user_enabled deadlocked"),
+        }
+        assert!(s.count_enabled_admins().unwrap() == 1);
+    }
+
+    #[test]
+    fn last_enabled_admin_table_ops_are_rejected_without_deadlock() {
+        let s = store();
+        s.create_console_user("admin", &console_admin("admin")).unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let s2 = s.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(("delete", s2.delete_console_user("admin")));
+        });
+        match rx.recv_timeout(std::time::Duration::from_secs(10)) {
+            Ok(("delete", Err(_))) => {}
+            Ok(("delete", Ok(_))) => panic!("last admin unexpectedly deleted"),
+            Ok(_) => panic!("unexpected result"),
+            Err(_) => panic!("delete_console_user deadlocked"),
+        }
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let s2 = s.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(("demote", s2.set_console_user_role("admin", Role::Viewer)));
+        });
+        match rx.recv_timeout(std::time::Duration::from_secs(10)) {
+            Ok(("demote", Err(_))) => {}
+            Ok(("demote", Ok(()))) => panic!("last admin unexpectedly demoted"),
+            Ok(_) => panic!("unexpected result"),
+            Err(_) => panic!("set_console_user_role deadlocked"),
+        }
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let s2 = s.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(("disable", s2.set_console_user_enabled("admin", false)));
+        });
+        match rx.recv_timeout(std::time::Duration::from_secs(10)) {
+            Ok(("disable", Err(_))) => {}
+            Ok(("disable", Ok(()))) => panic!("last admin unexpectedly disabled"),
+            Ok(_) => panic!("unexpected result"),
+            Err(_) => panic!("set_console_user_enabled deadlocked"),
+        }
+
+        // A viewer can still be removed freely, and an admin stays enabled.
+        s.create_console_user("auditor", &console_viewer("auditor")).unwrap();
+        assert!(s.clone().delete_console_user("auditor").unwrap());
     }
 }

@@ -12,8 +12,9 @@
 
 use std::collections::HashMap;
 use std::net::IpAddr;
-use std::sync::Mutex;
 use std::time::{Duration, Instant};
+
+use parking_lot::Mutex;
 
 use crate::config::RateLimitSettings;
 
@@ -71,7 +72,7 @@ impl RateLimiter {
     /// Swap in new limits (config reload). Existing buckets are kept; they
     /// simply reset when their current window elapses.
     pub fn set_settings(&self, settings: &RateLimitSettings) {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lock();
         inner.enabled = settings.enabled;
         inner.client_limit = settings.client_max_queries;
         inner.client_window = Duration::from_secs(settings.client_window_secs);
@@ -82,13 +83,13 @@ impl RateLimiter {
 
     /// Whether rate limiting is currently enabled.
     pub fn is_enabled(&self) -> bool {
-        self.inner.lock().unwrap().enabled
+        self.inner.lock().enabled
     }
 
     /// Admit one query from `client`. Returns `true` when the query may be
     /// processed, `false` when the client exceeded its window limit.
     pub fn check_client(&self, client: IpAddr) -> bool {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lock();
         if !inner.enabled {
             return true;
         }
@@ -104,7 +105,7 @@ impl RateLimiter {
     /// Admit one query for `domain`. Returns `true` when the query may be
     /// processed, `false` when the domain exceeded its window limit.
     pub fn check_domain(&self, domain: &str) -> bool {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lock();
         if !inner.enabled {
             return true;
         }
@@ -116,7 +117,7 @@ impl RateLimiter {
 
     /// Forget all state (used by tests).
     pub fn reset(&self) {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lock();
         inner.clients.clear();
         inner.domains.clear();
         inner.last_sweep = Instant::now();
@@ -125,13 +126,13 @@ impl RateLimiter {
     /// The number of tracked client buckets (used by tests).
     #[cfg(test)]
     fn client_buckets(&self) -> usize {
-        self.inner.lock().unwrap().clients.len()
+        self.inner.lock().clients.len()
     }
 
     /// The number of tracked domain buckets (used by tests).
     #[cfg(test)]
     fn domain_buckets(&self) -> usize {
-        self.inner.lock().unwrap().domains.len()
+        self.inner.lock().domains.len()
     }
 }
 

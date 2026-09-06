@@ -716,14 +716,47 @@ fn materialize_one(
 }
 
 /// Write `bytes` to `path` unless the file already holds the same content.
+///
+/// On Unix the file is created with mode `0600` so a managed private key is
+/// never world-readable. Writes go through a sibling `.tmp` file and are
+/// atomically renamed into place so a crash between cert and key writes
+/// cannot leave the listener with a mismatched pair.
 fn write_if_changed(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
     if std::fs::read(path).map(|b| b == bytes).unwrap_or(false) {
         return Ok(());
     }
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(DaygleError::Io)?;
+        // Refuse to follow a symlinked directory for TLS material - an
+        // attacker who controls a symlink there could redirect our write.
+        let meta = std::fs::symlink_metadata(parent).map_err(DaygleError::Io)?;
+        if meta.file_type().is_symlink() {
+            return Err(DaygleError::Config(format!(
+                "refusing to write TLS material under symlinked {}",
+                parent.display()
+            )));
+        }
     }
-    std::fs::write(path, bytes).map_err(DaygleError::Io)
+    let tmp = path.with_extension("tmp");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&tmp)
+            .map_err(DaygleError::Io)?;
+        std::fs::write(&tmp, bytes).map_err(DaygleError::Io)?;
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::write(&tmp, bytes).map_err(DaygleError::Io)?;
+    }
+    // `rename` is atomic on POSIX for files on the same filesystem and best-
+    // effort on Windows (replaces if the destination exists).
+    std::fs::rename(&tmp, path).map_err(DaygleError::Io)
 }
 
 async fn bind_listeners(

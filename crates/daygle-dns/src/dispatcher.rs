@@ -448,19 +448,11 @@ impl RequestHandler for DnsDispatcher {
         // later must not assume this casing contract; cookies in particular have their
         // own RFC 6265 matching rules and should be normalized separately at the
         // response layer rather than inheriting DNS lowercasing.
-        let _info = match request.request_info() {
-            Ok(info) => info,
-            Err(e) => {
-                warn!("malformed request from {}: {e}", request.src());
-                self.metrics.inc(&self.metrics.errors);
-                return send_error(&mut response_handle, request, ResponseCode::FormErr).await;
-            }
-        };
-
-        // RFC 2136 dynamic updates are handled with write-through to SQLite:
-        // the catalog is reloaded after each successful update, so changes
-        // are immediately live and survive restarts. `allow_dynamic_updates`
-        // and `update_networks` gate who may update.
+        //
+        // RFC 2136 dynamic updates and RFC 1996 NOTIFY do NOT need request_info()
+        // parsing - they operate on the raw request and have their own validation
+        // paths. Branch on OpCode first and only call request_info() once for
+        // ordinary queries; this avoids parsing the request up to 3x per query.
         if request.metadata.op_code == OpCode::Update {
             let edns = request.edns.as_ref();
             return daygle_dns_authoritative::handle_update_with_notify(
@@ -472,10 +464,6 @@ impl RequestHandler for DnsDispatcher {
             )
             .await;
         }
-
-        // RFC 1996 NOTIFY (OpCode 4): a master's hint that a secondary zone
-        // changed. Handled like updates - before policy/rate limiting per
-        // domain - so masters are never refused for asking us to sync.
         if request.metadata.op_code == OpCode::Notify {
             return match &self.notify.inbound {
                 Some(inbound) => inbound.handle(request, response_handle).await,
@@ -493,8 +481,12 @@ impl RequestHandler for DnsDispatcher {
             }
         };
 
-        let query_name = info.query.name().to_string();
-        let qname = query_name.trim_end_matches('.').to_ascii_lowercase();
+        let qname = info
+            .query
+            .name()
+            .to_string()
+            .trim_end_matches('.')
+            .to_ascii_lowercase();
         let rtype = info.query.query_type().to_string();
         let client = info.src.ip();
         let protocol = protocol_label(info.protocol);

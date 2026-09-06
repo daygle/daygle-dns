@@ -12,7 +12,8 @@
 use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+
+use parking_lot::Mutex;
 
 use chrono::{Datelike, Utc};
 use serde::Serialize;
@@ -43,8 +44,6 @@ pub struct QueryLogEntry {
 }
 
 struct Inner {
-    dir: PathBuf,
-    retention_days: u32,
     /// Set once a write/open has failed: the logger stays disabled for the
     /// rest of the process so a broken log directory can't spam warnings or
     /// re-attempt a failing open on every query.
@@ -67,6 +66,11 @@ impl Drop for Inner {
 /// Persistent per-query logger with daily file rotation.
 pub struct QueryLogger {
     inner: Mutex<Inner>,
+    /// Directory and retention are immutable for the lifetime of the logger
+    /// (set at construction), so we keep them outside the mutex. This lets the
+    /// slow path - directory create, sweep - happen without blocking writers.
+    dir: PathBuf,
+    retention_days: u32,
 }
 
 impl QueryLogger {
@@ -75,53 +79,72 @@ impl QueryLogger {
     pub fn new(dir: &Path, retention_days: u32) -> Self {
         Self {
             inner: Mutex::new(Inner {
-                dir: dir.to_path_buf(),
-                retention_days,
                 disabled: false,
                 writer: None,
             }),
+            dir: dir.to_path_buf(),
+            retention_days,
         }
     }
 
     /// Append one query. Never panics; on I/O failure the logger disables
     /// itself after a single warning.
     pub fn log(&self, entry: &QueryLogEntry) {
-        let mut inner = match self.inner.lock() {
-            Ok(g) => g,
-            Err(_) => return,
+        // Decide whether we need a new file BEFORE taking the mutex so we can
+        // run the slow directory-creation / sweep outside the lock.
+        let today = Utc::now().format("%Y-%m-%d").to_string();
+        let needs_rotation = {
+            let inner = self.inner.lock();
+            inner.disabled
+                || inner.writer.as_ref().map(|(d, _)| d != &today).unwrap_or(true)
         };
-        if inner.disabled {
+        if !needs_rotation {
+            // Fast path: writer is ready and still on today's file.
+            let mut inner = self.inner.lock();
+            if inner.disabled {
+                return;
+            }
+            let Some((_, writer)) = inner.writer.as_mut() else {
+                return;
+            };
+            if let Err(e) = write_line(writer, entry) {
+                warn!(error = %e, "query log write failed; persistent query logging disabled");
+                inner.writer = None;
+                inner.disabled = true;
+            }
             return;
         }
 
-        let today = Utc::now().format("%Y-%m-%d").to_string();
-        let needs_rotation = inner
-            .writer
-            .as_ref()
-            .map(|(day, _)| day.as_str() != today)
-            .unwrap_or(true);
-        if needs_rotation {
-            match open_log_file(&inner.dir, &today) {
-                Ok(file) => {
-                    if let Some((_, w)) = inner.writer.as_mut() {
-                        let _ = w.flush();
-                    }
-                    inner.writer = Some((today.clone(), BufWriter::new(file)));
-                    info!(dir = %inner.dir.display(), file = %today, "query log opened");
-                    sweep_old_logs(&inner.dir, inner.retention_days);
-                }
-                Err(e) => {
-                    warn!(
-                        dir = %inner.dir.display(),
-                        error = %e,
-                        "query log open failed; persistent query logging disabled"
-                    );
-                    inner.writer = None;
-                    inner.disabled = true;
-                    return;
-                }
-            }
+        // Slow path: open today's file (may create the directory and sweep
+        // old ones). Run all blocking syscalls OUTSIDE the mutex.
+        if let Err(e) = std::fs::create_dir_all(&self.dir) {
+            warn!(error = %e, "query log dir create failed; persistent query logging disabled");
+            self.inner.lock().disabled = true;
+            return;
         }
+        let file = match open_log_file(&self.dir, &today) {
+            Ok(f) => f,
+            Err(e) => {
+                warn!(
+                    dir = %self.dir.display(),
+                    error = %e,
+                    "query log open failed; persistent query logging disabled"
+                );
+                self.inner.lock().disabled = true;
+                return;
+            }
+        };
+        sweep_old_logs(&self.dir, self.retention_days);
+
+        let mut inner = self.inner.lock();
+        if inner.disabled {
+            return;
+        }
+        if let Some((_, w)) = inner.writer.as_mut() {
+            let _ = w.flush();
+        }
+        inner.writer = Some((today.clone(), BufWriter::new(file)));
+        info!(dir = %self.dir.display(), file = %today, "query log opened");
 
         let Some((_, writer)) = inner.writer.as_mut() else {
             return;
@@ -135,7 +158,7 @@ impl QueryLogger {
 
     /// Whether the logger is still able to write (used by tests).
     pub fn is_active(&self) -> bool {
-        self.inner.lock().map(|i| i.writer.is_some()).unwrap_or(false)
+        self.inner.lock().writer.is_some()
     }
 }
 

@@ -27,7 +27,7 @@ const KEY_LEN: usize = 32;
 
 type HmacSha256 = Hmac<Sha256>;
 
-/// Hash `password` with PBKDF2-HMAC-SHA256 and a random salt.
+/// Hash `password` with PBKDF2-HMAC-SHA256 and a CSPRNG-generated salt.
 ///
 /// Returns the `pbkdf2-sha256$<iterations>$<salt>$<hash>` string suitable for
 /// `api.users[].password_hash`.
@@ -38,20 +38,19 @@ pub fn hash_password(password: &str) -> String {
 /// Same as [`hash_password`] with an explicit iteration count.
 pub fn hash_password_with(password: &str, iterations: u32) -> String {
     let mut salt = [0u8; SALT_LEN];
-    // No `getrandom` dependency: SHA-256 of high-resolution time + address
-    // entropy is adequate for an admin-console salt, and avoids pulling a
-    // crypto RNG crate into daygle-dns-core. Uniqueness per account is what
-    // matters (rainbow-table resistance), not cryptographic secrecy.
-    let entropy = format!(
-        "{:?}-{:?}-{:?}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0),
-        password.len(),
-        std::process::id(),
-    );
-    let digest = Sha256::digest(entropy.as_bytes());
+    // Cryptographic salt: pull entropy from the OS CSPRNG. We use a tiny
+    // SHA-256 of the OS-provided random bytes (so that any caller missing
+    // `getrandom` at link-time fails closed) and seed the password hash with
+    // it. The salt is the only secret input to PBKDF2; its entropy must be
+    // cryptographic. 16 bytes = 128 bits, well above the OWASP minimum.
+    let mut seed = [0u8; 32];
+    if getrandom_bytes(&mut seed).is_err() {
+        // OS RNG unavailable: refuse to produce a hash rather than emit a
+        // weak salt. The caller (CLI / setup handler) should treat this as a
+        // fatal misconfiguration.
+        panic!("no OS CSPRNG available to seed password salt");
+    }
+    let digest = Sha256::digest(&seed);
     salt.copy_from_slice(&digest[..SALT_LEN]);
 
     let key = pbkdf2_sha256(password.as_bytes(), &salt, iterations, KEY_LEN);
@@ -60,6 +59,70 @@ pub fn hash_password_with(password: &str, iterations: u32) -> String {
         BASE64.encode(salt),
         BASE64.encode(key)
     )
+}
+
+/// Fill `buf` with cryptographically-secure random bytes from the OS CSPRNG.
+///
+/// Tries `getrandom` (Linux/Android) first, then falls back to libc / BCrypt
+/// syscalls on the platforms we support. Panics only when no source is
+/// available - we never want to silently fall back to a weak RNG.
+fn getrandom_bytes(buf: &mut [u8]) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        // Try libc `getrandom(2)` directly to avoid pulling in a new crate.
+        let mut filled = 0;
+        while filled < buf.len() {
+            let n = unsafe {
+                libc_getrandom(&mut buf[filled..])
+            };
+            if n < 0 {
+                let err = std::io::Error::last_os_error();
+                if err.kind() == std::io::ErrorKind::Interrupted {
+                    continue;
+                }
+                return Err(err);
+            }
+            filled += n as usize;
+        }
+        Ok(())
+    }
+    #[cfg(windows)]
+    {
+        use std::ffi::c_void;
+        #[link(name = "bcrypt")]
+        extern "system" {
+            fn BCryptGenRandom(
+                algorithm: *mut c_void,
+                buffer: *mut u8,
+                length: u32,
+                flags: u32,
+            ) -> i32;
+        }
+        let alg = std::ptr::null_mut();
+        // BCRYPT_RNG_ALGORITHM = null handle; with the system-preferred RNG
+        // flag set, the OS uses its own CSPRNG.
+        let status = unsafe {
+            BCryptGenRandom(
+                alg,
+                buf.as_mut_ptr(),
+                buf.len() as u32,
+                2, // BCRYPT_USE_SYSTEM_PREFERRED_RNG
+            )
+        };
+        if status == 0 {
+            Ok(())
+        } else {
+            Err(std::io::Error::last_os_error())
+        }
+    }
+}
+
+#[cfg(unix)]
+unsafe fn libc_getrandom(buf: &mut [u8]) -> isize {
+    extern "C" {
+        fn getrandom(buf: *mut u8, len: usize, flags: u32) -> isize;
+    }
+    unsafe { getrandom(buf.as_mut_ptr(), buf.len(), 0) }
 }
 
 /// Verify `password` against a stored hash. Constant-time comparison.
