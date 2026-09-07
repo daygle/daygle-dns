@@ -61,7 +61,7 @@ toml = "1.1"
 rusqlite = { version = "0.40", features = ["bundled"] }
 ipnet = "2"
 base64 = "0.23"
-sha2 = "0.10"
+sha2 = "0.11"
 hmac = "0.13"
 uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
