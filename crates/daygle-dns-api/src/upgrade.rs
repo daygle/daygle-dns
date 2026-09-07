@@ -113,16 +113,19 @@ fn pid_alive(_pid: i64) -> bool {
 
 /// Whether a self-update is possible for this host.
 ///
-/// Only real install-managed Linux hosts qualify (systemd unit present, the
-/// binary at `/usr/local/bin/daygle-dns`, or the config under `/etc/`), so a
-/// dev/test binary is never updated in place.
+/// Only real install-managed Linux hosts qualify: systemd unit present, the
+/// binary at `/usr/local/bin/daygle-dns`, or the config under `/etc/`. A
+/// dev/test binary is never updated in place. Tool availability is reported
+/// separately by [`gates`], not as a hard gate, so a genuine install still
+/// offers the button when the daemon account's PATH is bare (cargo is often
+/// installed to `/root/.cargo/bin`, invisible to the systemd service user).
 pub fn can_update(config_dir: Option<&Path>) -> bool {
-    if std::env::consts::OS != "linux" {
-        return false;
-    }
-    if !tools_present() {
-        return false;
-    }
+    std::env::consts::OS == "linux" && has_install_evidence(config_dir)
+}
+
+/// Install evidence markers, in order: systemd unit, the conventional binary
+/// location, or the config living under `/etc/`.
+fn has_install_evidence(config_dir: Option<&Path>) -> bool {
     if Path::new("/etc/systemd/system/daygle-dns.service").is_file() {
         return true;
     }
@@ -133,12 +136,29 @@ pub fn can_update(config_dir: Option<&Path>) -> bool {
         return true;
     }
     if let Some(dir) = config_dir {
-        let s = dir.to_string_lossy();
-        if s.starts_with("/etc/") {
+        if dir.to_string_lossy().starts_with("/etc/") {
             return true;
         }
     }
     false
+}
+
+/// Human-readable reasons an in-place update is unavailable on this host, for
+/// the console's "Current Installation" card.
+pub fn gates(config_dir: Option<&Path>) -> Vec<&'static str> {
+    let mut missing = Vec::new();
+    if std::env::consts::OS != "linux" {
+        missing.push("host OS is not Linux");
+    }
+    if !tools_present() {
+        missing.push("sh, git, or cargo not found on this account's PATH");
+    }
+    if !has_install_evidence(config_dir) {
+        missing.push(
+            "no install evidence (systemd unit, /usr/local/bin/daygle-dns binary, or config under /etc)",
+        );
+    }
+    missing
 }
 
 /// Whether an update run is currently active. A state marked running whose
@@ -281,7 +301,21 @@ mod tests {
         #[cfg(not(target_os = "windows"))]
         {
             // Harmless on Linux CI: no install evidence on CI hosts.
-            assert!(!can_update(Some(Path::new(env!("TEMP")))));
+            assert!(!can_update(None));
+        }
+    }
+
+    #[test]
+    fn unmet_conditions_are_listed_for_the_console() {
+        // Whatever the platform, a host that cannot update reports at least one
+        // actionable gate, and engineers can read them off the /api/upgrade
+        // response without tracing the boolean.
+        if !can_update(None) {
+            let missing = gates(None);
+            assert!(!missing.is_empty());
+            assert!(missing
+                .iter()
+                .all(|g| !g.is_empty() && g.contains(' ')));
         }
     }
 }

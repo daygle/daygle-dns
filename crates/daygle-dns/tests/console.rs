@@ -1236,6 +1236,7 @@ async fn upgrade_endpoints_report_state_and_gate_start() {
         .unwrap();
     assert!(info["version"].as_str().unwrap_or("").contains('.'));
     assert!(info["can_update"].is_boolean());
+    assert!(info["gates"].is_array());
     assert!(info["has_config_file"].is_boolean());
     assert!(info["has_systemd"].is_boolean());
     assert!(info["upgrade_command"].as_str().unwrap_or("").contains("install.sh"));

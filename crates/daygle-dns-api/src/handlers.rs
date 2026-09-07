@@ -666,6 +666,7 @@ pub async fn upgrade_info(State(state): State<AppState>) -> Response {
         .as_deref()
         .and_then(|p| p.parent().map(std::path::Path::to_path_buf));
     let can_update = crate::upgrade::can_update(config_dir.as_deref());
+    let gates = crate::upgrade::gates(config_dir.as_deref());
 
     Json(serde_json::json!({
         "version": version,
@@ -673,6 +674,7 @@ pub async fn upgrade_info(State(state): State<AppState>) -> Response {
         "has_config_file": has_config_file,
         "has_systemd": has_systemd,
         "can_update": can_update,
+        "gates": gates,
         "upgrade_command": format!("curl -fsSL {} | sh", install_script),
         "preserves": ["configuration", "zones", "certificates", "database"],
         "note": "Run the upgrade command on the host to update all components in place. The installer rebuilds the server binary and preserves configuration, zones, certificates and the database.".to_string(),
@@ -695,6 +697,7 @@ pub async fn upgrade_status(State(state): State<AppState>) -> Response {
     Json(serde_json::json!({
         "version": daygle_dns_core::VERSION,
         "can_update": crate::upgrade::can_update(config_dir.as_deref()),
+        "gates": crate::upgrade::gates(config_dir.as_deref()),
         "state": crate::upgrade::read_state(),
         "log": crate::upgrade::log_tail(8192),
     }))

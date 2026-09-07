@@ -48,10 +48,27 @@ if ! command -v git >/dev/null 2>&1; then
   fail "git is required to update; install git and try again."
   exit 1
 fi
-if ! command -v cargo >/dev/null 2>&1; then
-  fail "cargo is required to update; install Rust and try again."
+
+# Systemd service accounts usually have a bare PATH with no cargo. Find it the
+# way rustup lays it out rather than relying on the daemon's PATH.
+CARGO_BIN=""
+if command -v cargo >/dev/null 2>&1; then
+  CARGO_BIN="$(command -v cargo)"
+else
+  for cand in "$HOME/.cargo/bin/cargo" \
+              /root/.cargo/bin/cargo \
+              /home/*/.cargo/bin/cargo; do
+    if [ -x "$cand" ]; then
+      CARGO_BIN="$cand"
+      break
+    fi
+  done
+fi
+if [ -z "$CARGO_BIN" ]; then
+  fail "cargo was not found; install the Rust toolchain (curl -fsSL https://sh.rustup.rs | sh) and try again."
   exit 1
 fi
+export PATH="$(dirname "$CARGO_BIN"):$PATH"
 
 state cloning "Fetching the latest source…"
 if ! git clone --depth 1 "$REPO" "$SRC" >>"$LOG" 2>&1; then

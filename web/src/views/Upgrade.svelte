@@ -215,11 +215,16 @@
     </div>
     {#if !info.can_update}
       <p class="muted" style="font-size: 0.82rem; margin: 10px 0 0; max-width: 80ch">
-        In-place updates need a Linux host with git and cargo, plus a binary
-        managed by the installer (systemd unit, <code>/usr/local/bin</code>,
-        or a config under <code>/etc</code>). Otherwise use the host command
-        below.
+        In-place updates need a Linux host managed by the installer (systemd
+        unit, <code>/usr/local/bin/daygle-dns</code>, or a config under
+        <code>/etc</code>), with git and cargo available. Otherwise use the host
+        command below. Missing requirements:
       </p>
+      <ul class="gates" style="font-size: 0.82rem; margin: 8px 0 0">
+        {#each info.gates || [] as gate}
+          <li>{gate}</li>
+        {/each}
+      </ul>
     {/if}
   </div>
 
