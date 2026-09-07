@@ -4,7 +4,7 @@
 //! path, restart the systemd unit).
 //!
 //! The heavy lifting runs as a detached POSIX `sh` helper (embedded below)
-//! writing progress to `<temp>/daygle-dns-upgrade/state.json` and its full
+//! writing progress to `<temp>/daygle-dns-update/state.json` and its full
 //! output to `update.log`. The helper is spawned with its own process group so
 //! it keeps running after the server is restarted by the updater itself.
 //!
@@ -19,17 +19,17 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 /// The embedded POSIX `sh` helper that performs the update.
-const UPDATE_SCRIPT: &str = include_str!("upgrade.sh");
+const UPDATE_SCRIPT: &str = include_str!("update.sh");
 
 /// Directory, under the OS temp dir, that holds `update.sh`, `state.json` and
 /// `update.log`. Writable by the service user without elevated privileges.
 pub fn workspace_dir() -> PathBuf {
-    std::env::temp_dir().join("daygle-dns-upgrade")
+    std::env::temp_dir().join("daygle-dns-update")
 }
 
 /// Progress snapshot written by the updater helper.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
-pub struct UpgradeState {
+pub struct UpdateState {
     /// One of `""` (idle), `preparing`, `cloning`, `building`, `installing`,
     /// `done` or `error`.
     #[serde(default)]
@@ -44,7 +44,7 @@ pub struct UpgradeState {
     pub exit_code: i64,
 }
 
-impl UpgradeState {
+impl UpdateState {
     /// Whether the helper is currently doing work (as opposed to idle, done,
     /// or failed).
     pub fn is_running(&self) -> bool {
@@ -61,10 +61,10 @@ impl UpgradeState {
 }
 
 /// Read the current state; a missing or unreadable file reads as idle.
-pub fn read_state() -> UpgradeState {
+pub fn read_state() -> UpdateState {
     let path = workspace_dir().join("state.json");
     let Ok(text) = std::fs::read_to_string(path) else {
-        return UpgradeState::default();
+        return UpdateState::default();
     };
     serde_json::from_str(&text).unwrap_or_default()
 }
@@ -249,7 +249,7 @@ mod tests {
 
     #[test]
     fn state_roundtrips() {
-        let st = UpgradeState {
+        let st = UpdateState {
             phase: "building".to_string(),
             pid: 4242,
             started_at: "2026-09-07T00:00:00Z".to_string(),
@@ -257,7 +257,7 @@ mod tests {
             exit_code: 0,
         };
         let json = serde_json::to_string(&st).unwrap();
-        let back: UpgradeState = serde_json::from_str(&json).unwrap();
+        let back: UpdateState = serde_json::from_str(&json).unwrap();
         assert_eq!(back, st);
         assert!(back.is_running());
         assert!(!back.is_terminal());
@@ -266,14 +266,14 @@ mod tests {
     #[test]
     fn missing_state_is_idle() {
         // read_state reads a fixed path; the default is the idle shape we need.
-        let idle = UpgradeState::default();
+        let idle = UpdateState::default();
         assert!(idle.phase.is_empty());
         assert!(!idle.is_terminal() && !idle.is_running());
     }
 
     #[test]
     fn partial_state_json_is_tolerated() {
-        let st: UpgradeState =
+        let st: UpdateState =
             serde_json::from_str(r#"{"phase":"done","message":"ok"}"#).unwrap();
         assert_eq!(st.phase, "done");
         assert_eq!(st.message, "ok");
@@ -284,7 +284,7 @@ mod tests {
     #[test]
     fn error_and_done_are_terminal() {
         for phase in ["done", "error"] {
-            let st = UpgradeState {
+            let st = UpdateState {
                 phase: phase.to_string(),
                 ..Default::default()
             };
@@ -308,7 +308,7 @@ mod tests {
     #[test]
     fn unmet_conditions_are_listed_for_the_console() {
         // Whatever the platform, a host that cannot update reports at least one
-        // actionable gate, and engineers can read them off the /api/upgrade
+        // actionable gate, and engineers can read them off the /api/update
         // response without tracing the boolean.
         if !can_update(None) {
             let missing = gates(None);

@@ -1177,13 +1177,13 @@ async fn doq_query_end_to_end() {
 }
 
 #[tokio::test]
-async fn gui_cache_headers_allow_upgrades_without_hard_refresh() {
+async fn gui_cache_headers_allow_updates_without_hard_refresh() {
     let dir = tempfile::tempdir().unwrap();
     let server = spawn_with_users(&dir, None).await;
     let base = api_url(server.api_addr, "");
 
     // The HTML shell is served at a stable URL, so it is revalidated on
-    // every load: after an upgrade the embedded shell references new hashed
+    // every load: after an update the embedded shell references new hashed
     // bundles, and a browser holding a stale shell would request assets the
     // new binary no longer carries.
     let resp = reqwest::get(format!("{base}/"))
@@ -1221,14 +1221,14 @@ async fn gui_cache_headers_allow_upgrades_without_hard_refresh() {
 }
 
 #[tokio::test]
-async fn upgrade_endpoints_report_state_and_gate_start() {
+async fn update_endpoints_report_state_and_gate_start() {
     let dir = tempfile::tempdir().unwrap();
-    let server = spawn(base_config(&dir.path().join("upgrade.db"))).await;
+    let server = spawn(base_config(&dir.path().join("update.db"))).await;
     let base = api_url(server.api_addr, "");
 
-    // The info endpoint feeds the Upgrade page: version, layout flags, the
+    // The info endpoint feeds the Update page: version, layout flags, the
     // host-side command, and the last run's state snapshot.
-    let info: serde_json::Value = reqwest::get(format!("{base}/api/upgrade"))
+    let info: serde_json::Value = reqwest::get(format!("{base}/api/update"))
         .await
         .unwrap()
         .json()
@@ -1239,13 +1239,13 @@ async fn upgrade_endpoints_report_state_and_gate_start() {
     assert!(info["gates"].is_array());
     assert!(info["has_config_file"].is_boolean());
     assert!(info["has_systemd"].is_boolean());
-    assert!(info["upgrade_command"].as_str().unwrap_or("").contains("install.sh"));
+    assert!(info["update_command"].as_str().unwrap_or("").contains("install.sh"));
     assert!(info["preserves"].is_array());
     assert!(info["state"]["phase"].is_string());
 
     // The status endpoint is safe to poll while an update runs (or after a
     // restart): it reads the shared state file rather than live state.
-    let status: serde_json::Value = reqwest::get(format!("{base}/api/upgrade/status"))
+    let status: serde_json::Value = reqwest::get(format!("{base}/api/update/status"))
         .await
         .unwrap()
         .json()
@@ -1260,7 +1260,7 @@ async fn upgrade_endpoints_report_state_and_gate_start() {
     // test/dep build never qualifies, so expect 409 here.
     if !info["can_update"].as_bool().unwrap_or(false) {
         let resp = reqwest::Client::new()
-            .post(format!("{base}/api/upgrade/start"))
+            .post(format!("{base}/api/update/start"))
             .send()
             .await
             .unwrap();

@@ -35,7 +35,7 @@ impl Asset {
 /// Cache-Control policy for a served embedded file.
 ///
 /// The app shell (`index.html`) is served at a stable URL, so it must be
-/// revalidated on every load (`no-cache`): after an upgrade the server
+/// revalidated on every load (`no-cache`): after an update the server
 /// embeds a new shell pointing at new hashed bundles, and a browser holding
 /// a stale cached shell would keep requesting removed assets until a hard
 /// refresh.

@@ -9,7 +9,7 @@
 
   const isAdmin = getStoredUser()?.role === 'admin';
 
-  // In-place update run state (mirrors the server's UpgradeState).
+  // In-place update run state (mirrors the server's UpdateState).
   let run = $state(null);
   let logTail = $state('');
   let updating = $state(false); // we started (or resumed polling) a run
@@ -41,7 +41,7 @@
   function poll() {
     clearTimeout(pollTimer);
     api
-      .upgradeStatus()
+      .updateStatus()
       .then((st) => {
         serverDown = false;
         run = st.state;
@@ -72,7 +72,7 @@
     busy = true;
     error = null;
     try {
-      info = await api.upgradeInfo();
+      info = await api.updateInfo();
       run = info?.state ?? null;
       // Server can come back in the middle of a run started elsewhere (or a
       // previous session); resume following it.
@@ -95,7 +95,7 @@
     );
     if (!ok) return;
     try {
-      await api.upgradeStart();
+      await api.updateStart();
       iStarted = true;
       updating = true;
       serverDown = false;
@@ -108,7 +108,7 @@
   async function copyCommand() {
     if (!info) return;
     try {
-      await navigator.clipboard.writeText(info.upgrade_command);
+      await navigator.clipboard.writeText(info.update_command);
       copied = true;
       setTimeout(() => {
         copied = false;
@@ -119,7 +119,7 @@
   }
 </script>
 
-<h1>Upgrade</h1>
+<h1>Update</h1>
 
 <p class="muted" style="max-width: 75ch">
   The recommended way to update all components is the project's in-place
@@ -229,13 +229,13 @@
   </div>
 
   <div class="card" style="margin-bottom: 14px">
-    <h3 style="margin-top: 0">Upgrade Command</h3>
+    <h3 style="margin-top: 0">Update Command</h3>
     <p class="muted" style="font-size: 0.85rem; margin-bottom: 10px">
       Run this on the host to update all components the same way
       <code>install.sh</code> does.
     </p>
     <div class="command-block">
-      <code>{info.upgrade_command}</code>
+      <code>{info.update_command}</code>
       <button class="secondary" onclick={copyCommand} disabled={copied || busy}>
         {copied ? 'Copied' : 'Copy'}
       </button>
@@ -246,7 +246,7 @@
   </div>
 
   <div class="card" style="margin-bottom: 14px">
-    <h3 style="margin-top: 0">Preserved During Upgrade</h3>
+    <h3 style="margin-top: 0">Preserved During Update</h3>
     <div class="preserve-list">
       {#each info.preserves as item}
         <span class="preserve">{item}</span>
@@ -267,7 +267,7 @@
     </table>
   </div>
 {:else if busy}
-  <p class="muted">Loading upgrade details…</p>
+  <p class="muted">Loading update details…</p>
 {/if}
 
 <style>

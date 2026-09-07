@@ -53,7 +53,7 @@
 //! new values without locking or restarting.
 
 mod handlers;
-mod upgrade;
+mod update;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -288,9 +288,9 @@ pub fn router(state: AppState) -> Router {
             "/policy/blocking/{id}",
             delete(handlers::delete_blocking_group),
         )
-        .route("/upgrade", get(handlers::upgrade_info))
-        .route("/upgrade/status", get(handlers::upgrade_status))
-        .route("/upgrade/start", post(handlers::upgrade_start))
+        .route("/update", get(handlers::update_info))
+        .route("/update/status", get(handlers::update_status))
+        .route("/update/start", post(handlers::update_start))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             require_auth,

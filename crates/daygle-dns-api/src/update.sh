@@ -1,7 +1,7 @@
 #!/usr/bin/env sh
 # Daygle DNS in-place update, driven by the web console.
 #
-# Usage: sh daygle-dns-upgrade.sh <current-binary> <state-dir>
+# Usage: sh daygle-dns-update.sh <current-binary> <state-dir>
 #
 # Mirrors what install.sh does for an existing installation: clone the latest
 # source, build a release binary, swap it in place, and restart the systemd
@@ -18,7 +18,7 @@ EXE="$1"
 DIR="$2"
 SRC="$(mktemp -d)"
 LOG="$DIR/update.log"
-REPO="${DAYGLE_UPGRADE_REPO:-https://github.com/daygle/daygle-dns.git}"
+REPO="${DAYGLE_UPDATE_REPO:-https://github.com/daygle/daygle-dns.git}"
 
 trap 'rm -rf "$SRC"' EXIT HUP INT TERM
 

@@ -165,9 +165,9 @@ export const api = {
       'GET',
       `/policy/blocklist/sources/validate?url=${encodeURIComponent(url)}&format=${encodeURIComponent(format || 'auto')}`
     ),
-  upgradeInfo: () => request('GET', '/upgrade'),
-  upgradeStatus: () => request('GET', '/upgrade/status'),
-  upgradeStart: () => request('POST', '/upgrade/start'),
+  updateInfo: () => request('GET', '/update'),
+  updateStatus: () => request('GET', '/update/status'),
+  updateStart: () => request('POST', '/update/start'),
   blockingGroups: () => request('GET', '/policy/blocking'),
   saveBlockingGroup: (body) => request('POST', '/policy/blocking', body),
   deleteBlockingGroup: (id) => request('DELETE', `/policy/blocking/${id}`),
