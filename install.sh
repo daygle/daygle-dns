@@ -83,20 +83,20 @@ install_system_toolchain() {
     # C compiler, git, and curl via the platform package manager.
     if have_cmd apt-get; then
         run_as_root apt-get update || return 1
-        run_as_root apt-get install -y --no-install-recommends build-essential git curl || return 1
+        run_as_root apt-get install -y --no-install-recommends build-essential git curl sudo || return 1
     elif have_cmd dnf; then
         run_as_root dnf -y group install "Development Tools" || return 1
-        run_as_root dnf -y install git curl || return 1
+        run_as_root dnf -y install git curl sudo || return 1
     elif have_cmd yum; then
         run_as_root yum -y groupinstall "Development Tools" || return 1
-        run_as_root yum -y install git curl || return 1
+        run_as_root yum -y install git curl sudo || return 1
     elif have_cmd apk; then
-        run_as_root apk add --no-cache build-base git curl || return 1
+        run_as_root apk add --no-cache build-base git curl sudo || return 1
     elif have_cmd pacman; then
-        run_as_root pacman -S --needed --noconfirm base-devel git curl || return 1
+        run_as_root pacman -S --needed --noconfirm base-devel git curl sudo || return 1
     elif have_cmd zypper; then
         run_as_root zypper -n install -t pattern devel_basis || return 1
-        run_as_root zypper -n install git curl || return 1
+        run_as_root zypper -n install git curl sudo || return 1
     elif [ "$(uname -s)" = "Darwin" ]; then
         # Xcode Command Line Tools provide a C compiler (and git); curl ships with macOS.
         xcode-select --install >/dev/null 2>&1 || true
@@ -299,6 +299,17 @@ NoNewPrivileges=false
 WantedBy=multi-user.target
 EOF
     id "$SERVICE_USER" >/dev/null 2>&1 || useradd --system --no-create-home "$SERVICE_USER"
+    # In-place updates from the web console need to rebuild, swap the binary,
+    # and restart the service. The dedicated service account gets passwordless
+    # sudo for that so the "Update" button works on a clean install.
+    mkdir -p /etc/sudoers.d
+    if ! grep -q "^$SERVICE_USER ALL=(ALL) NOPASSWD: ALL" /etc/sudoers.d/"$SERVICE_USER" 2>/dev/null; then
+        printf '%s\n' \
+            "# Provisioned by the Daygle DNS installer: in-place updates from" \
+            "# the web console rebuild, reinstall, and restart the service." \
+            "$SERVICE_USER ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/"$SERVICE_USER"
+    fi
+    chmod 0440 /etc/sudoers.d/"$SERVICE_USER" 2>/dev/null || true
     chown -R "$SERVICE_USER":"$SERVICE_USER" "$CONFIG_DIR" "$DATA_DIR"
     systemctl daemon-reload
     if [ "$INSTALL_MODE" = "upgrade" ]; then

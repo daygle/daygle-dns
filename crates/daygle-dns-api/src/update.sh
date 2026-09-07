@@ -86,7 +86,7 @@ if [ -z "$CARGO_BIN" ]; then
   fi
 fi
 if [ -z "$CARGO_BIN" ]; then
-  fail "cargo was not found; install the Rust toolchain (curl -fsSL https://sh.rustup.rs | sh) or configure passwordless sudo for this account, then retry."
+  fail "cargo was not found; install the Rust toolchain, configure passwordless sudo for this account (re-running install.sh provisions it), then retry."
   exit 1
 fi
 export PATH="$(dirname "$CARGO_BIN"):$PATH"

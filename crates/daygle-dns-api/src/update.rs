@@ -10,9 +10,11 @@
 //!
 //! Self-update is deliberately opt-in by environment: it is only available on
 //! Linux hosts that look like a real install (systemd unit, `/usr/local/bin`
-//! binary, or a config under `/etc/`) AND have `git` + `cargo`. Dev/test
-//! builds and the Windows/macOS console fall back to the informational
-//! guidance-only mode.
+//! binary, or a config under `/etc/`). Tool availability and privilege are
+//! handled by the helper at run time: it re-executes under passwordless `sudo`
+//! when possible (installed by `install.sh`), otherwise it falls back to the
+//! service account's own PATH. Dev/test builds and the Windows/macOS console
+//! expose the informational guidance-only mode.
 
 use std::path::{Path, PathBuf};
 
