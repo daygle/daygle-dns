@@ -129,18 +129,17 @@ impl DnsDispatcher {
         stats: Arc<daygle_dns_core::stats::QueryStats>,
     ) -> Self {
         Self {
-            catalog,
-            resolver,
-            policy,
-            advanced_blocking: Arc::new(ArcSwap::from_pointee(AdvancedBlocking::default())),
-            rate_limiter,
-            metrics,
-            logs,
-            notify,
-            tsig_keys,
             stats: Some(stats),
-            query_logger: None,
-            query_db_logger: None,
+            ..Self::with_notify(
+                catalog,
+                resolver,
+                policy,
+                rate_limiter,
+                metrics,
+                logs,
+                notify,
+                tsig_keys,
+            )
         }
     }
 
@@ -625,7 +624,6 @@ impl RequestHandler for DnsDispatcher {
                 metadata.message_type = MessageType::Response;
                 metadata.response_code = lookup.message().response_code;
                 metadata.recursion_available = true;
-                metadata.recursion_desired = request.metadata.recursion_desired;
                 metadata.authentic_data = validated;
 
                 // Log with the upstream response code and the full handling

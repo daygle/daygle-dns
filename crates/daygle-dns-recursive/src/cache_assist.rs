@@ -103,6 +103,18 @@ impl CacheAssistant {
         if snapshots.len() >= MAX_TRACKED_ENTRIES && !snapshots.contains_key(key) {
             evict_oldest(&mut snapshots);
         }
+        // The epoch's full TTL is measured from when the answer was first
+        // observed. A Hickory cache hit re-serves the same entry with an
+        // unchanged deadline, so keep the previous snapshot's `fetched_at` in
+        // that case; overwriting it on every hit would make the full TTL
+        // equal the remaining TTL and the prefetch trigger below could never
+        // fire for any configured fraction (validation caps it at 100).
+        let full_ttl = match snapshots.get(key) {
+            Some(prev) if prev.valid_until == valid_until && valid_until > now => {
+                valid_until.saturating_duration_since(prev.fetched_at)
+            }
+            _ => valid_until.saturating_duration_since(now),
+        };
         snapshots.insert(key.clone(), snapshot);
         drop(snapshots);
 
@@ -114,13 +126,6 @@ impl CacheAssistant {
         // Prefetch when less than the configured fraction of the effective
         // TTL remains.
         let effective_ttl = valid_until.saturating_duration_since(now);
-        let full_ttl = valid_until.saturating_duration_since(
-            self.snapshots
-                .lock()
-                .get(key)
-                .map(|s| s.fetched_at)
-                .unwrap_or(now),
-        );
         let trigger = full_ttl.mul_f32(self.config.ttl_fraction_pct as f32 / 100.0);
         if effective_ttl < trigger {
             debug!(
@@ -175,7 +180,7 @@ impl CacheAssistant {
             // oldest by count.
             popular.retain(|_, p| now.saturating_duration_since(p.window_start) < self.config.window);
             if popular.len() >= MAX_TRACKED_ENTRIES {
-                evict_least_popular(&mut popular, now);
+                evict_least_popular(&mut popular);
             }
         }
         let entry = popular.entry(key.clone()).or_insert(Popularity {
@@ -240,12 +245,11 @@ fn evict_oldest<K: Clone + std::hash::Hash + Eq, V: Clone + HasInstant>(
     }
 }
 
-fn evict_least_popular(map: &mut HashMap<CacheKey, Popularity>, now: Instant) {
+fn evict_least_popular(map: &mut HashMap<CacheKey, Popularity>) {
     let victim = map
         .iter()
         .min_by_key(|(_, p)| (p.count, u64::try_from(p.window_start.elapsed().as_millis()).unwrap_or(0)))
         .map(|(k, _)| k.clone());
-    let _ = now;
     if let Some(k) = victim {
         map.remove(&k);
     }
@@ -397,6 +401,41 @@ mod tests {
         assert!(!ca.try_begin_prefetch(&key));
         ca.end_prefetch(&key);
         assert!(ca.try_begin_prefetch(&key));
+    }
+
+    #[test]
+    fn prefetch_fires_late_in_the_same_epoch() {
+        let ca = CacheAssistant::new(config()); // 10 % threshold, min 2 queries
+        let key = key_for("late.example.");
+
+        // First fetch: full 100 s TTL remaining -> no prefetch (and not yet
+        // popular).
+        assert!(!ca.on_success(&key, &lookup_a("late.example.", 100)));
+
+        // Simulate 95 s having elapsed inside the 100 s epoch: the deadline a
+        // Hickory cache hit would re-serve is now 5 s away, and the epoch
+        // started 95 s ago. 5 s remaining is below the 10 s (10 %) trigger.
+        let now = Instant::now();
+        let past = now
+            .checked_sub(Duration::from_secs(95))
+            .expect("monotonic clock covers the 95 s test epoch");
+        let aged_deadline = now + Duration::from_secs(5);
+        let (aged_query, aged_answers) = {
+            let mut snaps = ca.snapshots.lock();
+            let s = snaps.get_mut(&key).unwrap();
+            s.fetched_at = past;
+            s.valid_until = aged_deadline;
+            (s.query.clone(), s.answers.clone())
+        };
+        let aged = Lookup::new_with_deadline(aged_query, aged_answers, aged_deadline);
+
+        // Second query: popular now, and 5 s < 10 % of the 100 s epoch -> the
+        // prefetch trigger must fire.
+        assert!(ca.on_success(&key, &aged));
+
+        // A brand-new epoch with the full TTL remaining never fires, even
+        // though the name is popular.
+        assert!(!ca.on_success(&key, &lookup_a("late.example.", 100)));
     }
 
     #[test]

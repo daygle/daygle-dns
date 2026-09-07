@@ -110,7 +110,23 @@ impl RateLimiter {
             return true;
         }
         let (window, limit) = (inner.domain_window, inner.domain_limit);
-        let allowed = check_bucket(inner.domains.entry(domain.to_string()), window, limit);
+        // Fast path without allocating an owned key for the (common) case of
+        // an already-tracked domain; `entry` would allocate on every query.
+        let allowed = match inner.domains.get_mut(domain) {
+            Some(bucket) => advance_bucket(bucket, window, limit),
+            None => {
+                // A fresh bucket always admits its first query (config
+                // validation rejects a limit of 0).
+                inner.domains.insert(
+                    domain.to_string(),
+                    Bucket {
+                        window_start: Instant::now(),
+                        count: 1,
+                    },
+                );
+                true
+            }
+        };
         maybe_sweep(&mut inner);
         allowed
     }
@@ -142,17 +158,23 @@ impl Default for RateLimiter {
     }
 }
 
-/// Core fixed-window check for one bucket.
+/// Core fixed-window check for one bucket (creating it if absent).
 fn check_bucket(
     entry: std::collections::hash_map::Entry<'_, impl std::hash::Hash + Eq, Bucket>,
     window: Duration,
     limit: u32,
 ) -> bool {
-    let now = Instant::now();
     let bucket = entry.or_insert(Bucket {
-        window_start: now,
+        window_start: Instant::now(),
         count: 0,
     });
+    advance_bucket(bucket, window, limit)
+}
+
+/// Advance one existing bucket by a query: reset it when its window has
+/// elapsed, then admit (and count) the query if under the limit.
+fn advance_bucket(bucket: &mut Bucket, window: Duration, limit: u32) -> bool {
+    let now = Instant::now();
     if now.duration_since(bucket.window_start) >= window {
         bucket.window_start = now;
         bucket.count = 0;

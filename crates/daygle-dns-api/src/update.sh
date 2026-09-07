@@ -29,18 +29,36 @@ if [ "$(id -u)" -ne 0 ] && command -v sudo >/dev/null 2>&1 && sudo -n true >/dev
   exec sudo -n sh "$0" "$EXE" "$DIR"
 fi
 
+# Big transient artifacts (the build tree, the cargo registry cache) should
+# not land on /tmp: many distros mount it as tmpfs, so a multi-GB release
+# build can exhaust memory on small hosts. /var/tmp is the conventional spot.
+# (Placed after the sudo re-exec because sudo strips env: this way both the
+# service-account and root paths get it.)
+if [ -z "${TMPDIR:-}" ] && [ -d /var/tmp ]; then
+  export TMPDIR=/var/tmp
+fi
+
 SRC="$(mktemp -d)"
 
 trap 'rm -rf "$SRC"' EXIT HUP INT TERM
 
-state() { # phase message
-  printf '{"phase":"%s","pid":%s,"started_at":"%s","message":"%s","exit_code":0}\n' \
-    "$1" "$$" "$(date -u +%FT%TZ)" "$2" > "$DIR/state.json"
+# Escape a message for embedding in a JSON string (backslashes and quotes).
+json_escape() {
+  printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
 }
 
-fail() { # phase message
+# Write state atomically (temp file + rename) so the server's status polls
+# never observe a half-written file.
+state() { # phase message
+  printf '{"phase":"%s","pid":%s,"started_at":"%s","message":"%s","exit_code":0}\n' \
+    "$1" "$$" "$(date -u +%FT%TZ)" "$(json_escape "$2")" > "$DIR/state.json.tmp" \
+    && mv -f "$DIR/state.json.tmp" "$DIR/state.json"
+}
+
+fail() { # message
   printf '{"phase":"error","pid":%s,"started_at":"%s","message":"%s","exit_code":1}\n' \
-    "$$" "$(date -u +%FT%TZ)" "$1" > "$DIR/state.json"
+    "$$" "$(date -u +%FT%TZ)" "$(json_escape "$1")" > "$DIR/state.json.tmp" \
+    && mv -f "$DIR/state.json.tmp" "$DIR/state.json"
 }
 
 run_as_root() {
@@ -98,8 +116,13 @@ if [ -z "${CARGO_HOME:-}" ]; then
   if [ -n "${HOME:-}" ] && [ -d "$HOME" ] && [ -w "$HOME" ]; then
     :
   else
-    CARGO_HOME="$DIR/cargo-home"
-    mkdir -p "$CARGO_HOME"
+    # Prefer /var/tmp so the registry cache survives reboots and stays off a
+    # tmpfs-backed /tmp; fall back to the state dir when it is not writable.
+    CARGO_HOME="/var/tmp/daygle-dns-cargo-home"
+    if ! mkdir -p "$CARGO_HOME" 2>/dev/null || [ ! -w "$CARGO_HOME" ]; then
+      CARGO_HOME="$DIR/cargo-home"
+      mkdir -p "$CARGO_HOME"
+    fi
     export CARGO_HOME
   fi
 fi
@@ -119,6 +142,9 @@ if ! cargo build --release -p daygle-dns >>"$LOG" 2>&1; then
 fi
 
 state installing "Installing the new binary…"
+# Keep a copy of the current binary as a manual rollback point (best effort;
+# a release that builds can still fail at runtime).
+run_as_root cp -f "$EXE" "$EXE.bak" >>"$LOG" 2>&1 || true
 if ! run_as_root install -m 0755 target/release/daygle-dns "$EXE"; then
   fail "installing the new binary to $EXE failed (needs root or passwordless sudo)."
   exit 1

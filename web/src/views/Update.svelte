@@ -33,7 +33,11 @@
 
   let pollTimer = null;
   let reloadTimer = null;
+  // Set while we are waiting for the restarted service to answer before
+  // reloading the console.
+  let waitingForServer = $state(false);
   onDestroy(() => {
+    waitingForServer = false;
     clearTimeout(pollTimer);
     clearTimeout(reloadTimer);
   });
@@ -50,10 +54,11 @@
           pollTimer = setTimeout(poll, 1500);
         } else {
           updating = false;
-          // The run we triggered finished and the fresh binary is live:
-          // bring the operator back to the reloaded console.
-          if (iStarted && run?.phase === 'done' && !reloadTimer) {
-            reloadTimer = setTimeout(reloadConsole, 4000);
+          // The run we triggered finished; the helper restarts the service
+          // right after installing, so wait for it to answer before
+          // reloading instead of landing on a connection-refused page.
+          if (iStarted && run?.phase === 'done') {
+            scheduleReload();
           }
         }
       })
@@ -66,6 +71,24 @@
 
   function reloadConsole() {
     location.reload();
+  }
+
+  function scheduleReload() {
+    if (waitingForServer) return;
+    waitingForServer = true;
+    reloadTimer = setTimeout(pingServer, 4000);
+  }
+
+  function pingServer() {
+    if (!waitingForServer) return;
+    // Any HTTP response - even 401 - means the API is back up.
+    fetch('/api/auth/setup', { cache: 'no-store' })
+      .then(() => {
+        location.reload();
+      })
+      .catch(() => {
+        if (waitingForServer) reloadTimer = setTimeout(pingServer, 1500);
+      });
   }
 
   async function load() {
@@ -94,13 +117,14 @@
       'Update Daygle DNS to the latest source?\n\nThe server will build a new release binary, swap it in place and restart. DNS resolution is briefly interrupted and this console may take a moment to reconnect.'
     );
     if (!ok) return;
+    updating = true; // guard against double-clicks while the request is out
     try {
       await api.updateStart();
       iStarted = true;
-      updating = true;
       serverDown = false;
       poll();
     } catch (e) {
+      updating = false;
       startError = formatApiError(e);
     }
   }
@@ -168,13 +192,15 @@
 
       {:else if run?.phase === 'done'}
         <p style="margin: 8px 0">
-          <span class="pill ok">✓</span> Update complete — the server restarted with the latest build.
+          <span class="pill ok">✓</span> {run?.message || 'Update complete.'}
         </p>
         <button class="secondary" onclick={reloadConsole} style="margin-top: 8px">
           Reload console
         </button>
         <p class="muted" style="font-size: 0.8rem; margin-top: 10px">
-          Reloading in a few seconds automatically.
+          {waitingForServer
+            ? 'Waiting for the restarted service to come back, then reloading automatically…'
+            : 'Reloading in a few seconds automatically.'}
         </p>
 
       {:else if run?.phase === 'error'}
@@ -188,7 +214,7 @@
 
       {:else}
         {#if isAdmin}
-          <button onclick={startUpdate} disabled={busy}>Update Now</button>
+          <button onclick={startUpdate} disabled={busy || updating}>Update Now</button>
         {:else}
           <p class="muted" style="font-size: 0.85rem">
             Read-only console accounts cannot start an update; ask an

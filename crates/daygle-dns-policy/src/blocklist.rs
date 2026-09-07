@@ -1,6 +1,6 @@
 //! Domain blocklist supporting exact matches and `*.suffix` wildcards.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 
 use daygle_dns_core::config::normalize_domains;
 
@@ -11,10 +11,14 @@ use daygle_dns_core::config::normalize_domains;
 /// `*.` (`*.example.com`). A wildcard matches any strict subdomain of the
 /// suffix (`a.example.com`, `a.b.example.com`) but not the bare suffix itself
 /// (`example.com`); block that with a separate exact entry if needed.
+///
+/// Membership is hashed, not ordered: `contains` runs on every query for the
+/// allowlist, blocklist, remote blocklist and AAAA-bypass sets, which can
+/// hold hundreds of thousands of entries.
 #[derive(Debug, Clone, Default)]
 pub struct Blocklist {
-    exact: BTreeSet<String>,
-    suffixes: BTreeSet<String>,
+    exact: HashSet<String>,
+    suffixes: HashSet<String>,
 }
 
 impl Blocklist {
@@ -50,9 +54,10 @@ impl Blocklist {
         self.exact.len() + self.suffixes.len()
     }
 
-    /// The full set of entries, `*.` wildcards included, as a `BTreeSet`.
+    /// The full set of entries, `*.` wildcards included, as a `BTreeSet`
+    /// (deterministic ordering for display and change comparison).
     pub fn domains(&self) -> std::collections::BTreeSet<String> {
-        let mut all = self.exact.clone();
+        let mut all: BTreeSet<String> = self.exact.iter().cloned().collect();
         all.extend(self.suffixes.iter().map(|s| format!("*.{s}")));
         all
     }

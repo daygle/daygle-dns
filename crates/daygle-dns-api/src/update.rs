@@ -62,23 +62,100 @@ impl UpdateState {
     }
 }
 
+/// Grace period for a primed `preparing` state whose helper has not yet
+/// recorded its pid. Beyond it the run is reported as failed instead of
+/// wedging the pipeline in a forever-"running" shape.
+const START_GRACE_SECS: u64 = 60;
+
 /// Read the current state; a missing or unreadable file reads as idle.
+///
+/// A run-shaped state whose helper is provably gone (dead pid, or a primed
+/// pid-less state older than the start grace period) is reported as `error`
+/// so both the API and the console stop treating a dead run as in progress.
 pub fn read_state() -> UpdateState {
     let path = workspace_dir().join("state.json");
-    let Ok(text) = std::fs::read_to_string(path) else {
+    let Ok(text) = std::fs::read_to_string(&path) else {
         return UpdateState::default();
     };
-    serde_json::from_str(&text).unwrap_or_default()
+    let st: UpdateState = serde_json::from_str(&text).unwrap_or_default();
+    let age = std::fs::metadata(&path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.elapsed().ok());
+    normalize_stale(st, age, pid_alive)
 }
 
-/// Last `max` bytes of the updater's combined output.
-pub fn log_tail(max: usize) -> String {
-    let path = workspace_dir().join("update.log");
-    let Ok(bytes) = std::fs::read(path) else {
-        return String::new();
+/// Map a stale "running" snapshot to a terminal `error` one.
+///
+/// The helper can die mid-run (killed alongside the service, OOM, crash) and
+/// leave `cloning`/`building`/`installing` behind forever; without this, the
+/// console would poll forever and `start` would refuse every new run with
+/// "already in progress". `state_age` is the age of the state file itself and
+/// only applies to pid-less (primed) states.
+fn normalize_stale(
+    st: UpdateState,
+    state_age: Option<std::time::Duration>,
+    alive: impl Fn(i64) -> bool,
+) -> UpdateState {
+    if !st.is_running() {
+        return st;
+    }
+    let stale = if st.pid > 0 {
+        !alive(st.pid)
+    } else {
+        matches!(state_age, Some(age) if age.as_secs() > START_GRACE_SECS)
     };
-    let start = bytes.len().saturating_sub(max);
-    String::from_utf8_lossy(&bytes[start..]).to_string()
+    if !stale {
+        return st;
+    }
+    UpdateState {
+        phase: "error".to_string(),
+        pid: st.pid,
+        started_at: st.started_at,
+        message: "the updater helper is no longer running (the server may have restarted mid-run); it is safe to start a new update".to_string(),
+        exit_code: 1,
+    }
+}
+
+/// Write a state snapshot atomically (temp file + rename) so a concurrent
+/// status poll never observes a truncated file - which previously read as
+/// "idle" and could admit a second concurrent update run.
+fn write_state_atomic(path: &Path, st: &UpdateState) -> std::io::Result<()> {
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, serde_json::to_vec(st).unwrap_or_default())?;
+    std::fs::rename(&tmp, path)
+}
+
+fn now_rfc3339() -> String {
+    chrono::Utc::now().to_rfc3339()
+}
+
+/// Last `max` bytes of the updater's combined output. Reads only the tail
+/// from disk: the log accumulates a full release build's output, so reading
+/// the whole file on every status poll would be wasteful.
+pub fn log_tail(max: usize) -> String {
+    use std::io::{Read, Seek, SeekFrom};
+    let path = workspace_dir().join("update.log");
+    let mut file = match std::fs::File::open(&path) {
+        Ok(f) => f,
+        Err(_) => return String::new(),
+    };
+    let len = match file.metadata() {
+        Ok(m) => m.len(),
+        Err(_) => return String::new(),
+    };
+    if len == 0 {
+        return String::new();
+    }
+    let start = len.saturating_sub(max as u64);
+    if file.seek(SeekFrom::Start(start)).is_err() {
+        return String::new();
+    }
+    let mut buf = Vec::with_capacity((len - start) as usize);
+    match file.read_to_end(&mut buf) {
+        Ok(_) => String::from_utf8_lossy(&buf).to_string(),
+        Err(_) => String::new(),
+    }
 }
 
 /// Whether a `sh`, `git` and `cargo` exist on `PATH`.
@@ -95,17 +172,27 @@ fn tools_present() -> bool {
     })
 }
 
-/// Whether the CLI tool reports success for a host it can update: request the
-/// worker process started for `pid` is measurable presence. Walk /proc (if
-/// present) or fall back to `kill -0`.
+/// Whether the updater helper process `pid` is still alive.
+///
+/// Existence is checked via `/proc/<pid>` rather than `kill -0`: when the
+/// helper re-executed under sudo it runs as root, and the service account's
+/// `kill -0` fails with EPERM on it even though the process is alive - which
+/// would mark healthy runs as stale. The cmdline is matched against the
+/// updater workspace so a recycled PID is not mistaken for a live helper.
 #[cfg(unix)]
 fn pid_alive(pid: i64) -> bool {
-    std::process::Command::new("kill")
-        .arg("-0")
-        .arg(pid.to_string())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+    if pid <= 0 {
+        return false;
+    }
+    let proc_dir = PathBuf::from(format!("/proc/{pid}"));
+    if !proc_dir.is_dir() {
+        return false;
+    }
+    match std::fs::read_to_string(proc_dir.join("cmdline")) {
+        Ok(cmdline) => cmdline.replace('\0', " ").contains("daygle-dns-update"),
+        // Exists but unreadable: assume it is still the helper.
+        Err(_) => true,
+    }
 }
 
 #[cfg(not(unix))]
@@ -163,12 +250,11 @@ pub fn gates(config_dir: Option<&Path>) -> Vec<&'static str> {
     missing
 }
 
-/// Whether an update run is currently active. A state marked running whose
-/// recorded helper is no longer alive is treated as stale/idle (the server may
-/// have restarted underneath it).
+/// Whether an update run is currently active. `read_state` normalizes stale
+/// run-shaped snapshots (dead helper, expired primed state) to `error`, so a
+/// plain phase check is sufficient here.
 fn update_in_progress() -> bool {
-    let st = read_state();
-    st.is_running() && (st.pid <= 0 || pid_alive(st.pid))
+    read_state().is_running()
 }
 
 /// Reasons `start` can refuse to begin an update.
@@ -203,14 +289,37 @@ pub fn start(exe: &Path, config_dir: Option<&Path>) -> Result<u32, StartError> {
     let dir = workspace_dir();
     std::fs::create_dir_all(&dir).map_err(StartError::Io)?;
     std::fs::write(dir.join("update.sh"), UPDATE_SCRIPT).map_err(StartError::Io)?;
+    // Each run starts a fresh log so output cannot grow without bound across
+    // repeated updates.
+    let _ = std::fs::write(dir.join("update.log"), b"");
     // Prime the state so the console shows activity the moment the request
     // returns; the helper overwrites it with its own pid/message immediately.
-    std::fs::write(
-        dir.join("state.json"),
-        r#"{"phase":"preparing","pid":0,"started_at":"","message":"Preparing update…","exit_code":0}"#,
-    )
-    .map_err(StartError::Io)?;
-    spawn(script_path(&dir), exe, &dir).map_err(StartError::Io)
+    let primed = UpdateState {
+        phase: "preparing".to_string(),
+        pid: 0,
+        started_at: now_rfc3339(),
+        message: "Preparing update…".to_string(),
+        exit_code: 0,
+    };
+    let state_path = dir.join("state.json");
+    write_state_atomic(&state_path, &primed).map_err(StartError::Io)?;
+    match spawn(script_path(&dir), exe, &dir) {
+        Ok(pid) => Ok(pid),
+        Err(e) => {
+            // Never leave the primed "preparing" snapshot behind: nothing
+            // would overwrite it and every future start would be refused
+            // with "already in progress".
+            let failed = UpdateState {
+                phase: "error".to_string(),
+                pid: 0,
+                started_at: now_rfc3339(),
+                message: format!("failed to launch the updater helper: {e}"),
+                exit_code: 1,
+            };
+            let _ = write_state_atomic(&state_path, &failed);
+            Err(StartError::Io(e))
+        }
+    }
 }
 
 fn script_path(dir: &Path) -> PathBuf {
@@ -319,5 +428,58 @@ mod tests {
                 .iter()
                 .all(|g| !g.is_empty() && g.contains(' ')));
         }
+    }
+
+    #[test]
+    fn stale_running_states_are_normalized_to_error() {
+        let running = |pid: i64| UpdateState {
+            phase: "building".to_string(),
+            pid,
+            started_at: "2026-09-07T00:00:00Z".to_string(),
+            message: "compiling…".to_string(),
+            exit_code: 0,
+        };
+
+        // A run-shaped state whose helper is dead becomes a terminal error.
+        let dead = normalize_stale(running(4242), None, |_| false);
+        assert_eq!(dead.phase, "error");
+        assert!(dead.is_terminal());
+        assert!(!dead.is_running());
+
+        // A live helper is reported unchanged.
+        let live = normalize_stale(running(7), None, |_| true);
+        assert_eq!(live.phase, "building");
+        assert!(live.is_running());
+
+        // A primed (pid 0) state inside the start grace period still counts
+        // as running; past it, it is stale.
+        let primed = UpdateState {
+            phase: "preparing".to_string(),
+            pid: 0,
+            ..Default::default()
+        };
+        let fresh = normalize_stale(
+            primed.clone(),
+            Some(std::time::Duration::from_secs(5)),
+            |_| false,
+        );
+        assert_eq!(fresh.phase, "preparing");
+        let expired = normalize_stale(
+            primed,
+            Some(std::time::Duration::from_secs(START_GRACE_SECS + 60)),
+            |_| false,
+        );
+        assert_eq!(expired.phase, "error");
+
+        // Terminal states are never rewritten, whatever their age.
+        let done = normalize_stale(
+            UpdateState {
+                phase: "done".to_string(),
+                ..Default::default()
+            },
+            Some(std::time::Duration::from_secs(999_999)),
+            |_| false,
+        );
+        assert_eq!(done.phase, "done");
     }
 }

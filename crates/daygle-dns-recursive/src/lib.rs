@@ -358,12 +358,25 @@ where
     I: IntoIterator<Item = &'a str>,
 {
     let qname = normalize_zone(&name.to_string());
-    zones.into_iter()
+    zones
+        .into_iter()
         .enumerate()
         // An empty zone string is the root zone and matches every name.
-        .filter(|(_, z)| z.is_empty() || qname == *z || qname.ends_with(&format!(".{}", z)))
+        .filter(|(_, z)| z.is_empty() || is_label_aligned_suffix(&qname, z))
         .max_by_key(|(_, z)| z.len())
         .map(|(idx, _)| idx)
+}
+
+/// Allocation-free label-aligned suffix test for two normalized names:
+/// `qname == zone` or `qname` ends with `.zone`. Runs once per configured
+/// zone on every recursive query, so it must not build the ".zone" string.
+fn is_label_aligned_suffix(qname: &str, zone: &str) -> bool {
+    if qname.len() == zone.len() {
+        return qname == zone;
+    }
+    qname.len() > zone.len()
+        && qname.ends_with(zone)
+        && qname.as_bytes()[qname.len() - zone.len() - 1] == b'.'
 }
 
 /// Build a [`ResolverConfig`] + [`ResolverOpts`] for one conditional zone:
