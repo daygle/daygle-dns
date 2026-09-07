@@ -16,9 +16,20 @@ set -u
 
 EXE="$1"
 DIR="$2"
-SRC="$(mktemp -d)"
 LOG="$DIR/update.log"
 REPO="${DAYGLE_UPDATE_REPO:-https://github.com/daygle/daygle-dns.git}"
+
+# systemd service accounts usually have no sudo and a bare PATH, so cargo (as
+# installed by rustup for the operator/root) is unreachable. When passwordless
+# sudo is available, re-exec the whole updater as root: the same pid is kept
+# (exec), state and log stay where they are, and the build/install/restart
+# steps all write to their normal locations. Otherwise the script continues
+# as the service user with whatever tooling it can reach.
+if [ "$(id -u)" -ne 0 ] && command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
+  exec sudo -n sh "$0" "$EXE" "$DIR"
+fi
+
+SRC="$(mktemp -d)"
 
 trap 'rm -rf "$SRC"' EXIT HUP INT TERM
 
@@ -49,26 +60,49 @@ if ! command -v git >/dev/null 2>&1; then
   exit 1
 fi
 
-# Systemd service accounts usually have a bare PATH with no cargo. Find it the
-# way rustup lays it out rather than relying on the daemon's PATH.
+# Cargo may live almost anywhere: on this account's PATH, rustup's layout for
+# any plausible user, or a distro package (/usr/bin). Prefer `rustup which`
+# when rustup is reachable, then crawl the standard spots.
 CARGO_BIN=""
-if command -v cargo >/dev/null 2>&1; then
-  CARGO_BIN="$(command -v cargo)"
-else
-  for cand in "$HOME/.cargo/bin/cargo" \
-              /root/.cargo/bin/cargo \
-              /home/*/.cargo/bin/cargo; do
-    if [ -x "$cand" ]; then
-      CARGO_BIN="$cand"
-      break
-    fi
-  done
+if command -v rustup >/dev/null 2>&1; then
+  CARGO_BIN="$(rustup which cargo 2>/dev/null || true)"
 fi
 if [ -z "$CARGO_BIN" ]; then
-  fail "cargo was not found; install the Rust toolchain (curl -fsSL https://sh.rustup.rs | sh) and try again."
+  if command -v cargo >/dev/null 2>&1; then
+    CARGO_BIN="$(command -v cargo)"
+  else
+    for cand in "$HOME/.cargo/bin/cargo" \
+                /root/.cargo/bin/cargo \
+                /home/*/.cargo/bin/cargo \
+                "${CARGO_HOME:-/.cargo}/bin/cargo" \
+                /usr/bin/cargo \
+                /usr/local/bin/cargo \
+                /snap/bin/cargo; do
+      if [ -x "$cand" ]; then
+        CARGO_BIN="$cand"
+        break
+      fi
+    done
+  fi
+fi
+if [ -z "$CARGO_BIN" ]; then
+  fail "cargo was not found; install the Rust toolchain (curl -fsSL https://sh.rustup.rs | sh) or configure passwordless sudo for this account, then retry."
   exit 1
 fi
 export PATH="$(dirname "$CARGO_BIN"):$PATH"
+
+# cargo writes its registry to $CARGO_HOME (default $HOME/.cargo). systemd
+# accounts may have no usable home directory; fall back to a writable dir
+# inside the state directory so the build can proceed and cache across runs.
+if [ -z "${CARGO_HOME:-}" ]; then
+  if [ -n "${HOME:-}" ] && [ -d "$HOME" ] && [ -w "$HOME" ]; then
+    :
+  else
+    CARGO_HOME="$DIR/cargo-home"
+    mkdir -p "$CARGO_HOME"
+    export CARGO_HOME
+  fi
+fi
 
 state cloning "Fetching the latest source…"
 if ! git clone --depth 1 "$REPO" "$SRC" >>"$LOG" 2>&1; then
