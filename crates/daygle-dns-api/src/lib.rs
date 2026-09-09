@@ -146,10 +146,8 @@ fn prune_expired(sessions: &mut HashMap<String, Session>) {
 /// Generate a 128-bit random hex token (from OS entropy via rand's
 /// thread-local generator; collision probability is negligible).
 fn new_token() -> String {
-    use rand::Rng;
-    let mut rng = rand::thread_rng();
     (0..16)
-        .map(|_| format!("{:02x}", rng.gen::<u8>()))
+        .map(|_| format!("{:02x}", rand::random::<u8>()))
         .collect()
 }
 
