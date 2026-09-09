@@ -115,7 +115,7 @@
   async function startUpdate() {
     startError = '';
     const ok = confirm(
-      'Update Daygle DNS to the latest source?\n\nThe server will build a new release binary, swap it in place and restart. DNS resolution is briefly interrupted and this console may take a moment to reconnect.'
+      'Update Daygle DNS to the latest release?\n\nThe server will download the latest prebuilt release, verify its checksum, swap it in place and restart. DNS resolution is briefly interrupted and this console may take a moment to reconnect.'
     );
     if (!ok) return;
     updating = true; // guard against double-clicks while the request is out
@@ -195,6 +195,30 @@
         <div class="form-error" style="margin-bottom: 10px">{startError}</div>
       {/if}
 
+      {#if info.updater_bootstrap_required}
+        <div class="bootstrap">
+          <p style="margin: 0 0 8px">
+            <strong>One-time bootstrap needed:</strong> the installed updater
+            (from version {info.version}) predates the release-download update
+            path, so an update started here cannot complete on this host. Run
+            the installer command below once - it swaps in the new binary and
+            provisions the update helper - and one-click updates work from
+            then on.
+          </p>
+          <div class="command-block">
+            <code>{info.update_command}</code>
+            <button class="secondary" onclick={copyCommand} disabled={copied || busy}>
+              {copied ? 'Copied' : 'Copy'}
+            </button>
+          </div>
+        </div>
+      {:else if info.updater_outdated && info.latest_release}
+        <p class="muted" style="font-size: 0.82rem; margin: 8px 0 0">
+          A newer release (v{info.latest_release}) is available; the installed
+          version is {info.version}.
+        </p>
+      {/if}
+
       {#if updating || runRunning()}
         <p style="margin: 8px 0">
           <strong>{run?.message || PHASE_LABEL[run?.phase] || 'Working…'}</strong>
@@ -230,6 +254,11 @@
         {/if}
         <button class="secondary" onclick={dismissRun} style="margin-top: 8px">Dismiss</button>
 
+      {:else if info.updater_bootstrap_required}
+        <p class="muted" style="font-size: 0.85rem; margin: 8px 0 0">
+          Complete the one-time bootstrap above to enable in-place updates
+          from this page.
+        </p>
       {:else}
         {#if isAdmin}
           <button onclick={startUpdate} disabled={busy || updating}>Update Now</button>
@@ -253,6 +282,7 @@
     <h3 style="margin-top: 0">Current Installation</h3>
     <div class="form-grid">
       <label><span>Installed Version</span><code>{info.version}</code></label>
+      <label><span>Latest Release</span>{#if info.latest_release}<code>v{info.latest_release}</code>{:else}Unknown{/if}</label>
       <label><span>Config File</span>{info.has_config_file ? 'Detected' : 'Not detected'}</label>
       <label><span>Service Manager</span>{info.has_systemd ? 'systemd' : 'Not detected'}</label>
       <label><span>In-Place Update</span>{info.can_update ? 'Available' : 'Not available on this host'}</label>
@@ -343,6 +373,14 @@
     padding: 6px 12px;
     font-size: 0.8rem;
     white-space: nowrap;
+  }
+  .bootstrap {
+    background: var(--panel-2);
+    border: 1px solid var(--warn, #b58900);
+    border-radius: 6px;
+    padding: 10px 12px;
+    margin: 10px 0;
+    font-size: 0.88rem;
   }
   .preserve-list {
     display: flex;

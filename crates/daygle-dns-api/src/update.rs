@@ -263,6 +263,169 @@ pub fn gates(config_dir: Option<&Path>) -> Vec<&'static str> {
     missing
 }
 
+/// Cached latest-release version (tag without the leading `v`) and when it
+/// was fetched, shared across status polls: the console hits this endpoint
+/// every few seconds during a run, and GitHub rate-limits unauthenticated
+/// API calls per IP.
+static LATEST_RELEASE: std::sync::Mutex<Option<(String, std::time::Instant)>> =
+    std::sync::Mutex::new(None);
+
+/// Cache lifetime for the latest-release lookup.
+const RELEASE_CACHE_SECS: u64 = 600;
+
+/// Fetch the latest published release version (e.g. `"1.0.2"`), or `None`
+/// when GitHub is unreachable, rate-limited, or has no release. Mirrors the
+/// updater helper's resolution strategy: the GitHub API first, the
+/// `/releases/latest` HTML redirect as fallback.
+fn fetch_latest_release_version() -> Option<String> {
+    if let Some(guard) = LATEST_RELEASE.lock().ok() {
+        if let Some((ver, at)) = guard.as_ref() {
+            if at.elapsed().as_secs() < RELEASE_CACHE_SECS {
+                return Some(ver.clone());
+            }
+        }
+    }
+    let version = fetch_latest_release_uncached()?;
+    if let Ok(mut guard) = LATEST_RELEASE.lock() {
+        *guard = Some((version.clone(), std::time::Instant::now()));
+    }
+    Some(version)
+}
+
+fn fetch_latest_release_uncached() -> Option<String> {
+    // Short timeouts: this runs inline in a status/info request.
+    let get = |url: &str| -> Option<String> {
+        let out = std::process::Command::new("curl")
+            .args([
+                "-fsSL",
+                "--max-time",
+                "5",
+                "--connect-timeout",
+                "2",
+                url,
+            ])
+            .output()
+            .ok()
+            .filter(|o| o.status.success())?;
+        String::from_utf8_lossy(&out.stdout).into_owned().into()
+    };
+    let body = get(
+        "https://api.github.com/repos/daygle/daygle-dns/releases/latest",
+    )?;
+    if let Some(tag) = extract_tag_name(&body) {
+        return normalize_release_tag(&tag);
+    }
+    // Fallback: scrape the tag out of the HTML redirect page.
+    let body = get(
+        "https://github.com/daygle/daygle-dns/releases/latest",
+    )?;
+    extract_html_tag(&body).and_then(|tag| normalize_release_tag(&tag))
+}
+
+/// Pull the `tag_name` value (e.g. `"v1.2.3"`) from the API response.
+fn extract_tag_name(body: &str) -> Option<String> {
+    let marker = "\"tag_name\"";
+    let idx = body.find(marker)?;
+    let rest = &body[idx + marker.len()..];
+    // Skip the JSON key/value separator (`: `) before the value quote.
+    let colon = rest.find(':')?;
+    let after = &rest[colon + 1..];
+    let start = after.find('"')? + 1;
+    let end = after[start..].find('"')? + start;
+    Some(after[start..end].to_string())
+}
+
+/// Pull the tag out of a `/releases/latest` HTML redirect page.
+fn extract_html_tag(body: &str) -> Option<String> {
+    let marker = "releases/tag/";
+    let idx = body.find(marker)?;
+    let rest = &body[idx + marker.len()..];
+    let end = rest
+        .find(|c: char| !(c.is_ascii_alphanumeric() || c == '.' || c == '_'))
+        .unwrap_or(rest.len());
+    if end == 0 {
+        return None;
+    }
+    Some(rest[..end].to_string())
+}
+
+/// `"v1.2.3"` -> `"1.2.3"`; `None` when the tag does not look like a version.
+fn normalize_release_tag(tag: &str) -> Option<String> {
+    let t = tag.strip_prefix('v').unwrap_or(tag);
+    if t.is_empty() || !t.chars().next().unwrap().is_ascii_digit() {
+        return None;
+    }
+    Some(t.to_string())
+}
+
+/// The version of the updater logic this binary embeds. The updater gained
+/// its release-download path (and the fixed privilege/swap handling) in
+/// 1.0.2; older binaries can only build from source, so an update started
+/// from them fails on hosts without a toolchain.
+fn updater_min_version() -> &'static str {
+    "1.0.2"
+}
+
+/// How the installed binary compares to the latest published release, for
+/// the console's update page.
+pub struct ReleaseComparison {
+    /// Latest published release version, e.g. `"1.0.2"`.
+    pub latest: String,
+    /// Whether the running binary is older than the latest release.
+    pub outdated: bool,
+    /// Whether the embedded updater is too old to self-update reliably
+    /// (it predates the release-download fix): the console then shows a
+    /// one-time installer bootstrap hint instead of a run button.
+    pub bootstrap_required: bool,
+}
+
+/// Compare the running binary with the latest published release. Runs the
+/// network lookup only on hosts that can actually self-update, so dev and
+/// non-Linux consoles never wait on GitHub.
+pub fn release_comparison() -> Option<ReleaseComparison> {
+    if !can_update(config_dir_hint()) {
+        return None;
+    }
+    let latest = fetch_latest_release_version()?;
+    let installed = daygle_dns_core::VERSION.to_string();
+    let outdated = version_lt(&installed, &latest);
+    let bootstrap_required = version_lt(&installed, updater_min_version());
+    Some(ReleaseComparison {
+        latest,
+        outdated,
+        bootstrap_required,
+    })
+}
+
+/// The config-dir hint `can_update` needs, resolved the same way the HTTP
+/// handlers do (config file under `/etc/` counts as install evidence).
+fn config_dir_hint() -> Option<&'static Path> {
+    if Path::new("/etc/daygle-dns").is_dir() {
+        Some(Path::new("/etc/daygle-dns"))
+    } else {
+        None
+    }
+}
+
+/// Numeric semver-ish comparison: true when `a` < `b`. Tolerates prefixes
+/// and extra segments (`"1.0.2-rc1"`), comparing only leading numeric parts.
+fn version_lt(a: &str, b: &str) -> bool {
+    let nums = |s: &str| -> Vec<u64> {
+        s.trim_start_matches('v')
+            .split(['.', '-'])
+            .map_while(|p| p.parse::<u64>().ok())
+            .collect()
+    };
+    let (va, vb) = (nums(a), nums(b));
+    for i in 0..va.len().max(vb.len()) {
+        let (x, y) = (va.get(i).copied().unwrap_or(0), vb.get(i).copied().unwrap_or(0));
+        if x != y {
+            return x < y;
+        }
+    }
+    false
+}
+
 /// Whether an update run is currently active. `read_state` normalizes stale
 /// run-shaped snapshots (dead helper, expired primed state) to `error`, so a
 /// plain phase check is sufficient here.
@@ -491,6 +654,37 @@ mod tests {
                 .iter()
                 .all(|g| !g.is_empty() && g.contains(' ')));
         }
+    }
+
+    #[test]
+    fn tag_parsing_handles_api_and_html_shapes() {
+        let api = "{ \"tag_name\": \"v1.0.2\", \"name\": \"v1.0.2\" }";
+        assert_eq!(extract_tag_name(api).as_deref(), Some("v1.0.2"));
+        assert_eq!(extract_tag_name("{}"), None);
+
+        let html = "<html><head><title>Release v1.0.3</title>\n<meta content=\"https://github.com/daygle/daygle-dns/releases/tag/v1.0.3\">";
+        assert_eq!(extract_html_tag(html).as_deref(), Some("v1.0.3"));
+        assert_eq!(extract_html_tag("no marker here"), None);
+        assert_eq!(extract_html_tag("releases/tag/"), None);
+    }
+
+    #[test]
+    fn release_tags_normalize_to_versions() {
+        assert_eq!(normalize_release_tag("v1.0.2").as_deref(), Some("1.0.2"));
+        assert_eq!(normalize_release_tag("1.0.2").as_deref(), Some("1.0.2"));
+        assert_eq!(normalize_release_tag("latest"), None);
+        assert_eq!(normalize_release_tag("v"), None);
+    }
+
+    #[test]
+    fn version_comparison_covers_semver_shapes() {
+        assert!(version_lt("1.0.1", "1.0.2"));
+        assert!(!version_lt("1.0.2", "1.0.2"));
+        assert!(!version_lt("1.0.2", "1.0.1"));
+        assert!(version_lt("1.0", "1.0.1")); // missing segment reads as 0
+        assert!(version_lt("v0.9", "1.0")); // v-prefix tolerated
+        assert!(!version_lt("1.0.2-rc1", "1.0.2")); // prerelease suffix ignored
+        assert!(version_lt("2", "10")); // numeric, not lexicographic
     }
 
     #[test]

@@ -667,6 +667,9 @@ pub async fn update_info(State(state): State<AppState>) -> Response {
         .and_then(|p| p.parent().map(std::path::Path::to_path_buf));
     let can_update = crate::update::can_update(config_dir.as_deref());
     let gates = crate::update::gates(config_dir.as_deref());
+    // Latest-release comparison (network, cached): only resolved on hosts
+    // that can self-update, so dev/non-Linux consoles get null fields.
+    let release = crate::update::release_comparison();
 
     Json(serde_json::json!({
         "version": version,
@@ -675,6 +678,9 @@ pub async fn update_info(State(state): State<AppState>) -> Response {
         "has_systemd": has_systemd,
         "can_update": can_update,
         "gates": gates,
+        "latest_release": release.as_ref().map(|r| r.latest.clone()),
+        "updater_outdated": release.as_ref().map(|r| r.outdated),
+        "updater_bootstrap_required": release.as_ref().map(|r| r.bootstrap_required),
         "update_command": format!("curl -fsSL {} | sh", install_script),
         "preserves": ["configuration", "zones", "certificates", "database"],
         "note": "Run the update command on the host to update all components in place. The installer rebuilds the server binary and preserves configuration, zones, certificates and the database.".to_string(),
