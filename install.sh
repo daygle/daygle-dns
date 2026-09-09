@@ -20,6 +20,8 @@ DATA_DIR="${DATA_DIR:-/var/lib/daygle-dns}"
 SERVICE_USER="${SERVICE_USER:-daygle-dns}"
 CONFIG_FILE="$CONFIG_DIR/daygle-dns.toml"
 SERVICE_FILE="/etc/systemd/system/daygle-dns.service"
+PRIV_LIB_DIR="${PRIV_LIB_DIR:-$PREFIX/lib/daygle-dns}"
+PRIV_HELPER="$PRIV_LIB_DIR/update-priv.sh"
 
 # Detect the installation mode before changing anything. A config file is the
 # strongest signal, while the binary/unit checks also catch interrupted or
@@ -139,6 +141,45 @@ install_rust() {
         return 1
     fi
     export PATH="$HOME/.cargo/bin:$PATH"
+}
+
+# Write the root-owned privilege helper used by in-place updates. The web
+# console's updater invokes it through a sudoers rule that permits this exact
+# script - the service account never gets broad root rights.
+install_priv_helper() {
+    run_as_root install -d "$PRIV_LIB_DIR" || return 1
+    run_as_root tee "$PRIV_HELPER" > /dev/null <<'EOF'
+#!/usr/bin/env sh
+# Root-owned privilege helper for Daygle DNS in-place updates.
+# Invoked ONLY by the service account via a matching sudoers rule:
+#   update-priv.sh install <new-binary>   - back up and swap the server binary
+#   update-priv.sh restart                - restart the systemd unit
+# Any other usage fails closed.
+set -eu
+[ "$(id -u)" -eq 0 ] || { echo "must run as root" >&2; exit 1; }
+EXE="${DAYGLE_EXE:-__DAYGLE_EXE__}"
+SERVICE="${DAYGLE_SERVICE:-daygle-dns}"
+case "${1:-}" in
+  install)
+    new="${2:-}"
+    [ -n "$new" ] && [ -f "$new" ] || { echo "usage: update-priv.sh install <new-binary>" >&2; exit 2; }
+    cp -f "$EXE" "$EXE.bak" 2>/dev/null || true
+    install -m 0755 "$new" "$EXE"
+    ;;
+  restart)
+    systemctl restart "$SERVICE"
+    ;;
+  *)
+    echo "usage: update-priv.sh install <new-binary> | restart" >&2
+    exit 2
+    ;;
+esac
+EOF
+    run_as_root chmod 0755 "$PRIV_HELPER" || return 1
+    run_as_root chown root:root "$PRIV_HELPER" || return 1
+    # Bake in the installed binary path so custom PREFIX installs work even
+    # though sudo strips the environment.
+    run_as_root sed -i "s|__DAYGLE_EXE__|$PREFIX/bin/daygle-dns|" "$PRIV_HELPER" || return 1
 }
 
 open_lan_firewall() {
@@ -299,16 +340,20 @@ NoNewPrivileges=false
 WantedBy=multi-user.target
 EOF
     id "$SERVICE_USER" >/dev/null 2>&1 || useradd --system --no-create-home "$SERVICE_USER"
-    # In-place updates from the web console need to rebuild, swap the binary,
-    # and restart the service. The dedicated service account gets passwordless
-    # sudo for that so the "Update" button works on a clean install.
+    # In-place updates from the web console need to swap the binary and
+    # restart the service as root. Instead of granting the service account
+    # broad root access, the installer provisions a root-owned helper script
+    # and a sudoers rule that permits invoking exactly that script.
+    install_priv_helper || log "WARNING: could not provision the update privilege helper; in-place updates from the web console will need passwordless sudo."
     mkdir -p /etc/sudoers.d
     printf '%s\n' \
         "# Provisioned by the Daygle DNS installer: in-place updates from" \
-        "# the web console rebuild, reinstall, and restart the service." \
+        "# the web console may swap the binary and restart the service via" \
+        "# the root-owned update-priv.sh helper - nothing else." \
         "Defaults:$SERVICE_USER !requiretty" \
-        "$SERVICE_USER ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/"$SERVICE_USER"
-    chmod 0440 /etc/sudoers.d/"$SERVICE_USER"
+        "$SERVICE_USER ALL=(root) NOPASSWD: $PRIV_HELPER install [A-Za-z0-9/._-]*" \
+        "$SERVICE_USER ALL=(root) NOPASSWD: $PRIV_HELPER restart" | run_as_root tee /etc/sudoers.d/"$SERVICE_USER" > /dev/null
+    run_as_root chmod 0440 /etc/sudoers.d/"$SERVICE_USER"
     # Some distros ship /etc/sudoers without the #includedir directive that
     # makes /etc/sudoers.d files take effect; repair it so the provisioned
     # rule actually applies.

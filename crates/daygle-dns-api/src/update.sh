@@ -3,10 +3,20 @@
 #
 # Usage: sh daygle-dns-update.sh <current-binary> <state-dir>
 #
-# Mirrors what install.sh does for an existing installation: clone the latest
-# source, build a release binary, swap it in place, and restart the systemd
-# service. Progress is written to <state-dir>/state.json so the console can
-# follow along; all command output accumulates in <state-dir>/update.log.
+# Preferred path: download the prebuilt release binary for this architecture
+# from GitHub Releases, verify its sha256 checksum, swap it in place, and
+# restart the systemd service - no Rust toolchain, no git, no compilation on
+# the host. Fallback path (only when no release asset can be fetched): build
+# from source, the way install.sh does. Progress is written to
+# <state-dir>/state.json so the console can follow along; all command output
+# accumulates in <state-dir>/update.log.
+#
+# Privilege model: the helper runs as the service account and only invokes
+# root for two narrow steps (swap the binary, restart the service) through
+# the root-owned update-priv.sh installed by install.sh under a sudo rule
+# that permits exactly that script - the service account never gets broad
+# root access. On older installs with a passwordless ALL grant, the generic
+# sudo fallback still works.
 #
 # The script runs as a detached helper so it survives the server's restart.
 # `state` files and log output live under the OS temp dir (writable by the
@@ -17,37 +27,11 @@ set -u
 EXE="$1"
 DIR="$2"
 LOG="$DIR/update.log"
-REPO="${DAYGLE_UPDATE_REPO:-https://github.com/daygle/daygle-dns.git}"
-
-# systemd service accounts usually have no sudo and a bare PATH, so cargo (as
-# installed by rustup for the operator/root) is unreachable. When passwordless
-# sudo is available, re-exec the whole updater as root: the same pid is kept
-# (exec), state and log stay where they are, and the build/install/restart
-# steps all write to their normal locations. Otherwise the script continues
-# as the service user with whatever tooling it can reach.
-SUDO_HINT=""
-if [ "$(id -u)" -ne 0 ]; then
-  if ! command -v sudo >/dev/null 2>&1; then
-    SUDO_HINT="sudo is not installed"
-  elif ! sudo -n true >/dev/null 2>&1; then
-    SUDO_HINT="passwordless sudo is not configured for this account (re-running install.sh provisions it)"
-  else
-    exec sudo -n sh "$0" "$EXE" "$DIR"
-  fi
-fi
-
-# Big transient artifacts (the build tree, the cargo registry cache) should
-# not land on /tmp: many distros mount it as tmpfs, so a multi-GB release
-# build can exhaust memory on small hosts. /var/tmp is the conventional spot.
-# (Placed after the sudo re-exec because sudo strips env: this way both the
-# service-account and root paths get it.)
-if [ -z "${TMPDIR:-}" ] && [ -d /var/tmp ]; then
-  export TMPDIR=/var/tmp
-fi
-
-SRC="$(mktemp -d)"
-
-trap 'rm -rf "$SRC"' EXIT HUP INT TERM
+REPO_OWNER="${DAYGLE_UPDATE_REPO_OWNER:-daygle}"
+REPO_NAME="${DAYGLE_UPDATE_REPO_NAME:-daygle-dns}"
+REPO_URL="${DAYGLE_UPDATE_REPO:-https://github.com/${REPO_OWNER}/${REPO_NAME}.git}"
+LATEST_URL="https://github.com/${REPO_OWNER}/${REPO_NAME}/releases/latest"
+BASE_URL="https://github.com/${REPO_OWNER}/${REPO_NAME}/releases/download"
 
 # Escape a message for embedding in a JSON string (backslashes and quotes).
 json_escape() {
@@ -68,114 +52,239 @@ fail() { # message
     && mv -f "$DIR/state.json.tmp" "$DIR/state.json"
 }
 
-run_as_root() {
+# Root-owned privilege helper installed by install.sh; permits exactly the
+# binary swap and service restart - nothing else. May also sit beside a
+# custom-PREFIX install: derive candidates from the binary's own location.
+PRIV_HELPER=""
+EXE_DIR="$(dirname "$EXE")"
+for cand in /usr/local/lib/daygle-dns/update-priv.sh \
+            /usr/local/libexec/daygle-dns/update-priv.sh \
+            /usr/lib/daygle-dns/update-priv.sh \
+            "$EXE_DIR/../lib/daygle-dns/update-priv.sh" \
+            "$EXE_DIR/../libexec/daygle-dns/update-priv.sh"; do
+  if [ -x "$cand" ]; then
+    PRIV_HELPER="$cand"
+    break
+  fi
+done
+
+SUDO_HINT=""
+if [ "$(id -u)" -ne 0 ] && ! command -v sudo >/dev/null 2>&1; then
+  SUDO_HINT="sudo is not installed"
+elif [ "$(id -u)" -ne 0 ] && [ -z "$PRIV_HELPER" ] && command -v sudo >/dev/null 2>&1 \
+     && ! sudo -n true >/dev/null 2>&1; then
+  # Deliberately not probed when a privilege helper exists: the narrowed
+  # sudoers rule permits only that helper, so a generic `sudo -n true`
+  # failure would be meaningless there.
+  SUDO_HINT="passwordless sudo is not configured for this account (re-running install.sh provisions the privilege helper)"
+fi
+
+# Swap the current binary for a new one. Prefers the narrowed helper; falls
+# back to the service account's own sudo rights on older installs.
+priv_install() { # src
   if [ "$(id -u)" -eq 0 ]; then
-    "$@"
+    cp -f "$EXE" "$EXE.bak" 2>/dev/null || true
+    install -m 0755 "$1" "$EXE"
+  elif [ -n "$PRIV_HELPER" ] && command -v sudo >/dev/null 2>&1; then
+    sudo -n "$PRIV_HELPER" install "$1"
   elif command -v sudo >/dev/null 2>&1; then
-    sudo -n "$@"
+    sudo -n cp -f "$EXE" "$EXE.bak" 2>/dev/null || true
+    sudo -n install -m 0755 "$1" "$EXE"
   else
     return 1
   fi
 }
 
+priv_restart() {
+  if [ "$(id -u)" -eq 0 ]; then
+    systemctl restart daygle-dns
+  elif [ -n "$PRIV_HELPER" ] && command -v sudo >/dev/null 2>&1; then
+    sudo -n "$PRIV_HELPER" restart
+  elif command -v sudo >/dev/null 2>&1; then
+    sudo -n systemctl restart daygle-dns
+  else
+    return 1
+  fi
+}
+
+# Big transient artifacts (a fallback source build's tree and registry cache)
+# should not land on /tmp: many distros mount it as tmpfs, so a multi-GB
+# release build can exhaust memory on small hosts. /var/tmp is the
+# conventional spot.
+if [ -z "${TMPDIR:-}" ] && [ -d /var/tmp ]; then
+  export TMPDIR=/var/tmp
+fi
+
+SRC="$(mktemp -d)"
+
+trap 'rm -rf "$SRC"' EXIT HUP INT TERM
+
 state preparing "Preparing update…"
 
-if ! command -v git >/dev/null 2>&1; then
-  fail "git is required to update; install git and try again."
-  exit 1
-fi
+# ---- locate a toolchain (used only by the source-build fallback) --------
 
-# Cargo may live almost anywhere: on this account's PATH, rustup's layout for
-# any plausible user, or a distro package (/usr/bin). Prefer `rustup which`
-# when rustup is reachable, then crawl the standard spots.
-CARGO_BIN=""
-if command -v rustup >/dev/null 2>&1; then
-  CARGO_BIN="$(rustup which cargo 2>/dev/null || true)"
-fi
-if [ -z "$CARGO_BIN" ]; then
+find_cargo() {
+  if command -v rustup >/dev/null 2>&1; then
+    rustup which cargo 2>/dev/null && return 0
+  fi
   if command -v cargo >/dev/null 2>&1; then
-    CARGO_BIN="$(command -v cargo)"
-  else
-    for cand in "$HOME/.cargo/bin/cargo" \
-                /root/.cargo/bin/cargo \
-                /home/*/.cargo/bin/cargo \
-                "${CARGO_HOME:-/.cargo}/bin/cargo" \
-                /usr/bin/cargo \
-                /usr/local/bin/cargo \
-                /snap/bin/cargo; do
-      if [ -x "$cand" ]; then
-        CARGO_BIN="$cand"
-        break
-      fi
-    done
+    command -v cargo && return 0
   fi
-fi
-# Last resort: ask the filesystem. A bare PATH on a service account does not
-# mean the toolchain is missing - rustup under another user's home (or under
-# /opt) is the common case, and the binary there is usually world-executable.
-if [ -z "$CARGO_BIN" ] && command -v find >/dev/null 2>&1; then
-  CARGO_BIN="$(find /root /home /opt /usr -maxdepth 4 -type f -name cargo -perm -u+x 2>/dev/null | head -n 1)"
-fi
-if [ -z "$CARGO_BIN" ]; then
-  if [ "$(id -u)" -eq 0 ]; then
-    fail "cargo was not found; install the Rust toolchain (curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal), then retry."
-  else
-    fail "cargo was not found and ${SUDO_HINT:-passwordless sudo is unavailable}; install the Rust toolchain for this account, or re-run install.sh as root to provision passwordless sudo, then retry."
-  fi
-  exit 1
-fi
-export PATH="$(dirname "$CARGO_BIN"):$PATH"
-
-# cargo writes its registry to $CARGO_HOME (default $HOME/.cargo). systemd
-# accounts may have no usable home directory; fall back to a writable dir
-# inside the state directory so the build can proceed and cache across runs.
-if [ -z "${CARGO_HOME:-}" ]; then
-  if [ -n "${HOME:-}" ] && [ -d "$HOME" ] && [ -w "$HOME" ]; then
-    :
-  else
-    # Prefer /var/tmp so the registry cache survives reboots and stays off a
-    # tmpfs-backed /tmp; fall back to the state dir when it is not writable.
-    CARGO_HOME="/var/tmp/daygle-dns-cargo-home"
-    if ! mkdir -p "$CARGO_HOME" 2>/dev/null || [ ! -w "$CARGO_HOME" ]; then
-      CARGO_HOME="$DIR/cargo-home"
-      mkdir -p "$CARGO_HOME"
+  for cand in "$HOME/.cargo/bin/cargo" \
+              /root/.cargo/bin/cargo \
+              /home/*/.cargo/bin/cargo \
+              "${CARGO_HOME:-/.cargo}/bin/cargo" \
+              /usr/bin/cargo \
+              /usr/local/bin/cargo \
+              /snap/bin/cargo; do
+    if [ -x "$cand" ]; then
+      printf '%s\n' "$cand"
+      return 0
     fi
-    export CARGO_HOME
+  done
+  # Last resort: ask the filesystem. A bare PATH on a service account does
+  # not mean the toolchain is missing - rustup under another user's home (or
+  # under /opt) is the common case, and the binary is usually world-executable.
+  if command -v find >/dev/null 2>&1; then
+    find /root /home /opt /usr -maxdepth 4 -type f -name cargo -perm -u+x 2>/dev/null | head -n 1
   fi
+}
+CARGO_BIN="$(find_cargo || true)"
+
+# ---- download the prebuilt release --------------------------------------
+
+# A downloader (curl or wget) enables the fast prebuilt-release path.
+DOWNLOADER=""
+if command -v curl >/dev/null 2>&1; then
+  DOWNLOADER="curl"
+elif command -v wget >/dev/null 2>&1; then
+  DOWNLOADER="wget"
 fi
 
-state cloning "Fetching the latest source…"
-if ! git clone --depth 1 "$REPO" "$SRC" >>"$LOG" 2>&1; then
-  fail "git clone failed - check network access to $REPO (see update.log)."
-  exit 1
+fetch() { # url dest
+  case "$DOWNLOADER" in
+    curl) curl -fSL --retry 3 --connect-timeout 15 -o "$2" "$1" ;;
+    wget) wget -q --tries=3 -O "$2" "$1" ;;
+    *) return 1 ;;
+  esac
+}
+
+# Match the release asset to this machine's architecture. CI publishes
+# daygle-dns-linux-{x86_64,x86_64-musl,aarch64}; the musl asset is the
+# universal fallback because it is statically linked and runs on any Linux.
+ARCH="$(uname -m)"
+case "$ARCH" in
+  x86_64) ASSET="linux-x86_64" ;;
+  aarch64|arm64) ASSET="linux-aarch64" ;;
+  *) ASSET="linux-x86_64-musl" ;;
+esac
+
+DOWNLOAD_OK=0
+REL_TAG=""
+if [ -n "$DOWNLOADER" ]; then
+  state downloading "Downloading the prebuilt release (${ASSET} build)…"
+  # Resolve the latest release tag from the /releases/latest redirect so the
+  # error message can name exactly which version failed.
+  if fetch "$LATEST_URL" "$SRC/release.html" 2>>"$LOG"; then
+    REL_TAG="$(sed -n 's/.*releases\/tag\/\([^"/?]*\).*/\1/p' "$SRC/release.html" | head -n 1)"
+  fi
+  # Try the architecture-matched asset first, then the other Linux builds.
+  try_assets="$ASSET"
+  case "$ASSET" in
+    linux-x86_64) try_assets="$try_assets linux-x86_64-musl" ;;
+    *) try_assets="$try_assets linux-x86_64" ;;
+  esac
+  case "$ASSET" in
+    linux-aarch64) ;;
+    *) try_assets="$try_assets linux-aarch64" ;;
+  esac
+  for asset in $try_assets; do
+    BIN_TMP="$SRC/bin-$asset"
+    SUM_TMP="$SRC/sum-$asset"
+    if fetch "$BASE_URL/$REL_TAG/daygle-dns-$asset" "$BIN_TMP" 2>>"$LOG" \
+       && fetch "$BASE_URL/$REL_TAG/daygle-dns-$asset.sha256" "$SUM_TMP" 2>>"$LOG"; then
+      mv -f "$BIN_TMP" "$SRC/daygle-dns"
+      mv -f "$SUM_TMP" "$SRC/daygle-dns.sha256"
+      DOWNLOAD_OK=1
+      break
+    fi
+    # A failed fetch can leave an empty/partial file behind (wget -O does);
+    # remove it so it is never mistaken for a real download.
+    rm -f "$BIN_TMP" "$SUM_TMP"
+  done
 fi
 
-cd "$SRC"
+if [ "$DOWNLOAD_OK" -eq 1 ]; then
+  # Verify the checksum BEFORE the file is used; a mismatch is fatal.
+  state downloading "Verifying the download checksum…"
+  EXPECTED="$(cut -d' ' -f1 "$SRC/daygle-dns.sha256" 2>/dev/null | tr -d '[:space:]')"
+  ACTUAL="$(sha256sum "$SRC/daygle-dns" 2>/dev/null | cut -d' ' -f1 | tr -d '[:space:]')"
+  if [ -z "$EXPECTED" ] || [ "$EXPECTED" != "$ACTUAL" ]; then
+    fail "checksum verification failed for the downloaded release${REL_TAG:+ ($REL_TAG)} - refusing to install it. If this persists, report the release as broken."
+    exit 1
+  fi
+  chmod 0755 "$SRC/daygle-dns"
 
-state building "Building the release binary (this can take a few minutes)…"
-if ! cargo build --release -p daygle-dns >>"$LOG" 2>&1; then
-  fail "build failed - see update.log for details."
-  exit 1
-fi
+  state installing "Installing the release binary…"
+  # priv_install keeps a .bak copy of the current binary as a manual rollback
+  # point (best effort; a release that installs can still fail at runtime).
+  if ! priv_install "$SRC/daygle-dns"; then
+    fail "installing the release binary to $EXE failed${SUDO_HINT:+ ($SUDO_HINT)}."
+    exit 1
+  fi
+else
+  # No release asset could be fetched: fall back to building from source,
+  # which additionally requires git and a working toolchain.
+  if ! command -v git >/dev/null 2>&1; then
+    fail "no release binary could be downloaded and git is not installed (needed for the source-build fallback); install git and retry."
+    exit 1
+  fi
+  if [ -z "$CARGO_BIN" ]; then
+    fail "no release binary could be downloaded and cargo was not found${SUDO_HINT:+; privilege checks also failed ($SUDO_HINT)}; install the Rust toolchain (curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal) and retry."
+    exit 1
+  fi
 
-state installing "Installing the new binary…"
-if ! command -v sudo >/dev/null 2>&1 && [ "$(id -u)" -ne 0 ]; then
-  fail "cannot install the new binary: sudo is not installed. Re-run install.sh as root to provision passwordless sudo, then retry."
-  exit 1
-fi
-# Keep a copy of the current binary as a manual rollback point (best effort;
-# a release that builds can still fail at runtime).
-run_as_root cp -f "$EXE" "$EXE.bak" >>"$LOG" 2>&1 || true
-if ! run_as_root install -m 0755 target/release/daygle-dns "$EXE"; then
-  fail "installing the new binary to $EXE failed (needs root or passwordless sudo)."
-  exit 1
+  state cloning "No prebuilt release matched - building from source (this can take several minutes)…"
+  if ! git clone --depth 1 "$REPO_URL" "$SRC" >>"$LOG" 2>&1; then
+    fail "git clone failed - check network access to $REPO_URL (see update.log)."
+    exit 1
+  fi
+
+  cd "$SRC"
+
+  state building "Building the release binary (this can take a few minutes)…"
+  # cargo writes its registry to $CARGO_HOME (default $HOME/.cargo). systemd
+  # accounts may have no usable home directory; fall back to a writable dir
+  # so the build can proceed and cache across runs.
+  if [ -z "${CARGO_HOME:-}" ]; then
+    if [ -n "${HOME:-}" ] && [ -d "$HOME" ] && [ -w "$HOME" ]; then
+      :
+    else
+      CARGO_HOME="/var/tmp/daygle-dns-cargo-home"
+      if ! mkdir -p "$CARGO_HOME" 2>/dev/null || [ ! -w "$CARGO_HOME" ]; then
+        CARGO_HOME="$DIR/cargo-home"
+        mkdir -p "$CARGO_HOME"
+      fi
+      export CARGO_HOME
+    fi
+  fi
+  if ! PATH="$(dirname "$CARGO_BIN"):$PATH" cargo build --release -p daygle-dns >>"$LOG" 2>&1; then
+    fail "build failed - see update.log for details."
+    exit 1
+  fi
+
+  state installing "Installing the new binary…"
+  if ! priv_install target/release/daygle-dns; then
+    fail "installing the new binary to $EXE failed${SUDO_HINT:+ ($SUDO_HINT)}."
+    exit 1
+  fi
 fi
 
 if [ -f /etc/systemd/system/daygle-dns.service ] && command -v systemctl >/dev/null 2>&1; then
   # The restart is issued strictly after "done" is written: systemd kills the
   # old unit's cgroup (which includes this helper) once the service stops.
   state done "Update installed - restarting the service…"
-  if ! run_as_root systemctl restart daygle-dns >>"$LOG" 2>&1; then
+  if ! priv_restart >>"$LOG" 2>&1; then
     state done "Update installed - restart daygle-dns manually (auto-restart failed)."
   fi
   exit 0

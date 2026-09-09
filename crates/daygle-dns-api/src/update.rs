@@ -1,20 +1,29 @@
-//! Web-console self-update: builds the latest source and swaps the running
-//! binary in place, mirroring what `install.sh` does for an existing
-//! installation (clone, `cargo build --release`, install to the current exe
-//! path, restart the systemd unit).
+//! Web-console self-update: fetches the newest release binary and swaps the
+//! running binary in place, restarting the systemd unit afterwards.
 //!
-//! The heavy lifting runs as a detached POSIX `sh` helper (embedded below)
-//! writing progress to `<temp>/daygle-dns-update/state.json` and its full
-//! output to `update.log`. The helper is spawned with its own process group so
-//! it keeps running after the server is restarted by the updater itself.
+//! Two paths, in order of preference (both handled by the embedded `sh`
+//! helper):
 //!
-//! Self-update is deliberately opt-in by environment: it is only available on
-//! Linux hosts that look like a real install (systemd unit, `/usr/local/bin`
-//! binary, or a config under `/etc/`). Tool availability and privilege are
-//! handled by the helper at run time: it re-executes under passwordless `sudo`
-//! when possible (installed by `install.sh`), otherwise it falls back to the
-//! service account's own PATH. Dev/test builds and the Windows/macOS console
-//! expose the informational guidance-only mode.
+//! 1. **Prebuilt release** (default): download the release asset for this
+//!    architecture from GitHub Releases, verify its sha256 checksum, swap it
+//!    in place. Needs only a downloader (curl or wget) - no Rust toolchain,
+//!    no compilation, seconds instead of minutes. Assets are published by
+//!    the release CI workflow (`.github/workflows/release.yml`).
+//! 2. **Source build** (fallback): only when no release asset can be
+//!    fetched, clone and build as `install.sh` does - needs git + cargo.
+//!
+//! Progress is written to `<temp>/daygle-dns-update/state.json` and full
+//! output to `update.log`. The helper is spawned with its own process group
+//! so it keeps running after the server is restarted by the updater itself.
+//!
+//! Privilege is deliberately narrow: the helper invokes root only for the
+//! binary swap and the service restart, through the root-owned
+//! `update-priv.sh` that `install.sh` provisions under a sudoers rule
+//! permitting exactly that script. Older installs with a passwordless ALL
+//! grant keep working via the generic sudo fallback. Self-update is opt-in
+//! by environment: only Linux hosts that look like a real install (systemd
+//! unit, `/usr/local/bin` binary, or a config under `/etc/`). Dev/test
+//! builds and the Windows/macOS console expose guidance-only mode.
 
 use std::path::{Path, PathBuf};
 
@@ -32,8 +41,8 @@ pub fn workspace_dir() -> PathBuf {
 /// Progress snapshot written by the updater helper.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct UpdateState {
-    /// One of `""` (idle), `preparing`, `cloning`, `building`, `installing`,
-    /// `done` or `error`.
+    /// One of `""` (idle), `preparing`, `downloading`, `cloning`,
+    /// `building`, `installing`, `done` or `error`.
     #[serde(default)]
     pub phase: String,
     #[serde(default)]
@@ -52,7 +61,7 @@ impl UpdateState {
     pub fn is_running(&self) -> bool {
         matches!(
             self.phase.as_str(),
-            "preparing" | "cloning" | "building" | "installing"
+            "preparing" | "downloading" | "cloning" | "building" | "installing"
         )
     }
 
@@ -158,9 +167,12 @@ pub fn log_tail(max: usize) -> String {
     }
 }
 
-/// Whether a `sh`, `git` and `cargo` exist on `PATH`.
+/// Whether `sh` and a downloader (curl or wget) exist on `PATH`.
+///
+/// The prebuilt-release path needs only these; git and cargo are required
+/// solely by the source-build fallback, so they are deliberately not gates.
 fn tools_present() -> bool {
-    ["sh", "git", "cargo"].iter().all(|tool| {
+    let have = |tool: &str| {
         std::process::Command::new("sh")
             .arg("-c")
             .arg(format!("command -v {tool}"))
@@ -169,7 +181,8 @@ fn tools_present() -> bool {
             .status()
             .map(|s| s.success())
             .unwrap_or(false)
-    })
+    };
+    have("sh") && (have("curl") || have("wget"))
 }
 
 /// Whether the updater helper process `pid` is still alive.
@@ -205,9 +218,9 @@ fn pid_alive(_pid: i64) -> bool {
 /// Only real install-managed Linux hosts qualify: systemd unit present, the
 /// binary at `/usr/local/bin/daygle-dns`, or the config under `/etc/`. A
 /// dev/test binary is never updated in place. Tool availability is reported
-/// separately by [`gates`], not as a hard gate, so a genuine install still
-/// offers the button when the daemon account's PATH is bare (cargo is often
-/// installed to `/root/.cargo/bin`, invisible to the systemd service user).
+/// separately by [`gates`], not as a hard gate: the primary update path
+/// needs only a downloader, and privilege is handled by the helper at run
+/// time through the installer-provisioned privilege helper.
 pub fn can_update(config_dir: Option<&Path>) -> bool {
     std::env::consts::OS == "linux" && has_install_evidence(config_dir)
 }
@@ -240,7 +253,7 @@ pub fn gates(config_dir: Option<&Path>) -> Vec<&'static str> {
         missing.push("host OS is not Linux");
     }
     if !tools_present() {
-        missing.push("sh, git, or cargo not found on this account's PATH");
+        missing.push("sh or a downloader (curl/wget) not found on this account's PATH");
     }
     if !has_install_evidence(config_dir) {
         missing.push(

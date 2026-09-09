@@ -1,0 +1,138 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  # Primary, guaranteed artifact: glibc build for distro-managed x86_64 hosts
+  # (Debian, Ubuntu, Fedora, Arch - exactly what install.sh targets).
+  build-glibc-x86_64:
+    name: Build linux-x86_64
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build release binary
+        run: cargo build --release -p daygle-dns
+
+      - name: Smoke test
+        run: ./target/release/daygle-dns --version
+
+      - name: Stage artifact
+        run: |
+          mkdir -p stage
+          cp target/release/daygle-dns stage/daygle-dns-linux-x86_64
+          strip stage/daygle-dns-linux-x86_64 || true
+
+      - name: Checksum
+        working-directory: stage
+        run: sha256sum daygle-dns-linux-x86_64 > daygle-dns-linux-x86_64.sha256
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: daygle-dns-linux-x86_64
+          path: stage/*
+          if-no-files-found: error
+
+  # Best-effort extras: published only when they build. The updater falls
+  # back to a source build when no asset matches the host architecture.
+  build-musl-x86_64:
+    name: Build linux-x86_64-musl
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+
+      - name: Install musl toolchain
+        run: sudo apt-get update && sudo apt-get install -y musl-tools perl
+
+      - name: Build static binary
+        env:
+          # Fully static: runs on any Linux regardless of glibc version.
+          RUSTFLAGS: -C target-feature=+crt-static
+        run: cargo build --release -p daygle-dns --target x86_64-unknown-linux-musl
+
+      - name: Stage artifact
+        run: |
+          mkdir -p stage
+          cp target/x86_64-unknown-linux-musl/release/daygle-dns stage/daygle-dns-linux-x86_64-musl
+          strip stage/daygle-dns-linux-x86_64-musl || true
+
+      - name: Checksum
+        working-directory: stage
+        run: sha256sum daygle-dns-linux-x86_64-musl > daygle-dns-linux-x86_64-musl.sha256
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: daygle-dns-linux-x86_64-musl
+          path: stage/*
+          if-no-files-found: error
+
+  build-aarch64:
+    name: Build linux-aarch64
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-linux-gnu
+
+      - name: Install cross
+        run: cargo install cross --locked
+
+      - name: Build release binary
+        run: cross build --release -p daygle-dns --target aarch64-unknown-linux-gnu
+
+      - name: Stage artifact
+        run: |
+          mkdir -p stage
+          cp target/aarch64-unknown-linux-gnu/release/daygle-dns stage/daygle-dns-linux-aarch64
+          strip stage/daygle-dns-linux-aarch64 || true
+
+      - name: Checksum
+        working-directory: stage
+        run: sha256sum daygle-dns-linux-aarch64 > daygle-dns-linux-aarch64.sha256
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: daygle-dns-linux-aarch64
+          path: stage/*
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub release
+    needs: [build-glibc-x86_64, build-musl-x86_64, build-aarch64]
+    if: always() && needs.build-glibc-x86_64.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+          path: stage
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: false
+          generate_release_notes: true
+          files: stage/*

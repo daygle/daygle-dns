@@ -17,10 +17,11 @@
   let startError = $state('');
   let iStarted = $state(false); // this session triggered the current run
 
-  const RUNNING = ['preparing', 'cloning', 'building', 'installing'];
+  const RUNNING = ['preparing', 'downloading', 'cloning', 'building', 'installing'];
   const PHASE_LABEL = {
     preparing: 'Preparing…',
-    cloning: 'Fetching source…',
+    downloading: 'Downloading the prebuilt release…',
+    cloning: 'Fetching source (no prebuilt release matched, building from source)…',
     building: 'Building release binary (a few minutes)…',
     installing: 'Installing new binary…',
     done: 'Complete',
@@ -162,10 +163,12 @@
 
 <p class="muted" style="max-width: 75ch">
   The recommended way to update all components is the project's in-place
-  update, which mirrors the one-line installer: it fetches the latest source,
-  rebuilds the server binary, installs it in place, and preserves your
-  configuration, zones, certificates, and database. On qualifying hosts you
-  can trigger it right from here; elsewhere it runs as a one-liner on the host.
+  update. It downloads the latest prebuilt release, verifies its checksum,
+  installs it in place, and preserves your configuration, zones,
+  certificates, and database - no Rust toolchain is required on the host.
+  (When no prebuilt release matches, it falls back to building from source.)
+  On qualifying hosts you can trigger it right from here; elsewhere it runs
+  as a one-liner on the host.
 </p>
 
 {#if error}
@@ -258,8 +261,8 @@
       <p class="muted" style="font-size: 0.82rem; margin: 10px 0 0; max-width: 80ch">
         In-place updates need a Linux host managed by the installer (systemd
         unit, <code>/usr/local/bin/daygle-dns</code>, or a config under
-        <code>/etc</code>), with git and cargo available. Otherwise use the host
-        command below. Missing requirements:
+        <code>/etc</code>) and a downloader (curl or wget) for the prebuilt
+        release. Otherwise use the host command below. Missing requirements:
       </p>
       <ul class="gates" style="font-size: 0.82rem; margin: 8px 0 0">
         {#each info.gates || [] as gate}
