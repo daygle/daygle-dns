@@ -83,28 +83,26 @@ jobs:
           path: stage/*
           if-no-files-found: error
 
+  # Native arm64 build (free hosted runner for public repos). Avoids
+  # cross-compilation entirely: cross 0.2's images ship an old glibc that
+  # cannot link modern Rust std (undefined reference to `getrandom`).
   build-aarch64:
     name: Build linux-aarch64
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04-arm
     continue-on-error: true
     steps:
       - uses: actions/checkout@v4
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-unknown-linux-gnu
-
-      - name: Install cross
-        run: cargo install cross --locked
 
       - name: Build release binary
-        run: cross build --release -p daygle-dns --target aarch64-unknown-linux-gnu
+        run: cargo build --release -p daygle-dns
 
       - name: Stage artifact
         run: |
           mkdir -p stage
-          cp target/aarch64-unknown-linux-gnu/release/daygle-dns stage/daygle-dns-linux-aarch64
+          cp target/release/daygle-dns stage/daygle-dns-linux-aarch64
           strip stage/daygle-dns-linux-aarch64 || true
 
       - name: Checksum

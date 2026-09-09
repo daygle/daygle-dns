@@ -481,7 +481,7 @@ checksum = "4583a4551df46e2792f82ceeac45e850d2e2d5debba0b91f102385cda5b11f06"
 
 [[package]]
 name = "daygle-dns"
-version = "1.0.1"
+version = "1.0.2"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -516,7 +516,7 @@ dependencies = [
 
 [[package]]
 name = "daygle-dns-api"
-version = "1.0.1"
+version = "1.0.2"
 dependencies = [
  "arc-swap",
  "axum",
@@ -542,7 +542,7 @@ dependencies = [
 
 [[package]]
 name = "daygle-dns-authoritative"
-version = "1.0.1"
+version = "1.0.2"
 dependencies = [
  "arc-swap",
  "base64 0.23.1",
@@ -564,7 +564,7 @@ dependencies = [
 
 [[package]]
 name = "daygle-dns-core"
-version = "1.0.1"
+version = "1.0.2"
 dependencies = [
  "base64 0.23.1",
  "chrono",
@@ -584,7 +584,7 @@ dependencies = [
 
 [[package]]
 name = "daygle-dns-dot"
-version = "1.0.1"
+version = "1.0.2"
 dependencies = [
  "daygle-dns-core",
  "hickory-net",
@@ -602,14 +602,14 @@ dependencies = [
 
 [[package]]
 name = "daygle-dns-gui"
-version = "1.0.1"
+version = "1.0.2"
 dependencies = [
  "rust-embed",
 ]
 
 [[package]]
 name = "daygle-dns-policy"
-version = "1.0.1"
+version = "1.0.2"
 dependencies = [
  "async-trait",
  "daygle-dns-core",
@@ -623,7 +623,7 @@ dependencies = [
 
 [[package]]
 name = "daygle-dns-recursive"
-version = "1.0.1"
+version = "1.0.2"
 dependencies = [
  "daygle-dns-core",
  "hickory-proto",

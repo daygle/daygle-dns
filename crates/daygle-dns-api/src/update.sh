@@ -53,6 +53,13 @@ fail() { # message
     && mv -f "$DIR/state.json.tmp" "$DIR/state.json"
 }
 
+# Most recent meaningful log line, for embedding in error messages: without
+# this, a failed sudo invocation (whose stderr only goes to the log) leaves
+# the console saying "install failed" with no hint as to why.
+last_log_error() {
+  tail -n 8 "$LOG" 2>/dev/null | tr '\r' '\n' | grep -v '^[[:space:]]*$' | tail -n 1 | cut -c1-200
+}
+
 # Root-owned privilege helper installed by install.sh; permits exactly the
 # binary swap and service restart - nothing else. May also sit beside a
 # custom-PREFIX install: derive candidates from the binary's own location.
@@ -63,6 +70,11 @@ for cand in /usr/local/lib/daygle-dns/update-priv.sh \
             /usr/lib/daygle-dns/update-priv.sh \
             "$EXE_DIR/../lib/daygle-dns/update-priv.sh" \
             "$EXE_DIR/../libexec/daygle-dns/update-priv.sh"; do
+  # Canonicalize each candidate (resolve "/.." segments): sudo matches the
+  # command literally, and "sudo /usr/local/bin/../lib/x" does NOT match a
+  # sudoers rule written for "/usr/local/lib/x" - so a perfectly installed
+  # helper would be refused and silently fall back to generic sudo.
+  cand="$(cd "$(dirname "$cand")" 2>/dev/null && pwd)/$(basename "$cand")"
   if [ -x "$cand" ]; then
     PRIV_HELPER="$cand"
     break
@@ -80,32 +92,53 @@ elif [ "$(id -u)" -ne 0 ] && [ -z "$PRIV_HELPER" ] && command -v sudo >/dev/null
   SUDO_HINT="passwordless sudo is not configured for this account (re-running install.sh provisions the privilege helper)"
 fi
 
-# Swap the current binary for a new one. Prefers the narrowed helper; falls
-# back to the service account's own sudo rights on older installs.
+# Swap the current binary for a new one. Prefers the narrowed helper; on
+# failure falls back to the account's own sudo rights (covers hosts upgraded
+# from the old broad-grant installer where the helper exists but its rule
+# does not, and vice versa). All privileged output goes to the log.
 priv_install() { # src
   if [ "$(id -u)" -eq 0 ]; then
     cp -f "$EXE" "$EXE.bak" 2>/dev/null || true
-    install -m 0755 "$1" "$EXE"
-  elif [ -n "$PRIV_HELPER" ] && command -v sudo >/dev/null 2>&1; then
-    sudo -n "$PRIV_HELPER" install "$1"
-  elif command -v sudo >/dev/null 2>&1; then
-    sudo -n cp -f "$EXE" "$EXE.bak" 2>/dev/null || true
-    sudo -n install -m 0755 "$1" "$EXE"
-  else
-    return 1
+    # Install beside the target and rename: writing over a running
+    # executable in place can fail with "Text file busy" (ETXTBSY), while
+    # rename(2) swaps the directory entry without touching the live inode.
+    rm -f "$EXE.new"
+    install -m 0755 "$1" "$EXE.new" && mv -f "$EXE.new" "$EXE"
+    return
   fi
+  if [ -n "$PRIV_HELPER" ] && command -v sudo >/dev/null 2>&1; then
+    if sudo -n "$PRIV_HELPER" install "$1" >>"$LOG" 2>&1; then
+      return 0
+    fi
+    # The helper was refused (rule mismatch, mixed install state, ...) - try
+    # the generic sudo path before giving up.
+  fi
+  if command -v sudo >/dev/null 2>&1; then
+    sudo -n cp -f "$EXE" "$EXE.bak" 2>>"$LOG" || true
+    sudo -n rm -f "$EXE.new" 2>>"$LOG"
+    if sudo -n install -m 0755 "$1" "$EXE.new" >>"$LOG" 2>&1 \
+       && sudo -n mv -f "$EXE.new" "$EXE" >>"$LOG" 2>&1; then
+      return 0
+    fi
+  fi
+  return 1
 }
 
 priv_restart() {
   if [ "$(id -u)" -eq 0 ]; then
     systemctl restart daygle-dns
-  elif [ -n "$PRIV_HELPER" ] && command -v sudo >/dev/null 2>&1; then
-    sudo -n "$PRIV_HELPER" restart
-  elif command -v sudo >/dev/null 2>&1; then
-    sudo -n systemctl restart daygle-dns
-  else
-    return 1
+    return 0
   fi
+  if [ -n "$PRIV_HELPER" ] && command -v sudo >/dev/null 2>&1; then
+    if sudo -n "$PRIV_HELPER" restart >>"$LOG" 2>&1; then
+      return 0
+    fi
+  fi
+  if command -v sudo >/dev/null 2>&1; then
+    sudo -n systemctl restart daygle-dns >>"$LOG" 2>&1
+    return
+  fi
+  return 1
 }
 
 # Big transient artifacts (a fallback source build's tree and registry cache)
@@ -235,7 +268,8 @@ if [ "$DOWNLOAD_OK" -eq 1 ]; then
   # priv_install keeps a .bak copy of the current binary as a manual rollback
   # point (best effort; a release that installs can still fail at runtime).
   if ! priv_install "$SRC/daygle-dns"; then
-    fail "installing the release binary to $EXE failed${SUDO_HINT:+ ($SUDO_HINT)}."
+    WHY="$(last_log_error)"
+    fail "installing the release binary to $EXE failed${WHY:+: $WHY}${SUDO_HINT:+ (${SUDO_HINT})}."
     exit 1
   fi
 else
@@ -289,7 +323,8 @@ else
 
   state installing "Installing the new binary…"
   if ! priv_install target/release/daygle-dns; then
-    fail "installing the new binary to $EXE failed${SUDO_HINT:+ ($SUDO_HINT)}."
+    WHY="$(last_log_error)"
+    fail "installing the new binary to $EXE failed${WHY:+: $WHY}${SUDO_HINT:+ (${SUDO_HINT})}."
     exit 1
   fi
 fi
@@ -299,7 +334,8 @@ if [ -f /etc/systemd/system/daygle-dns.service ] && command -v systemctl >/dev/n
   # old unit's cgroup (which includes this helper) once the service stops.
   state done "Update installed - restarting the service…"
   if ! priv_restart >>"$LOG" 2>&1; then
-    state done "Update installed - restart daygle-dns manually (auto-restart failed)."
+    WHY="$(last_log_error)"
+    state done "Update installed - restart daygle-dns manually (auto-restart failed${WHY:+: $WHY})."
   fi
   exit 0
 fi

@@ -164,7 +164,12 @@ case "${1:-}" in
     new="${2:-}"
     [ -n "$new" ] && [ -f "$new" ] || { echo "usage: update-priv.sh install <new-binary>" >&2; exit 2; }
     cp -f "$EXE" "$EXE.bak" 2>/dev/null || true
-    install -m 0755 "$new" "$EXE"
+    # Install beside the target and rename: writing over the running
+    # executable fails with "Text file busy" (ETXTBSY); rename(2) swaps the
+    # directory entry atomically without touching the live inode.
+    rm -f "$EXE.new"
+    install -m 0755 "$new" "$EXE.new"
+    mv -f "$EXE.new" "$EXE"
     ;;
   restart)
     systemctl restart "$SERVICE"
@@ -303,7 +308,12 @@ cargo build --release -p daygle-dns
 
 log "Installing binary to $PREFIX/bin/daygle-dns…"
 install -d "$PREFIX/bin"
-install -m 0755 target/release/daygle-dns "$PREFIX/bin/daygle-dns"
+# Install beside the target and rename: writing over the running executable
+# fails with "Text file busy" (ETXTBSY); rename(2) swaps the directory entry
+# atomically without touching the live inode.
+rm -f "$PREFIX/bin/daygle-dns.new"
+install -m 0755 target/release/daygle-dns "$PREFIX/bin/daygle-dns.new"
+mv -f "$PREFIX/bin/daygle-dns.new" "$PREFIX/bin/daygle-dns"
 
 log "Installing configuration to $CONFIG_DIR…"
 install -d "$CONFIG_DIR" "$CONFIG_DIR/zones" "$CONFIG_DIR/certs" "$DATA_DIR"
