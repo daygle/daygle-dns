@@ -303,13 +303,22 @@ EOF
     # and restart the service. The dedicated service account gets passwordless
     # sudo for that so the "Update" button works on a clean install.
     mkdir -p /etc/sudoers.d
-    if ! grep -q "^$SERVICE_USER ALL=(ALL) NOPASSWD: ALL" /etc/sudoers.d/"$SERVICE_USER" 2>/dev/null; then
-        printf '%s\n' \
-            "# Provisioned by the Daygle DNS installer: in-place updates from" \
-            "# the web console rebuild, reinstall, and restart the service." \
-            "$SERVICE_USER ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/"$SERVICE_USER"
+    printf '%s\n' \
+        "# Provisioned by the Daygle DNS installer: in-place updates from" \
+        "# the web console rebuild, reinstall, and restart the service." \
+        "Defaults:$SERVICE_USER !requiretty" \
+        "$SERVICE_USER ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/"$SERVICE_USER"
+    chmod 0440 /etc/sudoers.d/"$SERVICE_USER"
+    # Some distros ship /etc/sudoers without the #includedir directive that
+    # makes /etc/sudoers.d files take effect; repair it so the provisioned
+    # rule actually applies.
+    if [ -f /etc/sudoers ] && ! grep -Eq "^[#@]includedir /etc/sudoers.d" /etc/sudoers; then
+        printf '\n# See sudoers(5) for more information on #includedir\n@includedir /etc/sudoers.d\n' >> /etc/sudoers
     fi
-    chmod 0440 /etc/sudoers.d/"$SERVICE_USER" 2>/dev/null || true
+    if command -v visudo >/dev/null 2>&1; then
+        visudo -cf /etc/sudoers >/dev/null 2>&1 || true
+        visudo -cf /etc/sudoers.d/"$SERVICE_USER" >/dev/null 2>&1 || true
+    fi
     chown -R "$SERVICE_USER":"$SERVICE_USER" "$CONFIG_DIR" "$DATA_DIR"
     systemctl daemon-reload
     if [ "$INSTALL_MODE" = "upgrade" ]; then

@@ -25,8 +25,15 @@ REPO="${DAYGLE_UPDATE_REPO:-https://github.com/daygle/daygle-dns.git}"
 # (exec), state and log stay where they are, and the build/install/restart
 # steps all write to their normal locations. Otherwise the script continues
 # as the service user with whatever tooling it can reach.
-if [ "$(id -u)" -ne 0 ] && command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
-  exec sudo -n sh "$0" "$EXE" "$DIR"
+SUDO_HINT=""
+if [ "$(id -u)" -ne 0 ]; then
+  if ! command -v sudo >/dev/null 2>&1; then
+    SUDO_HINT="sudo is not installed"
+  elif ! sudo -n true >/dev/null 2>&1; then
+    SUDO_HINT="passwordless sudo is not configured for this account (re-running install.sh provisions it)"
+  else
+    exec sudo -n sh "$0" "$EXE" "$DIR"
+  fi
 fi
 
 # Big transient artifacts (the build tree, the cargo registry cache) should
@@ -103,8 +110,18 @@ if [ -z "$CARGO_BIN" ]; then
     done
   fi
 fi
+# Last resort: ask the filesystem. A bare PATH on a service account does not
+# mean the toolchain is missing - rustup under another user's home (or under
+# /opt) is the common case, and the binary there is usually world-executable.
+if [ -z "$CARGO_BIN" ] && command -v find >/dev/null 2>&1; then
+  CARGO_BIN="$(find /root /home /opt /usr -maxdepth 4 -type f -name cargo -perm -u+x 2>/dev/null | head -n 1)"
+fi
 if [ -z "$CARGO_BIN" ]; then
-  fail "cargo was not found; install the Rust toolchain, configure passwordless sudo for this account (re-running install.sh provisions it), then retry."
+  if [ "$(id -u)" -eq 0 ]; then
+    fail "cargo was not found; install the Rust toolchain (curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal), then retry."
+  else
+    fail "cargo was not found and ${SUDO_HINT:-passwordless sudo is unavailable}; install the Rust toolchain for this account, or re-run install.sh as root to provision passwordless sudo, then retry."
+  fi
   exit 1
 fi
 export PATH="$(dirname "$CARGO_BIN"):$PATH"
@@ -142,6 +159,10 @@ if ! cargo build --release -p daygle-dns >>"$LOG" 2>&1; then
 fi
 
 state installing "Installing the new binary…"
+if ! command -v sudo >/dev/null 2>&1 && [ "$(id -u)" -ne 0 ]; then
+  fail "cannot install the new binary: sudo is not installed. Re-run install.sh as root to provision passwordless sudo, then retry."
+  exit 1
+fi
 # Keep a copy of the current binary as a manual rollback point (best effort;
 # a release that builds can still fail at runtime).
 run_as_root cp -f "$EXE" "$EXE.bak" >>"$LOG" 2>&1 || true
