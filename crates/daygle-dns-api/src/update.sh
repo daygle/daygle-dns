@@ -60,6 +60,15 @@ last_log_error() {
   tail -n 8 "$LOG" 2>/dev/null | tr '\r' '\n' | grep -v '^[[:space:]]*$' | tail -n 1 | cut -c1-200
 }
 
+# Detect a host whose sudo policy itself is broken: one unparsable sudoers
+# file makes EVERY sudo command die with the audit-plugin error, which no
+# updater-side retry can fix. Name the likely cause and the exact repair.
+sudo_broken_hint() {
+  if tail -n 40 "$LOG" 2>/dev/null | grep -q "audit plugin sudoers_audit\|no valid sudoers sources\|parse error in /etc/sudoers"; then
+    printf '%s' "the sudo policy on this host is broken (a sudoers file fails to parse, so every sudo command fails). Repair it before retrying: as root, run 'visudo -cf /etc/sudoers /etc/sudoers.d/*' to find the offending file. The most common cause is an '@includedir /etc/sudoers.d' line appended by older installer versions on sudo < 1.9.3 - change '@includedir' to '#includedir' in /etc/sudoers."
+  fi
+}
+
 # Root-owned privilege helper installed by install.sh; permits exactly the
 # binary swap and service restart - nothing else. May also sit beside a
 # custom-PREFIX install: derive candidates from the binary's own location.
@@ -269,7 +278,8 @@ if [ "$DOWNLOAD_OK" -eq 1 ]; then
   # point (best effort; a release that installs can still fail at runtime).
   if ! priv_install "$SRC/daygle-dns"; then
     WHY="$(last_log_error)"
-    fail "installing the release binary to $EXE failed${WHY:+: $WHY}${SUDO_HINT:+ (${SUDO_HINT})}."
+    BROKEN="$(sudo_broken_hint)"
+    fail "installing the release binary to $EXE failed${WHY:+: $WHY}.${BROKEN:+ $BROKEN}${SUDO_HINT:+ (${SUDO_HINT})}"
     exit 1
   fi
 else
@@ -324,7 +334,8 @@ else
   state installing "Installing the new binary…"
   if ! priv_install target/release/daygle-dns; then
     WHY="$(last_log_error)"
-    fail "installing the new binary to $EXE failed${WHY:+: $WHY}${SUDO_HINT:+ (${SUDO_HINT})}."
+    BROKEN="$(sudo_broken_hint)"
+    fail "installing the new binary to $EXE failed${WHY:+: $WHY}.${BROKEN:+ $BROKEN}${SUDO_HINT:+ (${SUDO_HINT})}"
     exit 1
   fi
 fi

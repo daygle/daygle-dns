@@ -361,18 +361,39 @@ EOF
         "# the web console may swap the binary and restart the service via" \
         "# the root-owned update-priv.sh helper - nothing else." \
         "Defaults:$SERVICE_USER !requiretty" \
-        "$SERVICE_USER ALL=(root) NOPASSWD: $PRIV_HELPER install [A-Za-z0-9/._-]*" \
+        "$SERVICE_USER ALL=(root) NOPASSWD: $PRIV_HELPER install *" \
         "$SERVICE_USER ALL=(root) NOPASSWD: $PRIV_HELPER restart" | run_as_root tee /etc/sudoers.d/"$SERVICE_USER" > /dev/null
     run_as_root chmod 0440 /etc/sudoers.d/"$SERVICE_USER"
-    # Some distros ship /etc/sudoers without the #includedir directive that
-    # makes /etc/sudoers.d files take effect; repair it so the provisioned
-    # rule actually applies.
-    if [ -f /etc/sudoers ] && ! grep -Eq "^[#@]includedir /etc/sudoers.d" /etc/sudoers; then
-        printf '\n# See sudoers(5) for more information on #includedir\n@includedir /etc/sudoers.d\n' >> /etc/sudoers
+    # /etc/sudoers.d only takes effect through an includedir directive; the
+    # classic `#includedir` form is understood by every sudo version, while
+    # the `@includedir` variant needs sudo >= 1.9.3 and is a syntax error on
+    # older releases - which breaks ALL sudo use on the host.
+    if [ -f /etc/sudoers ] && ! grep -q '^#includedir /etc/sudoers.d' /etc/sudoers; then
+        run_as_root cp -a /etc/sudoers /etc/sudoers.daygle-backup
+        if grep -q '^@includedir /etc/sudoers.d' /etc/sudoers; then
+            # Repair hosts provisioned by an older installer run.
+            run_as_root sed -i 's|^@includedir /etc/sudoers.d|#includedir /etc/sudoers.d|' /etc/sudoers
+        else
+            printf '\n# See sudoers(5) for more information on #includedir\n#includedir /etc/sudoers.d\n' | run_as_root tee -a /etc/sudoers > /dev/null
+        fi
     fi
+    # Never leave broken sudo configuration behind: one unparsable sudoers
+    # file makes every sudo invocation fail with "error initializing audit
+    # plugin sudoers_audit" until repaired by hand. Validate what was
+    # written and roll back completely on failure.
     if command -v visudo >/dev/null 2>&1; then
-        visudo -cf /etc/sudoers >/dev/null 2>&1 || true
-        visudo -cf /etc/sudoers.d/"$SERVICE_USER" >/dev/null 2>&1 || true
+        if run_as_root visudo -cf /etc/sudoers.d/"$SERVICE_USER" >/dev/null \
+           && run_as_root visudo -cf /etc/sudoers >/dev/null; then
+            log "Update privilege rule provisioned and validated."
+        else
+            log "WARNING: the provisioned privilege rule failed validation; rolling it back."
+            run_as_root rm -f /etc/sudoers.d/"$SERVICE_USER"
+            if [ -f /etc/sudoers.daygle-backup ]; then
+                run_as_root cp -a /etc/sudoers.daygle-backup /etc/sudoers
+                run_as_root rm -f /etc/sudoers.daygle-backup
+            fi
+            log "In-place updates will need manual configuration; see the docs."
+        fi
     fi
     chown -R "$SERVICE_USER":"$SERVICE_USER" "$CONFIG_DIR" "$DATA_DIR"
     systemctl daemon-reload
