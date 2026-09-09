@@ -215,13 +215,13 @@
         {#each certs as cert (cert.name)}
           <tr>
             <td><code>{cert.name}</code></td>
-            <td>{cert.server_name || '—'}</td>
+            <td>{cert.server_name || '-'}</td>
             <td class="muted">{formatDate(cert.created_at)}</td>
             <td>
               {#if cert.in_use && cert.in_use.length > 0}
                 <span class="pill ok">{cert.in_use.join(', ')}</span>
               {:else}
-                <span class="muted">—</span>
+                <span class="muted">-</span>
               {/if}
             </td>
             <td class="row" style="justify-content: flex-end; gap: 6px">

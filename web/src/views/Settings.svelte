@@ -227,7 +227,7 @@
           <select bind:value={dotCertMode} onchange={(e) => applyCertMode(dot, e.currentTarget.value)}>
             <option value="self">Self-signed (auto)</option>
             {#each certs as cert (cert.name)}
-              <option value={cert.name}>{cert.name}{cert.server_name ? ` — ${cert.server_name}` : ''}</option>
+              <option value={cert.name}>{cert.name}{cert.server_name ? ` - ${cert.server_name}` : ''}</option>
             {/each}
             <option value="custom">Custom files…</option>
           </select>
@@ -250,7 +250,7 @@
           <select bind:value={dohCertMode} onchange={(e) => applyCertMode(doh, e.currentTarget.value)}>
             <option value="self">Self-signed (auto)</option>
             {#each certs as cert (cert.name)}
-              <option value={cert.name}>{cert.name}{cert.server_name ? ` — ${cert.server_name}` : ''}</option>
+              <option value={cert.name}>{cert.name}{cert.server_name ? ` - ${cert.server_name}` : ''}</option>
             {/each}
             <option value="custom">Custom files…</option>
           </select>
@@ -274,7 +274,7 @@
           <select bind:value={doqCertMode} onchange={(e) => applyCertMode(doq, e.currentTarget.value)}>
             <option value="self">Self-signed (auto)</option>
             {#each certs as cert (cert.name)}
-              <option value={cert.name}>{cert.name}{cert.server_name ? ` — ${cert.server_name}` : ''}</option>
+              <option value={cert.name}>{cert.name}{cert.server_name ? ` - ${cert.server_name}` : ''}</option>
             {/each}
             <option value="custom">Custom files…</option>
           </select>

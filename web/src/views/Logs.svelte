@@ -275,7 +275,7 @@
             <td><span class:pill={true} class:ok={outcomeClass(entry.outcome) === 'ok'} class:err={outcomeClass(entry.outcome) === 'err'} class:warn={outcomeClass(entry.outcome) === 'warn'}>
               {outcomeLabel(entry.outcome)}
             </span></td>
-            <td>{entry.rcode || '—'}</td>
+            <td>{entry.rcode || '-'}</td>
             <td style="text-align: right">{entry.elapsed_ms} ms</td>
           </tr>
         {/each}

@@ -160,7 +160,7 @@
     if (first && last) return `${first} ${last}`;
     if (first) return first;
     if (last) return last;
-    return '—';
+    return '-';
   }
 </script>
 
@@ -240,7 +240,7 @@
               {user.username}
               {#if me && user.username === me.username}<span class="muted"> (you)</span>{/if}
             </td>
-            <td class="muted">{user.email || '—'}</td>
+            <td class="muted">{user.email || '-'}</td>
             <td>
               <span class="pill">{user.role === 'admin' ? 'Administrator' : 'Read-Only'}</span>
             </td>
@@ -261,7 +261,7 @@
   <div class="modal-backdrop" role="presentation" onclick={(e) => { if (e.target === e.currentTarget) editUser = null; }}>
     <div class="card modal">
       <div class="spread" style="margin-bottom: 4px">
-        <h3 style="margin: 0">Edit Account — {editUser.username}</h3>
+        <h3 style="margin: 0">Edit Account - {editUser.username}</h3>
         <button type="button" class="secondary" style="padding: 2px 10px" onclick={() => (editUser = null)}>✕</button>
       </div>
 

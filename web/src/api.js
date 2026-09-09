@@ -78,7 +78,7 @@ export function configOk(cfg) {
 // 65 -> "1m 5s", 3600 -> "1h"). Days are included once the server has been
 // up for more than a day.
 export function formatUptime(totalSecs) {
-  if (totalSecs === null || totalSecs === undefined || Number.isNaN(totalSecs)) return '—';
+  if (totalSecs === null || totalSecs === undefined || Number.isNaN(totalSecs)) return '-';
   const secs = Math.max(0, Math.floor(totalSecs));
   const units = [
     ['d', Math.floor(secs / 86400)],

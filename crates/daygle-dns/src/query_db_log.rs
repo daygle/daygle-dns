@@ -4,7 +4,7 @@
 //! which only pushes into a bounded channel (never touching SQLite), and a
 //! background task drains that channel in batches through
 //! `ZoneStore::insert_query_logs`. When the channel is full the entry is
-//! dropped and a counter is bumped — a logging backlog can never slow queries
+//! dropped and a counter is bumped - a logging backlog can never slow queries
 //! down. Retention (`logging.query_db_max_rows`) is enforced opportunistically
 //! by the same writer task.
 

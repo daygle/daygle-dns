@@ -106,25 +106,25 @@ function partsFor(value, withSeconds, withDate) {
 /** Full date + time, e.g. "5 Sep 2026, 02:45:20" (respecting the prefs). */
 export function formatDateTime(value) {
   const out = partsFor(value, true, true);
-  return out === null ? String(value ?? '—') : out;
+  return out === null ? String(value ?? '-') : out;
 }
 
 /** Time only, e.g. "02:45:20" (chart axes, tooltips). */
 export function formatTime(value) {
   const out = partsFor(value, true, false);
-  return out === null ? String(value ?? '—') : out;
+  return out === null ? String(value ?? '-') : out;
 }
 
 /** Time only without seconds (compact chart labels). */
 export function formatTimeShort(value) {
   const out = partsFor(value, false, false);
-  return out === null ? String(value ?? '—') : out;
+  return out === null ? String(value ?? '-') : out;
 }
 
 /** Date only, e.g. "5 Sep 2026". */
 export function formatDate(value) {
   const d = toDate(value);
-  if (!d) return String(value ?? '—');
+  if (!d) return String(value ?? '-');
   if (prefs.format === 'iso') return d.toISOString().slice(0, 10);
   return d.toLocaleDateString(undefined, {
     timeZone: zoneArg(),

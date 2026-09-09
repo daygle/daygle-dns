@@ -183,7 +183,7 @@
         </p>
         {#if serverDown}
           <div class="form-error" style="margin: 8px 0">
-            The server is restarting with the new build — reconnecting…
+            The server is restarting with the new build - reconnecting…
           </div>
         {/if}
         {#if logTail}
