@@ -31,6 +31,7 @@ REPO_OWNER="${DAYGLE_UPDATE_REPO_OWNER:-daygle}"
 REPO_NAME="${DAYGLE_UPDATE_REPO_NAME:-daygle-dns}"
 REPO_URL="${DAYGLE_UPDATE_REPO:-https://github.com/${REPO_OWNER}/${REPO_NAME}.git}"
 LATEST_URL="https://github.com/${REPO_OWNER}/${REPO_NAME}/releases/latest"
+LATEST_API_URL="https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/releases/latest"
 BASE_URL="https://github.com/${REPO_OWNER}/${REPO_NAME}/releases/download"
 
 # Escape a message for embedding in a JSON string (backslashes and quotes).
@@ -183,9 +184,14 @@ DOWNLOAD_OK=0
 REL_TAG=""
 if [ -n "$DOWNLOADER" ]; then
   state downloading "Downloading the prebuilt release (${ASSET} build)…"
-  # Resolve the latest release tag from the /releases/latest redirect so the
-  # error message can name exactly which version failed.
-  if fetch "$LATEST_URL" "$SRC/release.html" 2>>"$LOG"; then
+  # Resolve the latest release tag: the GitHub API is authoritative (and
+  # cheap); the /releases/latest HTML redirect is the fallback if the API is
+  # unreachable or rate-limited. Naming the tag lets errors say exactly
+  # which release failed.
+  if fetch "$LATEST_API_URL" "$SRC/release.json" 2>>"$LOG"; then
+    REL_TAG="$(grep -o '"tag_name"[[:space:]]*:[[:space:]]*"[^"]*"' "$SRC/release.json" 2>/dev/null | head -n 1 | sed 's/.*"tag_name"[[:space:]]*:[[:space:]]*"//; s/"$//')"
+  fi
+  if [ -z "$REL_TAG" ] && fetch "$LATEST_URL" "$SRC/release.html" 2>>"$LOG"; then
     REL_TAG="$(sed -n 's/.*releases\/tag\/\([^"/?]*\).*/\1/p' "$SRC/release.html" | head -n 1)"
   fi
   # Try the architecture-matched asset first, then the other Linux builds.
@@ -234,17 +240,25 @@ if [ "$DOWNLOAD_OK" -eq 1 ]; then
   fi
 else
   # No release asset could be fetched: fall back to building from source,
-  # which additionally requires git and a working toolchain.
+  # which additionally requires git and a working toolchain. Say exactly why
+  # the download path failed so the operator knows which fix applies.
+  if [ -z "$DOWNLOADER" ]; then
+    DL_WHY="no downloader (curl or wget) is installed"
+  elif [ -z "$REL_TAG" ]; then
+    DL_WHY="no published release exists (publish one by pushing a version tag)"
+  else
+    DL_WHY="release ${REL_TAG} has no usable binary assets for this platform"
+  fi
   if ! command -v git >/dev/null 2>&1; then
     fail "no release binary could be downloaded and git is not installed (needed for the source-build fallback); install git and retry."
     exit 1
   fi
   if [ -z "$CARGO_BIN" ]; then
-    fail "no release binary could be downloaded and cargo was not found${SUDO_HINT:+; privilege checks also failed ($SUDO_HINT)}; install the Rust toolchain (curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal) and retry."
+    fail "no release binary could be downloaded ($DL_WHY) and cargo was not found${SUDO_HINT:+; privilege checks also failed ($SUDO_HINT)}; install the Rust toolchain (curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal) and retry."
     exit 1
   fi
 
-  state cloning "No prebuilt release matched - building from source (this can take several minutes)…"
+  state cloning "No prebuilt release matched ($DL_WHY) - building from source (this can take several minutes)…"
   if ! git clone --depth 1 "$REPO_URL" "$SRC" >>"$LOG" 2>&1; then
     fail "git clone failed - check network access to $REPO_URL (see update.log)."
     exit 1
