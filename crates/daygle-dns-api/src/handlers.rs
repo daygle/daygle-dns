@@ -740,6 +740,26 @@ pub async fn update_start(State(state): State<AppState>) -> Response {
     }
 }
 
+/// `POST /api/update/dismiss` - clear the recorded update-run state (admin
+/// only) so the console stops showing the last `done`/`error` result.
+/// Refused while a run is active.
+pub async fn update_dismiss() -> Response {
+    match crate::update::clear_state() {
+        Ok(()) => (
+            StatusCode::OK,
+            Json(serde_json::json!({ "dismissed": true })),
+        )
+            .into_response(),
+        Err(e) => {
+            let status = match e {
+                crate::update::StartError::Io(_) => StatusCode::INTERNAL_SERVER_ERROR,
+                _ => StatusCode::CONFLICT,
+            };
+            error_response(status, e.to_string())
+        }
+    }
+}
+
 // ---- Zones --------------------------------------------------------------
 
 #[derive(Serialize)]

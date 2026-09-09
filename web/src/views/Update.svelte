@@ -129,6 +129,21 @@
     }
   }
 
+  // Clear the recorded run state on the server so the last done/error
+  // result stops being shown. A dismiss while a run is active is refused
+  // (409) and surfaces through startError.
+  async function dismissRun() {
+    startError = '';
+    try {
+      await api.updateDismiss();
+      run = null;
+      logTail = '';
+      await load();
+    } catch (e) {
+      startError = formatApiError(e);
+    }
+  }
+
   async function copyCommand() {
     if (!info) return;
     try {
@@ -210,7 +225,7 @@
         {#if logTail}
           <pre class="log">{logTail}</pre>
         {/if}
-        <button class="secondary" onclick={load} style="margin-top: 8px">Dismiss</button>
+        <button class="secondary" onclick={dismissRun} style="margin-top: 8px">Dismiss</button>
 
       {:else}
         {#if isAdmin}

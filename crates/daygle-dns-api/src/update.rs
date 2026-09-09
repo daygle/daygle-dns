@@ -326,6 +326,23 @@ fn script_path(dir: &Path) -> PathBuf {
     dir.join("update.sh")
 }
 
+/// Reset the recorded run state so a terminal `done`/`error` snapshot stops
+/// being shown. Intentionally refuses while a run is in progress: the helper
+/// would immediately overwrite the file anyway, and the console relies on the
+/// run-shaped state to keep polling.
+pub fn clear_state() -> Result<(), StartError> {
+    if update_in_progress() {
+        return Err(StartError::AlreadyRunning);
+    }
+    let path = workspace_dir().join("state.json");
+    match std::fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        // No state file is already "dismissed".
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(StartError::Io(e)),
+    }
+}
+
 /// Spawn the helper detached. On Unix the child gets its own process group so
 /// a service restart (which only signals the service's cgroup) cannot take it
 /// down mid-step.
@@ -402,6 +419,39 @@ mod tests {
             assert!(st.is_terminal(), "{phase} should be terminal");
             assert!(!st.is_running(), "{phase} should not be running");
         }
+    }
+
+    #[test]
+    fn clear_state_removes_terminal_snapshot() {
+        let dir = workspace_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        let st = UpdateState {
+            phase: "error".to_string(),
+            message: "boom".to_string(),
+            ..Default::default()
+        };
+        write_state_atomic(&dir.join("state.json"), &st).unwrap();
+        clear_state().expect("clear_state succeeds for a terminal snapshot");
+        assert!(!dir.join("state.json").exists());
+        // Clearing again (nothing recorded) is still a success.
+        clear_state().expect("clear_state on a missing state file is a no-op");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn clear_state_refuses_while_run_in_progress() {
+        let dir = workspace_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        // Our own pid is trivially alive, so the state reads as in progress.
+        let st = UpdateState {
+            phase: "building".to_string(),
+            pid: std::process::id() as i64,
+            ..Default::default()
+        };
+        write_state_atomic(&dir.join("state.json"), &st).unwrap();
+        assert!(matches!(clear_state(), Err(StartError::AlreadyRunning)));
+        // Clean up so the fake running state cannot leak elsewhere.
+        let _ = std::fs::remove_file(dir.join("state.json"));
     }
 
     #[test]
