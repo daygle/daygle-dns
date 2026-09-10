@@ -342,7 +342,12 @@ ExecStart=${PREFIX}/bin/daygle-dns --config ${CONFIG_DIR}/daygle-dns.toml
 Restart=on-failure
 RestartSec=3
 # DNS on port 53 needs privileges; drop to a dedicated user after binding.
-CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+# CAP_SETUID/CAP_SETGID are added to the *bounding set* only (not ambient):
+# the in-place updater is spawned from this service and its `sudo` is a
+# setuid-root binary that must switch to root's gid/uid. Keeping them out of
+# the ambient set means the service account itself can never setuid/setgid
+# without going through sudo.
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_SETUID CAP_SETGID
 AmbientCapabilities=CAP_NET_BIND_SERVICE
 NoNewPrivileges=false
 
