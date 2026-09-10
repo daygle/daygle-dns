@@ -694,7 +694,7 @@ pub async fn update_info(State(state): State<AppState>) -> Response {
         "updater_bootstrap_required": release.as_ref().map(|r| r.bootstrap_required),
         "update_command": format!("curl -fsSL {} | sh", install_script),
         "preserves": ["configuration", "zones", "certificates", "database"],
-        "note": "Run the update command on the host to update all components in place. The installer rebuilds the server binary and preserves configuration, zones, certificates and the database.".to_string(),
+        "note": "Run the update command on the host to update all components in place. The installer rebuilds the server binary, preserves configuration, zones, certificates and the database, and provisions the systemd update service.".to_string(),
         "state": crate::update::read_state(),
     }))
         .into_response()
@@ -724,9 +724,10 @@ pub async fn update_status(State(state): State<AppState>) -> Response {
 /// `POST /api/update/start` - begin an in-place update (admin only).
 ///
 /// Only available when the host qualifies (see [`crate::update::can_update`]).
-/// The updater runs detached and the server process is restarted by it, so a
-/// `202` only means the update began; follow `/api/update/status` for
-/// progress and to detect the restart.
+/// The updater runs detached, then hands the privileged step to the root
+/// systemd update service, which restarts the server - so a `202` only means
+/// the update began; follow `/api/update/status` for progress and to detect
+/// the restart.
 pub async fn update_start(State(state): State<AppState>) -> Response {
     let config_dir = state
         .config_path

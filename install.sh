@@ -21,7 +21,7 @@ SERVICE_USER="${SERVICE_USER:-daygle-dns}"
 CONFIG_FILE="$CONFIG_DIR/daygle-dns.toml"
 SERVICE_FILE="/etc/systemd/system/daygle-dns.service"
 PRIV_LIB_DIR="${PRIV_LIB_DIR:-$PREFIX/lib/daygle-dns}"
-PRIV_HELPER="$PRIV_LIB_DIR/update-priv.sh"
+APPLY_HELPER="$PRIV_LIB_DIR/update-apply.sh"
 
 # Detect the installation mode before changing anything. A config file is the
 # strongest signal, while the binary/unit checks also catch interrupted or
@@ -143,48 +143,49 @@ install_rust() {
     export PATH="$HOME/.cargo/bin:$PATH"
 }
 
-# Write the root-owned privilege helper used by in-place updates. The web
-# console's updater invokes it through a sudoers rule that permits this exact
-# script - the service account never gets broad root rights.
-install_priv_helper() {
+# Provision the root-owned apply step and the systemd units that perform the
+# privileged half of an in-place update. The web console's updater (running as
+# the unprivileged service account) only downloads, verifies and stages a
+# release into $DATA_DIR/updates/staging, then drops a `request` marker into
+# $DATA_DIR/updates. The daygle-dns-update.path watcher notices the marker and
+# starts daygle-dns-update.service - a short root oneshot that swaps the
+# binary, restarts the unit, health-checks and rolls back on failure. No sudo,
+# no setuid, no CapabilityBoundingSet gymnastics: the privileged step is its
+# own root systemd unit, so the service account never gains any other rights.
+install_update_service() {
     run_as_root install -d "$PRIV_LIB_DIR" || return 1
-    run_as_root tee "$PRIV_HELPER" > /dev/null <<'EOF'
-#!/usr/bin/env sh
-# Root-owned privilege helper for Daygle DNS in-place updates.
-# Invoked ONLY by the service account via a matching sudoers rule:
-#   update-priv.sh install <new-binary>   - back up and swap the server binary
-#   update-priv.sh restart                - restart the systemd unit
-# Any other usage fails closed.
-set -eu
-[ "$(id -u)" -eq 0 ] || { echo "must run as root" >&2; exit 1; }
-EXE="${DAYGLE_EXE:-__DAYGLE_EXE__}"
-SERVICE="${DAYGLE_SERVICE:-daygle-dns}"
-case "${1:-}" in
-  install)
-    new="${2:-}"
-    [ -n "$new" ] && [ -f "$new" ] || { echo "usage: update-priv.sh install <new-binary>" >&2; exit 2; }
-    cp -f "$EXE" "$EXE.bak" 2>/dev/null || true
-    # Install beside the target and rename: writing over the running
-    # executable fails with "Text file busy" (ETXTBSY); rename(2) swaps the
-    # directory entry atomically without touching the live inode.
-    rm -f "$EXE.new"
-    install -m 0755 "$new" "$EXE.new"
-    mv -f "$EXE.new" "$EXE"
-    ;;
-  restart)
-    systemctl restart "$SERVICE"
-    ;;
-  *)
-    echo "usage: update-priv.sh install <new-binary> | restart" >&2
-    exit 2
-    ;;
-esac
+    run_as_root install -d "$DATA_DIR/updates" "$DATA_DIR/updates/staging" || return 1
+    run_as_root chown "$SERVICE_USER":"$SERVICE_USER" "$DATA_DIR/updates" "$DATA_DIR/updates/staging" || return 1
+    run_as_root chmod 0770 "$DATA_DIR/updates" "$DATA_DIR/updates/staging" || return 1
+    # Install the apply step from the checkout (single source of truth) and
+    # bake in the concrete binary/updates paths.
+    run_as_root install -m 0700 "$SRC_DIR/crates/daygle-dns-api/src/update-apply.sh" "$APPLY_HELPER" || return 1
+    run_as_root chown root:root "$APPLY_HELPER" || return 1
+    run_as_root sed -i "s|__DAYGLE_EXE__|$PREFIX/bin/daygle-dns|; s|__DAYGLE_UPDATES_DIR__|$DATA_DIR/updates|" "$APPLY_HELPER" || return 1
+    run_as_root tee /etc/systemd/system/daygle-dns-update.service > /dev/null <<EOF
+[Unit]
+Description=Daygle DNS update apply step (root oneshot)
+
+[Service]
+Type=oneshot
+ExecStart=$APPLY_HELPER
 EOF
-    run_as_root chmod 0755 "$PRIV_HELPER" || return 1
-    run_as_root chown root:root "$PRIV_HELPER" || return 1
-    # Bake in the installed binary path so custom PREFIX installs work even
-    # though sudo strips the environment.
-    run_as_root sed -i "s|__DAYGLE_EXE__|$PREFIX/bin/daygle-dns|" "$PRIV_HELPER" || return 1
+    run_as_root tee /etc/systemd/system/daygle-dns-update.path > /dev/null <<EOF
+[Unit]
+Description=Daygle DNS update request watcher
+
+[Path]
+PathChanged=$DATA_DIR/updates
+Unit=daygle-dns-update.service
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    run_as_root systemctl daemon-reload || return 1
+    run_as_root systemctl enable --now daygle-dns-update.path || return 1
+    # Remove the sudo-based privilege plumbing provisioned by older installer
+    # runs (it is obsolete and can no longer be exercised by the updater).
+    run_as_root rm -f /etc/sudoers.d/"$SERVICE_USER" "$PRIV_LIB_DIR/update-priv.sh"
 }
 
 open_lan_firewall() {
@@ -341,16 +342,11 @@ User=${SERVICE_USER}
 ExecStart=${PREFIX}/bin/daygle-dns --config ${CONFIG_DIR}/daygle-dns.toml
 Restart=on-failure
 RestartSec=3
-# DNS on port 53 needs privileges; drop to a dedicated user after binding.
-# CAP_SETUID/CAP_SETGID are added to the *bounding set* only (not ambient):
-# the in-place updater is spawned from this service and its `sudo` is a
-# setuid-root binary that must switch to root's gid/uid. Keeping them out of
-# the ambient set means the service account itself can never setuid/setgid
-# without going through sudo. CAP_AUDIT_WRITE is required for that sudo to
-# complete: without it sudo's exec audit event dies with "unable to send
-# audit message: Operation not permitted" and every update aborts before the
-# helper runs.
-CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_SETUID CAP_SETGID CAP_AUDIT_WRITE
+# DNS on port 53 needs privileges. The service drops to a dedicated user;
+# the ambient cap covers the port bind. The privileged half of updates is
+# performed by the separate root daygle-dns-update.service (see
+# install_update_service), so this unit carries no setuid/sudo machinery.
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 AmbientCapabilities=CAP_NET_BIND_SERVICE
 NoNewPrivileges=false
 
@@ -358,91 +354,22 @@ NoNewPrivileges=false
 WantedBy=multi-user.target
 EOF
     id "$SERVICE_USER" >/dev/null 2>&1 || useradd --system --no-create-home "$SERVICE_USER"
-    # In-place updates from the web console need to swap the binary and
-    # restart the service as root. Instead of granting the service account
-    # broad root access, the installer provisions a root-owned helper script
-    # and a sudoers rule that permits invoking exactly that script.
-    install_priv_helper || log "WARNING: could not provision the update privilege helper; in-place updates from the web console will need passwordless sudo."
-    mkdir -p /etc/sudoers.d
-    printf '%s\n' \
-        "# Provisioned by the Daygle DNS installer: in-place updates from" \
-        "# the web console may swap the binary and restart the service via" \
-        "# the root-owned update-priv.sh helper - nothing else." \
-        "Defaults:$SERVICE_USER !requiretty" \
-        "$SERVICE_USER ALL=(root) NOPASSWD: $PRIV_HELPER install *" \
-        "$SERVICE_USER ALL=(root) NOPASSWD: $PRIV_HELPER restart" | run_as_root tee /etc/sudoers.d/"$SERVICE_USER" > /dev/null
-    run_as_root chmod 0440 /etc/sudoers.d/"$SERVICE_USER"
-    # /etc/sudoers.d only takes effect through an includedir directive; the
-    # classic `#includedir` form is understood by every sudo version, while
-    # the `@includedir` variant needs sudo >= 1.9.3 and is a syntax error on
-    # older releases - which breaks ALL sudo use on the host.
-    if [ -f /etc/sudoers ] && ! grep -q '^#includedir /etc/sudoers.d' /etc/sudoers; then
-        run_as_root cp -a /etc/sudoers /etc/sudoers.daygle-backup
-        if grep -q '^@includedir /etc/sudoers.d' /etc/sudoers; then
-            # Repair hosts provisioned by an older installer run.
-            run_as_root sed -i 's|^@includedir /etc/sudoers.d|#includedir /etc/sudoers.d|' /etc/sudoers
-        else
-            printf '\n# See sudoers(5) for more information on #includedir\n#includedir /etc/sudoers.d\n' | run_as_root tee -a /etc/sudoers > /dev/null
-        fi
-    fi
-    # Never leave broken sudo configuration behind: one unparsable sudoers
-    # file makes every sudo invocation fail with "error initializing audit
-    # plugin sudoers_audit" until repaired by hand. Validate what was
-    # written and roll back completely on failure.
-    if command -v visudo >/dev/null 2>&1; then
-        if run_as_root visudo -cf /etc/sudoers.d/"$SERVICE_USER" >/dev/null \
-           && run_as_root visudo -cf /etc/sudoers >/dev/null; then
-            log "Update privilege rule provisioned and validated."
-        else
-            log "WARNING: the provisioned privilege rule failed validation; rolling it back."
-            run_as_root rm -f /etc/sudoers.d/"$SERVICE_USER"
-            if [ -f /etc/sudoers.daygle-backup ]; then
-                run_as_root cp -a /etc/sudoers.daygle-backup /etc/sudoers
-                run_as_root rm -f /etc/sudoers.daygle-backup
-            fi
-            log "In-place updates will need manual configuration; see the docs."
-        fi
-    fi
-    # On hosts where auditd is not installed, sudo's audit plugin emits a
-    # non-fatal initialisation warning on every invocation. While harmless
-    # in isolation, the updater's diagnostics misread it as a broken policy.
-    # Disable the audit plugin by explicitly loading only the two essential
-    # plugins; this is a no-op when auditd is present.
-    if ! command -v auditd >/dev/null 2>&1; then
-        if [ -f /etc/sudo.conf ]; then
-            run_as_root cp -a /etc/sudo.conf /etc/sudo.conf.daygle-backup
-            run_as_root sed -i 's/^#\(Plugin sudoers_policy sudoers\.so\)/\1/' /etc/sudo.conf
-            run_as_root sed -i 's/^#\(Plugin sudoers_io sudoers\.so\)/\1/' /etc/sudo.conf
-            run_as_root sed -i 's/^Plugin sudoers_audit sudoers\.so/#&/' /etc/sudo.conf
-        else
-            printf '%s\n' \
-                "# Configured by the Daygle DNS installer: disables the audit plugin" \
-                "# on hosts without auditd to prevent non-fatal initialisation warnings." \
-                "Plugin sudoers_policy sudoers.so" \
-                "Plugin sudoers_io sudoers.so" | run_as_root tee /etc/sudo.conf > /dev/null
-        fi
-    fi
+    # In-place updates from the web console hand the privileged binary swap,
+    # restart and health-check to a root systemd oneshot triggered by a path
+    # unit (no sudo, no setuid on the service account).
+    install_update_service || log "WARNING: could not provision the systemd update service; in-place updates from the web console will be unavailable until a re-run succeeds."
     # Older installer runs (and some debugging drop-ins) pinned the service's
-    # CapabilityBoundingSet without CAP_AUDIT_WRITE, which makes every update
-    # sudo abort with "unable to send audit message: Operation not permitted".
-    # The unit above now carries the full set; reconcile a stale drop-in so a
-    # reinstall heals the host without manual edits.
+    # CapabilityBoundingSet with setuid/sudo machinery that is no longer used.
+    # Reconcile a stale drop-in so a reinstall heals the host without manual
+    # edits; drop-ins with other, deliberate settings are left untouched.
     DROP_DIR=/etc/systemd/system/daygle-dns.service.d
     if [ -f "$DROP_DIR/capabilities.conf" ]; then
-        STALE_SET='^CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_SETUID CAP_SETGID[[:space:]]*$'
-        if grep -qE "$STALE_SET" "$DROP_DIR/capabilities.conf" 2>/dev/null; then
-            # If the file only pins the bounding set it is redundant with the
-            # unit; remove it. Otherwise patch just the stale line in place.
-            if [ -z "$(grep -vE '^[[:space:]]*(#.*)?$' "$DROP_DIR/capabilities.conf" 2>/dev/null | grep -vE '^CapabilityBoundingSet=')" ]; then
-                run_as_root rm -f "$DROP_DIR/capabilities.conf"
-                if [ -z "$(ls -A "$DROP_DIR" 2>/dev/null)" ]; then
-                    run_as_root rmdir "$DROP_DIR" 2>/dev/null || true
-                fi
-                log "Removed the stale capabilities drop-in (the unit now grants CAP_AUDIT_WRITE)."
-            else
-                run_as_root sed -i -E "s|$STALE_SET|CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_SETUID CAP_SETGID CAP_AUDIT_WRITE|" "$DROP_DIR/capabilities.conf"
-                log "Updated the capabilities drop-in to grant CAP_AUDIT_WRITE."
+        if [ -z "$(grep -vE '^[[:space:]]*(#.*)?$' "$DROP_DIR/capabilities.conf" 2>/dev/null | grep -v '^CapabilityBoundingSet=')" ]; then
+            run_as_root rm -f "$DROP_DIR/capabilities.conf"
+            if [ -z "$(ls -A "$DROP_DIR" 2>/dev/null)" ]; then
+                run_as_root rmdir "$DROP_DIR" 2>/dev/null || true
             fi
+            log "Removed the stale capabilities drop-in (the service unit now grants only CAP_NET_BIND_SERVICE)."
         fi
     fi
     chown -R "$SERVICE_USER":"$SERVICE_USER" "$CONFIG_DIR" "$DATA_DIR"

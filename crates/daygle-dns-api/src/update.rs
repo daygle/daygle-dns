@@ -16,14 +16,19 @@
 //! output to `update.log`. The helper is spawned with its own process group
 //! so it keeps running after the server is restarted by the updater itself.
 //!
-//! Privilege is deliberately narrow: the helper invokes root only for the
-//! binary swap and the service restart, through the root-owned
-//! `update-priv.sh` that `install.sh` provisions under a sudoers rule
-//! permitting exactly that script. Older installs with a passwordless ALL
-//! grant keep working via the generic sudo fallback. Self-update is opt-in
-//! by environment: only Linux hosts that look like a real install (systemd
-//! unit, `/usr/local/bin` binary, or a config under `/etc/`). Dev/test
-//! builds and the Windows/macOS console expose guidance-only mode.
+//! Privilege is deliberately narrow and does **not** use sudo or any setuid
+//! helper (a hardened service's `CapabilityBoundingSet` can break sudo's core
+//! audit write, which aborted every update). Instead, the helper - running as
+//! the unprivileged service account - downloads, verifies and stages the new
+//! binary under `<data>/updates/staging`, then drops a `request` marker into
+//! `<data>/updates`. A root-owned systemd path unit
+//! (`daygle-dns-update.path`) watches that directory and starts
+//! `daygle-dns-update.service`, a short root oneshot (embedded as
+//! `update-apply.sh`) that swaps the binary, restarts the unit, health-checks
+//! and rolls back on failure. `install.sh` provisions both units. Self-update
+//! is opt-in by environment: only Linux hosts that look like a real install
+//! (systemd unit, `/usr/local/bin` binary, or a config under `/etc/`).
+//! Dev/test builds and the Windows/macOS console expose guidance-only mode.
 
 use std::path::{Path, PathBuf};
 
@@ -61,7 +66,13 @@ impl UpdateState {
     pub fn is_running(&self) -> bool {
         matches!(
             self.phase.as_str(),
-            "preparing" | "downloading" | "cloning" | "building" | "installing"
+            "preparing"
+                | "downloading"
+                | "cloning"
+                | "building"
+                | "installing"
+                | "applying"
+                | "restarting"
         )
     }
 
@@ -187,11 +198,11 @@ fn tools_present() -> bool {
 
 /// Whether the updater helper process `pid` is still alive.
 ///
-/// Existence is checked via `/proc/<pid>` rather than `kill -0`: when the
-/// helper re-executed under sudo it runs as root, and the service account's
-/// `kill -0` fails with EPERM on it even though the process is alive - which
-/// would mark healthy runs as stale. The cmdline is matched against the
-/// updater workspace so a recycled PID is not mistaken for a live helper.
+/// Existence is checked via `/proc/<pid>` rather than `kill -0`: the helper
+/// can run under a different uid (the root apply step), where the service
+/// account's `kill -0` fails with EPERM even though the process is alive -
+/// which would mark healthy runs as stale. The cmdline is matched against
+/// both helpers so a recycled PID is not mistaken for a live one.
 #[cfg(unix)]
 fn pid_alive(pid: i64) -> bool {
     if pid <= 0 {
@@ -202,7 +213,12 @@ fn pid_alive(pid: i64) -> bool {
         return false;
     }
     match std::fs::read_to_string(proc_dir.join("cmdline")) {
-        Ok(cmdline) => cmdline.replace('\0', " ").contains("daygle-dns-update"),
+        // The service-side helper is `update.sh` under the `daygle-dns-update`
+        // workspace; the root apply step is `update-apply.sh`. Both carry one
+        // of these substrings, so a recycled PID is not mistaken for a live
+        // helper (the former does not run under sudo anymore, so readback is
+        // allowed for both).
+        Ok(cmdline) => cmdline.contains("daygle-dns-update") || cmdline.contains("update-apply"),
         // Exists but unreadable: assume it is still the helper.
         Err(_) => true,
     }
@@ -219,8 +235,8 @@ fn pid_alive(_pid: i64) -> bool {
 /// binary at `/usr/local/bin/daygle-dns`, or the config under `/etc/`. A
 /// dev/test binary is never updated in place. Tool availability is reported
 /// separately by [`gates`], not as a hard gate: the primary update path
-/// needs only a downloader, and privilege is handled by the helper at run
-/// time through the installer-provisioned privilege helper.
+/// needs only a downloader, and privilege is handled at apply time by the
+/// installer-provisioned systemd path service.
 pub fn can_update(config_dir: Option<&Path>) -> bool {
     std::env::consts::OS == "linux" && has_install_evidence(config_dir)
 }
@@ -266,7 +282,7 @@ pub fn gates(config_dir: Option<&Path>) -> Vec<&'static str> {
 /// Pre-flight health check result for a single check.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PreflightCheck {
-    /// Check name (e.g., "sudoers", "disk_space", "permissions").
+    /// Check name (e.g., "update_service", "disk_space", "network").
     pub name: String,
     /// Whether the check passed.
     pub ok: bool,
@@ -312,22 +328,17 @@ pub fn preflight(config_dir: Option<&Path>) -> PreflightResult {
         fix_commands: None,
     });
 
-    // Check 2: Sudoers configuration
-    if let Some(sudoers_check) = check_sudoers() {
-        checks.push(sudoers_check);
+    // Check 2: the installer-provisioned update pipeline (path unit + staging)
+    if let Some(update_service_check) = check_update_service() {
+        checks.push(update_service_check);
     }
 
-    // Check 3: Disk space in temp directory
+    // Check 3: Disk space in the download/working directory
     if let Some(disk_check) = check_disk_space() {
         checks.push(disk_check);
     }
 
-    // Check 4: Write permissions to binary location
-    if let Some(perm_check) = check_binary_permissions() {
-        checks.push(perm_check);
-    }
-
-    // Check 5: Network connectivity to GitHub
+    // Check 4: Network connectivity to GitHub
     if let Some(network_check) = check_github_connectivity() {
         checks.push(network_check);
     }
@@ -336,70 +347,78 @@ pub fn preflight(config_dir: Option<&Path>) -> PreflightResult {
     PreflightResult { ready, checks }
 }
 
-/// Check if sudo configuration is parseable.
-/// Returns None if sudo is not required (already root) or not available.
-fn check_sudoers() -> Option<PreflightCheck> {
-    // If already root, sudo is not needed
+/// Check the installer-provisioned update pipeline that performs the
+/// privileged half of an update: the `daygle-dns-update.path` watcher plus
+/// its `daygle-dns-update.service` (root oneshot). Also verifies the service
+/// account can actually stage into the updates directory. Returns `None` on
+/// non-Linux, where the update machinery is irrelevant.
+fn check_update_service() -> Option<PreflightCheck> {
     if std::env::consts::OS != "linux" {
         return None;
     }
+    let path_unit = Path::new("/etc/systemd/system/daygle-dns-update.path");
+    let update_dir = resolved_updates_dir().unwrap_or_else(|| "/var/lib/daygle-dns/updates".into());
+    let staging = update_dir.join("staging");
+    let install_command =
+        "curl -fsSL https://raw.githubusercontent.com/daygle/daygle-dns/main/install.sh | sh"
+            .to_string();
 
-    // Test if sudo is available and working
-    let output = std::process::Command::new("sudo")
-        .args(["-n", "true"])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::piped())
-        .output()
-        .ok()?;
-
-    if output.status.success() {
+    if !path_unit.is_file() {
         return Some(PreflightCheck {
-            name: "sudoers".to_string(),
-            ok: true,
-            message: "Sudo configuration is valid".to_string(),
-            fix: None,
-            fix_commands: None,
+            name: "update_service".to_string(),
+            ok: false,
+            message: "The systemd update service is not provisioned (daygle-dns-update.path is missing).".to_string(),
+            fix: Some("Run the installer - it provisions the systemd path unit whose root oneshot performs the privileged apply step (no sudo required).".to_string()),
+            fix_commands: Some(vec![install_command.clone()]),
         });
     }
 
-    let stderr = String::from_utf8_lossy(&output.stderr).to_lowercase();
+    // Probe writability of the staging subdir with a scratch file; the
+    // subdir is NOT watched by the path unit, so this cannot trigger an apply.
+    let writable = std::fs::create_dir_all(&staging)
+        .and_then(|_| {
+            let probe = staging.join(".preflight-probe");
+            std::fs::write(&probe, b"probe")?;
+            std::fs::remove_file(&probe)
+        })
+        .is_ok();
 
-    // Detect actual sudoers parse errors. The audit plugin warning alone
-    // (auditd not installed) is non-fatal and should not block updates.
-    if stderr.contains("no valid sudoers sources")
-        || stderr.contains("parse error in /etc/sudoers")
-    {
-        let fix_commands = vec![
-            "sudo visudo -cf /etc/sudoers".to_string(),
-            "sudo visudo -cf /etc/sudoers.d/*".to_string(),
-            "sudo sed -i 's/^@includedir/@#includedir/' /etc/sudoers".to_string(),
-            "sudo systemctl restart daygle-dns".to_string(),
-        ];
-
-        Some(PreflightCheck {
-            name: "sudoers".to_string(),
+    if !writable {
+        return Some(PreflightCheck {
+            name: "update_service".to_string(),
             ok: false,
-            message: "The sudo policy on this host is broken (a sudoers file fails to parse, so every sudo command fails).".to_string(),
-            fix: Some("The most common cause is an '@includedir /etc/sudoers.d' line appended by older installer versions on sudo < 1.9.3. To fix: 1) Run 'sudo visudo -cf /etc/sudoers /etc/sudoers.d/*' to find the offending file. 2) Change '@includedir' to '#includedir' in /etc/sudoers. 3) Test with 'sudo true'. 4) Restart the service.".to_string()),
-            fix_commands: Some(fix_commands),
-        })
-    } else if stderr.contains("password") || stderr.contains("sorry") {
-        Some(PreflightCheck {
-            name: "sudoers".to_string(),
-            ok: false,
-            message: "Passwordless sudo is not configured for this account".to_string(),
-            fix: Some("Re-run the installer to provision the privilege helper, or configure passwordless sudo for the service account.".to_string()),
-            fix_commands: None,
-        })
-    } else {
-        Some(PreflightCheck {
-            name: "sudoers".to_string(),
-            ok: false,
-            message: format!("Sudo test failed: {}", String::from_utf8_lossy(&output.stderr).trim()),
-            fix: Some("Check sudo configuration and ensure the service account has appropriate permissions.".to_string()),
-            fix_commands: None,
-        })
+            message: format!(
+                "The update staging directory {} is not writable by this account.",
+                staging.display()
+            ),
+            fix: Some(
+                "Re-run the installer to repair the updates directory ownership/permissions."
+                    .to_string(),
+            ),
+            fix_commands: Some(vec![install_command]),
+        });
     }
+
+    Some(PreflightCheck {
+        name: "update_service".to_string(),
+        ok: true,
+        message: "The systemd update service is provisioned and the staging area is writable"
+            .to_string(),
+        fix: None,
+        fix_commands: None,
+    })
+}
+
+/// The updates directory the `daygle-dns-update.path` watcher monitors,
+/// resolved from the installed path unit so custom `DATA_DIR` installs line
+/// up; falls back to the installer default.
+fn resolved_updates_dir() -> Option<PathBuf> {
+    let unit = std::fs::read_to_string("/etc/systemd/system/daygle-dns-update.path").ok()?;
+    unit.lines().find_map(|l| {
+        l.strip_prefix("PathChanged=")
+            .filter(|dir| !dir.is_empty())
+            .map(PathBuf::from)
+    })
 }
 
 /// Check available disk space in the temp directory.
@@ -441,7 +460,12 @@ fn check_disk_space() -> Option<PreflightCheck> {
             Some(PreflightCheck {
                 name: "disk_space".to_string(),
                 ok: false,
-                message: format!("Only {} MB available in {} (need at least {} MB)", avail_mb, temp_dir.display(), min_required_mb),
+                message: format!(
+                    "Only {} MB available in {} (need at least {} MB)",
+                    avail_mb,
+                    temp_dir.display(),
+                    min_required_mb
+                ),
                 fix: Some("Free up disk space in the temp directory before updating.".to_string()),
                 fix_commands: None,
             })
@@ -450,33 +474,6 @@ fn check_disk_space() -> Option<PreflightCheck> {
 
     #[cfg(not(unix))]
     None
-}
-
-/// Check write permissions to the binary location.
-fn check_binary_permissions() -> Option<PreflightCheck> {
-    let exe = std::env::current_exe().ok()?;
-    let parent = exe.parent()?;
-
-    let metadata = std::fs::metadata(parent).ok()?;
-    let writable = metadata.permissions().readonly();
-
-    if !writable {
-        Some(PreflightCheck {
-            name: "permissions".to_string(),
-            ok: true,
-            message: format!("Write access to {}", parent.display()),
-            fix: None,
-            fix_commands: None,
-        })
-    } else {
-        Some(PreflightCheck {
-            name: "permissions".to_string(),
-            ok: false,
-            message: format!("Cannot write to {}", parent.display()),
-            fix: Some("Ensure the service account has write permissions to the binary directory, or run the installer to set up proper permissions.".to_string()),
-            fix_commands: None,
-        })
-    }
 }
 
 /// Check network connectivity to GitHub releases.
@@ -550,29 +547,18 @@ fn fetch_latest_release_uncached() -> Option<String> {
     // Short timeouts: this runs inline in a status/info request.
     let get = |url: &str| -> Option<String> {
         let out = std::process::Command::new("curl")
-            .args([
-                "-fsSL",
-                "--max-time",
-                "5",
-                "--connect-timeout",
-                "2",
-                url,
-            ])
+            .args(["-fsSL", "--max-time", "5", "--connect-timeout", "2", url])
             .output()
             .ok()
             .filter(|o| o.status.success())?;
         String::from_utf8_lossy(&out.stdout).into_owned().into()
     };
-    let body = get(
-        "https://api.github.com/repos/daygle/daygle-dns/releases/latest",
-    )?;
+    let body = get("https://api.github.com/repos/daygle/daygle-dns/releases/latest")?;
     if let Some(tag) = extract_tag_name(&body) {
         return normalize_release_tag(&tag);
     }
     // Fallback: scrape the tag out of the HTML redirect page.
-    let body = get(
-        "https://github.com/daygle/daygle-dns/releases/latest",
-    )?;
+    let body = get("https://github.com/daygle/daygle-dns/releases/latest")?;
     extract_html_tag(&body).and_then(|tag| normalize_release_tag(&tag))
 }
 
@@ -672,7 +658,10 @@ fn version_lt(a: &str, b: &str) -> bool {
     };
     let (va, vb) = (nums(a), nums(b));
     for i in 0..va.len().max(vb.len()) {
-        let (x, y) = (va.get(i).copied().unwrap_or(0), vb.get(i).copied().unwrap_or(0));
+        let (x, y) = (
+            va.get(i).copied().unwrap_or(0),
+            vb.get(i).copied().unwrap_or(0),
+        );
         if x != y {
             return x < y;
         }
@@ -775,7 +764,7 @@ pub fn clear_state() -> Result<(), StartError> {
 
 /// Spawn the helper detached. On Unix the child gets its own process group so
 /// a service restart (which only signals the service's cgroup) cannot take it
-/// down mid-step.
+/// down mid-step; the helper exits at the hand-off, before the restart.
 #[cfg(unix)]
 fn spawn(script: PathBuf, exe: &Path, dir: &Path) -> std::io::Result<u32> {
     use std::os::unix::process::CommandExt;
@@ -831,8 +820,7 @@ mod tests {
 
     #[test]
     fn partial_state_json_is_tolerated() {
-        let st: UpdateState =
-            serde_json::from_str(r#"{"phase":"done","message":"ok"}"#).unwrap();
+        let st: UpdateState = serde_json::from_str(r#"{"phase":"done","message":"ok"}"#).unwrap();
         assert_eq!(st.phase, "done");
         assert_eq!(st.message, "ok");
         assert_eq!(st.pid, 0);
@@ -904,9 +892,7 @@ mod tests {
         if !can_update(None) {
             let missing = gates(None);
             assert!(!missing.is_empty());
-            assert!(missing
-                .iter()
-                .all(|g| !g.is_empty() && g.contains(' ')));
+            assert!(missing.iter().all(|g| !g.is_empty() && g.contains(' ')));
         }
     }
 

@@ -22,13 +22,15 @@
   let preflightLoading = $state(false);
   let preflightError = $state('');
 
-  const RUNNING = ['preparing', 'downloading', 'cloning', 'building', 'installing'];
+  const RUNNING = ['preparing', 'downloading', 'cloning', 'building', 'installing', 'applying', 'restarting'];
   const PHASE_LABEL = {
     preparing: 'Preparing…',
     downloading: 'Downloading the prebuilt release…',
     cloning: 'Fetching source (no prebuilt release matched, building from source)…',
     building: 'Building release binary (a few minutes)…',
     installing: 'Installing new binary…',
+    applying: 'Applying the new release…',
+    restarting: 'Restarting the service…',
     checking: 'Verifying update…',
     rolling_back: 'Rolling back to previous version…',
     done: 'Complete',
@@ -205,8 +207,9 @@
   installs it in place, and preserves your configuration, zones,
   certificates, and database - no Rust toolchain is required on the host.
   (When no prebuilt release matches, it falls back to building from source.)
-  On qualifying hosts you can trigger it right from here; elsewhere it runs
-  as a one-liner on the host.
+  The privileged install step runs as its own dedicated systemd service, so
+  the server account never needs root rights. On qualifying hosts you can
+  trigger it right from here; elsewhere it runs as a one-liner on the host.
 </p>
 
 {#if error}
