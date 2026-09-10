@@ -395,6 +395,25 @@ EOF
             log "In-place updates will need manual configuration; see the docs."
         fi
     fi
+    # On hosts where auditd is not installed, sudo's audit plugin emits a
+    # non-fatal initialisation warning on every invocation. While harmless
+    # in isolation, the updater's diagnostics misread it as a broken policy.
+    # Disable the audit plugin by explicitly loading only the two essential
+    # plugins; this is a no-op when auditd is present.
+    if ! command -v auditd >/dev/null 2>&1; then
+        if [ -f /etc/sudo.conf ]; then
+            run_as_root cp -a /etc/sudo.conf /etc/sudo.conf.daygle-backup
+            run_as_root sed -i 's/^#\(Plugin sudoers_policy sudoers\.so\)/\1/' /etc/sudo.conf
+            run_as_root sed -i 's/^#\(Plugin sudoers_io sudoers\.so\)/\1/' /etc/sudo.conf
+            run_as_root sed -i 's/^Plugin sudoers_audit sudoers\.so/#&/' /etc/sudo.conf
+        else
+            printf '%s\n' \
+                "# Configured by the Daygle DNS installer: disables the audit plugin" \
+                "# on hosts without auditd to prevent non-fatal initialisation warnings." \
+                "Plugin sudoers_policy sudoers.so" \
+                "Plugin sudoers_io sudoers.so" | run_as_root tee /etc/sudo.conf > /dev/null
+        fi
+    fi
     chown -R "$SERVICE_USER":"$SERVICE_USER" "$CONFIG_DIR" "$DATA_DIR"
     systemctl daemon-reload
     if [ "$INSTALL_MODE" = "upgrade" ]; then
