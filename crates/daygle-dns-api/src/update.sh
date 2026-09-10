@@ -71,8 +71,17 @@ last_log_error() {
 # file makes EVERY sudo command die with the audit-plugin error, which no
 # updater-side retry can fix. Name the likely cause and the exact repair.
 sudo_broken_hint() {
-  if tail -n 40 "$LOG" 2>/dev/null | grep -q "audit plugin sudoers_audit\|no valid sudoers sources\|parse error in /etc/sudoers"; then
+  local log_snippet
+  log_snippet="$(tail -n 40 "$LOG" 2>/dev/null)"
+  # Actual sudoers syntax errors: every sudo command is refused.
+  if printf '%s' "$log_snippet" | grep -q "no valid sudoers sources\|parse error in /etc/sudoers"; then
     printf '%s' "the sudo policy on this host is broken (a sudoers file fails to parse, so every sudo command fails). Repair it before retrying: as root, run 'visudo -cf /etc/sudoers /etc/sudoers.d/*' to find the offending file. The most common cause is an '@includedir /etc/sudoers.d' line appended by older installer versions on sudo < 1.9.3 - change '@includedir' to '#includedir' in /etc/sudoers."
+    return
+  fi
+  # The audit plugin warning alone is non-fatal on hosts where auditd is not
+  # installed; only flag it when the actual sudoers errors are absent.
+  if printf '%s' "$log_snippet" | grep -q "audit plugin sudoers_audit"; then
+    printf '%s' "sudo reports an audit-plugin initialisation warning (auditd may not be installed). This is usually harmless but can be silenced: as root, edit /etc/sudo.conf and uncomment only the policy and I/O plugin lines (leave sudoers_audit commented out)."
   fi
 }
 
@@ -222,7 +231,7 @@ priv_install() { # src
   fi
   if command -v sudo >/dev/null 2>&1; then
     sudo -n cp -f "$EXE" "$EXE.bak" 2>>"$LOG" || true
-    sudo -n rm -f "$EXE.new" 2>>"$LOG"
+    sudo -n rm -f "$EXE.new" 2>>"$LOG" || true
     if sudo -n install -m 0755 "$1" "$EXE.new" >>"$LOG" 2>&1 \
        && sudo -n mv -f "$EXE.new" "$EXE" >>"$LOG" 2>&1; then
       return 0

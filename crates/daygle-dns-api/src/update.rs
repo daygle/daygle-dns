@@ -364,9 +364,9 @@ fn check_sudoers() -> Option<PreflightCheck> {
 
     let stderr = String::from_utf8_lossy(&output.stderr).to_lowercase();
 
-    // Detect the specific sudoers_audit error pattern
-    if stderr.contains("audit plugin sudoers_audit")
-        || stderr.contains("no valid sudoers sources")
+    // Detect actual sudoers parse errors. The audit plugin warning alone
+    // (auditd not installed) is non-fatal and should not block updates.
+    if stderr.contains("no valid sudoers sources")
         || stderr.contains("parse error in /etc/sudoers")
     {
         let fix_commands = vec![
