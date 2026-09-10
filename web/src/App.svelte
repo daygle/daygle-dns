@@ -148,6 +148,7 @@
     logs: 'M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01',
     settings: 'M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6zm7.4-3a7.4 7.4 0 0 0-.1-1.2l2.1-1.6-2-3.5-2.5 1a7.3 7.3 0 0 0-2-1.2L14.4 3h-4l-.5 2.5a7.3 7.3 0 0 0-2 1.2l-2.5-1-2 3.5 2.1 1.6a7.4 7.4 0 0 0 0 2.4L3.4 14.8l2 3.5 2.5-1a7.3 7.3 0 0 0 2 1.2l.5 2.5h4l.5-2.5a7.3 7.3 0 0 0 2-1.2l2.5 1 2-3.5-2.1-1.6c.07-.4.1-.8.1-1.2z',
     about: 'M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20zM12 16v-4M12 8h.01',
+    update: 'M21 12a9 9 0 1 1-2.64-6.36M21 3v6h-6',
   };
 
   const tabs = [
@@ -163,7 +164,7 @@
     { id: 'certificates', label: 'Certificates', icon: icons.certificates },
     { id: 'logs', label: 'Logs', icon: icons.logs },
     { id: 'settings', label: 'Settings', icon: icons.settings, viewer: true },
-    { id: 'update', label: 'Update', icon: icons.about },
+    { id: 'update', label: 'Update', icon: icons.update },
     { id: 'about', label: 'About', icon: icons.about },
   ].filter((t) => !isViewer || !t.viewer);
 </script>
