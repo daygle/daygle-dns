@@ -364,7 +364,7 @@ if [ "$DOWNLOAD_OK" -eq 1 ]; then
   # Verify the checksum BEFORE the file is used; a mismatch is fatal.
   state downloading "Verifying the download checksum…"
   EXPECTED="$(cut -d' ' -f1 "$SRC/daygle-dns.sha256" 2>/dev/null | tr -d '[:space:]')"
-  ACTUAL="$(sha256sum "$SRC/daygle-dns" 2>/dev/null || shasum -a 256 "$SRC/daygle-dns" 2>/dev/null | cut -d' ' -f1 | tr -d '[:space:]')"
+  ACTUAL="$( (sha256sum "$SRC/daygle-dns" 2>/dev/null || shasum -a 256 "$SRC/daygle-dns" 2>/dev/null) | cut -d' ' -f1 | tr -d '[:space:]')"
   if [ -z "$EXPECTED" ] || [ "$EXPECTED" != "$ACTUAL" ]; then
     fail "checksum verification failed for the downloaded release${REL_TAG:+ ($REL_TAG)} - refusing to install it. If this persists, report the release as broken."
     exit 1
