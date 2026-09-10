@@ -134,7 +134,7 @@ attempt_rollback() {
   
   # Try to restore the backup
   if priv_install "$backup_path"; then
-    state done "Update failed - successfully rolled back to previous version. Please fix the issue and try again."
+    state error "Update failed - successfully rolled back to previous version. Please fix the issue and try again."
     return 0
   else
     state error "Update failed and rollback also failed. Manual intervention required. Previous binary backup: $backup_path"

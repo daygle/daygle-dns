@@ -39,6 +39,14 @@
     return run && RUNNING.includes(run.phase);
   }
 
+  // A successful rollback is a terminal state recorded with phase "done"
+  // (archived update.sh versions) even though the update failed. Treat it as
+  // a failure so the console offers Dismiss/retry instead of a dead-end
+  // "Complete" view with only a Reload button.
+  function isRollback(run) {
+    return run?.phase === 'done' && /successfully rolled back/i.test(run.message || '');
+  }
+
   let pollTimer = null;
   let reloadTimer = null;
   // Set while we are waiting for the restarted service to answer before
@@ -65,7 +73,7 @@
           // The run we triggered finished; the helper restarts the service
           // right after installing, so wait for it to answer before
           // reloading instead of landing on a connection-refused page.
-          if (iStarted && run?.phase === 'done') {
+          if (iStarted && run?.phase === 'done' && !isRollback(run)) {
             scheduleReload();
           }
         }
@@ -214,6 +222,8 @@
         <h3 style="margin: 0">In-Place Update</h3>
         {#if updating || runRunning()}
           <span class="pill"><span class="spin" aria-hidden="true"></span> Updating…</span>
+        {:else if run?.phase === 'done' && isRollback(run)}
+          <span class="pill err">Failed</span>
         {:else if run?.phase === 'done'}
           <span class="pill ok">Complete</span>
         {:else if run?.phase === 'error'}
@@ -294,17 +304,25 @@
         {/if}
 
       {:else if run?.phase === 'done'}
-        <p style="margin: 8px 0">
-          <span class="pill ok">✓</span> {run?.message || 'Update complete.'}
-        </p>
-        <button class="secondary" onclick={reloadConsole} style="margin-top: 8px">
-          Reload console
-        </button>
-        <p class="muted" style="font-size: 0.8rem; margin-top: 10px">
-          {waitingForServer
-            ? 'Waiting for the restarted service to come back, then reloading automatically…'
-            : 'Reloading in a few seconds automatically.'}
-        </p>
+        {#if isRollback(run)}
+          <p style="margin: 8px 0; color: var(--danger)">The update failed: {run.message}</p>
+          <div style="display: flex; gap: 8px; margin-top: 8px">
+            <button class="secondary" onclick={dismissRun}>Dismiss</button>
+            <button class="secondary" onclick={reloadConsole}>Reload console</button>
+          </div>
+        {:else}
+          <p style="margin: 8px 0">
+            <span class="pill ok">✓</span> {run?.message || 'Update complete.'}
+          </p>
+          <button class="secondary" onclick={reloadConsole} style="margin-top: 8px">
+            Reload console
+          </button>
+          {#if waitingForServer}
+            <p class="muted" style="font-size: 0.8rem; margin-top: 10px">
+              Waiting for the restarted service to come back, then reloading automatically…
+            </p>
+          {/if}
+        {/if}
 
       {:else if run?.phase === 'error'}
         <p style="margin: 8px 0; color: var(--danger)">
