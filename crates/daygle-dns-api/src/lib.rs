@@ -7,6 +7,7 @@
 //!
 //! | Method   | Path                              | Purpose |
 //! |----------|-----------------------------------|---------|
+//! | `GET`    | `/api/health`                     | unauthenticated liveness (used by the in-place updater) |
 //! | `GET`    | `/api/status`                     | server status |
 //! | `GET`    | `/api/metrics`                    | runtime metrics |
 //! | `GET`    | `/api/logs?limit=N`               | recent log entries |
@@ -190,6 +191,7 @@ pub struct AppState {
 pub fn router(state: AppState) -> Router {
     let api = Router::new()
         .route("/status", get(handlers::status))
+        .route("/health", get(handlers::health))
         .route("/metrics", get(handlers::metrics))
         .route("/stats", get(handlers::stats))
         .route("/logs", get(handlers::logs))
@@ -312,6 +314,8 @@ pub fn router(state: AppState) -> Router {
 ///
 /// - `POST /api/auth/login` and the one-time `POST /api/auth/setup` are
 ///   always open (they *are* the login).
+/// - `GET /api/health` is always open: the in-place updater probes it after a
+///   restart to confirm the service is serving HTTP, with no credentials.
 /// - Console auth is **on by default**: every endpoint requires a valid
 ///   session token (from login) or the static `api_token`. With no `users`
 ///   configured yet, `/api/auth/setup` reports that first-run setup is
@@ -330,7 +334,9 @@ async fn require_auth(
     let is_auth_path = path == "/api/auth/login"
         || path == "/auth/login"
         || path == "/api/auth/setup"
-        || path == "/auth/setup";
+        || path == "/auth/setup"
+        || path == "/api/health"
+        || path == "/health";
     if is_auth_path || req.method() == axum::http::Method::OPTIONS {
         return next.run(req).await;
     }

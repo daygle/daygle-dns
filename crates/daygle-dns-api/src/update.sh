@@ -162,7 +162,7 @@ health_check() {
     while [ $i -lt 10 ]; do
       if systemctl is-active --quiet daygle-dns 2>/dev/null; then
         # Service is active, try to reach the API
-        if curl -fsSL --max-time 2 http://localhost:5380/api/status >/dev/null 2>&1; then
+        if curl -fsSL --max-time 2 http://localhost:5380/api/health >/dev/null 2>&1; then
           return 0
         fi
       fi
@@ -213,6 +213,10 @@ fi
 # from the old broad-grant installer where the helper exists but its rule
 # does not, and vice versa). All privileged output goes to the log.
 priv_install() { # src
+  if [ -z "${1:-}" ] || [ ! -f "$1" ]; then
+    echo "priv_install: refusing to install - source binary missing or unreadable: ${1:-<none>}" >>"$LOG"
+    return 1
+  fi
   if [ "$(id -u)" -eq 0 ]; then
     cp -f "$EXE" "$EXE.bak" 2>/dev/null || true
     # Install beside the target and rename: writing over a running

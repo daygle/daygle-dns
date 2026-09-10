@@ -147,6 +147,17 @@ pub async fn status(State(state): State<AppState>) -> Response {
     .into_response()
 }
 
+/// Public liveness endpoint, deliberately exempt from `require_auth` so the
+/// in-place updater can verify a restarted service is serving HTTP without
+/// carrying credentials. Exposes no configuration or zone data.
+pub async fn health() -> Response {
+    Json(serde_json::json!({
+        "status": "ok",
+        "version": VERSION,
+    }))
+    .into_response()
+}
+
 pub async fn metrics(State(state): State<AppState>) -> Response {
     Json(state.metrics.snapshot()).into_response()
 }
