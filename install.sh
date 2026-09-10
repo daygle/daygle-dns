@@ -346,8 +346,11 @@ RestartSec=3
 # the in-place updater is spawned from this service and its `sudo` is a
 # setuid-root binary that must switch to root's gid/uid. Keeping them out of
 # the ambient set means the service account itself can never setuid/setgid
-# without going through sudo.
-CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_SETUID CAP_SETGID
+# without going through sudo. CAP_AUDIT_WRITE is required for that sudo to
+# complete: without it sudo's exec audit event dies with "unable to send
+# audit message: Operation not permitted" and every update aborts before the
+# helper runs.
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_SETUID CAP_SETGID CAP_AUDIT_WRITE
 AmbientCapabilities=CAP_NET_BIND_SERVICE
 NoNewPrivileges=false
 
@@ -417,6 +420,29 @@ EOF
                 "# on hosts without auditd to prevent non-fatal initialisation warnings." \
                 "Plugin sudoers_policy sudoers.so" \
                 "Plugin sudoers_io sudoers.so" | run_as_root tee /etc/sudo.conf > /dev/null
+        fi
+    fi
+    # Older installer runs (and some debugging drop-ins) pinned the service's
+    # CapabilityBoundingSet without CAP_AUDIT_WRITE, which makes every update
+    # sudo abort with "unable to send audit message: Operation not permitted".
+    # The unit above now carries the full set; reconcile a stale drop-in so a
+    # reinstall heals the host without manual edits.
+    DROP_DIR=/etc/systemd/system/daygle-dns.service.d
+    if [ -f "$DROP_DIR/capabilities.conf" ]; then
+        STALE_SET='^CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_SETUID CAP_SETGID[[:space:]]*$'
+        if grep -qE "$STALE_SET" "$DROP_DIR/capabilities.conf" 2>/dev/null; then
+            # If the file only pins the bounding set it is redundant with the
+            # unit; remove it. Otherwise patch just the stale line in place.
+            if [ -z "$(grep -vE '^[[:space:]]*(#.*)?$' "$DROP_DIR/capabilities.conf" 2>/dev/null | grep -vE '^CapabilityBoundingSet=')" ]; then
+                run_as_root rm -f "$DROP_DIR/capabilities.conf"
+                if [ -z "$(ls -A "$DROP_DIR" 2>/dev/null)" ]; then
+                    run_as_root rmdir "$DROP_DIR" 2>/dev/null || true
+                fi
+                log "Removed the stale capabilities drop-in (the unit now grants CAP_AUDIT_WRITE)."
+            else
+                run_as_root sed -i -E "s|$STALE_SET|CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_SETUID CAP_SETGID CAP_AUDIT_WRITE|" "$DROP_DIR/capabilities.conf"
+                log "Updated the capabilities drop-in to grant CAP_AUDIT_WRITE."
+            fi
         fi
     fi
     chown -R "$SERVICE_USER":"$SERVICE_USER" "$CONFIG_DIR" "$DATA_DIR"

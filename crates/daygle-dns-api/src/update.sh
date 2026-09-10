@@ -82,6 +82,13 @@ sudo_broken_hint() {
   # installed; only flag it when the actual sudoers errors are absent.
   if printf '%s' "$log_snippet" | grep -q "audit plugin sudoers_audit"; then
     printf '%s' "sudo reports an audit-plugin initialisation warning (auditd may not be installed). This is usually harmless but can be silenced: as root, edit /etc/sudo.conf and uncomment only the policy and I/O plugin lines (leave sudoers_audit commented out)."
+    return
+  fi
+  # The service's CapabilityBoundingSet can omit CAP_AUDIT_WRITE, which makes
+  # sudo abort the update's (otherwise valid) invocation before the helper
+  # runs. This is the classic self-update dead end on hardened installs.
+  if printf '%s' "$log_snippet" | grep -q "unable to send audit message: Operation not permitted"; then
+    printf '%s' "sudo cannot complete because the daygle-dns systemd service omits CAP_AUDIT_WRITE from its CapabilityBoundingSet, so sudo aborts before running the update helper. Re-run the installer (v1.0.6 or newer), which rewrites the service unit to grant CAP_AUDIT_WRITE; or as root run 'systemctl edit daygle-dns' and set 'CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_SETUID CAP_SETGID CAP_AUDIT_WRITE'."
   fi
 }
 
