@@ -169,6 +169,7 @@ export const api = {
   updateStatus: () => request('GET', '/update/status'),
   updateStart: () => request('POST', '/update/start'),
   updateDismiss: () => request('POST', '/update/dismiss'),
+  updatePreflight: () => request('GET', '/update/preflight'),
   blockingGroups: () => request('GET', '/policy/blocking'),
   saveBlockingGroup: (body) => request('POST', '/policy/blocking', body),
   deleteBlockingGroup: (id) => request('DELETE', `/policy/blocking/${id}`),

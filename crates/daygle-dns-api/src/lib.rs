@@ -290,6 +290,7 @@ pub fn router(state: AppState) -> Router {
         .route("/update/status", get(handlers::update_status))
         .route("/update/start", post(handlers::update_start))
         .route("/update/dismiss", post(handlers::update_dismiss))
+        .route("/update/preflight", get(handlers::update_preflight))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             require_auth,

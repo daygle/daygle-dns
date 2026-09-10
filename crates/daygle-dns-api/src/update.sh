@@ -22,7 +22,7 @@
 # `state` files and log output live under the OS temp dir (writable by the
 # service user without extra privileges).
 
-set -u
+set -eu
 
 EXE="$1"
 DIR="$2"
@@ -34,9 +34,16 @@ LATEST_URL="https://github.com/${REPO_OWNER}/${REPO_NAME}/releases/latest"
 LATEST_API_URL="https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/releases/latest"
 BASE_URL="https://github.com/${REPO_OWNER}/${REPO_NAME}/releases/download"
 
-# Escape a message for embedding in a JSON string (backslashes and quotes).
+# Escape a message for embedding in a JSON string (backslashes, quotes, and
+# control characters). Without handling newlines/tabs, a multi-line sudo error
+# would produce invalid JSON that the Rust side reads as idle.
 json_escape() {
-  printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
+  printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g; s/	/\\t/g' | awk '{
+    gsub(/\\n/, "\\\\n");
+    gsub(/\\r/, "\\\\r");
+    if (NR == 1) printf "%s", $0;
+    else printf "\\n%s", $0;
+  }'
 }
 
 # Write state atomically (temp file + rename) so the server's status polls
@@ -67,6 +74,97 @@ sudo_broken_hint() {
   if tail -n 40 "$LOG" 2>/dev/null | grep -q "audit plugin sudoers_audit\|no valid sudoers sources\|parse error in /etc/sudoers"; then
     printf '%s' "the sudo policy on this host is broken (a sudoers file fails to parse, so every sudo command fails). Repair it before retrying: as root, run 'visudo -cf /etc/sudoers /etc/sudoers.d/*' to find the offending file. The most common cause is an '@includedir /etc/sudoers.d' line appended by older installer versions on sudo < 1.9.3 - change '@includedir' to '#includedir' in /etc/sudoers."
   fi
+}
+
+# ---- Rollback support ----------------------------------------------------
+# Before installing a new binary, we create a timestamped backup. If the new
+# binary fails health checks after restart, we can automatically revert.
+
+BACKUP_DIR="$DIR/backups"
+ROLLBACK_INFO="$DIR/rollback.json"
+
+# Create a backup of the current binary before updating.
+create_backup() {
+  local backup_name="daygle-dns.$(date -u +%Y%m%dT%H%M%SZ)"
+  local backup_path="$BACKUP_DIR/$backup_name"
+  mkdir -p "$BACKUP_DIR"
+  
+  # Copy the current binary
+  if [ -f "$EXE" ]; then
+    cp -f "$EXE" "$backup_path" 2>/dev/null || true
+    chmod 0755 "$backup_path" 2>/dev/null || true
+    
+    # Record rollback information
+    printf '{"backup":"%s","original":"%s","timestamp":"%s","version":"%s"}\n' \
+      "$backup_path" "$EXE" "$(date -u +%FT%TZ)" "$(${EXE} --version 2>/dev/null | head -n1 || echo unknown)" \
+      > "$ROLLBACK_INFO"
+    
+    # Keep only the last 3 backups
+    ls -1t "$BACKUP_DIR"/daygle-dns.* 2>/dev/null | tail -n +4 | xargs rm -f 2>/dev/null || true
+    
+    return 0
+  fi
+  return 1
+}
+
+# Attempt to rollback to the previous binary if the update failed.
+# Returns 0 if rollback succeeded, 1 if no backup exists or rollback failed.
+attempt_rollback() {
+  if [ ! -f "$ROLLBACK_INFO" ]; then
+    return 1
+  fi
+  
+  local backup_path
+  backup_path=$(grep -o '"backup":"[^"]*"' "$ROLLBACK_INFO" | cut -d'"' -f4)
+  
+  if [ -z "$backup_path" ] || [ ! -f "$backup_path" ]; then
+    return 1
+  fi
+  
+  state rolling_back "Update failed - rolling back to previous version…"
+  
+  # Try to restore the backup
+  if priv_install "$backup_path"; then
+    state done "Update failed - successfully rolled back to previous version. Please fix the issue and try again."
+    return 0
+  else
+    state error "Update failed and rollback also failed. Manual intervention required. Previous binary backup: $backup_path"
+    return 1
+  fi
+}
+
+# Verify the new binary is functional before declaring success.
+# Returns 0 if healthy, 1 if unhealthy.
+health_check() {
+  local check_exe="$1"
+  
+  # Wait a moment for the binary to be ready
+  sleep 2
+  
+  # Check if the binary can at least show its version
+  if ! "$check_exe" --version >/dev/null 2>&1; then
+    return 1
+  fi
+  
+  # Check if the service is responding (if systemd is available)
+  if [ -f /etc/systemd/system/daygle-dns.service ] && command -v systemctl >/dev/null 2>&1; then
+    # Give the service up to 10 seconds to start
+    local i=0
+    while [ $i -lt 10 ]; do
+      if systemctl is-active --quiet daygle-dns 2>/dev/null; then
+        # Service is active, try to reach the API
+        if curl -fsSL --max-time 2 http://localhost:5380/api/status >/dev/null 2>&1; then
+          return 0
+        fi
+      fi
+      sleep 1
+      i=$((i + 1))
+    done
+    return 1
+  fi
+  
+  # No systemd: just check that the binary is executable
+  return 0
 }
 
 # Root-owned privilege helper installed by install.sh; permits exactly the
@@ -266,12 +364,18 @@ if [ "$DOWNLOAD_OK" -eq 1 ]; then
   # Verify the checksum BEFORE the file is used; a mismatch is fatal.
   state downloading "Verifying the download checksum…"
   EXPECTED="$(cut -d' ' -f1 "$SRC/daygle-dns.sha256" 2>/dev/null | tr -d '[:space:]')"
-  ACTUAL="$(sha256sum "$SRC/daygle-dns" 2>/dev/null | cut -d' ' -f1 | tr -d '[:space:]')"
+  ACTUAL="$(sha256sum "$SRC/daygle-dns" 2>/dev/null || shasum -a 256 "$SRC/daygle-dns" 2>/dev/null | cut -d' ' -f1 | tr -d '[:space:]')"
   if [ -z "$EXPECTED" ] || [ "$EXPECTED" != "$ACTUAL" ]; then
     fail "checksum verification failed for the downloaded release${REL_TAG:+ ($REL_TAG)} - refusing to install it. If this persists, report the release as broken."
     exit 1
   fi
   chmod 0755 "$SRC/daygle-dns"
+
+  # Create backup before installing new binary
+  state preparing "Creating backup of current binary…"
+  if ! create_backup; then
+    echo "Warning: could not create backup, continuing anyway" >>"$LOG"
+  fi
 
   state installing "Installing the release binary…"
   # priv_install keeps a .bak copy of the current binary as a manual rollback
@@ -331,6 +435,12 @@ else
     exit 1
   fi
 
+  # Create backup before installing new binary
+  state preparing "Creating backup of current binary…"
+  if ! create_backup; then
+    echo "Warning: could not create backup, continuing anyway" >>"$LOG"
+  fi
+
   state installing "Installing the new binary…"
   if ! priv_install target/release/daygle-dns; then
     WHY="$(last_log_error)"
@@ -347,7 +457,23 @@ if [ -f /etc/systemd/system/daygle-dns.service ] && command -v systemctl >/dev/n
   if ! priv_restart >>"$LOG" 2>&1; then
     WHY="$(last_log_error)"
     state done "Update installed - restart daygle-dns manually (auto-restart failed${WHY:+: $WHY})."
+    exit 0
   fi
+  
+  # Health check after restart - wait for service to come up
+  state checking "Verifying the new binary is working…"
+  if ! health_check "$EXE"; then
+    echo "Health check failed after update, attempting rollback" >>"$LOG"
+    if attempt_rollback; then
+      priv_restart >>"$LOG" 2>&1 || true
+      exit 0
+    else
+      state error "Update installed but health check failed and rollback was not possible. Manual intervention required."
+      exit 1
+    fi
+  fi
+  
+  state done "Update installed and verified successfully."
   exit 0
 fi
 

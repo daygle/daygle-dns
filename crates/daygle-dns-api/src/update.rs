@@ -263,6 +263,260 @@ pub fn gates(config_dir: Option<&Path>) -> Vec<&'static str> {
     missing
 }
 
+/// Pre-flight health check result for a single check.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PreflightCheck {
+    /// Check name (e.g., "sudoers", "disk_space", "permissions").
+    pub name: String,
+    /// Whether the check passed.
+    pub ok: bool,
+    /// Human-readable message explaining the result.
+    pub message: String,
+    /// For failed checks: specific fix instructions.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fix: Option<String>,
+    /// For failed checks: shell commands to run as root.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fix_commands: Option<Vec<String>>,
+}
+
+/// Complete pre-flight health check result.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PreflightResult {
+    /// Whether all checks passed and an update can proceed.
+    pub ready: bool,
+    /// Individual check results.
+    pub checks: Vec<PreflightCheck>,
+}
+
+/// Run pre-flight health checks to detect issues before starting an update.
+/// Returns structured results with specific fix instructions for each failure.
+pub fn preflight(config_dir: Option<&Path>) -> PreflightResult {
+    let mut checks = Vec::new();
+
+    // Check 1: Platform and install evidence
+    let gates = gates(config_dir);
+    checks.push(PreflightCheck {
+        name: "platform".to_string(),
+        ok: gates.is_empty(),
+        message: if gates.is_empty() {
+            "Host qualifies for in-place updates".to_string()
+        } else {
+            format!("Missing requirements: {}", gates.join(", "))
+        },
+        fix: if gates.is_empty() {
+            None
+        } else {
+            Some("Run the installer on the host to set up update prerequisites.".to_string())
+        },
+        fix_commands: None,
+    });
+
+    // Check 2: Sudoers configuration
+    if let Some(sudoers_check) = check_sudoers() {
+        checks.push(sudoers_check);
+    }
+
+    // Check 3: Disk space in temp directory
+    if let Some(disk_check) = check_disk_space() {
+        checks.push(disk_check);
+    }
+
+    // Check 4: Write permissions to binary location
+    if let Some(perm_check) = check_binary_permissions() {
+        checks.push(perm_check);
+    }
+
+    // Check 5: Network connectivity to GitHub
+    if let Some(network_check) = check_github_connectivity() {
+        checks.push(network_check);
+    }
+
+    let ready = checks.iter().all(|c| c.ok);
+    PreflightResult { ready, checks }
+}
+
+/// Check if sudo configuration is parseable.
+/// Returns None if sudo is not required (already root) or not available.
+fn check_sudoers() -> Option<PreflightCheck> {
+    // If already root, sudo is not needed
+    if std::env::consts::OS != "linux" {
+        return None;
+    }
+
+    // Test if sudo is available and working
+    let output = std::process::Command::new("sudo")
+        .args(["-n", "true"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .ok()?;
+
+    if output.status.success() {
+        return Some(PreflightCheck {
+            name: "sudoers".to_string(),
+            ok: true,
+            message: "Sudo configuration is valid".to_string(),
+            fix: None,
+            fix_commands: None,
+        });
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr).to_lowercase();
+
+    // Detect the specific sudoers_audit error pattern
+    if stderr.contains("audit plugin sudoers_audit")
+        || stderr.contains("no valid sudoers sources")
+        || stderr.contains("parse error in /etc/sudoers")
+    {
+        let fix_commands = vec![
+            "sudo visudo -cf /etc/sudoers".to_string(),
+            "sudo visudo -cf /etc/sudoers.d/*".to_string(),
+            "sudo sed -i 's/^@includedir/@#includedir/' /etc/sudoers".to_string(),
+            "sudo systemctl restart daygle-dns".to_string(),
+        ];
+
+        Some(PreflightCheck {
+            name: "sudoers".to_string(),
+            ok: false,
+            message: "The sudo policy on this host is broken (a sudoers file fails to parse, so every sudo command fails).".to_string(),
+            fix: Some("The most common cause is an '@includedir /etc/sudoers.d' line appended by older installer versions on sudo < 1.9.3. To fix: 1) Run 'sudo visudo -cf /etc/sudoers /etc/sudoers.d/*' to find the offending file. 2) Change '@includedir' to '#includedir' in /etc/sudoers. 3) Test with 'sudo true'. 4) Restart the service.".to_string()),
+            fix_commands: Some(fix_commands),
+        })
+    } else if stderr.contains("password") || stderr.contains("sorry") {
+        Some(PreflightCheck {
+            name: "sudoers".to_string(),
+            ok: false,
+            message: "Passwordless sudo is not configured for this account".to_string(),
+            fix: Some("Re-run the installer to provision the privilege helper, or configure passwordless sudo for the service account.".to_string()),
+            fix_commands: None,
+        })
+    } else {
+        Some(PreflightCheck {
+            name: "sudoers".to_string(),
+            ok: false,
+            message: format!("Sudo test failed: {}", String::from_utf8_lossy(&output.stderr).trim()),
+            fix: Some("Check sudo configuration and ensure the service account has appropriate permissions.".to_string()),
+            fix_commands: None,
+        })
+    }
+}
+
+/// Check available disk space in the temp directory.
+fn check_disk_space() -> Option<PreflightCheck> {
+    #[cfg(unix)]
+    {
+        let temp_dir = std::env::temp_dir();
+        let output = std::process::Command::new("df")
+            .arg("--output=avail")
+            .arg(&temp_dir)
+            .stdout(std::process::Stdio::piped())
+            .output()
+            .ok()?;
+
+        if !output.status.success() {
+            return None;
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let avail_kb: u64 = stdout
+            .lines()
+            .nth(1)
+            .and_then(|line| line.trim().parse().ok())
+            .unwrap_or(0);
+
+        // Need at least 100MB for download, 1GB for source build
+        let min_required_mb = 100;
+        let avail_mb = avail_kb / 1024;
+
+        if avail_mb >= min_required_mb {
+            Some(PreflightCheck {
+                name: "disk_space".to_string(),
+                ok: true,
+                message: format!("{} MB available in {}", avail_mb, temp_dir.display()),
+                fix: None,
+                fix_commands: None,
+            })
+        } else {
+            Some(PreflightCheck {
+                name: "disk_space".to_string(),
+                ok: false,
+                message: format!("Only {} MB available in {} (need at least {} MB)", avail_mb, temp_dir.display(), min_required_mb),
+                fix: Some("Free up disk space in the temp directory before updating.".to_string()),
+                fix_commands: None,
+            })
+        }
+    }
+
+    #[cfg(not(unix))]
+    None
+}
+
+/// Check write permissions to the binary location.
+fn check_binary_permissions() -> Option<PreflightCheck> {
+    let exe = std::env::current_exe().ok()?;
+    let parent = exe.parent()?;
+
+    let metadata = std::fs::metadata(parent).ok()?;
+    let writable = metadata.permissions().readonly();
+
+    if !writable {
+        Some(PreflightCheck {
+            name: "permissions".to_string(),
+            ok: true,
+            message: format!("Write access to {}", parent.display()),
+            fix: None,
+            fix_commands: None,
+        })
+    } else {
+        Some(PreflightCheck {
+            name: "permissions".to_string(),
+            ok: false,
+            message: format!("Cannot write to {}", parent.display()),
+            fix: Some("Ensure the service account has write permissions to the binary directory, or run the installer to set up proper permissions.".to_string()),
+            fix_commands: None,
+        })
+    }
+}
+
+/// Check network connectivity to GitHub releases.
+fn check_github_connectivity() -> Option<PreflightCheck> {
+    let output = std::process::Command::new("curl")
+        .args([
+            "-fsSL",
+            "--max-time",
+            "5",
+            "--connect-timeout",
+            "2",
+            "-o",
+            "/dev/null",
+            "https://api.github.com/repos/daygle/daygle-dns/releases/latest",
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .ok()?;
+
+    if output.status.success() {
+        Some(PreflightCheck {
+            name: "network".to_string(),
+            ok: true,
+            message: "GitHub releases are accessible".to_string(),
+            fix: None,
+            fix_commands: None,
+        })
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        Some(PreflightCheck {
+            name: "network".to_string(),
+            ok: false,
+            message: format!("Cannot reach GitHub releases: {}", stderr.trim()),
+            fix: Some("Check network connectivity and firewall rules. The update requires access to github.com.".to_string()),
+            fix_commands: None,
+        })
+    }
+}
+
 /// Cached latest-release version (tag without the leading `v`) and when it
 /// was fetched, shared across status polls: the console hits this endpoint
 /// every few seconds during a run, and GitHub rate-limits unauthenticated

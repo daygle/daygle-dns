@@ -17,6 +17,11 @@
   let startError = $state('');
   let iStarted = $state(false); // this session triggered the current run
 
+  // Pre-flight health check state
+  let preflightResult = $state(null);
+  let preflightLoading = $state(false);
+  let preflightError = $state('');
+
   const RUNNING = ['preparing', 'downloading', 'cloning', 'building', 'installing'];
   const PHASE_LABEL = {
     preparing: 'Preparing…',
@@ -24,6 +29,8 @@
     cloning: 'Fetching source (no prebuilt release matched, building from source)…',
     building: 'Building release binary (a few minutes)…',
     installing: 'Installing new binary…',
+    checking: 'Verifying update…',
+    rolling_back: 'Rolling back to previous version…',
     done: 'Complete',
     error: 'Failed',
   };
@@ -77,6 +84,8 @@
   function scheduleReload() {
     if (waitingForServer) return;
     waitingForServer = true;
+    // Clear poll timer to avoid unnecessary requests during reload
+    clearTimeout(pollTimer);
     reloadTimer = setTimeout(pingServer, 4000);
   }
 
@@ -90,6 +99,18 @@
       .catch(() => {
         if (waitingForServer) reloadTimer = setTimeout(pingServer, 1500);
       });
+  }
+
+  async function runPreflight() {
+    preflightLoading = true;
+    preflightError = '';
+    try {
+      preflightResult = await api.updatePreflight();
+    } catch (e) {
+      preflightError = formatApiError(e);
+    } finally {
+      preflightLoading = false;
+    }
   }
 
   async function load() {
@@ -114,6 +135,14 @@
 
   async function startUpdate() {
     startError = '';
+    
+    // Run pre-flight checks first
+    await runPreflight();
+    if (preflightResult && !preflightResult.ready) {
+      // Show pre-flight errors instead of proceeding
+      return;
+    }
+    
     const ok = confirm(
       'Update Daygle DNS to the latest release?\n\nThe server will download the latest prebuilt release, verify its checksum, swap it in place and restart. DNS resolution is briefly interrupted and this console may take a moment to reconnect.'
     );
@@ -123,6 +152,7 @@
       await api.updateStart();
       iStarted = true;
       serverDown = false;
+      preflightResult = null; // Clear pre-flight results on successful start
       poll();
     } catch (e) {
       updating = false;
@@ -195,6 +225,37 @@
         <div class="form-error" style="margin-bottom: 10px">{startError}</div>
       {/if}
 
+      {#if preflightResult && !preflightResult.ready}
+        <div class="preflight-card">
+          <h4 style="margin: 0 0 10px">Pre-flight Check Results</h4>
+          <p class="muted" style="font-size: 0.85rem; margin-bottom: 10px">
+            The following issues were detected. Please fix them before attempting an update.
+          </p>
+          {#each preflightResult.checks as check}
+            <div class="preflight-check" class:failed={!check.ok}>
+              <div class="preflight-header">
+                <span class="preflight-icon">{check.ok ? '✓' : '✗'}</span>
+                <strong>{check.name}</strong>
+              </div>
+              <p class="preflight-message">{check.message}</p>
+              {#if check.fix}
+                <div class="preflight-fix">
+                  <strong>How to fix:</strong> {check.fix}
+                </div>
+              {/if}
+              {#if check.fix_commands}
+                <div class="preflight-commands">
+                  <strong>Commands to run:</strong>
+                  <pre>{check.fix_commands.join('\n')}</pre>
+                </div>
+              {/if}
+            </div>
+          {/each}
+        </div>
+      {:else if preflightError}
+        <div class="form-error" style="margin-bottom: 10px">{preflightError}</div>
+      {/if}
+
       {#if info.updater_bootstrap_required}
         <div class="bootstrap">
           <p style="margin: 0 0 8px">
@@ -261,7 +322,12 @@
         </p>
       {:else}
         {#if isAdmin}
-          <button onclick={startUpdate} disabled={busy || updating}>Update Now</button>
+          <div style="display: flex; gap: 8px; margin-top: 8px">
+            <button onclick={startUpdate} disabled={busy || updating || preflightLoading}>Update Now</button>
+            <button class="secondary" onclick={runPreflight} disabled={busy || updating || preflightLoading}>
+              {preflightLoading ? 'Checking…' : 'Check Health'}
+            </button>
+          </div>
         {:else}
           <p class="muted" style="font-size: 0.85rem">
             Read-only console accounts cannot start an update; ask an
@@ -425,5 +491,61 @@
     white-space: pre-wrap;
     word-break: break-all;
     color: var(--text);
+  }
+  .preflight-card {
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 12px;
+    margin: 10px 0;
+  }
+  .preflight-check {
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 10px;
+    margin: 8px 0;
+    background: var(--panel);
+  }
+  .preflight-check.failed {
+    border-color: var(--danger, #dc3545);
+    background: rgba(220, 53, 69, 0.05);
+  }
+  .preflight-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 6px;
+  }
+  .preflight-icon {
+    font-weight: bold;
+    color: var(--muted);
+  }
+  .preflight-check.failed .preflight-icon {
+    color: var(--danger, #dc3545);
+  }
+  .preflight-message {
+    margin: 0;
+    font-size: 0.85rem;
+    color: var(--muted);
+  }
+  .preflight-fix {
+    margin-top: 8px;
+    padding: 8px;
+    background: var(--panel-2);
+    border-radius: 4px;
+    font-size: 0.85rem;
+  }
+  .preflight-commands {
+    margin-top: 8px;
+  }
+  .preflight-commands pre {
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 8px;
+    margin: 4px 0 0;
+    font: 0.8rem/1.4 ui-monospace, 'Cascadia Code', Consolas, monospace;
+    white-space: pre-wrap;
+    overflow-x: auto;
   }
 </style>

@@ -766,6 +766,20 @@ pub async fn update_dismiss() -> Response {
     }
 }
 
+/// `GET /api/update/preflight` - run health checks before starting an update.
+///
+/// Returns structured results indicating whether an update can proceed, with
+/// specific fix instructions for any detected issues. This allows the console
+/// to show actionable guidance before the user attempts an update.
+pub async fn update_preflight(State(state): State<AppState>) -> Response {
+    let config_dir = state
+        .config_path
+        .as_deref()
+        .and_then(|p| p.parent().map(std::path::Path::to_path_buf));
+    let result = crate::update::preflight(config_dir.as_deref());
+    Json(serde_json::json!(result)).into_response()
+}
+
 // ---- Zones --------------------------------------------------------------
 
 #[derive(Serialize)]
