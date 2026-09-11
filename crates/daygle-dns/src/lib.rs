@@ -5,6 +5,7 @@
 //! runnable server. The `daygle-dns` binary is a thin CLI wrapper around this.
 
 pub mod dispatcher;
+mod doq;
 pub mod query_db_log;
 pub mod reload;
 
@@ -380,12 +381,20 @@ pub async fn bind_with(
         shared.tsig_keys.clone(),
         stats.clone(),
     )
+    .with_client_timeout(Duration::from_millis(config.server.client_timeout_ms))
     .with_advanced_blocking(shared.advanced_blocking.clone())
     .with_query_logger(shared.query_logger.clone())
     .with_query_db_logger(shared.query_db_logger.clone());
-    let mut server = Server::new(dispatcher);
+    let mut server = Server::new(dispatcher.clone());
     let mut initial_addrs = ListenerAddrs::default();
-    bind_listeners(&config, &store, &mut server, &mut initial_addrs).await?;
+    let initial_doq = bind_listeners(
+        &config,
+        &store,
+        &dispatcher,
+        &mut server,
+        &mut initial_addrs,
+    )
+    .await?;
     let addrs = Arc::new(ArcSwap::from_pointee(initial_addrs));
 
     // DNS supervisor: owns the listeners and rebinds them on command.
@@ -396,6 +405,7 @@ pub async fn bind_with(
         shutdown.clone(),
         reload_rx,
         server,
+        initial_doq,
         config.clone(),
     ));
 
@@ -486,19 +496,25 @@ pub async fn bind_with(
 struct ListenerGen {
     /// Cancels the serving tasks when this generation is stopped.
     token: CancellationToken,
-    /// The serving task (`Server::block_until_done`). Includes the DoQ
-    /// listener when enabled: Hickory registers QUIC into the same server.
+    /// The serving task (`Server::block_until_done`).
     task: tokio::task::JoinHandle<std::result::Result<(), hickory_server::net::NetError>>,
+    /// The DoQ serving task; `None` when DoQ is disabled. It is a separate
+    /// task because the custom quinn listener (which honors the configurable
+    /// QUIC idle timeout) lives outside Hickory's `Server`.
+    doq: Option<tokio::task::JoinHandle<()>>,
 }
 
 /// Spawn a listener generation and return its handle.
-fn spawn_listeners(server: Server<DnsDispatcher>) -> ListenerGen {
+fn spawn_listeners(
+    server: Server<DnsDispatcher>,
+    doq: Option<tokio::task::JoinHandle<()>>,
+) -> ListenerGen {
     let token = server.shutdown_token().clone();
     let task = tokio::spawn(async move {
         let mut server = server;
         server.block_until_done().await
     });
-    ListenerGen { token, task }
+    ListenerGen { token, task, doq }
 }
 
 /// Gracefully stop a listener generation, awaiting completion.
@@ -507,6 +523,9 @@ async fn stop_listeners(listeners: &mut Option<ListenerGen>) {
         return;
     };
     gen.token.cancel();
+    if let Some(doq) = gen.doq {
+        let _ = doq.await;
+    }
     match gen.task.await {
         Ok(Ok(())) => {}
         Ok(Err(e)) => warn!("listener task ended with error: {e}"),
@@ -535,14 +554,17 @@ async fn start_listeners(
         shared.tsig_keys.clone(),
         shared.stats.clone(),
     )
+    .with_client_timeout(Duration::from_millis(config.server.client_timeout_ms))
     .with_advanced_blocking(shared.advanced_blocking.clone())
     .with_query_logger(shared.query_logger.clone())
     .with_query_db_logger(shared.query_db_logger.clone());
-    let mut server = Server::new(dispatcher);
+    let mut server = Server::new(dispatcher.clone());
     let mut snapshot = ListenerAddrs::default();
-    bind_listeners(&config, &shared.catalog.store(), &mut server, &mut snapshot).await?;
+    let doq_task =
+        bind_listeners(&config, &shared.catalog.store(), &dispatcher, &mut server, &mut snapshot)
+            .await?;
     addrs.store(Arc::new(snapshot));
-    Ok(spawn_listeners(server))
+    Ok(spawn_listeners(server, doq_task))
 }
 
 /// Supervisor loop: keep the listeners running, rebinding them on command.
@@ -555,9 +577,10 @@ async fn run_dns_supervisor(
     shutdown: CancellationToken,
     mut cmd_rx: mpsc::Receiver<ReloadCommand>,
     initial: Server<DnsDispatcher>,
+    initial_doq: Option<tokio::task::JoinHandle<()>>,
     initial_config: Arc<DaygleConfig>,
 ) -> Result<()> {
-    let mut listeners = Some(spawn_listeners(initial));
+    let mut listeners = Some(spawn_listeners(initial, initial_doq));
     let mut last_good = initial_config;
 
     loop {
@@ -628,14 +651,17 @@ async fn start_listeners_with(
         shared.tsig_keys.clone(),
         shared.stats.clone(),
     )
+    .with_client_timeout(Duration::from_millis(config.server.client_timeout_ms))
     .with_advanced_blocking(shared.advanced_blocking.clone())
     .with_query_logger(shared.query_logger.clone())
     .with_query_db_logger(shared.query_db_logger.clone());
-    let mut server = Server::new(dispatcher);
+    let mut server = Server::new(dispatcher.clone());
     let mut snapshot = ListenerAddrs::default();
-    bind_listeners(config, &shared.catalog.store(), &mut server, &mut snapshot).await?;
+    let doq_task =
+        bind_listeners(config, &shared.catalog.store(), &dispatcher, &mut server, &mut snapshot)
+            .await?;
     addrs.store(Arc::new(snapshot));
-    Ok(spawn_listeners(server))
+    Ok(spawn_listeners(server, doq_task))
 }
 /// Materialize the console-managed certificates (stored PEM in the database)
 /// that the DoT/DoH/DoQ listeners reference by name. Each is written next to
@@ -762,9 +788,10 @@ fn write_if_changed(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
 async fn bind_listeners(
     config: &DaygleConfig,
     store: &daygle_dns_authoritative::ZoneStore,
+    dispatcher: &DnsDispatcher,
     server: &mut Server<DnsDispatcher>,
     addrs: &mut ListenerAddrs,
-) -> Result<()> {
+) -> Result<Option<tokio::task::JoinHandle<()>>> {
     // Console-managed certificates referenced by name are materialized next
     // to the zone database so the file-based TLS loaders can read them.
     let mut config = config.clone();
@@ -773,11 +800,38 @@ async fn bind_listeners(
         .parse()
         .map_err(|e| DaygleError::Config(format!("bad server listen address: {e}")))?;
 
+    // DoQ task, spawned below when QUIC is enabled.
+    let mut doq_task = None;
+
     if config.server.udp_enabled {
-        let socket = tokio::net::UdpSocket::bind(listen).await?;
+        // Bind through a std socket so the kernel send/receive buffers can be
+        // sized before the socket is wrapped for Tokio (the buffer sizes must
+        // be set before Windows picks them up on the first connect).
+        let std_socket = std::net::UdpSocket::bind(listen)?;
+        std_socket.set_send_buffer_size(
+            (config.server.udp_send_buffer_kb as usize)
+                .checked_mul(1024)
+                .ok_or_else(|| {
+                    DaygleError::Config("udp_send_buffer_kb is too large".to_string())
+                })?,
+        )?;
+        std_socket.set_recv_buffer_size(
+            (config.server.udp_recv_buffer_kb as usize)
+                .checked_mul(1024)
+                .ok_or_else(|| {
+                    DaygleError::Config("udp_recv_buffer_kb is too large".to_string())
+                })?,
+        )?;
+        std_socket.set_nonblocking(true)?;
+        let socket = tokio::net::UdpSocket::from_std(std_socket)?;
         addrs.udp = Some(socket.local_addr()?);
         server.register_socket(socket);
-        info!(addr = %addrs.udp.expect("addr set above"), "plaintext UDP DNS listening");
+        info!(
+            addr = %addrs.udp.expect("addr set above"),
+            send_buffer_kb = config.server.udp_send_buffer_kb,
+            recv_buffer_kb = config.server.udp_recv_buffer_kb,
+            "plaintext UDP DNS listening"
+        );
     }
     if config.server.tcp_enabled {
         let listener = tokio::net::TcpListener::bind(listen).await?;
@@ -829,19 +883,28 @@ async fn bind_listeners(
             .parse()
             .map_err(|e| DaygleError::Config(format!("bad DoQ listen address: {e}")))?;
         let socket = tokio::net::UdpSocket::bind(addr).await?;
-        addrs.doq = Some(socket.local_addr()?);
         let tls_config = daygle_dns_dot::build_doq_tls_config(&config.doq)?;
-        server
-            .register_quic_listener_and_tls_config(
-                socket,
-                Duration::from_secs(10),
-                tls_config,
-            )
-            .map_err(|e| DaygleError::Config(format!("cannot register DoQ listener: {e}")))?;
-        info!(addr = %addrs.doq.expect("addr set above"), "DNS over QUIC (RFC 9250) listening");
+        let endpoint = crate::doq::build_doq_endpoint(
+            socket,
+            tls_config,
+            Duration::from_secs(config.doq.idle_timeout_secs),
+        )
+        .map_err(|e| DaygleError::Config(format!("cannot build DoQ listener: {e}")))?;
+        addrs.doq = Some(endpoint.local_addr().map_err(DaygleError::Io)?);
+        let token = server.shutdown_token().clone();
+        doq_task = Some(tokio::spawn(crate::doq::serve_doq(
+            endpoint,
+            dispatcher.clone(),
+            token,
+        )));
+        info!(
+            addr = %addrs.doq.expect("addr set above"),
+            idle_timeout_s = config.doq.idle_timeout_secs,
+            "DNS over QUIC (RFC 9250) listening"
+        );
     }
 
-    Ok(())
+    Ok(doq_task)
 }
 
 /// Import BIND zone files from `authoritative.zones_dir` (if configured).

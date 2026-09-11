@@ -2,7 +2,7 @@
 
 use std::net::IpAddr;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use arc_swap::{ArcSwap, ArcSwapOption};
 use async_trait::async_trait;
@@ -54,6 +54,9 @@ pub struct DnsDispatcher {
     /// Async SQLite query-log sink feeding the console's searchable Query
     /// Logs view. `None` unless `logging.query_db_enabled`; best-effort.
     query_db_logger: Option<Arc<crate::query_db_log::QueryDbLogger>>,
+    /// Client Timeout (`server.client_timeout_ms`): how long the recursive
+    /// path may take before the client receives SERVFAIL. Default 2000 ms.
+    client_timeout: Duration,
 }
 
 impl DnsDispatcher {
@@ -111,6 +114,7 @@ impl DnsDispatcher {
             stats: None,
             query_logger: None,
             query_db_logger: None,
+            client_timeout: Duration::from_millis(2000),
         }
     }
 
@@ -167,6 +171,14 @@ impl DnsDispatcher {
     /// its contents; the dispatcher never needs rebuilding.
     pub fn with_advanced_blocking(mut self, advanced_blocking: Arc<ArcSwap<AdvancedBlocking>>) -> Self {
         self.advanced_blocking = advanced_blocking;
+        self
+    }
+
+    /// Bound the time spent waiting for an answer (`server.client_timeout_ms`).
+    /// When recursion cannot produce a response in time, the client receives
+    /// SERVFAIL and the whole recursion is cancelled.
+    pub fn with_client_timeout(mut self, client_timeout: Duration) -> Self {
+        self.client_timeout = client_timeout;
         self
     }
 
@@ -609,7 +621,29 @@ impl RequestHandler for DnsDispatcher {
         };
 
         self.metrics.inc(&self.metrics.recursive);
-        match resolver.lookup(&qname, info.query.query_type()).await {
+        let lookup = match tokio::time::timeout(
+            self.client_timeout,
+            resolver.lookup(&qname, info.query.query_type()),
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(_elapsed) => {
+                debug!(
+                    query = %qname,
+                    client_timeout = ?self.client_timeout,
+                    "no answer within server.client_timeout_ms, replying SERVFAIL"
+                );
+                Err(DaygleError::Resolution {
+                    message: format!(
+                        "no answer within the client timeout of {} ms",
+                        self.client_timeout.as_millis()
+                    ),
+                    response_code: None,
+                })
+            }
+        };
+        match lookup {
             Ok(lookup) => {
                 let answers = lookup.answers().to_vec();
                 let authorities = lookup.authorities().to_vec();

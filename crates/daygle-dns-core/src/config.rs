@@ -89,6 +89,9 @@ pub struct ListenerUpdate {
     pub key_path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub certificate: Option<String>,
+    /// DoQ-only: QUIC connection idle timeout in seconds. Ignored for DoT.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub idle_timeout_secs: Option<u64>,
 }
 
 /// Partial updates for DoH.
@@ -174,6 +177,7 @@ impl RuntimeSettings {
             if let Some(v) = &d.cert_path { config.doq.cert_path = v.clone(); }
             if let Some(v) = &d.key_path { config.doq.key_path = v.clone(); }
             if let Some(v) = &d.certificate { config.doq.certificate = v.clone(); }
+            if let Some(v) = d.idle_timeout_secs { config.doq.idle_timeout_secs = v; }
         }
         if let Some(p) = &self.policy {
             if let Some(v) = &p.allowlist { config.policy.allowlist = v.clone(); }
@@ -225,6 +229,7 @@ impl RuntimeSettings {
                 cert_path: Some(config.doq.cert_path.clone()),
                 key_path: Some(config.doq.key_path.clone()),
                 certificate: (!config.doq.certificate.is_empty()).then(|| config.doq.certificate.clone()),
+                idle_timeout_secs: Some(config.doq.idle_timeout_secs),
             }),
             policy: Some(PolicyUpdate {
                 allowlist: Some(config.policy.allowlist.clone()),
@@ -278,6 +283,21 @@ impl DaygleConfig {
         if self.doq.enabled && self.doq.idle_timeout_secs < 30 {
             return Err(DaygleError::Config(
                 "doq.idle_timeout_secs must be >= 30 (RFC 9250 recommends 600)".to_string(),
+            ));
+        }
+        if !(1000..=10_000).contains(&self.server.client_timeout_ms) {
+            return Err(DaygleError::Config(
+                "server.client_timeout_ms must be in 1000..=10000".to_string(),
+            ));
+        }
+        if !(8..=65_536).contains(&self.server.udp_send_buffer_kb) {
+            return Err(DaygleError::Config(
+                "server.udp_send_buffer_kb must be in 8..=65536 (KiB)".to_string(),
+            ));
+        }
+        if !(8..=65_536).contains(&self.server.udp_recv_buffer_kb) {
+            return Err(DaygleError::Config(
+                "server.udp_recv_buffer_kb must be in 8..=65536 (KiB)".to_string(),
             ));
         }
         let rec = &self.recursive;
@@ -594,6 +614,18 @@ pub struct ServerSettings {
     pub tcp_timeout_ms: u64,
     /// Outbound response buffer size (bytes).
     pub response_buffer_size: usize,
+    /// Client Timeout (milliseconds): how long the server waits for an answer
+    /// before replying SERVFAIL. Applied to the recursive path; valid range
+    /// 1000-10000 (Technitium-style Client Timeout, default 2000).
+    pub client_timeout_ms: u64,
+    /// Plaintext UDP listener socket send buffer size, in KiB. The kernel may
+    /// round or double the requested value. Valid range 8-65536 (default
+    /// 2048). Does not apply to DoQ/QUIC sockets.
+    pub udp_send_buffer_kb: u32,
+    /// Plaintext UDP listener socket receive buffer size, in KiB. The kernel
+    /// may round or double the requested value. Valid range 8-65536 (default
+    /// 2048). Does not apply to DoQ/QUIC sockets.
+    pub udp_recv_buffer_kb: u32,
     /// Watch the configuration file and apply policy, upstream and listener
     /// changes without restarting.
     pub reload_enabled: bool,
@@ -611,6 +643,9 @@ impl Default for ServerSettings {
             tcp_enabled: true,
             tcp_timeout_ms: 5000,
             response_buffer_size: 4096,
+            client_timeout_ms: 2000,
+            udp_send_buffer_kb: 2048,
+            udp_recv_buffer_kb: 2048,
             reload_enabled: true,
             reload_interval_ms: 2000,
         }

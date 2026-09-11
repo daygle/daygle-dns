@@ -88,7 +88,15 @@
   }
 
   function reloadConsole() {
-    location.reload();
+    // A manual reload is a deliberate "move on" action: clear the recorded
+    // run snapshot as well, so the console comes back actionable instead of
+    // re-showing the done/error card. The auto-reload after an update goes
+    // through pingServer() below and deliberately keeps the snapshot so the
+    // completion confirmation is still visible.
+    api
+      .updateDismiss()
+      .then(() => location.reload())
+      .catch(() => location.reload());
   }
 
   function scheduleReload() {
@@ -311,14 +319,14 @@
           <p style="margin: 8px 0; color: var(--danger)">The update failed: {run.message}</p>
           <div style="display: flex; gap: 8px; margin-top: 8px">
             <button class="secondary" onclick={dismissRun}>Dismiss</button>
-            <button class="secondary" onclick={reloadConsole}>Reload console</button>
+            <button class="secondary" onclick={reloadConsole}>Reload Console</button>
           </div>
         {:else}
           <p style="margin: 8px 0">
             <span class="pill ok">✓</span> {run?.message || 'Update complete.'}
           </p>
           <div style="display: flex; gap: 8px; margin-top: 8px">
-            <button class="secondary" onclick={reloadConsole}>Reload console</button>
+            <button class="secondary" onclick={reloadConsole}>Reload Console</button>
             <button class="secondary" onclick={dismissRun}>Dismiss</button>
           </div>
           {#if waitingForServer}
