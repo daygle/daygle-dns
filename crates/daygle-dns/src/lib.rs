@@ -806,22 +806,19 @@ async fn bind_listeners(
     if config.server.udp_enabled {
         // Bind through a std socket so the kernel send/receive buffers can be
         // sized before the socket is wrapped for Tokio (the buffer sizes must
-        // be set before Windows picks them up on the first connect).
+        // be set before Windows picks them up on the first connect). These
+        // knobs use `socket2` because std::net::UdpSocket no longer exposes
+        // SO_SNDBUF/SO_RCVBUF setters.
         let std_socket = std::net::UdpSocket::bind(listen)?;
-        std_socket.set_send_buffer_size(
-            (config.server.udp_send_buffer_kb as usize)
+        let buffer_bytes = |kb: u32| {
+            (kb as usize)
                 .checked_mul(1024)
-                .ok_or_else(|| {
-                    DaygleError::Config("udp_send_buffer_kb is too large".to_string())
-                })?,
-        )?;
-        std_socket.set_recv_buffer_size(
-            (config.server.udp_recv_buffer_kb as usize)
-                .checked_mul(1024)
-                .ok_or_else(|| {
-                    DaygleError::Config("udp_recv_buffer_kb is too large".to_string())
-                })?,
-        )?;
+                .ok_or_else(|| DaygleError::Config("udp buffer size is too large".to_string()))
+        };
+        socket2::SockRef::from(&std_socket)
+            .set_send_buffer_size(buffer_bytes(config.server.udp_send_buffer_kb)?)?;
+        socket2::SockRef::from(&std_socket)
+            .set_recv_buffer_size(buffer_bytes(config.server.udp_recv_buffer_kb)?)?;
         std_socket.set_nonblocking(true)?;
         let socket = tokio::net::UdpSocket::from_std(std_socket)?;
         addrs.udp = Some(socket.local_addr()?);

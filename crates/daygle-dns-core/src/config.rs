@@ -210,6 +210,7 @@ impl RuntimeSettings {
                 cert_path: Some(config.dot.cert_path.clone()),
                 key_path: Some(config.dot.key_path.clone()),
                 certificate: (!config.dot.certificate.is_empty()).then(|| config.dot.certificate.clone()),
+                idle_timeout_secs: None,
             }),
             doh: Some(DohUpdate {
                 enabled: Some(config.doh.enabled),
