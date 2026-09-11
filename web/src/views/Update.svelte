@@ -358,6 +358,10 @@
           Complete the one-time bootstrap above to enable in-place updates
           from this page.
         </p>
+      {:else if info.updater_outdated === false}
+        <p class="muted" style="font-size: 0.85rem; margin: 8px 0 0">
+          No newer release is available; the installed version ({info.version}) is up to date.
+        </p>
       {:else}
         {#if isAdmin}
           <div style="display: flex; gap: 8px; margin-top: 8px">
