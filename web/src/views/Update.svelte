@@ -298,20 +298,14 @@
 
       {#if info.updater_bootstrap_required}
         <div class="bootstrap">
-          <p style="margin: 0 0 8px">
+          <p style="margin: 0">
             <strong>One-time bootstrap needed:</strong> the installed updater
             (from version {info.version}) predates the release-download update
             path, so an update started here cannot complete on this host. Run
-            the installer command below once - it swaps in the new binary and
-            provisions the update helper - and one-click updates work from
-            then on.
+            the installer command in the Manual Update Command card below once
+            - it swaps in the new binary and provisions the update helper -
+            and one-click updates work from then on.
           </p>
-          <div class="command-block">
-            <code>{info.update_command}</code>
-            <button class="secondary" onclick={copyCommand} disabled={copied || busy}>
-              {copied ? 'Copied' : 'Copy'}
-            </button>
-          </div>
         </div>
       {:else if info.updater_outdated && info.latest_release}
         <p class="muted" style="font-size: 0.82rem; margin: 8px 0 0">
@@ -342,7 +336,7 @@
           </div>
         {:else}
           <p style="margin: 8px 0">
-            <span class="pill ok">✓</span> {run?.message || 'Update complete.'}
+            <span style="color: var(--ok)">✓</span> {run?.message || 'Update complete.'}
           </p>
           <div style="display: flex; gap: 8px; margin-top: 8px">
             <button class="secondary" onclick={reloadConsole}>Reload Console</button>
@@ -395,13 +389,15 @@
 
   <div class="card" style="margin-bottom: 14px">
     <h3 style="margin-top: 0">Current Installation</h3>
-    <div class="form-grid">
-      <label><span>Installed Version</span><code>{info.version}</code></label>
-      <label><span>Latest Release</span>{#if info.latest_release}<code>v{info.latest_release}</code>{:else}Unknown{/if}</label>
-      <label><span>Config File</span>{info.has_config_file ? 'Detected' : 'Not detected'}</label>
-      <label><span>Service Manager</span>{info.has_systemd ? 'systemd' : 'Not detected'}</label>
-      <label><span>In-Place Update</span>{info.can_update ? 'Available' : 'Not available on this host'}</label>
-    </div>
+    <table>
+      <tbody>
+        <tr><td class="muted">Installed Version</td><td><code>{info.version}</code></td></tr>
+        <tr><td class="muted">Latest Release</td><td>{#if info.latest_release}<code>v{info.latest_release}</code>{:else}Unknown{/if}</td></tr>
+        <tr><td class="muted">Config File</td><td>{info.has_config_file ? 'Detected' : 'Not detected'}</td></tr>
+        <tr><td class="muted">Service Manager</td><td>{info.has_systemd ? 'systemd' : 'Not detected'}</td></tr>
+        <tr><td class="muted">In-Place Update</td><td>{info.can_update ? 'Available' : 'Not available on this host'}</td></tr>
+      </tbody>
+    </table>
     {#if !info.can_update}
       <p class="muted" style="font-size: 0.82rem; margin: 10px 0 0; max-width: 80ch">
         In-place updates need a Linux host managed by the installer (systemd
@@ -418,7 +414,7 @@
   </div>
 
   <div class="card" style="margin-bottom: 14px">
-    <h3 style="margin-top: 0">Update Command</h3>
+    <h3 style="margin-top: 0">Manual Update Command</h3>
     <p class="muted" style="font-size: 0.85rem; margin-bottom: 10px">
       Run this on the host to update all components the same way
       <code>install.sh</code> does.
@@ -432,6 +428,10 @@
     {#if info.note}
       <p class="muted" style="font-size: 0.85rem; margin-top: 10px">{info.note}</p>
     {/if}
+    <p class="muted" style="font-size: 0.85rem; margin-top: 10px">
+      The one-line installer is available directly from the project repository:
+      <a href={info.install_script} target="_blank" rel="noreferrer">{info.install_script}</a>
+    </p>
   </div>
 
   <div class="card" style="margin-bottom: 14px">
@@ -441,33 +441,12 @@
         <span class="preserve">{item}</span>
       {/each}
     </div>
-    <p class="muted" style="font-size: 0.85rem; margin-top: 10px">
-      The one-line installer is available directly from the project repository:
-      <a href={info.install_script} target="_blank" rel="noreferrer">{info.install_script}</a>
-    </p>
-  </div>
-
-  <div class="card">
-    <h3 style="margin-top: 0">Runtime Status</h3>
-    <table>
-      <tbody>
-        <tr><td class="muted">Version</td><td><code>{info.version}</code></td></tr>
-      </tbody>
-    </table>
   </div>
 {:else if busy}
   <p class="muted">Loading update details…</p>
 {/if}
 
 <style>
-  .form-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
-    gap: 12px;
-    align-items: end;
-  }
-  label { display: flex; flex-direction: column; gap: 4px; font-size: 0.85rem; }
-  label span { color: var(--muted); }
   code { font: inherit; color: var(--text); }
   .command-block {
     display: flex;
