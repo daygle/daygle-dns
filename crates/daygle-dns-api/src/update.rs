@@ -521,26 +521,37 @@ fn check_github_connectivity() -> Option<PreflightCheck> {
 static LATEST_RELEASE: std::sync::Mutex<Option<(String, std::time::Instant)>> =
     std::sync::Mutex::new(None);
 
-/// Cache lifetime for the latest-release lookup.
-const RELEASE_CACHE_SECS: u64 = 600;
+/// Cache lifetime for the latest-release lookup. Short enough that a freshly
+/// published release shows up in the console within ~2 minutes, long enough
+/// to stay well under GitHub's unauthenticated API budget.
+const RELEASE_CACHE_SECS: u64 = 120;
 
 /// Fetch the latest published release version (e.g. `"1.0.2"`), or `None`
 /// when GitHub is unreachable, rate-limited, or has no release. Mirrors the
 /// updater helper's resolution strategy: the GitHub API first, the
 /// `/releases/latest` HTML redirect as fallback.
 fn fetch_latest_release_version() -> Option<String> {
-    if let Some(guard) = LATEST_RELEASE.lock().ok() {
-        if let Some((ver, at)) = guard.as_ref() {
-            if at.elapsed().as_secs() < RELEASE_CACHE_SECS {
-                return Some(ver.clone());
-            }
+    // Serve the cached value while it is fresh. After the TTL, attempt a
+    // refresh but fall back to the last-known value on failure rather than
+    // forgetting it, so a rate-limited or unreachable GitHub shows the last
+    // known release instead of "unknown".
+    let cached = LATEST_RELEASE
+        .lock()
+        .ok()
+        .and_then(|g| g.as_ref().map(|(ver, at)| (ver.clone(), *at)));
+    if let Some((ver, at)) = cached.as_ref() {
+        if at.elapsed().as_secs() < RELEASE_CACHE_SECS {
+            return Some(ver.clone());
         }
     }
-    let version = fetch_latest_release_uncached()?;
-    if let Ok(mut guard) = LATEST_RELEASE.lock() {
-        *guard = Some((version.clone(), std::time::Instant::now()));
+    if let Some(version) = fetch_latest_release_uncached() {
+        if let Ok(mut guard) = LATEST_RELEASE.lock() {
+            *guard = Some((version.clone(), std::time::Instant::now()));
+        }
+        Some(version)
+    } else {
+        cached.map(|(ver, _)| ver)
     }
-    Some(version)
 }
 
 fn fetch_latest_release_uncached() -> Option<String> {
