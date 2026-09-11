@@ -49,6 +49,22 @@
     return run?.phase === 'done' && /successfully rolled back/i.test(run.message || '');
   }
 
+  let autoDismissTimer = null;
+
+  // Give the completion card a few seconds on screen after a successful
+  // update, then clear the recorded run so the console falls back to the
+  // actionable state (Update Now / banner). Rollbacks and errors keep
+  // waiting for the user to act.
+  $effect(() => {
+    if (run?.phase === 'done' && !isRollback(run)) {
+      if (autoDismissTimer) return;
+      autoDismissTimer = setTimeout(() => {
+        autoDismissTimer = null;
+        dismissRun();
+      }, 12000);
+    }
+  });
+
   let pollTimer = null;
   let reloadTimer = null;
   // Set while we are waiting for the restarted service to answer before
@@ -58,6 +74,7 @@
     waitingForServer = false;
     clearTimeout(pollTimer);
     clearTimeout(reloadTimer);
+    clearTimeout(autoDismissTimer);
   });
 
   function poll() {
@@ -182,6 +199,8 @@
   // result stops being shown. A dismiss while a run is active is refused
   // (409) and surfaces through startError.
   async function dismissRun() {
+    clearTimeout(autoDismissTimer);
+    autoDismissTimer = null;
     startError = '';
     try {
       await api.updateDismiss();
