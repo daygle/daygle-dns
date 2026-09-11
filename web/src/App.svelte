@@ -16,7 +16,7 @@
   import About from './views/About.svelte';
   import Update from './views/Update.svelte';
   import { icons } from './icons.svelte.js';
-  import { sidebar, setSidebar, isNarrow } from './nav.svelte.js';
+  import { sidebar, setSidebar, isNarrow, toggleSidebar } from './nav.svelte.js';
 
   let view = $state('status');
   // Zone preselected for the Records page (set when opening records from the Zones page).
@@ -197,7 +197,35 @@
       aria-label="Close navigation"
       onclick={() => setSidebar(false)}
     ></button>
+    <button
+      type="button"
+      class="fab"
+      class:hidden={sidebar.open}
+      aria-label="Open navigation"
+      onclick={() => setSidebar(true)}
+    >
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M3 6h18M3 12h18M3 18h18" />
+      </svg>
+    </button>
     <aside class:open={sidebar.open} class:closed={!sidebar.open}>
+      <div class="side-top">
+        <button
+          type="button"
+          class="menu-btn"
+          aria-label="Toggle navigation"
+          aria-expanded={sidebar.open}
+          onclick={toggleSidebar}
+        >
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            {#if sidebar.open}
+              <path d="M6 6l12 12M18 6L6 18" />
+            {:else}
+              <path d="M3 6h18M3 12h18M3 18h18" />
+            {/if}
+          </svg>
+        </button>
+      </div>
       <div class="brand">
         <span class="logo">⬡</span>
         <div>
@@ -291,6 +319,31 @@
   .brand { display: flex; gap: 10px; align-items: center; }
   .logo { font-size: 1.6rem; color: var(--accent); }
 
+  .side-top { display: flex; justify-content: flex-end; }
+  .menu-btn {
+    flex: 0 0 auto;
+    width: 38px;
+    height: 38px;
+    border-radius: 8px;
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    color: var(--text);
+    cursor: pointer;
+    padding: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .menu-btn:hover {
+    border-color: var(--accent);
+    color: var(--accent);
+  }
+  .menu-btn:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 1px;
+  }
+  .menu-btn svg { width: 20px; height: 20px; }
+
   nav { display: flex; flex-direction: column; gap: 4px; }
   .nav-btn {
     background: none;
@@ -332,11 +385,22 @@
 
   .backdrop { display: none; }
 
+  .fab { display: none; }
+
   main { flex: 1; padding: 24px 28px; }
 
-  /* Wide screens: the sidebar is in-flow and can be collapsed entirely. */
+  /* Wide screens: the sidebar is in-flow; collapsed it becomes a slim rail
+     holding just the menu toggle, so it can always be reopened. */
   @media (min-width: 900px) {
-    aside.closed { display: none; }
+    aside.closed {
+      width: 52px;
+      padding: 16px 6px;
+    }
+    aside.closed .side-top { justify-content: center; }
+    aside.closed .brand,
+    aside.closed nav,
+    aside.closed .user-box,
+    aside.closed .password-notice { display: none; }
   }
 
   /* Narrow screens: the sidebar becomes a slide-in overlay drawer. */
@@ -367,6 +431,30 @@
       transition: opacity 0.2s ease;
     }
     .backdrop.show { opacity: 1; pointer-events: auto; }
+
+    .fab {
+      display: inline-flex;
+      position: fixed;
+      top: 10px;
+      left: 10px;
+      z-index: 35;
+      width: 40px;
+      height: 40px;
+      border-radius: 8px;
+      background: var(--panel-2);
+      border: 1px solid var(--border);
+      color: var(--text);
+      cursor: pointer;
+      padding: 0;
+      align-items: center;
+      justify-content: center;
+    }
+    .fab:hover {
+      border-color: var(--accent);
+      color: var(--accent);
+    }
+    .fab svg { width: 22px; height: 22px; }
+    .fab.hidden { display: none; pointer-events: none; }
   }
 
   .modal-backdrop {

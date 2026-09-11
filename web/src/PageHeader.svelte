@@ -1,34 +1,8 @@
 <script>
-  import { sidebar, toggleSidebar } from './nav.svelte.js';
-
   let { icon, title, lead, tagline } = $props();
 </script>
 
 <div class="hero card">
-  <button
-    type="button"
-    class="menu-btn"
-    aria-label="Toggle navigation"
-    aria-expanded={sidebar.open}
-    onclick={toggleSidebar}
-  >
-    <svg
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      stroke-width="2"
-      stroke-linecap="round"
-      stroke-linejoin="round"
-      aria-hidden="true"
-    >
-      {#if sidebar.open}
-        <path d="M6 6l12 12M18 6L6 18" />
-      {:else}
-        <path d="M3 6h18M3 12h18M3 18h18" />
-      {/if}
-    </svg>
-  </button>
-
   <span class="hero-mark">
     <svg
       viewBox="0 0 24 24"
@@ -90,31 +64,5 @@
   .hero .muted {
     margin: 0;
     max-width: 76ch;
-  }
-  .menu-btn {
-    flex: 0 0 auto;
-    width: 40px;
-    height: 40px;
-    border-radius: 8px;
-    background: var(--panel-2);
-    border: 1px solid var(--border);
-    color: var(--text);
-    cursor: pointer;
-    padding: 0;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-  }
-  .menu-btn:hover {
-    border-color: var(--accent);
-    color: var(--accent);
-  }
-  .menu-btn:focus-visible {
-    outline: 2px solid var(--accent);
-    outline-offset: 1px;
-  }
-  .menu-btn svg {
-    width: 22px;
-    height: 22px;
   }
 </style>
