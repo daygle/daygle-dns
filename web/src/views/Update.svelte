@@ -317,9 +317,10 @@
           <p style="margin: 8px 0">
             <span class="pill ok">✓</span> {run?.message || 'Update complete.'}
           </p>
-          <button class="secondary" onclick={reloadConsole} style="margin-top: 8px">
-            Reload console
-          </button>
+          <div style="display: flex; gap: 8px; margin-top: 8px">
+            <button class="secondary" onclick={reloadConsole}>Reload console</button>
+            <button class="secondary" onclick={dismissRun}>Dismiss</button>
+          </div>
           {#if waitingForServer}
             <p class="muted" style="font-size: 0.8rem; margin-top: 10px">
               Waiting for the restarted service to come back, then reloading automatically…
