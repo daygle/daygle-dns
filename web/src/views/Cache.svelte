@@ -1,5 +1,7 @@
 <script>
   import { api, configOk, formatApiError } from '../api.js';
+  import PageHeader from '../PageHeader.svelte';
+  import { icons } from '../icons.svelte.js';
 
   let cache = $state(null);
   let config = $state(null);
@@ -78,12 +80,11 @@
   const hitRate = $derived(total ? ((cache.hits / total) * 100).toFixed(1) : '0.0');
 </script>
 
-<h1>Cache</h1>
-<p class="muted" style="max-width: 75ch">
-  The recursive resolver caches positive and negative DNS answers to reduce
-  upstream traffic and improve response times. Cache entries are kept in memory
-  and are cleared when the service restarts.
-</p>
+<PageHeader
+  icon={icons.cache}
+  title="Cache"
+  tagline="The recursive resolver caches positive and negative DNS answers to reduce upstream traffic and improve response times. Cache entries are kept in memory and are cleared when the service restarts."
+/>
 
 {#if notice}
   <div class="card" style="border-color: var(--ok); margin-bottom: 14px">{notice}</div>

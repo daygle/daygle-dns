@@ -1,5 +1,7 @@
 <script>
   import { api, formatApiError } from '../api.js';
+  import PageHeader from '../PageHeader.svelte';
+  import { icons } from '../icons.svelte.js';
 
   // The zone to preselect, passed when coming from the Zones page.
   let { zoneId = null, onSelectZone = () => {} } = $props();
@@ -136,11 +138,11 @@
   $effect(() => { loadZones(); });
 </script>
 
-<h1>Records</h1>
-<p class="muted" style="max-width: 75ch">
-  View and edit the DNS records of an authoritative zone. Pick a zone below;
-  secondary zones are refreshed from their master and are read-only here.
-</p>
+<PageHeader
+  icon={icons.records}
+  title="Records"
+  tagline="View and edit the DNS records of an authoritative zone. Pick a zone below; secondary zones are refreshed from their master and are read-only here."
+/>
 
 {#if notice}
   <div class="card notice" class:error={notice.startsWith('Error:')}>{notice}</div>

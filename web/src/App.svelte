@@ -15,6 +15,8 @@
   import DomainLists from './views/DomainLists.svelte';
   import About from './views/About.svelte';
   import Update from './views/Update.svelte';
+  import { icons } from './icons.svelte.js';
+  import { sidebar, setSidebar, isNarrow } from './nav.svelte.js';
 
   let view = $state('status');
   // Zone preselected for the Records page (set when opening records from the Zones page).
@@ -133,24 +135,6 @@
     recordZoneId = zoneId;
   }
 
-  // Inline SVG icon paths (24x24 viewBox, stroke style) for the sidebar nav.
-  const icons = {
-    status: 'M13 2 3 14h7l-1 8 10-12h-7l1-8z',
-    zones: 'M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zm0 0v20M2 12h20',
-    records: 'M4 19.5A2.5 2.5 0 0 1 6.5 17H20M4 19.5A2.5 2.5 0 0 0 6.5 22H20V2H6.5A2.5 2.5 0 0 0 4 4.5v15zM9 7h6M9 11h6M9 15h4',
-    'split-horizon': 'M9 9 2 12l7 3 3 7 3-7 7-3-7-3-3-7-3 7zm0 0 5 5M14 14l-5 5',
-    blocklists: 'M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z',
-    'domain-lists': 'M12 21s-7.5-4.9-7.5-11a7.5 7.5 0 0 1 15 0c0 6.1-7.5 11-7.5 11zM12 13a3 3 0 1 0 0-6 3 3 0 0 0 0 6z',
-    'advanced-blocking': 'M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10zM9 12l2 2 4-4',
-    cache: 'M3 3v18h18M7 15l4-6 4 4 5-8',
-    certificates: 'M19 11H5a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7a2 2 0 0 0-2-2zM7 11V7a5 5 0 0 1 10 0v4',
-    users: 'M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75',
-    logs: 'M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01',
-    settings: 'M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6zm7.4-3a7.4 7.4 0 0 0-.1-1.2l2.1-1.6-2-3.5-2.5 1a7.3 7.3 0 0 0-2-1.2L14.4 3h-4l-.5 2.5a7.3 7.3 0 0 0-2 1.2l-2.5-1-2 3.5 2.1 1.6a7.4 7.4 0 0 0 0 2.4L3.4 14.8l2 3.5 2.5-1a7.3 7.3 0 0 0 2 1.2l.5 2.5h4l.5-2.5a7.3 7.3 0 0 0 2-1.2l2.5 1 2-3.5-2.1-1.6c.07-.4.1-.8.1-1.2z',
-    about: 'M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20zM12 16v-4M12 8h.01',
-    update: 'M21 12a9 9 0 1 1-2.64-6.36M21 3v6h-6',
-  };
-
   const tabs = [
     { id: 'status', label: 'Status', icon: icons.status },
     { id: 'zones', label: 'Zones', icon: icons.zones, viewer: true },
@@ -206,7 +190,14 @@
     </div>
   {/if}
   <div class="shell">
-    <aside>
+    <button
+      type="button"
+      class="backdrop"
+      class:show={sidebar.open}
+      aria-label="Close navigation"
+      onclick={() => setSidebar(false)}
+    ></button>
+    <aside class:open={sidebar.open} class:closed={!sidebar.open}>
       <div class="brand">
         <span class="logo">⬡</span>
         <div>
@@ -219,7 +210,10 @@
           <button
             class="nav-btn"
             class:active={view === tab.id}
-            onclick={() => (view = tab.id)}
+            onclick={() => {
+              view = tab.id;
+              if (isNarrow()) setSidebar(false);
+            }}
           >
             <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
               <path d={tab.icon} />
@@ -336,7 +330,44 @@
     font-size: 0.8rem;
   }
 
+  .backdrop { display: none; }
+
   main { flex: 1; padding: 24px 28px; }
+
+  /* Wide screens: the sidebar is in-flow and can be collapsed entirely. */
+  @media (min-width: 900px) {
+    aside.closed { display: none; }
+  }
+
+  /* Narrow screens: the sidebar becomes a slide-in overlay drawer. */
+  @media (max-width: 899px) {
+    aside {
+      position: fixed;
+      top: 0;
+      left: 0;
+      height: 100vh;
+      width: 240px;
+      z-index: 40;
+      transform: translateX(-100%);
+      transition: transform 0.2s ease;
+    }
+    aside.open { transform: translateX(0); }
+    main { padding: 16px 14px; }
+
+    .backdrop {
+      display: block;
+      position: fixed;
+      inset: 0;
+      z-index: 30;
+      background: rgba(0, 0, 0, 0.5);
+      border: none;
+      border-radius: 0;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.2s ease;
+    }
+    .backdrop.show { opacity: 1; pointer-events: auto; }
+  }
 
   .modal-backdrop {
     position: fixed;

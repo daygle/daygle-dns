@@ -1,5 +1,7 @@
 <script>
   import { api } from '../api.js';
+  import PageHeader from '../PageHeader.svelte';
+  import { icons } from '../icons.svelte.js';
 
   let groups = $state([]);
   let filterAaaa = $state(false);
@@ -145,12 +147,11 @@
   });
 </script>
 
-<h1>Advanced Blocking</h1>
-<p class="muted">
-  Per-client-group allow/block policies. Each group targets a set of client
-  networks and applies its own allow list, block list and regex patterns; allow
-  rules win over block rules, and groups are evaluated top to bottom.
-</p>
+<PageHeader
+  icon={icons['advanced-blocking']}
+  title="Advanced Blocking"
+  tagline="Per-client-group allow/block policies. Each group targets a set of client networks and applies its own allow list, block list and regex patterns; allow rules win over block rules, and groups are evaluated top to bottom."
+/>
 
 {#if error}
   <div class="card" style="border-color: var(--danger); color: var(--danger); margin-bottom: 14px">

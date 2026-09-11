@@ -1,5 +1,7 @@
 <script>
   import { api, formatApiError } from '../api.js';
+  import PageHeader from '../PageHeader.svelte';
+  import { icons } from '../icons.svelte.js';
   import { prefs, setDateTimePrefs, timeZoneOptions, FORMAT_OPTIONS, formatDateTime } from '../datetime.svelte.js';
 
   let config = $state(null);
@@ -171,7 +173,7 @@
   }
 </script>
 
-<h1>Settings</h1>
+<PageHeader icon={icons.settings} title="Settings" />
 
 {#if notice}
   <div class="card" style="border-color: var(--ok); margin-bottom: 14px">{notice}</div>

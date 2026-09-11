@@ -1,5 +1,7 @@
 <script>
   import { api, formatApiError, formatUptime } from '../api.js';
+  import PageHeader from '../PageHeader.svelte';
+  import { icons } from '../icons.svelte.js';
   import { formatTime, formatTimeShort } from '../datetime.svelte.js';
 
   let status = $state(null);
@@ -146,7 +148,7 @@
   }
 </script>
 
-<h1>Server Status</h1>
+<PageHeader icon={icons.status} title="Server Status" />
 
 {#if error}
   <div class="card" style="border-color: var(--danger); color: var(--danger)">

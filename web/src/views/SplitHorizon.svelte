@@ -1,5 +1,7 @@
 <script>
   import { api } from '../api.js';
+  import PageHeader from '../PageHeader.svelte';
+  import { icons } from '../icons.svelte.js';
 
   let networks = $state([]);
   let entries = $state([]);
@@ -154,19 +156,20 @@
   });
 </script>
 
-<h1>Split Horizon</h1>
-<p class="muted">
-  Serve different answers for the same domain depending on the client's
-  network - e.g. clients on <code>LAN</code> get
-  <code>10.0.0.5</code> for <code>intranet.example.com</code> while everyone
-  else gets the public address. Entries are matched in order: the first entry
-  whose domain matches and whose networks contain the client wins, so the
-  specific internal views must come before the public fallback. Use the
-  ↑/↓ buttons to reorder entries for the same domain. Each entry serves
-  typed answers (A, AAAA, MX, TXT, CNAME, SRV) to queries of the matching
-  type - a CNAME answers every type - and an entry with no networks matches
-  every client, so the public fallback needs no network list.
-</p>
+<PageHeader icon={icons['split-horizon']} title="Split Horizon">
+  {#snippet tagline()}
+    Serve different answers for the same domain depending on the client's
+    network - e.g. clients on <code>LAN</code> get
+    <code>10.0.0.5</code> for <code>intranet.example.com</code> while everyone
+    else gets the public address. Entries are matched in order: the first entry
+    whose domain matches and whose networks contain the client wins, so the
+    specific internal views must come before the public fallback. Use the
+    ↑/↓ buttons to reorder entries for the same domain. Each entry serves
+    typed answers (A, AAAA, MX, TXT, CNAME, SRV) to queries of the matching
+    type - a CNAME answers every type - and an entry with no networks matches
+    every client, so the public fallback needs no network list.
+  {/snippet}
+</PageHeader>
 
 {#if notice}
   <div class="card" style="border-color: var(--danger); color: var(--danger)">{notice}</div>

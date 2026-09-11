@@ -1,5 +1,7 @@
 <script>
   import { api } from '../api.js';
+  import PageHeader from '../PageHeader.svelte';
+  import { icons } from '../icons.svelte.js';
   import { formatDateTime } from '../datetime.svelte.js';
 
   // Two tabs: the in-memory server log and the searchable per-query history.
@@ -154,7 +156,7 @@
   $effect(() => { if (tab === 'queries' && qTotal === 0 && qEntries.length === 0 && !qError && !qLoading) runQuery(1); });
 </script>
 
-<h1>Logs</h1>
+<PageHeader icon={icons.logs} title="Logs" />
 
 <div class="tabs">
   <button class="tab" class:active={tab === 'server'} onclick={() => { tab = 'server'; refresh(); }}>Server Log</button>

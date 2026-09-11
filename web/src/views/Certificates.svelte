@@ -1,5 +1,7 @@
 <script>
   import { api, formatApiError, getStoredUser } from '../api.js';
+  import PageHeader from '../PageHeader.svelte';
+  import { icons } from '../icons.svelte.js';
   import { formatDate } from '../datetime.svelte.js';
 
   let certs = $state([]);
@@ -114,14 +116,15 @@
   }
 </script>
 
-<h1>Certificates</h1>
-<p class="muted" style="max-width: 75ch">
-  TLS certificates used by the DNS over TLS / HTTPS / QUIC listeners. Create a
-  self-signed certificate here, or upload a certificate + private key pair
-  (e.g. one issued by a CA). The PEM material is stored in the server database
-  and never returned to the browser. Pick a certificate for each listener on
-  the <strong>Settings</strong> page.
-</p>
+<PageHeader icon={icons.certificates} title="Certificates">
+  {#snippet tagline()}
+    TLS certificates used by the DNS over TLS / HTTPS / QUIC listeners. Create a
+    self-signed certificate here, or upload a certificate + private key pair
+    (e.g. one issued by a CA). The PEM material is stored in the server database
+    and never returned to the browser. Pick a certificate for each listener on
+    the <strong>Settings</strong> page.
+  {/snippet}
+</PageHeader>
 
 {#if notice}
   <div class="card" style="border-color: var(--ok); margin-bottom: 14px">{notice}</div>

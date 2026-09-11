@@ -1,5 +1,7 @@
 <script>
   import { api, formatApiError, getStoredUser } from '../api.js';
+  import PageHeader from '../PageHeader.svelte';
+  import { icons } from '../icons.svelte.js';
   import { onDestroy } from 'svelte';
 
   let info = $state(null);
@@ -226,18 +228,11 @@
   }
 </script>
 
-<h1>Update</h1>
-
-<p class="muted" style="max-width: 75ch">
-  The recommended way to update all components is the project's in-place
-  update. It downloads the latest prebuilt release, verifies its checksum,
-  installs it in place, and preserves your configuration, zones,
-  certificates, and database - no Rust toolchain is required on the host.
-  (When no prebuilt release matches, it falls back to building from source.)
-  The privileged install step runs as its own dedicated systemd service, so
-  the server account never needs root rights. On qualifying hosts you can
-  trigger it right from here; elsewhere it runs as a one-liner on the host.
-</p>
+<PageHeader
+  icon={icons.update}
+  title="Update"
+  tagline="The recommended way to update all components is the project's in-place update. It downloads the latest prebuilt release, verifies its checksum, installs it in place, and preserves your configuration, zones, certificates, and database - no Rust toolchain is required on the host. (When no prebuilt release matches, it falls back to building from source.) The privileged install step runs as its own dedicated systemd service, so the server account never needs root rights. On qualifying hosts you can trigger it right from here; elsewhere it runs as a one-liner on the host."
+/>
 
 {#if error}
   <div class="card" style="border-color: var(--danger); color: var(--danger); margin-bottom: 14px">{error}</div>

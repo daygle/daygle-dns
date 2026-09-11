@@ -1,5 +1,7 @@
 <script>
   import { api, formatUptime } from '../api.js';
+  import PageHeader from '../PageHeader.svelte';
+  import { icons } from '../icons.svelte.js';
 
   let status = $state(null);
   let error = $state(null);
@@ -40,16 +42,12 @@
   ];
 </script>
 
-<h1>About Daygle DNS</h1>
-
-<div class="hero card">
-  <div class="hero-mark">⬡</div>
-  <div>
-    <h2>Daygle DNS</h2>
-    <p class="lead">A modern, secure, and manageable DNS server for homes, labs, and networks.</p>
-    <p class="muted">Designed to combine authoritative DNS, recursive resolution, filtering, caching, and a practical web console in one service.</p>
-  </div>
-</div>
+<PageHeader
+  icon={icons.about}
+  title="Daygle DNS"
+  lead="A modern, secure, and manageable DNS server for homes, labs, and networks."
+  tagline="Designed to combine authoritative DNS, recursive resolution, filtering, caching, and a practical web console in one service."
+/>
 
 <div class="feature-grid">
   {#each features as feature (feature.title)}
@@ -105,11 +103,6 @@
 
 <style>
   h2, h3 { margin-top: 0; }
-  .hero { display: flex; gap: 20px; align-items: center; margin-bottom: 16px; }
-  .hero-mark { color: var(--accent); font-size: 3.2rem; line-height: 1; }
-  .hero h2 { margin-bottom: 6px; }
-  .lead { font-size: 1.05rem; margin: 0 0 8px; }
-  .hero p { max-width: 760px; }
   .feature-grid, .details-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 16px; }
   .feature-grid { margin-bottom: 16px; }
   .feature { display: flex; gap: 14px; }
@@ -121,8 +114,4 @@
   .footer-card { margin-top: 16px; display: flex; justify-content: space-between; gap: 16px; align-items: center; flex-wrap: wrap; }
   .footer-card p { margin: 0; }
   a { color: var(--accent); }
-  @media (max-width: 560px) {
-    .hero { align-items: flex-start; }
-    .hero-mark { font-size: 2.4rem; }
-  }
 </style>

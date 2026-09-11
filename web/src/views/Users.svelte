@@ -1,5 +1,7 @@
 <script>
   import { api, formatApiError, getStoredUser } from '../api.js';
+  import PageHeader from '../PageHeader.svelte';
+  import { icons } from '../icons.svelte.js';
   import { formatDate } from '../datetime.svelte.js';
 
   let users = $state([]);
@@ -164,12 +166,11 @@
   }
 </script>
 
-<h1>Users</h1>
-<p class="muted" style="max-width: 75ch">
-  Console accounts for signing in to this dashboard. Accounts live in the
-  server database (not the config file); every change signs out the affected
-  account's sessions immediately. Click a row to edit the account.
-</p>
+<PageHeader
+  icon={icons.users}
+  title="Users"
+  tagline="Console accounts for signing in to this dashboard. Accounts live in the server database (not the config file); every change signs out the affected account's sessions immediately. Click a row to edit the account."
+/>
 
 {#if notice}
   <div class="card" style="border-color: var(--ok); margin-bottom: 14px">{notice}</div>

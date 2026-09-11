@@ -1,5 +1,7 @@
 <script>
   import { api, formatApiError } from '../api.js';
+  import PageHeader from '../PageHeader.svelte';
+  import { icons } from '../icons.svelte.js';
 
   let { onOpenRecords = () => {} } = $props();
 
@@ -194,12 +196,11 @@
   $effect(() => { loadZones(); });
 </script>
 
-<h1>Zones</h1>
-<p class="muted" style="max-width: 75ch">
-  Host authoritative zones backed by SQLite. Add a primary zone to serve
-  records directly, or a secondary zone replicated from a master via AXFR/IXFR.
-  Manage a zone's DNS records from the Records page.
-</p>
+<PageHeader
+  icon={icons.zones}
+  title="Zones"
+  tagline="Host authoritative zones backed by SQLite. Add a primary zone to serve records directly, or a secondary zone replicated from a master via AXFR/IXFR. Manage a zone's DNS records from the Records page."
+/>
 
 {#if notice}
   <div class="card notice" class:error={notice.startsWith('Error:')}>{notice}</div>
