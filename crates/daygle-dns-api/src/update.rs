@@ -707,7 +707,20 @@ pub fn start(exe: &Path, config_dir: Option<&Path>) -> Result<u32, StartError> {
     }
     let dir = workspace_dir();
     std::fs::create_dir_all(&dir).map_err(StartError::Io)?;
-    std::fs::write(dir.join("update.sh"), UPDATE_SCRIPT).map_err(StartError::Io)?;
+    if let Err(e) = std::fs::write(dir.join("update.sh"), UPDATE_SCRIPT) {
+        // A stale workspace left behind by the old sudo-era updater (or a
+        // manual root diagnostic) can be root-owned and unwritable by the
+        // service account. Its contents - the helper script, the log, and the
+        // state snapshot - are regenerated every run, so drop it and start
+        // fresh rather than failing the whole update.
+        if dir.is_dir() {
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).map_err(StartError::Io)?;
+            std::fs::write(dir.join("update.sh"), UPDATE_SCRIPT).map_err(StartError::Io)?;
+        } else {
+            return Err(StartError::Io(e));
+        }
+    }
     // Each run starts a fresh log so output cannot grow without bound across
     // repeated updates.
     let _ = std::fs::write(dir.join("update.log"), b"");
