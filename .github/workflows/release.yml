@@ -8,6 +8,11 @@ on:
 permissions:
   contents: write
 
+# A re-pushed tag must not race itself into a half-published release.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   # Primary, guaranteed artifact: glibc build for distro-managed x86_64 hosts
   # (Debian, Ubuntu, Fedora, Arch - exactly what install.sh targets).
@@ -20,8 +25,11 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Cache cargo builds
+        uses: Swatinem/rust-cache@v2
+
       - name: Build release binary
-        run: cargo build --release -p daygle-dns
+        run: cargo build --locked --release -p daygle-dns
 
       - name: Smoke test
         run: ./target/release/daygle-dns --version
@@ -60,11 +68,14 @@ jobs:
       - name: Install musl toolchain
         run: sudo apt-get update && sudo apt-get install -y musl-tools perl
 
+      - name: Cache cargo builds
+        uses: Swatinem/rust-cache@v2
+
       - name: Build static binary
         env:
           # Fully static: runs on any Linux regardless of glibc version.
           RUSTFLAGS: -C target-feature=+crt-static
-        run: cargo build --release -p daygle-dns --target x86_64-unknown-linux-musl
+        run: cargo build --locked --release -p daygle-dns --target x86_64-unknown-linux-musl
 
       - name: Stage artifact
         run: |
@@ -96,8 +107,14 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Cache cargo builds
+        uses: Swatinem/rust-cache@v2
+
       - name: Build release binary
-        run: cargo build --release -p daygle-dns
+        run: cargo build --locked --release -p daygle-dns
+
+      - name: Smoke test
+        run: ./target/release/daygle-dns --version
 
       - name: Stage artifact
         run: |
@@ -116,9 +133,97 @@ jobs:
           path: stage/*
           if-no-files-found: error
 
+  # Best-effort desktop-platform builds. The server itself is portable
+  # (cfg-guarded where it matters); only the in-place updater is Linux-only,
+  # so these are "download and run" binaries with no auto-update path.
+  build-windows-x86_64:
+    name: Build windows-x86_64
+    runs-on: windows-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo builds
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build release binary
+        run: cargo build --locked --release -p daygle-dns
+
+      - name: Smoke test
+        shell: bash
+        run: ./target/release/daygle-dns.exe --version
+
+      - name: Stage artifact
+        shell: bash
+        run: |
+          mkdir -p stage
+          cp target/release/daygle-dns.exe stage/daygle-dns-windows-x86_64.exe
+
+      - name: Checksum
+        shell: bash
+        working-directory: stage
+        run: sha256sum daygle-dns-windows-x86_64.exe > daygle-dns-windows-x86_64.exe.sha256
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: daygle-dns-windows-x86_64
+          path: stage/*
+          if-no-files-found: error
+
+  build-darwin-aarch64:
+    name: Build darwin-aarch64
+    runs-on: macos-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo builds
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build release binary
+        run: cargo build --locked --release -p daygle-dns
+
+      - name: Smoke test
+        run: ./target/release/daygle-dns --version
+
+      # Arm64 macOS binaries get an ad-hoc signature from the linker, so the
+      # binary runs without a codesigning step. Notarization is out of scope.
+      - name: Stage artifact
+        run: |
+          mkdir -p stage
+          cp target/release/daygle-dns stage/daygle-dns-darwin-aarch64
+
+      - name: Checksum
+        working-directory: stage
+        run: shasum -a 256 daygle-dns-darwin-aarch64 > daygle-dns-darwin-aarch64.sha256
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: daygle-dns-darwin-aarch64
+          path: stage/*
+          if-no-files-found: error
+
   publish:
     name: Publish GitHub release
-    needs: [build-glibc-x86_64, build-musl-x86_64, build-aarch64]
+    # Every build job must be in `needs` so its artifacts finish uploading
+    # before the release is created; only the glibc job gates success, so a
+    # best-effort platform failure never blocks the release.
+    needs:
+      [
+        build-glibc-x86_64,
+        build-musl-x86_64,
+        build-aarch64,
+        build-windows-x86_64,
+        build-darwin-aarch64,
+      ]
     if: always() && needs.build-glibc-x86_64.result == 'success'
     runs-on: ubuntu-latest
     steps:
