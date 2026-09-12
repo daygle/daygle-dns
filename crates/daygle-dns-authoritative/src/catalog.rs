@@ -35,7 +35,9 @@ pub(crate) fn sig_duration(settings: &AuthoritativeSettings) -> Duration {
 /// read lock per query.
 pub struct AuthorityCatalog {
     store: ZoneStore,
-    settings: AuthoritativeSettings,
+    // `ArcSwap` so the console can hot-swap the per-request gate settings
+    // (AXFR and dynamic-update policy) without rebuilding the zones.
+    settings: arc_swap::ArcSwap<AuthoritativeSettings>,
     // `ArcSwap` lets readers clone out an owned `Arc<Catalog>` (which is `Send`)
     // instead of holding a lock guard across an `.await` in the dispatcher.
     catalog: arc_swap::ArcSwap<Catalog>,
@@ -51,7 +53,7 @@ impl AuthorityCatalog {
         let split_horizon = Arc::new(build_split_horizon(&store)?);
         Ok(Self {
             store,
-            settings,
+            settings: arc_swap::ArcSwap::from_pointee(settings),
             catalog: arc_swap::ArcSwap::from_pointee(catalog),
             split_horizon: arc_swap::ArcSwap::from(split_horizon),
         })
@@ -61,27 +63,51 @@ impl AuthorityCatalog {
         &self.store
     }
 
-    pub fn settings(&self) -> &AuthoritativeSettings {
-        &self.settings
+    /// A snapshot of the authoritative settings. Returned owned (not a
+    /// reference) so callers may hold it across `.await` points.
+    pub fn settings(&self) -> std::sync::Arc<AuthoritativeSettings> {
+        self.settings.load_full()
+    }
+
+    /// Hot-swap the per-request gate settings: the AXFR/IXFR policy and the
+    /// RFC 2136 dynamic-update policy. The dispatcher and update handler read
+    /// these per request, so changes apply immediately.
+    ///
+    /// DNSSEC signing parameters are deliberately untouched: they are baked
+    /// into the signed zone data at build time and still require a restart.
+    pub fn update_gate_settings(
+        &self,
+        axfr_enabled: bool,
+        axfr_networks: Vec<String>,
+        allow_dynamic_updates: bool,
+        update_networks: Vec<String>,
+    ) {
+        self.settings.rcu(|s| {
+            let mut s = AuthoritativeSettings::clone(s);
+            s.axfr_enabled = axfr_enabled;
+            s.axfr_networks = axfr_networks.clone();
+            s.allow_dynamic_updates = allow_dynamic_updates;
+            s.update_networks = update_networks.clone();
+            s
+        });
     }
 
     /// The TSIG key ring built from the authoritative settings. Keys are
     /// validated at load time; an invalid key is a configuration error that
     /// surfaces at startup/reload rather than at first use.
     pub fn tsig_key_ring(&self) -> std::sync::Arc<crate::tsig::TsigKeyRing> {
-        use std::sync::OnceLock;
-        static CACHE_INVALID: OnceLock<()> = OnceLock::new();
-        let _ = CACHE_INVALID;
-        let ring = crate::tsig::TsigKeyRing::from_configs(&self.settings.tsig_keys)
+        let settings = self.settings.load_full();
+        let ring = crate::tsig::TsigKeyRing::from_configs(&settings.tsig_keys)
             .unwrap_or_default();
         std::sync::Arc::new(ring)
     }
 
     /// The TSIG key (if any) required for transfers of `zone_name`.
     pub fn tsig_transfer_key(&self, zone_name: &str) -> Option<crate::tsig::TsigKey> {
-        let ring = crate::tsig::TsigKeyRing::from_configs(&self.settings.tsig_keys)
+        let settings = self.settings.load_full();
+        let ring = crate::tsig::TsigKeyRing::from_configs(&settings.tsig_keys)
             .unwrap_or_default();
-        for binding in &self.settings.tsig_transfer_zones {
+        for binding in &settings.tsig_transfer_zones {
             if let Some((zone, key)) = binding.split_once('=') {
                 if zone.trim_end_matches('.').eq_ignore_ascii_case(zone_name.trim_end_matches('.')) {
                     return ring.get_by_config_name(key).cloned();
@@ -93,9 +119,10 @@ impl AuthorityCatalog {
 
     /// The TSIG key (if any) required for updates to `zone_name`.
     pub fn tsig_update_key(&self, zone_name: &str) -> Option<crate::tsig::TsigKey> {
-        let ring = crate::tsig::TsigKeyRing::from_configs(&self.settings.tsig_keys)
+        let settings = self.settings.load_full();
+        let ring = crate::tsig::TsigKeyRing::from_configs(&settings.tsig_keys)
             .unwrap_or_default();
-        for binding in &self.settings.tsig_update_zones {
+        for binding in &settings.tsig_update_zones {
             if let Some((zone, key)) = binding.split_once('=') {
                 if zone.trim_end_matches('.').eq_ignore_ascii_case(zone_name.trim_end_matches('.')) {
                     return ring.get_by_config_name(key).cloned();
@@ -119,7 +146,8 @@ impl AuthorityCatalog {
     /// Rebuild the catalog and split-horizon index from the database,
     /// applying DNSSEC signing when keys are present and signing is enabled.
     pub fn reload(&self) -> Result<()> {
-        let catalog = build_catalog(&self.store, &self.settings, self.settings.dnssec_enabled)?;
+        let settings = self.settings.load_full();
+        let catalog = build_catalog(&self.store, &settings, settings.dnssec_enabled)?;
         self.catalog.store(Arc::new(catalog));
         let split_horizon = Arc::new(build_split_horizon(&self.store)?);
         self.split_horizon.store(split_horizon);

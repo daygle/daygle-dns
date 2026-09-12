@@ -209,7 +209,14 @@
       </svg>
     </button>
     <aside class:open={sidebar.open} class:closed={!sidebar.open}>
-      <div class="side-top">
+      <div class="side-head">
+        <div class="brand">
+          <span class="logo">⬡</span>
+          <div>
+            <strong>Daygle DNS</strong>
+            <div class="muted" style="font-size:0.75rem">Modern DNS server</div>
+          </div>
+        </div>
         <button
           type="button"
           class="menu-btn"
@@ -226,18 +233,13 @@
           </svg>
         </button>
       </div>
-      <div class="brand">
-        <span class="logo">⬡</span>
-        <div>
-          <strong>Daygle DNS</strong>
-          <div class="muted" style="font-size:0.75rem">Modern DNS server</div>
-        </div>
-      </div>
       <nav>
         {#each tabs as tab (tab.id)}
           <button
             class="nav-btn"
             class:active={view === tab.id}
+            title={!sidebar.open ? tab.label : undefined}
+            aria-label={tab.label}
             onclick={() => {
               view = tab.id;
               if (isNarrow()) setSidebar(false);
@@ -252,13 +254,17 @@
       </nav>
       {#if user}
         <div class="user-box">
-          <div class="muted" style="font-size: 0.75rem">Signed in as</div>
-          <div>{user.username}</div>
-          <span class="pill" class:ok={!isViewer} class:err={isViewer}>
-            {isViewer ? 'Read-Only' : 'Admin'}
-          </span>
-          <button class="secondary logout" onclick={openPassword}>Change Password</button>
-          <button class="secondary logout" onclick={handleLogout}>Sign out</button>
+          <div class="user-row" title={isViewer ? 'Read-only account' : 'Full admin access'}>
+            <span class="avatar" aria-hidden="true">{user.username.slice(0, 1).toUpperCase()}</span>
+            <div class="user-meta">
+              <div class="user-name">{user.username}</div>
+              <div class="user-role" class:admin={!isViewer}>{isViewer ? 'Read-Only' : 'Admin'}</div>
+            </div>
+          </div>
+          <div class="user-actions">
+            <button class="secondary" onclick={openPassword} title="Change your password">Change Password</button>
+            <button class="secondary" onclick={handleLogout} title="End this session">Sign out</button>
+          </div>
         </div>
       {/if}
       {#if passwordNotice}
@@ -319,7 +325,12 @@
   .brand { display: flex; gap: 10px; align-items: center; }
   .logo { font-size: 1.6rem; color: var(--accent); }
 
-  .side-top { display: flex; justify-content: flex-end; }
+  .side-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+  }
   .menu-btn {
     flex: 0 0 auto;
     width: 38px;
@@ -365,14 +376,57 @@
 
   .user-box {
     margin-top: auto;
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    border-radius: 10px;
     padding: 10px;
-    border-top: 1px solid var(--border);
     display: flex;
     flex-direction: column;
-    gap: 4px;
-    font-size: 0.85rem;
+    gap: 10px;
   }
-  .logout { margin-top: 8px; }
+  .user-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    min-width: 0;
+  }
+  .avatar {
+    flex: 0 0 32px;
+    width: 32px;
+    height: 32px;
+    border-radius: 50%;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(91, 140, 255, 0.16);
+    color: var(--accent);
+    font-weight: 700;
+    font-size: 0.9rem;
+    text-transform: uppercase;
+  }
+  .user-meta { min-width: 0; }
+  .user-name {
+    font-weight: 600;
+    font-size: 0.9rem;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .user-role {
+    font-size: 0.72rem;
+    color: var(--muted);
+  }
+  .user-role.admin { color: var(--accent); }
+  .user-actions {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 6px;
+  }
+  .user-actions button {
+    padding: 6px 4px;
+    font-size: 0.8rem;
+    border-radius: 6px;
+  }
 
   .password-notice {
     margin-top: 10px;
@@ -389,18 +443,27 @@
 
   main { flex: 1; padding: 24px 28px; }
 
-  /* Wide screens: the sidebar is in-flow; collapsed it becomes a slim rail
-     holding just the menu toggle, so it can always be reopened. */
+  /* Wide screens: the sidebar is in-flow; collapsed it becomes a slim icon rail
+     so navigation stays available while saving horizontal space. */
   @media (min-width: 900px) {
     aside.closed {
       width: 52px;
       padding: 16px 6px;
     }
-    aside.closed .side-top { justify-content: center; }
+    aside.closed .side-head { justify-content: center; }
     aside.closed .brand,
-    aside.closed nav,
     aside.closed .user-box,
     aside.closed .password-notice { display: none; }
+    /* Icon-only navigation: labels are hidden and the buttons center. */
+    aside.closed nav {
+      min-height: 0;
+      overflow-y: auto;
+    }
+    aside.closed .nav-btn {
+      justify-content: center;
+      padding: 9px 0;
+    }
+    aside.closed .nav-btn span { display: none; }
   }
 
   /* Narrow screens: the sidebar becomes a slide-in overlay drawer. */

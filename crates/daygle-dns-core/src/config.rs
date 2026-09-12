@@ -49,6 +49,7 @@ pub struct RuntimeSettings {
     pub doh: Option<DohUpdate>,
     pub doq: Option<ListenerUpdate>,
     pub policy: Option<PolicyUpdate>,
+    pub authoritative: Option<AuthoritativeUpdate>,
 }
 
 /// Partial updates for the recursive resolver (matches the API's shape).
@@ -70,6 +71,48 @@ pub struct RecursiveUpdate {
     pub prefetch_min_queries: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub serve_stale_secs: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_cache_ttl: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failure_cache_ttl: Option<u32>,
+}
+
+/// Partial updates for authoritative-zone defaults (the runtime-tunable
+/// subset of [`AuthoritativeSettings`], matching the API's shape).
+///
+/// AXFR and dynamic-update gates are read from the live catalog per request,
+/// so these apply immediately. NOTIFY sender/listener hooks are built at
+/// startup: `notify_*` fields are persisted and validated but take effect on
+/// the next restart.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct AuthoritativeUpdate {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_record_ttl: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub axfr_enabled: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub axfr_networks: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub allow_dynamic_updates: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub update_networks: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub notify_enabled: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub notify_targets: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub notify_listen_enabled: Option<bool>,
+}
+
+impl AuthoritativeUpdate {
+    /// Normalize user-supplied network lists (trim entries, drop empties).
+    fn normalize_networks(items: Vec<String>) -> Vec<String> {
+        items
+            .into_iter()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect()
+    }
 }
 
 /// Partial updates for TLS listeners (DoT and DoQ share the shape).
@@ -136,6 +179,7 @@ impl RuntimeSettings {
             && self.doh.is_none()
             && self.doq.is_none()
             && self.policy.is_none()
+            && self.authoritative.is_none()
     }
 
     /// Apply the overlay to `config` in place. `None` fields are untouched.
@@ -149,6 +193,8 @@ impl RuntimeSettings {
             if let Some(v) = r.prefetch_ttl_fraction_pct { config.recursive.prefetch_ttl_fraction_pct = v; }
             if let Some(v) = r.prefetch_min_queries { config.recursive.prefetch_min_queries = v; }
             if let Some(v) = r.serve_stale_secs { config.recursive.serve_stale_secs = v; }
+            if let Some(v) = r.max_cache_ttl { config.recursive.max_cache_ttl = v; }
+            if let Some(v) = r.failure_cache_ttl { config.recursive.failure_cache_ttl = v; }
         }
         if let Some(d) = &self.dot {
             if let Some(v) = d.enabled { config.dot.enabled = v; }
@@ -185,6 +231,16 @@ impl RuntimeSettings {
             if let Some(v) = p.filter_aaaa { config.policy.filter_aaaa = v; }
             if let Some(v) = &p.filter_aaaa_except { config.policy.filter_aaaa_except = v.clone(); }
         }
+        if let Some(a) = &self.authoritative {
+            if let Some(v) = a.default_record_ttl { config.authoritative.default_record_ttl = v; }
+            if let Some(v) = a.axfr_enabled { config.authoritative.axfr_enabled = v; }
+            if let Some(v) = &a.axfr_networks { config.authoritative.axfr_networks = AuthoritativeUpdate::normalize_networks(v.clone()); }
+            if let Some(v) = a.allow_dynamic_updates { config.authoritative.allow_dynamic_updates = v; }
+            if let Some(v) = &a.update_networks { config.authoritative.update_networks = AuthoritativeUpdate::normalize_networks(v.clone()); }
+            if let Some(v) = a.notify_enabled { config.authoritative.notify_enabled = v; }
+            if let Some(v) = &a.notify_targets { config.authoritative.notify_targets = AuthoritativeUpdate::normalize_networks(v.clone()); }
+            if let Some(v) = a.notify_listen_enabled { config.authoritative.notify_listen_enabled = v; }
+        }
     }
 
     /// Capture the DB-owned fields of `config` as a full overlay, so a save
@@ -201,6 +257,8 @@ impl RuntimeSettings {
                 prefetch_ttl_fraction_pct: Some(config.recursive.prefetch_ttl_fraction_pct),
                 prefetch_min_queries: Some(config.recursive.prefetch_min_queries),
                 serve_stale_secs: Some(config.recursive.serve_stale_secs),
+                max_cache_ttl: Some(config.recursive.max_cache_ttl),
+                failure_cache_ttl: Some(config.recursive.failure_cache_ttl),
             }),
             dot: Some(ListenerUpdate {
                 enabled: Some(config.dot.enabled),
@@ -237,6 +295,16 @@ impl RuntimeSettings {
                 blocklist: Some(config.policy.blocklist.clone()),
                 filter_aaaa: Some(config.policy.filter_aaaa),
                 filter_aaaa_except: Some(config.policy.filter_aaaa_except.clone()),
+            }),
+            authoritative: Some(AuthoritativeUpdate {
+                default_record_ttl: Some(config.authoritative.default_record_ttl),
+                axfr_enabled: Some(config.authoritative.axfr_enabled),
+                axfr_networks: Some(config.authoritative.axfr_networks.clone()),
+                allow_dynamic_updates: Some(config.authoritative.allow_dynamic_updates),
+                update_networks: Some(config.authoritative.update_networks.clone()),
+                notify_enabled: Some(config.authoritative.notify_enabled),
+                notify_targets: Some(config.authoritative.notify_targets.clone()),
+                notify_listen_enabled: Some(config.authoritative.notify_listen_enabled),
             }),
         }
     }
@@ -329,6 +397,16 @@ impl DaygleConfig {
                 "recursive.serve_stale_secs must be <= 604800 (7 days)".to_string(),
             ));
         }
+        if rec.max_cache_ttl > 0 && rec.max_cache_ttl < rec.min_cache_ttl {
+            return Err(DaygleError::Config(
+                "recursive.max_cache_ttl must be >= recursive.min_cache_ttl when both are set".to_string(),
+            ));
+        }
+        if rec.failure_cache_ttl > 7 * 24 * 3600 {
+            return Err(DaygleError::Config(
+                "recursive.failure_cache_ttl must be <= 604800 (7 days)".to_string(),
+            ));
+        }
         if !self.api.users.is_empty() {
             for user in &self.api.users {
                 if user.username.trim().is_empty() {
@@ -358,6 +436,11 @@ impl DaygleConfig {
             ));
         }
         let dnssec = &self.authoritative;
+        if dnssec.default_record_ttl == 0 {
+            return Err(DaygleError::Config(
+                "authoritative.default_record_ttl must be >= 1".to_string(),
+            ));
+        }
         if dnssec.dnssec_sig_validity_days == 0 {
             return Err(DaygleError::Config(
                 "authoritative.dnssec_sig_validity_days must be >= 1".to_string(),
@@ -674,11 +757,24 @@ pub struct RecursiveSettings {
     pub attempts: usize,
     /// Validate DNSSEC responses (sets AD and rejects bogus chains).
     pub dnssec_validate: bool,
-    /// Lower bound, in seconds, applied to cached TTLs.
+    /// Lower bound, in seconds, applied to cached *positive* TTLs.
+    /// A record whose authoritative TTL is below this is kept in cache for at
+    /// least this long so very-short-TTL answers are not churned out of the
+    /// cache immediately.
     pub min_cache_ttl: u32,
-    /// Upper bound, in seconds, for caching negative (NXDOMAIN/NODATA) answers.
-    /// Hickory derives the authoritative TTL from the SOA; this caps it.
+    /// Upper bound, in seconds, for caching *negative* (NXDOMAIN/NODATA)
+    /// answers. Hickory derives the authoritative negative TTL from the SOA;
+    /// this caps it.
     pub negative_cache_ttl: u32,
+    /// Upper bound, in seconds, applied to cached *positive* TTLs at insert
+    /// time. Records whose TTL exceeds this are clamped down so tracking-heavy
+    /// domains cannot pin themselves in cache for weeks.
+    pub max_cache_ttl: u32,
+    /// TTL, in seconds, for caching *failure responses* (SERVFAIL and, when the
+    /// upstream returns an explicit code, NXDOMAIN/NODATA that arrives as an
+    /// error). A cached failure blocks repeated lookups to a broken upstream
+    /// for this long; 0 disables failure caching.
+    pub failure_cache_ttl: u32,
     /// Conditional forwarding: queries for these zones are resolved by the
     /// zone's dedicated upstreams instead of the default ones. The most
     /// specific (deepest) matching zone wins.
@@ -714,6 +810,8 @@ impl Default for RecursiveSettings {
             dnssec_validate: true,
             min_cache_ttl: 0,
             negative_cache_ttl: 3600,
+            max_cache_ttl: 0,
+            failure_cache_ttl: 10,
             conditional_zones: vec![],
             prefetch_enabled: true,
             prefetch_ttl_fraction_pct: 10,
@@ -748,6 +846,9 @@ pub struct AuthoritativeSettings {
     pub default_primary_ns: String,
     /// Default SOA contact mailbox used when a zone is created.
     pub default_admin_mailbox: String,
+    /// Default TTL (seconds) used for records that do not specify one (e.g.
+    /// the console's Records page pre-fills this value for new records).
+    pub default_record_ttl: u32,
     /// Whether zones with signing keys are DNSSEC-signed on reload.
     pub dnssec_enabled: bool,
     /// RRSIG validity window in days. The DNSSEC maintenance task re-signs
@@ -815,6 +916,7 @@ impl Default for AuthoritativeSettings {
             zones_dir: None,
             default_primary_ns: "ns1.daygle.test.".to_string(),
             default_admin_mailbox: "admin.daygle.test.".to_string(),
+            default_record_ttl: 3600,
             dnssec_enabled: true,
             dnssec_sig_validity_days: 14,
             dnssec_rollover_days: 90,

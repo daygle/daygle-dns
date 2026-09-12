@@ -908,6 +908,16 @@ fn normalize_recursive_upstreams(items: &[String]) -> Vec<String> {
         .collect()
 }
 
+/// Canonicalize CIDR network allow-lists (AXFR and dynamic-update networks).
+fn normalize_policy_networks(items: &[String]) -> Vec<String> {
+    normalize_recursive_upstreams(items)
+}
+
+/// Canonicalize NOTIFY targets (`IP`, `IP:port`, `[IPv6]:port`).
+fn normalize_notify_targets(items: &[String]) -> Vec<String> {
+    normalize_recursive_upstreams(items)
+}
+
 fn date_serial() -> u32 {
     let now = chrono::Utc::now();
     (now.year() as u32) * 10_000 + now.month() * 100 + now.day()
@@ -2148,6 +2158,24 @@ pub struct SettingsUpdate {
     pub doq: Option<ListenerUpdate>,
     pub api: Option<ApiUpdate>,
     pub policy: Option<PolicyUpdate>,
+    pub authoritative: Option<AuthoritativeUpdate>,
+}
+
+/// Partial update for authoritative-zone settings surfaced in the console.
+/// Mirrors `daygle_dns_core::config::AuthoritativeUpdate` (the DB overlay
+/// shape); kept separate so the HTTP API and persistence formats evolve
+/// independently.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuthoritativeUpdate {
+    pub default_record_ttl: Option<u32>,
+    pub axfr_enabled: Option<bool>,
+    pub axfr_networks: Option<Vec<String>>,
+    pub allow_dynamic_updates: Option<bool>,
+    pub update_networks: Option<Vec<String>>,
+    pub notify_enabled: Option<bool>,
+    pub notify_targets: Option<Vec<String>>,
+    pub notify_listen_enabled: Option<bool>,
 }
 
 /// Partial update for policy-engine settings surfaced in the console (only the
@@ -2182,6 +2210,8 @@ pub struct RecursiveUpdate {
     pub prefetch_ttl_fraction_pct: Option<u32>,
     pub prefetch_min_queries: Option<u32>,
     pub serve_stale_secs: Option<u64>,
+    pub max_cache_ttl: Option<u32>,
+    pub failure_cache_ttl: Option<u32>,
 }
 
 /// Fields shared by the DoT and DoQ listeners.
@@ -2276,6 +2306,12 @@ pub async fn update_settings(
         if let Some(v) = r.serve_stale_secs {
             config.recursive.serve_stale_secs = v;
         }
+        if let Some(v) = r.max_cache_ttl {
+            config.recursive.max_cache_ttl = v;
+        }
+        if let Some(v) = r.failure_cache_ttl {
+            config.recursive.failure_cache_ttl = v;
+        }
     }
     if let Some(d) = &update.dot {
         if let Some(v) = d.enabled {
@@ -2366,6 +2402,41 @@ pub async fn update_settings(
             config.api.cors_origins = v.clone();
         }
     }
+    let mut authoritative_changed = false;
+    if let Some(a) = &update.authoritative {
+        if let Some(v) = a.default_record_ttl {
+            config.authoritative.default_record_ttl = v;
+            authoritative_changed = true;
+        }
+        if let Some(v) = a.axfr_enabled {
+            config.authoritative.axfr_enabled = v;
+            authoritative_changed = true;
+        }
+        if let Some(v) = &a.axfr_networks {
+            config.authoritative.axfr_networks = normalize_policy_networks(v);
+            authoritative_changed = true;
+        }
+        if let Some(v) = a.allow_dynamic_updates {
+            config.authoritative.allow_dynamic_updates = v;
+            authoritative_changed = true;
+        }
+        if let Some(v) = &a.update_networks {
+            config.authoritative.update_networks = normalize_policy_networks(v);
+            authoritative_changed = true;
+        }
+        if let Some(v) = a.notify_enabled {
+            config.authoritative.notify_enabled = v;
+            authoritative_changed = true;
+        }
+        if let Some(v) = &a.notify_targets {
+            config.authoritative.notify_targets = normalize_notify_targets(v);
+            authoritative_changed = true;
+        }
+        if let Some(v) = a.notify_listen_enabled {
+            config.authoritative.notify_listen_enabled = v;
+            authoritative_changed = true;
+        }
+    }
     let mut policy_changed = false;
     if let Some(p) = &update.policy {
         if let Some(v) = &p.allowlist {
@@ -2430,6 +2501,18 @@ pub async fn update_settings(
         if let Some(rebuild) = &state.request_dns_rebuild {
             rebuild();
         }
+    }
+    // Hot-swap the per-request authoritative gates (AXFR + dynamic-update
+    // policy) so the change applies to in-flight DNS traffic immediately,
+    // not just after a restart. NOTIFY hooks are startup-built and need a
+    // restart; the persisted config already carries them.
+    if authoritative_changed {
+        state.catalog.update_gate_settings(
+            config.authoritative.axfr_enabled,
+            config.authoritative.axfr_networks.clone(),
+            config.authoritative.allow_dynamic_updates,
+            config.authoritative.update_networks.clone(),
+        );
     }
     // Rebuild the policy engine so a Filter-AAAA change applies immediately,
     // regardless of whether the config-file watcher is enabled.

@@ -6,6 +6,10 @@
   // The zone to preselect, passed when coming from the Zones page.
   let { zoneId = null, onSelectZone = () => {} } = $props();
 
+  // Server-wide default TTL (Settings → Zones & Records), used to pre-fill
+  // the TTL field of new records.
+  let defaultTtl = $state(3600);
+
   const TYPES = ['A', 'AAAA', 'CNAME', 'MX', 'TXT', 'NS', 'SRV', 'PTR', 'CAA'];
 
   let zones = $state([]);
@@ -101,7 +105,7 @@
   function startEdit(record) {
     edit = record
       ? { ...record, isNew: false }
-      : { name: '', rtype: 'A', content: '', ttl: 3600, priority: 0, isNew: true };
+      : { name: '', rtype: 'A', content: '', ttl: defaultTtl, priority: 0, isNew: true };
   }
 
   async function saveEdit() {
@@ -112,7 +116,7 @@
         name: edit.name,
         rtype: edit.rtype,
         content: edit.content,
-        ttl: Number(edit.ttl) || 3600,
+        ttl: Number(edit.ttl) || defaultTtl,
         priority: Number(edit.priority) || 0,
       });
       edit = null;
@@ -135,7 +139,13 @@
     }
   }
 
-  $effect(() => { loadZones(); });
+  $effect(() => {
+    loadZones();
+    api.config().then((cfg) => {
+      const ttl = cfg?.authoritative?.default_record_ttl;
+      if (Number(ttl) > 0) defaultTtl = Number(ttl);
+    }).catch(() => {});
+  });
 </script>
 
 <PageHeader

@@ -23,12 +23,13 @@ mod cache_assist;
 mod upstream;
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use cache_assist::{cache_key, CacheAssistant, PrefetchConfig};
 use daygle_dns_core::config::{ConditionalZoneConfig, RecursiveSettings};
 use daygle_dns_core::error::{DaygleError, Result};
 use daygle_dns_core::Metrics;
+use hickory_proto::op::Query;
 use hickory_proto::rr::{Name, RecordType};
 use hickory_resolver::config::{ResolverConfig, ResolverOpts};
 use hickory_resolver::lookup::Lookup;
@@ -36,7 +37,6 @@ use hickory_resolver::net::runtime::TokioRuntimeProvider;
 use hickory_resolver::TokioResolver;
 use tracing::{debug, info, warn};
 
-pub use cache_assist::STALE_TTL_SECS;
 pub use upstream::parse_upstreams;
 
 /// A thread-safe recursive resolver.
@@ -136,6 +136,8 @@ impl RecursiveResolver {
             min_queries: settings.prefetch_min_queries,
             window: Duration::from_secs(settings.prefetch_window_secs),
             serve_stale_secs: settings.serve_stale_secs,
+            max_cache_ttl: settings.max_cache_ttl,
+            failure_cache_ttl: settings.failure_cache_ttl,
         }));
 
         Ok(Self {
@@ -209,6 +211,23 @@ impl Inner {
             response_code: None,
         })?;
         let key = cache_key(&name, record_type);
+
+        // Replay a fresh cached failure before any upstream round trip, so a
+        // broken or refusing upstream is not hammered on every client query.
+        // The code is replayed as a Resolution error so the dispatcher surfaces
+        // the right RCODE (an empty Lookup would wrongly read as NoError).
+        if let Some(code) = inner.cache_assist.cached_failure_code(&key) {
+            debug!(
+                name = %key.name,
+                code,
+                "serving cached failure response"
+            );
+            return Err(DaygleError::Resolution {
+                message: "cached failure response".to_string(),
+                response_code: Some(code),
+            });
+        }
+
         match Self::resolve(Arc::clone(&inner), name, record_type, true).await {
             Ok(lookup) => Ok(lookup),
             Err(e @ DaygleError::Resolution { response_code, .. }) => {
@@ -216,13 +235,25 @@ impl Inner {
                 // covered by a serve-stale snapshot; negative answers
                 // (NXDOMAIN etc.) are real answers, never stale-served.
                 if response_code.is_none() {
-                    if let Some(stale) = inner.cache_assist.on_failure(&key) {
+                    if let Some(stale) = inner.cache_assist.stale_answer(&key) {
                         warn!(
                             name = %key.name,
                             error = %e,
                             "upstream failed; serving stale answer"
                         );
                         return Ok(stale);
+                    }
+                } else if let Some(code) = response_code {
+                    // Negative answers (NXDOMAIN/NODATA etc.) and upstream error
+                    // codes: cache the failure for next time (when enabled).
+                    if inner.cache_assist.failure_cache_ttl() > 0 {
+                        let until = Instant::now()
+                            + Duration::from_secs(inner.cache_assist.failure_cache_ttl() as u64);
+                        let query = Query::query(
+                            Name::from_utf8(key.name.clone()).unwrap_or_default(),
+                            RecordType::from(key.rtype),
+                        );
+                        inner.cache_assist.record_failure(&key, &query, code, until);
                     }
                 }
                 Err(e)
