@@ -93,11 +93,11 @@ impl BoundServer {
         let mut new = DaygleConfig::load(&path)?;
         // The DB overlay owns the console-managed runtime settings: re-apply
         // it so a file edit cannot silently revert GUI-made changes.
-        if let Ok(Some(overlay)) = self
-            .shared
-            .catalog
-            .store()
-            .get_runtime_settings::<daygle_dns_core::config::RuntimeSettings>()
+        if let Ok(Some(overlay)) =
+            self.shared
+                .catalog
+                .store()
+                .get_runtime_settings::<daygle_dns_core::config::RuntimeSettings>()
         {
             overlay.apply_to(&mut new);
             new.validate()?;
@@ -110,9 +110,9 @@ impl BoundServer {
                 .send(ReloadCommand::Rebuild { ack: Some(ack_tx) })
                 .await
                 .map_err(|_| DaygleError::Internal("DNS supervisor is gone".to_string()))?;
-            ack_rx
-                .await
-                .map_err(|_| DaygleError::Internal("DNS supervisor did not ack reload".to_string()))??;
+            ack_rx.await.map_err(|_| {
+                DaygleError::Internal("DNS supervisor did not ack reload".to_string())
+            })??;
         }
         Ok(())
     }
@@ -184,7 +184,9 @@ pub async fn bind_with(
             overlay.apply_to(&mut config);
         }
         None => {
-            store.put_runtime_settings(&daygle_dns_core::config::RuntimeSettings::capture(&config))?;
+            store.put_runtime_settings(&daygle_dns_core::config::RuntimeSettings::capture(
+                &config,
+            ))?;
             logs.push(
                 daygle_dns_core::LogLevel::Info,
                 "api",
@@ -280,11 +282,16 @@ pub async fn bind_with(
     // Inbound NOTIFY: masters trigger an immediate secondary-zone refresh.
     // Handled on the regular DNS listeners (OpCode::Notify interception), so
     // no extra socket is bound.
-    let notify_inbound = match (config.authoritative.notify_listen_enabled, refresher.clone()) {
-        (true, Some(refresher)) => Some(Arc::new(daygle_dns_authoritative::notify::NotifyInbound::new(
-            config.authoritative.secondary_zones.clone(),
-            refresher,
-        ))),
+    let notify_inbound = match (
+        config.authoritative.notify_listen_enabled,
+        refresher.clone(),
+    ) {
+        (true, Some(refresher)) => Some(Arc::new(
+            daygle_dns_authoritative::notify::NotifyInbound::new(
+                config.authoritative.secondary_zones.clone(),
+                refresher,
+            ),
+        )),
         (true, None) => {
             warn!(
                 "notify_listen_enabled is set but no secondary zones are configured; \
@@ -560,9 +567,14 @@ async fn start_listeners(
     .with_query_db_logger(shared.query_db_logger.clone());
     let mut server = Server::new(dispatcher.clone());
     let mut snapshot = ListenerAddrs::default();
-    let doq_task =
-        bind_listeners(&config, &shared.catalog.store(), &dispatcher, &mut server, &mut snapshot)
-            .await?;
+    let doq_task = bind_listeners(
+        &config,
+        shared.catalog.store(),
+        &dispatcher,
+        &mut server,
+        &mut snapshot,
+    )
+    .await?;
     addrs.store(Arc::new(snapshot));
     Ok(spawn_listeners(server, doq_task))
 }
@@ -657,9 +669,14 @@ async fn start_listeners_with(
     .with_query_db_logger(shared.query_db_logger.clone());
     let mut server = Server::new(dispatcher.clone());
     let mut snapshot = ListenerAddrs::default();
-    let doq_task =
-        bind_listeners(config, &shared.catalog.store(), &dispatcher, &mut server, &mut snapshot)
-            .await?;
+    let doq_task = bind_listeners(
+        config,
+        shared.catalog.store(),
+        &dispatcher,
+        &mut server,
+        &mut snapshot,
+    )
+    .await?;
     addrs.store(Arc::new(snapshot));
     Ok(spawn_listeners(server, doq_task))
 }
@@ -724,13 +741,11 @@ fn materialize_one(
     if certificate.is_empty() {
         return Ok(());
     }
-    let cert = store
-        .get_tls_certificate(certificate)?
-        .ok_or_else(|| {
-            DaygleError::Config(format!(
-                "{label} references an unknown managed certificate '{certificate}'"
-            ))
-        })?;
+    let cert = store.get_tls_certificate(certificate)?.ok_or_else(|| {
+        DaygleError::Config(format!(
+            "{label} references an unknown managed certificate '{certificate}'"
+        ))
+    })?;
     let crt = dir.join(format!("{certificate}.crt"));
     let key = dir.join(format!("{certificate}.key"));
     write_if_changed(&crt, cert.cert_pem.as_bytes())?;
@@ -848,12 +863,7 @@ async fn bind_listeners(
         let listener = tokio::net::TcpListener::bind(addr).await?;
         addrs.dot = Some(listener.local_addr()?);
         let tls_config = daygle_dns_dot::build_tls_config(&config.dot)?;
-        daygle_dns_dot::register_dot(
-            server,
-            listener,
-            tls_config,
-            Duration::from_secs(10),
-        )?;
+        daygle_dns_dot::register_dot(server, listener, tls_config, Duration::from_secs(10))?;
         info!(addr = %addrs.dot.expect("addr set above"), "DNS over TLS listening");
     }
 
@@ -935,12 +945,14 @@ fn import_zone_files(
 
         let zone = match catalog.store().find_zone_by_name(name) {
             Ok(Some(z)) => z,
-            Ok(None) => catalog
-                .store()
-                .create_zone(&daygle_dns_authoritative::model::ZoneInput {
-                    name: name.to_string(),
-                    ..Default::default()
-                })?,
+            Ok(None) => {
+                catalog
+                    .store()
+                    .create_zone(&daygle_dns_authoritative::model::ZoneInput {
+                        name: name.to_string(),
+                        ..Default::default()
+                    })?
+            }
             Err(e) => return Err(e),
         };
         catalog.store().replace_records(&zone.id, &records)?;

@@ -11,11 +11,7 @@ use hickory_proto::rr::RecordType;
 /// A config with rate limiting enabled, loopback NOT exempt (tests run from
 /// 127.0.0.1). Each test gives the counter it exercises a small budget and
 /// the other a large one so the two limits never interfere.
-fn rate_limited_config(
-    db: &std::path::Path,
-    client_max: u32,
-    domain_max: u32,
-) -> DaygleConfig {
+fn rate_limited_config(db: &std::path::Path, client_max: u32, domain_max: u32) -> DaygleConfig {
     let mut cfg = base_config(db);
     cfg.rate_limit.enabled = true;
     cfg.rate_limit.client_max_queries = client_max;

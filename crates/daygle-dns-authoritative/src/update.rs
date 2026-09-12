@@ -53,16 +53,33 @@ pub async fn handle_update_with_notify<R: ResponseHandler>(
         Ok(zone) => zone,
         Err(_) => {
             warn!("dynamic update rejected: zone section must contain exactly one record");
-            return respond(update, response_edns, response_handle, ResponseCode::FormErr)
-                .await;
+            return respond(
+                update,
+                response_edns,
+                response_handle,
+                ResponseCode::FormErr,
+            )
+            .await;
         }
     };
     if zone_query.query_type() != RecordType::SOA {
         warn!("dynamic update rejected: zone type must be SOA");
-        return respond(update, response_edns, response_handle, ResponseCode::FormErr).await;
+        return respond(
+            update,
+            response_edns,
+            response_handle,
+            ResponseCode::FormErr,
+        )
+        .await;
     }
     if zone_query.query_class() != DNSClass::IN {
-        return respond(update, response_edns, response_handle, ResponseCode::Refused).await;
+        return respond(
+            update,
+            response_edns,
+            response_handle,
+            ResponseCode::Refused,
+        )
+        .await;
     }
     let zone_name = lower_name(&zone_query.name().to_string());
 
@@ -75,7 +92,13 @@ pub async fn handle_update_with_notify<R: ResponseHandler>(
             client = %update.src(),
             "dynamic update refused by policy"
         );
-        return respond(update, response_edns, response_handle, ResponseCode::Refused).await;
+        return respond(
+            update,
+            response_edns,
+            response_handle,
+            ResponseCode::Refused,
+        )
+        .await;
     }
 
     // -- TSIG gate (RFC 8945) ---------------------------------------------
@@ -83,8 +106,7 @@ pub async fn handle_update_with_notify<R: ResponseHandler>(
     // before any zone state is read or modified.
     if let Some(required) = catalog.tsig_update_key(&zone_name) {
         match crate::tsig::verify_request(
-            &crate::tsig::TsigKeyRing::from_configs(&settings.tsig_keys)
-                .unwrap_or_default(),
+            &crate::tsig::TsigKeyRing::from_configs(&settings.tsig_keys).unwrap_or_default(),
             update.as_slice(),
             update.metadata.id,
         ) {
@@ -93,15 +115,33 @@ pub async fn handle_update_with_notify<R: ResponseHandler>(
             }
             crate::tsig::TsigVerifyOutcome::Valid { .. } => {
                 debug!(zone = %zone_name, "dynamic update signed with wrong TSIG key");
-                return respond(update, response_edns, response_handle, ResponseCode::Refused).await;
+                return respond(
+                    update,
+                    response_edns,
+                    response_handle,
+                    ResponseCode::Refused,
+                )
+                .await;
             }
             crate::tsig::TsigVerifyOutcome::Invalid(failure) => {
                 debug!(zone = %zone_name, ?failure, "dynamic update TSIG verification failed");
-                return respond(update, response_edns, response_handle, ResponseCode::Refused).await;
+                return respond(
+                    update,
+                    response_edns,
+                    response_handle,
+                    ResponseCode::Refused,
+                )
+                .await;
             }
             crate::tsig::TsigVerifyOutcome::Unsigned => {
                 debug!(zone = %zone_name, "dynamic update requires TSIG");
-                return respond(update, response_edns, response_handle, ResponseCode::Refused).await;
+                return respond(
+                    update,
+                    response_edns,
+                    response_handle,
+                    ResponseCode::Refused,
+                )
+                .await;
             }
         }
     }
@@ -111,11 +151,23 @@ pub async fn handle_update_with_notify<R: ResponseHandler>(
         Ok(Some(zone)) => zone,
         Ok(None) => {
             debug!(zone = %zone_name, "dynamic update for unhosted zone");
-            return respond(update, response_edns, response_handle, ResponseCode::NotAuth).await;
+            return respond(
+                update,
+                response_edns,
+                response_handle,
+                ResponseCode::NotAuth,
+            )
+            .await;
         }
         Err(e) => {
             warn!(zone = %zone_name, error = %e, "zone lookup failed for update");
-            return respond(update, response_edns, response_handle, ResponseCode::ServFail).await;
+            return respond(
+                update,
+                response_edns,
+                response_handle,
+                ResponseCode::ServFail,
+            )
+            .await;
         }
     };
 
@@ -123,19 +175,37 @@ pub async fn handle_update_with_notify<R: ResponseHandler>(
         Ok(list) => list,
         Err(e) => {
             warn!(error = %e, "secondary-zone lookup failed for update");
-            return respond(update, response_edns, response_handle, ResponseCode::ServFail).await;
+            return respond(
+                update,
+                response_edns,
+                response_handle,
+                ResponseCode::ServFail,
+            )
+            .await;
         }
     };
     if secondary_ids.iter().any(|s| s.zone_id == zone.id) {
         debug!(zone = %zone.name, "dynamic update rejected for secondary zone");
-        return respond(update, response_edns, response_handle, ResponseCode::Refused).await;
+        return respond(
+            update,
+            response_edns,
+            response_handle,
+            ResponseCode::Refused,
+        )
+        .await;
     }
 
     let records = match store.list_records(&zone.id) {
         Ok(records) => records,
         Err(e) => {
             warn!(zone = %zone.name, error = %e, "record lookup failed for update");
-            return respond(update, response_edns, response_handle, ResponseCode::ServFail).await;
+            return respond(
+                update,
+                response_edns,
+                response_handle,
+                ResponseCode::ServFail,
+            )
+            .await;
         }
     };
 
@@ -143,7 +213,13 @@ pub async fn handle_update_with_notify<R: ResponseHandler>(
     for prereq in update.prerequisites() {
         let name = lower_name(&prereq.name.to_string());
         if !name_in_zone(&name, &zone.name) {
-            return respond(update, response_edns, response_handle, ResponseCode::NotZone).await;
+            return respond(
+                update,
+                response_edns,
+                response_handle,
+                ResponseCode::NotZone,
+            )
+            .await;
         }
         if let Err(code) = check_prerequisite(&zone, &records, prereq, &name) {
             debug!(
@@ -161,7 +237,13 @@ pub async fn handle_update_with_notify<R: ResponseHandler>(
     for record in update.updates() {
         let name = lower_name(&record.name.to_string());
         if !name_in_zone(&name, &zone.name) {
-            return respond(update, response_edns, response_handle, ResponseCode::NotZone).await;
+            return respond(
+                update,
+                response_edns,
+                response_handle,
+                ResponseCode::NotZone,
+            )
+            .await;
         }
         if let Err(code) = build_update(&zone, &name, record, &mut plan) {
             return respond(update, response_edns, response_handle, code).await;
@@ -172,7 +254,13 @@ pub async fn handle_update_with_notify<R: ResponseHandler>(
     // record; refuse such updates rather than leaving a broken zone.
     if would_remove_last_apex_ns(&zone, &records, &plan) {
         debug!(zone = %zone.name, "update refused: would delete last apex NS");
-        return respond(update, response_edns, response_handle, ResponseCode::Refused).await;
+        return respond(
+            update,
+            response_edns,
+            response_handle,
+            ResponseCode::Refused,
+        )
+        .await;
     }
 
     // -- Apply atomically, then reload the catalog -------------------------
@@ -186,7 +274,13 @@ pub async fn handle_update_with_notify<R: ResponseHandler>(
     }
     if let Err(e) = catalog.reload() {
         warn!(zone = %zone.name, error = %e, "catalog reload after update failed");
-        return respond(update, response_edns, response_handle, ResponseCode::ServFail).await;
+        return respond(
+            update,
+            response_edns,
+            response_handle,
+            ResponseCode::ServFail,
+        )
+        .await;
     }
 
     info!(
@@ -205,7 +299,13 @@ pub async fn handle_update_with_notify<R: ResponseHandler>(
             sender.notify_zone(&zone_name).await;
         });
     }
-    respond(update, response_edns, response_handle, ResponseCode::NoError).await
+    respond(
+        update,
+        response_edns,
+        response_handle,
+        ResponseCode::NoError,
+    )
+    .await
 }
 
 /// Evaluate one prerequisite record against the current zone data.
@@ -335,11 +435,7 @@ fn build_update(
 }
 
 /// True when applying `plan` would delete every NS record at the zone apex.
-fn would_remove_last_apex_ns(
-    zone: &Zone,
-    records: &[DbRecord],
-    plan: &DynamicUpdate,
-) -> bool {
+fn would_remove_last_apex_ns(zone: &Zone, records: &[DbRecord], plan: &DynamicUpdate) -> bool {
     let apex_ns: Vec<&DbRecord> = records
         .iter()
         .filter(|r| !r.disabled && r.name == zone.name && r.rtype == "NS")
@@ -442,9 +538,11 @@ fn update_client_allowed(networks: &[String], client: IpAddr) -> bool {
     if networks.is_empty() {
         return true;
     }
-    networks
-        .iter()
-        .any(|net| net.parse::<ipnet::IpNet>().map(|ip| ip.contains(&client)).unwrap_or(false))
+    networks.iter().any(|net| {
+        net.parse::<ipnet::IpNet>()
+            .map(|ip| ip.contains(&client))
+            .unwrap_or(false)
+    })
 }
 
 /// Send an RFC 2136 update response with only a response code.

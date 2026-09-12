@@ -197,9 +197,9 @@ fn split_host_port(rest: &str) -> Result<(IpAddr, u16)> {
                 )))
             }
         };
-        let ip: IpAddr = host.parse().map_err(|_| {
-            DaygleError::Config(format!("upstream '{rest}' is not an IP literal"))
-        })?;
+        let ip: IpAddr = host
+            .parse()
+            .map_err(|_| DaygleError::Config(format!("upstream '{rest}' is not an IP literal")))?;
         return Ok((ip, port));
     }
 
@@ -295,7 +295,8 @@ mod tests {
 
     #[test]
     fn https_custom_port_and_path() {
-        let ns = parse_upstreams(&["https://[2606:4700:4700::1111]:8443/custom".to_string()]).unwrap();
+        let ns =
+            parse_upstreams(&["https://[2606:4700:4700::1111]:8443/custom".to_string()]).unwrap();
         assert!(ns[0].ip.is_ipv6());
         assert_eq!(ns[0].connections[0].port, 8443);
         match &ns[0].connections[0].protocol {

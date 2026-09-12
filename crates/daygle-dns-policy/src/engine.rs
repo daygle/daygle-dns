@@ -142,12 +142,7 @@ impl PolicyEngine {
     ///
     /// `query_name` must already be normalized (lowercase, no trailing dot).
     /// Returns a [`Decision`]; `Action::Allow` means "no policy objected".
-    pub async fn evaluate(
-        &self,
-        client: IpAddr,
-        query_name: &str,
-        record_type: &str,
-    ) -> Decision {
+    pub async fn evaluate(&self, client: IpAddr, query_name: &str, record_type: &str) -> Decision {
         if !self.enabled {
             return Decision::allow();
         }
@@ -155,10 +150,7 @@ impl PolicyEngine {
         // 1. ACLs.
         if let Some(acl) = &self.acl {
             if !acl.is_allowed(client) {
-                return Decision::new(
-                    format!("client {client} denied by ACL"),
-                    Action::Refused,
-                );
+                return Decision::new(format!("client {client} denied by ACL"), Action::Refused);
             }
         }
 
@@ -176,10 +168,7 @@ impl PolicyEngine {
         // 3. Blocklists (static config + remote sources).
         if let Some(list) = &self.blocklist {
             if list.contains(query_name) {
-                return Decision::new(
-                    format!("'{query_name}' matched blocklist"),
-                    Action::Block,
-                );
+                return Decision::new(format!("'{query_name}' matched blocklist"), Action::Block);
             }
         }
         if let Some(list) = &self.remote_blocklist {
@@ -205,10 +194,7 @@ impl PolicyEngine {
         // block still wins with NXDOMAIN) but before plugins, suppress IPv6
         // answers by returning NODATA, forcing dual-stack clients to IPv4.
         if self.aaaa_filtered(query_name, record_type) {
-            return Decision::new(
-                format!("AAAA filtered for '{query_name}'"),
-                Action::NoData,
-            );
+            return Decision::new(format!("AAAA filtered for '{query_name}'"), Action::NoData);
         }
 
         // 6. Plugins.
@@ -234,10 +220,7 @@ mod tests {
     fn engine() -> PolicyEngine {
         let mut e = PolicyEngine::new(true);
         e.set_blocklist(Blocklist::from_lines(["ads.example.com"]));
-        e.set_acl(Acl::new(
-            vec!["10.99.0.0/16".parse().unwrap()],
-            vec![],
-        ));
+        e.set_acl(Acl::new(vec!["10.99.0.0/16".parse().unwrap()], vec![]));
         e.add_rule(PerClientRule::new(
             vec!["192.168.1.0/24".parse().unwrap()],
             Some(vec!["*.internal.test".to_string()]),
@@ -267,9 +250,7 @@ mod tests {
     #[tokio::test]
     async fn per_client_redirect() {
         let e = engine();
-        let d = e
-            .evaluate(ip("192.168.1.42"), "x.internal.test", "A")
-            .await;
+        let d = e.evaluate(ip("192.168.1.42"), "x.internal.test", "A").await;
         assert_eq!(d.action, Action::Redirect("0.0.0.0".parse().unwrap()));
     }
 
@@ -294,7 +275,9 @@ mod tests {
         e.set_filter_aaaa(true, None);
         // AAAA is filtered...
         assert_eq!(
-            e.evaluate(ip("8.8.8.8"), "example.org", "AAAA").await.action,
+            e.evaluate(ip("8.8.8.8"), "example.org", "AAAA")
+                .await
+                .action,
             Action::NoData
         );
         // ...but A (and other types) pass through untouched.
@@ -311,7 +294,10 @@ mod tests {
     #[tokio::test]
     async fn filter_aaaa_bypass_keeps_ipv6() {
         let mut e = PolicyEngine::new(true);
-        e.set_filter_aaaa(true, Some(Blocklist::from_lines(["*.v6.test", "host.test"])));
+        e.set_filter_aaaa(
+            true,
+            Some(Blocklist::from_lines(["*.v6.test", "host.test"])),
+        );
         // Bypassed names keep their AAAA answers (fall through to Allow).
         assert_eq!(
             e.evaluate(ip("8.8.8.8"), "a.v6.test", "AAAA").await.action,
@@ -332,7 +318,9 @@ mod tests {
     async fn filter_aaaa_off_by_default() {
         let e = PolicyEngine::new(true);
         assert_eq!(
-            e.evaluate(ip("8.8.8.8"), "example.org", "AAAA").await.action,
+            e.evaluate(ip("8.8.8.8"), "example.org", "AAAA")
+                .await
+                .action,
             Action::Allow
         );
     }
@@ -343,7 +331,9 @@ mod tests {
         let mut e = engine();
         e.set_filter_aaaa(true, None);
         assert_eq!(
-            e.evaluate(ip("1.1.1.1"), "ads.example.com", "AAAA").await.action,
+            e.evaluate(ip("1.1.1.1"), "ads.example.com", "AAAA")
+                .await
+                .action,
             Action::Block
         );
     }
@@ -351,16 +341,23 @@ mod tests {
     #[tokio::test]
     async fn allowlist_overrides_static_and_remote_blocklists() {
         let mut e = PolicyEngine::new(true);
-        e.set_allowlist(Blocklist::from_lines(["safe.example.com", "*.trusted.test"]));
+        e.set_allowlist(Blocklist::from_lines([
+            "safe.example.com",
+            "*.trusted.test",
+        ]));
         e.set_blocklist(Blocklist::from_lines(["safe.example.com", "blocked.test"]));
         e.set_remote_blocklist(Blocklist::from_lines(["remote.test"]));
 
         assert_eq!(
-            e.evaluate(ip("8.8.8.8"), "safe.example.com", "A").await.action,
+            e.evaluate(ip("8.8.8.8"), "safe.example.com", "A")
+                .await
+                .action,
             Action::Allow
         );
         assert_eq!(
-            e.evaluate(ip("8.8.8.8"), "a.trusted.test", "A").await.action,
+            e.evaluate(ip("8.8.8.8"), "a.trusted.test", "A")
+                .await
+                .action,
             Action::Allow
         );
         assert_eq!(

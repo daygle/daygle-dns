@@ -49,7 +49,10 @@ impl SecondaryRefresher {
     /// Add or replace a secondary zone configuration and wake the refresh loop.
     pub fn set_zone(&self, config: SecondaryZoneConfig) {
         let mut zones = self.zones.write().expect("secondary zone lock poisoned");
-        if let Some(existing) = zones.iter_mut().find(|z| z.name.eq_ignore_ascii_case(&config.name)) {
+        if let Some(existing) = zones
+            .iter_mut()
+            .find(|z| z.name.eq_ignore_ascii_case(&config.name))
+        {
             *existing = config;
         } else {
             zones.push(config);
@@ -144,7 +147,9 @@ impl SecondaryRefresher {
                     if !needs {
                         return Ok(false);
                     }
-                    return self.transfer_from(addr, &zone_name, master_serial, current_serial, &zone.id).await;
+                    return self
+                        .transfer_from(addr, &zone_name, master_serial, current_serial, &zone.id)
+                        .await;
                 }
                 Ok(None) => {
                     warn!(zone = %zone.name, %master, "master returned no SOA");
@@ -157,7 +162,10 @@ impl SecondaryRefresher {
         }
 
         Err(last_error.unwrap_or_else(|| {
-            DaygleError::Proto(format!("no reachable master for secondary zone '{}'", config.name))
+            DaygleError::Proto(format!(
+                "no reachable master for secondary zone '{}'",
+                config.name
+            ))
         }))
     }
 
@@ -178,14 +186,7 @@ impl SecondaryRefresher {
         let (soa, inputs) = records_to_inputs(zone_name, &records);
         if let Some((mname, rname, serial, refresh, retry, expire, minimum)) = soa {
             self.store.set_zone_soa(
-                zone_id,
-                &mname,
-                &rname,
-                serial,
-                refresh,
-                retry,
-                expire,
-                minimum,
+                zone_id, &mname, &rname, serial, refresh, retry, expire, minimum,
             )?;
         } else {
             // Some masters do not include the SOA in the record list; apply
@@ -217,12 +218,10 @@ impl SecondaryRefresher {
     fn ensure_zone(&self, config: &SecondaryZoneConfig) -> Result<crate::model::Zone> {
         let zone = match self.store.find_zone_by_name(&config.name)? {
             Some(zone) => zone,
-            None => self
-                .store
-                .create_zone(&ZoneInput {
-                    name: config.name.clone(),
-                    ..Default::default()
-                })?,
+            None => self.store.create_zone(&ZoneInput {
+                name: config.name.clone(),
+                ..Default::default()
+            })?,
         };
         self.store
             .set_secondary(&zone.id, &config.masters, config.refresh_secs)?;

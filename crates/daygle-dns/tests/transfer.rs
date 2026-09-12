@@ -20,7 +20,10 @@ async fn tcp_transfer_query(addr: std::net::SocketAddr, name: &str, rtype: Recor
         .await
         .expect("connect TCP");
     let mut msg = Message::new(0x2222, MessageType::Query, OpCode::Query);
-    msg.add_query(Query::query(Name::from_utf8(name).expect("valid name"), rtype));
+    msg.add_query(Query::query(
+        Name::from_utf8(name).expect("valid name"),
+        rtype,
+    ));
     let bytes = msg.to_vec().expect("encode query");
     let mut framed = Vec::with_capacity(bytes.len() + 2);
     framed.extend_from_slice(&(bytes.len() as u16).to_be_bytes());
@@ -255,13 +258,15 @@ async fn xfr_client_transfers_zone() {
     assert!(soa.is_some(), "master should answer SOA");
 
     let records = client.axfr(tcp, &zone).await.expect("AXFR");
-    assert!(records.len() >= 3, "full zone expected, got {}", records.len());
+    assert!(
+        records.len() >= 3,
+        "full zone expected, got {}",
+        records.len()
+    );
     assert_eq!(records.first().unwrap().record_type(), RecordType::SOA);
     assert_eq!(records.last().unwrap().record_type(), RecordType::SOA);
     assert!(
-        records
-            .iter()
-            .any(|r| r.data.to_string() == "192.0.2.10"),
+        records.iter().any(|r| r.data.to_string() == "192.0.2.10"),
         "A record missing from transfer"
     );
 

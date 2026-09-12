@@ -61,15 +61,16 @@ async fn spawn_stub(zone: &str, ip: &str) -> SocketAddr {
 }
 
 fn settings(upstream: SocketAddr, conditional: Vec<ConditionalZoneConfig>) -> RecursiveSettings {
-    let mut s = RecursiveSettings::default();
-    s.enabled = true;
-    s.use_system_config = false;
-    s.upstreams = vec![upstream.to_string()];
-    s.dnssec_validate = false;
-    s.attempts = 2;
-    s.timeout_secs = 3;
-    s.conditional_zones = conditional;
-    s
+    RecursiveSettings {
+        enabled: true,
+        use_system_config: false,
+        upstreams: vec![upstream.to_string()],
+        dnssec_validate: false,
+        attempts: 2,
+        timeout_secs: 3,
+        conditional_zones: conditional,
+        ..Default::default()
+    }
 }
 
 fn first_ip(lookup: &Lookup) -> String {
@@ -100,18 +101,30 @@ async fn conditional_subdomain_routes_to_dedicated_upstream() {
     .unwrap();
 
     // Default path: zonea via stub_a.
-    let apex = resolver.lookup("host.zonea.test.", RecordType::A).await.unwrap();
+    let apex = resolver
+        .lookup("host.zonea.test.", RecordType::A)
+        .await
+        .unwrap();
     assert_eq!(first_ip(&apex), "198.51.100.10");
 
     // Conditional path: apex and subdomains of zoneb via stub_b.
-    let apex = resolver.lookup("host.zoneb.test.", RecordType::A).await.unwrap();
+    let apex = resolver
+        .lookup("host.zoneb.test.", RecordType::A)
+        .await
+        .unwrap();
     assert_eq!(first_ip(&apex), "198.51.100.20");
 
     // Deep subdomains of the conditional zone route there too.
-    let deep = resolver.lookup("deep.host.zoneb.test.", RecordType::A).await.unwrap();
+    let deep = resolver
+        .lookup("deep.host.zoneb.test.", RecordType::A)
+        .await
+        .unwrap();
     assert_eq!(first_ip(&deep), "198.51.100.20");
 
     // Nothing outside the conditional zone leaks into it.
-    let outside = resolver.lookup("deep.host.zonea.test.", RecordType::A).await.unwrap();
+    let outside = resolver
+        .lookup("deep.host.zonea.test.", RecordType::A)
+        .await
+        .unwrap();
     assert_eq!(first_ip(&outside), "198.51.100.10");
 }

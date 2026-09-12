@@ -118,7 +118,7 @@ impl CacheAssistant {
         };
         let snapshot = Snapshot {
             query: lookup.query().clone(),
-            answers: clamp_answer_ttls(&lookup.answers(), self.config.max_cache_ttl),
+            answers: clamp_answer_ttls(lookup.answers(), self.config.max_cache_ttl),
             valid_until: effective_deadline,
             fetched_at: now,
             failure_until: None,
@@ -263,7 +263,8 @@ impl CacheAssistant {
         if popular.len() >= MAX_TRACKED_ENTRIES && !popular.contains_key(key) {
             // Drop entries whose window has lapsed (cheap sweep), else the
             // oldest by count.
-            popular.retain(|_, p| now.saturating_duration_since(p.window_start) < self.config.window);
+            popular
+                .retain(|_, p| now.saturating_duration_since(p.window_start) < self.config.window);
             if popular.len() >= MAX_TRACKED_ENTRIES {
                 evict_least_popular(&mut popular);
             }
@@ -323,9 +324,7 @@ fn stale_answers(answers: &[Record]) -> Vec<Record> {
         .collect()
 }
 
-fn evict_oldest<K: Clone + std::hash::Hash + Eq, V: Clone + HasInstant>(
-    map: &mut HashMap<K, V>,
-) {
+fn evict_oldest<K: Clone + std::hash::Hash + Eq, V: Clone + HasInstant>(map: &mut HashMap<K, V>) {
     let oldest = map
         .iter()
         .min_by_key(|(_, v)| v.instant())
@@ -338,7 +337,12 @@ fn evict_oldest<K: Clone + std::hash::Hash + Eq, V: Clone + HasInstant>(
 fn evict_least_popular(map: &mut HashMap<CacheKey, Popularity>) {
     let victim = map
         .iter()
-        .min_by_key(|(_, p)| (p.count, u64::try_from(p.window_start.elapsed().as_millis()).unwrap_or(0)))
+        .min_by_key(|(_, p)| {
+            (
+                p.count,
+                u64::try_from(p.window_start.elapsed().as_millis()).unwrap_or(0),
+            )
+        })
         .map(|(k, _)| k.clone());
     if let Some(k) = victim {
         map.remove(&k);
@@ -414,7 +418,11 @@ mod tests {
             ttl_secs as u32,
             RData::A(hickory_proto::rr::rdata::a::A(Ipv4Addr::new(192, 0, 2, 7))),
         );
-        Lookup::new_with_deadline(query, [record], Instant::now() + Duration::from_secs(ttl_secs))
+        Lookup::new_with_deadline(
+            query,
+            [record],
+            Instant::now() + Duration::from_secs(ttl_secs),
+        )
     }
 
     fn key_for(name: &str) -> CacheKey {
@@ -504,7 +512,7 @@ mod tests {
         // pct; emulate by re-storing with fetched_at long past.
         let lk = lookup_a("frac.example.", 1000);
         ca.on_success(&key, &lk); // full TTL again
-        // Now shrink remaining while keeping fetched_at old.
+                                  // Now shrink remaining while keeping fetched_at old.
         {
             let mut snaps = ca.snapshots.lock();
             let s = snaps.get_mut(&key).unwrap();
@@ -692,7 +700,10 @@ mod tests {
         cfg.failure_cache_ttl = 60;
         let ca = CacheAssistant::new(cfg);
         let key = key_for("never-resolved.example.");
-        let query = Query::query(Name::from_utf8("never-resolved.example.").unwrap(), RecordType::A);
+        let query = Query::query(
+            Name::from_utf8("never-resolved.example.").unwrap(),
+            RecordType::A,
+        );
         let until = Instant::now() + Duration::from_secs(60);
         let nxdomain = hickory_proto::op::ResponseCode::NXDomain.into();
         ca.record_failure(&key, &query, nxdomain, until);
@@ -728,7 +739,12 @@ mod tests {
         ca.on_success(&key, &lookup_a("recover.example.", 300));
         let until = Instant::now() + Duration::from_secs(60);
         let servfail = hickory_proto::op::ResponseCode::ServFail.into();
-        ca.record_failure(&key, &lookup_a("recover.example.", 300).query().clone(), servfail, until);
+        ca.record_failure(
+            &key,
+            &lookup_a("recover.example.", 300).query().clone(),
+            servfail,
+            until,
+        );
         assert!(ca.cached_failure_code(&key).is_some());
         // A fresh successful answer clears the cached failure.
         ca.on_success(&key, &lookup_a("recover.example.", 300));

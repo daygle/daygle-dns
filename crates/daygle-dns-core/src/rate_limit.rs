@@ -191,8 +191,7 @@ fn advance_bucket(bucket: &mut Bucket, window: Duration, limit: u32) -> bool {
 fn maybe_sweep(inner: &mut Inner) {
     let now = Instant::now();
     let due_by_time = now.duration_since(inner.last_sweep) >= SWEEP_INTERVAL;
-    let due_by_size =
-        inner.clients.len() + inner.domains.len() >= SWEEP_AT_ENTRIES;
+    let due_by_size = inner.clients.len() + inner.domains.len() >= SWEEP_AT_ENTRIES;
     if !due_by_time && !due_by_size {
         return;
     }
@@ -309,7 +308,11 @@ mod tests {
 
         // Fill past the size threshold with distinct spoofed clients.
         for i in 0..(SWEEP_AT_ENTRIES + 10) {
-            limiter.check_client(format!("10.{}.{}.{}", (i >> 8) % 256, i % 256, (i >> 16) % 8).parse().unwrap());
+            limiter.check_client(
+                format!("10.{}.{}.{}", (i >> 8) % 256, i % 256, (i >> 16) % 8)
+                    .parse()
+                    .unwrap(),
+            );
         }
         assert!(limiter.client_buckets() > SWEEP_AT_ENTRIES);
 

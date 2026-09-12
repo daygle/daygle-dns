@@ -1,7 +1,7 @@
 //! HTTP handlers for the REST API.
 
-use std::net::IpAddr;
 use std::collections::BTreeSet;
+use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -9,10 +9,10 @@ use axum::extract::{Path, Query, State};
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
+use chrono::Datelike;
 use daygle_dns_authoritative::model::{
     MoveDirection, RecordInput, SplitHorizonEntryInput, SplitHorizonNetworkInput, ZoneInput,
 };
-use chrono::Datelike;
 use daygle_dns_authoritative::store::MoveResult;
 use daygle_dns_core::VERSION;
 use serde::{Deserialize, Serialize};
@@ -63,6 +63,9 @@ fn is_http_url(url: &str) -> bool {
 /// Compares on the [`DaygleError::kind`] discriminant instead of the full
 /// `Display` string so cosmetic changes to error messages (paths, line
 /// numbers, capitalization) cannot make the comparison silently disagree.
+// The Err variant carries a full axum `Response`; boxing it would churn every
+// call site for no real gain.
+#[allow(clippy::result_large_err)]
 fn validate_config_update(
     state: &AppState,
     old: &daygle_dns_core::config::DaygleConfig,
@@ -78,43 +81,12 @@ fn validate_config_update(
         if !pre_existing {
             return Err(map_err(e));
         }
-        state
-            .logs
-            .warn("api", format!("{what} applied despite pre-existing validation error: {e}"));
+        state.logs.warn(
+            "api",
+            format!("{what} applied despite pre-existing validation error: {e}"),
+        );
     }
     Ok(())
-}
-
-/// Persist `config` to the config file when its path is known. The whole
-/// document is rewritten (comments in an edited file are not preserved; the
-/// example file documents every option).
-#[allow(dead_code)]
-fn persist_config(
-    state: &AppState,
-    config: &daygle_dns_core::config::DaygleConfig,
-) -> std::result::Result<(), (StatusCode, String)> {
-    let Some(path) = &state.config_path else {
-        return Ok(());
-    };
-    match config.to_toml() {
-        Ok(text) => {
-            if let Err(e) = std::fs::write(path.as_ref(), text) {
-                state.logs.error(
-                    "api",
-                    format!("failed to persist config to {}: {e}", path.display()),
-                );
-                return Err((
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "not applied: failed to persist to the config file".to_string(),
-                ));
-            }
-            Ok(())
-        }
-        Err(e) => Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("cannot serialize config: {e}"),
-        )),
-    }
 }
 
 // ---- Status / metrics / logs / config -----------------------------------
@@ -169,10 +141,7 @@ pub struct StatsQuery {
     window: Option<String>,
 }
 
-pub async fn stats(
-    State(state): State<AppState>,
-    Query(query): Query<StatsQuery>,
-) -> Response {
+pub async fn stats(State(state): State<AppState>, Query(query): Query<StatsQuery>) -> Response {
     let window_minutes = match query.window.as_deref() {
         Some("1h") | None => 60,
         Some("6h") => 360,
@@ -269,7 +238,10 @@ pub async fn replace_blocklist_sources(
     for source in &input.sources {
         let name = source.name.trim();
         if name.is_empty() {
-            return error_response(StatusCode::BAD_REQUEST, "blocklist source name must not be empty");
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "blocklist source name must not be empty",
+            );
         }
         if !seen.insert(name.to_ascii_lowercase()) {
             return error_response(
@@ -289,7 +261,8 @@ pub async fn replace_blocklist_sources(
     let mut config = old_config.clone();
     config.policy.blocklist_sources = input.sources.clone();
 
-    if let Err(response) = validate_config_update(&state, &old_config, &config, "blocklist sources") {
+    if let Err(response) = validate_config_update(&state, &old_config, &config, "blocklist sources")
+    {
         return response;
     }
     // Blocklist sources are console-managed runtime settings: store them in
@@ -363,7 +336,14 @@ pub async fn validate_blocklist_source(
             "URL must start with http:// or https://",
         );
     }
-    let requested = match query.format.as_deref().unwrap_or("").trim().to_ascii_lowercase().as_str() {
+    let requested = match query
+        .format
+        .as_deref()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
         "" | "auto" | "detect" => None,
         "domains" => Some(daygle_dns_core::config::BlocklistFormat::Domains),
         "hosts" => Some(daygle_dns_core::config::BlocklistFormat::Hosts),
@@ -384,16 +364,12 @@ pub async fn validate_blocklist_source(
     let text = match manager.fetch_text(url).await {
         Ok(t) => t,
         Err(e) => {
-            return error_response(
-                StatusCode::BAD_GATEWAY,
-                format!("cannot fetch {url}: {e}"),
-            );
+            return error_response(StatusCode::BAD_GATEWAY, format!("cannot fetch {url}: {e}"));
         }
     };
 
-    let fmt_name = |f: daygle_dns_core::config::BlocklistFormat| {
-        format!("{f:?}").to_ascii_lowercase()
-    };
+    let fmt_name =
+        |f: daygle_dns_core::config::BlocklistFormat| format!("{f:?}").to_ascii_lowercase();
     let verdict = |format: daygle_dns_core::config::BlocklistFormat| {
         let domains = daygle_dns_policy::parse_blocklist(&text, format);
         let sample: Vec<String> = domains.iter().take(5).cloned().collect();
@@ -475,7 +451,9 @@ pub async fn refresh_blocklist_sources(State(state): State<AppState>) -> Respons
             }))
             .into_response()
         }
-        Ok(None) => Json(serde_json::json!({"refreshed": true, "total_domains": 0})).into_response(),
+        Ok(None) => {
+            Json(serde_json::json!({"refreshed": true, "total_domains": 0})).into_response()
+        }
         Err(e) => error_response(StatusCode::BAD_GATEWAY, format!("refresh failed: {e}")),
     }
 }
@@ -485,10 +463,7 @@ pub struct LogsQuery {
     limit: Option<usize>,
 }
 
-pub async fn logs(
-    State(state): State<AppState>,
-    Query(query): Query<LogsQuery>,
-) -> Response {
+pub async fn logs(State(state): State<AppState>, Query(query): Query<LogsQuery>) -> Response {
     let limit = query.limit.unwrap_or(200).min(10_000);
     Json(state.logs.tail(limit)).into_response()
 }
@@ -551,7 +526,8 @@ pub async fn query_logs(
             Ok((rows, _)) => rows,
             Err(e) => return map_err(e),
         };
-        let mut csv = String::from("timestamp,client,qname,qtype,protocol,outcome,rcode,elapsed_ms\n");
+        let mut csv =
+            String::from("timestamp,client,qname,qtype,protocol,outcome,rcode,elapsed_ms\n");
         for r in &rows {
             csv.push_str(&format!(
                 "{},{},{},{},{},{},{},{}\n",
@@ -647,7 +623,11 @@ pub async fn reload_config(State(state): State<AppState>) -> Response {
     }
     // Wake the watcher; it performs the actual reload and reports failures in
     // the logs. The re-read is asynchronous by design.
-    state.reload_notify.as_ref().expect("reload_notify checked above").notify_waiters();
+    state
+        .reload_notify
+        .as_ref()
+        .expect("reload_notify checked above")
+        .notify_waiters();
     (
         StatusCode::ACCEPTED,
         Json(serde_json::json!({ "status": "reload requested" })),
@@ -669,7 +649,8 @@ pub async fn reload_config(State(state): State<AppState>) -> Response {
 /// tells the operator to run the `update_command` on the host.
 pub async fn update_info(State(state): State<AppState>) -> Response {
     let version = daygle_dns_core::VERSION;
-    let install_script = "https://raw.githubusercontent.com/daygle/daygle-dns/main/install.sh".to_string();
+    let install_script =
+        "https://raw.githubusercontent.com/daygle/daygle-dns/main/install.sh".to_string();
     let has_config_file = state.config_path.is_some();
     let has_systemd = std::path::Path::new("/etc/systemd/system/daygle-dns.service").is_file();
     let config_dir = state
@@ -718,7 +699,7 @@ pub async fn update_status(State(state): State<AppState>) -> Response {
         "state": crate::update::read_state(),
         "log": crate::update::log_tail(8192),
     }))
-        .into_response()
+    .into_response()
 }
 
 /// `POST /api/update/start` - begin an in-place update (admin only).
@@ -924,7 +905,9 @@ fn date_serial() -> u32 {
 }
 
 fn imported_soa(records: &[RecordInput]) -> Option<(String, String, u32, u32, u32, u32, u32)> {
-    let record = records.iter().find(|record| record.rtype.eq_ignore_ascii_case("SOA"))?;
+    let record = records
+        .iter()
+        .find(|record| record.rtype.eq_ignore_ascii_case("SOA"))?;
     let fields: Vec<&str> = record.content.split_whitespace().collect();
     if fields.len() < 7 {
         return None;
@@ -970,7 +953,10 @@ pub async fn create_zone(
 
     let secondary_input = if zone_type == "secondary" {
         if input.masters.is_empty() {
-            return error_response(StatusCode::BAD_REQUEST, "secondary zones require at least one master server");
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "secondary zones require at least one master server",
+            );
         }
         for master in &input.masters {
             if let Err(e) = daygle_dns_core::config::parse_master_addr(master) {
@@ -982,7 +968,10 @@ pub async fn create_zone(
         }
         let refresh_secs = input.refresh_secs.unwrap_or(3600);
         if refresh_secs == 0 {
-            return error_response(StatusCode::BAD_REQUEST, "secondary refresh interval must be greater than zero");
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "secondary refresh interval must be greater than zero",
+            );
         }
         Some(daygle_dns_core::config::SecondaryZoneConfig {
             name: input.name.trim().trim_end_matches('.').to_ascii_lowercase(),
@@ -1005,7 +994,8 @@ pub async fn create_zone(
         expire: input.expire,
         minimum: input.minimum,
     };
-    if let Some((primary_ns, admin_mailbox, serial, refresh, retry, expire, minimum)) = imported_soa {
+    if let Some((primary_ns, admin_mailbox, serial, refresh, retry, expire, minimum)) = imported_soa
+    {
         zone_input.primary_ns.get_or_insert(primary_ns);
         zone_input.admin_mailbox.get_or_insert(admin_mailbox);
         zone_input.serial.get_or_insert(serial);
@@ -1029,25 +1019,31 @@ pub async fn create_zone(
         }
     }
     let old_config = (*state.config.load_full()).clone();
-    let mut new_config = old_config.clone();        if let Some(secondary) = &secondary_input {
-            new_config.authoritative.secondary_zones.push(secondary.clone());
-            if let Err(response) = validate_config_update(&state, &old_config, &new_config, "secondary zone") {
-                let _ = state.catalog.store().delete_zone(&zone.id);
-                return response;
-            }
-            if let Err(e) = state.catalog.store().set_secondary(
-                &zone.id,
-                &secondary.masters,
-                secondary.refresh_secs,
-            ) {
-                let _ = state.catalog.store().delete_zone(&zone.id);
-                return map_err(e);
-            }
-            state.config.store(Arc::new(new_config));
-            if let Some(refresher) = &state.secondary_refresher {
-                refresher.set_zone(secondary.clone());
-            }
+    let mut new_config = old_config.clone();
+    if let Some(secondary) = &secondary_input {
+        new_config
+            .authoritative
+            .secondary_zones
+            .push(secondary.clone());
+        if let Err(response) =
+            validate_config_update(&state, &old_config, &new_config, "secondary zone")
+        {
+            let _ = state.catalog.store().delete_zone(&zone.id);
+            return response;
         }
+        if let Err(e) = state.catalog.store().set_secondary(
+            &zone.id,
+            &secondary.masters,
+            secondary.refresh_secs,
+        ) {
+            let _ = state.catalog.store().delete_zone(&zone.id);
+            return map_err(e);
+        }
+        state.config.store(Arc::new(new_config));
+        if let Some(refresher) = &state.secondary_refresher {
+            refresher.set_zone(secondary.clone());
+        }
+    }
 
     if let Err(e) = state.catalog.reload() {
         let _ = state.catalog.store().delete_zone(&zone.id);
@@ -1056,10 +1052,7 @@ pub async fn create_zone(
     (StatusCode::CREATED, Json(zone)).into_response()
 }
 
-pub async fn delete_zone(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-) -> Response {
+pub async fn delete_zone(State(state): State<AppState>, Path(id): Path<String>) -> Response {
     let existing = match state.catalog.store().get_zone(&id) {
         Ok(Some(zone)) => zone,
         Ok(None) => return error_response(StatusCode::NOT_FOUND, "zone not found"),
@@ -1072,10 +1065,13 @@ pub async fn delete_zone(
     let old_config = (*state.config.load_full()).clone();
     let mut new_config = old_config.clone();
     if secondary.is_some() {
-        new_config.authoritative.secondary_zones.retain(|z| {
-            !z.name.eq_ignore_ascii_case(&existing.name)
-        });
-        if let Err(response) = validate_config_update(&state, &old_config, &new_config, "zone deletion") {
+        new_config
+            .authoritative
+            .secondary_zones
+            .retain(|z| !z.name.eq_ignore_ascii_case(&existing.name));
+        if let Err(response) =
+            validate_config_update(&state, &old_config, &new_config, "zone deletion")
+        {
             return response;
         }
     }
@@ -1194,22 +1190,22 @@ pub async fn update_zone_soa(
         Err(msg) => return error_response(StatusCode::BAD_REQUEST, msg),
     };
     let refresh = match require_positive(input.refresh, "refresh") {
-        Ok(v) if v == 0 => current.refresh,
+        Ok(0) => current.refresh,
         Ok(v) => v,
         Err(msg) => return error_response(StatusCode::BAD_REQUEST, msg),
     };
     let retry = match require_positive(input.retry, "retry") {
-        Ok(v) if v == 0 => current.retry,
+        Ok(0) => current.retry,
         Ok(v) => v,
         Err(msg) => return error_response(StatusCode::BAD_REQUEST, msg),
     };
     let expire = match require_positive(input.expire, "expire") {
-        Ok(v) if v == 0 => current.expire,
+        Ok(0) => current.expire,
         Ok(v) => v,
         Err(msg) => return error_response(StatusCode::BAD_REQUEST, msg),
     };
     let minimum = match require_positive(input.minimum, "minimum TTL") {
-        Ok(v) if v == 0 => current.minimum,
+        Ok(0) => current.minimum,
         Ok(v) => v,
         Err(msg) => return error_response(StatusCode::BAD_REQUEST, msg),
     };
@@ -1246,10 +1242,7 @@ pub async fn update_zone_soa(
     }
 }
 
-pub async fn list_records(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-) -> Response {
+pub async fn list_records(State(state): State<AppState>, Path(id): Path<String>) -> Response {
     match state.catalog.store().list_records(&id) {
         Ok(records) => Json(records).into_response(),
         Err(e) => map_err(e),
@@ -1321,7 +1314,11 @@ pub async fn set_record_disabled(
     if let Some(response) = reject_secondary_mutation(&state, &zone_id) {
         return response;
     }
-    match state.catalog.store().set_record_disabled(&rid, input.disabled) {
+    match state
+        .catalog
+        .store()
+        .set_record_disabled(&rid, input.disabled)
+    {
         Ok(true) => {
             let _ = state.catalog.reload();
             Json(serde_json::json!({ "id": rid, "disabled": input.disabled })).into_response()
@@ -1335,10 +1332,7 @@ pub async fn set_record_disabled(
 /// (`text/plain`), including SOA and every record. Disabled records are
 /// included as `; disabled:` comments, so an export doubles as a full-zone
 /// backup that round-trips through the import endpoint.
-pub async fn export_zone(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-) -> Response {
+pub async fn export_zone(State(state): State<AppState>, Path(id): Path<String>) -> Response {
     match state.catalog.store().export_zone_file(&id) {
         Ok(text) => {
             let name = state
@@ -1367,16 +1361,22 @@ pub async fn export_zone(
 /// previous engine in place and is logged.
 fn rebuild_advanced_blocking(state: &AppState) {
     match state.catalog.store().list_blocking_groups() {
-        Ok(groups) => state
-            .advanced_blocking
-            .store(Arc::new(daygle_dns_policy::AdvancedBlocking::build(&groups))),
+        Ok(groups) => {
+            state
+                .advanced_blocking
+                .store(Arc::new(daygle_dns_policy::AdvancedBlocking::build(
+                    &groups,
+                )))
+        }
         Err(e) => tracing::warn!("failed to rebuild advanced blocking: {e}"),
     }
 }
 
 /// Reject invalid regex patterns before they reach the store, so a bad pattern
 /// is a clear 400 rather than a rule silently dropped at engine-build time.
-fn validate_group_regexes(input: &daygle_dns_core::blocking::BlockingGroupInput) -> Result<(), String> {
+fn validate_group_regexes(
+    input: &daygle_dns_core::blocking::BlockingGroupInput,
+) -> Result<(), String> {
     for pattern in input.allow_regex.iter().chain(input.block_regex.iter()) {
         daygle_dns_policy::validate_regex(pattern)
             .map_err(|e| format!("invalid regex '{pattern}': {e}"))?;
@@ -1443,15 +1443,23 @@ pub async fn test_blocking(
 ) -> Response {
     let client: IpAddr = match input.client.trim().parse() {
         Ok(ip) => ip,
-        Err(_) => {
-            return error_response(StatusCode::BAD_REQUEST, "client must be an IP address")
-        }
+        Err(_) => return error_response(StatusCode::BAD_REQUEST, "client must be an IP address"),
     };
-    let domain = input.domain.trim().trim_end_matches('.').to_ascii_lowercase();
-    let (blocked, action, reason, group) = match state.advanced_blocking.load().evaluate(client, &domain) {
-        Some(d) => (true, d.action.as_str().to_string(), d.reason, d.group),
-        None => (false, "allow".to_string(), "no group blocked this query".to_string(), None),
-    };
+    let domain = input
+        .domain
+        .trim()
+        .trim_end_matches('.')
+        .to_ascii_lowercase();
+    let (blocked, action, reason, group) =
+        match state.advanced_blocking.load().evaluate(client, &domain) {
+            Some(d) => (true, d.action.as_str().to_string(), d.reason, d.group),
+            None => (
+                false,
+                "allow".to_string(),
+                "no group blocked this query".to_string(),
+                None,
+            ),
+        };
     Json(serde_json::json!({
         "client": client.to_string(),
         "domain": domain,
@@ -1548,7 +1556,11 @@ pub async fn update_split_horizon_entry(
     Path(id): Path<String>,
     Json(input): Json<SplitHorizonEntryInput>,
 ) -> Response {
-    match state.catalog.store().update_split_horizon_entry(&id, &input) {
+    match state
+        .catalog
+        .store()
+        .update_split_horizon_entry(&id, &input)
+    {
         Ok(Some(entry)) => {
             let _ = state.catalog.reload();
             Json(entry).into_response()
@@ -1595,9 +1607,7 @@ pub async fn move_split_horizon_entry(
             let _ = state.catalog.reload();
             Json(serde_json::json!({ "moved": true })).into_response()
         }
-        Ok(MoveResult::AtBoundary) => {
-            Json(serde_json::json!({ "moved": false })).into_response()
-        }
+        Ok(MoveResult::AtBoundary) => Json(serde_json::json!({ "moved": false })).into_response(),
         Ok(MoveResult::NotFound) => error_response(StatusCode::NOT_FOUND, "entry not found"),
         Err(e) => map_err(e),
     }
@@ -1644,7 +1654,11 @@ pub async fn auth_login(
     State(state): State<AppState>,
     axum::Json(input): axum::Json<LoginInput>,
 ) -> Response {
-    let user = match state.catalog.store().get_console_user(input.username.trim()) {
+    let user = match state
+        .catalog
+        .store()
+        .get_console_user(input.username.trim())
+    {
         Ok(user) => user,
         Err(e) => return map_err(e),
     };
@@ -1664,13 +1678,11 @@ pub async fn auth_login(
     };
 
     if !ok {
-        state
-            .logs
-            .push(
-                daygle_dns_core::LogLevel::Warn,
-                "api",
-                format!("failed login attempt for user '{}'", input.username),
-            );
+        state.logs.push(
+            daygle_dns_core::LogLevel::Warn,
+            "api",
+            format!("failed login attempt for user '{}'", input.username),
+        );
         return error_response(StatusCode::UNAUTHORIZED, "invalid username or password");
     }
 
@@ -1702,10 +1714,7 @@ pub async fn auth_logout(
 }
 
 /// `GET /api/auth/me` - identity of the presented session.
-pub async fn auth_me(
-    State(state): State<AppState>,
-    headers: axum::http::HeaderMap,
-) -> Response {
+pub async fn auth_me(State(state): State<AppState>, headers: axum::http::HeaderMap) -> Response {
     let token = bearer_token(&headers).unwrap_or_default();
     match state.sessions.verify(&token) {
         Some(session) => Json(serde_json::json!({
@@ -1778,9 +1787,10 @@ pub async fn auth_change_password(
         );
     }
 
-    if let Err(e) =
-        store.set_console_user_password(&session.username, &daygle_dns_core::auth::hash_password(&input.new_password))
-    {
+    if let Err(e) = store.set_console_user_password(
+        &session.username,
+        &daygle_dns_core::auth::hash_password(&input.new_password),
+    ) {
         return map_err(e);
     }
     // Other devices are signed out; this session survives.
@@ -1808,7 +1818,11 @@ fn bearer_token(headers: &axum::http::HeaderMap) -> Option<String> {
 /// is configured (token-only mode manages auth itself, no setup step).
 fn setup_pending(state: &AppState) -> bool {
     let config = state.config.load();
-    let users = state.catalog.store().list_console_users().unwrap_or_default();
+    let users = state
+        .catalog
+        .store()
+        .list_console_users()
+        .unwrap_or_default();
     config.api.auth_required && users.is_empty() && config.api.api_token.trim().is_empty()
 }
 
@@ -1897,7 +1911,9 @@ pub async fn auth_setup(
     }
 
     let ttl = Duration::from_secs(state.config.load().api.session_ttl_secs.max(60));
-    let token = state.sessions.create(&username, daygle_dns_core::config::Role::Admin, ttl);
+    let token = state
+        .sessions
+        .create(&username, daygle_dns_core::config::Role::Admin, ttl);
     state.logs.push(
         daygle_dns_core::LogLevel::Info,
         "api",
@@ -1916,7 +1932,12 @@ pub async fn auth_setup(
 
 /// Guards against demoting, disabling, or deleting the last enabled admin
 /// account, which would permanently lock the console.
-fn last_admin_guard(store: &daygle_dns_authoritative::ZoneStore, target: &str) -> Result<(), Response> {
+// Err carries a full axum `Response` (see validate_config_update above).
+#[allow(clippy::result_large_err)]
+fn last_admin_guard(
+    store: &daygle_dns_authoritative::ZoneStore,
+    target: &str,
+) -> Result<(), Response> {
     let user = match store.get_console_user(target).map_err(map_err)? {
         Some(u) => u,
         None => return Err(error_response(StatusCode::NOT_FOUND, "user not found")),
@@ -1952,9 +1973,10 @@ fn validate_username_password(username: &str, password: &str) -> Option<Response
 /// `GET /api/users` - list console accounts (password hashes redacted).
 pub async fn list_users(State(state): State<AppState>) -> Response {
     match state.catalog.store().list_console_users() {
-        Ok(users) => Json(serde_json::json!(
-            users.iter().map(|u| u.redacted()).collect::<Vec<_>>()
-        ))
+        Ok(users) => Json(serde_json::json!(users
+            .iter()
+            .map(|u| u.redacted())
+            .collect::<Vec<_>>()))
         .into_response(),
         Err(e) => map_err(e),
     }
@@ -1984,7 +2006,7 @@ pub async fn create_user(
         None | Some("admin") => daygle_dns_core::config::Role::Admin,
         Some("viewer") => daygle_dns_core::config::Role::Viewer,
         Some(other) => {
-            return error_response(StatusCode::BAD_REQUEST, &format!("unknown role '{other}'"))
+            return error_response(StatusCode::BAD_REQUEST, format!("unknown role '{other}'"))
         }
     };
     let store = state.catalog.store();
@@ -2056,23 +2078,21 @@ pub async fn update_user(
         Some("admin") => Some(daygle_dns_core::config::Role::Admin),
         Some("viewer") => Some(daygle_dns_core::config::Role::Viewer),
         Some(other) => {
-            return error_response(StatusCode::BAD_REQUEST, &format!("unknown role '{other}'"))
+            return error_response(StatusCode::BAD_REQUEST, format!("unknown role '{other}'"))
         }
     };
 
     // Demotion to viewer on the last admin is the same lockout risk as a
     // deletion, so it goes through the same guard.
-    if new_role == Some(daygle_dns_core::config::Role::Viewer)
-        || input.enabled == Some(false)
-    {
+    if new_role == Some(daygle_dns_core::config::Role::Viewer) || input.enabled == Some(false) {
         if let Err(resp) = last_admin_guard(store, &username) {
             return resp;
         }
     }
 
     if let Some(password) = &input.password {
-        if let Err(e) =
-            store.set_console_user_password(&username, &daygle_dns_core::auth::hash_password(password))
+        if let Err(e) = store
+            .set_console_user_password(&username, &daygle_dns_core::auth::hash_password(password))
         {
             return map_err(e);
         }
@@ -2087,10 +2107,7 @@ pub async fn update_user(
             return map_err(e);
         }
     }
-    if input.first_name.is_some()
-        || input.last_name.is_some()
-        || input.email.is_some()
-    {
+    if input.first_name.is_some() || input.last_name.is_some() || input.email.is_some() {
         let first = input.first_name.as_deref().map(str::trim);
         let last = input.last_name.as_deref().map(str::trim);
         let email = input.email.as_deref().map(str::trim);
@@ -2118,10 +2135,7 @@ pub async fn update_user(
 
 /// `DELETE /api/users/{username}` - remove a console account. The last
 /// enabled admin cannot be deleted.
-pub async fn delete_user(
-    State(state): State<AppState>,
-    Path(username): Path<String>,
-) -> Response {
+pub async fn delete_user(State(state): State<AppState>, Path(username): Path<String>) -> Response {
     let username = username.trim().to_string();
     let store = state.catalog.store();
     if let Err(resp) = last_admin_guard(store, &username) {
@@ -2473,7 +2487,7 @@ pub async fn update_settings(
         {
             return error_response(
                 StatusCode::BAD_REQUEST,
-                &format!("unknown certificate '{name}' selected for {label}"),
+                format!("unknown certificate '{name}' selected for {label}"),
             );
         }
     }
@@ -2573,7 +2587,9 @@ fn validate_certificate_name(name: &str) -> Result<(), String> {
 }
 
 /// Which listeners currently reference a managed certificate (by name).
-fn certificate_references(config: &daygle_dns_core::config::DaygleConfig) -> Vec<(String, &'static str)> {
+fn certificate_references(
+    config: &daygle_dns_core::config::DaygleConfig,
+) -> Vec<(String, &'static str)> {
     let mut refs = Vec::new();
     for (name, label) in [
         (&config.dot.certificate, "DoT"),
@@ -2587,7 +2603,10 @@ fn certificate_references(config: &daygle_dns_core::config::DaygleConfig) -> Vec
     refs
 }
 
-fn certificate_json(cert: &daygle_dns_authoritative::TlsCertificate, in_use: Vec<&'static str>) -> serde_json::Value {
+fn certificate_json(
+    cert: &daygle_dns_authoritative::TlsCertificate,
+    in_use: Vec<&'static str>,
+) -> serde_json::Value {
     serde_json::json!({
         "name": cert.name,
         "server_name": cert.server_name,
@@ -2683,7 +2702,14 @@ pub async fn create_certificate(
     state.logs.push(
         daygle_dns_core::LogLevel::Info,
         "api",
-        format!("certificate '{name}' {}", if referenced { "updated (listeners rebuilt)" } else { "saved" }),
+        format!(
+            "certificate '{name}' {}",
+            if referenced {
+                "updated (listeners rebuilt)"
+            } else {
+                "saved"
+            }
+        ),
     );
 
     let in_use: Vec<&'static str> = certificate_references(&state.config.load_full())
@@ -2718,9 +2744,7 @@ pub async fn delete_certificate(
     }
     match state.catalog.store().delete_tls_certificate(&name) {
         Ok(true) => {}
-        Ok(false) => {
-            return error_response(StatusCode::NOT_FOUND, "certificate not found")
-        }
+        Ok(false) => return error_response(StatusCode::NOT_FOUND, "certificate not found"),
         Err(e) => return map_err(e),
     }
     state.logs.push(

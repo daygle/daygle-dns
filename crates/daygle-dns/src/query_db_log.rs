@@ -82,7 +82,8 @@ async fn run_writer(
     // Wake at most twice a second, or sooner when a full batch is queued.
     let mut tick = tokio::time::interval(std::time::Duration::from_millis(500));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    let mut pending: Vec<daygle_dns_authoritative::QueryLogRow> = Vec::with_capacity(BATCH_MAX_ROWS);
+    let mut pending: Vec<daygle_dns_authoritative::QueryLogRow> =
+        Vec::with_capacity(BATCH_MAX_ROWS);
 
     loop {
         tokio::select! {
@@ -128,7 +129,10 @@ async fn run_writer(
     }
 }
 
-fn flush(store: &daygle_dns_authoritative::ZoneStore, pending: &mut Vec<daygle_dns_authoritative::QueryLogRow>) {
+fn flush(
+    store: &daygle_dns_authoritative::ZoneStore,
+    pending: &mut Vec<daygle_dns_authoritative::QueryLogRow>,
+) {
     if pending.is_empty() {
         return;
     }

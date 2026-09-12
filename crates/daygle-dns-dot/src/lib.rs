@@ -132,8 +132,7 @@ pub fn client_tls_config_with_roots(extra_roots: &[&str]) -> Result<rustls::Clie
         for cert in rustls_pki_types::pem::PemObject::pem_file_iter(path)
             .map_err(|e| DaygleError::Tls(format!("cannot read '{path}': {e}")))?
         {
-            let cert = cert
-                .map_err(|e| DaygleError::Tls(format!("cannot parse '{path}': {e}")))?;
+            let cert = cert.map_err(|e| DaygleError::Tls(format!("cannot parse '{path}': {e}")))?;
             roots
                 .add(cert)
                 .map_err(|e| DaygleError::Tls(format!("cannot add root from {path}: {e}")))?;
@@ -141,9 +140,8 @@ pub fn client_tls_config_with_roots(extra_roots: &[&str]) -> Result<rustls::Clie
     }
     // Pick whatever crypto provider is installed rather than hardcoding `ring`,
     // so binaries built with only `aws-lc-rs` start cleanly.
-    let provider = crate::cert::crypto_provider().ok_or_else(|| {
-        DaygleError::Tls("no rustls crypto provider available".to_string())
-    })?;
+    let provider = crate::cert::crypto_provider()
+        .ok_or_else(|| DaygleError::Tls("no rustls crypto provider available".to_string()))?;
     Ok(rustls::ClientConfig::builder_with_provider(provider)
         .with_safe_default_protocol_versions()
         .map_err(|e| DaygleError::Tls(format!("tls versions: {e}")))?
@@ -193,20 +191,14 @@ pub async fn dot_query_message(
         .split_once(']')
         .map(|(h, _)| h.to_string())
         .unwrap_or_else(|| endpoint.server.clone());
-    let server_name = endpoint
-        .server_name
-        .clone()
-        .unwrap_or_else(|| host.clone());
+    let server_name = endpoint.server_name.clone().unwrap_or_else(|| host.clone());
     let addr = resolve_endpoint(&endpoint.server, endpoint.port_or(853)).await?;
 
     // Bound the connect so a SYN-blackholed server cannot wedge us forever.
-    let tcp = tokio::time::timeout(
-        Duration::from_secs(5),
-        tokio::net::TcpStream::connect(addr),
-    )
-    .await
-    .map_err(|_| DaygleError::Proto(format!("TCP connect to {addr} timed out")))?
-    .map_err(|e| DaygleError::Proto(format!("cannot connect to {addr}: {e}")))?;
+    let tcp = tokio::time::timeout(Duration::from_secs(5), tokio::net::TcpStream::connect(addr))
+        .await
+        .map_err(|_| DaygleError::Proto(format!("TCP connect to {addr} timed out")))?
+        .map_err(|e| DaygleError::Proto(format!("cannot connect to {addr}: {e}")))?;
     let tls = Arc::new(client_tls_config()?);
     let connector = tokio_rustls::TlsConnector::from(tls);
     let sni = rustls::pki_types::ServerName::try_from(server_name.clone())
@@ -256,8 +248,8 @@ pub async fn doh_query_message(
     path: &str,
     message: &hickory_proto::op::Message,
 ) -> Result<hickory_proto::op::Message> {
-    use hickory_proto::op::DnsRequestOptions;
     use hickory_net::xfer::{DnsHandle, FirstAnswer};
+    use hickory_proto::op::DnsRequestOptions;
 
     let host = endpoint
         .server
@@ -285,9 +277,13 @@ pub async fn doh_query_message(
     .map_err(|e| DaygleError::Proto(format!("DoH connection failed: {e}")))?;
 
     let mut query = hickory_proto::op::Message::query();
-    query.add_query(message.queries.first().cloned().ok_or_else(|| {
-        DaygleError::Proto("query message has no question".to_string())
-    })?);
+    query.add_query(
+        message
+            .queries
+            .first()
+            .cloned()
+            .ok_or_else(|| DaygleError::Proto("query message has no question".to_string()))?,
+    );
     // RFC 8484 §4.1: the DNS message ID is always 0 over DoH.
     query.metadata.id = 0;
     let request = hickory_proto::op::DnsRequest::new(query, DnsRequestOptions::default());
@@ -304,9 +300,9 @@ async fn resolve_endpoint(server: &str, port: u16) -> Result<std::net::SocketAdd
     let server = server.trim();
     // Bracketed IPv6: `[::1]` or `[::1]:853`.
     if let Some(stripped) = server.strip_prefix('[') {
-        let (host, tail) = stripped.split_once(']').ok_or_else(|| {
-            DaygleError::Config(format!("unbalanced '[' in '{server}'"))
-        })?;
+        let (host, tail) = stripped
+            .split_once(']')
+            .ok_or_else(|| DaygleError::Config(format!("unbalanced '[' in '{server}'")))?;
         // If the user already supplied a port after the brackets, use it
         // verbatim. Otherwise append the protocol default.
         let effective_port = tail

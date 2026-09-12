@@ -154,7 +154,9 @@ fn compile_regex(patterns: &[String], group: &str) -> RegexSet {
 /// Used by the API to reject a bad pattern up front instead of silently
 /// dropping it at build time.
 pub fn validate_regex(pattern: &str) -> std::result::Result<(), String> {
-    regex::Regex::new(pattern).map(|_| ()).map_err(|e| e.to_string())
+    regex::Regex::new(pattern)
+        .map(|_| ())
+        .map_err(|e| e.to_string())
 }
 
 /// Map a stored [`BlockResponse`] to the engine [`Action`] the dispatcher

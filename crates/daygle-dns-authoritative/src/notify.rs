@@ -193,9 +193,13 @@ impl NotifyInbound {
         // Answer first (with the current SOA, RFC 1996 §3.7) so the master is
         // not left waiting, then pull in the background.
         let current_soa = self.refresher.current_soa(&zone).await;
-        let info =
-            send_notify_reply(&mut response_handle, request, ResponseCode::NoError, current_soa)
-                .await;
+        let info = send_notify_reply(
+            &mut response_handle,
+            request,
+            ResponseCode::NoError,
+            current_soa,
+        )
+        .await;
 
         let refresher = self.refresher.clone();
         let config = config.clone();

@@ -57,11 +57,7 @@ pub fn generate_self_signed_pem(server_name: &str) -> Result<(String, String)> {
 }
 
 /// Generate a self-signed ECDSA certificate and write PEM files to disk.
-pub fn generate_self_signed(
-    cert_path: &str,
-    key_path: &str,
-    server_name: &str,
-) -> Result<()> {
+pub fn generate_self_signed(cert_path: &str, key_path: &str, server_name: &str) -> Result<()> {
     let (cert_pem, key_pem) = generate_self_signed_pem(server_name)?;
 
     write_if_parent_exists(cert_path, cert_pem.as_bytes())?;
@@ -83,9 +79,7 @@ pub fn validate_pem_pair(cert_pem: &str, key_pem: &str) -> Result<()> {
     }
     let key = PrivateKeyDer::pem_slice_iter(key_pem.as_bytes())
         .next()
-        .ok_or_else(|| {
-            DaygleError::Tls("no private key found in the uploaded PEM".to_string())
-        })?
+        .ok_or_else(|| DaygleError::Tls("no private key found in the uploaded PEM".to_string()))?
         .map_err(|e| DaygleError::Tls(format!("cannot parse key PEM: {e}")))?;
 
     let provider = crypto_provider().ok_or_else(|| {
@@ -136,7 +130,11 @@ fn write_if_parent_exists(path: &str, bytes: &[u8]) -> Result<()> {
 
 /// Load a PEM certificate chain + private key into a rustls server config
 /// advertising the given ALPN protocol (e.g. `dot` for DoT, `h2` for DoH).
-pub fn load_tls_config(cert_path: &str, key_path: &str, alpn: &[u8]) -> Result<rustls::ServerConfig> {
+pub fn load_tls_config(
+    cert_path: &str,
+    key_path: &str,
+    alpn: &[u8],
+) -> Result<rustls::ServerConfig> {
     load_tls_config_versions(cert_path, key_path, alpn)
 }
 
@@ -154,9 +152,7 @@ pub fn load_tls_config_versions(
     // hardcoding `ring::default_provider()` so binaries built without the
     // `ring` feature (e.g. only `aws-lc-rs`) still start cleanly.
     let provider = crypto_provider().ok_or_else(|| {
-        DaygleError::Tls(
-            "no rustls crypto provider available; enable `ring` or `aws_lc_rs`".into(),
-        )
+        DaygleError::Tls("no rustls crypto provider available; enable `ring` or `aws_lc_rs`".into())
     })?;
     let mut config = rustls::ServerConfig::builder_with_provider(provider)
         .with_safe_default_protocol_versions()
@@ -232,6 +228,11 @@ mod tests {
         fs::write(&cert, b"not a certificate").unwrap();
         let key = dir.path().join("bad.key");
         fs::write(&key, b"not a key").unwrap();
-        assert!(load_tls_config(cert.to_str().unwrap(), key.to_str().unwrap(), crate::DOT_ALPN).is_err());
+        assert!(load_tls_config(
+            cert.to_str().unwrap(),
+            key.to_str().unwrap(),
+            crate::DOT_ALPN
+        )
+        .is_err());
     }
 }

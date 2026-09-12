@@ -314,7 +314,10 @@ async fn split_horizon_serves_mx_txt_srv_records() {
     assert_eq!(mx.response_code, ResponseCode::NoError);
     assert_eq!(mx.answers.len(), 1);
     assert_eq!(mx.answers[0].record_type(), RecordType::MX);
-    assert!(mx.answers[0].data.to_string().contains("10 mailhost.example.test"));
+    assert!(mx.answers[0]
+        .data
+        .to_string()
+        .contains("10 mailhost.example.test"));
 
     let txt = udp_query(udp, "mail.example.test.", RecordType::TXT).await;
     assert_eq!(txt.answers.len(), 1);
@@ -365,7 +368,10 @@ async fn split_horizon_cname_answers_all_types() {
     assert_eq!(a.response_code, ResponseCode::NoError);
     assert_eq!(a.answers.len(), 1);
     assert_eq!(a.answers[0].record_type(), RecordType::CNAME);
-    assert!(a.answers[0].data.to_string().contains("target.example.test"));
+    assert!(a.answers[0]
+        .data
+        .to_string()
+        .contains("target.example.test"));
 
     let cname = udp_query(udp, "alias.example.test.", RecordType::CNAME).await;
     assert_eq!(cname.answers.len(), 1);

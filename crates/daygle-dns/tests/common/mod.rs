@@ -112,8 +112,8 @@ pub async fn dot_query(
         .expect("connect DoT");
 
     let mut roots = rustls::RootCertStore::empty();
-    for cert in rustls::pki_types::CertificateDer::<'_>::pem_file_iter(cert_path)
-        .expect("open cert file")
+    for cert in
+        rustls::pki_types::CertificateDer::<'_>::pem_file_iter(cert_path).expect("open cert file")
     {
         roots.add(cert.expect("parse cert")).expect("add root");
     }

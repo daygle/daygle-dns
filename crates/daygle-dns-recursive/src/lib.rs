@@ -96,18 +96,16 @@ impl RecursiveResolver {
         for zone in &settings.conditional_zones {
             let zone_name = normalize_zone(&zone.name);
             let (zconfig, zopts) = build_zone_config(zone, settings)?;
-            let resolver = TokioResolver::builder_with_config(
-                zconfig,
-                TokioRuntimeProvider::default(),
-            )
-            .with_options(zopts)
-            .build()
-            .map_err(|e| {
-                DaygleError::Config(format!(
-                    "cannot build conditional resolver for '{}': {e}",
-                    zone.name
-                ))
-            })?;
+            let resolver =
+                TokioResolver::builder_with_config(zconfig, TokioRuntimeProvider::default())
+                    .with_options(zopts)
+                    .build()
+                    .map_err(|e| {
+                        DaygleError::Config(format!(
+                            "cannot build conditional resolver for '{}': {e}",
+                            zone.name
+                        ))
+                    })?;
             info!(
                 zone = %zone_name,
                 upstreams = zone.upstreams.len(),
@@ -158,7 +156,9 @@ impl RecursiveResolver {
     /// On upstream failure, a previously-good answer within the serve-stale
     /// window is served with a short TTL when `serve_stale_secs` is set.
     pub async fn lookup(&self, name: &str, record_type: RecordType) -> Result<Lookup> {
-        Arc::clone(&self.inner).lookup_owned(name, record_type).await
+        Arc::clone(&self.inner)
+            .lookup_owned(name, record_type)
+            .await
     }
 
     /// Flush the response cache.
@@ -204,7 +204,11 @@ impl Inner {
     /// cache assistant and may spawn a prefetch refresh for popular names.
     /// (The spawned task uses [`Self::refresh`], which never spawns again -
     /// keeping both futures provably `Send` without recursion.)
-    pub async fn lookup_owned(self: Arc<Self>, name: &str, record_type: RecordType) -> Result<Lookup> {
+    pub async fn lookup_owned(
+        self: Arc<Self>,
+        name: &str,
+        record_type: RecordType,
+    ) -> Result<Lookup> {
         let inner = self;
         let name = Name::from_utf8(name).map_err(|e| DaygleError::Resolution {
             message: format!("invalid name '{name}': {e}"),
@@ -376,10 +380,7 @@ fn normalize_zone(name: &str) -> String {
 /// (label-aligned). The most specific (deepest) match wins; returns the index
 /// into `conditional`, or `None` to fall through to the default resolver.
 fn match_conditional_zones(conditional: &[ConditionalResolver], name: &Name) -> Option<usize> {
-    match_conditional_zones_by_name(
-        conditional.iter().map(|c| c.zone.as_str()),
-        name,
-    )
+    match_conditional_zones_by_name(conditional.iter().map(|c| c.zone.as_str()), name)
 }
 
 /// Pure matching core: the index of the longest zone suffix that is a
@@ -502,7 +503,10 @@ mod tests {
         assert_eq!(m("notcorp.internal."), Some(1));
         // The root zone matches everything.
         assert_eq!(
-            match_conditional_zones_by_name(["".to_string()].iter().map(String::as_str), &q("anything.example.")),
+            match_conditional_zones_by_name(
+                ["".to_string()].iter().map(String::as_str),
+                &q("anything.example.")
+            ),
             Some(0)
         );
     }

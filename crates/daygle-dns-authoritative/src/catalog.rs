@@ -9,7 +9,7 @@ use hickory_proto::dnssec::crypto::EcdsaSigningKey;
 use hickory_proto::dnssec::rdata::dnskey::DNSKEY;
 use hickory_proto::dnssec::rdata::DNSSECRData;
 use hickory_proto::dnssec::{Algorithm, DnssecSigner, SigningKey};
-use hickory_proto::rr::{LowerName, Name, RData, RrKey, Record, RecordSet, RecordType};
+use hickory_proto::rr::{LowerName, Name, RData, Record, RecordSet, RecordType, RrKey};
 use hickory_server::dnssec::NxProofKind;
 use hickory_server::store::in_memory::InMemoryZoneHandler;
 use hickory_server::zone_handler::{AxfrPolicy, Catalog, ZoneHandler, ZoneType};
@@ -97,19 +97,20 @@ impl AuthorityCatalog {
     /// surfaces at startup/reload rather than at first use.
     pub fn tsig_key_ring(&self) -> std::sync::Arc<crate::tsig::TsigKeyRing> {
         let settings = self.settings.load_full();
-        let ring = crate::tsig::TsigKeyRing::from_configs(&settings.tsig_keys)
-            .unwrap_or_default();
+        let ring = crate::tsig::TsigKeyRing::from_configs(&settings.tsig_keys).unwrap_or_default();
         std::sync::Arc::new(ring)
     }
 
     /// The TSIG key (if any) required for transfers of `zone_name`.
     pub fn tsig_transfer_key(&self, zone_name: &str) -> Option<crate::tsig::TsigKey> {
         let settings = self.settings.load_full();
-        let ring = crate::tsig::TsigKeyRing::from_configs(&settings.tsig_keys)
-            .unwrap_or_default();
+        let ring = crate::tsig::TsigKeyRing::from_configs(&settings.tsig_keys).unwrap_or_default();
         for binding in &settings.tsig_transfer_zones {
             if let Some((zone, key)) = binding.split_once('=') {
-                if zone.trim_end_matches('.').eq_ignore_ascii_case(zone_name.trim_end_matches('.')) {
+                if zone
+                    .trim_end_matches('.')
+                    .eq_ignore_ascii_case(zone_name.trim_end_matches('.'))
+                {
                     return ring.get_by_config_name(key).cloned();
                 }
             }
@@ -120,11 +121,13 @@ impl AuthorityCatalog {
     /// The TSIG key (if any) required for updates to `zone_name`.
     pub fn tsig_update_key(&self, zone_name: &str) -> Option<crate::tsig::TsigKey> {
         let settings = self.settings.load_full();
-        let ring = crate::tsig::TsigKeyRing::from_configs(&settings.tsig_keys)
-            .unwrap_or_default();
+        let ring = crate::tsig::TsigKeyRing::from_configs(&settings.tsig_keys).unwrap_or_default();
         for binding in &settings.tsig_update_zones {
             if let Some((zone, key)) = binding.split_once('=') {
-                if zone.trim_end_matches('.').eq_ignore_ascii_case(zone_name.trim_end_matches('.')) {
+                if zone
+                    .trim_end_matches('.')
+                    .eq_ignore_ascii_case(zone_name.trim_end_matches('.'))
+                {
                     return ring.get_by_config_name(key).cloned();
                 }
             }
@@ -212,7 +215,10 @@ impl AuthorityCatalog {
 pub fn generate_signing_key() -> Result<(u8, Vec<u8>)> {
     let der = EcdsaSigningKey::generate_pkcs8(Algorithm::ECDSAP256SHA256)
         .map_err(|e| DaygleError::Internal(format!("key generation failed: {e}")))?;
-    Ok((u8::from(Algorithm::ECDSAP256SHA256), der.secret_pkcs8_der().to_vec()))
+    Ok((
+        u8::from(Algorithm::ECDSAP256SHA256),
+        der.secret_pkcs8_der().to_vec(),
+    ))
 }
 
 /// Build the split-horizon index from the store's networks and entries.
@@ -254,8 +260,12 @@ fn build_catalog(
         // made by the old key can still build a chain of trust (RFC 6781).
         if sign_zones {
             for key in &retired {
-                match build_dnskey_record(&origin, key.algorithm, &key.key_der, zone.minimum.max(300))
-                {
+                match build_dnskey_record(
+                    &origin,
+                    key.algorithm,
+                    &key.key_der,
+                    zone.minimum.max(300),
+                ) {
                     Ok(record) => {
                         insert_record_set(&mut map, record)?;
                     }

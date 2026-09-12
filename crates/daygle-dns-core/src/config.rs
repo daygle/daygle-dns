@@ -185,61 +185,154 @@ impl RuntimeSettings {
     /// Apply the overlay to `config` in place. `None` fields are untouched.
     pub fn apply_to(&self, config: &mut DaygleConfig) {
         if let Some(r) = &self.recursive {
-            if let Some(v) = r.enabled { config.recursive.enabled = v; }
-            if let Some(v) = r.cache_size { config.recursive.cache_size = v; }
-            if let Some(v) = &r.upstreams { config.recursive.upstreams = v.clone(); }
-            if let Some(v) = r.dnssec_validate { config.recursive.dnssec_validate = v; }
-            if let Some(v) = r.prefetch_enabled { config.recursive.prefetch_enabled = v; }
-            if let Some(v) = r.prefetch_ttl_fraction_pct { config.recursive.prefetch_ttl_fraction_pct = v; }
-            if let Some(v) = r.prefetch_min_queries { config.recursive.prefetch_min_queries = v; }
-            if let Some(v) = r.serve_stale_secs { config.recursive.serve_stale_secs = v; }
-            if let Some(v) = r.max_cache_ttl { config.recursive.max_cache_ttl = v; }
-            if let Some(v) = r.failure_cache_ttl { config.recursive.failure_cache_ttl = v; }
+            if let Some(v) = r.enabled {
+                config.recursive.enabled = v;
+            }
+            if let Some(v) = r.cache_size {
+                config.recursive.cache_size = v;
+            }
+            if let Some(v) = &r.upstreams {
+                config.recursive.upstreams = v.clone();
+            }
+            if let Some(v) = r.dnssec_validate {
+                config.recursive.dnssec_validate = v;
+            }
+            if let Some(v) = r.prefetch_enabled {
+                config.recursive.prefetch_enabled = v;
+            }
+            if let Some(v) = r.prefetch_ttl_fraction_pct {
+                config.recursive.prefetch_ttl_fraction_pct = v;
+            }
+            if let Some(v) = r.prefetch_min_queries {
+                config.recursive.prefetch_min_queries = v;
+            }
+            if let Some(v) = r.serve_stale_secs {
+                config.recursive.serve_stale_secs = v;
+            }
+            if let Some(v) = r.max_cache_ttl {
+                config.recursive.max_cache_ttl = v;
+            }
+            if let Some(v) = r.failure_cache_ttl {
+                config.recursive.failure_cache_ttl = v;
+            }
         }
         if let Some(d) = &self.dot {
-            if let Some(v) = d.enabled { config.dot.enabled = v; }
-            if let Some(v) = d.port { config.dot.port = v; }
-            if let Some(v) = d.self_signed { config.dot.self_signed = v; }
-            if let Some(v) = &d.server_name { config.dot.server_name = v.clone(); }
-            if let Some(v) = &d.cert_path { config.dot.cert_path = v.clone(); }
-            if let Some(v) = &d.key_path { config.dot.key_path = v.clone(); }
-            if let Some(v) = &d.certificate { config.dot.certificate = v.clone(); }
+            if let Some(v) = d.enabled {
+                config.dot.enabled = v;
+            }
+            if let Some(v) = d.port {
+                config.dot.port = v;
+            }
+            if let Some(v) = d.self_signed {
+                config.dot.self_signed = v;
+            }
+            if let Some(v) = &d.server_name {
+                config.dot.server_name = v.clone();
+            }
+            if let Some(v) = &d.cert_path {
+                config.dot.cert_path = v.clone();
+            }
+            if let Some(v) = &d.key_path {
+                config.dot.key_path = v.clone();
+            }
+            if let Some(v) = &d.certificate {
+                config.dot.certificate = v.clone();
+            }
         }
         if let Some(d) = &self.doh {
-            if let Some(v) = d.enabled { config.doh.enabled = v; }
-            if let Some(v) = d.port { config.doh.port = v; }
-            if let Some(v) = d.self_signed { config.doh.self_signed = v; }
-            if let Some(v) = &d.server_name { config.doh.server_name = v.clone(); }
-            if let Some(v) = &d.cert_path { config.doh.cert_path = v.clone(); }
-            if let Some(v) = &d.key_path { config.doh.key_path = v.clone(); }
-            if let Some(v) = &d.endpoint { config.doh.endpoint = v.clone(); }
-            if let Some(v) = &d.certificate { config.doh.certificate = v.clone(); }
+            if let Some(v) = d.enabled {
+                config.doh.enabled = v;
+            }
+            if let Some(v) = d.port {
+                config.doh.port = v;
+            }
+            if let Some(v) = d.self_signed {
+                config.doh.self_signed = v;
+            }
+            if let Some(v) = &d.server_name {
+                config.doh.server_name = v.clone();
+            }
+            if let Some(v) = &d.cert_path {
+                config.doh.cert_path = v.clone();
+            }
+            if let Some(v) = &d.key_path {
+                config.doh.key_path = v.clone();
+            }
+            if let Some(v) = &d.endpoint {
+                config.doh.endpoint = v.clone();
+            }
+            if let Some(v) = &d.certificate {
+                config.doh.certificate = v.clone();
+            }
         }
         if let Some(d) = &self.doq {
-            if let Some(v) = d.enabled { config.doq.enabled = v; }
-            if let Some(v) = d.port { config.doq.port = v; }
-            if let Some(v) = d.self_signed { config.doq.self_signed = v; }
-            if let Some(v) = &d.server_name { config.doq.server_name = v.clone(); }
-            if let Some(v) = &d.cert_path { config.doq.cert_path = v.clone(); }
-            if let Some(v) = &d.key_path { config.doq.key_path = v.clone(); }
-            if let Some(v) = &d.certificate { config.doq.certificate = v.clone(); }
-            if let Some(v) = d.idle_timeout_secs { config.doq.idle_timeout_secs = v; }
+            if let Some(v) = d.enabled {
+                config.doq.enabled = v;
+            }
+            if let Some(v) = d.port {
+                config.doq.port = v;
+            }
+            if let Some(v) = d.self_signed {
+                config.doq.self_signed = v;
+            }
+            if let Some(v) = &d.server_name {
+                config.doq.server_name = v.clone();
+            }
+            if let Some(v) = &d.cert_path {
+                config.doq.cert_path = v.clone();
+            }
+            if let Some(v) = &d.key_path {
+                config.doq.key_path = v.clone();
+            }
+            if let Some(v) = &d.certificate {
+                config.doq.certificate = v.clone();
+            }
+            if let Some(v) = d.idle_timeout_secs {
+                config.doq.idle_timeout_secs = v;
+            }
         }
         if let Some(p) = &self.policy {
-            if let Some(v) = &p.allowlist { config.policy.allowlist = v.clone(); }
-            if let Some(v) = &p.blocklist { config.policy.blocklist = v.clone(); }
-            if let Some(v) = p.filter_aaaa { config.policy.filter_aaaa = v; }
-            if let Some(v) = &p.filter_aaaa_except { config.policy.filter_aaaa_except = v.clone(); }
+            if let Some(v) = &p.allowlist {
+                config.policy.allowlist = v.clone();
+            }
+            if let Some(v) = &p.blocklist {
+                config.policy.blocklist = v.clone();
+            }
+            if let Some(v) = p.filter_aaaa {
+                config.policy.filter_aaaa = v;
+            }
+            if let Some(v) = &p.filter_aaaa_except {
+                config.policy.filter_aaaa_except = v.clone();
+            }
         }
         if let Some(a) = &self.authoritative {
-            if let Some(v) = a.default_record_ttl { config.authoritative.default_record_ttl = v; }
-            if let Some(v) = a.axfr_enabled { config.authoritative.axfr_enabled = v; }
-            if let Some(v) = &a.axfr_networks { config.authoritative.axfr_networks = AuthoritativeUpdate::normalize_networks(v.clone()); }
-            if let Some(v) = a.allow_dynamic_updates { config.authoritative.allow_dynamic_updates = v; }
-            if let Some(v) = &a.update_networks { config.authoritative.update_networks = AuthoritativeUpdate::normalize_networks(v.clone()); }
-            if let Some(v) = a.notify_enabled { config.authoritative.notify_enabled = v; }
-            if let Some(v) = &a.notify_targets { config.authoritative.notify_targets = AuthoritativeUpdate::normalize_networks(v.clone()); }
-            if let Some(v) = a.notify_listen_enabled { config.authoritative.notify_listen_enabled = v; }
+            if let Some(v) = a.default_record_ttl {
+                config.authoritative.default_record_ttl = v;
+            }
+            if let Some(v) = a.axfr_enabled {
+                config.authoritative.axfr_enabled = v;
+            }
+            if let Some(v) = &a.axfr_networks {
+                config.authoritative.axfr_networks =
+                    AuthoritativeUpdate::normalize_networks(v.clone());
+            }
+            if let Some(v) = a.allow_dynamic_updates {
+                config.authoritative.allow_dynamic_updates = v;
+            }
+            if let Some(v) = &a.update_networks {
+                config.authoritative.update_networks =
+                    AuthoritativeUpdate::normalize_networks(v.clone());
+            }
+            if let Some(v) = a.notify_enabled {
+                config.authoritative.notify_enabled = v;
+            }
+            if let Some(v) = &a.notify_targets {
+                config.authoritative.notify_targets =
+                    AuthoritativeUpdate::normalize_networks(v.clone());
+            }
+            if let Some(v) = a.notify_listen_enabled {
+                config.authoritative.notify_listen_enabled = v;
+            }
         }
     }
 
@@ -267,7 +360,8 @@ impl RuntimeSettings {
                 server_name: Some(config.dot.server_name.clone()),
                 cert_path: Some(config.dot.cert_path.clone()),
                 key_path: Some(config.dot.key_path.clone()),
-                certificate: (!config.dot.certificate.is_empty()).then(|| config.dot.certificate.clone()),
+                certificate: (!config.dot.certificate.is_empty())
+                    .then(|| config.dot.certificate.clone()),
                 idle_timeout_secs: None,
             }),
             doh: Some(DohUpdate {
@@ -278,7 +372,8 @@ impl RuntimeSettings {
                 cert_path: Some(config.doh.cert_path.clone()),
                 key_path: Some(config.doh.key_path.clone()),
                 endpoint: Some(config.doh.endpoint.clone()),
-                certificate: (!config.doh.certificate.is_empty()).then(|| config.doh.certificate.clone()),
+                certificate: (!config.doh.certificate.is_empty())
+                    .then(|| config.doh.certificate.clone()),
             }),
             doq: Some(ListenerUpdate {
                 enabled: Some(config.doq.enabled),
@@ -287,7 +382,8 @@ impl RuntimeSettings {
                 server_name: Some(config.doq.server_name.clone()),
                 cert_path: Some(config.doq.cert_path.clone()),
                 key_path: Some(config.doq.key_path.clone()),
-                certificate: (!config.doq.certificate.is_empty()).then(|| config.doq.certificate.clone()),
+                certificate: (!config.doq.certificate.is_empty())
+                    .then(|| config.doq.certificate.clone()),
                 idle_timeout_secs: Some(config.doq.idle_timeout_secs),
             }),
             policy: Some(PolicyUpdate {
@@ -313,8 +409,8 @@ impl RuntimeSettings {
 impl DaygleConfig {
     /// Parse a TOML document into a validated configuration.
     pub fn parse(text: &str) -> Result<Self> {
-        let cfg: DaygleConfig = toml::from_str(text)
-            .map_err(|e| DaygleError::Config(format!("invalid TOML: {e}")))?;
+        let cfg: DaygleConfig =
+            toml::from_str(text).map_err(|e| DaygleError::Config(format!("invalid TOML: {e}")))?;
         cfg.validate()?;
         Ok(cfg)
     }
@@ -322,9 +418,8 @@ impl DaygleConfig {
     /// Load and parse a configuration file from disk.
     pub fn load(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
-        let text = std::fs::read_to_string(path).map_err(|e| {
-            DaygleError::Config(format!("cannot read {}: {e}", path.display()))
-        })?;
+        let text = std::fs::read_to_string(path)
+            .map_err(|e| DaygleError::Config(format!("cannot read {}: {e}", path.display())))?;
         Self::parse(&text)
     }
 
@@ -339,7 +434,11 @@ impl DaygleConfig {
         // Only *enabled* listeners need a concrete port; a disabled service
         // may keep port 0 (e.g. ephemeral test setups).
         for (name, port, enabled) in [
-            ("server.port", self.server.port, self.server.udp_enabled || self.server.tcp_enabled),
+            (
+                "server.port",
+                self.server.port,
+                self.server.udp_enabled || self.server.tcp_enabled,
+            ),
             ("dot.port", self.dot.port, self.dot.enabled),
             ("doh.port", self.doh.port, self.doh.enabled),
             ("doq.port", self.doq.port, self.doq.enabled),
@@ -399,7 +498,8 @@ impl DaygleConfig {
         }
         if rec.max_cache_ttl > 0 && rec.max_cache_ttl < rec.min_cache_ttl {
             return Err(DaygleError::Config(
-                "recursive.max_cache_ttl must be >= recursive.min_cache_ttl when both are set".to_string(),
+                "recursive.max_cache_ttl must be >= recursive.min_cache_ttl when both are set"
+                    .to_string(),
             ));
         }
         if rec.failure_cache_ttl > 7 * 24 * 3600 {
@@ -446,9 +546,7 @@ impl DaygleConfig {
                 "authoritative.dnssec_sig_validity_days must be >= 1".to_string(),
             ));
         }
-        if dnssec.dnssec_rollover_overlap_days == 0
-            || dnssec.dnssec_rollover_retire_days == 0
-        {
+        if dnssec.dnssec_rollover_overlap_days == 0 || dnssec.dnssec_rollover_retire_days == 0 {
             return Err(DaygleError::Config(
                 "authoritative.dnssec_rollover_{overlap,retire}_days must be >= 1".to_string(),
             ));
@@ -509,8 +607,7 @@ impl DaygleConfig {
                 )));
             }
         }
-        if self.authoritative.notify_listen_enabled
-            && self.authoritative.secondary_zones.is_empty()
+        if self.authoritative.notify_listen_enabled && self.authoritative.secondary_zones.is_empty()
         {
             return Err(DaygleError::Config(
                 "authoritative.notify_listen_enabled requires secondary_zones".to_string(),
@@ -519,8 +616,14 @@ impl DaygleConfig {
         for (label, networks) in [
             ("policy.denied_networks", &self.policy.denied_networks),
             ("policy.allowed_networks", &self.policy.allowed_networks),
-            ("authoritative.axfr_networks", &self.authoritative.axfr_networks),
-            ("authoritative.update_networks", &self.authoritative.update_networks),
+            (
+                "authoritative.axfr_networks",
+                &self.authoritative.axfr_networks,
+            ),
+            (
+                "authoritative.update_networks",
+                &self.authoritative.update_networks,
+            ),
         ] {
             for net in networks {
                 if net.parse::<ipnet::IpNet>().is_err() {
@@ -590,7 +693,10 @@ impl DaygleConfig {
                     key.name
                 )));
             }
-            if base64::engine::general_purpose::STANDARD.decode(key.secret.trim()).is_err() {
+            if base64::engine::general_purpose::STANDARD
+                .decode(key.secret.trim())
+                .is_err()
+            {
                 return Err(DaygleError::Config(format!(
                     "tsig key '{}' secret is not valid base64",
                     key.name
@@ -1460,7 +1566,10 @@ pub fn validate_domain_pattern(pattern: &str) -> std::result::Result<(), String>
         if label.starts_with('-') || label.ends_with('-') {
             return Err("DNS labels must not start or end with '-'".to_string());
         }
-        if !label.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-') {
+        if !label
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+        {
             return Err("DNS labels may contain only letters, numbers and '-'".to_string());
         }
     }
@@ -1601,10 +1710,7 @@ masters = ["192.0.2.1"]
         )
         .is_err());
         // Inbound NOTIFY without any secondary zone is rejected.
-        assert!(DaygleConfig::parse(
-            "[authoritative]\nnotify_listen_enabled = true\n"
-        )
-        .is_err());
+        assert!(DaygleConfig::parse("[authoritative]\nnotify_listen_enabled = true\n").is_err());
     }
 
     #[test]
@@ -1635,18 +1741,11 @@ dnssec_maintenance_secs = 600
         assert_eq!(defaults.dnssec_maintenance_secs, 3600);
 
         // Nonsensical values are rejected.
-        assert!(DaygleConfig::parse(
-            "[authoritative]\ndnssec_sig_validity_days = 0\n"
-        )
-        .is_err());
-        assert!(DaygleConfig::parse(
-            "[authoritative]\ndnssec_rollover_overlap_days = 0\n"
-        )
-        .is_err());
-        assert!(DaygleConfig::parse(
-            "[authoritative]\ndnssec_maintenance_secs = 10\n"
-        )
-        .is_err());
+        assert!(DaygleConfig::parse("[authoritative]\ndnssec_sig_validity_days = 0\n").is_err());
+        assert!(
+            DaygleConfig::parse("[authoritative]\ndnssec_rollover_overlap_days = 0\n").is_err()
+        );
+        assert!(DaygleConfig::parse("[authoritative]\ndnssec_maintenance_secs = 10\n").is_err());
     }
 
     #[test]
@@ -1663,9 +1762,7 @@ update_networks = ["192.0.2.0/24", "2001:db8::/32"]
             .authoritative
             .update_networks
             .is_empty());
-        assert!(!DaygleConfig::default()
-            .authoritative
-            .allow_dynamic_updates);
+        assert!(!DaygleConfig::default().authoritative.allow_dynamic_updates);
 
         // Invalid networks are rejected like the other network lists.
         let bad = r#"
@@ -1748,9 +1845,15 @@ format = "adblock"
 "#;
         let cfg = DaygleConfig::parse(text).unwrap();
         assert_eq!(cfg.policy.blocklist_sources.len(), 2);
-        assert_eq!(cfg.policy.blocklist_sources[0].format, BlocklistFormat::Hosts);
+        assert_eq!(
+            cfg.policy.blocklist_sources[0].format,
+            BlocklistFormat::Hosts
+        );
         assert_eq!(cfg.policy.blocklist_sources[0].refresh_secs, 43200);
-        assert_eq!(cfg.policy.blocklist_sources[1].format, BlocklistFormat::Adblock);
+        assert_eq!(
+            cfg.policy.blocklist_sources[1].format,
+            BlocklistFormat::Adblock
+        );
         assert_eq!(cfg.policy.blocklist_sources[1].refresh_secs, 86400);
     }
 

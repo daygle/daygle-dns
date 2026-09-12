@@ -157,8 +157,7 @@ impl DnssecMaintenance {
                 && key_age(active[0]) >= self.config.rollover_after
             {
                 let (algorithm, der) = generate_signing_key()?;
-                self.store
-                    .store_signing_key(&zone.id, algorithm, &der)?;
+                self.store.store_signing_key(&zone.id, algorithm, &der)?;
                 changed = true;
                 events += 1;
                 info!(
@@ -178,27 +177,28 @@ impl DnssecMaintenance {
                 .max()
                 .unwrap_or(DateTime::<Utc>::MIN_UTC);
             for key in &active {
-                if key_age(key) >= retire_after && key_created_at(key) < newest_active
-                    && self.store.set_key_state(&key.id, "retired")? {
-                        changed = true;
-                        events += 1;
-                        info!(
-                            zone = %zone.name,
-                            "DNSSEC rollover: retired old key; it stays published for \
-                             the retirement grace period"
-                        );
-                    }
+                if key_age(key) >= retire_after
+                    && key_created_at(key) < newest_active
+                    && self.store.set_key_state(&key.id, "retired")?
+                {
+                    changed = true;
+                    events += 1;
+                    info!(
+                        zone = %zone.name,
+                        "DNSSEC rollover: retired old key; it stays published for \
+                         the retirement grace period"
+                    );
+                }
             }
 
             // -- Delete fully aged-out keys ------------------------------
             let delete_after = retire_after + self.config.retire;
             for key in &retired {
-                if key_age(key) >= delete_after
-                    && self.store.delete_key(&key.id)? {
-                        changed = true;
-                        events += 1;
-                        info!(zone = %zone.name, "DNSSEC rollover: removed old key");
-                    }
+                if key_age(key) >= delete_after && self.store.delete_key(&key.id)? {
+                    changed = true;
+                    events += 1;
+                    info!(zone = %zone.name, "DNSSEC rollover: removed old key");
+                }
             }
         }
 

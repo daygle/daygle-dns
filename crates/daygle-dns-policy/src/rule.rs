@@ -19,11 +19,7 @@ pub struct PerClientRule {
 }
 
 impl PerClientRule {
-    pub fn new(
-        clients: Vec<IpNet>,
-        domains: Option<Vec<String>>,
-        action: Action,
-    ) -> Self {
+    pub fn new(clients: Vec<IpNet>, domains: Option<Vec<String>>, action: Action) -> Self {
         // An empty client list means "every client" (match-all), mirroring
         // `from_config` which defaults to 0.0.0.0/0.
         let clients = if clients.is_empty() {
@@ -45,9 +41,11 @@ impl PerClientRule {
     pub fn from_config(rule: &PolicyRule) -> Result<Self> {
         let mut clients = Vec::new();
         for net in &rule.clients {
-            clients.push(net.parse().map_err(|_| {
-                DaygleError::InvalidPolicy(format!("bad client network '{net}'"))
-            })?);
+            clients.push(
+                net.parse().map_err(|_| {
+                    DaygleError::InvalidPolicy(format!("bad client network '{net}'"))
+                })?,
+            );
         }
         if clients.is_empty() {
             clients.push("0.0.0.0/0".parse().unwrap());

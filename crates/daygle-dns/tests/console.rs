@@ -6,12 +6,12 @@ mod common;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use common::*;
 use chrono::Datelike;
+use common::*;
+use daygle_dns::BoundServer;
 use daygle_dns_authoritative::model::{RecordInput, ZoneInput};
 use daygle_dns_core::config::DaygleConfig;
 use daygle_dns_core::hash_password;
-use daygle_dns::BoundServer;
 use hickory_proto::op::{Message, MessageType, OpCode, Query};
 use hickory_proto::rr::{Name, RecordType};
 use rustls_pki_types::pem::PemObject;
@@ -130,7 +130,12 @@ async fn console_users_live_in_the_database() {
         .unwrap();
     assert_eq!(resp.status(), 200);
     let users: serde_json::Value = resp.json().await.unwrap();
-    let admin = users.as_array().unwrap().iter().find(|u| u["username"] == "admin").unwrap();
+    let admin = users
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|u| u["username"] == "admin")
+        .unwrap();
     assert_eq!(admin["password_hash"], json!("[redacted]"));
 
     // Create a viewer and an extra admin through the API.
@@ -181,7 +186,10 @@ async fn console_users_live_in_the_database() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 200);
-    assert_eq!(login_status(server.api_addr, "auditor", "long-enough-pw").await, 401);
+    assert_eq!(
+        login_status(server.api_addr, "auditor", "long-enough-pw").await,
+        401
+    );
 
     // Re-enable, then reset the password: the old one stops working.
     let resp = client
@@ -200,7 +208,10 @@ async fn console_users_live_in_the_database() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 200);
-    assert_eq!(login_status(server.api_addr, "auditor", "long-enough-pw").await, 401);
+    assert_eq!(
+        login_status(server.api_addr, "auditor", "long-enough-pw").await,
+        401
+    );
     let _ = login(server.api_addr, "auditor", "rotated-password").await;
 
     // The last enabled admin is protected: with two admins, deleting one
@@ -212,7 +223,10 @@ async fn console_users_live_in_the_database() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 204);
-    assert_eq!(login_status(server.api_addr, "root2", "long-enough-pw").await, 401);
+    assert_eq!(
+        login_status(server.api_addr, "root2", "long-enough-pw").await,
+        401
+    );
     let resp = client
         .delete(format!("{base}/api/users/admin"))
         .bearer_auth(&token)
@@ -231,7 +245,10 @@ async fn console_users_live_in_the_database() {
     assert_eq!(resp.status(), 409);
 
     // Deleted accounts cannot log in.
-    assert_eq!(login_status(server.api_addr, "root2", "long-enough-pw").await, 401);
+    assert_eq!(
+        login_status(server.api_addr, "root2", "long-enough-pw").await,
+        401
+    );
 
     shutdown(server).await;
 }
@@ -334,7 +351,11 @@ async fn first_run_setup_creates_admin_and_locks_the_console() {
     // written to a file so the setup can persist the account and a restarted
     // process can load it back. The console is locked and setup is pending.
     let cfg_path = dir.path().join("daygle-dns.toml");
-    std::fs::write(&cfg_path, DaygleConfig::default().to_toml().expect("serialize")).unwrap();
+    std::fs::write(
+        &cfg_path,
+        DaygleConfig::default().to_toml().expect("serialize"),
+    )
+    .unwrap();
     let mut cfg = base_config(&dir.path().join("daygle-dns.db"));
     cfg.server.port = free_tcp_port();
     cfg.api.port = free_tcp_port();
@@ -353,7 +374,9 @@ async fn first_run_setup_creates_admin_and_locks_the_console() {
     assert_eq!(body["setup"], json!(true));
 
     // The setup status is public and reports pending; login is not possible.
-    let resp = reqwest::get(format!("{base}/api/auth/setup")).await.unwrap();
+    let resp = reqwest::get(format!("{base}/api/auth/setup"))
+        .await
+        .unwrap();
     assert_eq!(resp.status(), 200);
     let status: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(status["setup_pending"], json!(true));
@@ -382,7 +405,12 @@ async fn first_run_setup_creates_admin_and_locks_the_console() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 200, "setup body: {}", resp.text().await.unwrap_or_default());
+    assert_eq!(
+        resp.status(),
+        200,
+        "setup body: {}",
+        resp.text().await.unwrap_or_default()
+    );
     let created: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(created["username"], json!("admin"));
     assert_eq!(created["role"], json!("admin"));
@@ -429,9 +457,15 @@ async fn first_run_setup_creates_admin_and_locks_the_console() {
     cfg.doq.enabled = false;
     cfg.recursive.enabled = false;
     cfg.recursive.use_system_config = false;
-    cfg.authoritative.database = dir.path().join("daygle-dns.db").to_string_lossy().into_owned();
+    cfg.authoritative.database = dir
+        .path()
+        .join("daygle-dns.db")
+        .to_string_lossy()
+        .into_owned();
     let server = bind_with_config(cfg, Some(cfg_path)).await;
-    let resp = reqwest::get(api_url(server.api_addr, "/api/status")).await.unwrap();
+    let resp = reqwest::get(api_url(server.api_addr, "/api/status"))
+        .await
+        .unwrap();
     assert_eq!(resp.status(), 401);
     let (token, role) = login(server.api_addr, "admin", "first-run-secret").await;
     assert_eq!(role, "admin");
@@ -456,9 +490,13 @@ async fn auth_can_be_disabled_explicitly() {
     let server = spawn(cfg).await;
 
     // The opt-out serves the console open, and no setup is pending.
-    let resp = reqwest::get(api_url(server.api_addr, "/api/status")).await.unwrap();
+    let resp = reqwest::get(api_url(server.api_addr, "/api/status"))
+        .await
+        .unwrap();
     assert_eq!(resp.status(), 200);
-    let resp = reqwest::get(api_url(server.api_addr, "/api/auth/setup")).await.unwrap();
+    let resp = reqwest::get(api_url(server.api_addr, "/api/auth/setup"))
+        .await
+        .unwrap();
     assert_eq!(resp.status(), 200);
     let status: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(status["setup_pending"], json!(false));
@@ -706,7 +744,10 @@ async fn settings_update_applies_and_persists() {
     // The config file itself was NOT rewritten by the console save: its
     // serve-stale value is still the file's default, not the console's 1800.
     assert_ne!(
-        DaygleConfig::load(&cfg_path).unwrap().recursive.serve_stale_secs,
+        DaygleConfig::load(&cfg_path)
+            .unwrap()
+            .recursive
+            .serve_stale_secs,
         1800
     );
 
@@ -765,7 +806,12 @@ async fn zone_form_creates_primary_import_and_secondary_zones() {
         .send()
         .await
         .unwrap();
-    assert_eq!(primary.status(), 201, "primary body: {}", primary.text().await.unwrap_or_default());
+    assert_eq!(
+        primary.status(),
+        201,
+        "primary body: {}",
+        primary.text().await.unwrap_or_default()
+    );
     let primary: serde_json::Value = client
         .get(format!("{base}/api/zones"))
         .send()
@@ -784,7 +830,10 @@ async fn zone_form_creates_primary_import_and_secondary_zones() {
     assert_eq!(imported["serial"], json!(42));
 
     let records: Vec<serde_json::Value> = client
-        .get(format!("{base}/api/zones/{}/records", imported["id"].as_str().unwrap()))
+        .get(format!(
+            "{base}/api/zones/{}/records",
+            imported["id"].as_str().unwrap()
+        ))
         .send()
         .await
         .unwrap()
@@ -817,7 +866,12 @@ async fn zone_form_creates_primary_import_and_secondary_zones() {
         .send()
         .await
         .unwrap();
-    assert_eq!(secondary.status(), 201, "secondary body: {}", secondary.text().await.unwrap_or_default());
+    assert_eq!(
+        secondary.status(),
+        201,
+        "secondary body: {}",
+        secondary.text().await.unwrap_or_default()
+    );
 
     let zones: Vec<serde_json::Value> = client
         .get(format!("{base}/api/zones"))
@@ -827,13 +881,19 @@ async fn zone_form_creates_primary_import_and_secondary_zones() {
         .json()
         .await
         .unwrap();
-    let branch = zones.iter().find(|zone| zone["name"] == "branch.test").unwrap();
+    let branch = zones
+        .iter()
+        .find(|zone| zone["name"] == "branch.test")
+        .unwrap();
     assert_eq!(branch["zone_type"], json!("secondary"));
     assert_eq!(branch["masters"], json!(["192.0.2.10", "192.0.2.11:5353"]));
     assert_eq!(branch["refresh_secs"], json!(600));
 
     let mutation = client
-        .put(format!("{base}/api/zones/{}/records", branch["id"].as_str().unwrap()))
+        .put(format!(
+            "{base}/api/zones/{}/records",
+            branch["id"].as_str().unwrap()
+        ))
         .json(&json!({ "name": "host", "rtype": "A", "content": "192.0.2.20" }))
         .send()
         .await
@@ -956,7 +1016,10 @@ async fn stats_endpoint_tracks_served_queries() {
     );
     let zone = catalog
         .store()
-        .create_zone(&ZoneInput { name: "stats.test".to_string(), ..Default::default() })
+        .create_zone(&ZoneInput {
+            name: "stats.test".to_string(),
+            ..Default::default()
+        })
         .unwrap();
     catalog
         .store()
@@ -1008,14 +1071,20 @@ async fn stats_endpoint_tracks_served_queries() {
         .iter()
         .filter_map(|e| e["key"].as_str())
         .collect();
-    assert!(top_domains.contains(&"host.stats.test"), "top domains: {top_domains:?}");
+    assert!(
+        top_domains.contains(&"host.stats.test"),
+        "top domains: {top_domains:?}"
+    );
     let top_clients: Vec<&str> = stats["top_clients"]
         .as_array()
         .unwrap()
         .iter()
         .filter_map(|e| e["key"].as_str())
         .collect();
-    assert!(top_clients.iter().any(|k| k.starts_with("127.0.0.1")), "{top_clients:?}");
+    assert!(
+        top_clients.iter().any(|k| k.starts_with("127.0.0.1")),
+        "{top_clients:?}"
+    );
 
     shutdown(server).await;
 }
@@ -1036,22 +1105,11 @@ async fn doq_query_end_to_end() {
     cfg.doq.port = 0;
     cfg.doq.server_name = "daygle.test".to_string();
     // Local cert paths inside the temp dir.
-    cfg.doq.cert_path = dir
-        .path()
-        .join("doq.crt")
-        .to_string_lossy()
-        .into_owned();
-    cfg.doq.key_path = dir
-        .path()
-        .join("doq.key")
-        .to_string_lossy()
-        .into_owned();
+    cfg.doq.cert_path = dir.path().join("doq.crt").to_string_lossy().into_owned();
+    cfg.doq.key_path = dir.path().join("doq.key").to_string_lossy().into_owned();
 
     // Authoritative zone with one record.
-    let store = daygle_dns_authoritative::ZoneStore::open(
-        &zone_db.to_string_lossy(),
-    )
-    .unwrap();
+    let store = daygle_dns_authoritative::ZoneStore::open(&zone_db.to_string_lossy()).unwrap();
     let catalog = Arc::new(
         daygle_dns_authoritative::AuthorityCatalog::new(
             store,
@@ -1090,8 +1148,8 @@ async fn doq_query_end_to_end() {
     // loading it as a root.
     let cert_path = dir.path().join("doq.crt");
     let mut roots = rustls::RootCertStore::empty();
-    for cert in rustls::pki_types::CertificateDer::<'_>::pem_file_iter(&cert_path)
-        .expect("open cert")
+    for cert in
+        rustls::pki_types::CertificateDer::<'_>::pem_file_iter(&cert_path).expect("open cert")
     {
         roots.add(cert.expect("parse cert")).expect("add root");
     }
@@ -1186,12 +1244,14 @@ async fn gui_cache_headers_allow_updates_without_hard_refresh() {
     // every load: after an update the embedded shell references new hashed
     // bundles, and a browser holding a stale shell would request assets the
     // new binary no longer carries.
-    let resp = reqwest::get(format!("{base}/"))
-        .await
-        .unwrap();
+    let resp = reqwest::get(format!("{base}/")).await.unwrap();
     assert_eq!(resp.status(), 200);
     assert_eq!(
-        resp.headers().get("cache-control").unwrap().to_str().unwrap(),
+        resp.headers()
+            .get("cache-control")
+            .unwrap()
+            .to_str()
+            .unwrap(),
         "no-cache"
     );
     assert!(resp
@@ -1209,11 +1269,18 @@ async fn gui_cache_headers_allow_updates_without_hard_refresh() {
         .nth(1)
         .and_then(|s| s.split('"').next())
         .expect("index.html references an entry script");
-    assert!(src.starts_with("/assets/"), "expected a hashed Vite asset, got {src}");
+    assert!(
+        src.starts_with("/assets/"),
+        "expected a hashed Vite asset, got {src}"
+    );
     let resp = reqwest::get(format!("{base}{src}")).await.unwrap();
     assert_eq!(resp.status(), 200);
     assert_eq!(
-        resp.headers().get("cache-control").unwrap().to_str().unwrap(),
+        resp.headers()
+            .get("cache-control")
+            .unwrap()
+            .to_str()
+            .unwrap(),
         "public, max-age=31536000, immutable"
     );
 
@@ -1239,7 +1306,10 @@ async fn update_endpoints_report_state_and_gate_start() {
     assert!(info["gates"].is_array());
     assert!(info["has_config_file"].is_boolean());
     assert!(info["has_systemd"].is_boolean());
-    assert!(info["update_command"].as_str().unwrap_or("").contains("install.sh"));
+    assert!(info["update_command"]
+        .as_str()
+        .unwrap_or("")
+        .contains("install.sh"));
     assert!(info["preserves"].is_array());
     assert!(info["state"]["phase"].is_string());
 

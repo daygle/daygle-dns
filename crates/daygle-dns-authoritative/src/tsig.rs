@@ -28,8 +28,8 @@ use hickory_proto::op::{Message, OpCode};
 use hickory_proto::rr::rdata::tsig::{
     make_tsig_record, message_tbs, signed_bitmessage_to_buf, TsigAlgorithm, TsigError, TSIG,
 };
-use hickory_proto::rr::{TSigner, TSigResponseContext};
 use hickory_proto::rr::{Name, Record, RecordType};
+use hickory_proto::rr::{TSigResponseContext, TSigner};
 use hickory_proto::serialize::binary::BinEncodable;
 
 /// Default time window (seconds) a TSIG timestamp may drift, per RFC 8945
@@ -53,11 +53,10 @@ impl TsigKey {
     /// Build a key from its configuration. Returns an error for unsupported
     /// algorithms or malformed base64 secrets.
     pub fn from_config(config: &TsigKeyConfig) -> Result<Self, String> {
-        let algorithm = TsigAlgorithm::from_name(
-            Name::from_ascii(config.algorithm.trim()).map_err(|e| {
+        let algorithm =
+            TsigAlgorithm::from_name(Name::from_ascii(config.algorithm.trim()).map_err(|e| {
                 format!("tsig key '{}' has invalid algorithm name: {e}", config.name)
-            })?,
-        );
+            })?);
         if !algorithm.supported() {
             return Err(format!(
                 "tsig key '{}' uses algorithm '{}' which hickory cannot sign (supported: hmac-sha256, hmac-sha384, hmac-sha512)",
@@ -128,9 +127,7 @@ impl TsigKeyRing {
 
     /// Look up a key by config-style name (with or without trailing dot).
     pub fn get_by_config_name(&self, name: &str) -> Option<&TsigKey> {
-        normalize_key_name(name)
-            .ok()
-            .and_then(|n| self.get(&n))
+        normalize_key_name(name).ok().and_then(|n| self.get(&n))
     }
 
     /// Whether the ring is empty.
@@ -198,11 +195,7 @@ impl TsigFailure {
 /// the caller gets the key, the request MAC (for response chaining), and a
 /// [`TSigResponseContext`] ready to sign the reply (including RFC 8945
 /// BADTIME/BADSIG error replies).
-pub fn verify_request(
-    key_ring: &TsigKeyRing,
-    raw: &[u8],
-    request_id: u16,
-) -> TsigVerifyOutcome {
+pub fn verify_request(key_ring: &TsigKeyRing, raw: &[u8], request_id: u16) -> TsigVerifyOutcome {
     // A message with no additional records cannot carry a TSIG.
     if raw.len() < 12 {
         return TsigVerifyOutcome::Invalid(TsigFailure::Malformed);
@@ -245,18 +238,12 @@ pub fn verify_request(
         Err(_) => return TsigVerifyOutcome::Invalid(TsigFailure::Malformed),
     };
     let request_mac = tsig_rr.data.mac.clone();
-    
+
     TsigVerifyOutcome::Valid {
         key: key.clone(),
         request_mac: request_mac.clone(),
         request_tsig: tsig_rr,
-        response_context: TSigResponseContext::new(
-            request_id,
-            now,
-            signer,
-            request_mac,
-            None,
-        ),
+        response_context: TSigResponseContext::new(request_id, now, signer, request_mac, None),
     }
 }
 

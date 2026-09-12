@@ -61,7 +61,10 @@ async fn failed_recursive_query_is_counted_once() {
     let recursive = sum_of("recursive");
     assert_eq!(total, 1, "one query must count once (got {total}): {stats}");
     assert_eq!(errors, 1, "the failure must be classified as error");
-    assert_eq!(recursive, 0, "a failed lookup must not also count as recursive");
+    assert_eq!(
+        recursive, 0,
+        "a failed lookup must not also count as recursive"
+    );
 
     // The top-domains table must list the queried name once, not twice.
     let top_domains = stats["top_domains"].as_array().unwrap();

@@ -30,7 +30,7 @@ pub use blocklist_source::{
     detect_blocklist_format, parse_blocklist, BlocklistSourceManager, SourceStatus,
 };
 pub use engine::{Decision, PolicyEngine};
-pub use plugin::{PolicyContext, PolicyPlugin, PluginRegistry};
+pub use plugin::{PluginRegistry, PolicyContext, PolicyPlugin};
 pub use rule::PerClientRule;
 
 use std::net::IpAddr;
@@ -94,9 +94,8 @@ pub fn build_engine(settings: &PolicySettings) -> Result<PolicyEngine> {
     // Blocklists: inline entries first, then files.
     let mut domains = normalize_domains(settings.blocklist.iter().cloned());
     for file in &settings.blocklist_files {
-        let text = std::fs::read_to_string(file).map_err(|e| {
-            DaygleError::Config(format!("cannot read blocklist {file}: {e}"))
-        })?;
+        let text = std::fs::read_to_string(file)
+            .map_err(|e| DaygleError::Config(format!("cannot read blocklist {file}: {e}")))?;
         domains.extend(normalize_domains(text.lines().map(|l| l.to_string())));
     }
     if !domains.is_empty() {
@@ -107,14 +106,16 @@ pub fn build_engine(settings: &PolicySettings) -> Result<PolicyEngine> {
     let mut denied = Vec::new();
     let mut allowed = Vec::new();
     for net in &settings.denied_networks {
-        denied.push(net.parse().map_err(|_| {
-            DaygleError::InvalidPolicy(format!("bad denied network '{net}'"))
-        })?);
+        denied.push(
+            net.parse()
+                .map_err(|_| DaygleError::InvalidPolicy(format!("bad denied network '{net}'")))?,
+        );
     }
     for net in &settings.allowed_networks {
-        allowed.push(net.parse().map_err(|_| {
-            DaygleError::InvalidPolicy(format!("bad allowed network '{net}'"))
-        })?);
+        allowed.push(
+            net.parse()
+                .map_err(|_| DaygleError::InvalidPolicy(format!("bad allowed network '{net}'")))?,
+        );
     }
     engine.set_acl(Acl::new(denied, allowed));
 

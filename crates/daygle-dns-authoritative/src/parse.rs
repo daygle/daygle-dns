@@ -237,7 +237,10 @@ txt  IN TXT "hello world"
         let ns = records.iter().find(|r| r.rtype == "NS").unwrap();
         assert_eq!(ns.name, "example.com"); // inherited owner
 
-        let www = records.iter().find(|r| r.rtype == "A" && r.name == "www.example.com").unwrap();
+        let www = records
+            .iter()
+            .find(|r| r.rtype == "A" && r.name == "www.example.com")
+            .unwrap();
         assert_eq!(www.content, "192.0.2.2");
         assert_eq!(www.ttl, 3600);
 

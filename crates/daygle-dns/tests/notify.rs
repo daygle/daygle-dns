@@ -160,8 +160,7 @@ async fn notify_unknown_zone_or_non_master_is_notimp() {
     let mut config = base_config(&dir.path().join("secondary.db"));
     // Masters live on 192.0.2.1 in this test, so 127.0.0.1 senders are not
     // one of the zone's masters.
-    config.authoritative.secondary_zones =
-        vec![secondary_config("known.test", "192.0.2.1")];
+    config.authoritative.secondary_zones = vec![secondary_config("known.test", "192.0.2.1")];
     config.authoritative.notify_listen_enabled = true;
     let secondary = spawn(config).await;
 

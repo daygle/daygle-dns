@@ -33,8 +33,7 @@ fn config_with_tsig_and_notify(db: &std::path::Path) -> DaygleConfig {
     let mut cfg = base_config(db);
     cfg.authoritative.axfr_enabled = true;
     cfg.authoritative.tsig_keys = vec![tsig_config()];
-    cfg.authoritative.tsig_transfer_zones =
-        vec!["reload-transfer.test=reload-key".to_string()];
+    cfg.authoritative.tsig_transfer_zones = vec!["reload-transfer.test=reload-key".to_string()];
     cfg.authoritative.notify_listen_enabled = true;
     cfg.authoritative.secondary_zones = vec![SecondaryZoneConfig {
         name: "notify-reload.test".to_string(),
@@ -80,10 +79,7 @@ async fn udp_notify(addr: std::net::SocketAddr, zone: &str) -> Message {
         Name::from_utf8(zone).expect("valid zone"),
         RecordType::SOA,
     ));
-    socket
-        .send_to(&msg.to_vec().unwrap(), addr)
-        .await
-        .unwrap();
+    socket.send_to(&msg.to_vec().unwrap(), addr).await.unwrap();
     let mut buf = vec![0u8; 4096];
     let (n, _) = tokio::time::timeout(Duration::from_secs(5), socket.recv_from(&mut buf))
         .await
@@ -114,11 +110,7 @@ async fn tsig_transfers_and_notify_survive_listener_reload() {
     cfg.dot.port = free_tcp_port().await;
     cfg.doh.port = free_tcp_port().await;
     cfg.api.port = free_tcp_port().await;
-    std::fs::write(
-        &cfg_path,
-        toml::to_string(&cfg).expect("serialize config"),
-    )
-    .unwrap();
+    std::fs::write(&cfg_path, toml::to_string(&cfg).expect("serialize config")).unwrap();
 
     let loaded = DaygleConfig::load(&cfg_path).unwrap();
     let server = bind_with(Arc::new(loaded), Some(cfg_path.clone()))
@@ -176,11 +168,7 @@ async fn tsig_transfers_and_notify_survive_listener_reload() {
         s.local_addr().unwrap().port()
     };
     cfg.server.port = new_port;
-    std::fs::write(
-        &cfg_path,
-        toml::to_string(&cfg).expect("serialize config"),
-    )
-    .unwrap();
+    std::fs::write(&cfg_path, toml::to_string(&cfg).expect("serialize config")).unwrap();
     server.reload().await.expect("reload");
 
     // The listeners moved to the new port...

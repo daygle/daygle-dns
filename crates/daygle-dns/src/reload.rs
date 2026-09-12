@@ -81,10 +81,8 @@ pub enum ReloadCommand {
 pub fn apply_config(shared: &Shared, new: Arc<DaygleConfig>) -> bool {
     let old = shared.config.load_full();
 
-    let listeners_changed = old.server != new.server
-        || old.dot != new.dot
-        || old.doh != new.doh
-        || old.doq != new.doq;
+    let listeners_changed =
+        old.server != new.server || old.dot != new.dot || old.doh != new.doh || old.doq != new.doq;
 
     // Publish the new configuration first so the API token, `/api/config` and
     // the listener supervisor all observe the requested state immediately.
@@ -170,8 +168,8 @@ pub fn spawn_watcher(
                     if let Ok(Some(overlay)) = shared
                         .catalog
                         .store()
-                        .get_runtime_settings::<daygle_dns_core::config::RuntimeSettings>()
-                    {
+                        .get_runtime_settings::<daygle_dns_core::config::RuntimeSettings>(
+                    ) {
                         overlay.apply_to(&mut cfg);
                         if let Err(e) = cfg.validate() {
                             warn!(
@@ -212,9 +210,7 @@ async fn notified(notify: Option<&tokio::sync::Notify>) {
 }
 
 fn last_modified(path: &Path) -> Option<std::time::SystemTime> {
-    std::fs::metadata(path)
-        .and_then(|m| m.modified())
-        .ok()
+    std::fs::metadata(path).and_then(|m| m.modified()).ok()
 }
 
 /// Spawn the remote blocklist source refresher.
@@ -307,9 +303,7 @@ mod tests {
 
     fn shared(cfg: DaygleConfig) -> Shared {
         let store = daygle_dns_authoritative::ZoneStore::open(":memory:").unwrap();
-        let catalog = Arc::new(
-            AuthorityCatalog::new(store, cfg.authoritative.clone()).unwrap(),
-        );
+        let catalog = Arc::new(AuthorityCatalog::new(store, cfg.authoritative.clone()).unwrap());
         Shared {
             catalog,
             policy: Arc::new(ArcSwap::from_pointee(PolicyEngine::new(false))),

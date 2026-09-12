@@ -163,7 +163,8 @@ impl BlocklistSourceManager {
         // `notify_one` (which is sufficient because there's a single refresh
         // loop) AND arm a flag the loop inspects after each tick.
         self.changed.notify_one();
-        self.changed_flag.store(true, std::sync::atomic::Ordering::Release);
+        self.changed_flag
+            .store(true, std::sync::atomic::Ordering::Release);
     }
 
     /// Whether the source list has changed since the last `take_change`.
@@ -532,19 +533,28 @@ example.com##.banner
         assert_eq!(detect_blocklist_format(text), Some(BlocklistFormat::Hosts));
         // A mismatched declaration is caught even when the adblock parser
         // would have extracted junk from the same text.
-        assert_ne!(detect_blocklist_format(text), Some(BlocklistFormat::Adblock));
+        assert_ne!(
+            detect_blocklist_format(text),
+            Some(BlocklistFormat::Adblock)
+        );
     }
 
     #[test]
     fn detects_adblock_format() {
         let text = "! Title: Example\n||ads.example.com^\n||tracker.example.net^$third-party\nexample.com##.banner\n";
-        assert_eq!(detect_blocklist_format(text), Some(BlocklistFormat::Adblock));
+        assert_eq!(
+            detect_blocklist_format(text),
+            Some(BlocklistFormat::Adblock)
+        );
     }
 
     #[test]
     fn detects_domains_format() {
         let text = "# a plain list\nexample.com\nads.example.net\n*.tracker.test\n";
-        assert_eq!(detect_blocklist_format(text), Some(BlocklistFormat::Domains));
+        assert_eq!(
+            detect_blocklist_format(text),
+            Some(BlocklistFormat::Domains)
+        );
     }
 
     #[test]

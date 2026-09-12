@@ -41,9 +41,7 @@ impl Blocklist {
 
     /// Build a blocklist from raw (possibly mixed-case, possibly dotted) lines.
     pub fn from_lines<'a>(lines: impl IntoIterator<Item = &'a str>) -> Self {
-        Self::from_set(normalize_domains(
-            lines.into_iter().map(|l| l.to_string()),
-        ))
+        Self::from_set(normalize_domains(lines.into_iter().map(|l| l.to_string())))
     }
 
     pub fn is_empty(&self) -> bool {

@@ -183,10 +183,7 @@ impl XfrClient {
         Ok(all_answers)
     }
 
-    async fn read_message(
-        &self,
-        stream: &mut tokio::net::TcpStream,
-    ) -> Result<Message> {
+    async fn read_message(&self, stream: &mut tokio::net::TcpStream) -> Result<Message> {
         let mut len_buf = [0u8; 2];
         tokio::time::timeout(self.timeout, stream.read_exact(&mut len_buf))
             .await

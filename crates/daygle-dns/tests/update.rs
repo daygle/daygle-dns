@@ -147,7 +147,10 @@ async fn update_prerequisite_failures_return_rcodes() {
         vec![],
         vec![add_a_record("box.prereq.test.", [192, 0, 2, 10], 60)],
     );
-    assert_eq!(udp_send(udp, &add).await.response_code, ResponseCode::NoError);
+    assert_eq!(
+        udp_send(udp, &add).await.response_code,
+        ResponseCode::NoError
+    );
 
     // "Name is not in use" now fails with YXDOMAIN.
     let again = update_message(
@@ -155,7 +158,10 @@ async fn update_prerequisite_failures_return_rcodes() {
         vec![prereq_name_not_in_use("box.prereq.test.")],
         vec![add_a_record("box.prereq.test.", [192, 0, 2, 11], 60)],
     );
-    assert_eq!(udp_send(udp, &again).await.response_code, ResponseCode::YXDomain);
+    assert_eq!(
+        udp_send(udp, &again).await.response_code,
+        ResponseCode::YXDomain
+    );
 
     // "RRset exists" for an absent name fails with NXRRSet.
     let missing = update_message(
@@ -206,7 +212,10 @@ async fn update_delete_rrset_and_persistence_across_restart() {
         vec![],
         vec![add_a_record("dyn.persist.test.", [192, 0, 2, 77], 300)],
     );
-    assert_eq!(udp_send(udp, &add).await.response_code, ResponseCode::NoError);
+    assert_eq!(
+        udp_send(udp, &add).await.response_code,
+        ResponseCode::NoError
+    );
     let q = udp_query(udp, "dyn.persist.test.", RecordType::A).await;
     assert_eq!(first_answer(&q).as_deref(), Some("192.0.2.77"));
 
@@ -216,7 +225,10 @@ async fn update_delete_rrset_and_persistence_across_restart() {
         vec![],
         vec![delete_rrset("dyn.persist.test.", RecordType::A)],
     );
-    assert_eq!(udp_send(udp, &del).await.response_code, ResponseCode::NoError);
+    assert_eq!(
+        udp_send(udp, &del).await.response_code,
+        ResponseCode::NoError
+    );
     let gone = udp_query(udp, "dyn.persist.test.", RecordType::A).await;
     assert_eq!(gone.response_code, ResponseCode::NXDomain);
     let kept = udp_query(udp, "seed.persist.test.", RecordType::A).await;
@@ -228,7 +240,10 @@ async fn update_delete_rrset_and_persistence_across_restart() {
         vec![prereq_name_not_in_use("dyn.persist.test.")],
         vec![add_a_record("dyn.persist.test.", [192, 0, 2, 77], 300)],
     );
-    assert_eq!(udp_send(udp, &re_add).await.response_code, ResponseCode::NoError);
+    assert_eq!(
+        udp_send(udp, &re_add).await.response_code,
+        ResponseCode::NoError
+    );
 
     shutdown(server).await;
 
@@ -304,7 +319,10 @@ async fn update_with_explicit_soa_writes_metadata() {
     let mut record = Record::from_rdata(Name::from_utf8("soa.test.").unwrap(), 300, soa);
     record.dns_class = DNSClass::IN;
     let msg = update_message("soa.test.", vec![], vec![record]);
-    assert_eq!(udp_send(udp, &msg).await.response_code, ResponseCode::NoError);
+    assert_eq!(
+        udp_send(udp, &msg).await.response_code,
+        ResponseCode::NoError
+    );
 
     let zone = server.catalog.store().get_zone(&zone_id).unwrap().unwrap();
     assert_eq!(zone.serial, 9001);
@@ -333,7 +351,10 @@ async fn update_refuses_deleting_last_apex_ns() {
         vec![],
         vec![delete_rrset("ns.test.", RecordType::NS)],
     );
-    assert_eq!(udp_send(udp, &msg).await.response_code, ResponseCode::Refused);
+    assert_eq!(
+        udp_send(udp, &msg).await.response_code,
+        ResponseCode::Refused
+    );
 
     shutdown(server).await;
 }

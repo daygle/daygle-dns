@@ -150,7 +150,10 @@ impl DnsDispatcher {
     /// Attach a persistent query logger (daily JSON-lines files). When present,
     /// every served query is appended; logging is best-effort and never blocks
     /// or fails a response.
-    pub fn with_query_logger(mut self, query_logger: Option<Arc<daygle_dns_core::QueryLogger>>) -> Self {
+    pub fn with_query_logger(
+        mut self,
+        query_logger: Option<Arc<daygle_dns_core::QueryLogger>>,
+    ) -> Self {
         self.query_logger = query_logger;
         self
     }
@@ -169,7 +172,10 @@ impl DnsDispatcher {
     /// Attach a shared Advanced Blocking set. The same `Arc` is held by the
     /// API layer so CRUD changes are published to the dispatcher by swapping
     /// its contents; the dispatcher never needs rebuilding.
-    pub fn with_advanced_blocking(mut self, advanced_blocking: Arc<ArcSwap<AdvancedBlocking>>) -> Self {
+    pub fn with_advanced_blocking(
+        mut self,
+        advanced_blocking: Arc<ArcSwap<AdvancedBlocking>>,
+    ) -> Self {
         self.advanced_blocking = advanced_blocking;
         self
     }
@@ -242,6 +248,7 @@ impl DnsDispatcher {
     /// Queue one served query into the SQLite-backed query log (no-op when
     /// the sink is absent). `protocol` labels the transport the query arrived
     /// on (`udp`, `tcp`, `tls`, `https`, `quic`, `h3`).
+    #[allow(clippy::too_many_arguments)]
     fn db_log_query(
         &self,
         client: IpAddr,
@@ -269,6 +276,7 @@ impl DnsDispatcher {
     /// Record a served query into the dashboard statistics, the JSON-lines
     /// log and the SQLite query log in one call (used by the branches that
     /// decide the outcome and response code up front).
+    #[allow(clippy::too_many_arguments)]
     fn observe(
         &self,
         client: IpAddr,
@@ -367,7 +375,8 @@ impl DnsDispatcher {
                 // as hickory's own catalog zone-transfer path.
                 if let Some((_, context)) = tsig {
                     let mut tbs_buf = Vec::with_capacity(1024);
-                    let mut encoder = hickory_proto::serialize::binary::BinEncoder::new(&mut tbs_buf);
+                    let mut encoder =
+                        hickory_proto::serialize::binary::BinEncoder::new(&mut tbs_buf);
                     let tbs_response = MessageResponseBuilder::from_message_request(request).build(
                         metadata,
                         answers.iter(),
@@ -377,13 +386,19 @@ impl DnsDispatcher {
                     );
                     if let Err(e) = tbs_response.destructive_emit(&mut encoder) {
                         warn!(query = %qname, error = %e, "failed to encode signed transfer");
-                        return send_error(&mut response_handle, request, ResponseCode::ServFail).await;
+                        return send_error(&mut response_handle, request, ResponseCode::ServFail)
+                            .await;
                     }
                     match context.sign(&tbs_buf) {
                         Ok(signature) => response.set_signature(signature),
                         Err(e) => {
                             warn!(query = %qname, error = %e, "failed to sign zone transfer");
-                            return send_error(&mut response_handle, request, ResponseCode::ServFail).await;
+                            return send_error(
+                                &mut response_handle,
+                                request,
+                                ResponseCode::ServFail,
+                            )
+                            .await;
                         }
                     }
                 }
@@ -448,7 +463,15 @@ impl RequestHandler for DnsDispatcher {
                 .request_info()
                 .map(|i| protocol_label(i.protocol))
                 .unwrap_or("");
-            self.observe(client, "(rate-limited)", "", protocol, Outcome::RateLimited, Some("SERVFAIL"), started);
+            self.observe(
+                client,
+                "(rate-limited)",
+                "",
+                protocol,
+                Outcome::RateLimited,
+                Some("SERVFAIL"),
+                started,
+            );
             return send_error(&mut response_handle, request, ResponseCode::ServFail).await;
         }
 
@@ -508,7 +531,15 @@ impl RequestHandler for DnsDispatcher {
         if !self.rate_limiter.check_domain(&qname) {
             debug!(query = %qname, "query rate-limited by domain");
             self.metrics.inc(&self.metrics.rate_limited);
-            self.observe(client, &qname, &rtype, &protocol, Outcome::RateLimited, Some("SERVFAIL"), started);
+            self.observe(
+                client,
+                &qname,
+                &rtype,
+                protocol,
+                Outcome::RateLimited,
+                Some("SERVFAIL"),
+                started,
+            );
             return send_error(&mut response_handle, request, ResponseCode::ServFail).await;
         }
 
@@ -521,19 +552,43 @@ impl RequestHandler for DnsDispatcher {
             Action::Refused => {
                 debug!(query = %qname, reason = %decision.reason, "refused by policy");
                 self.metrics.inc(&self.metrics.blocked);
-                self.observe(client, &qname, &rtype, protocol, Outcome::Blocked, Some("REFUSED"), started);
+                self.observe(
+                    client,
+                    &qname,
+                    &rtype,
+                    protocol,
+                    Outcome::Blocked,
+                    Some("REFUSED"),
+                    started,
+                );
                 return send_error(&mut response_handle, request, ResponseCode::Refused).await;
             }
             Action::Block => {
                 debug!(query = %qname, reason = %decision.reason, "blocked by policy");
                 self.metrics.inc(&self.metrics.blocked);
-                self.observe(client, &qname, &rtype, protocol, Outcome::Blocked, Some("NXDOMAIN"), started);
+                self.observe(
+                    client,
+                    &qname,
+                    &rtype,
+                    protocol,
+                    Outcome::Blocked,
+                    Some("NXDOMAIN"),
+                    started,
+                );
                 return send_error(&mut response_handle, request, ResponseCode::NXDomain).await;
             }
             Action::Redirect(ip) => {
                 debug!(query = %qname, %ip, "redirected by policy");
                 self.metrics.inc(&self.metrics.blocked);
-                self.observe(client, &qname, &rtype, protocol, Outcome::Blocked, Some("NOERROR"), started);
+                self.observe(
+                    client,
+                    &qname,
+                    &rtype,
+                    protocol,
+                    Outcome::Blocked,
+                    Some("NOERROR"),
+                    started,
+                );
                 return send_redirect(&mut response_handle, request, info.query.query_type(), *ip)
                     .await;
             }
@@ -541,7 +596,15 @@ impl RequestHandler for DnsDispatcher {
                 // Filter AAAA: NODATA (empty NOERROR) forces IPv4 fallback.
                 debug!(query = %qname, reason = %decision.reason, "AAAA filtered");
                 self.metrics.inc(&self.metrics.blocked);
-                self.observe(client, &qname, &rtype, protocol, Outcome::Blocked, Some("NOERROR"), started);
+                self.observe(
+                    client,
+                    &qname,
+                    &rtype,
+                    protocol,
+                    Outcome::Blocked,
+                    Some("NOERROR"),
+                    started,
+                );
                 return send_empty(&mut response_handle, request).await;
             }
         }
@@ -559,13 +622,22 @@ impl RequestHandler for DnsDispatcher {
                     Action::Redirect(_) | Action::NoData => "NOERROR",
                     _ => "NXDOMAIN",
                 };
-                self.observe(client, &qname, &rtype, protocol, Outcome::Blocked, Some(rcode), started);
+                self.observe(
+                    client,
+                    &qname,
+                    &rtype,
+                    protocol,
+                    Outcome::Blocked,
+                    Some(rcode),
+                    started,
+                );
                 return match decision.action {
                     Action::Refused => {
                         send_error(&mut response_handle, request, ResponseCode::Refused).await
                     }
                     Action::Redirect(ip) => {
-                        send_redirect(&mut response_handle, request, info.query.query_type(), ip).await
+                        send_redirect(&mut response_handle, request, info.query.query_type(), ip)
+                            .await
                     }
                     Action::NoData => send_empty(&mut response_handle, request).await,
                     // Block (NXDOMAIN) and any future action default to NXDOMAIN.
@@ -587,7 +659,15 @@ impl RequestHandler for DnsDispatcher {
             if let Some(m) = index.lookup(client, &qname, info.query.query_type()) {
                 debug!(query = %qname, %client, "split-horizon answer");
                 self.metrics.inc(&self.metrics.split_horizon);
-                self.observe(client, &qname, &rtype, protocol, Outcome::SplitHorizon, Some("NOERROR"), started);
+                self.observe(
+                    client,
+                    &qname,
+                    &rtype,
+                    protocol,
+                    Outcome::SplitHorizon,
+                    Some("NOERROR"),
+                    started,
+                );
                 return send_records(&mut response_handle, request, &m.records).await;
             }
         }
@@ -597,7 +677,9 @@ impl RequestHandler for DnsDispatcher {
         // transfer ACL and answer IXFR with a full transfer, which is always
         // valid per RFC 1995.
         if rtype_is_transfer(&rtype) {
-            return self.handle_transfer(request, &qname, info.src.ip(), response_handle).await;
+            return self
+                .handle_transfer(request, &qname, info.src.ip(), response_handle)
+                .await;
         }
 
         // 2b. Authoritative zones.
@@ -606,10 +688,22 @@ impl RequestHandler for DnsDispatcher {
             // The catalog builds and sends the response itself; its exact
             // rcode is not surfaced here, so the log records the outcome
             // without one.
-            self.observe(client, &qname, &rtype, protocol, Outcome::Authoritative, None, started);
+            self.observe(
+                client,
+                &qname,
+                &rtype,
+                protocol,
+                Outcome::Authoritative,
+                None,
+                started,
+            );
             let now = unix_now();
             let edns = request.edns.as_ref();
-            return self.catalog.read().lookup(request, edns, now, response_handle).await;
+            return self
+                .catalog
+                .read()
+                .lookup(request, edns, now, response_handle)
+                .await;
         }
 
         // 3. Recursive resolution. The resolver is swapped atomically on
@@ -738,8 +832,8 @@ async fn send_error<R: ResponseHandler>(
     request: &Request,
     code: ResponseCode,
 ) -> ResponseInfo {
-    let response = MessageResponseBuilder::from_message_request(request)
-        .error_msg(&request.metadata, code);
+    let response =
+        MessageResponseBuilder::from_message_request(request).error_msg(&request.metadata, code);
     match handle.send_response(response).await {
         Ok(info) => info,
         Err(e) => {
@@ -866,9 +960,7 @@ async fn send_address_answer<R: ResponseHandler>(
         .iter()
         .filter_map(|ip| {
             let rdata = match (ip, rtype) {
-                (IpAddr::V4(v4), RecordType::A | RecordType::ANY) => {
-                    Some(RData::A((*v4).into()))
-                }
+                (IpAddr::V4(v4), RecordType::A | RecordType::ANY) => Some(RData::A((*v4).into())),
                 (IpAddr::V6(v6), RecordType::AAAA | RecordType::ANY) => {
                     Some(RData::AAAA((*v6).into()))
                 }
@@ -910,10 +1002,4 @@ fn fallback_response() -> ResponseInfo {
         metadata: hickory_proto::op::Metadata::new(0, MessageType::Response, OpCode::Query),
         counts: hickory_proto::op::HeaderCounts::default(),
     })
-}
-
-/// Convert a [`DaygleError`] into a log line (helper for callers).
-#[allow(dead_code)]
-pub fn log_daygle_error(logs: &LogStore, component: &str, e: &DaygleError) {
-    logs.error(component, e.to_string());
 }

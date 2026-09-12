@@ -3,16 +3,16 @@
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-use chrono::{Utc};
-use serde::{Deserialize, Serialize};
+use chrono::Utc;
 use hickory_proto::rr::{RData, RecordType};
 use rusqlite::{params, Connection, OptionalExtension};
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::model::{
     DynamicUpdate, MoveDirection, Record, RecordInput, SigningKeyRecord, SplitHorizonEntry,
-    SplitHorizonEntryInput, SplitHorizonNetwork, SplitHorizonNetworkInput,
-    SplitHorizonRecord, Zone, ZoneInput,
+    SplitHorizonEntryInput, SplitHorizonNetwork, SplitHorizonNetworkInput, SplitHorizonRecord,
+    Zone, ZoneInput,
 };
 use crate::validate_name;
 use daygle_dns_core::blocking::{BlockingGroup, BlockingGroupInput};
@@ -198,7 +198,9 @@ impl ZoneStore {
     /// Lock the internal SQLite connection. Converts mutex-poison into
     /// [`DaygleError::Internal`] so callers never need to handle it.
     fn lock_conn(&self) -> std::result::Result<std::sync::MutexGuard<'_, Connection>, DaygleError> {
-        self.conn.lock().map_err(|e| DaygleError::Internal(format!("database lock poisoned: {e}")))
+        self.conn
+            .lock()
+            .map_err(|e| DaygleError::Internal(format!("database lock poisoned: {e}")))
     }
 
     fn init(&self) -> Result<()> {
@@ -348,7 +350,16 @@ impl ZoneStore {
             "UPDATE zones SET primary_ns = ?2, admin_mailbox = ?3, serial = ?4,
                              refresh = ?5, retry = ?6, expire = ?7, minimum = ?8
              WHERE id = ?1",
-            params![id, primary_ns, admin_mailbox, serial, refresh, retry, expire, minimum],
+            params![
+                id,
+                primary_ns,
+                admin_mailbox,
+                serial,
+                refresh,
+                retry,
+                expire,
+                minimum
+            ],
         )?;
         if changed == 0 {
             return Err(DaygleError::NotFound(format!("zone {id}")));
@@ -359,7 +370,12 @@ impl ZoneStore {
     // ---- Secondary zones --------------------------------------------------
 
     /// Mark a zone as secondary, replacing its master list and refresh interval.
-    pub fn set_secondary(&self, zone_id: &str, masters: &[String], refresh_secs: u64) -> Result<()> {
+    pub fn set_secondary(
+        &self,
+        zone_id: &str,
+        masters: &[String],
+        refresh_secs: u64,
+    ) -> Result<()> {
         let masters = serde_json::to_string(masters)
             .map_err(|e| DaygleError::Database(format!("encode masters: {e}")))?;
         let conn = self.lock_conn()?;
@@ -413,7 +429,13 @@ impl ZoneStore {
 
     /// Insert or update a stub zone. `nss` may be empty while the
     /// nameservers are still being learned.
-    pub fn set_stub(&self, name: &str, nss: &[String], refresh_secs: u64, enabled: bool) -> Result<()> {
+    pub fn set_stub(
+        &self,
+        name: &str,
+        nss: &[String],
+        refresh_secs: u64,
+        enabled: bool,
+    ) -> Result<()> {
         let nss = serde_json::to_string(nss)
             .map_err(|e| DaygleError::Database(format!("encode nss: {e}")))?;
         let conn = self.lock_conn()?;
@@ -538,7 +560,9 @@ impl ZoneStore {
         self.list_blocking_groups()?
             .into_iter()
             .find(|g| g.name == name)
-            .ok_or_else(|| DaygleError::Internal("blocking group vanished after upsert".to_string()))
+            .ok_or_else(|| {
+                DaygleError::Internal("blocking group vanished after upsert".to_string())
+            })
     }
 
     /// Delete a blocking group by id. Returns whether a row was removed.
@@ -606,7 +630,9 @@ impl ZoneStore {
         let mut conn = self.lock_conn()?;
         let tx = conn.transaction()?;
         let zone_id: Option<String> = tx
-            .query_row("SELECT zone_id FROM records WHERE id = ?1", [id], |r| r.get(0))
+            .query_row("SELECT zone_id FROM records WHERE id = ?1", [id], |r| {
+                r.get(0)
+            })
             .optional()?;
         let Some(zone_id) = zone_id else {
             return Ok(false);
@@ -656,11 +682,7 @@ impl ZoneStore {
     /// transaction: either every change lands or none do. When no explicit
     /// SOA is supplied, the zone serial is bumped (RFC 2136 §3.4.2.2 requires
     /// the serial to increase on any successful update).
-    pub fn apply_dynamic_updates(
-        &self,
-        zone_id: &str,
-        update: &DynamicUpdate,
-    ) -> Result<()> {
+    pub fn apply_dynamic_updates(&self, zone_id: &str, update: &DynamicUpdate) -> Result<()> {
         let zone = self
             .get_zone(zone_id)?
             .ok_or_else(|| DaygleError::NotFound(format!("zone {zone_id}")))?;
@@ -669,8 +691,7 @@ impl ZoneStore {
 
         for del in &update.deletes {
             let name = normalize_fqdn(&del.name);
-            let mut sql =
-                "DELETE FROM records WHERE zone_id = ?1 AND name = ?2".to_string();
+            let mut sql = "DELETE FROM records WHERE zone_id = ?1 AND name = ?2".to_string();
             let mut values: Vec<Box<dyn rusqlite::ToSql>> =
                 vec![Box::new(zone_id.to_string()), Box::new(name)];
             if let Some(rtype) = &del.rtype {
@@ -682,7 +703,9 @@ impl ZoneStore {
                 values.push(Box::new(content.clone()));
             }
             let mut stmt = tx.prepare(&sql)?;
-            stmt.execute(rusqlite::params_from_iter(values.iter().map(|v| v.as_ref())))?;
+            stmt.execute(rusqlite::params_from_iter(
+                values.iter().map(|v| v.as_ref()),
+            ))?;
         }
 
         for add in &update.adds {
@@ -740,12 +763,16 @@ impl ZoneStore {
 
     pub fn count_zones(&self) -> Result<u64> {
         let conn = self.lock_conn()?;
-        Ok(conn.query_row("SELECT COUNT(*) FROM zones", [], |r| Ok(r.get::<_, i64>(0)? as u64))?)
+        Ok(conn.query_row("SELECT COUNT(*) FROM zones", [], |r| {
+            Ok(r.get::<_, i64>(0)? as u64)
+        })?)
     }
 
     pub fn count_records(&self) -> Result<u64> {
         let conn = self.lock_conn()?;
-        Ok(conn.query_row("SELECT COUNT(*) FROM records", [], |r| Ok(r.get::<_, i64>(0)? as u64))?)
+        Ok(conn.query_row("SELECT COUNT(*) FROM records", [], |r| {
+            Ok(r.get::<_, i64>(0)? as u64)
+        })?)
     }
 
     // ---- Split horizon ---------------------------------------------------
@@ -801,10 +828,7 @@ impl ZoneStore {
     /// kept but simply never match until the name is recreated.
     pub fn delete_split_horizon_network(&self, name: &str) -> Result<bool> {
         let conn = self.lock_conn()?;
-        let changed = conn.execute(
-            "DELETE FROM split_horizon_networks WHERE name = ?1",
-            [name],
-        )?;
+        let changed = conn.execute("DELETE FROM split_horizon_networks WHERE name = ?1", [name])?;
         Ok(changed > 0)
     }
 
@@ -858,13 +882,12 @@ impl ZoneStore {
             .map_err(|e| DaygleError::Database(format!("encode records: {e}")))?;
 
         let conn = self.lock_conn()?;
-        let next_position: i64 = conn
-            .query_row(
-                "SELECT COALESCE(MAX(position), -1) + 1 FROM split_horizon_entries
+        let next_position: i64 = conn.query_row(
+            "SELECT COALESCE(MAX(position), -1) + 1 FROM split_horizon_entries
                  WHERE domain = ?1",
-                [&domain],
-                |r| r.get(0),
-            )?;
+            [&domain],
+            |r| r.get(0),
+        )?;
         let entry = SplitHorizonEntry {
             id: Uuid::new_v4().to_string(),
             domain,
@@ -1016,23 +1039,13 @@ impl ZoneStore {
     }
 
     /// Store or replace a TSIG key.
-    pub fn store_tsig_key(
-        &self,
-        name: &str,
-        algorithm: &str,
-        secret_b64: &str,
-    ) -> Result<()> {
+    pub fn store_tsig_key(&self, name: &str, algorithm: &str, secret_b64: &str) -> Result<()> {
         let conn = self.lock_conn()?;
         conn.execute(
             "INSERT INTO tsig_keys (name, algorithm, secret, created_at)
              VALUES (?1, ?2, ?3, ?4)
              ON CONFLICT(name) DO UPDATE SET algorithm = ?2, secret = ?3",
-            params![
-                name,
-                algorithm,
-                secret_b64,
-                Utc::now().to_rfc3339()
-            ],
+            params![name, algorithm, secret_b64, Utc::now().to_rfc3339()],
         )?;
         Ok(())
     }
@@ -1082,7 +1095,13 @@ impl ZoneStore {
         conn.execute(
             "INSERT INTO dnssec_keys (id, zone_id, algorithm, key_der, state, created_at)
              VALUES (?1, ?2, ?3, ?4, 'active', ?5)",
-            params![id, zone_id, algorithm as i64, key_der, created_at.to_rfc3339()],
+            params![
+                id,
+                zone_id,
+                algorithm as i64,
+                key_der,
+                created_at.to_rfc3339()
+            ],
         )?;
         Ok(id)
     }
@@ -1195,8 +1214,7 @@ fn row_to_key(row: &rusqlite::Row<'_>) -> rusqlite::Result<SigningKeyRecord> {
 
 /// JSON-encode a list column, mapping serialization errors to `DaygleError`.
 fn encode_json(value: &[String], field: &str) -> Result<String> {
-    serde_json::to_string(value)
-        .map_err(|e| DaygleError::Database(format!("encode {field}: {e}")))
+    serde_json::to_string(value).map_err(|e| DaygleError::Database(format!("encode {field}: {e}")))
 }
 
 /// Decode a JSON string list column, falling back to empty on malformed data.
@@ -1357,10 +1375,7 @@ impl ZoneStore {
     /// Delete a managed TLS certificate by name. Returns whether one existed.
     pub fn delete_tls_certificate(&self, name: &str) -> Result<bool> {
         let conn = self.lock_conn()?;
-        let n = conn.execute(
-            "DELETE FROM tls_certificates WHERE name = ?1",
-            [name],
-        )?;
+        let n = conn.execute("DELETE FROM tls_certificates WHERE name = ?1", [name])?;
         Ok(n > 0)
     }
 }
@@ -1570,9 +1585,7 @@ impl ZoneStore {
             )
             .optional()?;
         let Some((role, was_enabled)) = row else {
-            return Err(DaygleError::Config(format!(
-                "user '{username}' not found"
-            )));
+            return Err(DaygleError::Config(format!("user '{username}' not found")));
         };
         if role == Role::Admin.as_str() && was_enabled != 0 {
             let count: i64 = conn.query_row(
@@ -1630,19 +1643,16 @@ impl ZoneStore {
             .optional()?;
         match text {
             None => Ok(None),
-            Some(text) => serde_json::from_str(&text)
-                .map(Some)
-                .map_err(|e| {
-                    DaygleError::Config(format!("stored runtime settings are invalid: {e}"))
-                }),
+            Some(text) => serde_json::from_str(&text).map(Some).map_err(|e| {
+                DaygleError::Config(format!("stored runtime settings are invalid: {e}"))
+            }),
         }
     }
 
     /// Persist the DB-backed runtime settings, replacing any previous value.
     pub fn put_runtime_settings<T: serde::Serialize>(&self, settings: &T) -> Result<()> {
-        let text =
-            serde_json::to_string(settings)
-                .map_err(|e| DaygleError::Config(format!("cannot serialize settings: {e}")))?;
+        let text = serde_json::to_string(settings)
+            .map_err(|e| DaygleError::Config(format!("cannot serialize settings: {e}")))?;
         let conn = self.lock_conn()?;
         conn.execute(
             "INSERT INTO runtime_settings (name, value) VALUES ('runtime', ?1)
@@ -1767,11 +1777,21 @@ impl ZoneStore {
     pub fn search_query_logs(&self, filter: &QueryLogFilter) -> Result<(Vec<QueryLogRow>, u64)> {
         let mut wheres: Vec<String> = vec![];
         let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = vec![];
-        if let Some(client) = filter.client.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        if let Some(client) = filter
+            .client
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
             params_vec.push(Box::new(client.to_string()));
             wheres.push(format!("client = ?{}", params_vec.len()));
         }
-        if let Some(qname) = filter.qname.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        if let Some(qname) = filter
+            .qname
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
             params_vec.push(Box::new(qname_like_pattern(qname)));
             wheres.push(format!("qname LIKE ?{} ESCAPE '\\'", params_vec.len()));
         }
@@ -1786,11 +1806,21 @@ impl ZoneStore {
                 wheres.push(format!("{column} = ?{}", params_vec.len()));
             }
         }
-        if let Some(from) = filter.from.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        if let Some(from) = filter
+            .from
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
             params_vec.push(Box::new(from.to_string()));
             wheres.push(format!("ts >= ?{}", params_vec.len()));
         }
-        if let Some(to) = filter.to.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        if let Some(to) = filter
+            .to
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
             params_vec.push(Box::new(to.to_string()));
             wheres.push(format!("ts <= ?{}", params_vec.len()));
         }
@@ -1804,8 +1834,7 @@ impl ZoneStore {
         let page = filter.page.unwrap_or(1).max(1);
         let offset = (page - 1).saturating_mul(per_page);
 
-        let params_ref: Vec<&dyn rusqlite::ToSql> =
-            params_vec.iter().map(|p| p.as_ref()).collect();
+        let params_ref: Vec<&dyn rusqlite::ToSql> = params_vec.iter().map(|p| p.as_ref()).collect();
         let conn = self.lock_conn()?;
         let count: u64 = conn.query_row(
             &format!("SELECT COUNT(*) FROM query_logs {where_clause}"),
@@ -1991,9 +2020,7 @@ pub fn qualify_name(owner: &str, zone_name: &str) -> Result<String> {
 
 /// Normalize an FQDN: trim, strip a single trailing dot, lowercase.
 pub fn normalize_fqdn(name: &str) -> String {
-    name.trim()
-        .trim_end_matches('.')
-        .to_ascii_lowercase()
+    name.trim().trim_end_matches('.').to_ascii_lowercase()
 }
 
 /// Result of [`ZoneStore::move_split_horizon_entry`].
@@ -2010,9 +2037,8 @@ pub enum MoveResult {
 /// Validate a split-horizon network payload: every CIDR must parse.
 fn validate_split_horizon_network(input: &SplitHorizonNetworkInput) -> Result<()> {
     for cidr in &input.cidrs {
-        cidr.parse::<ipnet::IpNet>().map_err(|e| {
-            DaygleError::InvalidRecord(format!("split-horizon CIDR '{cidr}': {e}"))
-        })?;
+        cidr.parse::<ipnet::IpNet>()
+            .map_err(|e| DaygleError::InvalidRecord(format!("split-horizon CIDR '{cidr}': {e}")))?;
     }
     Ok(())
 }
@@ -2062,9 +2088,8 @@ fn canonicalize_split_horizon_records(
         // The legacy `ips` path: every address must parse - reject junk
         // instead of silently dropping it.
         for ip in &input.ips {
-            ip.parse::<std::net::IpAddr>().map_err(|e| {
-                DaygleError::InvalidRecord(format!("split-horizon IP '{ip}': {e}"))
-            })?;
+            ip.parse::<std::net::IpAddr>()
+                .map_err(|e| DaygleError::InvalidRecord(format!("split-horizon IP '{ip}': {e}")))?;
         }
         ips_to_records(&input.ips)
     } else {
@@ -2132,11 +2157,7 @@ fn migrate_split_horizon_records(conn: &Connection) -> Result<()> {
 /// Add the personal profile columns (`first_name`, `last_name`, `email`) to
 /// `console_users` for databases created before user profiles existed.
 fn migrate_console_user_profile(conn: &Connection) -> Result<()> {
-    for (column, default) in [
-        ("first_name", "''"),
-        ("last_name", "''"),
-        ("email", "''"),
-    ] {
+    for (column, default) in [("first_name", "''"), ("last_name", "''"), ("email", "''")] {
         let has: bool = conn.query_row(
             "SELECT EXISTS(
                 SELECT 1 FROM pragma_table_info('console_users') WHERE name = ?1
@@ -2146,7 +2167,9 @@ fn migrate_console_user_profile(conn: &Connection) -> Result<()> {
         )?;
         if !has {
             conn.execute(
-                &format!("ALTER TABLE console_users ADD COLUMN {column} TEXT NOT NULL DEFAULT {default}"),
+                &format!(
+                    "ALTER TABLE console_users ADD COLUMN {column} TEXT NOT NULL DEFAULT {default}"
+                ),
                 [],
             )?;
         }
@@ -2229,7 +2252,10 @@ mod tests {
             .unwrap();
         assert_eq!(created.name, "Kids");
         assert_eq!(created.block, vec!["*.games.test".to_string()]);
-        assert_eq!(created.response, BlockResponse::Redirect("0.0.0.0".parse().unwrap()));
+        assert_eq!(
+            created.response,
+            BlockResponse::Redirect("0.0.0.0".parse().unwrap())
+        );
 
         // Upsert by the same name updates in place (id and position preserved).
         let updated = s
@@ -2249,7 +2275,10 @@ mod tests {
         assert!(!updated.enabled);
         assert_eq!(s.list_blocking_groups().unwrap().len(), 1);
 
-        assert_eq!(s.get_blocking_group(&created.id).unwrap().unwrap().id, created.id);
+        assert_eq!(
+            s.get_blocking_group(&created.id).unwrap().unwrap().id,
+            created.id
+        );
         assert!(s.delete_blocking_group(&created.id).unwrap());
         assert!(s.list_blocking_groups().unwrap().is_empty());
         assert!(!s.delete_blocking_group(&created.id).unwrap());
@@ -2512,17 +2541,17 @@ mod tests {
 
         let records = s.list_records(&zone.id).unwrap();
         assert!(!records.iter().any(|r| r.name == "ok.example.com"));
-        assert_eq!(
-            s.get_zone(&zone.id).unwrap().unwrap().serial,
-            serial_before
-        );
+        assert_eq!(s.get_zone(&zone.id).unwrap().unwrap().serial, serial_before);
         let _ = DeleteSpec::default();
     }
 
     #[test]
     fn qualifies_relative_names() {
         assert_eq!(qualify_name("@", "example.com").unwrap(), "example.com");
-        assert_eq!(qualify_name("www", "example.com").unwrap(), "www.example.com");
+        assert_eq!(
+            qualify_name("www", "example.com").unwrap(),
+            "www.example.com"
+        );
         assert_eq!(
             qualify_name("a.b.example.com.", "example.com").unwrap(),
             "a.b.example.com"
@@ -2605,7 +2634,7 @@ mod tests {
                     domain: "www.example.com".to_string(),
                     networks: vec!["VPN".to_string()],
                     ips: vec!["10.0.0.7".to_string()],
-                records: vec![],
+                    records: vec![],
                     ttl: 120,
                     disabled: true,
                 },
@@ -2635,7 +2664,7 @@ mod tests {
                     domain: "x.example.com".to_string(),
                     networks: vec![],
                     ips: vec!["10.0.0.1".to_string()],
-                records: vec![],
+                    records: vec![],
                     ttl: 60,
                     disabled: false,
                 },
@@ -2781,7 +2810,8 @@ mod tests {
 
         // Move the middle entry up: b,a,c.
         assert_eq!(
-            s.move_split_horizon_entry(&b.id, MoveDirection::Up).unwrap(),
+            s.move_split_horizon_entry(&b.id, MoveDirection::Up)
+                .unwrap(),
             MoveResult::Moved
         );
         assert!(pos(&b.id) < pos(&a.id));
@@ -2792,11 +2822,13 @@ mod tests {
 
         // Edges report AtBoundary without changing anything.
         assert_eq!(
-            s.move_split_horizon_entry(&b.id, MoveDirection::Up).unwrap(),
+            s.move_split_horizon_entry(&b.id, MoveDirection::Up)
+                .unwrap(),
             MoveResult::AtBoundary
         );
         assert_eq!(
-            s.move_split_horizon_entry(&c.id, MoveDirection::Down).unwrap(),
+            s.move_split_horizon_entry(&c.id, MoveDirection::Down)
+                .unwrap(),
             MoveResult::AtBoundary
         );
         assert_eq!(pos(&b.id), 0);
@@ -2804,14 +2836,16 @@ mod tests {
 
         // Move the last entry up: b,c,a.
         assert_eq!(
-            s.move_split_horizon_entry(&c.id, MoveDirection::Up).unwrap(),
+            s.move_split_horizon_entry(&c.id, MoveDirection::Up)
+                .unwrap(),
             MoveResult::Moved
         );
         assert!(pos(&c.id) < pos(&a.id));
 
         // Unknown ids are reported as NotFound.
         assert_eq!(
-            s.move_split_horizon_entry("nope", MoveDirection::Up).unwrap(),
+            s.move_split_horizon_entry("nope", MoveDirection::Up)
+                .unwrap(),
             MoveResult::NotFound
         );
     }
@@ -2995,9 +3029,12 @@ mod tests {
     #[test]
     fn admin_writes_do_not_deadlock_on_the_lock() {
         let s = store();
-        s.create_console_user("admin", &console_admin("admin")).unwrap();
-        s.create_console_user("root2", &console_admin("root2")).unwrap();
-        s.create_console_user("auditor", &console_viewer("auditor")).unwrap();
+        s.create_console_user("admin", &console_admin("admin"))
+            .unwrap();
+        s.create_console_user("root2", &console_admin("root2"))
+            .unwrap();
+        s.create_console_user("auditor", &console_viewer("auditor"))
+            .unwrap();
         let (tx, rx) = std::sync::mpsc::channel();
         let s2 = s.clone();
         std::thread::spawn(move || {
@@ -3030,7 +3067,8 @@ mod tests {
     #[test]
     fn last_enabled_admin_table_ops_are_rejected_without_deadlock() {
         let s = store();
-        s.create_console_user("admin", &console_admin("admin")).unwrap();
+        s.create_console_user("admin", &console_admin("admin"))
+            .unwrap();
         let (tx, rx) = std::sync::mpsc::channel();
         let s2 = s.clone();
         std::thread::spawn(move || {
@@ -3068,7 +3106,8 @@ mod tests {
         }
 
         // A viewer can still be removed freely, and an admin stays enabled.
-        s.create_console_user("auditor", &console_viewer("auditor")).unwrap();
+        s.create_console_user("auditor", &console_viewer("auditor"))
+            .unwrap();
         assert!(s.clone().delete_console_user("auditor").unwrap());
     }
 }

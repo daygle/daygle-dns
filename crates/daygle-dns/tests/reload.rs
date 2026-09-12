@@ -122,11 +122,14 @@ async fn reloads_recursive_upstreams() {
     // Upstreams are a DB-owned runtime setting: seed the DB with the values
     // the file would have supplied on first boot.
     let seed_db = dir.path().join("daygle-dns.db");
-    let store = daygle_dns_authoritative::ZoneStore::open(seed_db.to_string_lossy().as_ref()).unwrap();
+    let store =
+        daygle_dns_authoritative::ZoneStore::open(seed_db.to_string_lossy().as_ref()).unwrap();
     let mut cfg_for_db = DaygleConfig::load(&cfg_path).unwrap();
     cfg_for_db.recursive.upstreams = vec![up_a.to_string()];
     store
-        .put_runtime_settings(&daygle_dns_core::config::RuntimeSettings::capture(&cfg_for_db))
+        .put_runtime_settings(&daygle_dns_core::config::RuntimeSettings::capture(
+            &cfg_for_db,
+        ))
         .unwrap();
     drop(store);
 
@@ -205,7 +208,10 @@ async fn watches_config_file_and_applies_edits() {
         if bound.port() == port_b {
             break;
         }
-        assert!(Instant::now() < deadline, "watcher did not apply the edit in time");
+        assert!(
+            Instant::now() < deadline,
+            "watcher did not apply the edit in time"
+        );
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 

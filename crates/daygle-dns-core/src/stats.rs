@@ -165,8 +165,7 @@ impl QueryStats {
         let now_min = epoch_minutes();
         let first = now_min.saturating_sub(window - 1);
         let buckets = self.inner.buckets.lock();
-        let by_minute: HashMap<u64, &Bucket> =
-            buckets.iter().map(|b| (b.minute, b)).collect();
+        let by_minute: HashMap<u64, &Bucket> = buckets.iter().map(|b| (b.minute, b)).collect();
         (first..=now_min)
             .map(|m| {
                 let b = by_minute.get(&m);
@@ -239,10 +238,7 @@ fn top(map: &Mutex<HashMap<String, u64>>, n: usize) -> Vec<TopEntry> {
 /// Keep only the [`TOP_KEEP`] highest-count keys (deterministic tiebreak by
 /// key) so the map stays bounded without losing the hot entries.
 fn prune(map: &mut HashMap<String, u64>) {
-    let mut rows: Vec<(String, u64)> = map
-        .iter()
-        .map(|(k, c)| (k.clone(), *c))
-        .collect();
+    let mut rows: Vec<(String, u64)> = map.iter().map(|(k, c)| (k.clone(), *c)).collect();
     rows.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
     map.clear();
     for (k, c) in rows.into_iter().take(TOP_KEEP) {
@@ -285,7 +281,11 @@ mod tests {
         for _ in 0..5 {
             s.record(ip, "hot.example", Outcome::Recursive);
         }
-        s.record(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)), "cold.example", Outcome::Recursive);
+        s.record(
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+            "cold.example",
+            Outcome::Recursive,
+        );
         let clients = s.top_clients(10);
         assert_eq!(clients[0].key, "127.0.0.1");
         assert_eq!(clients[0].count, 5);

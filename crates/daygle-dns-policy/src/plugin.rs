@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use crate::{Action, Decision};
+use crate::Decision;
 
 /// Context passed to each plugin.
 #[derive(Debug, Clone)]
@@ -72,15 +72,10 @@ impl PluginRegistry {
     }
 }
 
-/// Convenience helper to build a [`Decision`] from a plugin.
-#[allow(dead_code)]
-pub fn decide(reason: impl Into<String>, action: Action) -> Decision {
-    Decision::new(reason, action)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Action;
 
     struct AlwaysAllow;
     #[async_trait]
@@ -89,7 +84,7 @@ mod tests {
             "always-allow"
         }
         async fn evaluate(&self, _ctx: &PolicyContext) -> Option<Decision> {
-            Some(decide("always allow", Action::Allow))
+            Some(Decision::new("always allow", Action::Allow))
         }
     }
 
@@ -101,7 +96,7 @@ mod tests {
         }
         async fn evaluate(&self, ctx: &PolicyContext) -> Option<Decision> {
             if ctx.query_name.ends_with("google.com") {
-                Some(decide("blocked by plugin", Action::Block))
+                Some(Decision::new("blocked by plugin", Action::Block))
             } else {
                 None
             }

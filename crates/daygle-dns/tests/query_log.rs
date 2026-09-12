@@ -150,7 +150,9 @@ async fn db_query_log_records_filters_and_clears() {
     assert_eq!(body["entries"].as_array().unwrap().len(), 1);
 
     // CSV export streams all rows with a header.
-    let csv = reqwest_text(&format!("{api}/querylogs?format=csv")).await.unwrap();
+    let csv = reqwest_text(&format!("{api}/querylogs?format=csv"))
+        .await
+        .unwrap();
     assert!(csv.starts_with("timestamp,client,qname,qtype,protocol,outcome,rcode,elapsed_ms\n"));
     assert_eq!(csv.lines().count(), 4);
 
@@ -174,5 +176,10 @@ async fn reqwest_text(url: &str) -> Option<String> {
 }
 
 async fn reqwest_delete(url: &str) -> reqwest::StatusCode {
-    reqwest::Client::new().delete(url).send().await.unwrap().status()
+    reqwest::Client::new()
+        .delete(url)
+        .send()
+        .await
+        .unwrap()
+        .status()
 }

@@ -25,6 +25,11 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Verify GUI version is in sync with the workspace
+        # Fails the release when web/package.json / package-lock.json drifted
+        # from Cargo.toml's [workspace.package] version.
+        run: node web/scripts/sync-version.mjs --check
+
       - name: Cache cargo builds
         uses: Swatinem/rust-cache@v2
 

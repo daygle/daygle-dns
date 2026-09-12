@@ -101,14 +101,20 @@ async fn blocklist_source_blocks_domains_and_refreshes() {
     assert_eq!(first_answer(&msg).as_deref(), Some("198.51.100.77"));
 
     // The API reports the source and its domain count.
-    let resp = reqwest::get(format!("http://{}/api/policy/blocklist/sources", server.api_addr)) // lgtm
-        .await
-        .unwrap();
+    let resp = reqwest::get(format!(
+        "http://{}/api/policy/blocklist/sources",
+        server.api_addr
+    )) // lgtm
+    .await
+    .unwrap();
     assert!(resp.status().is_success());
     let json: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(json["sources"][0]["name"], "test-list");
     let fetched_domains = json["sources"][0]["domains"].as_u64().unwrap();
-    assert!(fetched_domains >= 2, "expected >= 2 domains, got {fetched_domains}");
+    assert!(
+        fetched_domains >= 2,
+        "expected >= 2 domains, got {fetched_domains}"
+    );
 
     // Change the source content and trigger a manual refresh; the new domain
     // must start being blocked.
@@ -214,17 +220,20 @@ async fn blocklist_sources_can_be_managed_through_the_api() {
         .send()
         .await
         .unwrap();
-    assert!(
-        resp.status().is_success(),
-        "PUT failed: {}",
-        resp.status()
-    );
+    assert!(resp.status().is_success(), "PUT failed: {}", resp.status());
 
     // Wait for the background fetch: both sources must report domain counts.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     let mut fetched = false;
     while std::time::Instant::now() < deadline {
-        let json: serde_json::Value = client.get(&base).send().await.unwrap().json().await.unwrap();
+        let json: serde_json::Value = client
+            .get(&base)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
         let list = json["sources"].as_array().unwrap();
         if list.len() == 2 && list.iter().all(|s| s["domains"].as_u64().unwrap_or(0) >= 1) {
             fetched = true;
@@ -254,7 +263,11 @@ async fn blocklist_sources_can_be_managed_through_the_api() {
         .send()
         .await
         .unwrap();
-    assert!(resp.status().is_success(), "removal PUT failed: {}", resp.status());
+    assert!(
+        resp.status().is_success(),
+        "removal PUT failed: {}",
+        resp.status()
+    );
 
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     let mut unblocked = false;
@@ -276,7 +289,11 @@ async fn blocklist_sources_can_be_managed_through_the_api() {
         .send()
         .await
         .unwrap();
-    assert!(resp.status().is_success(), "clear PUT failed: {}", resp.status());
+    assert!(
+        resp.status().is_success(),
+        "clear PUT failed: {}",
+        resp.status()
+    );
     let resp = client.get(&base).send().await.unwrap();
     assert_eq!(resp.status(), reqwest::StatusCode::NOT_FOUND);
 
@@ -290,7 +307,10 @@ async fn blocklist_sources_can_be_managed_through_the_api() {
         }
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     }
-    assert!(cleared, "domains kept blocking after all sources were removed");
+    assert!(
+        cleared,
+        "domains kept blocking after all sources were removed"
+    );
 
     // Invalid payloads are rejected (non-HTTP URL, duplicate names) and the
     // current (empty) state is untouched.
@@ -320,12 +340,17 @@ async fn blocklist_source_validation_detects_format_mismatches() {
         "# StevenBlack-style\n127.0.0.1 localhost\n0.0.0.0 ads-validate-one.test\n0.0.0.0 ads-validate-two.test\n",
     )
     .await;
-    let domains = BlocklistServer::spawn("# plain list\nads-validate-three.test\n*.tracker-validate.test\n").await;
+    let domains =
+        BlocklistServer::spawn("# plain list\nads-validate-three.test\n*.tracker-validate.test\n")
+            .await;
 
     let config = base_config(&dir.path().join("daygle-dns.db"));
     let server = spawn(config).await;
     let client = reqwest::Client::new();
-    let base = format!("http://{}/api/policy/blocklist/sources/validate", server.api_addr);
+    let base = format!(
+        "http://{}/api/policy/blocklist/sources/validate",
+        server.api_addr
+    );
     let url_of = |addr: std::net::SocketAddr| format!("http://{addr}/list");
 
     // Hosts content validates as `hosts` and auto-detects as `hosts`.
@@ -343,13 +368,19 @@ async fn blocklist_source_validation_detects_format_mismatches() {
     // ...but declaring it `adblock` is a mismatch, caught before saving.
     let resp = client
         .get(&base)
-        .query(&[("url", url_of(hosts.addr)), ("format", "adblock".to_string())])
+        .query(&[
+            ("url", url_of(hosts.addr)),
+            ("format", "adblock".to_string()),
+        ])
         .send()
         .await
         .unwrap();
     assert!(resp.status().is_success());
     let json: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(json["ok"], false, "hosts-as-adblock was not rejected: {json}");
+    assert_eq!(
+        json["ok"], false,
+        "hosts-as-adblock was not rejected: {json}"
+    );
     assert!(
         json["reason"].as_str().unwrap().contains("hosts"),
         "reason should name the detected format: {json}"
@@ -358,14 +389,20 @@ async fn blocklist_source_validation_detects_format_mismatches() {
     // Auto-detect resolves the format from the content for both shapes.
     let resp = client
         .get(&base)
-        .query(&[("url", url_of(domains.addr)), ("format", "auto".to_string())])
+        .query(&[
+            ("url", url_of(domains.addr)),
+            ("format", "auto".to_string()),
+        ])
         .send()
         .await
         .unwrap();
     let json: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(json["ok"], true, "domains content failed auto-detect: {json}");
+    assert_eq!(
+        json["ok"], true,
+        "domains content failed auto-detect: {json}"
+    );
     assert_eq!(json["format"], "domains");
-    assert!(json["sample"].as_array().unwrap().len() >= 1);
+    assert!(!json["sample"].as_array().unwrap().is_empty());
 
     // Non-HTTP URLs and unknown formats are bad requests, not verdicts.
     let resp = client

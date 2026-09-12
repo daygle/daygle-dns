@@ -96,7 +96,11 @@ impl QueryLogger {
         let needs_rotation = {
             let inner = self.inner.lock();
             inner.disabled
-                || inner.writer.as_ref().map(|(d, _)| d != &today).unwrap_or(true)
+                || inner
+                    .writer
+                    .as_ref()
+                    .map(|(d, _)| d != &today)
+                    .unwrap_or(true)
         };
         if !needs_rotation {
             // Fast path: writer is ready and still on today's file.
@@ -288,7 +292,10 @@ mod tests {
         );
         std::fs::write(dir.path().join(&old_name), b"{}\n").unwrap();
         sweep_old_logs(dir.path(), 30);
-        assert!(!dir.path().join(old_name).exists(), "old file must be swept");
+        assert!(
+            !dir.path().join(old_name).exists(),
+            "old file must be swept"
+        );
     }
 
     #[test]
@@ -303,6 +310,9 @@ mod tests {
         );
         std::fs::write(dir.path().join(&old_name), b"{}\n").unwrap();
         sweep_old_logs(dir.path(), 0);
-        assert!(dir.path().join(old_name).exists(), "retention 0 keeps files");
+        assert!(
+            dir.path().join(old_name).exists(),
+            "retention 0 keeps files"
+        );
     }
 }

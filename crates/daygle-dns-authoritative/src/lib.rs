@@ -31,11 +31,11 @@ pub mod tsig;
 pub mod update;
 
 pub use catalog::{generate_signing_key, AuthorityCatalog};
-pub use model::{Record, RecordInput, SigningKeyRecord, Zone, ZoneInput};
-pub use split_horizon::{SplitHorizonIndex, SplitHorizonMatch};
 pub use dnssec::{DnssecMaintenance, MaintenanceConfig};
+pub use model::{Record, RecordInput, SigningKeyRecord, Zone, ZoneInput};
 pub use notify::{NotifyHooks, NotifyInbound, NotifySender};
 pub use secondary::SecondaryRefresher;
+pub use split_horizon::{SplitHorizonIndex, SplitHorizonMatch};
 pub use store::{
     ConsoleUser, ConsoleUserInput, QueryLogFilter, QueryLogRow, TlsCertificate, ZoneStore,
 };

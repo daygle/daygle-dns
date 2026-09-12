@@ -225,11 +225,11 @@ pub fn router(state: AppState) -> Router {
             "/certificates",
             get(handlers::list_certificates).post(handlers::create_certificate),
         )
+        .route("/certificates/{name}", delete(handlers::delete_certificate))
         .route(
-            "/certificates/{name}",
-            delete(handlers::delete_certificate),
+            "/zones",
+            get(handlers::list_zones).post(handlers::create_zone),
         )
-        .route("/zones", get(handlers::list_zones).post(handlers::create_zone))
         .route("/zones/import", post(handlers::import_zone))
         .route("/zones/{id}", delete(handlers::delete_zone))
         .route("/zones/{id}/soa", put(handlers::update_zone_soa))
@@ -262,8 +262,7 @@ pub fn router(state: AppState) -> Router {
         )
         .route(
             "/split-horizon/entries/{id}",
-            put(handlers::update_split_horizon_entry)
-                .delete(handlers::delete_split_horizon_entry),
+            put(handlers::update_split_horizon_entry).delete(handlers::delete_split_horizon_entry),
         )
         .route(
             "/split-horizon/entries/{id}/move",
@@ -293,10 +292,7 @@ pub fn router(state: AppState) -> Router {
         .route("/update/start", post(handlers::update_start))
         .route("/update/dismiss", post(handlers::update_dismiss))
         .route("/update/preflight", get(handlers::update_preflight))
-        .layer(middleware::from_fn_with_state(
-            state.clone(),
-            require_auth,
-        ))
+        .layer(middleware::from_fn_with_state(state.clone(), require_auth))
         .with_state(state.clone());
 
     let mut app = Router::new().nest("/api", api);
@@ -385,8 +381,7 @@ async fn require_auth(
             // The self-service password change is a mutation on the caller's
             // own credential (the handler re-verifies the current password),
             // so read-only accounts may use it too.
-            let is_own_password_change =
-                path == "/api/auth/password" || path == "/auth/password";
+            let is_own_password_change = path == "/api/auth/password" || path == "/auth/password";
             if mutating
                 && session.role == daygle_dns_core::config::Role::Viewer
                 && !is_own_password_change

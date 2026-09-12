@@ -8,9 +8,9 @@ mod common;
 use std::time::Duration;
 
 use common::*;
-use daygle_dns_core::config::DaygleConfig;
-use daygle_dns_authoritative::DnssecMaintenance;
 use daygle_dns_authoritative::model::{RecordInput, ZoneInput};
+use daygle_dns_authoritative::DnssecMaintenance;
+use daygle_dns_core::config::DaygleConfig;
 use hickory_proto::op::{Edns, Message, ResponseCode};
 use hickory_proto::rr::RecordType;
 
@@ -120,9 +120,9 @@ async fn signed_zone_serves_dnskey_and_rrsigs() {
         .find(|r| r.record_type() == RecordType::DNSKEY)
         .unwrap();
     match &dnskey.data {
-        hickory_proto::rr::RData::DNSSEC(
-            hickory_proto::dnssec::rdata::DNSSECRData::DNSKEY(key),
-        ) => {
+        hickory_proto::rr::RData::DNSSEC(hickory_proto::dnssec::rdata::DNSSECRData::DNSKEY(
+            key,
+        )) => {
             assert!(key.zone_key(), "zone key flag expected");
             assert!(key.secure_entry_point(), "SEP (KSK) flag expected");
         }
@@ -188,7 +188,10 @@ async fn rollover_transitions_are_served() {
         .find(|k| k.is_retired())
         .unwrap();
     store
-        .set_key_created_at(&old_key.id, chrono::Utc::now() - chrono::Duration::hours(96))
+        .set_key_created_at(
+            &old_key.id,
+            chrono::Utc::now() - chrono::Duration::hours(96),
+        )
         .unwrap();
     pass_rollover(&server);
     let reply = udp_query_do(udp, "roll.test.", RecordType::DNSKEY).await;

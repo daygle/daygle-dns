@@ -13,8 +13,8 @@
 //! accepts any iteration count recorded in the stored hash, so admins can
 //! raise the count in future without breaking existing accounts.
 
-use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
+use base64::Engine as _;
 use hmac::{Hmac, KeyInit, Mac};
 use sha2::{Digest, Sha256};
 
@@ -50,7 +50,7 @@ pub fn hash_password_with(password: &str, iterations: u32) -> String {
         // fatal misconfiguration.
         panic!("no OS CSPRNG available to seed password salt");
     }
-    let digest = Sha256::digest(&seed);
+    let digest = Sha256::digest(seed);
     salt.copy_from_slice(&digest[..SALT_LEN]);
 
     let key = pbkdf2_sha256(password.as_bytes(), &salt, iterations, KEY_LEN);
@@ -88,9 +88,7 @@ fn getrandom_bytes(buf: &mut [u8]) -> std::io::Result<()> {
         // Try libc `getrandom(2)` directly to avoid pulling in a new crate.
         let mut filled = 0;
         while filled < buf.len() {
-            let n = unsafe {
-                libc_getrandom(&mut buf[filled..])
-            };
+            let n = unsafe { libc_getrandom(&mut buf[filled..]) };
             if n < 0 {
                 let err = std::io::Error::last_os_error();
                 if err.kind() == std::io::ErrorKind::Interrupted {

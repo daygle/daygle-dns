@@ -96,11 +96,7 @@ impl SplitHorizonIndex {
                         .collect()
                 };
                 ResolvedEntry {
-                    domain: e
-                        .domain
-                        .trim()
-                        .trim_end_matches('.')
-                        .to_ascii_lowercase(),
+                    domain: e.domain.trim().trim_end_matches('.').to_ascii_lowercase(),
                     networks,
                     match_all: e.networks.is_empty(),
                     records: parse_records(e),
@@ -159,11 +155,7 @@ impl SplitHorizonIndex {
             } else if rtype == RecordType::ANY {
                 entry.records.iter().collect()
             } else {
-                entry
-                    .records
-                    .iter()
-                    .filter(|(t, _)| *t == rtype)
-                    .collect()
+                entry.records.iter().filter(|(t, _)| *t == rtype).collect()
             };
             if selected.is_empty() {
                 continue;
@@ -214,7 +206,12 @@ mod tests {
     use crate::model::{SplitHorizonEntryInput, SplitHorizonNetworkInput, SplitHorizonRecord};
     use crate::store::ZoneStore;
 
-    fn entry(position: u8, domain: &str, nets: &[&str], records: &[(&str, &str)]) -> SplitHorizonEntry {
+    fn entry(
+        position: u8,
+        domain: &str,
+        nets: &[&str],
+        records: &[(&str, &str)],
+    ) -> SplitHorizonEntry {
         SplitHorizonEntry {
             id: format!("e-{domain}-{position}"),
             domain: domain.to_string(),
@@ -272,25 +269,45 @@ mod tests {
             .lookup(lan(), "www.example.com", RecordType::A)
             .expect("LAN client matches");
         assert_eq!(rec(&m, 0), (RecordType::A, "10.0.0.5".to_string()));
-        assert!(idx.lookup(vpn(), "www.example.com", RecordType::A).is_none());
-        assert!(idx.lookup(outside(), "www.example.com", RecordType::A).is_none());
+        assert!(idx
+            .lookup(vpn(), "www.example.com", RecordType::A)
+            .is_none());
+        assert!(idx
+            .lookup(outside(), "www.example.com", RecordType::A)
+            .is_none());
     }
 
     #[test]
     fn empty_networks_match_every_client() {
-        let idx = index(&[], &[entry(0, "www.example.com", &[], &[("A", "10.0.0.5")])]);
-        assert!(idx.lookup(lan(), "www.example.com", RecordType::A).is_some());
-        assert!(idx.lookup(outside(), "www.example.com", RecordType::A).is_some());
+        let idx = index(
+            &[],
+            &[entry(0, "www.example.com", &[], &[("A", "10.0.0.5")])],
+        );
+        assert!(idx
+            .lookup(lan(), "www.example.com", RecordType::A)
+            .is_some());
+        assert!(idx
+            .lookup(outside(), "www.example.com", RecordType::A)
+            .is_some());
     }
 
     #[test]
     fn literal_cidr_in_entry() {
         let idx = index(
             &[],
-            &[entry(0, "www.example.com", &["192.168.30.0/24"], &[("A", "10.0.0.9")])],
+            &[entry(
+                0,
+                "www.example.com",
+                &["192.168.30.0/24"],
+                &[("A", "10.0.0.9")],
+            )],
         );
-        assert!(idx.lookup(vpn(), "www.example.com", RecordType::A).is_some());
-        assert!(idx.lookup(lan(), "www.example.com", RecordType::A).is_none());
+        assert!(idx
+            .lookup(vpn(), "www.example.com", RecordType::A)
+            .is_some());
+        assert!(idx
+            .lookup(lan(), "www.example.com", RecordType::A)
+            .is_none());
     }
 
     #[test]
@@ -304,7 +321,9 @@ mod tests {
         );
         let lan_match = idx.lookup(lan(), "www.example.com", RecordType::A).unwrap();
         assert_eq!(rec(&lan_match, 0), (RecordType::A, "10.0.0.5".to_string()));
-        let outside_match = idx.lookup(outside(), "www.example.com", RecordType::A).unwrap();
+        let outside_match = idx
+            .lookup(outside(), "www.example.com", RecordType::A)
+            .unwrap();
         assert_eq!(
             rec(&outside_match, 0),
             (RecordType::A, "203.0.113.1".to_string())
@@ -313,10 +332,19 @@ mod tests {
 
     #[test]
     fn domain_matching_is_case_and_dot_insensitive() {
-        let idx = index(&[], &[entry(0, "WWW.Example.COM", &[], &[("A", "10.0.0.5")])]);
-        assert!(idx.lookup(lan(), "www.example.com.", RecordType::A).is_some());
-        assert!(idx.lookup(lan(), "WWW.EXAMPLE.COM", RecordType::A).is_some());
-        assert!(idx.lookup(lan(), "other.example.com", RecordType::A).is_none());
+        let idx = index(
+            &[],
+            &[entry(0, "WWW.Example.COM", &[], &[("A", "10.0.0.5")])],
+        );
+        assert!(idx
+            .lookup(lan(), "www.example.com.", RecordType::A)
+            .is_some());
+        assert!(idx
+            .lookup(lan(), "WWW.EXAMPLE.COM", RecordType::A)
+            .is_some());
+        assert!(idx
+            .lookup(lan(), "other.example.com", RecordType::A)
+            .is_none());
     }
 
     #[test]
@@ -343,7 +371,9 @@ mod tests {
             .unwrap();
         let idx = SplitHorizonIndex::build(&[network], &[entry]);
         assert!(idx.is_empty());
-        assert!(idx.lookup(lan(), "www.example.com", RecordType::A).is_none());
+        assert!(idx
+            .lookup(lan(), "www.example.com", RecordType::A)
+            .is_none());
     }
 
     #[test]
@@ -352,7 +382,9 @@ mod tests {
             &[("LAN", &["192.168.20.0/24"])],
             &[entry(0, "www.example.com", &["VPN"], &[("A", "10.0.0.5")])],
         );
-        assert!(idx.lookup(lan(), "www.example.com", RecordType::A).is_none());
+        assert!(idx
+            .lookup(lan(), "www.example.com", RecordType::A)
+            .is_none());
     }
 
     #[test]
@@ -370,22 +402,30 @@ mod tests {
                 ],
             )],
         );
-        let mx = idx.lookup(lan(), "mail.example.com", RecordType::MX).unwrap();
+        let mx = idx
+            .lookup(lan(), "mail.example.com", RecordType::MX)
+            .unwrap();
         assert_eq!(mx.records.len(), 1);
         assert_eq!(rec(&mx, 0).0, RecordType::MX);
         assert!(rec(&mx, 0).1.contains("10 mailhost.example.com"));
 
-        let txt = idx.lookup(lan(), "mail.example.com", RecordType::TXT).unwrap();
+        let txt = idx
+            .lookup(lan(), "mail.example.com", RecordType::TXT)
+            .unwrap();
         assert_eq!(txt.records.len(), 1);
         assert_eq!(rec(&txt, 0).0, RecordType::TXT);
         assert!(rec(&txt, 0).1.contains("v=spf1 -all"));
 
-        let a = idx.lookup(lan(), "mail.example.com", RecordType::A).unwrap();
+        let a = idx
+            .lookup(lan(), "mail.example.com", RecordType::A)
+            .unwrap();
         assert_eq!(a.records.len(), 1);
         assert_eq!(rec(&a, 0), (RecordType::A, "10.0.0.5".to_string()));
 
         // No SRV record: fall through to normal resolution.
-        assert!(idx.lookup(lan(), "mail.example.com", RecordType::SRV).is_none());
+        assert!(idx
+            .lookup(lan(), "mail.example.com", RecordType::SRV)
+            .is_none());
     }
 
     #[test]
@@ -441,10 +481,14 @@ mod tests {
                 &[("A", "not-an-ip"), ("TXT", "\"ok\"")],
             )],
         );
-        let m = idx.lookup(lan(), "www.example.com", RecordType::TXT).unwrap();
+        let m = idx
+            .lookup(lan(), "www.example.com", RecordType::TXT)
+            .unwrap();
         assert_eq!(m.records.len(), 1);
         assert_eq!(rec(&m, 0).0, RecordType::TXT);
-        assert!(idx.lookup(lan(), "www.example.com", RecordType::A).is_none());
+        assert!(idx
+            .lookup(lan(), "www.example.com", RecordType::A)
+            .is_none());
     }
 
     #[test]
@@ -463,8 +507,12 @@ mod tests {
         let a = idx.lookup(lan(), "www.example.com", RecordType::A).unwrap();
         assert_eq!(a.records.len(), 1);
         assert_eq!(rec(&a, 0), (RecordType::A, "10.0.0.5".to_string()));
-        let aaaa = idx.lookup(lan(), "www.example.com", RecordType::AAAA).unwrap();
+        let aaaa = idx
+            .lookup(lan(), "www.example.com", RecordType::AAAA)
+            .unwrap();
         assert_eq!(rec(&aaaa, 0), (RecordType::AAAA, "fd00::5".to_string()));
-        assert!(idx.lookup(lan(), "www.example.com", RecordType::MX).is_none());
+        assert!(idx
+            .lookup(lan(), "www.example.com", RecordType::MX)
+            .is_none());
     }
 }
