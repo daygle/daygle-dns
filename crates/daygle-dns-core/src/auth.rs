@@ -63,11 +63,27 @@ pub fn hash_password_with(password: &str, iterations: u32) -> String {
 
 /// Fill `buf` with cryptographically-secure random bytes from the OS CSPRNG.
 ///
-/// Tries `getrandom` (Linux/Android) first, then falls back to libc / BCrypt
-/// syscalls on the platforms we support. Panics only when no source is
-/// available - we never want to silently fall back to a weak RNG.
+/// Uses `getrandom(2)` on Linux/BSDs that export it, `SecRandomCopyBytes` on
+/// Apple platforms (macOS does not provide `getrandom(2)`, and declaring it
+/// fails the final link), and BCrypt on Windows. Panics only when no source
+/// is available - we never want to silently fall back to a weak RNG.
 fn getrandom_bytes(buf: &mut [u8]) -> std::io::Result<()> {
-    #[cfg(unix)]
+    #[cfg(target_vendor = "apple")]
+    {
+        use std::ffi::c_void;
+        #[link(name = "Security", kind = "framework")]
+        extern "C" {
+            fn SecRandomCopyBytes(rnd: *const c_void, count: usize, bytes: *mut u8) -> i32;
+        }
+        // NULL = kSecRandomDefault: the system CSPRNG. 0 = errSecSuccess.
+        let status = unsafe { SecRandomCopyBytes(std::ptr::null(), buf.len(), buf.as_mut_ptr()) };
+        if status == 0 {
+            Ok(())
+        } else {
+            Err(std::io::Error::last_os_error())
+        }
+    }
+    #[cfg(all(unix, not(target_vendor = "apple")))]
     {
         // Try libc `getrandom(2)` directly to avoid pulling in a new crate.
         let mut filled = 0;
@@ -115,9 +131,17 @@ fn getrandom_bytes(buf: &mut [u8]) -> std::io::Result<()> {
             Err(std::io::Error::last_os_error())
         }
     }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = buf;
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "no OS CSPRNG binding for this platform",
+        ))
+    }
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, not(target_vendor = "apple")))]
 unsafe fn libc_getrandom(buf: &mut [u8]) -> isize {
     extern "C" {
         fn getrandom(buf: *mut u8, len: usize, flags: u32) -> isize;
