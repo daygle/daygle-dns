@@ -93,6 +93,14 @@ const START_GRACE_SECS: u64 = 60;
 /// pid-less state older than the start grace period) is reported as `error`
 /// so both the API and the console stop treating a dead run as in progress.
 pub fn read_state() -> UpdateState {
+    read_state_with(pid_alive)
+}
+
+/// Test seam for [`read_state`]: the same logic with an injectable
+/// pid-liveness predicate (the real one only accepts updater helper
+/// processes, which a test binary cannot impersonate). Private helper,
+/// shared by [`read_state`] and its tests.
+fn read_state_with(alive: impl Fn(i64) -> bool) -> UpdateState {
     let path = workspace_dir().join("state.json");
     let Ok(text) = std::fs::read_to_string(&path) else {
         return UpdateState::default();
@@ -102,7 +110,7 @@ pub fn read_state() -> UpdateState {
         .and_then(|m| m.modified())
         .ok()
         .and_then(|t| t.elapsed().ok());
-    normalize_stale(st, age, pid_alive)
+    normalize_stale(st, age, alive)
 }
 
 /// Map a stale "running" snapshot to a terminal `error` one.
@@ -774,7 +782,14 @@ fn script_path(dir: &Path) -> PathBuf {
 /// would immediately overwrite the file anyway, and the console relies on the
 /// run-shaped state to keep polling.
 pub fn clear_state() -> Result<(), StartError> {
-    if update_in_progress() {
+    clear_state_for(read_state())
+}
+
+/// Test seam for [`clear_state`]: the same refusal + removal logic against an
+/// explicit state snapshot instead of re-reading the workspace file. Private
+/// helper, shared by [`clear_state`] and its tests.
+fn clear_state_for(st: UpdateState) -> Result<(), StartError> {
+    if st.is_running() {
         return Err(StartError::AlreadyRunning);
     }
     let path = workspace_dir().join("state.json");
@@ -817,6 +832,7 @@ fn spawn(_script: PathBuf, _exe: &Path, _dir: &Path) -> std::io::Result<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
 
     #[test]
     fn state_roundtrips() {
@@ -863,8 +879,13 @@ mod tests {
         }
     }
 
+    /// These tests share the single `workspace_dir()/state.json`, so they
+    /// must not run concurrently (cargo runs tests in parallel threads).
+    static STATE_LOCK: Mutex<()> = Mutex::new(());
+
     #[test]
     fn clear_state_removes_terminal_snapshot() {
+        let _guard = STATE_LOCK.lock().unwrap();
         let dir = workspace_dir();
         std::fs::create_dir_all(&dir).unwrap();
         let st = UpdateState {
@@ -873,27 +894,104 @@ mod tests {
             ..Default::default()
         };
         write_state_atomic(&dir.join("state.json"), &st).unwrap();
-        clear_state().expect("clear_state succeeds for a terminal snapshot");
+        // A terminal snapshot is never "in progress", so clearing succeeds
+        // regardless of which processes are alive.
+        clear_state_for(read_state_with(|_| false))
+            .expect("clear_state succeeds for a terminal snapshot");
         assert!(!dir.join("state.json").exists());
         // Clearing again (nothing recorded) is still a success.
-        clear_state().expect("clear_state on a missing state file is a no-op");
+        clear_state_for(read_state_with(|_| false))
+            .expect("clear_state on a missing state file is a no-op");
     }
 
     #[test]
-    #[cfg(unix)]
     fn clear_state_refuses_while_run_in_progress() {
+        let _guard = STATE_LOCK.lock().unwrap();
         let dir = workspace_dir();
         std::fs::create_dir_all(&dir).unwrap();
-        // Our own pid is trivially alive, so the state reads as in progress.
+        // A live updater helper keeps the run-shaped state in progress, so
+        // clearing must be refused with AlreadyRunning. The test binary's own
+        // pid does not look like an updater helper (see pid_alive), so the
+        // read seam fakes a live helper process.
         let st = UpdateState {
             phase: "building".to_string(),
             pid: std::process::id() as i64,
             ..Default::default()
         };
         write_state_atomic(&dir.join("state.json"), &st).unwrap();
-        assert!(matches!(clear_state(), Err(StartError::AlreadyRunning)));
+        let state = read_state_with(|_| true);
+        assert!(state.is_running(), "a live helper keeps the state running");
+        assert!(matches!(
+            clear_state_for(state),
+            Err(StartError::AlreadyRunning)
+        ));
         // Clean up so the fake running state cannot leak elsewhere.
         let _ = std::fs::remove_file(dir.join("state.json"));
+    }
+
+    #[test]
+    fn run_shaped_state_with_dead_pid_normalizes_to_error() {
+        // A run-shaped snapshot whose helper is provably gone must read back
+        // as terminal `error` so a new update can start (self-healing).
+        let st = UpdateState {
+            phase: "building".to_string(),
+            pid: 424_242,
+            ..Default::default()
+        };
+        let normalized = normalize_stale(st, None, |_| false);
+        assert_eq!(normalized.phase, "error");
+        assert!(normalized.is_terminal());
+    }
+
+    #[test]
+    fn run_shaped_state_with_live_pid_stays_running() {
+        let st = UpdateState {
+            phase: "building".to_string(),
+            pid: 424_242,
+            ..Default::default()
+        };
+        let normalized = normalize_stale(st, None, |_| true);
+        assert_eq!(normalized.phase, "building");
+        assert!(normalized.is_running());
+    }
+
+    #[test]
+    fn pidless_state_within_grace_period_stays_running() {
+        let st = UpdateState {
+            phase: "installing".to_string(),
+            pid: 0,
+            ..Default::default()
+        };
+        // Younger than START_GRACE_SECS: still running (normal helper start,
+        // before it records its own pid).
+        let normalized = normalize_stale(st, Some(std::time::Duration::from_secs(1)), |_| false);
+        assert_eq!(normalized.phase, "installing");
+    }
+
+    #[test]
+    fn stale_pidless_state_normalizes_to_error() {
+        let st = UpdateState {
+            phase: "installing".to_string(),
+            pid: 0,
+            ..Default::default()
+        };
+        let normalized = normalize_stale(
+            st,
+            Some(std::time::Duration::from_secs(START_GRACE_SECS + 60)),
+            |_| false,
+        );
+        assert_eq!(normalized.phase, "error");
+    }
+
+    #[test]
+    fn terminal_state_is_never_normalized() {
+        let st = UpdateState {
+            phase: "done".to_string(),
+            pid: 424_242, // even with a "dead" pid
+            ..Default::default()
+        };
+        let normalized = normalize_stale(st, None, |_| false);
+        assert_eq!(normalized.phase, "done");
     }
 
     #[test]
