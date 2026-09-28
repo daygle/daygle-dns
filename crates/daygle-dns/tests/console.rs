@@ -629,6 +629,82 @@ async fn static_api_token_still_works() {
         .unwrap();
     assert_eq!(resp.status(), 201);
 
+    // Privileged GETs (server-side fetches) are not part of the open reads.
+    let resp = reqwest::get(api_url(
+        server.api_addr,
+        "/api/policy/blocklist/sources/validate?url=http://127.0.0.1:1/x",
+    ))
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), 401);
+
+    // A near-miss token is rejected.
+    let resp = reqwest::Client::new()
+        .post(api_url(server.api_addr, "/api/zones"))
+        .bearer_auth("legacy-tokeN")
+        .json(&json!({ "name": "y.test" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 401);
+
+    shutdown(server).await;
+}
+
+#[tokio::test]
+async fn responses_carry_security_headers_and_configured_cors() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut cfg = base_config(&dir.path().join("daygle-dns.db"));
+    cfg.api.auth_required = false;
+    cfg.api.cors_origins = vec!["https://ops.example".to_string()];
+    let server = spawn(cfg).await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .get(api_url(server.api_addr, "/api/health"))
+        .header("Origin", "https://ops.example")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    assert_eq!(resp.headers()["x-frame-options"], "DENY");
+    assert_eq!(resp.headers()["x-content-type-options"], "nosniff");
+    assert_eq!(
+        resp.headers()["access-control-allow-origin"],
+        "https://ops.example"
+    );
+
+    // An origin outside the allow-list gets no CORS grant.
+    let resp = client
+        .get(api_url(server.api_addr, "/api/health"))
+        .header("Origin", "https://evil.example")
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.headers().get("access-control-allow-origin").is_none());
+
+    shutdown(server).await;
+}
+
+#[tokio::test]
+async fn oversized_login_is_rejected_without_bloating_the_log() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = spawn_with_roles(&dir).await;
+    let huge = "u".repeat(512 * 1024);
+    assert_eq!(login_status(server.api_addr, &huge, "watch").await, 401);
+    // A long (but not absurd) unknown username is logged truncated.
+    let long = "v".repeat(200);
+    assert_eq!(login_status(server.api_addr, &long, "watch").await, 401);
+    let logged = server
+        .logs
+        .tail(50)
+        .into_iter()
+        .map(|e| e.message)
+        .filter(|m| m.to_ascii_lowercase().contains("failed login"))
+        .collect::<Vec<_>>();
+    assert!(!logged.is_empty());
+    assert!(logged.iter().all(|m| m.len() < 200), "{logged:?}");
+
     shutdown(server).await;
 }
 
@@ -966,6 +1042,20 @@ async fn viewer_role_is_read_only_and_secrets_are_redacted() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 403);
+    // GETs that make the server reach out are admin-only too: a viewer must
+    // not be able to make the server fetch arbitrary URLs.
+    for path in [
+        "/api/policy/blocklist/sources/validate?url=http://127.0.0.1:1/x",
+        "/api/update/preflight",
+    ] {
+        let resp = client
+            .get(format!("{base}{path}"))
+            .bearer_auth(&viewer_token)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 403, "viewer reached {path}");
+    }
 
     // Admin keeps full access.
     let (admin_token, role) = login(server.api_addr, "admin", "secret").await;
@@ -993,6 +1083,32 @@ async fn viewer_role_is_read_only_and_secrets_are_redacted() {
     for u in users {
         assert_eq!(u["password_hash"], json!("[redacted]"), "hash leaked");
     }
+
+    // ...and in the configuration echoed back by a settings update.
+    let resp = client
+        .put(format!("{base}/api/config"))
+        .bearer_auth(&admin_token)
+        .json(&json!({ "recursive": { "prefetch_enabled": true } }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let echoed: serde_json::Value = resp.json().await.unwrap();
+    for u in echoed["api"]["users"].as_array().unwrap() {
+        assert_eq!(u["password_hash"], json!("[redacted]"), "hash leaked");
+    }
+
+    // Status reports the database accounts.
+    let status: serde_json::Value = client
+        .get(format!("{base}/api/status"))
+        .bearer_auth(&admin_token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(status["users_configured"], json!(true));
 
     shutdown(server).await;
 }
@@ -1345,3 +1461,33 @@ async fn update_endpoints_report_state_and_gate_start() {
 // Keep unused helpers referenced.
 #[allow(unused_imports)]
 use common as _;
+
+#[tokio::test]
+async fn redirect_answers_nodata_for_types_the_target_cannot_serve() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = spawn(base_config(&dir.path().join("daygle-dns.db"))).await;
+    let resp = reqwest::Client::new()
+        .post(api_url(server.api_addr, "/api/policy/blocking"))
+        .json(&json!({
+            "name": "sinkhole",
+            "block": ["ads.test"],
+            "response": { "kind": "redirect", "address": "0.0.0.0" },
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let udp = server.addrs().udp.unwrap();
+
+    let a = udp_query(udp, "ads.test.", RecordType::A).await;
+    assert_eq!(a.response_code, hickory_proto::op::ResponseCode::NoError);
+    assert_eq!(first_answer(&a).as_deref(), Some("0.0.0.0"));
+
+    // The name exists (it redirects), so an AAAA query for an IPv4 sinkhole
+    // is NODATA, not NXDOMAIN (which would negatively cache every type).
+    let aaaa = udp_query(udp, "ads.test.", RecordType::AAAA).await;
+    assert_eq!(aaaa.response_code, hickory_proto::op::ResponseCode::NoError);
+    assert!(aaaa.answers.is_empty());
+
+    shutdown(server).await;
+}

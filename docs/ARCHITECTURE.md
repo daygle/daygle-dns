@@ -206,10 +206,15 @@ same path for per-source status.
   keeps the response time constant so usernames cannot be enumerated.
 - **Roles.** Sessions carry the account's role. `viewer` sessions may read
   everything but any mutating method is rejected with `403` by the auth
-  middleware before a handler runs. `admin` sessions (and the legacy static
-  `api_token`) have full access.
-- **Secret redaction.** `GET /api/config` masks `api.api_token` and every
-  password hash as `[redacted]`, so secrets never round-trip to a browser.
+  middleware before a handler runs; so are the `GET`s that make the server
+  fetch a URL or probe the host (`is_privileged_read`). `admin` sessions (and
+  the legacy static `api_token`) have full access.
+- **Password hashing.** PBKDF2 runs on the blocking thread pool behind a
+  small semaphore, so a login flood queues there instead of stalling the
+  async workers that also serve DNS.
+- **Secret redaction.** `GET /api/config` (and the config echoed by
+  `PUT /api/config`) masks `api.api_token` and every password hash as
+  `[redacted]`, so secrets never round-trip to a browser.
 - **Settings forms.** `PUT /api/config` applies a validated partial update
   (server/recursive/DoT/DoH/DoQ/API groups), persists it to the config file,
   and triggers a listener rebuild through `request_dns_rebuild` when
