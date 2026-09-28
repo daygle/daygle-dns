@@ -7,7 +7,8 @@
 #
 # It performs the ONLY privileged work an update needs - swap the binary,
 # restart the unit, health-check, roll back on failure - and writes its
-# progress to the same <temp>/daygle-dns-update/state.json the console polls.
+# progress to the same <temp>/daygle-dns-update/state.json the console polls
+# (plus its own log as apply.log next to it).
 # No sudo, no setuid, no capability gymnastics: the privileged step is a
 # normal root systemd unit, so the service account itself never gains any
 # rights beyond the staging dir it already owns.
@@ -29,9 +30,38 @@ UPDATES_DIR="__DAYGLE_UPDATES_DIR__"
 STAGING="$UPDATES_DIR/staging"
 REQ="$UPDATES_DIR/request"
 DIR="${DAYGLE_UPDATE_DIR:-/tmp/daygle-dns-update}"
-LOG="$DIR/update.log"
 
-log() { printf '[daygle-dns-update] %s\n' "$*" >>"$LOG"; }
+# This step runs as root, but $DIR (and everything under $UPDATES_DIR) is
+# writable by the unprivileged service account. Root therefore never opens
+# (reads, writes or appends to) a path in those directories: progress and
+# log output are written to a root-private scratch dir and only *renamed*
+# into $DIR, and the staged binary is copied out before it is verified, so a
+# symlink or a file swapped in mid-run cannot redirect a root write or slip
+# an unverified binary past the checksum.
+PRIV="$(mktemp -d)"
+trap 'rm -rf "$PRIV"' EXIT HUP INT TERM
+LOG="$PRIV/apply.log"
+: >"$LOG"
+
+# Only publish into the workspace when it is a real directory (the service
+# creates it before requesting an update); never create it as root, which
+# would leave a root-owned workspace the service cannot use.
+PUBLISH=1
+if [ -L "$DIR" ] || [ ! -d "$DIR" ]; then
+  PUBLISH=0
+fi
+
+# Rename a finished root-private file into the workspace.
+publish() { # private-file name
+  [ "$PUBLISH" -eq 1 ] || return 0
+  chmod 0644 "$1" 2>/dev/null || true
+  mv -f "$1" "$DIR/$2" 2>/dev/null || true
+}
+
+log() {
+  printf '[daygle-dns-update] %s\n' "$*" >>"$LOG"
+  { cp -f "$LOG" "$PRIV/apply.log.pub" && publish "$PRIV/apply.log.pub" apply.log; } || true
+}
 
 # Escape a message for embedding in a JSON string (see update.sh).
 json_escape() {
@@ -47,17 +77,15 @@ json_escape() {
 # half-written file.
 state() { # phase message
   printf '{"phase":"%s","pid":%s,"started_at":"%s","message":"%s","exit_code":0}\n' \
-    "$1" "$$" "$(date -u +%FT%TZ)" "$(json_escape "$2")" > "$DIR/state.json.tmp" \
-    && mv -f "$DIR/state.json.tmp" "$DIR/state.json"
+    "$1" "$$" "$(date -u +%FT%TZ)" "$(json_escape "$2")" > "$PRIV/state.json" \
+    && publish "$PRIV/state.json" state.json
 }
 
 fail() { # message
   printf '{"phase":"error","pid":%s,"started_at":"%s","message":"%s","exit_code":1}\n' \
-    "$$" "$(date -u +%FT%TZ)" "$(json_escape "$1")" > "$DIR/state.json.tmp" \
-    && mv -f "$DIR/state.json.tmp" "$DIR/state.json"
+    "$$" "$(date -u +%FT%TZ)" "$(json_escape "$1")" > "$PRIV/state.json" \
+    && publish "$PRIV/state.json" state.json
 }
-
-mkdir -p "$DIR"
 
 # Nothing pending: the marker's own rename/removal events can re-trigger this
 # unit; a run without a request is a clean no-op.
@@ -70,9 +98,12 @@ fi
 mv -f "$REQ" "$REQ.processing"
 
 MANIFEST="$STAGING/apply.json"
-BIN="$STAGING/apply.bin"
+STAGED_BIN="$STAGING/apply.bin"
+# Verify and install a root-private copy, never the service-writable file.
+BIN="$PRIV/apply.bin"
 
-if [ ! -f "$MANIFEST" ] || [ ! -f "$BIN" ]; then
+if [ ! -f "$MANIFEST" ] || [ ! -f "$STAGED_BIN" ] || [ -L "$STAGED_BIN" ] \
+   || ! cp "$STAGED_BIN" "$BIN"; then
   log "request present but staged manifest/binary missing"
   rm -f "$REQ.processing"
   fail "the update was requested but its staged manifest or binary is missing. Re-run the update from the console; if it persists, re-run the installer."
@@ -103,7 +134,7 @@ fi
 
 ACTUAL="$( (sha256sum "$BIN" 2>/dev/null || shasum -a 256 "$BIN" 2>/dev/null) | cut -d' ' -f1 | tr -d '[:space:]')"
 if [ -z "$ACTUAL" ] || [ "$ACTUAL" != "$SHA256" ]; then
-  log "rejecting update: sha256 mismatch (expected $SHA256, got ${ACTUAL:-none})"
+  log "rejecting update: sha256 mismatch (expected $SHA256)"
   rm -f "$REQ.processing"
   fail "the staged binary failed checksum verification - refusing to install it. Re-run the update from the console."
   exit 1
@@ -166,7 +197,7 @@ while [ $i -lt 15 ]; do
   i=$((i + 1))
 done
 
-rm -f "$REQ.processing" "$MANIFEST" "$BIN"
+rm -f "$REQ.processing" "$MANIFEST" "$STAGED_BIN"
 
 if [ "$HEALTHY" -eq 1 ]; then
   log "applied v${VERSION} and health check passed"

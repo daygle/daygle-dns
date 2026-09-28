@@ -158,13 +158,34 @@ fn now_rfc3339() -> String {
     chrono::Utc::now().to_rfc3339()
 }
 
-/// Last `max` bytes of the updater's combined output. Reads only the tail
+/// Log written by the root apply step (`update-apply.sh`). It is published
+/// separately from `update.log` because the root step never opens a file in
+/// the service-writable workspace (it only renames finished files into it).
+const APPLY_LOG: &str = "apply.log";
+
+/// Last `max` bytes of the updater's combined output: the service-side
+/// helper's log followed by the root apply step's log. Reads only the tails
 /// from disk: the log accumulates a full release build's output, so reading
 /// the whole file on every status poll would be wasteful.
 pub fn log_tail(max: usize) -> String {
+    let dir = workspace_dir();
+    let apply = file_tail(&dir.join(APPLY_LOG), max);
+    let helper = file_tail(&dir.join("update.log"), max.saturating_sub(apply.len()));
+    match (helper.is_empty(), apply.is_empty()) {
+        (_, true) => helper,
+        (true, false) => apply,
+        (false, false) if helper.ends_with('\n') => helper + &apply,
+        (false, false) => helper + "\n" + &apply,
+    }
+}
+
+/// Last `max` bytes of `path` (lossy UTF-8); empty when unreadable.
+fn file_tail(path: &Path, max: usize) -> String {
     use std::io::{Read, Seek, SeekFrom};
-    let path = workspace_dir().join("update.log");
-    let mut file = match std::fs::File::open(&path) {
+    if max == 0 {
+        return String::new();
+    }
+    let mut file = match std::fs::File::open(path) {
         Ok(f) => f,
         Err(_) => return String::new(),
     };
@@ -725,8 +746,9 @@ pub fn start(exe: &Path, config_dir: Option<&Path>) -> Result<u32, StartError> {
         return Err(StartError::AlreadyRunning);
     }
     let dir = workspace_dir();
-    std::fs::create_dir_all(&dir).map_err(StartError::Io)?;
-    if let Err(e) = std::fs::write(dir.join("update.sh"), UPDATE_SCRIPT) {
+    let written = secure_workspace(&dir)
+        .and_then(|()| replace_file(&dir.join("update.sh"), UPDATE_SCRIPT.as_bytes()));
+    if let Err(e) = written {
         // A stale workspace left behind by the old sudo-era updater (or a
         // manual root diagnostic) can be root-owned and unwritable by the
         // service account. Its contents - the helper script, the log, and the
@@ -734,15 +756,17 @@ pub fn start(exe: &Path, config_dir: Option<&Path>) -> Result<u32, StartError> {
         // fresh rather than failing the whole update.
         if dir.is_dir() {
             let _ = std::fs::remove_dir_all(&dir);
-            std::fs::create_dir_all(&dir).map_err(StartError::Io)?;
-            std::fs::write(dir.join("update.sh"), UPDATE_SCRIPT).map_err(StartError::Io)?;
+            secure_workspace(&dir).map_err(StartError::Io)?;
+            replace_file(&dir.join("update.sh"), UPDATE_SCRIPT.as_bytes())
+                .map_err(StartError::Io)?;
         } else {
             return Err(StartError::Io(e));
         }
     }
     // Each run starts a fresh log so output cannot grow without bound across
-    // repeated updates.
-    let _ = std::fs::write(dir.join("update.log"), b"");
+    // repeated updates; the root apply step's log is regenerated as well.
+    let _ = replace_file(&dir.join("update.log"), b"");
+    let _ = std::fs::remove_file(dir.join(APPLY_LOG));
     // Prime the state so the console shows activity the moment the request
     // returns; the helper overwrites it with its own pid/message immediately.
     let primed = UpdateState {
@@ -771,6 +795,67 @@ pub fn start(exe: &Path, config_dir: Option<&Path>) -> Result<u32, StartError> {
             Err(StartError::Io(e))
         }
     }
+}
+
+/// Create the workspace (mode `0700`) or verify an existing one.
+///
+/// The workspace lives in the shared temp dir under a fixed name, so another
+/// local account could create it first and then swap `update.sh` between
+/// our write and its execution. Refuse any workspace that is not a real
+/// directory owned by this account, and never leave it group/world-writable.
+#[cfg(unix)]
+fn secure_workspace(dir: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+    extern "C" {
+        fn geteuid() -> u32;
+    }
+    match std::fs::DirBuilder::new().mode(0o700).create(dir) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(e) => return Err(e),
+    }
+    let meta = std::fs::symlink_metadata(dir)?;
+    if !meta.file_type().is_dir() {
+        return Err(std::io::Error::other(format!(
+            "update workspace {} is not a directory",
+            dir.display()
+        )));
+    }
+    // SAFETY: geteuid(2) has no preconditions and cannot fail.
+    if meta.uid() != unsafe { geteuid() } {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!(
+                "update workspace {} is owned by another account",
+                dir.display()
+            ),
+        ));
+    }
+    if meta.permissions().mode() & 0o077 != 0 {
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn secure_workspace(dir: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dir)
+}
+
+/// Replace `path` with `bytes` without following a symlink planted at
+/// `path` (write a sibling temp file, then rename over the entry).
+fn replace_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let tmp = path.with_extension("tmp-write");
+    let _ = std::fs::remove_file(&tmp);
+    {
+        use std::io::Write as _;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)?;
+        file.write_all(bytes)?;
+    }
+    std::fs::rename(&tmp, path)
 }
 
 fn script_path(dir: &Path) -> PathBuf {
