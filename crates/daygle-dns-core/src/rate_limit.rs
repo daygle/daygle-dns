@@ -22,6 +22,11 @@ use crate::config::RateLimitSettings;
 /// even when the interval has not elapsed.
 const SWEEP_INTERVAL: Duration = Duration::from_secs(30);
 const SWEEP_AT_ENTRIES: usize = 10_000;
+/// Minimum spacing between size-triggered sweeps. Without it, a map holding
+/// more than [`SWEEP_AT_ENTRIES`] live (in-window) buckets - easy to reach
+/// with random query names - was rescanned in full on *every* query while
+/// the global lock was held.
+const SIZE_SWEEP_MIN_GAP: Duration = Duration::from_secs(1);
 
 /// A thread-safe fixed-window rate limiter.
 ///
@@ -190,8 +195,10 @@ fn advance_bucket(bucket: &mut Bucket, window: Duration, limit: u32) -> bool {
 /// flood of spoofed keys cannot grow the map without bound.
 fn maybe_sweep(inner: &mut Inner) {
     let now = Instant::now();
-    let due_by_time = now.duration_since(inner.last_sweep) >= SWEEP_INTERVAL;
-    let due_by_size = inner.clients.len() + inner.domains.len() >= SWEEP_AT_ENTRIES;
+    let since_last = now.duration_since(inner.last_sweep);
+    let due_by_time = since_last >= SWEEP_INTERVAL;
+    let due_by_size = inner.clients.len() + inner.domains.len() >= SWEEP_AT_ENTRIES
+        && since_last >= SIZE_SWEEP_MIN_GAP;
     if !due_by_time && !due_by_size {
         return;
     }

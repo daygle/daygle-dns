@@ -63,6 +63,19 @@ impl Bucket {
             ..Default::default()
         }
     }
+
+    /// Count one query with the given outcome.
+    fn count(&mut self, outcome: Outcome) {
+        self.queries += 1;
+        match outcome {
+            Outcome::Authoritative => self.authoritative += 1,
+            Outcome::Recursive => self.recursive += 1,
+            Outcome::SplitHorizon => self.split_horizon += 1,
+            Outcome::Blocked => self.blocked += 1,
+            Outcome::RateLimited => self.rate_limited += 1,
+            Outcome::Error => self.errors += 1,
+        }
+    }
 }
 
 /// Aggregated series point returned to the dashboard.
@@ -121,34 +134,18 @@ impl QueryStats {
         let now_min = epoch_minutes();
         {
             let mut buckets = self.inner.buckets.lock();
-            match buckets.last_mut() {
-                Some(b) if b.minute == now_min => match outcome {
-                    Outcome::Authoritative => b.authoritative += 1,
-                    Outcome::Recursive => b.recursive += 1,
-                    Outcome::SplitHorizon => b.split_horizon += 1,
-                    Outcome::Blocked => b.blocked += 1,
-                    Outcome::RateLimited => b.rate_limited += 1,
-                    Outcome::Error => b.errors += 1,
-                },
-                _ => {
-                    // New minute (possibly after a gap): rotate.
-                    let mut b = Bucket::new(now_min);
-                    match outcome {
-                        Outcome::Authoritative => b.authoritative += 1,
-                        Outcome::Recursive => b.recursive += 1,
-                        Outcome::SplitHorizon => b.split_horizon += 1,
-                        Outcome::Blocked => b.blocked += 1,
-                        Outcome::RateLimited => b.rate_limited += 1,
-                        Outcome::Error => b.errors += 1,
-                    }
-                    buckets.push(b);
-                    if buckets.len() > MAX_BUCKETS {
-                        let excess = buckets.len() - MAX_BUCKETS;
-                        buckets.drain(..excess);
-                    }
+            if !matches!(buckets.last(), Some(b) if b.minute == now_min) {
+                // New minute (possibly after a gap): rotate.
+                buckets.push(Bucket::new(now_min));
+                if buckets.len() > MAX_BUCKETS {
+                    let excess = buckets.len() - MAX_BUCKETS;
+                    buckets.drain(..excess);
                 }
             }
-            buckets.last_mut().expect("bucket just pushed").queries += 1;
+            buckets
+                .last_mut()
+                .expect("current bucket ensured above")
+                .count(outcome);
         }
 
         bump(&self.inner.clients, &client.to_string());
@@ -215,10 +212,15 @@ fn epoch_minutes() -> u64 {
 
 fn bump(map: &Mutex<HashMap<String, u64>>, key: &str) {
     let mut m = map.lock();
-    if m.len() >= MAX_TOP_ENTRIES && !m.contains_key(key) {
+    // Hot path: an already-tracked key needs no owned-key allocation.
+    if let Some(count) = m.get_mut(key) {
+        *count += 1;
+        return;
+    }
+    if m.len() >= MAX_TOP_ENTRIES {
         prune(&mut m);
     }
-    *m.entry(key.to_string()).or_insert(0) += 1;
+    m.insert(key.to_string(), 1);
 }
 
 fn top(map: &Mutex<HashMap<String, u64>>, n: usize) -> Vec<TopEntry> {
