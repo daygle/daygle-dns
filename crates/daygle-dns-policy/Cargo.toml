@@ -10,7 +10,6 @@ description = "Plugin-style policy engine: blocklists, ACLs and per-client rules
 daygle-dns-core = { path = "../daygle-dns-core" }
 ipnet.workspace = true
 regex.workspace = true
-serde.workspace = true
 async-trait.workspace = true
 tracing.workspace = true
 reqwest.workspace = true

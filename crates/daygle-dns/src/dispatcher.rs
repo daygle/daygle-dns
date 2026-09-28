@@ -589,8 +589,14 @@ impl RequestHandler for DnsDispatcher {
                     Some("NOERROR"),
                     started,
                 );
-                return send_redirect(&mut response_handle, request, info.query.query_type(), *ip)
-                    .await;
+                return send_redirect(
+                    &mut response_handle,
+                    request,
+                    info.query.name(),
+                    info.query.query_type(),
+                    *ip,
+                )
+                .await;
             }
             Action::NoData => {
                 // Filter AAAA: NODATA (empty NOERROR) forces IPv4 fallback.
@@ -636,8 +642,14 @@ impl RequestHandler for DnsDispatcher {
                         send_error(&mut response_handle, request, ResponseCode::Refused).await
                     }
                     Action::Redirect(ip) => {
-                        send_redirect(&mut response_handle, request, info.query.query_type(), ip)
-                            .await
+                        send_redirect(
+                            &mut response_handle,
+                            request,
+                            info.query.name(),
+                            info.query.query_type(),
+                            ip,
+                        )
+                        .await
                     }
                     Action::NoData => send_empty(&mut response_handle, request).await,
                     // Block (NXDOMAIN) and any future action default to NXDOMAIN.
@@ -746,8 +758,6 @@ impl RequestHandler for DnsDispatcher {
                 if validated {
                     self.metrics.inc(&self.metrics.dnssec_validated);
                 }
-                self.record_stats(client, &qname, Outcome::Recursive);
-
                 let mut metadata = request.metadata;
                 metadata.message_type = MessageType::Response;
                 metadata.response_code = lookup.message().response_code;
@@ -757,15 +767,7 @@ impl RequestHandler for DnsDispatcher {
                 // Log with the upstream response code and the full handling
                 // time (the lookup is the bulk of a recursive query's latency).
                 let rcode = rcode_label(metadata.response_code);
-                self.log_query(
-                    client,
-                    &qname,
-                    &rtype,
-                    Outcome::Recursive,
-                    Some(&rcode),
-                    started,
-                );
-                self.db_log_query(
+                self.observe(
                     client,
                     &qname,
                     &rtype,
@@ -793,7 +795,6 @@ impl RequestHandler for DnsDispatcher {
             Err(e) => {
                 debug!(query = %qname, error = %e, "recursive resolution failed");
                 self.metrics.inc(&self.metrics.errors);
-                self.record_stats(client, &qname, Outcome::Error);
                 // Negative answers (NXDOMAIN, NODATA) carry their response
                 // code so they pass through instead of SERVFAIL.
                 let code = match &e {
@@ -803,15 +804,7 @@ impl RequestHandler for DnsDispatcher {
                     } => <ResponseCode as From<u16>>::from(*code),
                     _ => ResponseCode::ServFail,
                 };
-                self.log_query(
-                    client,
-                    &qname,
-                    &rtype,
-                    Outcome::Error,
-                    Some(&rcode_label(code)),
-                    started,
-                );
-                self.db_log_query(
+                self.observe(
                     client,
                     &qname,
                     &rtype,
@@ -843,7 +836,6 @@ async fn send_error<R: ResponseHandler>(
     }
 }
 
-/// Send a response whose answer section is exactly `records`.
 /// Upper-case DNS name for a response code, for the persistent query log.
 fn rcode_label(code: ResponseCode) -> String {
     match code {
@@ -907,6 +899,7 @@ async fn send_empty<R: ResponseHandler>(handle: &mut R, request: &Request) -> Re
     }
 }
 
+/// Send a response whose answer section is exactly `records`.
 async fn send_records<R: ResponseHandler>(
     handle: &mut R,
     request: &Request,
@@ -938,55 +931,26 @@ async fn send_records<R: ResponseHandler>(
     }
 }
 
-/// Synthesize an A/AAAA answer carrying `ips` (used by the policy `redirect`
-/// action).
-async fn send_address_answer<R: ResponseHandler>(
-    handle: &mut R,
-    request: &Request,
-    rtype: RecordType,
-    ips: &[IpAddr],
-    ttl: u32,
-) -> ResponseInfo {
-    let qname = request
-        .request_info()
-        .map(|i| i.query.name().to_string())
-        .unwrap_or_else(|_| ".".to_string());
-    let name = match Name::from_utf8(format!("{}.", qname.trim_end_matches('.'))) {
-        Ok(n) => n,
-        Err(_) => return send_error(handle, request, ResponseCode::ServFail).await,
-    };
-
-    let records: Vec<Record> = ips
-        .iter()
-        .filter_map(|ip| {
-            let rdata = match (ip, rtype) {
-                (IpAddr::V4(v4), RecordType::A | RecordType::ANY) => Some(RData::A((*v4).into())),
-                (IpAddr::V6(v6), RecordType::AAAA | RecordType::ANY) => {
-                    Some(RData::AAAA((*v6).into()))
-                }
-                _ => None,
-            };
-            rdata.map(|rdata| Record::from_rdata(name.clone(), ttl, rdata))
-        })
-        .collect();
-
-    // No address of the requested family: the redirect target cannot answer
-    // this query, so send NXDOMAIN.
-    if records.is_empty() {
-        return send_error(handle, request, ResponseCode::NXDomain).await;
-    }
-
-    send_records(handle, request, &records).await
-}
-
 /// Synthesize a single-address redirect answer (policy `redirect` action).
+///
+/// A query whose type the redirect target cannot answer (e.g. AAAA for an
+/// IPv4 sinkhole, or MX) gets an empty NOERROR (NODATA) response: the name is
+/// deliberately made to exist, so NXDOMAIN would wrongly tell caching
+/// resolvers that no record of *any* type exists for it (RFC 8020).
 async fn send_redirect<R: ResponseHandler>(
     handle: &mut R,
     request: &Request,
+    name: &Name,
     rtype: RecordType,
     ip: IpAddr,
 ) -> ResponseInfo {
-    send_address_answer(handle, request, rtype, std::slice::from_ref(&ip), 60).await
+    let rdata = match (ip, rtype) {
+        (IpAddr::V4(v4), RecordType::A | RecordType::ANY) => RData::A(v4.into()),
+        (IpAddr::V6(v6), RecordType::AAAA | RecordType::ANY) => RData::AAAA(v6.into()),
+        _ => return send_empty(handle, request).await,
+    };
+    let record = Record::from_rdata(name.clone(), 60, rdata);
+    send_records(handle, request, std::slice::from_ref(&record)).await
 }
 
 fn unix_now() -> u64 {

@@ -256,16 +256,19 @@ pub fn spawn_blocklist_refresh(
                     // Apply only when the fetched set differs from what the
                     // engine already has, so failed/empty fetches don't wipe
                     // previously loaded domains.
-                    let mut engine = shared.policy.load_full().as_ref().clone();
-                    let current: std::collections::BTreeSet<String> = engine
-                        .remote_blocklist_snapshot()
-                        .map(|b| b.domains())
-                        .unwrap_or_default();
-                    let fetched: std::collections::BTreeSet<String> = list.domains();
-                    if current != fetched {
+                    // Compared in place (hash-set equality): materializing
+                    // sorted copies of both sets every cycle was costly for
+                    // lists with hundreds of thousands of entries.
+                    let unchanged = match shared.policy.load().remote_blocklist_snapshot() {
+                        Some(current) => *current == list,
+                        None => list.is_empty(),
+                    };
+                    if !unchanged {
+                        let domains = list.len();
+                        let mut engine = shared.policy.load_full().as_ref().clone();
                         engine.set_remote_blocklist(list);
                         shared.policy.store(std::sync::Arc::new(engine));
-                        info!(domains = fetched.len(), "remote blocklist refreshed");
+                        info!(domains, "remote blocklist refreshed");
                     }
                 }
                 Ok(None) => {}
