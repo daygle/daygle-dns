@@ -20,15 +20,12 @@ daygle-dns-dot = { path = "../daygle-dns-dot" }
 daygle-dns-api = { path = "../daygle-dns-api" }
 hickory-proto.workspace = true
 hickory-server.workspace = true
-hickory-resolver.workspace = true
 axum.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 
 async-trait.workspace = true
-futures-util.workspace = true
 arc-swap.workspace = true
-parking_lot.workspace = true
 ipnet.workspace = true
 quinn.workspace = true
 rustls.workspace = true

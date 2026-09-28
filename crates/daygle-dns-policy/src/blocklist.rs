@@ -15,7 +15,7 @@ use daygle_dns_core::config::normalize_domains;
 /// Membership is hashed, not ordered: `contains` runs on every query for the
 /// allowlist, blocklist, remote blocklist and AAAA-bypass sets, which can
 /// hold hundreds of thousands of entries.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Blocklist {
     exact: HashSet<String>,
     suffixes: HashSet<String>,
@@ -50,14 +50,6 @@ impl Blocklist {
 
     pub fn len(&self) -> usize {
         self.exact.len() + self.suffixes.len()
-    }
-
-    /// The full set of entries, `*.` wildcards included, as a `BTreeSet`
-    /// (deterministic ordering for display and change comparison).
-    pub fn domains(&self) -> std::collections::BTreeSet<String> {
-        let mut all: BTreeSet<String> = self.exact.iter().cloned().collect();
-        all.extend(self.suffixes.iter().map(|s| format!("*.{s}")));
-        all
     }
 
     /// Whether `domain` (already normalized, no trailing dot) is blocked.

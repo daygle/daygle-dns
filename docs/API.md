@@ -72,13 +72,23 @@ affected account's sessions; disabled accounts cannot log in.
 Roles:
 
 - `admin` - full access (reads *and* mutations).
-- `viewer` - read-only; every mutating method (`POST`/`PUT`/`DELETE`) is
-  rejected with `403 Forbidden`.
+- `viewer` - read-only; every mutating method (`POST`/`PUT`/`PATCH`/`DELETE`)
+  is rejected with `403 Forbidden`. The two `GET`s that make the server reach
+  out - `/api/policy/blocklist/sources/validate` (fetches the given URL) and
+  `/api/update/preflight` (probes GitHub and the staging directory) - are
+  treated like mutations: admin role (or the static `api_token`) only.
 
-Sensitive values are never echoed back: `GET /api/config` reports
-`api.api_token` and every `api.users[].password_hash` as `"[redacted]"`.
-Failed login attempts are logged and do not reveal whether the username
-exists.
+Sensitive values are never echoed back: `GET /api/config` and the
+configuration returned by `PUT /api/config` report `api.api_token` and every
+`api.users[].password_hash` as `"[redacted]"`. Failed login attempts are
+logged and do not reveal whether the username exists. Passwords are limited
+to 8-1024 characters.
+
+`api.cors_origins` lists browser origins (e.g. `https://ops.example`, or `*`)
+allowed to call the API cross-origin; it is read live, so a console edit
+applies immediately. Empty (the default) means same-origin only. Every
+response carries `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`
+and `Referrer-Policy: same-origin`.
 
 ## Endpoints
 

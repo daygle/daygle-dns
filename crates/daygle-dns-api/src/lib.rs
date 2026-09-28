@@ -303,7 +303,69 @@ pub fn router(state: AppState) -> Router {
             .route("/{*path}", get(handlers::gui_asset));
     }
 
-    app
+    app.layer(cors_layer(state.config.clone()))
+        .layer(middleware::map_response(security_headers))
+}
+
+/// CORS for `api.cors_origins`. The allow-list is read from the live config
+/// on every request, so a console edit applies without a restart; an empty
+/// list (the default) emits no CORS headers, i.e. same-origin only. `*`
+/// allows any origin (credentials travel as a bearer header, not cookies).
+fn cors_layer(config: Arc<ArcSwap<DaygleConfig>>) -> tower_http::cors::CorsLayer {
+    use tower_http::cors::{AllowOrigin, CorsLayer};
+    CorsLayer::new()
+        .allow_origin(AllowOrigin::predicate(move |origin, _| {
+            let Ok(origin) = origin.to_str() else {
+                return false;
+            };
+            config
+                .load()
+                .api
+                .cors_origins
+                .iter()
+                .any(|allowed| allowed == "*" || allowed.trim_end_matches('/') == origin)
+        }))
+        .allow_methods([
+            axum::http::Method::GET,
+            axum::http::Method::POST,
+            axum::http::Method::PUT,
+            axum::http::Method::PATCH,
+            axum::http::Method::DELETE,
+        ])
+        .allow_headers([
+            axum::http::header::AUTHORIZATION,
+            axum::http::header::CONTENT_TYPE,
+        ])
+}
+
+/// Baseline hardening headers for the console and API: forbid framing
+/// (clickjacking) and MIME sniffing, and keep URLs out of cross-site
+/// referrers.
+async fn security_headers(mut response: Response) -> Response {
+    use axum::http::{header, HeaderValue};
+    let headers = response.headers_mut();
+    headers
+        .entry(header::X_FRAME_OPTIONS)
+        .or_insert(HeaderValue::from_static("DENY"));
+    headers
+        .entry(header::X_CONTENT_TYPE_OPTIONS)
+        .or_insert(HeaderValue::from_static("nosniff"));
+    headers
+        .entry(header::REFERRER_POLICY)
+        .or_insert(HeaderValue::from_static("same-origin"));
+    response
+}
+
+/// `GET` endpoints that still need the admin role: they make the server
+/// reach out (fetch an arbitrary URL, probe GitHub, write a probe file), so
+/// read-only accounts - and the legacy open-GET token mode - must not be
+/// able to trigger them. Matched on both the full and nested path forms.
+fn is_privileged_read(path: &str) -> bool {
+    let path = path.strip_prefix("/api").unwrap_or(path);
+    matches!(
+        path,
+        "/policy/blocklist/sources/validate" | "/update/preflight"
+    )
 }
 
 /// Authorization for API calls.
@@ -319,6 +381,8 @@ pub fn router(state: AppState) -> Router {
 /// - `api.auth_required = false` restores the fully-open development mode.
 /// - A static `api_token` alone keeps its legacy GETs-open/mutations-tokened
 ///   behavior.
+/// - A few `GET`s are privileged (see [`is_privileged_read`]) and are
+///   treated like mutations: admin role or the static token.
 async fn require_auth(
     axum::extract::State(state): axum::extract::State<AppState>,
     req: Request,
@@ -342,13 +406,13 @@ async fn require_auth(
     let auth_required = config.api.auth_required;
     drop(config);
     // Console accounts live in the database; config-file `[[api.users]]`
-    // entries are only a seed imported at startup.
-    let users_configured = !state
+    // entries are only a seed imported at startup. A failed read counts as
+    // "configured" so a database error can never open the API.
+    let users_configured = state
         .catalog
         .store()
-        .list_console_users()
-        .unwrap_or_default()
-        .is_empty();
+        .count_console_users()
+        .map_or(true, |n| n > 0);
 
     if !users_configured && static_token.is_empty() && !auth_required {
         // Auth explicitly disabled (`api.auth_required = false`): open access.
@@ -364,9 +428,12 @@ async fn require_auth(
         .to_string();
 
     // A static api_token always authorizes (backwards compatible).
-    if !static_token.is_empty() && bearer == static_token {
+    if !static_token.is_empty()
+        && daygle_dns_core::auth::constant_time_eq(bearer.as_bytes(), static_token.as_bytes())
+    {
         return next.run(req).await;
     }
+    let privileged_read = is_privileged_read(path);
 
     // When users are configured, a valid login session is required for every
     // method. In legacy token-only mode, GETs stay open.
@@ -374,10 +441,11 @@ async fn require_auth(
         if let Some(session) = state.sessions.verify(&bearer) {
             // `viewer` accounts are read-only: any state-changing method is
             // rejected with 403 even though the session itself is valid.
-            let mutating = !matches!(
-                *req.method(),
-                axum::http::Method::GET | axum::http::Method::HEAD
-            );
+            let mutating = privileged_read
+                || !matches!(
+                    *req.method(),
+                    axum::http::Method::GET | axum::http::Method::HEAD
+                );
             // The self-service password change is a mutation on the caller's
             // own credential (the handler re-verifies the current password),
             // so read-only accounts may use it too.
@@ -421,7 +489,7 @@ async fn require_auth(
             .into_response();
     }
 
-    if req.method() == axum::http::Method::GET {
+    if req.method() == axum::http::Method::GET && !privileged_read {
         return next.run(req).await;
     }
 

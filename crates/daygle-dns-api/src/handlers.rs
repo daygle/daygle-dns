@@ -47,6 +47,86 @@ fn map_err(e: daygle_dns_core::error::DaygleError) -> Response {
     error_response(status, e.to_string())
 }
 
+/// Longest password accepted anywhere. Far above any real passphrase; it
+/// only bounds the work (and memory) an unauthenticated request can cause.
+const MAX_PASSWORD_LEN: usize = 1024;
+
+/// Concurrent PBKDF2 computations. Each takes a CPU core for a noticeable
+/// time (210k iterations), so bound them: a login flood then queues here
+/// instead of starving the DNS listeners of CPU.
+static PASSWORD_WORK: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(4);
+
+/// Run a PBKDF2 job on the blocking pool (never on an async worker thread,
+/// where it would stall every task scheduled there, DNS included).
+async fn password_work<T: Send + 'static>(job: impl FnOnce() -> T + Send + 'static) -> T {
+    let _permit = PASSWORD_WORK
+        .acquire()
+        .await
+        .expect("password semaphore is never closed");
+    tokio::task::spawn_blocking(job)
+        .await
+        .expect("password hashing task panicked")
+}
+
+/// [`daygle_dns_core::auth::hash_password`] off the async runtime.
+async fn hash_password(password: &str) -> String {
+    let password = password.to_string();
+    password_work(move || daygle_dns_core::auth::hash_password(&password)).await
+}
+
+/// [`daygle_dns_core::auth::verify_password`] off the async runtime.
+async fn verify_password(password: &str, hash: &str) -> bool {
+    let (password, hash) = (password.to_string(), hash.to_string());
+    password_work(move || daygle_dns_core::auth::verify_password(&password, &hash)).await
+}
+
+/// Shorten attacker-controlled text before it is written to the in-memory
+/// log ring (an unauthenticated login may carry megabytes in `username`).
+fn log_safe(value: &str) -> String {
+    const MAX: usize = 64;
+    let mut out: String = value
+        .chars()
+        .take(MAX)
+        .map(|c| if c.is_control() { '?' } else { c })
+        .collect();
+    if value.chars().count() > MAX {
+        out.push('…');
+    }
+    out
+}
+
+/// Serialize a configuration for the browser with secrets removed: password
+/// hashes and the static API token are write-only and never echoed back,
+/// not even to admins.
+fn redacted_config_json(
+    config: &daygle_dns_core::config::DaygleConfig,
+) -> std::result::Result<serde_json::Value, serde_json::Error> {
+    let mut value = serde_json::to_value(config)?;
+    if let Some(api) = value.get_mut("api").and_then(|a| a.as_object_mut()) {
+        let token = api.get("api_token").and_then(|t| t.as_str()).unwrap_or("");
+        let redacted = if token.is_empty() { "" } else { "[redacted]" };
+        api.insert("api_token".to_string(), serde_json::json!(redacted));
+        if let Some(users) = api.get_mut("users").and_then(|u| u.as_array_mut()) {
+            for user in users.iter_mut() {
+                if let Some(obj) = user.as_object_mut() {
+                    obj.insert("password_hash".to_string(), serde_json::json!("[redacted]"));
+                }
+            }
+        }
+    }
+    Ok(value)
+}
+
+fn config_response(config: &daygle_dns_core::config::DaygleConfig) -> Response {
+    match redacted_config_json(config) {
+        Ok(value) => Json(value).into_response(),
+        Err(e) => error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("cannot serialize config: {e}"),
+        ),
+    }
+}
+
 /// Whether `url` is an HTTP(S) URL. Blocklist sources are fetched over
 /// HTTP(S), so anything else (e.g. `file://`) would only fail later with a
 /// confusing transport error.
@@ -110,7 +190,11 @@ pub async fn status(State(state): State<AppState>) -> Response {
         "dnssec": config.recursive.dnssec_validate,
         "dot_enabled": config.dot.enabled,
         "doq_enabled": config.doq.enabled,
-        "users_configured": !config.api.users.is_empty(),
+        "users_configured": state
+            .catalog
+            .store()
+            .count_console_users()
+            .is_ok_and(|n| n > 0),
         "setup_pending": setup_pending(&state),
         "api_enabled": config.api.enabled,
         "blocklist_sources": config.policy.blocklist_sources.len(),
@@ -502,8 +586,18 @@ fn query_log_filter(query: &QueryLogsQuery) -> daygle_dns_authoritative::QueryLo
     }
 }
 
+/// Escape one CSV field (RFC 4180). Fields a spreadsheet would evaluate as a
+/// formula (`=`, `+`, `-`, `@`, tab, CR) get a leading `'`: query names are
+/// client-controlled, and an export is typically opened in a spreadsheet.
 fn csv_escape(value: &str) -> String {
-    if value.contains(',') || value.contains('"') || value.contains('\n') {
+    let guarded;
+    let value = if value.starts_with(['=', '+', '-', '@', '\t', '\r']) {
+        guarded = format!("'{value}");
+        guarded.as_str()
+    } else {
+        value
+    };
+    if value.contains([',', '"', '\n', '\r']) {
         format!("\"{}\"", value.replace('"', "\"\""))
     } else {
         value.to_string()
@@ -583,33 +677,7 @@ pub async fn clear_query_logs(State(state): State<AppState>) -> Response {
 }
 
 pub async fn config(State(state): State<AppState>) -> Response {
-    // Redact secrets before serving: password hashes and the static API
-    // token must never round-trip to the browser, not even for admins (the
-    // values are only ever written, never echoed back).
-    let mut value = match serde_json::to_value(state.config.load_full().as_ref().clone()) {
-        Ok(v) => v,
-        Err(e) => {
-            return error_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("cannot serialize config: {e}"),
-            );
-        }
-    };
-    if let Some(api) = value.get_mut("api").and_then(|a| a.as_object_mut()) {
-        let token = api.get("api_token").and_then(|t| t.as_str()).unwrap_or("");
-        api.insert(
-            "api_token".to_string(),
-            serde_json::json!(if token.is_empty() { "" } else { "[redacted]" }),
-        );
-        if let Some(users) = api.get_mut("users").and_then(|u| u.as_array_mut()) {
-            for user in users.iter_mut() {
-                if let Some(obj) = user.as_object_mut() {
-                    obj.insert("password_hash".to_string(), serde_json::json!("[redacted]"));
-                }
-            }
-        }
-    }
-    axum::Json(value).into_response()
+    config_response(&state.config.load_full())
 }
 
 /// Re-read the configuration file and apply policy/upstream/listener changes
@@ -648,23 +716,27 @@ pub async fn reload_config(State(state): State<AppState>) -> Response {
 /// run the same steps in place. Elsewhere this endpoint is guidance-only and
 /// tells the operator to run the `update_command` on the host.
 pub async fn update_info(State(state): State<AppState>) -> Response {
-    let version = daygle_dns_core::VERSION;
-    let install_script =
-        "https://raw.githubusercontent.com/daygle/daygle-dns/main/install.sh".to_string();
+    let install_script = "https://raw.githubusercontent.com/daygle/daygle-dns/main/install.sh";
     let has_config_file = state.config_path.is_some();
-    let has_systemd = std::path::Path::new("/etc/systemd/system/daygle-dns.service").is_file();
-    let config_dir = state
-        .config_path
-        .as_deref()
-        .and_then(|p| p.parent().map(std::path::Path::to_path_buf));
-    let can_update = crate::update::can_update(config_dir.as_deref());
-    let gates = crate::update::gates(config_dir.as_deref());
-    // Latest-release comparison (network, cached): only resolved on hosts
-    // that can self-update, so dev/non-Linux consoles get null fields.
-    let release = crate::update::release_comparison();
+    let config_dir = config_dir(&state);
+    // Spawns processes (`sh`, `curl` with multi-second timeouts) and reads
+    // files: keep it off the async workers.
+    let (has_systemd, can_update, gates, release, update_state) = run_blocking(move || {
+        let dir = config_dir.as_deref();
+        (
+            std::path::Path::new("/etc/systemd/system/daygle-dns.service").is_file(),
+            crate::update::can_update(dir),
+            crate::update::gates(dir),
+            // Latest-release comparison (network, cached): only resolved on
+            // hosts that can self-update, so dev/non-Linux consoles get nulls.
+            crate::update::release_comparison(),
+            crate::update::read_state(),
+        )
+    })
+    .await;
 
     Json(serde_json::json!({
-        "version": version,
+        "version": VERSION,
         "install_script": install_script,
         "has_config_file": has_config_file,
         "has_systemd": has_systemd,
@@ -673,12 +745,36 @@ pub async fn update_info(State(state): State<AppState>) -> Response {
         "latest_release": release.as_ref().map(|r| r.latest.clone()),
         "updater_outdated": release.as_ref().map(|r| r.outdated),
         "updater_bootstrap_required": release.as_ref().map(|r| r.bootstrap_required),
-        "update_command": format!("curl -fsSL {} | sh", install_script),
+        "update_command": format!("curl -fsSL {install_script} | sh"),
         "preserves": ["configuration", "zones", "certificates", "database"],
-        "note": "Run the update command on the host to update all components in place. The installer rebuilds the server binary, preserves configuration, zones, certificates and the database, and provisions the systemd update service.".to_string(),
-        "state": crate::update::read_state(),
+        "note": "Run the update command on the host to update all components in place. The installer rebuilds the server binary, preserves configuration, zones, certificates and the database, and provisions the systemd update service.",
+        "state": update_state,
     }))
-        .into_response()
+    .into_response()
+}
+
+/// Directory of the config file, used by the updater's install-evidence
+/// checks.
+fn config_dir(state: &AppState) -> Option<std::path::PathBuf> {
+    state
+        .config_path
+        .as_deref()
+        .and_then(|p| p.parent().map(std::path::Path::to_path_buf))
+}
+
+/// Run blocking host work (process spawns, file I/O) on the blocking pool.
+async fn run_blocking<T: Send + 'static>(job: impl FnOnce() -> T + Send + 'static) -> T {
+    tokio::task::spawn_blocking(job)
+        .await
+        .expect("blocking update task panicked")
+}
+
+fn start_error_response(e: crate::update::StartError) -> Response {
+    let status = match e {
+        crate::update::StartError::Io(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        _ => StatusCode::CONFLICT,
+    };
+    error_response(status, e.to_string())
 }
 
 /// `GET /api/update/status` - progress of an in-place update (polls safe).
@@ -688,16 +784,23 @@ pub async fn update_info(State(state): State<AppState>) -> Response {
 /// state file, so a poll after the server restarts still reports the outcome
 /// of the run that just restarted it.
 pub async fn update_status(State(state): State<AppState>) -> Response {
-    let config_dir = state
-        .config_path
-        .as_deref()
-        .and_then(|p| p.parent().map(std::path::Path::to_path_buf));
+    let config_dir = config_dir(&state);
+    let (can_update, gates, update_state, log) = run_blocking(move || {
+        let dir = config_dir.as_deref();
+        (
+            crate::update::can_update(dir),
+            crate::update::gates(dir),
+            crate::update::read_state(),
+            crate::update::log_tail(8192),
+        )
+    })
+    .await;
     Json(serde_json::json!({
-        "version": daygle_dns_core::VERSION,
-        "can_update": crate::update::can_update(config_dir.as_deref()),
-        "gates": crate::update::gates(config_dir.as_deref()),
-        "state": crate::update::read_state(),
-        "log": crate::update::log_tail(8192),
+        "version": VERSION,
+        "can_update": can_update,
+        "gates": gates,
+        "state": update_state,
+        "log": log,
     }))
     .into_response()
 }
@@ -710,32 +813,20 @@ pub async fn update_status(State(state): State<AppState>) -> Response {
 /// the update began; follow `/api/update/status` for progress and to detect
 /// the restart.
 pub async fn update_start(State(state): State<AppState>) -> Response {
-    let config_dir = state
-        .config_path
-        .as_deref()
-        .and_then(|p| p.parent().map(std::path::Path::to_path_buf));
-    let exe = match std::env::current_exe() {
-        Ok(e) => e,
-        Err(_) => {
-            return error_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "cannot locate the running binary",
-            )
-        }
+    let config_dir = config_dir(&state);
+    let Ok(exe) = std::env::current_exe() else {
+        return error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "cannot locate the running binary",
+        );
     };
-    match crate::update::start(&exe, config_dir.as_deref()) {
+    match run_blocking(move || crate::update::start(&exe, config_dir.as_deref())).await {
         Ok(pid) => (
             StatusCode::ACCEPTED,
             Json(serde_json::json!({ "started": true, "pid": pid })),
         )
             .into_response(),
-        Err(e) => {
-            let status = match e {
-                crate::update::StartError::Io(_) => StatusCode::INTERNAL_SERVER_ERROR,
-                _ => StatusCode::CONFLICT,
-            };
-            error_response(status, e.to_string())
-        }
+        Err(e) => start_error_response(e),
     }
 }
 
@@ -743,34 +834,22 @@ pub async fn update_start(State(state): State<AppState>) -> Response {
 /// only) so the console stops showing the last `done`/`error` result.
 /// Refused while a run is active.
 pub async fn update_dismiss() -> Response {
-    match crate::update::clear_state() {
-        Ok(()) => (
-            StatusCode::OK,
-            Json(serde_json::json!({ "dismissed": true })),
-        )
-            .into_response(),
-        Err(e) => {
-            let status = match e {
-                crate::update::StartError::Io(_) => StatusCode::INTERNAL_SERVER_ERROR,
-                _ => StatusCode::CONFLICT,
-            };
-            error_response(status, e.to_string())
-        }
+    match run_blocking(crate::update::clear_state).await {
+        Ok(()) => Json(serde_json::json!({ "dismissed": true })).into_response(),
+        Err(e) => start_error_response(e),
     }
 }
 
-/// `GET /api/update/preflight` - run health checks before starting an update.
+/// `GET /api/update/preflight` - run health checks before starting an update
+/// (admin only: it probes the network and the staging directory).
 ///
 /// Returns structured results indicating whether an update can proceed, with
 /// specific fix instructions for any detected issues. This allows the console
 /// to show actionable guidance before the user attempts an update.
 pub async fn update_preflight(State(state): State<AppState>) -> Response {
-    let config_dir = state
-        .config_path
-        .as_deref()
-        .and_then(|p| p.parent().map(std::path::Path::to_path_buf));
-    let result = crate::update::preflight(config_dir.as_deref());
-    Json(serde_json::json!(result)).into_response()
+    let config_dir = config_dir(&state);
+    let result = run_blocking(move || crate::update::preflight(config_dir.as_deref())).await;
+    Json(result).into_response()
 }
 
 // ---- Zones --------------------------------------------------------------
@@ -1654,6 +1733,9 @@ pub async fn auth_login(
     State(state): State<AppState>,
     axum::Json(input): axum::Json<LoginInput>,
 ) -> Response {
+    if input.username.len() > 256 || input.password.len() > MAX_PASSWORD_LEN {
+        return error_response(StatusCode::UNAUTHORIZED, "invalid username or password");
+    }
     let user = match state
         .catalog
         .store()
@@ -1668,11 +1750,9 @@ pub async fn auth_login(
     // cannot enumerate accounts.
     let dummy_hash = "pbkdf2-sha256$210000$AAAAAAAAAAAAAAAAAAAAAA==$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
     let ok = match user.as_ref() {
-        Some(u) if u.enabled => {
-            daygle_dns_core::auth::verify_password(&input.password, &u.password_hash)
-        }
+        Some(u) if u.enabled => verify_password(&input.password, &u.password_hash).await,
         _ => {
-            let _ = daygle_dns_core::auth::verify_password(&input.password, dummy_hash);
+            let _ = verify_password(&input.password, dummy_hash).await;
             false
         }
     };
@@ -1681,7 +1761,10 @@ pub async fn auth_login(
         state.logs.push(
             daygle_dns_core::LogLevel::Warn,
             "api",
-            format!("failed login attempt for user '{}'", input.username),
+            format!(
+                "failed login attempt for user '{}'",
+                log_safe(&input.username)
+            ),
         );
         return error_response(StatusCode::UNAUTHORIZED, "invalid username or password");
     }
@@ -1766,7 +1849,9 @@ pub async fn auth_change_password(
     if !user.enabled {
         return error_response(StatusCode::FORBIDDEN, "account is disabled");
     }
-    if !daygle_dns_core::auth::verify_password(&input.current_password, &user.password_hash) {
+    if input.current_password.len() > MAX_PASSWORD_LEN
+        || !verify_password(&input.current_password, &user.password_hash).await
+    {
         state.logs.push(
             daygle_dns_core::LogLevel::Warn,
             "api",
@@ -1774,10 +1859,10 @@ pub async fn auth_change_password(
         );
         return error_response(StatusCode::UNAUTHORIZED, "current password is incorrect");
     }
-    if input.new_password.chars().count() < 8 {
+    if input.new_password.chars().count() < 8 || input.new_password.len() > MAX_PASSWORD_LEN {
         return error_response(
             StatusCode::BAD_REQUEST,
-            "new password must be at least 8 characters",
+            format!("new password must be 8-{MAX_PASSWORD_LEN} characters"),
         );
     }
     if input.new_password == input.current_password {
@@ -1787,10 +1872,8 @@ pub async fn auth_change_password(
         );
     }
 
-    if let Err(e) = store.set_console_user_password(
-        &session.username,
-        &daygle_dns_core::auth::hash_password(&input.new_password),
-    ) {
+    let new_hash = hash_password(&input.new_password).await;
+    if let Err(e) = store.set_console_user_password(&session.username, &new_hash) {
         return map_err(e);
     }
     // Other devices are signed out; this session survives.
@@ -1818,12 +1901,8 @@ fn bearer_token(headers: &axum::http::HeaderMap) -> Option<String> {
 /// is configured (token-only mode manages auth itself, no setup step).
 fn setup_pending(state: &AppState) -> bool {
     let config = state.config.load();
-    let users = state
-        .catalog
-        .store()
-        .list_console_users()
-        .unwrap_or_default();
-    config.api.auth_required && users.is_empty() && config.api.api_token.trim().is_empty()
+    let no_users = matches!(state.catalog.store().count_console_users(), Ok(0));
+    config.api.auth_required && no_users && config.api.api_token.trim().is_empty()
 }
 
 /// `GET /api/auth/setup` - is the one-time admin setup still pending?
@@ -1856,6 +1935,11 @@ pub async fn auth_setup(
     State(state): State<AppState>,
     axum::Json(input): axum::Json<SetupInput>,
 ) -> Response {
+    // Serialize setup attempts: the "no account exists yet" check and the
+    // account creation below must be atomic, or two racing requests could
+    // each create an admin.
+    static SETUP_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    let _setup = SETUP_LOCK.lock().await;
     let config = state.config.load_full();
     let existing = match state.catalog.store().list_console_users() {
         Ok(users) => users,
@@ -1882,20 +1966,11 @@ pub async fn auth_setup(
     drop(config);
 
     let username = input.username.trim().to_string();
-    if username.is_empty() || username.len() > 64 || username.contains(char::is_whitespace) {
-        return error_response(
-            StatusCode::BAD_REQUEST,
-            "username must be 1-64 characters with no whitespace",
-        );
-    }
-    if input.password.chars().count() < 8 {
-        return error_response(
-            StatusCode::BAD_REQUEST,
-            "password must be at least 8 characters",
-        );
+    if let Some(resp) = validate_username_password(&username, &input.password) {
+        return resp;
     }
 
-    let password_hash = daygle_dns_core::auth::hash_password(&input.password);
+    let password_hash = hash_password(&input.password).await;
     if let Err(e) = state.catalog.store().create_console_user(
         &username,
         &daygle_dns_authoritative::ConsoleUserInput {
@@ -1961,10 +2036,10 @@ fn validate_username_password(username: &str, password: &str) -> Option<Response
             "username must be 1-64 characters with no whitespace",
         ));
     }
-    if password.chars().count() < 8 {
+    if password.chars().count() < 8 || password.len() > MAX_PASSWORD_LEN {
         return Some(error_response(
             StatusCode::BAD_REQUEST,
-            "password must be at least 8 characters",
+            format!("password must be 8-{MAX_PASSWORD_LEN} characters"),
         ));
     }
     None
@@ -2017,10 +2092,11 @@ pub async fn create_user(
     if existing.is_some() {
         return error_response(StatusCode::CONFLICT, "username already exists");
     }
+    let password_hash = hash_password(&input.password).await;
     let user = match store.create_console_user(
         &username,
         &daygle_dns_authoritative::ConsoleUserInput {
-            password_hash: daygle_dns_core::auth::hash_password(&input.password),
+            password_hash,
             role,
             enabled: true,
             first_name: input.first_name.unwrap_or_default().trim().to_string(),
@@ -2091,9 +2167,8 @@ pub async fn update_user(
     }
 
     if let Some(password) = &input.password {
-        if let Err(e) = store
-            .set_console_user_password(&username, &daygle_dns_core::auth::hash_password(password))
-        {
+        let password_hash = hash_password(password).await;
+        if let Err(e) = store.set_console_user_password(&username, &password_hash) {
             return map_err(e);
         }
     }
@@ -2338,15 +2413,19 @@ pub async fn update_settings(
         }
         if let Some(v) = d.self_signed {
             config.dot.self_signed = v;
+            listeners_affected = true;
         }
         if let Some(v) = &d.server_name {
             config.dot.server_name = v.clone();
+            listeners_affected = true;
         }
         if let Some(v) = &d.cert_path {
             config.dot.cert_path = v.clone();
+            listeners_affected = true;
         }
         if let Some(v) = &d.key_path {
             config.dot.key_path = v.clone();
+            listeners_affected = true;
         }
         if let Some(v) = &d.certificate {
             config.dot.certificate = v.clone();
@@ -2364,18 +2443,23 @@ pub async fn update_settings(
         }
         if let Some(v) = d.self_signed {
             config.doh.self_signed = v;
+            listeners_affected = true;
         }
         if let Some(v) = &d.server_name {
             config.doh.server_name = v.clone();
+            listeners_affected = true;
         }
         if let Some(v) = &d.cert_path {
             config.doh.cert_path = v.clone();
+            listeners_affected = true;
         }
         if let Some(v) = &d.key_path {
             config.doh.key_path = v.clone();
+            listeners_affected = true;
         }
         if let Some(v) = &d.endpoint {
             config.doh.endpoint = v.clone();
+            listeners_affected = true;
         }
         if let Some(v) = &d.certificate {
             config.doh.certificate = v.clone();
@@ -2393,15 +2477,19 @@ pub async fn update_settings(
         }
         if let Some(v) = d.self_signed {
             config.doq.self_signed = v;
+            listeners_affected = true;
         }
         if let Some(v) = &d.server_name {
             config.doq.server_name = v.clone();
+            listeners_affected = true;
         }
         if let Some(v) = &d.cert_path {
             config.doq.cert_path = v.clone();
+            listeners_affected = true;
         }
         if let Some(v) = &d.key_path {
             config.doq.key_path = v.clone();
+            listeners_affected = true;
         }
         if let Some(v) = &d.certificate {
             config.doq.certificate = v.clone();
@@ -2509,7 +2597,14 @@ pub async fn update_settings(
         return map_err(e);
     }
 
-    // Publish live, then ask for a listener rebuild when needed.
+    // Publish live, then ask for a listener rebuild when needed (only when a
+    // listener-relevant section really changed: a no-op save must not bounce
+    // every socket).
+    let listeners_affected = listeners_affected
+        && (old_config.server != config.server
+            || old_config.dot != config.dot
+            || old_config.doh != config.doh
+            || old_config.doq != config.doq);
     state.config.store(Arc::new(config.clone()));
     if listeners_affected {
         if let Some(rebuild) = &state.request_dns_rebuild {
@@ -2549,7 +2644,7 @@ pub async fn update_settings(
         "api",
         "settings updated via the console".to_string(),
     );
-    Json((*state.config.load_full()).clone()).into_response()
+    config_response(&state.config.load_full())
 }
 
 // ---- Managed TLS certificates --------------------------------------------
@@ -2617,7 +2712,6 @@ fn certificate_json(
 
 /// `GET /api/certificates` - list console-managed TLS certificates (metadata
 /// only; PEM material is never returned to the GUI).
-#[allow(clippy::unused_async)]
 pub async fn list_certificates(State(state): State<AppState>) -> Response {
     let refs = certificate_references(&state.config.load_full());
     let list = match state.catalog.store().list_tls_certificates() {
@@ -2641,7 +2735,6 @@ pub async fn list_certificates(State(state): State<AppState>) -> Response {
 /// `POST /api/certificates` - create (self-signed) or upload a TLS
 /// certificate. Uploading with the same `name` replaces the existing entry;
 /// listeners referencing the name are rebuilt so the new material applies.
-#[allow(clippy::unused_async)]
 pub async fn create_certificate(
     State(state): State<AppState>,
     axum::Json(input): axum::Json<CertificateInput>,
@@ -2722,7 +2815,6 @@ pub async fn create_certificate(
 
 /// `DELETE /api/certificates/{name}` - remove a managed certificate. A
 /// certificate still selected by a listener cannot be deleted.
-#[allow(clippy::unused_async)]
 pub async fn delete_certificate(
     State(state): State<AppState>,
     Path(name): Path<String>,

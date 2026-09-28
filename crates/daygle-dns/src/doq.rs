@@ -94,6 +94,11 @@ pub async fn serve_doq(endpoint: Endpoint, handler: DnsDispatcher, shutdown: Can
                 while connections.join_next().await.is_some() {}
                 break;
             }
+            // Reap finished connection tasks: a `JoinSet` keeps every
+            // completed task's result until it is joined, so without this the
+            // set would grow by one entry per connection for the server's
+            // whole lifetime.
+            Some(_) = connections.join_next(), if !connections.is_empty() => {}
             incoming = endpoint.accept() => {
                 let Some(connecting) = incoming else { break };
                 let handler = handler.clone();

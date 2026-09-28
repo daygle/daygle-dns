@@ -16,7 +16,7 @@
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
 use hmac::{Hmac, KeyInit, Mac};
-use sha2::{Digest, Sha256};
+use sha2::Sha256;
 
 /// PBKDF2 iteration count used when generating new password hashes.
 pub const DEFAULT_PBKDF2_ITERATIONS: u32 = 210_000;
@@ -37,21 +37,15 @@ pub fn hash_password(password: &str) -> String {
 
 /// Same as [`hash_password`] with an explicit iteration count.
 pub fn hash_password_with(password: &str, iterations: u32) -> String {
+    // Salt straight from the OS CSPRNG: 16 bytes = 128 bits, well above the
+    // OWASP minimum.
     let mut salt = [0u8; SALT_LEN];
-    // Cryptographic salt: pull entropy from the OS CSPRNG. We use a tiny
-    // SHA-256 of the OS-provided random bytes (so that any caller missing
-    // `getrandom` at link-time fails closed) and seed the password hash with
-    // it. The salt is the only secret input to PBKDF2; its entropy must be
-    // cryptographic. 16 bytes = 128 bits, well above the OWASP minimum.
-    let mut seed = [0u8; 32];
-    if getrandom_bytes(&mut seed).is_err() {
+    if getrandom_bytes(&mut salt).is_err() {
         // OS RNG unavailable: refuse to produce a hash rather than emit a
         // weak salt. The caller (CLI / setup handler) should treat this as a
         // fatal misconfiguration.
         panic!("no OS CSPRNG available to seed password salt");
     }
-    let digest = Sha256::digest(seed);
-    salt.copy_from_slice(&digest[..SALT_LEN]);
 
     let key = pbkdf2_sha256(password.as_bytes(), &salt, iterations, KEY_LEN);
     format!(
@@ -181,19 +175,23 @@ fn parse_hash(stored: &str) -> Option<(u32, Vec<u8>, Vec<u8>)> {
 /// Minimal PBKDF2-HMAC-SHA256 (RFC 2898 §5.2) for `dk_len <= 32`.
 fn pbkdf2_sha256(password: &[u8], salt: &[u8], iterations: u32, dk_len: usize) -> Vec<u8> {
     debug_assert!(dk_len <= 32, "single-block PBKDF2 only");
+    // Key the PRF once and clone the keyed state for every iteration. Keying
+    // per iteration re-hashed the whole password each time, which made a
+    // single login attempt with a multi-megabyte password cost hundreds of
+    // gigabytes of hashing.
+    let prf = HmacSha256::new_from_slice(password).expect("hmac accepts any key length");
+
     // Block index 1 (first and only block for dk_len <= hash len).
-    let mut block = salt.to_vec();
-    block.extend_from_slice(&1u32.to_be_bytes());
+    let mut mac = prf.clone();
+    mac.update(salt);
+    mac.update(&1u32.to_be_bytes());
+    let mut u = mac.finalize().into_bytes();
 
-    let mut mac = HmacSha256::new_from_slice(password).expect("hmac accepts any key length");
-    mac.update(&block);
-    let mut u = mac.finalize().into_bytes().to_vec();
-
-    let mut out = u.clone();
+    let mut out = u.to_vec();
     for _ in 1..iterations {
-        let mut mac = HmacSha256::new_from_slice(password).expect("hmac accepts any key length");
+        let mut mac = prf.clone();
         mac.update(&u);
-        u = mac.finalize().into_bytes().to_vec();
+        u = mac.finalize().into_bytes();
         for (o, x) in out.iter_mut().zip(u.iter()) {
             *o ^= x;
         }
@@ -202,8 +200,8 @@ fn pbkdf2_sha256(password: &[u8], salt: &[u8], iterations: u32, dk_len: usize) -
     out
 }
 
-/// Constant-time byte comparison.
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+/// Constant-time byte comparison (the length itself is not secret).
+pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
     }
@@ -244,6 +242,28 @@ mod tests {
         assert!(hash.starts_with("pbkdf2-sha256$100$"));
         assert!(verify_password("fast", &hash));
         assert!(!verify_password("slow", &hash));
+    }
+
+    #[test]
+    fn pbkdf2_matches_rfc7914_test_vector() {
+        // RFC 7914 §11: P="passwd", S="salt", c=1, dkLen=32 (first block).
+        let dk = pbkdf2_sha256(b"passwd", b"salt", 1, 32);
+        let hex: String = dk.iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(
+            hex,
+            "55ac046e56e3089fec1691c22544b605f94185216dde0465e68b9d57c20dacbc"
+        );
+    }
+
+    #[test]
+    fn long_passwords_are_cheap_to_verify() {
+        // Keying the PRF once means a huge password costs one extra hash,
+        // not one per iteration.
+        let long = "x".repeat(4 * 1024 * 1024);
+        let hash = hash_password_with("short", 1000);
+        let started = std::time::Instant::now();
+        assert!(!verify_password(&long, &hash));
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
     }
 
     #[test]

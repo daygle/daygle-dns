@@ -494,12 +494,9 @@ dependencies = [
  "daygle-dns-dot",
  "daygle-dns-policy",
  "daygle-dns-recursive",
- "futures-util",
  "hickory-proto",
- "hickory-resolver",
  "hickory-server",
  "ipnet",
- "parking_lot",
  "quinn",
  "reqwest",
  "rustls",
@@ -528,17 +525,14 @@ dependencies = [
  "daygle-dns-gui",
  "daygle-dns-policy",
  "daygle-dns-recursive",
- "mime_guess",
  "parking_lot",
  "rand",
  "serde",
  "serde_json",
  "tokio",
- "toml",
  "tower",
  "tower-http 0.7.1",
  "tracing",
- "uuid",
 ]
 
 [[package]]
@@ -617,7 +611,6 @@ dependencies = [
  "ipnet",
  "regex",
  "reqwest",
- "serde",
  "tokio",
  "tracing",
 ]

@@ -37,6 +37,12 @@ pub const MAX_TRACKED_ENTRIES: usize = 10_000;
 /// recovered upstream is picked up fast, but caches still help.
 pub const STALE_TTL_SECS: u32 = 30;
 
+/// Entries evicted at once when a bounded map is full. Evicting a batch keeps
+/// the amortized cost per insert constant: evicting a single victim meant a
+/// full O(n) scan for *every* new name once the map had filled up, which a
+/// stream of random query names makes the steady state.
+const EVICT_BATCH: usize = MAX_TRACKED_ENTRIES / 10;
+
 #[derive(Clone, Debug, Default)]
 pub struct PrefetchConfig {
     pub enabled: bool,
@@ -127,7 +133,7 @@ impl CacheAssistant {
 
         let mut snapshots = self.snapshots.lock();
         if snapshots.len() >= MAX_TRACKED_ENTRIES && !snapshots.contains_key(key) {
-            evict_oldest(&mut snapshots);
+            evict_batch(&mut snapshots, |snap| snap.fetched_at);
         }
         // Clear any in-effect cached failure; a real answer beats it.
         if let Some(prev) = snapshots.get_mut(key) {
@@ -242,7 +248,7 @@ impl CacheAssistant {
     pub fn record_failure(&self, key: &CacheKey, query: &Query, code: u16, until: Instant) {
         let mut snapshots = self.snapshots.lock();
         if snapshots.len() >= MAX_TRACKED_ENTRIES && !snapshots.contains_key(key) {
-            evict_oldest(&mut snapshots);
+            evict_batch(&mut snapshots, |snap| snap.fetched_at);
         }
         let snapshot = snapshots.entry(key.clone()).or_insert_with(|| Snapshot {
             query: query.clone(),
@@ -266,7 +272,8 @@ impl CacheAssistant {
             popular
                 .retain(|_, p| now.saturating_duration_since(p.window_start) < self.config.window);
             if popular.len() >= MAX_TRACKED_ENTRIES {
-                evict_least_popular(&mut popular);
+                // Least popular first; among equals, the oldest window.
+                evict_batch(&mut popular, |p| (p.count, p.window_start));
             }
         }
         let entry = popular.entry(key.clone()).or_insert(Popularity {
@@ -324,38 +331,22 @@ fn stale_answers(answers: &[Record]) -> Vec<Record> {
         .collect()
 }
 
-fn evict_oldest<K: Clone + std::hash::Hash + Eq, V: Clone + HasInstant>(map: &mut HashMap<K, V>) {
-    let oldest = map
-        .iter()
-        .min_by_key(|(_, v)| v.instant())
-        .map(|(k, _)| k.clone());
-    if let Some(k) = oldest {
-        map.remove(&k);
+/// Remove the [`EVICT_BATCH`] entries with the smallest `rank` (at least one,
+/// and never more than the map holds).
+fn evict_batch<K, V, R>(map: &mut HashMap<K, V>, rank: impl Fn(&V) -> R)
+where
+    K: Clone + std::hash::Hash + Eq,
+    R: Ord,
+{
+    let count = EVICT_BATCH.clamp(1, map.len().max(1));
+    let mut ranked: Vec<(R, &K)> = map.iter().map(|(k, v)| (rank(v), k)).collect();
+    if ranked.len() > count {
+        ranked.select_nth_unstable_by(count - 1, |a, b| a.0.cmp(&b.0));
+        ranked.truncate(count);
     }
-}
-
-fn evict_least_popular(map: &mut HashMap<CacheKey, Popularity>) {
-    let victim = map
-        .iter()
-        .min_by_key(|(_, p)| {
-            (
-                p.count,
-                u64::try_from(p.window_start.elapsed().as_millis()).unwrap_or(0),
-            )
-        })
-        .map(|(k, _)| k.clone());
-    if let Some(k) = victim {
-        map.remove(&k);
-    }
-}
-
-trait HasInstant {
-    fn instant(&self) -> Instant;
-}
-
-impl HasInstant for Snapshot {
-    fn instant(&self) -> Instant {
-        self.fetched_at
+    let victims: Vec<K> = ranked.into_iter().map(|(_, k)| k.clone()).collect();
+    for key in victims {
+        map.remove(&key);
     }
 }
 

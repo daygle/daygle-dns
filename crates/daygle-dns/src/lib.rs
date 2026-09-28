@@ -377,21 +377,7 @@ pub async fn bind_with(
     });
 
     // DNS listeners (bound immediately so the server serves right away).
-    let dispatcher = DnsDispatcher::with_stats(
-        catalog.clone(),
-        shared.resolver.clone(),
-        shared.policy.clone(),
-        rate_limiter.clone(),
-        metrics.clone(),
-        logs.clone(),
-        shared.notify_hooks.clone(),
-        shared.tsig_keys.clone(),
-        stats.clone(),
-    )
-    .with_client_timeout(Duration::from_millis(config.server.client_timeout_ms))
-    .with_advanced_blocking(shared.advanced_blocking.clone())
-    .with_query_logger(shared.query_logger.clone())
-    .with_query_db_logger(shared.query_db_logger.clone());
+    let dispatcher = build_dispatcher(&shared, &config);
     let mut server = Server::new(dispatcher.clone());
     let mut initial_addrs = ListenerAddrs::default();
     let initial_doq = bind_listeners(
@@ -547,36 +533,7 @@ async fn start_listeners(
     addrs: &Arc<ArcSwap<ListenerAddrs>>,
 ) -> Result<ListenerGen> {
     let config = shared.config.load_full();
-    // Reuse the NOTIFY hooks and TSIG keys built at startup: rebuilding them
-    // here (or worse, substituting defaults) would silently drop secondary
-    // replication and transfer/update authentication after any live reload.
-    let dispatcher = DnsDispatcher::with_stats(
-        shared.catalog.clone(),
-        shared.resolver.clone(),
-        shared.policy.clone(),
-        shared.rate_limiter.clone(),
-        shared.metrics.clone(),
-        shared.logs.clone(),
-        shared.notify_hooks.clone(),
-        shared.tsig_keys.clone(),
-        shared.stats.clone(),
-    )
-    .with_client_timeout(Duration::from_millis(config.server.client_timeout_ms))
-    .with_advanced_blocking(shared.advanced_blocking.clone())
-    .with_query_logger(shared.query_logger.clone())
-    .with_query_db_logger(shared.query_db_logger.clone());
-    let mut server = Server::new(dispatcher.clone());
-    let mut snapshot = ListenerAddrs::default();
-    let doq_task = bind_listeners(
-        &config,
-        shared.catalog.store(),
-        &dispatcher,
-        &mut server,
-        &mut snapshot,
-    )
-    .await?;
-    addrs.store(Arc::new(snapshot));
-    Ok(spawn_listeners(server, doq_task))
+    start_listeners_with(shared, addrs, &config).await
 }
 
 /// Supervisor loop: keep the listeners running, rebinding them on command.
@@ -645,14 +602,13 @@ async fn run_dns_supervisor(
     }
 }
 
-/// Bind listeners for a specific configuration snapshot (used to restore the
-/// previous configuration after a failed reload).
-async fn start_listeners_with(
-    shared: &Shared,
-    addrs: &Arc<ArcSwap<ListenerAddrs>>,
-    config: &DaygleConfig,
-) -> Result<ListenerGen> {
-    let dispatcher = DnsDispatcher::with_stats(
+/// Build the request handler shared by every listener of one generation.
+///
+/// The NOTIFY hooks and TSIG keys built at startup are reused: rebuilding them
+/// here (or worse, substituting defaults) would silently drop secondary
+/// replication and transfer/update authentication after any live reload.
+fn build_dispatcher(shared: &Shared, config: &DaygleConfig) -> DnsDispatcher {
+    DnsDispatcher::with_stats(
         shared.catalog.clone(),
         shared.resolver.clone(),
         shared.policy.clone(),
@@ -666,7 +622,17 @@ async fn start_listeners_with(
     .with_client_timeout(Duration::from_millis(config.server.client_timeout_ms))
     .with_advanced_blocking(shared.advanced_blocking.clone())
     .with_query_logger(shared.query_logger.clone())
-    .with_query_db_logger(shared.query_db_logger.clone());
+    .with_query_db_logger(shared.query_db_logger.clone())
+}
+
+/// Bind listeners for a specific configuration snapshot (the current one, or
+/// the last good one when restoring after a failed reload).
+async fn start_listeners_with(
+    shared: &Shared,
+    addrs: &Arc<ArcSwap<ListenerAddrs>>,
+    config: &DaygleConfig,
+) -> Result<ListenerGen> {
+    let dispatcher = build_dispatcher(shared, config);
     let mut server = Server::new(dispatcher.clone());
     let mut snapshot = ListenerAddrs::default();
     let doq_task = bind_listeners(
@@ -680,6 +646,7 @@ async fn start_listeners_with(
     addrs.store(Arc::new(snapshot));
     Ok(spawn_listeners(server, doq_task))
 }
+
 /// Materialize the console-managed certificates (stored PEM in the database)
 /// that the DoT/DoH/DoQ listeners reference by name. Each is written next to
 /// the zone database under `<db-dir>/tls/<name>.crt|key`, and the listener's
@@ -779,21 +746,26 @@ fn write_if_changed(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
         }
     }
     let tmp = path.with_extension("tmp");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(&tmp)
-            .map_err(DaygleError::Io)?;
-        std::fs::write(&tmp, bytes).map_err(DaygleError::Io)?;
+    // A leftover temp file (e.g. from a crash) may carry looser permissions
+    // or be a planted symlink; `mode` only applies on creation, so remove it
+    // and create a fresh file exclusively.
+    match std::fs::remove_file(&tmp) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(DaygleError::Io(e)),
     }
-    #[cfg(not(unix))]
     {
-        std::fs::write(&tmp, bytes).map_err(DaygleError::Io)?;
+        use std::io::Write as _;
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&tmp).map_err(DaygleError::Io)?;
+        file.write_all(bytes).map_err(DaygleError::Io)?;
+        file.sync_all().map_err(DaygleError::Io)?;
     }
     // `rename` is atomic on POSIX for files on the same filesystem and best-
     // effort on Windows (replaces if the destination exists).

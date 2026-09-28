@@ -47,8 +47,6 @@ quinn = "0.11"
 rustls-pki-types = "1"
 rcgen = "0.14"
 async-trait = "0.1"
-futures-util = "0.3"
-bytes = "1"
 
 axum = "0.8"
 tower = { version = "0.5", features = ["util"] }
@@ -73,7 +71,6 @@ clap = { version = "4", features = ["derive"] }
 arc-swap = "1"
 parking_lot = "0.12"
 rust-embed = "8"
-mime_guess = "2"
 rand = "0.10"
 regex = "1"
 tempfile = "3"

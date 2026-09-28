@@ -186,7 +186,9 @@ impl ZoneStore {
                     std::fs::create_dir_all(parent)?;
                 }
             }
-            Connection::open(path)?
+            let conn = Connection::open(path)?;
+            restrict_permissions(Path::new(path))?;
+            conn
         };
         let store = Self {
             conn: Arc::new(Mutex::new(conn)),
@@ -209,6 +211,18 @@ impl ZoneStore {
         migrate_split_horizon_records(&conn)?;
         migrate_dnssec_keys(&conn)?;
         migrate_console_user_profile(&conn)?;
+        // SQLite ships with foreign-key enforcement off (per connection), so
+        // the schema's `ON DELETE CASCADE` never fired and deleting a zone
+        // left its records, DNSSEC private keys and secondary state behind.
+        // Purge what earlier versions orphaned, then turn enforcement on (the
+        // migrations above run first: they copy rows between tables and must
+        // not trip over legacy orphans).
+        conn.execute_batch(
+            "DELETE FROM records WHERE zone_id NOT IN (SELECT id FROM zones);
+             DELETE FROM dnssec_keys WHERE zone_id NOT IN (SELECT id FROM zones);
+             DELETE FROM secondary_zones WHERE zone_id NOT IN (SELECT id FROM zones);
+             PRAGMA foreign_keys = ON;",
+        )?;
         Ok(())
     }
 
@@ -1394,6 +1408,14 @@ impl ZoneStore {
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
+    /// Number of console accounts (enabled or not). Cheaper than listing
+    /// them for callers that only need to know whether any exist.
+    pub fn count_console_users(&self) -> Result<usize> {
+        let conn = self.lock_conn()?;
+        let n: i64 = conn.query_row("SELECT COUNT(*) FROM console_users", [], |r| r.get(0))?;
+        Ok(n as usize)
+    }
+
     /// Count enabled admin accounts (used by the last-admin guard).
     pub fn count_enabled_admins(&self) -> Result<usize> {
         let conn = self.lock_conn()?;
@@ -2215,6 +2237,25 @@ fn migrate_dnssec_keys(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// Make the database file readable by its owner only. It holds console
+/// password hashes, TLS and DNSSEC private keys and TSIG secrets, and SQLite
+/// otherwise creates it (and its journals, which inherit the file's mode)
+/// with the process umask - typically world-readable.
+fn restrict_permissions(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(path)?.permissions();
+        if perms.mode() & 0o077 != 0 {
+            perms.set_mode(perms.mode() & 0o700);
+            std::fs::set_permissions(path, perms)?;
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+    Ok(())
+}
+
 fn map_unique_violation(e: rusqlite::Error) -> DaygleError {
     match &e {
         rusqlite::Error::SqliteFailure(err, _)
@@ -2310,6 +2351,37 @@ mod tests {
             s.create_zone(&input),
             Err(DaygleError::AlreadyExists(_))
         ));
+    }
+
+    #[test]
+    fn deleting_a_zone_cascades_to_its_dependents() {
+        let s = store();
+        let zone = s
+            .create_zone(&ZoneInput {
+                name: "example.com".to_string(),
+                ..zone_input_defaults()
+            })
+            .unwrap();
+        s.set_secondary(&zone.id, &["192.0.2.53".to_string()], 3600)
+            .unwrap();
+        assert!(s.count_records().unwrap() > 0, "zone creation adds records");
+
+        assert!(s.delete_zone(&zone.id).unwrap());
+        assert_eq!(
+            s.count_records().unwrap(),
+            0,
+            "records must not be orphaned"
+        );
+        assert!(s.list_secondary().unwrap().is_empty());
+    }
+
+    #[test]
+    fn count_console_users_tracks_accounts() {
+        let s = store();
+        assert_eq!(s.count_console_users().unwrap(), 0);
+        s.create_console_user("alice", &console_admin("alice"))
+            .unwrap();
+        assert_eq!(s.count_console_users().unwrap(), 1);
     }
 
     #[test]

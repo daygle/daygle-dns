@@ -8,7 +8,7 @@
 //! [`BlocklistSourceManager::refresh_all`].
 
 use std::collections::BTreeSet;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use daygle_dns_core::config::{normalize_domains, BlocklistFormat, BlocklistSourceConfig};
@@ -34,8 +34,9 @@ pub struct SourceStatus {
     pub domains: usize,
     /// Cached domain set from the last successful fetch. Kept so a source
     /// removal/disable can rebuild the merged remote blocklist immediately,
-    /// without waiting for the next due refetch.
-    pub cached_domains: BTreeSet<String>,
+    /// without waiting for the next due refetch. Shared (`Arc`) so status
+    /// snapshots stay cheap for lists with hundreds of thousands of entries.
+    pub cached_domains: Arc<BTreeSet<String>>,
     /// Human-readable error from the last failed fetch, if any.
     pub last_error: Option<String>,
 }
@@ -79,7 +80,7 @@ impl BlocklistSourceManager {
                 refresh_secs: s.refresh_secs,
                 last_fetch: None,
                 domains: 0,
-                cached_domains: BTreeSet::new(),
+                cached_domains: Arc::default(),
                 last_error: None,
             })
             .collect();
@@ -137,7 +138,7 @@ impl BlocklistSourceManager {
                     refresh_secs: s.refresh_secs,
                     last_fetch: None,
                     domains: 0,
-                    cached_domains: BTreeSet::new(),
+                    cached_domains: Arc::default(),
                     last_error: None,
                 };
                 if let Some(prev) = carried {
@@ -218,7 +219,16 @@ impl BlocklistSourceManager {
             if !source.enabled {
                 continue;
             }
-            let due = match self.status.lock().unwrap()[i].last_fetch {
+            // The list may have been replaced (and shortened) since the
+            // snapshot was taken, so never index the status table blindly.
+            let last_fetch = {
+                let status = self.status.lock().unwrap();
+                match status.get(i) {
+                    Some(st) if st.name == source.name => st.last_fetch,
+                    _ => continue,
+                }
+            };
+            let due = match last_fetch {
                 Some(last) => now.duration_since(last) >= Duration::from_secs(source.refresh_secs),
                 None => true, // never fetched: fetch on startup
             };
@@ -242,7 +252,7 @@ impl BlocklistSourceManager {
                             if st.name == source.name {
                                 st.last_fetch = Some(now);
                                 st.domains = domains.len();
-                                st.cached_domains = domains;
+                                st.cached_domains = Arc::new(domains);
                                 st.last_error = None;
                             }
                         }
@@ -263,14 +273,16 @@ impl BlocklistSourceManager {
         // Merge the per-source caches so the effective set follows the
         // current source list, not the last fetch cycle. A source removed or
         // disabled on the latest edit stops contributing here immediately.
-        for (i, source) in sources.iter().enumerate() {
-            if !source.enabled {
-                continue;
-            }
+        {
             let status = self.status.lock().unwrap();
-            if let Some(st) = status.get(i) {
-                if st.name == source.name {
-                    merged.extend(st.cached_domains.iter().cloned());
+            for (i, source) in sources.iter().enumerate() {
+                if !source.enabled {
+                    continue;
+                }
+                if let Some(st) = status.get(i) {
+                    if st.name == source.name {
+                        merged.extend(st.cached_domains.iter().cloned());
+                    }
                 }
             }
         }
@@ -429,20 +441,17 @@ pub fn parse_blocklist(text: &str, format: BlocklistFormat) -> BTreeSet<String> 
                 if line.is_empty() || line.starts_with('#') {
                     continue;
                 }
-                // `0.0.0.0 example.com` - take the hostname column.
-                let mut fields = line.split_whitespace();
-                let _ip = fields.next();
-                if let Some(host) = fields.next() {
+                // `0.0.0.0 example.com [alias ...]` - every hostname column
+                // after the address, up to an inline comment.
+                let hosts = line
+                    .split_whitespace()
+                    .skip(1)
+                    .take_while(|field| !field.starts_with('#'))
                     // Skip loopback/placeholder entries and bare labels
                     // (localhost, broadcasthost): real entries are FQDNs.
-                    if !host.is_empty()
-                        && !host.starts_with('#')
-                        && host.contains('.')
-                        && !host.ends_with('.')
-                    {
-                        out.extend(normalize_domains([host.to_string()]));
-                    }
-                }
+                    .filter(|host| host.contains('.') && !host.ends_with('.'))
+                    .map(str::to_string);
+                out.extend(normalize_domains(hosts));
             }
         }
         BlocklistFormat::Adblock => {
@@ -495,12 +504,16 @@ mod tests {
 127.0.0.1 localhost
 0.0.0.0 example.com
 0.0.0.0 ads.example.net # inline comment
+0.0.0.0 one.example.org two.example.org
 ::1 localhost
 255.255.255.255 broadcasthost
 ";
         let set = parse_blocklist(text, BlocklistFormat::Hosts);
         assert!(set.contains("example.com"));
         assert!(set.contains("ads.example.net"));
+        assert!(set.contains("one.example.org"));
+        assert!(set.contains("two.example.org"));
+        assert!(!set.contains("comment"));
         assert!(!set.contains("localhost"));
         assert!(!set.contains("broadcasthost"));
     }
