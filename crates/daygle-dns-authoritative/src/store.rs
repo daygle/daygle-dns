@@ -2093,16 +2093,16 @@ fn ips_to_records(ips: &[String]) -> Vec<SplitHorizonRecord> {
         .collect()
 }
 
+/// Maximum number of records allowed in a single split-horizon entry.
+/// Prevents unbounded memory allocation from adversarial input.
+const MAX_SPLIT_HORIZON_RECORDS: usize = 1024;
+
 /// Build the canonical `(ips, records)` pair for an entry input. `records` is
 /// authoritative when provided; otherwise `ips` is converted to A/AAAA
 /// records. Every record is validated: the type must be supported and the
 /// content must parse as that type's RDATA in zone-file presentation format
 /// (TXT values are auto-quoted). The returned `ips` is always the A/AAAA
 /// subset of the canonical records.
-/// Maximum number of records allowed in a single split-horizon entry.
-/// Prevents unbounded memory allocation from adversarial input.
-const MAX_SPLIT_HORIZON_RECORDS: usize = 1024;
-
 fn canonicalize_split_horizon_records(
     input: &SplitHorizonEntryInput,
 ) -> Result<(Vec<String>, Vec<SplitHorizonRecord>)> {
@@ -2126,7 +2126,9 @@ fn canonicalize_split_horizon_records(
         )));
     }
 
-    let mut canonical = Vec::with_capacity(records.len());
+    // Grown on push rather than pre-sized from the request: the bound above
+    // already caps it, and the allocation never trusts a client-supplied length.
+    let mut canonical = Vec::new();
     for record in &records {
         let rtype = record.rtype.trim().to_ascii_uppercase();
         if !crate::model::SPLIT_HORIZON_RECORD_TYPES.contains(&rtype.as_str()) {

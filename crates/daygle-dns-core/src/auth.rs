@@ -40,7 +40,7 @@ pub fn hash_password_with(password: &str, iterations: u32) -> String {
     // Salt straight from the OS CSPRNG: 16 bytes = 128 bits, well above the
     // OWASP minimum.
     let mut salt = [0u8; SALT_LEN];
-    if getrandom_bytes(&mut salt).is_err() {
+    if getrandom::fill(&mut salt).is_err() {
         // OS RNG unavailable: refuse to produce a hash rather than emit a
         // weak salt. The caller (CLI / setup handler) should treat this as a
         // fatal misconfiguration.
@@ -53,92 +53,6 @@ pub fn hash_password_with(password: &str, iterations: u32) -> String {
         BASE64.encode(salt),
         BASE64.encode(key)
     )
-}
-
-/// Fill `buf` with cryptographically-secure random bytes from the OS CSPRNG.
-///
-/// Uses `getrandom(2)` on Linux/BSDs that export it, `SecRandomCopyBytes` on
-/// Apple platforms (macOS does not provide `getrandom(2)`, and declaring it
-/// fails the final link), and BCrypt on Windows. Panics only when no source
-/// is available - we never want to silently fall back to a weak RNG.
-fn getrandom_bytes(buf: &mut [u8]) -> std::io::Result<()> {
-    #[cfg(target_vendor = "apple")]
-    {
-        use std::ffi::c_void;
-        #[link(name = "Security", kind = "framework")]
-        extern "C" {
-            fn SecRandomCopyBytes(rnd: *const c_void, count: usize, bytes: *mut u8) -> i32;
-        }
-        // NULL = kSecRandomDefault: the system CSPRNG. 0 = errSecSuccess.
-        let status = unsafe { SecRandomCopyBytes(std::ptr::null(), buf.len(), buf.as_mut_ptr()) };
-        if status == 0 {
-            Ok(())
-        } else {
-            Err(std::io::Error::last_os_error())
-        }
-    }
-    #[cfg(all(unix, not(target_vendor = "apple")))]
-    {
-        // Try libc `getrandom(2)` directly to avoid pulling in a new crate.
-        let mut filled = 0;
-        while filled < buf.len() {
-            let n = unsafe { libc_getrandom(&mut buf[filled..]) };
-            if n < 0 {
-                let err = std::io::Error::last_os_error();
-                if err.kind() == std::io::ErrorKind::Interrupted {
-                    continue;
-                }
-                return Err(err);
-            }
-            filled += n as usize;
-        }
-        Ok(())
-    }
-    #[cfg(windows)]
-    {
-        use std::ffi::c_void;
-        #[link(name = "bcrypt")]
-        extern "system" {
-            fn BCryptGenRandom(
-                algorithm: *mut c_void,
-                buffer: *mut u8,
-                length: u32,
-                flags: u32,
-            ) -> i32;
-        }
-        let alg = std::ptr::null_mut();
-        // BCRYPT_RNG_ALGORITHM = null handle; with the system-preferred RNG
-        // flag set, the OS uses its own CSPRNG.
-        let status = unsafe {
-            BCryptGenRandom(
-                alg,
-                buf.as_mut_ptr(),
-                buf.len() as u32,
-                2, // BCRYPT_USE_SYSTEM_PREFERRED_RNG
-            )
-        };
-        if status == 0 {
-            Ok(())
-        } else {
-            Err(std::io::Error::last_os_error())
-        }
-    }
-    #[cfg(not(any(unix, windows)))]
-    {
-        let _ = buf;
-        Err(std::io::Error::new(
-            std::io::ErrorKind::Unsupported,
-            "no OS CSPRNG binding for this platform",
-        ))
-    }
-}
-
-#[cfg(all(unix, not(target_vendor = "apple")))]
-unsafe fn libc_getrandom(buf: &mut [u8]) -> isize {
-    extern "C" {
-        fn getrandom(buf: *mut u8, len: usize, flags: u32) -> isize;
-    }
-    unsafe { getrandom(buf.as_mut_ptr(), buf.len(), 0) }
 }
 
 /// Verify `password` against a stored hash. Constant-time comparison.
@@ -213,64 +127,4 @@ pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn round_trip() {
-        let hash = hash_password("hunter2");
-        assert!(is_valid_password_hash(&hash));
-        assert!(verify_password("hunter2", &hash));
-        assert!(!verify_password("hunter3", &hash));
-        assert!(!verify_password("", &hash));
-        assert!(!verify_password("hunter2", "garbage"));
-        assert!(!verify_password("hunter2", "pbkdf2-sha256$0$aaaa$bbbb"));
-    }
-
-    #[test]
-    fn salt_makes_hashes_unique() {
-        let a = hash_password("same");
-        let b = hash_password("same");
-        assert_ne!(a, b, "random salt must produce distinct hashes");
-        assert!(verify_password("same", &a));
-        assert!(verify_password("same", &b));
-    }
-
-    #[test]
-    fn low_iteration_hash_round_trips() {
-        let hash = hash_password_with("fast", 100);
-        assert!(hash.starts_with("pbkdf2-sha256$100$"));
-        assert!(verify_password("fast", &hash));
-        assert!(!verify_password("slow", &hash));
-    }
-
-    #[test]
-    fn pbkdf2_matches_rfc7914_test_vector() {
-        // RFC 7914 §11: P="passwd", S="salt", c=1, dkLen=32 (first block).
-        let dk = pbkdf2_sha256(b"passwd", b"salt", 1, 32);
-        let hex: String = dk.iter().map(|b| format!("{b:02x}")).collect();
-        assert_eq!(
-            hex,
-            "55ac046e56e3089fec1691c22544b605f94185216dde0465e68b9d57c20dacbc"
-        );
-    }
-
-    #[test]
-    fn long_passwords_are_cheap_to_verify() {
-        // Keying the PRF once means a huge password costs one extra hash,
-        // not one per iteration.
-        let long = "x".repeat(4 * 1024 * 1024);
-        let hash = hash_password_with("short", 1000);
-        let started = std::time::Instant::now();
-        assert!(!verify_password(&long, &hash));
-        assert!(started.elapsed() < std::time::Duration::from_secs(5));
-    }
-
-    #[test]
-    fn rejects_malformed() {
-        assert!(!is_valid_password_hash(""));
-        assert!(!is_valid_password_hash("plain"));
-        assert!(!is_valid_password_hash("pbkdf2-sha256$x$y$z"));
-        assert!(!is_valid_password_hash("pbkdf2-sha256$1$!!!$!!!"));
-    }
-}
+mod tests;
