@@ -1,0 +1,12 @@
+# CodeQL configuration for the advanced setup in workflows/codeql.yml.
+#
+# Test code is excluded: it deliberately uses dummy passwords, plain-HTTP
+# requests to in-process servers on 127.0.0.1, and self-signed certificates,
+# which CodeQL otherwise reports as critical vulnerabilities.
+name: daygle-dns CodeQL config
+
+paths-ignore:
+  # Integration tests (crates/<crate>/tests/*.rs).
+  - "crates/*/tests/**"
+  # Unit-test modules kept in their own file (`#[cfg(test)] mod tests;`).
+  - "crates/**/tests.rs"
