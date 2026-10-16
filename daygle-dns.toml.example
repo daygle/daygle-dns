@@ -128,6 +128,9 @@ notify_listen_enabled = false
 enabled = false
 listen = "0.0.0.0"
 port = 853
+# How long a client may take to complete the TLS handshake before its
+# connection is dropped (seconds, 1..=600; default 10).
+# handshake_timeout_secs = 10
 # Instead of file paths / self-signed generation below, a listener can use a
 # certificate stored in the database and managed from the console's
 # Certificates page (set certificate = "<name>"; it overrides cert_path/
@@ -146,6 +149,8 @@ server_name = "dns.example.com"
 enabled = false
 listen = "0.0.0.0"
 port = 443
+# TLS handshake timeout in seconds (1..=600; default 10).
+# handshake_timeout_secs = 10
 # May reuse the same certificate as DoT.
 cert_path = "/etc/daygle-dns/certs/server.crt"
 key_path = "/etc/daygle-dns/certs/server.key"

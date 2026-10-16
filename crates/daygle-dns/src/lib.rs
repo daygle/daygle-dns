@@ -835,7 +835,12 @@ async fn bind_listeners(
         let listener = tokio::net::TcpListener::bind(addr).await?;
         addrs.dot = Some(listener.local_addr()?);
         let tls_config = daygle_dns_dot::build_tls_config(&config.dot)?;
-        daygle_dns_dot::register_dot(server, listener, tls_config, Duration::from_secs(10))?;
+        daygle_dns_dot::register_dot(
+            server,
+            listener,
+            tls_config,
+            Duration::from_secs(config.dot.handshake_timeout_secs),
+        )?;
         info!(addr = %addrs.dot.expect("addr set above"), "DNS over TLS listening");
     }
 
@@ -850,7 +855,7 @@ async fn bind_listeners(
             server,
             listener,
             tls_config,
-            Duration::from_secs(10),
+            Duration::from_secs(config.doh.handshake_timeout_secs),
             None,
             &config.doh.endpoint,
         )?;

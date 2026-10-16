@@ -169,6 +169,7 @@
           cert_path: dot.cert_path || '',
           key_path: dot.key_path || '',
           certificate: dot.certificate || '',
+          handshake_timeout_secs: Number(dot.handshake_timeout_secs),
         },
         doh: {
           enabled: !!doh.enabled,
@@ -179,6 +180,7 @@
           key_path: doh.key_path || '',
           certificate: doh.certificate || '',
           endpoint: doh.endpoint,
+          handshake_timeout_secs: Number(doh.handshake_timeout_secs),
         },
         doq: {
           enabled: !!doq.enabled,
@@ -351,6 +353,7 @@
       <div class="form-grid">
         <label class="check"><input type="checkbox" bind:checked={dot.enabled} /> <span>Enabled</span></label>
         <label><span>Port</span><input type="number" bind:value={dot.port} /></label>
+        <label><span>TLS Handshake Timeout (Sec)</span><input type="number" bind:value={dot.handshake_timeout_secs} /></label>
         <label>
           <span>Certificate</span>
           <select bind:value={dotCertMode} onchange={(e) => applyCertMode(dot, e.currentTarget.value)}>
@@ -374,6 +377,7 @@
       <div class="form-grid">
         <label class="check"><input type="checkbox" bind:checked={doh.enabled} /> <span>Enabled</span></label>
         <label><span>Port</span><input type="number" bind:value={doh.port} /></label>
+        <label><span>TLS Handshake Timeout (Sec)</span><input type="number" bind:value={doh.handshake_timeout_secs} /></label>
         <label>
           <span>Certificate</span>
           <select bind:value={dohCertMode} onchange={(e) => applyCertMode(doh, e.currentTarget.value)}>

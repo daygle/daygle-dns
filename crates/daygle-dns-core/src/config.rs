@@ -135,6 +135,10 @@ pub struct ListenerUpdate {
     /// DoQ-only: QUIC connection idle timeout in seconds. Ignored for DoT.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub idle_timeout_secs: Option<u64>,
+    /// DoT-only: TLS handshake timeout in seconds. Ignored for DoQ (QUIC
+    /// governs its own handshake).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub handshake_timeout_secs: Option<u64>,
 }
 
 /// Partial updates for DoH.
@@ -156,6 +160,9 @@ pub struct DohUpdate {
     pub endpoint: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub certificate: Option<String>,
+    /// TLS handshake timeout in seconds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub handshake_timeout_secs: Option<u64>,
 }
 
 /// Partial updates for the policy engine (allow/block lists and Filter AAAA).
@@ -238,6 +245,9 @@ impl RuntimeSettings {
             if let Some(v) = &d.certificate {
                 config.dot.certificate = v.clone();
             }
+            if let Some(v) = d.handshake_timeout_secs {
+                config.dot.handshake_timeout_secs = v;
+            }
         }
         if let Some(d) = &self.doh {
             if let Some(v) = d.enabled {
@@ -263,6 +273,9 @@ impl RuntimeSettings {
             }
             if let Some(v) = &d.certificate {
                 config.doh.certificate = v.clone();
+            }
+            if let Some(v) = d.handshake_timeout_secs {
+                config.doh.handshake_timeout_secs = v;
             }
         }
         if let Some(d) = &self.doq {
@@ -363,6 +376,7 @@ impl RuntimeSettings {
                 certificate: (!config.dot.certificate.is_empty())
                     .then(|| config.dot.certificate.clone()),
                 idle_timeout_secs: None,
+                handshake_timeout_secs: Some(config.dot.handshake_timeout_secs),
             }),
             doh: Some(DohUpdate {
                 enabled: Some(config.doh.enabled),
@@ -374,6 +388,7 @@ impl RuntimeSettings {
                 endpoint: Some(config.doh.endpoint.clone()),
                 certificate: (!config.doh.certificate.is_empty())
                     .then(|| config.doh.certificate.clone()),
+                handshake_timeout_secs: Some(config.doh.handshake_timeout_secs),
             }),
             doq: Some(ListenerUpdate {
                 enabled: Some(config.doq.enabled),
@@ -385,6 +400,7 @@ impl RuntimeSettings {
                 certificate: (!config.doq.certificate.is_empty())
                     .then(|| config.doq.certificate.clone()),
                 idle_timeout_secs: Some(config.doq.idle_timeout_secs),
+                handshake_timeout_secs: None,
             }),
             policy: Some(PolicyUpdate {
                 allowlist: Some(config.policy.allowlist.clone()),
@@ -452,6 +468,29 @@ impl DaygleConfig {
             return Err(DaygleError::Config(
                 "doq.idle_timeout_secs must be >= 30 (RFC 9250 recommends 600)".to_string(),
             ));
+        }
+        // TLS handshake timeout for the DoT/DoH listeners: a client cannot
+        // start sending DNS messages until the handshake completes, so 0
+        // drops every connection and an over-large one pins connections for
+        // minutes. Same validation style as doq.idle_timeout_secs above:
+        // only *enabled* listeners need a concrete value.
+        for (name, secs, enabled) in [
+            (
+                "dot.handshake_timeout_secs",
+                self.dot.handshake_timeout_secs,
+                self.dot.enabled,
+            ),
+            (
+                "doh.handshake_timeout_secs",
+                self.doh.handshake_timeout_secs,
+                self.doh.enabled,
+            ),
+        ] {
+            if enabled && !(1..=600).contains(&secs) {
+                return Err(DaygleError::Config(format!(
+                    "{name} must be in 1..=600 (default 10)"
+                )));
+            }
         }
         if !(1000..=10_000).contains(&self.server.client_timeout_ms) {
             return Err(DaygleError::Config(
@@ -1126,6 +1165,10 @@ pub struct DotSettings {
     /// When set it takes precedence over `self_signed` and the file paths.
     #[serde(default)]
     pub certificate: String,
+    /// TLS handshake timeout in seconds: how long a client may take to
+    /// complete the TLS handshake before the connection is dropped
+    /// (1..=600, default 10).
+    pub handshake_timeout_secs: u64,
 }
 
 impl Default for DotSettings {
@@ -1139,6 +1182,7 @@ impl Default for DotSettings {
             self_signed: true,
             server_name: "daygle.local".to_string(),
             certificate: String::new(),
+            handshake_timeout_secs: 10,
         }
     }
 }
@@ -1167,6 +1211,10 @@ pub struct DohSettings {
     /// Name of a console-managed certificate (stored in the database) to use.
     #[serde(default)]
     pub certificate: String,
+    /// TLS handshake timeout in seconds: how long a client may take to
+    /// complete the TLS handshake before the connection is dropped
+    /// (1..=600, default 10).
+    pub handshake_timeout_secs: u64,
 }
 
 impl Default for DohSettings {
@@ -1181,6 +1229,7 @@ impl Default for DohSettings {
             server_name: "daygle.local".to_string(),
             endpoint: "/dns-query".to_string(),
             certificate: String::new(),
+            handshake_timeout_secs: 10,
         }
     }
 }
@@ -1799,6 +1848,35 @@ exempt_loopback = false
         // Zero limits / windows are rejected.
         assert!(DaygleConfig::parse("[rate_limit]\nclient_max_queries = 0\n").is_err());
         assert!(DaygleConfig::parse("[rate_limit]\nclient_window_secs = 0\n").is_err());
+    }
+
+    #[test]
+    fn parses_dot_doh_handshake_timeout() {
+        let text = r#"
+[dot]
+enabled = true
+handshake_timeout_secs = 30
+
+[doh]
+enabled = true
+handshake_timeout_secs = 60
+"#;
+        let cfg = DaygleConfig::parse(text).unwrap();
+        assert_eq!(cfg.dot.handshake_timeout_secs, 30);
+        assert_eq!(cfg.doh.handshake_timeout_secs, 60);
+
+        // Sensible default: matches the previously hard-coded 10 s.
+        assert_eq!(DaygleConfig::default().dot.handshake_timeout_secs, 10);
+        assert_eq!(DaygleConfig::default().doh.handshake_timeout_secs, 10);
+
+        // Out-of-range values are rejected for enabled listeners (same
+        // validation style as doq.idle_timeout_secs).
+        assert!(DaygleConfig::parse("[dot]\nenabled = true\nhandshake_timeout_secs = 0\n").is_err());
+        assert!(DaygleConfig::parse("[dot]\nenabled = true\nhandshake_timeout_secs = 601\n").is_err());
+        assert!(DaygleConfig::parse("[doh]\nenabled = true\nhandshake_timeout_secs = 0\n").is_err());
+
+        // Disabled listeners may keep a placeholder value.
+        assert!(DaygleConfig::parse("[dot]\nhandshake_timeout_secs = 0\n").is_ok());
     }
 
     #[test]

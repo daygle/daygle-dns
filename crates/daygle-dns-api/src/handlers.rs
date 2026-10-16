@@ -2311,6 +2311,7 @@ pub struct ListenerUpdate {
     pub cert_path: Option<String>,
     pub key_path: Option<String>,
     pub certificate: Option<String>,
+    pub handshake_timeout_secs: Option<u64>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -2324,6 +2325,7 @@ pub struct DohUpdate {
     pub key_path: Option<String>,
     pub endpoint: Option<String>,
     pub certificate: Option<String>,
+    pub handshake_timeout_secs: Option<u64>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -2428,6 +2430,10 @@ pub async fn update_settings(
             config.dot.certificate = v.clone();
             listeners_affected = true;
         }
+        if let Some(v) = d.handshake_timeout_secs {
+            config.dot.handshake_timeout_secs = v;
+            listeners_affected = true;
+        }
     }
     if let Some(d) = &update.doh {
         if let Some(v) = d.enabled {
@@ -2460,6 +2466,10 @@ pub async fn update_settings(
         }
         if let Some(v) = &d.certificate {
             config.doh.certificate = v.clone();
+            listeners_affected = true;
+        }
+        if let Some(v) = d.handshake_timeout_secs {
+            config.doh.handshake_timeout_secs = v;
             listeners_affected = true;
         }
     }

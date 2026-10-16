@@ -20,6 +20,9 @@ async fn serves_queries_over_dot() {
     config.dot.cert_path = cert.to_string_lossy().to_string();
     config.dot.key_path = key.to_string_lossy().to_string();
     config.dot.server_name = "daygle.test".to_string();
+    // Exercise the configured handshake timeout (not the default 10 s) so the
+    // listener provably reads the setting.
+    config.dot.handshake_timeout_secs = 1;
 
     let server = spawn(config).await;
     let zone = server
