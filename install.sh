@@ -393,32 +393,28 @@ fi
 
 # ---- optional LAN access for the web GUI ------------------------------
 # The API/GUI binds to 127.0.0.1 by default so an unauthenticated admin
-# console is never exposed. When run interactively the installer can bind
-# it to 0.0.0.0 and create an admin login; non-interactive runs opt in
-# with DAYGLE_LAN_GUI=1 (plus DAYGLE_ADMIN_USER / DAYGLE_ADMIN_PASSWORD)
-# and opt out with DAYGLE_LAN_GUI=0.
+# console is never exposed. Fresh installs expose the GUI on the LAN by
+# default (no prompt) so the first-run setup page can create the admin
+# account in the browser; opt out with DAYGLE_LAN_GUI=0. Non-interactive
+# runs need DAYGLE_ADMIN_USER / DAYGLE_ADMIN_PASSWORD or the GUI setup
+# page creates the account.
 LAN_SETUP=0
 LAN_IP=""
 INTERACTIVE=0
 if [ "${DAYGLE_LAN_GUI:-}" = "1" ]; then
     LAN_SETUP=1
-elif [ "$INSTALL_MODE" = "install" ] && [ "${DAYGLE_LAN_GUI:-}" != "0" ]; then
-    # Detect interactive terminal.  When piped through `curl | sh` the
-    # controlling terminal is still accessible via /dev/tty, but some
-    # environments (containers, CI) do not have one at all.
-    INTERACTIVE=0
+elif [ "${DAYGLE_LAN_GUI:-}" = "0" ]; then
+    # Explicitly opted out.
+    :
+elif [ "$INSTALL_MODE" = "install" ]; then
+    # Default for fresh installs: expose the web GUI on the LAN so the
+    # first-run setup page can create the admin account in the browser.
+    LAN_SETUP=1
+    # Detect interactive terminal so we can skip the credential prompts below.
     if [ -t 0 ] 2>/dev/null; then
         INTERACTIVE=1
     elif : < /dev/tty 2>/dev/null; then
         INTERACTIVE=1
-    fi
-    if [ "$INTERACTIVE" = "1" ]; then
-        printf '%s' "[daygle-dns-install] Expose the web GUI to your LAN (adds an admin login, binds 0.0.0.0:5380)? [y/N] "
-        ANSWER=""
-        read -r ANSWER < /dev/tty || true
-        case "$ANSWER" in
-            y|Y|yes|Yes|YES) LAN_SETUP=1 ;;
-        esac
     fi
 fi
 
@@ -430,7 +426,12 @@ if [ "$INSTALL_MODE" = "upgrade" ] && [ "$LAN_SETUP" = "0" ]; then
 fi
 
 if [ "$LAN_SETUP" = "1" ]; then
-    ADMIN_USER="${DAYGLE_ADMIN_USER:-admin}"
+    # On fresh installs the web GUI's first-run setup page creates the admin
+    # account in the browser, so the installer does not prompt for credentials.
+    # Interactive runs just leave the defaults (the setup page will ask);
+    # non-interactive runs must supply DAYGLE_ADMIN_USER /
+    # DAYGLE_ADMIN_PASSWORD so an account exists before the GUI is reachable.
+    ADMIN_USER="${DAYGLE_ADMIN_USER:-}"
     PRESERVE_USERS=0
     if [ "$INSTALL_MODE" = "upgrade" ] && has_configured_api_users; then
         PRESERVE_USERS=1
@@ -441,61 +442,23 @@ if [ "$LAN_SETUP" = "1" ]; then
     if [ "$PRESERVE_USERS" = "1" ]; then
         ADMIN_PASSWORD=""
         ADMIN_HASH=""
-    else
-        # On fresh installs with an interactive terminal, ask for username
-        # and password.  The env vars DAYGLE_ADMIN_USER / DAYGLE_ADMIN_PASSWORD
-        # can override these in non-interactive or automated runs.
-        if [ "$PRESERVE_USERS" != "1" ] && [ -z "${DAYGLE_ADMIN_USER:-}" ] && : < /dev/tty 2>/dev/null; then
-            printf '%s' "[daygle-dns-install] Admin username [$ADMIN_USER]: "
-        fi
-        if [ -z "${DAYGLE_ADMIN_USER:-}" ]; then
-            # Validate username interactively.  Allow alphanumeric, hyphens,
-            # underscores, and dots; reject reserved system names.
-            while true; do
-                ADMIN_INPUT=""
-                read -r ADMIN_INPUT < /dev/tty 2>/dev/null || true
-                printf '\n'
-                # Empty input accepts the default.
-                if [ -z "$ADMIN_INPUT" ]; then
-                    break
-                fi
-                case "$ADMIN_INPUT" in
-                    *[!a-zA-Z0-9_.-]*|*..*|*-|-.*)
-                        printf '%s\n' "[daygle-dns-install] Invalid username: only letters, digits, hyphens, underscores, and dots allowed."
-                        printf '%s' "[daygle-dns-install] Admin username [$ADMIN_USER]: "
-                        ;;
-                    root|nobody|daemon|bin|sys|sync|games|man|lp|mail|news|uucp|proxy|www-data|backup|list|irc|gnats|systemd-network|dbus|sshd|daygle-dns)
-                        printf '%s\n' "[daygle-dns-install] '$ADMIN_INPUT' is a reserved system name."
-                        printf '%s' "[daygle-dns-install] Admin username [$ADMIN_USER]: "
-                        ;;
-                    *)
-                        ADMIN_USER="$ADMIN_INPUT"
-                        break
-                        ;;
-                esac
-            done
-        fi
-        if [ -n "${DAYGLE_ADMIN_PASSWORD:-}" ]; then
-            ADMIN_PASSWORD="$DAYGLE_ADMIN_PASSWORD"
-        elif : < /dev/tty 2>/dev/null; then
-            printf '%s' "[daygle-dns-install] Password for user '$ADMIN_USER': "
-            ADMIN_PASSWORD=""
-            # -s is a bash extension; use stty for POSIX sh compatibility.
-            if stty -echo 2>/dev/null; then
-                read -r ADMIN_PASSWORD < /dev/tty || true
-                stty echo 2>/dev/null
-            else
-                read -r ADMIN_PASSWORD < /dev/tty || true
-            fi
-            printf '\n'
-        else
+    elif [ -n "${DAYGLE_ADMIN_USER:-}" ]; then
+        # Non-interactive run with explicit credentials: use them so the GUI
+        # is reachable immediately without the setup page.
+        ADMIN_PASSWORD="${DAYGLE_ADMIN_PASSWORD:-}"
+        if [ -z "$ADMIN_PASSWORD" ]; then
             if command -v openssl >/dev/null 2>&1; then
                 ADMIN_PASSWORD="$(openssl rand -hex 12)"
             else
                 ADMIN_PASSWORD="daygle-$(date +%s)$$"
             fi
-            log "Generated a random admin password (shown at the end of this run)."
+            log "No DAYGLE_ADMIN_PASSWORD given; generated one for user '$ADMIN_USER'."
         fi
+    else
+        # Fresh install, interactive or not, with no explicit credentials:
+        # leave ADMIN_USER / ADMIN_PASSWORD empty so no [[api.users]] is written
+        # and the first GUI visit shows the setup page.
+        :
     fi
     # ---- summary & confirmation ---------------------------------------
     if [ "$INTERACTIVE" = "1" ]; then
@@ -507,10 +470,12 @@ if [ "$LAN_SETUP" = "1" ]; then
         log "  Binary:          $PREFIX/bin/daygle-dns"
         log "  Config dir:      $CONFIG_DIR"
         log "  LAN GUI:         enabled (0.0.0.0:5380)"
-        if [ "$PRESERVE_USERS" = "1" ]; then
+        if [ "$PRESERVE_USERS" = "1" ] && [ -n "$ADMIN_USER" ]; then
             log "  Admin user:      $ADMIN_USER (existing)"
-        else
+        elif [ -n "${ADMIN_USER:-}" ]; then
             log "  Admin user:      $ADMIN_USER"
+        else
+            log "  Admin user:      (create on the setup page)"
         fi
         log "──────────────────────────────────────────"
         printf '%s' "[daygle-dns-install] Proceed? [Y/n] "
@@ -526,21 +491,21 @@ if [ "$LAN_SETUP" = "1" ]; then
         esac
     fi
     if [ "$PRESERVE_USERS" = "1" ] || [ -n "${ADMIN_PASSWORD:-}" ]; then
-        if [ "$PRESERVE_USERS" != "1" ]; then
+        if [ "$PRESERVE_USERS" != "1" ] && [ -n "${ADMIN_USER:-}" ]; then
+            # Fresh install with explicit credentials: write the admin account
+            # to the config so the GUI is reachable immediately.
             ADMIN_HASH="$("$PREFIX/bin/daygle-dns" hash-password "$ADMIN_PASSWORD")"
-        fi
-        # Rebind only the API/GUI section (not the DNS or DoT listeners).
-        awk '
-            /^\[api\][[:space:]]*$/ { in_api = 1 }
-            /^\[/ && $0 !~ /^\[api\][[:space:]]*$/ { in_api = 0 }
-            in_api && $1 == "listen" { $0 = "listen = \"0.0.0.0\"" }
-            { print }
-        ' "$CONFIG_FILE" > "$CONFIG_FILE.tmp" && mv "$CONFIG_FILE.tmp" "$CONFIG_FILE"
-        # The mv recreated the file owned by root; give it back to the
-        # service user, which writes the config when settings are saved
-        # from the web console.
-        chown "$SERVICE_USER":"$SERVICE_USER" "$CONFIG_FILE" 2>/dev/null || true
-        if ! has_configured_api_users; then
+            # Rebind only the API/GUI section (not the DNS or DoT listeners).
+            awk '
+                /^\[api\][[:space:]]*$/ { in_api = 1 }
+                /^\[/ && $0 !~ /^\[api\][[:space:]]*$/ { in_api = 0 }
+                in_api && $1 == "listen" { $0 = "listen = \"0.0.0.0\"" }
+                { print }
+            ' "$CONFIG_FILE" > "$CONFIG_FILE.tmp" && mv "$CONFIG_FILE.tmp" "$CONFIG_FILE"
+            # The mv recreated the file owned by root; give it back to the
+            # service user, which writes the config when settings are saved
+            # from the web console.
+            chown "$SERVICE_USER":"$SERVICE_USER" "$CONFIG_FILE" 2>/dev/null || true
             cat >> "$CONFIG_FILE" <<EOF
 
 # Added by the installer: LAN web GUI login.
@@ -549,24 +514,28 @@ username = "$ADMIN_USER"
 password_hash = "$ADMIN_HASH"
 role = "admin"
 EOF
+        else
+            # Upgrade (PRESERVE) or fresh install with no credentials: just
+            # rebind the API listener to 0.0.0.0; the account (if any) already
+            # lives in the config or the database.
+            awk '
+                /^\[api\][[:space:]]*$/ { in_api = 1 }
+                /^\[/ && $0 !~ /^\[api\][[:space:]]*$/ { in_api = 0 }
+                in_api && $1 == "listen" { $0 = "listen = \"0.0.0.0\"" }
+                { print }
+            ' "$CONFIG_FILE" > "$CONFIG_FILE.tmp" && mv "$CONFIG_FILE.tmp" "$CONFIG_FILE"
+            chown "$SERVICE_USER":"$SERVICE_USER" "$CONFIG_FILE" 2>/dev/null || true
         fi
         open_lan_firewall || true
         LAN_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
-        if [ "$PRESERVE_USERS" = "1" ]; then
-            log "Existing console account '$ADMIN_USER' preserved and API bound to 0.0.0.0:5380."
-        else
-            log "Web GUI user '$ADMIN_USER' added and API bound to 0.0.0.0:5380."
-        fi
-        if command -v systemctl >/dev/null 2>&1; then
-            systemctl restart daygle-dns 2>/dev/null || true
-            log "Restarted daygle-dns to apply the GUI bind."
-        fi
-        if [ -n "$LAN_IP" ]; then
+        if [ -n "$ADMIN_USER" ]; then
             if [ "$PRESERVE_USERS" = "1" ]; then
-                log "Web GUI (LAN): http://$LAN_IP:5380  user: $ADMIN_USER  (existing password preserved)"
+                log "Existing console account '$ADMIN_USER' preserved and API bound to 0.0.0.0:5380."
             else
                 log "Web GUI (LAN): http://$LAN_IP:5380  user: $ADMIN_USER  password: $ADMIN_PASSWORD"
             fi
+        else
+            log "Web GUI (LAN): http://$LAN_IP:5380  - create your admin account on the setup page."
         fi
     else
         log "No password given - leaving the GUI on the loopback interface."
