@@ -9,7 +9,7 @@
 # prerequisites (Rust, a C compiler, git, a downloader such as curl) are
 # installed automatically when possible via rustup and the detected package
 # manager; DNS test tools (dig) are installed as a convenience. Set
-# DAYGLE_NO_DEPS=1 to skip the automatic installs and get manual
+# DAYGLE_DNS_NO_DEPS=1 to skip the automatic installs and get manual
 # instructions instead.
 
 set -eu
@@ -161,7 +161,7 @@ install_update_service() {
     # bake in the concrete binary/updates paths.
     run_as_root install -m 0700 "$SRC_DIR/crates/daygle-dns-api/src/update-apply.sh" "$APPLY_HELPER" || return 1
     run_as_root chown root:root "$APPLY_HELPER" || return 1
-    run_as_root sed -i "s|__DAYGLE_EXE__|$PREFIX/bin/daygle-dns|; s|__DAYGLE_UPDATES_DIR__|$DATA_DIR/updates|" "$APPLY_HELPER" || return 1
+    run_as_root sed -i "s|__DAYGLE_DNS_EXE__|$PREFIX/bin/daygle-dns|; s|__DAYGLE_DNS_UPDATES_DIR__|$DATA_DIR/updates|" "$APPLY_HELPER" || return 1
     run_as_root tee /etc/systemd/system/daygle-dns-update.service > /dev/null <<EOF
 [Unit]
 Description=Daygle DNS update apply step (root oneshot)
@@ -231,7 +231,7 @@ open_lan_firewall() {
 # ---- prerequisites -----------------------------------------------------
 # System packages first so curl is available for the rustup fetch below.
 if need_cc || need_git || need_downloader; then
-    if [ "${DAYGLE_NO_DEPS:-0}" != "1" ]; then
+    if [ "${DAYGLE_DNS_NO_DEPS:-0}" != "1" ]; then
         install_system_toolchain || true
     fi
 fi
@@ -252,13 +252,13 @@ if need_cc; then
 fi
 
 if need_dig; then
-    if [ "${DAYGLE_NO_DEPS:-0}" != "1" ]; then
+    if [ "${DAYGLE_DNS_NO_DEPS:-0}" != "1" ]; then
         install_dns_tools || true
     fi
 fi
 
 if need_cargo; then
-    if [ "${DAYGLE_NO_DEPS:-0}" != "1" ]; then
+    if [ "${DAYGLE_DNS_NO_DEPS:-0}" != "1" ]; then
         install_rust || true
     fi
     if need_cargo; then
@@ -397,12 +397,12 @@ fi
 # The API/GUI binds to 127.0.0.1 by default so an unauthenticated admin
 # console is never exposed. The installer always rebinds it to 0.0.0.0 so
 # the first-run setup page (or a supplied admin account) is reachable from
-# the LAN; opt out with DAYGLE_LAN_GUI=0.
-if [ "${DAYGLE_LAN_GUI:-}" = "0" ]; then
+# the LAN; opt out with DAYGLE_DNS_LAN_GUI=0.
+if [ "${DAYGLE_DNS_LAN_GUI:-}" = "0" ]; then
     LAN_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
-    log "Web GUI left on the loopback interface (DAYGLE_LAN_GUI=0)."
+    log "Web GUI left on the loopback interface (DAYGLE_DNS_LAN_GUI=0)."
 else
-    ADMIN_USER="${DAYGLE_ADMIN_USER:-}"
+    ADMIN_USER="${DAYGLE_DNS_ADMIN_USER:-}"
     PRESERVE_USERS=0
     if [ "$INSTALL_MODE" = "upgrade" ] && has_configured_api_users; then
         PRESERVE_USERS=1
@@ -413,15 +413,15 @@ else
     if [ "$PRESERVE_USERS" = "1" ]; then
         ADMIN_PASSWORD=""
         ADMIN_HASH=""
-    elif [ -n "${DAYGLE_ADMIN_USER:-}" ]; then
-        ADMIN_PASSWORD="${DAYGLE_ADMIN_PASSWORD:-}"
+    elif [ -n "${DAYGLE_DNS_ADMIN_USER:-}" ]; then
+        ADMIN_PASSWORD="${DAYGLE_DNS_ADMIN_PASSWORD:-}"
         if [ -z "$ADMIN_PASSWORD" ]; then
             if command -v openssl >/dev/null 2>&1; then
                 ADMIN_PASSWORD="$(openssl rand -hex 12)"
             else
                 ADMIN_PASSWORD="daygle-$(date +%s)$$"
             fi
-            log "No DAYGLE_ADMIN_PASSWORD given; generated one for user '$ADMIN_USER'."
+            log "No DAYGLE_DNS_ADMIN_PASSWORD given; generated one for user '$ADMIN_USER'."
         fi
     else
         # No explicit credentials: leave ADMIN_USER / ADMIN_PASSWORD empty so

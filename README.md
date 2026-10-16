@@ -72,7 +72,7 @@ cargo run --release -p daygle-dns -- --config daygle-dns.toml.example
 The installer provisions missing prerequisites itself: Rust via rustup; a C
 compiler, git, and curl via your package manager (apt, dnf/yum, apk, pacman,
 zypper, or Xcode Command Line Tools on macOS); DNS test tools (dig) where
-available. Set `DAYGLE_NO_DEPS=1` to
+available. Set `DAYGLE_DNS_NO_DEPS=1` to
 skip the automatic installs and get manual instructions instead.
 
 The installer automatically detects whether it is performing a fresh install
@@ -84,11 +84,13 @@ service.
 
 The installer also offers to expose the web GUI on your LAN when run
 interactively (prompts for an admin username and password, then binds the API
-to 0.0.0.0:5380); for scripted installs use `DAYGLE_LAN_GUI=1` with
-`DAYGLE_ADMIN_USER` and `DAYGLE_ADMIN_PASSWORD`. On upgrades, existing LAN binding and console
-credentials are preserved automatically, and the existing admin password is
-never replaced. Without either, fresh installs keep the GUI loopback-only for
-security.
+to 0.0.0.0:5380); the web GUI is exposed on the LAN by default (the API listener is rebinded to
+0.0.0.0:5380) so the first-run setup page can create the admin account in the
+browser; opt out with `DAYGLE_DNS_LAN_GUI=0`. For scripted installs pass
+`DAYGLE_DNS_ADMIN_USER` and `DAYGLE_DNS_ADMIN_PASSWORD` to create the admin
+account immediately. On upgrades the installer rebinds the API listener to
+0.0.0.0:5380 when it is still on 127.0.0.1 and preserves any existing console
+account (its password is never replaced).
 
 Then open the dashboard at <http://127.0.0.1:5380>.
 

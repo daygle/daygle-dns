@@ -13,7 +13,7 @@
 # normal root systemd unit, so the service account itself never gains any
 # rights beyond the staging dir it already owns.
 #
-# Contract (paths baked by install.sh via __DAYGLE_EXE__/__DAYGLE_UPDATES_DIR__):
+# Contract (paths baked by install.sh via __DAYGLE_DNS_EXE__/__DAYGLE_DNS_UPDATES_DIR__):
 #   <updates>/request               - empty trigger marker (created atomically
 #                                     by the updater after staging completes)
 #   <updates>/staging/apply.json   - {"version":"x.y.z","sha256":"<64hex>"}
@@ -25,11 +25,11 @@
 
 set -eu
 
-EXE="__DAYGLE_EXE__"
-UPDATES_DIR="__DAYGLE_UPDATES_DIR__"
+EXE="__DAYGLE_DNS_EXE__"
+UPDATES_DIR="__DAYGLE_DNS_UPDATES_DIR__"
 STAGING="$UPDATES_DIR/staging"
 REQ="$UPDATES_DIR/request"
-DIR="${DAYGLE_UPDATE_DIR:-/tmp/daygle-dns-update}"
+DIR="${DAYGLE_DNS_UPDATE_DIR:-/tmp/daygle-dns-update}"
 
 # This step runs as root, but $DIR (and everything under $UPDATES_DIR) is
 # writable by the unprivileged service account. Root therefore never opens
