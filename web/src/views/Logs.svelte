@@ -327,9 +327,6 @@
     gap: 4px;
     font-size: 0.85rem;
   }
-  .danger {
-    color: var(--danger);
-  }
   .pill.warn {
     color: #e0a34e;
     border-color: #e0a34e;

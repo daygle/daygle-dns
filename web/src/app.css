@@ -49,6 +49,11 @@ button.secondary {
 
 button.danger {
   background: var(--danger);
+  color: var(--bg);
+  border-color: var(--danger);
+}
+button.danger:hover {
+  background: color-mix(in srgb, var(--danger) 85%, black);
 }
 
 button:disabled { opacity: 0.5; cursor: default; }
