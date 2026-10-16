@@ -248,11 +248,7 @@
           onclick={toggleSidebar}
         >
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            {#if sidebar.open}
-              <path d="M6 6l12 12M18 6L6 18" />
-            {:else}
-              <path d="M3 6h18M3 12h18M3 18h18" />
-            {/if}
+            <path d={sidebar.open ? icons.sidebarCollapse : icons.sidebarExpand} />
           </svg>
         </button>
       </div>
