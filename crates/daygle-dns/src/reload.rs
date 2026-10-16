@@ -99,10 +99,18 @@ pub fn apply_config(shared: &Shared, new: Arc<DaygleConfig>) -> bool {
         }
     }
 
-    // Recursive resolver / upstreams.
-    if old.recursive != new.recursive {
+    // Recursive resolver / upstreams / stub zones. Stub zones are config-
+    // file-owned (see StubZoneConfig), so a change to them rebuilds the
+    // resolver together with the recursive settings.
+    if old.recursive != new.recursive
+        || old.authoritative.stub_zones != new.authoritative.stub_zones
+    {
         if new.recursive.enabled {
-            match RecursiveResolver::build(&new.recursive, shared.metrics.clone()) {
+            match RecursiveResolver::build(
+                &new.recursive,
+                shared.metrics.clone(),
+                &new.authoritative.stub_zones,
+            ) {
                 Ok(resolver) => {
                     shared.resolver.store(Some(Arc::new(resolver)));
                     info!("recursive resolver reloaded");

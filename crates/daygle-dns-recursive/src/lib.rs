@@ -18,6 +18,9 @@
 //! - **Conditional forwarding**: queries inside a configured conditional zone
 //!   are resolved by that zone's dedicated upstreams instead of the default
 //!   ones (longest-suffix match wins).
+//! - **Stub zones**: queries inside a configured stub zone are sent directly
+//!   to the zone's own nameservers (bare-IP NS entries; hostname NSs are
+//!   resolved through the system resolver once at build time).
 
 mod cache_assist;
 mod upstream;
@@ -26,7 +29,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use cache_assist::{cache_key, CacheAssistant, PrefetchConfig};
-use daygle_dns_core::config::{ConditionalZoneConfig, RecursiveSettings};
+use daygle_dns_core::config::{ConditionalZoneConfig, RecursiveSettings, StubZoneConfig};
 use daygle_dns_core::error::{DaygleError, Result};
 use daygle_dns_core::Metrics;
 use hickory_proto::op::Query;
@@ -56,6 +59,10 @@ struct Inner {
     resolver: TokioResolver,
     /// Conditional forwarding zones: `zone suffix` -> dedicated resolver.
     conditional: Vec<ConditionalResolver>,
+    /// Stub zones: like conditional zones, but the upstreams are the zone's
+    /// own nameservers, so the query goes straight to the authoritative
+    /// server instead of walking root -> TLD -> authoritative.
+    stubs: Vec<ConditionalResolver>,
     settings: RecursiveSettings,
     metrics: Arc<Metrics>,
     cache_assist: Arc<CacheAssistant>,
@@ -85,7 +92,11 @@ impl RecursiveResolver {
     ///
     /// When `upstreams` is empty or `use_system_config` is set, the operating
     /// system's resolver configuration (`/etc/resolv.conf` on Unix) is used.
-    pub fn build(settings: &RecursiveSettings, metrics: Arc<Metrics>) -> Result<Self> {
+    pub fn build(
+        settings: &RecursiveSettings,
+        metrics: Arc<Metrics>,
+        stub_zones: &[StubZoneConfig],
+    ) -> Result<Self> {
         let (config, opts) = build_config(settings)?;
         let inner = TokioResolver::builder_with_config(config, TokioRuntimeProvider::default())
             .with_options(opts)
@@ -117,6 +128,47 @@ impl RecursiveResolver {
             });
         }
 
+        let mut stubs = Vec::new();
+        for stub in stub_zones {
+            if !stub.enabled || stub.nss.is_empty() {
+                continue;
+            }
+            let zone_name = normalize_zone(&stub.name);
+            let nss = upstream::parse_stub_nss(&stub.nss);
+            if nss.is_empty() {
+                warn!(
+                    zone = %zone_name,
+                    "stub zone skipped: no nameserver could be resolved"
+                );
+                continue;
+            }
+            let mut opts = resolver_opts(settings);
+            // Direct answers from a zone's own nameservers cannot be
+            // DNSSEC-validated without walking the delegation chain, so
+            // stub zones skip validation (conditional forwarding keeps it).
+            opts.validate = false;
+            let zconfig = ResolverConfig::from_parts(None, vec![], nss);
+            let resolver =
+                TokioResolver::builder_with_config(zconfig, TokioRuntimeProvider::default())
+                    .with_options(opts)
+                    .build()
+                    .map_err(|e| {
+                        DaygleError::Config(format!(
+                            "cannot build stub resolver for '{}': {e}",
+                            stub.name
+                        ))
+                    })?;
+            info!(
+                zone = %zone_name,
+                nameservers = stub.nss.len(),
+                "stub zone ready"
+            );
+            stubs.push(ConditionalResolver {
+                zone: zone_name,
+                resolver,
+            });
+        }
+
         info!(
             cache_size = settings.cache_size,
             attempts = settings.attempts,
@@ -125,6 +177,7 @@ impl RecursiveResolver {
             prefetch = settings.prefetch_enabled,
             serve_stale_secs = settings.serve_stale_secs,
             conditional_zones = conditional.len(),
+            stub_zones = stubs.len(),
             "recursive resolver ready"
         );
 
@@ -136,13 +189,12 @@ impl RecursiveResolver {
             serve_stale_secs: settings.serve_stale_secs,
             max_cache_ttl: settings.max_cache_ttl,
             failure_cache_ttl: settings.failure_cache_ttl,
-        }));
-
-        Ok(Self {
-            inner: Arc::new(Inner {
-                resolver: inner,
-                conditional,
-                settings: settings.clone(),
+        }));            Ok(Self {
+                inner: Arc::new(Inner {
+                    resolver: inner,
+                    conditional,
+                    stubs,
+                    settings: settings.clone(),
                 metrics,
                 cache_assist,
             }),
@@ -167,6 +219,9 @@ impl RecursiveResolver {
         for zone in &self.inner.conditional {
             zone.resolver.clear_cache();
         }
+        for zone in &self.inner.stubs {
+            zone.resolver.clear_cache();
+        }
         self.inner.cache_assist.clear();
         info!("recursive resolver cache cleared");
     }
@@ -188,6 +243,15 @@ impl RecursiveResolver {
     pub fn conditional_zones(&self) -> Vec<String> {
         self.inner
             .conditional
+            .iter()
+            .map(|c| c.zone.clone())
+            .collect()
+    }
+
+    /// The configured stub zones (for status/metrics).
+    pub fn stub_zones(&self) -> Vec<String> {
+        self.inner
+            .stubs
             .iter()
             .map(|c| c.zone.clone())
             .collect()
@@ -280,10 +344,7 @@ impl Inner {
         // Clone the routed resolver out of `inner` before awaiting so no
         // borrow of `Inner` is held across the lookup, and never spawn
         // again here (acyclic => provably `Send`).
-        let resolver = match match_conditional_zones(&self.conditional, &name) {
-            Some(idx) => self.conditional[idx].resolver.clone(),
-            None => self.resolver.clone(),
-        };
+        let resolver = route_resolver(&self.resolver, &self.conditional, &self.stubs, &name);
         match resolver.lookup(name, record_type).await {
             Ok(lookup) => {
                 self.cache_assist.on_success(&key, &lookup);
@@ -308,14 +369,18 @@ impl Inner {
         record_type: RecordType,
         allow_prefetch: bool,
     ) -> Result<Lookup> {
-        let matched = match_conditional_zones(&inner.conditional, &name);
-        let via_conditional = matched.is_some();
-        let resolver = match matched {
-            Some(idx) => inner.conditional[idx].resolver.clone(),
-            None => inner.resolver.clone(),
-        };
+        let conditional_match = match_conditional_zones(&inner.conditional, &name);
+        let stub_match = match_conditional_zones(&inner.stubs, &name);
+        let resolver = route_resolver(&inner.resolver, &inner.conditional, &inner.stubs, &name);
+        let via_conditional = conditional_match.is_some();
         let key = cache_key(&name, record_type);
-        debug!(query = %name, rtype = ?record_type, conditional = via_conditional, "lookup routing");
+        debug!(
+            query = %name,
+            rtype = ?record_type,
+            conditional = via_conditional,
+            stub = stub_match.is_some(),
+            "lookup routing"
+        );
 
         match resolver.lookup(name, record_type).await {
             Ok(lookup) => {
@@ -397,6 +462,32 @@ where
         .filter(|(_, z)| z.is_empty() || is_label_aligned_suffix(&qname, z))
         .max_by_key(|(_, z)| z.len())
         .map(|(idx, _)| idx)
+}
+
+/// Route `name` to the most specific configured zone resolver. A stub zone
+/// wins only when it is strictly deeper than the best conditional match
+/// (a depth tie falls back to conditional forwarding); with no zone match
+/// the default upstreams are used.
+fn route_resolver(
+    default: &TokioResolver,
+    conditional: &[ConditionalResolver],
+    stubs: &[ConditionalResolver],
+    name: &Name,
+) -> TokioResolver {
+    let conditional_match = match_conditional_zones(conditional, name);
+    let stub_match = match_conditional_zones(stubs, name);
+    match (conditional_match, stub_match) {
+        (None, None) => default.clone(),
+        (None, Some(i)) => stubs[i].resolver.clone(),
+        (Some(i), None) => conditional[i].resolver.clone(),
+        (Some(i), Some(j)) => {
+            if stubs[j].zone.len() > conditional[i].zone.len() {
+                stubs[j].resolver.clone()
+            } else {
+                conditional[i].resolver.clone()
+            }
+        }
+    }
 }
 
 /// Allocation-free label-aligned suffix test for two normalized names:

@@ -24,6 +24,38 @@ pub fn parse_upstreams(entries: &[String]) -> Result<Vec<NameServerConfig>> {
     Ok(out)
 }
 
+/// Parse stub-zone nameserver entries into name server configs, one at a
+/// time so a bad entry does not disable the whole zone.
+///
+/// Supported forms are the plain upstream forms (`IP`, `IP:port`,
+/// `[IPv6]:port`, `udp://…`, `tcp://…`) plus plain DNS hostnames, which are
+/// resolved here through the system resolver (port 53). Entries that cannot
+/// be used are skipped; the caller decides whether the zone remains usable.
+pub fn parse_stub_nss(entries: &[String]) -> Vec<NameServerConfig> {
+    let mut out = Vec::new();
+    for entry in entries {
+        let trimmed = entry.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if let Ok(config) = parse_upstream(trimmed) {
+            out.push(config);
+            continue;
+        }
+        // A DNS hostname rather than an IP literal: resolve it once here.
+        use std::net::ToSocketAddrs;
+        if let Ok(mut addrs) = (trimmed.trim_end_matches('.'), 53u16).to_socket_addrs() {
+            if let Some(addr) = addrs.next() {
+                out.push(
+                    parse_plain(&addr.to_string(), true, true)
+                        .expect("a resolved socket address always parses"),
+                );
+            }
+        }
+    }
+    out
+}
+
 fn parse_upstream(entry: &str) -> Result<NameServerConfig> {
     let trimmed = entry.trim();
     if trimmed.is_empty() {
@@ -229,9 +261,22 @@ mod tests {
     use super::*;
 
     #[test]
+    fn stub_ns_literals_parse_and_keep_port() {
+        let ns = parse_stub_nss(&[
+            "192.0.2.1".to_string(),
+            "192.0.2.2:5353".to_string(),
+            "".to_string(),
+            "   ".to_string(),
+        ]);
+        assert_eq!(ns.len(), 2);
+        assert_eq!(ns[0].connections[0].port, 53);
+        assert_eq!(ns[1].connections[0].port, 5353);
+    }
+
+    #[test]
     fn plain_default_port() {
         let (ip, port) = split_host_port("8.8.8.8").unwrap();
-        assert_eq!(ip, "8.8.8.8".parse::<IpAddr>().unwrap());
+        assert_eq!(ip, "8.8.8.8".parse::<IpAddr>().unwrap());
         assert_eq!(port, 53);
     }
 

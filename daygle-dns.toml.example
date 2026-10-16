@@ -123,6 +123,19 @@ notify_targets = ["192.0.2.20", "192.0.2.21:5353"]
 # or spoofed NOTIFYs cannot corrupt zone data.
 notify_listen_enabled = false
 
+# Stub zones: queries for these zones go straight to the zone's own
+# nameservers instead of walking root -> TLD -> authoritative. Useful when
+# you know a sibling nameserver hosts `internal.example.com` and want
+# queries for it to land there directly. NSS entries accept IP, IP:port, or
+# hostname (resolved through the system resolver at startup); disabled stub
+# zones are ignored.
+#
+# [[authoritative.stub_zones]]
+# name = "internal.example.com"
+# nss = ["192.0.2.5"]
+# refresh_secs = 3600
+# enabled = true
+
 # DNS over TLS (RFC 7858) using rustls.
 [dot]
 enabled = false

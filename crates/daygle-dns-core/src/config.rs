@@ -788,7 +788,7 @@ impl DaygleConfig {
             }
             if zone.nss.is_empty() && zone.enabled {
                 return Err(DaygleError::Config(format!(
-                    "stub zone '{}' has no nameservers (learn them with the DNS client tool or set them manually)",
+                    "stub zone '{}' has no nameservers (set them in nss)",
                     zone.name
                 )));
             }
@@ -1044,9 +1044,8 @@ pub struct AuthoritativeSettings {
     /// Zones whose RFC 2136 updates must be TSIG-signed with the named key;
     /// unsigned updates are refused. Each entry is `zone=key-name`.
     pub tsig_update_zones: Vec<String>,
-    /// Stub zones: zones whose nameservers we track and forward to directly
-    /// (see [`StubZoneConfig`]). Managed at runtime through the API as well;
-    /// entries here are merged with the database list at startup.
+    /// Stub zones: queries for names inside these zones are resolved
+    /// directly against the zone's own nameservers (see [`StubZoneConfig`]).
     pub stub_zones: Vec<StubZoneConfig>,
     /// When true, a TSIG-signed request must also carry a valid signature on
     /// our response (request MAC inclusion) per RFC 8945 §5. Always enabled
@@ -1573,8 +1572,9 @@ impl Default for LoggingSettings {
 pub struct StubZoneConfig {
     /// Zone apex the stub covers, e.g. `branch.example.com`.
     pub name: String,
-    /// The zone's nameservers. Bare IPs are used as-is; hostnames are
-    /// resolved through the default upstreams when the stub refreshes.
+    /// The zone's nameservers. Bare IPs (and `IP:port`) are used as-is;
+    /// hostnames are resolved once through the system resolver at startup
+    /// and on live reload. Entries that cannot be resolved are skipped.
     pub nss: Vec<String>,
     /// How often to re-check the zone's SOA/NS on its nameservers, in
     /// seconds, so newly added nameservers are picked up.

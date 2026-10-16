@@ -31,8 +31,9 @@ Daygle combines, in a single process:
   answers (A, AAAA, MX, TXT, CNAME, SRV), everyone else gets the public view.
 - **Recursive resolution** (root → TLD → authoritative) with **caching**,
   **negative caching**, **retries**, **timeouts**, and **DNSSEC validation**,
-  plus **conditional forwarding** so specific zones resolve via dedicated
-  upstreams.
+- **Conditional forwarding** so specific zones resolve via dedicated
+  upstreams, plus **stub zones** that send queries straight to a zone's own
+  nameservers (no root→TLD walk) - both matched by longest suffix.
 - **DNS over TLS (DoT)**, **DNS over HTTPS (DoH, RFC 8484)**, and
   **DNS over QUIC (DoQ, RFC 9250)** using **rustls**.
 - **Cache prefetch & serve-stale**: popular names are refreshed in the

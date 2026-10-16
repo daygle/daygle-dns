@@ -311,6 +311,7 @@ pub async fn bind_with(
         Some(Arc::new(RecursiveResolver::build(
             &config.recursive,
             metrics.clone(),
+            &config.authoritative.stub_zones,
         )?))
     } else {
         warn!("recursion is disabled");
