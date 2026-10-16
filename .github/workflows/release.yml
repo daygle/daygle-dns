@@ -22,13 +22,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Set version from release tag
+        # Rewrite Cargo.toml + Cargo.lock from the pushed tag (v1.2.7 -> 1.2.7)
+        # and propagate it to web/package*.json, so the built binary, the API
+        # and the dashboard all report the tagged version.
+        run: node scripts/set-version.mjs
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
-
-      - name: Verify GUI version is in sync with the workspace
-        # Fails the release when web/package.json / package-lock.json drifted
-        # from Cargo.toml's [workspace.package] version.
-        run: node web/scripts/sync-version.mjs --check
 
       - name: Cache cargo builds
         uses: Swatinem/rust-cache@v2
@@ -37,7 +38,14 @@ jobs:
         run: cargo build --locked --release -p daygle-dns
 
       - name: Smoke test
-        run: ./target/release/daygle-dns --version
+        run: |
+          ./target/release/daygle-dns --version
+          built="$(./target/release/daygle-dns --version | awk '{print $2}')"
+          expected="${GITHUB_REF_NAME#v}"
+          if [ "$built" != "$expected" ]; then
+            echo "::error::binary reports $built but tag is $expected"
+            exit 1
+          fi
 
       - name: Stage artifact
         run: |
@@ -64,6 +72,12 @@ jobs:
     continue-on-error: true
     steps:
       - uses: actions/checkout@v4
+
+      - name: Set version from release tag
+        # Rewrite Cargo.toml + Cargo.lock from the pushed tag (v1.2.7 -> 1.2.7)
+        # and propagate it to web/package*.json, so the built binary, the API
+        # and the dashboard all report the tagged version.
+        run: node scripts/set-version.mjs
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -109,6 +123,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Set version from release tag
+        # Rewrite Cargo.toml + Cargo.lock from the pushed tag (v1.2.7 -> 1.2.7)
+        # and propagate it to web/package*.json, so the built binary, the API
+        # and the dashboard all report the tagged version.
+        run: node scripts/set-version.mjs
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
@@ -148,6 +168,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Set version from release tag
+        # Rewrite Cargo.toml + Cargo.lock from the pushed tag (v1.2.7 -> 1.2.7)
+        # and propagate it to web/package*.json, so the built binary, the API
+        # and the dashboard all report the tagged version.
+        run: node scripts/set-version.mjs
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
@@ -185,6 +211,12 @@ jobs:
     continue-on-error: true
     steps:
       - uses: actions/checkout@v4
+
+      - name: Set version from release tag
+        # Rewrite Cargo.toml + Cargo.lock from the pushed tag (v1.2.7 -> 1.2.7)
+        # and propagate it to web/package*.json, so the built binary, the API
+        # and the dashboard all report the tagged version.
+        run: node scripts/set-version.mjs
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
