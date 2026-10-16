@@ -3,15 +3,12 @@
   import { api, getStoredUser } from './api.js';
   import Login from './views/Login.svelte';
   import Setup from './views/Setup.svelte';
-  import Dashboard from './views/Dashboard.svelte';
   import Zones from './views/Zones.svelte';
   import Users from './views/Users.svelte';
   import Certificates from './views/Certificates.svelte';
   import About from './views/About.svelte';
   import Settings from './views/Settings.svelte';
   import Blocklists from './views/Blocklists.svelte';
-  import QueryLog from './views/QueryLog.svelte';
-  import Tools from './views/Tools.svelte';
   import Update from './views/Update.svelte';
   import Status from './views/Status.svelte';
 
@@ -22,15 +19,13 @@
   let needsSetup = false;
 
   const views = {
-    '/': Dashboard,
+    '/': Zones,
     '/zones': Zones,
     '/users': Users,
     '/certificates': Certificates,
     '/about': About,
     '/settings': Settings,
     '/blocklists': Blocklists,
-    '/querylog': QueryLog,
-    '/tools': Tools,
     '/update': Update,
     '/status': Status
   };
@@ -91,21 +86,19 @@
   <Login />
 {:else}
   <nav class='nav'>
-    <button class:active={path === '/'} on:click={() => navigate('/')}>Dashboard</button>
+    <button class:active={path === '/'} on:click={() => navigate('/')}>Zones</button>
     <button class:active={path === '/zones'} on:click={() => navigate('/zones')}>Zones</button>
-    <button class:active={path === '/querylog'} on:click={() => navigate('/querylog')}>Query Log</button>
     <button class:active={path === '/blocklists'} on:click={() => navigate('/blocklists')}>Blocklists</button>
     <button class:active={path === '/certificates'} on:click={() => navigate('/certificates')}>Certificates</button>
     <button class:active={path === '/users'} on:click={() => navigate('/users')}>Users</button>
     <button class:active={path === '/settings'} on:click={() => navigate('/settings')}>Settings</button>
     <button class:active={path === '/status'} on:click={() => navigate('/status')}>Status</button>
     <button class:active={path === '/update'} on:click={() => navigate('/update')}>Update</button>
-    <button class:active={path === '/tools'} on:click={() => navigate('/tools')}>Tools</button>
     <button class:active={path === '/about'} on:click={() => navigate('/about')}>About</button>
     <button class='logout' on:click={() => { api.logout(); window.location.href = '/'; }}>Logout</button>
   </nav>
   <main class='view'>
-    <svelte:component this={views[path] || Dashboard} />
+    <svelte:component this={views[path] || Zones} />
   </main>
 {/if}
 

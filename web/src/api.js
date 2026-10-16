@@ -147,8 +147,6 @@ export const api = {
         return data;
       }),
 
-  },
-
   // ---- data ----
   status: () => request('GET', '/status'),
   metrics: () => request('GET', '/metrics'),
