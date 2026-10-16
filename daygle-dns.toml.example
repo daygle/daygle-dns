@@ -1,5 +1,5 @@
 # Daygle DNS - example configuration
-# Copy to /etc/daygle-dns/daygle.toml and adjust as needed.
+# Copy to /etc/daygle-dns/daygle-dns.toml and adjust as needed.
 
 # Plaintext DNS listeners (UDP/TCP on port 53).
 [server]

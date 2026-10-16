@@ -146,7 +146,7 @@ dispatcher and the REST API, so every query observes one consistent snapshot.
 When the `server`/`dot`/`doh` sections change, a listener supervisor gracefully
 stops the current sockets and rebinds new ones, self-healing back to the last
 good configuration if a bind fails. Reload can also be triggered on demand via
-`POST /api/config/reload` or `BoundServer::reload()`.
+`POST /api/config` or `BoundServer::reload()`.
 
 The DoH listener (hickory's h2 server) serves POST requests carrying
 `application/dns-message` bodies at the configured `endpoint` (default
@@ -216,9 +216,11 @@ same path for per-source status.
   `PUT /api/config`) masks `api.api_token` and every password hash as
   `[redacted]`, so secrets never round-trip to a browser.
 - **Settings forms.** `PUT /api/config` applies a validated partial update
-  (server/recursive/DoT/DoH/DoQ/API groups), persists it to the config file,
-  and triggers a listener rebuild through `request_dns_rebuild` when
-  listeners were touched - the same mechanism live reload uses.
+  (server/recursive/DoT/DoH/DoQ/API, policy, and authoritative groups),
+  persists it to the **SQLite database** as the runtime overlay (the config
+  file is only the bootstrap seed), and triggers a listener rebuild through
+  `request_dns_rebuild` when listeners were touched - the same mechanism
+  live reload uses.
 - **Dashboard statistics.** `QueryStats` (`daygle-dns-core/src/stats.rs`)
   records every served query into a 24-hour ring of one-minute buckets plus
   bounded top-N tables (clients, domains, blocked domains; pruned to 2 000

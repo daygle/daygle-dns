@@ -22,7 +22,7 @@ Daygle combines, in a single process:
   prerequisite checking, and atomic apply - records added over the wire
   persist and go live immediately (gated by `allow_dynamic_updates`).
 - **TSIG authentication** (RFC 8945): protect zone transfers and dynamic
-  updates with HMAC-signed requests (HMAC-MD5, HMAC-SHA1, HMAC-SHA256,
+  updates with HMAC-signed requests (HMAC-SHA256, HMAC-SHA384,
   HMAC-SHA512). Per-zone key binding, signed responses, and request-MAC
   chaining.
 - **Split horizon**: serve different answers for the same domain depending
@@ -72,8 +72,8 @@ cargo run --release -p daygle-dns -- --config daygle-dns.toml.example
 The installer provisions missing prerequisites itself: Rust via rustup; a C
 compiler, git, and curl via your package manager (apt, dnf/yum, apk, pacman,
 zypper, or Xcode Command Line Tools on macOS); DNS test tools (dig) where
-available. Set `DAYGLE_DNS_NO_DEPS=1` to
-skip the automatic installs and get manual instructions instead.
+available. Set `DAYGLE_DNS_NO_DEPS=1` to skip the automatic installs and get
+manual instructions instead.
 
 The installer automatically detects whether it is performing a fresh install
 or upgrading an existing installation. It treats an existing configuration,
@@ -82,9 +82,7 @@ and restarts an existing service (or enables it if an interrupted installation
 left it stopped). Fresh installs create the default configuration and start the
 service.
 
-The installer also offers to expose the web GUI on your LAN when run
-interactively (prompts for an admin username and password, then binds the API
-to 0.0.0.0:5380); the web GUI is exposed on the LAN by default (the API listener is rebinded to
+The web GUI is exposed on the LAN by default (the API listener is rebound to
 0.0.0.0:5380) so the first-run setup page can create the admin account in the
 browser; opt out with `DAYGLE_DNS_LAN_GUI=0`. For scripted installs pass
 `DAYGLE_DNS_ADMIN_USER` and `DAYGLE_DNS_ADMIN_PASSWORD` to create the admin
@@ -124,31 +122,11 @@ The server is configured via a TOML file (default
 is the bootstrap: it seeds runtime settings into the database on first boot,
 then the database is authoritative for recursive settings, policy
 (allowlist/blocklist), DoT/DoH/DoQ, and console accounts. Listener addresses,
-`[authoritative]`, `[api]`, and `blocklist_sources` remain file-owned so a
-broken config can always be fixed by hand.
+`[authoritative]`, and `[api]` remain file-owned so a broken config can always
+be fixed by hand.
 A fully commented example lives in
 [`daygle-dns.toml.example`](daygle-dns.toml.example).
-
-### TSIG authentication
-
-Zone transfers (AXFR/IXFR) and RFC 2136 dynamic updates can be protected
-with **TSIG** (RFC 8945). Define HMAC keys in the config and bind them to
-specific zones:
-
-```toml
-[authoritative]
-tsig_keys = [
-  { name = "transfer-key", algorithm = "hmac-sha256", secret = "<base64>" },
-]
-
-[[authoritative.zones]]
-name = "internal.example.com"
-tsig_key = "transfer-key"
-```
-
-When a TSIG key is bound to a zone, unsigned transfer/update requests are
-refused and all responses are signed. TSIG also covers secondaries pulling
-from masters - see [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for details.
+The skeleton, with the live values that matter most:
 
 ```toml
 # ── File-owned: bootstrap values and listeners ──────────────────────
@@ -169,13 +147,15 @@ port = 5380
 # role = "admin"
 
 [authoritative]
-database = "/var/lib/daygle-dns/daygle-dns.db"
+database = "/var/lib/daygle-dns/daygle.db"
 
 # ── DB-seeded: these values seed the database on first boot ──────────
 # After that, changes made in the GUI or via PUT /api/config are
 # authoritative and survive restarts and config-file edits.
 [recursive]
-upstreams = ["1.1.1.1", "tls://8.8.8.8:853@dns.google"]
+# Empty upstreams + use_system_config = true resolves via /etc/resolv.conf.
+upstreams = []
+use_system_config = true
 dnssec_validate = true
 # prefetch_enabled = true      # refresh popular names before their TTL expires
 # serve_stale_secs = 86400     # serve last-known-good answers for up to 24 h
@@ -183,7 +163,7 @@ dnssec_validate = true
 # Conditional forwarding: resolve corp.internal via the office DNS servers.
 # [[recursive.conditional_zones]]
 # name = "corp.internal"
-# upstreams = ["192.0.2.10"]
+# upstreams = [ "192.0.2.10", "tls://192.0.2.10:853@ns.corp.example" ]
 
 [dot]
 enabled = false
@@ -191,17 +171,16 @@ port = 853
 self_signed = true
 
 [doh]
-enabled = true
+enabled = false
 port = 443
 self_signed = true
 endpoint = "/dns-query"
 
 [doq]
 # DNS over QUIC (RFC 9250), default port 853/udp.
-enabled = true
+enabled = false
 port = 853
 self_signed = true
-server_name = "daygle.local"
 
 # ── Policy: blocklist_sources are file-owned (via file watcher), ─────
 # allowlist/blocklist are DB-backed (GUI or PUT /api/config).
@@ -220,22 +199,32 @@ touching the config file - saved changes are stored in the SQLite database
 and applied to the running server immediately (the config file is no longer
 rewritten).
 
+### TSIG authentication
+
+Zone transfers (AXFR/IXFR) and RFC 2136 dynamic updates can be protected
+with **TSIG** (RFC 8945). Define HMAC keys in the config and bind them to
+specific zones:
+
+```toml
+[authoritative]
+tsig_keys = [
+  { name = "transfer-key", algorithm = "hmac-sha256", secret = "<base64>" },
+]
+tsig_transfer_zones = ["internal.example.com=transfer-key"]
+```
+
+When a TSIG key is bound to a zone, unsigned transfer/update requests are
+refused and all responses are signed. TSIG also covers secondaries pulling
+from masters - see [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for details.
+
 ### Live reload
 
 With `server.reload_enabled = true` (the default), Daygle polls the config
 file (every `server.reload_interval_ms`, default 2000) and applies edits
 **without restarting** - the UDP/TCP listener settings update in place.
 A bad config is rejected and the previous configuration stays active. You
-can also trigger an immediate re-read with `POST /api/config/reload` (see
+can also trigger an immediate re-read with `POST /api/config` (see
 [`docs/API.md`](docs/API.md)).
-
-Runtime settings (cache size, upstreams, prefetch, serve-stale, policy
-allowlist/blocklist, DoT/DoH/DoQ, and console accounts) live in the
-**SQLite database**: the config file is the bootstrap that seeds them on
-first boot, and after that changes made in the GUI (or `PUT /api/config`)
-are authoritative and survive restarts and config-file edits. Listener
-addresses, `[authoritative]`, `[api]`, and `blocklist_sources` remain
-file-owned so a broken config can always be fixed by hand.
 
 ## Building the web GUI
 
@@ -261,20 +250,23 @@ real server on ephemeral ports and exercise:
 
 - authoritative answers over **UDP** and **TCP**,
 - **split-horizon** synthetic answers per client network,
-- **policy** blocking,
-- **DNS over TLS** against a self-signed certificate,
+- **policy** blocking and **remote blocklist sources**,
 - full **recursive** resolution through a local stub upstream (no internet
-  required),
+  required) and **conditional forwarding**,
+- **zone transfers** (AXFR/IXFR) and secondary-zone replication,
+- **RFC 2136 dynamic updates** and **NOTIFY** propagation,
+- **query logging** into SQLite and the console's query-log filters,
+- **rate limiting** per client and per domain,
 - **live config reload** of policy, upstreams and listeners, both via the
   reload API and the file watcher,
 - **console login, roles and settings**: login flow, read-only `viewer`
   accounts (403 on mutations), secret redaction in `GET /api/config`,
   settings updates persisted to the database (the config file seeds the
-  first boot), and the dashboard stats
-  endpoint, and
+  first boot), and the dashboard stats endpoint,
+- **DNS over TLS** and **DNS over HTTPS** against a self-signed certificate,
 - **DNS over QUIC** (RFC 9250) against the generated self-signed certificate,
-- **TSIG** unit tests covering HMAC-SHA256 request/response round-trips
-  with request-MAC chaining.
+- **TSIG** covering HMAC-SHA256 request/response round-trips with
+  request-MAC chaining.
 
 ## Upgrading
 
@@ -289,13 +281,21 @@ rebuilds the release binary, replaces `/usr/local/bin/daygle-dns`, preserves
 curl -fsSL https://raw.githubusercontent.com/daygle/daygle-dns/main/install.sh | sh
 ```
 
-The installer never overwrites an existing `/etc/daygle-dns/daygle-dns.toml`, and your
-zones, certificates, and SQLite database under `/var/lib/daygle-dns` are left
-untouched. Before upgrading, back up the database just in case:
+The installer never overwrites an existing `/etc/daygle-dns/daygle-dns.toml`,
+and your zones, certificates, and SQLite database under `/var/lib/daygle-dns`
+are left untouched. Before upgrading, back up the database just in case:
 
 ```bash
-sudo cp /var/lib/daygle-dns/daygle-dns.db /var/lib/daygle-dns/daygle-dns.db.bak
+sudo cp /var/lib/daygle-dns/daygle.db /var/lib/daygle-dns/daygle.db.bak
 ```
+
+Installations on systemd can also be upgraded **from the web console**: the
+console's updater downloads and verifies a release into
+`/var/lib/daygle-dns/updates`, stages the binary, then hands the privileged
+swap, service restart, health-check, and rollback to a root systemd oneshot
+(`daygle-dns-update.service`, provisioned by the installer). No sudo or
+setuid for the service account. `GET /api/update/preflight` probes GitHub and
+the staging directory beforehand.
 
 ### Source builds
 

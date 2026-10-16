@@ -1648,6 +1648,18 @@ mod tests {
     }
 
     #[test]
+    fn example_config_file_parses() {
+        // The shipped example must stay valid for the real parser so users
+        // who copy it as-is (the installer does exactly that) get a working
+        // configuration.
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../daygle-dns.toml.example");
+        let text = std::fs::read_to_string(&path).expect("daygle-dns.toml.example is readable");
+        DaygleConfig::parse(&text)
+            .expect("daygle-dns.toml.example must parse and validate");
+    }
+
+    #[test]
     fn parses_full_config() {
         let text = r#"
 [server]

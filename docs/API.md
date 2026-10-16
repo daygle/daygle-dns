@@ -92,6 +92,16 @@ and `Referrer-Policy: same-origin`.
 
 ## Endpoints
 
+### Health
+
+```
+GET /api/health
+```
+
+Public liveness endpoint, exempt from authentication (the in-place updater
+uses it to verify a restarted service is serving HTTP without carrying
+credentials); it exposes no configuration or zone data.
+
 ### Status
 
 ```
@@ -214,7 +224,8 @@ retention is bounded by `logging.query_db_max_rows` (0 = unlimited).
 
 ```
 GET  /api/config
-POST /api/config/reload
+PUT  /api/config
+POST /api/config
 ```
 
 `GET` returns the effective `DaygleConfig` document (the TOML configuration,
@@ -244,7 +255,7 @@ config-file edits; `server.*` and `api.*` stay config-file-owned so a broken
 listener can always be fixed by editing the file. Login users are managed
 from the console's **Users** page (see [Console users and roles](#console-users-and-roles)).
 
-`POST /api/config/reload` asks the server to re-read its configuration file and
+`POST /api/config` asks the server to re-read its configuration file and
 apply policy, upstream and listener changes immediately, without waiting for
 `server.reload_interval_ms`. It returns `202 Accepted` when a reload was
 requested and `409 Conflict` when live reload is unavailable (no config file
@@ -259,6 +270,8 @@ GET    /api/zones
 POST   /api/zones
 DELETE /api/zones/{id}
 POST   /api/zones/import
+PUT    /api/zones/{id}/soa
+GET    /api/zones/{id}/export
 ```
 
 Create a zone:
@@ -347,11 +360,22 @@ NOTIFYs for its configured secondary zones on the main UDP port, replies with
 the current SOA, and refreshes that zone immediately (the refresh interval
 remains the fallback and serials are always compared before a transfer).
 
+`PUT /api/zones/{id}/soa` edits a primary zone's SOA metadata. Every field is
+optional; omitted fields keep their current value. `bump_serial` increments
+the serial automatically (so secondaries pick up the change); it wins over
+an explicit `serial`.
+
+`GET /api/zones/{id}/export` returns the zone as a BIND-style zone file
+(`text/plain`) - SOA plus every record, with disabled records included as
+`; disabled:` comments, so an export doubles as a full-zone backup that
+round-trips through `/api/zones/import`.
+
 ### Records
 
 ```
 GET    /api/zones/{id}/records
 PUT    /api/zones/{id}/records
+PUT    /api/zones/{id}/records/{rid}/disabled
 DELETE /api/zones/{id}/records/{rid}
 ```
 
@@ -374,6 +398,11 @@ PUT /api/zones/{id}/records
 
 Supported `rtype` values: `A`, `AAAA`, `CNAME`, `MX`, `TXT`, `NS`, `SOA`,
 `SRV`, `PTR`, `CAA`.
+
+`PUT /api/zones/{id}/records/{rid}/disabled` stages (or re-enables) a single
+record without deleting it - a disabled record stays in the zone but stops
+being served. The serial is bumped and the catalog reloaded, so the change
+is live immediately.
 
 ### Split horizon
 
@@ -482,6 +511,23 @@ every query type (RFC 1034 §3.6.2), and `ANY` queries receive all records.
 When the entry has no record for the queried type the query falls through to
 normal resolution, so an entry holding only a TXT never swallows A queries.
 
+### Certificates
+
+```
+GET    /api/certificates
+POST   /api/certificates
+DELETE /api/certificates/{name}
+```
+
+TLS certificates stored in the database and managed from the console; the
+`dot`/`doh`/`doq` listener sections select one with `certificate = "<name>"`
+(overriding `cert_path`/`key_path`/`self_signed`). `GET` lists metadata only
+- PEM material is never returned. `POST` creates a self-signed certificate
+or uploads PEM material; uploading with the same `name` replaces the entry,
+and listeners referencing the name are rebuilt immediately. `DELETE`
+removes the certificate; one still referenced by a listener cannot be
+deleted.
+
 ### DNSSEC signing
 
 ```
@@ -502,10 +548,14 @@ zone.
 ### Cache
 
 ```
+GET  /api/cache
 POST /api/cache/clear
 ```
 
-Flushes the recursive resolver cache.
+`GET` returns the current recursive cache configuration and runtime
+counters.
+
+`POST /api/cache/clear` flushes the recursive resolver cache.
 
 ### Blocklist sources
 
@@ -545,8 +595,9 @@ Returns `404` when no sources are configured.
 
 `PUT` replaces the complete source list (body: `{"sources": [...]}` with the
 same fields as the config file) - this is what the console's add / edit /
-remove flow calls. Each source is validated, the list is persisted to
-`daygle-dns.toml`, and the running server swaps its sources and refetches
+remove flow calls. Each source is validated, the list is persisted to the
+**SQLite database** (the config file is no longer rewritten), and the
+running server swaps its sources and refetches
 them in the background immediately; the change survives a restart.
 Removing the last source (or disabling all of them) clears the remote
 blocklist right away.
@@ -568,6 +619,49 @@ caught before it is added:
 auto-detect the format from the content. `ok: false` with a `reason` means
 the URL fetched fine but the content does not parse as (or does not match)
 `format`; a `502` means the URL itself could not be fetched.
+
+### Advanced blocking
+
+```
+GET    /api/policy/blocking
+POST   /api/policy/blocking
+DELETE /api/policy/blocking/{id}
+POST   /api/policy/blocking/test
+```
+
+Blocking groups extend the policy engine with per-group client and domain
+criteria, including regular expressions (`allow_regex` / `block_regex`;
+invalid patterns are rejected with `400` instead of being silently dropped
+at engine-build time).
+`POST /api/policy/blocking` creates a group or updates the one with the same
+name; the dispatcher's blocking engine is rebuilt immediately.
+`DELETE /api/policy/blocking/{id}` removes a group.
+
+`POST /api/policy/blocking/test` evaluates a `{client, domain}` pair against
+the live blocking groups and reports whether (and why) it is blocked, so an
+operator can verify rules before relying on them.
+
+### In-place updates
+
+```
+GET    /api/update
+GET    /api/update/status
+POST   /api/update/start
+POST   /api/update/dismiss
+GET    /api/update/preflight
+```
+
+`GET /api/update` reports host-level information relevant to upgrading. The
+canonical update path is the one-line installer; on a qualifying systemd
+install (`can_update: true`) the console can upgrade in place with
+`POST /api/update/start` (admin only) - a `202 Accepted` only means the
+update began, because the updater runs detached, hands the privileged step
+to the root systemd update service, and restarts the server; poll
+`GET /api/update/status` for progress and to detect the restart (the status
+is read from a shared state file, so it still reports the outcome of the
+run that restarted the server). `POST /api/update/dismiss` (admin only)
+clears the last result. `GET /api/update/preflight` (admin only - it probes
+GitHub and the staging directory) checks readiness beforehand.
 
 ## Errors
 
