@@ -89,12 +89,12 @@ async fn run_writer(
         tokio::select! {
             _ = shutdown.cancelled() => {
                 // Final flush, best-effort.
-                flush(&store, &mut pending);
+                flush(&store, &mut pending).await;
                 break;
             }
             _ = tick.tick() => {
-                flush(&store, &mut pending);
-                trim(&store, max_rows);
+                flush(&store, &mut pending).await;
+                trim(&store, max_rows).await;
             }
             maybe = rx.recv() => {
                 match maybe {
@@ -111,12 +111,12 @@ async fn run_writer(
                             elapsed_ms: entry.elapsed_ms as i64,
                         });
                         if pending.len() >= BATCH_MAX_ROWS {
-                            flush(&store, &mut pending);
+                            flush(&store, &mut pending).await;
                         }
                     }
                     // All handles dropped: final flush and exit.
                     None => {
-                        flush(&store, &mut pending);
+                        flush(&store, &mut pending).await;
                         break;
                     }
                 }
@@ -129,26 +129,45 @@ async fn run_writer(
     }
 }
 
-fn flush(
+/// Write one batch of rows. The SQLite INSERT txn is synchronous work on a
+/// shared connection, so it runs on a blocking thread to keep async workers
+/// free for query serving.
+async fn flush(
     store: &daygle_dns_authoritative::ZoneStore,
     pending: &mut Vec<daygle_dns_authoritative::QueryLogRow>,
 ) {
     if pending.is_empty() {
         return;
     }
-    if let Err(e) = store.insert_query_logs(pending) {
-        debug!(error = %e, "query db log write failed; batch dropped");
+    let batch = std::mem::take(pending);
+    let res = tokio::task::spawn_blocking({
+        let store = store.clone();
+        move || store.insert_query_logs(&batch)
+    })
+    .await;
+    match res {
+        Ok(Ok(_)) => {}
+        Ok(Err(e)) => debug!(error = %e, "query db log write failed; batch dropped"),
+        Err(e) => debug!(error = %e, "query db log write join failed; batch dropped"),
     }
-    pending.clear();
 }
 
-fn trim(store: &daygle_dns_authoritative::ZoneStore, max_rows: usize) {
+/// Opportunistically keep the query-log table bounded (`query_db_max_rows`).
+/// Cheap enough at the 2 Hz cadence, and like `flush` runs off the async
+/// runtime. 0 keeps everything.
+async fn trim(store: &daygle_dns_authoritative::ZoneStore, max_rows: usize) {
     if max_rows == 0 {
         return;
     }
-    // Cheap enough at a 2 Hz cadence and keeps the table bounded forever.
-    if let Err(e) = store.trim_query_logs(max_rows) {
-        debug!(error = %e, "query db log trim failed");
+    let res = tokio::task::spawn_blocking({
+        let store = store.clone();
+        move || store.trim_query_logs(max_rows)
+    })
+    .await;
+    match res {
+        Ok(Ok(_)) => {}
+        Ok(Err(e)) => debug!(error = %e, "query db log trim failed"),
+        Err(e) => debug!(error = %e, "query db log trim join failed"),
     }
 }
 

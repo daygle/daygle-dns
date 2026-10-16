@@ -207,7 +207,7 @@ impl BlocklistSourceManager {
     /// results are merged with the per-source caches, so removing or disabling
     /// a source is reflected immediately even when no source was due for a
     /// refetch. Empty when no source contributes domains.
-    pub async fn refresh_due(&self) -> Result<Option<Blocklist>> {
+    pub async fn refresh_due(&self) -> Result<Blocklist> {
         // Snapshot the list so the fetch cycle never holds the source lock
         // across network I/O, and so a concurrent `set_sources` cannot make
         // the loop read a half-replaced list.
@@ -291,12 +291,12 @@ impl BlocklistSourceManager {
         // source removed, disabled, or emptied on its last fetch must stop
         // blocking immediately. Callers persist the engine only when the set
         // actually differs, so an unchanged result is a no-op.
-        Ok(Some(Blocklist::from_set(merged)))
+        Ok(Blocklist::from_set(merged))
     }
 
     /// Force a refresh of every enabled source now (used by `POST
     /// /api/policy/blocklist/refresh`).
-    pub async fn refresh_all(&self) -> Result<Option<Blocklist>> {
+    pub async fn refresh_all(&self) -> Result<Blocklist> {
         // Reset the per-source due-tracking so everything is considered due.
         {
             let mut status = self.status.lock().unwrap();

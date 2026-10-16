@@ -524,7 +524,7 @@ pub async fn refresh_blocklist_sources(State(state): State<AppState>) -> Respons
         );
     }
     match manager.refresh_all().await {
-        Ok(Some(list)) => {
+        Ok(list) => {
             let mut engine = state.policy.load_full().as_ref().clone();
             engine.set_remote_blocklist(list);
             state.policy.store(Arc::new(engine));
@@ -534,9 +534,6 @@ pub async fn refresh_blocklist_sources(State(state): State<AppState>) -> Respons
                 "total_domains": total,
             }))
             .into_response()
-        }
-        Ok(None) => {
-            Json(serde_json::json!({"refreshed": true, "total_domains": 0})).into_response()
         }
         Err(e) => error_response(StatusCode::BAD_GATEWAY, format!("refresh failed: {e}")),
     }

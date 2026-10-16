@@ -252,7 +252,7 @@ pub fn spawn_blocklist_refresh(
             let changed = refresh_manager.changed_notify().notified();
             let expected = refresh_manager.sources();
             match refresh_manager.refresh_due().await {
-                Ok(Some(list)) => {
+                Ok(list) => {
                     // Apply only when the fetched set differs from what the
                     // engine already has, so failed/empty fetches don't wipe
                     // previously loaded domains.
@@ -271,7 +271,6 @@ pub fn spawn_blocklist_refresh(
                         info!(domains, "remote blocklist refreshed");
                     }
                 }
-                Ok(None) => {}
                 Err(e) => warn!("blocklist refresh failed: {e}"),
             }
             // The source list changed while the cycle was running (e.g. a
