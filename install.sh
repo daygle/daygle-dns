@@ -393,53 +393,15 @@ else
     log "  $PREFIX/bin/daygle-dns --config $CONFIG_DIR/daygle-dns.toml"
 fi
 
-# ---- optional LAN access for the web GUI ------------------------------
+# ---- web GUI on the LAN -----------------------------------------
 # The API/GUI binds to 127.0.0.1 by default so an unauthenticated admin
-# console is never exposed. Fresh installs expose the GUI on the LAN by
-# default (no prompt) so the first-run setup page can create the admin
-# account in the browser; opt out with DAYGLE_LAN_GUI=0. Non-interactive
-# runs need DAYGLE_ADMIN_USER / DAYGLE_ADMIN_PASSWORD or the GUI setup
-# page creates the account.
-LAN_SETUP=0
-LAN_IP=""
-INTERACTIVE=0
-if [ "${DAYGLE_LAN_GUI:-}" = "1" ]; then
-    LAN_SETUP=1
-elif [ "${DAYGLE_LAN_GUI:-}" = "0" ]; then
-    # Explicitly opted out.
-    :
-elif [ "$INSTALL_MODE" = "install" ]; then
-    # Default for fresh installs: expose the web GUI on the LAN so the
-    # first-run setup page can create the admin account in the browser.
-    LAN_SETUP=1
-    # Detect interactive terminal so we can skip the credential prompts below.
-    if [ -t 0 ] 2>/dev/null; then
-        INTERACTIVE=1
-    elif : < /dev/tty 2>/dev/null; then
-        INTERACTIVE=1
-    fi
-fi
-
-if [ "$INSTALL_MODE" = "upgrade" ] && [ "$LAN_SETUP" = "0" ]; then
-    case "$(api_listen_address)" in
-        0.0.0.0)
-            LAN_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
-            log "Preserving existing LAN GUI configuration and console credentials."
-            ;;
-        127.0.0.1|*)
-            # Legacy / fresh re-run: the GUI is still on loopback, so enable LAN
-            # access on this re-run. Opt out with DAYGLE_LAN_GUI=0.
-            LAN_SETUP=1
-            ;;
-    esac
-fi
-
-if [ "$LAN_SETUP" = "1" ]; then
-    # On fresh installs the web GUI's first-run setup page creates the admin
-    # account in the browser, so the installer does not prompt for credentials.
-    # Interactive runs just leave the defaults (the setup page will ask);
-    # non-interactive runs must supply DAYGLE_ADMIN_USER /
-    # DAYGLE_ADMIN_PASSWORD so an account exists before the GUI is reachable.
+# console is never exposed. The installer always rebinds it to 0.0.0.0 so
+# the first-run setup page (or a supplied admin account) is reachable from
+# the LAN; opt out with DAYGLE_LAN_GUI=0.
+if [ "${DAYGLE_LAN_GUI:-}" = "0" ]; then
+    LAN_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
+    log "Web GUI left on the loopback interface (DAYGLE_LAN_GUI=0)."
+else
     ADMIN_USER="${DAYGLE_ADMIN_USER:-}"
     PRESERVE_USERS=0
     if [ "$INSTALL_MODE" = "upgrade" ] && has_configured_api_users; then
@@ -452,8 +414,6 @@ if [ "$LAN_SETUP" = "1" ]; then
         ADMIN_PASSWORD=""
         ADMIN_HASH=""
     elif [ -n "${DAYGLE_ADMIN_USER:-}" ]; then
-        # Non-interactive run with explicit credentials: use them so the GUI
-        # is reachable immediately without the setup page.
         ADMIN_PASSWORD="${DAYGLE_ADMIN_PASSWORD:-}"
         if [ -z "$ADMIN_PASSWORD" ]; then
             if command -v openssl >/dev/null 2>&1; then
@@ -464,16 +424,13 @@ if [ "$LAN_SETUP" = "1" ]; then
             log "No DAYGLE_ADMIN_PASSWORD given; generated one for user '$ADMIN_USER'."
         fi
     else
-        # Fresh install, interactive or not, with no explicit credentials:
-        # leave ADMIN_USER / ADMIN_PASSWORD empty so no [[api.users]] is written
-        # and the first GUI visit shows the setup page.
+        # No explicit credentials: leave ADMIN_USER / ADMIN_PASSWORD empty so
+        # no [[api.users]] is written and the first GUI visit shows the setup page.
         :
     fi
-    # ---- apply LAN GUI bind + optional admin account --------------------
-    # Always rebind the API listener to 0.0.0.0 when the LAN GUI is enabled,
-    # even when no admin account is being written (the setup page will create
-    # one in the browser).
-    # Rebind only the API/GUI section (not the DNS or DoT listeners).
+
+    # Rebind the API listener from 127.0.0.1 to 0.0.0.0. Only the [api] section
+    # is touched (the DNS and DoT/DoH/DoQ listeners keep their own binds).
     awk '
         /^\[api\][[:space:]]*$/ { in_api = 1 }
         /^\[/ && $0 !~ /^\[api\][[:space:]]*$/ { in_api = 0 }
@@ -492,8 +449,8 @@ if [ "$LAN_SETUP" = "1" ]; then
     fi
 
     if [ "$PRESERVE_USERS" != "1" ] && [ -n "${ADMIN_USER:-}" ] && [ -n "${ADMIN_PASSWORD:-}" ]; then
-        # Fresh install with explicit credentials: also write the admin account
-        # to the config so the GUI is reachable immediately without the setup page.
+        # Explicit credentials: also write the admin account to the config so the
+        # GUI is reachable immediately without the setup page.
         ADMIN_HASH="$("$PREFIX/bin/daygle-dns" hash-password "$ADMIN_PASSWORD")"
         cat >> "$CONFIG_FILE" <<EOF
 
@@ -508,31 +465,29 @@ EOF
     open_lan_firewall || true
     LAN_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
 
-    # ---- summary (no confirmation needed: nothing to approve) -------------
-    if [ "$INTERACTIVE" = "1" ]; then
-        printf '\n'
-        log "──────────────────────────────────────────"
-        log "  Installation Summary"
-        log "──────────────────────────────────────────"
-        log "  Mode:        $INSTALL_MODE"
-        log "  Binary:      $PREFIX/bin/daygle-dns"
-        log "  Config dir:  $CONFIG_DIR"
-        log "  Firewall:    ports 53, 853, 5380 opened for the LAN where possible"
-        if [ -n "$LAN_IP" ]; then
-            log "  Web GUI (LAN): http://$LAN_IP:5380"
-        else
-            log "  Web GUI (LAN): http://$LAN_IP:5380 (LAN IP could not be determined)"
-        fi
-        if [ "$PRESERVE_USERS" = "1" ] && [ -n "$ADMIN_USER" ]; then
-            log "  Admin user:  $ADMIN_USER (existing)"
-        elif [ -n "${ADMIN_USER:-}" ]; then
-            log "  Admin user:  $ADMIN_USER  password: $ADMIN_PASSWORD"
-        else
-            log "  Admin user:  (create on the setup page in the browser)"
-        fi
-        log "  Configuration: $CONFIG_DIR/daygle-dns.toml"
-        log "──────────────────────────────────────────"
+    # ---- summary -------------------------------------------------------
+    log ""
+    log "──────────────────────────────────────────"
+    log "  Installation Summary"
+    log "──────────────────────────────────────────"
+    log "  Mode:        $INSTALL_MODE"
+    log "  Binary:      $PREFIX/bin/daygle-dns"
+    log "  Config dir:  $CONFIG_DIR"
+    log "  Firewall:    ports 53, 853, 5380 opened for the LAN where possible"
+    if [ -n "$LAN_IP" ]; then
+        log "  Web GUI (LAN): http://$LAN_IP:5380"
+    else
+        log "  Web GUI (LAN): http://$LAN_IP:5380 (LAN IP could not be determined)"
     fi
+    if [ "$PRESERVE_USERS" = "1" ] && [ -n "$ADMIN_USER" ]; then
+        log "  Admin user:  $ADMIN_USER (existing)"
+    elif [ -n "${ADMIN_USER:-}" ]; then
+        log "  Admin user:  $ADMIN_USER  password: $ADMIN_PASSWORD"
+    else
+        log "  Admin user:  (create on the setup page in the browser)"
+    fi
+    log "  Configuration: $CONFIG_DIR/daygle-dns.toml"
+    log "──────────────────────────────────────────"
 
     if command -v systemctl >/dev/null 2>&1; then
         systemctl restart daygle-dns 2>/dev/null || true
@@ -546,8 +501,8 @@ EOF
             :
         elif [ -n "$LAN_IP" ]; then
             log "NOTE: the web GUI is listening on $ACTUAL_LISTEN:5380, not on the LAN."
-            log "      If the GUI is not reachable from other machines, re-run the installer with"
-            log "      DAYGLE_LAN_GUI=1, or edit $CONFIG_FILE and set listen = \"0.0.0.0\" under [api]."
+            log "      If the GUI is not reachable from other machines, re-run the installer,"
+            log "      or edit $CONFIG_FILE and set listen = \"0.0.0.0\" under [api]."
         fi
     fi
 fi
