@@ -276,7 +276,7 @@ mod tests {
     #[test]
     fn plain_default_port() {
         let (ip, port) = split_host_port("8.8.8.8").unwrap();
-        assert_eq!(ip, "8.8.8.8".parse::<IpAddr>().unwrap());
+        assert_eq!(ip, "8.8.8.8".parse::<IpAddr>().unwrap());
         assert_eq!(port, 53);
     }
 

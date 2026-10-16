@@ -189,12 +189,13 @@ impl RecursiveResolver {
             serve_stale_secs: settings.serve_stale_secs,
             max_cache_ttl: settings.max_cache_ttl,
             failure_cache_ttl: settings.failure_cache_ttl,
-        }));            Ok(Self {
-                inner: Arc::new(Inner {
-                    resolver: inner,
-                    conditional,
-                    stubs,
-                    settings: settings.clone(),
+        }));
+        Ok(Self {
+            inner: Arc::new(Inner {
+                resolver: inner,
+                conditional,
+                stubs,
+                settings: settings.clone(),
                 metrics,
                 cache_assist,
             }),
@@ -250,11 +251,7 @@ impl RecursiveResolver {
 
     /// The configured stub zones (for status/metrics).
     pub fn stub_zones(&self) -> Vec<String> {
-        self.inner
-            .stubs
-            .iter()
-            .map(|c| c.zone.clone())
-            .collect()
+        self.inner.stubs.iter().map(|c| c.zone.clone()).collect()
     }
 
     /// Number of names tracked for prefetch/serve-stale decisions.
