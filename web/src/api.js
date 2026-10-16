@@ -13,6 +13,10 @@ export function getToken() {
   return localStorage.getItem(TOKEN_KEY) || '';
 }
 
+export function setToken(token) {
+  localStorage.setItem(TOKEN_KEY, token);
+}
+
 export function getStoredUser() {
   try {
     return JSON.parse(localStorage.getItem(USER_KEY) || 'null');
@@ -98,7 +102,14 @@ export const api = {
   // ---- auth ----
   login: async (username, password) => {
     const data = await request('POST', '/auth/login', { username, password }, { noLoginRedirect: true });
-
+    if (data?.token) {
+      setToken(data.token);
+      localStorage.setItem(
+        USER_KEY,
+        JSON.stringify({ username: data.username, role: data.role || 'admin' }),
+      );
+    }
+    return data;
   },
   logout: async () => {
     try { await request('POST', '/auth/logout', {}); } catch (_) { /* ignore */ }
@@ -122,9 +133,19 @@ export const api = {
   createCertificate: (payload) => request('POST', '/certificates', payload),
   deleteCertificate: (name) => request('DELETE', `/certificates/${encodeURIComponent(name)}`),
   // First-run setup: whether the one-time admin account still needs creating.
-  authSetupStatus: () => request('GET', '/auth/setup', undefined, { noLoginRedirect: true }),
   setupStatus: () => request('GET', '/auth/setup', undefined, { noLoginRedirect: true }),
-  setup: (username, password) => request('POST', '/auth/setup', { username, password }, { noLoginRedirect: true }),
+  setup: (username, password) =>
+    request('POST', '/auth/setup', { username, password }, { noLoginRedirect: true })
+      .then((data) => {
+        if (data?.token) {
+          setToken(data.token);
+          localStorage.setItem(
+            USER_KEY,
+            JSON.stringify({ username: data.username, role: data.role || 'admin' }),
+          );
+        }
+        return data;
+      }),
 
   },
 

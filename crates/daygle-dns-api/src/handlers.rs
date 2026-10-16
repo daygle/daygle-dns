@@ -90,7 +90,7 @@ fn log_safe(value: &str) -> String {
         .map(|c| if c.is_control() { '?' } else { c })
         .collect();
     if value.chars().count() > MAX {
-        out.push('â€¦');
+        out.push('…');
     }
     out
 }

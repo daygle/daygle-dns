@@ -1,6 +1,6 @@
 <script>
   import { onMount } from 'svelte';
-  import { api } from './api.js';
+  import { api, getStoredUser } from './api.js';
   import Login from './views/Login.svelte';
   import Setup from './views/Setup.svelte';
   import Dashboard from './views/Dashboard.svelte';
@@ -46,9 +46,15 @@
 
   onMount(async () => {
     try {
-      const status = await api.status();
-      user = status && status.user || null;
-      authed = !!user;
+      const stored = getStoredUser();
+      if (stored) {
+        // Re-verify the session is still live before trusting the stored copy.
+        const me = await api.me();
+        if (me) {
+          user = me;
+          authed = true;
+        }
+      }
     } catch (e) {
       user = null;
       authed = false;

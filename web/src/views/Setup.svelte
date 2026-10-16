@@ -38,7 +38,6 @@
     try {
       const resp = await api.setup(username.trim(), password);
       if (resp && resp.token) {
-        api.setToken(resp.token);
         window.location.href = '/';
       } else {
         error = 'Setup completed but no session was returned.';

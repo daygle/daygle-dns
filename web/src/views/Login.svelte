@@ -21,7 +21,6 @@
     try {
       const resp = await api.login(username.trim(), password);
       if (resp && resp.token) {
-        api.setToken(resp.token);
         window.location.href = '/';
       } else {
         error = 'Login failed.';
