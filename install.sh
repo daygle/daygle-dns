@@ -216,12 +216,14 @@ open_lan_firewall() {
         return 0
     fi
     if command -v nft >/dev/null 2>&1 && nft list ruleset >/dev/null 2>&1 && [ -n "$(nft list ruleset 2>/dev/null)" ]; then
-        log "WARNING: nftables ruleset detected - open ports 53, 853, and 5380 for your LAN manually."
-        return 1
+        log "NOTE: nftables rules were detected. If the web GUI is not reachable from your LAN,"
+        log "      open ports 53, 853, and 5380 for your LAN in nftables (or your cloud/router firewall)."
+        return 0
     fi
     if command -v iptables >/dev/null 2>&1 && iptables -S >/dev/null 2>&1 && [ -n "$(iptables -S 2>/dev/null)" ]; then
-        log "WARNING: iptables rules detected - open ports 53, 853, and 5380 for your LAN manually."
-        return 1
+        log "NOTE: iptables rules were detected. If the web GUI is not reachable from your LAN,"
+        log "      open ports 53, 853, and 5380 for your LAN in iptables (or your cloud/router firewall)."
+        return 0
     fi
     return 0
 }
@@ -460,25 +462,6 @@ if [ "$LAN_SETUP" = "1" ]; then
         # and the first GUI visit shows the setup page.
         :
     fi
-    # ---- summary (no confirmation needed: nothing to approve) -------------
-    if [ "$INTERACTIVE" = "1" ]; then
-        printf '\n'
-        log "──────────────────────────────────────────"
-        log "  Installation summary"
-        log "──────────────────────────────────────────"
-        log "  Mode:            $INSTALL_MODE"
-        log "  Binary:          $PREFIX/bin/daygle-dns"
-        log "  Config dir:      $CONFIG_DIR"
-        log "  LAN GUI:         enabled (0.0.0.0:5380)"
-        if [ "$PRESERVE_USERS" = "1" ] && [ -n "$ADMIN_USER" ]; then
-            log "  Admin user:      $ADMIN_USER (existing)"
-        elif [ -n "${ADMIN_USER:-}" ]; then
-            log "  Admin user:      $ADMIN_USER  password: $ADMIN_PASSWORD"
-        else
-            log "  Admin user:      (create on the setup page)"
-        fi
-        log "──────────────────────────────────────────"
-    fi
     # ---- apply LAN GUI bind + optional admin account --------------------
     # Always rebind the API listener to 0.0.0.0 when the LAN GUI is enabled,
     # even when no admin account is being written (the setup page will create
@@ -508,23 +491,34 @@ EOF
 
     open_lan_firewall || true
     LAN_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
-    if [ -n "$ADMIN_USER" ]; then
-        if [ "$PRESERVE_USERS" = "1" ]; then
-            log "Existing console account '$ADMIN_USER' preserved and API bound to 0.0.0.0:5380."
+
+    # ---- summary (no confirmation needed: nothing to approve) -------------
+    if [ "$INTERACTIVE" = "1" ]; then
+        printf '\n'
+        log "──────────────────────────────────────────"
+        log "  Installation Summary"
+        log "──────────────────────────────────────────"
+        log "  Mode:        $INSTALL_MODE"
+        log "  Binary:      $PREFIX/bin/daygle-dns"
+        log "  Config dir:  $CONFIG_DIR"
+        log "  Firewall:    ports 53, 853, 5380 opened for the LAN where possible"
+        if [ -n "$LAN_IP" ]; then
+            log "  Web GUI (LAN): http://$LAN_IP:5380"
         else
-            log "Web GUI (LAN): http://$LAN_IP:5380  user: $ADMIN_USER  password: $ADMIN_PASSWORD"
+            log "  Web GUI (LAN): http://$LAN_IP:5380 (LAN IP could not be determined)"
         fi
-    else
-        log "Web GUI (LAN): http://$LAN_IP:5380  - create your admin account on the setup page."
+        if [ "$PRESERVE_USERS" = "1" ] && [ -n "$ADMIN_USER" ]; then
+            log "  Admin user:  $ADMIN_USER (existing)"
+        elif [ -n "${ADMIN_USER:-}" ]; then
+            log "  Admin user:  $ADMIN_USER  password: $ADMIN_PASSWORD"
+        else
+            log "  Admin user:  (create on the setup page in the browser)"
+        fi
+        log "  Configuration: $CONFIG_DIR/daygle-dns.toml"
+        log "──────────────────────────────────────────"
     fi
 
     if command -v systemctl >/dev/null 2>&1; then
         systemctl restart daygle-dns 2>/dev/null || true
-        log "Restarted daygle-dns to apply the GUI bind."
     fi
 fi
-
-GUI_HOST="$LAN_IP"
-[ -n "$GUI_HOST" ] || GUI_HOST="127.0.0.1"
-log "Done! Web GUI: http://$GUI_HOST:5380"
-log "Configuration: $CONFIG_DIR/daygle-dns.toml"
