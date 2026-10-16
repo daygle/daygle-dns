@@ -1871,9 +1871,15 @@ handshake_timeout_secs = 60
 
         // Out-of-range values are rejected for enabled listeners (same
         // validation style as doq.idle_timeout_secs).
-        assert!(DaygleConfig::parse("[dot]\nenabled = true\nhandshake_timeout_secs = 0\n").is_err());
-        assert!(DaygleConfig::parse("[dot]\nenabled = true\nhandshake_timeout_secs = 601\n").is_err());
-        assert!(DaygleConfig::parse("[doh]\nenabled = true\nhandshake_timeout_secs = 0\n").is_err());
+        assert!(
+            DaygleConfig::parse("[dot]\nenabled = true\nhandshake_timeout_secs = 0\n").is_err()
+        );
+        assert!(
+            DaygleConfig::parse("[dot]\nenabled = true\nhandshake_timeout_secs = 601\n").is_err()
+        );
+        assert!(
+            DaygleConfig::parse("[doh]\nenabled = true\nhandshake_timeout_secs = 0\n").is_err()
+        );
 
         // Disabled listeners may keep a placeholder value.
         assert!(DaygleConfig::parse("[dot]\nhandshake_timeout_secs = 0\n").is_ok());
