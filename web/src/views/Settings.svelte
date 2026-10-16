@@ -257,18 +257,21 @@
       <label class="check"><input type="checkbox" bind:checked={recursive.enabled} /> <span>Recursion Enabled</span></label>
       <label class="check"><input type="checkbox" bind:checked={recursive.dnssec_validate} /> <span>DNSSEC Validation</span></label>
       <label class="check"><input type="checkbox" bind:checked={recursive.use_system_config} /> <span>Use System DNS Configuration</span></label>
-      <label><span>Upstream Servers (one per line; supports <code>tls://</code> and <code>https://</code>)</span>
-        <textarea rows="4" bind:value={upstreamText}></textarea>
-      </label>
     </div>
+    <label class="stacked" style="margin-top: 12px">
+      <span>Upstream Servers (one per line; supports <code>tls://</code> and <code>https://</code>)</span>
+      <textarea rows="4" bind:value={upstreamText}></textarea>
+    </label>
     <h4>Caching</h4>
-    <div class="form-grid">
+    <div class="recursive-cache-grid">
       <label><span>Minimum Cache TTL (Seconds)</span><input type="number" min="0" bind:value={recursive.min_cache_ttl} /></label>
       <label><span>Negative Cache TTL (Seconds)</span><input type="number" min="0" bind:value={recursive.negative_cache_ttl} /></label>
       <label><span>Maximum Cache TTL (Seconds)</span><input type="number" min="0" bind:value={recursive.max_cache_ttl} /></label>
       <label><span>Failure Cache TTL (Seconds)</span><input type="number" min="0" bind:value={recursive.failure_cache_ttl} /></label>
       <label><span>Cache Size (Entries)</span><input type="number" min="0" bind:value={recursive.cache_size} /></label>
       <label class="check"><input type="checkbox" bind:checked={recursive.prefetch_enabled} /> <span>Refresh Popular Names Early</span></label>
+    </div>
+    <div class="recursive-cache-grid">
       <label><span>Prefetch Trigger (TTL Fraction %)</span><input type="number" min="1" max="99" bind:value={recursive.prefetch_ttl_fraction_pct} /></label>
       <label><span>Prefetch Minimum Queries</span><input type="number" min="1" bind:value={recursive.prefetch_min_queries} /></label>
       <label><span>Serve-Stale Window (Seconds)</span><input type="number" min="0" bind:value={recursive.serve_stale_secs} /></label>
@@ -489,6 +492,12 @@
   .form-grid {
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+    gap: 12px;
+    align-items: end;
+  }
+  .recursive-cache-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
     gap: 12px;
     align-items: end;
   }

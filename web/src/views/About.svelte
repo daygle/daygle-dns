@@ -63,14 +63,14 @@
 
 <div class="details-grid">
   <div class="card">
-    <h3>Project Details</h3>
+    <h3>Application Details</h3>
     <table>
       <tbody>
-        <tr><td class="muted">Version</td><td><code>{status?.version || 'Loading…'}</code></td></tr>
+        <tr><td class="muted">Version</td><td><code>v{status?.version || 'Loading…'}</code></td></tr>
         <tr><td class="muted">License</td><td>Apache License 2.0</td></tr>
-        <tr><td class="muted">Authoritative storage</td><td>SQLite</td></tr>
-        <tr><td class="muted">DNS engine</td><td>Hickory DNS</td></tr>
-        <tr><td class="muted">Web console</td><td>Svelte</td></tr>
+        <tr><td class="muted">Authoritative Storage</td><td>SQLite</td></tr>
+        <tr><td class="muted">DNS Engine</td><td>Hickory DNS</td></tr>
+        <tr><td class="muted">Web Console</td><td>Svelte</td></tr>
         <tr><td class="muted">Implementation</td><td>Rust</td></tr>
       </tbody>
     </table>
@@ -84,8 +84,8 @@
           <tr><td class="muted">Uptime</td><td>{formatUptime(status.uptime_secs)}</td></tr>
           <tr><td class="muted">Zones</td><td>{status.zones}</td></tr>
           <tr><td class="muted">Records</td><td>{status.records}</td></tr>
-          <tr><td class="muted">Recursive resolver</td><td>{status.recursion ? 'Enabled' : 'Disabled'}</td></tr>
-          <tr><td class="muted">DNSSEC validation</td><td>{status.dnssec ? 'Enabled' : 'Disabled'}</td></tr>
+          <tr><td class="muted">Recursive Resolver</td><td>{status.recursion ? 'Enabled' : 'Disabled'}</td></tr>
+          <tr><td class="muted">DNSSEC Validation</td><td>{status.dnssec ? 'Enabled' : 'Disabled'}</td></tr>
         </tbody>
       </table>
     {:else if error}

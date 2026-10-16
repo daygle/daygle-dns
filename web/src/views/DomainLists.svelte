@@ -19,8 +19,9 @@
         blocked = '';
         return;
       }
-      trusted = (config.policy?.allowlist || []).join('\n');
-      blocked = (config.policy?.blocklist || []).join('\n');
+      // Domain lists start empty until the user types values and saves them.
+      trusted = '';
+      blocked = '';
     } catch (e) {
       error = formatApiError(e);
     }

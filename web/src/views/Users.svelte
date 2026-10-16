@@ -156,6 +156,10 @@
     return user.role === 'admin' && user.enabled && admins.length <= 1;
   }
 
+  function roleLabel(role) {
+    return role === 'admin' ? 'Administrator' : 'Read-Only';
+  }
+
   function displayName(user) {
     const first = (user.first_name || '').trim();
     const last = (user.last_name || '').trim();
@@ -243,7 +247,7 @@
             </td>
             <td class="muted">{user.email || '-'}</td>
             <td>
-              <span class="pill">{user.role === 'admin' ? 'Administrator' : 'Read-Only'}</span>
+              <span class="pill">{roleLabel(user.role)}</span>
             </td>
             <td>
               <span class="pill" class:ok={user.enabled} class:err={!user.enabled}>

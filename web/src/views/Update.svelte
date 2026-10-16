@@ -390,7 +390,7 @@
     <h3 style="margin-top: 0">Current Installation</h3>
     <table>
       <tbody>
-        <tr><td class="muted">Installed Version</td><td><code>{info.version}</code></td></tr>
+        <tr><td class="muted">Installed Version</td><td><code>v{info.version}</code></td></tr>
         <tr><td class="muted">Latest Release</td><td>{#if info.latest_release}<code>v{info.latest_release}</code>{:else}Unknown{/if}</td></tr>
         <tr><td class="muted">Config File</td><td>{info.has_config_file ? 'Detected' : 'Not detected'}</td></tr>
         <tr><td class="muted">Service Manager</td><td>{info.has_systemd ? 'systemd' : 'Not detected'}</td></tr>

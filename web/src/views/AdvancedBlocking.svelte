@@ -29,7 +29,8 @@
       const [g, cfg] = await Promise.all([api.blockingGroups(), api.config()]);
       groups = g;
       filterAaaa = !!cfg.policy?.filter_aaaa;
-      filterAaaaExcept = (cfg.policy?.filter_aaaa_except || []).join('\n');
+      // Filter AAAA exceptions start empty until the user types values and saves them.
+      filterAaaaExcept = '';
     } catch (e) {
       error = String(e.message || e);
     }

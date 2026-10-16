@@ -290,7 +290,7 @@
     <h3 style="margin-top: 0">Runtime</h3>
     <table>
       <tbody>
-        <tr><td>Version</td><td><code>{status.version}</code></td></tr>
+        <tr><td>Version</td><td><code>v{status.version}</code></td></tr>
         <tr><td>Uptime</td><td>{formatUptime(status.uptime_secs)}</td></tr>
         <tr><td>Zones</td><td>{status.zones}</td></tr>
         <tr><td>Records</td><td>{status.records}</td></tr>
