@@ -473,19 +473,13 @@ EOF
     log "  Mode:        $INSTALL_MODE"
     log "  Binary:      $PREFIX/bin/daygle-dns"
     log "  Config dir:  $CONFIG_DIR"
-    log "  Firewall:    ports 53, 853, 5380 opened for the LAN where possible"
+
     if [ -n "$LAN_IP" ]; then
         log "  Web GUI (LAN): http://$LAN_IP:5380"
     else
         log "  Web GUI (LAN): http://$LAN_IP:5380 (LAN IP could not be determined)"
     fi
-    if [ "$PRESERVE_USERS" = "1" ] && [ -n "$ADMIN_USER" ]; then
-        log "  Admin user:  $ADMIN_USER (existing)"
-    elif [ -n "${ADMIN_USER:-}" ]; then
-        log "  Admin user:  $ADMIN_USER  password: $ADMIN_PASSWORD"
-    else
-        log "  Admin user:  (create on the setup page in the browser)"
-    fi
+
     log "  Configuration: $CONFIG_DIR/daygle-dns.toml"
     log "──────────────────────────────────────────"
 
