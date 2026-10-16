@@ -638,12 +638,12 @@ fn normalize_release_tag(tag: &str) -> Option<String> {
     Some(t.to_string())
 }
 
-/// The version of the updater logic this binary embeds. The updater gained
-/// its release-download path (and the fixed privilege/swap handling) in
-/// 1.0.2; older binaries can only build from source, so an update started
-/// from them fails on hosts without a toolchain.
+/// The version of the updater logic this binary embeds. The release-download
+/// path (and the fixed privilege/swap handling) is available from the first
+/// release, so any v1.0.0+ binary can self-update without re-running the
+/// installer.
 fn updater_min_version() -> &'static str {
-    "1.0.2"
+    "1.0.0"
 }
 
 /// How the installed binary compares to the latest published release, for
