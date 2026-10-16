@@ -90,7 +90,7 @@ fn log_safe(value: &str) -> String {
         .map(|c| if c.is_control() { '?' } else { c })
         .collect();
     if value.chars().count() > MAX {
-        out.push('…');
+        out.push('â€¦');
     }
     out
 }
@@ -298,7 +298,7 @@ pub struct BlocklistSourcesInput {
 /// `PUT /api/policy/blocklist/sources` - replace the configured remote
 /// blocklist sources (add / edit / remove through the console).
 ///
-/// The new list is validated, persisted to the config file and applied live:
+/// The new list is validated, persisted to the database and applied live:
 /// `set_sources` wakes the background refresher (reload.rs), which rebuilds
 /// the remote blocklist from per-source caches and fetches anything new or
 /// changed, so a saved source starts blocking (or unblocking) within seconds
@@ -1929,7 +1929,7 @@ pub struct SetupInput {
 ///
 /// Open endpoint (it runs before any account exists, which is the point).
 /// It refuses to run once any user is configured or when console auth is
-/// disabled. On success the account is persisted to the config file and a
+/// disabled. On success the account is persisted to the database and a
 /// session for it is returned, so the GUI lands straight in the console.
 pub async fn auth_setup(
     State(state): State<AppState>,
@@ -2235,7 +2235,7 @@ pub async fn delete_user(State(state): State<AppState>, Path(username): Path<Str
 // ---- Settings update -----------------------------------------------------
 
 /// Partial update of the editable settings. `None` fields are left unchanged.
-/// Applied to the live config, validated, persisted to the config file, and
+/// Applied to the live config, validated, persisted to the database, and
 /// (when listeners are affected) DNS listeners are rebound.
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]

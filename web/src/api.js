@@ -98,9 +98,7 @@ export const api = {
   // ---- auth ----
   login: async (username, password) => {
     const data = await request('POST', '/auth/login', { username, password }, { noLoginRedirect: true });
-    localStorage.setItem(TOKEN_KEY, data.token);
-    localStorage.setItem(USER_KEY, JSON.stringify({ username: data.username, role: data.role || 'admin' }));
-    return data;
+
   },
   logout: async () => {
     try { await request('POST', '/auth/logout', {}); } catch (_) { /* ignore */ }
@@ -125,12 +123,9 @@ export const api = {
   deleteCertificate: (name) => request('DELETE', `/certificates/${encodeURIComponent(name)}`),
   // First-run setup: whether the one-time admin account still needs creating.
   authSetupStatus: () => request('GET', '/auth/setup', undefined, { noLoginRedirect: true }),
-  // Create the first admin account. Returns a session, stored like a login.
-  authSetup: async (username, password) => {
-    const data = await request('POST', '/auth/setup', { username, password }, { noLoginRedirect: true });
-    localStorage.setItem(TOKEN_KEY, data.token);
-    localStorage.setItem(USER_KEY, JSON.stringify({ username: data.username, role: data.role || 'admin' }));
-    return data;
+  setupStatus: () => request('GET', '/auth/setup', undefined, { noLoginRedirect: true }),
+  setup: (username, password) => request('POST', '/auth/setup', { username, password }, { noLoginRedirect: true }),
+
   },
 
   // ---- data ----
@@ -187,3 +182,5 @@ export const api = {
   moveSplitHorizonEntry: (id, direction) =>
     request('POST', `/split-horizon/entries/${id}/move`, { direction }),
 };
+
+ 
