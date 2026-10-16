@@ -421,10 +421,17 @@ elif [ "$INSTALL_MODE" = "install" ]; then
 fi
 
 if [ "$INSTALL_MODE" = "upgrade" ] && [ "$LAN_SETUP" = "0" ]; then
-    if [ "$(api_listen_address)" = "0.0.0.0" ]; then
-        LAN_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
-        log "Preserving existing LAN GUI configuration and console credentials."
-    fi
+    case "$(api_listen_address)" in
+        0.0.0.0)
+            LAN_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
+            log "Preserving existing LAN GUI configuration and console credentials."
+            ;;
+        127.0.0.1|*)
+            # Legacy / fresh re-run: the GUI is still on loopback, so enable LAN
+            # access on this re-run. Opt out with DAYGLE_LAN_GUI=0.
+            LAN_SETUP=1
+            ;;
+    esac
 fi
 
 if [ "$LAN_SETUP" = "1" ]; then
@@ -475,6 +482,15 @@ if [ "$LAN_SETUP" = "1" ]; then
     ' "$CONFIG_FILE" > "$CONFIG_FILE.tmp" && mv "$CONFIG_FILE.tmp" "$CONFIG_FILE"
     chown "$SERVICE_USER":"$SERVICE_USER" "$CONFIG_FILE" 2>/dev/null || true
 
+    # Best-effort verification: if the awk pattern did not match the actual
+    # listen line (unusual formatting, different quoting, a comment, etc.)
+    # force the bind with a second, more explicit pass so the LAN GUI is
+    # reachable without requiring the user to hand-edit the config.
+    if [ "$(api_listen_address)" != "0.0.0.0" ]; then
+        sed -i 's/^\(\s*listen\s*=\s*\)"[^"]*"/\1"0.0.0.0"/' "$CONFIG_FILE"
+        chown "$SERVICE_USER":"$SERVICE_USER" "$CONFIG_FILE" 2>/dev/null || true
+    fi
+
     if [ "$PRESERVE_USERS" != "1" ] && [ -n "${ADMIN_USER:-}" ] && [ -n "${ADMIN_PASSWORD:-}" ]; then
         # Fresh install with explicit credentials: also write the admin account
         # to the config so the GUI is reachable immediately without the setup page.
@@ -520,5 +536,18 @@ EOF
 
     if command -v systemctl >/dev/null 2>&1; then
         systemctl restart daygle-dns 2>/dev/null || true
+        # Verify the API listener actually landed on 0.0.0.0 after restart.
+        # If it didn't (for example the service failed to start, or the bind
+        # was overridden by a runtime config overlay), tell the user plainly
+        # so they are not left guessing why the LAN URL does not answer.
+        sleep 1
+        ACTUAL_LISTEN="$(api_listen_address)"
+        if [ "$ACTUAL_LISTEN" = "0.0.0.0" ]; then
+            :
+        elif [ -n "$LAN_IP" ]; then
+            log "NOTE: the web GUI is listening on $ACTUAL_LISTEN:5380, not on the LAN."
+            log "      If the GUI is not reachable from other machines, re-run the installer with"
+            log "      DAYGLE_LAN_GUI=1, or edit $CONFIG_FILE and set listen = \"0.0.0.0\" under [api]."
+        fi
     fi
 fi
