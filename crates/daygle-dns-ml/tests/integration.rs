@@ -11,9 +11,7 @@ use daygle_dns_ml::AiEngine;
 use tempfile::TempDir;
 
 fn tmp_store(dir: &TempDir) -> Arc<AiStore> {
-    Arc::new(
-        AiStore::open(&dir.path().join("ai.db")).expect("AI store opens"),
-    )
+    Arc::new(AiStore::open(&dir.path().join("ai.db")).expect("AI store opens"))
 }
 
 fn settings(mode: AiMode) -> AiSettings {
@@ -41,13 +39,36 @@ fn verdict_lifecycle_and_expiry() {
 
     store.observe("bad.example.net").unwrap();
     store
-        .save_verdict("bad.example.net", "phishing", "threat", "classified", 0.995, "fasttext", "minilm",
-                      7 * 86400)
+        .save_verdict(
+            "bad.example.net",
+            "phishing",
+            "threat",
+            "classified",
+            0.995,
+            "fasttext",
+            "minilm",
+            7 * 86400,
+        )
         .unwrap();
     let (rows, total) = store.list_verdicts(Some("classified"), 100, 0).unwrap();
     assert_eq!(total, 1);
-    let VerdictRow { domain, category, severity, status, confidence, .. } = &rows[0];
-    assert_eq!((domain.as_str(), category.as_str(), severity.as_str(), status.as_str()), ("bad.example.net", "phishing", "threat", "classified"));
+    let VerdictRow {
+        domain,
+        category,
+        severity,
+        status,
+        confidence,
+        ..
+    } = &rows[0];
+    assert_eq!(
+        (
+            domain.as_str(),
+            category.as_str(),
+            severity.as_str(),
+            status.as_str()
+        ),
+        ("bad.example.net", "phishing", "threat", "classified")
+    );
     assert!(*confidence > 0.9);
 
     // Fresh threat is listed as block-eligible.
@@ -63,7 +84,10 @@ fn verdict_lifecycle_and_expiry() {
     assert_eq!(rows.len(), 1);
     // No longer fresh ⇒ no longer block-eligible (freshly-scanned again).
     assert_eq!(
-        store.fresh_blocked(now + 7 * 86400 + 2, 0.99).unwrap().len(),
+        store
+            .fresh_blocked(now + 7 * 86400 + 2, 0.99)
+            .unwrap()
+            .len(),
         0,
         "expired verdicts must not stay block-eligible"
     );
@@ -75,13 +99,23 @@ fn allow_override_vetoes_block_snapshot() {
     let store = tmp_store(&dir);
     store.observe("site.example.org").unwrap();
     store
-        .save_verdict("site.example.org", "malware", "threat", "classified", 1.0, "fasttext", "evidence",
-                      3600)
+        .save_verdict(
+            "site.example.org",
+            "malware",
+            "threat",
+            "classified",
+            1.0,
+            "fasttext",
+            "evidence",
+            3600,
+        )
         .unwrap();
     let now = chrono::Utc::now().timestamp();
     assert_eq!(store.fresh_blocked(now, 0.99).unwrap().len(), 1);
 
-    store.set_override("site.example.org", "allow", "customer wants it").unwrap();
+    store
+        .set_override("site.example.org", "allow", "customer wants it")
+        .unwrap();
     assert_eq!(
         store.fresh_blocked(now, 0.99).unwrap().len(),
         0,
@@ -95,8 +129,10 @@ fn allow_override_vetoes_block_snapshot() {
 
 fn zone_store(dir: &TempDir) -> Arc<daygle_dns_authoritative::ZoneStore> {
     Arc::new(
-        daygle_dns_authoritative::ZoneStore::open(&dir.path().join("zones.db").display().to_string())
-            .unwrap(),
+        daygle_dns_authoritative::ZoneStore::open(
+            &dir.path().join("zones.db").display().to_string(),
+        )
+        .unwrap(),
     )
 }
 
@@ -119,8 +155,12 @@ fn scanner_cycle_classifies_query_log_domains() {
     let dir = TempDir::new().unwrap();
     let zones = zone_store(&dir);
     let now_rfc3339 = chrono::Utc::now().to_rfc3339();
-    zones.insert_query_log(&log_row(&now_rfc3339, "evil-virus-site.net")).unwrap();
-    zones.insert_query_log(&log_row(&now_rfc3339, "plain-news.example")).unwrap();
+    zones
+        .insert_query_log(&log_row(&now_rfc3339, "evil-virus-site.net"))
+        .unwrap();
+    zones
+        .insert_query_log(&log_row(&now_rfc3339, "plain-news.example"))
+        .unwrap();
 
     let ai = AiEngine::new(
         &settings(AiMode::Train),
@@ -143,8 +183,8 @@ fn scanner_cycle_classifies_query_log_domains() {
         "heuristic backend should class the malware keyword domain: {rows:?}"
     );
     assert!(
-        rows.iter().any(|r| r.domain == "plain-news.example"
-            && r.status == "skipped"),
+        rows.iter()
+            .any(|r| r.domain == "plain-news.example" && r.status == "skipped"),
         "no-signal domains are skipped, not classified: {rows:?}"
     );
 
@@ -159,7 +199,9 @@ fn enforce_mode_populates_snapshot_train_does_not() {
     let dir = TempDir::new().unwrap();
     let zones = zone_store(&dir);
     let now_rfc3339 = chrono::Utc::now().to_rfc3339();
-    zones.insert_query_log(&log_row(&now_rfc3339, "evil-virus-site.net")).unwrap();
+    zones
+        .insert_query_log(&log_row(&now_rfc3339, "evil-virus-site.net"))
+        .unwrap();
 
     // Train mode: nothing in the snapshot.
     let train = AiEngine::new(
@@ -199,13 +241,31 @@ fn expired_verdicts_are_requeued_and_visible_again() {
     store.observe("x.example").unwrap();
     // 1-second TTL verdict already expired by the time we check.
     store
-        .save_verdict("x.example", "gambling", "info", "classified", 0.8, "fasttext", "ev", 1)
+        .save_verdict(
+            "x.example",
+            "gambling",
+            "info",
+            "classified",
+            0.8,
+            "fasttext",
+            "ev",
+            1,
+        )
         .unwrap();
     let now = chrono::Utc::now().timestamp();
     assert_eq!(store.expire_old(now + 5, 100).unwrap(), 1);
     // The row is pending again; a later save (new scan) overwrites the verdict.
     store
-        .save_verdict("x.example", "news", "info", "classified", 0.85, "fasttext", "ev2", 3600)
+        .save_verdict(
+            "x.example",
+            "news",
+            "info",
+            "classified",
+            0.85,
+            "fasttext",
+            "ev2",
+            3600,
+        )
         .unwrap();
     let (rows, _) = store.list_verdicts(None, 100, 0).unwrap();
     assert_eq!(rows[0].category, "news");
@@ -220,7 +280,16 @@ fn engine_snapshot_never_contains_below_threshold_verdicts() {
     store.observe("t.example").unwrap();
     // Threat verdict just below the default 0.99 threshold.
     store
-        .save_verdict("t.example", "phishing", "threat", "classified", 0.97, "fasttext", "ev", 3600)
+        .save_verdict(
+            "t.example",
+            "phishing",
+            "threat",
+            "classified",
+            0.97,
+            "fasttext",
+            "ev",
+            3600,
+        )
         .unwrap();
     let now = chrono::Utc::now().timestamp();
     assert_eq!(store.fresh_blocked(now, 0.99).unwrap().len(), 0);

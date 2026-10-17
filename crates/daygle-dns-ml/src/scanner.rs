@@ -95,7 +95,8 @@ impl Scanner {
         let mut skipped_new = 0usize;
         let mut candidates = 0usize;
         {
-            let names = source.distinct_recent_query_names(since_epoch, cfg.max_domains_per_scan)?;
+            let names =
+                source.distinct_recent_query_names(since_epoch, cfg.max_domains_per_scan)?;
             for name in names {
                 let name = name.trim_end_matches('.').to_ascii_lowercase();
                 if !looks_like_domain(&name) {
@@ -265,9 +266,9 @@ pub fn looks_like_domain(name: &str) -> bool {
     name.split('.').all(|label| {
         !label.is_empty()
             && label.len() <= 63
-            && label.bytes().all(|b| {
-                b.is_ascii_alphanumeric() || b == b'-' || b == b'_'
-            })
+            && label
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
             && !label.starts_with('-')
             && !label.ends_with('-')
     })

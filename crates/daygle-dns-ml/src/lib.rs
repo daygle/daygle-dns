@@ -82,8 +82,10 @@ impl AiEngine {
             if settings.model_path.trim().is_empty() {
                 Box::new(heuristic::HeuristicBackend)
             } else {
-            Box::new(fasttext_backend::FastTextBackend::load(&settings.model_path)?)
-        };
+                Box::new(fasttext_backend::FastTextBackend::load(
+                    &settings.model_path,
+                )?)
+            };
 
         let settings = Arc::new(ArcSwap::from_pointee(settings.clone()));
         let snapshot = Arc::new(ArcSwap::from_pointee(BlockSnapshot::new()));

@@ -49,10 +49,7 @@ impl AiBlockPlugin {
         snapshot: Arc<ArcSwap<BlockSnapshot>>,
         settings: Arc<ArcSwap<AiSettings>>,
     ) -> Arc<Self> {
-        Arc::new(Self {
-            snapshot,
-            settings,
-        })
+        Arc::new(Self { snapshot, settings })
     }
 }
 

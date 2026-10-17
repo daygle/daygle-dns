@@ -30,7 +30,15 @@ const RULES: &[Rule] = &[
         severity: Severity::Info,
     },
     Rule {
-        tokens: &["casino", "gambling", "poker", "bingo", "bookmaker", "lottery", "bet"],
+        tokens: &[
+            "casino",
+            "gambling",
+            "poker",
+            "bingo",
+            "bookmaker",
+            "lottery",
+            "bet",
+        ],
         category: "gambling",
         rule_confidence: 0.3,
         severity: Severity::Info,
@@ -42,7 +50,13 @@ const RULES: &[Rule] = &[
         severity: Severity::Threat,
     },
     Rule {
-        tokens: &["phishing", "phish", "credential", "loginpage", "securelogin"],
+        tokens: &[
+            "phishing",
+            "phish",
+            "credential",
+            "loginpage",
+            "securelogin",
+        ],
         category: "phishing",
         rule_confidence: 0.3,
         severity: Severity::Threat,

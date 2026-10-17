@@ -162,15 +162,7 @@ impl AiStore {
                  backend = ?6, evidence = ?7, classified_at = ?8, expires_at = ?9
              WHERE domain = ?1 AND status = 'pending'",
             params![
-                domain,
-                category,
-                severity,
-                status,
-                confidence,
-                backend,
-                evidence,
-                now,
-                expires_at
+                domain, category, severity, status, confidence, backend, evidence, now, expires_at
             ],
         )?;
         Ok(())
@@ -189,7 +181,9 @@ impl AiStore {
              LIMIT ?2",
         )?;
         let collected = stmt
-            .query_map(params![until_epoch, limit as i64], |r| r.get::<_, String>(0))?
+            .query_map(params![until_epoch, limit as i64], |r| {
+                r.get::<_, String>(0)
+            })?
             .collect::<std::result::Result<Vec<String>, _>>()?;
         drop(stmt);
         let mut requeued = 0usize;
@@ -252,12 +246,10 @@ impl AiStore {
     /// again. Returns whether one existed.
     pub fn clear_override(&self, domain: &str) -> Result<bool> {
         let conn = self.lock()?;
-        Ok(conn
-            .execute(
-                "DELETE FROM ai_overrides WHERE domain = ?1",
-                params![domain],
-            )?
-            > 0)
+        Ok(conn.execute(
+            "DELETE FROM ai_overrides WHERE domain = ?1",
+            params![domain],
+        )? > 0)
     }
 
     /// Whether the domain has an `allow` override.
@@ -339,8 +331,7 @@ impl AiStore {
     /// Per-status counts, for the status endpoint (missing statuses are absent).
     pub fn status_counts(&self) -> Result<Vec<(String, usize)>> {
         let conn = self.lock()?;
-        let mut stmt = conn
-            .prepare("SELECT status, COUNT(*) FROM ai_verdicts GROUP BY status")?;
+        let mut stmt = conn.prepare("SELECT status, COUNT(*) FROM ai_verdicts GROUP BY status")?;
         let collected = stmt
             .query_map([], |r| {
                 Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? as usize))

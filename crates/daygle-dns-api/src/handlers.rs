@@ -712,10 +712,10 @@ pub async fn ai_status(State(state): State<AppState>) -> Response {
         Ok(s) => s,
         Err(e) => return map_err(e),
     };
-    let threats = match ai.store.threat_counts(
-        chrono::Utc::now().timestamp(),
-        settings.block_threshold,
-    ) {
+    let threats = match ai
+        .store
+        .threat_counts(chrono::Utc::now().timestamp(), settings.block_threshold)
+    {
         Ok(t) => t,
         Err(e) => return map_err(e),
     };
@@ -801,7 +801,9 @@ pub async fn ai_override(
         && domain.split('.').all(|label| {
             !label.is_empty()
                 && label.len() <= 63
-                && label.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+                && label
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-')
                 && !label.starts_with('-')
                 && !label.ends_with('-')
         });

@@ -1900,11 +1900,7 @@ impl ZoneStore {
     /// `limit` (including previously-seen names). Used by the AI scanner to
     /// harvest domains from live traffic without duplicating work; the query
     /// log's qname index keeps this cheap even on large logs.
-    pub fn distinct_recent_query_names(
-        &self,
-        since_epoch: i64,
-        limit: u32,
-    ) -> Result<Vec<String>> {
+    pub fn distinct_recent_query_names(&self, since_epoch: i64, limit: u32) -> Result<Vec<String>> {
         let cutoff = Utc::now()
             .checked_sub_signed(chrono::Duration::seconds(since_epoch))
             .unwrap_or(chrono::DateTime::<Utc>::UNIX_EPOCH)
