@@ -1068,7 +1068,10 @@ pub async fn create_zone(
     let mut zone_input = ZoneInput {
         name: input.name.clone(),
         primary_ns: input.primary_ns.clone(),
-        admin_mailbox: input.admin_mailbox.clone().or_else(|| input.default_admin_mailbox.clone()),
+        admin_mailbox: input
+            .admin_mailbox
+            .clone()
+            .or_else(|| input.default_admin_mailbox.clone()),
         serial: input.serial,
         refresh: input.refresh,
         retry: input.retry,

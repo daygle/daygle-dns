@@ -414,7 +414,7 @@ impl RuntimeSettings {
                 filter_aaaa: Some(config.policy.filter_aaaa),
                 filter_aaaa_except: Some(config.policy.filter_aaaa_except.clone()),
             }),
-            authoritative: Some(            AuthoritativeUpdate {
+            authoritative: Some(AuthoritativeUpdate {
                 default_record_ttl: Some(config.authoritative.default_record_ttl),
                 default_admin_mailbox: Some(config.authoritative.default_admin_mailbox.clone()),
                 axfr_enabled: Some(config.authoritative.axfr_enabled),
