@@ -91,6 +91,12 @@ pub struct AuthoritativeUpdate {
     /// Default SOA contact mailbox used when a zone is created.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_admin_mailbox: Option<String>,
+    /// Default SOA primary nameserver (MNAME) used when a zone is created
+    /// without one; typically this server's own hostname (e.g.
+    /// "ns1.example.com."). Exposed in the console's Settings page as "DNS
+    /// Server Domain" instead of guessing "ns1.<zone>".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_primary_ns: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub axfr_enabled: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -352,6 +358,19 @@ impl RuntimeSettings {
             if let Some(v) = &a.default_admin_mailbox {
                 config.authoritative.default_admin_mailbox = v.clone();
             }
+            if let Some(v) = &a.default_primary_ns {
+                let v = v.trim();
+                if !v.is_empty() {
+                    // SOA MNAME is conventionally fully qualified; store the
+                    // trailing dot even when the user omitted it. Blank input
+                    // keeps the current value.
+                    config.authoritative.default_primary_ns = if v.ends_with('.') {
+                        v.to_string()
+                    } else {
+                        format!("{v}.")
+                    };
+                }
+            }
         }
     }
 
@@ -417,6 +436,7 @@ impl RuntimeSettings {
             authoritative: Some(AuthoritativeUpdate {
                 default_record_ttl: Some(config.authoritative.default_record_ttl),
                 default_admin_mailbox: Some(config.authoritative.default_admin_mailbox.clone()),
+                default_primary_ns: Some(config.authoritative.default_primary_ns.clone()),
                 axfr_enabled: Some(config.authoritative.axfr_enabled),
                 axfr_networks: Some(config.authoritative.axfr_networks.clone()),
                 allow_dynamic_updates: Some(config.authoritative.allow_dynamic_updates),

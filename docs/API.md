@@ -59,13 +59,16 @@ Additional endpoints:
 | `POST /api/auth/logout` | revoke the presented token |
 | `POST /api/auth/password` | signed-in user rotates their own password (current password required; other sessions revoked) |
 | `GET /api/auth/setup` | whether the one-time first-run setup is still pending |
-| `POST /api/auth/setup` | one-time creation of the first admin account (returns a session) |
+| `POST /api/auth/setup` | one-time creation of the first admin account (returns a session); body: `{ "username", "password" }` plus optional `name` (first/last display name), `email` |
 | `GET /api/users` | list accounts (password hashes redacted) |
 | `POST /api/users` | create an account (`username`, `password`, optional `role`) |
 | `PATCH /api/users/{username}` | reset password / change role / enable-disable |
 | `DELETE /api/users/{username}` | delete an account |
 
-The last enabled `admin` account cannot be deleted, demoted, or disabled.
+The last enabled `admin` account cannot be deleted, demoted, or disabled. The initial admin account may be created with an optional display name (`name`, stored as `first_name`/`last_name`) and `email`; these follow the same profile fields as accounts created through `POST /api/users` and can be edited later.
+
+Password, role, and enabled changes (and deletions) immediately revoke the
+affected account's sessions; disabled accounts cannot log in.
 Password, role, and enabled changes (and deletions) immediately revoke the
 affected account's sessions; disabled accounts cannot log in.
 
@@ -248,12 +251,24 @@ PUT /api/config
 
 Editable groups: `server` (listen/port/udp_enabled/tcp_enabled), `recursive`
 (enabled/upstreams/dnssec_validate/prefetch_* /serve_stale_secs), `dot`,
-`doh`, `doq` (enabled/port/self_signed/server_name [+ `doh.endpoint`]), and
-`api` (gui_enabled/cors_origins). Runtime groups (`recursive`, `dot`, `doh`,
-`doq`, `policy`) are stored in the database and survive restarts and
+`doh`, `doq` (enabled/port/self_signed/server_name [+ `doh.endpoint`]), `api`
+(gui_enabled/cors_origins), and `authoritative`
+(default_record_ttl/default_primary_ns/axfr_enabled/axfr_networks/
+allow_dynamic_updates/update_networks/notify_enabled/notify_targets/
+notify_listen_enabled). Runtime groups (`recursive`, `dot`, `doh`, `doq`,
+`policy`, `authoritative`) are stored in the database and survive restarts and
 config-file edits; `server.*` and `api.*` stay config-file-owned so a broken
 listener can always be fixed by editing the file. Login users are managed
 from the console's **Users** page (see [Console users and roles](#console-users-and-roles)).
+
+The `authoritative` group holds zone-creation defaults. Of note:
+`authoritative.default_primary_ns` (the console's **DNS Server Domain**
+setting under Settings → Zones & Records) is used as the SOA Primary
+Nameserver (MNAME) — and to synthesize the zone's default `@` NS record — for
+zones created without an explicit `primary_ns`, instead of assuming
+`ns1.<zone>`. The value is normalized to a fully-qualified name (a trailing
+dot is added when missing) and a blank value keeps the current one; when the
+setting is unset, the server falls back to `ns1.<zone>.`.
 
 `POST /api/config` asks the server to re-read its configuration file and
 apply policy, upstream and listener changes immediately, without waiting for
@@ -296,7 +311,11 @@ POST /api/zones
 }
 ```
 
-Only `name` is required for a primary zone. `zone_type` defaults to `primary`.
+Only `name` is required for a primary zone. If `primary_ns` is omitted (and
+`import_text` carries no SOA), it defaults to
+`authoritative.default_primary_ns` — the **DNS Server Domain** setting (see
+[Configuration](#configuration)) — falling back to `ns1.<zone>.` when that is
+unset. `zone_type` defaults to `primary`.
 Set `serial_date_scheme` to `true` to generate a `YYYYMMDDnn`-style SOA
 serial. When `import_text` contains a BIND zone file, it is parsed and its
 records are imported; SOA fields from the file supply defaults unless explicit

@@ -197,6 +197,7 @@
         },
         authoritative: {
           default_record_ttl: Number(authoritative.default_record_ttl),
+          default_primary_ns: authoritative.default_primary_ns || '',
           axfr_enabled: !!authoritative.axfr_enabled,
           axfr_networks: parseLines(axfrNetworksText),
           allow_dynamic_updates: !!authoritative.allow_dynamic_updates,
@@ -288,13 +289,14 @@
   </div>
   {:else if tab === 'zones'}
   <div class="card" style="margin-bottom: 14px">
-    <h3 style="margin-top: 0">Records</h3>
+    <h3 style="margin-top: 0">Zones & Records</h3>
     <div class="form-grid">
       <label><span>Default Record TTL (Seconds)</span><input type="number" min="1" bind:value={authoritative.default_record_ttl} /></label>
+      <label><span>DNS Server Domain</span><input placeholder="ns1.dns.example.com." bind:value={authoritative.default_primary_ns} /></label>
     </div>
     <p class="muted help">
-      Pre-filled when adding records on the Records page. Existing records keep
-      their own TTL; change it there when needed.
+      Pre-fills the TTL when adding records: existing records keep their
+      own TTL. Zones created without an explicit Primary Nameserver on the Zones page use DNS Server Domain as their SOA MNAME.
     </p>
   </div>
 

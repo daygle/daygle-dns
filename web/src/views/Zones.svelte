@@ -65,6 +65,8 @@
   function openAddZone() {
     notice = null;
     resetZoneForm();
+    // Default the Primary Nameserver to the server's own DNS domain.
+    if (dnsServerDomain) newZone.primary_ns = dnsServerDomain;
     showAdd = true;
   }
 
@@ -77,7 +79,7 @@
     soaEdit = {
       zone,
       primary_ns: zone.primary_ns || '',
-      default_admin_mailbox: config.default_admin_mailbox || '',
+
       admin_mailbox: zone.admin_mailbox || '',
       serial: zone.serial,
       refresh: zone.refresh,
@@ -101,7 +103,7 @@
       const body = {
         primary_ns: form.primary_ns.trim(),
         admin_mailbox: form.admin_mailbox.trim(),
-        default_admin_mailbox: form.default_admin_mailbox.trim(),
+
         refresh: Number(form.refresh) || form.refresh,
         retry: Number(form.retry) || form.retry,
         expire: Number(form.expire) || form.expire,
@@ -198,7 +200,15 @@
     }
   }
 
-  $effect(() => { loadZones(); });
+  // Server config: DNS Server Domain (Settings -> Zones & Records) is used
+  // to pre-fill and placeholder the SOA Primary Nameserver for new zones.
+  let config = $state(null);
+  let dnsServerDomain = $derived(config?.authoritative?.default_primary_ns || '');
+
+  $effect(() => {
+    loadZones();
+    api.config().then((c) => (config = c)).catch(() => {});
+  });
 </script>
 
 <PageHeader
@@ -272,7 +282,7 @@
 
       <div class="section-title">SOA Settings</div>
       <div class="grid2">
-        <label>Primary Nameserver <input placeholder="ns1.example.com." bind:value={newZone.primary_ns} /></label>
+        <label>Primary Nameserver <input placeholder={dnsServerDomain || 'ns1.example.com.'} bind:value={newZone.primary_ns} /></label>
         <label>Default Administrator Mailbox <input placeholder="admin@example.com." bind:value={newZone.default_admin_mailbox} /></label>
         <label>Administrator Mailbox <input placeholder="admin.example.com." bind:value={newZone.admin_mailbox} /></label>
         <label>Serial <input type="number" min="1" bind:value={newZone.serial} disabled={newZone.serial_date_scheme} /></label>
@@ -314,7 +324,7 @@
 
       <div class="section-title">SOA Parameters</div>
       <div class="grid2">
-        <label>Primary Nameserver <input placeholder="ns1.example.com." bind:value={soaEdit.primary_ns} /></label>
+        <label>Primary Nameserver <input placeholder={dnsServerDomain || 'ns1.example.com.'} bind:value={soaEdit.primary_ns} /></label>
         <label>Administrator Mailbox <input placeholder="admin.example.com." bind:value={soaEdit.admin_mailbox} /></label>
         <label>Serial <input type="number" min="1" bind:value={soaEdit.serial} disabled={soaEdit.bumpSerial} /></label>
         <label class="checkbox"><span>Increment Serial on Save</span><input type="checkbox" bind:checked={soaEdit.bumpSerial} /></label>

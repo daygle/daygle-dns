@@ -1078,6 +1078,7 @@ pub async fn create_zone(
         expire: input.expire,
         minimum: input.minimum,
     };
+    let has_imported_soa = imported_soa.is_some();
     if let Some((primary_ns, admin_mailbox, serial, refresh, retry, expire, minimum)) = imported_soa
     {
         zone_input.primary_ns.get_or_insert(primary_ns);
@@ -1087,6 +1088,25 @@ pub async fn create_zone(
         zone_input.retry.get_or_insert(retry);
         zone_input.expire.get_or_insert(expire);
         zone_input.minimum.get_or_insert(minimum);
+    }
+    // No explicit nameserver and the imported zone file carried no SOA:
+    // default the SOA MNAME to the server's own DNS domain (Settings ->
+    // DNS Server Domain) rather than guessing "ns1.<zone>".
+    if zone_input.primary_ns.is_none() && !has_imported_soa {
+        let default_ns = state
+            .config
+            .load_full()
+            .authoritative
+            .default_primary_ns
+            .trim()
+            .to_string();
+        if !default_ns.is_empty() {
+            zone_input.primary_ns = Some(if default_ns.ends_with('.') {
+                default_ns
+            } else {
+                format!("{default_ns}.")
+            });
+        }
     }
     if input.serial_date_scheme {
         zone_input.serial = Some(date_serial().saturating_mul(100).saturating_add(1));
@@ -1928,6 +1948,18 @@ pub async fn auth_setup_status(State(state): State<AppState>) -> Response {
 pub struct SetupInput {
     username: String,
     password: String,
+    /// Optional display name for the initial admin account (stored as
+    /// the profile `first_name`).
+    #[serde(default)]
+    pub first_name: String,
+    /// Optional display surname for the initial admin account (stored as
+    /// the profile `last_name`).
+    #[serde(default)]
+    pub last_name: String,
+    /// Optional email for the initial admin account (stored as the
+    /// profile `email`).
+    #[serde(default)]
+    pub email: String,
 }
 
 /// `POST /api/auth/setup` - one-time creation of the first admin account.
@@ -1982,9 +2014,9 @@ pub async fn auth_setup(
             password_hash,
             role: daygle_dns_core::config::Role::Admin,
             enabled: true,
-            first_name: String::new(),
-            last_name: String::new(),
-            email: String::new(),
+            first_name: input.first_name.trim().to_string(),
+            last_name: input.last_name.trim().to_string(),
+            email: input.email.trim().to_string(),
         },
     ) {
         return map_err(e);
@@ -2263,6 +2295,7 @@ pub struct SettingsUpdate {
 #[serde(deny_unknown_fields)]
 pub struct AuthoritativeUpdate {
     pub default_record_ttl: Option<u32>,
+    pub default_primary_ns: Option<String>,
     pub axfr_enabled: Option<bool>,
     pub axfr_networks: Option<Vec<String>>,
     pub allow_dynamic_updates: Option<bool>,
@@ -2523,6 +2556,20 @@ pub async fn update_settings(
     if let Some(a) = &update.authoritative {
         if let Some(v) = a.default_record_ttl {
             config.authoritative.default_record_ttl = v;
+            authoritative_changed = true;
+        }
+        if let Some(v) = &a.default_primary_ns {
+            // Normalize to the fully-qualified form so the SOA MNAME is
+            // absolute regardless of whether the user typed the trailing
+            // dot; blank input keeps the current value.
+            let v = v.trim();
+            if !v.is_empty() {
+                config.authoritative.default_primary_ns = if v.ends_with('.') {
+                    v.to_string()
+                } else {
+                    format!("{v}.")
+                };
+            }
             authoritative_changed = true;
         }
         if let Some(v) = a.axfr_enabled {
