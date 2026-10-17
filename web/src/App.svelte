@@ -11,6 +11,8 @@
   import Blocklists from './views/Blocklists.svelte';
   import AdvancedBlocking from './views/AdvancedBlocking.svelte';
   import Settings from './views/Settings.svelte';
+  import AiStatus from './views/AiStatus.svelte';
+  import AiVerdicts from './views/AiVerdicts.svelte';
   import Cache from './views/Cache.svelte';
   import Users from './views/Users.svelte';
   import Certificates from './views/Certificates.svelte';
@@ -162,6 +164,8 @@
     { id: 'blocklists', label: 'Blocklists', icon: icons.blocklists, viewer: true },
     { id: 'domain-lists', label: 'Domain Lists', icon: icons['domain-lists'], viewer: true },
     { id: 'advanced-blocking', label: 'Advanced Blocking', icon: icons['advanced-blocking'], viewer: true },
+    { id: 'ai-status', label: 'AI Scanner', icon: icons.ai, viewer: true },
+    { id: 'ai-verdicts', label: 'AI Verdicts', icon: icons.ai, viewer: true },
     { id: 'cache', label: 'Cache', icon: icons.cache },
     { id: 'users', label: 'Users', icon: icons.users },
     { id: 'certificates', label: 'Certificates', icon: icons.certificates },
@@ -312,6 +316,10 @@
         <Certificates />
       {:else if view === 'advanced-blocking'}
         <AdvancedBlocking />
+      {:else if view === 'ai-status'}
+        <AiStatus />
+      {:else if view === 'ai-verdicts'}
+        <AiVerdicts />
       {:else if view === 'about'}
         <About />
       {:else if view === 'update'}

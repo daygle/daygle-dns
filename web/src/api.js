@@ -200,6 +200,12 @@ export const api = {
     request('DELETE', `/split-horizon/entries/${id}`),
   moveSplitHorizonEntry: (id, direction) =>
     request('POST', `/split-horizon/entries/${id}/move`, { direction }),
+  // ---- AI subsystem (404 = the [ai] section is disabled) ----
+  aiStatus: () => request('GET', '/ai/status'),
+  aiVerdicts: (qs) => request('GET', `/ai/verdicts${qs ? `?${qs}` : ''}`),
+  aiOverride: (domain, action, reason = '') =>
+    request('POST', '/ai/override', { domain, action, reason }),
+  aiRescan: () => request('POST', '/ai/rescan'),
 };
 
  

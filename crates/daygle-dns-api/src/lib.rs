@@ -42,6 +42,10 @@
 //! | `POST`   | `/api/policy/blocklist/sources`   | force an immediate refresh of every source |
 //! | `PUT`    | `/api/policy/blocklist/sources`   | replace the configured sources (console CRUD) |
 //! | `GET`    | `/api/policy/blocklist/sources/validate` | probe a URL and validate / auto-detect its format |
+//! | `GET`    | `/api/ai/status`                  | AI scanner configuration and per-status counts |
+//! | `GET`    | `/api/ai/verdicts`                | paginated per-domain AI verdicts |
+//! | `POST`   | `/api/ai/override`                | allow-exempt or clear overrides for a domain |
+//! | `POST`   | `/api/ai/rescan`                  | wake the scanner for an immediate cycle |
 //!
 //! Auth endpoints: `POST /api/auth/login`, `POST /api/auth/logout`,
 //! `GET /api/auth/me`, plus the one-time first-run setup
