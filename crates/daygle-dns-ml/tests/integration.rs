@@ -4,7 +4,6 @@
 
 use std::sync::Arc;
 
-use arc_swap::ArcSwap;
 use daygle_dns_core::config::{AiMode, AiSettings};
 use daygle_dns_core::LogStore;
 use daygle_dns_ml::store::{AiStore, VerdictRow};

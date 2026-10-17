@@ -1907,7 +1907,7 @@ impl ZoneStore {
     ) -> Result<Vec<String>> {
         let cutoff = Utc::now()
             .checked_sub_signed(chrono::Duration::seconds(since_epoch))
-            .unwrap_or_else(|| chrono::DateTime::<Utc>::UNIX_EPOCH)
+            .unwrap_or(chrono::DateTime::<Utc>::UNIX_EPOCH)
             .to_rfc3339();
         let conn = self.lock_conn()?;
         let mut stmt = conn.prepare(

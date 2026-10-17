@@ -92,7 +92,7 @@ impl DomainClassifier for HeuristicBackend {
         // Lowercase once; split on dots and hyphens - real sub-label boundary.
         let hay = format!("{} {} {}", input.domain, input.title, input.text);
         let labels: Vec<&str> = hay
-            .split(|c: char| c == '.' || c == '-' || c == '/' || c == ' ')
+            .split(['.', '-', '/', ' '])
             .filter(|s| !s.is_empty())
             .collect();
         for rule in RULES {

@@ -698,15 +698,13 @@ pub async fn clear_query_logs(State(state): State<AppState>) -> Response {
 // Every endpoint 404s when the AI subsystem is disabled, mirroring how the
 // blocklist-source endpoints treat an empty configuration.
 
-fn ai_engine(state: &AppState) -> Result<Arc<daygle_dns_ml::AiEngine>, Response> {
-    state.ai.clone().ok_or_else(|| {
-        map_err(daygle_dns_ml::ai_disabled_error())
-    })
+fn ai_engine(state: &AppState) -> Option<Arc<daygle_dns_ml::AiEngine>> {
+    state.ai.clone()
 }
 
 /// `GET /api/ai/status` - scanner configuration and per-status counts.
 pub async fn ai_status(State(state): State<AppState>) -> Response {
-    let Ok(ai) = ai_engine(&state) else {
+    let Some(ai) = ai_engine(&state) else {
         return map_err(daygle_dns_ml::ai_disabled_error());
     };
     let settings = ai.settings.load();
@@ -755,7 +753,7 @@ pub async fn ai_verdicts(
     State(state): State<AppState>,
     Query(query): Query<AiVerdictsQuery>,
 ) -> Response {
-    let Ok(ai) = ai_engine(&state) else {
+    let Some(ai) = ai_engine(&state) else {
         return map_err(daygle_dns_ml::ai_disabled_error());
     };
     match ai.store.list_verdicts(query.status.as_deref(), query.per_page.unwrap_or(50),
@@ -794,7 +792,7 @@ pub async fn ai_override(
     State(state): State<AppState>,
     Json(body): Json<AiOverrideBody>,
 ) -> Response {
-    let Ok(ai) = ai_engine(&state) else {
+    let Some(ai) = ai_engine(&state) else {
         return map_err(daygle_dns_ml::ai_disabled_error());
     };
     let domain = body.domain.trim().trim_matches('.').to_ascii_lowercase();
@@ -854,7 +852,7 @@ pub async fn ai_override(
 
 /// `POST /api/ai/rescan` - wake the scanner for an immediate cycle.
 pub async fn ai_rescan(State(state): State<AppState>) -> Response {
-    let Ok(ai) = ai_engine(&state) else {
+    let Some(ai) = ai_engine(&state) else {
         return map_err(daygle_dns_ml::ai_disabled_error());
     };
     ai.trigger_rescan();
