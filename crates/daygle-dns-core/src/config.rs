@@ -88,6 +88,9 @@ pub struct RecursiveUpdate {
 pub struct AuthoritativeUpdate {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_record_ttl: Option<u32>,
+    /// Default SOA contact mailbox used when a zone is created.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_admin_mailbox: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub axfr_enabled: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -346,6 +349,9 @@ impl RuntimeSettings {
             if let Some(v) = a.notify_listen_enabled {
                 config.authoritative.notify_listen_enabled = v;
             }
+            if let Some(v) = &a.default_admin_mailbox {
+                config.authoritative.default_admin_mailbox = v.clone();
+            }
         }
     }
 
@@ -408,8 +414,9 @@ impl RuntimeSettings {
                 filter_aaaa: Some(config.policy.filter_aaaa),
                 filter_aaaa_except: Some(config.policy.filter_aaaa_except.clone()),
             }),
-            authoritative: Some(AuthoritativeUpdate {
+            authoritative: Some(            AuthoritativeUpdate {
                 default_record_ttl: Some(config.authoritative.default_record_ttl),
+                default_admin_mailbox: Some(config.authoritative.default_admin_mailbox.clone()),
                 axfr_enabled: Some(config.authoritative.axfr_enabled),
                 axfr_networks: Some(config.authoritative.axfr_networks.clone()),
                 allow_dynamic_updates: Some(config.authoritative.allow_dynamic_updates),

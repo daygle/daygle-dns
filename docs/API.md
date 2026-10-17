@@ -283,6 +283,7 @@ POST /api/zones
   "zone_type": "primary",
   "primary_ns": "ns1.example.com.",
   "admin_mailbox": "admin.example.com.",
+  "default_admin_mailbox": null,
   "serial": 1,
   "refresh": 3600,
   "retry": 600,

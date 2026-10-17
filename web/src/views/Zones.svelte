@@ -21,6 +21,7 @@
     zone_type: 'primary',
     primary_ns: '',
     admin_mailbox: '',
+    default_admin_mailbox: '',
     serial: 1,
     refresh: 3600,
     retry: 600,
@@ -46,6 +47,7 @@
       name: '',
       zone_type: 'primary',
       primary_ns: '',
+      default_admin_mailbox: '',
       admin_mailbox: '',
       serial: 1,
       refresh: 3600,
@@ -75,6 +77,7 @@
     soaEdit = {
       zone,
       primary_ns: zone.primary_ns || '',
+      default_admin_mailbox: config.default_admin_mailbox || '',
       admin_mailbox: zone.admin_mailbox || '',
       serial: zone.serial,
       refresh: zone.refresh,
@@ -98,6 +101,7 @@
       const body = {
         primary_ns: form.primary_ns.trim(),
         admin_mailbox: form.admin_mailbox.trim(),
+        default_admin_mailbox: form.default_admin_mailbox.trim(),
         refresh: Number(form.refresh) || form.refresh,
         retry: Number(form.retry) || form.retry,
         expire: Number(form.expire) || form.expire,
@@ -149,7 +153,8 @@
         name,
         zone_type: newZone.zone_type,
         primary_ns: newZone.primary_ns.trim() || null,
-        admin_mailbox: newZone.admin_mailbox.trim() || null,
+        admin_mailbox: newZone.admin_mailbox.trim() || newZone.default_admin_mailbox.trim() || null,
+        default_admin_mailbox: newZone.default_admin_mailbox.trim() || null,
         serial: newZone.serial_date_scheme ? null : Number(newZone.serial) || 1,
         refresh: Number(newZone.refresh) || 3600,
         retry: Number(newZone.retry) || 600,
@@ -268,6 +273,7 @@
       <div class="section-title">SOA Settings</div>
       <div class="grid2">
         <label>Primary Nameserver <input placeholder="ns1.example.com." bind:value={newZone.primary_ns} /></label>
+        <label>Default Administrator Mailbox <input placeholder="admin@example.com." bind:value={newZone.default_admin_mailbox} /></label>
         <label>Administrator Mailbox <input placeholder="admin.example.com." bind:value={newZone.admin_mailbox} /></label>
         <label>Serial <input type="number" min="1" bind:value={newZone.serial} disabled={newZone.serial_date_scheme} /></label>
         <label class="checkbox"><span>Use SOA Serial Date Scheme</span><input type="checkbox" bind:checked={newZone.serial_date_scheme} /></label>

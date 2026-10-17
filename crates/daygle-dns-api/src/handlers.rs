@@ -916,6 +916,11 @@ pub struct CreateZoneInput {
     pub zone_type: String,
     pub primary_ns: Option<String>,
     pub admin_mailbox: Option<String>,
+    /// Default SOA contact mailbox for zones created by this request; when
+    /// not provided the API falls back to the server's
+    /// `authoritative.default_admin_mailbox` setting.
+    #[serde(default)]
+    pub default_admin_mailbox: Option<String>,
     pub serial: Option<u32>,
     pub refresh: Option<u32>,
     pub retry: Option<u32>,
@@ -1063,7 +1068,7 @@ pub async fn create_zone(
     let mut zone_input = ZoneInput {
         name: input.name.clone(),
         primary_ns: input.primary_ns.clone(),
-        admin_mailbox: input.admin_mailbox.clone(),
+        admin_mailbox: input.admin_mailbox.clone().or_else(|| input.default_admin_mailbox.clone()),
         serial: input.serial,
         refresh: input.refresh,
         retry: input.retry,

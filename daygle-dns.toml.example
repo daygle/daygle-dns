@@ -65,6 +65,8 @@ database = "/var/lib/daygle-dns/daygle.db"
 zones_dir = "/etc/daygle-dns/zones"
 default_primary_ns = "ns1.daygle.test."
 default_admin_mailbox = "admin.daygle.test."
+# Default administrator mailbox used as the SOA contact for zones created
+# by the console/API when no explicit mailbox is given.
 # Default TTL (seconds) pre-filled when adding records in the console.
 # Also the fallback when an API record update omits the TTL.
 default_record_ttl = 3600
