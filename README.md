@@ -45,9 +45,8 @@ Daygle combines, in a single process:
 - A **searchable query log**: every served query is recorded into SQLite
   (client, name, type, transport, outcome, rcode, duration) with retention,
   and the console's **Logs → Query Logs** tab filters, paginates, live-updates
-  and CSV-exports the history.
-- A **REST API** (tower/axum) for configuration, zone management, logs, and
-  metrics.
+  and CSV-exports the history.- A **REST API** (tower/axum) for configuration, zone management, logs, and
+metrics.
 - An embedded **Svelte** web GUI with **username/password login and roles**
   (`admin` = full access, `viewer` = read-only), editable settings forms for
   server/recursive/DoT/DoH/DoQ/API, zones, records, split horizon, status,

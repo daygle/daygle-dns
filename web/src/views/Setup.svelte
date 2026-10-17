@@ -4,6 +4,10 @@
   let username = '';
   let password = '';
   let confirm = '';
+  // Optional profile fields shown on the initial admin account.
+  let firstName = '';
+  let lastName = '';
+  let email = '';
   let error = '';
   let loading = false;
 
@@ -36,7 +40,7 @@
 
     loading = true;
     try {
-      const resp = await api.setup(username.trim(), password);
+      const resp = await api.setup(username.trim(), password, firstName, email);
       if (resp && resp.token) {
         window.location.href = '/';
       } else {
@@ -63,6 +67,13 @@
 
       <label for="confirm">Confirm Password</label>
       <input id="confirm" type="password" bind:value={confirm} autocomplete="new-password" />
+
+      <label for="name">Name</label>
+      <input id="name" type="text" bind:value={firstName} placeholder="First" autocomplete="off" />
+      <input type="text" bind:value={lastName} placeholder="Last" autocomplete="off" />
+
+      <label for="email">Email</label>
+      <input id="email" type="email" bind:value={email} placeholder="you@example.com" autocomplete="off" />
 
       {#if error}
         <div class="error">{error}</div>

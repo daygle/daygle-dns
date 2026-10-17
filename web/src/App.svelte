@@ -277,12 +277,12 @@
             <span class="avatar" aria-hidden="true">{user.username.slice(0, 1).toUpperCase()}</span>
             <div class="user-meta">
               <div class="user-name">{user.username}</div>
-              <div class="user-role" class:admin={!isViewer}>{isViewer ? 'Read-Only' : 'Admin'}</div>
+              <div class="user-role" class:admin={!isViewer}>{isViewer ? 'Read-Only' : 'Administrator'}</div>
             </div>
           </div>
           <div class="user-actions">
             <button class="secondary" onclick={openPassword} title="Change your password">Change Password</button>
-            <button class="secondary" onclick={handleLogout} title="End this session">Sign out</button>
+            <button class="secondary" onclick={handleLogout} title="End this session">Sign Out</button>
           </div>
         </div>
       {/if}
