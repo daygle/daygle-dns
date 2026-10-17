@@ -185,6 +185,10 @@ pub struct AppState {
     pub request_dns_rebuild: Option<Arc<dyn Fn() + Send + Sync>>,
     /// Dashboard time-series + top-N tables.
     pub stats: Arc<daygle_dns_core::stats::QueryStats>,
+    /// AI subsystem (verdict store, scanner handles); `None` when the
+    /// `[ai]` section is disabled. All `/api/ai/...` endpoints read through
+    /// this handle.
+    pub ai: Option<Arc<daygle_dns_ml::AiEngine>>,
 }
 
 /// Build the API router (REST endpoints plus the embedded GUI).
@@ -199,6 +203,10 @@ pub fn router(state: AppState) -> Router {
             "/querylogs",
             get(handlers::query_logs).delete(handlers::clear_query_logs),
         )
+        .route("/ai/status", get(handlers::ai_status))
+        .route("/ai/verdicts", get(handlers::ai_verdicts))
+        .route("/ai/override", post(handlers::ai_override))
+        .route("/ai/rescan", post(handlers::ai_rescan))
         .route(
             "/config",
             get(handlers::config)

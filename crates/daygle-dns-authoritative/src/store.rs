@@ -1896,6 +1896,32 @@ impl ZoneStore {
         Ok(conn.execute("DELETE FROM query_logs", [])?)
     }
 
+    /// Distinct query names seen since `since_epoch`, newest first, capped at
+    /// `limit` (including previously-seen names). Used by the AI scanner to
+    /// harvest domains from live traffic without duplicating work; the query
+    /// log's qname index keeps this cheap even on large logs.
+    pub fn distinct_recent_query_names(
+        &self,
+        since_epoch: i64,
+        limit: u32,
+    ) -> Result<Vec<String>> {
+        let cutoff = Utc::now()
+            .checked_sub_signed(chrono::Duration::seconds(since_epoch))
+            .unwrap_or_else(|| chrono::DateTime::<Utc>::UNIX_EPOCH)
+            .to_rfc3339();
+        let conn = self.lock_conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT DISTINCT qname FROM query_logs
+             WHERE ts >= ?1
+             ORDER BY qname
+             LIMIT ?2",
+        )?;
+        let names = stmt
+            .query_map(params![cutoff, limit as i64], |r| r.get::<_, String>(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(names)
+    }
+
     /// Enforce the retention cap by deleting rows beyond the newest `max`
     /// (0 disables the cap). Called opportunistically by the log writer.
     pub fn trim_query_logs(&self, max: usize) -> Result<usize> {

@@ -319,7 +319,34 @@ pub async fn bind_with(
     };
 
     // Policy.
-    let policy = daygle_dns_policy::build_engine(&config.policy)?;
+    let mut policy = daygle_dns_policy::build_engine(&config.policy)?;
+
+    // AI subsystem (daygle-dns-ml): a CPU-only background classifier over
+    // domains observed in the query log. Opt-in via `[ai] enabled = true`.
+    // The scanner runs on its own cadence - never on the DNS hot path - and
+    // the policy plugin defers in train mode, blocks in enforce mode. The
+    // user allowlist and operator blocklists still run before plugins, so
+    // operator decisions always supersede AI verdicts.
+    let ai_engine = daygle_dns_ml::build_ai_engine(
+        &config.ai,
+        &config.authoritative.database,
+        Arc::new(store.clone()),
+        logs.clone(),
+    );
+    if let Some(ai) = &ai_engine {
+        policy.add_plugin(ai.block_plugin());
+        tokio::spawn({
+            let ai = ai.clone();
+            let shutdown = shutdown.clone();
+            async move {
+                ai.run_forever(shutdown).await;
+            }
+        });
+        info!(
+            mode = ?config.ai.mode,
+            "AI scanner enabled"
+        );
+    }
 
     // Advanced Blocking groups (per-client allow/block policies) built from
     // the store; swapped atomically when the groups change via the API.
@@ -455,6 +482,7 @@ pub async fn bind_with(
         sessions: Arc::new(daygle_dns_api::SessionStore::default()),
         request_dns_rebuild: Some(request_dns_rebuild),
         stats: stats.clone(),
+        ai: ai_engine.clone(),
     });
     info!(addr = %api_addr, "REST API and GUI listening");
     let api_task = tokio::spawn(async move {

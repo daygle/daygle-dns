@@ -18,6 +18,7 @@ daygle-dns-authoritative = { path = "../daygle-dns-authoritative" }
 daygle-dns-recursive = { path = "../daygle-dns-recursive" }
 daygle-dns-dot = { path = "../daygle-dns-dot" }
 daygle-dns-api = { path = "../daygle-dns-api" }
+daygle-dns-ml = { path = "../daygle-dns-ml" }
 hickory-proto.workspace = true
 hickory-server.workspace = true
 axum.workspace = true

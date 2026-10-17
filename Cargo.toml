@@ -8,6 +8,7 @@ members = [
     "crates/daygle-dns-dot",
     "crates/daygle-dns-api",
     "crates/daygle-dns-gui",
+    "crates/daygle-dns-ml",
     "crates/daygle-dns",
 ]
 
@@ -77,6 +78,8 @@ regex = "1"
 tempfile = "3"
 url = "2"
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "http2", "json", "socks", "query", "form"] }
+# AI subsystem: pure-Rust fastText inference (supervised text classification)
+fasttext = "0.8"
 
 [profile.release]
 lto = "thin"

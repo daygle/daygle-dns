@@ -8,6 +8,7 @@ description = "REST API for configuration, zones, logs and metrics, plus the emb
 
 [dependencies]
 daygle-dns-core = { path = "../daygle-dns-core" }
+daygle-dns-ml = { path = "../daygle-dns-ml" }
 daygle-dns-authoritative = { path = "../daygle-dns-authoritative" }
 daygle-dns-dot = { path = "../daygle-dns-dot" }
 daygle-dns-policy = { path = "../daygle-dns-policy" }

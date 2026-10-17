@@ -1,0 +1,26 @@
+[package]
+name = "daygle-dns-ml"
+description = "Daygle DNS AI subsystem: background domain classification (fastText/heuristic backends), verdict storage and the AI block policy plugin"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+daygle-dns-core = { path = "../daygle-dns-core" }
+daygle-dns-policy = { path = "../daygle-dns-policy" }
+daygle-dns-authoritative = { path = "../daygle-dns-authoritative" }
+rusqlite.workspace = true
+serde.workspace = true
+chrono.workspace = true
+tracing.workspace = true
+async-trait.workspace = true
+arc-swap.workspace = true
+tokio = { version = "1", features = ["sync", "time", "rt", "macros"] }
+tokio-util.workspace = true
+fasttext.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

@@ -196,6 +196,41 @@ same path for per-source status.
   during the overlap window; Daygle keeps the old key published long enough
   for that exchange.
 
+## AI scanner (`daygle-dns-ml`)
+
+A CPU-only background classifier over domains observed in the query log.
+Opt-in via `[ai] enabled = true`; the DNS hot path nevers runs a model.
+
+- **Backends.** A [`DomainClassifier`] trait abstracts the model: the
+  built-in `HeuristicBackend` (zero-model keyword tables, deliberately
+  low-confidence so it can never auto-block on its own) and the
+  `FastTextBackend` (supervised fastText `.bin` models trained out of
+  process - labels like `__label__malware`). The planned MiniLM/ONNX
+  verifier plugs into the same trait.
+- **Scanner.** Every `scan_interval_secs`, a worker harvests new domains
+  via `ZoneStore::distinct_recent_query_names`, normalizes them, classifies
+  each one, and writes verdicts into a **separate** SQLite database
+  (`ai.db` beside the zone database by default): category, severity,
+  confidence, backend, evidence, observation counter, and an expiry
+  timestamp (`category_ttl_secs` for content categories,
+  `threat_ttl_secs` for threats). Expired verdicts re-enter `pending` and
+  are re-classified; categories never carry over, so a site that changed
+  gets re-judged. Off the DNS path entirely: the classifier only runs on
+  the scan cycle.
+- **Enforcement.** The `AiBlockPlugin` (a `PolicyPlugin` registered last in
+  the engine) consults a pre-built, atomically-swapped block snapshot
+  (`ArcSwap<HashMap<domain, block>>`). In `train` mode the snapshot stays
+  empty and nothing blocks; in `enforce` mode it contains fresh threat
+  verdicts in the configured `auto_block_categories` that meet
+  `block_threshold`. The plugin suffix-matches at label boundaries (a
+  verdict on `bad.example.com` also blocks `www.bad.example.com`) and
+  returns NXDOMAIN via `Action::Block`, tagged with group `ai`.
+- **Operator precedence.** The engine evaluates the user allowlist and
+  operator blocklists *before* plugins, and `ai_overrides` rows (the
+  `allow` action of `POST /api/ai/override`) are filtered out at snapshot
+  build time - so operator decisions and explicit trust always supersede AI
+  verdicts.
+
 ## Console, roles and dashboard
 
 - **Login.** `api.users` accounts are verified with PBKDF2-HMAC-SHA256

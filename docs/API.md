@@ -633,14 +633,39 @@ caught before it is added:
   "domains": 182344,
   "sample": ["0.0.0.0", "ads.example.com"]
 }
-```
-
-`format` accepts `domains`, `hosts`, `adblock`, or `auto` (empty = auto) to
+````format` accepts `domains`, `hosts`, `adblock`, or `auto` (empty = auto) to
 auto-detect the format from the content. `ok: false` with a `reason` means
 the URL fetched fine but the content does not parse as (or does not match)
 `format`; a `502` means the URL itself could not be fetched.
 
+### AI scanner
+
+```
+GET  /api/ai/status
+GET  /api/ai/verdicts?status=classified&page=1&per_page=50
+POST /api/ai/override          {"domain": "x.example", "action": "allow|clear", "reason": "..."}
+POST /api/ai/rescan
+```
+
+Available when `[ai] enabled = true`. `GET /api/ai/status` reports the
+configured mode (`train`/`enforce`), the active backend (`heuristic` or
+`fasttext`), scanners' TTLs and thresholds, per-status verdict counts and
+fresh threat counts per category, plus the current block-snapshot size.
+
+`GET /api/ai/verdicts` paginates the scanner's verdict store: domain,
+category, severity, status (`pending`/`classified`/`skipped`), confidence,
+backend, evidence text, observation count, `classified_at`/`expires_at` in
+RFC 3339 (expiry shows exactly when the verdict silently drops). An
+operator override (`POST /api/ai/override` with `action: "allow"`) exempts
+a domain from every AI block; `clear` removes the exemption.
+`POST /api/ai/rescan` wakes the scanner for one immediate cycle.
+
+All four endpoints return `404` when the AI subsystem is disabled.
+
 ### Advanced blocking
+
+
+
 
 ```
 GET    /api/policy/blocking

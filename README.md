@@ -45,7 +45,17 @@ Daygle combines, in a single process:
 - A **searchable query log**: every served query is recorded into SQLite
   (client, name, type, transport, outcome, rcode, duration) with retention,
   and the console's **Logs → Query Logs** tab filters, paginates, live-updates
-  and CSV-exports the history.- A **REST API** (tower/axum) for configuration, zone management, logs, and
+  and CSV-exports the history.
+- An **AI scanner** (`daygle-dns-ml`, opt-in): a small CPU-only classifier
+  runs in the background over domains observed in the query log, assigns
+  categories (malware, phishing, adult, ...) with confidence scores and
+  expiry dates, and can auto-block fresh high-confidence threat verdicts.
+  Train-first by default (`mode = "train"` records verdicts, nothing
+  blocks), operator allowlist always wins, expired verdicts re-enter the
+  scan queue. Ships with a zero-model heuristic backend and supports
+  supervised fastText `.bin` models. Verdicts are visible via the REST API
+  (`/api/ai/*`).
+- A **REST API** (tower/axum) for configuration, zone management, logs, and
 metrics.
 - An embedded **Svelte** web GUI with **username/password login and roles**
   (`admin` = full access, `viewer` = read-only), editable settings forms for
@@ -107,8 +117,8 @@ dig @127.0.0.1 -p 853 example.com A +tls   # DNS over TLS
 | `daygle-dns-policy`         | Plugin-style policy engine (blocklists, ACLs, per-client rules) |
 | `daygle-dns-authoritative`  | SQLite zone storage, zone-file parser, Hickory catalog + DNSSEC signing |
 | `daygle-dns-recursive`      | Recursive resolver (caching, negative caching, retries, timeouts, DNSSEC) |
-| `daygle-dns-dot`            | DoT (RFC 7858) + DoH (RFC 8484) + DoQ (RFC 9250) TLS certificates |
-| `daygle-dns-api`            | REST API (axum) + embedded GUI serving |
+| `daygle-dns-dot`            | DoT (RFC 7858) + DoH (RFC 8484) + DoQ (RFC 9250) TLS certificates || `daygle-dns-ml`            | AI domain scanner: verdict store, fastText/heuristic backends, AI policy plugin |
+| `daygle-dns-api`           | REST API (axum) + embedded GUI serving |
 | `daygle-dns-gui`            | Embedded web GUI assets (Svelte build output) |
 | `daygle-dns`             | The server binary: UDP/TCP/DoT listeners + the combined dispatcher |
 

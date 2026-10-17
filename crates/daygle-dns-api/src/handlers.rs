@@ -601,6 +601,26 @@ fn csv_escape(value: &str) -> String {
     }
 }
 
+/// `GET /api/ai/verdicts` query params.
+#[derive(Debug, Default, serde::Deserialize)]
+pub struct AiVerdictsQuery {
+    /// Optional status filter (`pending`, `classified`, `skipped`).
+    status: Option<String>,
+    page: Option<u32>,
+    per_page: Option<u32>,
+}
+
+/// `POST /api/ai/override` body.
+#[derive(Debug, serde::Deserialize)]
+pub struct AiOverrideBody {
+    pub domain: String,
+    /// `allow` installs an AI-exempt override; `clear` removes it.
+    pub action: String,
+    /// Optional justification, shown in the console.
+    #[serde(default)]
+    pub reason: String,
+}
+
 /// `GET /api/querylogs` - search the query log. JSON by default; `?format=csv`
 /// streams every matching row (no pagination) as a CSV download.
 pub async fn query_logs(
@@ -671,6 +691,179 @@ pub async fn clear_query_logs(State(state): State<AppState>) -> Response {
         }
         Err(e) => map_err(e),
     }
+}
+
+// ── AI subsystem (`[ai]` section of the config) ─────────────────────────────
+//
+// Every endpoint 404s when the AI subsystem is disabled, mirroring how the
+// blocklist-source endpoints treat an empty configuration.
+
+fn ai_engine(state: &AppState) -> Result<Arc<daygle_dns_ml::AiEngine>, Response> {
+    state.ai.clone().ok_or_else(|| {
+        map_err(daygle_dns_ml::ai_disabled_error())
+    })
+}
+
+/// `GET /api/ai/status` - scanner configuration and per-status counts.
+pub async fn ai_status(State(state): State<AppState>) -> Response {
+    let Ok(ai) = ai_engine(&state) else {
+        return map_err(daygle_dns_ml::ai_disabled_error());
+    };
+    let settings = ai.settings.load();
+    let statuses = match ai.store.status_counts() {
+        Ok(s) => s,
+        Err(e) => return map_err(e),
+    };
+    let threats = match ai.store.threat_counts(
+        chrono::Utc::now().timestamp(),
+        settings.block_threshold,
+    ) {
+        Ok(t) => t,
+        Err(e) => return map_err(e),
+    };
+    let snapshot = ai.snapshot().load();
+    Json(serde_json::json!({
+        "enabled": settings.enabled,
+        "mode": match settings.mode {
+            daygle_dns_core::config::AiMode::Train => "train",
+            daygle_dns_core::config::AiMode::Enforce => "enforce",
+        },
+        "backend": if settings.model_path.is_empty() { "heuristic" } else { "fasttext" },
+        "workers": settings.workers,
+        "scan_interval_secs": settings.scan_interval_secs,
+        "category_ttl_secs": settings.category_ttl_secs,
+        "threat_ttl_secs": settings.threat_ttl_secs,
+        "block_threshold": settings.block_threshold,
+        "auto_block_categories": settings.auto_block_categories,
+        "status_counts": serde_json::Map::from_iter(
+            statuses
+                .into_iter()
+                .map(|(k, v)| (k, serde_json::Value::from(v))),
+        ),
+        "threat_counts": serde_json::Map::from_iter(
+            threats
+                .into_iter()
+                .map(|(k, v)| (k, serde_json::Value::from(v))),
+        ),
+        "snapshot_len": snapshot.len(),
+    }))
+    .into_response()
+}
+
+/// `GET /api/ai/verdicts?page=&per_page=&status=` - paginated verdict list.
+pub async fn ai_verdicts(
+    State(state): State<AppState>,
+    Query(query): Query<AiVerdictsQuery>,
+) -> Response {
+    let Ok(ai) = ai_engine(&state) else {
+        return map_err(daygle_dns_ml::ai_disabled_error());
+    };
+    match ai.store.list_verdicts(query.status.as_deref(), query.per_page.unwrap_or(50),
+        (query.page.unwrap_or(1).max(1) - 1).saturating_mul(query.per_page.unwrap_or(50)))
+    {
+        Ok((rows, total)) => (
+            StatusCode::OK,
+            axum::Json(serde_json::json!({
+                "entries": rows.iter().map(|r| serde_json::json!({
+                    "domain": r.domain,
+                    "category": r.category,
+                    "severity": r.severity,
+                    "status": r.status,
+                    "confidence": r.confidence,
+                    "backend": r.backend,
+                    "evidence": r.evidence,
+                    "observations": r.observations,
+                    "classified_at": chrono::DateTime::<chrono::Utc>::from_timestamp(r.classified_at, 0)
+                        .map(|t| t.to_rfc3339()),
+                    "expires_at": chrono::DateTime::<chrono::Utc>::from_timestamp(r.expires_at, 0)
+                        .map(|t| t.to_rfc3339()),
+                }))
+                .collect::<Vec<_>>(),
+                "total": total,
+                "per_page": query.per_page.unwrap_or(50).clamp(1, 500),
+                "page": query.page.unwrap_or(1).max(1),
+            })),
+        )
+            .into_response(),
+        Err(e) => map_err(e),
+    }
+}
+
+/// `POST /api/ai/override` - `{"domain": "x", "action": "allow" | "clear"}`.
+pub async fn ai_override(
+    State(state): State<AppState>,
+    Json(body): Json<AiOverrideBody>,
+) -> Response {
+    let Ok(ai) = ai_engine(&state) else {
+        return map_err(daygle_dns_ml::ai_disabled_error());
+    };
+    let domain = body.domain.trim().trim_matches('.').to_ascii_lowercase();
+    let domain_ok = !domain.is_empty()
+        && domain.len() <= 253
+        && domain.split('.').all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && label.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+        });
+    if !domain_ok {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "domain is required"})),
+        )
+            .into_response();
+    }
+    match body.action.as_str() {
+        "allow" => match ai.set_allow_override(&domain, &body.reason) {
+            Ok(()) => {
+                state.logs.push(
+                    daygle_dns_core::LogLevel::Info,
+                    "api",
+                    format!("AI override: '{domain}' is now AI-exempt"),
+                );
+                Json(serde_json::json!({"domain": domain, "action": "allow"})).into_response()
+            }
+            Err(e) => map_err(e),
+        },
+        "clear" => match ai.clear_override(&domain) {
+            Ok(true) => {
+                state.logs.push(
+                    daygle_dns_core::LogLevel::Info,
+                    "api",
+                    format!("AI override cleared for '{domain}'"),
+                );
+                Json(serde_json::json!({"domain": domain, "action": "clear"})).into_response()
+            }
+            Ok(false) => (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": "no override exists"})),
+            )
+                .into_response(),
+            Err(e) => map_err(e),
+        },
+        other => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": format!("unknown action '{other}' (expected allow or clear)")
+            })),
+        )
+            .into_response(),
+    }
+}
+
+/// `POST /api/ai/rescan` - wake the scanner for an immediate cycle.
+pub async fn ai_rescan(State(state): State<AppState>) -> Response {
+    let Ok(ai) = ai_engine(&state) else {
+        return map_err(daygle_dns_ml::ai_disabled_error());
+    };
+    ai.trigger_rescan();
+    state.logs.push(
+        daygle_dns_core::LogLevel::Info,
+        "api",
+        "AI rescan requested".to_string(),
+    );
+    Json(serde_json::json!({"requested": true})).into_response()
 }
 
 pub async fn config(State(state): State<AppState>) -> Response {

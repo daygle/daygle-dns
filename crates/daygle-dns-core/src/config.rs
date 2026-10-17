@@ -36,6 +36,91 @@ pub struct DaygleConfig {
     pub rate_limit: RateLimitSettings,
     /// Logging.
     pub logging: LoggingSettings,
+    /// AI scanner: background classification of observed domains.
+    pub ai: AiSettings,
+}
+
+/// How AI scanner verdicts are applied.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum AiMode {
+    /// Record verdicts only (train/observe mode); nothing is blocked.
+    #[default]
+    Train,
+    /// High-confidence threat verdicts additionally auto-block.
+    Enforce,
+}
+
+/// AI scanner subsystem settings: a small CPU-only classifier runs in the
+/// background over domains observed in the query log and records verdicts
+/// (category, confidence, TTL). In `enforce` mode, fresh high-confidence
+/// threat verdicts auto-block, while manual allowlist/overrides always win.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct AiSettings {
+    /// Run the background scanner at all.
+    pub enabled: bool,
+    /// Train (record-only) or enforce (auto-block) mode.
+    pub mode: AiMode,
+    /// SQLite database for AI verdicts; empty uses `ai.db` next to the
+    /// authoritative zone database.
+    pub database: String,
+    /// fastText supervised model (.bin) used for classification; empty uses
+    /// the built-in heuristic keyword backend.
+    pub model_path: String,
+    /// Background classification workers (off the DNS path).
+    pub workers: u32,
+    /// How often the scanner harvests unseen query-log domains, in seconds.
+    pub scan_interval_secs: u64,
+    /// How often expired verdicts are checked and re-queued, in seconds.
+    pub expire_check_secs: u64,
+    /// Domains per scan cycle (older ones are picked up on later cycles).
+    pub max_domains_per_scan: u32,
+    /// Categories eligible to auto-block in `enforce` mode (lowercase,
+    /// e.g. `malware`, `phishing`). Other categories only feed the console.
+    pub auto_block_categories: Vec<String>,
+    /// Minimum confidence for a threat verdict to auto-block.
+    pub block_threshold: f32,
+    /// Verdicts below this confidence are skipped entirely.
+    pub confidence_floor: f32,
+    /// Freshness window for ordinary content-category verdicts, in seconds.
+    pub category_ttl_secs: u64,
+    /// Freshness window for threat verdicts, in seconds (re-scanned when expired).
+    pub threat_ttl_secs: u64,
+}
+
+impl Default for AiSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            mode: AiMode::Train,
+            database: String::new(),
+            model_path: String::new(),
+            workers: 2,
+            scan_interval_secs: 300,
+            expire_check_secs: 3600,
+            max_domains_per_scan: 5120,
+            auto_block_categories: vec!["malware".to_string(), "phishing".to_string()],
+            block_threshold: 0.99,
+            confidence_floor: 0.2,
+            category_ttl_secs: 30 * 86400,
+            threat_ttl_secs: 7 * 86400,
+        }
+    }
+}
+
+impl AiSettings {
+    /// Whether `category` is eligible to auto-block in enforce mode.
+    pub fn is_auto_block_category(&self, category: &str) -> bool {
+        self.auto_block_categories
+            .iter()
+            .any(|c| c.eq_ignore_ascii_case(category))
+    }
+
+    /// Whether this verdict would auto-block in enforce mode.
+    pub fn would_block(&self, category: &str, confidence: f32) -> bool {
+        self.is_auto_block_category(category) && confidence >= self.block_threshold
+    }
 }
 
 /// The runtime-tunable subset of the configuration that lives in the
@@ -837,6 +922,56 @@ impl DaygleConfig {
             return Err(DaygleError::Config(
                 "logging.query_db_max_rows must be 0 (unlimited) or >= 100".to_string(),
             ));
+        }
+        let ai = &self.ai;
+        if !(1..=32).contains(&ai.workers) {
+            return Err(DaygleError::Config(
+                "ai.workers must be in 1..=32".to_string(),
+            ));
+        }
+        if ai.enabled {
+            if ai.scan_interval_secs < 10 {
+                return Err(DaygleError::Config(
+                    "ai.scan_interval_secs must be >= 10".to_string(),
+                ));
+            }
+            if ai.expire_check_secs < 10 {
+                return Err(DaygleError::Config(
+                    "ai.expire_check_secs must be >= 10".to_string(),
+                ));
+            }
+        }
+        if ai.max_domains_per_scan < 1 {
+            return Err(DaygleError::Config(
+                "ai.max_domains_per_scan must be >= 1".to_string(),
+            ));
+        }
+        if !(0.5..=1.0).contains(&ai.block_threshold) {
+            return Err(DaygleError::Config(
+                "ai.block_threshold must be in 0.5..=1.0".to_string(),
+            ));
+        }
+        if !(0.0..ai.block_threshold).contains(&ai.confidence_floor) {
+            return Err(DaygleError::Config(
+                "ai.confidence_floor must be < ai.block_threshold".to_string(),
+            ));
+        }
+        if ai.category_ttl_secs < 60 {
+            return Err(DaygleError::Config(
+                "ai.category_ttl_secs must be >= 60".to_string(),
+            ));
+        }
+        if ai.threat_ttl_secs < 60 {
+            return Err(DaygleError::Config(
+                "ai.threat_ttl_secs must be >= 60".to_string(),
+            ));
+        }
+        for category in &ai.auto_block_categories {
+            if category.trim().is_empty() {
+                return Err(DaygleError::Config(
+                    "ai.auto_block_categories contains an empty category".to_string(),
+                ));
+            }
         }
         Ok(())
     }

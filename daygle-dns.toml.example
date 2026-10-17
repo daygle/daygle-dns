@@ -291,3 +291,44 @@ ring_buffer = 2000
 # Retention keeps at most this many rows (0 = unlimited).
 query_db_enabled = true
 query_db_max_rows = 200000
+
+# ── AI scanner: CPU-only background classification of observed domains ─────
+#
+# The scanner harvests domains from the query log, classifies them with a
+# small local model (never on the DNS hot path), and records verdicts with
+# confidence scores and expiry into its own SQLite database (ai.db next to
+# the authoritative database by default). The console's API exposes the
+# verdicts at /api/ai/verdicts, the status at /api/ai/status, operator
+# overrides at POST /api/ai/override, and an immediate rescan trigger at
+# POST /api/ai/rescan.
+#
+# Safety model:
+#   - mode = "train" records verdicts only; nothing is ever blocked.
+#     Inspect the verdict log for a while, then flip to "enforce".
+#   - In "enforce" mode only the categories listed in auto_block_categories
+#     (e.g. malware, phishing) auto-block, and only above block_threshold
+#     confidence while the verdict is fresh (threat_ttl_secs).
+#   - The user allowlist and operator blocklists still apply before AI
+#     verdicts, and POST /api/ai/override pins a domain AI-exempt.
+#   - Expired verdicts re-enter the scan queue; a site that changed is
+#     re-classified and old categories never carry over.
+#
+# Backends: without a model the built-in low-confidence heuristic keyword
+# table is used (bootstraps data; can never auto-block on its own). Train a
+# supervised fastText model (labels like __label__malware or
+# __label__news) and point model_path at the .bin file for real
+# classification. See docs/ARCHITECTURE.md.
+#  TOML:  [ai]
+#  TOML:  enabled = false
+#  TOML:  mode = "train"            # train | enforce
+#  TOML:  database = ""             # empty = ai.db beside the zone DB
+#  TOML:  model_path = ""           # empty = heuristic backend
+#  TOML:  workers = 2
+#  TOML:  scan_interval_secs = 300
+#  TOML:  expire_check_secs = 3600
+#  TOML:  max_domains_per_scan = 5120
+#  TOML:  auto_block_categories = ["malware", "phishing"]
+#  TOML:  block_threshold = 0.99
+#  TOML:  confidence_floor = 0.2
+#  TOML:  category_ttl_secs = 2592000    # 30 days
+#  TOML:  threat_ttl_secs = 604800       # 7 days
