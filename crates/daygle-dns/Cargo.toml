@@ -17,8 +17,8 @@ daygle-dns-policy = { path = "../daygle-dns-policy" }
 daygle-dns-authoritative = { path = "../daygle-dns-authoritative" }
 daygle-dns-recursive = { path = "../daygle-dns-recursive" }
 daygle-dns-dot = { path = "../daygle-dns-dot" }
-daygle-dns-api = { path = "../daygle-dns-api" }
-daygle-dns-ml = { path = "../daygle-dns-ml" }
+daygle-dns-api = { path = "../daygle-dns-api", default-features = false }
+daygle-dns-ml = { path = "../daygle-dns-ml", default-features = false }
 hickory-proto.workspace = true
 hickory-server.workspace = true
 axum.workspace = true
@@ -35,6 +35,13 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 clap.workspace = true
 chrono.workspace = true
+
+[features]
+default = ["verifier-onnx"]
+# Builds with --no-default-features (the static musl release job) exclude
+# the ONNX Runtime dependency: prebuilt ORT binaries are glibc-based, so
+# those binaries run the fastText/heuristic backends only.
+verifier-onnx = ["daygle-dns-api/verifier-onnx", "daygle-dns-ml/verifier-onnx"]
 
 [dev-dependencies]
 tempfile.workspace = true

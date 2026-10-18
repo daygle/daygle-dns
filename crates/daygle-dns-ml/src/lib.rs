@@ -36,6 +36,10 @@ pub mod heuristic;
 pub mod plugin;
 pub mod scanner;
 pub mod store;
+pub mod verify;
+
+#[cfg(feature = "verifier-onnx")]
+pub mod verifier_onnx;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -76,16 +80,71 @@ impl AiEngine {
         let store = Arc::new(AiStore::open(&database_path)?);
 
         // Backend selection: trained model when configured, heuristics
-        // otherwise. A configured-but-broken model is a startup error (fail
-        // fast) rather than a silent downgrade.
+        // otherwise. A configured-but-corrupt model is a startup error (fail
+        // fast) rather than a silent downgrade. A configured-but-*missing*
+        // model file only degrades to the heuristic backend (with a log line)
+        // so installs stay alive if the bundled model was moved or deleted.
         let classifier: Box<dyn DomainClassifier + Send + Sync> =
             if settings.model_path.trim().is_empty() {
+                Box::new(heuristic::HeuristicBackend)
+            } else if !Path::new(settings.model_path.trim()).is_file() {
+                logs.push(
+                    daygle_dns_core::LogLevel::Warn,
+                    "ai",
+                    format!(
+                        "AI model '{}' not found on disk; using the built-in heuristic backend",
+                        settings.model_path
+                    ),
+                );
                 Box::new(heuristic::HeuristicBackend)
             } else {
                 Box::new(fasttext_backend::FastTextBackend::load(
                     &settings.model_path,
                 )?)
             };
+
+        // Optional verifying second pass (feature-gated): threat verdicts
+        // from the primary classifier get re-checked against the bundled
+        // MiniLM/ONNX embedding verifier. A load failure degrades gracefully
+        // to the primary classifier — it never disables the AI subsystem.
+        #[cfg(feature = "verifier-onnx")]
+        let classifier: Box<dyn DomainClassifier + Send + Sync> = if !settings
+            .verifier_model_path
+            .trim()
+            .is_empty()
+        {
+            match verifier_onnx::MiniLmVerifier::load(
+                &settings.verifier_model_path,
+                if settings.verifier_reference_path.trim().is_empty() {
+                    None
+                } else {
+                    Some(settings.verifier_reference_path.as_str())
+                },
+            ) {
+                Ok(verifier) => {
+                    let log = logs.clone();
+                    log.push(
+                        daygle_dns_core::LogLevel::Info,
+                        "ai",
+                        format!(
+                            "AI verifier active: MiniLM model '{}' corroborates threat verdicts",
+                            settings.verifier_model_path
+                        ),
+                    );
+                    Box::new(verify::VerifyingBackend::new(classifier, verifier))
+                }
+                Err(e) => {
+                    logs.push(
+                            daygle_dns_core::LogLevel::Warn,
+                            "ai",
+                            format!("MiniLM verifier not loaded ({e}); threat verdicts rely on the primary classifier only"),
+                        );
+                    classifier
+                }
+            }
+        } else {
+            classifier
+        };
 
         let settings = Arc::new(ArcSwap::from_pointee(settings.clone()));
         let snapshot = Arc::new(ArcSwap::from_pointee(BlockSnapshot::new()));

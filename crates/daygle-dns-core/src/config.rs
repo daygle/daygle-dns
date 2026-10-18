@@ -87,6 +87,16 @@ pub struct AiSettings {
     pub category_ttl_secs: u64,
     /// Freshness window for threat verdicts, in seconds (re-scanned when expired).
     pub threat_ttl_secs: u64,
+    /// Optional MiniLM/ONNX verifier model (.onnx). Empty disables the
+    /// verifying second pass; threat verdicts from the primary classifier
+    /// are then taken at face value. File-owned (not editable via the
+    /// console's settings overlay).
+    pub verifier_model_path: String,
+    /// Optional centroid reference path for the verifier; empty looks for
+    /// `minilm-centroids.json` beside the ONNX model.
+    pub verifier_reference_path: String,
+    /// Minimum embedding cosine for the verifier to assert a category.
+    pub verifier_threshold: f32,
 }
 
 impl Default for AiSettings {
@@ -105,6 +115,9 @@ impl Default for AiSettings {
             confidence_floor: 0.2,
             category_ttl_secs: 30 * 86400,
             threat_ttl_secs: 7 * 86400,
+            verifier_model_path: String::new(),
+            verifier_reference_path: String::new(),
+            verifier_threshold: 0.35,
         }
     }
 }
@@ -306,6 +319,27 @@ pub struct AiUpdate {
 }
 
 impl AiUpdate {
+    /// The full-field overlay captured from an [`AiSettings`] (this is the
+    /// single capture used by [`RuntimeSettings::capture`], so callers that
+    /// must reason about "what the first boot would have stored" reuse it).
+    pub fn capture_ai(settings: &AiSettings) -> Self {
+        Self {
+            enabled: Some(settings.enabled),
+            mode: Some(settings.mode),
+            database: Some(settings.database.clone()),
+            model_path: Some(settings.model_path.clone()),
+            workers: Some(settings.workers),
+            scan_interval_secs: Some(settings.scan_interval_secs),
+            expire_check_secs: Some(settings.expire_check_secs),
+            max_domains_per_scan: Some(settings.max_domains_per_scan),
+            auto_block_categories: Some(settings.auto_block_categories.clone()),
+            block_threshold: Some(settings.block_threshold),
+            confidence_floor: Some(settings.confidence_floor),
+            category_ttl_secs: Some(settings.category_ttl_secs),
+            threat_ttl_secs: Some(settings.threat_ttl_secs),
+        }
+    }
+
     /// Normalize a category list: trim, lowercase, drop empties and
     /// duplicates. Matching ignores case, so this is cosmetic but keeps the
     /// stored value canonical.
@@ -622,21 +656,7 @@ impl RuntimeSettings {
                 notify_targets: Some(config.authoritative.notify_targets.clone()),
                 notify_listen_enabled: Some(config.authoritative.notify_listen_enabled),
             }),
-            ai: Some(AiUpdate {
-                enabled: Some(config.ai.enabled),
-                mode: Some(config.ai.mode),
-                database: Some(config.ai.database.clone()),
-                model_path: Some(config.ai.model_path.clone()),
-                workers: Some(config.ai.workers),
-                scan_interval_secs: Some(config.ai.scan_interval_secs),
-                expire_check_secs: Some(config.ai.expire_check_secs),
-                max_domains_per_scan: Some(config.ai.max_domains_per_scan),
-                auto_block_categories: Some(config.ai.auto_block_categories.clone()),
-                block_threshold: Some(config.ai.block_threshold),
-                confidence_floor: Some(config.ai.confidence_floor),
-                category_ttl_secs: Some(config.ai.category_ttl_secs),
-                threat_ttl_secs: Some(config.ai.threat_ttl_secs),
-            }),
+            ai: Some(AiUpdate::capture_ai(&config.ai)),
         }
     }
 }
@@ -2219,6 +2239,40 @@ format = "adblock"
             BlocklistFormat::Adblock
         );
         assert_eq!(cfg.policy.blocklist_sources[1].refresh_secs, 86400);
+    }
+
+    #[test]
+    fn ai_overlay_capture_matches_runtime_capture() {
+        // capture() and AiUpdate::capture_ai must stay in lockstep: the
+        // installer's seed-ai-settings step compares a stored overlay against
+        // capture_ai(default) to decide whether the console ever edited the
+        // AI settings.
+        let mut cfg = DaygleConfig::default();
+        assert_eq!(
+            RuntimeSettings::capture(&cfg).ai,
+            Some(AiUpdate::capture_ai(&cfg.ai))
+        );
+
+        cfg.ai = AiSettings {
+            enabled: true,
+            model_path: "/etc/daygle-dns/models/daygle-starter.bin".to_string(),
+            ..AiSettings::default()
+        };
+        assert_eq!(
+            RuntimeSettings::capture(&cfg).ai,
+            Some(AiUpdate::capture_ai(&cfg.ai))
+        );
+
+        // A never-edited (default) overlay matches the "untouched" baseline;
+        // an overlay with the bundled model enabled does not.
+        assert_eq!(
+            Some(AiUpdate::capture_ai(&AiSettings::default())),
+            RuntimeSettings::capture(&DaygleConfig::default()).ai
+        );
+        assert_ne!(
+            Some(AiUpdate::capture_ai(&cfg.ai)),
+            RuntimeSettings::capture(&DaygleConfig::default()).ai
+        );
     }
 
     #[test]

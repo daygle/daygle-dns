@@ -12,7 +12,8 @@ use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
 use daygle_dns::bind_with;
-use daygle_dns_core::config::DaygleConfig;
+use daygle_dns_authoritative::ZoneStore;
+use daygle_dns_core::config::{AiSettings, AiUpdate, DaygleConfig, RuntimeSettings};
 use daygle_dns_core::DEFAULT_CONFIG_PATH;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
@@ -43,6 +44,15 @@ enum Command {
         /// The password to hash. Omitted to read it from stdin (e.g. a pipe).
         password: Option<String>,
     },
+    /// Copy the config file's `[ai]` settings into the database overlay.
+    ///
+    /// Runtime settings live in the database and win over the config file on
+    /// every boot, so `install.sh` runs this on upgrades: the appended
+    /// `[ai]` section (bundled starter model, train mode) would otherwise be
+    /// ignored because an older boot already stored an overlay. The stored
+    /// AI settings are only replaced when they are still exactly the
+    /// defaults - anything the console actively edited is left alone.
+    SeedAiSettings,
 }
 
 fn main() {
@@ -68,6 +78,53 @@ fn main() {
             }
         };
         println!("{}", daygle_dns_core::hash_password(&password));
+        return;
+    }
+
+    if let Some(Command::SeedAiSettings) = &args.command {
+        let config = match DaygleConfig::load(&args.config) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("daygle-dns: failed to load configuration: {e}");
+                std::process::exit(1);
+            }
+        };
+        let untouched = AiUpdate::capture_ai(&AiSettings::default());
+        let store = match ZoneStore::open(&config.authoritative.database) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!(
+                    "daygle-dns: cannot open zone database '{}': {e}",
+                    config.authoritative.database
+                );
+                std::process::exit(1);
+            }
+        };
+        match store.get_runtime_settings::<RuntimeSettings>() {
+            Ok(None) => {
+                // Nothing stored: the next server boot seeds from the file.
+                let _ = store.put_runtime_settings(&RuntimeSettings::capture(&config));
+                println!("ai settings seeded from {} (first boot)", args.config);
+            }
+            Ok(Some(mut overlay)) => {
+                if overlay.ai.as_ref() == Some(&untouched) {
+                    overlay.ai = Some(AiUpdate::capture_ai(&config.ai));
+                    match store.put_runtime_settings(&overlay) {
+                        Ok(()) => println!("ai settings synchronized from {}", args.config),
+                        Err(e) => {
+                            eprintln!("daygle-dns: cannot write runtime settings: {e}");
+                            std::process::exit(1);
+                        }
+                    }
+                } else {
+                    println!("stored ai settings were edited by the console - left untouched");
+                }
+            }
+            Err(e) => {
+                eprintln!("daygle-dns: cannot read runtime settings: {e}");
+                std::process::exit(1);
+            }
+        }
         return;
     }
 

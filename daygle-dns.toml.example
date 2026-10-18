@@ -313,22 +313,32 @@ query_db_max_rows = 200000
 #   - Expired verdicts re-enter the scan queue; a site that changed is
 #     re-classified and old categories never carry over.
 #
-# Backends: without a model the built-in low-confidence heuristic keyword
-# table is used (bootstraps data; can never auto-block on its own). Train a
-# supervised fastText model (labels like __label__malware or
-# __label__news) and point model_path at the .bin file for real
-# classification. See docs/ARCHITECTURE.md.
-#  TOML:  [ai]
-#  TOML:  enabled = false
-#  TOML:  mode = "train"            # train | enforce
-#  TOML:  database = ""             # empty = ai.db beside the zone DB
-#  TOML:  model_path = ""           # empty = heuristic backend
-#  TOML:  workers = 2
-#  TOML:  scan_interval_secs = 300
-#  TOML:  expire_check_secs = 3600
-#  TOML:  max_domains_per_scan = 5120
-#  TOML:  auto_block_categories = ["malware", "phishing"]
-#  TOML:  block_threshold = 0.99
-#  TOML:  confidence_floor = 0.2
-#  TOML:  category_ttl_secs = 2592000    # 30 days
-#  TOML:  threat_ttl_secs = 604800       # 7 days
+# Backends: the supervised fastText starter model shipped under
+# models/ (installed to <config dir>/models/daygle-starter.bin) is the
+# default below; delete it or point model_path elsewhere for your own
+# trained .bin, or empty it to use the built-in low-confidence heuristic
+# keyword table. See docs/ARCHITECTURE.md.
+[ai]
+enabled = true
+mode = "train"
+database = ""
+model_path = "/etc/daygle-dns/models/daygle-starter.bin"
+workers = 2
+scan_interval_secs = 300
+expire_check_secs = 3600
+max_domains_per_scan = 5120
+auto_block_categories = ["malware", "phishing"]
+block_threshold = 0.99
+confidence_floor = 0.2
+category_ttl_secs = 2592000
+threat_ttl_secs = 604800
+# Verifier: threat verdicts from the model above are re-checked against a
+# bundled MiniLM embedding model (all-MiniLM-L6-v2, int8) before they can
+# matter in enforce mode: agreement raises confidence, confident disagreement
+# downgrades to informational. Empty disables the second pass. The tokenizer
+# (minilm-tokenizer.json) and centroid reference (minilm-centroids.json) are
+# looked up beside the .onnx file; verifier_threshold is the minimum
+# embedding cosine for the verifier to assert a category.
+verifier_model_path = "/etc/daygle-dns/models/all-MiniLM-L6-v2-int8.onnx"
+verifier_reference_path = ""
+verifier_threshold = 0.35

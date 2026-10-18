@@ -1,9 +1,10 @@
 //! fastText backend: loads a supervised `.bin` model and classifies inputs.
 //!
-//! Models are trained out-of-process (the parent project's tooling adopts
-//! models from external training pipelines; see the README's AI section for
-//! a recipe). Labels inside the model use the fastText convention
-//! `__label__<category>`; the `__label__` prefix is stripped here.
+//! Models are trained out-of-process: a starter model ships under
+//! `models/` (regenerate with the `train-starter-model` bin; see
+//! `models/README.md`), and operators can point `ai.model_path` at any
+//! supervised fastText `.bin`. Labels inside the model use the fastText
+//! convention `__label__<category>`; the `__label__` prefix is stripped here.
 //!
 //! The backend is thread-safe: `FastText` inference in the pure-Rust crate
 //! is `Send + Sync` (immutable model weights, per-call scratch state).

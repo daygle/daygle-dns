@@ -9,8 +9,10 @@
 //! | [`crate::heuristic::HeuristicBackend`] | built-in keyword tables                      | µs, 0 MB   |
 //! | [`crate::fasttext_backend::FastTextBackend`] | supervised fastText `.bin` model | ms, ~1-20 MB |
 //!
-//! The planned MiniLM/ONNX verifier (next milestone) plugs in the same way:
-//! flagged or low-evidence domains get a second, more expensive pass.
+//! A MiniLM/ONNX verifier (see
+//! [`crate::verifier_onnx`] / [`crate::verify`]) plugs in the same way:
+//! threat verdicts from the primary get a second, more expensive pass that
+//! corroborates or downgrades them.
 
 /// Severity attached to a verdict category.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -56,7 +58,6 @@ impl ClassificationInput {
         }
     }
 }
-
 /// A pluggable classification backend. Cheap to share: implementations are
 /// interior-mutated (`Arc` every `Send + Sync`).
 pub trait DomainClassifier: Send + Sync {
@@ -65,4 +66,14 @@ pub trait DomainClassifier: Send + Sync {
     /// Classify one input. `None` = "no signal" (the domain is not skipped:
     /// the scanner records the attempt without a verdict).
     fn classify(&self, input: &ClassificationInput) -> Option<Verdict>;
+}
+
+impl<T: DomainClassifier + ?Sized> DomainClassifier for Box<T> {
+    fn name(&self) -> &str {
+        (**self).name()
+    }
+
+    fn classify(&self, input: &ClassificationInput) -> Option<Verdict> {
+        (**self).classify(input)
+    }
 }

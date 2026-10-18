@@ -22,6 +22,8 @@ CONFIG_FILE="$CONFIG_DIR/daygle-dns.toml"
 SERVICE_FILE="/etc/systemd/system/daygle-dns.service"
 PRIV_LIB_DIR="${PRIV_LIB_DIR:-$PREFIX/lib/daygle-dns}"
 APPLY_HELPER="$PRIV_LIB_DIR/update-apply.sh"
+# DAYGLE_DNS_AI=0 keeps the AI scanner off (the bundled starter model is
+# still copied to the config dir; the [ai] section is simply not enabled).
 
 # Detect the installation mode before changing anything. A config file is the
 # strongest signal, while the binary/unit checks also catch interrupted or
@@ -69,6 +71,29 @@ first_api_username() {
             exit
         }
     ' "$CONFIG_FILE" 2>/dev/null || true
+}
+
+has_ai_section() {
+    [ -f "$CONFIG_FILE" ] && grep -q '^[[:space:]]*\[ai\][[:space:]]*$' "$CONFIG_FILE"
+}
+
+# Run a short-lived maintenance command as the service user (its SQLite
+# database files are owned by it). The installer itself normally runs as
+# root; being already the service user also works.
+run_as_service() {
+    if [ "$(id -u)" -eq 0 ]; then
+        if have_cmd sudo; then
+            sudo -H -u "$SERVICE_USER" -- "$@" || return 1
+        elif have_cmd runuser; then
+            runuser -u "$SERVICE_USER" -- "$@" || return 1
+        else
+            return 1
+        fi
+    elif [ "$(id -un)" = "$SERVICE_USER" ]; then
+        "$@" || return 1
+    else
+        return 1
+    fi
 }
 
 run_as_root() {
@@ -161,7 +186,7 @@ install_update_service() {
     # bake in the concrete binary/updates paths.
     run_as_root install -m 0700 "$SRC_DIR/crates/daygle-dns-api/src/update-apply.sh" "$APPLY_HELPER" || return 1
     run_as_root chown root:root "$APPLY_HELPER" || return 1
-    run_as_root sed -i "s|__DAYGLE_DNS_EXE__|$PREFIX/bin/daygle-dns|; s|__DAYGLE_DNS_UPDATES_DIR__|$DATA_DIR/updates|" "$APPLY_HELPER" || return 1
+    run_as_root sed -i "s|__DAYGLE_DNS_EXE__|$PREFIX/bin/daygle-dns|; s|__DAYGLE_DNS_UPDATES_DIR__|$DATA_DIR/updates|; s|__DAYGLE_DNS_MODELS_DIR__|$CONFIG_DIR/models|; s|__DAYGLE_DNS_USER__|$SERVICE_USER|" "$APPLY_HELPER" || return 1
     run_as_root tee /etc/systemd/system/daygle-dns-update.service > /dev/null <<EOF
 [Unit]
 Description=Daygle DNS update apply step (root oneshot)
@@ -329,6 +354,56 @@ if [ ! -f "$CONFIG_DIR/blocklist.txt" ]; then
     : > "$CONFIG_DIR/blocklist.txt"
 fi
 
+# ---- bundled AI starter model --------------------------------------------
+# The AI scanner (daygle-dns-ml) is enabled in safe "train" mode out of the
+# box: a small fastText classifier ships in the source tree and is recorded
+# verdicts only until mode = "enforce". DAYGLE_DNS_AI=0 keeps the scanner
+# disabled without touching the rest of the install.
+if [ "${DAYGLE_DNS_AI:-}" != "0" ]; then
+    if [ -f "$SRC_DIR/models/daygle-starter.bin" ]; then
+        install -d "$CONFIG_DIR/models"
+        if [ ! -f "$CONFIG_DIR/models/daygle-starter.bin" ]; then
+            install -m 0644 "$SRC_DIR/models/daygle-starter.bin" \
+                "$CONFIG_DIR/models/daygle-starter.bin"
+            chown "$SERVICE_USER":"$SERVICE_USER" \
+                "$CONFIG_DIR/models/daygle-starter.bin" 2>/dev/null || true
+            log "Installed bundled AI starter model to $CONFIG_DIR/models/daygle-starter.bin"
+        fi
+        # MiniLM/ONNX verifier artifacts: model, tokenizer, centroid refs.
+        for f in all-MiniLM-L6-v2-int8.onnx minilm-tokenizer.json minilm-centroids.json; do
+            if [ -f "$SRC_DIR/models/$f" ] && [ ! -f "$CONFIG_DIR/models/$f" ]; then
+                install -m 0644 "$SRC_DIR/models/$f" "$CONFIG_DIR/models/$f"
+                chown "$SERVICE_USER":"$SERVICE_USER" "$CONFIG_DIR/models/$f" 2>/dev/null || true
+            fi
+        done
+        # Upgrades keep their existing configuration untouched, but an older
+        # installer predates the AI section: seed it once, in train mode, so
+        # the model the operator already has on disk is actually used.
+        if ! has_ai_section && [ -f "$CONFIG_FILE" ]; then
+            cat >> "$CONFIG_FILE" <<EOF
+
+# AI scanner (added by the installer): train mode records verdicts only;
+# nothing is blocked until you set mode = "enforce" below or in the GUI.
+[ai]
+enabled = true
+mode = "train"
+database = ""
+model_path = "$CONFIG_DIR/models/daygle-starter.bin"
+EOF
+            chown "$SERVICE_USER":"$SERVICE_USER" "$CONFIG_FILE" 2>/dev/null || true
+            log "Added safe [ai] section (train mode) to $CONFIG_FILE."
+        fi
+    else
+        log "WARNING: bundled AI model missing from the source tree; the AI scanner will fall back to its heuristic backend."
+    fi
+else
+    log "DAYGLE_DNS_AI=0 - leaving the AI scanner disabled."
+    if [ "$INSTALL_MODE" = "install" ] && has_ai_section; then
+        sed -i '/^\[ai\][[:space:]]*$/,/^\[/s/^enabled = true/enabled = false/' "$CONFIG_FILE"
+        log "Fresh install with DAYGLE_DNS_AI=0: [ai] section disabled in $CONFIG_FILE."
+    fi
+fi
+
 # ---- systemd unit (Linux with systemd only) -----------------------------
 if [ -d /etc/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
     log "Installing systemd unit…"
@@ -377,7 +452,24 @@ EOF
     chown -R "$SERVICE_USER":"$SERVICE_USER" "$CONFIG_DIR" "$DATA_DIR"
     systemctl daemon-reload
     if [ "$INSTALL_MODE" = "upgrade" ]; then
+        WAS_ACTIVE=0
         if systemctl is-active --quiet daygle-dns 2>/dev/null; then
+            WAS_ACTIVE=1
+        fi
+        # The runtime settings overlay lives in the database and wins over
+        # the config file: synchronize the [ai] section (bundled starter
+        # model, train mode) for installs that predate the AI feature. This
+        # writes SQLite, so the service must be down while it runs.
+        systemctl stop daygle-dns 2>/dev/null || true
+        if [ "${DAYGLE_DNS_AI:-}" != "0" ] && id "$SERVICE_USER" >/dev/null 2>&1; then
+            # (global --config must precede the subcommand)
+            if run_as_service "$PREFIX/bin/daygle-dns" --config "$CONFIG_FILE" seed-ai-settings; then
+                log "AI runtime settings synchronized from the config file (bundled starter model, train mode)."
+            else
+                log "WARNING: could not synchronize AI runtime settings; enable the AI scanner from the console's AI page if you want it."
+            fi
+        fi
+        if [ "$WAS_ACTIVE" = "1" ]; then
             systemctl restart daygle-dns
         else
             # Also repairs an interrupted or previously disabled installation.
@@ -481,6 +573,9 @@ EOF
     fi
 
     log "  Configuration: $CONFIG_DIR/daygle-dns.toml"
+    if [ -f "$CONFIG_DIR/models/daygle-starter.bin" ]; then
+        log "  AI scanner:   enabled (train mode; model: $CONFIG_DIR/models/daygle-starter.bin)"
+    fi
     log "──────────────────────────────────────────"
 
     if command -v systemctl >/dev/null 2>&1; then

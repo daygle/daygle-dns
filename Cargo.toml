@@ -15,7 +15,7 @@ members = [
 [workspace.package]
 version = "1.0.0"
 edition = "2021"
-rust-version = "1.88"
+rust-version = "1.92"  # pinned to the `ort` (ONNX Runtime) MSRV
 license = "Apache-2.0"
 repository = "https://github.com/daygle/daygle-dns"
 authors = ["Daygle DNS contributors"]
@@ -80,6 +80,12 @@ url = "2"
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "http2", "json", "socks", "query", "form"] }
 # AI subsystem: pure-Rust fastText inference (supervised text classification)
 fasttext = "0.8"
+# AI verifier: all-MiniLM-L6-v2 embeddings via ONNX Runtime (feature-gated:
+# daygle-dns-ml/verifier-onnx, default on; excluded from the static musl
+# release build because the prebuilt ONNX Runtime binaries are glibc-based).
+ort = { version = "2.0.0-rc.14", default-features = false, features = ["std", "download-binaries", "copy-dylibs", "ndarray", "tls-rustls"] }
+ndarray = "0.16"
+tokenizers = { version = "0.22", default-features = false, features = ["fancy-regex"] }
 
 [profile.release]
 lto = "thin"
