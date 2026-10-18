@@ -278,7 +278,8 @@ jobs:
           set -eu
           {
             printf '{"version":"%s","files":[' "${GITHUB_REF_NAME#v}"
-            first=1n            for f in daygle-starter.bin all-MiniLM-L6-v2-int8.onnx minilm-tokenizer.json minilm-centroids.json; do
+            first=1
+            for f in daygle-starter.bin all-MiniLM-L6-v2-int8.onnx minilm-tokenizer.json minilm-centroids.json; do
               sha="$(sha256sum "$f" | cut -d' ' -f1)"
               size="$(stat -c %s "$f")"
               if [ "$first" -eq 0 ]; then printf ','; fi
