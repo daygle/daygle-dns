@@ -46,6 +46,8 @@
 //! | `GET`    | `/api/ai/verdicts`                | paginated per-domain AI verdicts |
 //! | `POST`   | `/api/ai/override`                | allow-exempt or clear overrides for a domain |
 //! | `POST`   | `/api/ai/rescan`                  | wake the scanner for an immediate cycle |
+//! | `GET`    | `/api/ai/model-status`            | installed AI model files (size, sha256) + update-run state |
+//! | `POST`   | `/api/ai/update-models`           | begin a models-only update from the latest release |
 //!
 //! Auth endpoints: `POST /api/auth/login`, `POST /api/auth/logout`,
 //! `GET /api/auth/me`, plus the one-time first-run setup
@@ -211,6 +213,8 @@ pub fn router(state: AppState) -> Router {
         .route("/ai/verdicts", get(handlers::ai_verdicts))
         .route("/ai/override", post(handlers::ai_override))
         .route("/ai/rescan", post(handlers::ai_rescan))
+        .route("/ai/model-status", get(handlers::ai_model_status))
+        .route("/ai/update-models", post(handlers::ai_update_models))
         .route(
             "/config",
             get(handlers::config)

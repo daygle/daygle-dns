@@ -1,12 +1,84 @@
 <script>
-  import { api, formatApiError } from '../api.js';
+  import { api, formatApiError, getStoredUser } from '../api.js';
   import PageHeader from '../PageHeader.svelte';
   import { icons } from '../icons.svelte.js';
+  import { onDestroy } from 'svelte';
 
   let status = $state(null);
   let loading = $state(true);
   let error = $state(null);
   let notice = $state(null);
+
+  const isAdmin = getStoredUser()?.role === 'admin';
+
+  // Installed AI model files (fastText starter, MiniLM verifier, tokenizer,
+  // centroids) + the shared updater run state.
+  let models = $state(null);
+  let modelsError = $state(null);
+  let modelRun = $state(null); // active/finished model update run
+  let modelBusy = $state(false);
+  let pollTimer = null;
+  const RUNNING = ['preparing', 'downloading', 'installing', 'applying', 'restarting'];
+
+  function fmtSize(bytes) {
+    if (bytes == null) return '—';
+    if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+    if (bytes >= 1024) return `${(bytes / 1024).toFixed(0)} KB`;
+    return `${bytes} B`;
+  }
+
+  async function loadModels() {
+    modelsError = null;
+    try {
+      models = await api.aiModelStatus();
+      modelRun = models?.state?.phase ? models.state : null;
+      // Follow an active run so the button state reflects the server.
+      if (RUNNING.includes(modelRun?.phase)) {
+        scheduleModelPoll();
+      }
+    } catch (e) {
+      models = null;
+      modelsError = formatApiError(e);
+    }
+  }
+
+  function scheduleModelPoll() {
+    clearTimeout(pollTimer);
+    pollTimer = setTimeout(async () => {
+      try {
+        const run = (await api.updateStatus())?.state;
+        modelRun = run?.phase ? run : null;
+        if (RUNNING.includes(modelRun?.phase)) {
+          scheduleModelPoll();
+        } else if (modelRun?.phase) {
+          // Terminal: surface the result and refresh the file listing.
+          notice = modelRun.message;
+          await loadModels();
+        }
+      } catch {
+        // The service restarts during apply; the next poll continues.
+        scheduleModelPoll();
+      }
+    }, 2000);
+  }
+
+  async function updateModels() {
+    modelBusy = true;
+    error = null;
+    notice = null;
+    try {
+      await api.aiUpdateModels();
+      modelRun = { phase: 'preparing', message: 'Preparing AI model update…' };
+      notice = 'AI model update started - see progress below.';
+      scheduleModelPoll();
+    } catch (e) {
+      error = formatApiError(e);
+    } finally {
+      modelBusy = false;
+    }
+  }
+
+  onDestroy(() => clearTimeout(pollTimer));
 
   // Override editor (allow exempt / clear existing override).
   let overrideDomain = $state('');
@@ -79,6 +151,7 @@
 
   $effect(() => {
     load();
+    loadModels();
   });
 </script>
 
@@ -180,6 +253,49 @@
         </tbody>
       </table>
     </div>
+  </div>
+
+  <div class="card" style="margin-top: 18px">
+    <h3 style="margin-top: 0">AI Models</h3>
+    <p class="muted" style="margin-top: 4px">
+      The bundled classifier and verifier files. Updating downloads the
+      models bundle from the latest GitHub release, verifies it, installs the
+      files and restarts the service (a brief DNS pause) with automatic
+      rollback on failure.
+    </p>
+    {#if modelsError}
+      <p style="color: var(--danger)">{modelsError}</p>
+    {:else if models}
+      <table>
+        <thead>
+          <tr><th>File</th><th style="text-align: right">Size</th><th>sha256</th></tr>
+        </thead>
+        <tbody>
+          {#each models.files as f (f.file)}
+            <tr>
+              <td><code>{f.file}</code></td>
+              <td class="num">{f.present ? fmtSize(f.size) : 'missing'}</td>
+              <td><code class="muted">{f.sha256 ? f.sha256.slice(0, 16) + '…' : '—'}</code></td>
+            </tr>
+          {/each}
+        </tbody>
+      </table>
+    {/if}
+    {#if modelRun && RUNNING.includes(modelRun.phase)}
+      <div style="margin-top: 10px">
+        <span class="pill">{modelRun.phase}</span>
+        <span class="muted">{modelRun.message} This page resumes after the service restart.</span>
+      </div>
+    {:else if isAdmin}
+      <div class="row" style="margin-top: 12px">
+        <button onclick={updateModels} disabled={modelBusy || !models?.models_dir}>
+          Update AI Models
+        </button>
+        <span class="muted">
+          {models?.models_dir ? `Installed in ${models.models_dir}` : 'No model directory found (models update unavailable)'}
+        </span>
+      </div>
+    {/if}
   </div>
 
   <div class="card" style="margin-top: 18px">

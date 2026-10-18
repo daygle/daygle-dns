@@ -1042,6 +1042,48 @@ pub async fn update_preflight(State(state): State<AppState>) -> Response {
     Json(result).into_response()
 }
 
+/// `GET /api/ai/model-status` - the installed AI model files (present, size,
+/// sha256), for the console's AI page. Shares the update run state so an
+/// in-flight model update can be followed from there too.
+pub async fn ai_model_status(State(state): State<AppState>) -> Response {
+    let config_dir = config_dir(&state);
+    let (dir, files, update_state) = run_blocking(move || {
+        let (dir, files) = crate::update::model_status(config_dir.as_deref());
+        (dir, files, crate::update::read_state())
+    })
+    .await;
+    Json(serde_json::json!({
+        "models_dir": dir.as_ref().map(|d| d.display().to_string()),
+        "files": files,
+        "state": update_state,
+    }))
+    .into_response()
+}
+
+/// `POST /api/ai/update-models` - begin a models-only update: download the
+/// `daygle-dns-models.tar.gz` bundle from the latest release and hand it to
+/// the privileged apply service, which installs the model files and restarts
+/// the server. A `202` only means the update began; poll
+/// `GET /api/ai/model-status` (which embeds the shared update-state) until
+/// `done`/`error`.
+pub async fn ai_update_models(State(state): State<AppState>) -> Response {
+    let config_dir = config_dir(&state);
+    let Ok(exe) = std::env::current_exe() else {
+        return error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "cannot locate the running binary",
+        );
+    };
+    match run_blocking(move || crate::update::start_models(&exe, config_dir.as_deref())).await {
+        Ok(pid) => (
+            StatusCode::ACCEPTED,
+            Json(serde_json::json!({ "started": true, "pid": pid })),
+        )
+            .into_response(),
+        Err(e) => start_error_response(e),
+    }
+}
+
 // ---- Zones --------------------------------------------------------------
 
 #[derive(Serialize)]

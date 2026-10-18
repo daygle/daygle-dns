@@ -93,8 +93,12 @@ jobs:
       - name: Build static binary
         env:
           # Fully static: runs on any Linux regardless of glibc version.
+          # --no-default-features excludes the MiniLM/ONNX verifier: prebuilt
+          # ONNX Runtime binaries are glibc-based and do not link statically
+          # into a musl binary. Those builds run the fastText/heuristic
+          # backends; ai.verifier_model_path is ignored.
           RUSTFLAGS: -C target-feature=+crt-static
-        run: cargo build --locked --release -p daygle-dns --target x86_64-unknown-linux-musl
+        run: cargo build --locked --release -p daygle-dns --no-default-features --target x86_64-unknown-linux-musl
 
       - name: Stage artifact
         run: |
@@ -248,6 +252,58 @@ jobs:
           path: stage/*
           if-no-files-found: error
 
+  # The AI models bundle: platform-independent data shipped with every
+  # release so an installed server can refresh its AI models (fastText
+  # starter + MiniLM verifier files) from the console without a binary
+  # update. Flat contents: manifest.json + whitelisted model files.
+  build-models-bundle:
+    name: Build AI models bundle
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Stage bundle
+        run: |
+          set -eu
+          mkdir -p stage
+          for f in daygle-starter.bin all-MiniLM-L6-v2-int8.onnx minilm-tokenizer.json minilm-centroids.json README.md; do
+            if [ ! -f "models/$f" ]; then echo "::error::models/$f missing"; exit 1; fi
+            cp "models/$f" "stage/$f"
+          done
+          rm stage/README.md
+
+      - name: Generate manifest
+        working-directory: stage
+        run: |
+          set -eu
+          {
+            printf '{"version":"%s","files":[' "${GITHUB_REF_NAME#v}"
+            first=1n            for f in daygle-starter.bin all-MiniLM-L6-v2-int8.onnx minilm-tokenizer.json minilm-centroids.json; do
+              sha="$(sha256sum "$f" | cut -d' ' -f1)"
+              size="$(stat -c %s "$f")"
+              if [ "$first" -eq 0 ]; then printf ','; fi
+              printf '{"name":"%s","sha256":"%s","size":%s}' "$f" "$sha" "$size"
+              first=0
+            done
+            printf ']}\n'
+          } > manifest.json
+          cat manifest.json
+
+      - name: Bundle
+        working-directory: stage
+        run: |
+          tar -czf daygle-dns-models.tar.gz \
+            manifest.json daygle-starter.bin all-MiniLM-L6-v2-int8.onnx \
+            minilm-tokenizer.json minilm-centroids.json
+          sha256sum daygle-dns-models.tar.gz > daygle-dns-models.tar.gz.sha256
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: daygle-dns-models-bundle
+          path: stage/*
+          if-no-files-found: error
+
   publish:
     name: Publish GitHub release
     # Every build job must be in `needs` so its artifacts finish uploading
@@ -260,6 +316,7 @@ jobs:
         build-aarch64,
         build-windows-x86_64,
         build-darwin-aarch64,
+        build-models-bundle,
       ]
     if: always() && needs.build-glibc-x86_64.result == 'success'
     runs-on: ubuntu-latest

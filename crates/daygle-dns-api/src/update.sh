@@ -27,6 +27,15 @@
 
 set -eu
 
+# Modes: default updates the binary; `--models` updates the AI model bundle
+# (daygle-dns-models.tar.gz) instead - no architecture matching and no
+# source-build fallback, since models are platform-independent data.
+MODE="release"
+if [ "$1" = "--models" ]; then
+  MODE="models"
+  shift
+fi
+
 EXE="$1"
 DIR="$2"
 LOG="$DIR/update.log"
@@ -154,16 +163,49 @@ fetch() { # url dest
 # Match the release asset to this machine's architecture. CI publishes
 # daygle-dns-linux-{x86_64,x86_64-musl,aarch64}; the musl asset is the
 # universal fallback because it is statically linked and runs on any Linux.
+# (The models bundle is arch-independent and skips this entirely.)
 ARCH="$(uname -m)"
-case "$ARCH" in
-  x86_64) ASSET="linux-x86_64" ;;
-  aarch64|arm64) ASSET="linux-aarch64" ;;
-  *) ASSET="linux-x86_64-musl" ;;
-esac
+if [ "$MODE" = "models" ]; then
+  ASSET="models"
+else
+  case "$ARCH" in
+    x86_64) ASSET="linux-x86_64" ;;
+    aarch64|arm64) ASSET="linux-aarch64" ;;
+    *) ASSET="linux-x86_64-musl" ;;
+  esac
+fi
 
 DOWNLOAD_OK=0
 REL_TAG=""
-if [ -n "$DOWNLOADER" ]; then
+if [ "$MODE" = "models" ]; then
+  if [ -z "$DOWNLOADER" ]; then
+    fail "no downloader (curl or wget) is installed; it is needed to fetch the AI models bundle."
+    exit 1
+  fi
+  # Resolve the latest release tag with the same API-first logic as the
+  # binary path.
+  if fetch "$LATEST_API_URL" "$SRC/release.json" 2>>"$LOG"; then
+    REL_TAG="$(grep -o '"tag_name"[[:space:]]*:[[:space:]]*"[^"]*"' "$SRC/release.json" 2>/dev/null | head -n 1 | sed 's/.*"tag_name"[[:space:]]*:[[:space:]]*"//; s/"$//')"
+  fi
+  if [ -z "$REL_TAG" ] && fetch "$LATEST_URL" "$SRC/release.html" 2>>"$LOG"; then
+    REL_TAG="$(sed -n 's/.*releases\/tag\/\([^"/?]*\).*/\1/p' "$SRC/release.html" | head -n 1)"
+  fi
+  if [ -z "$REL_TAG" ]; then
+    fail "could not resolve the latest release (GitHub unreachable or rate-limited) - see update.log."
+    exit 1
+  fi
+  state downloading "Downloading the AI models bundle (${REL_TAG})…"
+  BUNDLE_TMP="$SRC/models.tar.gz"
+  BUNDLE_SUM="$SRC/models.sha256"
+  if fetch "$BASE_URL/$REL_TAG/daygle-dns-models.tar.gz" "$BUNDLE_TMP" 2>>"$LOG" \
+     && fetch "$BASE_URL/$REL_TAG/daygle-dns-models.tar.gz.sha256" "$BUNDLE_SUM" 2>>"$LOG"; then
+    DOWNLOAD_OK=1
+  else
+    rm -f "$BUNDLE_TMP" "$BUNDLE_SUM"
+    fail "release ${REL_TAG} has no AI models bundle (daygle-dns-models.tar.gz) or it failed to download - see update.log."
+    exit 1
+  fi
+elif [ -n "$DOWNLOADER" ]; then
   state downloading "Downloading the prebuilt release (${ASSET} build)…"
   # Resolve the latest release tag: the GitHub API is authoritative (and
   # cheap); the /releases/latest HTML redirect is the fallback if the API is
@@ -203,7 +245,18 @@ fi
 
 NEW_BIN=""
 TARGET_VERSION=""
-if [ "$DOWNLOAD_OK" -eq 1 ]; then
+if [ "$MODE" = "models" ]; then
+  # Verify the bundle checksum BEFORE staging; a mismatch is fatal.
+  state downloading "Verifying the models bundle checksum…"
+  EXPECTED="$(cut -d' ' -f1 "$BUNDLE_SUM" 2>/dev/null | tr -d '[:space:]')"
+  ACTUAL="$( (sha256sum "$BUNDLE_TMP" 2>/dev/null || shasum -a 256 "$BUNDLE_TMP" 2>/dev/null) | cut -d' ' -f1 | tr -d '[:space:]')"
+  if [ -z "$EXPECTED" ] || [ "$EXPECTED" != "$ACTUAL" ]; then
+    fail "checksum verification failed for the AI models bundle${REL_TAG:+ ($REL_TAG)} - refusing to install it."
+    exit 1
+  fi
+  NEW_BIN="$BUNDLE_TMP"
+  TARGET_VERSION="$(printf '%s' "$REL_TAG" | sed 's/^v//')"
+elif [ "$DOWNLOAD_OK" -eq 1 ]; then
   # Verify the checksum BEFORE the file is used; a mismatch is fatal.
   state downloading "Verifying the download checksum…"
   EXPECTED="$(cut -d' ' -f1 "$SRC/daygle-dns.sha256" 2>/dev/null | tr -d '[:space:]')"
@@ -278,23 +331,24 @@ TARGET_VERSION="$(printf '%s' "$TARGET_VERSION" | sed 's/^v//' | grep -o '[0-9][
 
 # ---- stage and hand off to the root apply service ------------------------
 
-# Stage the verified binary + manifest into the staging subdir (which the
+# Stage the verified artifact + manifest into the staging subdir (which the
 # watcher does NOT monitor), then atomically create the top-level `request`
 # marker that triggers daygle-dns-update.service.
-stage_and_trigger() { # staged-binary target-version
-  src_bin="$1"
+stage_and_trigger() { # staged-file target-version kind
+  stage_file="$1"
   tgt_ver="$2"
-  [ -f "$src_bin" ] || return 1
+  stage_kind="$3"
+  [ -f "$stage_file" ] || return 1
   rm -f "$STAGING/apply.bin" "$STAGING/apply.json" "$UPDATES_DIR/request" "$UPDATES_DIR/request.processing"
-  cp -f "$src_bin" "$STAGING/apply.bin" 2>/dev/null || return 1
+  cp -f "$stage_file" "$STAGING/apply.bin" 2>/dev/null || return 1
   sha="$( (sha256sum "$STAGING/apply.bin" 2>/dev/null || shasum -a 256 "$STAGING/apply.bin" 2>/dev/null) | cut -d' ' -f1 | tr -d '[:space:]')"
   [ -n "$sha" ] || return 1
-  printf '{"version":"%s","sha256":"%s"}\n' "$tgt_ver" "$sha" > "$STAGING/apply.json" || return 1
+  printf '{"kind":"%s","version":"%s","sha256":"%s"}\n' "$stage_kind" "$tgt_ver" "$sha" > "$STAGING/apply.json" || return 1
   : > "$UPDATES_DIR/request" || return 1
 }
 
-state installing "Update ready - handing off to the systemd update service (v${TARGET_VERSION})…"
-if ! stage_and_trigger "$NEW_BIN" "$TARGET_VERSION"; then
+state installing "Update ready - handing off to the systemd update service (${MODE} v${TARGET_VERSION})…"
+if ! stage_and_trigger "$NEW_BIN" "$TARGET_VERSION" "$MODE"; then
   WHY="$(last_log_error)"
   fail "the update binary could not be staged into $STAGING${WHY:+: $WHY}. Re-run the installer to repair the update service, then retry."
   exit 1

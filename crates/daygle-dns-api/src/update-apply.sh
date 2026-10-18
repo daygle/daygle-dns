@@ -13,11 +13,13 @@
 # normal root systemd unit, so the service account itself never gains any
 # rights beyond the staging dir it already owns.
 #
-# Contract (paths baked by install.sh via __DAYGLE_DNS_EXE__/__DAYGLE_DNS_UPDATES_DIR__):
+# Contract (paths baked by install.sh via __DAYGLE_DNS_EXE__/
+# __DAYGLE_DNS_UPDATES_DIR__/__DAYGLE_DNS_MODELS_DIR__/__DAYGLE_DNS_USER__):
 #   <updates>/request               - empty trigger marker (created atomically
 #                                     by the updater after staging completes)
-#   <updates>/staging/apply.json   - {"version":"x.y.z","sha256":"<64hex>"}
-#   <updates>/staging/apply.bin    - the staged, checksum-verified binary
+#   <updates>/staging/apply.json   - {"kind":"release|models","version":"x.y.z","sha256":"<64hex>"}
+#   <updates>/staging/apply.bin    - the staged, checksum-verified binary (or
+#                                     models bundle tar.gz for kind=models)
 #
 # Only the fixed staging paths are ever touched (the manifest cannot select a
 # path), and the staged binary is validated against the manifest's sha256, so
@@ -27,9 +29,16 @@ set -eu
 
 EXE="__DAYGLE_DNS_EXE__"
 UPDATES_DIR="__DAYGLE_DNS_UPDATES_DIR__"
+MODELS_DIR="__DAYGLE_DNS_MODELS_DIR__"
+SERVICE_USER="__DAYGLE_DNS_USER__"
 STAGING="$UPDATES_DIR/staging"
 REQ="$UPDATES_DIR/request"
 DIR="${DAYGLE_DNS_UPDATE_DIR:-/tmp/daygle-dns-update}"
+
+# The manifest may only install AI model files with these exact flat names
+# (mirrors update.rs MODEL_FILES). Nothing in a manifest or a bundle ever
+# selects another path.
+MODEL_WHITELIST="daygle-starter.bin all-MiniLM-L6-v2-int8.onnx minilm-tokenizer.json minilm-centroids.json"
 
 # This step runs as root, but $DIR (and everything under $UPDATES_DIR) is
 # writable by the unprivileged service account. Root therefore never opens
@@ -112,6 +121,8 @@ fi
 
 VERSION="$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$MANIFEST" | head -n 1)"
 SHA256="$(sed -n 's/.*"sha256"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$MANIFEST" | head -n 1)"
+KIND="$(sed -n 's/.*"kind"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$MANIFEST" | head -n 1)"
+KIND="${KIND:-release}"
 BAD=""
 
 # Strict validation of the manifest: version is dotted numerics only; sha256
@@ -137,6 +148,127 @@ if [ -z "$ACTUAL" ] || [ "$ACTUAL" != "$SHA256" ]; then
   log "rejecting update: sha256 mismatch (expected $SHA256)"
   rm -f "$REQ.processing"
   fail "the staged binary failed checksum verification - refusing to install it. Re-run the update from the console."
+  exit 1
+fi
+
+# ---- models-only update ------------------------------------------------
+# The staged file is a tar.gz bundle containing manifest.json + whitelisted
+# model files. Install them INTO $MODELS_DIR, chmod/chown for the service
+# account, restart, health-check and roll the files back on failure. The
+# binary path below never runs for this kind.
+if [ "$KIND" = "models" ]; then
+  state applying "Applying AI model files (v${VERSION})…"
+  log "applying models bundle v${VERSION} into $MODELS_DIR"
+
+  WORK="$PRIV/models"
+  mkdir -p "$WORK"
+  if ! tar -xzf "$BIN" -C "$WORK"; then
+    log "tar extraction failed for the models bundle"
+    rm -f "$REQ.processing"
+    fail "the staged AI models bundle could not be extracted. Re-run the model update from the console."
+    exit 1
+  fi
+
+  INNER="$WORK/manifest.json"
+  if [ ! -f "$INNER" ] || [ -L "$INNER" ]; then
+    log "models bundle is missing its manifest.json"
+    rm -f "$REQ.processing"
+    fail "the staged AI models bundle is missing its internal manifest. Re-run the model update from the console."
+    exit 1
+  fi
+
+  VALID=""
+  for f in $MODEL_WHITELIST; do
+    if grep -q "\"name\"[[:space:]]*:[[:space:]]*\"$f\"" "$INNER"; then
+      VALID="$VALID $f"
+    fi
+  done
+  if [ -z "$VALID" ]; then
+    log "models manifest lists no whitelisted files"
+    rm -f "$REQ.processing"
+    fail "the models bundle manifest lists no installed model files. Re-run the model update from the console."
+    exit 1
+  fi
+
+  # Verify each file against the manifest's sha256 before installing.
+  mkdir -p "$PRIV/model-backup"
+  FAILED=""
+  for f in $VALID; do
+    SRCF="$WORK/$f"
+    WANT="$(sed -n "s/.*\"name\"[[:space:]]*:[[:space:]]*\"$f\"[^}]*\"sha256\"[[:space:]]*:[[:space:]]*\"\([0-9a-fA-F]*\)\".*/\1/p" "$INNER" | head -n 1)"
+    case "$WANT" in ''|*[!0-9a-fA-F]*) WANT="" ;; esac
+    if [ -z "$WANT" ] || [ "${#WANT}" -ne 64 ] || [ -L "$SRCF" ] || [ ! -f "$SRCF" ]; then
+      FAILED="$FAILED $f"
+      continue
+    fi
+    ACT="$( (sha256sum "$SRCF" 2>/dev/null || shasum -a 256 "$SRCF" 2>/dev/null) | cut -d' ' -f1 | tr -d '[:space:]')"
+    [ "$ACT" = "$WANT" ] || FAILED="$FAILED $f"
+  done
+  if [ -n "$FAILED" ]; then
+    log "rejecting models bundle; failed:${FAILED}"
+    rm -f "$REQ.processing"
+    fail "the staged AI models bundle failed file validation:${FAILED}. Re-run the model update from the console."
+    exit 1
+  fi
+
+  # Back up whatever is currently installed (best effort), install the
+  # verified files atomically (temp name + rename), hand them to the
+  # service account.
+  for f in $VALID; do
+    if [ -f "$MODELS_DIR/$f" ]; then cp -f "$MODELS_DIR/$f" "$PRIV/model-backup/$f" 2>/dev/null || true; fi
+    install -m 0644 "$WORK/$f" "$MODELS_DIR/.new-$f" 2>>"$LOG" || { FAILED="$FAILED $f"; continue; }
+    mv -f "$MODELS_DIR/.new-$f" "$MODELS_DIR/$f"
+  done
+  if [ -n "$FAILED" ]; then
+    log "install failed for:${FAILED}"
+    rm -f "$REQ.processing"
+    fail "installing the AI model files failed (${FAILED}). Please check the disk and retry."
+    exit 1
+  fi
+  for f in $VALID; do
+    chown "$SERVICE_USER":"$SERVICE_USER" "$MODELS_DIR/$f" 2>/dev/null || true
+  done
+
+  state restarting "Restarting the service to load the new AI models…"
+  if ! systemctl restart daygle-dns; then
+    log "systemctl restart daygle-dns failed after model install"
+    for f in $VALID; do
+      if [ -f "$PRIV/model-backup/$f" ]; then cp -f "$PRIV/model-backup/$f" "$MODELS_DIR/$f" 2>/dev/null || true; fi
+    done
+    systemctl restart daygle-dns 2>>"$LOG" || true
+    rm -f "$REQ.processing"
+    fail "the new AI models were installed but the service restart failed; the previous model files were restored."
+    exit 1
+  fi
+
+  # Health check: the service must come back and the API answer.
+  i=0
+  HEALTHY=0
+  while [ $i -lt 15 ]; do
+    sleep 1
+    if systemctl is-active --quiet daygle-dns 2>/dev/null \
+       && curl -fsSL --max-time 2 http://localhost:5380/api/health >/dev/null 2>&1; then
+      HEALTHY=1
+      break
+    fi
+    i=$((i + 1))
+  done
+
+  rm -f "$REQ.processing" "$MANIFEST" "$STAGED_BIN"
+  if [ "$HEALTHY" -eq 1 ]; then
+    log "applied models bundle v${VERSION} and health check passed"
+    state done "AI model files updated and verified successfully (v${VERSION})."
+    exit 0
+  fi
+
+  log "health check failed after model update - rolling back"
+  state rolling_back "Model update failed - rolling back the AI model files…"
+  for f in $VALID; do
+    if [ -f "$PRIV/model-backup/$f" ]; then cp -f "$PRIV/model-backup/$f" "$MODELS_DIR/$f" 2>/dev/null || true; fi
+  done
+  systemctl restart daygle-dns 2>>"$LOG" || true
+  rm -f "$REQ.processing"
+  fail "Model update failed - successfully rolled back the AI model files. Release v${VERSION} did not pass its health check."
   exit 1
 fi
 

@@ -687,6 +687,93 @@ fn config_dir_hint() -> Option<&'static Path> {
     }
 }
 
+/// The AI model files managed by the models-bundle update flow (flat names
+/// inside `$CONFIG_DIR/models`). The bundle manifest may only ever select
+/// these names - the apply side re-validates.
+pub const MODEL_FILES: &[&str] = &[
+    "daygle-starter.bin",
+    "all-MiniLM-L6-v2-int8.onnx",
+    "minilm-tokenizer.json",
+    "minilm-centroids.json",
+];
+
+/// Where the installed models live: `<config dir>/models`. The install
+/// convention is `/etc/daygle-dns`.
+pub fn models_dir(config_dir: Option<&Path>) -> Option<std::path::PathBuf> {
+    if let Some(dir) = config_dir {
+        if dir.join("models").is_dir() {
+            return Some(dir.join("models"));
+        }
+    }
+    if Path::new("/etc/daygle-dns/models").is_dir() {
+        return Some(std::path::PathBuf::from("/etc/daygle-dns/models"));
+    }
+    None
+}
+
+/// One installed AI model file for `GET /api/ai/model-status`.
+#[derive(Debug, Clone, Serialize)]
+pub struct ModelFileInfo {
+    pub file: String,
+    pub present: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub size: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
+}
+
+/// Inspect the installed AI model files (present/size/sha256), so the
+/// console can show what ships and what an update would replace.
+pub fn model_status(config_dir: Option<&Path>) -> (Option<std::path::PathBuf>, Vec<ModelFileInfo>) {
+    let dir = models_dir(config_dir);
+    let files = MODEL_FILES
+        .iter()
+        .map(|name| {
+            let path: Option<std::path::PathBuf> = dir.as_ref().map(|d| d.join(name));
+            match path.as_ref().and_then(|p| std::fs::metadata(p).ok()) {
+                Some(meta) => {
+                    use sha2::Digest;
+                    let mut hasher = sha2::Sha256::new();
+                    let mut chunk = vec![0u8; 64 * 1024];
+                    let _ = path
+                        .as_ref()
+                        .and_then(|p| std::fs::File::open(p).ok())
+                        .map(|mut f| {
+                            use std::io::Read as _;
+                            loop {
+                                match f.read(&mut chunk) {
+                                    Ok(0) => break,
+                                    Ok(n) => hasher.update(&chunk[..n]),
+                                    Err(_) => break,
+                                }
+                            }
+                        });
+                    let sha256 = Some(
+                        hasher
+                            .finalize()
+                            .iter()
+                            .map(|b| format!("{b:02x}"))
+                            .collect::<String>(),
+                    );
+                    ModelFileInfo {
+                        file: (*name).to_string(),
+                        present: true,
+                        size: Some(meta.len()),
+                        sha256,
+                    }
+                }
+                None => ModelFileInfo {
+                    file: (*name).to_string(),
+                    present: false,
+                    size: None,
+                    sha256: None,
+                },
+            }
+        })
+        .collect();
+    (dir, files)
+}
+
 /// Numeric semver-ish comparison: true when `a` < `b`. Tolerates prefixes
 /// and extra segments (`"1.0.2-rc1"`), comparing only leading numeric parts.
 fn version_lt(a: &str, b: &str) -> bool {
@@ -739,6 +826,35 @@ impl std::fmt::Display for StartError {
 /// Begin an update run. Resets the state file, writes the embedded helper and
 /// spawns it detached; returns the helper's pid.
 pub fn start(exe: &Path, config_dir: Option<&Path>) -> Result<u32, StartError> {
+    launch_run(None, exe, config_dir, "Preparing update…")
+}
+
+/// Begin a **model-only** update run: download the `daygle-dns-models.tar.gz`
+/// bundle from the latest release and hand it to the same privileged apply
+/// service, which installs the AI model files and restarts. The binary is
+/// never touched.
+pub fn start_models(exe: &Path, config_dir: Option<&Path>) -> Result<u32, StartError> {
+    if can_update(config_dir) && models_dir(config_dir).is_none() {
+        return Err(StartError::Io(std::io::Error::other(
+            "no AI model directory (config_dir/models) found",
+        )));
+    }
+    launch_run(
+        Some("--models"),
+        exe,
+        config_dir,
+        "Preparing AI model update…",
+    )
+}
+
+/// Common launcher for both run kinds (release binary / models bundle):
+/// writes the embedded helper and spawns it detached; returns the pid.
+fn launch_run(
+    mode: Option<&str>,
+    exe: &Path,
+    config_dir: Option<&Path>,
+    preparing_message: &str,
+) -> Result<u32, StartError> {
     if !can_update(config_dir) {
         return Err(StartError::NotUpdateable);
     }
@@ -773,12 +889,12 @@ pub fn start(exe: &Path, config_dir: Option<&Path>) -> Result<u32, StartError> {
         phase: "preparing".to_string(),
         pid: 0,
         started_at: now_rfc3339(),
-        message: "Preparing update…".to_string(),
+        message: preparing_message.to_string(),
         exit_code: 0,
     };
     let state_path = dir.join("state.json");
     write_state_atomic(&state_path, &primed).map_err(StartError::Io)?;
-    match spawn(script_path(&dir), exe, &dir) {
+    match spawn(script_path(&dir), exe, &dir, mode) {
         Ok(pid) => Ok(pid),
         Err(e) => {
             // Never leave the primed "preparing" snapshot behind: nothing
@@ -889,12 +1005,17 @@ fn clear_state_for(st: UpdateState) -> Result<(), StartError> {
 /// Spawn the helper detached. On Unix the child gets its own process group so
 /// a service restart (which only signals the service's cgroup) cannot take it
 /// down mid-step; the helper exits at the hand-off, before the restart.
+/// `mode`: `None` for a release-binary update, `Some("--models")` for an
+/// AI-models bundle update (the helper reads it as its first argument).
 #[cfg(unix)]
-fn spawn(script: PathBuf, exe: &Path, dir: &Path) -> std::io::Result<u32> {
+fn spawn(script: PathBuf, exe: &Path, dir: &Path, mode: Option<&str>) -> std::io::Result<u32> {
     use std::os::unix::process::CommandExt;
     let mut cmd = std::process::Command::new("sh");
-    cmd.arg(&script)
-        .arg(exe)
+    cmd.arg(&script);
+    if let Some(m) = mode {
+        cmd.arg(m);
+    }
+    cmd.arg(exe)
         .arg(dir)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
@@ -907,7 +1028,7 @@ fn spawn(script: PathBuf, exe: &Path, dir: &Path) -> std::io::Result<u32> {
 }
 
 #[cfg(not(unix))]
-fn spawn(_script: PathBuf, _exe: &Path, _dir: &Path) -> std::io::Result<u32> {
+fn spawn(_script: PathBuf, _exe: &Path, _dir: &Path, _mode: Option<&str>) -> std::io::Result<u32> {
     Err(std::io::Error::new(
         std::io::ErrorKind::Unsupported,
         "self-update is only supported on Linux",
@@ -918,6 +1039,32 @@ fn spawn(_script: PathBuf, _exe: &Path, _dir: &Path) -> std::io::Result<u32> {
 mod tests {
     use super::*;
     use std::sync::Mutex;
+
+    /// The model-file whitelist must stay in lockstep between the compiled
+    /// list (used by /api/ai/model-status), the embedded apply script (which
+    /// validates the bundle's manifest) and the release workflow that builds
+    /// the bundle. A drift on any side would silently drop file updates.
+    #[test]
+    fn model_file_whitelist_matches_apply_script_and_release_workflow() {
+        let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let apply = std::fs::read_to_string(manifest_dir.join("src/update-apply.sh"))
+            .expect("update-apply.sh readable");
+        let workflow = std::fs::read_to_string(
+            std::path::Path::new(&manifest_dir).join("../../.github/workflows/release.yml"),
+        )
+        .expect("release.yml readable");
+
+        for name in MODEL_FILES {
+            assert!(
+                apply.contains(name),
+                "update-apply.sh MODEL_WHITELIST must contain {name}"
+            );
+            assert!(
+                workflow.contains(name),
+                "release.yml models bundle must package {name}"
+            );
+        }
+    }
 
     #[test]
     fn state_roundtrips() {

@@ -206,6 +206,8 @@ export const api = {
   aiOverride: (domain, action, reason = '') =>
     request('POST', '/ai/override', { domain, action, reason }),
   aiRescan: () => request('POST', '/ai/rescan'),
+  aiModelStatus: () => request('GET', '/ai/model-status'),
+  aiUpdateModels: () => request('POST', '/ai/update-models'),
 };
 
  
