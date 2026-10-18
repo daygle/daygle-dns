@@ -229,7 +229,13 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Build release binary
-        run: cargo build --locked --release -p daygle-dns
+        # --no-default-features excludes the MiniLM/ONNX verifier: the
+        # prebuilt ONNX Runtime static lib carries CoreML objects compiled
+        # against a newer macOS SDK than the runner's 11.0 deployment
+        # target (___isPlatformVersionAtLeast fails to link). Desktop
+        # builds are best-effort convenience; those binaries run the
+        # fastText/heuristic backends only.
+        run: cargo build --locked --release -p daygle-dns --no-default-features
 
       - name: Smoke test
         run: ./target/release/daygle-dns --version
