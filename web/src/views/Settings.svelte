@@ -17,6 +17,7 @@
     ['recursive', 'Recursive & Caching'],
     ['listeners', 'Protocol Listeners'],
     ['zones', 'Zones & Records'],
+    ['ai', 'AI Scanner'],
     ['interface', 'Interface'],
   ];
 
@@ -28,6 +29,9 @@
   let doh = $state({});
   let doq = $state({});
   let api_ = $state({});
+  let ai_ = $state({});
+  // Auto-block categories as a comma-separated text input.
+  let aiCategoriesText = $state('');
   let upstreamText = $state('');
   // Multi-line textareas for the network allow-lists and NOTIFY targets.
   let axfrNetworksText = $state('');
@@ -88,6 +92,8 @@
         doh = {};
         doq = {};
         api_ = {};
+        ai_ = {};
+        aiCategoriesText = '';
         upstreamText = '';
         axfrNetworksText = '';
         updateNetworksText = '';
@@ -101,6 +107,8 @@
       doh = { ...config.doh };
       doq = { ...config.doq };
       api_ = { ...config.api };
+      ai_ = { ...config.ai, mode: config.ai?.mode || 'train' };
+      aiCategoriesText = (config.ai?.auto_block_categories || []).join(', ');
       dotCertMode = certModeOf(dot);
       dohCertMode = certModeOf(doh);
       doqCertMode = certModeOf(doq);
@@ -205,6 +213,23 @@
           notify_enabled: !!authoritative.notify_enabled,
           notify_targets: parseLines(notifyTargetsText),
           notify_listen_enabled: !!authoritative.notify_listen_enabled,
+        },
+        ai: {
+          enabled: !!ai_.enabled,
+          mode: ai_.mode || 'train',
+          database: ai_.database || '',
+          model_path: ai_.model_path || '',
+          workers: Number(ai_.workers),
+          scan_interval_secs: Number(ai_.scan_interval_secs),
+          expire_check_secs: Number(ai_.expire_check_secs),
+          max_domains_per_scan: Number(ai_.max_domains_per_scan),
+          auto_block_categories: (
+            aiCategoriesText || ''
+          ).split(',').map((c) => c.trim()).filter(Boolean),
+          block_threshold: Number(ai_.block_threshold),
+          confidence_floor: Number(ai_.confidence_floor),
+          category_ttl_secs: Number(ai_.category_ttl_secs),
+          threat_ttl_secs: Number(ai_.threat_ttl_secs),
         },
       };
       await api.updateSettings(body);
@@ -422,6 +447,50 @@
         {/if}
       </div>
     </div>
+  </div>
+  {:else if tab === 'ai'}
+  <div class="card" style="margin-bottom: 14px">
+    <h3 style="margin-top: 0">AI Safety Scanner</h3>
+    <div class="form-grid">
+      <label class="check"><input type="checkbox" bind:checked={ai_.enabled} /> <span>Enable AI Scanner</span></label>
+      <label>
+        <span>Mode</span>
+        <select bind:value={ai_.mode}>
+          <option value="train">Train - record verdicts only, never block</option>
+          <option value="enforce">Enforce - auto-block qualifying threats</option>
+        </select>
+      </label>
+      <label><span>Classification Workers</span><input type="number" min="1" max="32" bind:value={ai_.workers} /></label>
+      <label><span>Scan Interval (Seconds)</span><input type="number" min="10" bind:value={ai_.scan_interval_secs} /></label>
+      <label><span>Expiry Check Interval (Seconds)</span><input type="number" min="10" bind:value={ai_.expire_check_secs} /></label>
+      <label><span>Domains Per Scan</span><input type="number" min="1" bind:value={ai_.max_domains_per_scan} /></label>
+      <label><span>Model Path</span><input bind:value={ai_.model_path} placeholder="/path/to/model.bin (empty = heuristic rules)" /></label>
+      <label><span>Verdict Database</span><input bind:value={ai_.database} placeholder="empty = ai.db next to the zone database" /></label>
+    </div>
+    <p class="muted help">
+      The scanner classifies domains seen in live queries and records verdicts
+      with TTLs. In Enforce mode verdicts can fire fastText auto-blocks;
+      the operator allowlist and overrides always win. Restarting is required:
+      enabling/disabling in-flight happens live once a scanner has been built
+      at startup, but switching the model or database path needs a restart.
+    </p>
+    <h4>Enforcement</h4>
+    <div class="form-grid">
+      <label><span>Block Threshold (0.5 - 1.0)</span><input type="number" step="0.01" min="0.5" max="1" bind:value={ai_.block_threshold} /></label>
+      <label><span>Confidence Floor (0 - 1)</span><input type="number" step="0.01" min="0" max="1" bind:value={ai_.confidence_floor} /></label>
+      <label><span>Category Verdict TTL (Seconds)</span><input type="number" min="60" bind:value={ai_.category_ttl_secs} /></label>
+      <label><span>Threat Verdict TTL (Seconds)</span><input type="number" min="60" bind:value={ai_.threat_ttl_secs} /></label>
+    </div>
+    <label class="stacked" style="margin-top: 12px">
+      <span>Auto-Block Categories (comma-separated, e.g. malware, phishing)</span>
+      <input bind:value={aiCategoriesText} placeholder="malware, phishing" />
+    </label>
+    <p class="muted help">
+      Only threats in these categories auto-block, and only above the block
+      threshold. Lower confidence verdicts feed the verdict table for train-mode
+      review. Changes apply live when a scanner is already running; enabling for
+      the first time takes effect after a restart.
+    </p>
   </div>
   {:else if tab === 'interface'}
   <div class="card" style="margin-bottom: 14px">

@@ -135,6 +135,7 @@ pub struct RuntimeSettings {
     pub doq: Option<ListenerUpdate>,
     pub policy: Option<PolicyUpdate>,
     pub authoritative: Option<AuthoritativeUpdate>,
+    pub ai: Option<AiUpdate>,
 }
 
 /// Partial updates for the recursive resolver (matches the API's shape).
@@ -272,6 +273,55 @@ pub struct PolicyUpdate {
     pub filter_aaaa_except: Option<Vec<String>>,
 }
 
+/// Partial update for the AI scanner (matches the API's shape): the fields
+/// of [`AiSettings`] the console edits.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct AiUpdate {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mode: Option<AiMode>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub database: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workers: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scan_interval_secs: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expire_check_secs: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_domains_per_scan: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auto_block_categories: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub block_threshold: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub confidence_floor: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub category_ttl_secs: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub threat_ttl_secs: Option<u64>,
+}
+
+impl AiUpdate {
+    /// Normalize a category list: trim, lowercase, drop empties and
+    /// duplicates. Matching ignores case, so this is cosmetic but keeps the
+    /// stored value canonical.
+    pub fn normalize_categories(categories: Vec<String>) -> Vec<String> {
+        let mut seen = std::collections::HashSet::new();
+        let mut normalized = Vec::new();
+        for category in categories {
+            let category = category.trim().trim_matches(',').to_ascii_lowercase();
+            if !category.is_empty() && seen.insert(category.clone()) {
+                normalized.push(category);
+            }
+        }
+        normalized
+    }
+}
+
 impl RuntimeSettings {
     /// Whether anything in this overlay would change `config`.
     pub fn is_empty(&self) -> bool {
@@ -281,6 +331,7 @@ impl RuntimeSettings {
             && self.doq.is_none()
             && self.policy.is_none()
             && self.authoritative.is_none()
+            && self.ai.is_none()
     }
 
     /// Apply the overlay to `config` in place. `None` fields are untouched.
@@ -412,6 +463,47 @@ impl RuntimeSettings {
                 config.policy.filter_aaaa_except = v.clone();
             }
         }
+        if let Some(a) = &self.ai {
+            if let Some(v) = a.enabled {
+                config.ai.enabled = v;
+            }
+            if let Some(v) = a.mode {
+                config.ai.mode = v;
+            }
+            if let Some(v) = &a.database {
+                config.ai.database = v.trim().to_string();
+            }
+            if let Some(v) = &a.model_path {
+                config.ai.model_path = v.trim().to_string();
+            }
+            if let Some(v) = a.workers {
+                config.ai.workers = v;
+            }
+            if let Some(v) = a.scan_interval_secs {
+                config.ai.scan_interval_secs = v;
+            }
+            if let Some(v) = a.expire_check_secs {
+                config.ai.expire_check_secs = v;
+            }
+            if let Some(v) = a.max_domains_per_scan {
+                config.ai.max_domains_per_scan = v;
+            }
+            if let Some(v) = &a.auto_block_categories {
+                config.ai.auto_block_categories = AiUpdate::normalize_categories(v.clone());
+            }
+            if let Some(v) = a.block_threshold {
+                config.ai.block_threshold = v;
+            }
+            if let Some(v) = a.confidence_floor {
+                config.ai.confidence_floor = v;
+            }
+            if let Some(v) = a.category_ttl_secs {
+                config.ai.category_ttl_secs = v;
+            }
+            if let Some(v) = a.threat_ttl_secs {
+                config.ai.threat_ttl_secs = v;
+            }
+        }
         if let Some(a) = &self.authoritative {
             if let Some(v) = a.default_record_ttl {
                 config.authoritative.default_record_ttl = v;
@@ -529,6 +621,21 @@ impl RuntimeSettings {
                 notify_enabled: Some(config.authoritative.notify_enabled),
                 notify_targets: Some(config.authoritative.notify_targets.clone()),
                 notify_listen_enabled: Some(config.authoritative.notify_listen_enabled),
+            }),
+            ai: Some(AiUpdate {
+                enabled: Some(config.ai.enabled),
+                mode: Some(config.ai.mode),
+                database: Some(config.ai.database.clone()),
+                model_path: Some(config.ai.model_path.clone()),
+                workers: Some(config.ai.workers),
+                scan_interval_secs: Some(config.ai.scan_interval_secs),
+                expire_check_secs: Some(config.ai.expire_check_secs),
+                max_domains_per_scan: Some(config.ai.max_domains_per_scan),
+                auto_block_categories: Some(config.ai.auto_block_categories.clone()),
+                block_threshold: Some(config.ai.block_threshold),
+                confidence_floor: Some(config.ai.confidence_floor),
+                category_ttl_secs: Some(config.ai.category_ttl_secs),
+                threat_ttl_secs: Some(config.ai.threat_ttl_secs),
             }),
         }
     }

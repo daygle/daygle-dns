@@ -2478,6 +2478,7 @@ pub struct SettingsUpdate {
     pub api: Option<ApiUpdate>,
     pub policy: Option<PolicyUpdate>,
     pub authoritative: Option<AuthoritativeUpdate>,
+    pub ai: Option<AiUpdate>,
 }
 
 /// Partial update for authoritative-zone settings surfaced in the console.
@@ -2507,6 +2508,29 @@ pub struct PolicyUpdate {
     pub blocklist: Option<Vec<String>>,
     pub filter_aaaa: Option<bool>,
     pub filter_aaaa_except: Option<Vec<String>>,
+}
+
+/// Partial update for the AI scanner (mirrors `AiSettings` fields; the
+/// fields the console edits on the Settings page). Bounds and cross-field
+/// invariants are enforced by `DaygleConfig::validate()` once applied.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AiUpdate {
+    pub enabled: Option<bool>,
+    pub mode: Option<daygle_dns_core::config::AiMode>,
+    /// Verdict-store database path; empty uses `ai.db` next to the zone DB.
+    pub database: Option<String>,
+    /// fastText model path; empty uses the built-in heuristic backend.
+    pub model_path: Option<String>,
+    pub workers: Option<u32>,
+    pub scan_interval_secs: Option<u64>,
+    pub expire_check_secs: Option<u64>,
+    pub max_domains_per_scan: Option<u32>,
+    pub auto_block_categories: Option<Vec<String>>,
+    pub block_threshold: Option<f32>,
+    pub confidence_floor: Option<f32>,
+    pub category_ttl_secs: Option<u64>,
+    pub threat_ttl_secs: Option<u64>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -2813,6 +2837,62 @@ pub async fn update_settings(
             policy_changed = true;
         }
     }
+    let mut ai_changed = false;
+    if let Some(a) = &update.ai {
+        if let Some(v) = a.enabled {
+            config.ai.enabled = v;
+            ai_changed = true;
+        }
+        if let Some(v) = a.mode {
+            config.ai.mode = v;
+            ai_changed = true;
+        }
+        if let Some(v) = &a.database {
+            config.ai.database = v.trim().to_string();
+            ai_changed = true;
+        }
+        if let Some(v) = &a.model_path {
+            config.ai.model_path = v.trim().to_string();
+            ai_changed = true;
+        }
+        if let Some(v) = a.workers {
+            config.ai.workers = v;
+            ai_changed = true;
+        }
+        if let Some(v) = a.scan_interval_secs {
+            config.ai.scan_interval_secs = v;
+            ai_changed = true;
+        }
+        if let Some(v) = a.expire_check_secs {
+            config.ai.expire_check_secs = v;
+            ai_changed = true;
+        }
+        if let Some(v) = a.max_domains_per_scan {
+            config.ai.max_domains_per_scan = v;
+            ai_changed = true;
+        }
+        if let Some(v) = &a.auto_block_categories {
+            config.ai.auto_block_categories =
+                daygle_dns_core::config::AiUpdate::normalize_categories(v.clone());
+            ai_changed = true;
+        }
+        if let Some(v) = a.block_threshold {
+            config.ai.block_threshold = v;
+            ai_changed = true;
+        }
+        if let Some(v) = a.confidence_floor {
+            config.ai.confidence_floor = v;
+            ai_changed = true;
+        }
+        if let Some(v) = a.category_ttl_secs {
+            config.ai.category_ttl_secs = v;
+            ai_changed = true;
+        }
+        if let Some(v) = a.threat_ttl_secs {
+            config.ai.threat_ttl_secs = v;
+            ai_changed = true;
+        }
+    }
 
     // A selected console-managed certificate must exist in the store.
     for (label, name) in [
@@ -2892,6 +2972,35 @@ pub async fn update_settings(
                 state.policy.store(Arc::new(engine));
             }
             Err(e) => tracing::warn!("policy rebuild after settings update failed: {e}"),
+        }
+    }
+    // Hot-apply AI settings on the running engine: the plugin and scanner
+    // read the swapped settings atomically, so enable/mode/thresholds/TTLs
+    // apply immediately and the block snapshot is rebuilt with the new
+    // invariants. Enabling a server that started with `[ai]` disabled (and
+    // model/database switches) needs the startup path to build the engine -
+    // the persisted overlay makes it effective on the next restart.
+    if ai_changed {
+        match &state.ai {
+            Some(ai) => {
+                let backend_changed = old_config.ai.model_path != config.ai.model_path
+                    || old_config.ai.database != config.ai.database;
+                ai.settings.store(Arc::new(config.ai.clone()));
+                ai.refresh_snapshot_now();
+                ai.trigger_rescan();
+                if backend_changed {
+                    state.logs.warn(
+                        "api",
+                        "AI model or database path changed; restart to switch backends".to_string(),
+                    );
+                }
+            }
+            None => {
+                state.logs.info(
+                    "api",
+                    "AI settings stored; the scanner activates on the next restart".to_string(),
+                );
+            }
         }
     }
     state.logs.push(
