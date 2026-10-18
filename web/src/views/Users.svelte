@@ -293,7 +293,7 @@
         <div class="form-grid modal-grid">
           <label>
             <span>Role</span>
-            <select bind:value={editUser.role} disabled={editSaving || isLastAdmin(editUser)} title={isLastAdmin(editUser) ? 'The last enabled admin cannot be changed' : undefined}>
+            <select bind:value={editUser.role} disabled={editSaving || isLastAdmin(editUser)} title={isLastAdmin(editUser) ? 'The last enabled administrator cannot be changed' : undefined}>
               <option value="admin">Administrator</option>
               <option value="viewer">Read-Only</option>
             </select>

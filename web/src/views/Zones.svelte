@@ -283,7 +283,7 @@
       <div class="section-title">SOA Settings</div>
       <div class="grid2">
         <label>Primary Nameserver <input placeholder={dnsServerDomain || 'ns1.example.com.'} bind:value={newZone.primary_ns} /></label>
-        <label>Default Administrator Mailbox <input placeholder="admin@example.com." bind:value={newZone.default_admin_mailbox} /></label>
+        <label>Default Administrator Mailbox <input placeholder="admin.example.com." bind:value={newZone.default_admin_mailbox} /></label>
         <label>Administrator Mailbox <input placeholder="admin.example.com." bind:value={newZone.admin_mailbox} /></label>
         <label>Serial <input type="number" min="1" bind:value={newZone.serial} disabled={newZone.serial_date_scheme} /></label>
         <label class="checkbox"><span>Use SOA Serial Date Scheme</span><input type="checkbox" bind:checked={newZone.serial_date_scheme} /></label>

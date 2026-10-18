@@ -47,7 +47,7 @@
         error = 'Setup completed but no session was returned.';
       }
     } catch (e) {
-      error = e && e.message ? e.message : (String(e) || 'Failed to create admin account.');
+      error = e && e.message ? e.message : (String(e) || 'Failed to create the administrator account.');
     } finally {
       loading = false;
     }
@@ -79,7 +79,7 @@
         <div class="error">{error}</div>
       {/if}
 
-      <button type="submit" disabled={loading}>{loading ? 'Creating…' : 'Create Admin'}</button>
+      <button type="submit" disabled={loading}>{loading ? 'Creating…' : 'Create Administrator'}</button>
     </form>
   </section>
 </main>

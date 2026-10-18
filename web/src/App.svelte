@@ -277,7 +277,7 @@
       </nav>
       {#if user}
         <div class="user-box">
-          <div class="user-row" title={isViewer ? 'Read-only account' : 'Full admin access'}>
+          <div class="user-row" title={isViewer ? 'Read-only account' : 'Full administrator access'}>
             <span class="avatar" aria-hidden="true">{user.username.slice(0, 1).toUpperCase()}</span>
             <div class="user-meta">
               <div class="user-name">{user.username}</div>
