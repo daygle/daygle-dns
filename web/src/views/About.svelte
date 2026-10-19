@@ -30,7 +30,7 @@
       text: 'Caching, DNSSEC validation, retries, conditional forwarding, prefetch, and serve-stale support.',
     },
     {
-      icon: icons['advanced-blocking'],
+      icon: icons.filtering,
       title: 'Policy Controls',
       text: 'Trusted domains, blocked domains, remote blocklist sources, client rules, and split horizon DNS.',
     },

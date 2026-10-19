@@ -212,7 +212,7 @@ self_signed = true
 # refresh_secs = 43200
 ```
 
-Sources are also manageable from the **Blocklists** page of the web console:
+Sources are also manageable from the **Filtering → Blocklists** tab of the web console:
 add, edit, remove and validate (including auto-detecting the format) without
 touching the config file - saved changes are stored in the SQLite database
 and applied to the running server immediately (the config file is no longer

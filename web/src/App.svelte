@@ -8,14 +8,12 @@
   import Records from './views/Records.svelte';
   import SplitHorizon from './views/SplitHorizon.svelte';
   import Logs from './views/Logs.svelte';
-  import Blocklists from './views/Blocklists.svelte';
-  import AdvancedBlocking from './views/AdvancedBlocking.svelte';
+  import Filtering from './views/Filtering.svelte';
   import Settings from './views/Settings.svelte';
   import Ai from './views/Ai.svelte';
   import Cache from './views/Cache.svelte';
   import Users from './views/Users.svelte';
   import Certificates from './views/Certificates.svelte';
-  import DomainLists from './views/DomainLists.svelte';
   import About from './views/About.svelte';
   import Update from './views/Update.svelte';
   import { icons } from './icons.svelte.js';
@@ -87,7 +85,7 @@
     authed = true;
     user = getStoredUser();
     needsSetup = false;
-    if (isViewer && (view === 'zones' || view === 'records' || view === 'split-horizon' || view === 'blocklists')) {
+    if (isViewer && (view === 'zones' || view === 'records' || view === 'split-horizon' || view === 'filtering')) {
       view = 'status';
     }
   }
@@ -160,9 +158,7 @@
     { id: 'zones', label: 'Zones', icon: icons.zones, viewer: true },
     { id: 'records', label: 'Records', icon: icons.records, viewer: true },
     { id: 'split-horizon', label: 'Split Horizon', icon: icons['split-horizon'], viewer: true },
-    { id: 'blocklists', label: 'Blocklists', icon: icons.blocklists, viewer: true },
-    { id: 'domain-lists', label: 'Domain Lists', icon: icons['domain-lists'], viewer: true },
-    { id: 'advanced-blocking', label: 'Advanced Blocking', icon: icons['advanced-blocking'], viewer: true },
+    { id: 'filtering', label: 'Filtering', icon: icons.filtering, viewer: true },
     { id: 'ai', label: 'AI', icon: icons.ai, viewer: true },
     { id: 'cache', label: 'Cache', icon: icons.cache },
     { id: 'users', label: 'Users', icon: icons.users },
@@ -291,18 +287,14 @@
         <Records zoneId={recordZoneId} onSelectZone={setRecordZone} />
       {:else if view === 'split-horizon'}
         <SplitHorizon />
-      {:else if view === 'blocklists'}
-        <Blocklists />
-      {:else if view === 'domain-lists'}
-        <DomainLists />
+      {:else if view === 'filtering'}
+        <Filtering />
       {:else if view === 'cache'}
         <Cache />
       {:else if view === 'users'}
         <Users />
       {:else if view === 'certificates'}
         <Certificates />
-      {:else if view === 'advanced-blocking'}
-        <AdvancedBlocking />
       {:else if view === 'ai'}
         <Ai />
       {:else if view === 'about'}

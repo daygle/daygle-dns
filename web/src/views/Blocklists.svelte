@@ -1,7 +1,5 @@
 <script>
   import { api, formatApiError } from '../api.js';
-  import PageHeader from '../PageHeader.svelte';
-  import { icons } from '../icons.svelte.js';
 
   let sources = $state([]);
   let total = $state(0);
@@ -247,12 +245,6 @@
     load();
   });
 </script>
-
-<PageHeader
-  icon={icons.blocklists}
-  title="Blocklists"
-  tagline="Fetch remote blocklists (domain lists, hosts files or adblock filters) and merge them into the blocklist. Add, edit and remove sources below - changes are stored in the server database and applied to the running server immediately. Sources are validated before they are saved."
-/>
 
 {#if notice}
   <div class="card" style="border-color: var(--ok); margin-bottom: 14px">{notice}</div>

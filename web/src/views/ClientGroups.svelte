@@ -1,11 +1,7 @@
 <script>
   import { api } from '../api.js';
-  import PageHeader from '../PageHeader.svelte';
-  import { icons } from '../icons.svelte.js';
 
   let groups = $state([]);
-  let filterAaaa = $state(false);
-  let filterAaaaExcept = $state('');
   let error = $state(null);
   let notice = $state(null);
 
@@ -26,12 +22,7 @@
   async function load() {
     error = null;
     try {
-      const [g, cfg] = await Promise.all([api.blockingGroups(), api.config()]);
-      groups = g;
-      filterAaaa = !!cfg.policy?.filter_aaaa;
-      // Load the saved exceptions: Save sends the whole list, so starting
-      // empty would erase them on the next save.
-      filterAaaaExcept = (cfg.policy?.filter_aaaa_except || []).join('\n');
+      groups = await api.blockingGroups();
     } catch (e) {
       error = String(e.message || e);
     }
@@ -45,20 +36,6 @@
       .filter(Boolean);
   }
 
-  async function saveFilterAaaa() {
-    notice = null;
-    try {
-      await api.updateSettings({
-        policy: {
-          filter_aaaa: filterAaaa,
-          filter_aaaa_except: parseList(filterAaaaExcept),
-        },
-      });
-      notice = 'Filter AAAA settings saved.';
-    } catch (e) {
-      notice = `Error: ${e.message || e}`;
-    }
-  }
 
   function startEdit(group) {
     testResult = null;
@@ -149,12 +126,6 @@
   });
 </script>
 
-<PageHeader
-  icon={icons['advanced-blocking']}
-  title="Advanced Blocking"
-  tagline="Per-client-group allow/block policies. Each group targets a set of client networks and applies its own allow list, block list and regex patterns; allow rules win over block rules, and groups are evaluated top to bottom."
-/>
-
 {#if error}
   <div class="card" style="border-color: var(--danger); color: var(--danger); margin-bottom: 14px">
     Failed to load: {error}
@@ -164,33 +135,9 @@
   <div class="card" style="border-color: var(--ok); margin-bottom: 14px">{notice}</div>
 {/if}
 
-<!-- Filter AAAA -->
 <div class="card" style="margin-bottom: 14px">
   <div class="spread" style="margin-bottom: 10px">
-    <h3 style="margin: 0">Filter AAAA (Force IPv4)</h3>
-    <label class="check">
-      <input type="checkbox" bind:checked={filterAaaa} /> <span>Enabled</span>
-    </label>
-  </div>
-  <p class="muted help" style="margin: 0 0 10px">
-    Answer AAAA (IPv6) queries with an empty response so dual-stack clients fall
-    back to IPv4. List any names - one per line, <code>*.suffix</code> allowed -
-    that must keep their IPv6 answers.
-  </p>
-  <textarea
-    rows="3"
-    placeholder={'*.ipv6.example.com\nnas.home.arpa'}
-    bind:value={filterAaaaExcept}
-  ></textarea>
-  <div class="row" style="margin-top: 8px">
-    <button onclick={saveFilterAaaa}>Save</button>
-  </div>
-</div>
-
-<!-- Groups -->
-<div class="card" style="margin-bottom: 14px">
-  <div class="spread" style="margin-bottom: 10px">
-    <h3 style="margin: 0">Blocking Groups ({groups.length})</h3>
+    <h3 style="margin: 0">Client Groups ({groups.length})</h3>
     <button onclick={() => startEdit(null)}>Add Group</button>
   </div>
 

@@ -1,7 +1,5 @@
 <script>
   import { api, formatApiError } from '../api.js';
-  import PageHeader from '../PageHeader.svelte';
-  import { icons } from '../icons.svelte.js';
 
   let config = $state(null);
   let trusted = $state('');
@@ -48,15 +46,6 @@
 
   $effect(() => load());
 </script>
-
-<PageHeader icon={icons['domain-lists']} title="Domain Lists">
-  {#snippet tagline()}
-    Add domains that should always be trusted or always blocked. Enter one
-    domain per line; use <code>*.example.com</code> for subdomains. Trusted
-    domains take precedence over domain blocking, including remote blocklist
-    sources. Client access-control rules remain authoritative.
-  {/snippet}
-</PageHeader>
 
 {#if notice}
   <div class="card" style="border-color: var(--ok); margin-bottom: 14px">{notice}</div>
