@@ -267,7 +267,7 @@
   </div>
 {:else if !configured}
   <div class="card">
-    <h3 style="margin-top: 0">No Remote Blocklist Sources Configured</h3>
+    <h3 style="margin: 0 0 10px">No Remote Blocklist Sources Configured</h3>
     <p class="muted" style="max-width: 70ch">
       Add your first source to start blocking from a remote list. Give it a
       name, paste the URL, and pick the content format - or leave the format

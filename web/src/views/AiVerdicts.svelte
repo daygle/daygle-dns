@@ -126,7 +126,7 @@
   </div>
 {:else if disabled}
   <div class="card">
-    <h3 style="margin-top: 0">AI Subsystem Disabled</h3>
+    <h3 style="margin: 0 0 10px">AI Subsystem Disabled</h3>
     <p class="muted" style="max-width: 70ch">
       The <code>[ai]</code> section of the configuration is not enabled, so
       there are no verdicts.

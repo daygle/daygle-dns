@@ -166,7 +166,7 @@
   </div>
 {:else if !status}
   <div class="card">
-    <h3 style="margin-top: 0">AI Subsystem Disabled</h3>
+    <h3 style="margin: 0 0 10px">AI Subsystem Disabled</h3>
     <p class="muted" style="max-width: 70ch">
       The <code>[ai]</code> section of the configuration is not enabled, so no
       domains are being classified. Enable it to activate the scanner.
@@ -203,7 +203,7 @@
 
   <div class="two-col">
     <div class="card">
-      <h3 style="margin-top: 0">Threat Categories</h3>
+      <h3 style="margin: 0 0 10px">Threat Categories</h3>
       {#if Object.keys(status.threat_counts || {}).length}
         <table>
           <thead>
@@ -224,14 +224,14 @@
     </div>
 
     <div class="card">
-      <h3 style="margin-top: 0">Enforcement</h3>
+      <h3 style="margin: 0 0 10px">Enforcement</h3>
       <table>
         <tbody>
-          <tr><td>Blocking Threshold</td><td class="num">{status.block_threshold}</td></tr>
-          <tr><td>Category Verdict TTL</td><td class="num">{status.category_ttl_secs}s</td></tr>
-          <tr><td>Threat Verdict TTL</td><td class="num">{status.threat_ttl_secs}s</td></tr>
+          <tr><td class="muted">Blocking Threshold</td><td class="num">{status.block_threshold}</td></tr>
+          <tr><td class="muted">Category Verdict TTL</td><td class="num">{status.category_ttl_secs}s</td></tr>
+          <tr><td class="muted">Threat Verdict TTL</td><td class="num">{status.threat_ttl_secs}s</td></tr>
           <tr>
-            <td>Auto-Block Categories</td>
+            <td class="muted">Auto-Block Categories</td>
             <td>
               {#if status.auto_block_categories?.length}
                 {#each status.auto_block_categories as c, i (c)}
@@ -248,7 +248,7 @@
   </div>
 
   <div class="card" style="margin-top: 18px">
-    <h3 style="margin-top: 0">AI Models</h3>
+    <h3 style="margin: 0 0 10px">AI Models</h3>
     <p class="muted" style="margin-top: 4px">
       The bundled classifier and verifier files. Updating downloads the
       models bundle from the latest GitHub release, verifies it, installs the
@@ -291,7 +291,7 @@
   </div>
 
   <div class="card" style="margin-top: 18px">
-    <h3 style="margin-top: 0">Domain Override</h3>
+    <h3 style="margin: 0 0 10px">Domain Override</h3>
     <p class="muted" style="margin-top: 4px">
       <strong>Allow</strong> exempts a domain from every AI verdict (it is
       never auto-blocked). <strong>Clear</strong> removes an existing override

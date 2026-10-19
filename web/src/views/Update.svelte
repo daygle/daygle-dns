@@ -262,7 +262,7 @@
 
       {#if preflightResult && !preflightResult.ready}
         <div class="preflight-card">
-          <h4 style="margin: 0 0 10px">Pre-flight Check Results</h4>
+          <h4 style="margin: 0 0 10px">Pre-Flight Check Results</h4>
           <p class="muted small" style="margin-bottom: 10px">
             The following issues were detected. Please fix them before attempting an update.
           </p>
@@ -387,7 +387,7 @@
   {/if}
 
   <div class="card" style="margin-bottom: 14px">
-    <h3 style="margin-top: 0">Current Installation</h3>
+    <h3 style="margin: 0 0 10px">Current Installation</h3>
     <table>
       <tbody>
         <tr><td class="muted">Installed Version</td><td><code>v{info.version}</code></td></tr>
@@ -413,7 +413,7 @@
   </div>
 
   <div class="card" style="margin-bottom: 14px">
-    <h3 style="margin-top: 0">Manual Update Command</h3>
+    <h3 style="margin: 0 0 10px">Manual Update Command</h3>
     <p class="muted small" style="margin-bottom: 10px">
       Run this on the host to update all components the same way
       <code>install.sh</code> does.
@@ -434,7 +434,7 @@
   </div>
 
   <div class="card" style="margin-bottom: 14px">
-    <h3 style="margin-top: 0">Preserved During Update</h3>
+    <h3 style="margin: 0 0 10px">Preserved During Update</h3>
     <div class="preserve-list">
       {#each info.preserves as item}
         <span class="preserve">{item}</span>
@@ -442,7 +442,9 @@
     </div>
   </div>
 {:else if busy}
-  <p class="muted">Loading update details…</p>
+  <div class="card">
+    <p class="muted">Loading update details…</p>
+  </div>
 {/if}
 
 <style>

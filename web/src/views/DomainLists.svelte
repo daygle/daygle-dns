@@ -72,12 +72,12 @@
 {#if config}
   <div class="lists">
     <div class="card">
-      <h3 style="margin-top: 0">Trusted Domains (Allowlist)</h3>
+      <h3 style="margin: 0 0 10px">Trusted Domains (Allowlist)</h3>
       <p class="muted small">These domains bypass the normal blocklist and remote sources.</p>
       <textarea rows="14" bind:value={trusted} placeholder={"updates.example.com\n*.trusted.example"}></textarea>
     </div>
     <div class="card">
-      <h3 style="margin-top: 0">Blocked Domains (Blocklist)</h3>
+      <h3 style="margin: 0 0 10px">Blocked Domains (Blocklist)</h3>
       <p class="muted small">These domains are blocked before normal resolution.</p>
       <textarea rows="14" bind:value={blocked} placeholder={"ads.example.com\n*.tracking.example"}></textarea>
     </div>

@@ -227,7 +227,7 @@
 <!-- Editor -->
 {#if edit}
   <div class="card" style="border-color: var(--accent); margin-bottom: 14px">
-    <h3 style="margin-top: 0">{edit.isNew ? 'New Group' : `Edit "${edit.name}"`}</h3>
+    <h3 style="margin: 0 0 10px">{edit.isNew ? 'New Group' : `Edit "${edit.name}"`}</h3>
     <div class="form-grid">
       <label><span>Name</span><input bind:value={edit.name} placeholder="Kids devices" /></label>
       <label class="check" style="align-self: end">
@@ -272,7 +272,7 @@
 
 <!-- Tester -->
 <div class="card">
-  <h3 style="margin-top: 0">Query Tester</h3>
+  <h3 style="margin: 0 0 10px">Query Tester</h3>
   <p class="muted" style="margin: 8px 0">
     Check what the live groups would do with a given client and domain.
   </p>

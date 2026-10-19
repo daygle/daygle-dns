@@ -292,36 +292,36 @@
     <h3 style="margin: 0 0 10px">Runtime</h3>
     <table>
       <tbody>
-        <tr><td>Version</td><td><code>v{status.version}</code></td></tr>
-        <tr><td>Uptime</td><td>{formatUptime(status.uptime_secs)}</td></tr>
-        <tr><td>Zones</td><td>{status.zones}</td></tr>
-        <tr><td>Records</td><td>{status.records}</td></tr>
+        <tr><td class="muted">Version</td><td><code>v{status.version}</code></td></tr>
+        <tr><td class="muted">Uptime</td><td>{formatUptime(status.uptime_secs)}</td></tr>
+        <tr><td class="muted">Zones</td><td>{status.zones}</td></tr>
+        <tr><td class="muted">Records</td><td>{status.records}</td></tr>
         <tr>
-          <td>Recursion</td>
+          <td class="muted">Recursion</td>
           <td><span class:pill={true} class:ok={status.recursion} class:err={!status.recursion}>
             {status.recursion ? 'Enabled' : 'Disabled'}
           </span></td>
         </tr>
         <tr>
-          <td>DNSSEC Validation</td>
+          <td class="muted">DNSSEC Validation</td>
           <td><span class:pill={true} class:ok={status.dnssec} class:err={!status.dnssec}>
             {status.dnssec ? 'Enabled' : 'Disabled'}
           </span></td>
         </tr>
         <tr>
-          <td>DoT</td>
+          <td class="muted">DoT</td>
           <td><span class:pill={true} class:ok={status.dot_enabled} class:err={!status.dot_enabled}>
             {status.dot_enabled ? 'Enabled' : 'Disabled'}
           </span></td>
         </tr>
         <tr>
-          <td>DoH</td>
+          <td class="muted">DoH</td>
           <td><span class:pill={true} class:ok={status.doh_enabled} class:err={!status.doh_enabled}>
             {status.doh_enabled ? 'Enabled' : 'Disabled'}
           </span></td>
         </tr>
         <tr>
-          <td>DoQ</td>
+          <td class="muted">DoQ</td>
           <td><span class:pill={true} class:ok={status.doq_enabled} class:err={!status.doq_enabled}>
             {status.doq_enabled ? 'Enabled' : 'Disabled'}
           </span></td>

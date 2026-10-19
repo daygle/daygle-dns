@@ -63,7 +63,7 @@
 
 <div class="details-grid">
   <div class="card">
-    <h3>Application Details</h3>
+    <h3 style="margin: 0 0 10px">Application Details</h3>
     <table>
       <tbody>
         <tr><td class="muted">Version</td><td><code>v{status?.version || 'Loading…'}</code></td></tr>
@@ -77,7 +77,7 @@
   </div>
 
   <div class="card">
-    <h3>Runtime Status</h3>
+    <h3 style="margin: 0 0 10px">Runtime Status</h3>
     {#if status}
       <table>
         <tbody>
