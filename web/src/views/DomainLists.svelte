@@ -14,14 +14,10 @@
     error = null;
     try {
       config = await api.config();
-      if (config == null) {
-        trusted = '';
-        blocked = '';
-        return;
-      }
-      // Domain lists start empty until the user types values and saves them.
-      trusted = '';
-      blocked = '';
+      // Load the saved lists: Save sends both lists whole, so starting empty
+      // would erase them on the next save.
+      trusted = (config?.policy?.allowlist || []).join('\n');
+      blocked = (config?.policy?.blocklist || []).join('\n');
     } catch (e) {
       error = formatApiError(e);
     }
@@ -73,12 +69,12 @@
   <div class="lists">
     <div class="card">
       <h3 style="margin: 0 0 10px">Trusted Domains (Allowlist)</h3>
-      <p class="muted small">These domains bypass the normal blocklist and remote sources.</p>
+      <p class="muted help" style="margin: 0 0 10px">These domains bypass the normal blocklist and remote sources.</p>
       <textarea rows="14" bind:value={trusted} placeholder={"updates.example.com\n*.trusted.example"}></textarea>
     </div>
     <div class="card">
       <h3 style="margin: 0 0 10px">Blocked Domains (Blocklist)</h3>
-      <p class="muted small">These domains are blocked before normal resolution.</p>
+      <p class="muted help" style="margin: 0 0 10px">These domains are blocked before normal resolution.</p>
       <textarea rows="14" bind:value={blocked} placeholder={"ads.example.com\n*.tracking.example"}></textarea>
     </div>
   </div>
@@ -87,7 +83,9 @@
     <button class="secondary" onclick={load} disabled={busy}>Reload</button>
   </div>
 {:else}
-  <p class="muted">Loading…</p>
+  <div class="card">
+    <p class="muted">Loading…</p>
+  </div>
 {/if}
 
 <style>
