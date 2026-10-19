@@ -265,8 +265,8 @@
   <div class="modal-backdrop" role="presentation" onclick={(e) => e.target === e.currentTarget && closeAddZone()}>
     <div class="modal card" role="dialog" aria-modal="true" aria-labelledby="add-zone-title">
       <div class="spread modal-title">
-        <h2 id="add-zone-title">Add Zone</h2>
-        <button class="secondary" onclick={closeAddZone} aria-label="Close">✕</button>
+        <h3 id="add-zone-title" style="margin: 0">Add Zone</h3>
+        <button class="secondary" style="padding: 2px 10px" onclick={closeAddZone} aria-label="Close">✕</button>
       </div>
 
       <div class="grid2">
@@ -285,7 +285,7 @@
         <label>Default Administrator Mailbox <input placeholder="admin.example.com." bind:value={newZone.default_admin_mailbox} /></label>
         <label>Administrator Mailbox <input placeholder="admin.example.com." bind:value={newZone.admin_mailbox} /></label>
         <label>Serial <input type="number" min="1" bind:value={newZone.serial} disabled={newZone.serial_date_scheme} /></label>
-        <label class="checkbox"><span>Use SOA Serial Date Scheme</span><input type="checkbox" bind:checked={newZone.serial_date_scheme} /></label>
+        <label class="checkbox"><input type="checkbox" bind:checked={newZone.serial_date_scheme} /><span>Use SOA Serial Date Scheme</span></label>
         <label>Refresh (Seconds) <input type="number" min="1" bind:value={newZone.refresh} /></label>
         <label>Retry (Seconds) <input type="number" min="1" bind:value={newZone.retry} /></label>
         <label>Expire (Seconds) <input type="number" min="1" bind:value={newZone.expire} /></label>
@@ -317,8 +317,8 @@
   <div class="modal-backdrop" role="presentation" onclick={(e) => e.target === e.currentTarget && closeSoa()}>
     <div class="modal card" role="dialog" aria-modal="true" aria-labelledby="edit-soa-title">
       <div class="spread modal-title">
-        <h2 id="edit-soa-title">Edit SOA - {soaEdit.zone.name}</h2>
-        <button class="secondary" onclick={closeSoa} aria-label="Close">✕</button>
+        <h3 id="edit-soa-title" style="margin: 0">Edit SOA - {soaEdit.zone.name}</h3>
+        <button class="secondary" style="padding: 2px 10px" onclick={closeSoa} aria-label="Close">✕</button>
       </div>
 
       <div class="section-title">SOA Parameters</div>
@@ -326,7 +326,7 @@
         <label>Primary Nameserver <input placeholder={dnsServerDomain || 'ns1.example.com.'} bind:value={soaEdit.primary_ns} /></label>
         <label>Administrator Mailbox <input placeholder="admin.example.com." bind:value={soaEdit.admin_mailbox} /></label>
         <label>Serial <input type="number" min="1" bind:value={soaEdit.serial} disabled={soaEdit.bumpSerial} /></label>
-        <label class="checkbox"><span>Increment Serial on Save</span><input type="checkbox" bind:checked={soaEdit.bumpSerial} /></label>
+        <label class="checkbox"><input type="checkbox" bind:checked={soaEdit.bumpSerial} /><span>Increment Serial on Save</span></label>
         <label>Refresh (Seconds) <input type="number" min="1" bind:value={soaEdit.refresh} /></label>
         <label>Retry (Seconds) <input type="number" min="1" bind:value={soaEdit.retry} /></label>
         <label>Expire (Seconds) <input type="number" min="1" bind:value={soaEdit.expire} /></label>
@@ -353,10 +353,20 @@
   label { display: flex; flex-direction: column; gap: 4px; font-size: 0.85rem; color: var(--muted); }
   .modal-backdrop { position: fixed; inset: 0; background: rgb(0 0 0 / 0.65); display: grid; place-items: center; padding: 20px; z-index: 10; }
   .modal { width: min(760px, 100%); max-height: calc(100vh - 40px); overflow: auto; }
-  .modal-title { margin-bottom: 18px; }
-  .modal-title h2 { margin: 0; }
-  .section-title { color: var(--text); font-weight: 600; margin: 20px 0 10px; padding-top: 14px; border-top: 1px solid var(--border); }
-  .checkbox { flex-direction: row; align-items: center; justify-content: space-between; padding-top: 22px; }
+  .modal-title { margin-bottom: 12px; }
+  /* Matches the Users dialog section headings. */
+  .section-title {
+    margin: 14px 0 8px;
+    padding-top: 12px;
+    border-top: 1px solid var(--border);
+    font-size: 0.75rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--muted);
+  }
+  .checkbox { flex-direction: row; align-items: center; gap: 8px; padding-top: 22px; }
   .checkbox input { width: auto; }
+  .checkbox span { color: var(--text); }
   .actions { margin-top: 22px; padding-top: 14px; border-top: 1px solid var(--border); }
 </style>
