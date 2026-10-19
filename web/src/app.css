@@ -56,7 +56,7 @@ button.secondary {
 
 button.danger {
   background: var(--danger);
-  color: var(--bg);
+  color: #fff;
   border-color: var(--danger);
 }
 button.danger:hover {
