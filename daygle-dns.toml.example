@@ -90,16 +90,18 @@ dnssec_rollover_retire_days = 14
 dnssec_maintenance_secs = 3600
 
 # Serve AXFR/IXFR zone transfers (RFC 5936) for hosted zones.
-# axfr_networks limits which clients may transfer (empty = anyone).
+# axfr_networks limits which clients may transfer (empty = anyone),
+# e.g. ["10.0.0.0/8", "192.168.0.0/16"].
 axfr_enabled = false
-axfr_networks = ["10.0.0.0/8", "192.168.0.0/16"]
+axfr_networks = []
 
 # Accept RFC 2136 dynamic updates (UPDATE messages) for primary zones.
 # Changes are written through to SQLite and go live immediately. Off by
 # default: anyone who can reach the server could otherwise add records.
-# update_networks limits which clients may update (empty = anyone).
+# update_networks limits which clients may update (empty = anyone),
+# e.g. ["10.0.0.0/8", "192.168.0.0/16"].
 allow_dynamic_updates = false
-update_networks = ["10.0.0.0/8", "192.168.0.0/16"]
+update_networks = []
 
 # Secondary zones: replicated from a master via AXFR/IXFR. The zone's
 # records and SOA are re-pulled from the first reachable master on
@@ -115,9 +117,10 @@ update_networks = ["10.0.0.0/8", "192.168.0.0/16"]
 #
 # Outbound: when a primary zone changes (e.g. a dynamic update is applied),
 # send a NOTIFY to each target so secondaries pull immediately instead of
-# waiting out their refresh interval. Requires at least one target.
+# waiting out their refresh interval. Requires at least one target,
+# e.g. ["192.0.2.20", "192.0.2.21:5353"].
 notify_enabled = false
-notify_targets = ["192.0.2.20", "192.0.2.21:5353"]
+notify_targets = []
 #
 # Inbound: accept NOTIFYs from masters for the secondary zones above and
 # refresh the affected zone immediately. The NOTIFY is answered with the

@@ -348,7 +348,7 @@
     </div>
     <label class="stacked">
       <span>Allowed Networks (one CIDR per line)</span>
-      <textarea rows="3" placeholder="192.168.1.0/24" bind:value={updateNetworksText}></textarea>
+      <textarea rows="3" placeholder={"192.168.1.0/24\n10.0.0.0/8"} bind:value={updateNetworksText}></textarea>
     </label>
     <p class="muted help">
       Clients on these networks may add, change, or delete records in primary
