@@ -10,7 +10,26 @@
   // the TTL field of new records.
   let defaultTtl = $state(3600);
 
-  const TYPES = ['A', 'AAAA', 'CNAME', 'MX', 'TXT', 'NS', 'SRV', 'PTR', 'CAA'];
+  // Value examples in zone-file presentation format, which is what the server
+  // parses. MX and SRV carry their priority inside the value.
+  const EXAMPLES = {
+    A: '192.0.2.1',
+    AAAA: '2001:db8::1',
+    CNAME: 'target.example.com.',
+    MX: '10 mail.example.com.',
+    TXT: '"v=spf1 mx -all"',
+    NS: 'ns1.example.com.',
+    SRV: '10 5 5060 sip.example.com.',
+    PTR: 'host.example.com.',
+    CAA: '0 issue "letsencrypt.org"',
+    HTTPS: '1 . alpn=h2,h3',
+    SVCB: '1 svc.example.com. port=8443',
+    DS: '12345 13 2 3F2A6B1C…',
+    TLSA: '3 1 1 0C72AC70B745…',
+    SSHFP: '4 2 9F6B2C1D0E3A…',
+    NAPTR: '100 10 "S" "SIP+D2U" "" _sip._udp.example.com.',
+  };
+  const TYPES = Object.keys(EXAMPLES);
 
   let zones = $state([]);
   let zonesLoaded = $state(false);
@@ -270,12 +289,10 @@
           <div class="grid2">
             <label>Name <input placeholder="www" bind:value={edit.name} /></label>
             <label>Type<select bind:value={edit.rtype}>{#each TYPES as t (t)}<option value={t}>{t}</option>{/each}</select></label>
-            <label>Value <input placeholder="192.0.2.1" bind:value={edit.content} /></label>
+            <label>Value <input placeholder={EXAMPLES[edit.rtype]} bind:value={edit.content} /></label>
             <label>TTL <input type="number" bind:value={edit.ttl} /></label>
-            {#if edit.rtype === 'MX' || edit.rtype === 'SRV'}
-              <label>Priority <input type="number" bind:value={edit.priority} /></label>
-            {/if}
           </div>
+          <p class="muted value-help">Format: <code>{EXAMPLES[edit.rtype]}</code>{#if edit.rtype === 'MX' || edit.rtype === 'SRV'} (the priority is the first number){/if}</p>
           <div class="row" style="margin-top: 10px">
             <button onclick={saveEdit}>Save</button>
             <button class="secondary" onclick={() => (edit = null)}>Cancel</button>
@@ -287,6 +304,7 @@
 {/if}
 
 <style>
+  .value-help { margin: 8px 0 0; font-size: 0.85rem; }
   .picker { margin-bottom: 14px; gap: 10px; align-items: center; }
   .picker-label { font-size: 0.85rem; color: var(--muted); margin: 0; }
   .picker-box { position: relative; flex: 0 1 340px; min-width: 240px; }

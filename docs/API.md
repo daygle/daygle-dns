@@ -420,7 +420,10 @@ PUT /api/zones/{id}/records
 ```
 
 Supported `rtype` values: `A`, `AAAA`, `CNAME`, `MX`, `TXT`, `NS`, `SOA`,
-`SRV`, `PTR`, `CAA`.
+`SRV`, `PTR`, `CAA`, `HTTPS`, `SVCB`, `DS`, `TLSA`, `SSHFP`, `NAPTR`.
+`content` must parse as that type's RDATA, otherwise the request fails with
+400. `priority` is stored but not served: MX and SRV take their priority from
+`content`.
 
 `PUT /api/zones/{id}/records/{rid}/disabled` stages (or re-enables) a single
 record without deleting it - a disabled record stays in the zone but stops

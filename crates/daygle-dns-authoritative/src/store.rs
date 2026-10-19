@@ -2039,12 +2039,22 @@ fn insert_record_in_tx(
     let name = qualify_name(&input.name, zone_name)?;
     validate_name(&name, false)?;
 
+    // Reject content the catalog could not serve: it parses records with the
+    // same presentation-format parser and would otherwise skip them silently.
+    let content = input.content.trim();
+    let rr_type = rtype
+        .parse::<RecordType>()
+        .map_err(|e| DaygleError::InvalidRecord(format!("record type '{rtype}': {e}")))?;
+    RData::try_from_str(rr_type, content).map_err(|e| {
+        DaygleError::InvalidRecord(format!("invalid {rtype} record '{content}': {e}"))
+    })?;
+
     let record = Record {
         id: Uuid::new_v4().to_string(),
         zone_id: zone_id.to_string(),
         name,
         rtype,
-        content: input.content.trim().to_string(),
+        content: content.to_string(),
         ttl: input.ttl,
         priority: input.priority,
         disabled: input.disabled,
@@ -2563,6 +2573,95 @@ mod tests {
             )
             .unwrap_err();
         assert!(matches!(err, DaygleError::InvalidRecord(_)));
+    }
+
+    #[test]
+    fn extended_record_types_round_trip() {
+        let s = store();
+        let zone = s
+            .create_zone(&ZoneInput {
+                name: "example.com".to_string(),
+                ..zone_input_defaults()
+            })
+            .unwrap();
+        let samples = [
+            ("HTTPS", "1 . alpn=h2,h3"),
+            ("SVCB", "1 svc.example.com. port=8443"),
+            (
+                "DS",
+                "12345 13 2 3F2A6B1C9D8E7F60514233241506F7E8D9C0B1A2938475665748392A1B0C0D0E",
+            ),
+            (
+                "TLSA",
+                "3 1 1 0C72AC70B745AC19998811B131D662C9AC69DBDBE7CB23E5B514B56664C5D3D6",
+            ),
+            (
+                "SSHFP",
+                "4 2 9F6B2C1D0E3A4B5C6D7E8F90A1B2C3D4E5F60718293A4B5C6D7E8F9012345678",
+            ),
+            (
+                "NAPTR",
+                "100 10 \"S\" \"SIP+D2U\" \"\" _sip._udp.example.com.",
+            ),
+        ];
+        for (rtype, content) in samples {
+            let record = s
+                .upsert_record(
+                    &zone.id,
+                    &RecordInput {
+                        name: "svc".to_string(),
+                        rtype: rtype.to_string(),
+                        content: content.to_string(),
+                        ttl: 300,
+                        priority: 0,
+                        disabled: false,
+                    },
+                )
+                .unwrap_or_else(|e| panic!("{rtype} '{content}' rejected: {e}"));
+            assert_eq!(record.rtype, rtype);
+
+            // Secondary zones store the transferred RDATA's display form, so
+            // it must parse back to the same data.
+            let rr_type = rtype.parse::<RecordType>().unwrap();
+            let rdata = RData::try_from_str(rr_type, content).unwrap();
+            let reparsed = RData::try_from_str(rr_type, &rdata.to_string())
+                .unwrap_or_else(|e| panic!("{rtype} display form '{rdata}' does not reparse: {e}"));
+            assert_eq!(rdata, reparsed, "{rtype} round trip");
+        }
+    }
+
+    #[test]
+    fn record_validation_rejects_unparseable_content() {
+        let s = store();
+        let zone = s
+            .create_zone(&ZoneInput {
+                name: "example.com".to_string(),
+                ..zone_input_defaults()
+            })
+            .unwrap();
+        for (rtype, content) in [
+            ("A", "not-an-ip"),
+            ("TLSA", "3 1 1 nothex"),
+            ("DS", "12345"),
+        ] {
+            let err = s
+                .upsert_record(
+                    &zone.id,
+                    &RecordInput {
+                        name: "www".to_string(),
+                        rtype: rtype.to_string(),
+                        content: content.to_string(),
+                        ttl: 60,
+                        priority: 0,
+                        disabled: false,
+                    },
+                )
+                .unwrap_err();
+            assert!(
+                matches!(err, DaygleError::InvalidRecord(_)),
+                "{rtype} '{content}' must be rejected"
+            );
+        }
     }
 
     #[test]
