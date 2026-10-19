@@ -102,8 +102,8 @@
   </div>
 
   <div class="card" style="margin-top: 18px; margin-bottom: 14px">
-    <div class="spread">
-      <h3 style="margin-top: 0">Cache Controls</h3>
+    <div class="spread" style="margin-bottom: 10px">
+      <h3 style="margin: 0">Cache Controls</h3>
       <button class="danger" onclick={flush} disabled={busy || !cache.enabled}>Flush Cache</button>
     </div>
     {#if !cache.enabled}
@@ -123,12 +123,16 @@
           <span>Refresh Popular Names Early</span>
         </label>
       </div>
-      <p class="muted small">Changing capacity rebuilds the resolver and may briefly interrupt recursive lookups.</p>
-      <button onclick={save} disabled={busy}>{busy ? 'Saving…' : 'Save'}</button>
+      <p class="muted help">Changing capacity rebuilds the resolver and may briefly interrupt recursive lookups.</p>
+      <div class="row" style="margin-top: 10px">
+        <button onclick={save} disabled={busy}>{busy ? 'Saving…' : 'Save'}</button>
+      </div>
     {/if}
   </div>
 {:else}
-  <p class="muted">Loading…</p>
+  <div class="card">
+    <p class="muted">Loading…</p>
+  </div>
 {/if}
 
 <style>
