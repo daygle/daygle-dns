@@ -259,7 +259,7 @@
   <button class="secondary" onclick={refreshNow} disabled={refreshing || !configured}>
     {refreshing ? 'Refreshing…' : 'Refresh All'}
   </button>
-  <button class="secondary" onclick={load}>Refresh</button>
+  <button class="secondary" onclick={load}>Reload</button>
   {#if configured}
     <span class="muted">
       {sources.length} source{sources.length === 1 ? '' : 's'} · {fmt(total)} domains blocked
@@ -298,9 +298,9 @@
         <tr>
           <th>Source</th>
           <th>Format</th>
-          <th>Refresh</th>
+          <th>Refresh Interval</th>
           <th style="text-align: right">Domains</th>
-          <th>Last refresh</th>
+          <th>Last Refresh</th>
           <th>Status</th>
           <th></th>
         </tr>
