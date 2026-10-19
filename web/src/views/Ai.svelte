@@ -38,26 +38,3 @@
 {:else}
   <AiVerdicts />
 {/if}
-
-<style>
-  .tabs {
-    display: flex;
-    gap: 4px;
-    margin-bottom: 14px;
-    border-bottom: 1px solid var(--border);
-    flex-wrap: wrap;
-  }
-  .tab {
-    background: none;
-    border: none;
-    border-bottom: 2px solid transparent;
-    padding: 8px 14px;
-    cursor: pointer;
-    color: var(--muted);
-    font: inherit;
-  }
-  .tab.active {
-    color: var(--text);
-    border-bottom-color: var(--accent);
-  }
-</style>

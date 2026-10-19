@@ -348,18 +348,10 @@
 {/if}
 
 <style>
-  .table-wrap { overflow-x: auto; }
-  .table-wrap th, .table-wrap td { padding: 8px 6px; font-size: 0.85rem; }
-  table { width: 100%; border-collapse: collapse; }
-  th, td { text-align: left; border-bottom: 1px solid var(--border); vertical-align: middle; }
-  th { font-size: 0.78rem; color: var(--muted); font-weight: 600; }
-  .num { text-align: right; white-space: nowrap; }
-  td.num button { padding: 4px 9px; }
   .notice { margin-bottom: 14px; }
   .notice.error { border-color: var(--danger); color: var(--danger); }
   .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
   label { display: flex; flex-direction: column; gap: 4px; font-size: 0.85rem; color: var(--muted); }
-  textarea { font: inherit; color: inherit; background: var(--panel-2); border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; resize: vertical; }
   .modal-backdrop { position: fixed; inset: 0; background: rgb(0 0 0 / 0.65); display: grid; place-items: center; padding: 20px; z-index: 10; }
   .modal { width: min(760px, 100%); max-height: calc(100vh - 40px); overflow: auto; }
   .modal-title { margin-bottom: 18px; }
@@ -367,6 +359,5 @@
   .section-title { color: var(--text); font-weight: 600; margin: 20px 0 10px; padding-top: 14px; border-top: 1px solid var(--border); }
   .checkbox { flex-direction: row; align-items: center; justify-content: space-between; padding-top: 22px; }
   .checkbox input { width: auto; }
-  .help { font-size: 0.8rem; margin: 6px 0 0; }
   .actions { margin-top: 22px; padding-top: 14px; border-top: 1px solid var(--border); }
 </style>

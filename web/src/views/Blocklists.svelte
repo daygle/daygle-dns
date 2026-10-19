@@ -337,7 +337,7 @@
     </table>
   </div>
 
-  <p class="muted" style="font-size: 0.8rem">
+  <p class="muted help">
     Refresh All fetches every source immediately. Sources also refresh
     automatically on their configured interval; a failed fetch is reported
     here and retried on the next cycle.
@@ -418,13 +418,6 @@
 {/if}
 
 <style>
-  tr.disabled { opacity: 0.55; }
-  .pill.ok { color: var(--ok); border-color: var(--ok); }
-  .pill.err { color: var(--danger); border-color: var(--danger); }
-  table { width: 100%; border-collapse: collapse; margin-top: 10px; }
-  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); vertical-align: middle; }
-  th { font-size: 0.78rem; color: var(--muted); font-weight: 600; }
-  .num { text-align: right; white-space: nowrap; }
   .check { display: inline-flex; align-items: center; gap: 6px; }
   .form-grid {
     display: grid;

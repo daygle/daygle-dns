@@ -505,7 +505,7 @@
         </select>
       </label>
     </div>
-    <p class="muted" style="font-size: 0.85rem; margin-bottom: 0">
+    <p class="muted small" style="margin-bottom: 0">
       Example with the current choice: <strong>{formatDateTime(new Date())}</strong>. Display
       preferences are per browser and apply everywhere dates and times are shown.
     </p>
@@ -516,7 +516,7 @@
     <div class="form-grid">
       <label class="check"><input type="checkbox" bind:checked={api_.gui_enabled} /> <span>Serve the Web GUI</span></label>
     </div>
-    <p class="muted" style="font-size: 0.85rem">
+    <p class="muted small">
       The settings on this page are stored in the server database and survive
       restarts. Bootstrap options (listen addresses, ports, certificate paths,
       login accounts and zone signing) are edited in
@@ -531,36 +531,11 @@
 
 <style>
   .actions { display: flex; gap: 10px; margin-bottom: 16px; }
-  .tabs {
-    display: flex;
-    gap: 4px;
-    margin-bottom: 14px;
-    border-bottom: 1px solid var(--border);
-    flex-wrap: wrap;
-  }
-  .tab {
-    background: none;
-    border: none;
-    border-bottom: 2px solid transparent;
-    padding: 8px 14px;
-    cursor: pointer;
-    color: var(--muted);
-    font: inherit;
-  }
-  .tab.active {
-    color: var(--text);
-    border-bottom-color: var(--accent);
-  }
   .stacked {
     display: flex;
     flex-direction: column;
     gap: 4px;
     margin-bottom: 4px;
-  }
-  .help {
-    font-size: 0.82rem;
-    line-height: 1.45;
-    margin: 6px 0 0;
   }
   .form-grid {
     display: grid;
@@ -583,14 +558,5 @@
     padding-bottom: 8px;
   }
   label.check span { color: var(--text); }
-  textarea {
-    background: var(--panel-2);
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    padding: 6px 8px;
-    font: inherit;
-    color: inherit;
-    resize: vertical;
-  }
   h4 { margin: 14px 0 8px; }
 </style>

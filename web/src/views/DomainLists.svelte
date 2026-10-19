@@ -92,7 +92,6 @@
 
 <style>
   .lists { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
-  textarea { width: 100%; min-height: 260px; background: var(--panel-2); border: 1px solid var(--border); border-radius: 6px; padding: 8px; font: inherit; color: inherit; resize: vertical; }
-  .small { font-size: 0.8rem; }
+  textarea { width: 100%; min-height: 260px; padding: 8px; }
   @media (max-width: 760px) { .lists { grid-template-columns: 1fr; } }
 </style>

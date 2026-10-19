@@ -297,22 +297,10 @@
 
 <style>
   p { max-width: 70ch; }
-  table { width: 100%; border-collapse: collapse; margin-top: 10px; }
-  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); vertical-align: top; }
-  th { font-size: 0.78rem; color: var(--muted); font-weight: 600; }
-  tr.disabled { opacity: 0.55; }
-  .num { text-align: right; white-space: nowrap; }
+  table { margin-top: 10px; }
+  td { vertical-align: top; }
+  textarea { width: 100%; }
   .check { display: inline-flex; align-items: center; gap: 6px; }
-  textarea {
-    width: 100%;
-    background: var(--panel-2);
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    padding: 6px 8px;
-    font: inherit;
-    color: inherit;
-    resize: vertical;
-  }
   .form-grid {
     display: grid;
     grid-template-columns: repeat(2, 1fr);

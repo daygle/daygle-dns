@@ -332,9 +332,5 @@
     gap: 12px;
     margin-top: 18px;
   }
-  table { width: 100%; border-collapse: collapse; }
-  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); }
-  th { font-size: 0.78rem; color: var(--muted); font-weight: 600; }
-  .num { text-align: right; font-variant-numeric: tabular-nums; }
   .override-row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
 </style>

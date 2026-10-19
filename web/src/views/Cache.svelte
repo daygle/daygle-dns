@@ -139,5 +139,4 @@
   label span { color: var(--muted); }
   label.check { flex-direction: row; align-items: center; gap: 8px; padding-bottom: 8px; }
   label.check span { color: var(--text); }
-  .small { font-size: 0.8rem; }
 </style>

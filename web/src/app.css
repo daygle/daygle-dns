@@ -25,11 +25,18 @@ button, input, select {
   color: inherit;
 }
 
-input, select {
+input, select, textarea {
   background: var(--panel-2);
   border: 1px solid var(--border);
   border-radius: 6px;
   padding: 6px 8px;
+  /* Typed text stays full-contrast even inside a muted label. */
+  color: var(--text);
+}
+
+textarea {
+  font: inherit;
+  resize: vertical;
 }
 
 button {
@@ -65,12 +72,26 @@ table {
 
 th, td {
   text-align: left;
-  padding: 8px 10px;
+  padding: 7px 10px;
   border-bottom: 1px solid var(--border);
   font-size: 0.9rem;
+  vertical-align: middle;
 }
 
-th { color: var(--muted); font-weight: 600; }
+th {
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+/* Numeric / action cells align right. */
+.num { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+td.num button { padding: 4px 9px; }
+tr.disabled { opacity: 0.55; }
+
+/* Scrolls a wide table inside its card instead of the page. */
+.table-wrap { overflow-x: auto; }
 
 .card {
   background: var(--panel);
@@ -94,3 +115,28 @@ th { color: var(--muted); font-weight: 600; }
 .pill.err { color: var(--danger); border-color: var(--danger); }
 
 code, pre { font-family: ui-monospace, "Cascadia Code", monospace; }
+
+/* Explanatory text under a section or field. */
+.help { font-size: 0.82rem; line-height: 1.45; margin: 6px 0 0; }
+.small { font-size: 0.82rem; }
+
+/* Page-level tabs (Settings, Logs, AI). */
+.tabs {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 14px;
+  border-bottom: 1px solid var(--border);
+  flex-wrap: wrap;
+}
+.tab {
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  padding: 8px 14px;
+  cursor: pointer;
+  color: var(--muted);
+}
+.tab.active {
+  color: var(--text);
+  border-bottom-color: var(--accent);
+}

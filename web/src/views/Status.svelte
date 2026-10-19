@@ -389,5 +389,4 @@
     gap: 12px;
     margin-top: 18px;
   }
-  .num { text-align: right; font-variant-numeric: tabular-nums; }
 </style>

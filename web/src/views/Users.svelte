@@ -333,9 +333,6 @@
 {/if}
 
 <style>
-  table { width: 100%; border-collapse: collapse; }
-  th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--border); }
-  th { color: var(--muted); font-size: 0.8rem; font-weight: 600; }
   tr.clickable { cursor: pointer; }
   tr.clickable:hover td { background: var(--panel-2); }
   .row { display: flex; align-items: center; }

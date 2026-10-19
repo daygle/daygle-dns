@@ -292,7 +292,7 @@
             <label>Value <input placeholder={EXAMPLES[edit.rtype]} bind:value={edit.content} /></label>
             <label>TTL <input type="number" bind:value={edit.ttl} /></label>
           </div>
-          <p class="muted value-help">Format: <code>{EXAMPLES[edit.rtype]}</code>{#if edit.rtype === 'MX' || edit.rtype === 'SRV'} (the priority is the first number){/if}</p>
+          <p class="muted help value-help">Format: <code>{EXAMPLES[edit.rtype]}</code>{#if edit.rtype === 'MX' || edit.rtype === 'SRV'} (the priority is the first number){/if}</p>
           <div class="row" style="margin-top: 10px">
             <button onclick={saveEdit}>Save</button>
             <button class="secondary" onclick={() => (edit = null)}>Cancel</button>
@@ -304,7 +304,7 @@
 {/if}
 
 <style>
-  .value-help { margin: 8px 0 0; font-size: 0.85rem; }
+  .value-help { margin-top: 8px; }
   .picker { margin-bottom: 14px; gap: 10px; align-items: center; }
   .picker-label { font-size: 0.85rem; color: var(--muted); margin: 0; }
   .picker-box { position: relative; flex: 0 1 340px; min-width: 240px; }
@@ -355,12 +355,6 @@
   .notice { margin-bottom: 14px; }
   .notice.error { border-color: var(--danger); color: var(--danger); }
   .zone-help { margin-top: -4px; }
-  .table-wrap { overflow-x: auto; }
-  table { width: 100%; border-collapse: collapse; }
-  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); vertical-align: middle; }
-  th { font-size: 0.78rem; color: var(--muted); font-weight: 600; }
-  .num { text-align: right; white-space: nowrap; }
-  td.num button { padding: 4px 9px; }
   .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
   label { display: flex; flex-direction: column; gap: 4px; font-size: 0.85rem; color: var(--muted); }
 </style>

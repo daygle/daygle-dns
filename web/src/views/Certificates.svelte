@@ -246,9 +246,6 @@
 </div>
 
 <style>
-  table { width: 100%; border-collapse: collapse; }
-  th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--border); }
-  th { color: var(--muted); font-size: 0.8rem; font-weight: 600; }
   .row { display: flex; align-items: center; }
   label { display: flex; flex-direction: column; gap: 4px; font-size: 0.85rem; }
   label span { color: var(--muted); }
@@ -257,14 +254,6 @@
   .file-label { font-size: 0.85rem; }
   .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
   .pem-grid { grid-template-columns: 1fr 1fr; margin-top: 12px; }
-  textarea {
-    background: var(--panel);
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    padding: 6px 8px;
-    font: 0.8rem/1.4 ui-monospace, 'Cascadia Code', Consolas, monospace;
-    color: inherit;
-    resize: vertical;
-  }
+  textarea { font: 0.8rem/1.4 ui-monospace, 'Cascadia Code', Consolas, monospace; }
   .form-error { margin-top: 10px; color: var(--danger); font-size: 0.85rem; }
 </style>

@@ -263,7 +263,7 @@
       {#if preflightResult && !preflightResult.ready}
         <div class="preflight-card">
           <h4 style="margin: 0 0 10px">Pre-flight Check Results</h4>
-          <p class="muted" style="font-size: 0.85rem; margin-bottom: 10px">
+          <p class="muted small" style="margin-bottom: 10px">
             The following issues were detected. Please fix them before attempting an update.
           </p>
           {#each preflightResult.checks as check}
@@ -303,7 +303,7 @@
           </p>
         </div>
       {:else if info.updater_outdated && info.latest_release}
-        <p class="muted" style="font-size: 0.82rem; margin: 8px 0 0">
+        <p class="muted small" style="margin: 8px 0 0">
           A newer release (v{info.latest_release}) is available; the installed
           version is {info.version}.
         </p>
@@ -338,7 +338,7 @@
             <button class="secondary" onclick={dismissRun}>Dismiss</button>
           </div>
           {#if waitingForServer}
-            <p class="muted" style="font-size: 0.8rem; margin-top: 10px">
+            <p class="muted small" style="margin-top: 10px">
               Waiting for the restarted service to come back, then reloading automatically…
             </p>
           {/if}
@@ -354,12 +354,12 @@
         <button class="secondary" onclick={dismissRun} style="margin-top: 8px">Dismiss</button>
 
       {:else if info.updater_bootstrap_required}
-        <p class="muted" style="font-size: 0.85rem; margin: 8px 0 0">
+        <p class="muted small" style="margin: 8px 0 0">
           Complete the one-time bootstrap above to enable in-place updates
           from this page.
         </p>
       {:else if info.updater_outdated === false}
-        <p class="muted" style="font-size: 0.85rem; margin: 8px 0 0">
+        <p class="muted small" style="margin: 8px 0 0">
           No newer release is available; the installed version ({info.version}) is up to date.
         </p>
       {:else}
@@ -371,7 +371,7 @@
             </button>
           </div>
         {:else}
-          <p class="muted" style="font-size: 0.85rem">
+          <p class="muted small">
             Read-only console accounts cannot start an update; ask an
             administrator.
           </p>
@@ -379,7 +379,7 @@
       {/if}
 
       {#if run?.started_at}
-        <p class="muted" style="font-size: 0.78rem; margin-top: 10px">
+        <p class="muted small" style="margin-top: 10px">
           Last run: {run.started_at} · pid {run.pid} · exit {run.exit_code}
         </p>
       {/if}
@@ -398,13 +398,13 @@
       </tbody>
     </table>
     {#if !info.can_update}
-      <p class="muted" style="font-size: 0.82rem; margin: 10px 0 0; max-width: 80ch">
+      <p class="muted small" style="margin: 10px 0 0; max-width: 80ch">
         In-place updates need a Linux host managed by the installer (systemd
         unit, <code>/usr/local/bin/daygle-dns</code>, or a config under
         <code>/etc</code>) and a downloader (curl or wget) for the prebuilt
         release. Otherwise use the host command below. Missing requirements:
       </p>
-      <ul class="gates" style="font-size: 0.82rem; margin: 8px 0 0">
+      <ul class="gates small" style="margin: 8px 0 0">
         {#each info.gates || [] as gate}
           <li>{gate}</li>
         {/each}
@@ -414,7 +414,7 @@
 
   <div class="card" style="margin-bottom: 14px">
     <h3 style="margin-top: 0">Manual Update Command</h3>
-    <p class="muted" style="font-size: 0.85rem; margin-bottom: 10px">
+    <p class="muted small" style="margin-bottom: 10px">
       Run this on the host to update all components the same way
       <code>install.sh</code> does.
     </p>
@@ -425,9 +425,9 @@
       </button>
     </div>
     {#if info.note}
-      <p class="muted" style="font-size: 0.85rem; margin-top: 10px">{info.note}</p>
+      <p class="muted small" style="margin-top: 10px">{info.note}</p>
     {/if}
-    <p class="muted" style="font-size: 0.85rem; margin-top: 10px">
+    <p class="muted small" style="margin-top: 10px">
       The one-line installer is available directly from the project repository:
       <a href={info.install_script} target="_blank" rel="noreferrer">{info.install_script}</a>
     </p>
@@ -488,8 +488,6 @@
     padding: 4px 10px;
     font-size: 0.85rem;
   }
-  table { width: 100%; border-collapse: collapse; }
-  td { text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--border); }
   td:first-child { width: 52%; }
   .spread { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
   .spin {

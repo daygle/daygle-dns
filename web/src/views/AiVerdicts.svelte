@@ -204,12 +204,5 @@
 {/if}
 
 <style>
-  table { width: 100%; border-collapse: collapse; }
-  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); vertical-align: middle; }
-  th { font-size: 0.78rem; color: var(--muted); font-weight: 600; white-space: nowrap; }
-  .num { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
-  .muted { color: var(--muted); }
   .evidence { max-width: 260px; font-size: 0.78rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .pill.ok { color: var(--ok); border-color: var(--ok); }
-  .pill.err { color: var(--danger); border-color: var(--danger); }
 </style>
