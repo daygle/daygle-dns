@@ -203,7 +203,7 @@
   <div class="row" style="margin: 14px 0">
     <button onclick={rescan}>Rescan Now</button>
     <span class="muted">
-      Mode <span class="pill">{status.mode}</span> · backend
+      Mode <span class="pill">{status.mode}</span> · Backend
       <span class="pill">{status.backend}</span> · {status.workers} worker{status.workers === 1 ? '' : 's'} ·
       every {status.scan_interval_secs}s
     </span>
@@ -235,18 +235,18 @@
       <h3 style="margin-top: 0">Enforcement</h3>
       <table>
         <tbody>
-          <tr><td>Blocking threshold</td><td class="num">{status.block_threshold}</td></tr>
-          <tr><td>Category verdict TTL</td><td class="num">{status.category_ttl_secs}s</td></tr>
-          <tr><td>Threat verdict TTL</td><td class="num">{status.threat_ttl_secs}s</td></tr>
+          <tr><td>Blocking Threshold</td><td class="num">{status.block_threshold}</td></tr>
+          <tr><td>Category Verdict TTL</td><td class="num">{status.category_ttl_secs}s</td></tr>
+          <tr><td>Threat Verdict TTL</td><td class="num">{status.threat_ttl_secs}s</td></tr>
           <tr>
-            <td>Auto-block categories</td>
+            <td>Auto-Block Categories</td>
             <td>
               {#if status.auto_block_categories?.length}
                 {#each status.auto_block_categories as c, i (c)}
                   <span class="pill">{c}</span>{i < status.auto_block_categories.length - 1 ? ' ' : ''}
                 {/each}
               {:else}
-                <span class="muted">none</span>
+                <span class="muted">None</span>
               {/if}
             </td>
           </tr>
@@ -268,13 +268,13 @@
     {:else if models}
       <table>
         <thead>
-          <tr><th>File</th><th style="text-align: right">Size</th><th>sha256</th></tr>
+          <tr><th>File</th><th style="text-align: right">Size</th><th>SHA-256</th></tr>
         </thead>
         <tbody>
           {#each models.files as f (f.file)}
             <tr>
               <td><code>{f.file}</code></td>
-              <td class="num">{f.present ? fmtSize(f.size) : 'missing'}</td>
+              <td class="num">{f.present ? fmtSize(f.size) : 'Missing'}</td>
               <td><code class="muted">{f.sha256 ? f.sha256.slice(0, 16) + '…' : '—'}</code></td>
             </tr>
           {/each}
@@ -308,12 +308,12 @@
     <form class="override-row" onsubmit={(e) => { e.preventDefault(); saveOverride('allow'); }}>
       <input
         bind:value={overrideDomain}
-        placeholder="domain e.g. news.example.com"
+        placeholder="Domain, e.g. news.example.com"
         style="flex: 1; min-width: 200px"
       />
       <input
         bind:value={overrideReason}
-        placeholder="reason (optional)"
+        placeholder="Reason (Optional)"
         style="flex: 1; min-width: 160px"
       />
       <button type="submit" disabled={overrideBusy}>Allow</button>
