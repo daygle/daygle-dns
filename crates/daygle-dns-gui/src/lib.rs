@@ -3,10 +3,11 @@
 //! Embeds the compiled web GUI (a Svelte app) into the server binary so the
 //! REST API can serve the dashboard with no external web server.
 //!
-//! The build output lives in `web/dist`; building the Svelte app is optional -
-//! a minimal fallback `index.html` is committed so the workspace always
-//! compiles. Run `npm install && npm run build` in `web/` to refresh the
-//! embedded bundle.
+//! The build output lives in `web/dist` and is committed, so the workspace
+//! compiles without Node. Run `npm ci && npm run build` in `web/` to refresh
+//! the embedded bundle after changing `web/src`.
+
+use std::borrow::Cow;
 
 use rust_embed::RustEmbed;
 
@@ -19,7 +20,9 @@ pub struct GuiAssets;
 /// satisfied the request (used to pick a cache policy).
 pub struct Asset {
     pub content_type: &'static str,
-    pub bytes: Vec<u8>,
+    /// Borrowed straight from the binary in release builds (no per-request
+    /// copy); owned only when rust-embed reads from disk in debug builds.
+    pub bytes: Cow<'static, [u8]>,
     /// Embedded file served (e.g. `index.html`, `assets/index-abc123.js`).
     /// Empty, directory-style and unknown SPA routes resolve to `index.html`.
     pub served_path: String,
@@ -81,7 +84,7 @@ pub fn lookup(path: &str) -> Option<Asset> {
 
     Some(Asset {
         content_type: content_type(served),
-        bytes: file.data.to_vec(),
+        bytes: file.data,
         served_path: served.to_string(),
     })
 }
@@ -89,9 +92,9 @@ pub fn lookup(path: &str) -> Option<Asset> {
 /// Best-effort MIME type for an asset path.
 pub fn content_type(path: &str) -> &'static str {
     match path.rsplit('.').next() {
-        Some("html") => "text/html",
-        Some("js" | "mjs") => "text/javascript",
-        Some("css") => "text/css",
+        Some("html") => "text/html; charset=utf-8",
+        Some("js" | "mjs") => "text/javascript; charset=utf-8",
+        Some("css") => "text/css; charset=utf-8",
         Some("svg") => "image/svg+xml",
         Some("json") => "application/json",
         Some("png") => "image/png",
@@ -102,11 +105,6 @@ pub fn content_type(path: &str) -> &'static str {
         Some("map") => "application/json",
         _ => "application/octet-stream",
     }
-}
-
-/// Whether any GUI assets are embedded (always true; present for clarity).
-pub fn is_available() -> bool {
-    true
 }
 
 #[cfg(test)]

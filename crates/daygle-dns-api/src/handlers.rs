@@ -96,12 +96,22 @@ fn log_safe(value: &str) -> String {
 }
 
 /// Serialize a configuration for the browser with secrets removed: password
-/// hashes and the static API token are write-only and never echoed back,
-/// not even to admins.
+/// hashes, the static API token and TSIG shared secrets are write-only and
+/// never echoed back, not even to admins (viewers can read this endpoint, and
+/// a TSIG secret authorizes zone transfers and dynamic updates).
 fn redacted_config_json(
     config: &daygle_dns_core::config::DaygleConfig,
 ) -> std::result::Result<serde_json::Value, serde_json::Error> {
     let mut value = serde_json::to_value(config)?;
+    if let Some(keys) = value
+        .get_mut("authoritative")
+        .and_then(|a| a.get_mut("tsig_keys"))
+        .and_then(|k| k.as_array_mut())
+    {
+        for key in keys.iter_mut().filter_map(|k| k.as_object_mut()) {
+            key.insert("secret".to_string(), serde_json::json!("[redacted]"));
+        }
+    }
     if let Some(api) = value.get_mut("api").and_then(|a| a.as_object_mut()) {
         let token = api.get("api_token").and_then(|t| t.as_str()).unwrap_or("");
         let redacted = if token.is_empty() { "" } else { "[redacted]" };
@@ -632,8 +642,8 @@ pub async fn query_logs(
         // window cannot produce an unbounded response.
         let mut filter = query_log_filter(&query);
         filter.page = Some(1);
-        filter.per_page = Some(10_000);
-        let rows = match state.catalog.store().search_query_logs(&filter) {
+        filter.per_page = Some(daygle_dns_authoritative::ZoneStore::QUERY_LOG_MAX_EXPORT);
+        let rows = match state.catalog.store().export_query_logs(&filter) {
             Ok((rows, _)) => rows,
             Err(e) => return map_err(e),
         };
@@ -671,7 +681,10 @@ pub async fn query_logs(
             "entries": rows,
             "total": total,
             "page": query.page.unwrap_or(1).max(1),
-            "per_page": query.per_page.unwrap_or(50).clamp(1, 500),
+            "per_page": query
+                .per_page
+                .unwrap_or(50)
+                .clamp(1, daygle_dns_authoritative::ZoneStore::QUERY_LOG_MAX_PAGE),
         }))
         .into_response(),
         Err(e) => map_err(e),
@@ -778,7 +791,10 @@ pub async fn ai_verdicts(
                 }))
                 .collect::<Vec<_>>(),
                 "total": total,
-                "per_page": query.per_page.unwrap_or(50).clamp(1, 500),
+                "per_page": query
+                .per_page
+                .unwrap_or(50)
+                .clamp(1, daygle_dns_authoritative::ZoneStore::QUERY_LOG_MAX_PAGE),
                 "page": query.page.unwrap_or(1).max(1),
             })),
         )
@@ -1991,8 +2007,20 @@ pub struct LoginInput {
 /// (unauthenticated by definition).
 pub async fn auth_login(
     State(state): State<AppState>,
+    connect_info: Option<axum::Extension<axum::extract::ConnectInfo<std::net::SocketAddr>>>,
     axum::Json(input): axum::Json<LoginInput>,
 ) -> Response {
+    let client_ip = connect_info.map(|axum::Extension(info)| info.0.ip().to_canonical());
+    if let Some(retry) = client_ip.and_then(|ip| state.login_throttle.retry_after(ip)) {
+        let mut resp = error_response(
+            StatusCode::TOO_MANY_REQUESTS,
+            "too many failed login attempts; try again later",
+        );
+        if let Ok(value) = header::HeaderValue::from_str(&retry.to_string()) {
+            resp.headers_mut().insert(header::RETRY_AFTER, value);
+        }
+        return resp;
+    }
     if input.username.len() > 256 || input.password.len() > MAX_PASSWORD_LEN {
         return error_response(StatusCode::UNAUTHORIZED, "invalid username or password");
     }
@@ -2018,15 +2046,24 @@ pub async fn auth_login(
     };
 
     if !ok {
+        if let Some(ip) = client_ip {
+            state.login_throttle.record_failure(ip);
+        }
         state.logs.push(
             daygle_dns_core::LogLevel::Warn,
             "api",
             format!(
-                "failed login attempt for user '{}'",
-                log_safe(&input.username)
+                "failed login attempt for user '{}'{}",
+                log_safe(&input.username),
+                client_ip
+                    .map(|ip| format!(" from {ip}"))
+                    .unwrap_or_default()
             ),
         );
         return error_response(StatusCode::UNAUTHORIZED, "invalid username or password");
+    }
+    if let Some(ip) = client_ip {
+        state.login_throttle.clear(ip);
     }
 
     let user = user.expect("checked above");

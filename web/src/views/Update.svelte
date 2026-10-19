@@ -24,7 +24,7 @@
   let preflightLoading = $state(false);
   let preflightError = $state('');
 
-  const RUNNING = ['preparing', 'downloading', 'cloning', 'building', 'installing', 'applying', 'restarting'];
+  const RUNNING = ['preparing', 'downloading', 'cloning', 'building', 'installing', 'applying', 'restarting', 'rolling_back'];
   const PHASE_LABEL = {
     preparing: 'Preparing…',
     downloading: 'Downloading the prebuilt release…',

@@ -20,21 +20,22 @@ use chrono::Utc;
 use daygle_dns_core::config::{AiMode, AiSettings};
 use daygle_dns_policy::{Action, Decision, PolicyContext, PolicyPlugin};
 
-use crate::scanner::BlockSnapshot;
+use crate::scanner::{ActiveBlock, BlockSnapshot};
 
 /// Longest suffix match against the snapshot: a verdict recorded on
 /// `bad.example.com` also blocks `www.bad.example.com`, while a verdict on
-/// `example.com` covers every subdomain. Anchor on label boundaries. The
-/// returned domain is a snapshot key owned by the caller.
-fn suffix_match(qname: &str, snapshot: &BlockSnapshot, now: i64) -> Option<String> {
-    let mut candidate = qname.trim_end_matches('.').to_ascii_lowercase();
+/// `example.com` covers every subdomain. Anchor on label boundaries. Walks
+/// borrowed suffixes of one lowercased copy (no allocation per label).
+fn suffix_match<'a>(qname: &str, snapshot: &'a BlockSnapshot, now: i64) -> Option<&'a ActiveBlock> {
+    let name = qname.trim_end_matches('.').to_ascii_lowercase();
+    let mut candidate = name.as_str();
     loop {
-        if let Some(block) = snapshot.get(&candidate) {
+        if let Some(block) = snapshot.get(candidate) {
             if block.expires_at > now {
-                return Some(candidate);
+                return Some(block);
             }
         }
-        candidate = candidate.split_once('.')?.1.to_string();
+        candidate = candidate.split_once('.')?.1;
     }
 }
 
@@ -74,8 +75,7 @@ impl PolicyPlugin for AiBlockPlugin {
         }
         let snapshot = self.snapshot.load_full();
         let now = Utc::now().timestamp();
-        let key = suffix_match(&context.query_name, &snapshot, now)?;
-        let block = snapshot.get(&key)?;
+        let block = suffix_match(&context.query_name, &snapshot, now)?;
         Some(
             Decision::new(
                 format!(
@@ -92,7 +92,6 @@ impl PolicyPlugin for AiBlockPlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::scanner::ActiveBlock;
     use daygle_dns_core::config::AiMode;
 
     fn plugin(mode: AiMode, snapshot: BlockSnapshot) -> Arc<AiBlockPlugin> {

@@ -289,12 +289,15 @@ else
   fi
 
   state cloning "No prebuilt release matched ($DL_WHY) - building from source (this can take several minutes)…"
-  if ! git clone --depth 1 "$REPO_URL" "$SRC" >>"$LOG" 2>&1; then
+  # Clone into a fresh subdirectory: $SRC already holds the release lookup
+  # files, and git refuses to clone into a non-empty directory.
+  BUILD_DIR="$SRC/source"
+  if ! git clone --depth 1 "$REPO_URL" "$BUILD_DIR" >>"$LOG" 2>&1; then
     fail "git clone failed - check network access to $REPO_URL (see update.log)."
     exit 1
   fi
 
-  cd "$SRC"
+  cd "$BUILD_DIR"
 
   state building "Building the release binary (this can take a few minutes)…"
   # cargo writes its registry to $CARGO_HOME (default $HOME/.cargo). systemd
@@ -317,7 +320,7 @@ else
     exit 1
   fi
 
-  NEW_BIN="$SRC/target/release/daygle-dns"
+  NEW_BIN="$BUILD_DIR/target/release/daygle-dns"
   TARGET_VERSION="$("$NEW_BIN" --version 2>/dev/null | head -n 1 || true)"
 fi
 

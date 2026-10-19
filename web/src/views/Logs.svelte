@@ -1,5 +1,6 @@
 <script>
-  import { api } from '../api.js';
+  import { onDestroy } from 'svelte';
+  import { api, getToken } from '../api.js';
   import PageHeader from '../PageHeader.svelte';
   import { icons } from '../icons.svelte.js';
   import { formatDateTime } from '../datetime.svelte.js';
@@ -97,8 +98,9 @@
 
   function exportCsv() {
     const qs = buildQuery({ format: 'csv' });
-    const token = localStorage.getItem('daygle_token') || '';
-    fetch(`/api/querylogs?${qs}`, { headers: { Authorization: `Bearer ${token}` } })
+    const token = getToken();
+    const headers = token ? { Authorization: `Bearer ${token}` } : {};
+    fetch(`/api/querylogs?${qs}`, { headers })
       .then((res) => { if (!res.ok) throw new Error(res.statusText); return res.blob(); })
       .then((blob) => {
         const url = URL.createObjectURL(blob);
@@ -106,7 +108,8 @@
         a.href = url;
         a.download = 'query-logs.csv';
         a.click();
-        URL.revokeObjectURL(url);
+        // Revoking synchronously can cancel the download in some browsers.
+        setTimeout(() => URL.revokeObjectURL(url), 0);
       })
       .catch((e) => { qError = String(e.message || e); });
   }
@@ -151,6 +154,10 @@
   function outcomeLabel(outcome) {
     return outcome.replaceAll('_', ' ').replace(/\b\w/g, (c) => c.toUpperCase());
   }
+
+  // Stop live polling when the view is left; the interval would otherwise
+  // keep querying (and stack up) after navigating away.
+  onDestroy(() => { if (liveTimer) clearInterval(liveTimer); });
 
   $effect(() => { refresh(); });
   $effect(() => { if (tab === 'queries' && qTotal === 0 && qEntries.length === 0 && !qError && !qLoading) runQuery(1); });

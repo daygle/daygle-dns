@@ -82,10 +82,13 @@ Roles:
   treated like mutations: admin role (or the static `api_token`) only.
 
 Sensitive values are never echoed back: `GET /api/config` and the
-configuration returned by `PUT /api/config` report `api.api_token` and every
-`api.users[].password_hash` as `"[redacted]"`. Failed login attempts are
-logged and do not reveal whether the username exists. Passwords are limited
-to 8-1024 characters.
+configuration returned by `PUT /api/config` report `api.api_token`, every
+`api.users[].password_hash` and every `authoritative.tsig_keys[].secret` as
+`"[redacted]"`. Failed login attempts are logged and do not reveal whether the
+username exists. After 10 failed logins from one client address within
+5 minutes, further `POST /api/auth/login` attempts from it get
+`429 Too Many Requests` (with `Retry-After`) until the window lapses; a
+successful login resets the count. Passwords are limited to 8-1024 characters.
 
 `api.cors_origins` lists browser origins (e.g. `https://ops.example`, or `*`)
 allowed to call the API cross-origin; it is read live, so a console edit
