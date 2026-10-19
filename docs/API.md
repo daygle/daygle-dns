@@ -123,6 +123,8 @@ GET /api/status
   "recursion": true,
   "dnssec": true,
   "dot_enabled": true,
+  "doh_enabled": false,
+  "doq_enabled": false,
   "api_enabled": true
 }
 ```

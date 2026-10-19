@@ -199,6 +199,7 @@ pub async fn status(State(state): State<AppState>) -> Response {
         "recursion": state.resolver.load_full().is_some(),
         "dnssec": config.recursive.dnssec_validate,
         "dot_enabled": config.dot.enabled,
+        "doh_enabled": config.doh.enabled,
         "doq_enabled": config.doq.enabled,
         "users_configured": state
             .catalog

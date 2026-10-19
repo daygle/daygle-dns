@@ -155,7 +155,9 @@
     Failed to load status: {error}
   </div>
 {:else if !status}
-  <p class="muted">Loading…</p>
+  <div class="card">
+    <p class="muted">Loading…</p>
+  </div>
 {:else}
   <div class="grid">
     {#each cards as card (card.label)}
@@ -243,7 +245,7 @@
 
   <div class="tops">
     <div class="card">
-      <h3 style="margin-top: 0">Top Clients</h3>
+      <h3 style="margin: 0 0 10px">Top Clients</h3>
       {#if stats?.top_clients?.length}
         <table>
           <tbody>
@@ -257,7 +259,7 @@
       {/if}
     </div>
     <div class="card">
-      <h3 style="margin-top: 0">Top Domains</h3>
+      <h3 style="margin: 0 0 10px">Top Domains</h3>
       {#if stats?.top_domains?.length}
         <table>
           <tbody>
@@ -271,7 +273,7 @@
       {/if}
     </div>
     <div class="card">
-      <h3 style="margin-top: 0">Top Blocked</h3>
+      <h3 style="margin: 0 0 10px">Top Blocked</h3>
       {#if stats?.top_blocked?.length}
         <table>
           <tbody>
@@ -287,7 +289,7 @@
   </div>
 
   <div class="card" style="margin-top: 18px">
-    <h3 style="margin-top: 0">Runtime</h3>
+    <h3 style="margin: 0 0 10px">Runtime</h3>
     <table>
       <tbody>
         <tr><td>Version</td><td><code>v{status.version}</code></td></tr>
@@ -301,7 +303,7 @@
           </span></td>
         </tr>
         <tr>
-          <td>DNSSEC validation</td>
+          <td>DNSSEC Validation</td>
           <td><span class:pill={true} class:ok={status.dnssec} class:err={!status.dnssec}>
             {status.dnssec ? 'Enabled' : 'Disabled'}
           </span></td>
@@ -310,6 +312,12 @@
           <td>DoT</td>
           <td><span class:pill={true} class:ok={status.dot_enabled} class:err={!status.dot_enabled}>
             {status.dot_enabled ? 'Enabled' : 'Disabled'}
+          </span></td>
+        </tr>
+        <tr>
+          <td>DoH</td>
+          <td><span class:pill={true} class:ok={status.doh_enabled} class:err={!status.doh_enabled}>
+            {status.doh_enabled ? 'Enabled' : 'Disabled'}
           </span></td>
         </tr>
         <tr>
