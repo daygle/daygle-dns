@@ -172,10 +172,10 @@
 </PageHeader>
 
 {#if notice}
-  <div class="card" style="border-color: var(--danger); color: var(--danger)">{notice}</div>
+  <div class="card" style="border-color: var(--danger); color: var(--danger); margin-bottom: 14px">{notice}</div>
 {/if}
 {#if error}
-  <div class="card" style="border-color: var(--danger); color: var(--danger)">{error}</div>
+  <div class="card" style="border-color: var(--danger); color: var(--danger); margin-bottom: 14px">{error}</div>
 {/if}
 
 <div class="split">
@@ -193,6 +193,7 @@
       />
       <button onclick={saveNetwork} disabled={!netName.trim()}>Add</button>
     </div>
+    <div class="table-wrap">
     <table>
       <thead>
         <tr><th>Name</th><th>CIDRs</th><th></th></tr>
@@ -208,13 +209,14 @@
                 {/each}
               </div>
             </td>
-            <td>
+            <td class="num">
               <button class="danger" onclick={() => removeNetwork(network)}>✕</button>
             </td>
           </tr>
         {/each}
       </tbody>
     </table>
+    </div>
     {#if networks.length === 0}
       <p class="muted">
         No networks. Name your client groups (LAN, VPN, IoT…) and list their
@@ -228,6 +230,7 @@
       <h3 style="margin: 0">Domain Entries ({entries.length})</h3>
       <button onclick={() => startEdit(null)}>Add Entry</button>
     </div>
+    <div class="table-wrap">
     <table>
       <thead>
         <tr>
@@ -245,7 +248,7 @@
             <td><code>{entry.domain}</code></td>
             <td>
               {#if entry.networks.length === 0}
-                <span class="muted">all clients</span>
+                <span class="muted">All Clients</span>
               {:else}
                 <div class="row" style="gap: 6px">
                   {#each entry.networks as n (n)}
@@ -268,8 +271,8 @@
                 {entry.disabled ? 'Disabled' : 'Active'}
               </span>
             </td>
-            <td>
-              <div class="row" style="gap: 6px">
+            <td class="num">
+              <div class="row" style="gap: 6px; justify-content: flex-end">
                 <button
                   class="secondary"
                   title="Move up (higher precedence)"
@@ -290,6 +293,7 @@
         {/each}
       </tbody>
     </table>
+    </div>
     {#if entries.length === 0}
       <p class="muted">
         No entries. Add one: pick a domain, the networks that see the special
@@ -299,7 +303,7 @@
 
     {#if edit}
       <div class="card" style="margin-top: 14px; background: var(--panel-2)">
-        <h4 style="margin-top: 0">{edit.isNew ? 'New Entry' : 'Edit Entry'}</h4>
+        <h4 style="margin: 0 0 10px">{edit.isNew ? 'New Entry' : 'Edit Entry'}</h4>
         <div class="grid2">
           <label>
             Domain
@@ -339,10 +343,10 @@
             <button class="danger" onclick={() => removeRecordAt(i)}>✕</button>
           </div>
         {/each}
-        <button class="secondary" onclick={addRecord} style="margin-top: 6px">+ Add Record</button>
-        <label style="margin-top: 8px; flex-direction: row; align-items: center">
+        <button class="secondary" onclick={addRecord} style="margin-top: 6px">Add Answer</button>
+        <label style="margin-top: 8px; flex-direction: row; align-items: center; gap: 8px">
           <input type="checkbox" bind:checked={edit.disabled} />
-          Disabled (keep for later)
+          <span style="color: var(--text)">Disabled (Keep for Later)</span>
         </label>
         <div class="row" style="margin-top: 10px">
           <button
