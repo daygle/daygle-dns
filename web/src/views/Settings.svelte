@@ -332,7 +332,7 @@
     </div>
     <label class="stacked">
       <span>Allowed Networks (one CIDR per line, e.g. 192.168.1.0/24)</span>
-      <textarea rows="3" placeholder="192.168.1.0/24\n10.0.0.0/8" bind:value={axfrNetworksText}></textarea>
+      <textarea rows="3" placeholder={"192.168.1.0/24\n10.0.0.0/8"} bind:value={axfrNetworksText}></textarea>
     </label>
     <p class="muted help">
       Only these networks may request a copy of your zones. An empty list allows
@@ -365,7 +365,7 @@
     </div>
     <label class="stacked">
       <span>NOTIFY Targets (one per line: IP, IP:port, or [IPv6]:port)</span>
-      <textarea rows="3" placeholder="198.51.100.10\n198.51.100.11:5353" bind:value={notifyTargetsText}></textarea>
+      <textarea rows="3" placeholder={"198.51.100.10\n198.51.100.11:5353"} bind:value={notifyTargetsText}></textarea>
     </label>
     <p class="muted help">
       When a primary zone changes, the server notifies these targets so their
