@@ -1,7 +1,5 @@
 <script>
   import { api, formatApiError, getStoredUser } from '../api.js';
-  import PageHeader from '../PageHeader.svelte';
-  import { icons } from '../icons.svelte.js';
   import { onDestroy } from 'svelte';
 
   let status = $state(null);
@@ -154,12 +152,6 @@
     loadModels();
   });
 </script>
-
-<PageHeader
-  icon={icons.ai}
-  title="AI Safety Scanner"
-  tagline="The background scanner classifies domains from live query traffic into categories (using the heuristic rules or a fastText model) and threat verdicts can auto-block. Overrides here take precedence over verdicts."
-/>
 
 {#if notice}
   <div class="card" style="border-color: var(--ok); margin-bottom: 14px">{notice}</div>

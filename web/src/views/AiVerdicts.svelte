@@ -1,7 +1,5 @@
 <script>
   import { api, formatApiError } from '../api.js';
-  import PageHeader from '../PageHeader.svelte';
-  import { icons } from '../icons.svelte.js';
   import { formatTime } from '../datetime.svelte.js';
 
   const PER_PAGE = 50;
@@ -102,12 +100,6 @@
     load();
   });
 </script>
-
-<PageHeader
-  icon={icons.ai}
-  title="AI Verdicts"
-  tagline="Per-domain classifications from the AI scanner, newest activity first. Allow overrides a verdict permanently; every auto-block decision respects cleared and allow overrides."
-/>
 
 {#if notice}
   <div class="card" style="border-color: var(--ok); margin-bottom: 14px">{notice}</div>
