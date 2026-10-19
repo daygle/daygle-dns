@@ -108,18 +108,6 @@
   <div class="card" style="border-color: var(--danger); color: var(--danger); margin-bottom: 14px">{error}</div>
 {/if}
 
-<div class="row" style="margin-bottom: 14px">
-  <select bind:value={statusFilter} style="min-width: 150px">
-    {#each STATUS_FILTERS as f (f.label)}
-      <option value={f.value}>{f.label}</option>
-    {/each}
-  </select>
-  <button class="secondary" onclick={load}>Refresh</button>
-  {#if !disabled}
-    <span class="muted">{fmt(total)} verdict{total === 1 ? '' : 's'}</span>
-  {/if}
-</div>
-
 {#if loading}
   <div class="card">
     <p class="muted">Loading…</p>
@@ -132,15 +120,20 @@
       there are no verdicts.
     </p>
   </div>
-{:else if !rows.length}
-  <div class="card">
-    <p class="muted">
-      No verdicts{statusFilter ? ` with status "${statusFilter}"` : ''} yet -
-      they appear as the scanner classifies domains from live traffic.
-    </p>
-  </div>
 {:else}
-  <div class="card" style="padding: 0; overflow: auto">
+  <div class="card">
+    <div class="spread" style="margin-bottom: 10px; gap: 10px; flex-wrap: wrap">
+      <h3 style="margin: 0">Verdicts ({fmt(total)})</h3>
+      <div class="row" style="gap: 8px">
+        <select bind:value={statusFilter} style="min-width: 150px">
+          {#each STATUS_FILTERS as f (f.label)}
+            <option value={f.value}>{f.label}</option>
+          {/each}
+        </select>
+        <button class="secondary" onclick={load}>Reload</button>
+      </div>
+    </div>
+    <div class="table-wrap">
     <table>
       <thead>
         <tr>
@@ -190,6 +183,13 @@
         {/each}
       </tbody>
     </table>
+    </div>
+    {#if !rows.length}
+      <p class="muted">
+        No verdicts{statusFilter ? ` with status "${statusFilter}"` : ''} yet -
+        they appear as the scanner classifies domains from live traffic.
+      </p>
+    {/if}
   </div>
 
   <div class="row" style="margin-top: 12px">

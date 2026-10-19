@@ -192,13 +192,18 @@
     </div>
   </div>
 
-  <div class="row" style="margin: 14px 0">
-    <button onclick={rescan}>Rescan Now</button>
-    <span class="muted">
-      Mode <span class="pill">{status.mode}</span> · Backend
-      <span class="pill">{status.backend}</span> · {status.workers} worker{status.workers === 1 ? '' : 's'} ·
-      every {status.scan_interval_secs}s
-    </span>
+  <div class="card" style="margin-top: 14px">
+    <div class="spread" style="gap: 10px; flex-wrap: wrap">
+      <div>
+        <h3 style="margin: 0 0 6px">Scanner</h3>
+        <span class="muted small">
+          Mode <span class="pill">{status.mode}</span> · Backend
+          <span class="pill">{status.backend}</span> · {status.workers} Worker{status.workers === 1 ? '' : 's'} ·
+          Every {status.scan_interval_secs}s
+        </span>
+      </div>
+      <button onclick={rescan}>Rescan Now</button>
+    </div>
   </div>
 
   <div class="two-col">
@@ -207,7 +212,7 @@
       {#if Object.keys(status.threat_counts || {}).length}
         <table>
           <thead>
-            <tr><th>Category</th><th style="text-align: right">Domains</th></tr>
+            <tr><th>Category</th><th class="num">Domains</th></tr>
           </thead>
           <tbody>
             {#each Object.entries(status.threat_counts) as [category, n] (category)}
@@ -247,9 +252,9 @@
     </div>
   </div>
 
-  <div class="card" style="margin-top: 18px">
+  <div class="card" style="margin-top: 14px">
     <h3 style="margin: 0 0 10px">AI Models</h3>
-    <p class="muted" style="margin-top: 4px">
+    <p class="muted help" style="margin: 0 0 10px">
       The bundled classifier and verifier files. Updating downloads the
       models bundle from the latest GitHub release, verifies it, installs the
       files and restarts the service (a brief DNS pause) with automatic
@@ -260,7 +265,7 @@
     {:else if models}
       <table>
         <thead>
-          <tr><th>File</th><th style="text-align: right">Size</th><th>SHA-256</th></tr>
+          <tr><th>File</th><th class="num">Size</th><th>SHA-256</th></tr>
         </thead>
         <tbody>
           {#each models.files as f (f.file)}
@@ -290,9 +295,9 @@
     {/if}
   </div>
 
-  <div class="card" style="margin-top: 18px">
+  <div class="card" style="margin-top: 14px">
     <h3 style="margin: 0 0 10px">Domain Override</h3>
-    <p class="muted" style="margin-top: 4px">
+    <p class="muted help" style="margin: 0 0 10px">
       <strong>Allow</strong> exempts a domain from every AI verdict (it is
       never auto-blocked). <strong>Clear</strong> removes an existing override
       so the verdict applies again.
@@ -330,7 +335,7 @@
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
     gap: 12px;
-    margin-top: 18px;
+    margin-top: 14px;
   }
   .override-row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
 </style>
