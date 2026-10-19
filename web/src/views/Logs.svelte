@@ -171,15 +171,18 @@
 </div>
 
 {#if tab === 'server'}
-  <div class="row" style="margin-bottom: 14px">
-    <button class="secondary" onclick={refresh}>Refresh</button>
-    <span class="muted">Showing the most recent {logs.length} entries</span>
-  </div>
-
   {#if error}
-    <div class="card" style="border-color: var(--danger); color: var(--danger)">{error}</div>
-  {:else}
-    <div class="card" style="padding: 0; overflow: auto; max-height: 70vh">
+    <div class="card" style="border-color: var(--danger); color: var(--danger); margin-bottom: 14px">{error}</div>
+  {/if}
+  <div class="card">
+    <div class="spread" style="margin-bottom: 10px; gap: 10px; flex-wrap: wrap">
+      <div>
+        <h3 style="margin: 0">Server Log</h3>
+        <span class="muted small">Showing the most recent {logs.length} entries</span>
+      </div>
+      <button class="secondary" onclick={refresh}>Reload</button>
+    </div>
+    <div class="table-wrap" style="max-height: 70vh; overflow-y: auto">
       <table>
         <thead>
           <tr><th>Time</th><th>Level</th><th>Component</th><th>Message</th></tr>
@@ -197,13 +200,14 @@
           {/each}
         </tbody>
       </table>
-      {#if logs.length === 0}
-        <p class="muted" style="padding: 14px">No log entries yet.</p>
-      {/if}
     </div>
-  {/if}
+    {#if logs.length === 0}
+      <p class="muted">No log entries yet.</p>
+    {/if}
+  </div>
 {:else}
   <div class="card" style="margin-bottom: 14px">
+    <h3 style="margin: 0 0 10px">Filters</h3>
     <form onsubmit={(e) => { e.preventDefault(); runQuery(1); }}>
       <div class="filter-grid">
         <label>Client IP
@@ -230,7 +234,7 @@
             {#each OUTCOMES as [value, label]}<option value={value}>{label}</option>{/each}
           </select>
         </label>
-        <label>Rcode
+        <label>RCODE
           <select bind:value={fRcode}>
             <option value="">Any</option>
             {#each RCODES as r}<option value={r}>{r}</option>{/each}
@@ -265,13 +269,15 @@
   </div>
 
   {#if qError}
-    <div class="card" style="border-color: var(--danger); color: var(--danger)">{qError}</div>
+    <div class="card" style="border-color: var(--danger); color: var(--danger); margin-bottom: 14px">{qError}</div>
   {/if}
 
-  <div class="card" style="padding: 0; overflow: auto">
+  <div class="card">
+    <h3 style="margin: 0 0 10px">Queries ({qTotal})</h3>
+    <div class="table-wrap">
     <table>
       <thead>
-        <tr><th>Time</th><th>Client</th><th>Domain</th><th>Type</th><th>Protocol</th><th>Response</th><th>Rcode</th><th style="text-align: right">Took</th></tr>
+        <tr><th>Time</th><th>Client</th><th>Domain</th><th>Type</th><th>Protocol</th><th>Response</th><th>RCODE</th><th style="text-align: right">Took</th></tr>
       </thead>
       <tbody>
         {#each qEntries as entry (entry.id)}
@@ -290,8 +296,9 @@
         {/each}
       </tbody>
     </table>
+    </div>
     {#if !qLoading && qEntries.length === 0 && !qError}
-      <p class="muted" style="padding: 14px">
+      <p class="muted">
         No queries recorded yet{qTotal === 0 && buildQuery() === '' ? ' - make a DNS query or check that query logging is enabled in Settings' : ''}.
       </p>
     {/if}
@@ -315,6 +322,7 @@
     flex-direction: column;
     gap: 4px;
     font-size: 0.85rem;
+    color: var(--muted);
   }
   .pill.warn {
     color: #e0a34e;
