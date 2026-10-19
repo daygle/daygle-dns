@@ -134,8 +134,13 @@ export const api = {
   deleteCertificate: (name) => request('DELETE', `/certificates/${encodeURIComponent(name)}`),
   // First-run setup: whether the one-time admin account still needs creating.
   setupStatus: () => request('GET', '/auth/setup', undefined, { noLoginRedirect: true }),
-  setup: (username, password, name, email) =>
-    request('POST', '/auth/setup', { username, password, name, email }, { noLoginRedirect: true })
+  setup: (username, password, firstName, lastName, email) =>
+    request(
+      'POST',
+      '/auth/setup',
+      { username, password, first_name: firstName, last_name: lastName, email },
+      { noLoginRedirect: true },
+    )
       .then((data) => {
         if (data?.token) {
           setToken(data.token);
