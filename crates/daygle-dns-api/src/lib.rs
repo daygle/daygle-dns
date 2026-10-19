@@ -19,6 +19,7 @@
 //! | `PUT`    | `/api/zones/:id/soa`              | edit a primary zone's SOA metadata |
 //! | `GET`    | `/api/zones/:id/records`          | list records |
 //! | `PUT`    | `/api/zones/:id/records`          | upsert a record |
+//! | `PUT`    | `/api/zones/:id/records/:rid`     | replace a record in place |
 //! | `DELETE` | `/api/zones/:id/records/:rid`     | delete a record |
 //! | `POST`   | `/api/auth/password`              | signed-in user rotates their own password |
 //! | `GET`    | `/api/users`                      | list console accounts (hashes redacted) |
@@ -304,7 +305,10 @@ pub fn router(state: AppState) -> Router {
             put(handlers::set_record_disabled),
         )
         .route("/zones/{id}/export", get(handlers::export_zone))
-        .route("/zones/{id}/records/{rid}", delete(handlers::delete_record))
+        .route(
+            "/zones/{id}/records/{rid}",
+            put(handlers::replace_record).delete(handlers::delete_record),
+        )
         .route("/zones/{id}/sign", post(handlers::sign_zone))
         .route("/zones/{id}/unsign", post(handlers::unsign_zone))
         .route("/cache", get(handlers::cache_status))

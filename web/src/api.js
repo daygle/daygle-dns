@@ -168,6 +168,8 @@ export const api = {
   updateZoneSoa: (id, body) => request('PUT', `/zones/${id}/soa`, body),
   records: (zoneId) => request('GET', `/zones/${zoneId}/records`),
   upsertRecord: (zoneId, body) => request('PUT', `/zones/${zoneId}/records`, body),
+  replaceRecord: (zoneId, recordId, body) =>
+    request('PUT', `/zones/${zoneId}/records/${encodeURIComponent(recordId)}`, body),
   deleteRecord: (zoneId, recordId) =>
     request('DELETE', `/zones/${zoneId}/records/${recordId}`),
   signZone: (zoneId) => request('POST', `/zones/${zoneId}/sign`),

@@ -690,6 +690,48 @@ impl ZoneStore {
         Ok(true)
     }
 
+    /// Replace an existing record in place, keeping its id and staged
+    /// (disabled) state. The old row is removed and the new one validated and
+    /// inserted in one transaction, so a rejected value leaves the original
+    /// untouched. Returns `None` when no record with `record_id` exists in
+    /// `zone_id`.
+    pub fn replace_record(
+        &self,
+        zone_id: &str,
+        record_id: &str,
+        input: &RecordInput,
+    ) -> Result<Option<Record>> {
+        let zone = self
+            .get_zone(zone_id)?
+            .ok_or_else(|| DaygleError::NotFound(format!("zone {zone_id}")))?;
+        let mut conn = self.lock_conn()?;
+        let tx = conn.transaction()?;
+        let disabled: Option<bool> = tx
+            .query_row(
+                "SELECT disabled FROM records WHERE id = ?1 AND zone_id = ?2",
+                params![record_id, zone_id],
+                |r| Ok(r.get::<_, i64>(0)? != 0),
+            )
+            .optional()?;
+        let Some(disabled) = disabled else {
+            return Ok(None);
+        };
+        tx.execute("DELETE FROM records WHERE id = ?1", [record_id])?;
+        let input = RecordInput {
+            disabled,
+            ..input.clone()
+        };
+        let mut record = insert_record_in_tx(&tx, zone_id, &zone.name, &input)?;
+        tx.execute(
+            "UPDATE records SET id = ?1 WHERE id = ?2",
+            params![record_id, record.id],
+        )?;
+        record.id = record_id.to_string();
+        bump_serial_in(&tx, zone_id)?;
+        tx.commit()?;
+        Ok(Some(record))
+    }
+
     /// Apply a batch of RFC 2136 dynamic-update changes to a zone atomically.
     ///
     /// All additions, deletions, and the optional SOA rewrite happen in one
@@ -2080,7 +2122,9 @@ fn insert_record_in_tx(
 pub fn qualify_name(owner: &str, zone_name: &str) -> Result<String> {
     let owner = owner.trim();
     let zone = zone_name.trim().trim_end_matches('.');
-    let resolved = if owner == "@" || owner.is_empty() {
+    // The bare zone name is the apex too: the console's edit form fills in a
+    // stored record's full name, which for an apex record is the zone itself.
+    let resolved = if owner == "@" || owner.is_empty() || owner.eq_ignore_ascii_case(zone) {
         zone.to_string()
     } else if let Some(stripped) = owner.strip_suffix('.') {
         stripped.to_string()
@@ -2628,6 +2672,81 @@ mod tests {
                 .unwrap_or_else(|e| panic!("{rtype} display form '{rdata}' does not reparse: {e}"));
             assert_eq!(rdata, reparsed, "{rtype} round trip");
         }
+    }
+
+    #[test]
+    fn qualify_name_treats_the_bare_zone_name_as_the_apex() {
+        assert_eq!(
+            qualify_name("example.com", "example.com").unwrap(),
+            "example.com"
+        );
+        assert_eq!(
+            qualify_name("Example.COM", "example.com").unwrap(),
+            "example.com"
+        );
+        assert_eq!(qualify_name("@", "example.com").unwrap(), "example.com");
+        assert_eq!(
+            qualify_name("www", "example.com").unwrap(),
+            "www.example.com"
+        );
+        assert_eq!(
+            qualify_name("www.example.com", "example.com").unwrap(),
+            "www.example.com"
+        );
+    }
+
+    #[test]
+    fn replace_record_updates_in_place() {
+        let s = store();
+        let zone = s
+            .create_zone(&ZoneInput {
+                name: "example.com".to_string(),
+                ..zone_input_defaults()
+            })
+            .unwrap();
+        let input = |content: &str| RecordInput {
+            name: "www".to_string(),
+            rtype: "A".to_string(),
+            content: content.to_string(),
+            ttl: 300,
+            priority: 0,
+            disabled: false,
+        };
+        let original = s.upsert_record(&zone.id, &input("192.0.2.1")).unwrap();
+        s.set_record_disabled(&original.id, true).unwrap();
+        let serial = s.get_zone(&zone.id).unwrap().unwrap().serial;
+
+        let replaced = s
+            .replace_record(&zone.id, &original.id, &input("192.0.2.2"))
+            .unwrap()
+            .expect("record exists");
+        assert_eq!(replaced.id, original.id);
+        assert!(replaced.disabled, "staged state is kept");
+
+        let a_records: Vec<_> = s
+            .list_records(&zone.id)
+            .unwrap()
+            .into_iter()
+            .filter(|r| r.rtype == "A")
+            .collect();
+        assert_eq!(a_records.len(), 1, "edit must not leave a duplicate");
+        assert_eq!(a_records[0].content, "192.0.2.2");
+        assert_eq!(s.get_zone(&zone.id).unwrap().unwrap().serial, serial + 1);
+
+        // A rejected value leaves the original untouched.
+        assert!(s
+            .replace_record(&zone.id, &original.id, &input("not-an-ip"))
+            .is_err());
+        let after = s.list_records(&zone.id).unwrap();
+        assert!(after
+            .iter()
+            .any(|r| r.id == original.id && r.content == "192.0.2.2"));
+
+        // Unknown ids report None.
+        assert!(s
+            .replace_record(&zone.id, "missing", &input("192.0.2.3"))
+            .unwrap()
+            .is_none());
     }
 
     #[test]

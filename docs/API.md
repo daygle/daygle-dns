@@ -427,6 +427,11 @@ Supported `rtype` values: `A`, `AAAA`, `CNAME`, `MX`, `TXT`, `NS`, `SOA`,
 400. `priority` is stored but not served: MX and SRV take their priority from
 `content`.
 
+`PUT /api/zones/{id}/records/{rid}` replaces an existing record in place with
+the same body, keeping its id and disabled state (the collection `PUT` above
+always adds a new record). It returns 404 when the record does not exist in
+that zone.
+
 `PUT /api/zones/{id}/records/{rid}/disabled` stages (or re-enables) a single
 record without deleting it - a disabled record stays in the zone but stops
 being served. The serial is bumped and the catalog reloaded, so the change

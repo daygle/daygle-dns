@@ -131,13 +131,16 @@
     if (!edit || !selected) return;
     notice = null;
     try {
-      await api.upsertRecord(selected.id, {
+      const body = {
         name: edit.name,
         rtype: edit.rtype,
         content: edit.content,
         ttl: Number(edit.ttl) || defaultTtl,
         priority: Number(edit.priority) || 0,
-      });
+      };
+      // Editing replaces the record in place; only new records are added.
+      if (edit.isNew) await api.upsertRecord(selected.id, body);
+      else await api.replaceRecord(selected.id, edit.id, body);
       edit = null;
       notice = 'Record saved and applied live.';
       await loadRecords(selected.id);
@@ -181,7 +184,9 @@
 {/if}
 
 {#if !zonesLoaded}
-  <p class="muted">Loading…</p>
+  <div class="card">
+    <p class="muted">Loading…</p>
+  </div>
 {:else if zones.length === 0}
   <div class="card">
     <p class="muted" style="margin: 0">
@@ -238,11 +243,13 @@
   </div>
 
   {#if !selected}
-    <p class="muted">Select a zone to view and edit its records.</p>
+    <div class="card">
+      <p class="muted" style="margin: 0">Select a zone to view and edit its records.</p>
+    </div>
   {:else}
     <div class="card">
       <div class="spread" style="margin-bottom: 10px">
-        <h3 style="margin: 0">Records for <code>{selected.name}</code></h3>
+        <h3 style="margin: 0">Records for <code>{selected.name}</code> ({records.length})</h3>
         {#if selected.zone_type !== 'secondary'}
           <button onclick={() => startEdit(null)}>Add Record</button>
         {/if}
@@ -269,7 +276,7 @@
                       <button class="danger" onclick={() => removeRecord(record)}>✕</button>
                     </div>
                   {:else}
-                    <span class="muted">Read-only</span>
+                    <span class="muted">Read-Only</span>
                   {/if}
                 </td>
               </tr>
@@ -280,12 +287,12 @@
       {#if recordsLoading}
         <p class="muted">Loading records…</p>
       {:else if records.length === 0}
-        <p class="muted">No records yet. Add one with the + Record button.</p>
+        <p class="muted">No records yet. Add one with the Add Record button.</p>
       {/if}
 
       {#if edit}
         <div class="card" style="margin-top: 14px; background: var(--panel-2)">
-          <h4 style="margin-top: 0">{edit.isNew ? 'New Record' : 'Edit Record'}</h4>
+          <h4 style="margin: 0 0 10px">{edit.isNew ? 'New Record' : 'Edit Record'}</h4>
           <div class="grid2">
             <label>Name <input placeholder="www" bind:value={edit.name} /></label>
             <label>Type<select bind:value={edit.rtype}>{#each TYPES as t (t)}<option value={t}>{t}</option>{/each}</select></label>

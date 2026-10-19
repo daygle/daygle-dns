@@ -1041,6 +1041,72 @@ async fn zone_form_creates_primary_import_and_secondary_zones() {
 }
 
 #[tokio::test]
+async fn editing_a_record_replaces_it_in_place() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut cfg = base_config(&dir.path().join("daygle-dns.db"));
+    cfg.server.port = free_tcp_port();
+    cfg.api.port = free_tcp_port();
+    let server = spawn(cfg).await;
+    let client = reqwest::Client::new();
+    let base = api_url(server.api_addr, "");
+
+    let zone: serde_json::Value = client
+        .post(format!("{base}/api/zones"))
+        .json(&json!({ "name": "edit.test", "zone_type": "primary" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let zone_id = zone["id"].as_str().unwrap().to_string();
+    let records_url = format!("{base}/api/zones/{zone_id}/records");
+
+    let created: serde_json::Value = client
+        .put(&records_url)
+        .json(&json!({ "name": "www", "rtype": "A", "content": "192.0.2.1" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let rid = created["id"].as_str().unwrap().to_string();
+
+    let replaced = client
+        .put(format!("{records_url}/{rid}"))
+        .json(&json!({ "name": "www", "rtype": "A", "content": "192.0.2.2" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(replaced.status(), 200);
+    let replaced: serde_json::Value = replaced.json().await.unwrap();
+    assert_eq!(replaced["id"], json!(rid));
+
+    let records: Vec<serde_json::Value> = client
+        .get(&records_url)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let a: Vec<_> = records.iter().filter(|r| r["rtype"] == "A").collect();
+    assert_eq!(a.len(), 1, "edit must not leave the old record behind");
+    assert_eq!(a[0]["content"], json!("192.0.2.2"));
+
+    let missing = client
+        .put(format!("{records_url}/does-not-exist"))
+        .json(&json!({ "name": "www", "rtype": "A", "content": "192.0.2.3" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(missing.status(), 404);
+
+    shutdown(server).await;
+}
+
+#[tokio::test]
 async fn viewer_role_is_read_only_and_secrets_are_redacted() {
     let dir = tempfile::tempdir().unwrap();
     let server = spawn_with_roles(&dir).await;
