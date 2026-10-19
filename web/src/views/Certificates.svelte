@@ -148,11 +148,11 @@
       <div class="row" style="gap: 16px; flex-wrap: wrap">
         <label class="radio-label">
           <input type="radio" bind:group={mode} value="self" />
-          <span>Generate self-signed</span>
+          <span>Generate Self-Signed</span>
         </label>
         <label class="radio-label">
           <input type="radio" bind:group={mode} value="upload" />
-          <span>Upload certificate + key</span>
+          <span>Upload Certificate + Key</span>
         </label>
       </div>
 
@@ -227,11 +227,10 @@
                 <span class="muted">-</span>
               {/if}
             </td>
-            <td class="row" style="justify-content: flex-end; gap: 6px">
+            <td class="num">
               {#if !isViewer}
                 <button
                   class="danger"
-                  style="padding: 4px 10px"
                   disabled={busy || (cert.in_use && cert.in_use.length > 0)}
                   title={cert.in_use && cert.in_use.length > 0 ? 'Change the listener on Settings first' : undefined}
                   onclick={() => remove(cert)}
@@ -246,7 +245,6 @@
 </div>
 
 <style>
-  .row { display: flex; align-items: center; }
   label { display: flex; flex-direction: column; gap: 4px; font-size: 0.85rem; }
   label span { color: var(--muted); }
   .radio-label { flex-direction: row; align-items: center; gap: 6px; font-size: 0.9rem; }
