@@ -16,18 +16,18 @@
   let draft = $state(null);
 
   const FORMAT_OPTIONS = [
-    { value: 'auto', label: 'Auto-detect' },
+    { value: 'auto', label: 'Auto-Detect' },
     { value: 'domains', label: 'Domains (one per line)' },
-    { value: 'hosts', label: 'Hosts file (e.g. StevenBlack)' },
+    { value: 'hosts', label: 'Hosts File (e.g. StevenBlack)' },
     { value: 'adblock', label: 'Adblock (AdGuard / uBlock)' },
   ];
   const REFRESH_OPTIONS = [
-    { hours: 1, label: '1 hour' },
-    { hours: 6, label: '6 hours' },
-    { hours: 12, label: '12 hours' },
-    { hours: 24, label: '24 hours' },
-    { hours: 72, label: '3 days' },
-    { hours: 168, label: '7 days' },
+    { hours: 1, label: '1 Hour' },
+    { hours: 6, label: '6 Hours' },
+    { hours: 12, label: '12 Hours' },
+    { hours: 24, label: '24 Hours' },
+    { hours: 72, label: '3 Days' },
+    { hours: 168, label: '7 Days' },
   ];
 
   async function load() {
@@ -232,8 +232,8 @@
   }
 
   function ago(secs) {
-    if (secs === null || secs === undefined) return 'never';
-    if (secs < 60) return 'just now';
+    if (secs === null || secs === undefined) return 'Never';
+    if (secs < 60) return 'Just Now';
     if (secs < 3600) return `${Math.floor(secs / 60)}m ago`;
     if (secs < 86400) return `${Math.floor(secs / 3600)}h ago`;
     return `${Math.floor(secs / 86400)}d ago`;
@@ -337,19 +337,18 @@
       </tbody>
     </table>
     </div>
+    <p class="muted help">
+      Refresh All fetches every source immediately. Sources also refresh
+      automatically on their configured interval; a failed fetch is reported
+      here and retried on the next cycle.
+    </p>
   </div>
-
-  <p class="muted help">
-    Refresh All fetches every source immediately. Sources also refresh
-    automatically on their configured interval; a failed fetch is reported
-    here and retried on the next cycle.
-  </p>
 {/if}
 
 <!-- Source editor -->
 {#if draft}
-  <div class="card" style="border-color: var(--accent); margin-bottom: 14px">
-    <div class="spread">
+  <div class="card" style="border-color: var(--accent); margin: 14px 0">
+    <div class="spread" style="margin-bottom: 10px">
       <h3 style="margin: 0">
         {draft.originalName ? `Edit "${draft.originalName}"` : 'New Source'}
       </h3>
@@ -358,13 +357,13 @@
       </label>
     </div>
 
-    <div class="form-grid" style="margin-top: 12px">
+    <div class="form-grid">
       <label>
         <span>Name</span>
         <input bind:value={draft.name} placeholder="StevenBlack hosts" />
       </label>
       <label>
-        <span>Refresh interval</span>
+        <span>Refresh Interval</span>
         <select bind:value={draft.refreshHours}>
           {#each REFRESH_OPTIONS as o (o.hours)}
             <option value={o.hours}>{o.label}</option>
@@ -385,8 +384,8 @@
             <option value={o.value}>{o.label}</option>
           {/each}
         </select>
-        <small class="muted">
-          Auto-detect probes the URL and picks hosts, domains or adblock from
+        <small class="muted help">
+          Auto-Detect probes the URL and picks hosts, domains or adblock from
           the content. Picking a concrete format also checks the content
           matches before saving.
         </small>
@@ -399,9 +398,9 @@
         style="border-color: {draft.result.ok ? 'var(--ok)' : 'var(--danger)'}"
       >
         {#if draft.result.ok}
-          <span class="pill ok">valid</span>
+          <span class="pill ok">Valid</span>
         {:else}
-          <span class="pill err">{draft.result.transport ? 'unreachable' : 'invalid'}</span>
+          <span class="pill err">{draft.result.transport ? 'Unreachable' : 'Invalid'}</span>
         {/if}
         <span class="muted">{draft.result.msg}</span>
       </div>
@@ -429,7 +428,6 @@
   .form-grid label { display: flex; flex-direction: column; gap: 4px; font-size: 0.85rem; }
   .form-grid label.wide { grid-column: 1 / -1; }
   .form-grid label > span { color: var(--muted); }
-  .form-grid small { font-size: 0.78rem; }
   .result {
     margin-top: 12px;
     display: flex;
