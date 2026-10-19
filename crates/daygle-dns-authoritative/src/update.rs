@@ -85,7 +85,7 @@ pub async fn handle_update_with_notify<R: ResponseHandler>(
 
     // -- Policy gate ------------------------------------------------------
     if !settings.allow_dynamic_updates
-        || !update_client_allowed(&settings.update_networks, update.src().ip())
+        || !update_client_allowed(&settings.update_networks, update.src().ip().to_canonical())
     {
         debug!(
             zone = %zone_name,

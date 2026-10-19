@@ -47,7 +47,8 @@ pub fn workspace_dir() -> PathBuf {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct UpdateState {
     /// One of `""` (idle), `preparing`, `downloading`, `cloning`,
-    /// `building`, `installing`, `done` or `error`.
+    /// `building`, `installing`, `applying`, `restarting`, `rolling_back`,
+    /// `done` or `error`.
     #[serde(default)]
     pub phase: String,
     #[serde(default)]
@@ -73,6 +74,7 @@ impl UpdateState {
                 | "installing"
                 | "applying"
                 | "restarting"
+                | "rolling_back"
         )
     }
 
@@ -1113,6 +1115,19 @@ mod tests {
 
     /// These tests share the single `workspace_dir()/state.json`, so they
     /// must not run concurrently (cargo runs tests in parallel threads).
+    #[test]
+    fn root_apply_phases_count_as_running() {
+        // Phases written by update-apply.sh: a rollback in progress must not
+        // read as idle, or a new run could start mid-rollback.
+        for phase in ["applying", "restarting", "rolling_back"] {
+            let st = UpdateState {
+                phase: phase.to_string(),
+                ..Default::default()
+            };
+            assert!(st.is_running(), "{phase} should be running");
+        }
+    }
+
     static STATE_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]

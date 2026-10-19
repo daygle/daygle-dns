@@ -96,6 +96,52 @@ fail() { # message
     && publish "$PRIV/state.json" state.json
 }
 
+# The API endpoint the health check probes, read from the [api] section of
+# the config file next to the models dir (defaults: 127.0.0.1:5380). A
+# hard-coded port/host would fail the check - and roll back every update - on
+# hosts whose console listens elsewhere. Only digits / address characters are
+# accepted from the (service-writable) file.
+CONFIG_FILE="${MODELS_DIR%/*}/daygle-dns.toml"
+api_setting() { # key
+  awk -v key="$1" '
+    /^\[api\][[:space:]]*$/ { in_api = 1; next }
+    /^\[/ { in_api = 0 }
+    in_api {
+      line = $0
+      sub(/#.*/, "", line)
+      if (line ~ "^[[:space:]]*" key "[[:space:]]*=") {
+        sub(/^[^=]*=[[:space:]]*/, "", line)
+        gsub(/["[:space:]]/, "", line)
+        print line
+        exit
+      }
+    }
+  ' "$CONFIG_FILE" 2>/dev/null || true
+}
+API_PORT="$(api_setting port)"
+case "$API_PORT" in ''|*[!0-9]*) API_PORT=5380 ;; esac
+API_HOST="$(api_setting listen)"
+case "$API_HOST" in
+  ''|0.0.0.0|*[!0-9A-Fa-f.:]*) API_HOST=127.0.0.1 ;;
+  ::) API_HOST='[::1]' ;;
+  *:*) API_HOST="[$API_HOST]" ;;
+esac
+HEALTH_URL="http://$API_HOST:$API_PORT/api/health"
+
+# Wait up to 15s for the unit to be active and the API to answer.
+health_check() {
+  i=0
+  while [ $i -lt 15 ]; do
+    sleep 1
+    if systemctl is-active --quiet daygle-dns 2>/dev/null \
+       && curl -fsS --max-time 2 "$HEALTH_URL" >/dev/null 2>&1; then
+      return 0
+    fi
+    i=$((i + 1))
+  done
+  return 1
+}
+
 # Nothing pending: the marker's own rename/removal events can re-trigger this
 # unit; a run without a request is a clean no-op.
 if [ ! -f "$REQ" ]; then
@@ -162,7 +208,8 @@ if [ "$KIND" = "models" ]; then
 
   WORK="$PRIV/models"
   mkdir -p "$WORK"
-  if ! tar -xzf "$BIN" -C "$WORK"; then
+  # --no-same-owner: root must not recreate archive-chosen ownership.
+  if ! tar --no-same-owner -xzf "$BIN" -C "$WORK"; then
     log "tar extraction failed for the models bundle"
     rm -f "$REQ.processing"
     fail "the staged AI models bundle could not be extracted. Re-run the model update from the console."
@@ -242,17 +289,8 @@ if [ "$KIND" = "models" ]; then
   fi
 
   # Health check: the service must come back and the API answer.
-  i=0
   HEALTHY=0
-  while [ $i -lt 15 ]; do
-    sleep 1
-    if systemctl is-active --quiet daygle-dns 2>/dev/null \
-       && curl -fsSL --max-time 2 http://localhost:5380/api/health >/dev/null 2>&1; then
-      HEALTHY=1
-      break
-    fi
-    i=$((i + 1))
-  done
+  if health_check; then HEALTHY=1; fi
 
   rm -f "$REQ.processing" "$MANIFEST" "$STAGED_BIN"
   if [ "$HEALTHY" -eq 1 ]; then
@@ -317,17 +355,8 @@ fi
 
 # Health check: the service must come back and the API answer. Phase stays
 # "restarting" (a running phase) so the console keeps polling.
-i=0
 HEALTHY=0
-while [ $i -lt 15 ]; do
-  sleep 1
-  if systemctl is-active --quiet daygle-dns 2>/dev/null \
-     && curl -fsSL --max-time 2 http://localhost:5380/api/health >/dev/null 2>&1; then
-    HEALTHY=1
-    break
-  fi
-  i=$((i + 1))
-done
+if health_check; then HEALTHY=1; fi
 
 rm -f "$REQ.processing" "$MANIFEST" "$STAGED_BIN"
 

@@ -422,10 +422,11 @@ RestartSec=3
 # DNS on port 53 needs privileges. The service drops to a dedicated user;
 # the ambient cap covers the port bind. The privileged half of updates is
 # performed by the separate root daygle-dns-update.service (see
-# install_update_service), so this unit carries no setuid/sudo machinery.
+# install_update_service), so this unit carries no setuid/sudo machinery and
+# nothing it runs may gain privileges (ambient capabilities are unaffected).
 CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 AmbientCapabilities=CAP_NET_BIND_SERVICE
-NoNewPrivileges=false
+NoNewPrivileges=true
 
 [Install]
 WantedBy=multi-user.target
@@ -511,7 +512,8 @@ else
             if command -v openssl >/dev/null 2>&1; then
                 ADMIN_PASSWORD="$(openssl rand -hex 12)"
             else
-                ADMIN_PASSWORD="daygle-$(date +%s)$$"
+                # Never derive it from the clock/pid: those are guessable.
+                ADMIN_PASSWORD="$(od -An -N12 -tx1 /dev/urandom | tr -d ' \n')"
             fi
             log "No DAYGLE_DNS_ADMIN_PASSWORD given; generated one for user '$ADMIN_USER'."
         fi
@@ -536,7 +538,9 @@ else
     # force the bind with a second, more explicit pass so the LAN GUI is
     # reachable without requiring the user to hand-edit the config.
     if [ "$(api_listen_address)" != "0.0.0.0" ]; then
-        sed -i 's/^\(\s*listen\s*=\s*\)"[^"]*"/\1"0.0.0.0"/' "$CONFIG_FILE"
+        # Scoped to the [api] section: an unscoped substitution would also
+        # rebind the DNS and DoT/DoH/DoQ listeners.
+        sed -i '/^\[api\][[:space:]]*$/,/^\[/ s/^\([[:space:]]*listen[[:space:]]*=[[:space:]]*\)"[^"]*"/\1"0.0.0.0"/' "$CONFIG_FILE"
         chown "$SERVICE_USER":"$SERVICE_USER" "$CONFIG_FILE" 2>/dev/null || true
     fi
 

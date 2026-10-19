@@ -709,6 +709,67 @@ async fn oversized_login_is_rejected_without_bloating_the_log() {
 }
 
 #[tokio::test]
+async fn repeated_failed_logins_are_throttled_per_client() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = spawn_with_roles(&dir).await;
+    for _ in 0..daygle_dns_api::LoginThrottle::MAX_FAILURES {
+        assert_eq!(login_status(server.api_addr, "admin", "wrong").await, 401);
+    }
+    // Further attempts are refused - even with the right password - until
+    // the window lapses, so the password cannot be brute-forced.
+    let resp = reqwest::Client::new()
+        .post(api_url(server.api_addr, "/api/auth/login"))
+        .json(&json!({ "username": "admin", "password": "secret" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 429);
+    assert!(resp.headers().contains_key("retry-after"));
+
+    shutdown(server).await;
+}
+
+#[tokio::test]
+async fn tsig_secrets_are_redacted_from_the_config_endpoint() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut cfg = base_config(&dir.path().join("daygle-dns.db"));
+    cfg.server.port = free_tcp_port();
+    cfg.api.port = free_tcp_port();
+    cfg.api.users = vec![daygle_dns_core::config::ApiUser {
+        username: "auditor".to_string(),
+        password_hash: daygle_dns_core::auth::hash_password_with("watch", 100),
+        role: daygle_dns_core::config::Role::Viewer,
+    }];
+    cfg.authoritative.tsig_keys = vec![daygle_dns_core::config::TsigKeyConfig {
+        name: "xfer-key.".to_string(),
+        algorithm: "hmac-sha256".to_string(),
+        secret: "MDEyMzQ1Njc4OWFiY2RlZg==".to_string(),
+    }];
+    let server = spawn(cfg).await;
+
+    let (token, _) = login(server.api_addr, "auditor", "watch").await;
+    let body = reqwest::Client::new()
+        .get(api_url(server.api_addr, "/api/config"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(
+        !body.contains("MDEyMzQ1Njc4OWFiY2RlZg=="),
+        "TSIG secret leaked"
+    );
+    let cfg_json: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let key = &cfg_json["authoritative"]["tsig_keys"][0];
+    assert_eq!(key["name"], json!("xfer-key."));
+    assert_eq!(key["secret"], json!("[redacted]"));
+
+    shutdown(server).await;
+}
+
+#[tokio::test]
 async fn db_settings_survive_restart_and_win_over_the_file() {
     let dir = tempfile::tempdir().unwrap();
     let cfg_path = dir.path().join("daygle-dns.toml");

@@ -480,13 +480,19 @@ pub async fn bind_with(
         config_path: config_path.clone().map(Arc::new),
         reload_notify,
         sessions: Arc::new(daygle_dns_api::SessionStore::default()),
+        login_throttle: Arc::new(daygle_dns_api::LoginThrottle::default()),
         request_dns_rebuild: Some(request_dns_rebuild),
         stats: stats.clone(),
         ai: ai_engine.clone(),
     });
     info!(addr = %api_addr, "REST API and GUI listening");
     let api_task = tokio::spawn(async move {
-        if let Err(e) = axum::serve(api_listener, app).await {
+        if let Err(e) = axum::serve(
+            api_listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        {
             warn!("api server error: {e}");
         }
     });

@@ -18,7 +18,7 @@
   let modelRun = $state(null); // active/finished model update run
   let modelBusy = $state(false);
   let pollTimer = null;
-  const RUNNING = ['preparing', 'downloading', 'installing', 'applying', 'restarting'];
+  const RUNNING = ['preparing', 'downloading', 'installing', 'applying', 'restarting', 'rolling_back'];
 
   function fmtSize(bytes) {
     if (bytes == null) return '—';

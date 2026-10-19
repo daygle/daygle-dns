@@ -176,7 +176,7 @@ impl NotifyInbound {
         // (source ports are ephemeral, so compare IPs only). The refresh path
         // re-checks serials, so an accepted spoof could only cause an extra
         // SOA query - but there is no reason to accept one.
-        let src_ip = request.src().ip();
+        let src_ip = request.src().ip().to_canonical();
         let is_master = config.masters.iter().any(|m| {
             daygle_dns_core::config::parse_master_addr(m)
                 .map(|addr| addr.ip() == src_ip)

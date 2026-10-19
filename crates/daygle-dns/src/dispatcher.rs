@@ -455,7 +455,10 @@ impl RequestHandler for DnsDispatcher {
         // 0. Rate limiting (per client). Applied before anything else so a
         // flooding client cannot even reach the update/policy/recursive
         // machinery. Loopback may be exempt via `rate_limit.exempt_loopback`.
-        let client = request.src().ip();
+        // IPv4-mapped IPv6 sources (an IPv4 client on a dual-stack `::`
+        // listener) are canonicalized to plain IPv4 so IPv4 ACLs, rate
+        // limits, split-horizon networks and transfer allow-lists match them.
+        let client = request.src().ip().to_canonical();
         if !self.rate_limiter.check_client(client) {
             debug!(%client, "query rate-limited by client");
             self.metrics.inc(&self.metrics.rate_limited);
@@ -522,7 +525,6 @@ impl RequestHandler for DnsDispatcher {
             .trim_end_matches('.')
             .to_ascii_lowercase();
         let rtype = info.query.query_type().to_string();
-        let client = info.src.ip();
         let protocol = protocol_label(info.protocol);
 
         // 0b. Rate limiting (per domain). Tracked independently of the client
@@ -690,7 +692,7 @@ impl RequestHandler for DnsDispatcher {
         // valid per RFC 1995.
         if rtype_is_transfer(&rtype) {
             return self
-                .handle_transfer(request, &qname, info.src.ip(), response_handle)
+                .handle_transfer(request, &qname, client, response_handle)
                 .await;
         }
 

@@ -1721,7 +1721,7 @@ pub struct QueryLogFilter {
     pub to: Option<String>,
     /// 1-based page (default 1).
     pub page: Option<u32>,
-    /// Rows per page (default 50, max 500).
+    /// Rows per page (default 50; capped at 500, or 10 000 for an export).
     pub per_page: Option<u32>,
 }
 
@@ -1794,9 +1794,29 @@ impl ZoneStore {
         Ok(())
     }
 
+    /// Largest page [`Self::search_query_logs`] returns (the console's paged
+    /// view).
+    pub const QUERY_LOG_MAX_PAGE: u32 = 500;
+    /// Largest page [`Self::export_query_logs`] returns (CSV export).
+    pub const QUERY_LOG_MAX_EXPORT: u32 = 10_000;
+
     /// Search the query log with filters and pagination. Returns the page of
     /// rows (newest first) plus the total count under the same filter.
     pub fn search_query_logs(&self, filter: &QueryLogFilter) -> Result<(Vec<QueryLogRow>, u64)> {
+        self.query_logs_page(filter, Self::QUERY_LOG_MAX_PAGE)
+    }
+
+    /// Like [`Self::search_query_logs`], with the larger export page cap so a
+    /// CSV export is not silently cut to one console page.
+    pub fn export_query_logs(&self, filter: &QueryLogFilter) -> Result<(Vec<QueryLogRow>, u64)> {
+        self.query_logs_page(filter, Self::QUERY_LOG_MAX_EXPORT)
+    }
+
+    fn query_logs_page(
+        &self,
+        filter: &QueryLogFilter,
+        max_per_page: u32,
+    ) -> Result<(Vec<QueryLogRow>, u64)> {
         let mut wheres: Vec<String> = vec![];
         let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = vec![];
         if let Some(client) = filter
@@ -1852,7 +1872,7 @@ impl ZoneStore {
             format!("WHERE {}", wheres.join(" AND "))
         };
 
-        let per_page = filter.per_page.unwrap_or(50).clamp(1, 500);
+        let per_page = filter.per_page.unwrap_or(50).clamp(1, max_per_page);
         let page = filter.page.unwrap_or(1).max(1);
         let offset = (page - 1).saturating_mul(per_page);
 
@@ -2297,6 +2317,33 @@ mod tests {
 
     fn store() -> ZoneStore {
         ZoneStore::open(":memory:").unwrap()
+    }
+
+    #[test]
+    fn query_log_export_is_not_capped_at_one_console_page() {
+        let s = store();
+        let rows: Vec<QueryLogRow> = (0..600)
+            .map(|i| QueryLogRow {
+                id: 0,
+                ts: "2026-10-19T00:00:00Z".to_string(),
+                client: "10.0.0.1".to_string(),
+                qname: format!("host{i}.example"),
+                qtype: "A".to_string(),
+                protocol: "udp".to_string(),
+                outcome: "recursive".to_string(),
+                rcode: Some("NOERROR".to_string()),
+                elapsed_ms: 1,
+            })
+            .collect();
+        s.insert_query_logs(&rows).unwrap();
+        let filter = QueryLogFilter {
+            per_page: Some(ZoneStore::QUERY_LOG_MAX_EXPORT),
+            ..Default::default()
+        };
+        let (page, total) = s.search_query_logs(&filter).unwrap();
+        assert_eq!((page.len(), total), (500, 600));
+        let (export, total) = s.export_query_logs(&filter).unwrap();
+        assert_eq!((export.len(), total), (600, 600));
     }
 
     #[test]

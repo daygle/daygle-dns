@@ -156,7 +156,6 @@ impl Scanner {
                 }
             }
         }
-        let _ = candidates;
 
         if classified_new == 0 && skipped_new == 0 {
             self.refresh_snapshot(&cfg, now);
@@ -257,8 +256,8 @@ fn severity_name(s: crate::backend::Severity) -> &'static str {
     }
 }
 
-/// Basic sanity: a candidate is a DNS-ish name with at least one dot, no
-/// spaces, and label lengths in range. IP literals are never classified.
+/// Basic sanity: a candidate is a DNS-ish name with valid labels (letters,
+/// digits, `-`, `_`) of in-range length. IP literals are never classified.
 pub fn looks_like_domain(name: &str) -> bool {
     if name.len() > 253 || name.is_empty() || name.parse::<std::net::IpAddr>().is_ok() {
         return false;

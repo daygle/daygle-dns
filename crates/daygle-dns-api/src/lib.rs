@@ -150,6 +150,50 @@ fn prune_expired(sessions: &mut HashMap<String, Session>) {
     sessions.retain(|_, s| s.expires_at > now);
 }
 
+/// Failed-login throttle keyed by client address: after
+/// [`LoginThrottle::MAX_FAILURES`] failures inside [`LoginThrottle::WINDOW`],
+/// further attempts from that address are refused until the window lapses.
+/// Keyed by address rather than username so a guesser cannot lock a real
+/// admin out of their own account.
+#[derive(Default)]
+pub struct LoginThrottle {
+    failures: Mutex<HashMap<std::net::IpAddr, (u32, Instant)>>,
+}
+
+impl LoginThrottle {
+    pub const MAX_FAILURES: u32 = 10;
+    pub const WINDOW: Duration = Duration::from_secs(300);
+    /// Bound on tracked addresses; expired entries are dropped past it.
+    const MAX_TRACKED: usize = 10_000;
+
+    /// Seconds until `ip` may try again, or `None` when it is not throttled.
+    pub fn retry_after(&self, ip: std::net::IpAddr) -> Option<u64> {
+        let failures = self.failures.lock();
+        let (count, since) = failures.get(&ip)?;
+        let elapsed = since.elapsed();
+        (*count >= Self::MAX_FAILURES && elapsed < Self::WINDOW)
+            .then(|| (Self::WINDOW - elapsed).as_secs().max(1))
+    }
+
+    /// Record a failed attempt from `ip`.
+    pub fn record_failure(&self, ip: std::net::IpAddr) {
+        let mut failures = self.failures.lock();
+        if failures.len() >= Self::MAX_TRACKED {
+            failures.retain(|_, (_, since)| since.elapsed() < Self::WINDOW);
+        }
+        let entry = failures.entry(ip).or_insert((0, Instant::now()));
+        if entry.1.elapsed() >= Self::WINDOW {
+            *entry = (0, Instant::now());
+        }
+        entry.0 += 1;
+    }
+
+    /// Forget `ip`'s failures (after a successful login).
+    pub fn clear(&self, ip: std::net::IpAddr) {
+        self.failures.lock().remove(&ip);
+    }
+}
+
 /// Generate a 128-bit random hex token (from OS entropy via rand's
 /// thread-local generator; collision probability is negligible).
 fn new_token() -> String {
@@ -186,6 +230,8 @@ pub struct AppState {
     pub reload_notify: Option<Arc<tokio::sync::Notify>>,
     /// Login sessions (only meaningful when `api.users` is configured).
     pub sessions: Arc<SessionStore>,
+    /// Per-client failed-login counter backing the login brute-force guard.
+    pub login_throttle: Arc<LoginThrottle>,
     /// Hook that rebinds DNS listeners after a settings change; `None` when
     /// the caller does not support live listener rebinding.
     pub request_dns_rebuild: Option<Arc<dyn Fn() + Send + Sync>>,
