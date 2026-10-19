@@ -181,7 +181,7 @@
 <div class="split">
   <div class="card">
     <div class="spread" style="margin-bottom: 10px">
-      <strong>Networks ({networks.length})</strong>
+      <h3 style="margin: 0">Networks ({networks.length})</h3>
     </div>
     <div class="row" style="margin-bottom: 12px">
       <input placeholder="LAN" bind:value={netName} style="width: 90px" />
@@ -224,9 +224,9 @@
   </div>
 
   <div class="card">
-    <div class="spread" style="margin-bottom: 12px">
-      <strong>Domain Entries ({entries.length})</strong>
-      <button onclick={() => startEdit(null)}>+ Entry</button>
+    <div class="spread" style="margin-bottom: 10px">
+      <h3 style="margin: 0">Domain Entries ({entries.length})</h3>
+      <button onclick={() => startEdit(null)}>Add Entry</button>
     </div>
     <table>
       <thead>

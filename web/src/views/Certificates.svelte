@@ -138,7 +138,7 @@
     <h3 style="margin: 0">Managed Certificates</h3>
     {#if !isViewer}
       <button onclick={() => { showForm = !showForm; if (!showForm) resetForm(); }}>
-        {showForm ? 'Close' : 'New Certificate'}
+        {showForm ? 'Close' : 'Add Certificate'}
       </button>
     {/if}
   </div>

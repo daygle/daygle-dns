@@ -241,10 +241,10 @@
     <p class="muted">Select a zone to view and edit its records.</p>
   {:else}
     <div class="card">
-      <div class="spread" style="margin-bottom: 12px">
-        <strong>Records for <code>{selected.name}</code></strong>
+      <div class="spread" style="margin-bottom: 10px">
+        <h3 style="margin: 0">Records for <code>{selected.name}</code></h3>
         {#if selected.zone_type !== 'secondary'}
-          <button onclick={() => startEdit(null)}>+ Record</button>
+          <button onclick={() => startEdit(null)}>Add Record</button>
         {/if}
       </div>
 

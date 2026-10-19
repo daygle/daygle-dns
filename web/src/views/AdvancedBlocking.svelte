@@ -190,7 +190,7 @@
 <div class="card" style="margin-bottom: 14px">
   <div class="spread">
     <h3 style="margin: 0">Blocking Groups</h3>
-    <button onclick={() => startEdit(null)}>New Group</button>
+    <button onclick={() => startEdit(null)}>Add Group</button>
   </div>
 
   {#if groups.length === 0}

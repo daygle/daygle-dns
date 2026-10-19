@@ -224,12 +224,11 @@
   <div class="card notice error">{error}</div>
 {/if}
 
-<div class="row" style="margin-bottom: 14px">
-  <button onclick={openAddZone}>+ Add Zone</button>
-  <span class="muted">{zones.length} zone{zones.length === 1 ? '' : 's'}</span>
-</div>
-
-<div class="card" style="padding: 0; overflow: auto">
+<div class="card">
+  <div class="spread" style="margin-bottom: 10px">
+    <h3 style="margin: 0">Zones ({zones.length})</h3>
+    <button onclick={openAddZone}>Add Zone</button>
+  </div>
   <div class="table-wrap">
     <table>
       <thead>
@@ -258,7 +257,7 @@
     </table>
   </div>
   {#if zones.length === 0}
-    <p class="muted" style="padding: 14px">No zones yet. Add a primary or secondary zone to get started.</p>
+    <p class="muted">No zones yet. Add a primary or secondary zone to get started.</p>
   {/if}
 </div>
 

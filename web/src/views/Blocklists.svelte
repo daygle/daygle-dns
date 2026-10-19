@@ -254,19 +254,6 @@
   tagline="Fetch remote blocklists (domain lists, hosts files or adblock filters) and merge them into the blocklist. Add, edit and remove sources below - changes are stored in the server database and applied to the running server immediately. Sources are validated before they are saved."
 />
 
-<div class="row" style="margin-bottom: 14px">
-  <button onclick={openAdd}>Add Source</button>
-  <button class="secondary" onclick={refreshNow} disabled={refreshing || !configured}>
-    {refreshing ? 'Refreshing…' : 'Refresh All'}
-  </button>
-  <button class="secondary" onclick={load}>Reload</button>
-  {#if configured}
-    <span class="muted">
-      {sources.length} source{sources.length === 1 ? '' : 's'} · {fmt(total)} domains blocked
-    </span>
-  {/if}
-</div>
-
 {#if notice}
   <div class="card" style="border-color: var(--ok); margin-bottom: 14px">{notice}</div>
 {/if}
@@ -292,7 +279,21 @@
     </div>
   </div>
 {:else}
-  <div class="card" style="padding: 0; overflow: auto">
+  <div class="card">
+    <div class="spread" style="margin-bottom: 10px; gap: 10px; flex-wrap: wrap">
+      <div>
+        <h3 style="margin: 0">Sources ({sources.length})</h3>
+        <span class="muted small">{fmt(total)} domains blocked</span>
+      </div>
+      <div class="row" style="gap: 8px">
+        <button class="secondary" onclick={load}>Reload</button>
+        <button class="secondary" onclick={refreshNow} disabled={refreshing}>
+          {refreshing ? 'Refreshing…' : 'Refresh All'}
+        </button>
+        <button onclick={openAdd}>Add Source</button>
+      </div>
+    </div>
+    <div class="table-wrap">
     <table>
       <thead>
         <tr>
@@ -335,6 +336,7 @@
         {/each}
       </tbody>
     </table>
+    </div>
   </div>
 
   <p class="muted help">
