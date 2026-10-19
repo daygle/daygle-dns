@@ -222,17 +222,6 @@
       aria-label="Close navigation"
       onclick={() => setSidebar(false)}
     ></button>
-    <button
-      type="button"
-      class="fab"
-      class:hidden={sidebar.open}
-      aria-label="Open navigation"
-      onclick={() => setSidebar(true)}
-    >
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-        <path d="M3 6h18M3 12h18M3 18h18" />
-      </svg>
-    </button>
     <aside class:open={sidebar.open} class:closed={!sidebar.open}>
       <div class="side-head">
         <div class="brand">
@@ -462,47 +451,47 @@
 
   .backdrop { display: none; }
 
-  .fab { display: none; }
+  main { flex: 1; min-width: 0; padding: 24px 28px; }
 
-  main { flex: 1; padding: 24px 28px; }
-
-  /* Wide screens: the sidebar is in-flow; collapsed it becomes a slim icon rail
-     so navigation stays available while saving horizontal space. */
-  @media (min-width: 900px) {
-    aside.closed {
-      width: 52px;
-      padding: 16px 6px;
-    }
-    aside.closed .side-head { justify-content: center; }
-    aside.closed .brand,
-    aside.closed .user-box,
-    aside.closed .password-notice { display: none; }
-    /* Icon-only navigation: labels are hidden and the buttons center. */
-    aside.closed nav {
-      min-height: 0;
-      overflow-y: auto;
-    }
-    aside.closed .nav-btn {
-      justify-content: center;
-      padding: 9px 0;
-    }
-    aside.closed .nav-btn span { display: none; }
+  /* Collapsed, the sidebar is a slim icon rail on every screen size so
+     navigation stays one tap away without covering the page. */
+  aside.closed {
+    width: 52px;
+    padding: 16px 6px;
   }
+  aside.closed .side-head { justify-content: center; }
+  aside.closed .brand,
+  aside.closed .user-box,
+  aside.closed .password-notice { display: none; }
+  /* Icon-only navigation: labels are hidden and the buttons center. */
+  aside.closed nav {
+    min-height: 0;
+    overflow-y: auto;
+  }
+  aside.closed .nav-btn {
+    justify-content: center;
+    padding: 9px 0;
+  }
+  aside.closed .nav-btn span { display: none; }
 
-  /* Narrow screens: the sidebar becomes a slide-in overlay drawer. */
+  /* Narrow screens: the rail is pinned to the left edge and expanding it
+     opens the full sidebar as an overlay drawer over the page. */
   @media (max-width: 899px) {
     aside {
       position: fixed;
       top: 0;
       left: 0;
-      height: 100vh;
-      width: 240px;
       z-index: 40;
-      transform: translateX(-100%);
-      transition: transform 0.2s ease;
+      transition: width 0.2s ease;
     }
-    aside.open { transform: translateX(0); }
-    main { padding: 16px 14px; }
+    aside.open {
+      width: 240px;
+      overflow-y: auto;
+    }
+    main {
+      margin-left: 52px;
+      padding: 16px 12px;
+    }
 
     .backdrop {
       display: block;
@@ -517,30 +506,6 @@
       transition: opacity 0.2s ease;
     }
     .backdrop.show { opacity: 1; pointer-events: auto; }
-
-    .fab {
-      display: inline-flex;
-      position: fixed;
-      top: 10px;
-      left: 10px;
-      z-index: 35;
-      width: 40px;
-      height: 40px;
-      border-radius: 8px;
-      background: var(--panel-2);
-      border: 1px solid var(--border);
-      color: var(--text);
-      cursor: pointer;
-      padding: 0;
-      align-items: center;
-      justify-content: center;
-    }
-    .fab:hover {
-      border-color: var(--accent);
-      color: var(--accent);
-    }
-    .fab svg { width: 22px; height: 22px; }
-    .fab.hidden { display: none; pointer-events: none; }
   }
 
   .modal-backdrop {
