@@ -85,7 +85,7 @@ fasttext = "0.8"
 # release build because the prebuilt ONNX Runtime binaries are glibc-based).
 ort = { version = "2.0.0-rc.14", default-features = false, features = ["std", "download-binaries", "copy-dylibs", "ndarray", "tls-rustls"] }
 ndarray = "0.17"
-tokenizers = { version = "0.22", default-features = false, features = ["fancy-regex"] }
+tokenizers = { version = "0.23", default-features = false, features = ["fancy-regex"] }
 
 [profile.release]
 lto = "thin"
