@@ -244,7 +244,7 @@
   {#if info.can_update}
     <div class="card" style="margin-bottom: 14px">
       <div class="spread">
-        <h3 style="margin: 0">In-Place Update</h3>
+        <h3 style="margin: 0">Update</h3>
         {#if updating || runRunning()}
           <span class="pill"><span class="spin" aria-hidden="true"></span> Updating…</span>
         {:else if run?.phase === 'done' && isRollback(run)}
@@ -394,7 +394,7 @@
         <tr><td class="muted">Latest Release</td><td>{#if info.latest_release}<code>v{info.latest_release}</code>{:else}Unknown{/if}</td></tr>
         <tr><td class="muted">Config File</td><td>{info.has_config_file ? 'Detected' : 'Not detected'}</td></tr>
         <tr><td class="muted">Service Manager</td><td>{info.has_systemd ? 'systemd' : 'Not detected'}</td></tr>
-        <tr><td class="muted">In-Place Update</td><td>{info.can_update ? 'Available' : 'Not available on this host'}</td></tr>
+        <tr><td class="muted">Update</td><td>{info.can_update ? 'Available' : 'Not available on this host'}</td></tr>
       </tbody>
     </table>
     {#if !info.can_update}
