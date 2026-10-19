@@ -6,7 +6,7 @@
 
   const PER_PAGE = 50;
   const STATUS_FILTERS = [
-    { value: '', label: 'All statuses' },
+    { value: '', label: 'All Statuses' },
     { value: 'pending', label: 'Pending' },
     { value: 'classified', label: 'Classified' },
     { value: 'skipped', label: 'Skipped' },
@@ -71,6 +71,11 @@
     } catch (e) {
       error = formatApiError(e);
     }
+  }
+
+  // Severity and status are lowercase enum values; show them capitalized.
+  function title(s) {
+    return s ? s.charAt(0).toUpperCase() + s.slice(1) : s;
   }
 
   function pages() {
@@ -168,12 +173,12 @@
             </td>
             <td>
               <span class="pill" class:err={r.severity === 'threat'}>
-                {r.severity}
+                {title(r.severity)}
               </span>
             </td>
             <td>
               <span class="pill" class:ok={r.status === 'classified'}>
-                {r.status}
+                {title(r.status)}
               </span>
             </td>
             <td class="num">{r.confidence.toFixed(3)}</td>
