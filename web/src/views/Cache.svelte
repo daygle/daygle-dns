@@ -101,7 +101,7 @@
     <div class="card stat"><div class="muted">Tracked Names</div><div class="big">{cache.tracked_names.toLocaleString()}</div></div>
   </div>
 
-  <div class="card" style="margin-top: 18px; margin-bottom: 14px">
+  <div class="card" style="margin-top: 14px; margin-bottom: 14px">
     <div class="spread" style="margin-bottom: 10px">
       <h3 style="margin: 0">Cache Controls</h3>
       <button class="danger" onclick={flush} disabled={busy || !cache.enabled}>Flush Cache</button>

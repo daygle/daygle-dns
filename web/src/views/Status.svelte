@@ -168,7 +168,7 @@
     {/each}
   </div>
 
-  <div class="card" style="margin-top: 18px">
+  <div class="card" style="margin-top: 14px">
     <div class="spread" style="margin-bottom: 10px">
       <h3 style="margin: 0">Query Volume</h3>
       <div class="row">
@@ -288,7 +288,7 @@
     </div>
   </div>
 
-  <div class="card" style="margin-top: 18px">
+  <div class="card" style="margin-top: 14px">
     <h3 style="margin: 0 0 10px">Runtime</h3>
     <table>
       <tbody>
@@ -395,6 +395,6 @@
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
     gap: 12px;
-    margin-top: 18px;
+    margin-top: 14px;
   }
 </style>
