@@ -326,7 +326,7 @@
 <style>
   .grid {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
     gap: 12px;
   }
   .stat .big { font-size: 1.6rem; font-weight: 700; margin-top: 6px; }
