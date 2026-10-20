@@ -3,6 +3,7 @@
   import PageHeader from '../PageHeader.svelte';
   import { icons } from '../icons.svelte.js';
   import { onDestroy } from 'svelte';
+  import { formatDateTime } from '../datetime.svelte.js';
 
   let info = $state(null);
   let error = $state(null);
@@ -231,7 +232,7 @@
 <PageHeader
   icon={icons.update}
   title="Update"
-  tagline="The recommended way to update all components is the project's in-place update. It downloads the latest prebuilt release, verifies its checksum, installs it in place, and preserves your configuration, zones, certificates, and database - no Rust toolchain is required on the host. (When no prebuilt release matches, it falls back to building from source.) The privileged install step runs as its own dedicated systemd service, so the server account never needs root rights. On qualifying hosts you can trigger it right from here; elsewhere it runs as a one-liner on the host."
+  tagline="Update Daygle DNS in place. The latest release is downloaded, its checksum verified and installed, and your configuration, zones, certificates and database are kept. Start it here on hosts set up by the installer, or run the one-line command on any host."
 />
 
 {#if error}
@@ -260,7 +261,11 @@
         <div class="form-error" style="margin-bottom: 10px">{startError}</div>
       {/if}
 
-      {#if preflightResult && !preflightResult.ready}
+      {#if preflightResult?.ready}
+        <p class="health-ok">
+          ✓ All {preflightResult.checks?.length || ''} health checks passed. This host is ready to update.
+        </p>
+      {:else if preflightResult && !preflightResult.ready}
         <div class="preflight-card">
           <h4 style="margin: 0 0 10px">Pre-Flight Check Results</h4>
           <p class="muted small" style="margin-bottom: 10px">
@@ -379,8 +384,8 @@
       {/if}
 
       {#if run?.started_at}
-        <p class="muted small" style="margin-top: 10px">
-          Last run: {run.started_at} · pid {run.pid} · exit {run.exit_code}
+        <p class="muted small" style="margin-top: 10px" title="Process {run.pid}{run.exit_code != null ? `, exit code ${run.exit_code}` : ''}">
+          Last update started {formatDateTime(run.started_at)}.
         </p>
       {/if}
     </div>
@@ -392,9 +397,9 @@
       <tbody>
         <tr><td class="muted">Installed Version</td><td><code>v{info.version}</code></td></tr>
         <tr><td class="muted">Latest Release</td><td>{#if info.latest_release}<code>v{info.latest_release}</code>{:else}Unknown{/if}</td></tr>
-        <tr><td class="muted">Config File</td><td>{info.has_config_file ? 'Detected' : 'Not detected'}</td></tr>
-        <tr><td class="muted">Service Manager</td><td>{info.has_systemd ? 'systemd' : 'Not detected'}</td></tr>
-        <tr><td class="muted">Update</td><td>{info.can_update ? 'Available' : 'Not available on this host'}</td></tr>
+        <tr><td class="muted">Config File</td><td>{info.has_config_file ? 'Detected' : 'Not Detected'}</td></tr>
+        <tr><td class="muted">Service Manager</td><td>{info.has_systemd ? 'systemd' : 'Not Detected'}</td></tr>
+        <tr><td class="muted">How to Update</td><td>{info.can_update ? 'From This Page' : 'Manual Command Only'}</td></tr>
       </tbody>
     </table>
     {#if !info.can_update}
@@ -449,6 +454,7 @@
 
 <style>
   code { font: inherit; color: var(--text); }
+  .health-ok { color: var(--ok); margin: 10px 0 0; }
   .command-block {
     display: flex;
     gap: 8px;

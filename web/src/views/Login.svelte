@@ -9,11 +9,11 @@
   async function submit() {
     error = '';
     if (username.trim().length < 1) {
-      error = 'Username is required.';
+      error = 'Enter your username.';
       return;
     }
     if (password.length < 1) {
-      error = 'Password is required.';
+      error = 'Enter your password.';
       return;
     }
 
@@ -35,10 +35,12 @@
 
 <main class="page">
   <section class="panel">
-    <h2>Sign in</h2>
+    <div class="brand"><span class="logo" aria-hidden="true">⬡</span> Daygle DNS</div>
+    <h2>Sign In</h2>
     <form on:submit|preventDefault={submit} class="form">
       <label for="username">Username</label>
-      <input id="username" type="text" bind:value={username} autocomplete="username" />
+      <!-- svelte-ignore a11y_autofocus -->
+      <input id="username" type="text" bind:value={username} autocomplete="username" autofocus spellcheck="false" />
 
       <label for="password">Password</label>
       <input id="password" type="password" bind:value={password} autocomplete="current-password" />
@@ -47,7 +49,7 @@
         <div class="error">{error}</div>
       {/if}
 
-      <button type="submit" disabled={loading}>{loading ? 'Signing in…' : 'Sign in'}</button>
+      <button type="submit" disabled={loading}>{loading ? 'Signing In…' : 'Sign In'}</button>
     </form>
   </section>
 </main>
@@ -62,7 +64,7 @@
   }
   .panel {
     background: var(--panel, #1e1e1e);
-    color: var(--fg, #e0e0e0);
+    color: var(--text, #e6e9f2);
     border-radius: 8px;
     padding: 2rem;
     max-width: 400px;
@@ -73,6 +75,15 @@
     margin: 0 0 0.5rem 0;
     font-size: 1.5rem;
   }
+  .brand {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 1.25rem;
+    font-weight: 700;
+    color: var(--muted, #8b93a7);
+  }
+  .logo { color: var(--accent, #5b8cff); font-size: 1.3rem; }
   .form {
     display: flex;
     flex-direction: column;
@@ -86,7 +97,7 @@
     border-radius: 4px;
     border: 1px solid var(--border, #333);
     background: var(--bg, #121212);
-    color: var(--fg, #e0e0e0);
+    color: var(--text, #e6e9f2);
   }
   button {
     margin-top: 0.5rem;
