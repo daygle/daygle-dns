@@ -171,6 +171,11 @@ impl Scanner {
         Ok(classified_new)
     }
 
+    /// Categories the loaded backend can emit, for console pickers.
+    pub fn categories(&self) -> Vec<String> {
+        self.classifier.categories()
+    }
+
     /// Force-swap the block snapshot from the current store contents. Used
     /// by the scanner after each cycle and by operators after an override
     /// change; enforce mode ⇒ populated, train mode ⇒ empty.

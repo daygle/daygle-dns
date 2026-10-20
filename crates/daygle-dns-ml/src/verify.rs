@@ -24,9 +24,15 @@ use crate::backend::{ClassificationInput, DomainClassifier, Severity, Verdict};
 
 /// Any primary + verifier pair. The verifier's own match threshold decides
 /// where "confident" begins (`MiniLmVerifier` defaults to 0.35 cosine).
+///
+/// The classifier name recorded on verdicts is composed from the inner
+/// backends at construction time (e.g. `fasttext+minilm-onnx`), so the
+/// console's Backend column names the actual pipeline rather than the
+/// opaque stage it implements.
 pub struct VerifyingBackend<B, V> {
     pub base: B,
     pub verifier: V,
+    name: String,
 }
 
 impl<B, V> VerifyingBackend<B, V>
@@ -35,7 +41,12 @@ where
     V: DomainClassifier,
 {
     pub fn new(base: B, verifier: V) -> Self {
-        Self { base, verifier }
+        let name = format!("{}+{}", base.name(), verifier.name());
+        Self {
+            base,
+            verifier,
+            name,
+        }
     }
 }
 
@@ -74,7 +85,13 @@ where
     V: DomainClassifier,
 {
     fn name(&self) -> &str {
-        "verifying"
+        &self.name
+    }
+
+    // The verifier never emits categories of its own; the primary backend's
+    // list is the pipeline's.
+    fn categories(&self) -> Vec<String> {
+        self.base.categories()
     }
 
     fn classify(&self, input: &ClassificationInput) -> Option<Verdict> {

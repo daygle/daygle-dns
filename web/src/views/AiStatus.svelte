@@ -147,6 +147,11 @@
     return Number(n || 0).toLocaleString();
   }
 
+  // Threat categories are lowercase enum values; show them capitalized.
+  function title(s) {
+    return s ? s.charAt(0).toUpperCase() + s.slice(1) : s;
+  }
+
   $effect(() => {
     load();
     loadModels();
@@ -208,7 +213,12 @@
 
   <div class="two-col">
     <div class="card">
-      <h3 style="margin: 0 0 10px">Threat Categories</h3>
+      <h3 style="margin: 0 0 4px">Auto-Blockable Threats</h3>
+      <p class="muted small" style="margin: 0 0 10px">
+        Threat-category verdicts that qualify for auto-blocking: classified
+        (not skipped/pending), at or above the blocking threshold, and still
+        fresh. Content-category verdicts are not counted here.
+      </p>
       {#if Object.keys(status.threat_counts || {}).length}
         <table>
           <thead>
@@ -217,7 +227,7 @@
           <tbody>
             {#each Object.entries(status.threat_counts) as [category, n] (category)}
               <tr>
-                <td><code>{category}</code></td>
+                <td><code>{title(category)}</code></td>
                 <td class="num">{fmt(n)}</td>
               </tr>
             {/each}

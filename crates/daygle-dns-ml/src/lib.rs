@@ -219,6 +219,12 @@ impl AiEngine {
     pub fn snapshot(&self) -> Arc<ArcSwap<BlockSnapshot>> {
         self.snapshot.clone()
     }
+
+    /// Categories the loaded backend can emit (model labels or heuristic
+    /// rules), for the console's auto-block category picker.
+    pub fn backend_categories(&self) -> Vec<String> {
+        self.scanner.categories()
+    }
 }
 
 /// Resolve the database path: the config value, or `ai.db` beside the
