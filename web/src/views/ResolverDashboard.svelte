@@ -81,7 +81,7 @@
 {#if data?.stats && data.local_root}
   <div class="card" style="margin-top: 14px">
     <div class="spread" style="margin-bottom: 12px; flex-wrap: wrap; gap: 8px">
-      <h3 style="margin: 0">Resolver</h3>
+      <h3 style="margin: 0">Resolver <span class="muted since">Since Start</span></h3>
       <div class="row" style="gap: 6px; flex-wrap: wrap">
         <span class="pill">{modeLabel}</span>
         <span class="pill" class:ok={data.dnssec_validation}>{data.dnssec_validation ? 'DNSSEC Validating' : 'DNSSEC Off'}</span>
@@ -220,4 +220,5 @@
     pointer-events: none;
     box-shadow: 0 6px 20px rgba(0, 0, 0, 0.32);
   }
+  .since { font-size: 0.72rem; font-weight: 500; margin-left: 6px; }
 </style>

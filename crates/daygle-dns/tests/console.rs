@@ -1825,3 +1825,57 @@ async fn certificates_report_their_details() {
 
     shutdown(server).await;
 }
+
+#[tokio::test]
+async fn new_zones_use_the_default_admin_mailbox() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = spawn_with_roles(&dir).await;
+    let client = reqwest::Client::new();
+    let base = api_url(server.api_addr, "");
+    let (admin, _) = login(server.api_addr, "admin", "secret").await;
+    let put = |body: serde_json::Value| {
+        client
+            .put(format!("{base}/api/config"))
+            .bearer_auth(&admin)
+            .json(&body)
+            .send()
+    };
+    let (client2, base2, admin2) = (client.clone(), base.clone(), admin.clone());
+    let create = move |body: serde_json::Value| {
+        let (client, base, admin) = (client2.clone(), base2.clone(), admin2.clone());
+        async move {
+            let resp = client
+                .post(format!("{}/api/zones", base))
+                .bearer_auth(admin)
+                .json(&body)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), 201);
+            resp.json::<serde_json::Value>().await.unwrap()
+        }
+    };
+
+    // Set in Settings (the trailing dot is added).
+    let resp =
+        put(json!({ "authoritative": { "default_admin_mailbox": "hostmaster.example.net" } }))
+            .await
+            .unwrap();
+    assert_eq!(resp.status(), 200);
+    let zone = create(json!({ "name": "one.test" })).await;
+    assert_eq!(zone["admin_mailbox"], json!("hostmaster.example.net."));
+
+    // An explicit mailbox still wins.
+    let zone = create(json!({ "name": "two.test", "admin_mailbox": "dns.two.test." })).await;
+    assert_eq!(zone["admin_mailbox"], json!("dns.two.test."));
+
+    // Cleared: back to the per-zone admin.<zone>. fallback.
+    let resp = put(json!({ "authoritative": { "default_admin_mailbox": "" } }))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let zone = create(json!({ "name": "three.test" })).await;
+    assert_eq!(zone["admin_mailbox"], json!("admin.three.test."));
+
+    shutdown(server).await;
+}

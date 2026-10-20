@@ -1,5 +1,5 @@
 <script>
-  import { api } from '../api.js';
+  import { api, formatApiError } from '../api.js';
   import PageHeader from '../PageHeader.svelte';
   import { icons } from '../icons.svelte.js';
 
@@ -10,7 +10,7 @@
     try {
       status = await api.status();
     } catch (e) {
-      error = String(e.message || e);
+      error = formatApiError(e);
     }
   }
 
@@ -22,22 +22,32 @@
     {
       icon: icons.zones,
       title: 'Authoritative DNS',
-      text: 'SQLite-backed zones, records, zone transfers, DNSSEC signing, and dynamic updates.',
+      text: 'Primary and secondary zones, DNSSEC signing, zone transfers, NOTIFY, dynamic updates and split horizon.',
     },
     {
       icon: icons.cache,
       title: 'Recursive Resolution',
-      text: 'Caching, DNSSEC validation, retries, conditional forwarding, prefetch, and serve-stale support.',
+      text: 'Resolve from the root servers or forward to upstreams, with DNSSEC validation, a verified local root zone, prefetch and serve-stale.',
     },
     {
       icon: icons.filtering,
-      title: 'Policy Controls',
-      text: 'Trusted domains, blocked domains, remote blocklist sources, client rules, and split horizon DNS.',
+      title: 'Filtering and Policies',
+      text: 'Blocklists, allow and block lists, client groups, and per-client resolution policies.',
+    },
+    {
+      icon: icons.ai,
+      title: 'AI Safety Scanner',
+      text: 'Classifies the domains in your traffic in the background and can block unsafe ones.',
     },
     {
       icon: icons.certificates,
-      title: 'Modern Protocols',
-      text: 'DNS over TLS, DNS over HTTPS, and DNS over QUIC with a built-in management console.',
+      title: 'Encrypted DNS',
+      text: 'DNS over TLS, HTTPS and QUIC, with opportunistic encryption towards nameservers.',
+    },
+    {
+      icon: icons.logs,
+      title: 'Visibility',
+      text: 'Live dashboards, a searchable query log, and a web console with read-only accounts.',
     },
   ];
 </script>
@@ -89,8 +99,8 @@
 <style>
   h2, h3 { margin-top: 0; }
   .feature-grid, .details-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 14px; }
-  /* Four features: one row on wide screens, 2 x 2 below that, never 3 + 1. */
-  .feature-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); margin-bottom: 14px; }
+  /* Six features: 3 x 2 on wide screens, 2 x 3 below that - never a lone card. */
+  .feature-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); margin-bottom: 14px; }
   @media (max-width: 1180px) { .feature-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
   @media (max-width: 600px) { .feature-grid { grid-template-columns: 1fr; } }
   .feature { display: flex; gap: 14px; }

@@ -1,17 +1,21 @@
 <script>
+  import { onMount } from 'svelte';
   import { api, formatApiError, formatUptime } from '../api.js';
   import PageHeader from '../PageHeader.svelte';
   import ResolverDashboard from './ResolverDashboard.svelte';
   import { icons } from '../icons.svelte.js';
-  import { formatTime, formatTimeShort } from '../datetime.svelte.js';
+  import { formatTime, formatTimeShort, formatDateTime } from '../datetime.svelte.js';
 
   let status = $state(null);
   let metrics = $state(null);
   let stats = $state(null);
   let window_ = $state('1h');
   let error = $state(null);
+  // When the data on screen was fetched (shown if a later refresh fails).
+  let loadedAt = $state(null);
 
-  let inFlight = $state(false);
+  // Plain variable, not state: it only guards against overlapping requests.
+  let inFlight = false;
   // Bumped on every refresh so the resolver dashboard reloads with the page.
   let refreshKey = $state(0);
 
@@ -30,6 +34,7 @@
       status = s;
       metrics = m;
       stats = st;
+      loadedAt = Date.now();
       refreshKey += 1;
     } catch (e) {
       error = formatApiError(e);
@@ -38,12 +43,26 @@
     }
   }
 
-  // Refresh on mount, on window change, and every 10 s afterwards.
-  $effect(() => {
+  // Refresh on mount and every 10 s afterwards. (An $effect here would
+  // track the state `refresh` reads and re-run it after every response,
+  // polling the server continuously.)
+  onMount(() => {
     refresh();
     const id = setInterval(refresh, 10_000);
     return () => clearInterval(id);
   });
+
+  const WINDOWS = [
+    ['1h', '1 Hour', 'the last hour'],
+    ['6h', '6 Hours', 'the last 6 hours'],
+    ['24h', '24 Hours', 'the last 24 hours'],
+  ];
+  const windowText = $derived(WINDOWS.find(([w]) => w === window_)?.[2] || '');
+
+  function chooseWindow(w) {
+    window_ = w;
+    refresh();
+  }
 
   const cards = $derived([
     { label: 'Total Queries', value: metrics?.total_queries ?? 0 },
@@ -149,17 +168,19 @@
   }
 </script>
 
-<PageHeader icon={icons.status} title="Server Status" />
+<PageHeader icon={icons.status} title="Server Status" tagline="Live traffic and health at a glance. Updates every 10 seconds." />
 
 {#if error}
-  <div class="card" style="border-color: var(--danger); color: var(--danger)">
-    Failed to load status: {error}
+  <div class="card" style="border-color: var(--danger); color: var(--danger); margin-bottom: 14px">
+    Could not refresh ({error.replace(/\.$/, '')}).{#if loadedAt}{' '}Showing the data from {formatDateTime(loadedAt)}.{/if}
   </div>
-{:else if !status}
+{/if}
+{#if !status}
   <div class="card">
     <p class="muted">Loading…</p>
   </div>
 {:else}
+  <p class="muted since">Since the server started {formatUptime(status.uptime_secs)} ago:</p>
   <div class="grid">
     {#each cards as card (card.label)}
       <div class="card stat">
@@ -172,14 +193,15 @@
   <div class="card" style="margin-top: 14px">
     <div class="spread" style="margin-bottom: 10px">
       <h3 style="margin: 0">Query Volume</h3>
-      <div class="row">
-        {#each ['1h', '6h', '24h'] as w (w)}
+      <div class="row" role="group" aria-label="Time window">
+        {#each WINDOWS as [w, label] (w)}
           <button
             class="secondary"
             class:sel={window_ === w}
+            aria-pressed={window_ === w}
             style="padding: 4px 10px"
-            onclick={() => (window_ = w)}
-          >{w}</button>
+            onclick={() => chooseWindow(w)}
+          >{label}</button>
         {/each}
       </div>
     </div>
@@ -187,7 +209,7 @@
     <div class="row" style="margin-bottom: 8px; font-size: 0.85rem">
       <span class="legend"><span class="dot accent"></span> {fmt(totals.queries)} queries</span>
       <span class="legend"><span class="dot danger"></span> {fmt(totals.blocked)} blocked</span>
-      <span class="legend muted">{fmt(totals.errors)} errors · {fmt(totals.rate_limited)} rate-limited</span>
+      <span class="legend muted">{fmt(totals.errors)} errors · {fmt(totals.rate_limited)} rate-limited · in {windowText}, per minute</span>
     </div>
 
     {#if chart}
@@ -246,7 +268,7 @@
 
   <div class="tops">
     <div class="card">
-      <h3 style="margin: 0 0 10px">Top Clients</h3>
+      <h3 style="margin: 0 0 10px">Top Clients <span class="muted small-h">Since Start</span></h3>
       {#if stats?.top_clients?.length}
         <table>
           <tbody>
@@ -260,7 +282,7 @@
       {/if}
     </div>
     <div class="card">
-      <h3 style="margin: 0 0 10px">Top Domains</h3>
+      <h3 style="margin: 0 0 10px">Top Domains <span class="muted small-h">Since Start</span></h3>
       {#if stats?.top_domains?.length}
         <table>
           <tbody>
@@ -274,7 +296,7 @@
       {/if}
     </div>
     <div class="card">
-      <h3 style="margin: 0 0 10px">Top Blocked</h3>
+      <h3 style="margin: 0 0 10px">Top Blocked <span class="muted small-h">Since Start</span></h3>
       {#if stats?.top_blocked?.length}
         <table>
           <tbody>
@@ -298,24 +320,12 @@
         <tr><td class="muted">Uptime</td><td>{formatUptime(status.uptime_secs)}</td></tr>
         <tr><td class="muted">Zones</td><td>{status.zones}</td></tr>
         <tr><td class="muted">Records</td><td>{status.records}</td></tr>
-        <tr>
-          <td class="muted">DoT</td>
-          <td><span class:pill={true} class:ok={status.dot_enabled} class:err={!status.dot_enabled}>
-            {status.dot_enabled ? 'Enabled' : 'Disabled'}
-          </span></td>
-        </tr>
-        <tr>
-          <td class="muted">DoH</td>
-          <td><span class:pill={true} class:ok={status.doh_enabled} class:err={!status.doh_enabled}>
-            {status.doh_enabled ? 'Enabled' : 'Disabled'}
-          </span></td>
-        </tr>
-        <tr>
-          <td class="muted">DoQ</td>
-          <td><span class:pill={true} class:ok={status.doq_enabled} class:err={!status.doq_enabled}>
-            {status.doq_enabled ? 'Enabled' : 'Disabled'}
-          </span></td>
-        </tr>
+        {#each [['DNS over TLS', status.dot_enabled], ['DNS over HTTPS', status.doh_enabled], ['DNS over QUIC', status.doq_enabled]] as [label, on] (label)}
+          <tr>
+            <td class="muted">{label}</td>
+            <td><span class="pill" class:ok={on}>{on ? 'On' : 'Off'}</span></td>
+          </tr>
+        {/each}
       </tbody>
     </table>
   </div>
@@ -337,6 +347,8 @@
     .grid > :first-child { grid-column: 1 / -1; }
   }
   .stat .big { font-size: 1.6rem; font-weight: 700; margin-top: 6px; }
+  .since { margin: 0 0 8px; font-size: 0.85rem; }
+  .small-h { font-size: 0.72rem; font-weight: 500; margin-left: 6px; }
 
   .chart-wrap { position: relative; }
   .chart { width: 100%; height: 190px; display: block; touch-action: none; }
