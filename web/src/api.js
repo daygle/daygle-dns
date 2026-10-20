@@ -198,6 +198,7 @@ export const api = {
   blockingGroups: () => request('GET', '/policy/blocking'),
   saveBlockingGroup: (body) => request('POST', '/policy/blocking', body),
   deleteBlockingGroup: (id) => request('DELETE', `/policy/blocking/${id}`),
+  moveBlockingGroup: (id, direction) => request('POST', `/policy/blocking/${id}/move`, { direction }),
   testBlocking: (client, domain) =>
     request('POST', '/policy/blocking/test', { client, domain }),
   splitHorizon: () => request('GET', '/split-horizon'),
