@@ -858,6 +858,7 @@ All of these return `404` when the AI subsystem is disabled.
 GET    /api/policy/blocking
 POST   /api/policy/blocking
 DELETE /api/policy/blocking/{id}
+POST   /api/policy/blocking/{id}/move
 POST   /api/policy/blocking/test
 ```
 
@@ -866,8 +867,13 @@ criteria, including regular expressions (`allow_regex` / `block_regex`;
 invalid patterns are rejected with `400` instead of being silently dropped
 at engine-build time).
 `POST /api/policy/blocking` creates a group or updates the one with the same
-name; the dispatcher's blocking engine is rebuilt immediately.
+name; with an `id` it updates that group, so it can be renamed (`400` if
+another group has the new name, `404` if the id is unknown). The
+dispatcher's blocking engine is rebuilt immediately.
 `DELETE /api/policy/blocking/{id}` removes a group.
+`POST /api/policy/blocking/{id}/move` with `{"direction": "up"}` or
+`{"direction": "down"}` swaps the group with its neighbour and returns the
+reordered list. Groups are evaluated in this order.
 
 `POST /api/policy/blocking/test` evaluates a `{client, domain}` pair against
 the live blocking groups and reports whether (and why) it is blocked, so an
