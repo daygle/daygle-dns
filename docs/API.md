@@ -41,6 +41,17 @@ POST /api/auth/login
 ```
 
 Send the returned token as the `Authorization: Bearer` header on every call.
+Sessions are kept in the database (only a hash of each token), so they
+survive a restart until they expire (`api.session_ttl_secs`) or sign out.
+
+**Personal API tokens.** For scripts, each account can make long-lived
+tokens (`dgl_…`) from **API Tokens** below its name in the sidebar, or with
+the endpoints below. A token acts as its account (or as a viewer when made
+read-only, and always for a viewer account), works until it expires or is
+revoked, and skips two-factor login. Only its hash is stored; the token is
+shown once. A token cannot manage tokens, two-factor login or the
+password: those need a login session. Disabling or deleting the account
+stops its tokens.
 Password hashes for the config file are generated with
 `daygle-dns hash-password 'your-password'` (PBKDF2-HMAC-SHA256).
 
@@ -55,10 +66,13 @@ Additional endpoints:
 
 | Endpoint | Purpose |
 |----------|---------|
-| `GET /api/auth/me` | identity of the presented session (`username`, `role`, `expires_at_secs`), the account's own date/time `preferences` and the server's `display_defaults` |
+| `GET /api/auth/me` | identity of the presented session or API token (`username`, `role`, `expires_at_secs`, `api_token`), the account's own date/time `preferences` and the server's `display_defaults` |
 | `PUT /api/auth/preferences` | signed-in user sets their own `{time_zone, date_format, time_format}`; an empty field means the server default (viewers may use it too) |
 | `POST /api/auth/logout` | revoke the presented token |
 | `POST /api/auth/password` | signed-in user rotates their own password (current password required; other sessions revoked) |
+| `GET /api/auth/tokens` | the signed-in account's API tokens (`id`, `name`, `read_only`, `created_at`, `last_used_at`, `expires_at`; UNIX seconds, 0 = never) |
+| `POST /api/auth/tokens` | `{name, read_only, expires_in_days}` (0 or absent: never expires): make an API token; the response's `token` is shown only now. At most 50 per account |
+| `DELETE /api/auth/tokens/{id}` | revoke one of the signed-in account's tokens |
 | `GET /api/auth/two-factor` | whether the signed-in account uses two-factor login (`enabled`) and its `recovery_codes_left` |
 | `POST /api/auth/two-factor/setup` | `{password}`: start setting up two-factor login; returns a new `secret` and its `otpauth://` `uri` (for a QR code). Nothing changes until `/enable` |
 | `POST /api/auth/two-factor/enable` | `{code}` from the app: turn two-factor login on; returns 10 `recovery_codes`, shown only now. Other sessions are signed out |

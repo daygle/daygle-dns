@@ -115,6 +115,17 @@ fn pbkdf2_sha256(password: &[u8], salt: &[u8], iterations: u32, dk_len: usize) -
 }
 
 /// Constant-time byte comparison (the length itself is not secret).
+/// How a login session or API token is stored: its SHA-256, hex. The
+/// tokens are long random strings, so a fast hash is enough and a stolen
+/// database cannot be used to sign in.
+pub fn hash_token(token: &str) -> String {
+    use sha2::Digest as _;
+    Sha256::digest(token.as_bytes())
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
 pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;

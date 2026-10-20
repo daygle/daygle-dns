@@ -2554,7 +2554,7 @@ pub async fn auth_logout(
 /// have nowhere to store them.
 pub async fn auth_me(State(state): State<AppState>, headers: axum::http::HeaderMap) -> Response {
     let token = bearer_token(&headers).unwrap_or_default();
-    match state.sessions.verify(&token) {
+    match state.sessions.authenticate(&token) {
         Some(session) => {
             let preferences = state
                 .catalog
@@ -2573,6 +2573,8 @@ pub async fn auth_me(State(state): State<AppState>, headers: axum::http::HeaderM
                     .unwrap_or(0),
                 "preferences": preferences,
                 "display_defaults": state.config.load().display,
+                // Signed in with a personal API token rather than a login.
+                "api_token": session.api_token.is_some(),
             }))
             .into_response()
         }
@@ -2778,7 +2780,8 @@ fn check_two_factor(
     Ok(())
 }
 
-/// The signed-in account, for the self-service two-factor endpoints.
+/// The signed-in account (a login session, not an API token), for the
+/// self-service credential endpoints.
 #[allow(clippy::result_large_err)]
 fn session_user(
     state: &AppState,
@@ -2788,7 +2791,7 @@ fn session_user(
     let session = state.sessions.verify(&token).ok_or_else(|| {
         error_response(
             StatusCode::BAD_REQUEST,
-            "two-factor login belongs to a console account: sign in as one",
+            "this needs a signed-in console account (not an API token)",
         )
     })?;
     match state.catalog.store().get_console_user(&session.username) {
@@ -2986,6 +2989,120 @@ pub async fn two_factor_disable(
             }
             StatusCode::NO_CONTENT.into_response()
         }
+        Err(e) => map_err(e),
+    }
+}
+
+// ---- Personal API tokens ---------------------------------------------------
+
+#[derive(Deserialize)]
+pub struct ApiTokenInput {
+    name: String,
+    #[serde(default)]
+    read_only: bool,
+    /// Days until the token stops working; 0 or absent: never.
+    #[serde(default)]
+    expires_in_days: u32,
+}
+
+/// `GET /api/auth/tokens` - the signed-in account's API tokens.
+pub async fn list_api_tokens(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+) -> Response {
+    let user = match session_user(&state, &headers) {
+        Ok(u) => u,
+        Err(r) => return r,
+    };
+    match state.catalog.store().list_api_tokens(&user.username) {
+        Ok(tokens) => Json(tokens).into_response(),
+        Err(e) => map_err(e),
+    }
+}
+
+/// `POST /api/auth/tokens` `{name, read_only, expires_in_days}` - make an
+/// API token for the signed-in account. The token is returned only now.
+pub async fn create_api_token(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    axum::Json(input): axum::Json<ApiTokenInput>,
+) -> Response {
+    let user = match session_user(&state, &headers) {
+        Ok(u) => u,
+        Err(r) => return r,
+    };
+    let name = input.name.trim().to_string();
+    if name.is_empty() || name.chars().count() > 64 {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "give the token a name (up to 64 characters)",
+        );
+    }
+    if input.expires_in_days > 3650 {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "a token can last at most 3650 days",
+        );
+    }
+    let store = state.catalog.store();
+    match store.list_api_tokens(&user.username) {
+        Ok(tokens) if tokens.len() >= 50 => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "an account can have at most 50 API tokens: delete some first",
+            )
+        }
+        Ok(_) => {}
+        Err(e) => return map_err(e),
+    }
+    let now = unix_now() as i64;
+    let secret = crate::new_api_token();
+    let token = daygle_dns_authoritative::store::ApiToken {
+        id: format!("{:016x}", rand::random::<u64>()),
+        username: user.username.clone(),
+        name: name.clone(),
+        token_hash: daygle_dns_core::auth::hash_token(&secret),
+        read_only: input.read_only || user.role == daygle_dns_core::config::Role::Viewer,
+        created_at: now,
+        last_used_at: 0,
+        expires_at: if input.expires_in_days == 0 {
+            0
+        } else {
+            now + i64::from(input.expires_in_days) * 86_400
+        },
+    };
+    if let Err(e) = store.create_api_token(&token) {
+        return map_err(e);
+    }
+    state.logs.info(
+        "api",
+        format!("user '{}' created API token '{name}'", user.username),
+    );
+    let mut body = serde_json::to_value(&token).expect("token serializes");
+    body["token"] = serde_json::json!(secret);
+    (StatusCode::CREATED, Json(body)).into_response()
+}
+
+/// `DELETE /api/auth/tokens/{id}` - revoke one of the signed-in account's
+/// API tokens.
+pub async fn delete_api_token(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<String>,
+) -> Response {
+    let user = match session_user(&state, &headers) {
+        Ok(u) => u,
+        Err(r) => return r,
+    };
+    match state.catalog.store().delete_api_token(&user.username, &id) {
+        Ok(true) => {
+            state.logs.info(
+                "api",
+                format!("user '{}' revoked an API token", user.username),
+            );
+            StatusCode::NO_CONTENT.into_response()
+        }
+        Ok(false) => error_response(StatusCode::NOT_FOUND, "no such token"),
         Err(e) => map_err(e),
     }
 }

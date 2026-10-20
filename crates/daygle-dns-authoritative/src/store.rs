@@ -138,6 +138,24 @@ CREATE TABLE IF NOT EXISTS console_user_two_factor (
     last_step       INTEGER NOT NULL DEFAULT 0
 );
 
+CREATE TABLE IF NOT EXISTS console_sessions (
+    token_hash TEXT PRIMARY KEY,
+    username   TEXT NOT NULL REFERENCES console_users(username) ON DELETE CASCADE,
+    role       TEXT NOT NULL,
+    expires_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS api_tokens (
+    id           TEXT PRIMARY KEY,
+    username     TEXT NOT NULL REFERENCES console_users(username) ON DELETE CASCADE,
+    name         TEXT NOT NULL,
+    token_hash   TEXT NOT NULL UNIQUE,
+    read_only    INTEGER NOT NULL DEFAULT 0,
+    created_at   INTEGER NOT NULL,
+    last_used_at INTEGER NOT NULL DEFAULT 0,
+    expires_at   INTEGER NOT NULL DEFAULT 0
+);
+
 CREATE TABLE IF NOT EXISTS tls_certificates (
     name        TEXT PRIMARY KEY,
     server_name TEXT NOT NULL DEFAULT '',
@@ -1795,6 +1813,181 @@ impl ZoneStore {
             [username],
         )?;
         Ok(was_on)
+    }
+}
+
+// ---- Login sessions and API tokens ---------------------------------------
+
+/// A stored login session (the token itself is never stored, only its
+/// hash).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredSession {
+    pub token_hash: String,
+    pub username: String,
+    pub role: Role,
+    /// UNIX seconds.
+    pub expires_at: i64,
+}
+
+/// A personal API token: a long-lived credential for scripts, made by a
+/// signed-in account for itself.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ApiToken {
+    pub id: String,
+    pub username: String,
+    pub name: String,
+    #[serde(skip)]
+    pub token_hash: String,
+    /// Limited to reading, whatever the account's role.
+    pub read_only: bool,
+    /// UNIX seconds; `last_used_at` 0 = never, `expires_at` 0 = never.
+    pub created_at: i64,
+    pub last_used_at: i64,
+    pub expires_at: i64,
+}
+
+fn role_from_str(role: &str) -> Role {
+    if role == Role::Viewer.as_str() {
+        Role::Viewer
+    } else {
+        Role::Admin
+    }
+}
+
+fn row_to_api_token(row: &rusqlite::Row<'_>) -> rusqlite::Result<ApiToken> {
+    Ok(ApiToken {
+        id: row.get(0)?,
+        username: row.get(1)?,
+        name: row.get(2)?,
+        token_hash: row.get(3)?,
+        read_only: row.get::<_, i64>(4)? != 0,
+        created_at: row.get(5)?,
+        last_used_at: row.get(6)?,
+        expires_at: row.get(7)?,
+    })
+}
+
+const API_TOKEN_COLUMNS: &str =
+    "id, username, name, token_hash, read_only, created_at, last_used_at, expires_at";
+
+impl ZoneStore {
+    pub fn put_session(&self, session: &StoredSession) -> Result<()> {
+        let conn = self.lock_conn()?;
+        conn.execute(
+            "INSERT OR REPLACE INTO console_sessions (token_hash, username, role, expires_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![
+                session.token_hash,
+                session.username,
+                session.role.as_str(),
+                session.expires_at
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Unexpired sessions (expired ones are deleted).
+    pub fn load_sessions(&self, now: i64) -> Result<Vec<StoredSession>> {
+        let conn = self.lock_conn()?;
+        conn.execute("DELETE FROM console_sessions WHERE expires_at <= ?1", [now])?;
+        let mut stmt =
+            conn.prepare("SELECT token_hash, username, role, expires_at FROM console_sessions")?;
+        let rows = stmt.query_map([], |r| {
+            let role: String = r.get(2)?;
+            Ok(StoredSession {
+                token_hash: r.get(0)?,
+                username: r.get(1)?,
+                role: role_from_str(&role),
+                expires_at: r.get(3)?,
+            })
+        })?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    pub fn delete_session(&self, token_hash: &str) -> Result<()> {
+        let conn = self.lock_conn()?;
+        conn.execute(
+            "DELETE FROM console_sessions WHERE token_hash = ?1",
+            [token_hash],
+        )?;
+        Ok(())
+    }
+
+    /// Delete `username`'s sessions, except the one with `keep_hash`.
+    pub fn delete_user_sessions(&self, username: &str, keep_hash: Option<&str>) -> Result<()> {
+        let conn = self.lock_conn()?;
+        conn.execute(
+            "DELETE FROM console_sessions WHERE username = ?1 AND token_hash != ?2",
+            params![username, keep_hash.unwrap_or("")],
+        )?;
+        Ok(())
+    }
+
+    pub fn create_api_token(&self, token: &ApiToken) -> Result<()> {
+        let conn = self.lock_conn()?;
+        conn.execute(
+            &format!("INSERT INTO api_tokens ({API_TOKEN_COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)"),
+            params![
+                token.id,
+                token.username,
+                token.name,
+                token.token_hash,
+                token.read_only as i64,
+                token.created_at,
+                token.last_used_at,
+                token.expires_at
+            ],
+        )
+        .map_err(|e| match e {
+            rusqlite::Error::SqliteFailure(f, _)
+                if f.code == rusqlite::ErrorCode::ConstraintViolation =>
+            {
+                DaygleError::NotFound(format!("user '{}'", token.username))
+            }
+            other => other.into(),
+        })?;
+        Ok(())
+    }
+
+    /// `username`'s tokens, newest first.
+    pub fn list_api_tokens(&self, username: &str) -> Result<Vec<ApiToken>> {
+        let conn = self.lock_conn()?;
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {API_TOKEN_COLUMNS} FROM api_tokens WHERE username = ?1
+             ORDER BY created_at DESC, name"
+        ))?;
+        let rows = stmt.query_map([username], row_to_api_token)?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    pub fn find_api_token(&self, token_hash: &str) -> Result<Option<ApiToken>> {
+        let conn = self.lock_conn()?;
+        conn.query_row(
+            &format!("SELECT {API_TOKEN_COLUMNS} FROM api_tokens WHERE token_hash = ?1"),
+            [token_hash],
+            row_to_api_token,
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    /// Note that the token was used (at most once a minute).
+    pub fn touch_api_token(&self, id: &str, now: i64) -> Result<()> {
+        let conn = self.lock_conn()?;
+        conn.execute(
+            "UPDATE api_tokens SET last_used_at = ?2 WHERE id = ?1 AND last_used_at < ?2 - 60",
+            params![id, now],
+        )?;
+        Ok(())
+    }
+
+    /// Delete one of `username`'s tokens. Returns whether it existed.
+    pub fn delete_api_token(&self, username: &str, id: &str) -> Result<bool> {
+        let conn = self.lock_conn()?;
+        Ok(conn.execute(
+            "DELETE FROM api_tokens WHERE id = ?1 AND username = ?2",
+            params![id, username],
+        )? > 0)
     }
 }
 

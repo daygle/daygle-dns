@@ -90,21 +90,77 @@ use daygle_dns_policy::BlocklistSourceManager;
 use daygle_dns_recursive::RecursiveResolver;
 use parking_lot::Mutex;
 
-/// A live login session: the authenticated username, its role and expiry.
+/// Who a request is from: a login session, or a personal API token.
 #[derive(Debug, Clone)]
 pub struct Session {
     pub username: String,
     pub role: daygle_dns_core::config::Role,
     pub expires_at: SystemTime,
+    /// The API token's id, when the request used one rather than a login.
+    pub api_token: Option<String>,
 }
 
-/// In-memory login-session store (tokens are 128-bit random hex).
+/// Login sessions, kept in memory and (when given a store) in the
+/// database, so signing in survives a restart. Only token hashes are kept.
+/// Also recognises personal API tokens ([`SessionStore::authenticate`]).
 #[derive(Default)]
 pub struct SessionStore {
     sessions: Mutex<HashMap<String, Session>>,
+    store: Option<daygle_dns_authoritative::ZoneStore>,
+}
+
+fn unix(t: SystemTime) -> i64 {
+    t.duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+fn from_unix(secs: i64) -> SystemTime {
+    std::time::UNIX_EPOCH + Duration::from_secs(secs.max(0) as u64)
 }
 
 impl SessionStore {
+    /// A store whose sessions live in the database too: the unexpired ones
+    /// saved by an earlier run are loaded.
+    pub fn with_store(store: daygle_dns_authoritative::ZoneStore) -> Self {
+        let loaded = store
+            .load_sessions(unix(SystemTime::now()))
+            .unwrap_or_else(|e| {
+                tracing::warn!("cannot load saved login sessions: {e}");
+                Vec::new()
+            });
+        let sessions = loaded
+            .into_iter()
+            .map(|s| {
+                (
+                    s.token_hash,
+                    Session {
+                        username: s.username,
+                        role: s.role,
+                        expires_at: from_unix(s.expires_at),
+                        api_token: None,
+                    },
+                )
+            })
+            .collect();
+        Self {
+            sessions: Mutex::new(sessions),
+            store: Some(store),
+        }
+    }
+
+    fn persist(
+        &self,
+        what: &str,
+        f: impl FnOnce(&daygle_dns_authoritative::ZoneStore) -> daygle_dns_core::Result<()>,
+    ) {
+        if let Some(store) = &self.store {
+            if let Err(e) = f(store) {
+                tracing::warn!("cannot {what} a login session in the database: {e}");
+            }
+        }
+    }
+
     /// Insert a fresh session for `username`, valid for `ttl`.
     pub fn create(
         &self,
@@ -113,33 +169,88 @@ impl SessionStore {
         ttl: Duration,
     ) -> String {
         let token = new_token();
-        self.sessions.lock().insert(
-            token.clone(),
-            Session {
+        let hash = daygle_dns_core::auth::hash_token(&token);
+        let session = Session {
+            username: username.to_string(),
+            role,
+            expires_at: SystemTime::now() + ttl,
+            api_token: None,
+        };
+        self.persist("save", |store| {
+            store.put_session(&daygle_dns_authoritative::store::StoredSession {
+                token_hash: hash.clone(),
                 username: username.to_string(),
                 role,
-                expires_at: SystemTime::now() + ttl,
-            },
-        );
+                expires_at: unix(session.expires_at),
+            })
+        });
+        self.sessions.lock().insert(hash, session);
         token
     }
 
-    /// Return the session for a token if it exists and is unexpired.
+    /// Return the login session for a token if it exists and is unexpired.
     /// Expired sessions are pruned lazily on access.
     pub fn verify(&self, token: &str) -> Option<Session> {
+        if token.is_empty() {
+            return None;
+        }
         let mut sessions = self.sessions.lock();
         prune_expired(&mut sessions);
-        sessions.get(token).cloned()
+        sessions
+            .get(&daygle_dns_core::auth::hash_token(token))
+            .cloned()
+    }
+
+    /// Who presents `token`: a login session, or else a personal API token
+    /// of an enabled account (read-only tokens act as viewers).
+    pub fn authenticate(&self, token: &str) -> Option<Session> {
+        if let Some(session) = self.verify(token) {
+            return Some(session);
+        }
+        let store = self.store.as_ref()?;
+        if !token.starts_with(API_TOKEN_PREFIX) {
+            return None;
+        }
+        let found = store
+            .find_api_token(&daygle_dns_core::auth::hash_token(token))
+            .ok()
+            .flatten()?;
+        let now = unix(SystemTime::now());
+        if found.expires_at != 0 && found.expires_at <= now {
+            return None;
+        }
+        let user = store.get_console_user(&found.username).ok().flatten()?;
+        if !user.enabled {
+            return None;
+        }
+        let _ = store.touch_api_token(&found.id, now);
+        Some(Session {
+            username: user.username,
+            role: if found.read_only {
+                daygle_dns_core::config::Role::Viewer
+            } else {
+                user.role
+            },
+            expires_at: if found.expires_at == 0 {
+                SystemTime::now() + Duration::from_secs(3600)
+            } else {
+                from_unix(found.expires_at)
+            },
+            api_token: Some(found.id),
+        })
     }
 
     /// Remove a session (logout). Returns whether it existed.
     pub fn revoke(&self, token: &str) -> bool {
-        self.sessions.lock().remove(token).is_some()
+        let hash = daygle_dns_core::auth::hash_token(token);
+        self.persist("delete", |store| store.delete_session(&hash));
+        self.sessions.lock().remove(&hash).is_some()
     }
 
     /// Drop every session belonging to `username` (used when an account is
     /// disabled, deleted, or its password/role changes).
     pub fn revoke_user(&self, username: &str) {
+        self.persist("delete", |store| store.delete_user_sessions(username, None));
         self.sessions.lock().retain(|_, s| s.username != username);
     }
 
@@ -147,10 +258,26 @@ impl SessionStore {
     /// self-service password change so the current device stays signed in
     /// while every other session is signed out.
     pub fn revoke_user_except(&self, username: &str, keep_token: &str) {
+        let keep = daygle_dns_core::auth::hash_token(keep_token);
+        self.persist("delete", |store| {
+            store.delete_user_sessions(username, Some(&keep))
+        });
         self.sessions
             .lock()
-            .retain(|token, s| s.username != username || token == keep_token);
+            .retain(|hash, s| s.username != username || *hash == keep);
     }
+}
+
+/// Personal API tokens start with this, so they are told apart from login
+/// sessions (and recognisable if leaked).
+pub const API_TOKEN_PREFIX: &str = "dgl_";
+
+/// A new personal API token (256 random bits).
+pub fn new_api_token() -> String {
+    let random: String = (0..32)
+        .map(|_| format!("{:02x}", rand::random::<u8>()))
+        .collect();
+    format!("{API_TOKEN_PREFIX}{random}")
 }
 
 fn prune_expired(sessions: &mut HashMap<String, Session>) {
@@ -303,6 +430,11 @@ pub fn router(state: AppState) -> Router {
         .route("/auth/me", get(handlers::auth_me))
         .route("/auth/preferences", put(handlers::auth_set_preferences))
         .route("/auth/password", post(handlers::auth_change_password))
+        .route(
+            "/auth/tokens",
+            get(handlers::list_api_tokens).post(handlers::create_api_token),
+        )
+        .route("/auth/tokens/{id}", delete(handlers::delete_api_token))
         .route("/auth/two-factor", get(handlers::two_factor_status))
         .route("/auth/two-factor/setup", post(handlers::two_factor_setup))
         .route("/auth/two-factor/enable", post(handlers::two_factor_enable))
@@ -588,7 +720,7 @@ async fn require_auth(
     // When users are configured, a valid login session is required for every
     // method. In legacy token-only mode, GETs stay open.
     if users_configured {
-        if let Some(session) = state.sessions.verify(&bearer) {
+        if let Some(session) = state.sessions.authenticate(&bearer) {
             // `viewer` accounts are read-only: any state-changing method is
             // rejected with 403 even though the session itself is valid.
             let mutating = privileged_read
@@ -602,7 +734,8 @@ async fn require_auth(
             // the caller's own view, so read-only accounts may use them.
             let own_path = path.strip_prefix("/api").unwrap_or(path);
             let is_own_account_change = matches!(own_path, "/auth/password" | "/auth/preferences")
-                || own_path.starts_with("/auth/two-factor");
+                || own_path.starts_with("/auth/two-factor")
+                || own_path.starts_with("/auth/tokens");
             if mutating
                 && session.role == daygle_dns_core::config::Role::Viewer
                 && !is_own_account_change

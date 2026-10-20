@@ -124,6 +124,9 @@ export const api = {
     }
     return data;
   },
+  apiTokens: () => request('GET', '/auth/tokens'),
+  createApiToken: (body) => request('POST', '/auth/tokens', body),
+  deleteApiToken: (id) => request('DELETE', `/auth/tokens/${encodeURIComponent(id)}`),
   twoFactorStatus: () => request('GET', '/auth/two-factor'),
   twoFactorSetup: (password) => request('POST', '/auth/two-factor/setup', { password }),
   twoFactorEnable: (code) => request('POST', '/auth/two-factor/enable', { code }),

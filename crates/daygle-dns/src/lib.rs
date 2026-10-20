@@ -542,7 +542,7 @@ pub async fn bind_with(
         started_at,
         config_path: config_path.clone().map(Arc::new),
         reload_notify,
-        sessions: Arc::new(daygle_dns_api::SessionStore::default()),
+        sessions: Arc::new(daygle_dns_api::SessionStore::with_store(store.clone())),
         login_throttle: Arc::new(daygle_dns_api::LoginThrottle::default()),
         request_dns_rebuild: Some(request_dns_rebuild),
         web_apply: Some(web_apply),

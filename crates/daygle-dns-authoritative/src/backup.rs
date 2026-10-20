@@ -5,7 +5,7 @@
 //! blocking groups, split horizon, ...) made with `VACUUM INTO`, plus the
 //! AI scanner's operator overrides (from `ai.db`; its verdicts are a cache
 //! and are not kept) and a `backup_info` row describing it. Query logs are
-//! left out unless asked for.
+//! left out unless asked for, and login sessions always are.
 //!
 //! Restoring never swaps the database under a running server. The backup is
 //! checked and staged next to the database as `<database>.restore`, and the
@@ -101,6 +101,9 @@ fn finish_backup(
         conn.execute("DELETE FROM query_logs", [])
             .map_err(|e| db_err("cannot leave out query logs", e))?;
     }
+    // Login sessions belong to the running server, not to the backup.
+    conn.execute("DELETE FROM console_sessions", [])
+        .map_err(|e| db_err("cannot leave out login sessions", e))?;
     conn.execute_batch(
         "CREATE TABLE backup_ai_overrides (
              domain     TEXT PRIMARY KEY,
