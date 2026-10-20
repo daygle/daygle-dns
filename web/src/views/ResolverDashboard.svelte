@@ -96,7 +96,6 @@
     </div>
 
     <div class="tiles">
-      <div class="tile"><div class="muted">Lookups</div><div class="big">{fmt(lookups)}</div></div>
       <div class="tile"><div class="muted">Median Latency</div><div class="big">{ms(stats.latency.p50_ms)}</div></div>
       <div class="tile"><div class="muted">90th Percentile</div><div class="big">{ms(stats.latency.p90_ms)}</div></div>
       <div class="tile"><div class="muted">99th Percentile</div><div class="big">{ms(stats.latency.p99_ms)}</div></div>

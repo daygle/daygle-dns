@@ -1,5 +1,5 @@
 <script>
-  import { api, formatUptime } from '../api.js';
+  import { api } from '../api.js';
   import PageHeader from '../PageHeader.svelte';
   import { icons } from '../icons.svelte.js';
 
@@ -69,7 +69,7 @@
     <h3 style="margin: 0 0 10px">Application Details</h3>
     <table>
       <tbody>
-        <tr><td class="muted">Version</td><td>{#if status?.version}<code>v{status.version}</code>{:else}<span class="muted">Loading…</span>{/if}</td></tr>
+        <tr><td class="muted">Version</td><td>{#if status?.version}<code>v{status.version}</code>{:else if error}<span class="muted">Unavailable</span>{:else}<span class="muted">Loading…</span>{/if}</td></tr>
         <tr><td class="muted">License</td><td>Apache License 2.0</td></tr>
         <tr><td class="muted">Authoritative Storage</td><td>SQLite</td></tr>
         <tr><td class="muted">DNS Engine</td><td>Hickory DNS</td></tr>
@@ -79,24 +79,6 @@
     </table>
   </div>
 
-  <div class="card">
-    <h3 style="margin: 0 0 10px">Runtime Status</h3>
-    {#if status}
-      <table>
-        <tbody>
-          <tr><td class="muted">Uptime</td><td>{formatUptime(status.uptime_secs)}</td></tr>
-          <tr><td class="muted">Zones</td><td>{status.zones}</td></tr>
-          <tr><td class="muted">Records</td><td>{status.records}</td></tr>
-          <tr><td class="muted">Recursive Resolver</td><td><span class="pill" class:ok={status.recursion} class:err={!status.recursion}>{status.recursion ? 'Enabled' : 'Disabled'}</span></td></tr>
-          <tr><td class="muted">DNSSEC Validation</td><td><span class="pill" class:ok={status.dnssec} class:err={!status.dnssec}>{status.dnssec ? 'Enabled' : 'Disabled'}</span></td></tr>
-        </tbody>
-      </table>
-    {:else if error}
-      <p class="muted">Runtime details are unavailable: {error}</p>
-    {:else}
-      <p class="muted">Loading runtime details…</p>
-    {/if}
-  </div>
 </div>
 
 <div class="card footer-card">
