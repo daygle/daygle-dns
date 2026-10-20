@@ -66,6 +66,72 @@ pub fn generate_self_signed(cert_path: &str, key_path: &str, server_name: &str) 
     Ok(())
 }
 
+/// What the console shows about a certificate: its first (leaf) entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CertificateInfo {
+    /// Subject common name (or the whole subject when it has no CN).
+    pub subject: String,
+    /// Issuer common name (or the whole issuer).
+    pub issuer: String,
+    /// Issued by itself rather than by a certificate authority.
+    pub self_signed: bool,
+    /// Validity window, as UNIX seconds.
+    pub not_before: i64,
+    pub not_after: i64,
+    /// Subject alternative names (DNS names and IP addresses).
+    pub names: Vec<String>,
+}
+
+/// Read the leaf certificate of a PEM chain for display.
+pub fn describe_certificate(cert_pem: &str) -> Result<CertificateInfo> {
+    use x509_parser::extensions::GeneralName;
+    use x509_parser::x509::X509Name;
+
+    let der = CertificateDer::pem_slice_iter(cert_pem.as_bytes())
+        .next()
+        .ok_or_else(|| DaygleError::Tls("no certificate found in the PEM".to_string()))?
+        .map_err(|e| DaygleError::Tls(format!("cannot parse certificate PEM: {e}")))?;
+    let (_, cert) = x509_parser::parse_x509_certificate(&der)
+        .map_err(|e| DaygleError::Tls(format!("cannot read certificate: {e}")))?;
+
+    let common_name = |name: &X509Name<'_>| {
+        name.iter_common_name()
+            .next()
+            .and_then(|cn| cn.as_str().ok())
+            .map(str::to_string)
+            .unwrap_or_else(|| name.to_string())
+    };
+    let mut names = Vec::new();
+    if let Ok(Some(san)) = cert.subject_alternative_name() {
+        for name in &san.value.general_names {
+            match name {
+                GeneralName::DNSName(dns) => names.push(dns.to_string()),
+                GeneralName::IPAddress(bytes) => match bytes.len() {
+                    4 => names.push(
+                        std::net::Ipv4Addr::from(<[u8; 4]>::try_from(*bytes).unwrap_or_default())
+                            .to_string(),
+                    ),
+                    16 => names.push(
+                        std::net::Ipv6Addr::from(<[u8; 16]>::try_from(*bytes).unwrap_or_default())
+                            .to_string(),
+                    ),
+                    _ => {}
+                },
+                _ => {}
+            }
+        }
+    }
+    let validity = cert.validity();
+    Ok(CertificateInfo {
+        subject: common_name(cert.subject()),
+        issuer: common_name(cert.issuer()),
+        self_signed: cert.subject().as_raw() == cert.issuer().as_raw(),
+        not_before: validity.not_before.timestamp(),
+        not_after: validity.not_after.timestamp(),
+        names,
+    })
+}
+
 /// Validate that the PEM `cert_pem`/`key_pem` pair is well-formed and the key
 /// matches the certificate (by building a rustls server config from them).
 pub fn validate_pem_pair(cert_pem: &str, key_pem: &str) -> Result<()> {
@@ -188,6 +254,18 @@ fn read_key(path: &str) -> Result<PrivateKeyDer<'static>> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn describes_a_generated_certificate() {
+        let (cert_pem, _) = generate_self_signed_pem("dns.example.test").unwrap();
+        let info = describe_certificate(&cert_pem).unwrap();
+        assert!(info.self_signed);
+        assert_eq!(info.subject, info.issuer);
+        assert!(info.names.contains(&"dns.example.test".to_string()));
+        assert!(info.names.contains(&"localhost".to_string()));
+        assert!(info.not_before < info.not_after);
+        assert!(describe_certificate("not a certificate").is_err());
+    }
     use super::*;
     use tempfile::tempdir;
 

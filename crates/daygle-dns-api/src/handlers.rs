@@ -3528,12 +3528,24 @@ fn certificate_json(
     cert: &daygle_dns_authoritative::TlsCertificate,
     in_use: Vec<&'static str>,
 ) -> serde_json::Value {
-    serde_json::json!({
+    let stamp = |secs: i64| {
+        chrono::DateTime::<chrono::Utc>::from_timestamp(secs, 0).map(|t| t.to_rfc3339())
+    };
+    let mut value = serde_json::json!({
         "name": cert.name,
         "server_name": cert.server_name,
         "created_at": cert.created_at,
         "in_use": in_use,
-    })
+    });
+    // Details read from the certificate itself (null when it cannot be read).
+    let details = daygle_dns_dot::describe_certificate(&cert.cert_pem).ok();
+    value["subject"] = serde_json::json!(details.as_ref().map(|d| &d.subject));
+    value["issuer"] = serde_json::json!(details.as_ref().map(|d| &d.issuer));
+    value["self_signed"] = serde_json::json!(details.as_ref().map(|d| d.self_signed));
+    value["names"] = serde_json::json!(details.as_ref().map(|d| &d.names));
+    value["not_before"] = serde_json::json!(details.as_ref().and_then(|d| stamp(d.not_before)));
+    value["not_after"] = serde_json::json!(details.as_ref().and_then(|d| stamp(d.not_after)));
+    value
 }
 
 /// `GET /api/certificates` - list console-managed TLS certificates (metadata

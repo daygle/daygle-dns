@@ -636,7 +636,11 @@ DELETE /api/certificates/{name}
 TLS certificates stored in the database and managed from the console; the
 `dot`/`doh`/`doq` listener sections select one with `certificate = "<name>"`
 (overriding `cert_path`/`key_path`/`self_signed`). `GET` lists metadata only
-- PEM material is never returned. `POST` creates a self-signed certificate
+- PEM material is never returned. Each entry has `name`, `server_name`,
+`created_at`, `in_use` (the listeners using it) and details read from the
+leaf certificate: `subject`, `issuer`, `self_signed`, `names` (DNS and IP
+subject alternative names) and `not_before`/`not_after` (RFC 3339); these
+are `null` if the certificate cannot be read. `POST` creates a self-signed certificate
 or uploads PEM material; uploading with the same `name` replaces the entry,
 and listeners referencing the name are rebuilt immediately. `DELETE`
 removes the certificate; one still referenced by a listener cannot be

@@ -1745,3 +1745,83 @@ async fn display_defaults_and_personal_preferences() {
     assert_eq!(m["preferences"]["time_format"], json!("12h"));
     shutdown(server).await;
 }
+
+#[tokio::test]
+async fn certificates_report_their_details() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = spawn_with_roles(&dir).await;
+    let client = reqwest::Client::new();
+    let base = api_url(server.api_addr, "");
+    let (admin, _) = login(server.api_addr, "admin", "secret").await;
+    let list = || async {
+        client
+            .get(format!("{base}/api/certificates"))
+            .bearer_auth(&admin)
+            .send()
+            .await
+            .unwrap()
+            .json::<serde_json::Value>()
+            .await
+            .unwrap()
+    };
+
+    // A generated certificate lists who it is for and when it expires.
+    let resp = client
+        .post(format!("{base}/api/certificates"))
+        .bearer_auth(&admin)
+        .json(&json!({ "name": "lan", "server_name": "dns.lan.test" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let certs = list().await;
+    let lan = &certs[0];
+    assert_eq!(lan["name"], json!("lan"));
+    assert_eq!(lan["self_signed"], json!(true));
+    assert!(lan["names"]
+        .as_array()
+        .unwrap()
+        .contains(&json!("dns.lan.test")));
+    let not_after = chrono::DateTime::parse_from_rfc3339(lan["not_after"].as_str().unwrap())
+        .expect("not_after is RFC 3339");
+    assert!(not_after > chrono::Utc::now());
+
+    // Uploading under the same name replaces it (how a renewal is applied).
+    let (cert_pem, key_pem) = daygle_dns_dot::generate_self_signed_pem("dns2.lan.test").unwrap();
+    let resp = client
+        .post(format!("{base}/api/certificates"))
+        .bearer_auth(&admin)
+        .json(&json!({ "name": "lan", "cert_pem": cert_pem, "key_pem": key_pem }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let certs = list().await;
+    assert_eq!(certs.as_array().unwrap().len(), 1);
+    assert!(certs[0]["names"]
+        .as_array()
+        .unwrap()
+        .contains(&json!("dns2.lan.test")));
+
+    // A key that does not belong to the certificate is refused.
+    let (_, other_key) = daygle_dns_dot::generate_self_signed_pem("other.test").unwrap();
+    let resp = client
+        .post(format!("{base}/api/certificates"))
+        .bearer_auth(&admin)
+        .json(&json!({ "name": "bad", "cert_pem": cert_pem, "key_pem": other_key }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+
+    let resp = client
+        .delete(format!("{base}/api/certificates/lan"))
+        .bearer_auth(&admin)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 204);
+    assert_eq!(list().await, json!([]));
+
+    shutdown(server).await;
+}
