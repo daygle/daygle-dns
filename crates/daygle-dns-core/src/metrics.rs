@@ -276,7 +276,7 @@ impl Metrics {
     pub fn render_prometheus(&self, gauges: &[Gauge<'_>]) -> String {
         use std::fmt::Write as _;
         let mut out = String::with_capacity(4096);
-        let mut family = |out: &mut String, name: &str, kind: &str, help: &str| {
+        let family = |out: &mut String, name: &str, kind: &str, help: &str| {
             let _ = writeln!(out, "# HELP daygle_dns_{name} {help}");
             let _ = writeln!(out, "# TYPE daygle_dns_{name} {kind}");
         };
