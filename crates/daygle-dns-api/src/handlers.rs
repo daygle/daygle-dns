@@ -2539,6 +2539,14 @@ pub async fn auth_login(
                     .unwrap_or_default()
             ),
         );
+        crate::audit::record_sign_in(
+            &state,
+            "/auth/login",
+            input.username.trim(),
+            client_ip,
+            "Failed sign-in",
+            401,
+        );
         return error_response(StatusCode::UNAUTHORIZED, "invalid username or password");
     }
     let user = user.expect("checked above");
@@ -2547,6 +2555,16 @@ pub async fn auth_login(
     // counts as a failed login, and the throttle is only cleared once both
     // pass, so codes cannot be guessed at full speed.
     if let Err(response) = check_two_factor(&state, &user.username, &input.code, client_ip) {
+        if !input.code.trim().is_empty() {
+            crate::audit::record_sign_in(
+                &state,
+                "/auth/login",
+                &user.username,
+                client_ip,
+                "Failed sign-in (wrong two-factor code)",
+                401,
+            );
+        }
         return response;
     }
     if let Some(ip) = client_ip {
@@ -2555,6 +2573,14 @@ pub async fn auth_login(
 
     let ttl = Duration::from_secs(state.config.load().api.session_ttl_secs.max(60));
     let token = state.sessions.create(&user.username, user.role, ttl);
+    crate::audit::record_sign_in(
+        &state,
+        "/auth/login",
+        &user.username,
+        client_ip,
+        "Signed in",
+        200,
+    );
     state.logs.push(
         daygle_dns_core::LogLevel::Info,
         "api",
@@ -2567,6 +2593,31 @@ pub async fn auth_login(
         "expires_in_secs": ttl.as_secs(),
     }))
     .into_response()
+}
+
+#[derive(Deserialize)]
+pub struct AuditQueryParams {
+    before_id: Option<i64>,
+    user: Option<String>,
+    q: Option<String>,
+    limit: Option<u32>,
+}
+
+/// `GET /api/audit` (admin) - the audit log, newest first.
+pub async fn audit_log(
+    State(state): State<AppState>,
+    Query(params): Query<AuditQueryParams>,
+) -> Response {
+    let query = daygle_dns_authoritative::store::AuditQuery {
+        before_id: params.before_id,
+        username: params.user,
+        text: params.q,
+        limit: params.limit.unwrap_or(100),
+    };
+    match state.catalog.store().search_audit_log(&query) {
+        Ok(entries) => Json(entries).into_response(),
+        Err(e) => map_err(e),
+    }
 }
 
 /// `POST /api/auth/logout` - revoke the presented session token.
@@ -3288,6 +3339,14 @@ pub async fn auth_setup(
     let token = state
         .sessions
         .create(&username, daygle_dns_core::config::Role::Admin, ttl);
+    crate::audit::record_sign_in(
+        &state,
+        "/auth/setup",
+        &username,
+        None,
+        "Created the first administrator",
+        200,
+    );
     state.logs.push(
         daygle_dns_core::LogLevel::Info,
         "api",

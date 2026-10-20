@@ -124,6 +124,13 @@ export const api = {
     }
     return data;
   },
+  auditLog: ({ before_id, user, q, limit = 100 } = {}) => {
+    const params = new URLSearchParams({ limit: String(limit) });
+    if (before_id) params.set('before_id', String(before_id));
+    if (user) params.set('user', user);
+    if (q) params.set('q', q);
+    return request('GET', `/audit?${params}`);
+  },
   apiTokens: () => request('GET', '/auth/tokens'),
   createApiToken: (body) => request('POST', '/auth/tokens', body),
   deleteApiToken: (id) => request('DELETE', `/auth/tokens/${encodeURIComponent(id)}`),

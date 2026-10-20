@@ -156,6 +156,19 @@ CREATE TABLE IF NOT EXISTS api_tokens (
     expires_at   INTEGER NOT NULL DEFAULT 0
 );
 
+CREATE TABLE IF NOT EXISTS audit_log (
+    id       INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts       INTEGER NOT NULL,
+    username TEXT NOT NULL,
+    via      TEXT NOT NULL,
+    client   TEXT NOT NULL DEFAULT '',
+    action   TEXT NOT NULL,
+    method   TEXT NOT NULL,
+    path     TEXT NOT NULL,
+    status   INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_audit_log_ts ON audit_log (ts DESC);
+
 CREATE TABLE IF NOT EXISTS tls_certificates (
     name        TEXT PRIMARY KEY,
     server_name TEXT NOT NULL DEFAULT '',
@@ -1988,6 +2001,114 @@ impl ZoneStore {
             "DELETE FROM api_tokens WHERE id = ?1 AND username = ?2",
             params![id, username],
         )? > 0)
+    }
+}
+
+// ---- Audit log ------------------------------------------------------------
+
+/// One change made through the API (or a sign-in): who, how, what, and
+/// whether it worked. Request bodies are never kept.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct AuditEntry {
+    pub id: i64,
+    /// UNIX seconds.
+    pub ts: i64,
+    pub username: String,
+    /// How the caller signed in: `session`, `api_token`, `static_token`,
+    /// `open` (authentication turned off), or `password` for a sign-in.
+    pub via: String,
+    pub client: String,
+    /// What was done, in words ("Created zone", "Signed in"...).
+    pub action: String,
+    pub method: String,
+    pub path: String,
+    /// HTTP status of the response.
+    pub status: u16,
+}
+
+/// Filters for [`ZoneStore::search_audit_log`].
+#[derive(Debug, Clone, Default)]
+pub struct AuditQuery {
+    /// Only entries older than this id (paging).
+    pub before_id: Option<i64>,
+    pub username: Option<String>,
+    /// Matches the action or path.
+    pub text: Option<String>,
+    pub limit: u32,
+}
+
+/// Audit entries older than this are dropped.
+const AUDIT_KEEP_SECS: i64 = 365 * 86_400;
+
+impl ZoneStore {
+    pub fn add_audit_entry(&self, entry: &AuditEntry) -> Result<()> {
+        let conn = self.lock_conn()?;
+        conn.execute(
+            "INSERT INTO audit_log (ts, username, via, client, action, method, path, status)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                entry.ts,
+                entry.username,
+                entry.via,
+                entry.client,
+                entry.action,
+                entry.method,
+                entry.path,
+                entry.status
+            ],
+        )?;
+        // Trim now and then rather than on every write.
+        if conn.last_insert_rowid() % 500 == 0 {
+            conn.execute(
+                "DELETE FROM audit_log WHERE ts < ?1",
+                [entry.ts - AUDIT_KEEP_SECS],
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Newest first.
+    pub fn search_audit_log(&self, query: &AuditQuery) -> Result<Vec<AuditEntry>> {
+        let conn = self.lock_conn()?;
+        let mut sql = String::from(
+            "SELECT id, ts, username, via, client, action, method, path, status
+             FROM audit_log WHERE 1 = 1",
+        );
+        let mut values: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+        if let Some(before) = query.before_id {
+            sql.push_str(" AND id < ?");
+            values.push(Box::new(before));
+        }
+        if let Some(user) = query.username.as_ref().filter(|u| !u.is_empty()) {
+            sql.push_str(" AND username = ?");
+            values.push(Box::new(user.clone()));
+        }
+        if let Some(text) = query.text.as_ref().filter(|t| !t.is_empty()) {
+            sql.push_str(" AND (action LIKE ? OR path LIKE ?)");
+            let pattern = format!("%{}%", text.replace(['%', '_'], ""));
+            values.push(Box::new(pattern.clone()));
+            values.push(Box::new(pattern));
+        }
+        sql.push_str(" ORDER BY id DESC LIMIT ?");
+        values.push(Box::new(i64::from(query.limit.clamp(1, 1000))));
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(
+            rusqlite::params_from_iter(values.iter().map(|v| v.as_ref())),
+            |r| {
+                Ok(AuditEntry {
+                    id: r.get(0)?,
+                    ts: r.get(1)?,
+                    username: r.get(2)?,
+                    via: r.get(3)?,
+                    client: r.get(4)?,
+                    action: r.get(5)?,
+                    method: r.get(6)?,
+                    path: r.get(7)?,
+                    status: r.get::<_, i64>(8)? as u16,
+                })
+            },
+        )?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 }
 

@@ -1077,6 +1077,30 @@ AI database. The same is available from the command line:
 `daygle-dns backup FILE [--query-logs]` (safe while the server runs) and
 `daygle-dns restore FILE` (then restart).
 
+### Audit log
+
+```
+GET /api/audit[?user=NAME][&q=TEXT][&before_id=ID][&limit=100]
+```
+
+Admin only. Every change made through the API (any method other than
+`GET`/`HEAD`/`OPTIONS`), every backup download, and every sign-in attempt
+and first-run setup is recorded once it has run, newest first:
+
+```json
+[{ "id": 42, "ts": 1792540000, "username": "glen", "via": "session",
+   "client": "192.168.1.20", "action": "Changed settings",
+   "method": "PUT", "path": "/api/config", "status": 200 }]
+```
+
+`via` is how the caller signed in: `session`, `api_token`, `static_token`,
+`open` (authentication off), or `password` for a sign-in. `action` says
+what was done in words, falling back to the method and path. Request
+bodies are never stored. Requests refused before they ran (`401`/`403` from
+authorization) are not recorded, apart from failed sign-ins. `q` matches the
+action or path; `before_id` pages back. Entries are kept for a year, and
+backups carry them.
+
 ### In-place updates
 
 ```

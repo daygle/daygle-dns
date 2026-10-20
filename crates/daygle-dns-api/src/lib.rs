@@ -67,6 +67,7 @@
 //! new values without locking or restarting.
 
 pub mod acme;
+mod audit;
 mod handlers;
 mod update;
 
@@ -567,6 +568,9 @@ pub fn router(state: AppState) -> Router {
         .route("/update/start", post(handlers::update_start))
         .route("/update/dismiss", post(handlers::update_dismiss))
         .route("/update/preflight", get(handlers::update_preflight))
+        .route("/audit", get(handlers::audit_log))
+        // Inside the authorization layer: refused requests are not recorded.
+        .layer(middleware::from_fn_with_state(state.clone(), audit::audit))
         .layer(middleware::from_fn_with_state(state.clone(), require_auth))
         .with_state(state.clone());
 
@@ -647,7 +651,11 @@ fn is_privileged_read(path: &str) -> bool {
     let path = path.strip_prefix("/api").unwrap_or(path);
     matches!(
         path,
-        "/policy/blocklist/sources/validate" | "/update/preflight" | "/backup" | "/backup/restore"
+        "/policy/blocklist/sources/validate"
+            | "/update/preflight"
+            | "/backup"
+            | "/backup/restore"
+            | "/audit"
     )
 }
 
