@@ -86,9 +86,14 @@
     !!(display.mine && (display.mine.time_zone || display.mine.date_format || display.mine.time_format)),
   );
 
+  // What empty SOA defaults resolve to (this server's name, the first
+  // administrator's email), for the Zones & Records placeholders.
+  let zoneDefaults = $state(null);
+
   $effect(() => {
     load();
     api.certificates().then((list) => { certs = list || []; }).catch(() => {});
+    api.zoneDefaults().then((d) => { zoneDefaults = d; }).catch(() => {});
   });
 
   // A managed certificate in the picker, flagged when it is not usable.
@@ -98,6 +103,10 @@
     if (cert.not_after && Date.parse(cert.not_after) <= Date.now()) label += ' (Expired)';
     return label;
   }
+
+  // The automatic values an empty SOA default falls back to.
+  const detectedName = $derived(zoneDefaults?.server_name || null);
+  const adminEmail = $derived(zoneDefaults?.first_admin_email || null);
 
   // Translate the config's certificate state into a picker value.
   function certModeOf(listener) {
@@ -487,17 +496,16 @@
   {:else if tab === 'zones'}
   <div class="card" style="margin-bottom: 14px">
     <h3 style="margin: 0 0 10px">Zones & Records</h3>
-    <div class="form-grid">
+    <div class="form-grid top">
       <label><span>Default Record TTL (Seconds)</span><span class="hint">{hint(authoritative.default_record_ttl)}</span><input type="number" min="1" bind:value={authoritative.default_record_ttl} /></label>
-      <label><span>DNS Server Domain</span><input placeholder="ns1.example.com." bind:value={authoritative.default_primary_ns} /></label>
-      <label><span>Default Administrator Mailbox</span><input placeholder="Empty = admin.<zone>." bind:value={authoritative.default_admin_mailbox} /></label>
+      <label><span>DNS Server Domain</span><input placeholder={detectedName ? `This server: ${detectedName}` : 'ns1.example.com.'} bind:value={authoritative.default_primary_ns} /></label>
+      <label><span>Default Administrator Email</span><input placeholder={adminEmail ? `First administrator: ${adminEmail}` : 'hostmaster@example.com'} bind:value={authoritative.default_admin_mailbox} /></label>
     </div>
     <p class="muted help">
       The TTL is pre-filled when adding records; existing records keep their
-      own. New zones without their own SOA values use this server's name as
-      the primary nameserver and this mailbox as the contact (written with a
-      dot for the @: <code>hostmaster.example.com.</code> is
-      hostmaster@example.com).
+      own. New zones use the DNS Server Domain as their primary nameserver
+      and the email as their contact; leave either empty to use this
+      server's own name and the first administrator's email.
     </p>
   </div>
 
@@ -806,6 +814,7 @@
     background: var(--bg);
   }
   .unsaved { color: #f5b041; font-size: 0.85rem; }
+  .form-grid.top { align-items: start; }
   /* Below the field, so it never collides with a label that wraps. */
   .hint { order: 3; font-size: 0.72rem; color: var(--muted); min-height: 1em; }
   .facts { width: auto; }

@@ -232,12 +232,40 @@
     }
   }
 
-  function openAddZone() {
+  // SOA values a new zone gets when left alone (Settings, else this
+  // server's host name and the first administrator's email).
+  let zoneDefaults = $state(null);
+
+  async function openAddZone() {
     clearMessages();
     resetZoneForm();
-    // Default the Primary Nameserver to the server's own DNS domain.
-    if (dnsServerDomain) newZone.primary_ns = dnsServerDomain;
     showAdd = true;
+    try {
+      zoneDefaults = await api.zoneDefaults();
+    } catch {
+      zoneDefaults = null;
+    }
+    // Pre-fill, so the values the zone will get are visible and editable.
+    if (!newZone.primary_ns) newZone.primary_ns = zoneDefaults?.primary_ns || '';
+    if (!newZone.admin_mailbox) {
+      newZone.admin_mailbox = zoneDefaults?.admin_email || zoneDefaults?.admin_mailbox || '';
+    }
+  }
+
+  // jane\.doe.example.com. -> jane.doe@example.com when the split is clear
+  // (mirrors the server's rname_to_email), else the SOA form unchanged.
+  function mailboxForDisplay(rname) {
+    const text = (rname || '').trim().replace(/\.$/, '');
+    let local = '';
+    for (let i = 0; i < text.length; i++) {
+      const c = text[i];
+      if (c === '\\' && i + 1 < text.length) local += text[++i];
+      else if (c === '.') {
+        const domain = text.slice(i + 1);
+        return local && domain.includes('.') ? `${local}@${domain}` : rname;
+      } else local += c;
+    }
+    return rname;
   }
 
   function closeAddZone() {
@@ -249,7 +277,7 @@
     soaEdit = {
       zone,
       primary_ns: zone.primary_ns || '',
-      admin_mailbox: zone.admin_mailbox || '',
+      admin_mailbox: mailboxForDisplay(zone.admin_mailbox || ''),
       serial: zone.serial,
       refresh: zone.refresh,
       retry: zone.retry,
@@ -294,6 +322,10 @@
     const file = event.currentTarget.files?.[0];
     if (!file) return;
     zoneFileName = file.name;
+    // Pre-filled defaults would override the file's own SOA; clear any the
+    // user has not changed.
+    if (newZone.primary_ns === (zoneDefaults?.primary_ns || '')) newZone.primary_ns = '';
+    if ([zoneDefaults?.admin_email, zoneDefaults?.admin_mailbox].includes(newZone.admin_mailbox)) newZone.admin_mailbox = '';
     try {
       newZone.import_text = await file.text();
     } catch (e) {
@@ -439,8 +471,7 @@
 
   // DNS Server Domain (Settings -> Zones & Records) pre-fills and
   // placeholders the SOA Primary Nameserver for new zones.
-  let dnsServerDomain = $derived(config?.authoritative?.default_primary_ns || '');
-  let defaultMailbox = $derived(config?.authoritative?.default_admin_mailbox || '');
+  let dnsServerDomain = $derived(zoneDefaults?.primary_ns || config?.authoritative?.default_primary_ns || '');
 
   $effect(() => {
     loadZones();
@@ -643,7 +674,7 @@
       <div class="section-title">SOA Settings</div>
       <div class="grid2">
         <label>Primary Nameserver <input placeholder={dnsServerDomain || 'ns1.example.com.'} bind:value={newZone.primary_ns} /></label>
-        <label>Administrator Mailbox <input placeholder={defaultMailbox || `admin.${newZone.name.trim().replace(/\.$/, '') || 'example.com'}.`} bind:value={newZone.admin_mailbox} /></label>
+        <label>Administrator Email <input placeholder={`admin@${newZone.name.trim().replace(/\.$/, '') || 'example.com'}`} bind:value={newZone.admin_mailbox} /></label>
         <label>Serial <input type="number" min="1" bind:value={newZone.serial} disabled={newZone.serial_date_scheme} /></label>
         <label class="checkbox"><input type="checkbox" bind:checked={newZone.serial_date_scheme} /><span>Date-Based Serial (YYYYMMDDnn)</span></label>
         <label>Refresh (Seconds) <span class="hint">{hint(newZone.refresh)}</span><input type="number" min="1" bind:value={newZone.refresh} /></label>
@@ -652,10 +683,10 @@
         <label>Minimum TTL (Seconds) <span class="hint">{hint(newZone.minimum)}</span><input type="number" min="1" bind:value={newZone.minimum} /></label>
       </div>
       <p class="muted help">
-        The mailbox is written with a dot for the @ (<code>hostmaster.example.com.</code>
-        is hostmaster@example.com). Empty fields use the defaults from
-        Settings → Zones &amp; Records. The timers tell secondary servers how
-        often to check for changes; the defaults suit most zones.
+        Pre-filled from Settings → Zones &amp; Records, or when those are
+        empty, this server's name and the first administrator's email. The
+        timers tell secondary servers how often to check for changes; the
+        defaults suit most zones.
       </p>
 
       {#if newZone.zone_type === 'secondary'}
@@ -698,7 +729,7 @@
       <div class="section-title">SOA Parameters</div>
       <div class="grid2">
         <label>Primary Nameserver <input placeholder={dnsServerDomain || 'ns1.example.com.'} bind:value={soaEdit.primary_ns} /></label>
-        <label>Administrator Mailbox <input placeholder="admin.example.com." bind:value={soaEdit.admin_mailbox} /></label>
+        <label>Administrator Email <input placeholder="hostmaster@example.com" bind:value={soaEdit.admin_mailbox} /></label>
         <label>Serial <input type="number" min="1" bind:value={soaEdit.serial} disabled={soaEdit.bumpSerial} /></label>
         <label class="checkbox"><input type="checkbox" bind:checked={soaEdit.bumpSerial} /><span>Increment Serial on Save</span></label>
         <label>Refresh (Seconds) <span class="hint">{hint(soaEdit.refresh)}</span><input type="number" min="1" bind:value={soaEdit.refresh} /></label>
