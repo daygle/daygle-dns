@@ -814,25 +814,40 @@ the URL fetched fine but the content does not parse as (or does not match)
 
 ```
 GET  /api/ai/status
-GET  /api/ai/verdicts?status=classified&page=1&per_page=50
+GET  /api/ai/verdicts?status=classified&q=example&page=1&per_page=50
+GET  /api/ai/overrides
 POST /api/ai/override          {"domain": "x.example", "action": "allow|clear", "reason": "..."}
 POST /api/ai/rescan
 ```
 
-Available when `[ai] enabled = true`. `GET /api/ai/status` reports the
-configured mode (`train`/`enforce`), the active backend (`heuristic` or
-`fasttext`), scanners' TTLs and thresholds, per-status verdict counts and
-fresh threat counts per category, plus the current block-snapshot size.
+Available when `[ai] enabled = true`. `GET /api/ai/status` reports the mode
+(`train`/`enforce`), the classification pipeline actually running
+(`backend`: `heuristic`, `fasttext` or `fasttext+minilm-onnx`; a configured
+model file that is missing falls back to `heuristic`), workers, intervals,
+TTLs and thresholds, per-status verdict counts, `blockable_counts` (domains
+that qualify for auto-blocking, by category: blocked in enforce mode, what
+would be blocked in train mode) and the current block-snapshot size.
 
-`GET /api/ai/verdicts` paginates the scanner's verdict store: domain,
-category, severity, status (`pending`/`classified`/`skipped`), confidence,
-backend, evidence text, observation count, `classified_at`/`expires_at` in
-RFC 3339 (expiry shows exactly when the verdict silently drops). An
-operator override (`POST /api/ai/override` with `action: "allow"`) exempts
-a domain from every AI block; `clear` removes the exemption.
+A domain qualifies for auto-blocking when its current verdict is in one of
+`ai.auto_block_categories` (any category, not only threats) with a
+confidence at or above `ai.block_threshold`, and neither it nor a parent
+domain is exempt. The built-in heuristic rules score at most 0.35, so they
+never auto-block on their own.
+
+`GET /api/ai/verdicts` pages through the verdict store, most recently
+classified first (pending rows last), optionally filtered by `status`
+(`pending`/`classified`/`skipped`) and a domain substring `q`: domain,
+category, severity, status, confidence, backend, evidence, observation count
+(scan cycles the domain appeared in), `overridden` (the domain is exempt) and
+`classified_at`/`expires_at` in RFC 3339 (the verdict is re-checked at
+expiry). `per_page` is capped at 500.
+
+`POST /api/ai/override` with `action: "allow"` exempts a domain and its
+subdomains from AI blocking; `clear` removes the exemption (`404` when there
+is none). `GET /api/ai/overrides` lists the exemptions, newest first.
 `POST /api/ai/rescan` wakes the scanner for one immediate cycle.
 
-All four endpoints return `404` when the AI subsystem is disabled.
+All of these return `404` when the AI subsystem is disabled.
 
 ### Advanced blocking
 

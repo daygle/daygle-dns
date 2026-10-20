@@ -1958,20 +1958,20 @@ impl ZoneStore {
         Ok(conn.execute("DELETE FROM query_logs", [])?)
     }
 
-    /// Distinct query names seen since `since_epoch`, newest first, capped at
-    /// `limit` (including previously-seen names). Used by the AI scanner to
-    /// harvest domains from live traffic without duplicating work; the query
-    /// log's qname index keeps this cheap even on large logs.
+    /// Distinct query names logged at or after `since_epoch` (UNIX seconds),
+    /// most recently queried first, capped at `limit`. Used by the AI
+    /// scanner to harvest domains from live traffic; the query log's `ts`
+    /// index keeps the time window cheap even on large logs.
     pub fn distinct_recent_query_names(&self, since_epoch: i64, limit: u32) -> Result<Vec<String>> {
-        let cutoff = Utc::now()
-            .checked_sub_signed(chrono::Duration::seconds(since_epoch))
+        let cutoff = chrono::DateTime::<Utc>::from_timestamp(since_epoch, 0)
             .unwrap_or(chrono::DateTime::<Utc>::UNIX_EPOCH)
             .to_rfc3339();
         let conn = self.lock_conn()?;
         let mut stmt = conn.prepare(
-            "SELECT DISTINCT qname FROM query_logs
+            "SELECT qname FROM query_logs
              WHERE ts >= ?1
-             ORDER BY qname
+             GROUP BY qname
+             ORDER BY MAX(ts) DESC
              LIMIT ?2",
         )?;
         let names = stmt

@@ -266,6 +266,7 @@ pub fn router(state: AppState) -> Router {
         .route("/ai/status", get(handlers::ai_status))
         .route("/ai/verdicts", get(handlers::ai_verdicts))
         .route("/ai/override", post(handlers::ai_override))
+        .route("/ai/overrides", get(handlers::ai_overrides))
         .route("/ai/rescan", post(handlers::ai_rescan))
         .route("/ai/model-status", get(handlers::ai_model_status))
         .route("/ai/update-models", post(handlers::ai_update_models))

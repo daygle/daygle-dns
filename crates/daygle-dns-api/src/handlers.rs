@@ -625,6 +625,8 @@ fn csv_escape(value: &str) -> String {
 pub struct AiVerdictsQuery {
     /// Optional status filter (`pending`, `classified`, `skipped`).
     status: Option<String>,
+    /// Optional domain substring search.
+    q: Option<String>,
     page: Option<u32>,
     per_page: Option<u32>,
 }
@@ -734,11 +736,8 @@ pub async fn ai_status(State(state): State<AppState>) -> Response {
         Ok(s) => s,
         Err(e) => return map_err(e),
     };
-    let threats = match ai
-        .store
-        .threat_counts(chrono::Utc::now().timestamp(), settings.block_threshold)
-    {
-        Ok(t) => t,
+    let blockable = match ai.blockable_counts() {
+        Ok(counts) => counts,
         Err(e) => return map_err(e),
     };
     let snapshot = ai.snapshot().load();
@@ -748,9 +747,13 @@ pub async fn ai_status(State(state): State<AppState>) -> Response {
             daygle_dns_core::config::AiMode::Train => "train",
             daygle_dns_core::config::AiMode::Enforce => "enforce",
         },
-        "backend": if settings.model_path.is_empty() { "heuristic" } else { "fasttext" },
+        // The pipeline actually running (a missing model file falls back to
+        // the heuristic rules whatever `model_path` says).
+        "backend": ai.backend_name(),
         "workers": settings.workers,
         "scan_interval_secs": settings.scan_interval_secs,
+        "expire_check_secs": settings.expire_check_secs,
+        "confidence_floor": settings.confidence_floor,
         "category_ttl_secs": settings.category_ttl_secs,
         "threat_ttl_secs": settings.threat_ttl_secs,
         "block_threshold": settings.block_threshold,
@@ -761,11 +764,9 @@ pub async fn ai_status(State(state): State<AppState>) -> Response {
                 .into_iter()
                 .map(|(k, v)| (k, serde_json::Value::from(v))),
         ),
-        "threat_counts": serde_json::Map::from_iter(
-            threats
-                .into_iter()
-                .map(|(k, v)| (k, serde_json::Value::from(v))),
-        ),
+        // Domains that qualify for auto-blocking, by category: blocked in
+        // enforce mode, what would be blocked in train mode.
+        "blockable_counts": blockable,
         "snapshot_len": snapshot.len(),
     }))
     .into_response()
@@ -779,9 +780,14 @@ pub async fn ai_verdicts(
     let Some(ai) = ai_engine(&state) else {
         return map_err(daygle_dns_ml::ai_disabled_error());
     };
-    match ai.store.list_verdicts(query.status.as_deref(), query.per_page.unwrap_or(50),
-        (query.page.unwrap_or(1).max(1) - 1).saturating_mul(query.per_page.unwrap_or(50)))
-    {
+    let per_page = query.per_page.unwrap_or(50).clamp(1, 500);
+    let page = query.page.unwrap_or(1).max(1);
+    match ai.store.list_verdicts(
+        query.status.as_deref(),
+        query.q.as_deref(),
+        per_page,
+        (page - 1).saturating_mul(per_page),
+    ) {
         Ok((rows, total)) => (
             StatusCode::OK,
             axum::Json(serde_json::json!({
@@ -794,6 +800,7 @@ pub async fn ai_verdicts(
                     "backend": r.backend,
                     "evidence": r.evidence,
                     "observations": r.observations,
+                    "overridden": r.overridden,
                     "classified_at": chrono::DateTime::<chrono::Utc>::from_timestamp(r.classified_at, 0)
                         .map(|t| t.to_rfc3339()),
                     "expires_at": chrono::DateTime::<chrono::Utc>::from_timestamp(r.expires_at, 0)
@@ -801,11 +808,8 @@ pub async fn ai_verdicts(
                 }))
                 .collect::<Vec<_>>(),
                 "total": total,
-                "per_page": query
-                .per_page
-                .unwrap_or(50)
-                .clamp(1, daygle_dns_authoritative::ZoneStore::QUERY_LOG_MAX_PAGE),
-                "page": query.page.unwrap_or(1).max(1),
+                "per_page": per_page,
+                "page": page,
             })),
         )
             .into_response(),
@@ -829,7 +833,7 @@ pub async fn ai_override(
                 && label.len() <= 63
                 && label
                     .bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
                 && !label.starts_with('-')
                 && !label.ends_with('-')
         });
@@ -875,6 +879,27 @@ pub async fn ai_override(
             })),
         )
             .into_response(),
+    }
+}
+
+/// `GET /api/ai/overrides` - the exempted domains (an exemption also covers
+/// subdomains), newest first.
+pub async fn ai_overrides(State(state): State<AppState>) -> Response {
+    let Some(ai) = ai_engine(&state) else {
+        return map_err(daygle_dns_ml::ai_disabled_error());
+    };
+    match ai.store.list_overrides() {
+        Ok(rows) => Json(serde_json::json!({
+            "overrides": rows.iter().map(|o| serde_json::json!({
+                "domain": o.domain,
+                "action": o.action,
+                "reason": o.reason,
+                "created_at": chrono::DateTime::<chrono::Utc>::from_timestamp(o.created_at, 0)
+                    .map(|t| t.to_rfc3339()),
+            })).collect::<Vec<_>>(),
+        }))
+        .into_response(),
+        Err(e) => map_err(e),
     }
 }
 
