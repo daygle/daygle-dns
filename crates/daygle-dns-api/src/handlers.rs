@@ -2806,6 +2806,7 @@ fn session_user(
 }
 
 /// Re-check the account's password before a two-factor change.
+#[allow(clippy::result_large_err)]
 async fn confirm_password(
     state: &AppState,
     user: &daygle_dns_authoritative::store::ConsoleUser,

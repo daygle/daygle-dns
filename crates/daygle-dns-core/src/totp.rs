@@ -138,7 +138,8 @@ mod tests {
     /// RFC 6238 Appendix B (SHA-1 key "12345678901234567890"), last 6 digits.
     #[test]
     fn matches_the_rfc_6238_test_vectors() {
-        let key = b"12345678901234567890";
+        // The RFC's key: the ASCII digits 1-9, 0, twice.
+        let key: Vec<u8> = b"1234567890".repeat(2);
         for (time, code) in [
             (59u64, 287_082u32),
             (1_111_111_109, 81_804),
@@ -147,7 +148,7 @@ mod tests {
             (2_000_000_000, 279_037),
             (20_000_000_000, 353_130),
         ] {
-            assert_eq!(code_at(key, step_at(time)), code, "t = {time}");
+            assert_eq!(code_at(&key, step_at(time)), code, "t = {time}");
         }
     }
 
