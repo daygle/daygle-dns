@@ -750,6 +750,7 @@ pub async fn ai_status(State(state): State<AppState>) -> Response {
         "threat_ttl_secs": settings.threat_ttl_secs,
         "block_threshold": settings.block_threshold,
         "auto_block_categories": settings.auto_block_categories,
+        "backend_categories": ai.backend_categories(),
         "status_counts": serde_json::Map::from_iter(
             statuses
                 .into_iter()

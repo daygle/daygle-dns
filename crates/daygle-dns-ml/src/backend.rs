@@ -63,6 +63,12 @@ impl ClassificationInput {
 pub trait DomainClassifier: Send + Sync {
     /// Backend name recorded on verdicts (e.g. `fasttext`, `heuristic`).
     fn name(&self) -> &str;
+    /// Category identifiers this backend can emit (e.g. `malware`), used for
+    /// category pickers in the console. Empty means "unknown" (the picker
+    /// then only shows configured categories).
+    fn categories(&self) -> Vec<String> {
+        Vec::new()
+    }
     /// Classify one input. `None` = "no signal" (the domain is not skipped:
     /// the scanner records the attempt without a verdict).
     fn classify(&self, input: &ClassificationInput) -> Option<Verdict>;
@@ -71,6 +77,10 @@ pub trait DomainClassifier: Send + Sync {
 impl<T: DomainClassifier + ?Sized> DomainClassifier for Box<T> {
     fn name(&self) -> &str {
         (**self).name()
+    }
+
+    fn categories(&self) -> Vec<String> {
+        (**self).categories()
     }
 
     fn classify(&self, input: &ClassificationInput) -> Option<Verdict> {

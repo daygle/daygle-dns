@@ -61,6 +61,17 @@ impl DomainClassifier for FastTextBackend {
         "fasttext"
     }
 
+    fn categories(&self) -> Vec<String> {
+        self.model
+            .get_labels()
+            .0
+            .iter()
+            .filter_map(|l| l.strip_prefix("__label__"))
+            .map(|c| c.to_ascii_lowercase())
+            .filter(|c| !c.is_empty())
+            .collect()
+    }
+
     fn classify(&self, input: &ClassificationInput) -> Option<Verdict> {
         // fastText expects prose-ish text; tokens separated by spaces.
         // Domains are passed as-is (dots/hyphens are its word-token
@@ -85,11 +96,15 @@ impl DomainClassifier for FastTextBackend {
         } else {
             Severity::Info
         };
+        let evidence = format!(
+            "fastText label '{}' (probability {:.3})",
+            category, best.prob
+        );
         Some(Verdict {
             category,
             confidence: best.prob,
             severity,
-            evidence: format!("fastText label '{}'", best.label),
+            evidence,
         })
     }
 }

@@ -102,6 +102,17 @@ impl DomainClassifier for HeuristicBackend {
         "heuristic"
     }
 
+    fn categories(&self) -> Vec<String> {
+        RULES
+            .iter()
+            .map(|r| r.category.to_string())
+            .collect::<Vec<_>>()
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect()
+    }
+
     fn classify(&self, input: &ClassificationInput) -> Option<Verdict> {
         // Lowercase once; split on dots and hyphens - real sub-label boundary.
         let hay = format!("{} {} {}", input.domain, input.title, input.text);

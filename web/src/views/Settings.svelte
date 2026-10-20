@@ -32,6 +32,9 @@
   let ai_ = $state({});
   // Auto-block categories as a comma-separated text input.
   let aiCategoriesText = $state('');
+  // The loaded backend's own category list (model labels / heuristic rules);
+  // empty when unavailable, in which case the text field is the only UI.
+  let aiBackendCategories = $state([]);
   let upstreamText = $state('');
   // Multi-line textareas for the network allow-lists and NOTIFY targets.
   let axfrNetworksText = $state('');
@@ -94,6 +97,7 @@
         api_ = {};
         ai_ = {};
         aiCategoriesText = '';
+        aiBackendCategories = [];
         upstreamText = '';
         axfrNetworksText = '';
         updateNetworksText = '';
@@ -109,6 +113,7 @@
       api_ = { ...config.api };
       ai_ = { ...config.ai, mode: config.ai?.mode || 'train' };
       aiCategoriesText = (config.ai?.auto_block_categories || []).join(', ');
+      api.aiStatus().then((s) => { aiBackendCategories = s?.backend_categories || []; }).catch(() => {});
       dotCertMode = certModeOf(dot);
       dohCertMode = certModeOf(doh);
       doqCertMode = certModeOf(doq);
@@ -223,9 +228,10 @@
           scan_interval_secs: Number(ai_.scan_interval_secs),
           expire_check_secs: Number(ai_.expire_check_secs),
           max_domains_per_scan: Number(ai_.max_domains_per_scan),
-          auto_block_categories: (
-            aiCategoriesText || ''
-          ).split(',').map((c) => c.trim()).filter(Boolean),
+          auto_block_categories:
+            aiBackendCategories.length
+              ? aiBackendCategories.filter((c) => aiSelectedCategories().includes(c))
+              : (aiCategoriesText || '').split(',').map((c) => c.trim()).filter(Boolean),
           block_threshold: Number(ai_.block_threshold),
           confidence_floor: Number(ai_.confidence_floor),
           category_ttl_secs: Number(ai_.category_ttl_secs),
@@ -240,6 +246,25 @@
     } finally {
       busy = false;
     }
+  }
+
+  // Auto-block category picker: checked state lives in aiCategoriesText so
+  // both the picker and (fallback) text field share one source of truth.
+  function aiSelectedCategories() {
+    return (aiCategoriesText || '')
+      .split(',')
+      .map((c) => c.trim().toLowerCase())
+      .filter(Boolean);
+  }
+
+  function toggleAiCategory(cat) {
+    const sel = aiSelectedCategories();
+    const next = sel.includes(cat) ? sel.filter((c) => c !== cat) : [...sel, cat];
+    aiCategoriesText = next.join(', ');
+  }
+
+  function titleCase(s) {
+    return s ? s.charAt(0).toUpperCase() + s.slice(1) : s;
   }
 </script>
 
@@ -480,8 +505,23 @@
       <label><span>Threat Verdict TTL (Seconds)</span><input type="number" min="60" bind:value={ai_.threat_ttl_secs} /></label>
     </div>
     <label class="stacked" style="margin-top: 12px">
-      <span>Auto-Block Categories (comma-separated, e.g. malware, phishing)</span>
-      <input bind:value={aiCategoriesText} placeholder="malware, phishing" />
+      <span>Auto-Block Categories</span>
+      {#if aiBackendCategories.length}
+        <div class="form-grid">
+          {#each aiBackendCategories as cat (cat)}
+            <label class="check">
+              <input
+                type="checkbox"
+                checked={aiSelectedCategories().includes(cat)}
+                onchange={() => toggleAiCategory(cat)}
+              />
+              <span>{titleCase(cat)}</span>
+            </label>
+          {/each}
+        </div>
+      {:else}
+        <input bind:value={aiCategoriesText} placeholder="malware, phishing (comma-separated)" />
+      {/if}
     </label>
     <p class="muted help">
       Only threats in these categories auto-block, and only above the block

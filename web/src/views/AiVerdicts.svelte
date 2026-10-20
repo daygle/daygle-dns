@@ -71,7 +71,7 @@
     }
   }
 
-  // Severity and status are lowercase enum values; show them capitalized.
+  // Category, severity and status are lowercase enum values; show them capitalized.
   function title(s) {
     return s ? s.charAt(0).toUpperCase() + s.slice(1) : s;
   }
@@ -154,7 +154,7 @@
           <tr>
             <td><code>{r.domain}</code></td>
             <td>
-              {#if r.category}{r.category}{:else}<span class="muted">-</span>{/if}
+              {#if r.category}{title(r.category)}{:else}<span class="muted">-</span>{/if}
             </td>
             <td>
               <span class="pill" class:err={r.severity === 'threat'}>
