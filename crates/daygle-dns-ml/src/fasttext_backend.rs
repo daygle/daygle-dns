@@ -96,7 +96,10 @@ impl DomainClassifier for FastTextBackend {
         } else {
             Severity::Info
         };
-        let evidence = format!("fastText label '{}' (probability {:.3})", category, best.prob);
+        let evidence = format!(
+            "fastText label '{}' (probability {:.3})",
+            category, best.prob
+        );
         Some(Verdict {
             category,
             confidence: best.prob,
