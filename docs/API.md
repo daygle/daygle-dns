@@ -227,7 +227,9 @@ name/type, transport (`udp`, `tcp`, `tls`, `https`, `quic`), outcome
 
 `GET` returns a page of entries (newest first) plus the total count under
 the same filter. `qname` accepts `*` wildcards (`*.example.com`, `www.*`)
-and substring matching otherwise; `from`/`to` are RFC 3339 timestamps;
+and substring matching otherwise; `from`/`to` are RFC 3339 timestamps
+with any UTC offset (a bare `YYYY-MM-DDTHH:MM[:SS]` is taken as UTC;
+anything else is `400`), both inclusive to the second;
 `per_page` is capped at 500. `format=csv` streams the whole filtered set
 (no pagination) as a CSV download. `DELETE` clears the log (admin only);
 retention is bounded by `logging.query_db_max_rows` (0 = unlimited).

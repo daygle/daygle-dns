@@ -587,19 +587,61 @@ pub struct QueryLogsQuery {
     format: Option<String>,
 }
 
-fn query_log_filter(query: &QueryLogsQuery) -> daygle_dns_authoritative::QueryLogFilter {
-    daygle_dns_authoritative::QueryLogFilter {
+/// Which end of a time range a bound is.
+#[derive(Clone, Copy)]
+enum Bound {
+    From,
+    To,
+}
+
+/// Turn a `from`/`to` query bound into the form the stored timestamps
+/// compare against. Rows store `Utc::now().to_rfc3339()` text and the store
+/// compares it as a string, so a bound must be UTC with the same `+00:00`
+/// layout: a local time such as `09:00+11:00` must become `22:00` the day
+/// before. Accepts RFC 3339 with any offset, or a bare
+/// `YYYY-MM-DDTHH:MM[:SS]` taken as UTC. `to` covers its whole last second.
+fn query_log_bound(raw: &str, bound: Bound) -> Result<String, String> {
+    use chrono::{DateTime, NaiveDateTime, Utc};
+    let raw = raw.trim();
+    let utc: DateTime<Utc> = match DateTime::parse_from_rfc3339(raw) {
+        Ok(dt) => dt.with_timezone(&Utc),
+        Err(_) => NaiveDateTime::parse_from_str(raw, "%Y-%m-%dT%H:%M:%S")
+            .or_else(|_| NaiveDateTime::parse_from_str(raw, "%Y-%m-%dT%H:%M"))
+            .map(|n| n.and_utc())
+            .map_err(|_| format!("'{raw}' is not a date and time (expected RFC 3339)"))?,
+    };
+    let second = utc.format("%Y-%m-%dT%H:%M:%S");
+    Ok(match bound {
+        // Every stored row in this second (with or without a fraction)
+        // sorts at or after the bare second.
+        Bound::From => second.to_string(),
+        // ...and before this, which outranks any fraction or offset text.
+        Bound::To => format!("{second}.999999999+99:99"),
+    })
+}
+
+fn query_log_filter(
+    query: &QueryLogsQuery,
+) -> Result<daygle_dns_authoritative::QueryLogFilter, String> {
+    let bound = |value: &Option<String>, which| {
+        value
+            .as_deref()
+            .filter(|v| !v.trim().is_empty())
+            .map(|v| query_log_bound(v, which))
+            .transpose()
+    };
+    Ok(daygle_dns_authoritative::QueryLogFilter {
         client: query.client.clone(),
         qname: query.qname.clone(),
         qtype: query.qtype.clone(),
         protocol: query.protocol.clone(),
         outcome: query.outcome.clone(),
         rcode: query.rcode.clone(),
-        from: query.from.clone(),
-        to: query.to.clone(),
+        from: bound(&query.from, Bound::From)?,
+        to: bound(&query.to, Bound::To)?,
         page: query.page,
         per_page: query.per_page,
-    }
+    })
 }
 
 /// Escape one CSV field (RFC 4180). Fields a spreadsheet would evaluate as a
@@ -648,10 +690,14 @@ pub async fn query_logs(
     State(state): State<AppState>,
     Query(query): Query<QueryLogsQuery>,
 ) -> Response {
+    let filter = match query_log_filter(&query) {
+        Ok(filter) => filter,
+        Err(e) => return error_response(StatusCode::BAD_REQUEST, e),
+    };
     if query.format.as_deref() == Some("csv") {
         // Export: the full filtered set, capped sanely so a huge retention
         // window cannot produce an unbounded response.
-        let mut filter = query_log_filter(&query);
+        let mut filter = filter;
         filter.page = Some(1);
         filter.per_page = Some(daygle_dns_authoritative::ZoneStore::QUERY_LOG_MAX_EXPORT);
         let rows = match state.catalog.store().export_query_logs(&filter) {
@@ -683,11 +729,7 @@ pub async fn query_logs(
         return (headers, csv).into_response();
     }
 
-    match state
-        .catalog
-        .store()
-        .search_query_logs(&query_log_filter(&query))
-    {
+    match state.catalog.store().search_query_logs(&filter) {
         Ok((rows, total)) => Json(serde_json::json!({
             "entries": rows,
             "total": total,
