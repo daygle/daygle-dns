@@ -303,6 +303,14 @@
           </span></td>
         </tr>
         <tr>
+          <td class="muted">Resolution Mode</td>
+          <td>
+            {#if status.resolution_mode === 'recursive'}Recursive (from the root servers)
+            {:else if status.resolution_mode === 'forwarding'}Forwarding (to upstream servers)
+            {:else}<span class="muted">-</span>{/if}
+          </td>
+        </tr>
+        <tr>
           <td class="muted">DNSSEC Validation</td>
           <td><span class:pill={true} class:ok={status.dnssec} class:err={!status.dnssec}>
             {status.dnssec ? 'Enabled' : 'Disabled'}
