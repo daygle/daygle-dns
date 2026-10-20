@@ -1436,6 +1436,25 @@ pub async fn create_zone(
             });
         }
     }
+    // Likewise the SOA contact: the server's default mailbox (Settings ->
+    // Default Administrator Mailbox) when set, else the store's
+    // "admin.<zone>." fallback.
+    if zone_input.admin_mailbox.is_none() && !has_imported_soa {
+        let default_mailbox = state
+            .config
+            .load_full()
+            .authoritative
+            .default_admin_mailbox
+            .trim()
+            .to_string();
+        if !default_mailbox.is_empty() {
+            zone_input.admin_mailbox = Some(if default_mailbox.ends_with('.') {
+                default_mailbox
+            } else {
+                format!("{default_mailbox}.")
+            });
+        }
+    }
     if input.serial_date_scheme {
         zone_input.serial = Some(date_serial().saturating_mul(100).saturating_add(1));
     }
@@ -2859,6 +2878,8 @@ pub struct DisplayUpdate {
 pub struct AuthoritativeUpdate {
     pub default_record_ttl: Option<u32>,
     pub default_primary_ns: Option<String>,
+    /// Blank clears it (new zones then use `admin.<zone>.`).
+    pub default_admin_mailbox: Option<String>,
     pub axfr_enabled: Option<bool>,
     pub axfr_networks: Option<Vec<String>>,
     pub allow_dynamic_updates: Option<bool>,
@@ -3218,6 +3239,15 @@ pub async fn update_settings(
                     format!("{v}.")
                 };
             }
+            authoritative_changed = true;
+        }
+        if let Some(v) = &a.default_admin_mailbox {
+            let v = v.trim();
+            config.authoritative.default_admin_mailbox = if v.is_empty() || v.ends_with('.') {
+                v.to_string()
+            } else {
+                format!("{v}.")
+            };
             authoritative_changed = true;
         }
         if let Some(v) = a.axfr_enabled {
