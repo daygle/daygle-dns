@@ -4,9 +4,7 @@
   import Login from './views/Login.svelte';
   import Setup from './views/Setup.svelte';
   import Status from './views/Status.svelte';
-  import Zones from './views/Zones.svelte';
-  import Records from './views/Records.svelte';
-  import SplitHorizon from './views/SplitHorizon.svelte';
+  import ZonesPage from './views/ZonesPage.svelte';
   import Logs from './views/Logs.svelte';
   import Filtering from './views/Filtering.svelte';
   import Settings from './views/Settings.svelte';
@@ -20,7 +18,7 @@
   import { sidebar, setSidebar, isNarrow, toggleSidebar } from './nav.svelte.js';
 
   let view = $state('status');
-  // Zone preselected for the Records page (set when opening records from the Zones page).
+  // Zone preselected on the Zones page's Records tab (remembered across visits).
   let recordZoneId = $state(null);
   let user = $state(getStoredUser());
   // Console auth is on by default, so start at the login/setup screen unless
@@ -85,7 +83,7 @@
     authed = true;
     user = getStoredUser();
     needsSetup = false;
-    if (isViewer && (view === 'zones' || view === 'records' || view === 'split-horizon' || view === 'filtering')) {
+    if (isViewer && (view === 'zones' || view === 'filtering')) {
       view = 'status';
     }
   }
@@ -142,13 +140,7 @@
     }
   }
 
-  // Open the Records page for a given zone (used from the Zones page).
-  function openZoneRecords(zoneId) {
-    recordZoneId = zoneId;
-    view = 'records';
-  }
-
-  // Remember the zone chosen on the Records page so it is restored next visit.
+  // Remember the zone chosen on the Records tab so it is restored next visit.
   function setRecordZone(zoneId) {
     recordZoneId = zoneId;
   }
@@ -156,8 +148,6 @@
   const tabs = [
     { id: 'status', label: 'Status', icon: icons.status },
     { id: 'zones', label: 'Zones', icon: icons.zones, viewer: true },
-    { id: 'records', label: 'Records', icon: icons.records, viewer: true },
-    { id: 'split-horizon', label: 'Split Horizon', icon: icons['split-horizon'], viewer: true },
     { id: 'filtering', label: 'Filtering', icon: icons.filtering, viewer: true },
     { id: 'ai', label: 'AI', icon: icons.ai, viewer: true },
     { id: 'cache', label: 'Cache', icon: icons.cache },
@@ -282,11 +272,7 @@
       {#if view === 'status' || (isViewer && !tabs.some((t) => t.id === view))}
         <Status />
       {:else if view === 'zones'}
-        <Zones onOpenRecords={openZoneRecords} />
-      {:else if view === 'records'}
-        <Records zoneId={recordZoneId} onSelectZone={setRecordZone} />
-      {:else if view === 'split-horizon'}
-        <SplitHorizon />
+        <ZonesPage {recordZoneId} onSelectZone={setRecordZone} />
       {:else if view === 'filtering'}
         <Filtering />
       {:else if view === 'cache'}
