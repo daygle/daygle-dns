@@ -59,7 +59,7 @@ async function request(method, path, body, opts = {}) {
     throw err;
   }
   if (res.status === 204) return null;
-  return res.json();
+  return opts.text ? res.text() : res.json();
 }
 
 export function formatApiError(e) {
@@ -173,6 +173,9 @@ export const api = {
     request('PUT', `/zones/${zoneId}/records/${encodeURIComponent(recordId)}`, body),
   deleteRecord: (zoneId, recordId) =>
     request('DELETE', `/zones/${zoneId}/records/${recordId}`),
+  setRecordDisabled: (zoneId, recordId, disabled) =>
+    request('PUT', `/zones/${zoneId}/records/${encodeURIComponent(recordId)}/disabled`, { disabled }),
+  exportZone: (zoneId) => request('GET', `/zones/${zoneId}/export`, undefined, { text: true }),
   signZone: (zoneId) => request('POST', `/zones/${zoneId}/sign`),
   unsignZone: (zoneId) => request('POST', `/zones/${zoneId}/unsign`),
   cache: () => request('GET', '/cache'),

@@ -1,5 +1,6 @@
 <script>
   import { api, formatApiError } from '../api.js';
+  import { duration } from '../aiLabels.js';
 
   // The zone to preselect, passed when coming from the Zones page.
   let { zoneId = null, onSelectZone = () => {} } = $props();
@@ -34,9 +35,25 @@
   let selected = $state(null);
   let records = $state([]);
   let recordsLoading = $state(false);
+  // `error` shows in red, `notice` (success) in green; failures while the
+  // record dialog is open show inside it.
   let error = $state(null);
   let notice = $state(null);
+  let dialogError = $state(null);
+  let saving = $state(false);
   let edit = $state(null);
+
+  // Record list filter.
+  let filterText = $state('');
+  let filterType = $state('');
+  const typesPresent = $derived([...new Set(records.map((r) => r.rtype))].sort());
+  const shown = $derived(
+    records.filter((r) => {
+      if (filterType && r.rtype !== filterType) return false;
+      const q = filterText.trim().toLowerCase();
+      return !q || r.name.toLowerCase().includes(q) || r.content.toLowerCase().includes(q);
+    }),
+  );
 
   // Searchable zone picker state.
   let query = $state('');
@@ -72,6 +89,8 @@
     pickerOpen = false;
     edit = null;
     notice = null;
+    filterText = '';
+    filterType = '';
     if (notify) onSelectZone(zone.id);
     await loadRecords(zone.id);
   }
@@ -119,15 +138,34 @@
     }
   }
 
+  // Names are stored fully qualified; show them relative to the zone the
+  // way zone files do ("www", "@" for the zone itself).
+  function relativeName(name) {
+    if (!selected) return name;
+    const zone = selected.name.replace(/\.$/, '').toLowerCase();
+    const n = name.replace(/\.$/, '').toLowerCase();
+    if (n === zone) return '@';
+    if (n.endsWith(`.${zone}`)) return name.slice(0, n.length - zone.length - 1);
+    return name;
+  }
+
   function startEdit(record) {
+    notice = null;
+    error = null;
+    dialogError = null;
     edit = record
-      ? { ...record, isNew: false }
+      ? { ...record, name: relativeName(record.name), isNew: false }
       : { name: '', rtype: 'A', content: '', ttl: defaultTtl, priority: 0, isNew: true };
+  }
+
+  function closeEdit() {
+    if (!saving) edit = null;
   }
 
   async function saveEdit() {
     if (!edit || !selected) return;
-    notice = null;
+    dialogError = null;
+    saving = true;
     try {
       const body = {
         name: edit.name,
@@ -139,23 +177,43 @@
       // Editing replaces the record in place; only new records are added.
       if (edit.isNew) await api.upsertRecord(selected.id, body);
       else await api.replaceRecord(selected.id, edit.id, body);
+      notice = `${body.rtype} record ${edit.isNew ? 'added' : 'saved'} and applied live.`;
       edit = null;
-      notice = 'Record saved and applied live.';
       await loadRecords(selected.id);
     } catch (e) {
-      notice = formatApiError(e);
+      dialogError = formatApiError(e);
+    } finally {
+      saving = false;
     }
   }
 
   async function removeRecord(record) {
     if (!selected) return;
-    if (!confirm(`Delete the ${record.rtype} record for "${record.name}"?`)) return;
+    if (!confirm(`Delete the ${record.rtype} record for "${relativeName(record.name)}"?`)) return;
     notice = null;
+    error = null;
     try {
       await api.deleteRecord(selected.id, record.id);
+      notice = `${record.rtype} record for "${relativeName(record.name)}" deleted.`;
       await loadRecords(selected.id);
     } catch (e) {
-      notice = formatApiError(e);
+      error = formatApiError(e);
+    }
+  }
+
+  // A disabled record stays in the zone but is not served.
+  async function toggleDisabled(record) {
+    if (!selected) return;
+    notice = null;
+    error = null;
+    try {
+      await api.setRecordDisabled(selected.id, record.id, !record.disabled);
+      notice = record.disabled
+        ? `${record.rtype} record for "${relativeName(record.name)}" enabled.`
+        : `${record.rtype} record for "${relativeName(record.name)}" disabled: kept in the zone but not served.`;
+      await loadRecords(selected.id);
+    } catch (e) {
+      error = formatApiError(e);
     }
   }
 
@@ -169,7 +227,7 @@
 </script>
 
 {#if notice}
-  <div class="card notice" class:error={notice.startsWith('Error:')}>{notice}</div>
+  <div class="card notice ok">{notice}</div>
 {/if}
 {#if error}
   <div class="card notice error">{error}</div>
@@ -251,21 +309,40 @@
         <p class="muted zone-help">This is a read-only secondary zone. It is refreshed from: {selected.masters?.join(', ') || 'configured masters'}.</p>
       {/if}
 
+      {#if records.length > 0}
+        <div class="row filters">
+          <input type="search" placeholder="Filter by Name or Value" bind:value={filterText} />
+          <select bind:value={filterType} aria-label="Record type">
+            <option value="">All Types</option>
+            {#each typesPresent as t (t)}<option value={t}>{t}</option>{/each}
+          </select>
+          {#if shown.length !== records.length}<span class="muted">Showing {shown.length} of {records.length}</span>{/if}
+        </div>
+      {/if}
+
       <div class="table-wrap">
         <table>
-          <thead><tr><th>Name</th><th>Type</th><th>Value</th><th>TTL</th><th class="num"></th></tr></thead>
+          <thead><tr><th>Name</th><th>Type</th><th>Value</th><th class="num">TTL</th><th class="num">Actions</th></tr></thead>
           <tbody>
-            {#each records as record (record.id)}
-              <tr>
-                <td><code>{record.name}</code></td>
+            {#each shown as record (record.id)}
+              <tr class:disabled={record.disabled}>
+                <td>
+                  <code title={record.name}>{relativeName(record.name)}</code>
+                  {#if record.disabled}<span class="pill">Disabled</span>{/if}
+                </td>
                 <td>{record.rtype}</td>
-                <td><code>{record.content}</code></td>
-                <td>{record.ttl}</td>
+                <td class="value"><code>{record.content}</code></td>
+                <td class="num" title={duration(record.ttl)}>{record.ttl}</td>
                 <td class="num">
                   {#if selected.zone_type !== 'secondary'}
-                    <div class="row" style="gap: 6px; justify-content: flex-end">
+                    <div class="row" style="gap: 6px; justify-content: flex-end; flex-wrap: nowrap">
                       <button class="secondary" onclick={() => startEdit(record)}>Edit</button>
-                      <button class="danger" onclick={() => removeRecord(record)}>✕</button>
+                      <button
+                        class="secondary"
+                        onclick={() => toggleDisabled(record)}
+                        title={record.disabled ? 'Serve this record again' : 'Stop serving this record but keep it'}
+                      >{record.disabled ? 'Enable' : 'Disable'}</button>
+                      <button class="danger" onclick={() => removeRecord(record)} aria-label="Delete record">✕</button>
                     </div>
                   {:else}
                     <span class="muted">Read-Only</span>
@@ -280,26 +357,49 @@
         <p class="muted">Loading records…</p>
       {:else if records.length === 0}
         <p class="muted">No records yet. Add one with the Add Record button.</p>
+      {:else if shown.length === 0}
+        <p class="muted">No records match this filter.</p>
       {/if}
-
-      {#if edit}
-        <div class="card" style="margin-top: 14px; background: var(--panel-2)">
-          <h4 style="margin: 0 0 10px">{edit.isNew ? 'New Record' : 'Edit Record'}</h4>
-          <div class="grid2">
-            <label>Name <input placeholder="www" bind:value={edit.name} /></label>
-            <label>Type<select bind:value={edit.rtype}>{#each TYPES as t (t)}<option value={t}>{t}</option>{/each}</select></label>
-            <label>Value <input placeholder={EXAMPLES[edit.rtype]} bind:value={edit.content} /></label>
-            <label>TTL <input type="number" bind:value={edit.ttl} /></label>
-          </div>
-          <p class="muted help value-help">Format: <code>{EXAMPLES[edit.rtype]}</code>{#if edit.rtype === 'MX' || edit.rtype === 'SRV'} (the priority is the first number){/if}</p>
-          <div class="row" style="margin-top: 10px">
-            <button onclick={saveEdit}>Save</button>
-            <button class="secondary" onclick={() => (edit = null)}>Cancel</button>
-          </div>
-        </div>
-      {/if}
+      <p class="muted help">
+        Names are shown relative to the zone; <code>@</code> is the zone itself.
+        Every change is applied live and increments the zone's serial.
+      </p>
     </div>
   {/if}
+{/if}
+
+{#if edit}
+  <div class="modal-backdrop" role="presentation" onclick={(e) => e.target === e.currentTarget && closeEdit()}>
+    <form
+      class="modal card"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="record-title"
+      onsubmit={(e) => { e.preventDefault(); saveEdit(); }}
+    >
+      <div class="spread modal-title">
+        <h3 id="record-title" style="margin: 0">{edit.isNew ? `Add Record - ${selected.name}` : `Edit Record - ${selected.name}`}</h3>
+        <button type="button" class="secondary" style="padding: 2px 10px" onclick={closeEdit} aria-label="Close">✕</button>
+      </div>
+      {#if dialogError}<p class="dialog-error">{dialogError}</p>{/if}
+      <div class="grid2">
+        <label>Name <input placeholder="www, or @ for {selected.name}" bind:value={edit.name} /></label>
+        <label>Type<select bind:value={edit.rtype}>{#each TYPES as t (t)}<option value={t}>{t}</option>{/each}</select></label>
+      </div>
+      <label class="full">Value <input placeholder={EXAMPLES[edit.rtype]} bind:value={edit.content} /></label>
+      <p class="muted help value-help">
+        Format: <code>{EXAMPLES[edit.rtype]}</code>{#if edit.rtype === 'MX' || edit.rtype === 'SRV'} (the priority is the first number){/if}.
+        End a host name with a dot when it is a full name.
+      </p>
+      <div class="grid2" style="margin-top: 10px">
+        <label>TTL (Seconds) <span class="hint">{duration(Number(edit.ttl) || 0)}</span><input type="number" min="0" bind:value={edit.ttl} /></label>
+      </div>
+      <div class="row actions">
+        <button type="submit" disabled={saving || !edit.content.trim()}>{saving ? 'Saving…' : edit.isNew ? 'Add Record' : 'Save Record'}</button>
+        <button type="button" class="secondary" onclick={closeEdit} disabled={saving}>Cancel</button>
+      </div>
+    </form>
+  </div>
 {/if}
 
 <style>
@@ -352,8 +452,23 @@
   .picker-option .pill { margin-left: auto; }
   .picker-empty { padding: 8px; color: var(--muted); font-size: 0.85rem; }
   .notice { margin-bottom: 14px; }
+  .notice.ok { border-color: var(--ok); }
   .notice.error { border-color: var(--danger); color: var(--danger); }
+  .dialog-error { color: var(--danger); margin: 0 0 10px; }
+  .filters { gap: 8px; margin-bottom: 10px; flex-wrap: wrap; }
+  .filters input { flex: 0 1 280px; min-width: 180px; }
+  .value { word-break: break-all; }
+  .full { margin-top: 10px; }
+  .modal-backdrop { position: fixed; inset: 0; background: rgb(0 0 0 / 0.65); display: grid; place-items: center; padding: 20px; z-index: 10; }
+  .modal { width: min(640px, 100%); max-height: calc(100vh - 40px); overflow: auto; }
+  .modal-title { margin-bottom: 12px; }
+  .actions { margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--border); }
+  .hint { position: absolute; right: 0; top: 0; font-size: 0.75rem; }
+  label:has(.hint) { position: relative; }
   .zone-help { margin-top: -4px; }
   .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
   label { display: flex; flex-direction: column; gap: 4px; font-size: 0.85rem; color: var(--muted); }
+  @media (max-width: 640px) {
+    .grid2 { grid-template-columns: 1fr; }
+  }
 </style>

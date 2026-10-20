@@ -88,7 +88,8 @@ th {
 /* Numeric / action cells align right. */
 .num { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
 td.num button { padding: 4px 9px; }
-tr.disabled { opacity: 0.55; }
+/* A disabled row is dimmed, but its actions (last column) stay readable. */
+tr.disabled td:not(:last-child) { opacity: 0.55; }
 
 /* Scrolls a wide table inside its card instead of the page. */
 .table-wrap { overflow-x: auto; }

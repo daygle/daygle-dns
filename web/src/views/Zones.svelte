@@ -1,6 +1,8 @@
 <script>
   import { api, formatApiError } from '../api.js';
   import { reverseZoneName } from '../reverseZone.js';
+  import { formatDateTime } from '../datetime.svelte.js';
+  import { duration } from '../aiLabels.js';
 
   let { onOpenRecords = () => {} } = $props();
 
@@ -8,8 +10,12 @@
   // Server config: supplies the stub and forwarder zones and the default
   // primary nameserver.
   let config = $state(null);
+  // Page-level messages: `error` in red, `notice` (success) in green. While a
+  // dialog is open its own failures show inside it (`dialogError`), where
+  // they can be seen.
   let error = $state(null);
   let notice = $state(null);
+  let dialogError = $state(null);
   let showAdd = $state(false);
   let savingZone = $state(false);
   let zoneFileName = $state('');
@@ -23,7 +29,6 @@
     zone_type: 'primary',
     primary_ns: '',
     admin_mailbox: '',
-    default_admin_mailbox: '',
     serial: 1,
     refresh: 3600,
     retry: 600,
@@ -87,7 +92,6 @@
       name: '',
       zone_type: 'primary',
       primary_ns: '',
-      default_admin_mailbox: '',
       admin_mailbox: '',
       serial: 1,
       refresh: 3600,
@@ -114,8 +118,14 @@
       .filter(Boolean);
   }
 
-  function openEditStub(stub) {
+  function clearMessages() {
     notice = null;
+    error = null;
+    dialogError = null;
+  }
+
+  function openEditStub(stub) {
+    clearMessages();
     resetZoneForm();
     editingName = stub.name;
     newZone.zone_type = 'stub';
@@ -127,7 +137,7 @@
   }
 
   function openEditRoot() {
-    notice = null;
+    clearMessages();
     resetZoneForm();
     editingName = '.';
     newZone.zone_type = 'root';
@@ -143,18 +153,18 @@
   }
 
   async function refreshRoot() {
-    notice = null;
+    clearMessages();
     try {
       await api.refreshLocalRoot();
       notice = 'Checking the root zone sources for a newer copy.';
       setTimeout(loadRootStatus, 2000);
     } catch (e) {
-      notice = formatApiError(e);
+      error = formatApiError(e);
     }
   }
 
   function openEditForwarder(fwd) {
-    notice = null;
+    clearMessages();
     resetZoneForm();
     editingName = fwd.name;
     newZone.zone_type = 'forwarder';
@@ -201,7 +211,7 @@
       root: 'Delete the Secondary ROOT Zone? Root queries go back to the root servers.',
     }[kind];
     if (!confirm(message)) return;
-    notice = null;
+    clearMessages();
     try {
       const fresh = await api.config();
       if (kind === 'root') {
@@ -215,14 +225,15 @@
         const list = (fresh.recursive?.conditional_zones || []).filter((z) => z.name !== name);
         await api.updateSettings({ recursive: { conditional_zones: list } });
       }
+      notice = kind === 'root' ? 'Secondary ROOT Zone deleted.' : `Zone ${name} deleted.`;
       await loadConfig();
     } catch (e) {
-      notice = formatApiError(e);
+      error = formatApiError(e);
     }
   }
 
   function openAddZone() {
-    notice = null;
+    clearMessages();
     resetZoneForm();
     // Default the Primary Nameserver to the server's own DNS domain.
     if (dnsServerDomain) newZone.primary_ns = dnsServerDomain;
@@ -234,11 +245,10 @@
   }
 
   function openSoa(zone) {
-    notice = null;
+    clearMessages();
     soaEdit = {
       zone,
       primary_ns: zone.primary_ns || '',
-
       admin_mailbox: zone.admin_mailbox || '',
       serial: zone.serial,
       refresh: zone.refresh,
@@ -257,12 +267,11 @@
     if (!soaEdit) return;
     const form = soaEdit;
     savingSoa = true;
-    notice = null;
+    dialogError = null;
     try {
       const body = {
         primary_ns: form.primary_ns.trim(),
         admin_mailbox: form.admin_mailbox.trim(),
-
         refresh: Number(form.refresh) || form.refresh,
         retry: Number(form.retry) || form.retry,
         expire: Number(form.expire) || form.expire,
@@ -272,10 +281,10 @@
       if (!form.bumpSerial) body.serial = Number(form.serial) || form.serial;
       await api.updateZoneSoa(form.zone.id, body);
       soaEdit = null;
-      notice = 'SOA settings saved and applied live.';
+      notice = `SOA for ${form.zone.name} saved and applied live.`;
       await loadZones();
     } catch (e) {
-      notice = formatApiError(e);
+      dialogError = formatApiError(e);
     } finally {
       savingSoa = false;
     }
@@ -289,45 +298,45 @@
       newZone.import_text = await file.text();
     } catch (e) {
       newZone.import_text = null;
-      notice = `Error: ${e.message || e}`;
+      dialogError = `Could not read ${file.name}: ${e.message || e}`;
     }
   }
 
   async function createZone() {
+    dialogError = null;
     if (reverse?.error) {
-      notice = `Error: ${reverse.error}`;
+      dialogError = reverse.error;
       return;
     }
     const name = reverse?.name || newZone.name.trim();
     if (!name) {
-      notice = 'Error: Zone name is required';
+      dialogError = 'Enter a zone name.';
       return;
     }
     if (isSettingsZone) {
       if (newZone.zone_type === 'stub' && newZone.stubEnabled && splitLines(newZone.nssText).length === 0) {
-        notice = 'Error: Add at least one nameserver for the stub zone';
+        dialogError = 'Add at least one nameserver for the stub zone.';
         return;
       }
       if (newZone.zone_type === 'forwarder' && splitLines(newZone.upstreamsText).length === 0) {
-        notice = 'Error: Add at least one upstream server for the forwarder';
+        dialogError = 'Add at least one upstream server for the forwarder.';
         return;
       }
       savingZone = true;
-      notice = null;
       const newZoneWasRoot = newZone.zone_type === 'root';
       try {
         const editing = editingName !== null;
         await saveSettingsZone(name);
         showAdd = false;
         resetZoneForm();
-        notice = editing ? 'Zone updated and applied live.' : 'Zone created and applied live.';
+        notice = editing ? `Zone ${name} updated and applied live.` : `Zone ${name} created and applied live.`;
         await loadConfig();
         if (newZoneWasRoot && !editing) {
           notice = 'Secondary ROOT Zone added. The root zone is being transferred and verified.';
           await loadRootStatus();
         }
       } catch (e) {
-        notice = formatApiError(e);
+        dialogError = formatApiError(e);
       } finally {
         savingZone = false;
       }
@@ -338,18 +347,17 @@
       .map((value) => value.trim())
       .filter(Boolean);
     if (newZone.zone_type === 'secondary' && masters.length === 0) {
-      notice = 'Error: Add at least one master server for a secondary zone';
+      dialogError = 'Add at least one master server for a secondary zone.';
       return;
     }
     savingZone = true;
-    notice = null;
+    const createdType = newZone.zone_type;
     try {
       await api.createZone({
         name,
         zone_type: newZone.zone_type,
         primary_ns: newZone.primary_ns.trim() || null,
-        admin_mailbox: newZone.admin_mailbox.trim() || newZone.default_admin_mailbox.trim() || null,
-        default_admin_mailbox: newZone.default_admin_mailbox.trim() || null,
+        admin_mailbox: newZone.admin_mailbox.trim() || null,
         serial: newZone.serial_date_scheme ? null : Number(newZone.serial) || 1,
         refresh: Number(newZone.refresh) || 3600,
         retry: Number(newZone.retry) || 600,
@@ -362,40 +370,77 @@
       });
       showAdd = false;
       resetZoneForm();
-      notice = 'Zone created successfully';
+      notice =
+        createdType === 'secondary'
+          ? `Zone ${name} created. Its records are being transferred from the master.`
+          : `Zone ${name} created. Add its records on the Records tab.`;
       await loadZones();
     } catch (e) {
-      notice = formatApiError(e);
+      dialogError = formatApiError(e);
     } finally {
       savingZone = false;
     }
   }
 
   async function removeZone(zone) {
-    if (!confirm(`Delete zone ${zone.name} and all its records?`)) return;
-    notice = null;
+    if (!confirm(`Delete zone ${zone.name} and all its records? Export it first if you may need it again.`)) return;
+    clearMessages();
     try {
       await api.deleteZone(zone.id);
+      notice = `Zone ${zone.name} deleted.`;
       await loadZones();
     } catch (e) {
-      notice = formatApiError(e);
+      error = formatApiError(e);
     }
   }
 
   async function toggleSign(zone) {
-    notice = null;
+    // Unsigning while the parent zone still publishes a DS record makes the
+    // zone fail validation everywhere, so say so before doing it.
+    if (
+      zone.dnssec &&
+      !confirm(
+        `Stop signing ${zone.name}? If the parent zone has a DS record for it, remove that first, or validating resolvers will treat the zone as bogus.`,
+      )
+    ) {
+      return;
+    }
+    clearMessages();
     try {
-      if (zone.dnssec) await api.unsignZone(zone.id);
-      else await api.signZone(zone.id);
+      if (zone.dnssec) {
+        await api.unsignZone(zone.id);
+        notice = `${zone.name} is no longer signed.`;
+      } else {
+        await api.signZone(zone.id);
+        notice = `${zone.name} is now signed. Publish its DS record at the parent zone to complete the chain of trust.`;
+      }
       await loadZones();
     } catch (e) {
-      notice = formatApiError(e);
+      error = formatApiError(e);
+    }
+  }
+
+  // Download the zone as a BIND-style zone file (a full backup that imports
+  // back through Add Zone).
+  async function exportZone(zone) {
+    clearMessages();
+    try {
+      const text = await api.exportZone(zone.id);
+      const url = URL.createObjectURL(new Blob([text], { type: 'text/plain' }));
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${zone.name}.zone`;
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch (e) {
+      error = formatApiError(e);
     }
   }
 
   // DNS Server Domain (Settings -> Zones & Records) pre-fills and
   // placeholders the SOA Primary Nameserver for new zones.
   let dnsServerDomain = $derived(config?.authoritative?.default_primary_ns || '');
+  let defaultMailbox = $derived(config?.authoritative?.default_admin_mailbox || '');
 
   $effect(() => {
     loadZones();
@@ -411,12 +456,18 @@
   });
 
   function formatTime(value) {
-    return value ? new Date(value).toLocaleString() : '-';
+    return value ? formatDateTime(value) : '-';
+  }
+
+  // "3600" -> "1 Hour", shown beside the seconds fields.
+  function hint(secs) {
+    const n = Number(secs);
+    return Number.isInteger(n) && n > 0 ? duration(n) : '';
   }
 </script>
 
 {#if notice}
-  <div class="card notice" class:error={notice.startsWith('Error:')}>{notice}</div>
+  <div class="card notice ok">{notice}</div>
 {/if}
 {#if error}
   <div class="card notice error">{error}</div>
@@ -438,17 +489,18 @@
             <td><code>{zone.name}</code></td>
             <td><span class="pill">{zone.zone_type === 'secondary' ? 'Secondary' : 'Primary'}</span></td>
             <td class="muted">
-              Serial {zone.serial}{#if zone.zone_type === 'secondary' && zone.masters?.length} · from {zone.masters.join(', ')}{/if}
+              Serial {zone.serial}{#if zone.zone_type === 'secondary' && zone.masters?.length}{` · from ${zone.masters.join(', ')}`}{/if}
             </td>
             <td><span class:pill={true} class:ok={zone.dnssec}>{zone.dnssec ? 'Signed' : 'Unsigned'}</span></td>
             <td class="num">
               <div class="row" style="gap: 6px; justify-content: flex-end">
                 <button class="secondary" onclick={() => onOpenRecords(zone.id)}>Records</button>
                 {#if zone.zone_type !== 'secondary'}
-                  <button class="secondary" onclick={() => openSoa(zone)}>SOA</button>
-                  <button class="secondary" onclick={() => toggleSign(zone)}>{zone.dnssec ? 'Unsign' : 'Sign'}</button>
+                  <button class="secondary" onclick={() => openSoa(zone)} title="Edit the zone's SOA (nameserver, contact, timers)">SOA</button>
+                  <button class="secondary" onclick={() => toggleSign(zone)} title={zone.dnssec ? 'Stop DNSSEC signing' : 'Sign the zone with DNSSEC'}>{zone.dnssec ? 'Unsign' : 'Sign'}</button>
                 {/if}
-                <button class="danger" onclick={() => removeZone(zone)}>✕</button>
+                <button class="secondary" onclick={() => exportZone(zone)} title="Download as a zone file">Export</button>
+                <button class="danger" onclick={() => removeZone(zone)} aria-label="Delete {zone.name}">✕</button>
               </div>
             </td>
           </tr>
@@ -465,7 +517,7 @@
             <td class="num">
               <div class="row" style="gap: 6px; justify-content: flex-end">
                 <button class="secondary" onclick={() => openEditStub(stub)}>Edit</button>
-                <button class="danger" onclick={() => removeSettingsZone('stub', stub.name)}>✕</button>
+                <button class="danger" onclick={() => removeSettingsZone('stub', stub.name)} aria-label="Delete {stub.name}">✕</button>
               </div>
             </td>
           </tr>
@@ -496,7 +548,7 @@
               <div class="row" style="gap: 6px; justify-content: flex-end">
                 <button class="secondary" onclick={refreshRoot}>Refresh</button>
                 <button class="secondary" onclick={openEditRoot}>Edit</button>
-                <button class="danger" onclick={() => removeSettingsZone('root', '.')}>✕</button>
+                <button class="danger" onclick={() => removeSettingsZone('root', '.')} aria-label="Delete the Secondary ROOT Zone">✕</button>
               </div>
             </td>
           </tr>
@@ -510,7 +562,7 @@
             <td class="num">
               <div class="row" style="gap: 6px; justify-content: flex-end">
                 <button class="secondary" onclick={() => openEditForwarder(fwd)}>Edit</button>
-                <button class="danger" onclick={() => removeSettingsZone('forwarder', fwd.name)}>✕</button>
+                <button class="danger" onclick={() => removeSettingsZone('forwarder', fwd.name)} aria-label="Delete {fwd.name}">✕</button>
               </div>
             </td>
           </tr>
@@ -519,7 +571,10 @@
     </table>
   </div>
   {#if rowCount === 0}
-    <p class="muted">No zones yet. Add a primary or secondary zone to get started.</p>
+    <p class="muted">
+      No zones yet. Add a primary zone to serve your own records, or a
+      secondary, stub or forwarder zone for names hosted elsewhere.
+    </p>
   {/if}
 </div>
 
@@ -530,6 +585,7 @@
         <h3 id="add-zone-title" style="margin: 0">{editingName ? `Edit Zone - ${editingName}` : 'Add Zone'}</h3>
         <button class="secondary" style="padding: 2px 10px" onclick={closeAddZone} aria-label="Close">✕</button>
       </div>
+      {#if dialogError}<p class="dialog-error">{dialogError}</p>{/if}
 
       <div class="grid2">
         <label>Zone Name <input placeholder="example.com or 192.168.0.0/24" bind:value={newZone.name} disabled={newZone.zone_type === 'root'} /></label>
@@ -553,7 +609,7 @@
         <div class="section-title">Stub Nameservers</div>
         <label>Nameservers <textarea rows="3" placeholder={'192.0.2.53\nns1.branch.example.com'} bind:value={newZone.nssText}></textarea></label>
         <div class="grid2">
-          <label>Refresh Interval (Seconds) <input type="number" min="60" bind:value={newZone.refresh_secs} /></label>
+          <label>Refresh Interval (Seconds) <span class="hint">{hint(newZone.refresh_secs)}</span><input type="number" min="60" bind:value={newZone.refresh_secs} /></label>
           <label class="checkbox"><input type="checkbox" bind:checked={newZone.stubEnabled} /><span>Enabled</span></label>
         </div>
         <p class="muted help">
@@ -587,27 +643,36 @@
       <div class="section-title">SOA Settings</div>
       <div class="grid2">
         <label>Primary Nameserver <input placeholder={dnsServerDomain || 'ns1.example.com.'} bind:value={newZone.primary_ns} /></label>
-        <label>Default Administrator Mailbox <input placeholder="admin.example.com." bind:value={newZone.default_admin_mailbox} /></label>
-        <label>Administrator Mailbox <input placeholder="admin.example.com." bind:value={newZone.admin_mailbox} /></label>
+        <label>Administrator Mailbox <input placeholder={defaultMailbox || 'hostmaster.example.com.'} bind:value={newZone.admin_mailbox} /></label>
         <label>Serial <input type="number" min="1" bind:value={newZone.serial} disabled={newZone.serial_date_scheme} /></label>
-        <label class="checkbox"><input type="checkbox" bind:checked={newZone.serial_date_scheme} /><span>Use SOA Serial Date Scheme</span></label>
-        <label>Refresh (Seconds) <input type="number" min="1" bind:value={newZone.refresh} /></label>
-        <label>Retry (Seconds) <input type="number" min="1" bind:value={newZone.retry} /></label>
-        <label>Expire (Seconds) <input type="number" min="1" bind:value={newZone.expire} /></label>
-        <label>Minimum TTL (Seconds) <input type="number" min="1" bind:value={newZone.minimum} /></label>
+        <label class="checkbox"><input type="checkbox" bind:checked={newZone.serial_date_scheme} /><span>Date-Based Serial (YYYYMMDDnn)</span></label>
+        <label>Refresh (Seconds) <span class="hint">{hint(newZone.refresh)}</span><input type="number" min="1" bind:value={newZone.refresh} /></label>
+        <label>Retry (Seconds) <span class="hint">{hint(newZone.retry)}</span><input type="number" min="1" bind:value={newZone.retry} /></label>
+        <label>Expire (Seconds) <span class="hint">{hint(newZone.expire)}</span><input type="number" min="1" bind:value={newZone.expire} /></label>
+        <label>Minimum TTL (Seconds) <span class="hint">{hint(newZone.minimum)}</span><input type="number" min="1" bind:value={newZone.minimum} /></label>
       </div>
+      <p class="muted help">
+        The mailbox is written with a dot for the @ (<code>hostmaster.example.com.</code>
+        is hostmaster@example.com). Empty fields use the defaults from
+        Settings → Zones &amp; Records. The timers tell secondary servers how
+        often to check for changes; the defaults suit most zones.
+      </p>
 
       {#if newZone.zone_type === 'secondary'}
         <div class="section-title">Secondary Masters</div>
         <label>Master Servers <textarea rows="3" placeholder="192.0.2.10&#10;192.0.2.11:5353" bind:value={newZone.mastersText}></textarea></label>
-        <label>Refresh Interval (Seconds) <input type="number" min="1" bind:value={newZone.refresh_secs} /></label>
+        <label>Refresh Interval (Seconds) <span class="hint">{hint(newZone.refresh_secs)}</span><input type="number" min="1" bind:value={newZone.refresh_secs} /></label>
         <p class="muted help">The first reachable master is used for AXFR/IXFR. Secondary records are read-only and refresh automatically.</p>
       {:else}
         <div class="section-title">Import (Optional)</div>
         <label>Import Zone File
           <input type="file" accept=".zone,.db,.txt,text/plain" onchange={chooseZoneFile} />
         </label>
-        {#if zoneFileName}<p class="muted help">Selected: {zoneFileName}. SOA values found in the file will be used unless you override them above.</p>{/if}
+        {#if zoneFileName}
+          <p class="muted help">Selected: {zoneFileName}. SOA values found in the file will be used unless you override them above.</p>
+        {:else}
+          <p class="muted help">A BIND-style zone file, such as one downloaded with Export. Leave empty to start with an empty zone.</p>
+        {/if}
       {/if}
       {/if}
 
@@ -628,6 +693,7 @@
         <h3 id="edit-soa-title" style="margin: 0">Edit SOA - {soaEdit.zone.name}</h3>
         <button class="secondary" style="padding: 2px 10px" onclick={closeSoa} aria-label="Close">✕</button>
       </div>
+      {#if dialogError}<p class="dialog-error">{dialogError}</p>{/if}
 
       <div class="section-title">SOA Parameters</div>
       <div class="grid2">
@@ -635,10 +701,10 @@
         <label>Administrator Mailbox <input placeholder="admin.example.com." bind:value={soaEdit.admin_mailbox} /></label>
         <label>Serial <input type="number" min="1" bind:value={soaEdit.serial} disabled={soaEdit.bumpSerial} /></label>
         <label class="checkbox"><input type="checkbox" bind:checked={soaEdit.bumpSerial} /><span>Increment Serial on Save</span></label>
-        <label>Refresh (Seconds) <input type="number" min="1" bind:value={soaEdit.refresh} /></label>
-        <label>Retry (Seconds) <input type="number" min="1" bind:value={soaEdit.retry} /></label>
-        <label>Expire (Seconds) <input type="number" min="1" bind:value={soaEdit.expire} /></label>
-        <label>Minimum TTL (Seconds) <input type="number" min="1" bind:value={soaEdit.minimum} /></label>
+        <label>Refresh (Seconds) <span class="hint">{hint(soaEdit.refresh)}</span><input type="number" min="1" bind:value={soaEdit.refresh} /></label>
+        <label>Retry (Seconds) <span class="hint">{hint(soaEdit.retry)}</span><input type="number" min="1" bind:value={soaEdit.retry} /></label>
+        <label>Expire (Seconds) <span class="hint">{hint(soaEdit.expire)}</span><input type="number" min="1" bind:value={soaEdit.expire} /></label>
+        <label>Minimum TTL (Seconds) <span class="hint">{hint(soaEdit.minimum)}</span><input type="number" min="1" bind:value={soaEdit.minimum} /></label>
       </div>
       {#if soaEdit.bumpSerial}
         <p class="muted help">The serial is incremented automatically so downstream secondaries and transfers pick up the change.</p>
@@ -656,7 +722,12 @@
 
 <style>
   .notice { margin-bottom: 14px; }
+  .notice.ok { border-color: var(--ok); }
   .notice.error { border-color: var(--danger); color: var(--danger); }
+  .dialog-error { color: var(--danger); margin: 0 0 10px; }
+  /* The friendly duration beside a seconds field, e.g. "1 Hour". */
+  .hint { position: absolute; right: 0; top: 0; font-size: 0.75rem; }
+  label:has(.hint) { position: relative; }
   .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
   label { display: flex; flex-direction: column; gap: 4px; font-size: 0.85rem; color: var(--muted); }
   .modal-backdrop { position: fixed; inset: 0; background: rgb(0 0 0 / 0.65); display: grid; place-items: center; padding: 20px; z-index: 10; }
@@ -677,4 +748,7 @@
   .checkbox input { width: auto; }
   .checkbox span { color: var(--text); }
   .actions { margin-top: 22px; padding-top: 14px; border-top: 1px solid var(--border); }
+  @media (max-width: 640px) {
+    .grid2 { grid-template-columns: 1fr; }
+  }
 </style>
