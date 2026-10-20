@@ -41,8 +41,8 @@ pub struct Metrics {
 pub const LATENCY_BUCKETS_MS: [u64; 10] = [1, 5, 10, 25, 50, 100, 250, 500, 1000, 2500];
 
 /// Counters describing how the resolver answered: which route each lookup
-/// took, how it ended, how long it took, and which transports the
-/// recursor's outbound connections used.
+/// took, how it ended, how long it took, and which transports its outbound
+/// connections used.
 #[derive(Debug, Default)]
 pub struct ResolverMetrics {
     /// Lookups resolved from the root servers (recursive mode).
@@ -74,7 +74,8 @@ pub struct ResolverMetrics {
     pub latency: [AtomicU64; 11],
     /// Sum of all recorded latencies, in microseconds.
     pub latency_sum_us: AtomicU64,
-    /// Outbound connections opened by the recursor, by transport.
+    /// Outbound connections opened to nameservers and upstreams, by
+    /// transport.
     pub conn_udp: AtomicU64,
     pub conn_tcp: AtomicU64,
     pub conn_tls: AtomicU64,

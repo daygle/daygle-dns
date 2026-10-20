@@ -29,12 +29,12 @@
   const routes = $derived(
     stats
       ? [
-          ['Recursive (root servers)', stats.routes.recursive],
-          ['Forwarded (upstreams)', stats.routes.forwarding],
-          ['Conditional forwarders', stats.routes.conditional],
-          ['Stub zones', stats.routes.stub],
-          ['Client policies', stats.routes.client_policy],
-          ['Local root NXDOMAIN', stats.routes.local_root],
+          ['Recursive (Root Servers)', stats.routes.recursive],
+          ['Forwarded (Upstreams)', stats.routes.forwarding],
+          ['Conditional Forwarders', stats.routes.conditional],
+          ['Stub Zones', stats.routes.stub],
+          ['Client Policies', stats.routes.client_policy],
+          ['Local Root NXDOMAIN', stats.routes.local_root],
         ].filter(([, n]) => n > 0)
       : [],
   );
@@ -47,8 +47,8 @@
           ['NXDOMAIN', stats.outcomes.nxdomain],
           ['SERVFAIL', stats.outcomes.servfail],
           ['REFUSED', stats.outcomes.refused],
-          ['Other error', stats.outcomes.other],
-          ['No answer (timeout)', stats.outcomes.failures],
+          ['Other Error', stats.outcomes.other],
+          ['No Answer (Timeout)', stats.outcomes.failures],
         ].filter(([, n]) => n > 0)
       : [],
   );
@@ -84,14 +84,14 @@
       <h3 style="margin: 0">Resolver</h3>
       <div class="row" style="gap: 6px; flex-wrap: wrap">
         <span class="pill">{modeLabel}</span>
-        <span class="pill" class:ok={data.dnssec_validation}>DNSSEC {data.dnssec_validation ? 'validating' : 'off'}</span>
+        <span class="pill" class:ok={data.dnssec_validation}>{data.dnssec_validation ? 'DNSSEC Validating' : 'DNSSEC Off'}</span>
         {#if data.mode === 'recursive' || data.client_policies}
-          <span class="pill" class:ok={data.opportunistic_encryption}>Encryption {data.opportunistic_encryption ? 'opportunistic' : 'off'}</span>
+          <span class="pill" class:ok={data.opportunistic_encryption}>{data.opportunistic_encryption ? 'Opportunistic Encryption' : 'Encryption Off'}</span>
         {/if}
         {#if data.local_root.enabled}
-          <span class="pill" class:ok={data.local_root.serving}>Local root {data.local_root.serving ? `serial ${data.local_root.serial}` : 'not in use'}</span>
+          <span class="pill" class:ok={data.local_root.serving}>{data.local_root.serving ? `Local Root Serial ${data.local_root.serial}` : 'Local Root Not in Use'}</span>
         {/if}
-        {#if data.client_policies}<span class="pill">{data.client_policies} client {data.client_policies === 1 ? 'policy' : 'policies'}</span>{/if}
+        {#if data.client_policies}<span class="pill">{data.client_policies} Client {data.client_policies === 1 ? 'Policy' : 'Policies'}</span>{/if}
       </div>
     </div>
 

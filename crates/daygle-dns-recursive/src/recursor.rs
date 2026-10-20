@@ -7,7 +7,9 @@
 //! Results are converted to [`Lookup`] so the rest of the crate (failure
 //! cache, serve-stale, prefetch) treats both modes alike.
 
+use std::future::Future;
 use std::net::{IpAddr, SocketAddr};
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -22,7 +24,9 @@ use hickory_resolver::config::{
 };
 use hickory_resolver::lookup::Lookup;
 use hickory_resolver::net::runtime::TokioRuntimeProvider;
+use hickory_resolver::net::xfer::DnsHandle;
 use hickory_resolver::net::NetError;
+use hickory_resolver::proto::op::DnsRequest;
 use hickory_resolver::recursor::{
     DnssecConfig, DnssecPolicy, QNameMinimization, Recursor, RecursorError, RecursorOptions,
 };
@@ -60,12 +64,14 @@ pub const ROOT_HINTS: &[&str] = &[
     "2001:dc3::35",
 ];
 
-/// Connection provider for the recursor: Tokio sockets, sending root
-/// queries to the local root zone responder when there is one, with an
-/// optional port override so tests can stand up a fake root/TLD/authoritative
-/// hierarchy on unprivileged ports.
+/// Connection provider for every upstream query (the recursor and the
+/// forwarding resolvers): Tokio sockets, with outbound connections counted by
+/// transport and every request flagged for [`track_upstream`]. For the
+/// recursor it also sends root queries to the local root zone responder when
+/// there is one, with an optional port override so tests can stand up a fake
+/// root/TLD/authoritative hierarchy on unprivileged ports.
 #[derive(Clone, Default)]
-pub struct RecursorConnections {
+pub struct UpstreamConnections {
     runtime: TokioRuntimeProvider,
     local_root: Option<SocketAddr>,
     port_override: Option<u16>,
@@ -73,9 +79,63 @@ pub struct RecursorConnections {
     metrics: Option<Arc<Metrics>>,
 }
 
-impl ConnectionProvider for RecursorConnections {
-    type Conn = <TokioRuntimeProvider as ConnectionProvider>::Conn;
-    type FutureConn = <TokioRuntimeProvider as ConnectionProvider>::FutureConn;
+impl UpstreamConnections {
+    /// The provider for a forwarding resolver (no local root, no test port).
+    pub fn forwarding(metrics: Arc<Metrics>) -> Self {
+        Self {
+            metrics: Some(metrics),
+            ..Self::default()
+        }
+    }
+}
+
+tokio::task_local! {
+    /// Set when the lookup running in this task sends a query upstream.
+    static SENT_UPSTREAM: std::cell::Cell<bool>;
+}
+
+/// Run a lookup and report whether it sent any query upstream. A lookup
+/// that did not was answered from a resolver cache.
+pub async fn track_upstream<F: Future>(lookup: F) -> (F::Output, bool) {
+    SENT_UPSTREAM
+        .scope(std::cell::Cell::new(false), async {
+            let output = lookup.await;
+            (output, SENT_UPSTREAM.with(|sent| sent.get()))
+        })
+        .await
+}
+
+/// A connection handle that flags each request it sends (see
+/// [`track_upstream`]).
+#[derive(Clone)]
+pub struct TrackedConn<C>(C);
+
+impl<C: DnsHandle> DnsHandle for TrackedConn<C> {
+    type Response = C::Response;
+    type Runtime = C::Runtime;
+
+    fn is_verifying_dnssec(&self) -> bool {
+        self.0.is_verifying_dnssec()
+    }
+
+    fn is_using_edns(&self) -> bool {
+        self.0.is_using_edns()
+    }
+
+    fn send(&self, request: DnsRequest) -> Self::Response {
+        // Outside a tracked lookup (prefetch refreshes, probes) there is
+        // nothing to flag.
+        let _ = SENT_UPSTREAM.try_with(|sent| sent.set(true));
+        self.0.send(request)
+    }
+}
+
+type TokioConn = <TokioRuntimeProvider as ConnectionProvider>::Conn;
+
+impl ConnectionProvider for UpstreamConnections {
+    type Conn = TrackedConn<TokioConn>;
+    type FutureConn =
+        Pin<Box<dyn Future<Output = std::result::Result<Self::Conn, NetError>> + Send>>;
     type RuntimeProvider = TokioRuntimeProvider;
 
     fn new_connection(
@@ -106,14 +166,15 @@ impl ConnectionProvider for RecursorConnections {
             Some(root) if root.ip() == ip => Some(root.port()),
             _ => self.port_override,
         };
-        match port {
+        let connecting = match port {
             Some(port) => {
                 let mut config = config.clone();
                 config.port = port;
-                self.runtime.new_connection(ip, &config, cx)
+                self.runtime.new_connection(ip, &config, cx)?
             }
-            None => self.runtime.new_connection(ip, config, cx),
-        }
+            None => self.runtime.new_connection(ip, config, cx)?,
+        };
+        Ok(Box::pin(async move { connecting.await.map(TrackedConn) }))
     }
 
     fn runtime_provider(&self) -> &Self::RuntimeProvider {
@@ -122,7 +183,7 @@ impl ConnectionProvider for RecursorConnections {
 }
 
 /// The recursor type used by recursive mode.
-pub type DaygleRecursor = Recursor<RecursorConnections>;
+pub type DaygleRecursor = Recursor<UpstreamConnections>;
 
 /// Build a recursor from the recursive settings. With `local_root` (the
 /// address of the local root zone responder, RFC 8806) every root query goes
@@ -175,10 +236,10 @@ pub fn build(
             .filter_map(|n| n.parse().ok())
             .collect();
     }
-    let mut connections = RecursorConnections {
+    let mut connections = UpstreamConnections {
         local_root,
         metrics: Some(metrics),
-        ..RecursorConnections::default()
+        ..UpstreamConnections::default()
     };
     if let Some(port) = settings.test_outbound_port {
         // Tests run the fake hierarchy on loopback, which the default

@@ -2019,7 +2019,7 @@ pub async fn cache_status(State(state): State<AppState>) -> Response {
 
 /// `GET /api/resolver` - the resolver dashboard: how lookups were routed
 /// and how they ended, a latency histogram, the DNSSEC share and the
-/// recursor's outbound transports (counters since the server started).
+/// outbound connections by transport (counters since the server started).
 pub async fn resolver_stats(State(state): State<AppState>) -> Response {
     let config = state.config.load_full();
     let resolver = state.resolver.load_full();

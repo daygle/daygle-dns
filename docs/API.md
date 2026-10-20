@@ -701,9 +701,9 @@ Counters since the server started, behind the Status page's Resolver card:
 `routes` counts lookups by the way they were resolved (`local_root` is
 NXDOMAIN answered from the local root zone without a lookup). `latency.counts`
 has one entry per bound plus a final one for slower lookups; the percentiles
-are bucket upper bounds. `connections` counts the recursor's outbound
-connections by transport (`tls` and `quic` come from opportunistic
-encryption).
+are bucket upper bounds. `connections` counts outbound connections to
+nameservers and upstreams by transport (`tls` and `quic` come from
+opportunistic encryption and from `tls://`/`quic://` upstreams).
 
 ### Local root zone
 

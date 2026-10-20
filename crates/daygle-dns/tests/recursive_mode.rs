@@ -434,6 +434,53 @@ async fn recursive_client_policy_while_the_default_forwards() {
     shutdown(server).await;
 }
 
+async fn cache_counters(server: &daygle_dns::BoundServer) -> (u64, u64) {
+    let metrics: serde_json::Value =
+        reqwest::get(format!("http://{}/api/metrics", server.api_addr))
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+    (
+        metrics["cache_hits"].as_u64().unwrap(),
+        metrics["cache_misses"].as_u64().unwrap(),
+    )
+}
+
+#[tokio::test]
+async fn cache_hits_and_misses_are_counted_in_both_modes() {
+    // Recursive: the first lookup walks the hierarchy, the repeat is cached.
+    let port = spawn_hierarchy().await;
+    let dir = tempfile::tempdir().unwrap();
+    let server = spawn(recursive_config(&dir, port)).await;
+    let udp = server.udp_addr.unwrap();
+    let msg = udp_query(udp, "www.example.test.", RecordType::A).await;
+    assert_eq!(first_answer(&msg).as_deref(), Some("198.51.100.7"));
+    assert_eq!(cache_counters(&server).await, (0, 1));
+    let msg = udp_query(udp, "www.example.test.", RecordType::A).await;
+    assert_eq!(first_answer(&msg).as_deref(), Some("198.51.100.7"));
+    assert_eq!(cache_counters(&server).await, (1, 1));
+    shutdown(server).await;
+
+    // Forwarding: the same through an upstream.
+    let upstream = spawn_upstream_answering("site.test.", Ipv4Addr::new(192, 0, 2, 1)).await;
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = base_config(&dir.path().join("daygle-dns.db"));
+    config.recursive.enabled = true;
+    config.recursive.mode = Some(ResolutionMode::Forwarding);
+    config.recursive.upstreams = vec![upstream.to_string()];
+    config.recursive.dnssec_validate = false;
+    let server = spawn(config).await;
+    let udp = server.udp_addr.unwrap();
+    for expected in [(0, 1), (1, 1), (2, 1)] {
+        let msg = udp_query(udp, "www.site.test.", RecordType::A).await;
+        assert_eq!(first_answer(&msg).as_deref(), Some("192.0.2.1"));
+        assert_eq!(cache_counters(&server).await, expected);
+    }
+    shutdown(server).await;
+}
+
 #[tokio::test]
 async fn opportunistic_encryption_falls_back_to_plain_dns() {
     // The fake servers speak no TLS: probes fail and resolution carries on

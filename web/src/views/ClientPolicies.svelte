@@ -12,7 +12,7 @@
 
   const ACTIONS = {
     forward: 'Forward to Upstreams',
-    recursive: 'Resolve from the Root Servers',
+    recursive: 'Resolve from Root Servers',
     refuse: 'Refuse Recursion',
   };
 
@@ -126,7 +126,7 @@
 
   function describe(p) {
     if (p.action === 'forward') return `→ ${p.upstreams.join(', ')}`;
-    return p.action === 'recursive' ? 'Resolved from the root servers' : 'Recursion refused';
+    return p.action === 'recursive' ? 'Resolved from Root Servers' : 'Recursion Refused';
   }
 
   $effect(() => {
@@ -191,7 +191,7 @@
         <button class="secondary" style="padding: 2px 10px" onclick={close} aria-label="Close">✕</button>
       </div>
       <div class="grid2">
-        <label>Name <input placeholder="Kids' devices" bind:value={form.name} /></label>
+        <label>Name <input placeholder="Kids' Devices" bind:value={form.name} /></label>
         <label>Resolution
           <select bind:value={form.action}>
             {#each Object.entries(ACTIONS) as [value, label]}

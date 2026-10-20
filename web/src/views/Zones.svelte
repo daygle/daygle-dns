@@ -480,9 +480,9 @@
                   Serial {rootStatus.serial} · {rootStatus.tlds} TLDs
                 </span>
               {:else if rootStatus?.last_error}
-                <span style="color: var(--danger)">Not in use: {rootStatus.last_error}</span>
+                <span style="color: var(--danger)">Not in Use: {rootStatus.last_error}</span>
               {:else}
-                Transferring and verifying the root zone…
+                Transferring and Verifying the Root Zone…
               {/if}
             </td>
             <td>

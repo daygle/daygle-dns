@@ -3,7 +3,7 @@
 //! Recursive resolution built on [`hickory_resolver`] (the continuation of
 //! trust-dns-resolver).
 //!
-//! [`RecursiveResolver`] wraps a `TokioResolver` and configures:
+//! [`RecursiveResolver`] wraps a `ForwardResolver` and configures:
 //!
 //! - Two resolution modes for everything not covered below: **recursive**
 //!   (root → TLD → authoritative iteration from the root servers, see
@@ -42,8 +42,7 @@ use hickory_proto::op::Query;
 use hickory_proto::rr::{Name, RecordType};
 use hickory_resolver::config::{ResolverConfig, ResolverOpts};
 use hickory_resolver::lookup::Lookup;
-use hickory_resolver::net::runtime::TokioRuntimeProvider;
-use hickory_resolver::TokioResolver;
+use hickory_resolver::Resolver;
 use tracing::{debug, info, warn};
 
 pub use upstream::parse_upstreams;
@@ -88,10 +87,14 @@ struct Inner {
     rebuild: std::sync::Mutex<()>,
 }
 
+/// A forwarding resolver (upstreams, conditional and stub zones, client
+/// policies) on the shared upstream connection provider.
+type ForwardResolver = Resolver<recursor::UpstreamConnections>;
+
 /// The resolver for names outside conditional and stub zones.
 enum DefaultBackend {
     /// Forwarding mode: upstreams or the system resolver.
-    Forward(Box<TokioResolver>),
+    Forward(Box<ForwardResolver>),
     /// Recursive mode: iteration from the root servers ([`Inner::recursor`]).
     Recursive,
 }
@@ -104,7 +107,7 @@ struct ClientPolicy {
 
 enum PolicyBackend {
     /// The policy's own upstreams.
-    Forward(Box<TokioResolver>),
+    Forward(Box<ForwardResolver>),
     /// Iteration from the root servers ([`Inner::recursor`]).
     Recursive,
     /// No recursion for these clients.
@@ -133,7 +136,7 @@ const SCOPE_POLICY: u16 = 2;
 /// A resolver chosen for one query, cloned out of [`Inner`] so no borrow is
 /// held across the lookup.
 enum Route {
-    Forward(Box<TokioResolver>),
+    Forward(Box<ForwardResolver>),
     Recursive(Arc<recursor::DaygleRecursor>),
     /// Forwarding mode with a local root zone: the top-level domain does
     /// not exist, so the name cannot either.
@@ -175,7 +178,7 @@ impl Route {
 /// trailing dot stripped) and its own resolver.
 struct ConditionalResolver {
     zone: String,
-    resolver: TokioResolver,
+    resolver: ForwardResolver,
 }
 
 impl std::fmt::Debug for RecursiveResolver {
@@ -209,7 +212,7 @@ impl RecursiveResolver {
     ) -> Result<Self> {
         let mode = settings.effective_mode();
         let local_root = local_root.filter(|_| settings.local_root.enabled);
-        let policies = build_policies(settings)?;
+        let policies = build_policies(settings, &metrics)?;
         let needs_recursor = mode == ResolutionMode::Recursive
             || policies
                 .iter()
@@ -230,10 +233,13 @@ impl RecursiveResolver {
             ResolutionMode::Forwarding => {
                 let (config, opts) = build_config(settings)?;
                 DefaultBackend::Forward(Box::new(
-                    TokioResolver::builder_with_config(config, TokioRuntimeProvider::default())
-                        .with_options(opts)
-                        .build()
-                        .map_err(|e| DaygleError::Config(format!("cannot build resolver: {e}")))?,
+                    ForwardResolver::builder_with_config(
+                        config,
+                        recursor::UpstreamConnections::forwarding(metrics.clone()),
+                    )
+                    .with_options(opts)
+                    .build()
+                    .map_err(|e| DaygleError::Config(format!("cannot build resolver: {e}")))?,
                 ))
             }
         };
@@ -242,16 +248,18 @@ impl RecursiveResolver {
         for zone in &settings.conditional_zones {
             let zone_name = normalize_zone(&zone.name);
             let (zconfig, zopts) = build_zone_config(zone, settings)?;
-            let resolver =
-                TokioResolver::builder_with_config(zconfig, TokioRuntimeProvider::default())
-                    .with_options(zopts)
-                    .build()
-                    .map_err(|e| {
-                        DaygleError::Config(format!(
-                            "cannot build conditional resolver for '{}': {e}",
-                            zone.name
-                        ))
-                    })?;
+            let resolver = ForwardResolver::builder_with_config(
+                zconfig,
+                recursor::UpstreamConnections::forwarding(metrics.clone()),
+            )
+            .with_options(zopts)
+            .build()
+            .map_err(|e| {
+                DaygleError::Config(format!(
+                    "cannot build conditional resolver for '{}': {e}",
+                    zone.name
+                ))
+            })?;
             info!(
                 zone = %zone_name,
                 upstreams = zone.upstreams.len(),
@@ -283,16 +291,18 @@ impl RecursiveResolver {
             // stub zones skip validation (conditional forwarding keeps it).
             opts.validate = false;
             let zconfig = ResolverConfig::from_parts(None, vec![], nss);
-            let resolver =
-                TokioResolver::builder_with_config(zconfig, TokioRuntimeProvider::default())
-                    .with_options(opts)
-                    .build()
-                    .map_err(|e| {
-                        DaygleError::Config(format!(
-                            "cannot build stub resolver for '{}': {e}",
-                            stub.name
-                        ))
-                    })?;
+            let resolver = ForwardResolver::builder_with_config(
+                zconfig,
+                recursor::UpstreamConnections::forwarding(metrics.clone()),
+            )
+            .with_options(opts)
+            .build()
+            .map_err(|e| {
+                DaygleError::Config(format!(
+                    "cannot build stub resolver for '{}': {e}",
+                    stub.name
+                ))
+            })?;
             info!(
                 zone = %zone_name,
                 nameservers = stub.nss.len(),
@@ -616,6 +626,7 @@ impl Inner {
                 "serving cached failure response"
             );
             inner.metrics.inc(&inner.metrics.resolver.failures_replayed);
+            inner.metrics.inc(&inner.metrics.cache_hits);
             return Err(DaygleError::Resolution {
                 message: "cached failure response".to_string(),
                 response_code: Some(code),
@@ -697,7 +708,7 @@ impl Inner {
     /// record metrics and cache-assistant state, optionally trigger a
     /// prefetch spawn.
     ///
-    /// The chosen `TokioResolver` is cloned out of `inner` **before** the
+    /// The chosen `ForwardResolver` is cloned out of `inner` **before** the
     /// await so no borrow of `Inner` is held across it (this keeps the
     /// future `Send` despite the generic Hickory lookup future).
     async fn resolve(
@@ -720,9 +731,17 @@ impl Inner {
             RouteKind::LocalRoot => &r.route_local_root,
         });
         let started = Instant::now();
-        let result = route.lookup(name, record_type).await;
+        let (result, sent_upstream) =
+            recursor::track_upstream(route.lookup(name, record_type)).await;
         if kind != RouteKind::LocalRoot {
             r.observe_latency(started.elapsed());
+            // Answered without a query leaving the server: a cache hit
+            // (negative answers included); otherwise a miss.
+            inner.metrics.inc(if sent_upstream {
+                &inner.metrics.cache_misses
+            } else {
+                &inner.metrics.cache_hits
+            });
         }
         match &result {
             Ok(_) => r.observe_outcome(Some(0), false),
@@ -734,7 +753,6 @@ impl Inner {
 
         match result {
             Ok(lookup) => {
-                inner.metrics.inc(&inner.metrics.cache_misses);
                 if allow_prefetch && inner.cache_assist.on_success(&key, &lookup) {
                     if inner.cache_assist.try_begin_prefetch(&key) {
                         let task_inner = Arc::clone(&inner);
@@ -835,7 +853,7 @@ fn zone_resolver(
     conditional: &[ConditionalResolver],
     stubs: &[ConditionalResolver],
     name: &Name,
-) -> Option<(TokioResolver, RouteKind)> {
+) -> Option<(ForwardResolver, RouteKind)> {
     let conditional_match = match_conditional_zones(conditional, name);
     let stub_match = match_conditional_zones(stubs, name);
     let (zone, kind) = match (conditional_match, stub_match) {
@@ -854,7 +872,10 @@ fn zone_resolver(
 }
 
 /// Build the client policies (forwarding ones get their own resolver).
-fn build_policies(settings: &RecursiveSettings) -> Result<Vec<ClientPolicy>> {
+fn build_policies(
+    settings: &RecursiveSettings,
+    metrics: &Arc<Metrics>,
+) -> Result<Vec<ClientPolicy>> {
     let mut policies = Vec::new();
     for policy in settings.client_policies.iter().filter(|p| p.enabled) {
         let networks = policy
@@ -866,16 +887,18 @@ fn build_policies(settings: &RecursiveSettings) -> Result<Vec<ClientPolicy>> {
             ClientPolicyAction::Forward => {
                 let config =
                     ResolverConfig::from_parts(None, vec![], parse_upstreams(&policy.upstreams)?);
-                let resolver =
-                    TokioResolver::builder_with_config(config, TokioRuntimeProvider::default())
-                        .with_options(resolver_opts(settings))
-                        .build()
-                        .map_err(|e| {
-                            DaygleError::Config(format!(
-                                "cannot build the resolver for client policy '{}': {e}",
-                                policy.name
-                            ))
-                        })?;
+                let resolver = ForwardResolver::builder_with_config(
+                    config,
+                    recursor::UpstreamConnections::forwarding(metrics.clone()),
+                )
+                .with_options(resolver_opts(settings))
+                .build()
+                .map_err(|e| {
+                    DaygleError::Config(format!(
+                        "cannot build the resolver for client policy '{}': {e}",
+                        policy.name
+                    ))
+                })?;
                 PolicyBackend::Forward(Box::new(resolver))
             }
             ClientPolicyAction::Recursive => PolicyBackend::Recursive,
@@ -922,7 +945,7 @@ fn build_zone_config(
 fn build_config(settings: &RecursiveSettings) -> Result<(ResolverConfig, ResolverOpts)> {
     let config = if settings.use_system_config || settings.upstreams.is_empty() {
         info!("using system resolver configuration (resolv.conf)");
-        // `TokioResolver::builder` would load system config, but we need the
+        // `ForwardResolver::builder` would load system config, but we need the
         // opts; instead read it here via hickory's system_conf helpers.
         let (cfg, _opts) = hickory_resolver::system_conf::read_system_conf()
             .map_err(|e| DaygleError::Config(format!("cannot read system config: {e}")))?;
