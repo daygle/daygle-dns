@@ -93,20 +93,27 @@ impl NotifySender {
             }
         };
 
-        let bind_addr = if self.targets.iter().any(|t| t.is_ipv6()) {
-            "[::]:0"
-        } else {
-            "0.0.0.0:0"
-        };
-        let socket = match UdpSocket::bind(bind_addr).await {
-            Ok(socket) => socket,
-            Err(e) => {
-                warn!(zone = %zone, error = %e, "cannot bind NOTIFY socket");
-                return;
-            }
-        };
-
+        // One socket per address family: a single IPv6 socket only reaches
+        // IPv4 targets on hosts that allow dual-stack sockets.
+        let mut v4 = None;
+        let mut v6 = None;
         for target in &self.targets {
+            let slot = if target.is_ipv6() { &mut v6 } else { &mut v4 };
+            if slot.is_none() {
+                let bind_addr = if target.is_ipv6() {
+                    "[::]:0"
+                } else {
+                    "0.0.0.0:0"
+                };
+                match UdpSocket::bind(bind_addr).await {
+                    Ok(socket) => *slot = Some(socket),
+                    Err(e) => {
+                        warn!(zone = %zone, %target, error = %e, "cannot bind NOTIFY socket");
+                        continue;
+                    }
+                }
+            }
+            let socket = slot.as_ref().expect("bound above");
             let send = async {
                 socket.send_to(&bytes, target).await?;
                 // Best-effort wait for the acknowledgment; its content is not

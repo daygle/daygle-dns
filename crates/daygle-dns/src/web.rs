@@ -163,12 +163,9 @@ impl WebServer {
     }
 
     async fn bind(&self, port: u16, label: &str) -> Result<TcpListener, String> {
-        let addr: SocketAddr = format!("{}:{port}", self.listen)
-            .parse()
-            .map_err(|e| format!("bad listen address '{}': {e}", self.listen))?;
-        TcpListener::bind(addr)
-            .await
-            .map_err(|e| format!("cannot listen for {label} on {addr}: {e}"))
+        let addr = daygle_dns_core::config::listen_socket_addr(&self.listen, port)
+            .map_err(|e| format!("api.listen: {e}"))?;
+        crate::net::bind_tcp(addr).map_err(|e| format!("cannot listen for {label} on {addr}: {e}"))
     }
 
     fn spawn_http(&self, port: u16, socket: TcpListener) -> Running {

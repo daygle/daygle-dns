@@ -2,6 +2,9 @@
 # Copy to /etc/daygle-dns/daygle-dns.toml and adjust as needed.
 
 # Plaintext DNS listeners (UDP/TCP on port 53).
+# Every `listen` below takes an IPv4 or IPv6 address: "0.0.0.0" listens on
+# every IPv4 address, "::" on every IPv4 AND IPv6 address (dual-stack), and
+# a specific address such as "192.168.1.2" or "fd00::53" on just that one.
 [server]
 listen = "0.0.0.0"
 port = 53

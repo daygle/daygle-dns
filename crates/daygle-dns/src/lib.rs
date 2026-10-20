@@ -6,6 +6,7 @@
 
 pub mod dispatcher;
 mod doq;
+mod net;
 pub mod query_db_log;
 pub mod reload;
 pub mod web;
@@ -859,6 +860,12 @@ fn write_if_changed(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
     std::fs::rename(&tmp, path).map_err(DaygleError::Io)
 }
 
+/// `[section].listen` and a port as a socket address (IPv4 or IPv6).
+fn listen_addr(section: &str, listen: &str, port: u16) -> Result<std::net::SocketAddr> {
+    daygle_dns_core::config::listen_socket_addr(listen, port)
+        .map_err(|e| DaygleError::Config(format!("{section}.listen: {e}")))
+}
+
 async fn bind_listeners(
     config: &DaygleConfig,
     store: &daygle_dns_authoritative::ZoneStore,
@@ -870,9 +877,7 @@ async fn bind_listeners(
     // to the zone database so the file-based TLS loaders can read them.
     let mut config = config.clone();
     materialize_stored_certs(&mut config, store)?;
-    let listen: std::net::SocketAddr = format!("{}:{}", config.server.listen, config.server.port)
-        .parse()
-        .map_err(|e| DaygleError::Config(format!("bad server listen address: {e}")))?;
+    let listen = listen_addr("server", &config.server.listen, config.server.port)?;
 
     // DoQ task, spawned below when QUIC is enabled.
     let mut doq_task = None;
@@ -883,7 +888,7 @@ async fn bind_listeners(
         // be set before Windows picks them up on the first connect). These
         // knobs use `socket2` because std::net::UdpSocket no longer exposes
         // SO_SNDBUF/SO_RCVBUF setters.
-        let std_socket = std::net::UdpSocket::bind(listen)?;
+        let std_socket = net::bind_udp_std(listen)?;
         let buffer_bytes = |kb: u32| {
             (kb as usize)
                 .checked_mul(1024)
@@ -905,7 +910,7 @@ async fn bind_listeners(
         );
     }
     if config.server.tcp_enabled {
-        let listener = tokio::net::TcpListener::bind(listen).await?;
+        let listener = net::bind_tcp(listen)?;
         addrs.tcp = Some(listener.local_addr()?);
         server.register_listener(
             listener,
@@ -916,10 +921,8 @@ async fn bind_listeners(
     }
 
     if config.dot.enabled {
-        let addr: std::net::SocketAddr = format!("{}:{}", config.dot.listen, config.dot.port)
-            .parse()
-            .map_err(|e| DaygleError::Config(format!("bad DoT listen address: {e}")))?;
-        let listener = tokio::net::TcpListener::bind(addr).await?;
+        let addr = listen_addr("dot", &config.dot.listen, config.dot.port)?;
+        let listener = net::bind_tcp(addr)?;
         addrs.dot = Some(listener.local_addr()?);
         let tls_config = daygle_dns_dot::build_tls_config(&config.dot)?;
         daygle_dns_dot::register_dot(
@@ -932,10 +935,8 @@ async fn bind_listeners(
     }
 
     if config.doh.enabled {
-        let addr: std::net::SocketAddr = format!("{}:{}", config.doh.listen, config.doh.port)
-            .parse()
-            .map_err(|e| DaygleError::Config(format!("bad DoH listen address: {e}")))?;
-        let listener = tokio::net::TcpListener::bind(addr).await?;
+        let addr = listen_addr("doh", &config.doh.listen, config.doh.port)?;
+        let listener = net::bind_tcp(addr)?;
         addrs.doh = Some(listener.local_addr()?);
         let tls_config = daygle_dns_dot::build_doh_tls_config(&config.doh)?;
         daygle_dns_dot::register_doh(
@@ -950,10 +951,8 @@ async fn bind_listeners(
     }
 
     if config.doq.enabled {
-        let addr: std::net::SocketAddr = format!("{}:{}", config.doq.listen, config.doq.port)
-            .parse()
-            .map_err(|e| DaygleError::Config(format!("bad DoQ listen address: {e}")))?;
-        let socket = tokio::net::UdpSocket::bind(addr).await?;
+        let addr = listen_addr("doq", &config.doq.listen, config.doq.port)?;
+        let socket = net::bind_udp(addr)?;
         let tls_config = daygle_dns_dot::build_doq_tls_config(&config.doq)?;
         let endpoint = crate::doq::build_doq_endpoint(
             socket,

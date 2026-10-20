@@ -993,6 +993,27 @@ impl RuntimeSettings {
     }
 }
 
+/// Join a listen address and a port. Takes IPv4 or IPv6 addresses, with or
+/// without brackets: `0.0.0.0` (every IPv4 address), `::` or `[::]` (every
+/// IPv4 and IPv6 address), `192.168.1.2`, `fd00::53`.
+pub fn listen_socket_addr(
+    listen: &str,
+    port: u16,
+) -> std::result::Result<std::net::SocketAddr, String> {
+    let text = listen.trim();
+    let bare = text
+        .strip_prefix('[')
+        .and_then(|t| t.strip_suffix(']'))
+        .unwrap_or(text);
+    bare.parse::<IpAddr>()
+        .map(|ip| std::net::SocketAddr::new(ip, port))
+        .map_err(|_| {
+            format!(
+                "'{text}' is not an IP address (use 0.0.0.0 for every IPv4 address, or :: for every IPv4 and IPv6 address)"
+            )
+        })
+}
+
 /// Placeholder SOA defaults that earlier versions shipped (and stored in
 /// the database on the first settings save). They name no real server or
 /// person, so they are treated as unset: the server's own name and the
@@ -1623,6 +1644,18 @@ impl DaygleConfig {
         self.display
             .check(false)
             .map_err(|e| DaygleError::Config(format!("display: {e}")))?;
+        for (name, listen, enabled) in [
+            ("server.listen", &self.server.listen, true),
+            ("api.listen", &self.api.listen, self.api.enabled),
+            ("dot.listen", &self.dot.listen, self.dot.enabled),
+            ("doh.listen", &self.doh.listen, self.doh.enabled),
+            ("doq.listen", &self.doq.listen, self.doq.enabled),
+        ] {
+            if enabled {
+                listen_socket_addr(listen, 0)
+                    .map_err(|e| DaygleError::Config(format!("{name}: {e}")))?;
+            }
+        }
         if self.api.enabled {
             self.web
                 .check(self.api.port)
@@ -2662,6 +2695,29 @@ mod tests {
         assert!(cfg.policy.allowlist.is_empty());
         assert_eq!(cfg.dot.port, 853);
         assert!(cfg.recursive.dnssec_validate);
+    }
+
+    #[test]
+    fn listen_addresses_take_ipv4_and_ipv6() {
+        let addr = |s: &str| listen_socket_addr(s, 53).map(|a| a.to_string());
+        assert_eq!(addr("0.0.0.0").unwrap(), "0.0.0.0:53");
+        assert_eq!(addr("::").unwrap(), "[::]:53");
+        assert_eq!(addr("[::]").unwrap(), "[::]:53");
+        assert_eq!(addr(" fd00::53 ").unwrap(), "[fd00::53]:53");
+        assert_eq!(addr("192.168.1.2").unwrap(), "192.168.1.2:53");
+        assert!(addr("dns.example.com").is_err());
+        assert!(addr("[::").is_err());
+        // Before this, "::" was joined into ":::53", which does not parse.
+        let mut cfg = DaygleConfig::default();
+        cfg.server.listen = "::".into();
+        cfg.api.listen = "[::1]".into();
+        cfg.validate().unwrap();
+        cfg.server.listen = "not-an-ip".into();
+        assert!(cfg
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("server.listen"));
     }
 
     #[test]

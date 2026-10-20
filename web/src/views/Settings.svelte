@@ -362,7 +362,9 @@
     const here = window.location;
     const port = Number(here.port) || (here.protocol === 'https:' ? 443 : 80);
     const path = here.pathname + here.search + here.hash;
-    const url = (scheme, p) => `${scheme}://${here.hostname.includes(':') ? `[${here.hostname}]` : here.hostname}${(scheme === 'https' && p === 443) || (scheme === 'http' && p === 80) ? '' : `:${p}`}${path}`;
+    // location.hostname keeps the brackets of an IPv6 literal ([::1]).
+    const host = here.hostname.includes(':') && !here.hostname.startsWith('[') ? `[${here.hostname}]` : here.hostname;
+    const url = (scheme, p) => `${scheme}://${host}${(scheme === 'https' && p === 443) || (scheme === 'http' && p === 80) ? '' : `:${p}`}${path}`;
     const servesHttp = web.http_enabled && !web.redirect_http && port === web.http_port;
     const servesHttps = web.https_enabled && port === web.https_port;
     if (here.protocol === 'http:' && servesHttp) return null;
