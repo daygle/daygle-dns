@@ -36,6 +36,7 @@
   // empty when unavailable, in which case the text field is the only UI.
   let aiBackendCategories = $state([]);
   let upstreamText = $state('');
+  let recursionNetworksText = $state('');
   // Multi-line textareas for the network allow-lists and NOTIFY targets.
   let axfrNetworksText = $state('');
   let updateNetworksText = $state('');
@@ -99,6 +100,7 @@
         aiCategoriesText = '';
         aiBackendCategories = [];
         upstreamText = '';
+        recursionNetworksText = '';
         axfrNetworksText = '';
         updateNetworksText = '';
         notifyTargetsText = '';
@@ -106,6 +108,10 @@
       }
       server = { ...config.server };
       recursive = { ...config.recursive };
+      // An unset mode means: forwarding when upstreams exist, else recursive.
+      recursive.mode = config.recursive.mode || (config.recursive.upstreams?.length ? 'forwarding' : 'recursive');
+      recursive.recursion_access = config.recursive.recursion_access || 'private_networks';
+      recursionNetworksText = (config.recursive.recursion_networks || []).join('\n');
       authoritative = { ...config.authoritative };
       dot = { ...config.dot };
       doh = { ...config.doh };
@@ -165,6 +171,11 @@
         },
         recursive: {
           enabled: !!recursive.enabled,
+          mode: recursive.mode,
+          recursion_access: recursive.recursion_access,
+          recursion_networks: parseLines(recursionNetworksText),
+          case_randomization: !!recursive.case_randomization,
+          rebinding_protection: !!recursive.rebinding_protection,
           upstreams: parseUpstreams(upstreamText),
           dnssec_validate: !!recursive.dnssec_validate,
           prefetch_enabled: !!recursive.prefetch_enabled,
@@ -307,14 +318,68 @@
   <div class="card" style="margin-bottom: 14px">
     <h3 style="margin: 0 0 10px">Recursive Resolver</h3>
     <div class="form-grid">
+      <label>
+        <span>Resolution Mode</span>
+        <select bind:value={recursive.mode}>
+          <option value="recursive">Recursive (from the root servers)</option>
+          <option value="forwarding">Forwarding (to upstream servers)</option>
+        </select>
+      </label>
       <label class="check"><input type="checkbox" bind:checked={recursive.enabled} /> <span>Recursion Enabled</span></label>
       <label class="check"><input type="checkbox" bind:checked={recursive.dnssec_validate} /> <span>DNSSEC Validation</span></label>
-      <label class="check"><input type="checkbox" bind:checked={recursive.use_system_config} /> <span>Use System DNS Configuration</span></label>
     </div>
-    <label class="stacked" style="margin-top: 12px">
-      <span>Upstream Servers (one per line; supports <code>tls://</code> and <code>https://</code>)</span>
-      <textarea rows="4" bind:value={upstreamText}></textarea>
-    </label>
+    {#if recursive.mode === 'recursive'}
+      <div class="form-grid" style="margin-top: 4px">
+        <label class="check"><input type="checkbox" bind:checked={recursive.case_randomization} /> <span>Randomize Query Case (0x20)</span></label>
+        <label class="check"><input type="checkbox" bind:checked={recursive.rebinding_protection} /> <span>DNS Rebinding Protection</span></label>
+      </div>
+      <p class="muted help">
+        Daygle resolves names itself, starting at the root servers, so no upstream
+        provider sees your queries. Query names are minimized (RFC 9156) and DNSSEC
+        is validated against the root trust anchor. Query-case randomization makes
+        spoofed answers harder to inject but can fail with the odd server that does
+        not preserve case. Rebinding protection drops private and loopback addresses
+        from public answers (your own zones, forwarders and stub zones are not
+        affected).
+      </p>
+    {:else}
+      <div class="form-grid" style="margin-top: 4px">
+        <label class="check"><input type="checkbox" bind:checked={recursive.use_system_config} /> <span>Use System DNS Configuration</span></label>
+      </div>
+      <label class="stacked" style="margin-top: 12px">
+        <span>Upstream Servers (one per line; supports <code>tls://</code> and <code>https://</code>)</span>
+        <textarea rows="4" bind:value={upstreamText}></textarea>
+      </label>
+      <p class="muted help">
+        Queries are sent to these upstream servers, or to the system's resolver when
+        the list is empty or Use System DNS Configuration is set.
+      </p>
+    {/if}
+    <h4>Recursion Access</h4>
+    <div class="form-grid">
+      <label>
+        <span>Who May Use Recursion</span>
+        <select bind:value={recursive.recursion_access}>
+          <option value="private_networks">Private Networks Only</option>
+          <option value="allow">Everyone</option>
+          <option value="custom">Custom Networks</option>
+          <option value="deny">Nobody</option>
+        </select>
+      </label>
+    </div>
+    {#if recursive.recursion_access === 'custom'}
+      <label class="stacked" style="margin-top: 12px">
+        <span>Allowed Networks (one per line, e.g. 192.168.1.0/24 or a single IP)</span>
+        <textarea rows="3" placeholder={'192.168.1.0/24\n2001:db8::/48'} bind:value={recursionNetworksText}></textarea>
+      </label>
+    {/if}
+    <p class="muted help">
+      Applies to everything this server resolves rather than answers from its own
+      zones; refused clients get REFUSED. Private Networks Only covers loopback,
+      10/8, 172.16/12, 192.168/16, 100.64/10 (CGNAT), link-local and IPv6 ULA, so
+      the server is not an open resolver if it is reachable from the internet.
+      Your own zones are answered for everyone.
+    </p>
     <h4>Caching</h4>
     <div class="recursive-cache-grid">
       <label><span>Minimum Cache TTL (Seconds)</span><input type="number" min="0" bind:value={recursive.min_cache_ttl} /></label>

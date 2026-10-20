@@ -38,6 +38,7 @@ hickory-resolver = { version = "0.26", features = [
     "quic-ring",
     "webpki-roots",
     "serde",
+    "recursor",
 ] }
 
 tokio = { version = "1", features = ["full"] }

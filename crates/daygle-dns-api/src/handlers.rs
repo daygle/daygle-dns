@@ -200,6 +200,9 @@ pub async fn status(State(state): State<AppState>) -> Response {
         "zones": zones,
         "records": records,
         "recursion": state.resolver.load_full().is_some(),
+        // "recursive" or "forwarding" while recursion is enabled, else null.
+        "resolution_mode": state.resolver.load_full().map(|r| r.mode()),
+        "recursion_access": config.recursive.recursion_access,
         "dnssec": config.recursive.dnssec_validate,
         "dot_enabled": config.dot.enabled,
         "doh_enabled": config.doh.enabled,
@@ -2665,6 +2668,12 @@ pub struct RecursiveUpdate {
     pub failure_cache_ttl: Option<u32>,
     /// Replaces the whole conditional-forwarder list.
     pub conditional_zones: Option<Vec<daygle_dns_core::config::ConditionalZoneConfig>>,
+    pub mode: Option<daygle_dns_core::config::ResolutionMode>,
+    pub recursion_access: Option<daygle_dns_core::config::RecursionAccess>,
+    pub recursion_networks: Option<Vec<String>>,
+    pub root_hints: Option<Vec<String>>,
+    pub case_randomization: Option<bool>,
+    pub rebinding_protection: Option<bool>,
 }
 
 /// Fields shared by the DoT and DoQ listeners.
@@ -2768,6 +2777,16 @@ pub async fn update_settings(
             config.recursive.conditional_zones =
                 daygle_dns_core::config::RecursiveUpdate::normalize_conditional_zones(v);
         }
+        daygle_dns_core::config::RecursiveUpdate {
+            mode: r.mode,
+            recursion_access: r.recursion_access,
+            recursion_networks: r.recursion_networks.clone(),
+            root_hints: r.root_hints.clone(),
+            case_randomization: r.case_randomization,
+            rebinding_protection: r.rebinding_protection,
+            ..Default::default()
+        }
+        .apply_resolution(&mut config.recursive);
         if let Some(v) = r.failure_cache_ttl {
             config.recursive.failure_cache_ttl = v;
         }

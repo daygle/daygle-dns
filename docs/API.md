@@ -121,6 +121,8 @@ GET /api/status
   "zones": 2,
   "records": 17,
   "recursion": true,
+  "resolution_mode": "recursive",
+  "recursion_access": "private_networks",
   "dnssec": true,
   "dot_enabled": true,
   "doh_enabled": false,
@@ -255,8 +257,9 @@ PUT /api/config
 ```
 
 Editable groups: `server` (listen/port/udp_enabled/tcp_enabled), `recursive`
-(enabled/upstreams/dnssec_validate/prefetch_* /serve_stale_secs/
-conditional_zones), `dot`,
+(enabled/mode/upstreams/dnssec_validate/prefetch_* /serve_stale_secs/
+conditional_zones/recursion_access/recursion_networks/root_hints/
+case_randomization/rebinding_protection), `dot`,
 `doh`, `doq` (enabled/port/self_signed/server_name [+ `doh.endpoint`]), `api`
 (gui_enabled/cors_origins), and `authoritative`
 (default_record_ttl/default_primary_ns/axfr_enabled/axfr_networks/
@@ -275,6 +278,20 @@ zones created without an explicit `primary_ns`, instead of assuming
 `ns1.<zone>`. The value is normalized to a fully-qualified name (a trailing
 dot is added when missing) and a blank value keeps the current one; when the
 setting is unset, the server falls back to `ns1.<zone>.`.
+
+`recursive.mode` is `"recursive"` (resolve from the root servers; DNSSEC is
+validated against the built-in root trust anchor and query names are
+minimized) or `"forwarding"` (send queries to `recursive.upstreams`, or the
+system resolver when that list is empty). When unset it is inferred:
+forwarding if upstreams are configured, otherwise recursive. Saving settings
+stores the effective mode explicitly. `recursive.recursion_access` decides who
+may use recursion - `"private_networks"` (default: loopback, RFC 1918, CGNAT,
+link-local, IPv6 ULA), `"allow"`, `"custom"` (the CIDRs or IPs in
+`recursion_networks`) or `"deny"`; refused clients get `REFUSED`, while the
+server's own zones are answered for everyone. In recursive mode,
+`case_randomization` enables 0x20 query-case randomization and
+`rebinding_protection` drops private and loopback addresses from public
+answers; `root_hints` overrides the built-in root server addresses.
 
 Recursive settings and stub zones apply to live traffic immediately: the
 resolver is rebuilt whenever `recursive.*` or `authoritative.stub_zones`

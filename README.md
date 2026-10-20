@@ -172,7 +172,12 @@ database = "/var/lib/daygle-dns/daygle.db"
 # After that, changes made in the GUI or via PUT /api/config are
 # authoritative and survive restarts and config-file edits.
 [recursive]
-# Empty upstreams + use_system_config = true resolves via /etc/resolv.conf.
+# "recursive" (default when no upstreams are listed) resolves from the root
+# servers itself; "forwarding" sends queries to `upstreams`, or /etc/resolv.conf
+# when the list is empty and use_system_config = true.
+mode = "recursive"
+# Only private networks may use recursion by default (not an open resolver).
+recursion_access = "private_networks"
 upstreams = []
 use_system_config = true
 dnssec_validate = true
