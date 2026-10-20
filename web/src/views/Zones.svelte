@@ -1,9 +1,13 @@
 <script>
   import { api, formatApiError } from '../api.js';
+  import { reverseZoneName } from '../reverseZone.js';
 
   let { onOpenRecords = () => {} } = $props();
 
   let zones = $state([]);
+  // Server config: supplies the stub and forwarder zones and the default
+  // primary nameserver.
+  let config = $state(null);
   let error = $state(null);
   let notice = $state(null);
   let showAdd = $state(false);
@@ -29,7 +33,29 @@
     import_text: null,
     mastersText: '',
     refresh_secs: 3600,
+    nssText: '',
+    upstreamsText: '',
+    stubEnabled: true,
   });
+  // Name of the stub/forwarder being edited, or null when adding a zone.
+  let editingName = $state(null);
+
+  // Stub and conditional-forwarder zones live in the server settings, not
+  // the zone database, so they come from the config rather than /zones.
+  const stubs = $derived(config?.authoritative?.stub_zones || []);
+  const forwarders = $derived(config?.recursive?.conditional_zones || []);
+  const rowCount = $derived(zones.length + stubs.length + forwarders.length);
+  const isSettingsZone = $derived(newZone.zone_type === 'stub' || newZone.zone_type === 'forwarder');
+  // Live preview when the Zone Name is a network such as 192.168.0.0/24.
+  const reverse = $derived(reverseZoneName(newZone.name));
+
+  async function loadConfig() {
+    try {
+      config = await api.config();
+    } catch {
+      // The zone list still works; stub/forwarder rows just stay hidden.
+    }
+  }
 
   async function loadZones() {
     error = null;
@@ -56,8 +82,84 @@
       import_text: null,
       mastersText: '',
       refresh_secs: 3600,
+      nssText: '',
+      upstreamsText: '',
+      stubEnabled: true,
     };
     zoneFileName = '';
+    editingName = null;
+  }
+
+  function splitLines(text) {
+    return (text || '')
+      .split(/[\n,]+/)
+      .map((value) => value.trim())
+      .filter(Boolean);
+  }
+
+  function openEditStub(stub) {
+    notice = null;
+    resetZoneForm();
+    editingName = stub.name;
+    newZone.zone_type = 'stub';
+    newZone.name = stub.name;
+    newZone.nssText = stub.nss.join('\n');
+    newZone.refresh_secs = stub.refresh_secs;
+    newZone.stubEnabled = stub.enabled;
+    showAdd = true;
+  }
+
+  function openEditForwarder(fwd) {
+    notice = null;
+    resetZoneForm();
+    editingName = fwd.name;
+    newZone.zone_type = 'forwarder';
+    newZone.name = fwd.name;
+    newZone.upstreamsText = fwd.upstreams.join('\n');
+    showAdd = true;
+  }
+
+  // Save a stub or forwarder by replacing that whole list in the settings.
+  // The list is re-read first so a concurrent change is not overwritten.
+  async function saveSettingsZone(name) {
+    const fresh = await api.config();
+    const key = (n) => n.trim().replace(/\.$/, '').toLowerCase();
+    const others = (list) => list.filter((z) => key(z.name) !== key(editingName || name));
+    if (newZone.zone_type === 'stub') {
+      const list = others(fresh.authoritative?.stub_zones || []);
+      if (list.some((z) => key(z.name) === key(name))) throw new Error(`A stub zone named ${name} already exists`);
+      list.push({
+        name,
+        nss: splitLines(newZone.nssText),
+        refresh_secs: Number(newZone.refresh_secs) || 3600,
+        enabled: newZone.stubEnabled,
+      });
+      await api.updateSettings({ authoritative: { stub_zones: list } });
+    } else {
+      const list = others(fresh.recursive?.conditional_zones || []);
+      if (list.some((z) => key(z.name) === key(name))) throw new Error(`A conditional forwarder for ${name} already exists`);
+      list.push({ name, upstreams: splitLines(newZone.upstreamsText) });
+      await api.updateSettings({ recursive: { conditional_zones: list } });
+    }
+  }
+
+  async function removeSettingsZone(kind, name) {
+    const label = kind === 'stub' ? 'stub zone' : 'conditional forwarder';
+    if (!confirm(`Delete ${label} ${name}?`)) return;
+    notice = null;
+    try {
+      const fresh = await api.config();
+      if (kind === 'stub') {
+        const list = (fresh.authoritative?.stub_zones || []).filter((z) => z.name !== name);
+        await api.updateSettings({ authoritative: { stub_zones: list } });
+      } else {
+        const list = (fresh.recursive?.conditional_zones || []).filter((z) => z.name !== name);
+        await api.updateSettings({ recursive: { conditional_zones: list } });
+      }
+      await loadConfig();
+    } catch (e) {
+      notice = formatApiError(e);
+    }
   }
 
   function openAddZone() {
@@ -133,9 +235,38 @@
   }
 
   async function createZone() {
-    const name = newZone.name.trim();
+    if (reverse?.error) {
+      notice = `Error: ${reverse.error}`;
+      return;
+    }
+    const name = reverse?.name || newZone.name.trim();
     if (!name) {
       notice = 'Error: Zone name is required';
+      return;
+    }
+    if (isSettingsZone) {
+      if (newZone.zone_type === 'stub' && newZone.stubEnabled && splitLines(newZone.nssText).length === 0) {
+        notice = 'Error: Add at least one nameserver for the stub zone';
+        return;
+      }
+      if (newZone.zone_type === 'forwarder' && splitLines(newZone.upstreamsText).length === 0) {
+        notice = 'Error: Add at least one upstream server for the forwarder';
+        return;
+      }
+      savingZone = true;
+      notice = null;
+      try {
+        const editing = editingName !== null;
+        await saveSettingsZone(name);
+        showAdd = false;
+        resetZoneForm();
+        notice = editing ? 'Zone updated and applied live.' : 'Zone created and applied live.';
+        await loadConfig();
+      } catch (e) {
+        notice = formatApiError(e);
+      } finally {
+        savingZone = false;
+      }
       return;
     }
     const masters = newZone.mastersText
@@ -198,14 +329,13 @@
     }
   }
 
-  // Server config: DNS Server Domain (Settings -> Zones & Records) is used
-  // to pre-fill and placeholder the SOA Primary Nameserver for new zones.
-  let config = $state(null);
+  // DNS Server Domain (Settings -> Zones & Records) pre-fills and
+  // placeholders the SOA Primary Nameserver for new zones.
   let dnsServerDomain = $derived(config?.authoritative?.default_primary_ns || '');
 
   $effect(() => {
     loadZones();
-    api.config().then((c) => (config = c)).catch(() => {});
+    loadConfig();
   });
 </script>
 
@@ -218,21 +348,23 @@
 
 <div class="card">
   <div class="spread" style="margin-bottom: 10px">
-    <h3 style="margin: 0">Zones ({zones.length})</h3>
+    <h3 style="margin: 0">Zones ({rowCount})</h3>
     <button onclick={openAddZone}>Add Zone</button>
   </div>
   <div class="table-wrap">
     <table>
       <thead>
-        <tr><th>Name</th><th>Type</th><th>DNSSEC</th><th>Serial</th><th class="num">Actions</th></tr>
+        <tr><th>Name</th><th>Type</th><th>Details</th><th>DNSSEC</th><th class="num">Actions</th></tr>
       </thead>
       <tbody>
         {#each zones as zone (zone.id)}
           <tr>
             <td><code>{zone.name}</code></td>
             <td><span class="pill">{zone.zone_type === 'secondary' ? 'Secondary' : 'Primary'}</span></td>
+            <td class="muted">
+              Serial {zone.serial}{#if zone.zone_type === 'secondary' && zone.masters?.length} · from {zone.masters.join(', ')}{/if}
+            </td>
             <td><span class:pill={true} class:ok={zone.dnssec}>{zone.dnssec ? 'Signed' : 'Unsigned'}</span></td>
-            <td>{zone.serial}</td>
             <td class="num">
               <div class="row" style="gap: 6px; justify-content: flex-end">
                 <button class="secondary" onclick={() => onOpenRecords(zone.id)}>Records</button>
@@ -245,10 +377,41 @@
             </td>
           </tr>
         {/each}
+        {#each stubs as stub (stub.name)}
+          <tr class:disabled={!stub.enabled}>
+            <td><code>{stub.name}</code></td>
+            <td>
+              <span class="pill">Stub</span>
+              {#if !stub.enabled}<span class="pill">Disabled</span>{/if}
+            </td>
+            <td class="muted">NS {stub.nss.join(', ') || '-'}</td>
+            <td class="muted">-</td>
+            <td class="num">
+              <div class="row" style="gap: 6px; justify-content: flex-end">
+                <button class="secondary" onclick={() => openEditStub(stub)}>Edit</button>
+                <button class="danger" onclick={() => removeSettingsZone('stub', stub.name)}>✕</button>
+              </div>
+            </td>
+          </tr>
+        {/each}
+        {#each forwarders as fwd (fwd.name)}
+          <tr>
+            <td><code>{fwd.name}</code></td>
+            <td><span class="pill">Forwarder</span></td>
+            <td class="muted">→ {fwd.upstreams.join(', ')}</td>
+            <td class="muted">-</td>
+            <td class="num">
+              <div class="row" style="gap: 6px; justify-content: flex-end">
+                <button class="secondary" onclick={() => openEditForwarder(fwd)}>Edit</button>
+                <button class="danger" onclick={() => removeSettingsZone('forwarder', fwd.name)}>✕</button>
+              </div>
+            </td>
+          </tr>
+        {/each}
       </tbody>
     </table>
   </div>
-  {#if zones.length === 0}
+  {#if rowCount === 0}
     <p class="muted">No zones yet. Add a primary or secondary zone to get started.</p>
   {/if}
 </div>
@@ -257,20 +420,48 @@
   <div class="modal-backdrop" role="presentation" onclick={(e) => e.target === e.currentTarget && closeAddZone()}>
     <div class="modal card" role="dialog" aria-modal="true" aria-labelledby="add-zone-title">
       <div class="spread modal-title">
-        <h3 id="add-zone-title" style="margin: 0">Add Zone</h3>
+        <h3 id="add-zone-title" style="margin: 0">{editingName ? `Edit Zone - ${editingName}` : 'Add Zone'}</h3>
         <button class="secondary" style="padding: 2px 10px" onclick={closeAddZone} aria-label="Close">✕</button>
       </div>
 
       <div class="grid2">
-        <label>Zone Name <input placeholder="example.com" bind:value={newZone.name} /></label>
+        <label>Zone Name <input placeholder="example.com or 192.168.0.0/24" bind:value={newZone.name} /></label>
         <label>Zone Type
-          <select bind:value={newZone.zone_type}>
+          <select bind:value={newZone.zone_type} disabled={editingName !== null}>
             <option value="primary">Primary Zone</option>
             <option value="secondary">Secondary Zone</option>
+            <option value="stub">Stub Zone</option>
+            <option value="forwarder">Conditional Forwarder Zone</option>
           </select>
         </label>
       </div>
+      {#if reverse?.name}
+        <p class="muted help">Creates the reverse zone <code>{reverse.name}</code>.</p>
+      {:else if reverse?.error}
+        <p class="help" style="color: var(--danger)">{reverse.error}</p>
+      {/if}
 
+      {#if newZone.zone_type === 'stub'}
+        <div class="section-title">Stub Nameservers</div>
+        <label>Nameservers <textarea rows="3" placeholder={'192.0.2.53\nns1.branch.example.com'} bind:value={newZone.nssText}></textarea></label>
+        <div class="grid2">
+          <label>Refresh Interval (Seconds) <input type="number" min="60" bind:value={newZone.refresh_secs} /></label>
+          <label class="checkbox"><input type="checkbox" bind:checked={newZone.stubEnabled} /><span>Enabled</span></label>
+        </div>
+        <p class="muted help">
+          Queries for this zone go straight to its own nameservers instead of the
+          upstreams. Use IPs, IP:port, or hostnames (resolved when the zone is
+          applied). One per line.
+        </p>
+      {:else if newZone.zone_type === 'forwarder'}
+        <div class="section-title">Forwarder Upstreams</div>
+        <label>Upstream Servers <textarea rows="3" placeholder={'10.0.0.53\ntls://10.0.0.53:853@dns.corp.example'} bind:value={newZone.upstreamsText}></textarea></label>
+        <p class="muted help">
+          Queries for this zone and its subdomains are resolved through these
+          servers instead of the default upstreams. Accepts the same forms as
+          Settings → Recursive &amp; Caching. One per line.
+        </p>
+      {:else}
       <div class="section-title">SOA Settings</div>
       <div class="grid2">
         <label>Primary Nameserver <input placeholder={dnsServerDomain || 'ns1.example.com.'} bind:value={newZone.primary_ns} /></label>
@@ -296,9 +487,12 @@
         </label>
         {#if zoneFileName}<p class="muted help">Selected: {zoneFileName}. SOA values found in the file will be used unless you override them above.</p>{/if}
       {/if}
+      {/if}
 
       <div class="row actions">
-        <button onclick={createZone} disabled={savingZone || !newZone.name.trim()}>{savingZone ? 'Creating…' : 'Create Zone'}</button>
+        <button onclick={createZone} disabled={savingZone || !newZone.name.trim()}>
+          {savingZone ? 'Saving…' : editingName ? 'Save Zone' : 'Create Zone'}
+        </button>
         <button class="secondary" onclick={closeAddZone} disabled={savingZone}>Cancel</button>
       </div>
     </div>
