@@ -406,6 +406,7 @@ pub fn router(state: AppState) -> Router {
         .route("/status", get(handlers::status))
         .route("/health", get(handlers::health))
         .route("/metrics", get(handlers::metrics))
+        .route("/metrics/prometheus", get(handlers::metrics_prometheus))
         .route("/stats", get(handlers::stats))
         .route("/logs", get(handlers::logs))
         .route(

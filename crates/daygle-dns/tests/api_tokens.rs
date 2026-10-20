@@ -105,6 +105,30 @@ async fn sessions_persist_and_api_tokens_work() {
         .unwrap();
     assert_eq!(me["api_token"], json!(true));
     assert_eq!(me["role"], json!("viewer"));
+    // Prometheus scrapes with a read-only token.
+    let resp = client
+        .get(format!("{api}/metrics/prometheus"))
+        .bearer_auth(&ro)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    assert!(resp.headers()["content-type"]
+        .to_str()
+        .unwrap()
+        .starts_with("text/plain"));
+    let text = resp.text().await.unwrap();
+    assert!(text.contains("# TYPE daygle_dns_queries_total counter"));
+    assert!(text.contains("daygle_dns_zones 1"));
+    assert_eq!(
+        client
+            .get(format!("{api}/metrics/prometheus"))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        401
+    );
     // A made-up token does nothing.
     assert_eq!(status(&client, &api, "dgl_0000").await, 401);
 

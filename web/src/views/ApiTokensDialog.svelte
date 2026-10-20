@@ -76,7 +76,9 @@
       For scripts and tools that use the API as you: send the token as
       <code>Authorization: Bearer &lt;token&gt;</code>. A token keeps working
       until it expires or you revoke it, even after the server restarts, and
-      skips two-factor login, so keep it as safe as a password.
+      skips two-factor login, so keep it as safe as a password. For
+      Prometheus, make a read-only token and scrape
+      <code>/api/metrics/prometheus</code>.
     </p>
 
     {#if created}

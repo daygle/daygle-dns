@@ -237,6 +237,37 @@ pub async fn metrics(State(state): State<AppState>) -> Response {
     Json(state.metrics.snapshot()).into_response()
 }
 
+/// `GET /api/metrics/prometheus` - every counter in the Prometheus text
+/// format, for scraping (authorize with a read-only API token).
+pub async fn metrics_prometheus(State(state): State<AppState>) -> Response {
+    let zones = state
+        .catalog
+        .store()
+        .list_zones()
+        .map(|z| z.len())
+        .unwrap_or(0);
+    let text = state.metrics.render_prometheus(&[
+        daygle_dns_core::metrics::Gauge {
+            name: "uptime_seconds",
+            help: "Seconds since the server started.",
+            value: state.started_at.elapsed().as_secs_f64().floor(),
+        },
+        daygle_dns_core::metrics::Gauge {
+            name: "zones",
+            help: "Zones served by this server.",
+            value: zones as f64,
+        },
+    ]);
+    (
+        [(
+            header::CONTENT_TYPE,
+            "text/plain; version=0.0.4; charset=utf-8",
+        )],
+        text,
+    )
+        .into_response()
+}
+
 /// Dashboard statistics: time-series over a window plus top-N tables.
 /// `?window=1h` (default), `6h` or `24h`.
 #[derive(Deserialize)]

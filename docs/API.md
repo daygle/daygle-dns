@@ -187,6 +187,26 @@ Returns a flat snapshot of the atomic counters:
 }
 ```
 
+```
+GET /api/metrics/prometheus
+```
+
+The same counters, plus the resolver's routes, outcomes, upstream
+connections and lookup-time histogram, and `uptime_seconds` and `zones`
+gauges, in the Prometheus text format (`text/plain; version=0.0.4`), every
+name prefixed `daygle_dns_`. It needs the same authorization as the rest of
+the API; give Prometheus a read-only personal API token:
+
+```yaml
+scrape_configs:
+  - job_name: daygle-dns
+    metrics_path: /api/metrics/prometheus
+    authorization:
+      credentials: dgl_…
+    static_configs:
+      - targets: ["dns.example.com:5380"]
+```
+
 ### Dashboard statistics
 
 ```
