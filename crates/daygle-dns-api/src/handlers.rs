@@ -482,10 +482,11 @@ pub async fn validate_blocklist_source(
         "domains" => Some(daygle_dns_core::config::BlocklistFormat::Domains),
         "hosts" => Some(daygle_dns_core::config::BlocklistFormat::Hosts),
         "adblock" => Some(daygle_dns_core::config::BlocklistFormat::Adblock),
+        "rpz" => Some(daygle_dns_core::config::BlocklistFormat::Rpz),
         other => {
             return error_response(
                 StatusCode::BAD_REQUEST,
-                format!("unknown format '{other}' (use domains, hosts, adblock or auto)"),
+                format!("unknown format '{other}' (use domains, hosts, adblock, rpz or auto)"),
             );
         }
     };

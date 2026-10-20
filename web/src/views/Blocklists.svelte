@@ -18,8 +18,9 @@
     { value: 'domains', label: 'Domains (One per Line)' },
     { value: 'hosts', label: 'Hosts File (e.g. StevenBlack)' },
     { value: 'adblock', label: 'Adblock (AdGuard / uBlock)' },
+    { value: 'rpz', label: 'Response Policy Zone (RPZ)' },
   ];
-  const FORMAT_NAMES = { domains: 'Domains', hosts: 'Hosts File', adblock: 'Adblock', auto: 'Auto-Detect' };
+  const FORMAT_NAMES = { domains: 'Domains', hosts: 'Hosts File', adblock: 'Adblock', rpz: 'RPZ', auto: 'Auto-Detect' };
   const REFRESH_OPTIONS = [
     { hours: 1, label: '1 Hour' },
     { hours: 6, label: '6 Hours' },

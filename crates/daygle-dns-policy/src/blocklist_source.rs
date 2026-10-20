@@ -1,7 +1,8 @@
 //! Remote blocklist sources (like Technitium's blocklist management).
 //!
 //! A [`BlocklistSourceManager`] fetches one or more HTTP(S) blocklist URLs,
-//! parses each in its declared format (`domains`, `hosts`, or `adblock`),
+//! parses each in its declared format (`domains`, `hosts`, `adblock`, or
+//! `rpz`),
 //! merges the results into a single domain set, and hands it to the policy
 //! engine as the *remote* blocklist. Sources are refreshed on their
 //! `refresh_secs` schedule; the refresh loop lives in `daygle` and calls
@@ -364,7 +365,8 @@ impl BlocklistSourceManager {
 /// The heuristic scores line shapes that are characteristic of each format:
 /// AdGuard/uBlock markers (`||`, `##`, `@@`) for `adblock`, hosts-file IP
 /// prefixes for `hosts`, and single-token dotted names for `domains`.
-/// Returns `None` for content that looks like none of the three.
+/// Zone-file records (`CNAME`, `SOA`, `$ORIGIN`) mark an `rpz` zone.
+/// Returns `None` for content that looks like none of these.
 ///
 /// This is deliberately conservative: it is used to catch a source whose
 /// declared format does not match its content (e.g. an adblock filter saved
@@ -373,10 +375,23 @@ pub fn detect_blocklist_format(text: &str) -> Option<BlocklistFormat> {
     let mut adblock = 0usize;
     let mut hosts = 0usize;
     let mut domains = 0usize;
+    let mut rpz = 0usize;
 
     for raw in text.lines() {
         let line = raw.trim();
         if line.is_empty() || line.starts_with('#') || line.starts_with('!') {
+            continue;
+        }
+        // Zone-file records and directives (RPZ).
+        if line.starts_with("$ORIGIN") || line.starts_with("$TTL") {
+            rpz += 1;
+            continue;
+        }
+        if line
+            .split_whitespace()
+            .any(|t| t.eq_ignore_ascii_case("CNAME") || t.eq_ignore_ascii_case("SOA"))
+        {
+            rpz += 1;
             continue;
         }
         // AdGuard/uBlock network rules and cosmetic filters.
@@ -409,7 +424,9 @@ pub fn detect_blocklist_format(text: &str) -> Option<BlocklistFormat> {
         }
     }
 
-    if adblock > 0 && adblock >= hosts {
+    if rpz > 0 && rpz >= adblock.max(hosts).max(domains) {
+        Some(BlocklistFormat::Rpz)
+    } else if adblock > 0 && adblock >= hosts {
         Some(BlocklistFormat::Adblock)
     } else if hosts > 0 {
         Some(BlocklistFormat::Hosts)
@@ -479,8 +496,141 @@ pub fn parse_blocklist(text: &str, format: BlocklistFormat) -> BTreeSet<String> 
                 }
             }
         }
+        BlocklistFormat::Rpz => out = parse_rpz(text),
     }
     out
+}
+
+/// The records of a zone file as `(owner, fields)`, with comments removed,
+/// parenthesised records joined, and blank owners filled in from the record
+/// before. Directives come back with the directive as the owner.
+fn zone_records(text: &str) -> Vec<(String, Vec<String>)> {
+    let mut records = Vec::new();
+    let mut owner = String::new();
+    let mut pending: Option<(bool, Vec<String>)> = None;
+    let mut depth = 0i32;
+    for raw in text.lines() {
+        let line = raw.split(';').next().unwrap_or("");
+        let starts_blank = line.starts_with([' ', '\t']);
+        let tokens: Vec<String> = line
+            .replace(['(', ')'], " ")
+            .split_whitespace()
+            .map(str::to_string)
+            .collect();
+        depth += line.matches('(').count() as i32 - line.matches(')').count() as i32;
+        match pending.as_mut() {
+            Some((_, fields)) => fields.extend(tokens),
+            None if tokens.is_empty() => continue,
+            None => pending = Some((starts_blank, tokens)),
+        }
+        if depth > 0 {
+            continue;
+        }
+        depth = 0;
+        let Some((blank, mut fields)) = pending.take() else {
+            continue;
+        };
+        if !blank && !fields.is_empty() {
+            let first = fields.remove(0);
+            if !first.starts_with('$') {
+                owner = first.clone();
+            }
+            if first.starts_with('$') {
+                records.push((first.to_ascii_uppercase(), fields));
+                continue;
+            }
+        }
+        records.push((owner.clone(), fields));
+    }
+    records
+}
+
+/// The QNAME triggers of a Response Policy Zone. Every trigger is blocked
+/// whatever its action (NXDOMAIN, NODATA, DROP, a walled-garden CNAME or
+/// local data all keep the client off the name), except `rpz-passthru.`
+/// exceptions, which are left out. IP, NSDNAME, NSIP and client-IP triggers
+/// have no domain to block and are skipped.
+fn parse_rpz(text: &str) -> BTreeSet<String> {
+    const SPECIAL: [&str; 5] = [
+        "rpz-ip",
+        "rpz-nsdname",
+        "rpz-nsip",
+        "rpz-client-ip",
+        "rpz-ip6",
+    ];
+    let mut origin: Option<String> = None;
+    let mut blocked = BTreeSet::new();
+    let mut passthru = BTreeSet::new();
+    for (owner, fields) in zone_records(text) {
+        if owner == "$ORIGIN" {
+            if let Some(o) = fields.first() {
+                let o = o.to_ascii_lowercase();
+                origin = Some(match (o.ends_with('.'), &origin) {
+                    (true, _) => o,
+                    (false, Some(cur)) => format!("{o}.{cur}"),
+                    (false, None) => format!("{o}."),
+                });
+            }
+            continue;
+        }
+        if owner.starts_with('$') {
+            continue;
+        }
+        // Skip the TTL and class, which may come in either order.
+        let mut rest = fields.iter().skip_while(|f| {
+            f.chars().next().is_some_and(|c| c.is_ascii_digit())
+                || ["IN", "CH", "HS", "CS"].contains(&f.to_ascii_uppercase().as_str())
+        });
+        let Some(rtype) = rest.next().map(|t| t.to_ascii_uppercase()) else {
+            continue;
+        };
+        let owner = owner.to_ascii_lowercase();
+        if rtype == "SOA" {
+            // A zone without `$ORIGIN` is named by its SOA.
+            if origin.is_none() && owner.ends_with('.') {
+                origin = Some(owner);
+            }
+            continue;
+        }
+        if rtype == "NS" || owner == "@" {
+            continue;
+        }
+        // The trigger: the owner relative to the zone's origin.
+        let name = if let Some(absolute) = owner.strip_suffix('.') {
+            let Some(origin) = &origin else {
+                continue;
+            };
+            if absolute == origin.trim_end_matches('.') {
+                continue;
+            }
+            match absolute.strip_suffix(&format!(".{}", origin.trim_end_matches('.'))) {
+                Some(relative) => relative.to_string(),
+                None => continue,
+            }
+        } else {
+            owner
+        };
+        if name == "*"
+            || !name.contains('.') && !name.starts_with("*.")
+            || name
+                .rsplit('.')
+                .next()
+                .is_some_and(|tld| SPECIAL.contains(&tld))
+        {
+            continue;
+        }
+        let target = rest.next().map(|t| t.to_ascii_lowercase());
+        match (rtype.as_str(), target.as_deref()) {
+            ("CNAME", Some("rpz-passthru.")) => {
+                passthru.insert(name);
+            }
+            ("CNAME", Some("rpz-tcp-only.")) => {}
+            _ => {
+                blocked.insert(name);
+            }
+        }
+    }
+    normalize_domains(blocked.difference(&passthru).cloned())
 }
 
 #[cfg(test)]
@@ -532,6 +682,60 @@ example.com##.banner
         assert!(set.contains("tracker.example.net"));
         assert!(!set.contains("allow.example.com"));
         assert!(!set.contains("example.com"));
+    }
+
+    #[test]
+    fn parses_rpz_format() {
+        let text = "$TTL 300
+@ IN SOA localhost. hostmaster.localhost. (
+        1 ; serial
+        3600 600 86400 300 )
+    IN NS localhost.
+bad.example        CNAME .            ; NXDOMAIN
+*.bad.example      CNAME .
+nodata.example 60 IN CNAME *.
+dropped.example    CNAME rpz-drop.
+garden.example     CNAME walled.garden.example.
+local.example      A     192.0.2.1
+                   AAAA  2001:db8::1
+ok.bad.example     CNAME rpz-passthru.
+tcp.example        CNAME rpz-tcp-only.
+32.1.2.0.192.rpz-ip CNAME .
+ns.evil.rpz-nsdname CNAME .
+Mixed.Example.     CNAME .
+";
+        let set = parse_blocklist(text, BlocklistFormat::Rpz);
+        let got: Vec<&str> = set.iter().map(String::as_str).collect();
+        // No origin is known, so the absolute name is skipped.
+        assert_eq!(
+            got,
+            [
+                "*.bad.example",
+                "bad.example",
+                "dropped.example",
+                "garden.example",
+                "local.example",
+                "nodata.example",
+            ]
+        );
+
+        // Absolute names under the origin (from `$ORIGIN` or the SOA).
+        let text = "$ORIGIN rpz.example.org.
+@ SOA ns. admin. 1 2 3 4 5
+ads.tracker.com.rpz.example.org. CNAME .
+elsewhere.com. CNAME .
+Sub CNAME .
+x.sub CNAME .
+";
+        let set = parse_blocklist(text, BlocklistFormat::Rpz);
+        let got: Vec<&str> = set.iter().map(String::as_str).collect();
+        assert_eq!(got, ["ads.tracker.com", "x.sub"]);
+        let text = "rpz.local. 300 IN SOA ns. admin. 1 2 3 4 5
+ads.tracker.com.rpz.local. 300 IN CNAME .
+";
+        let set = parse_blocklist(text, BlocklistFormat::Rpz);
+        assert!(set.contains("ads.tracker.com"));
+        assert_eq!(detect_blocklist_format(text), Some(BlocklistFormat::Rpz));
     }
 
     #[test]

@@ -88,7 +88,7 @@ metrics.
   logs, and settings.
 - A **plugin-style policy engine** for blocklists, ACLs, and per-client rules,
   including **remote blocklist sources** (hosts files, AdGuard lists, plain
-  domain lists) fetched over HTTP(S) and refreshed on a schedule.
+  domain lists, response policy zones) fetched over HTTP(S) and refreshed on a schedule.
 - **Rate limiting** per client (source IP) and per domain (query name) with
   configurable fixed windows, loopback exemption, and live reload - queries
   over the limit get SERVFAIL and are counted in the `rate_limited` metric.

@@ -986,8 +986,15 @@ caught before it is added:
   "domains": 182344,
   "sample": ["0.0.0.0", "ads.example.com"]
 }
-````format` accepts `domains`, `hosts`, `adblock`, or `auto` (empty = auto) to
-auto-detect the format from the content. `ok: false` with a `reason` means
+```
+
+`format` accepts `domains`, `hosts`, `adblock`, `rpz`, or `auto` (empty =
+auto) to auto-detect the format from the content. An `rpz` source is a
+Response Policy Zone in zone-file form (as served over HTTP by most RPZ
+feeds): every QNAME trigger in it is blocked, wildcards (`*.example.com`)
+included, whatever its action (NXDOMAIN, NODATA, drop, a walled-garden CNAME
+or local data); `rpz-passthru.` entries are exceptions and are left out, and
+IP and NSDNAME triggers are ignored. `ok: false` with a `reason` means
 the URL fetched fine but the content does not parse as (or does not match)
 `format`; a `502` means the URL itself could not be fetched.
 

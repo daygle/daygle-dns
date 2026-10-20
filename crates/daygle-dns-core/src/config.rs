@@ -2838,7 +2838,8 @@ pub struct BlocklistSourceConfig {
     /// HTTP(S) URL of the blocklist.
     pub url: String,
     /// Content format: `domains` (one domain per line), `hosts` (a hosts
-    /// file, e.g. StevenBlack), or `adblock` (AdGuard/uBlock syntax).
+    /// file, e.g. StevenBlack), `adblock` (AdGuard/uBlock syntax), or `rpz`
+    /// (a Response Policy Zone file).
     pub format: BlocklistFormat,
     /// How often to re-fetch the source, in seconds (default 24 h).
     pub refresh_secs: u64,
@@ -2871,6 +2872,10 @@ pub enum BlocklistFormat {
     /// AdGuard/uBlock origin syntax: `||example.com^`, `@@` exceptions are
     /// ignored (treated as not-blocked).
     Adblock,
+    /// A Response Policy Zone (RPZ) in zone-file form: every QNAME trigger is
+    /// blocked, except `rpz-passthru.` exceptions; IP and NSDNAME triggers
+    /// are ignored.
+    Rpz,
 }
 
 /// A single ordered policy rule.
