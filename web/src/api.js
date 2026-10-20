@@ -216,6 +216,7 @@ export const api = {
   aiVerdicts: (qs) => request('GET', `/ai/verdicts${qs ? `?${qs}` : ''}`),
   aiOverride: (domain, action, reason = '') =>
     request('POST', '/ai/override', { domain, action, reason }),
+  aiOverrides: () => request('GET', '/ai/overrides'),
   aiRescan: () => request('POST', '/ai/rescan'),
   aiModelStatus: () => request('GET', '/ai/model-status'),
   aiUpdateModels: () => request('POST', '/ai/update-models'),

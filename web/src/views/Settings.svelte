@@ -553,11 +553,15 @@
       <label><span>Verdict Database</span><input bind:value={ai_.database} placeholder="empty = ai.db next to the zone database" /></label>
     </div>
     <p class="muted help">
-      The scanner classifies domains seen in live queries and records verdicts
-      with TTLs. In Enforce mode verdicts can fire fastText auto-blocks;
-      the operator allowlist and overrides always win. Restarting is required:
-      enabling/disabling in-flight happens live once a scanner has been built
-      at startup, but switching the model or database path needs a restart.
+      The scanner classifies the domains seen in your DNS traffic in the
+      background and records each verdict until it is re-checked. Train mode
+      only records; Enforce mode auto-blocks (see below). Your allowlist and
+      the AI page's exempt domains always win. Mode, workers, intervals and
+      everything under Enforcement apply immediately; turning the scanner on
+      for the first time, or changing the model or database path, takes
+      effect after a restart. With no model path the built-in heuristic rules
+      are used: they are good for exploring in Train mode but never score high
+      enough to auto-block.
     </p>
     <h4>Enforcement</h4>
     <div class="form-grid">
@@ -586,10 +590,11 @@
       {/if}
     </label>
     <p class="muted help">
-      Only threats in these categories auto-block, and only above the block
-      threshold. Lower confidence verdicts feed the verdict table for train-mode
-      review. Changes apply live when a scanner is already running; enabling for
-      the first time takes effect after a restart.
+      In Enforce mode a domain is blocked when its current verdict is in one of
+      these categories and its confidence is at or above the block threshold.
+      Verdicts below the confidence floor are recorded as skipped. Threat
+      verdicts are re-checked after the threat verdict TTL, all others after
+      the category verdict TTL.
     </p>
   </div>
   {:else if tab === 'interface'}

@@ -4,6 +4,9 @@
   import AiStatus from './AiStatus.svelte';
   import AiVerdicts from './AiVerdicts.svelte';
 
+  // Opens Settings on a tab (null for viewers, who cannot).
+  let { onOpenSettings = null } = $props();
+
   // The AI page groups the scanner overview and the per-domain verdicts as
   // tabs (same pattern as Settings and Logs).
   const TABS = [
@@ -11,13 +14,13 @@
       id: 'scanner',
       label: 'AI Safety Scanner',
       tagline:
-        'The background scanner classifies domains from live query traffic into categories (using the heuristic rules or a fastText model) and threat verdicts can auto-block. Overrides here take precedence over verdicts.',
+        'Classifies the domains in your DNS traffic in the background, never on the query path. Train mode only records verdicts; Enforce mode blocks domains in the auto-block categories once their verdict reaches the block threshold. Exempt domains are never blocked.',
     },
     {
       id: 'verdicts',
       label: 'AI Verdicts',
       tagline:
-        'Per-domain classifications from the AI scanner, newest activity first. Allow overrides a verdict permanently; every auto-block decision respects cleared and allow overrides.',
+        'Every domain the scanner has looked at, most recently classified first. Exempt a domain to keep the AI from ever blocking it or its subdomains.',
     },
   ];
 
@@ -34,7 +37,7 @@
 </div>
 
 {#if tab === 'scanner'}
-  <AiStatus />
+  <AiStatus {onOpenSettings} />
 {:else}
   <AiVerdicts />
 {/if}
