@@ -377,7 +377,7 @@
       {:else if view === 'users'}
         <Users />
       {:else if view === 'certificates'}
-        <Certificates />
+        <Certificates onOpenSettings={isViewer ? null : openSettings} />
       {:else if view === 'ai'}
         <Ai onOpenSettings={isViewer ? null : openSettings} />
       {:else if view === 'about'}
