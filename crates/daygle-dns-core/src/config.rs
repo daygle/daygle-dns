@@ -818,6 +818,8 @@ impl RuntimeSettings {
                 }
             }
         }
+        // Placeholders stored by earlier versions count as unset.
+        config.authoritative.clear_legacy_placeholders();
     }
 
     /// Capture the DB-owned fields of `config` as a full overlay, so a save
@@ -913,11 +915,138 @@ impl RuntimeSettings {
     }
 }
 
+/// Placeholder SOA defaults that earlier versions shipped (and stored in
+/// the database on the first settings save). They name no real server or
+/// person, so they are treated as unset: the server's own name and the
+/// first administrator's email are used instead.
+const LEGACY_PLACEHOLDER_PRIMARY_NS: &str = "ns1.daygle.test.";
+const LEGACY_PLACEHOLDER_ADMIN_MAILBOX: &str = "admin.daygle.test.";
+
+impl AuthoritativeSettings {
+    /// Clear the legacy placeholder SOA defaults (see above).
+    pub fn clear_legacy_placeholders(&mut self) {
+        if self.default_primary_ns.trim() == LEGACY_PLACEHOLDER_PRIMARY_NS {
+            self.default_primary_ns.clear();
+        }
+        if self.default_admin_mailbox.trim() == LEGACY_PLACEHOLDER_ADMIN_MAILBOX {
+            self.default_admin_mailbox.clear();
+        }
+    }
+}
+
+/// Turn a mailbox as people write it into the SOA RNAME form:
+/// `jane.doe@example.com` becomes `jane\.doe.example.com.` (dots in the
+/// local part are escaped, the `@` becomes a dot). Input already in RNAME
+/// form gets its trailing dot. Empty stays empty.
+pub fn mailbox_to_rname(input: &str) -> std::result::Result<String, String> {
+    let input = input.trim();
+    if input.is_empty() {
+        return Ok(String::new());
+    }
+    if input.chars().any(|c| c.is_whitespace() || c.is_control()) || input.len() > 254 {
+        return Err(format!("'{input}' is not a mailbox"));
+    }
+    let rname = match input.split_once('@') {
+        Some((local, domain)) => {
+            let domain = domain.trim_end_matches('.');
+            if local.is_empty()
+                || domain.is_empty()
+                || domain.contains('@')
+                || domain.starts_with('.')
+            {
+                return Err(format!("'{input}' is not an email address"));
+            }
+            let local = local.replace('\\', "\\\\").replace('.', "\\.");
+            format!("{local}.{domain}.")
+        }
+        None if input.ends_with('.') => input.to_string(),
+        None => format!("{input}."),
+    };
+    if rname.starts_with('.') || rname.contains("..") {
+        return Err(format!("'{input}' is not a mailbox"));
+    }
+    Ok(rname.to_ascii_lowercase())
+}
+
+/// The inverse of [`mailbox_to_rname`] for display, when the first label
+/// is clearly the local part: `jane\.doe.example.com.` becomes
+/// `jane.doe@example.com`. Returns `None` for names with fewer than three
+/// labels (the split would be a guess).
+pub fn rname_to_email(rname: &str) -> Option<String> {
+    let rname = rname.trim().trim_end_matches('.');
+    let mut local = String::new();
+    let mut chars = rname.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => local.push(chars.next()?),
+            '.' => {
+                let domain: String = chars.collect();
+                return (domain.contains('.') && !local.is_empty())
+                    .then(|| format!("{local}@{domain}"));
+            }
+            c => local.push(c),
+        }
+    }
+    None
+}
+
+/// This server's host name as a fully qualified, absolute DNS name (e.g.
+/// `dns1.example.lan.`), for the SOA primary nameserver of new zones when no
+/// DNS Server Domain is set. A bare host name gets the resolver's `domain`
+/// (or first `search`) suffix from /etc/resolv.conf. `None` when the name
+/// cannot be read.
+pub fn detect_server_name() -> Option<String> {
+    let host = ["/proc/sys/kernel/hostname", "/etc/hostname"]
+        .iter()
+        .find_map(|p| std::fs::read_to_string(p).ok())
+        .or_else(|| std::env::var("HOSTNAME").ok())?;
+    let host = host.trim().trim_end_matches('.').to_ascii_lowercase();
+    let valid = |name: &str| {
+        !name.is_empty()
+            && name.len() <= 253
+            && name.split('.').all(|label| {
+                !label.is_empty()
+                    && label.len() <= 63
+                    && label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+            })
+    };
+    if !valid(&host) || host == "localhost" {
+        return None;
+    }
+    if host.contains('.') {
+        return Some(format!("{host}."));
+    }
+    let suffix = std::fs::read_to_string("/etc/resolv.conf")
+        .ok()
+        .and_then(|text| resolv_conf_domain(&text));
+    Some(match suffix {
+        Some(domain) if valid(&domain) => format!("{host}.{domain}."),
+        _ => format!("{host}."),
+    })
+}
+
+/// The `domain` entry of a resolv.conf, else the first `search` entry.
+fn resolv_conf_domain(text: &str) -> Option<String> {
+    let mut search = None;
+    for line in text.lines() {
+        let mut words = line.split_whitespace();
+        match (words.next(), words.next()) {
+            (Some("domain"), Some(d)) => return Some(d.trim_end_matches('.').to_ascii_lowercase()),
+            (Some("search"), Some(d)) if search.is_none() => {
+                search = Some(d.trim_end_matches('.').to_ascii_lowercase())
+            }
+            _ => {}
+        }
+    }
+    search
+}
+
 impl DaygleConfig {
     /// Parse a TOML document into a validated configuration.
     pub fn parse(text: &str) -> Result<Self> {
-        let cfg: DaygleConfig =
+        let mut cfg: DaygleConfig =
             toml::from_str(text).map_err(|e| DaygleError::Config(format!("invalid TOML: {e}")))?;
+        cfg.authoritative.clear_legacy_placeholders();
         cfg.validate()?;
         Ok(cfg)
     }
@@ -1790,9 +1919,11 @@ pub struct AuthoritativeSettings {
     pub database: String,
     /// Optional directory of BIND-style zone files imported at startup.
     pub zones_dir: Option<String>,
-    /// Default SOA primary nameserver used when a zone is created.
+    /// Default SOA primary nameserver used when a zone is created. Empty
+    /// means this server's own host name (see [`detect_server_name`]).
     pub default_primary_ns: String,
-    /// Default SOA contact mailbox used when a zone is created.
+    /// Default SOA contact mailbox used when a zone is created. Empty means
+    /// the first administrator's email address.
     pub default_admin_mailbox: String,
     /// Default TTL (seconds) used for records that do not specify one (e.g.
     /// the console's Records page pre-fills this value for new records).
@@ -1861,8 +1992,8 @@ impl Default for AuthoritativeSettings {
         Self {
             database: "daygle-dns.db".to_string(),
             zones_dir: None,
-            default_primary_ns: "ns1.daygle.test.".to_string(),
-            default_admin_mailbox: "admin.daygle.test.".to_string(),
+            default_primary_ns: String::new(),
+            default_admin_mailbox: String::new(),
             default_record_ttl: 3600,
             dnssec_enabled: true,
             dnssec_sig_validity_days: 14,
@@ -2448,6 +2579,87 @@ mod tests {
         assert!(cfg.policy.allowlist.is_empty());
         assert_eq!(cfg.dot.port, 853);
         assert!(cfg.recursive.dnssec_validate);
+    }
+
+    #[test]
+    fn mailboxes_convert_between_email_and_soa_form() {
+        assert_eq!(
+            mailbox_to_rname("Glen@Example.com").unwrap(),
+            "glen.example.com."
+        );
+        assert_eq!(
+            mailbox_to_rname("jane.doe@example.com").unwrap(),
+            "jane\\.doe.example.com."
+        );
+        assert_eq!(
+            mailbox_to_rname("hostmaster.example.com").unwrap(),
+            "hostmaster.example.com."
+        );
+        assert_eq!(
+            mailbox_to_rname("hostmaster.example.com.").unwrap(),
+            "hostmaster.example.com."
+        );
+        assert_eq!(mailbox_to_rname("  ").unwrap(), "");
+        for bad in [
+            "@example.com",
+            "jane@",
+            "a b@example.com",
+            "jane@@example.com",
+            "jane@.example.com",
+        ] {
+            assert!(mailbox_to_rname(bad).is_err(), "{bad}");
+        }
+        assert_eq!(
+            rname_to_email("jane\\.doe.example.com.").as_deref(),
+            Some("jane.doe@example.com")
+        );
+        assert_eq!(
+            rname_to_email("glen.example.com.").as_deref(),
+            Some("glen@example.com")
+        );
+        // Too short to tell the local part from the domain.
+        assert_eq!(rname_to_email("admin.lan."), None);
+    }
+
+    #[test]
+    fn resolv_conf_supplies_the_domain_suffix() {
+        assert_eq!(
+            resolv_conf_domain("domain example.lan\nsearch other.lan").as_deref(),
+            Some("example.lan")
+        );
+        assert_eq!(
+            resolv_conf_domain("# x\nsearch home.arpa corp.lan\nnameserver 1.1.1.1").as_deref(),
+            Some("home.arpa")
+        );
+        assert_eq!(resolv_conf_domain("nameserver 1.1.1.1"), None);
+    }
+
+    #[test]
+    fn legacy_placeholder_soa_defaults_count_as_unset() {
+        let cfg = DaygleConfig::parse(
+            "[authoritative]\ndefault_primary_ns = \"ns1.daygle.test.\"\ndefault_admin_mailbox = \"admin.daygle.test.\"\n",
+        )
+        .unwrap();
+        assert_eq!(cfg.authoritative.default_primary_ns, "");
+        assert_eq!(cfg.authoritative.default_admin_mailbox, "");
+        // Real values are kept.
+        let cfg =
+            DaygleConfig::parse("[authoritative]\ndefault_primary_ns = \"ns1.example.com.\"\n")
+                .unwrap();
+        assert_eq!(cfg.authoritative.default_primary_ns, "ns1.example.com.");
+        // A stored overlay from before is cleared the same way.
+        let mut cfg = DaygleConfig::default();
+        RuntimeSettings {
+            authoritative: Some(AuthoritativeUpdate {
+                default_primary_ns: Some("ns1.daygle.test.".into()),
+                default_admin_mailbox: Some("admin.daygle.test.".into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+        .apply_to(&mut cfg);
+        assert_eq!(cfg.authoritative.default_primary_ns, "");
+        assert_eq!(cfg.authoritative.default_admin_mailbox, "");
     }
 
     #[test]

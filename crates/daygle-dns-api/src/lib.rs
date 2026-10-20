@@ -15,6 +15,7 @@
 //! | `POST`   | `/api/config/reload`              | re-read the config file (live reload) |
 //! | `GET`    | `/api/zones`                      | list zones |
 //! | `POST`   | `/api/zones`                      | create a primary or secondary zone |
+//! | `GET`    | `/api/zones/defaults`             | SOA defaults a new zone would get |
 //! | `DELETE` | `/api/zones/:id`                  | delete a zone |
 //! | `PUT`    | `/api/zones/:id/soa`              | edit a primary zone's SOA metadata |
 //! | `GET`    | `/api/zones/:id/records`          | list records |
@@ -304,6 +305,7 @@ pub fn router(state: AppState) -> Router {
             get(handlers::list_zones).post(handlers::create_zone),
         )
         .route("/zones/import", post(handlers::import_zone))
+        .route("/zones/defaults", get(handlers::zone_defaults_handler))
         .route("/zones/{id}", delete(handlers::delete_zone))
         .route("/zones/{id}/soa", put(handlers::update_zone_soa))
         .route(

@@ -105,11 +105,12 @@ serve_stale_secs = 0
 database = "/var/lib/daygle-dns/daygle.db"
 # Optional: import BIND zone files (*.zone, *.db, *.txt) from this directory.
 zones_dir = "/etc/daygle-dns/zones"
-# SOA defaults for zones created by the console/API without their own:
-# the primary nameserver (this server's name) and the administrator mailbox
-# (written with a dot for the @). An empty mailbox means admin.<zone>.
-default_primary_ns = "ns1.daygle.test."
-default_admin_mailbox = "admin.daygle.test."
+# SOA defaults for zones created by the console/API without their own.
+# Empty (the default) uses this server's host name as the primary
+# nameserver and the first administrator's email as the mailbox; set them
+# to override (the mailbox may be an email address or the SOA form).
+default_primary_ns = ""
+default_admin_mailbox = ""
 # Default TTL (seconds) pre-filled when adding records in the console.
 # Also the fallback when an API record update omits the TTL.
 default_record_ttl = 3600

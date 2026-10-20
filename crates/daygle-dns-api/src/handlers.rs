@@ -1232,6 +1232,78 @@ pub async fn list_zones(State(state): State<AppState>) -> Response {
     Json(views).into_response()
 }
 
+/// The SOA defaults a new zone gets, with where each came from.
+pub(crate) struct ZoneDefaults {
+    pub primary_ns: Option<String>,
+    /// `setting`, `hostname` or `none`.
+    pub primary_ns_source: &'static str,
+    pub admin_mailbox: Option<String>,
+    /// `setting`, `admin_email` or `none`.
+    pub admin_mailbox_source: &'static str,
+    /// The mailbox as an email address, when that reading is unambiguous.
+    pub admin_email: Option<String>,
+}
+
+/// Resolve the SOA defaults for new zones: the Settings values when set,
+/// else this server's host name and the first administrator's email.
+pub(crate) fn zone_defaults(state: &AppState) -> ZoneDefaults {
+    let config = state.config.load_full();
+    let configured_ns = config.authoritative.default_primary_ns.trim();
+    let (primary_ns, primary_ns_source) = if !configured_ns.is_empty() {
+        let ns = if configured_ns.ends_with('.') {
+            configured_ns.to_string()
+        } else {
+            format!("{configured_ns}.")
+        };
+        (Some(ns), "setting")
+    } else {
+        match daygle_dns_core::config::detect_server_name() {
+            Some(name) => (Some(name), "hostname"),
+            None => (None, "none"),
+        }
+    };
+    let configured_mailbox = config.authoritative.default_admin_mailbox.trim();
+    let (admin_mailbox, admin_email, admin_mailbox_source) = if !configured_mailbox.is_empty() {
+        let rname = daygle_dns_core::config::mailbox_to_rname(configured_mailbox)
+            .unwrap_or_else(|_| configured_mailbox.to_string());
+        let email = daygle_dns_core::config::rname_to_email(&rname);
+        (Some(rname), email, "setting")
+    } else {
+        let email = state.catalog.store().first_admin_email().ok().flatten();
+        match email
+            .as_deref()
+            .map(daygle_dns_core::config::mailbox_to_rname)
+        {
+            Some(Ok(rname)) if !rname.is_empty() => (Some(rname), email, "admin_email"),
+            _ => (None, None, "none"),
+        }
+    };
+    ZoneDefaults {
+        primary_ns,
+        primary_ns_source,
+        admin_mailbox,
+        admin_mailbox_source,
+        admin_email,
+    }
+}
+
+/// `GET /api/zones/defaults` - the SOA values a new zone would get, so the
+/// console can pre-fill Add Zone and explain empty Settings fields.
+pub async fn zone_defaults_handler(State(state): State<AppState>) -> Response {
+    let d = zone_defaults(&state);
+    Json(serde_json::json!({
+        "primary_ns": d.primary_ns,
+        "primary_ns_source": d.primary_ns_source,
+        "admin_mailbox": d.admin_mailbox,
+        "admin_mailbox_source": d.admin_mailbox_source,
+        "admin_email": d.admin_email,
+        // What an empty setting falls back to, whatever is set now.
+        "server_name": daygle_dns_core::config::detect_server_name(),
+        "first_admin_email": state.catalog.store().first_admin_email().ok().flatten(),
+    }))
+    .into_response()
+}
+
 /// Payload used by the GUI's Add Zone form. `zone_type` currently accepts
 /// `primary` or `secondary`; the other zone kinds need recursive forwarding or
 /// catalog-specific behavior and are intentionally not represented as hosted
@@ -1393,13 +1465,21 @@ pub async fn create_zone(
         None
     };
 
+    // People type email addresses; the SOA wants the RNAME form.
+    let admin_mailbox = match input
+        .admin_mailbox
+        .clone()
+        .or_else(|| input.default_admin_mailbox.clone())
+        .map(|m| daygle_dns_core::config::mailbox_to_rname(&m))
+        .transpose()
+    {
+        Ok(m) => m.filter(|m| !m.is_empty()),
+        Err(msg) => return error_response(StatusCode::BAD_REQUEST, msg),
+    };
     let mut zone_input = ZoneInput {
         name: input.name.clone(),
         primary_ns: input.primary_ns.clone(),
-        admin_mailbox: input
-            .admin_mailbox
-            .clone()
-            .or_else(|| input.default_admin_mailbox.clone()),
+        admin_mailbox,
         serial: input.serial,
         refresh: input.refresh,
         retry: input.retry,
@@ -1417,42 +1497,17 @@ pub async fn create_zone(
         zone_input.expire.get_or_insert(expire);
         zone_input.minimum.get_or_insert(minimum);
     }
-    // No explicit nameserver and the imported zone file carried no SOA:
-    // default the SOA MNAME to the server's own DNS domain (Settings ->
-    // DNS Server Domain) rather than guessing "ns1.<zone>".
-    if zone_input.primary_ns.is_none() && !has_imported_soa {
-        let default_ns = state
-            .config
-            .load_full()
-            .authoritative
-            .default_primary_ns
-            .trim()
-            .to_string();
-        if !default_ns.is_empty() {
-            zone_input.primary_ns = Some(if default_ns.ends_with('.') {
-                default_ns
-            } else {
-                format!("{default_ns}.")
-            });
+    // No explicit nameserver or mailbox, and the imported zone file carried
+    // no SOA: use the server's defaults (Settings, else this server's host
+    // name and the first administrator's email), else the store's
+    // ns1.<zone>. / admin.<zone>. fallbacks.
+    if !has_imported_soa {
+        let defaults = zone_defaults(&state);
+        if zone_input.primary_ns.is_none() {
+            zone_input.primary_ns = defaults.primary_ns;
         }
-    }
-    // Likewise the SOA contact: the server's default mailbox (Settings ->
-    // Default Administrator Mailbox) when set, else the store's
-    // "admin.<zone>." fallback.
-    if zone_input.admin_mailbox.is_none() && !has_imported_soa {
-        let default_mailbox = state
-            .config
-            .load_full()
-            .authoritative
-            .default_admin_mailbox
-            .trim()
-            .to_string();
-        if !default_mailbox.is_empty() {
-            zone_input.admin_mailbox = Some(if default_mailbox.ends_with('.') {
-                default_mailbox
-            } else {
-                format!("{default_mailbox}.")
-            });
+        if zone_input.admin_mailbox.is_none() {
+            zone_input.admin_mailbox = defaults.admin_mailbox;
         }
     }
     if input.serial_date_scheme {
@@ -1635,7 +1690,9 @@ pub async fn update_zone_soa(
         Ok(v) => v,
         Err(msg) => return error_response(StatusCode::BAD_REQUEST, msg),
     };
-    let admin_mailbox = match require_non_empty(input.admin_mailbox, "administrator mailbox") {
+    let admin_mailbox = match require_non_empty(input.admin_mailbox, "administrator mailbox")
+        .and_then(|v| daygle_dns_core::config::mailbox_to_rname(&v))
+    {
         Ok(v) if v.is_empty() => current.admin_mailbox,
         Ok(v) => v,
         Err(msg) => return error_response(StatusCode::BAD_REQUEST, msg),
@@ -3230,24 +3287,23 @@ pub async fn update_settings(
         if let Some(v) = &a.default_primary_ns {
             // Normalize to the fully-qualified form so the SOA MNAME is
             // absolute regardless of whether the user typed the trailing
-            // dot; blank input keeps the current value.
+            // dot; blank clears it (new zones then use this server's name).
             let v = v.trim();
-            if !v.is_empty() {
-                config.authoritative.default_primary_ns = if v.ends_with('.') {
-                    v.to_string()
-                } else {
-                    format!("{v}.")
-                };
-            }
-            authoritative_changed = true;
-        }
-        if let Some(v) = &a.default_admin_mailbox {
-            let v = v.trim();
-            config.authoritative.default_admin_mailbox = if v.is_empty() || v.ends_with('.') {
+            config.authoritative.default_primary_ns = if v.is_empty() || v.ends_with('.') {
                 v.to_string()
             } else {
                 format!("{v}.")
             };
+            authoritative_changed = true;
+        }
+        if let Some(v) = &a.default_admin_mailbox {
+            // An email address or the SOA form; blank clears it (new zones
+            // then use the first administrator's email).
+            config.authoritative.default_admin_mailbox =
+                match daygle_dns_core::config::mailbox_to_rname(v) {
+                    Ok(m) => m,
+                    Err(msg) => return error_response(StatusCode::BAD_REQUEST, msg),
+                };
             authoritative_changed = true;
         }
         if let Some(v) = a.axfr_enabled {

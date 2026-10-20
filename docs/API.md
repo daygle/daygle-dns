@@ -281,19 +281,34 @@ in a `PUT` is applied to the running server but not stored, so it reverts
 at the next restart; the console shows these values read-only. Login users are managed
 from the console's **Users** page (see [Console users and roles](#console-users-and-roles)).
 
-The `authoritative` group holds zone-creation defaults. Of note:
-`authoritative.default_primary_ns` (the console's **DNS Server Domain**
-setting under Settings → Zones & Records) is used as the SOA Primary
-Nameserver (MNAME) — and to synthesize the zone's default `@` NS record — for
-zones created without an explicit `primary_ns`, instead of assuming
-`ns1.<zone>`. The value is normalized to a fully-qualified name (a trailing
-dot is added when missing) and a blank value keeps the current one; when the
-setting is unset, the server falls back to `ns1.<zone>.`.
-`authoritative.default_admin_mailbox` (Settings → Zones & Records →
-**Default Administrator Mailbox**) is likewise the SOA contact for zones
-created without an explicit `admin_mailbox` or an imported SOA. A trailing
-dot is added when missing; a blank value clears it, and new zones then use
-`admin.<zone>.`.
+The `authoritative` group holds zone-creation defaults, used for zones
+created without their own SOA values (no explicit value and no imported
+SOA):
+
+- `authoritative.default_primary_ns` (Settings → **DNS Server Domain**) is
+  the SOA primary nameserver (MNAME), also used to synthesize the zone's
+  default `@` NS record. A trailing dot is added when missing. Empty (the
+  default) means this server's own host name, made fully qualified with the
+  `domain` (or first `search`) entry of `/etc/resolv.conf`; when that
+  cannot be read either, `ns1.<zone>.`.
+- `authoritative.default_admin_mailbox` (Settings → **Default
+  Administrator Email**) is the SOA contact (RNAME). It takes an email
+  address (`jane.doe@example.com`, stored as `jane\.doe.example.com.`) or
+  the SOA form. Empty (the default) means the email of the first
+  administrator account that has one (normally the account created at
+  first-run setup); with none, `admin.<zone>.`.
+
+Blank values clear a setting. The placeholder values earlier versions
+shipped (`ns1.daygle.test.`, `admin.daygle.test.`) count as empty.
+`admin_mailbox` on `POST /api/zones` and `PUT /api/zones/{id}/soa` also
+accepts an email address.
+
+`GET /api/zones/defaults` reports what a new zone would get:
+`primary_ns` and `admin_mailbox` (with `primary_ns_source` =
+`setting`/`hostname`/`none` and `admin_mailbox_source` =
+`setting`/`admin_email`/`none`), `admin_email` (the mailbox as an email
+address when unambiguous), and the automatic fallbacks `server_name` and
+`first_admin_email` whatever is set.
 
 `recursive.mode` is `"recursive"` (resolve from the root servers; DNSSEC is
 validated against the built-in root trust anchor and query names are

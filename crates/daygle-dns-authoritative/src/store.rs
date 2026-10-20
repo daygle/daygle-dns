@@ -1779,6 +1779,22 @@ impl ZoneStore {
         Ok(n > 0)
     }
 
+    /// The email of the earliest-created enabled administrator that has
+    /// one (normally the account made at first-run setup), or `None`.
+    pub fn first_admin_email(&self) -> Result<Option<String>> {
+        let conn = self.lock_conn()?;
+        conn.query_row(
+            "SELECT email FROM console_users
+             WHERE role = 'admin' AND enabled = 1 AND TRIM(email) != ''
+             ORDER BY created_at, username LIMIT 1",
+            [],
+            |r| r.get::<_, String>(0),
+        )
+        .optional()
+        .map(|e| e.map(|e| e.trim().to_string()))
+        .map_err(Into::into)
+    }
+
     /// The username of the first enabled admin, or `None` (used to guard
     /// against demoting/disabling/deleting the last admin).
     pub fn first_enabled_admin(&self) -> Result<Option<String>> {
