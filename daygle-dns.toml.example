@@ -5,6 +5,10 @@
 # Every `listen` below takes an IPv4 or IPv6 address: "0.0.0.0" listens on
 # every IPv4 address, "::" on every IPv4 AND IPv6 address (dual-stack), and
 # a specific address such as "192.168.1.2" or "fd00::53" on just that one.
+# To listen on several, separate them with commas or use an array:
+#   listen = "192.168.1.2, fd00::53"   or   listen = ["192.168.1.2", "fd00::53"]
+# "::" next to IPv4 addresses ("::, 192.168.1.2") covers every IPv6 address
+# plus those IPv4 ones.
 [server]
 listen = "0.0.0.0"
 # With "::" (here or in [api], [dot], [doh], [doq]), accept IPv6 clients

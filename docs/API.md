@@ -371,6 +371,14 @@ an allowed version, all of them are used and a warning is logged. Zone
 transfers and NOTIFY use the addresses configured for them regardless. This
 is about transport only: AAAA records are still resolved and served.
 
+Every `listen` setting (`server`, `api`, `dot`, `doh`, `doq`) takes one
+address or several separated by commas (in the config file, an array works
+too): `"192.168.1.2, fd00::53"`. Each address gets its own socket on the
+listener's port. `::` next to IPv4 addresses covers every IPv6 address plus
+those IPv4 ones. A repeated address, or one a wildcard in the same list
+already covers (`"0.0.0.0, 192.168.1.2"`), is a config error, since the
+second socket could not be bound.
+
 `server.ipv6_only` (`false` by default; the console shows it but leaves it to the file) makes a `::` listen
 address, in `[server]` or in `[api]`, `[dot]`, `[doh]` or `[doq]`, accept
 IPv6 clients only; by default `::` accepts IPv4 clients too.

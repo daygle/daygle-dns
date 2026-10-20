@@ -169,9 +169,11 @@ fn main() {
                 std::process::exit(1);
             }
         }
-        let addr = daygle_dns_core::config::listen_socket_addr(&config.api.listen, config.api.port)
-            .map(|a| a.to_string())
-            .unwrap_or_else(|_| format!("{}:{}", config.api.listen, config.api.port));
+        let addr =
+            daygle_dns_core::config::listen_socket_addrs(&config.api.listen, config.api.port)
+                .ok()
+                .and_then(|addrs| addrs.first().map(|a| a.to_string()))
+                .unwrap_or_else(|| format!("{}:{}", config.api.listen, config.api.port));
         println!(
             "web console access reset: after a restart it is served over plain HTTP at http://{addr}/"
         );

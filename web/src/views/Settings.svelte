@@ -225,14 +225,24 @@
     return text.split('\n').map((l) => l.trim()).filter(Boolean);
   }
 
-  // What a listen address accepts, in words (`::` is dual-stack unless
-  // server.ipv6_only is set).
+  // What a listen setting accepts, in words. It is one address or several
+  // separated by commas; `::` is dual-stack unless server.ipv6_only is set
+  // or the list also names IPv4 addresses.
   function listenMeaning(listen, ipv6Only) {
-    const a = String(listen || '').trim().replace(/^\[(.*)\]$/, '$1');
-    if (a === '0.0.0.0') return 'All IPv4 addresses';
-    if (a === '::') return ipv6Only ? 'All IPv6 addresses (IPv6 only)' : 'All IPv4 and IPv6 addresses';
-    if (a === '127.0.0.1' || a === '::1') return 'This computer only';
-    return a.includes(':') ? 'This IPv6 address only' : 'This IPv4 address only';
+    const parts = String(listen || '').split(',').map((p) => p.trim().replace(/^\[(.*)\]$/, '$1')).filter(Boolean);
+    if (parts.length === 1) {
+      const a = parts[0];
+      if (a === '0.0.0.0') return 'All IPv4 addresses';
+      if (a === '::') return ipv6Only ? 'All IPv6 addresses (IPv6 only)' : 'All IPv4 and IPv6 addresses';
+      if (a === '127.0.0.1' || a === '::1') return 'This computer only';
+      return a.includes(':') ? 'This IPv6 address only' : 'This IPv4 address only';
+    }
+    const wildcards = parts.filter((p) => p === '0.0.0.0' || p === '::')
+      .map((p) => (p === '::' ? 'all IPv6 addresses' : 'all IPv4 addresses'));
+    const others = parts.length - wildcards.length;
+    const text = [...wildcards, others ? `${others} specific address${others > 1 ? 'es' : ''}` : '']
+      .filter(Boolean).join(' and ');
+    return text.charAt(0).toUpperCase() + text.slice(1);
   }
 
   // Trim each line and drop empties (shared by the network allow-lists and
@@ -489,7 +499,8 @@
       <code>daygle-dns.toml</code> and restart (or let Reload Config File
       pick it up). Use <code>0.0.0.0</code> for IPv4 only, <code>::</code>
       for IPv4 and IPv6, or <code>::</code> with <code>ipv6_only = true</code>
-      for IPv6 only. They live in the file rather than here so a listener that
+      for IPv6 only. To listen on particular addresses, list them separated
+      by commas, for example <code>192.168.1.2, fd00::53</code>. They live in the file rather than here so a listener that
       stops working can always be fixed without the console. The web console
       listens on {config?.api?.listen}. DNS over TLS, HTTPS and QUIC are on
       the Encrypted DNS tab.

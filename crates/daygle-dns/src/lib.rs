@@ -861,10 +861,19 @@ fn write_if_changed(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
     std::fs::rename(&tmp, path).map_err(DaygleError::Io)
 }
 
-/// `[section].listen` and a port as a socket address (IPv4 or IPv6).
-fn listen_addr(section: &str, listen: &str, port: u16) -> Result<std::net::SocketAddr> {
-    daygle_dns_core::config::listen_socket_addr(listen, port)
-        .map_err(|e| DaygleError::Config(format!("{section}.listen: {e}")))
+/// `[section].listen` and a port as socket addresses (one or several, IPv4
+/// or IPv6), each with whether it is bound IPv6-only (see
+/// [`net::v6_only`]).
+fn listen_addrs(
+    section: &str,
+    listen: &str,
+    port: u16,
+    ipv6_only: bool,
+) -> Result<Vec<(std::net::SocketAddr, bool)>> {
+    let addrs = daygle_dns_core::config::listen_socket_addrs(listen, port)
+        .map_err(|e| DaygleError::Config(format!("{section}.listen: {e}")))?;
+    let v6_only = net::v6_only(&addrs, ipv6_only);
+    Ok(addrs.into_iter().map(|a| (a, v6_only)).collect())
 }
 
 async fn bind_listeners(
@@ -878,101 +887,131 @@ async fn bind_listeners(
     // to the zone database so the file-based TLS loaders can read them.
     let mut config = config.clone();
     materialize_stored_certs(&mut config, store)?;
-    let listen = listen_addr("server", &config.server.listen, config.server.port)?;
+    let ipv6_only = config.server.ipv6_only;
+    let listen = listen_addrs(
+        "server",
+        &config.server.listen,
+        config.server.port,
+        ipv6_only,
+    )?;
 
     // DoQ task, spawned below when QUIC is enabled.
     let mut doq_task = None;
 
+    // `addrs` records the first address of each listener.
     if config.server.udp_enabled {
-        // Bind through a std socket so the kernel send/receive buffers can be
-        // sized before the socket is wrapped for Tokio (the buffer sizes must
-        // be set before Windows picks them up on the first connect). These
-        // knobs use `socket2` because std::net::UdpSocket no longer exposes
-        // SO_SNDBUF/SO_RCVBUF setters.
-        let std_socket = net::bind_udp_std(listen, config.server.ipv6_only)?;
         let buffer_bytes = |kb: u32| {
             (kb as usize)
                 .checked_mul(1024)
                 .ok_or_else(|| DaygleError::Config("udp buffer size is too large".to_string()))
         };
-        socket2::SockRef::from(&std_socket)
-            .set_send_buffer_size(buffer_bytes(config.server.udp_send_buffer_kb)?)?;
-        socket2::SockRef::from(&std_socket)
-            .set_recv_buffer_size(buffer_bytes(config.server.udp_recv_buffer_kb)?)?;
-        std_socket.set_nonblocking(true)?;
-        let socket = tokio::net::UdpSocket::from_std(std_socket)?;
-        addrs.udp = Some(socket.local_addr()?);
-        server.register_socket(socket);
-        info!(
-            addr = %addrs.udp.expect("addr set above"),
-            send_buffer_kb = config.server.udp_send_buffer_kb,
-            recv_buffer_kb = config.server.udp_recv_buffer_kb,
-            "plaintext UDP DNS listening"
-        );
+        for &(addr, v6_only) in &listen {
+            // Bind through a std socket so the kernel send/receive buffers
+            // can be sized before the socket is wrapped for Tokio (the
+            // buffer sizes must be set before Windows picks them up on the
+            // first connect). These knobs use `socket2` because
+            // std::net::UdpSocket no longer exposes SO_SNDBUF/SO_RCVBUF
+            // setters.
+            let std_socket = net::bind_udp_std(addr, v6_only)?;
+            socket2::SockRef::from(&std_socket)
+                .set_send_buffer_size(buffer_bytes(config.server.udp_send_buffer_kb)?)?;
+            socket2::SockRef::from(&std_socket)
+                .set_recv_buffer_size(buffer_bytes(config.server.udp_recv_buffer_kb)?)?;
+            std_socket.set_nonblocking(true)?;
+            let socket = tokio::net::UdpSocket::from_std(std_socket)?;
+            let bound = socket.local_addr()?;
+            addrs.udp.get_or_insert(bound);
+            server.register_socket(socket);
+            info!(
+                addr = %bound,
+                send_buffer_kb = config.server.udp_send_buffer_kb,
+                recv_buffer_kb = config.server.udp_recv_buffer_kb,
+                "plaintext UDP DNS listening"
+            );
+        }
     }
     if config.server.tcp_enabled {
-        let listener = net::bind_tcp(listen, config.server.ipv6_only)?;
-        addrs.tcp = Some(listener.local_addr()?);
-        server.register_listener(
-            listener,
-            Duration::from_millis(config.server.tcp_timeout_ms),
-            config.server.response_buffer_size,
-        );
-        info!(addr = %addrs.tcp.expect("addr set above"), "plaintext TCP DNS listening");
+        for &(addr, v6_only) in &listen {
+            let listener = net::bind_tcp(addr, v6_only)?;
+            let bound = listener.local_addr()?;
+            addrs.tcp.get_or_insert(bound);
+            server.register_listener(
+                listener,
+                Duration::from_millis(config.server.tcp_timeout_ms),
+                config.server.response_buffer_size,
+            );
+            info!(addr = %bound, "plaintext TCP DNS listening");
+        }
     }
 
     if config.dot.enabled {
-        let addr = listen_addr("dot", &config.dot.listen, config.dot.port)?;
-        let listener = net::bind_tcp(addr, config.server.ipv6_only)?;
-        addrs.dot = Some(listener.local_addr()?);
         let tls_config = daygle_dns_dot::build_tls_config(&config.dot)?;
-        daygle_dns_dot::register_dot(
-            server,
-            listener,
-            tls_config,
-            Duration::from_secs(config.dot.handshake_timeout_secs),
-        )?;
-        info!(addr = %addrs.dot.expect("addr set above"), "DNS over TLS listening");
+        for (addr, v6_only) in listen_addrs("dot", &config.dot.listen, config.dot.port, ipv6_only)?
+        {
+            let listener = net::bind_tcp(addr, v6_only)?;
+            let bound = listener.local_addr()?;
+            addrs.dot.get_or_insert(bound);
+            daygle_dns_dot::register_dot(
+                server,
+                listener,
+                tls_config.clone(),
+                Duration::from_secs(config.dot.handshake_timeout_secs),
+            )?;
+            info!(addr = %bound, "DNS over TLS listening");
+        }
     }
 
     if config.doh.enabled {
-        let addr = listen_addr("doh", &config.doh.listen, config.doh.port)?;
-        let listener = net::bind_tcp(addr, config.server.ipv6_only)?;
-        addrs.doh = Some(listener.local_addr()?);
         let tls_config = daygle_dns_dot::build_doh_tls_config(&config.doh)?;
-        daygle_dns_dot::register_doh(
-            server,
-            listener,
-            tls_config,
-            Duration::from_secs(config.doh.handshake_timeout_secs),
-            None,
-            &config.doh.endpoint,
-        )?;
-        info!(addr = %addrs.doh.expect("addr set above"), endpoint = %config.doh.endpoint, "DNS over HTTPS listening");
+        for (addr, v6_only) in listen_addrs("doh", &config.doh.listen, config.doh.port, ipv6_only)?
+        {
+            let listener = net::bind_tcp(addr, v6_only)?;
+            let bound = listener.local_addr()?;
+            addrs.doh.get_or_insert(bound);
+            daygle_dns_dot::register_doh(
+                server,
+                listener,
+                tls_config.clone(),
+                Duration::from_secs(config.doh.handshake_timeout_secs),
+                None,
+                &config.doh.endpoint,
+            )?;
+            info!(addr = %bound, endpoint = %config.doh.endpoint, "DNS over HTTPS listening");
+        }
     }
 
     if config.doq.enabled {
-        let addr = listen_addr("doq", &config.doq.listen, config.doq.port)?;
-        let socket = net::bind_udp(addr, config.server.ipv6_only)?;
         let tls_config = daygle_dns_dot::build_doq_tls_config(&config.doq)?;
-        let endpoint = crate::doq::build_doq_endpoint(
-            socket,
-            tls_config,
-            Duration::from_secs(config.doq.idle_timeout_secs),
-        )
-        .map_err(|e| DaygleError::Config(format!("cannot build DoQ listener: {e}")))?;
-        addrs.doq = Some(endpoint.local_addr().map_err(DaygleError::Io)?);
-        let token = server.shutdown_token().clone();
-        doq_task = Some(tokio::spawn(crate::doq::serve_doq(
-            endpoint,
-            dispatcher.clone(),
-            token,
-        )));
-        info!(
-            addr = %addrs.doq.expect("addr set above"),
-            idle_timeout_s = config.doq.idle_timeout_secs,
-            "DNS over QUIC (RFC 9250) listening"
-        );
+        let mut tasks = Vec::new();
+        for (addr, v6_only) in listen_addrs("doq", &config.doq.listen, config.doq.port, ipv6_only)?
+        {
+            let socket = net::bind_udp(addr, v6_only)?;
+            let endpoint = crate::doq::build_doq_endpoint(
+                socket,
+                tls_config.clone(),
+                Duration::from_secs(config.doq.idle_timeout_secs),
+            )
+            .map_err(|e| DaygleError::Config(format!("cannot build DoQ listener: {e}")))?;
+            let bound = endpoint.local_addr().map_err(DaygleError::Io)?;
+            addrs.doq.get_or_insert(bound);
+            let token = server.shutdown_token().clone();
+            tasks.push(tokio::spawn(crate::doq::serve_doq(
+                endpoint,
+                dispatcher.clone(),
+                token,
+            )));
+            info!(
+                addr = %bound,
+                idle_timeout_s = config.doq.idle_timeout_secs,
+                "DNS over QUIC (RFC 9250) listening"
+            );
+        }
+        // One handle for the generation: done when every endpoint is.
+        doq_task = Some(tokio::spawn(async move {
+            for task in tasks {
+                let _ = task.await;
+            }
+        }));
     }
 
     Ok(doq_task)

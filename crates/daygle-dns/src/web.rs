@@ -31,15 +31,17 @@ use tracing::{info, warn};
 /// How long a client may take to finish the TLS handshake.
 const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// The addresses the web listeners are bound to.
+/// The addresses the web listeners are bound to (the first, when
+/// `api.listen` names several).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct WebAddrs {
     pub http: Option<SocketAddr>,
     pub https: Option<SocketAddr>,
 }
 
-/// One running listener: the port it was asked for (0 = ephemeral, in
-/// tests), where it is bound, and how to stop it.
+/// One running listener (a socket per `api.listen` address): the port it
+/// was asked for (0 = ephemeral, in tests), where it is bound first, and
+/// how to stop it.
 struct Running {
     port: u16,
     addr: SocketAddr,
@@ -166,39 +168,62 @@ impl WebServer {
             .map_err(|e| format!("certificate '{name}' cannot be used: {e}"))
     }
 
-    async fn bind(&self, port: u16, label: &str) -> Result<TcpListener, String> {
-        let addr = daygle_dns_core::config::listen_socket_addr(&self.listen, port)
+    async fn bind(&self, port: u16, label: &str) -> Result<Vec<TcpListener>, String> {
+        let addrs = daygle_dns_core::config::listen_socket_addrs(&self.listen, port)
             .map_err(|e| format!("api.listen: {e}"))?;
-        crate::net::bind_tcp(addr, self.ipv6_only)
-            .map_err(|e| format!("cannot listen for {label} on {addr}: {e}"))
+        let v6_only = crate::net::v6_only(&addrs, self.ipv6_only);
+        addrs
+            .into_iter()
+            .map(|addr| {
+                crate::net::bind_tcp(addr, v6_only)
+                    .map_err(|e| format!("cannot listen for {label} on {addr}: {e}"))
+            })
+            .collect()
     }
 
-    fn spawn_http(&self, port: u16, socket: TcpListener) -> Running {
-        let addr = socket.local_addr().expect("bound socket has an address");
+    fn spawn_http(&self, port: u16, sockets: Vec<TcpListener>) -> Running {
         let stop = self.shutdown.child_token();
         let app = self.app.clone().layer(middleware::from_fn_with_state(
             self.settings.clone(),
             redirect_to_https,
         ));
-        let done = stop.clone();
-        tokio::spawn(async move {
-            let served = axum::serve(
-                socket,
-                app.into_make_service_with_connect_info::<SocketAddr>(),
-            )
-            .with_graceful_shutdown(done.cancelled_owned())
-            .await;
-            if let Err(e) = served {
-                warn!("web console HTTP listener error: {e}");
-            }
-        });
-        info!(%addr, "web console listening (HTTP)");
+        let mut first = None;
+        for socket in sockets {
+            let addr = socket.local_addr().expect("bound socket has an address");
+            first.get_or_insert(addr);
+            let app = app.clone();
+            let done = stop.clone();
+            tokio::spawn(async move {
+                let served = axum::serve(
+                    socket,
+                    app.into_make_service_with_connect_info::<SocketAddr>(),
+                )
+                .with_graceful_shutdown(done.cancelled_owned())
+                .await;
+                if let Err(e) = served {
+                    warn!("web console HTTP listener error: {e}");
+                }
+            });
+            info!(%addr, "web console listening (HTTP)");
+        }
+        let addr = first.expect("api.listen names at least one address");
         Running { port, addr, stop }
     }
 
-    fn spawn_https(&self, port: u16, socket: TcpListener) -> Running {
-        let addr = socket.local_addr().expect("bound socket has an address");
+    fn spawn_https(&self, port: u16, sockets: Vec<TcpListener>) -> Running {
         let stop = self.shutdown.child_token();
+        let mut first = None;
+        for socket in sockets {
+            let addr = socket.local_addr().expect("bound socket has an address");
+            first.get_or_insert(addr);
+            self.serve_https(socket, addr, &stop);
+        }
+        let addr = first.expect("api.listen names at least one address");
+        Running { port, addr, stop }
+    }
+
+    /// Serve HTTPS on one socket until `stop` is cancelled.
+    fn serve_https(&self, socket: TcpListener, addr: SocketAddr, stop: &CancellationToken) {
         let (tx, rx) = mpsc::channel(64);
         // Handshakes run in their own tasks so a slow client cannot hold
         // up the others.
@@ -246,7 +271,6 @@ impl WebServer {
             }
         });
         info!(%addr, "web console listening (HTTPS)");
-        Running { port, addr, stop }
     }
 }
 

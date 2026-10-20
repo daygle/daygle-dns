@@ -1000,10 +1000,60 @@ impl RuntimeSettings {
     }
 }
 
-/// Join a listen address and a port. Takes IPv4 or IPv6 addresses, with or
-/// without brackets: `0.0.0.0` (every IPv4 address), `::` or `[::]` (every
-/// IPv4 and IPv6 address), `192.168.1.2`, `fd00::53`.
-pub fn listen_socket_addr(
+/// Join a listen setting and a port. The setting is one address or several
+/// separated by commas, IPv4 or IPv6, with or without brackets: `0.0.0.0`
+/// (every IPv4 address), `::` or `[::]` (every IPv6 address, and every IPv4
+/// one too unless the list also names IPv4 addresses or `server.ipv6_only`
+/// is set), `192.168.1.2`, `fd00::53`, `192.168.1.2, fd00::53`.
+///
+/// Repeats, and an address a wildcard in the list already covers, are
+/// refused: the second socket could not be bound.
+pub fn listen_socket_addrs(
+    listen: &str,
+    port: u16,
+) -> std::result::Result<Vec<std::net::SocketAddr>, String> {
+    let mut addrs: Vec<std::net::SocketAddr> = Vec::new();
+    for entry in listen.split(',') {
+        let addr = listen_socket_addr(entry, port)?;
+        if addrs.iter().any(|a| a.ip() == addr.ip()) {
+            return Err(format!("{} is listed twice", addr.ip()));
+        }
+        addrs.push(addr);
+    }
+    for (wildcard, family) in [
+        (IpAddr::from(std::net::Ipv4Addr::UNSPECIFIED), "IPv4"),
+        (IpAddr::from(std::net::Ipv6Addr::UNSPECIFIED), "IPv6"),
+    ] {
+        if addrs.iter().any(|a| a.ip() == wildcard)
+            && addrs
+                .iter()
+                .any(|a| a.ip() != wildcard && a.is_ipv4() == wildcard.is_ipv4())
+        {
+            return Err(format!(
+                "{wildcard} already covers every {family} address: list it alone, or list specific addresses instead"
+            ));
+        }
+    }
+    Ok(addrs)
+}
+
+/// Accept a listen setting written as a string or, in the config file, as
+/// an array of addresses (kept as the comma-separated form).
+fn listen_list<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result<String, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Listen {
+        One(String),
+        Many(Vec<String>),
+    }
+    Ok(match Listen::deserialize(d)? {
+        Listen::One(s) => s,
+        Listen::Many(v) => v.join(", "),
+    })
+}
+
+/// One listen address and a port (see [`listen_socket_addrs`]).
+fn listen_socket_addr(
     listen: &str,
     port: u16,
 ) -> std::result::Result<std::net::SocketAddr, String> {
@@ -1692,7 +1742,7 @@ impl DaygleConfig {
             ("doq.listen", &self.doq.listen, self.doq.enabled),
         ] {
             if enabled {
-                listen_socket_addr(listen, 0)
+                listen_socket_addrs(listen, 0)
                     .map_err(|e| DaygleError::Config(format!("{name}: {e}")))?;
             }
         }
@@ -1722,6 +1772,7 @@ pub fn parse_master_addr(entry: &str) -> std::result::Result<std::net::SocketAdd
 #[serde(default, deny_unknown_fields)]
 pub struct ServerSettings {
     /// Address the plaintext DNS listeners bind to.
+    #[serde(deserialize_with = "listen_list")]
     pub listen: String,
     /// With a listen address of `::` (here or in `[api]`, `[dot]`, `[doh]`
     /// or `[doq]`), accept IPv6 clients only. Off by default: `::` accepts
@@ -2374,6 +2425,7 @@ pub struct DotSettings {
     /// Serve DNS over TLS.
     pub enabled: bool,
     /// Address the DoT listener binds to.
+    #[serde(deserialize_with = "listen_list")]
     pub listen: String,
     /// DoT port (default 853).
     pub port: u16,
@@ -2419,6 +2471,7 @@ pub struct DohSettings {
     /// Serve DNS over HTTPS.
     pub enabled: bool,
     /// Address the DoH listener binds to.
+    #[serde(deserialize_with = "listen_list")]
     pub listen: String,
     /// DoH port (default 443).
     pub port: u16,
@@ -2503,6 +2556,7 @@ pub struct ApiSettings {
     /// Serve the REST API and GUI.
     pub enabled: bool,
     /// Address the HTTP server binds to.
+    #[serde(deserialize_with = "listen_list")]
     pub listen: String,
     /// HTTP port (default 5380).
     pub port: u16,
@@ -2553,6 +2607,7 @@ pub struct DoqSettings {
     /// Serve DNS over QUIC.
     pub enabled: bool,
     /// Address the DoQ listener binds to.
+    #[serde(deserialize_with = "listen_list")]
     pub listen: String,
     /// DoQ port (default 853, per RFC 9250).
     pub port: u16,
@@ -2989,6 +3044,51 @@ fd0000000000000000000000000000aa 02 40 00 80     eth0
             .unwrap_err()
             .to_string()
             .contains("server.listen"));
+    }
+
+    #[test]
+    fn listen_settings_take_several_addresses() {
+        let addrs = |s: &str| {
+            listen_socket_addrs(s, 53).map(|v| v.iter().map(|a| a.to_string()).collect::<Vec<_>>())
+        };
+        assert_eq!(addrs("0.0.0.0").unwrap(), ["0.0.0.0:53"]);
+        assert_eq!(
+            addrs("192.168.1.2, [fd00::53]").unwrap(),
+            ["192.168.1.2:53", "[fd00::53]:53"]
+        );
+        // Every IPv6 address plus one IPv4 address, and both wildcards.
+        assert_eq!(
+            addrs("::,192.168.1.2").unwrap(),
+            ["[::]:53", "192.168.1.2:53"]
+        );
+        assert_eq!(addrs("0.0.0.0, ::").unwrap().len(), 2);
+        // A wildcard already covers its family; repeats cannot both bind.
+        assert!(addrs("0.0.0.0, 192.168.1.2")
+            .unwrap_err()
+            .contains("0.0.0.0 already covers"));
+        assert!(addrs(":: , fd00::53")
+            .unwrap_err()
+            .contains(":: already covers"));
+        assert!(addrs("192.168.1.2, 192.168.1.2")
+            .unwrap_err()
+            .contains("twice"));
+        assert!(addrs("192.168.1.2,").is_err());
+
+        // The file may use an array.
+        let cfg = DaygleConfig::parse(
+            "[server]\nlisten = [\"127.0.0.1\", \"::1\"]\n[api]\nlisten = \"127.0.0.1, ::1\"\n",
+        )
+        .unwrap();
+        assert_eq!(cfg.server.listen, "127.0.0.1, ::1");
+        assert_eq!(cfg.api.listen, "127.0.0.1, ::1");
+        let mut cfg = DaygleConfig::default();
+        cfg.dot.enabled = true;
+        cfg.dot.listen = "0.0.0.0, 10.0.0.1".into();
+        assert!(cfg
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("dot.listen"));
     }
 
     #[test]
