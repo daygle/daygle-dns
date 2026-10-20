@@ -12,4 +12,6 @@ hickory-resolver.workspace = true
 hickory-proto.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+arc-swap.workspace = true
+ipnet.workspace = true
 parking_lot.workspace = true

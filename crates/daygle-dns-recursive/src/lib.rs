@@ -5,9 +5,10 @@
 //!
 //! [`RecursiveResolver`] wraps a `TokioResolver` and configures:
 //!
-//! - **Root → TLD → authoritative** iteration (performed internally by
-//!   Hickory's resolver state machine, seeded from the configured upstreams or
-//!   the system resolver configuration).
+//! - Two resolution modes for everything not covered below: **recursive**
+//!   (root → TLD → authoritative iteration from the root servers, see
+//!   [`recursor`]) and **forwarding** (to the configured upstreams, or the
+//!   system resolver configuration when none are set).
 //! - **Positive caching** with a bounded LRU (`cache_size`).
 //! - **Negative caching** of NXDOMAIN/NODATA answers, bounded by
 //!   `negative_cache_ttl` (Hickory derives the per-zone value from the SOA
@@ -23,13 +24,17 @@
 //!   resolved through the system resolver once at build time).
 
 mod cache_assist;
+pub mod recursor;
 mod upstream;
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use cache_assist::{cache_key, CacheAssistant, PrefetchConfig};
-use daygle_dns_core::config::{ConditionalZoneConfig, RecursiveSettings, StubZoneConfig};
+use daygle_dns_core::config::{
+    parse_network, ConditionalZoneConfig, RecursionAccess, RecursiveSettings, ResolutionMode,
+    StubZoneConfig, PRIVATE_NETWORKS,
+};
 use daygle_dns_core::error::{DaygleError, Result};
 use daygle_dns_core::Metrics;
 use hickory_proto::op::Query;
@@ -56,7 +61,8 @@ pub struct RecursiveResolver {
 }
 
 struct Inner {
-    resolver: TokioResolver,
+    /// Resolves everything outside the conditional and stub zones.
+    default: DefaultBackend,
     /// Conditional forwarding zones: `zone suffix` -> dedicated resolver.
     conditional: Vec<ConditionalResolver>,
     /// Stub zones: like conditional zones, but the upstreams are the zone's
@@ -66,6 +72,44 @@ struct Inner {
     settings: RecursiveSettings,
     metrics: Arc<Metrics>,
     cache_assist: Arc<CacheAssistant>,
+    /// Client networks allowed to use recursion; `None` allows everyone.
+    allowed_clients: Option<Vec<ipnet::IpNet>>,
+}
+
+/// The resolver for names outside conditional and stub zones.
+enum DefaultBackend {
+    /// Forwarding mode: upstreams or the system resolver.
+    Forward(Box<TokioResolver>),
+    /// Recursive mode: iteration from the root servers. Swappable so a cache
+    /// flush can rebuild it (the recursor has no clear call).
+    Recursive(recursor::SharedRecursor),
+}
+
+/// A resolver chosen for one query, cloned out of [`Inner`] so no borrow is
+/// held across the lookup.
+enum Route {
+    Forward(Box<TokioResolver>),
+    Recursive(Arc<recursor::DaygleRecursor>),
+}
+
+impl Route {
+    /// Resolve through this route. Negative answers come back as
+    /// [`DaygleError::Resolution`] with their response code (NODATA as
+    /// `NoError`); transport failures carry none.
+    async fn lookup(self, name: Name, record_type: RecordType) -> Result<Lookup> {
+        match self {
+            Route::Forward(resolver) => {
+                resolver
+                    .lookup(name, record_type)
+                    .await
+                    .map_err(|e| DaygleError::Resolution {
+                        message: e.to_string(),
+                        response_code: negative_response_code(&e),
+                    })
+            }
+            Route::Recursive(recursor) => recursor::lookup(&recursor, name, record_type).await,
+        }
+    }
 }
 
 /// One conditional forwarding zone: the zone's FQDN suffix (lowercased,
@@ -90,18 +134,31 @@ impl std::fmt::Debug for RecursiveResolver {
 impl RecursiveResolver {
     /// Build a resolver from settings.
     ///
-    /// When `upstreams` is empty or `use_system_config` is set, the operating
-    /// system's resolver configuration (`/etc/resolv.conf` on Unix) is used.
+    /// In recursive mode, names outside conditional and stub zones are
+    /// resolved from the root servers. In forwarding mode they go to the
+    /// upstreams, or the operating system's resolver configuration
+    /// (`/etc/resolv.conf` on Unix) when `upstreams` is empty or
+    /// `use_system_config` is set.
     pub fn build(
         settings: &RecursiveSettings,
         metrics: Arc<Metrics>,
         stub_zones: &[StubZoneConfig],
     ) -> Result<Self> {
-        let (config, opts) = build_config(settings)?;
-        let inner = TokioResolver::builder_with_config(config, TokioRuntimeProvider::default())
-            .with_options(opts)
-            .build()
-            .map_err(|e| DaygleError::Config(format!("cannot build resolver: {e}")))?;
+        let mode = settings.effective_mode();
+        let default = match mode {
+            ResolutionMode::Recursive => DefaultBackend::Recursive(Arc::new(
+                arc_swap::ArcSwap::from_pointee(recursor::build(settings)?),
+            )),
+            ResolutionMode::Forwarding => {
+                let (config, opts) = build_config(settings)?;
+                DefaultBackend::Forward(Box::new(
+                    TokioResolver::builder_with_config(config, TokioRuntimeProvider::default())
+                        .with_options(opts)
+                        .build()
+                        .map_err(|e| DaygleError::Config(format!("cannot build resolver: {e}")))?,
+                ))
+            }
+        };
 
         let mut conditional = Vec::with_capacity(settings.conditional_zones.len());
         for zone in &settings.conditional_zones {
@@ -170,6 +227,7 @@ impl RecursiveResolver {
         }
 
         info!(
+            mode = ?mode,
             cache_size = settings.cache_size,
             attempts = settings.attempts,
             timeout_secs = settings.timeout_secs,
@@ -192,7 +250,8 @@ impl RecursiveResolver {
         }));
         Ok(Self {
             inner: Arc::new(Inner {
-                resolver: inner,
+                allowed_clients: allowed_clients(settings),
+                default,
                 conditional,
                 stubs,
                 settings: settings.clone(),
@@ -216,7 +275,13 @@ impl RecursiveResolver {
 
     /// Flush the response cache.
     pub fn clear_cache(&self) {
-        self.inner.resolver.clear_cache();
+        match &self.inner.default {
+            DefaultBackend::Forward(resolver) => resolver.clear_cache(),
+            DefaultBackend::Recursive(shared) => match recursor::build(&self.inner.settings) {
+                Ok(fresh) => shared.store(Arc::new(fresh)),
+                Err(e) => warn!("cannot rebuild the recursive resolver to clear its cache: {e}"),
+            },
+        }
         for zone in &self.inner.conditional {
             zone.resolver.clear_cache();
         }
@@ -234,6 +299,32 @@ impl RecursiveResolver {
 
     pub fn dnssec_enabled(&self) -> bool {
         self.inner.settings.dnssec_validate
+    }
+
+    /// Whether `client` may use recursion under `recursion_access`.
+    /// Authoritative zones are answered for every client regardless; this
+    /// only gates queries that would be resolved here.
+    pub fn allows_client(&self, client: std::net::IpAddr) -> bool {
+        match &self.inner.allowed_clients {
+            None => true,
+            Some(networks) => {
+                // IPv4-mapped IPv6 clients (dual-stack sockets) match the
+                // IPv4 networks.
+                let client = match client {
+                    std::net::IpAddr::V6(v6) => v6
+                        .to_ipv4_mapped()
+                        .map(std::net::IpAddr::V4)
+                        .unwrap_or(client),
+                    v4 => v4,
+                };
+                networks.iter().any(|n| n.contains(&client))
+            }
+        }
+    }
+
+    /// The resolution mode this resolver was built with.
+    pub fn mode(&self) -> ResolutionMode {
+        self.inner.settings.effective_mode()
     }
 
     pub fn metrics(&self) -> &Metrics {
@@ -341,8 +432,8 @@ impl Inner {
         // Clone the routed resolver out of `inner` before awaiting so no
         // borrow of `Inner` is held across the lookup, and never spawn
         // again here (acyclic => provably `Send`).
-        let resolver = route_resolver(&self.resolver, &self.conditional, &self.stubs, &name);
-        match resolver.lookup(name, record_type).await {
+        let route = route_resolver(&self.default, &self.conditional, &self.stubs, &name);
+        match route.lookup(name, record_type).await {
             Ok(lookup) => {
                 self.cache_assist.on_success(&key, &lookup);
             }
@@ -368,7 +459,7 @@ impl Inner {
     ) -> Result<Lookup> {
         let conditional_match = match_conditional_zones(&inner.conditional, &name);
         let stub_match = match_conditional_zones(&inner.stubs, &name);
-        let resolver = route_resolver(&inner.resolver, &inner.conditional, &inner.stubs, &name);
+        let route = route_resolver(&inner.default, &inner.conditional, &inner.stubs, &name);
         let via_conditional = conditional_match.is_some();
         let key = cache_key(&name, record_type);
         debug!(
@@ -379,7 +470,7 @@ impl Inner {
             "lookup routing"
         );
 
-        match resolver.lookup(name, record_type).await {
+        match route.lookup(name, record_type).await {
             Ok(lookup) => {
                 inner.metrics.inc(&inner.metrics.cache_misses);
                 if allow_prefetch && inner.cache_assist.on_success(&key, &lookup) {
@@ -398,30 +489,44 @@ impl Inner {
                 );
                 Ok(lookup)
             }
-            Err(e) => {
-                // Not counted in `metrics.errors` here: the dispatcher owns
-                // that counter for client-visible failures (this path also
-                // runs for prefetch refreshes and serve-stale fallbacks, which
-                // are not client query errors), so counting in both places
-                // would double-count every failed lookup.
-                Err(DaygleError::Resolution {
-                    message: e.to_string(),
-                    response_code: negative_response_code(&e),
-                })
-            }
+            // Not counted in `metrics.errors` here: the dispatcher owns that
+            // counter for client-visible failures (this path also runs for
+            // prefetch refreshes and serve-stale fallbacks, which are not
+            // client query errors), so counting in both places would
+            // double-count every failed lookup.
+            Err(e) => Err(e),
         }
     }
 }
 
+/// The client networks allowed by `recursion_access` (`None` = everyone).
+fn allowed_clients(settings: &RecursiveSettings) -> Option<Vec<ipnet::IpNet>> {
+    let parse = |items: &[&str]| items.iter().filter_map(|n| parse_network(n)).collect();
+    match settings.recursion_access {
+        RecursionAccess::Allow => None,
+        RecursionAccess::PrivateNetworks => Some(parse(PRIVATE_NETWORKS)),
+        RecursionAccess::Custom => {
+            let custom: Vec<&str> = settings
+                .recursion_networks
+                .iter()
+                .map(String::as_str)
+                .collect();
+            Some(parse(&custom))
+        }
+        RecursionAccess::Deny => Some(vec![]),
+    }
+}
+
 /// Extract the DNS response code for a negative-answer error from Hickory's
-/// resolver: NXDOMAIN/no-records become `NXDomain`, explicit upstream error
-/// codes are passed through, and everything else (timeouts, transport
-/// failures) has no code.
+/// resolver: a no-records answer keeps its own code (`NXDomain` when the name
+/// does not exist, `NoError` for NODATA - the name exists without records of
+/// the asked type), explicit upstream error codes are passed through, and
+/// everything else (timeouts, transport failures) has no code.
 fn negative_response_code(e: &hickory_resolver::net::NetError) -> Option<u16> {
     match e {
         hickory_resolver::net::NetError::Dns(hickory_resolver::net::DnsError::NoRecordsFound(
-            _,
-        )) => Some(hickory_proto::op::ResponseCode::NXDomain.into()),
+            no_records,
+        )) => Some(no_records.response_code.into()),
         hickory_resolver::net::NetError::Dns(hickory_resolver::net::DnsError::ResponseCode(
             code,
         )) => Some((*code).into()),
@@ -466,24 +571,29 @@ where
 /// (a depth tie falls back to conditional forwarding); with no zone match
 /// the default upstreams are used.
 fn route_resolver(
-    default: &TokioResolver,
+    default: &DefaultBackend,
     conditional: &[ConditionalResolver],
     stubs: &[ConditionalResolver],
     name: &Name,
-) -> TokioResolver {
+) -> Route {
     let conditional_match = match_conditional_zones(conditional, name);
     let stub_match = match_conditional_zones(stubs, name);
-    match (conditional_match, stub_match) {
-        (None, None) => default.clone(),
-        (None, Some(i)) => stubs[i].resolver.clone(),
-        (Some(i), None) => conditional[i].resolver.clone(),
+    let zone = match (conditional_match, stub_match) {
+        (None, None) => None,
+        (None, Some(i)) => Some(&stubs[i]),
+        (Some(i), None) => Some(&conditional[i]),
         (Some(i), Some(j)) => {
             if stubs[j].zone.len() > conditional[i].zone.len() {
-                stubs[j].resolver.clone()
+                Some(&stubs[j])
             } else {
-                conditional[i].resolver.clone()
+                Some(&conditional[i])
             }
         }
+    };
+    match (zone, default) {
+        (Some(zone), _) => Route::Forward(Box::new(zone.resolver.clone())),
+        (None, DefaultBackend::Forward(resolver)) => Route::Forward(resolver.clone()),
+        (None, DefaultBackend::Recursive(shared)) => Route::Recursive(shared.load_full()),
     }
 }
 

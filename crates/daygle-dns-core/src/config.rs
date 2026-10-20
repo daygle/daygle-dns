@@ -178,9 +178,44 @@ pub struct RecursiveUpdate {
     /// [`ConditionalZoneConfig`]).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub conditional_zones: Option<Vec<ConditionalZoneConfig>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mode: Option<ResolutionMode>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recursion_access: Option<RecursionAccess>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recursion_networks: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub root_hints: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub case_randomization: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rebinding_protection: Option<bool>,
 }
 
 impl RecursiveUpdate {
+    /// Apply the resolution-mode and recursion-access fields (shared by the
+    /// DB overlay and the settings API).
+    pub fn apply_resolution(&self, settings: &mut RecursiveSettings) {
+        if let Some(v) = self.mode {
+            settings.mode = Some(v);
+        }
+        if let Some(v) = self.recursion_access {
+            settings.recursion_access = v;
+        }
+        if let Some(v) = &self.recursion_networks {
+            settings.recursion_networks = trim_list(v);
+        }
+        if let Some(v) = &self.root_hints {
+            settings.root_hints = trim_list(v);
+        }
+        if let Some(v) = self.case_randomization {
+            settings.case_randomization = v;
+        }
+        if let Some(v) = self.rebinding_protection {
+            settings.rebinding_protection = v;
+        }
+    }
+
     /// Trim conditional zones: names lose surrounding whitespace and a
     /// trailing dot and are lowercased; blank upstream entries are dropped.
     pub fn normalize_conditional_zones(
@@ -199,6 +234,23 @@ impl RecursiveUpdate {
             })
             .collect()
     }
+}
+
+/// Trim every entry and drop the blank ones.
+fn trim_list(items: &[String]) -> Vec<String> {
+    items
+        .iter()
+        .map(|i| i.trim().to_string())
+        .filter(|i| !i.is_empty())
+        .collect()
+}
+
+/// Parse a CIDR network, or a bare IP address as a single-host network.
+pub fn parse_network(text: &str) -> Option<ipnet::IpNet> {
+    let text = text.trim();
+    text.parse::<ipnet::IpNet>()
+        .ok()
+        .or_else(|| text.parse::<IpAddr>().ok().map(ipnet::IpNet::from))
 }
 
 /// Normalize a zone apex for storage: trim, drop one trailing dot, lowercase.
@@ -456,6 +508,7 @@ impl RuntimeSettings {
                 config.recursive.conditional_zones =
                     RecursiveUpdate::normalize_conditional_zones(v);
             }
+            r.apply_resolution(&mut config.recursive);
         }
         if let Some(d) = &self.dot {
             if let Some(v) = d.enabled {
@@ -660,6 +713,14 @@ impl RuntimeSettings {
                 max_cache_ttl: Some(config.recursive.max_cache_ttl),
                 failure_cache_ttl: Some(config.recursive.failure_cache_ttl),
                 conditional_zones: Some(config.recursive.conditional_zones.clone()),
+                // Store the effective mode so a later upstreams change cannot
+                // silently flip an install between recursive and forwarding.
+                mode: Some(config.recursive.effective_mode()),
+                recursion_access: Some(config.recursive.recursion_access),
+                recursion_networks: Some(config.recursive.recursion_networks.clone()),
+                root_hints: Some(config.recursive.root_hints.clone()),
+                case_randomization: Some(config.recursive.case_randomization),
+                rebinding_protection: Some(config.recursive.rebinding_protection),
             }),
             dot: Some(ListenerUpdate {
                 enabled: Some(config.dot.enabled),
@@ -931,6 +992,27 @@ impl DaygleConfig {
                         zone.name
                     )));
                 }
+            }
+        }
+        for network in &self.recursive.recursion_networks {
+            if parse_network(network).is_none() {
+                return Err(DaygleError::Config(format!(
+                    "recursive.recursion_networks contains invalid network '{network}'"
+                )));
+            }
+        }
+        if self.recursive.recursion_access == RecursionAccess::Custom
+            && self.recursive.recursion_networks.is_empty()
+        {
+            return Err(DaygleError::Config(
+                "recursive.recursion_access = \"custom\" requires recursion_networks".to_string(),
+            ));
+        }
+        for hint in &self.recursive.root_hints {
+            if hint.trim().parse::<IpAddr>().is_err() {
+                return Err(DaygleError::Config(format!(
+                    "recursive.root_hints contains invalid IP address '{hint}'"
+                )));
             }
         }
         if self.authoritative.notify_enabled && self.authoritative.notify_targets.is_empty() {
@@ -1236,10 +1318,16 @@ impl Default for ServerSettings {
 pub struct RecursiveSettings {
     /// Whether recursion is offered at all.
     pub enabled: bool,
-    /// Upstream servers. Accepts `8.8.8.8`, `1.1.1.1:53`,
+    /// How non-authoritative queries are resolved: `recursive` walks root ->
+    /// TLD -> authoritative itself, `forwarding` sends them to `upstreams`.
+    /// Unset means: forwarding when `upstreams` is non-empty, otherwise
+    /// recursive (see [`RecursiveSettings::effective_mode`]).
+    pub mode: Option<ResolutionMode>,
+    /// Upstream servers (forwarding mode). Accepts `8.8.8.8`, `1.1.1.1:53`,
     /// `tls://1.1.1.1:853@cloudflare-dns.com` and `https://...` forms.
     ///
-    /// When empty, the operating system's resolver configuration is used.
+    /// In forwarding mode with no upstreams, the operating system's resolver
+    /// configuration is used.
     pub upstreams: Vec<String>,
     /// Use `/etc/resolv.conf` (or the Windows registry) instead of `upstreams`.
     pub use_system_config: bool,
@@ -1290,12 +1378,87 @@ pub struct RecursiveSettings {
     /// upstreams fail, so popular domains keep resolving during upstream
     /// outages. 0 disables serve-stale.
     pub serve_stale_secs: u64,
+    /// Which clients may use recursion (both modes). Authoritative zones are
+    /// answered for every client regardless.
+    pub recursion_access: RecursionAccess,
+    /// Client networks (CIDRs or bare IPs) allowed when `recursion_access` is
+    /// `custom`.
+    pub recursion_networks: Vec<String>,
+    /// Root server addresses for recursive mode. Empty uses the built-in IANA
+    /// root servers.
+    pub root_hints: Vec<String>,
+    /// Randomize query-name case (0x20) on outgoing UDP queries in recursive
+    /// mode and require answers to echo it, making spoofed answers harder to
+    /// inject. Off by default: a few authoritative servers do not preserve
+    /// case and would fail to resolve.
+    pub case_randomization: bool,
+    /// DNS rebinding protection (recursive mode): drop private, loopback and
+    /// link-local addresses from public answers. Names served by local
+    /// zones, conditional forwarders and stub zones are not affected.
+    pub rebinding_protection: bool,
+    /// Testing only: send recursive-mode queries to this port instead of 53
+    /// and allow private/loopback nameservers, so tests can run a fake
+    /// root -> TLD -> authoritative hierarchy without privileged ports.
+    #[serde(skip)]
+    pub test_outbound_port: Option<u16>,
+}
+
+/// How non-authoritative queries are resolved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResolutionMode {
+    /// Resolve iteratively from the root servers.
+    Recursive,
+    /// Send queries to the configured upstreams (or the system resolver).
+    Forwarding,
+}
+
+/// Which clients may use recursion.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecursionAccess {
+    /// Every client.
+    Allow,
+    /// Loopback, RFC 1918, CGNAT (100.64.0.0/10), link-local and IPv6 ULA
+    /// clients only.
+    #[default]
+    PrivateNetworks,
+    /// The networks in `recursion_networks`.
+    Custom,
+    /// Nobody: only authoritative zones are answered.
+    Deny,
+}
+
+/// Client networks treated as private for [`RecursionAccess::PrivateNetworks`].
+pub const PRIVATE_NETWORKS: &[&str] = &[
+    "127.0.0.0/8",
+    "10.0.0.0/8",
+    "172.16.0.0/12",
+    "192.168.0.0/16",
+    "100.64.0.0/10",
+    "169.254.0.0/16",
+    "::1/128",
+    "fc00::/7",
+    "fe80::/10",
+];
+
+impl RecursiveSettings {
+    /// The resolution mode in effect: the explicit `mode`, otherwise
+    /// forwarding when upstreams are configured and recursive when not.
+    pub fn effective_mode(&self) -> ResolutionMode {
+        self.mode.unwrap_or(if self.upstreams.is_empty() {
+            ResolutionMode::Recursive
+        } else {
+            ResolutionMode::Forwarding
+        })
+    }
 }
 
 impl Default for RecursiveSettings {
     fn default() -> Self {
         Self {
             enabled: true,
+            mode: None,
             upstreams: vec![],
             use_system_config: true,
             cache_size: 8192,
@@ -1312,6 +1475,12 @@ impl Default for RecursiveSettings {
             prefetch_min_queries: 5,
             prefetch_window_secs: 600,
             serve_stale_secs: 86400,
+            recursion_access: RecursionAccess::PrivateNetworks,
+            recursion_networks: vec![],
+            root_hints: vec![],
+            case_randomization: false,
+            rebinding_protection: false,
+            test_outbound_port: None,
         }
     }
 }
@@ -2374,6 +2543,57 @@ upstreams = ["192.0.2.20:5353"]
         assert_eq!(cfg.recursive.conditional_zones.len(), 2);
         assert_eq!(cfg.recursive.conditional_zones[0].name, "corp.internal");
         assert_eq!(cfg.recursive.conditional_zones[0].upstreams.len(), 2);
+    }
+
+    #[test]
+    fn resolution_mode_defaults_to_recursive_unless_upstreams_are_set() {
+        // New installs: no upstreams -> recursive.
+        let cfg = DaygleConfig::parse("[recursive]\n").unwrap();
+        assert_eq!(cfg.recursive.effective_mode(), ResolutionMode::Recursive);
+        // Existing installs with upstreams keep forwarding.
+        let cfg = DaygleConfig::parse("[recursive]\nupstreams = [\"1.1.1.1\"]\n").unwrap();
+        assert_eq!(cfg.recursive.effective_mode(), ResolutionMode::Forwarding);
+        // An explicit mode wins either way.
+        let cfg =
+            DaygleConfig::parse("[recursive]\nmode = \"recursive\"\nupstreams = [\"1.1.1.1\"]\n")
+                .unwrap();
+        assert_eq!(cfg.recursive.effective_mode(), ResolutionMode::Recursive);
+        // Saving settings pins the effective mode, so a later upstreams edit
+        // cannot silently flip it.
+        let captured = RuntimeSettings::capture(&cfg);
+        assert_eq!(
+            captured.recursive.unwrap().mode,
+            Some(ResolutionMode::Recursive)
+        );
+    }
+
+    #[test]
+    fn recursion_access_defaults_to_private_networks_and_validates() {
+        let cfg = DaygleConfig::default();
+        assert_eq!(
+            cfg.recursive.recursion_access,
+            RecursionAccess::PrivateNetworks
+        );
+
+        let err = DaygleConfig::parse("[recursive]\nrecursion_access = \"custom\"\n")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("requires recursion_networks"), "{err}");
+        let err = DaygleConfig::parse(
+            "[recursive]\nrecursion_access = \"custom\"\nrecursion_networks = [\"not-a-net\"]\n",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("invalid network"), "{err}");
+        // Bare IPs count as single-host networks.
+        DaygleConfig::parse(
+            "[recursive]\nrecursion_access = \"custom\"\nrecursion_networks = [\"203.0.113.5\", \"10.0.0.0/8\"]\n",
+        )
+        .unwrap();
+        let err = DaygleConfig::parse("[recursive]\nroot_hints = [\"a.root-servers.net\"]\n")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("root_hints"), "{err}");
     }
 
     #[test]

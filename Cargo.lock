@@ -133,6 +133,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "async-recursion"
+version = "1.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4f8abc12baad266b1c8cec146854c195b5864b4221d4b2ca7296a7ae82d9e451"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 3.0.9",
+]
+
+[[package]]
 name = "async-trait"
 version = "0.1.92"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -766,9 +777,11 @@ dependencies = [
 name = "daygle-dns-recursive"
 version = "1.0.0"
 dependencies = [
+ "arc-swap",
  "daygle-dns-core",
  "hickory-proto",
  "hickory-resolver",
+ "ipnet",
  "parking_lot",
  "tokio",
  "tracing",
@@ -1182,6 +1195,7 @@ version = "0.26.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3f3da5255c95d5a716857d54b5b8f4e8d67c3484d3beaaaae2ce25063b3ba981"
 dependencies = [
+ "async-recursion",
  "cfg-if",
  "futures-util",
  "hickory-net",
@@ -1189,6 +1203,7 @@ dependencies = [
  "ipconfig",
  "ipnet",
  "jni",
+ "lru-cache",
  "metrics",
  "moka",
  "ndk-context",

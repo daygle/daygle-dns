@@ -12,6 +12,7 @@ use daygle_dns_core::stats::Outcome;
 use daygle_dns_core::{DaygleError, LogStore, Metrics, RateLimiter};
 use daygle_dns_policy::{Action, AdvancedBlocking, PolicyEngine};
 use daygle_dns_recursive::RecursiveResolver;
+use hickory_proto::dnssec::Proof;
 use hickory_proto::op::{MessageType, OpCode, ResponseCode};
 use hickory_proto::rr::{Name, RData, Record, RecordType};
 use hickory_server::net::runtime::Time;
@@ -727,6 +728,22 @@ impl RequestHandler for DnsDispatcher {
             // Recursion disabled and not authoritative: REFUSED.
             return send_error(&mut response_handle, request, ResponseCode::Refused).await;
         };
+        // Recursion access control (`recursive.recursion_access`): clients
+        // outside the allowed networks get REFUSED for anything not answered
+        // above, so the server is not an open resolver by default.
+        if !resolver.allows_client(client) {
+            debug!(query = %qname, %client, "recursion refused for this client");
+            self.observe(
+                client,
+                &qname,
+                &rtype,
+                protocol,
+                Outcome::Error,
+                Some(&rcode_label(ResponseCode::Refused)),
+                started,
+            );
+            return send_error(&mut response_handle, request, ResponseCode::Refused).await;
+        }
 
         self.metrics.inc(&self.metrics.recursive);
         let lookup = match tokio::time::timeout(
@@ -756,7 +773,10 @@ impl RequestHandler for DnsDispatcher {
                 let answers = lookup.answers().to_vec();
                 let authorities = lookup.authorities().to_vec();
                 let additionals = lookup.additionals().to_vec();
-                let validated = lookup.message().authentic_data;
+                // Forwarding: the upstream's AD bit. Recursive mode validates
+                // locally and records the outcome on each record instead.
+                let validated = lookup.message().authentic_data
+                    || (!answers.is_empty() && answers.iter().all(|r| r.proof == Proof::Secure));
                 if validated {
                     self.metrics.inc(&self.metrics.dnssec_validated);
                 }

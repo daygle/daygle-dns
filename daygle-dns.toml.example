@@ -14,14 +14,32 @@ response_buffer_size = 4096
 reload_enabled = true
 reload_interval_ms = 2000
 
-# Recursive resolution (root -> TLD -> authoritative) with caching,
-# negative caching, retries and timeouts.
+# Recursive resolution (from the root servers, or forwarded to upstreams) with
+# caching, negative caching, retries and timeouts.
 # Runtime settings in this group live in the SQLite database: these values seed
 # the database on first boot, after which changes made in the GUI or via
 # PUT /api/config are authoritative and survive restarts and file edits.
 [recursive]
 enabled = true
-# Empty list + use_system_config = use /etc/resolv.conf.
+# Resolution mode for names not served by this server's own zones:
+#   "recursive"  - resolve from the root servers (root -> TLD -> authoritative),
+#                  validating DNSSEC; no upstream provider sees your queries.
+#   "forwarding" - send queries to `upstreams` (or /etc/resolv.conf when the
+#                  list is empty and use_system_config is set).
+# Unset: forwarding when upstreams are listed, otherwise recursive.
+mode = "recursive"
+# Who may use recursion: "private_networks" (loopback, RFC 1918, CGNAT,
+# link-local, IPv6 ULA), "allow" (everyone), "custom" (recursion_networks)
+# or "deny". Your own zones are answered for everyone regardless.
+recursion_access = "private_networks"
+# recursion_networks = ["192.168.1.0/24", "2001:db8::/48"]
+# Recursive mode only: randomize query-name case (0x20) to harden against
+# spoofing, and drop private/loopback addresses from public answers.
+# case_randomization = false
+# rebinding_protection = false
+# root_hints = []   # custom root server IPs; empty uses the IANA roots
+#
+# Forwarding mode: empty list + use_system_config = use /etc/resolv.conf.
 # Supported upstream forms:
 #   8.8.8.8             plaintext UDP+TCP, port 53
 #   1.1.1.1:5353        plaintext UDP+TCP, custom port
