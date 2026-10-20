@@ -95,10 +95,12 @@ fn load_config_or_exit(path: &str) -> DaygleConfig {
     }
 }
 
+/// A one-line summary of a backup (counts only; the console shows the
+/// rest).
 fn print_backup_info(info: &daygle_dns_authoritative::backup::BackupInfo) {
     println!(
-        "  {} zones, {} records, {} users, {} certificates, {} AI overrides, {} query log entries",
-        info.zones, info.records, info.users, info.certificates, info.ai_overrides, info.query_logs
+        "  {} zones, {} records, {} users, {} AI overrides, {} query log entries",
+        info.zones, info.records, info.users, info.ai_overrides, info.query_logs
     );
 }
 
