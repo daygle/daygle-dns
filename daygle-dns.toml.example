@@ -14,6 +14,10 @@ listen = "0.0.0.0"
 # With "::" (here or in [api], [dot], [doh], [doq]), accept IPv6 clients
 # only instead of IPv4 and IPv6.
 # ipv6_only = false
+# DNS cookies (RFC 7873): clients that send a cookie get a server cookie
+# back, and ones whose server cookie checks out (so cannot be spoofing their
+# address) skip the per-client rate limit.
+# dns_cookies = true
 port = 53
 udp_enabled = true
 tcp_enabled = true

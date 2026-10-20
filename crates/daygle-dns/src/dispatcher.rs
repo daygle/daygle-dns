@@ -58,6 +58,8 @@ pub struct DnsDispatcher {
     /// Client Timeout (`server.client_timeout_ms`): how long the recursive
     /// path may take before the client receives SERVFAIL. Default 2000 ms.
     client_timeout: Duration,
+    /// DNS cookies (RFC 7873, `server.dns_cookies`).
+    cookies: Arc<crate::cookies::Cookies>,
 }
 
 impl DnsDispatcher {
@@ -116,6 +118,7 @@ impl DnsDispatcher {
             query_logger: None,
             query_db_logger: None,
             client_timeout: Duration::from_millis(2000),
+            cookies: Arc::new(crate::cookies::Cookies::new(true)),
         }
     }
 
@@ -186,6 +189,12 @@ impl DnsDispatcher {
     /// SERVFAIL and the whole recursion is cancelled.
     pub fn with_client_timeout(mut self, client_timeout: Duration) -> Self {
         self.client_timeout = client_timeout;
+        self
+    }
+
+    /// Turn DNS cookies (RFC 7873) on or off.
+    pub fn with_cookies(mut self, enabled: bool) -> Self {
+        self.cookies = Arc::new(crate::cookies::Cookies::new(enabled));
         self
     }
 
@@ -466,7 +475,27 @@ impl RequestHandler for DnsDispatcher {
         // listener) are canonicalized to plain IPv4 so IPv4 ACLs, rate
         // limits, split-horizon networks and transfer allow-lists match them.
         let client = request.src().ip().to_canonical();
-        if !self.rate_limiter.check_client(client) {
+
+        // DNS cookies (RFC 7873): every response to a client that sent one
+        // carries a fresh server cookie, and a request whose server cookie
+        // checks out provably comes from its source address, so it is not
+        // held to the per-client rate limit (which exists for spoofed
+        // floods).
+        let (cookie_ok, cookie_reply) =
+            match self
+                .cookies
+                .check(request.edns.as_ref(), client, unix_now() as u32)
+            {
+                crate::cookies::CookieCheck::Absent => (false, None),
+                crate::cookies::CookieCheck::Malformed => {
+                    return send_error(&mut response_handle, request, ResponseCode::FormErr, None)
+                        .await;
+                }
+                crate::cookies::CookieCheck::Present { valid, reply } => (valid, Some(reply)),
+            };
+        let mut response_handle =
+            crate::cookies::CookieResponder::new(response_handle, cookie_reply);
+        if !cookie_ok && !self.rate_limiter.check_client(client) {
             debug!(%client, "query rate-limited by client");
             self.metrics.inc(&self.metrics.rate_limited);
             let protocol = request

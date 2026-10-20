@@ -36,6 +36,10 @@ Daygle combines, in a single process:
   nameservers (no root→TLD walk) - both matched by longest suffix.
 - **DNS over TLS (DoT)**, **DNS over HTTPS (DoH, RFC 8484)**, and
   **DNS over QUIC (DoQ, RFC 9250)** using **rustls**.
+- **DNS cookies** (RFC 7873, with RFC 9018 server cookies): clients that
+  send a cookie get a server cookie back, and ones that prove their address
+  with it are spared the per-client rate limit, so spoofed floods cannot
+  lock real clients out.
 - **Extended DNS Errors** (RFC 8914): blocked, filtered, refused, stale and
   failed answers say why (`dig` shows it as `EDE: 15 (Blocked)` and so on),
   and every response to an EDNS client carries an OPT record.

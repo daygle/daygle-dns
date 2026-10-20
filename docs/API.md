@@ -309,7 +309,7 @@ PUT /api/config
 }
 ```
 
-Editable groups: `server` (listen/ipv6_only/port/udp_enabled/tcp_enabled), `recursive`
+Editable groups: `server` (listen/ipv6_only/port/udp_enabled/tcp_enabled; `dns_cookies` is file-only), `recursive`
 (enabled/mode/upstreams/use_system_config/dnssec_validate/cache_size/
 min_cache_ttl/max_cache_ttl/negative_cache_ttl/failure_cache_ttl/
 prefetch_* /serve_stale_secs/

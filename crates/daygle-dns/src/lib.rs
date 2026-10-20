@@ -4,6 +4,7 @@
 //! [`DnsDispatcher`] and a [`bind`] helper that wires every subsystem into a
 //! runnable server. The `daygle-dns` binary is a thin CLI wrapper around this.
 
+pub mod cookies;
 pub mod dispatcher;
 mod doq;
 mod net;
@@ -749,6 +750,7 @@ fn build_dispatcher(shared: &Shared, config: &DaygleConfig) -> DnsDispatcher {
         shared.stats.clone(),
     )
     .with_client_timeout(Duration::from_millis(config.server.client_timeout_ms))
+    .with_cookies(config.server.dns_cookies)
     .with_advanced_blocking(shared.advanced_blocking.clone())
     .with_query_logger(shared.query_logger.clone())
     .with_query_db_logger(shared.query_db_logger.clone())

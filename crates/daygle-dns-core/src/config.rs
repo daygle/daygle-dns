@@ -1778,6 +1778,10 @@ pub struct ServerSettings {
     /// or `[doq]`), accept IPv6 clients only. Off by default: `::` accepts
     /// IPv4 clients too.
     pub ipv6_only: bool,
+    /// DNS cookies (RFC 7873): answer clients that send a cookie with a
+    /// server cookie, and let clients whose server cookie checks out skip
+    /// the per-client rate limit. On by default.
+    pub dns_cookies: bool,
     /// UDP/TCP port (default 53).
     pub port: u16,
     /// Serve plaintext UDP.
@@ -1813,6 +1817,7 @@ impl Default for ServerSettings {
         Self {
             listen: "0.0.0.0".to_string(),
             ipv6_only: false,
+            dns_cookies: true,
             port: 53,
             udp_enabled: true,
             tcp_enabled: true,
