@@ -2915,6 +2915,21 @@ pub struct SettingsUpdate {
     pub authoritative: Option<AuthoritativeUpdate>,
     pub ai: Option<AiUpdate>,
     pub display: Option<DisplayUpdate>,
+    pub web: Option<WebUpdate>,
+}
+
+/// Partial update for how the web console is served (HTTP and/or HTTPS).
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebUpdate {
+    pub http_enabled: Option<bool>,
+    pub http_port: Option<u16>,
+    pub https_enabled: Option<bool>,
+    pub https_port: Option<u16>,
+    /// A managed certificate name; empty means the generated self-signed
+    /// `web-console` certificate.
+    pub https_certificate: Option<String>,
+    pub redirect_http: Option<bool>,
 }
 
 /// Partial update for the console's date and time display defaults.
@@ -3267,6 +3282,57 @@ pub async fn update_settings(
             config.api.cors_origins = v.clone();
         }
     }
+    if let Some(w) = &update.web {
+        if let Some(v) = w.http_enabled {
+            config.web.http_enabled = v;
+        }
+        if let Some(v) = w.http_port {
+            config.web.http_port = v;
+        }
+        if let Some(v) = w.https_enabled {
+            config.web.https_enabled = v;
+        }
+        if let Some(v) = w.https_port {
+            config.web.https_port = v;
+        }
+        if let Some(v) = &w.https_certificate {
+            config.web.https_certificate = v.trim().to_string();
+        }
+        if let Some(v) = w.redirect_http {
+            config.web.redirect_http = v;
+        }
+        if let Err(msg) = config.web.check(config.api.port) {
+            return error_response(StatusCode::BAD_REQUEST, msg);
+        }
+        // HTTPS with no certificate chosen: generate (once) a self-signed
+        // one, kept as a managed certificate so it stays the same across
+        // restarts and can be replaced on the Certificates page.
+        if config.web.https_enabled && config.web.https_certificate.is_empty() {
+            let name = daygle_dns_core::config::WEB_SELF_SIGNED_CERT;
+            let exists = matches!(state.catalog.store().get_tls_certificate(name), Ok(Some(_)));
+            if !exists {
+                let server_name = daygle_dns_core::config::detect_server_name()
+                    .map(|n| n.trim_end_matches('.').to_string())
+                    .unwrap_or_else(|| "daygle.local".to_string());
+                let (cert_pem, key_pem) =
+                    match daygle_dns_dot::generate_self_signed_pem(&server_name) {
+                        Ok(pair) => pair,
+                        Err(e) => return map_err(e),
+                    };
+                let cert = daygle_dns_authoritative::TlsCertificate {
+                    name: name.to_string(),
+                    server_name,
+                    cert_pem,
+                    key_pem,
+                    created_at: chrono::Utc::now().to_rfc3339(),
+                };
+                if let Err(e) = state.catalog.store().put_tls_certificate(&cert) {
+                    return map_err(e);
+                }
+            }
+            config.web.https_certificate = name.to_string();
+        }
+    }
     if let Some(d) = &update.display {
         if let Some(v) = &d.time_zone {
             config.display.time_zone = v.trim().to_string();
@@ -3420,6 +3486,7 @@ pub async fn update_settings(
         ("DoT", &config.dot.certificate),
         ("DoH", &config.doh.certificate),
         ("DoQ", &config.doq.certificate),
+        ("HTTPS", &config.web.https_certificate),
     ] {
         if !name.is_empty()
             && state
@@ -3440,6 +3507,17 @@ pub async fn update_settings(
     // reject it (a pre-existing failure on a hand-managed file is kept).
     if let Err(response) = validate_config_update(&state, &old_config, &config, "settings") {
         return response;
+    }
+
+    // Move the web listeners first: a port that cannot be bound or a
+    // certificate that does not load rejects the whole update, so the
+    // console is never left unreachable by a save.
+    if old_config.web != config.web {
+        if let Some(apply) = &state.web_apply {
+            if let Err(msg) = apply(config.web.clone()).await {
+                return error_response(StatusCode::BAD_REQUEST, msg);
+            }
+        }
     }
 
     // Persist the DB-owned runtime settings to the database, then publish
@@ -3607,6 +3685,9 @@ fn certificate_references(
             refs.push((name.clone(), label));
         }
     }
+    if config.web.https_enabled && !config.web.https_certificate.is_empty() {
+        refs.push((config.web.https_certificate.clone(), "Web Console"));
+    }
     refs
 }
 
@@ -3714,6 +3795,15 @@ pub async fn create_certificate(
     if referenced {
         if let Some(rebuild) = &state.request_dns_rebuild {
             rebuild();
+        }
+        // The console's HTTPS listener picks the new pair up in place.
+        let web = state.config.load_full().web.clone();
+        if web.https_enabled && web.https_certificate == name {
+            if let Some(apply) = &state.web_apply {
+                if let Err(e) = apply(web).await {
+                    tracing::warn!("web console certificate reload failed: {e}");
+                }
+            }
         }
     }
     state.logs.push(

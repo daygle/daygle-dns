@@ -395,6 +395,22 @@ verifier_reference_path = ""
 verifier_threshold = 0.35
 
 # ---------------------------------------------------------------------------
+# How the web console and REST API are served (also editable in Settings →
+# General, which wins over this file once saved). The listen address is
+# api.listen. If a change locks you out, run `daygle-dns reset-web-access`
+# and restart: the console is then plain HTTP on api.port again.
+# http_port = 0 means api.port. https_certificate names a certificate from
+# the console's Certificates page; empty generates a self-signed one.
+# ---------------------------------------------------------------------------
+[web]
+http_enabled = true
+http_port = 0
+https_enabled = false
+https_port = 5443
+https_certificate = ""
+redirect_http = false
+
+# ---------------------------------------------------------------------------
 # Console date & time defaults (also editable in Settings → Interface).
 # Each console user can override these under My Preferences.
 # time_zone: "system" (each viewer's device), "UTC", or an IANA zone name.

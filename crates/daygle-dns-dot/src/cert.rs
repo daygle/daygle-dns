@@ -132,6 +132,34 @@ pub fn describe_certificate(cert_pem: &str) -> Result<CertificateInfo> {
     })
 }
 
+/// Build a TLS server config from an in-memory PEM pair (a certificate
+/// managed on the Certificates page), offering the given ALPN protocols.
+pub fn tls_config_from_pem(
+    cert_pem: &str,
+    key_pem: &str,
+    alpn: &[&[u8]],
+) -> Result<rustls::ServerConfig> {
+    let certs = CertificateDer::pem_slice_iter(cert_pem.as_bytes())
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|e| DaygleError::Tls(format!("cannot parse certificate PEM: {e}")))?;
+    if certs.is_empty() {
+        return Err(DaygleError::Tls("no certificate found in the PEM".into()));
+    }
+    let key = PrivateKeyDer::from_pem_slice(key_pem.as_bytes())
+        .map_err(|e| DaygleError::Tls(format!("cannot parse key PEM: {e}")))?;
+    let provider = crypto_provider().ok_or_else(|| {
+        DaygleError::Tls("no rustls crypto provider available; enable `ring` or `aws_lc_rs`".into())
+    })?;
+    let mut config = rustls::ServerConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .map_err(|e| DaygleError::Tls(format!("TLS protocol setup failed: {e}")))?
+        .with_no_client_auth()
+        .with_single_cert(certs, key)
+        .map_err(|e| DaygleError::Tls(format!("invalid TLS material: {e}")))?;
+    config.alpn_protocols = alpn.iter().map(|p| p.to_vec()).collect();
+    Ok(config)
+}
+
 /// Validate that the PEM `cert_pem`/`key_pem` pair is well-formed and the key
 /// matches the certificate (by building a rustls server config from them).
 pub fn validate_pem_pair(cert_pem: &str, key_pem: &str) -> Result<()> {

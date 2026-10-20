@@ -8,6 +8,7 @@ pub mod dispatcher;
 mod doq;
 pub mod query_db_log;
 pub mod reload;
+pub mod web;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -44,7 +45,8 @@ pub struct BoundServer {
     pub doh_addr: Option<std::net::SocketAddr>,
     /// The initially bound DNS-over-QUIC address, if DoQ is enabled.
     pub doq_addr: Option<std::net::SocketAddr>,
-    /// The REST API + GUI address.
+    /// The REST API + GUI address as bound at startup: the HTTP listener,
+    /// or HTTPS when HTTP is off (see [`BoundServer::web_addrs`]).
     pub api_addr: std::net::SocketAddr,
     /// Shared runtime metrics.
     pub metrics: Arc<Metrics>,
@@ -63,7 +65,7 @@ pub struct BoundServer {
     addrs: Arc<ArcSwap<ListenerAddrs>>,
     shutdown: CancellationToken,
     dns_task: Option<tokio::task::JoinHandle<Result<()>>>,
-    api_task: Option<tokio::task::JoinHandle<()>>,
+    web: Arc<web::WebServer>,
     reload_task: Option<tokio::task::JoinHandle<()>>,
     reload_tx: mpsc::Sender<ReloadCommand>,
     config_path: Option<PathBuf>,
@@ -73,6 +75,11 @@ impl BoundServer {
     /// Clone the cancellation token used to shut every subsystem down.
     pub fn shutdown_token(&self) -> CancellationToken {
         self.shutdown.clone()
+    }
+
+    /// Where the web console is listening now (reflecting Settings changes).
+    pub async fn web_addrs(&self) -> web::WebAddrs {
+        self.web.addrs().await
     }
 
     /// The currently bound DNS listener addresses (reflecting any reloads).
@@ -134,9 +141,7 @@ impl BoundServer {
         if let Some(task) = self.reload_task.take() {
             task.abort();
         }
-        if let Some(task) = self.api_task.take() {
-            task.abort();
-        }
+
         dns
     }
 }
@@ -466,17 +471,29 @@ pub async fn bind_with(
         shutdown.clone(),
     );
 
-    // REST API.
-    let api_addr: std::net::SocketAddr = format!("{}:{}", config.api.listen, config.api.port)
-        .parse()
-        .map_err(|e| DaygleError::Config(format!("bad API listen address: {e}")))?;
-    let api_listener = tokio::net::TcpListener::bind(api_addr).await?;
-    let api_addr = api_listener.local_addr()?;
+    // REST API and web console, over HTTP and/or HTTPS (Settings ->
+    // General); the listeners are bound once the router exists below.
     // The API can request a DNS listener rebuild after settings changes.
     let rebuild_tx = reload_tx.clone();
     let request_dns_rebuild: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
         let _ = rebuild_tx.try_send(ReloadCommand::Rebuild { ack: None });
     });
+    // The web server needs the router, and the router's settings handler
+    // needs the web server: the handle is filled in right after.
+    let web_cell: Arc<std::sync::OnceLock<Arc<web::WebServer>>> =
+        Arc::new(std::sync::OnceLock::new());
+    let web_apply: daygle_dns_api::WebApplyFn = {
+        let cell = web_cell.clone();
+        Arc::new(move |settings| {
+            let cell = cell.clone();
+            Box::pin(async move {
+                match cell.get() {
+                    Some(web) => web.apply(settings).await.map(|_| ()),
+                    None => Err("the web console is still starting".to_string()),
+                }
+            })
+        })
+    };
     let app = router(AppState {
         catalog: catalog.clone(),
         resolver: shared.resolver.clone(),
@@ -494,20 +511,43 @@ pub async fn bind_with(
         sessions: Arc::new(daygle_dns_api::SessionStore::default()),
         login_throttle: Arc::new(daygle_dns_api::LoginThrottle::default()),
         request_dns_rebuild: Some(request_dns_rebuild),
+        web_apply: Some(web_apply),
         stats: stats.clone(),
         ai: ai_engine.clone(),
     });
-    info!(addr = %api_addr, "REST API and GUI listening");
-    let api_task = tokio::spawn(async move {
-        if let Err(e) = axum::serve(
-            api_listener,
-            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-        )
-        .await
-        {
-            warn!("api server error: {e}");
+    let web = Arc::new(web::WebServer::new(
+        app,
+        catalog.clone(),
+        config.api.listen.clone(),
+        config.api.port,
+        shutdown.clone(),
+    ));
+    let _ = web_cell.set(web.clone());
+    let web_addrs = match web.apply(config.web.clone()).await {
+        Ok(addrs) => addrs,
+        // The saved web settings cannot start (a port taken, a certificate
+        // gone): fall back to plain HTTP on the config file's port so the
+        // console stays reachable to fix them.
+        Err(e) if config.web != daygle_dns_core::config::WebSettings::default() => {
+            warn!("web console settings cannot be applied ({e}); serving plain HTTP on api.port");
+            logs.push(
+                daygle_dns_core::LogLevel::Error,
+                "api",
+                format!("web console settings cannot be applied ({e}); serving plain HTTP on port {} instead", config.api.port),
+            );
+            let mut fallback = shared.config.load_full().as_ref().clone();
+            fallback.web = daygle_dns_core::config::WebSettings::default();
+            shared.config.store(Arc::new(fallback));
+            web.apply(daygle_dns_core::config::WebSettings::default())
+                .await
+                .map_err(DaygleError::Config)?
         }
-    });
+        Err(e) => return Err(DaygleError::Config(e)),
+    };
+    let api_addr = web_addrs
+        .http
+        .or(web_addrs.https)
+        .ok_or_else(|| DaygleError::Config("the web console has no listener".into()))?;
 
     Ok(BoundServer {
         udp_addr: initial_addrs.udp,
@@ -525,7 +565,7 @@ pub async fn bind_with(
         addrs,
         shutdown,
         dns_task: Some(dns_task),
-        api_task: Some(api_task),
+        web,
         reload_task,
         reload_tx,
         config_path,

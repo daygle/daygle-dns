@@ -18,8 +18,8 @@ mod cert;
 
 pub use cert::{
     describe_certificate, ensure_certificate, ensure_certificate_paths, generate_self_signed,
-    generate_self_signed_pem, load_tls_config, load_tls_config_versions, validate_pem_pair,
-    CertificateInfo,
+    generate_self_signed_pem, load_tls_config, load_tls_config_versions, tls_config_from_pem,
+    validate_pem_pair, CertificateInfo,
 };
 
 use std::net::SocketAddr;

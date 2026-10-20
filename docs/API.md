@@ -278,7 +278,20 @@ notify_listen_enabled/stub_zones). Runtime groups (`recursive`, `dot`, `doh`, `d
 config-file edits; `server.*` and `api.*` stay config-file-owned so a broken
 listener can always be fixed by editing the file. A `server` or `api` group
 in a `PUT` is applied to the running server but not stored, so it reverts
-at the next restart; the console shows these values read-only. Login users are managed
+at the next restart; the console shows these values read-only.
+
+`web` controls how the console and API themselves are served:
+`http_enabled`/`http_port` (0 = `api.port`), `https_enabled`/`https_port`,
+`https_certificate` (a certificate from `/api/certificates`; empty
+generates and selects a self-signed `web-console` certificate) and
+`redirect_http` (with both on, HTTP answers `308` to the same path over
+HTTPS). It is stored in the database and applied live. New ports are bound
+and the certificate loaded before the running listeners change, so a port
+in use, a missing or unusable certificate, or turning both off gets `400`
+and changes nothing. If the saved settings cannot start at boot, the server
+logs an error and serves plain HTTP on `api.port`. `daygle-dns
+reset-web-access` clears the stored settings (restart afterwards) for when
+a change locks you out. Login users are managed
 from the console's **Users** page (see [Console users and roles](#console-users-and-roles)).
 
 The `authoritative` group holds zone-creation defaults, used for zones

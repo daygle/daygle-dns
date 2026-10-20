@@ -40,6 +40,77 @@ pub struct DaygleConfig {
     pub ai: AiSettings,
     /// Console defaults for showing dates and times.
     pub display: DisplaySettings,
+    /// How the web console and API are reached: HTTP and/or HTTPS.
+    pub web: WebSettings,
+}
+
+/// How the web console and REST API are served. Edited in Settings ->
+/// General and stored in the database like other runtime settings; the
+/// `daygle-dns reset-web-access` command puts it back to plain HTTP on
+/// `api.port` if a change locks you out. Listen address, CORS and whether
+/// the GUI is served at all stay in `[api]`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct WebSettings {
+    /// Serve over plain HTTP.
+    pub http_enabled: bool,
+    /// HTTP port; 0 means `api.port` from the config file.
+    pub http_port: u16,
+    /// Serve over HTTPS.
+    pub https_enabled: bool,
+    /// HTTPS port.
+    pub https_port: u16,
+    /// Managed certificate (Certificates page) presented over HTTPS.
+    pub https_certificate: String,
+    /// With both enabled, answer HTTP requests with a redirect to HTTPS.
+    pub redirect_http: bool,
+}
+
+impl Default for WebSettings {
+    fn default() -> Self {
+        Self {
+            http_enabled: true,
+            http_port: 0,
+            https_enabled: false,
+            https_port: 5443,
+            https_certificate: String::new(),
+            redirect_http: false,
+        }
+    }
+}
+
+/// The managed certificate created for HTTPS when none is chosen.
+pub const WEB_SELF_SIGNED_CERT: &str = "web-console";
+
+impl WebSettings {
+    /// Check the settings a console user can change. `api_port` is the
+    /// config file's port, which an `http_port` of 0 stands for.
+    pub fn check(&self, api_port: u16) -> std::result::Result<(), String> {
+        if !self.http_enabled && !self.https_enabled {
+            return Err("enable HTTP, HTTPS or both, or the console cannot be reached".into());
+        }
+        let http_port = self.effective_http_port(api_port);
+        if self.https_enabled && self.https_port == 0 {
+            return Err("choose an HTTPS port".into());
+        }
+        if self.http_enabled && self.https_enabled && http_port == self.https_port && http_port != 0
+        {
+            return Err(format!("HTTP and HTTPS cannot share port {http_port}"));
+        }
+        if self.redirect_http && !(self.http_enabled && self.https_enabled) {
+            return Err("redirecting HTTP to HTTPS needs both enabled".into());
+        }
+        Ok(())
+    }
+
+    /// The HTTP port actually used.
+    pub fn effective_http_port(&self, api_port: u16) -> u16 {
+        if self.http_port == 0 {
+            api_port
+        } else {
+            self.http_port
+        }
+    }
 }
 
 /// How the console shows dates and times to users who have not chosen their
@@ -214,6 +285,8 @@ impl AiSettings {
 /// values: listeners, addresses, ports, paths, and certificates.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct RuntimeSettings {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub web: Option<WebSettings>,
     pub recursive: Option<RecursiveUpdate>,
     pub dot: Option<ListenerUpdate>,
     pub doh: Option<DohUpdate>,
@@ -590,6 +663,7 @@ impl RuntimeSettings {
             && self.authoritative.is_none()
             && self.ai.is_none()
             && self.display.is_none()
+            && self.web.is_none()
     }
 
     /// Apply the overlay to `config` in place. `None` fields are untouched.
@@ -728,6 +802,9 @@ impl RuntimeSettings {
         }
         if let Some(d) = &self.display {
             config.display = d.clone();
+        }
+        if let Some(w) = &self.web {
+            config.web = w.clone();
         }
         if let Some(a) = &self.ai {
             if let Some(v) = a.enabled {
@@ -911,6 +988,7 @@ impl RuntimeSettings {
             }),
             ai: Some(AiUpdate::capture_ai(&config.ai)),
             display: Some(config.display.clone()),
+            web: Some(config.web.clone()),
         }
     }
 }
@@ -1545,6 +1623,11 @@ impl DaygleConfig {
         self.display
             .check(false)
             .map_err(|e| DaygleError::Config(format!("display: {e}")))?;
+        if self.api.enabled {
+            self.web
+                .check(self.api.port)
+                .map_err(|e| DaygleError::Config(format!("web: {e}")))?;
+        }
         Ok(())
     }
 }

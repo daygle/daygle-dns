@@ -245,6 +245,9 @@ pub struct AppState {
     /// Hook that rebinds DNS listeners after a settings change; `None` when
     /// the caller does not support live listener rebinding.
     pub request_dns_rebuild: Option<Arc<dyn Fn() + Send + Sync>>,
+    /// Reconfigure the web console's HTTP/HTTPS listeners (Settings ->
+    /// General). `None` when the API runs without a server (tests).
+    pub web_apply: Option<WebApplyFn>,
     /// Dashboard time-series + top-N tables.
     pub stats: Arc<daygle_dns_core::stats::QueryStats>,
     /// AI subsystem (verdict store, scanner handles); `None` when the
@@ -254,6 +257,20 @@ pub struct AppState {
 }
 
 /// Build the API router (REST endpoints plus the embedded GUI).
+/// Moves the web console's listeners to new [`WebSettings`]: binds new
+/// ports and loads the certificate first, and on any failure changes
+/// nothing and returns the reason.
+///
+/// [`WebSettings`]: daygle_dns_core::config::WebSettings
+pub type WebApplyFn = Arc<
+    dyn Fn(
+            daygle_dns_core::config::WebSettings,
+        )
+            -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send>>
+        + Send
+        + Sync,
+>;
+
 pub fn router(state: AppState) -> Router {
     let api = Router::new()
         .route("/status", get(handlers::status))
