@@ -47,6 +47,23 @@ use tracing::{debug, info, warn};
 
 pub use upstream::{parse_upstreams, parse_upstreams_for};
 
+tokio::task_local! {
+    /// Set when the lookup running in this task was answered from the
+    /// serve-stale snapshot.
+    static SERVED_STALE: std::cell::Cell<bool>;
+}
+
+/// Run a lookup and report whether its answer was served stale (the
+/// upstream failed and an expired answer was used instead).
+pub async fn track_stale<F: std::future::Future>(lookup: F) -> (F::Output, bool) {
+    SERVED_STALE
+        .scope(std::cell::Cell::new(false), async {
+            let output = lookup.await;
+            (output, SERVED_STALE.with(|stale| stale.get()))
+        })
+        .await
+}
+
 /// A thread-safe recursive resolver.
 ///
 /// Queries are routed by name: the most specific configured conditional zone
@@ -733,6 +750,7 @@ impl Inner {
                             "upstream failed; serving stale answer"
                         );
                         inner.metrics.inc(&inner.metrics.resolver.stale_served);
+                        let _ = SERVED_STALE.try_with(|stale| stale.set(true));
                         return Ok(stale);
                     }
                 } else if let Some(code) = response_code {

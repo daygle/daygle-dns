@@ -309,7 +309,7 @@ impl DnsDispatcher {
         let settings = self.catalog.settings();
         if !settings.axfr_enabled || !transfer_client_allowed(&settings.axfr_networks, client) {
             debug!(query = %qname, %client, "zone transfer refused by policy");
-            return send_error(&mut response_handle, request, ResponseCode::Refused).await;
+            return send_error(&mut response_handle, request, ResponseCode::Refused, None).await;
         }
 
         // TSIG gate (RFC 8945): when the zone requires a signed transfer,
@@ -331,15 +331,15 @@ impl DnsDispatcher {
                     }
                     daygle_dns_authoritative::tsig::TsigVerifyOutcome::Valid { .. } => {
                         debug!(query = %qname, %client, "zone transfer signed with wrong TSIG key");
-                        return send_error(&mut response_handle, request, ResponseCode::Refused).await;
+                        return send_error(&mut response_handle, request, ResponseCode::Refused, None).await;
                     }
                     daygle_dns_authoritative::tsig::TsigVerifyOutcome::Invalid(failure) => {
                         debug!(query = %qname, %client, ?failure, "zone transfer TSIG verification failed");
-                        return send_error(&mut response_handle, request, ResponseCode::Refused).await;
+                        return send_error(&mut response_handle, request, ResponseCode::Refused, None).await;
                     }
                     daygle_dns_authoritative::tsig::TsigVerifyOutcome::Unsigned => {
                         debug!(query = %qname, %client, "zone transfer requires TSIG");
-                        return send_error(&mut response_handle, request, ResponseCode::Refused).await;
+                        return send_error(&mut response_handle, request, ResponseCode::Refused, None).await;
                     }
                 }
             }
@@ -387,8 +387,13 @@ impl DnsDispatcher {
                     );
                     if let Err(e) = tbs_response.destructive_emit(&mut encoder) {
                         warn!(query = %qname, error = %e, "failed to encode signed transfer");
-                        return send_error(&mut response_handle, request, ResponseCode::ServFail)
-                            .await;
+                        return send_error(
+                            &mut response_handle,
+                            request,
+                            ResponseCode::ServFail,
+                            None,
+                        )
+                        .await;
                     }
                     match context.sign(&tbs_buf) {
                         Ok(signature) => response.set_signature(signature),
@@ -398,6 +403,7 @@ impl DnsDispatcher {
                                 &mut response_handle,
                                 request,
                                 ResponseCode::ServFail,
+                                None,
                             )
                             .await;
                         }
@@ -413,12 +419,12 @@ impl DnsDispatcher {
             }
             Ok(None) => {
                 debug!(query = %qname, "zone transfer for unknown zone");
-                send_error(&mut response_handle, request, ResponseCode::Refused).await
+                send_error(&mut response_handle, request, ResponseCode::Refused, None).await
             }
             Err(e) => {
                 warn!(query = %qname, error = %e, "zone transfer failed");
                 self.log_error("transfer", format!("transfer for {qname} failed: {e}"));
-                send_error(&mut response_handle, request, ResponseCode::ServFail).await
+                send_error(&mut response_handle, request, ResponseCode::ServFail, None).await
             }
         }
     }
@@ -476,7 +482,13 @@ impl RequestHandler for DnsDispatcher {
                 Some("SERVFAIL"),
                 started,
             );
-            return send_error(&mut response_handle, request, ResponseCode::ServFail).await;
+            return send_error(
+                &mut response_handle,
+                request,
+                ResponseCode::ServFail,
+                Ede::new(ede::OTHER, "rate limit exceeded"),
+            )
+            .await;
         }
 
         // DNS labels are case-insensitive by design, so queries are normalized to
@@ -506,7 +518,7 @@ impl RequestHandler for DnsDispatcher {
             return match &self.notify.inbound {
                 Some(inbound) => inbound.handle(request, response_handle).await,
                 // No inbound NOTIFY configured: NOTIMP, per RFC 1996 §3.9.
-                None => send_error(&mut response_handle, request, ResponseCode::NotImp).await,
+                None => send_error(&mut response_handle, request, ResponseCode::NotImp, None).await,
             };
         }
 
@@ -515,7 +527,8 @@ impl RequestHandler for DnsDispatcher {
             Err(e) => {
                 warn!("malformed request from {}: {e}", request.src());
                 self.metrics.inc(&self.metrics.errors);
-                return send_error(&mut response_handle, request, ResponseCode::FormErr).await;
+                return send_error(&mut response_handle, request, ResponseCode::FormErr, None)
+                    .await;
             }
         };
 
@@ -543,7 +556,13 @@ impl RequestHandler for DnsDispatcher {
                 Some("SERVFAIL"),
                 started,
             );
-            return send_error(&mut response_handle, request, ResponseCode::ServFail).await;
+            return send_error(
+                &mut response_handle,
+                request,
+                ResponseCode::ServFail,
+                Ede::new(ede::OTHER, "rate limit exceeded"),
+            )
+            .await;
         }
 
         // 1. Policy. The engine is swapped atomically on reload; clone out the
@@ -564,7 +583,13 @@ impl RequestHandler for DnsDispatcher {
                     Some("REFUSED"),
                     started,
                 );
-                return send_error(&mut response_handle, request, ResponseCode::Refused).await;
+                return send_error(
+                    &mut response_handle,
+                    request,
+                    ResponseCode::Refused,
+                    Ede::new(ede::BLOCKED, decision.reason.clone()),
+                )
+                .await;
             }
             Action::Block => {
                 debug!(query = %qname, reason = %decision.reason, "blocked by policy");
@@ -578,7 +603,13 @@ impl RequestHandler for DnsDispatcher {
                     Some("NXDOMAIN"),
                     started,
                 );
-                return send_error(&mut response_handle, request, ResponseCode::NXDomain).await;
+                return send_error(
+                    &mut response_handle,
+                    request,
+                    ResponseCode::NXDomain,
+                    Ede::new(ede::BLOCKED, decision.reason.clone()),
+                )
+                .await;
             }
             Action::Redirect(ip) => {
                 debug!(query = %qname, %ip, "redirected by policy");
@@ -598,6 +629,7 @@ impl RequestHandler for DnsDispatcher {
                     info.query.name(),
                     info.query.query_type(),
                     *ip,
+                    Ede::new(ede::BLOCKED, decision.reason.clone()),
                 )
                 .await;
             }
@@ -614,7 +646,12 @@ impl RequestHandler for DnsDispatcher {
                     Some("NOERROR"),
                     started,
                 );
-                return send_empty(&mut response_handle, request).await;
+                return send_empty(
+                    &mut response_handle,
+                    request,
+                    Ede::new(ede::FILTERED, decision.reason.clone()),
+                )
+                .await;
             }
         }
 
@@ -640,9 +677,11 @@ impl RequestHandler for DnsDispatcher {
                     Some(rcode),
                     started,
                 );
+                // Per-client-group filtering (RFC 8914 "Filtered").
+                let why = Ede::new(ede::FILTERED, decision.reason.clone());
                 return match decision.action {
                     Action::Refused => {
-                        send_error(&mut response_handle, request, ResponseCode::Refused).await
+                        send_error(&mut response_handle, request, ResponseCode::Refused, why).await
                     }
                     Action::Redirect(ip) => {
                         send_redirect(
@@ -651,12 +690,15 @@ impl RequestHandler for DnsDispatcher {
                             info.query.name(),
                             info.query.query_type(),
                             ip,
+                            why,
                         )
                         .await
                     }
-                    Action::NoData => send_empty(&mut response_handle, request).await,
+                    Action::NoData => send_empty(&mut response_handle, request, why).await,
                     // Block (NXDOMAIN) and any future action default to NXDOMAIN.
-                    _ => send_error(&mut response_handle, request, ResponseCode::NXDomain).await,
+                    _ => {
+                        send_error(&mut response_handle, request, ResponseCode::NXDomain, why).await
+                    }
                 };
             }
         }
@@ -683,7 +725,7 @@ impl RequestHandler for DnsDispatcher {
                     Some("NOERROR"),
                     started,
                 );
-                return send_records(&mut response_handle, request, &m.records).await;
+                return send_records(&mut response_handle, request, &m.records, None).await;
             }
         }
 
@@ -726,7 +768,13 @@ impl RequestHandler for DnsDispatcher {
         let resolver = self.resolver.load_full();
         let Some(resolver) = resolver else {
             // Recursion disabled and not authoritative: REFUSED.
-            return send_error(&mut response_handle, request, ResponseCode::Refused).await;
+            return send_error(
+                &mut response_handle,
+                request,
+                ResponseCode::Refused,
+                Ede::new(ede::NOT_AUTHORITATIVE, "recursion is not available"),
+            )
+            .await;
         };
         // Recursion access control (`recursive.recursion_access`): clients
         // outside the allowed networks get REFUSED for anything not answered
@@ -742,17 +790,27 @@ impl RequestHandler for DnsDispatcher {
                 Some(&rcode_label(ResponseCode::Refused)),
                 started,
             );
-            return send_error(&mut response_handle, request, ResponseCode::Refused).await;
+            return send_error(
+                &mut response_handle,
+                request,
+                ResponseCode::Refused,
+                Ede::new(ede::PROHIBITED, "recursion is not allowed for this client"),
+            )
+            .await;
         }
 
         self.metrics.inc(&self.metrics.recursive);
         let lookup = match tokio::time::timeout(
             self.client_timeout,
-            resolver.lookup_for_client(client, &qname, info.query.query_type()),
+            daygle_dns_recursive::track_stale(resolver.lookup_for_client(
+                client,
+                &qname,
+                info.query.query_type(),
+            )),
         )
         .await
         {
-            Ok(result) => result,
+            Ok((result, stale)) => result.map(|lookup| (lookup, stale)),
             Err(_elapsed) => {
                 debug!(
                     query = %qname,
@@ -769,7 +827,7 @@ impl RequestHandler for DnsDispatcher {
             }
         };
         match lookup {
-            Ok(lookup) => {
+            Ok((lookup, stale)) => {
                 let answers = lookup.answers().to_vec();
                 let authorities = lookup.authorities().to_vec();
                 let additionals = lookup.additionals().to_vec();
@@ -799,7 +857,20 @@ impl RequestHandler for DnsDispatcher {
                     started,
                 );
 
-                let response = MessageResponseBuilder::from_message_request(request).build(
+                let ede = if stale {
+                    Ede::new(
+                        ede::STALE_ANSWER,
+                        "upstream unreachable; serving an expired answer",
+                    )
+                } else {
+                    None
+                };
+                let edns = response_edns(request, ede.as_ref());
+                let mut builder = MessageResponseBuilder::from_message_request(request);
+                if let Some(edns) = &edns {
+                    builder.edns(edns);
+                }
+                let response = builder.build(
                     metadata,
                     answers.iter(),
                     authorities.iter(),
@@ -835,10 +906,83 @@ impl RequestHandler for DnsDispatcher {
                     Some(&rcode_label(code)),
                     started,
                 );
-                send_error(&mut response_handle, request, code).await
+                let why = if code == ResponseCode::ServFail {
+                    failure_ede(&e)
+                } else {
+                    None
+                };
+                send_error(&mut response_handle, request, code, why).await
             }
         }
     }
+}
+
+/// An Extended DNS Error (RFC 8914): says why a response is what it is
+/// (blocked, filtered, refused, failed upstream...), for clients and tools
+/// such as `dig` that show it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Ede {
+    code: u16,
+    text: String,
+}
+
+/// RFC 8914 info codes used here.
+mod ede {
+    pub const OTHER: u16 = 0;
+    pub const STALE_ANSWER: u16 = 3;
+    pub const DNSSEC_BOGUS: u16 = 6;
+    pub const BLOCKED: u16 = 15;
+    pub const FILTERED: u16 = 17;
+    pub const PROHIBITED: u16 = 18;
+    pub const NOT_AUTHORITATIVE: u16 = 20;
+    pub const NO_REACHABLE_AUTHORITY: u16 = 22;
+}
+
+impl Ede {
+    fn new(code: u16, text: impl Into<String>) -> Option<Self> {
+        let mut text: String = text.into();
+        // Keep the OPT record small: a short explanation is enough.
+        if text.len() > 200 {
+            let mut end = 200;
+            while !text.is_char_boundary(end) {
+                end -= 1;
+            }
+            text.truncate(end);
+        }
+        Some(Self { code, text })
+    }
+}
+
+/// The EDE for a recursive lookup that failed without an answer.
+fn failure_ede(error: &DaygleError) -> Option<Ede> {
+    let message = error.to_string();
+    let lower = message.to_ascii_lowercase();
+    if lower.contains("dnssec") || lower.contains("bogus") {
+        Ede::new(ede::DNSSEC_BOGUS, "DNSSEC validation failed")
+    } else {
+        Ede::new(ede::NO_REACHABLE_AUTHORITY, message)
+    }
+}
+
+/// Largest UDP response offered in our OPT record (the DNS Flag Day 2020
+/// value, which avoids IP fragmentation).
+const RESPONSE_UDP_PAYLOAD: u16 = 1232;
+
+/// The OPT record for a response: only when the client sent one (RFC 6891),
+/// echoing its DO bit, and carrying `ede` when given.
+fn response_edns(request: &Request, ede: Option<&Ede>) -> Option<hickory_proto::op::Edns> {
+    let asked = request.edns.as_ref()?;
+    let mut edns = hickory_proto::op::Edns::new();
+    edns.set_max_payload(asked.max_payload().clamp(512, RESPONSE_UDP_PAYLOAD));
+    edns.set_version(0);
+    edns.set_dnssec_ok(asked.flags().dnssec_ok);
+    if let Some(ede) = ede {
+        let mut data = ede.code.to_be_bytes().to_vec();
+        data.extend_from_slice(ede.text.as_bytes());
+        edns.options_mut()
+            .insert(hickory_proto::rr::rdata::opt::EdnsOption::Unknown(15, data));
+    }
+    Some(edns)
 }
 
 /// Send a response with only an error code.
@@ -846,9 +990,14 @@ async fn send_error<R: ResponseHandler>(
     handle: &mut R,
     request: &Request,
     code: ResponseCode,
+    ede: Option<Ede>,
 ) -> ResponseInfo {
-    let response =
-        MessageResponseBuilder::from_message_request(request).error_msg(&request.metadata, code);
+    let edns = response_edns(request, ede.as_ref());
+    let mut builder = MessageResponseBuilder::from_message_request(request);
+    if let Some(edns) = &edns {
+        builder.edns(edns);
+    }
+    let response = builder.error_msg(&request.metadata, code);
     match handle.send_response(response).await {
         Ok(info) => info,
         Err(e) => {
@@ -899,13 +1048,22 @@ fn outcome_label(outcome: Outcome) -> &'static str {
 /// Send an empty NODATA response: NOERROR with no answer records, echoing the
 /// question. Used by the AAAA filter so dual-stack clients fall back to IPv4
 /// (an NXDOMAIN would wrongly claim the whole name does not exist).
-async fn send_empty<R: ResponseHandler>(handle: &mut R, request: &Request) -> ResponseInfo {
+async fn send_empty<R: ResponseHandler>(
+    handle: &mut R,
+    request: &Request,
+    ede: Option<Ede>,
+) -> ResponseInfo {
     let mut metadata = request.metadata;
     metadata.message_type = MessageType::Response;
     metadata.response_code = ResponseCode::NoError;
     metadata.recursion_available = true;
 
-    let response = MessageResponseBuilder::from_message_request(request).build(
+    let edns = response_edns(request, ede.as_ref());
+    let mut builder = MessageResponseBuilder::from_message_request(request);
+    if let Some(edns) = &edns {
+        builder.edns(edns);
+    }
+    let response = builder.build(
         metadata,
         std::iter::empty(),
         std::iter::empty(),
@@ -926,9 +1084,10 @@ async fn send_records<R: ResponseHandler>(
     handle: &mut R,
     request: &Request,
     records: &[Record],
+    ede: Option<Ede>,
 ) -> ResponseInfo {
     if records.is_empty() {
-        return send_error(handle, request, ResponseCode::NXDomain).await;
+        return send_error(handle, request, ResponseCode::NXDomain, ede).await;
     }
 
     let mut metadata = request.metadata;
@@ -937,7 +1096,12 @@ async fn send_records<R: ResponseHandler>(
     metadata.authoritative = true;
     metadata.recursion_available = true;
 
-    let response = MessageResponseBuilder::from_message_request(request).build(
+    let edns = response_edns(request, ede.as_ref());
+    let mut builder = MessageResponseBuilder::from_message_request(request);
+    if let Some(edns) = &edns {
+        builder.edns(edns);
+    }
+    let response = builder.build(
         metadata,
         records.iter(),
         std::iter::empty(),
@@ -965,6 +1129,7 @@ async fn send_redirect<R: ResponseHandler>(
     name: &Name,
     rtype: RecordType,
     ip: IpAddr,
+    ede: Option<Ede>,
 ) -> ResponseInfo {
     let rdata = match (ip, rtype) {
         (IpAddr::V4(v4), RecordType::A | RecordType::ANY) => RData::A(v4.into()),
@@ -978,10 +1143,10 @@ async fn send_redirect<R: ResponseHandler>(
         (IpAddr::V6(v6), RecordType::A) if v6.is_unspecified() => {
             RData::A(std::net::Ipv4Addr::UNSPECIFIED.into())
         }
-        _ => return send_empty(handle, request).await,
+        _ => return send_empty(handle, request, ede).await,
     };
     let record = Record::from_rdata(name.clone(), 60, rdata);
-    send_records(handle, request, std::slice::from_ref(&record)).await
+    send_records(handle, request, std::slice::from_ref(&record), ede).await
 }
 
 fn unix_now() -> u64 {
@@ -997,4 +1162,33 @@ fn fallback_response() -> ResponseInfo {
         metadata: hickory_proto::op::Metadata::new(0, MessageType::Response, OpCode::Query),
         counts: hickory_proto::op::HeaderCounts::default(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn failures_map_to_extended_errors() {
+        let failure = |message: &str| DaygleError::Resolution {
+            message: message.to_string(),
+            response_code: None,
+        };
+        assert_eq!(
+            failure_ede(&failure("DNSSEC validation failed")).map(|e| e.code),
+            Some(ede::DNSSEC_BOGUS)
+        );
+        let timeout =
+            failure_ede(&failure("no answer within the client timeout of 2000 ms")).unwrap();
+        assert_eq!(timeout.code, ede::NO_REACHABLE_AUTHORITY);
+        assert!(timeout.text.contains("client timeout"));
+    }
+
+    #[test]
+    fn extended_error_text_is_kept_short() {
+        let long = "é".repeat(300);
+        let e = Ede::new(ede::BLOCKED, long).unwrap();
+        assert!(e.text.len() <= 200);
+        assert!(e.text.chars().all(|c| c == 'é'));
+    }
 }

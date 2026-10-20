@@ -36,6 +36,16 @@ Daygle combines, in a single process:
   nameservers (no root→TLD walk) - both matched by longest suffix.
 - **DNS over TLS (DoT)**, **DNS over HTTPS (DoH, RFC 8484)**, and
   **DNS over QUIC (DoQ, RFC 9250)** using **rustls**.
+- **Extended DNS Errors** (RFC 8914): blocked, filtered, refused, stale and
+  failed answers say why (`dig` shows it as `EDE: 15 (Blocked)` and so on),
+  and every response to an EDNS client carries an OPT record.
+- **Let's Encrypt certificates** (ACME): issued from the Certificates page
+  and renewed automatically, proving control over HTTP (the web console) or
+  DNS (a TXT record in a zone hosted here, so wildcards work too). A private
+  ACME CA such as step-ca works as well.
+- **Backup and restore** of everything the server keeps (zones, keys,
+  settings, users, certificates) as one file, from the console or
+  `daygle-dns backup` / `daygle-dns restore`.
 - **Cache prefetch & serve-stale**: popular names are refreshed in the
   background as their TTLs near expiry, and the last-known-good answers keep
   being served during upstream outages (bounded staleness, e.g. 1 h).
@@ -61,7 +71,9 @@ Daygle combines, in a single process:
 - A **REST API** (tower/axum) for configuration, zone management, logs, and
 metrics.
 - An embedded **Svelte** web GUI with **username/password login and roles**
-  (`admin` = full access, `viewer` = read-only), editable settings forms for
+  (`admin` = full access, `viewer` = read-only), optional **two-factor
+  login** (authenticator app codes, recovery codes), sessions that survive
+  restarts, **personal API tokens** for scripts, editable settings forms for
   server/recursive/DoT/DoH/DoQ/API, zones, records, split horizon, status,
   logs, and settings.
 - A **plugin-style policy engine** for blocklists, ACLs, and per-client rules,
