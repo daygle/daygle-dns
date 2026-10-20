@@ -36,6 +36,7 @@
     nssText: '',
     upstreamsText: '',
     stubEnabled: true,
+    sourcesText: '',
   });
   // Name of the stub/forwarder being edited, or null when adding a zone.
   let editingName = $state(null);
@@ -44,8 +45,15 @@
   // the zone database, so they come from the config rather than /zones.
   const stubs = $derived(config?.authoritative?.stub_zones || []);
   const forwarders = $derived(config?.recursive?.conditional_zones || []);
-  const rowCount = $derived(zones.length + stubs.length + forwarders.length);
-  const isSettingsZone = $derived(newZone.zone_type === 'stub' || newZone.zone_type === 'forwarder');
+  // The Secondary ROOT Zone (RFC 8806) is a resolver setting too, with its
+  // transfer state from /local-root.
+  const localRoot = $derived(config?.recursive?.local_root || null);
+  const rootEnabled = $derived(!!localRoot?.enabled);
+  let rootStatus = $state(null);
+  const rowCount = $derived(zones.length + stubs.length + forwarders.length + (rootEnabled ? 1 : 0));
+  const isSettingsZone = $derived(
+    newZone.zone_type === 'stub' || newZone.zone_type === 'forwarder' || newZone.zone_type === 'root',
+  );
   // Live preview when the Zone Name is a network such as 192.168.0.0/24.
   const reverse = $derived(reverseZoneName(newZone.name));
 
@@ -54,6 +62,14 @@
       config = await api.config();
     } catch {
       // The zone list still works; stub/forwarder rows just stay hidden.
+    }
+  }
+
+  async function loadRootStatus() {
+    try {
+      rootStatus = await api.localRoot();
+    } catch {
+      rootStatus = null;
     }
   }
 
@@ -85,6 +101,7 @@
       nssText: '',
       upstreamsText: '',
       stubEnabled: true,
+      sourcesText: '',
     };
     zoneFileName = '';
     editingName = null;
@@ -109,6 +126,33 @@
     showAdd = true;
   }
 
+  function openEditRoot() {
+    notice = null;
+    resetZoneForm();
+    editingName = '.';
+    newZone.zone_type = 'root';
+    newZone.name = '.';
+    newZone.sourcesText = (localRoot?.sources || []).join('\n');
+    showAdd = true;
+  }
+
+  // The root zone has no name of its own to type.
+  function chooseZoneType() {
+    if (newZone.zone_type === 'root') newZone.name = '.';
+    else if (newZone.name === '.') newZone.name = '';
+  }
+
+  async function refreshRoot() {
+    notice = null;
+    try {
+      await api.refreshLocalRoot();
+      notice = 'Checking the root zone sources for a newer copy.';
+      setTimeout(loadRootStatus, 2000);
+    } catch (e) {
+      notice = formatApiError(e);
+    }
+  }
+
   function openEditForwarder(fwd) {
     notice = null;
     resetZoneForm();
@@ -125,7 +169,14 @@
     const fresh = await api.config();
     const key = (n) => n.trim().replace(/\.$/, '').toLowerCase();
     const others = (list) => list.filter((z) => key(z.name) !== key(editingName || name));
-    if (newZone.zone_type === 'stub') {
+    if (newZone.zone_type === 'root') {
+      if (editingName === null && fresh.recursive?.local_root?.enabled) {
+        throw new Error('A Secondary ROOT Zone already exists');
+      }
+      await api.updateSettings({
+        recursive: { local_root: { enabled: true, sources: splitLines(newZone.sourcesText) } },
+      });
+    } else if (newZone.zone_type === 'stub') {
       const list = others(fresh.authoritative?.stub_zones || []);
       if (list.some((z) => key(z.name) === key(name))) throw new Error(`A stub zone named ${name} already exists`);
       list.push({
@@ -144,12 +195,20 @@
   }
 
   async function removeSettingsZone(kind, name) {
-    const label = kind === 'stub' ? 'stub zone' : 'conditional forwarder';
-    if (!confirm(`Delete ${label} ${name}?`)) return;
+    const message = {
+      stub: `Delete stub zone ${name}?`,
+      forwarder: `Delete conditional forwarder ${name}?`,
+      root: 'Delete the Secondary ROOT Zone? Root queries go back to the root servers.',
+    }[kind];
+    if (!confirm(message)) return;
     notice = null;
     try {
       const fresh = await api.config();
-      if (kind === 'stub') {
+      if (kind === 'root') {
+        const sources = fresh.recursive?.local_root?.sources || [];
+        await api.updateSettings({ recursive: { local_root: { enabled: false, sources } } });
+        rootStatus = null;
+      } else if (kind === 'stub') {
         const list = (fresh.authoritative?.stub_zones || []).filter((z) => z.name !== name);
         await api.updateSettings({ authoritative: { stub_zones: list } });
       } else {
@@ -255,6 +314,7 @@
       }
       savingZone = true;
       notice = null;
+      const newZoneWasRoot = newZone.zone_type === 'root';
       try {
         const editing = editingName !== null;
         await saveSettingsZone(name);
@@ -262,6 +322,10 @@
         resetZoneForm();
         notice = editing ? 'Zone updated and applied live.' : 'Zone created and applied live.';
         await loadConfig();
+        if (newZoneWasRoot && !editing) {
+          notice = 'Secondary ROOT Zone added. The root zone is being transferred and verified.';
+          await loadRootStatus();
+        }
       } catch (e) {
         notice = formatApiError(e);
       } finally {
@@ -336,7 +400,19 @@
   $effect(() => {
     loadZones();
     loadConfig();
+    loadRootStatus();
   });
+
+  // While the root zone is being fetched, check on it every few seconds.
+  $effect(() => {
+    if (!rootEnabled || rootStatus?.serving || rootStatus?.last_error) return;
+    const timer = setInterval(loadRootStatus, 3000);
+    return () => clearInterval(timer);
+  });
+
+  function formatTime(value) {
+    return value ? new Date(value).toLocaleString() : '-';
+  }
 </script>
 
 {#if notice}
@@ -394,6 +470,37 @@
             </td>
           </tr>
         {/each}
+        {#if rootEnabled}
+          <tr>
+            <td><code>.</code></td>
+            <td><span class="pill" style="white-space: nowrap">Secondary ROOT</span></td>
+            <td class="muted">
+              {#if rootStatus?.serving}
+                <span title={`Last checked ${formatTime(rootStatus.last_checked)} · from ${rootStatus.source}`}>
+                  Serial {rootStatus.serial} · {rootStatus.tlds} TLDs
+                </span>
+              {:else if rootStatus?.last_error}
+                <span style="color: var(--danger)">Not in use: {rootStatus.last_error}</span>
+              {:else}
+                Transferring and verifying the root zone…
+              {/if}
+            </td>
+            <td>
+              {#if rootStatus?.serving}
+                <span class="pill ok" title="ZONEMD digest and DNSSEC signatures verified">Verified</span>
+              {:else}
+                <span class="muted">-</span>
+              {/if}
+            </td>
+            <td class="num">
+              <div class="row" style="gap: 6px; justify-content: flex-end">
+                <button class="secondary" onclick={refreshRoot}>Refresh</button>
+                <button class="secondary" onclick={openEditRoot}>Edit</button>
+                <button class="danger" onclick={() => removeSettingsZone('root', '.')}>✕</button>
+              </div>
+            </td>
+          </tr>
+        {/if}
         {#each forwarders as fwd (fwd.name)}
           <tr>
             <td><code>{fwd.name}</code></td>
@@ -425,13 +532,14 @@
       </div>
 
       <div class="grid2">
-        <label>Zone Name <input placeholder="example.com or 192.168.0.0/24" bind:value={newZone.name} /></label>
+        <label>Zone Name <input placeholder="example.com or 192.168.0.0/24" bind:value={newZone.name} disabled={newZone.zone_type === 'root'} /></label>
         <label>Zone Type
-          <select bind:value={newZone.zone_type} disabled={editingName !== null}>
+          <select bind:value={newZone.zone_type} onchange={chooseZoneType} disabled={editingName !== null}>
             <option value="primary">Primary Zone</option>
             <option value="secondary">Secondary Zone</option>
             <option value="stub">Stub Zone</option>
             <option value="forwarder">Conditional Forwarder Zone</option>
+            <option value="root" disabled={rootEnabled && editingName === null}>Secondary ROOT Zone</option>
           </select>
         </label>
       </div>
@@ -452,6 +560,20 @@
           Queries for this zone go straight to its own nameservers instead of the
           upstreams. Use IPs, IP:port, or hostnames (resolved when the zone is
           applied). One per line.
+        </p>
+      {:else if newZone.zone_type === 'root'}
+        <div class="section-title">Root Zone Sources</div>
+        <label>Transfer Servers <textarea rows="3" placeholder={'Leave empty for the IANA defaults\n(ICANN transfer servers and root servers b, c, d, f, g, k)'} bind:value={newZone.sourcesText}></textarea></label>
+        <p class="muted help">
+          Keeps a local copy of the root zone (RFC 8806), transferred over AXFR
+          and accepted only when its ZONEMD digest and DNSSEC signatures verify
+          against the root trust anchor. In recursive mode root queries are
+          answered from it; in forwarding mode names under top-level domains
+          that do not exist are answered NXDOMAIN without asking the upstreams
+          (use a conditional forwarder for private TLDs such as
+          <code>.lan</code>). Refreshed on the zone's own schedule; a copy
+          that cannot be refreshed for a week stops being used. Use IP,
+          IP:port or [IPv6]:port, one per line.
         </p>
       {:else if newZone.zone_type === 'forwarder'}
         <div class="section-title">Forwarder Upstreams</div>

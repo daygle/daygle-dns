@@ -305,7 +305,8 @@
         <tr>
           <td class="muted">Resolution Mode</td>
           <td>
-            {#if status.resolution_mode === 'recursive'}Recursive (from the root servers)
+            {#if status.resolution_mode === 'recursive' && status.local_root}Recursive (from the local root zone)
+            {:else if status.resolution_mode === 'recursive'}Recursive (from the root servers)
             {:else if status.resolution_mode === 'forwarding'}Forwarding (to upstream servers)
             {:else}<span class="muted">-</span>{/if}
           </td>
