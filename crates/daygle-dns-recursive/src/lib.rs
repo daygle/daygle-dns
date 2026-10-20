@@ -36,7 +36,7 @@ use daygle_dns_core::config::{
     StubZoneConfig, PRIVATE_NETWORKS,
 };
 use daygle_dns_core::error::{DaygleError, Result};
-use daygle_dns_core::Metrics;
+use daygle_dns_core::{LocalRootView, Metrics};
 use hickory_proto::op::Query;
 use hickory_proto::rr::{Name, RecordType};
 use hickory_resolver::config::{ResolverConfig, ResolverOpts};
@@ -74,6 +74,10 @@ struct Inner {
     cache_assist: Arc<CacheAssistant>,
     /// Client networks allowed to use recursion; `None` allows everyone.
     allowed_clients: Option<Vec<ipnet::IpNet>>,
+    /// The local root zone (RFC 8806), when `local_root.enabled`.
+    local_root: Option<Arc<dyn LocalRootView>>,
+    /// Serializes recursor rebuilds when the local root zone comes or goes.
+    rebuild: std::sync::Mutex<()>,
 }
 
 /// The resolver for names outside conditional and stub zones.
@@ -90,6 +94,9 @@ enum DefaultBackend {
 enum Route {
     Forward(Box<TokioResolver>),
     Recursive(Arc<recursor::DaygleRecursor>),
+    /// Forwarding mode with a local root zone: the top-level domain does
+    /// not exist, so the name cannot either.
+    NoSuchTld,
 }
 
 impl Route {
@@ -108,6 +115,10 @@ impl Route {
                     })
             }
             Route::Recursive(recursor) => recursor::lookup(&recursor, name, record_type).await,
+            Route::NoSuchTld => Err(DaygleError::Resolution {
+                message: "top-level domain not in the root zone".to_string(),
+                response_code: Some(hickory_proto::op::ResponseCode::NXDomain.into()),
+            }),
         }
     }
 }
@@ -139,16 +150,27 @@ impl RecursiveResolver {
     /// upstreams, or the operating system's resolver configuration
     /// (`/etc/resolv.conf` on Unix) when `upstreams` is empty or
     /// `use_system_config` is set.
+    ///
+    /// `local_root` is the local root zone (RFC 8806); it is used while
+    /// `settings.local_root.enabled` is set and it has a verified copy.
     pub fn build(
         settings: &RecursiveSettings,
         metrics: Arc<Metrics>,
         stub_zones: &[StubZoneConfig],
+        local_root: Option<Arc<dyn LocalRootView>>,
     ) -> Result<Self> {
         let mode = settings.effective_mode();
+        let local_root = local_root.filter(|_| settings.local_root.enabled);
         let default = match mode {
-            ResolutionMode::Recursive => DefaultBackend::Recursive(Arc::new(
-                arc_swap::ArcSwap::from_pointee(recursor::build(settings)?),
-            )),
+            ResolutionMode::Recursive => {
+                let addr = local_root.as_ref().and_then(|v| v.serving_addr());
+                DefaultBackend::Recursive(Arc::new(arc_swap::ArcSwap::from_pointee(
+                    recursor::RecursorSlot {
+                        recursor: Arc::new(recursor::build(settings, addr)?),
+                        local_root: addr,
+                    },
+                )))
+            }
             ResolutionMode::Forwarding => {
                 let (config, opts) = build_config(settings)?;
                 DefaultBackend::Forward(Box::new(
@@ -236,6 +258,7 @@ impl RecursiveResolver {
             serve_stale_secs = settings.serve_stale_secs,
             conditional_zones = conditional.len(),
             stub_zones = stubs.len(),
+            local_root = local_root.is_some(),
             "recursive resolver ready"
         );
 
@@ -251,6 +274,8 @@ impl RecursiveResolver {
         Ok(Self {
             inner: Arc::new(Inner {
                 allowed_clients: allowed_clients(settings),
+                local_root,
+                rebuild: std::sync::Mutex::new(()),
                 default,
                 conditional,
                 stubs,
@@ -277,10 +302,11 @@ impl RecursiveResolver {
     pub fn clear_cache(&self) {
         match &self.inner.default {
             DefaultBackend::Forward(resolver) => resolver.clear_cache(),
-            DefaultBackend::Recursive(shared) => match recursor::build(&self.inner.settings) {
-                Ok(fresh) => shared.store(Arc::new(fresh)),
-                Err(e) => warn!("cannot rebuild the recursive resolver to clear its cache: {e}"),
-            },
+            DefaultBackend::Recursive(shared) => {
+                if let Err(e) = self.inner.rebuild_recursor(shared) {
+                    warn!("cannot rebuild the recursive resolver to clear its cache: {e}");
+                }
+            }
         }
         for zone in &self.inner.conditional {
             zone.resolver.clear_cache();
@@ -352,6 +378,64 @@ impl RecursiveResolver {
 }
 
 impl Inner {
+    /// Pick the resolver for `name` (see [`route_resolver`]), applying the
+    /// local root zone: in recursive mode the recursor is rebuilt when the
+    /// zone starts or stops being served; in forwarding mode names under a
+    /// top-level domain the root zone does not have are answered NXDOMAIN.
+    fn route(&self, name: &Name) -> Route {
+        match route_resolver(&self.default, &self.conditional, &self.stubs, name) {
+            Route::Recursive(recursor) => {
+                let DefaultBackend::Recursive(shared) = &self.default else {
+                    return Route::Recursive(recursor);
+                };
+                let wanted = self.local_root.as_ref().and_then(|v| v.serving_addr());
+                if shared.load().local_root == wanted {
+                    return Route::Recursive(recursor);
+                }
+                // Another query may already be rebuilding: use the current
+                // recursor rather than wait.
+                if let Ok(_guard) = self.rebuild.try_lock() {
+                    if shared.load().local_root != wanted {
+                        match self.rebuild_recursor(shared) {
+                            Ok(()) => info!(
+                                local_root = wanted.is_some(),
+                                "recursive resolver switched root servers"
+                            ),
+                            Err(e) => warn!("cannot rebuild the recursive resolver: {e}"),
+                        }
+                    }
+                }
+                Route::Recursive(shared.load().recursor.clone())
+            }
+            Route::Forward(resolver) => {
+                let default_route = match_conditional_zones(&self.conditional, name).is_none()
+                    && match_conditional_zones(&self.stubs, name).is_none();
+                if default_route && name.num_labels() > 0 {
+                    let tld = name.iter().next_back().map(String::from_utf8_lossy);
+                    let exists = tld
+                        .and_then(|tld| self.local_root.as_ref().and_then(|v| v.tld_exists(&tld)));
+                    if exists == Some(false) {
+                        return Route::NoSuchTld;
+                    }
+                }
+                Route::Forward(resolver)
+            }
+            Route::NoSuchTld => Route::NoSuchTld,
+        }
+    }
+
+    /// Build a fresh recursor (empty caches) for the current local root
+    /// zone state.
+    fn rebuild_recursor(&self, shared: &recursor::SharedRecursor) -> Result<()> {
+        let addr = self.local_root.as_ref().and_then(|v| v.serving_addr());
+        let recursor = recursor::build(&self.settings, addr)?;
+        shared.store(Arc::new(recursor::RecursorSlot {
+            recursor: Arc::new(recursor),
+            local_root: addr,
+        }));
+        Ok(())
+    }
+
     /// Core lookup path used by client queries: records the result in the
     /// cache assistant and may spawn a prefetch refresh for popular names.
     /// (The spawned task uses [`Self::refresh`], which never spawns again -
@@ -432,7 +516,7 @@ impl Inner {
         // Clone the routed resolver out of `inner` before awaiting so no
         // borrow of `Inner` is held across the lookup, and never spawn
         // again here (acyclic => provably `Send`).
-        let route = route_resolver(&self.default, &self.conditional, &self.stubs, &name);
+        let route = self.route(&name);
         match route.lookup(name, record_type).await {
             Ok(lookup) => {
                 self.cache_assist.on_success(&key, &lookup);
@@ -459,7 +543,7 @@ impl Inner {
     ) -> Result<Lookup> {
         let conditional_match = match_conditional_zones(&inner.conditional, &name);
         let stub_match = match_conditional_zones(&inner.stubs, &name);
-        let route = route_resolver(&inner.default, &inner.conditional, &inner.stubs, &name);
+        let route = inner.route(&name);
         let via_conditional = conditional_match.is_some();
         let key = cache_key(&name, record_type);
         debug!(
@@ -593,7 +677,9 @@ fn route_resolver(
     match (zone, default) {
         (Some(zone), _) => Route::Forward(Box::new(zone.resolver.clone())),
         (None, DefaultBackend::Forward(resolver)) => Route::Forward(resolver.clone()),
-        (None, DefaultBackend::Recursive(shared)) => Route::Recursive(shared.load_full()),
+        (None, DefaultBackend::Recursive(shared)) => {
+            Route::Recursive(shared.load().recursor.clone())
+        }
     }
 }
 

@@ -7,7 +7,7 @@
 //! Results are converted to [`Lookup`] so the rest of the crate (failure
 //! cache, serve-stale, prefetch) treats both modes alike.
 
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -56,12 +56,14 @@ pub const ROOT_HINTS: &[&str] = &[
     "2001:dc3::35",
 ];
 
-/// Connection provider for the recursor: Tokio sockets, with an optional
-/// port override so tests can stand up a fake root/TLD/authoritative
+/// Connection provider for the recursor: Tokio sockets, sending root
+/// queries to the local root zone responder when there is one, with an
+/// optional port override so tests can stand up a fake root/TLD/authoritative
 /// hierarchy on unprivileged ports.
 #[derive(Clone, Default)]
 pub struct RecursorConnections {
     runtime: TokioRuntimeProvider,
+    local_root: Option<SocketAddr>,
     port_override: Option<u16>,
 }
 
@@ -76,7 +78,12 @@ impl ConnectionProvider for RecursorConnections {
         config: &ConnectionConfig,
         cx: &PoolContext,
     ) -> std::result::Result<Self::FutureConn, NetError> {
-        match self.port_override {
+        let port = match self.local_root {
+            // The responder listens on an unprivileged loopback port.
+            Some(root) if root.ip() == ip => Some(root.port()),
+            _ => self.port_override,
+        };
+        match port {
             Some(port) => {
                 let mut config = config.clone();
                 config.port = port;
@@ -94,9 +101,16 @@ impl ConnectionProvider for RecursorConnections {
 /// The recursor type used by recursive mode.
 pub type DaygleRecursor = Recursor<RecursorConnections>;
 
-/// Build a recursor from the recursive settings.
-pub fn build(settings: &RecursiveSettings) -> Result<DaygleRecursor> {
-    let hints: Vec<IpAddr> = if settings.root_hints.is_empty() {
+/// Build a recursor from the recursive settings. With `local_root` (the
+/// address of the local root zone responder, RFC 8806) every root query goes
+/// there instead of to the root servers.
+pub fn build(
+    settings: &RecursiveSettings,
+    local_root: Option<SocketAddr>,
+) -> Result<DaygleRecursor> {
+    let hints: Vec<IpAddr> = if let Some(root) = local_root {
+        vec![root.ip()]
+    } else if settings.root_hints.is_empty() {
         ROOT_HINTS.iter().filter_map(|h| h.parse().ok()).collect()
     } else {
         settings
@@ -127,7 +141,10 @@ pub fn build(settings: &RecursiveSettings) -> Result<DaygleRecursor> {
             .filter_map(|n| n.parse().ok())
             .collect();
     }
-    let mut connections = RecursorConnections::default();
+    let mut connections = RecursorConnections {
+        local_root,
+        ..RecursorConnections::default()
+    };
     if let Some(port) = settings.test_outbound_port {
         // Tests run the fake hierarchy on loopback, which the default
         // server filters (rightly) refuse to query.
@@ -214,6 +231,13 @@ fn ttl_config(settings: &RecursiveSettings) -> TtlConfig {
     TtlConfig::from_opts(&opts)
 }
 
+/// A recursor and the local root responder it was built for.
+pub struct RecursorSlot {
+    pub recursor: Arc<DaygleRecursor>,
+    pub local_root: Option<SocketAddr>,
+}
+
 /// A shared, rebuildable recursor: flushing the cache rebuilds it (the
-/// recursor has no cache-clear call).
-pub type SharedRecursor = Arc<arc_swap::ArcSwap<DaygleRecursor>>;
+/// recursor has no cache-clear call), and so does the local root zone
+/// starting or stopping being served (the root hints are fixed at build).
+pub type SharedRecursor = Arc<arc_swap::ArcSwap<RecursorSlot>>;

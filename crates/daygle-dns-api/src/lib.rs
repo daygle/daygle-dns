@@ -39,6 +39,8 @@
 //! | `DELETE` | `/api/split-horizon/entries/:id`  | delete a split-horizon entry |
 //! | `GET`    | `/api/cache`                      | recursive cache status |
 //! | `POST`   | `/api/cache/clear`                | flush the recursive cache |
+//! | `GET`    | `/api/local-root`                 | local root zone (RFC 8806) status |
+//! | `POST`   | `/api/local-root/refresh`         | check for a newer root zone now |
 //! | `GET`    | `/api/policy/blocklist/sources`   | list remote blocklist sources and their status |
 //! | `POST`   | `/api/policy/blocklist/sources`   | force an immediate refresh of every source |
 //! | `PUT`    | `/api/policy/blocklist/sources`   | replace the configured sources (console CRUD) |
@@ -221,6 +223,9 @@ pub struct AppState {
     /// Runtime secondary-zone refresher, used by the zone form to apply master
     /// changes without requiring a process restart.
     pub secondary_refresher: Option<Arc<SecondaryRefresher>>,
+    /// The local root zone (RFC 8806): settings changes, status and
+    /// on-demand refresh.
+    pub local_root: Arc<daygle_dns_authoritative::LocalRoot>,
     /// Remote blocklist source manager; `None` when no sources are configured.
     pub blocklist_sources: Option<Arc<BlocklistSourceManager>>,
     pub started_at: Instant,
@@ -313,6 +318,8 @@ pub fn router(state: AppState) -> Router {
         .route("/zones/{id}/unsign", post(handlers::unsign_zone))
         .route("/cache", get(handlers::cache_status))
         .route("/cache/clear", post(handlers::clear_cache))
+        .route("/local-root", get(handlers::local_root_status))
+        .route("/local-root/refresh", post(handlers::local_root_refresh))
         .route("/split-horizon", get(handlers::get_split_horizon))
         .route(
             "/split-horizon/networks",

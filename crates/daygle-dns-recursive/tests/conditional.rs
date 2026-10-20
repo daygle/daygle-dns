@@ -98,6 +98,7 @@ async fn conditional_subdomain_routes_to_dedicated_upstream() {
         ),
         Arc::new(Metrics::default()),
         &[],
+        None,
     )
     .unwrap();
 

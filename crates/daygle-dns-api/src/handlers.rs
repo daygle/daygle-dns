@@ -203,6 +203,8 @@ pub async fn status(State(state): State<AppState>) -> Response {
         // "recursive" or "forwarding" while recursion is enabled, else null.
         "resolution_mode": state.resolver.load_full().map(|r| r.mode()),
         "recursion_access": config.recursive.recursion_access,
+        // Whether a verified local root zone (RFC 8806) is in use.
+        "local_root": state.local_root.status().serving,
         "dnssec": config.recursive.dnssec_validate,
         "dot_enabled": config.dot.enabled,
         "doh_enabled": config.doh.enabled,
@@ -2015,6 +2017,22 @@ pub async fn cache_status(State(state): State<AppState>) -> Response {
     .into_response()
 }
 
+/// `GET /api/local-root` - the local root zone (RFC 8806): whether it is
+/// enabled and served, its serial and size, and the last refresh outcome.
+pub async fn local_root_status(State(state): State<AppState>) -> Response {
+    Json(state.local_root.status()).into_response()
+}
+
+/// `POST /api/local-root/refresh` - check the sources for a newer root zone
+/// now instead of waiting for the SOA refresh interval.
+pub async fn local_root_refresh(State(state): State<AppState>) -> Response {
+    if !state.config.load_full().recursive.local_root.enabled {
+        return error_response(StatusCode::CONFLICT, "the local root zone is not enabled");
+    }
+    state.local_root.refresh_now();
+    StatusCode::ACCEPTED.into_response()
+}
+
 pub async fn clear_cache(State(state): State<AppState>) -> Response {
     if let Some(resolver) = state.resolver.load_full() {
         resolver.clear_cache();
@@ -2674,6 +2692,8 @@ pub struct RecursiveUpdate {
     pub root_hints: Option<Vec<String>>,
     pub case_randomization: Option<bool>,
     pub rebinding_protection: Option<bool>,
+    /// Local root zone (RFC 8806): `enabled` and `sources`.
+    pub local_root: Option<daygle_dns_core::config::LocalRootSettings>,
 }
 
 /// Fields shared by the DoT and DoQ listeners.
@@ -2784,6 +2804,7 @@ pub async fn update_settings(
             root_hints: r.root_hints.clone(),
             case_randomization: r.case_randomization,
             rebinding_protection: r.rebinding_protection,
+            local_root: r.local_root.clone(),
             ..Default::default()
         }
         .apply_resolution(&mut config.recursive);
@@ -3082,6 +3103,9 @@ pub async fn update_settings(
             rebuild();
         }
     }
+    state
+        .local_root
+        .set_settings(config.recursive.local_root.clone());
     // Rebuild the recursive resolver when its settings or the stub zones
     // changed, so upstreams, cache settings, conditional forwarders and stub
     // zones apply to live traffic immediately (mirrors the config-file
@@ -3094,6 +3118,7 @@ pub async fn update_settings(
                 &config.recursive,
                 state.metrics.clone(),
                 &config.authoritative.stub_zones,
+                Some(state.local_root.clone()),
             ) {
                 Ok(resolver) => state.resolver.store(Some(Arc::new(resolver))),
                 Err(e) => state.logs.warn(
