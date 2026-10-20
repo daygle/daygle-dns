@@ -657,12 +657,25 @@ zone.
 ```
 GET  /api/cache
 POST /api/cache/clear
+POST /api/cache/flush
 ```
 
-`GET` returns the current recursive cache configuration and runtime
-counters.
+`GET` returns the cache configuration (`capacity`, `prefetch_enabled`,
+`serve_stale_secs`), the resolution `mode` and runtime counters: `hits` and
+`misses` (a hit is a lookup answered without any query leaving the server,
+negative answers included) and `tracked_names`.
 
-`POST /api/cache/clear` flushes the recursive resolver cache.
+`POST /api/cache/clear` flushes the whole resolver cache.
+
+`POST /api/cache/flush` with `{ "name": "www.example.com", "type": "AAAA" }`
+drops one name from the cache (`type` is optional; without it the common
+record types are flushed). It answers `{ "name", "complete" }`: `complete` is
+`false` in recursive mode when the name is resolved by the recursor, whose
+cache cannot drop a single entry - the forwarding resolvers (conditional
+forwarders, stub zones, forwarding client policies) and the serve-stale and
+failure caches are still flushed, and the recursor's copy expires on its own
+or with `/api/cache/clear`. Invalid names or types are `400`; `409` when
+recursion is disabled.
 
 ### Resolver dashboard
 

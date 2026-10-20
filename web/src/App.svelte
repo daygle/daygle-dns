@@ -18,6 +18,13 @@
   import { sidebar, setSidebar, isNarrow, toggleSidebar } from './nav.svelte.js';
 
   let view = $state('status');
+  // Settings tab to open on the next visit (set by cross-page links).
+  let settingsTab = $state('general');
+
+  function openSettings(tab) {
+    settingsTab = tab;
+    view = 'settings';
+  }
   // Zone preselected on the Zones page's Records tab (remembered across visits).
   let recordZoneId = $state(null);
   let user = $state(getStoredUser());
@@ -238,6 +245,7 @@
             aria-label={tab.label}
             onclick={() => {
               view = tab.id;
+              settingsTab = 'general';
               if (isNarrow()) setSidebar(false);
             }}
           >
@@ -276,7 +284,7 @@
       {:else if view === 'filtering'}
         <Filtering />
       {:else if view === 'cache'}
-        <Cache />
+        <Cache onOpenSettings={isViewer ? null : openSettings} />
       {:else if view === 'users'}
         <Users />
       {:else if view === 'certificates'}
@@ -290,7 +298,7 @@
       {:else if view === 'logs'}
         <Logs />
       {:else}
-        <Settings />
+        <Settings initialTab={settingsTab} />
       {/if}
     </main>
   </div>

@@ -176,6 +176,7 @@ export const api = {
   unsignZone: (zoneId) => request('POST', `/zones/${zoneId}/unsign`),
   cache: () => request('GET', '/cache'),
   clearCache: () => request('POST', '/cache/clear'),
+  flushCacheName: (name, type) => request('POST', '/cache/flush', type ? { name, type } : { name }),
   localRoot: () => request('GET', '/local-root'),
   resolver: () => request('GET', '/resolver'),
   refreshLocalRoot: () => request('POST', '/local-root/refresh'),

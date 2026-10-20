@@ -17,10 +17,21 @@ use daygle_dns_core::config::DaygleConfig;
 use hickory_proto::op::ResponseCode;
 use hickory_proto::rr::RecordType;
 
-/// Grab an ephemeral free port by binding and dropping a socket.
+/// Grab an ephemeral port that is free for both UDP and TCP by binding and
+/// dropping a socket of each. The callers use these ports for TCP listeners
+/// too (DNS over TCP, DoT, DoH, the API), and a port free for UDP can still
+/// be taken for TCP, e.g. as the local port of another test's connection.
 async fn free_port() -> u16 {
-    let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
-    socket.local_addr().unwrap().port()
+    loop {
+        let udp = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let port = udp.local_addr().unwrap().port();
+        if tokio::net::TcpListener::bind(("127.0.0.1", port))
+            .await
+            .is_ok()
+        {
+            return port;
+        }
+    }
 }
 
 /// Write `cfg` to `path` as TOML.

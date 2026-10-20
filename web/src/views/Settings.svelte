@@ -12,7 +12,10 @@
 
   // Settings is split into tabs (same pattern as the Logs page) so the page
   // stays navigable as more options are added.
-  let tab = $state('general');
+  // `initialTab` lets another page open a tab directly (the Cache page's
+  // "Change in Settings" link).
+  let { initialTab = 'general' } = $props();
+  let tab = $state(initialTab);
   const TABS = [
     ['general', 'General'],
     ['recursive', 'Recursive & Caching'],
@@ -143,19 +146,6 @@
     return text.split('\n').map((l) => l.trim()).filter(Boolean);
   }
 
-  async function clearCache() {
-    busy = true;
-    notice = null;
-    error = null;
-    try {
-      await api.clearCache();
-      notice = 'Recursive cache flushed.';
-    } catch (e) {
-      error = formatApiError(e);
-    } finally {
-      busy = false;
-    }
-  }
 
   async function save() {
     busy = true;
@@ -300,9 +290,6 @@
   <div class="actions">
     <button onclick={save} disabled={busy}>{busy ? 'Saving…' : 'Save'}</button>
     <button class="secondary" onclick={load} disabled={busy}>Reload</button>
-    {#if tab === 'recursive'}
-      <button class="secondary" onclick={clearCache}>Flush Cache</button>
-    {/if}
   </div>
 
   {#if tab === 'general'}

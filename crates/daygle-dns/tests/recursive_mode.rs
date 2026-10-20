@@ -481,6 +481,75 @@ async fn cache_hits_and_misses_are_counted_in_both_modes() {
     shutdown(server).await;
 }
 
+async fn flush_name(
+    server: &daygle_dns::BoundServer,
+    body: serde_json::Value,
+) -> (u16, serde_json::Value) {
+    let resp = reqwest::Client::new()
+        .post(format!("http://{}/api/cache/flush", server.api_addr))
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    let status = resp.status().as_u16();
+    (status, resp.json().await.unwrap_or_default())
+}
+
+#[tokio::test]
+async fn flushing_one_name_drops_it_from_the_cache() {
+    let upstream = spawn_upstream_answering("site.test.", Ipv4Addr::new(192, 0, 2, 1)).await;
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = base_config(&dir.path().join("daygle-dns.db"));
+    config.recursive.enabled = true;
+    config.recursive.mode = Some(ResolutionMode::Forwarding);
+    config.recursive.upstreams = vec![upstream.to_string()];
+    config.recursive.dnssec_validate = false;
+    let server = spawn(config).await;
+    let udp = server.udp_addr.unwrap();
+
+    for name in ["www.site.test.", "other.site.test.", "www.site.test."] {
+        udp_query(udp, name, RecordType::A).await;
+    }
+    assert_eq!(cache_counters(&server).await, (1, 2));
+
+    // Flushing www (all types, as typed without the trailing dot) makes the
+    // next query go upstream again; other.site.test stays cached.
+    let (status, body) = flush_name(&server, serde_json::json!({ "name": "WWW.site.test" })).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["complete"], true);
+    udp_query(udp, "www.site.test.", RecordType::A).await;
+    assert_eq!(cache_counters(&server).await, (1, 3));
+    udp_query(udp, "other.site.test.", RecordType::A).await;
+    assert_eq!(cache_counters(&server).await, (2, 3));
+
+    // One type only, and input errors.
+    let (status, _) = flush_name(
+        &server,
+        serde_json::json!({ "name": "www.site.test", "type": "aaaa" }),
+    )
+    .await;
+    assert_eq!(status, 200);
+    let (status, _) = flush_name(
+        &server,
+        serde_json::json!({ "name": "www.site.test", "type": "NOPE" }),
+    )
+    .await;
+    assert_eq!(status, 400);
+    let (status, _) = flush_name(&server, serde_json::json!({ "name": " " })).await;
+    assert_eq!(status, 400);
+    shutdown(server).await;
+
+    // Recursive mode cannot drop one entry from the recursor's cache.
+    let port = spawn_hierarchy().await;
+    let dir = tempfile::tempdir().unwrap();
+    let server = spawn(recursive_config(&dir, port)).await;
+    let (status, body) =
+        flush_name(&server, serde_json::json!({ "name": "www.example.test" })).await;
+    assert_eq!(status, 200);
+    assert_eq!(body["complete"], false);
+    shutdown(server).await;
+}
+
 #[tokio::test]
 async fn opportunistic_encryption_falls_back_to_plain_dns() {
     // The fake servers speak no TLS: probes fail and resolution carries on

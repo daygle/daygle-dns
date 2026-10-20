@@ -39,6 +39,7 @@
 //! | `DELETE` | `/api/split-horizon/entries/:id`  | delete a split-horizon entry |
 //! | `GET`    | `/api/cache`                      | recursive cache status |
 //! | `POST`   | `/api/cache/clear`                | flush the recursive cache |
+//! | `POST`   | `/api/cache/flush`                | flush one name from the cache |
 //! | `GET`    | `/api/local-root`                 | local root zone (RFC 8806) status |
 //! | `GET`    | `/api/resolver`                   | resolver dashboard counters |
 //! | `POST`   | `/api/local-root/refresh`         | check for a newer root zone now |
@@ -319,6 +320,7 @@ pub fn router(state: AppState) -> Router {
         .route("/zones/{id}/unsign", post(handlers::unsign_zone))
         .route("/cache", get(handlers::cache_status))
         .route("/cache/clear", post(handlers::clear_cache))
+        .route("/cache/flush", post(handlers::flush_cache_name))
         .route("/local-root", get(handlers::local_root_status))
         .route("/resolver", get(handlers::resolver_stats))
         .route("/local-root/refresh", post(handlers::local_root_refresh))

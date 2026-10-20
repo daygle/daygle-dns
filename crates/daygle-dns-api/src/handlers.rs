@@ -2007,6 +2007,9 @@ pub async fn cache_status(State(state): State<AppState>) -> Response {
     let metrics = state.metrics.snapshot();
     Json(serde_json::json!({
         "enabled": resolver.is_some(),
+        // "recursive" or "forwarding": recursive mode cannot flush one name
+        // from the recursor's own cache.
+        "mode": resolver.as_ref().map(|r| r.mode()),
         "capacity": resolver.as_ref().map(|r| r.cache_size()).unwrap_or(0),
         "tracked_names": resolver.as_ref().map(|r| r.tracked_names()).unwrap_or(0),
         "hits": metrics.cache_hits,
@@ -2066,6 +2069,48 @@ pub async fn local_root_refresh(State(state): State<AppState>) -> Response {
     }
     state.local_root.refresh_now();
     StatusCode::ACCEPTED.into_response()
+}
+
+/// `POST /api/cache/flush` body.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FlushNameInput {
+    pub name: String,
+    /// One record type (`"A"`, `"AAAA"`, ...); omitted flushes the common
+    /// types.
+    #[serde(default, rename = "type")]
+    pub record_type: Option<String>,
+}
+
+/// `POST /api/cache/flush` - remove one name from the resolver caches.
+/// `complete` is false when recursive mode still holds its own copy (the
+/// recursor has no per-entry removal; flush the whole cache for that).
+pub async fn flush_cache_name(
+    State(state): State<AppState>,
+    axum::Json(input): axum::Json<FlushNameInput>,
+) -> Response {
+    let Some(resolver) = state.resolver.load_full() else {
+        return error_response(
+            StatusCode::CONFLICT,
+            "recursion is disabled, so there is no cache",
+        );
+    };
+    if input.name.trim().is_empty() {
+        return error_response(StatusCode::BAD_REQUEST, "name is required");
+    }
+    let record_type = input
+        .record_type
+        .as_deref()
+        .map(str::trim)
+        .filter(|t| !t.is_empty());
+    match resolver.flush_name(&input.name, record_type) {
+        Ok(complete) => Json(serde_json::json!({
+            "name": input.name.trim(),
+            "complete": complete,
+        }))
+        .into_response(),
+        Err(e) => error_response(StatusCode::BAD_REQUEST, e.to_string()),
+    }
 }
 
 pub async fn clear_cache(State(state): State<AppState>) -> Response {

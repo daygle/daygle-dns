@@ -78,7 +78,7 @@
   );
 </script>
 
-{#if data}
+{#if data?.stats && data.local_root}
   <div class="card" style="margin-top: 14px">
     <div class="spread" style="margin-bottom: 12px; flex-wrap: wrap; gap: 8px">
       <h3 style="margin: 0">Resolver</h3>

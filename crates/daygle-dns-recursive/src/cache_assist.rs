@@ -319,6 +319,15 @@ impl CacheAssistant {
         self.in_flight.lock().clear();
     }
 
+    /// Drop the tracked state (stale snapshots, cached failures,
+    /// popularity) for `name` (lowercased FQDN), for one record type or all,
+    /// in every scope.
+    pub fn forget(&self, name: &str, rtype: Option<u16>) {
+        let matches = |key: &CacheKey| key.name == name && rtype.is_none_or(|t| key.rtype == t);
+        self.snapshots.lock().retain(|key, _| !matches(key));
+        self.popular.lock().retain(|key, _| !matches(key));
+    }
+
     pub fn tracked_names(&self) -> usize {
         self.snapshots.lock().len()
     }

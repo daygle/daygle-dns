@@ -125,6 +125,27 @@ enum RouteKind {
     LocalRoot,
 }
 
+/// Record types flushed by [`RecursiveResolver::flush_name`] when no type
+/// is given.
+const FLUSH_TYPES: &[RecordType] = &[
+    RecordType::A,
+    RecordType::AAAA,
+    RecordType::CNAME,
+    RecordType::MX,
+    RecordType::TXT,
+    RecordType::NS,
+    RecordType::SOA,
+    RecordType::PTR,
+    RecordType::SRV,
+    RecordType::CAA,
+    RecordType::HTTPS,
+    RecordType::SVCB,
+    RecordType::DS,
+    RecordType::DNSKEY,
+    RecordType::TLSA,
+    RecordType::NAPTR,
+];
+
 /// Cache-assistant scope of lookups on the default backend (and of the
 /// conditional and stub zones, which route by name only).
 const SCOPE_DEFAULT: u16 = 0;
@@ -405,6 +426,53 @@ impl RecursiveResolver {
         }
         self.inner.cache_assist.clear();
         info!("recursive resolver cache cleared");
+    }
+
+    /// Flush `name` (one record type such as `"AAAA"`, or the common ones)
+    /// from the caches.
+    ///
+    /// Returns whether the flush was complete: the recursor has no per-entry
+    /// removal, so a name it resolves keeps its cached answer there until it
+    /// expires or the whole cache is flushed (`false`). Forwarding resolvers
+    /// (default upstreams, conditional and stub zones, client policies) and
+    /// the serve-stale/failure caches are always flushed.
+    pub fn flush_name(&self, name: &str, record_type: Option<&str>) -> Result<bool> {
+        let mut name = Name::from_utf8(name.trim())
+            .map_err(|e| DaygleError::InvalidRecord(format!("invalid name '{name}': {e}")))?;
+        name.set_fqdn(true);
+        let record_type = record_type
+            .map(|t| {
+                t.to_ascii_uppercase()
+                    .parse::<RecordType>()
+                    .map_err(|_| DaygleError::InvalidRecord(format!("unknown record type '{t}'")))
+            })
+            .transpose()?;
+        let types: Vec<RecordType> = match record_type {
+            Some(t) => vec![t],
+            None => FLUSH_TYPES.to_vec(),
+        };
+        let inner = &self.inner;
+        let mut forwarders: Vec<&ForwardResolver> = Vec::new();
+        if let DefaultBackend::Forward(resolver) = &inner.default {
+            forwarders.push(resolver);
+        }
+        forwarders.extend(inner.conditional.iter().map(|z| &z.resolver));
+        forwarders.extend(inner.stubs.iter().map(|z| &z.resolver));
+        forwarders.extend(inner.policies.iter().filter_map(|p| match &p.backend {
+            PolicyBackend::Forward(resolver) => Some(resolver.as_ref()),
+            _ => None,
+        }));
+        for resolver in forwarders {
+            for rtype in &types {
+                resolver.clear_lookup_cache(name.clone(), *rtype);
+            }
+        }
+        let key = cache_key(&name, RecordType::A).name;
+        inner.cache_assist.forget(&key, record_type.map(u16::from));
+        let complete = inner.recursor.is_none()
+            || zone_resolver(&inner.conditional, &inner.stubs, &name).is_some();
+        info!(name = %name, rtype = ?record_type, complete, "flushed name from the cache");
+        Ok(complete)
     }
 
     /// The configured cache capacity.
