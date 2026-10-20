@@ -1,6 +1,7 @@
 <script>
   import { api, formatApiError } from '../api.js';
   import PageHeader from '../PageHeader.svelte';
+  import ClientPolicies from './ClientPolicies.svelte';
   import { icons } from '../icons.svelte.js';
   import { prefs, setDateTimePrefs, timeZoneOptions, FORMAT_OPTIONS, formatDateTime } from '../datetime.svelte.js';
 
@@ -176,6 +177,7 @@
           recursion_networks: parseLines(recursionNetworksText),
           case_randomization: !!recursive.case_randomization,
           rebinding_protection: !!recursive.rebinding_protection,
+          opportunistic_encryption: !!recursive.opportunistic_encryption,
           upstreams: parseUpstreams(upstreamText),
           dnssec_validate: !!recursive.dnssec_validate,
           prefetch_enabled: !!recursive.prefetch_enabled,
@@ -332,6 +334,7 @@
       <div class="form-grid" style="margin-top: 4px">
         <label class="check"><input type="checkbox" bind:checked={recursive.case_randomization} /> <span>Randomize Query Case (0x20)</span></label>
         <label class="check"><input type="checkbox" bind:checked={recursive.rebinding_protection} /> <span>DNS Rebinding Protection</span></label>
+        <label class="check"><input type="checkbox" bind:checked={recursive.opportunistic_encryption} /> <span>Opportunistic Encryption</span></label>
       </div>
       <p class="muted help">
         Daygle resolves names itself, starting at the root servers, so no upstream
@@ -340,7 +343,9 @@
         spoofed answers harder to inject but can fail with the odd server that does
         not preserve case. Rebinding protection drops private and loopback addresses
         from public answers (your own zones, forwarders and stub zones are not
-        affected).
+        affected). Opportunistic encryption (RFC 9539) probes nameservers for DNS
+        over TLS or QUIC in the background and uses it where it works, falling back
+        to plain DNS; it is experimental and adds some connection overhead.
       </p>
     {:else}
       <div class="form-grid" style="margin-top: 4px">
@@ -402,6 +407,7 @@
       set it to 0 to disable.
     </p>
   </div>
+  <ClientPolicies />
   {:else if tab === 'zones'}
   <div class="card" style="margin-bottom: 14px">
     <h3 style="margin: 0 0 10px">Zones & Records</h3>

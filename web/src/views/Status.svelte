@@ -1,6 +1,7 @@
 <script>
   import { api, formatApiError, formatUptime } from '../api.js';
   import PageHeader from '../PageHeader.svelte';
+  import ResolverDashboard from './ResolverDashboard.svelte';
   import { icons } from '../icons.svelte.js';
   import { formatTime, formatTimeShort } from '../datetime.svelte.js';
 
@@ -11,6 +12,8 @@
   let error = $state(null);
 
   let inFlight = $state(false);
+  // Bumped on every refresh so the resolver dashboard reloads with the page.
+  let refreshKey = $state(0);
 
   async function refresh() {
     // Skip if a previous refresh is still in flight: the interval keeps firing,
@@ -27,6 +30,7 @@
       status = s;
       metrics = m;
       stats = st;
+      refreshKey += 1;
     } catch (e) {
       error = formatApiError(e);
     } finally {
@@ -287,6 +291,8 @@
       {/if}
     </div>
   </div>
+
+  <ResolverDashboard {refreshKey} />
 
   <div class="card" style="margin-top: 14px">
     <h3 style="margin: 0 0 10px">Runtime</h3>

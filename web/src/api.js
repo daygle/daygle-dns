@@ -177,6 +177,7 @@ export const api = {
   cache: () => request('GET', '/cache'),
   clearCache: () => request('POST', '/cache/clear'),
   localRoot: () => request('GET', '/local-root'),
+  resolver: () => request('GET', '/resolver'),
   refreshLocalRoot: () => request('POST', '/local-root/refresh'),
   importZone: (name, text) => request('POST', '/zones/import', { name, text }),
   blocklistSources: () => request('GET', '/policy/blocklist/sources'),
