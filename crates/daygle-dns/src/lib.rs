@@ -316,7 +316,7 @@ pub async fn bind_with(
     // to the resolver on loopback while `recursive.local_root.enabled`. The
     // verified copy is cached next to the database across restarts.
     let local_root = Arc::new(daygle_dns_authoritative::LocalRoot::new(
-        config.recursive.local_root.clone(),
+        config.recursive.local_root_in_effect(),
         local_root_cache_path(&config.authoritative.database),
     ));
     tokio::spawn(local_root.clone().run_forever(shutdown.clone()));
@@ -520,6 +520,7 @@ pub async fn bind_with(
         app,
         catalog.clone(),
         config.api.listen.clone(),
+        config.server.ipv6_only,
         config.api.port,
         shutdown.clone(),
     ));
@@ -888,7 +889,7 @@ async fn bind_listeners(
         // be set before Windows picks them up on the first connect). These
         // knobs use `socket2` because std::net::UdpSocket no longer exposes
         // SO_SNDBUF/SO_RCVBUF setters.
-        let std_socket = net::bind_udp_std(listen)?;
+        let std_socket = net::bind_udp_std(listen, config.server.ipv6_only)?;
         let buffer_bytes = |kb: u32| {
             (kb as usize)
                 .checked_mul(1024)
@@ -910,7 +911,7 @@ async fn bind_listeners(
         );
     }
     if config.server.tcp_enabled {
-        let listener = net::bind_tcp(listen)?;
+        let listener = net::bind_tcp(listen, config.server.ipv6_only)?;
         addrs.tcp = Some(listener.local_addr()?);
         server.register_listener(
             listener,
@@ -922,7 +923,7 @@ async fn bind_listeners(
 
     if config.dot.enabled {
         let addr = listen_addr("dot", &config.dot.listen, config.dot.port)?;
-        let listener = net::bind_tcp(addr)?;
+        let listener = net::bind_tcp(addr, config.server.ipv6_only)?;
         addrs.dot = Some(listener.local_addr()?);
         let tls_config = daygle_dns_dot::build_tls_config(&config.dot)?;
         daygle_dns_dot::register_dot(
@@ -936,7 +937,7 @@ async fn bind_listeners(
 
     if config.doh.enabled {
         let addr = listen_addr("doh", &config.doh.listen, config.doh.port)?;
-        let listener = net::bind_tcp(addr)?;
+        let listener = net::bind_tcp(addr, config.server.ipv6_only)?;
         addrs.doh = Some(listener.local_addr()?);
         let tls_config = daygle_dns_dot::build_doh_tls_config(&config.doh)?;
         daygle_dns_dot::register_doh(
@@ -952,7 +953,7 @@ async fn bind_listeners(
 
     if config.doq.enabled {
         let addr = listen_addr("doq", &config.doq.listen, config.doq.port)?;
-        let socket = net::bind_udp(addr)?;
+        let socket = net::bind_udp(addr, config.server.ipv6_only)?;
         let tls_config = daygle_dns_dot::build_doq_tls_config(&config.doq)?;
         let endpoint = crate::doq::build_doq_endpoint(
             socket,

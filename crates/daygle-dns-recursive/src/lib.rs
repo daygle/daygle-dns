@@ -45,7 +45,7 @@ use hickory_resolver::lookup::Lookup;
 use hickory_resolver::Resolver;
 use tracing::{debug, info, warn};
 
-pub use upstream::parse_upstreams;
+pub use upstream::{parse_upstreams, parse_upstreams_for};
 
 /// A thread-safe recursive resolver.
 ///
@@ -298,7 +298,7 @@ impl RecursiveResolver {
                 continue;
             }
             let zone_name = normalize_zone(&stub.name);
-            let nss = upstream::parse_stub_nss(&stub.nss);
+            let nss = upstream::parse_stub_nss(&stub.nss, settings.outbound_ip_versions);
             if nss.is_empty() {
                 warn!(
                     zone = %zone_name,
@@ -961,8 +961,11 @@ fn build_policies(
             .collect();
         let backend = match policy.action {
             ClientPolicyAction::Forward => {
-                let config =
-                    ResolverConfig::from_parts(None, vec![], parse_upstreams(&policy.upstreams)?);
+                let upstreams =
+                    parse_upstreams_for(&policy.upstreams, settings.outbound_ip_versions).map_err(
+                        |e| DaygleError::Config(format!("client policy '{}': {e}", policy.name)),
+                    )?;
+                let config = ResolverConfig::from_parts(None, vec![], upstreams);
                 let resolver = ForwardResolver::builder_with_config(
                     config,
                     recursor::UpstreamConnections::forwarding(metrics.clone()),
@@ -1011,7 +1014,8 @@ fn build_zone_config(
     zone: &ConditionalZoneConfig,
     settings: &RecursiveSettings,
 ) -> Result<(ResolverConfig, ResolverOpts)> {
-    let name_servers = parse_upstreams(&zone.upstreams)?;
+    let name_servers = parse_upstreams_for(&zone.upstreams, settings.outbound_ip_versions)
+        .map_err(|e| DaygleError::Config(format!("conditional forwarder '{}': {e}", zone.name)))?;
     let config = ResolverConfig::from_parts(None, vec![], name_servers);
     let opts = resolver_opts(settings);
     Ok((config, opts))
@@ -1025,9 +1029,26 @@ fn build_config(settings: &RecursiveSettings) -> Result<(ResolverConfig, Resolve
         // opts; instead read it here via hickory's system_conf helpers.
         let (cfg, _opts) = hickory_resolver::system_conf::read_system_conf()
             .map_err(|e| DaygleError::Config(format!("cannot read system config: {e}")))?;
-        cfg
+        let versions = settings.outbound_ip_versions;
+        let allowed: Vec<_> = cfg
+            .name_servers()
+            .iter()
+            .filter(|ns| versions.allows(ns.ip))
+            .cloned()
+            .collect();
+        if allowed.is_empty() {
+            // resolv.conf can change under us, so this is not refused at
+            // save time: keep resolving rather than fail.
+            warn!(
+                "no system resolver uses {}, the only IP version Outbound IP Versions allows: using them all",
+                versions.label()
+            );
+            cfg
+        } else {
+            ResolverConfig::from_parts(cfg.domain().cloned(), cfg.search().to_vec(), allowed)
+        }
     } else {
-        let name_servers = parse_upstreams(&settings.upstreams)?;
+        let name_servers = parse_upstreams_for(&settings.upstreams, settings.outbound_ip_versions)?;
         ResolverConfig::from_parts(None, vec![], name_servers)
     };
 

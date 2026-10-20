@@ -80,3 +80,29 @@ async fn wildcard_ipv6_listen_serves_both_families() {
     }
     shutdown(server).await;
 }
+
+#[tokio::test]
+async fn ipv6_only_keeps_ipv4_clients_off_a_wildcard_listener() {
+    if !ipv6_available() {
+        eprintln!("IPv6 is not available on this host: IPv6-only check skipped");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let mut cfg = base_config(&dir.path().join("daygle-dns.db"));
+    cfg.server.listen = "::".into();
+    cfg.server.ipv6_only = true;
+    cfg.api.listen = "::".into();
+    let server = spawn(cfg).await;
+    let tcp_port = server.tcp_addr.expect("TCP is enabled").port();
+    let api_port = server.api_addr.port();
+    for port in [tcp_port, api_port] {
+        assert!(tokio::net::TcpStream::connect(("::1", port)).await.is_ok());
+        assert!(
+            tokio::net::TcpStream::connect(("127.0.0.1", port))
+                .await
+                .is_err(),
+            "IPv4 reached port {port}"
+        );
+    }
+    shutdown(server).await;
+}

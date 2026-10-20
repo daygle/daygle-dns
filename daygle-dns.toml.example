@@ -7,6 +7,9 @@
 # a specific address such as "192.168.1.2" or "fd00::53" on just that one.
 [server]
 listen = "0.0.0.0"
+# With "::" (here or in [api], [dot], [doh], [doq]), accept IPv6 clients
+# only instead of IPv4 and IPv6.
+# ipv6_only = false
 port = 53
 udp_enabled = true
 tcp_enabled = true
@@ -53,6 +56,12 @@ recursion_access = "private_networks"
 # Recursive mode: probe nameservers for DNS over TLS/QUIC and use it where it
 # works (RFC 9539, experimental), falling back to plain DNS.
 # opportunistic_encryption = false
+#
+# IP versions this server uses for its own queries (root and domain name
+# servers, upstreams, conditional forwarders, stub zones, local root
+# sources): "both", "ipv4" or "ipv6". Use "ipv4" when the host has an IPv6
+# address but no working IPv6 route. Clients can still ask for AAAA records.
+# outbound_ip_versions = "both"
 #
 # Forwarding mode: empty list + use_system_config = use /etc/resolv.conf.
 # Supported upstream forms:

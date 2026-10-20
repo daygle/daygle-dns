@@ -57,6 +57,8 @@ pub struct WebServer {
     app: Router,
     catalog: Arc<AuthorityCatalog>,
     listen: String,
+    /// `server.ipv6_only`: a `::` listen address takes IPv6 clients only.
+    ipv6_only: bool,
     api_port: u16,
     /// The settings in force (the redirect reads them per request).
     settings: Arc<ArcSwap<WebSettings>>,
@@ -71,6 +73,7 @@ impl WebServer {
         app: Router,
         catalog: Arc<AuthorityCatalog>,
         listen: String,
+        ipv6_only: bool,
         api_port: u16,
         shutdown: CancellationToken,
     ) -> Self {
@@ -78,6 +81,7 @@ impl WebServer {
             app,
             catalog,
             listen,
+            ipv6_only,
             api_port,
             settings: Arc::new(ArcSwap::from_pointee(WebSettings::default())),
             tls: Arc::new(ArcSwapOption::empty()),
@@ -165,7 +169,8 @@ impl WebServer {
     async fn bind(&self, port: u16, label: &str) -> Result<TcpListener, String> {
         let addr = daygle_dns_core::config::listen_socket_addr(&self.listen, port)
             .map_err(|e| format!("api.listen: {e}"))?;
-        crate::net::bind_tcp(addr).map_err(|e| format!("cannot listen for {label} on {addr}: {e}"))
+        crate::net::bind_tcp(addr, self.ipv6_only)
+            .map_err(|e| format!("cannot listen for {label} on {addr}: {e}"))
     }
 
     fn spawn_http(&self, port: u16, socket: TcpListener) -> Running {

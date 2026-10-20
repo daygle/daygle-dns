@@ -260,13 +260,13 @@ PUT /api/config
 }
 ```
 
-Editable groups: `server` (listen/port/udp_enabled/tcp_enabled), `recursive`
+Editable groups: `server` (listen/ipv6_only/port/udp_enabled/tcp_enabled), `recursive`
 (enabled/mode/upstreams/use_system_config/dnssec_validate/cache_size/
 min_cache_ttl/max_cache_ttl/negative_cache_ttl/failure_cache_ttl/
 prefetch_* /serve_stale_secs/
 conditional_zones/recursion_access/recursion_networks/root_hints/
 case_randomization/rebinding_protection/local_root/opportunistic_encryption/
-client_policies), `dot`,
+outbound_ip_versions/client_policies), `dot`,
 `doh`, `doq` (enabled/port/self_signed/server_name [+ `doh.endpoint`]), `api`
 (gui_enabled/cors_origins), `display` (the console's date/time defaults:
 `time_zone` = `system`, `UTC` or an IANA zone; `date_format` = `system`/`dmy`/
@@ -357,6 +357,23 @@ a private TLD).
 RFC 9539 opportunistic encryption: nameservers are probed for DNS over TLS or
 QUIC in the background and the encrypted transport is used where it works,
 with plain DNS as the fallback.
+
+`recursive.outbound_ip_versions` (`"both"` by default, `"ipv4"` or `"ipv6"`)
+limits which IP versions the server uses for its own queries: root hints and
+the name servers the recursor is referred to, upstreams, conditional
+forwarders, forwarding client policies, stub zone name servers and local root
+sources. Servers of the other version are skipped (a `https://` upstream
+named by host is resolved to an address of an allowed version). A save that
+leaves an upstream, conditional-forwarder or client-policy list with no
+usable server is refused with `400`, as is a `root_hints` or
+`local_root.sources` list with none. When `/etc/resolv.conf` has no server of
+an allowed version, all of them are used and a warning is logged. Zone
+transfers and NOTIFY use the addresses configured for them regardless. This
+is about transport only: AAAA records are still resolved and served.
+
+`server.ipv6_only` (`false` by default; the console shows it but leaves it to the file) makes a `::` listen
+address, in `[server]` or in `[api]`, `[dot]`, `[doh]` or `[doq]`, accept
+IPv6 clients only; by default `::` accepts IPv4 clients too.
 
 `recursive.client_policies` resolves some clients differently. Each policy is
 `{ "name", "enabled", "clients": [CIDRs or IPs], "action", "upstreams" }` with

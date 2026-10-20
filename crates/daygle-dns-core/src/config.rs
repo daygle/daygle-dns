@@ -347,6 +347,8 @@ pub struct RecursiveUpdate {
     pub local_root: Option<LocalRootSettings>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub opportunistic_encryption: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub outbound_ip_versions: Option<IpVersions>,
     /// Client resolution policies (the whole list; see
     /// [`ClientPolicyConfig`]).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -378,6 +380,9 @@ impl RecursiveUpdate {
         if let Some(v) = self.opportunistic_encryption {
             settings.opportunistic_encryption = v;
         }
+        if let Some(v) = self.outbound_ip_versions {
+            settings.outbound_ip_versions = v;
+        }
         if let Some(v) = self.min_cache_ttl {
             settings.min_cache_ttl = v;
         }
@@ -405,6 +410,7 @@ impl RecursiveUpdate {
                 sources: trim_list(&v.sources),
                 // Never set from the API or the database.
                 test_trust_anchor: settings.local_root.test_trust_anchor.clone(),
+                outbound_ip_versions: settings.local_root.outbound_ip_versions,
             };
         }
     }
@@ -929,6 +935,7 @@ impl RuntimeSettings {
                 rebinding_protection: Some(config.recursive.rebinding_protection),
                 local_root: Some(config.recursive.local_root.clone()),
                 opportunistic_encryption: Some(config.recursive.opportunistic_encryption),
+                outbound_ip_versions: Some(config.recursive.outbound_ip_versions),
                 client_policies: Some(config.recursive.client_policies.clone()),
             }),
             dot: Some(ListenerUpdate {
@@ -1419,6 +1426,34 @@ impl DaygleConfig {
                 )));
             }
         }
+        let versions = self.recursive.outbound_ip_versions;
+        if !self.recursive.root_hints.is_empty()
+            && !self
+                .recursive
+                .root_hints
+                .iter()
+                .filter_map(|h| h.trim().parse::<IpAddr>().ok())
+                .any(|ip| versions.allows(ip))
+        {
+            return Err(DaygleError::Config(format!(
+                "recursive.root_hints has no {} address, and outbound_ip_versions allows only {}",
+                versions.label(),
+                versions.label()
+            )));
+        }
+        if self.recursive.local_root.enabled
+            && self
+                .recursive
+                .local_root_in_effect()
+                .effective_sources()
+                .is_empty()
+        {
+            return Err(DaygleError::Config(format!(
+                "recursive.local_root.sources has no {} server, and outbound_ip_versions allows only {}",
+                versions.label(),
+                versions.label()
+            )));
+        }
         if self.authoritative.notify_enabled && self.authoritative.notify_targets.is_empty() {
             return Err(DaygleError::Config(
                 "authoritative.notify_enabled requires notify_targets".to_string(),
@@ -1688,6 +1723,10 @@ pub fn parse_master_addr(entry: &str) -> std::result::Result<std::net::SocketAdd
 pub struct ServerSettings {
     /// Address the plaintext DNS listeners bind to.
     pub listen: String,
+    /// With a listen address of `::` (here or in `[api]`, `[dot]`, `[doh]`
+    /// or `[doq]`), accept IPv6 clients only. Off by default: `::` accepts
+    /// IPv4 clients too.
+    pub ipv6_only: bool,
     /// UDP/TCP port (default 53).
     pub port: u16,
     /// Serve plaintext UDP.
@@ -1722,6 +1761,7 @@ impl Default for ServerSettings {
     fn default() -> Self {
         Self {
             listen: "0.0.0.0".to_string(),
+            ipv6_only: false,
             port: 53,
             udp_enabled: true,
             tcp_enabled: true,
@@ -1828,6 +1868,11 @@ pub struct RecursiveSettings {
     /// it works, falling back to plain DNS. Off by default: it is
     /// experimental and adds connection overhead.
     pub opportunistic_encryption: bool,
+    /// Which IP versions the resolver uses for its own queries: to root and
+    /// domain name servers, forwarders, stub zone name servers and local
+    /// root zone sources. Zone transfers and NOTIFY go to the addresses
+    /// configured for them regardless.
+    pub outbound_ip_versions: IpVersions,
     /// Client resolution policies: clients in a policy's networks are
     /// resolved its way (forwarded to its own upstreams, resolved from the
     /// root servers, or refused) instead of by the default mode. The first
@@ -1867,6 +1912,39 @@ pub enum RecursionAccess {
     Deny,
 }
 
+/// Which IP versions outgoing queries use.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IpVersions {
+    /// IPv4 and IPv6.
+    #[default]
+    Both,
+    /// IPv4 only, e.g. on a host whose IPv6 does not reach the internet.
+    Ipv4,
+    /// IPv6 only.
+    Ipv6,
+}
+
+impl IpVersions {
+    /// Whether `ip` may be used (IPv4-mapped IPv6 counts as IPv4).
+    pub fn allows(self, ip: IpAddr) -> bool {
+        match (self, ip.to_canonical()) {
+            (Self::Both, _) => true,
+            (Self::Ipv4, ip) => ip.is_ipv4(),
+            (Self::Ipv6, ip) => ip.is_ipv6(),
+        }
+    }
+
+    /// How the setting reads in error messages ("IPv4", "IPv6").
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Both => "IPv4 or IPv6",
+            Self::Ipv4 => "IPv4",
+            Self::Ipv6 => "IPv6",
+        }
+    }
+}
+
 /// Local root zone settings (RFC 8806, "Secondary ROOT Zone" in the
 /// console). The zone is transferred from `sources`, accepted only when its
 /// ZONEMD digest (RFC 8976) matches and is signed by a key chaining to the
@@ -1887,6 +1965,11 @@ pub struct LocalRootSettings {
     /// the built-in root trust anchor, so tests can sign a fake root zone.
     #[serde(skip)]
     pub test_trust_anchor: Option<Vec<u8>>,
+    /// Copied from `recursive.outbound_ip_versions` (see
+    /// [`RecursiveSettings::local_root_in_effect`]): sources of other IP
+    /// versions are skipped.
+    #[serde(skip)]
+    pub outbound_ip_versions: IpVersions,
 }
 
 /// Servers that allow root zone transfers (RFC 8806 Appendix A): ICANN's
@@ -1912,12 +1995,21 @@ pub const LOCAL_ROOT_SOURCES: &[&str] = &[
 
 impl LocalRootSettings {
     /// The transfer sources in effect (the configured list or the defaults).
+    /// Sources of an IP version the resolver does not use are left out.
     pub fn effective_sources(&self) -> Vec<String> {
-        if self.sources.is_empty() {
+        let sources: Vec<String> = if self.sources.is_empty() {
             LOCAL_ROOT_SOURCES.iter().map(|s| s.to_string()).collect()
         } else {
             self.sources.clone()
-        }
+        };
+        sources
+            .into_iter()
+            .filter(|s| {
+                parse_master_addr(s)
+                    .map(|a| self.outbound_ip_versions.allows(a.ip()))
+                    .unwrap_or(true)
+            })
+            .collect()
     }
 }
 
@@ -2045,6 +2137,14 @@ pub const PRIVATE_NETWORKS: &[&str] = &[
 ];
 
 impl RecursiveSettings {
+    /// The local root zone settings with the outbound IP versions applied.
+    pub fn local_root_in_effect(&self) -> LocalRootSettings {
+        LocalRootSettings {
+            outbound_ip_versions: self.outbound_ip_versions,
+            ..self.local_root.clone()
+        }
+    }
+
     /// The resolution mode in effect: the explicit `mode`, otherwise
     /// forwarding when upstreams are configured and recursive when not.
     pub fn effective_mode(&self) -> ResolutionMode {
@@ -2084,6 +2184,7 @@ impl Default for RecursiveSettings {
             rebinding_protection: false,
             local_root: LocalRootSettings::default(),
             opportunistic_encryption: false,
+            outbound_ip_versions: IpVersions::Both,
             client_policies: vec![],
             test_outbound_port: None,
         }
@@ -2820,6 +2921,51 @@ fd0000000000000000000000000000aa 02 40 00 80     eth0
                 "fd00::/64"
             ]
         );
+    }
+
+    #[test]
+    fn outbound_ip_versions_limit_root_hints_and_sources() {
+        let ip = |s: &str| s.parse::<IpAddr>().unwrap();
+        assert!(IpVersions::Both.allows(ip("2001:db8::1")));
+        assert!(IpVersions::Ipv4.allows(ip("192.0.2.1")));
+        assert!(IpVersions::Ipv4.allows(ip("::ffff:192.0.2.1")));
+        assert!(!IpVersions::Ipv4.allows(ip("2001:db8::1")));
+        assert!(!IpVersions::Ipv6.allows(ip("192.0.2.1")));
+
+        let cfg = DaygleConfig::parse(
+            "[server]\nipv6_only = true\n[recursive]\noutbound_ip_versions = \"ipv4\"\n",
+        )
+        .unwrap();
+        assert!(cfg.server.ipv6_only);
+        assert_eq!(cfg.recursive.outbound_ip_versions, IpVersions::Ipv4);
+        // The default local root sources narrow to IPv4.
+        let sources = cfg.recursive.local_root_in_effect().effective_sources();
+        assert!(!sources.is_empty());
+        assert!(sources.iter().all(|s| !s.contains(':')), "{sources:?}");
+
+        // Root hints and local root sources must keep an allowed server.
+        let mut cfg = DaygleConfig::default();
+        cfg.recursive.outbound_ip_versions = IpVersions::Ipv6;
+        cfg.recursive.root_hints = vec!["198.41.0.4".into()];
+        assert!(cfg
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("root_hints"));
+        cfg.recursive.root_hints = vec!["198.41.0.4".into(), "2001:503:ba3e::2:30".into()];
+        cfg.validate().unwrap();
+        cfg.recursive.local_root.enabled = true;
+        cfg.recursive.local_root.sources = vec!["192.0.32.132".into()];
+        assert!(cfg
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("local_root.sources"));
+        // The setting survives the database overlay.
+        let overlay = RuntimeSettings::capture(&cfg);
+        let mut restored = DaygleConfig::default();
+        overlay.apply_to(&mut restored);
+        assert_eq!(restored.recursive.outbound_ip_versions, IpVersions::Ipv6);
     }
 
     #[test]

@@ -217,6 +217,7 @@ fn local_root_config(
         enabled: true,
         sources: vec![source.to_string()],
         test_trust_anchor: Some(anchor.to_vec()),
+        ..Default::default()
     };
     config
 }

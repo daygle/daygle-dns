@@ -3009,6 +3009,7 @@ pub struct AiUpdate {
 #[serde(deny_unknown_fields)]
 pub struct ServerUpdate {
     pub listen: Option<String>,
+    pub ipv6_only: Option<bool>,
     pub port: Option<u16>,
     pub udp_enabled: Option<bool>,
     pub tcp_enabled: Option<bool>,
@@ -3039,11 +3040,41 @@ pub struct RecursiveUpdate {
     /// Local root zone (RFC 8806): `enabled` and `sources`.
     pub local_root: Option<daygle_dns_core::config::LocalRootSettings>,
     pub opportunistic_encryption: Option<bool>,
+    pub outbound_ip_versions: Option<daygle_dns_core::config::IpVersions>,
     pub min_cache_ttl: Option<u32>,
     pub negative_cache_ttl: Option<u32>,
     pub use_system_config: Option<bool>,
     /// Replaces the whole client policy list.
     pub client_policies: Option<Vec<daygle_dns_core::config::ClientPolicyConfig>>,
+}
+
+/// Check that every forwarder list keeps a server of an IP version the
+/// resolver may use: the default upstreams (unless the system resolver is
+/// used), conditional forwarders and forwarding client policies.
+fn check_outbound_servers(r: &daygle_dns_core::config::RecursiveSettings) -> Result<(), String> {
+    let versions = r.outbound_ip_versions;
+    if versions == daygle_dns_core::config::IpVersions::Both {
+        return Ok(());
+    }
+    if r.effective_mode() == daygle_dns_core::config::ResolutionMode::Forwarding
+        && !r.use_system_config
+    {
+        daygle_dns_recursive::parse_upstreams_for(&r.upstreams, versions)
+            .map_err(|e| format!("upstreams: {e}"))?;
+    }
+    for zone in &r.conditional_zones {
+        daygle_dns_recursive::parse_upstreams_for(&zone.upstreams, versions)
+            .map_err(|e| format!("conditional forwarder '{}': {e}", zone.name))?;
+    }
+    for policy in r
+        .client_policies
+        .iter()
+        .filter(|p| p.enabled && p.action == daygle_dns_core::config::ClientPolicyAction::Forward)
+    {
+        daygle_dns_recursive::parse_upstreams_for(&policy.upstreams, versions)
+            .map_err(|e| format!("client policy '{}': {e}", policy.name))?;
+    }
+    Ok(())
 }
 
 /// Fields shared by the DoT and DoQ listeners.
@@ -3097,6 +3128,10 @@ pub async fn update_settings(
     if let Some(s) = &update.server {
         if let Some(v) = &s.listen {
             config.server.listen = v.clone();
+            listeners_affected = true;
+        }
+        if let Some(v) = s.ipv6_only {
+            config.server.ipv6_only = v;
             listeners_affected = true;
         }
         if let Some(v) = s.port {
@@ -3169,6 +3204,7 @@ pub async fn update_settings(
             rebinding_protection: r.rebinding_protection,
             local_root: r.local_root.clone(),
             opportunistic_encryption: r.opportunistic_encryption,
+            outbound_ip_versions: r.outbound_ip_versions,
             client_policies: r.client_policies.clone(),
             min_cache_ttl: r.min_cache_ttl,
             negative_cache_ttl: r.negative_cache_ttl,
@@ -3516,6 +3552,12 @@ pub async fn update_settings(
     if let Err(response) = validate_config_update(&state, &old_config, &config, "settings") {
         return response;
     }
+    // Outbound IP Versions must leave every forwarder list someone to ask.
+    if config.recursive != old_config.recursive {
+        if let Err(e) = check_outbound_servers(&config.recursive) {
+            return error_response(StatusCode::BAD_REQUEST, e);
+        }
+    }
 
     // Move the web listeners first: a port that cannot be bound or a
     // certificate that does not load rejects the whole update, so the
@@ -3555,7 +3597,7 @@ pub async fn update_settings(
     }
     state
         .local_root
-        .set_settings(config.recursive.local_root.clone());
+        .set_settings(config.recursive.local_root_in_effect());
     // Rebuild the recursive resolver when its settings or the stub zones
     // changed, so upstreams, cache settings, conditional forwarders and stub
     // zones apply to live traffic immediately (mirrors the config-file

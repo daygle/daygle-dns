@@ -12,8 +12,8 @@ use std::net::{Ipv4Addr, SocketAddr};
 use common::*;
 use daygle_dns_authoritative::model::{RecordInput, ZoneInput};
 use daygle_dns_core::config::{
-    ClientPolicyAction, ClientPolicyConfig, ConditionalZoneConfig, DaygleConfig, RecursionAccess,
-    ResolutionMode,
+    ClientPolicyAction, ClientPolicyConfig, ConditionalZoneConfig, DaygleConfig, IpVersions,
+    RecursionAccess, ResolutionMode,
 };
 use hickory_proto::op::{Message, MessageType, ResponseCode};
 use hickory_proto::rr::rdata::{NS, SOA};
@@ -314,6 +314,74 @@ async fn forwarding_mode_passes_nodata_through_as_noerror() {
     let msg = udp_query(udp, "v4only.test.", RecordType::A).await;
     assert_eq!(first_answer(&msg).as_deref(), Some("192.0.2.44"));
 
+    shutdown(server).await;
+}
+
+#[tokio::test]
+async fn outbound_ip_versions_choose_which_servers_are_asked() {
+    // IPv4 only: an IPv6 root hint is ignored and the IPv4 hierarchy answers.
+    let port = spawn_hierarchy().await;
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = recursive_config(&dir, port);
+    config.recursive.outbound_ip_versions = IpVersions::Ipv4;
+    config.recursive.root_hints = vec!["2001:db8::53".to_string(), ROOT.to_string()];
+    let server = spawn(config).await;
+    let msg = udp_query(server.udp_addr.unwrap(), "www.example.test.", RecordType::A).await;
+    assert_eq!(first_answer(&msg).as_deref(), Some("198.51.100.7"));
+    shutdown(server).await;
+
+    // IPv6 only: the IPv4 root server is never asked, so nothing resolves
+    // (the only IPv6 root hint has no server behind it).
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = recursive_config(&dir, port);
+    config.recursive.outbound_ip_versions = IpVersions::Ipv6;
+    config.recursive.root_hints = vec![ROOT.to_string(), "::1".to_string()];
+    let server = spawn(config).await;
+    let msg = udp_query(server.udp_addr.unwrap(), "www.example.test.", RecordType::A).await;
+    assert_eq!(msg.response_code, ResponseCode::ServFail);
+    shutdown(server).await;
+
+    // Forwarding: a change that leaves no upstream of an allowed version is
+    // refused; one that keeps some is applied.
+    let upstream = spawn_upstream_answering("v4only.test.", Ipv4Addr::new(192, 0, 2, 44)).await;
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = base_config(&dir.path().join("daygle-dns.db"));
+    config.recursive.enabled = true;
+    config.recursive.mode = Some(ResolutionMode::Forwarding);
+    config.recursive.use_system_config = false;
+    config.recursive.upstreams = vec![upstream.to_string(), "[2001:db8::53]:53".to_string()];
+    config.recursive.dnssec_validate = false;
+    let server = spawn(config).await;
+    let client = reqwest::Client::new();
+    let put = |versions: &'static str| {
+        client
+            .put(format!("http://{}/api/config", server.api_addr))
+            .json(&serde_json::json!({
+                "recursive": { "upstreams": ["[2001:db8::53]:53"], "outbound_ip_versions": versions }
+            }))
+            .send()
+    };
+    let resp = put("ipv4").await.unwrap();
+    assert_eq!(resp.status(), 400);
+    assert!(resp.text().await.unwrap().contains("IPv4"));
+    let resp = client
+        .put(format!("http://{}/api/config", server.api_addr))
+        .json(&serde_json::json!({ "recursive": { "outbound_ip_versions": "ipv4" } }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let config: serde_json::Value = client
+        .get(format!("http://{}/api/config", server.api_addr))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(config["recursive"]["outbound_ip_versions"], "ipv4");
+    let msg = udp_query(server.udp_addr.unwrap(), "v4only.test.", RecordType::A).await;
+    assert_eq!(first_answer(&msg).as_deref(), Some("192.0.2.44"));
     shutdown(server).await;
 }
 

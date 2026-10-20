@@ -165,6 +165,7 @@
       // An unset mode means: forwarding when upstreams exist, else recursive.
       recursive.mode = config.recursive.mode || (config.recursive.upstreams?.length ? 'forwarding' : 'recursive');
       recursive.recursion_access = config.recursive.recursion_access || 'private_networks';
+      recursive.outbound_ip_versions = config.recursive.outbound_ip_versions || 'both';
       recursionNetworksText = (config.recursive.recursion_networks || []).join('\n');
       authoritative = { ...config.authoritative };
       dot = { ...config.dot };
@@ -224,6 +225,16 @@
     return text.split('\n').map((l) => l.trim()).filter(Boolean);
   }
 
+  // What a listen address accepts, in words (`::` is dual-stack unless
+  // server.ipv6_only is set).
+  function listenMeaning(listen, ipv6Only) {
+    const a = String(listen || '').trim().replace(/^\[(.*)\]$/, '$1');
+    if (a === '0.0.0.0') return 'All IPv4 addresses';
+    if (a === '::') return ipv6Only ? 'All IPv6 addresses (IPv6 only)' : 'All IPv4 and IPv6 addresses';
+    if (a === '127.0.0.1' || a === '::1') return 'This computer only';
+    return a.includes(':') ? 'This IPv6 address only' : 'This IPv4 address only';
+  }
+
   // Trim each line and drop empties (shared by the network allow-lists and
   // NOTIFY targets, which are all newline-separated textareas).
   function parseLines(text) {
@@ -245,6 +256,7 @@
         case_randomization: !!recursive.case_randomization,
         rebinding_protection: !!recursive.rebinding_protection,
         opportunistic_encryption: !!recursive.opportunistic_encryption,
+        outbound_ip_versions: recursive.outbound_ip_versions,
         upstreams: parseUpstreams(upstreamText),
         use_system_config: !!recursive.use_system_config,
         cache_size: Number(recursive.cache_size),
@@ -465,7 +477,7 @@
     <h3 style="margin: 0 0 10px">DNS Listeners</h3>
     <table class="facts">
       <tbody>
-        <tr><th>Listen Address</th><td><code>{server.listen}</code></td></tr>
+        <tr><th>Listen Address</th><td><code>{server.listen}</code> <span class="muted">{listenMeaning(server.listen, server.ipv6_only)}</span></td></tr>
         <tr><th>Port</th><td>{server.port}</td></tr>
         <tr><th>UDP</th><td><span class="pill" class:ok={server.udp_enabled}>{server.udp_enabled ? 'On' : 'Off'}</span></td></tr>
         <tr><th>TCP</th><td><span class="pill" class:ok={server.tcp_enabled}>{server.tcp_enabled ? 'On' : 'Off'}</span></td></tr>
@@ -475,7 +487,9 @@
     <p class="muted help">
       To change these, edit the <code>[server]</code> section of
       <code>daygle-dns.toml</code> and restart (or let Reload Config File
-      pick it up). They live in the file rather than here so a listener that
+      pick it up). Use <code>0.0.0.0</code> for IPv4 only, <code>::</code>
+      for IPv4 and IPv6, or <code>::</code> with <code>ipv6_only = true</code>
+      for IPv6 only. They live in the file rather than here so a listener that
       stops working can always be fixed without the console. The web console
       listens on {config?.api?.listen}. DNS over TLS, HTTPS and QUIC are on
       the Encrypted DNS tab.
@@ -528,6 +542,28 @@
       <p class="muted help">
         Queries are sent to these upstream servers, or to the system's resolver when
         the list is empty or Use System DNS Configuration is set.
+      </p>
+    {/if}
+    {#if recursive.enabled}
+      <h4>Outbound IP Versions</h4>
+      <div class="form-grid">
+        <label>
+          <span>Send Queries Over</span>
+          <select bind:value={recursive.outbound_ip_versions}>
+            <option value="both">IPv4 and IPv6</option>
+            <option value="ipv4">IPv4 Only</option>
+            <option value="ipv6">IPv6 Only</option>
+          </select>
+        </label>
+      </div>
+      <p class="muted help">
+        Which IP versions this server uses for its own lookups: root and domain
+        name servers, upstream servers, conditional forwarders, stub zones and the
+        root zone download. Choose IPv4 Only when this host has an IPv6 address
+        but IPv6 does not reach the internet, which otherwise shows up as slow or
+        failing lookups. Servers of the other version are skipped, and a list
+        left with none is refused. This does not change what clients can ask
+        for: IPv6 (AAAA) records are still resolved and served.
       </p>
     {/if}
     <h4>Recursion Access</h4>
