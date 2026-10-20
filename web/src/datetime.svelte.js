@@ -286,3 +286,39 @@ export function formatDate(value) {
 export function displayZoneName() {
   return zoneArg() || Intl.DateTimeFormat().resolvedOptions().timeZone || 'Local Time';
 }
+
+/**
+ * Read a `<input type="datetime-local">` value ("2026-10-20T09:00") as a
+ * time in the display zone and return it as UTC ISO 8601, for API filters.
+ * Returns '' for an empty or unreadable value.
+ */
+export function zonedInputToIso(value) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2}))?/.exec(value || '');
+  if (!m) return '';
+  // Seconds are optional in the input.
+  const [y, mo, d, h, mi, s] = m.slice(1).map((v) => Number(v || 0));
+  const tz = zoneArg();
+  if (!tz) return new Date(y, mo - 1, d, h, mi, s).toISOString();
+  // The wall-clock time read as UTC, then corrected by the zone's offset at
+  // that moment (twice, so a guess across a DST change settles).
+  const wall = Date.UTC(y, mo - 1, d, h, mi, s);
+  const offsetAt = (ms) => {
+    const parts = {};
+    for (const p of new Intl.DateTimeFormat('en-US', {
+      timeZone: tz,
+      hourCycle: 'h23',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+    }).formatToParts(new Date(ms))) {
+      parts[p.type] = Number(p.value);
+    }
+    return Date.UTC(parts.year, parts.month - 1, parts.day, parts.hour, parts.minute, parts.second) - ms;
+  };
+  let utc = wall - offsetAt(wall);
+  utc = wall - offsetAt(utc);
+  return new Date(utc).toISOString();
+}
