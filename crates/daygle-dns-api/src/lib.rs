@@ -22,6 +22,7 @@
 //! | `PUT`    | `/api/zones/:id/records/:rid`     | replace a record in place |
 //! | `DELETE` | `/api/zones/:id/records/:rid`     | delete a record |
 //! | `POST`   | `/api/auth/password`              | signed-in user rotates their own password |
+//! | `PUT`    | `/api/auth/preferences`           | signed-in user sets their own date/time display |
 //! | `GET`    | `/api/users`                      | list console accounts (hashes redacted) |
 //! | `POST`   | `/api/users`                      | create a console account |
 //! | `PATCH`  | `/api/users/:username`            | reset password / change role / enable-disable |
@@ -39,7 +40,9 @@
 //! | `DELETE` | `/api/split-horizon/entries/:id`  | delete a split-horizon entry |
 //! | `GET`    | `/api/cache`                      | recursive cache status |
 //! | `POST`   | `/api/cache/clear`                | flush the recursive cache |
+//! | `POST`   | `/api/cache/flush`                | flush one name from the cache |
 //! | `GET`    | `/api/local-root`                 | local root zone (RFC 8806) status |
+//! | `GET`    | `/api/resolver`                   | resolver dashboard counters |
 //! | `POST`   | `/api/local-root/refresh`         | check for a newer root zone now |
 //! | `GET`    | `/api/policy/blocklist/sources`   | list remote blocklist sources and their status |
 //! | `POST`   | `/api/policy/blocklist/sources`   | force an immediate refresh of every source |
@@ -264,6 +267,7 @@ pub fn router(state: AppState) -> Router {
         .route("/ai/status", get(handlers::ai_status))
         .route("/ai/verdicts", get(handlers::ai_verdicts))
         .route("/ai/override", post(handlers::ai_override))
+        .route("/ai/overrides", get(handlers::ai_overrides))
         .route("/ai/rescan", post(handlers::ai_rescan))
         .route("/ai/model-status", get(handlers::ai_model_status))
         .route("/ai/update-models", post(handlers::ai_update_models))
@@ -276,6 +280,7 @@ pub fn router(state: AppState) -> Router {
         .route("/auth/login", post(handlers::auth_login))
         .route("/auth/logout", post(handlers::auth_logout))
         .route("/auth/me", get(handlers::auth_me))
+        .route("/auth/preferences", put(handlers::auth_set_preferences))
         .route("/auth/password", post(handlers::auth_change_password))
         .route(
             "/auth/setup",
@@ -318,7 +323,9 @@ pub fn router(state: AppState) -> Router {
         .route("/zones/{id}/unsign", post(handlers::unsign_zone))
         .route("/cache", get(handlers::cache_status))
         .route("/cache/clear", post(handlers::clear_cache))
+        .route("/cache/flush", post(handlers::flush_cache_name))
         .route("/local-root", get(handlers::local_root_status))
+        .route("/resolver", get(handlers::resolver_stats))
         .route("/local-root/refresh", post(handlers::local_root_refresh))
         .route("/split-horizon", get(handlers::get_split_horizon))
         .route(
@@ -359,6 +366,10 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/policy/blocking/{id}",
             delete(handlers::delete_blocking_group),
+        )
+        .route(
+            "/policy/blocking/{id}/move",
+            post(handlers::move_blocking_group),
         )
         .route("/update", get(handlers::update_info))
         .route("/update/status", get(handlers::update_status))
@@ -521,11 +532,18 @@ async fn require_auth(
                 );
             // The self-service password change is a mutation on the caller's
             // own credential (the handler re-verifies the current password),
-            // so read-only accounts may use it too.
-            let is_own_password_change = path == "/api/auth/password" || path == "/auth/password";
+            // and display preferences only change the caller's own view, so
+            // read-only accounts may use both.
+            let is_own_account_change = matches!(
+                path,
+                "/api/auth/password"
+                    | "/auth/password"
+                    | "/api/auth/preferences"
+                    | "/auth/preferences"
+            );
             if mutating
                 && session.role == daygle_dns_core::config::Role::Viewer
-                && !is_own_password_change
+                && !is_own_account_change
             {
                 return (
                     StatusCode::FORBIDDEN,

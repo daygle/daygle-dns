@@ -37,12 +37,23 @@ pub struct VerdictRow {
     /// Backend that produced the verdict (`fasttext`, `heuristic`).
     pub backend: String,
     pub evidence: String,
-    /// How many times this domain was observed in the query log.
+    /// In how many scan cycles the domain showed up in the query log.
     pub observations: u32,
     /// Unix epoch seconds of the latest classification (0 when pending).
     pub classified_at: i64,
     /// Unix epoch seconds at which the verdict expires (0 when pending).
     pub expires_at: i64,
+    /// The domain itself has an operator `allow` override (it is exempt).
+    pub overridden: bool,
+}
+
+/// One operator override.
+#[derive(Debug, Clone)]
+pub struct OverrideRow {
+    pub domain: String,
+    pub action: String,
+    pub reason: String,
+    pub created_at: i64,
 }
 
 fn now_epoch() -> i64 {
@@ -134,6 +145,20 @@ impl AiStore {
         Ok(true)
     }
 
+    /// Domains waiting for classification (new, re-queued after expiry, or
+    /// left pending by an interrupted cycle), most-seen first.
+    pub fn pending_domains(&self, limit: u32) -> Result<Vec<String>> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(
+            "SELECT domain FROM ai_verdicts WHERE status = 'pending'
+             ORDER BY observations DESC, domain LIMIT ?1",
+        )?;
+        let collected = stmt
+            .query_map(params![limit as i64], |r| r.get::<_, String>(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(collected)
+    }
+
     /// Persist a classification. `expires_after_secs = 0` records a verdict
     /// without an expiry (scanner verdicts always pass a TTL; only operator
     /// pins use 0).
@@ -199,8 +224,9 @@ impl AiStore {
         Ok(requeued)
     }
 
-    /// Fresh (non-expired) threat verdicts above `threshold`, minus operator
-    /// `allow` vetoes: exactly what the block snapshot is built from.
+    /// Fresh (non-expired) classified verdicts at or above `threshold`, minus
+    /// exact operator `allow` vetoes. The block snapshot narrows these to the
+    /// auto-block categories and to domains no parent override exempts.
     pub fn fresh_blocked(
         &self,
         now_epoch: i64,
@@ -209,7 +235,7 @@ impl AiStore {
         let conn = self.lock()?;
         let mut stmt = conn.prepare(
             "SELECT domain, category, expires_at FROM ai_verdicts
-             WHERE status = 'classified' AND severity = 'threat'
+             WHERE status = 'classified'
                AND confidence >= ?1 AND expires_at > ?2
                AND NOT EXISTS (
                    SELECT 1 FROM ai_overrides o
@@ -252,6 +278,36 @@ impl AiStore {
         )? > 0)
     }
 
+    /// Every override, newest first.
+    pub fn list_overrides(&self) -> Result<Vec<OverrideRow>> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(
+            "SELECT domain, action, reason, created_at FROM ai_overrides
+             ORDER BY created_at DESC, domain",
+        )?;
+        let collected = stmt
+            .query_map([], |r| {
+                Ok(OverrideRow {
+                    domain: r.get(0)?,
+                    action: r.get(1)?,
+                    reason: r.get(2)?,
+                    created_at: r.get(3)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(collected)
+    }
+
+    /// The domains with an `allow` override.
+    pub fn allow_overrides(&self) -> Result<std::collections::HashSet<String>> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare("SELECT domain FROM ai_overrides WHERE action = 'allow'")?;
+        let collected = stmt
+            .query_map([], |r| r.get::<_, String>(0))?
+            .collect::<std::result::Result<_, _>>()?;
+        Ok(collected)
+    }
+
     /// Whether the domain has an `allow` override.
     pub fn is_overridden_allow(&self, domain: &str) -> Result<bool> {
         let conn = self.lock()?;
@@ -265,67 +321,62 @@ impl AiStore {
             .is_some())
     }
 
-    /// Paginated verdict list, ordered by domain, optional status filter.
+    /// Paginated verdict list, most recently classified first (pending rows
+    /// last), with an optional status filter and a domain substring search.
     /// Returns the page plus the total row count under the same filter.
     pub fn list_verdicts(
         &self,
         status: Option<&str>,
+        search: Option<&str>,
         limit: u32,
         offset: u32,
     ) -> Result<(Vec<VerdictRow>, u64)> {
         let conn = self.lock()?;
         let limit = limit.clamp(1, 500);
         let offset = offset.min(u32::MAX - limit);
-        let status = status.unwrap_or("");
-        let filtered = !status.is_empty();
-        let count_sql = if filtered {
-            "SELECT COUNT(*) FROM ai_verdicts WHERE status = ?1"
-        } else {
-            "SELECT COUNT(*) FROM ai_verdicts"
-        };
-        let select_sql = if filtered {
-            format!(
-                "SELECT domain, category, severity, status, confidence, backend, evidence,
-                        observations, classified_at, expires_at
-                 FROM ai_verdicts WHERE status = ?1
-                 ORDER BY domain LIMIT {limit} OFFSET {offset}"
-            )
-        } else {
-            format!(
-                "SELECT domain, category, severity, status, confidence, backend, evidence,
-                        observations, classified_at, expires_at
-                 FROM ai_verdicts
-                 ORDER BY domain LIMIT {limit} OFFSET {offset}"
-            )
-        };
-        let count: u64 = if filtered {
-            conn.query_row(count_sql, params![status], |r| r.get::<_, i64>(0))?
-        } else {
-            conn.query_row(count_sql, [], |r| r.get::<_, i64>(0))?
-        } as u64;
-        let mut stmt = conn.prepare(&select_sql)?;
-        let map_row = |r: &rusqlite::Row<'_>| -> rusqlite::Result<VerdictRow> {
-            Ok(VerdictRow {
-                domain: r.get(0)?,
-                category: r.get(1)?,
-                severity: r.get(2)?,
-                status: r.get(3)?,
-                confidence: r.get::<_, f64>(4)? as f32,
-                backend: r.get(5)?,
-                evidence: r.get(6)?,
-                observations: r.get::<_, i64>(7)? as u32,
-                classified_at: r.get(8)?,
-                expires_at: r.get(9)?,
-            })
-        };
-        let collected = if filtered {
-            stmt.query_map(params![status], map_row)?
-                .collect::<std::result::Result<Vec<_>, _>>()?
-        } else {
-            stmt.query_map([], map_row)?
-                .collect::<std::result::Result<Vec<_>, _>>()?
-        };
-        Ok((collected, count))
+        let status = status.unwrap_or("").trim().to_string();
+        // LIKE pattern with the wildcard characters escaped.
+        let search = search
+            .unwrap_or("")
+            .trim()
+            .to_ascii_lowercase()
+            .replace('\\', "\\\\")
+            .replace('%', "\\%")
+            .replace('_', "\\_");
+        let pattern = format!("%{search}%");
+        let filter = "(?1 = '' OR v.status = ?1) AND v.domain LIKE ?2 ESCAPE '\\'";
+        let total: i64 = conn.query_row(
+            &format!("SELECT COUNT(*) FROM ai_verdicts v WHERE {filter}"),
+            params![status, pattern],
+            |r| r.get(0),
+        )?;
+        let mut stmt = conn.prepare(&format!(
+            "SELECT v.domain, v.category, v.severity, v.status, v.confidence, v.backend,
+                    v.evidence, v.observations, v.classified_at, v.expires_at,
+                    EXISTS (SELECT 1 FROM ai_overrides o
+                            WHERE o.domain = v.domain AND o.action = 'allow')
+             FROM ai_verdicts v WHERE {filter}
+             ORDER BY v.classified_at DESC, v.domain
+             LIMIT {limit} OFFSET {offset}"
+        ))?;
+        let collected = stmt
+            .query_map(params![status, pattern], |r| {
+                Ok(VerdictRow {
+                    domain: r.get(0)?,
+                    category: r.get(1)?,
+                    severity: r.get(2)?,
+                    status: r.get(3)?,
+                    confidence: r.get::<_, f64>(4)? as f32,
+                    backend: r.get(5)?,
+                    evidence: r.get(6)?,
+                    observations: r.get::<_, i64>(7)? as u32,
+                    classified_at: r.get(8)?,
+                    expires_at: r.get(9)?,
+                    overridden: r.get(10)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok((collected, total as u64))
     }
 
     /// Per-status counts, for the status endpoint (missing statuses are absent).
@@ -334,23 +385,6 @@ impl AiStore {
         let mut stmt = conn.prepare("SELECT status, COUNT(*) FROM ai_verdicts GROUP BY status")?;
         let collected = stmt
             .query_map([], |r| {
-                Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? as usize))
-            })?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        Ok(collected)
-    }
-
-    /// Count of rows currently auto-block-eligible, by category.
-    pub fn threat_counts(&self, now_epoch: i64, threshold: f32) -> Result<Vec<(String, usize)>> {
-        let conn = self.lock()?;
-        let mut stmt = conn.prepare(
-            "SELECT category, COUNT(*) FROM ai_verdicts
-             WHERE status = 'classified' AND severity = 'threat'
-               AND confidence >= ?1 AND expires_at > ?2
-             GROUP BY category",
-        )?;
-        let collected = stmt
-            .query_map(params![threshold, now_epoch], |r| {
                 Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? as usize))
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;

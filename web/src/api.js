@@ -59,7 +59,7 @@ async function request(method, path, body, opts = {}) {
     throw err;
   }
   if (res.status === 204) return null;
-  return res.json();
+  return opts.text ? res.text() : res.json();
 }
 
 export function formatApiError(e) {
@@ -121,6 +121,7 @@ export const api = {
     localStorage.removeItem(USER_KEY);
   },
   me: () => request('GET', '/auth/me'),
+  savePreferences: (prefs) => request('PUT', '/auth/preferences', prefs),
   // Self-service password rotation (keeps the current session, signs out others).
   changePassword: (currentPassword, newPassword) =>
     request('POST', '/auth/password', { current_password: currentPassword, new_password: newPassword }),
@@ -172,11 +173,16 @@ export const api = {
     request('PUT', `/zones/${zoneId}/records/${encodeURIComponent(recordId)}`, body),
   deleteRecord: (zoneId, recordId) =>
     request('DELETE', `/zones/${zoneId}/records/${recordId}`),
+  setRecordDisabled: (zoneId, recordId, disabled) =>
+    request('PUT', `/zones/${zoneId}/records/${encodeURIComponent(recordId)}/disabled`, { disabled }),
+  exportZone: (zoneId) => request('GET', `/zones/${zoneId}/export`, undefined, { text: true }),
   signZone: (zoneId) => request('POST', `/zones/${zoneId}/sign`),
   unsignZone: (zoneId) => request('POST', `/zones/${zoneId}/unsign`),
   cache: () => request('GET', '/cache'),
   clearCache: () => request('POST', '/cache/clear'),
+  flushCacheName: (name, type) => request('POST', '/cache/flush', type ? { name, type } : { name }),
   localRoot: () => request('GET', '/local-root'),
+  resolver: () => request('GET', '/resolver'),
   refreshLocalRoot: () => request('POST', '/local-root/refresh'),
   importZone: (name, text) => request('POST', '/zones/import', { name, text }),
   blocklistSources: () => request('GET', '/policy/blocklist/sources'),
@@ -196,6 +202,7 @@ export const api = {
   blockingGroups: () => request('GET', '/policy/blocking'),
   saveBlockingGroup: (body) => request('POST', '/policy/blocking', body),
   deleteBlockingGroup: (id) => request('DELETE', `/policy/blocking/${id}`),
+  moveBlockingGroup: (id, direction) => request('POST', `/policy/blocking/${id}/move`, { direction }),
   testBlocking: (client, domain) =>
     request('POST', '/policy/blocking/test', { client, domain }),
   splitHorizon: () => request('GET', '/split-horizon'),
@@ -214,6 +221,7 @@ export const api = {
   aiVerdicts: (qs) => request('GET', `/ai/verdicts${qs ? `?${qs}` : ''}`),
   aiOverride: (domain, action, reason = '') =>
     request('POST', '/ai/override', { domain, action, reason }),
+  aiOverrides: () => request('GET', '/ai/overrides'),
   aiRescan: () => request('POST', '/ai/rescan'),
   aiModelStatus: () => request('GET', '/ai/model-status'),
   aiUpdateModels: () => request('POST', '/ai/update-models'),

@@ -1,6 +1,7 @@
 <script>
   import { api, formatApiError, formatUptime } from '../api.js';
   import PageHeader from '../PageHeader.svelte';
+  import ResolverDashboard from './ResolverDashboard.svelte';
   import { icons } from '../icons.svelte.js';
   import { formatTime, formatTimeShort } from '../datetime.svelte.js';
 
@@ -11,6 +12,8 @@
   let error = $state(null);
 
   let inFlight = $state(false);
+  // Bumped on every refresh so the resolver dashboard reloads with the page.
+  let refreshKey = $state(0);
 
   async function refresh() {
     // Skip if a previous refresh is still in flight: the interval keeps firing,
@@ -27,6 +30,7 @@
       status = s;
       metrics = m;
       stats = st;
+      refreshKey += 1;
     } catch (e) {
       error = formatApiError(e);
     } finally {
@@ -45,10 +49,7 @@
     { label: 'Total Queries', value: metrics?.total_queries ?? 0 },
     { label: 'Authoritative', value: metrics?.authoritative ?? 0 },
     { label: 'Recursive', value: metrics?.recursive ?? 0 },
-    { label: 'Cache Hits', value: metrics?.cache_hits ?? 0 },
-    { label: 'Cache Misses', value: metrics?.cache_misses ?? 0 },
     { label: 'Blocked', value: metrics?.blocked ?? 0 },
-    { label: 'DNSSEC Validated', value: metrics?.dnssec_validated ?? 0 },
     { label: 'Errors', value: metrics?.errors ?? 0 },
   ]);
 
@@ -288,35 +289,15 @@
     </div>
   </div>
 
+  <ResolverDashboard {refreshKey} />
+
   <div class="card" style="margin-top: 14px">
     <h3 style="margin: 0 0 10px">Runtime</h3>
     <table>
       <tbody>
-        <tr><td class="muted">Version</td><td><code>v{status.version}</code></td></tr>
         <tr><td class="muted">Uptime</td><td>{formatUptime(status.uptime_secs)}</td></tr>
         <tr><td class="muted">Zones</td><td>{status.zones}</td></tr>
         <tr><td class="muted">Records</td><td>{status.records}</td></tr>
-        <tr>
-          <td class="muted">Recursion</td>
-          <td><span class:pill={true} class:ok={status.recursion} class:err={!status.recursion}>
-            {status.recursion ? 'Enabled' : 'Disabled'}
-          </span></td>
-        </tr>
-        <tr>
-          <td class="muted">Resolution Mode</td>
-          <td>
-            {#if status.resolution_mode === 'recursive' && status.local_root}Recursive (from the local root zone)
-            {:else if status.resolution_mode === 'recursive'}Recursive (from the root servers)
-            {:else if status.resolution_mode === 'forwarding'}Forwarding (to upstream servers)
-            {:else}<span class="muted">-</span>{/if}
-          </td>
-        </tr>
-        <tr>
-          <td class="muted">DNSSEC Validation</td>
-          <td><span class:pill={true} class:ok={status.dnssec} class:err={!status.dnssec}>
-            {status.dnssec ? 'Enabled' : 'Disabled'}
-          </span></td>
-        </tr>
         <tr>
           <td class="muted">DoT</td>
           <td><span class:pill={true} class:ok={status.dot_enabled} class:err={!status.dot_enabled}>
@@ -341,10 +322,19 @@
 {/if}
 
 <style>
+  /* Five tiles: one row, or rows of three and two, or (on phones) Total
+     Queries across the top over two rows of two - never a lone tile. */
   .grid {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    grid-template-columns: repeat(5, minmax(0, 1fr));
     gap: 12px;
+  }
+  @media (max-width: 1180px) {
+    .grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  }
+  @media (max-width: 560px) {
+    .grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .grid > :first-child { grid-column: 1 / -1; }
   }
   .stat .big { font-size: 1.6rem; font-weight: 700; margin-top: 6px; }
 

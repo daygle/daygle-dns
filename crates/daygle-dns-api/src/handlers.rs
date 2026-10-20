@@ -587,19 +587,61 @@ pub struct QueryLogsQuery {
     format: Option<String>,
 }
 
-fn query_log_filter(query: &QueryLogsQuery) -> daygle_dns_authoritative::QueryLogFilter {
-    daygle_dns_authoritative::QueryLogFilter {
+/// Which end of a time range a bound is.
+#[derive(Clone, Copy)]
+enum Bound {
+    From,
+    To,
+}
+
+/// Turn a `from`/`to` query bound into the form the stored timestamps
+/// compare against. Rows store `Utc::now().to_rfc3339()` text and the store
+/// compares it as a string, so a bound must be UTC with the same `+00:00`
+/// layout: a local time such as `09:00+11:00` must become `22:00` the day
+/// before. Accepts RFC 3339 with any offset, or a bare
+/// `YYYY-MM-DDTHH:MM[:SS]` taken as UTC. `to` covers its whole last second.
+fn query_log_bound(raw: &str, bound: Bound) -> Result<String, String> {
+    use chrono::{DateTime, NaiveDateTime, Utc};
+    let raw = raw.trim();
+    let utc: DateTime<Utc> = match DateTime::parse_from_rfc3339(raw) {
+        Ok(dt) => dt.with_timezone(&Utc),
+        Err(_) => NaiveDateTime::parse_from_str(raw, "%Y-%m-%dT%H:%M:%S")
+            .or_else(|_| NaiveDateTime::parse_from_str(raw, "%Y-%m-%dT%H:%M"))
+            .map(|n| n.and_utc())
+            .map_err(|_| format!("'{raw}' is not a date and time (expected RFC 3339)"))?,
+    };
+    let second = utc.format("%Y-%m-%dT%H:%M:%S");
+    Ok(match bound {
+        // Every stored row in this second (with or without a fraction)
+        // sorts at or after the bare second.
+        Bound::From => second.to_string(),
+        // ...and before this, which outranks any fraction or offset text.
+        Bound::To => format!("{second}.999999999+99:99"),
+    })
+}
+
+fn query_log_filter(
+    query: &QueryLogsQuery,
+) -> Result<daygle_dns_authoritative::QueryLogFilter, String> {
+    let bound = |value: &Option<String>, which| {
+        value
+            .as_deref()
+            .filter(|v| !v.trim().is_empty())
+            .map(|v| query_log_bound(v, which))
+            .transpose()
+    };
+    Ok(daygle_dns_authoritative::QueryLogFilter {
         client: query.client.clone(),
         qname: query.qname.clone(),
         qtype: query.qtype.clone(),
         protocol: query.protocol.clone(),
         outcome: query.outcome.clone(),
         rcode: query.rcode.clone(),
-        from: query.from.clone(),
-        to: query.to.clone(),
+        from: bound(&query.from, Bound::From)?,
+        to: bound(&query.to, Bound::To)?,
         page: query.page,
         per_page: query.per_page,
-    }
+    })
 }
 
 /// Escape one CSV field (RFC 4180). Fields a spreadsheet would evaluate as a
@@ -625,6 +667,8 @@ fn csv_escape(value: &str) -> String {
 pub struct AiVerdictsQuery {
     /// Optional status filter (`pending`, `classified`, `skipped`).
     status: Option<String>,
+    /// Optional domain substring search.
+    q: Option<String>,
     page: Option<u32>,
     per_page: Option<u32>,
 }
@@ -646,10 +690,14 @@ pub async fn query_logs(
     State(state): State<AppState>,
     Query(query): Query<QueryLogsQuery>,
 ) -> Response {
+    let filter = match query_log_filter(&query) {
+        Ok(filter) => filter,
+        Err(e) => return error_response(StatusCode::BAD_REQUEST, e),
+    };
     if query.format.as_deref() == Some("csv") {
         // Export: the full filtered set, capped sanely so a huge retention
         // window cannot produce an unbounded response.
-        let mut filter = query_log_filter(&query);
+        let mut filter = filter;
         filter.page = Some(1);
         filter.per_page = Some(daygle_dns_authoritative::ZoneStore::QUERY_LOG_MAX_EXPORT);
         let rows = match state.catalog.store().export_query_logs(&filter) {
@@ -681,11 +729,7 @@ pub async fn query_logs(
         return (headers, csv).into_response();
     }
 
-    match state
-        .catalog
-        .store()
-        .search_query_logs(&query_log_filter(&query))
-    {
+    match state.catalog.store().search_query_logs(&filter) {
         Ok((rows, total)) => Json(serde_json::json!({
             "entries": rows,
             "total": total,
@@ -734,11 +778,8 @@ pub async fn ai_status(State(state): State<AppState>) -> Response {
         Ok(s) => s,
         Err(e) => return map_err(e),
     };
-    let threats = match ai
-        .store
-        .threat_counts(chrono::Utc::now().timestamp(), settings.block_threshold)
-    {
-        Ok(t) => t,
+    let blockable = match ai.blockable_counts() {
+        Ok(counts) => counts,
         Err(e) => return map_err(e),
     };
     let snapshot = ai.snapshot().load();
@@ -748,9 +789,13 @@ pub async fn ai_status(State(state): State<AppState>) -> Response {
             daygle_dns_core::config::AiMode::Train => "train",
             daygle_dns_core::config::AiMode::Enforce => "enforce",
         },
-        "backend": if settings.model_path.is_empty() { "heuristic" } else { "fasttext" },
+        // The pipeline actually running (a missing model file falls back to
+        // the heuristic rules whatever `model_path` says).
+        "backend": ai.backend_name(),
         "workers": settings.workers,
         "scan_interval_secs": settings.scan_interval_secs,
+        "expire_check_secs": settings.expire_check_secs,
+        "confidence_floor": settings.confidence_floor,
         "category_ttl_secs": settings.category_ttl_secs,
         "threat_ttl_secs": settings.threat_ttl_secs,
         "block_threshold": settings.block_threshold,
@@ -761,11 +806,9 @@ pub async fn ai_status(State(state): State<AppState>) -> Response {
                 .into_iter()
                 .map(|(k, v)| (k, serde_json::Value::from(v))),
         ),
-        "threat_counts": serde_json::Map::from_iter(
-            threats
-                .into_iter()
-                .map(|(k, v)| (k, serde_json::Value::from(v))),
-        ),
+        // Domains that qualify for auto-blocking, by category: blocked in
+        // enforce mode, what would be blocked in train mode.
+        "blockable_counts": blockable,
         "snapshot_len": snapshot.len(),
     }))
     .into_response()
@@ -779,9 +822,14 @@ pub async fn ai_verdicts(
     let Some(ai) = ai_engine(&state) else {
         return map_err(daygle_dns_ml::ai_disabled_error());
     };
-    match ai.store.list_verdicts(query.status.as_deref(), query.per_page.unwrap_or(50),
-        (query.page.unwrap_or(1).max(1) - 1).saturating_mul(query.per_page.unwrap_or(50)))
-    {
+    let per_page = query.per_page.unwrap_or(50).clamp(1, 500);
+    let page = query.page.unwrap_or(1).max(1);
+    match ai.store.list_verdicts(
+        query.status.as_deref(),
+        query.q.as_deref(),
+        per_page,
+        (page - 1).saturating_mul(per_page),
+    ) {
         Ok((rows, total)) => (
             StatusCode::OK,
             axum::Json(serde_json::json!({
@@ -794,6 +842,7 @@ pub async fn ai_verdicts(
                     "backend": r.backend,
                     "evidence": r.evidence,
                     "observations": r.observations,
+                    "overridden": r.overridden,
                     "classified_at": chrono::DateTime::<chrono::Utc>::from_timestamp(r.classified_at, 0)
                         .map(|t| t.to_rfc3339()),
                     "expires_at": chrono::DateTime::<chrono::Utc>::from_timestamp(r.expires_at, 0)
@@ -801,11 +850,8 @@ pub async fn ai_verdicts(
                 }))
                 .collect::<Vec<_>>(),
                 "total": total,
-                "per_page": query
-                .per_page
-                .unwrap_or(50)
-                .clamp(1, daygle_dns_authoritative::ZoneStore::QUERY_LOG_MAX_PAGE),
-                "page": query.page.unwrap_or(1).max(1),
+                "per_page": per_page,
+                "page": page,
             })),
         )
             .into_response(),
@@ -829,7 +875,7 @@ pub async fn ai_override(
                 && label.len() <= 63
                 && label
                     .bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
                 && !label.starts_with('-')
                 && !label.ends_with('-')
         });
@@ -875,6 +921,27 @@ pub async fn ai_override(
             })),
         )
             .into_response(),
+    }
+}
+
+/// `GET /api/ai/overrides` - the exempted domains (an exemption also covers
+/// subdomains), newest first.
+pub async fn ai_overrides(State(state): State<AppState>) -> Response {
+    let Some(ai) = ai_engine(&state) else {
+        return map_err(daygle_dns_ml::ai_disabled_error());
+    };
+    match ai.store.list_overrides() {
+        Ok(rows) => Json(serde_json::json!({
+            "overrides": rows.iter().map(|o| serde_json::json!({
+                "domain": o.domain,
+                "action": o.action,
+                "reason": o.reason,
+                "created_at": chrono::DateTime::<chrono::Utc>::from_timestamp(o.created_at, 0)
+                    .map(|t| t.to_rfc3339()),
+            })).collect::<Vec<_>>(),
+        }))
+        .into_response(),
+        Err(e) => map_err(e),
     }
 }
 
@@ -1796,6 +1863,44 @@ pub async fn upsert_blocking_group(
     }
 }
 
+/// `POST /api/policy/blocking/{id}/move` body.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MoveGroupInput {
+    /// `up` or `down`.
+    pub direction: String,
+}
+
+/// `POST /api/policy/blocking/{id}/move` - move a group one place up or down
+/// in the evaluation order (the first matching group decides).
+pub async fn move_blocking_group(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(input): Json<MoveGroupInput>,
+) -> Response {
+    let delta = match input.direction.as_str() {
+        "up" => -1,
+        "down" => 1,
+        other => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                format!("direction must be 'up' or 'down', not '{other}'"),
+            )
+        }
+    };
+    match state.catalog.store().move_blocking_group(&id, delta) {
+        Ok(true) => {
+            rebuild_advanced_blocking(&state);
+            match state.catalog.store().list_blocking_groups() {
+                Ok(groups) => Json(groups).into_response(),
+                Err(e) => map_err(e),
+            }
+        }
+        Ok(false) => error_response(StatusCode::NOT_FOUND, "blocking group not found"),
+        Err(e) => map_err(e),
+    }
+}
+
 /// `DELETE /api/policy/blocking/{id}` - remove a group and rebuild the engine.
 pub async fn delete_blocking_group(
     State(state): State<AppState>,
@@ -2007,12 +2112,50 @@ pub async fn cache_status(State(state): State<AppState>) -> Response {
     let metrics = state.metrics.snapshot();
     Json(serde_json::json!({
         "enabled": resolver.is_some(),
+        // "recursive" or "forwarding": recursive mode cannot flush one name
+        // from the recursor's own cache.
+        "mode": resolver.as_ref().map(|r| r.mode()),
         "capacity": resolver.as_ref().map(|r| r.cache_size()).unwrap_or(0),
         "tracked_names": resolver.as_ref().map(|r| r.tracked_names()).unwrap_or(0),
         "hits": metrics.cache_hits,
         "misses": metrics.cache_misses,
         "prefetch_enabled": state.config.load().recursive.prefetch_enabled,
         "serve_stale_secs": state.config.load().recursive.serve_stale_secs,
+    }))
+    .into_response()
+}
+
+/// `GET /api/resolver` - the resolver dashboard: how lookups were routed
+/// and how they ended, a latency histogram, the DNSSEC share and the
+/// outbound connections by transport (counters since the server started).
+pub async fn resolver_stats(State(state): State<AppState>) -> Response {
+    let config = state.config.load_full();
+    let resolver = state.resolver.load_full();
+    let metrics = &state.metrics;
+    let local_root = state.local_root.status();
+    Json(serde_json::json!({
+        "enabled": resolver.is_some(),
+        "mode": resolver.as_ref().map(|r| r.mode()),
+        "dnssec_validation": config.recursive.dnssec_validate,
+        "opportunistic_encryption": resolver
+            .as_ref()
+            .is_some_and(|r| r.opportunistic_encryption()),
+        "local_root": {
+            "enabled": local_root.enabled,
+            "serving": local_root.serving,
+            "serial": local_root.serial,
+        },
+        "client_policies": config
+            .recursive
+            .client_policies
+            .iter()
+            .filter(|p| p.enabled)
+            .count(),
+        "conditional_zones": config.recursive.conditional_zones.len(),
+        "stub_zones": config.authoritative.stub_zones.len(),
+        "queries": metrics.get(&metrics.recursive),
+        "dnssec_validated": metrics.get(&metrics.dnssec_validated),
+        "stats": metrics.resolver.snapshot(),
     }))
     .into_response()
 }
@@ -2031,6 +2174,48 @@ pub async fn local_root_refresh(State(state): State<AppState>) -> Response {
     }
     state.local_root.refresh_now();
     StatusCode::ACCEPTED.into_response()
+}
+
+/// `POST /api/cache/flush` body.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FlushNameInput {
+    pub name: String,
+    /// One record type (`"A"`, `"AAAA"`, ...); omitted flushes the common
+    /// types.
+    #[serde(default, rename = "type")]
+    pub record_type: Option<String>,
+}
+
+/// `POST /api/cache/flush` - remove one name from the resolver caches.
+/// `complete` is false when recursive mode still holds its own copy (the
+/// recursor has no per-entry removal; flush the whole cache for that).
+pub async fn flush_cache_name(
+    State(state): State<AppState>,
+    axum::Json(input): axum::Json<FlushNameInput>,
+) -> Response {
+    let Some(resolver) = state.resolver.load_full() else {
+        return error_response(
+            StatusCode::CONFLICT,
+            "recursion is disabled, so there is no cache",
+        );
+    };
+    if input.name.trim().is_empty() {
+        return error_response(StatusCode::BAD_REQUEST, "name is required");
+    }
+    let record_type = input
+        .record_type
+        .as_deref()
+        .map(str::trim)
+        .filter(|t| !t.is_empty());
+    match resolver.flush_name(&input.name, record_type) {
+        Ok(complete) => Json(serde_json::json!({
+            "name": input.name.trim(),
+            "complete": complete,
+        }))
+        .into_response(),
+        Err(e) => error_response(StatusCode::BAD_REQUEST, e.to_string()),
+    }
 }
 
 pub async fn clear_cache(State(state): State<AppState>) -> Response {
@@ -2140,22 +2325,70 @@ pub async fn auth_logout(
     StatusCode::NO_CONTENT.into_response()
 }
 
-/// `GET /api/auth/me` - identity of the presented session.
+/// `GET /api/auth/me` - identity of the presented session, with the
+/// account's display preferences and the server's display defaults.
+/// `preferences` is null for accounts defined in the config file, which
+/// have nowhere to store them.
 pub async fn auth_me(State(state): State<AppState>, headers: axum::http::HeaderMap) -> Response {
     let token = bearer_token(&headers).unwrap_or_default();
     match state.sessions.verify(&token) {
-        Some(session) => Json(serde_json::json!({
-            "username": session.username,
-            "role": session.role.as_str(),
-            "expires_at_secs": session
-                .expires_at
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0),
-        }))
-        .into_response(),
+        Some(session) => {
+            let preferences = state
+                .catalog
+                .store()
+                .get_console_user(&session.username)
+                .ok()
+                .flatten()
+                .map(|u| u.preferences);
+            Json(serde_json::json!({
+                "username": session.username,
+                "role": session.role.as_str(),
+                "expires_at_secs": session
+                    .expires_at
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0),
+                "preferences": preferences,
+                "display_defaults": state.config.load().display,
+            }))
+            .into_response()
+        }
         None => error_response(StatusCode::UNAUTHORIZED, "not authenticated"),
     }
+}
+
+/// `PUT /api/auth/preferences` - the signed-in user sets their own date and
+/// time display preferences. An empty field means "use the server default".
+/// Available to `viewer` accounts too (it only affects their own view).
+pub async fn auth_set_preferences(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    axum::Json(input): axum::Json<daygle_dns_core::config::DisplaySettings>,
+) -> Response {
+    let token = bearer_token(&headers).unwrap_or_default();
+    let Some(session) = state.sessions.verify(&token) else {
+        return error_response(StatusCode::UNAUTHORIZED, "not authenticated");
+    };
+    let preferences = daygle_dns_core::config::DisplaySettings {
+        time_zone: input.time_zone.trim().to_string(),
+        date_format: input.date_format.trim().to_string(),
+        time_format: input.time_format.trim().to_string(),
+    };
+    let store = state.catalog.store();
+    match store.get_console_user(&session.username) {
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            return error_response(
+                StatusCode::CONFLICT,
+                "accounts defined in the configuration file cannot store preferences",
+            )
+        }
+        Err(e) => return map_err(e),
+    }
+    if let Err(e) = store.set_console_user_preferences(&session.username, &preferences) {
+        return map_err(e);
+    }
+    Json(serde_json::json!({ "preferences": preferences })).into_response()
 }
 
 // ---- Self-service password change ---------------------------------------
@@ -2605,6 +2838,16 @@ pub struct SettingsUpdate {
     pub policy: Option<PolicyUpdate>,
     pub authoritative: Option<AuthoritativeUpdate>,
     pub ai: Option<AiUpdate>,
+    pub display: Option<DisplayUpdate>,
+}
+
+/// Partial update for the console's date and time display defaults.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DisplayUpdate {
+    pub time_zone: Option<String>,
+    pub date_format: Option<String>,
+    pub time_format: Option<String>,
 }
 
 /// Partial update for authoritative-zone settings surfaced in the console.
@@ -2694,6 +2937,12 @@ pub struct RecursiveUpdate {
     pub rebinding_protection: Option<bool>,
     /// Local root zone (RFC 8806): `enabled` and `sources`.
     pub local_root: Option<daygle_dns_core::config::LocalRootSettings>,
+    pub opportunistic_encryption: Option<bool>,
+    pub min_cache_ttl: Option<u32>,
+    pub negative_cache_ttl: Option<u32>,
+    pub use_system_config: Option<bool>,
+    /// Replaces the whole client policy list.
+    pub client_policies: Option<Vec<daygle_dns_core::config::ClientPolicyConfig>>,
 }
 
 /// Fields shared by the DoT and DoQ listeners.
@@ -2797,6 +3046,19 @@ pub async fn update_settings(
             config.recursive.conditional_zones =
                 daygle_dns_core::config::RecursiveUpdate::normalize_conditional_zones(v);
         }
+        // Policy upstreams use the resolver's own syntax, which the config
+        // validation cannot check: parse them here so a typo is a 400, not a
+        // resolver rebuild that silently keeps the old policies.
+        for policy in r.client_policies.iter().flatten() {
+            if policy.action == daygle_dns_core::config::ClientPolicyAction::Forward {
+                if let Err(e) = daygle_dns_recursive::parse_upstreams(&policy.upstreams) {
+                    return error_response(
+                        StatusCode::BAD_REQUEST,
+                        format!("client policy '{}': {e}", policy.name.trim()),
+                    );
+                }
+            }
+        }
         daygle_dns_core::config::RecursiveUpdate {
             mode: r.mode,
             recursion_access: r.recursion_access,
@@ -2805,6 +3067,11 @@ pub async fn update_settings(
             case_randomization: r.case_randomization,
             rebinding_protection: r.rebinding_protection,
             local_root: r.local_root.clone(),
+            opportunistic_encryption: r.opportunistic_encryption,
+            client_policies: r.client_policies.clone(),
+            min_cache_ttl: r.min_cache_ttl,
+            negative_cache_ttl: r.negative_cache_ttl,
+            use_system_config: r.use_system_config,
             ..Default::default()
         }
         .apply_resolution(&mut config.recursive);
@@ -2920,6 +3187,17 @@ pub async fn update_settings(
         }
         if let Some(v) = &a.cors_origins {
             config.api.cors_origins = v.clone();
+        }
+    }
+    if let Some(d) = &update.display {
+        if let Some(v) = &d.time_zone {
+            config.display.time_zone = v.trim().to_string();
+        }
+        if let Some(v) = &d.date_format {
+            config.display.date_format = v.clone();
+        }
+        if let Some(v) = &d.time_format {
+            config.display.time_format = v.clone();
         }
     }
     let mut authoritative_changed = false;
@@ -3250,12 +3528,24 @@ fn certificate_json(
     cert: &daygle_dns_authoritative::TlsCertificate,
     in_use: Vec<&'static str>,
 ) -> serde_json::Value {
-    serde_json::json!({
+    let stamp = |secs: i64| {
+        chrono::DateTime::<chrono::Utc>::from_timestamp(secs, 0).map(|t| t.to_rfc3339())
+    };
+    let mut value = serde_json::json!({
         "name": cert.name,
         "server_name": cert.server_name,
         "created_at": cert.created_at,
         "in_use": in_use,
-    })
+    });
+    // Details read from the certificate itself (null when it cannot be read).
+    let details = daygle_dns_dot::describe_certificate(&cert.cert_pem).ok();
+    value["subject"] = serde_json::json!(details.as_ref().map(|d| &d.subject));
+    value["issuer"] = serde_json::json!(details.as_ref().map(|d| &d.issuer));
+    value["self_signed"] = serde_json::json!(details.as_ref().map(|d| d.self_signed));
+    value["names"] = serde_json::json!(details.as_ref().map(|d| &d.names));
+    value["not_before"] = serde_json::json!(details.as_ref().and_then(|d| stamp(d.not_before)));
+    value["not_after"] = serde_json::json!(details.as_ref().and_then(|d| stamp(d.not_after)));
+    value
 }
 
 /// `GET /api/certificates` - list console-managed TLS certificates (metadata

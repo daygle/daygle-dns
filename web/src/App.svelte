@@ -16,8 +16,25 @@
   import Update from './views/Update.svelte';
   import { icons } from './icons.svelte.js';
   import { sidebar, setSidebar, isNarrow, toggleSidebar } from './nav.svelte.js';
+  import {
+    display,
+    loadDisplayPreferences,
+    setMyPreferences,
+    timeZoneOptions,
+    DATE_FORMAT_OPTIONS,
+    TIME_FORMAT_OPTIONS,
+    choiceLabel,
+    previewDateTime,
+  } from './datetime.svelte.js';
 
   let view = $state('status');
+  // Settings tab to open on the next visit (set by cross-page links).
+  let settingsTab = $state('general');
+
+  function openSettings(tab) {
+    settingsTab = tab;
+    view = 'settings';
+  }
   // Zone preselected on the Zones page's Records tab (remembered across visits).
   let recordZoneId = $state(null);
   let user = $state(getStoredUser());
@@ -94,6 +111,40 @@
     authed = false;
   }
 
+  // Load the date/time display settings once the console is usable.
+  $effect(() => {
+    if (authed) loadDisplayPreferences();
+  });
+
+  // Personal date/time preferences (sidebar user box).
+  let showPrefs = $state(false);
+  let prefsDraft = $state({ time_zone: '', date_format: '', time_format: '' });
+  let prefsError = $state(null);
+  let savingPrefs = $state(false);
+  const zoneChoices = timeZoneOptions();
+
+  function openPrefs() {
+    prefsDraft = { time_zone: '', date_format: '', time_format: '', ...display.mine };
+    prefsError = null;
+    passwordNotice = null;
+    showPrefs = true;
+  }
+
+  async function submitPrefs(e) {
+    e.preventDefault();
+    prefsError = null;
+    savingPrefs = true;
+    try {
+      await api.savePreferences(prefsDraft);
+      setMyPreferences(prefsDraft);
+      showPrefs = false;
+    } catch (err) {
+      prefsError = String(err.message || err);
+    } finally {
+      savingPrefs = false;
+    }
+  }
+
   // Self-service password change (sidebar user box).
   let showPassword = $state(false);
   let currentPassword = $state('');
@@ -152,7 +203,7 @@
     { id: 'ai', label: 'AI', icon: icons.ai, viewer: true },
     { id: 'logs', label: 'Logs', icon: icons.logs },
     { id: 'cache', label: 'Cache', icon: icons.cache },
-    { id: 'users', label: 'Users', icon: icons.users },
+    { id: 'users', label: 'Users', icon: icons.users, viewer: true },
     { id: 'certificates', label: 'Certificates', icon: icons.certificates },
     { id: 'settings', label: 'Settings', icon: icons.settings, viewer: true },
     { id: 'update', label: 'Update', icon: icons.update },
@@ -200,6 +251,48 @@
       </form>
     </div>
   {/if}
+  {#if showPrefs}
+    <div class="modal-backdrop" role="presentation" onclick={(e) => { if (e.target === e.currentTarget) showPrefs = false; }}>
+      <form class="card modal" onsubmit={submitPrefs}>
+        <div class="spread" style="margin-bottom: 10px">
+          <h3 style="margin: 0">My Preferences</h3>
+          <button type="button" class="secondary" style="padding: 2px 10px" onclick={() => (showPrefs = false)}>✕</button>
+        </div>
+        <p class="modal-note">
+          How dates and times are shown to you, on any device you sign in
+          from. "Server Default" follows the setting an administrator chose
+          for everyone.
+        </p>
+        <label>
+          <span>Time Zone</span>
+          <select bind:value={prefsDraft.time_zone}>
+            <option value="">Server Default ({choiceLabel('time_zone', display.defaults.time_zone)})</option>
+            {#each zoneChoices as [value, label]}<option value={value}>{label}</option>{/each}
+          </select>
+        </label>
+        <label>
+          <span>Date Format</span>
+          <select bind:value={prefsDraft.date_format}>
+            <option value="">Server Default ({choiceLabel('date_format', display.defaults.date_format)})</option>
+            {#each DATE_FORMAT_OPTIONS as [value, label]}<option value={value}>{label}</option>{/each}
+          </select>
+        </label>
+        <label>
+          <span>Time Format</span>
+          <select bind:value={prefsDraft.time_format}>
+            <option value="">Server Default ({choiceLabel('time_format', display.defaults.time_format)})</option>
+            {#each TIME_FORMAT_OPTIONS as [value, label]}<option value={value}>{label}</option>{/each}
+          </select>
+        </label>
+        <p class="modal-note">Example: <strong>{previewDateTime(prefsDraft)}</strong></p>
+        {#if prefsError}<div class="form-error">{prefsError}</div>{/if}
+        <div class="modal-actions">
+          <button type="submit" disabled={savingPrefs}>{savingPrefs ? 'Saving…' : 'Save Preferences'}</button>
+          <button type="button" class="secondary" onclick={() => (showPrefs = false)}>Cancel</button>
+        </div>
+      </form>
+    </div>
+  {/if}
   <div class="shell">
     <button
       type="button"
@@ -238,6 +331,7 @@
             aria-label={tab.label}
             onclick={() => {
               view = tab.id;
+              settingsTab = 'general';
               if (isNarrow()) setSidebar(false);
             }}
           >
@@ -258,6 +352,9 @@
             </div>
           </div>
           <div class="user-actions">
+            {#if display.mine}
+              <button class="secondary wide" onclick={openPrefs} title="Your time zone and date format">My Preferences</button>
+            {/if}
             <button class="secondary" onclick={openPassword} title="Change your password">Change Password</button>
             <button class="secondary" onclick={handleLogout} title="End this session">Sign Out</button>
           </div>
@@ -276,13 +373,13 @@
       {:else if view === 'filtering'}
         <Filtering />
       {:else if view === 'cache'}
-        <Cache />
+        <Cache onOpenSettings={isViewer ? null : openSettings} />
       {:else if view === 'users'}
         <Users />
       {:else if view === 'certificates'}
-        <Certificates />
+        <Certificates onOpenSettings={isViewer ? null : openSettings} />
       {:else if view === 'ai'}
-        <Ai />
+        <Ai onOpenSettings={isViewer ? null : openSettings} />
       {:else if view === 'about'}
         <About />
       {:else if view === 'update'}
@@ -290,7 +387,7 @@
       {:else if view === 'logs'}
         <Logs />
       {:else}
-        <Settings />
+        <Settings initialTab={settingsTab} />
       {/if}
     </main>
   </div>
@@ -417,6 +514,7 @@
     font-size: 0.8rem;
     border-radius: 6px;
   }
+  .user-actions .wide { grid-column: 1 / -1; }
 
   .password-notice {
     margin-top: 10px;

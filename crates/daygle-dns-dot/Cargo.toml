@@ -17,6 +17,8 @@ tokio-rustls.workspace = true
 rustls.workspace = true
 rustls-pki-types.workspace = true
 rcgen.workspace = true
+# Already in the dependency graph through rcgen; reads certificate details.
+x509-parser = "0.18"
 tracing.workspace = true
 
 [dev-dependencies]

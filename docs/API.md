@@ -55,7 +55,8 @@ Additional endpoints:
 
 | Endpoint | Purpose |
 |----------|---------|
-| `GET /api/auth/me` | identity of the presented session (`username`, `role`, `expires_at_secs`) |
+| `GET /api/auth/me` | identity of the presented session (`username`, `role`, `expires_at_secs`), the account's own date/time `preferences` and the server's `display_defaults` |
+| `PUT /api/auth/preferences` | signed-in user sets their own `{time_zone, date_format, time_format}`; an empty field means the server default (viewers may use it too) |
 | `POST /api/auth/logout` | revoke the presented token |
 | `POST /api/auth/password` | signed-in user rotates their own password (current password required; other sessions revoked) |
 | `GET /api/auth/setup` | whether the one-time first-run setup is still pending |
@@ -226,7 +227,9 @@ name/type, transport (`udp`, `tcp`, `tls`, `https`, `quic`), outcome
 
 `GET` returns a page of entries (newest first) plus the total count under
 the same filter. `qname` accepts `*` wildcards (`*.example.com`, `www.*`)
-and substring matching otherwise; `from`/`to` are RFC 3339 timestamps;
+and substring matching otherwise; `from`/`to` are RFC 3339 timestamps
+with any UTC offset (a bare `YYYY-MM-DDTHH:MM[:SS]` is taken as UTC;
+anything else is `400`), both inclusive to the second;
 `per_page` is capped at 500. `format=csv` streams the whole filtered set
 (no pagination) as a CSV download. `DELETE` clears the log (admin only);
 retention is bounded by `logging.query_db_max_rows` (0 = unlimited).
@@ -258,15 +261,20 @@ PUT /api/config
 ```
 
 Editable groups: `server` (listen/port/udp_enabled/tcp_enabled), `recursive`
-(enabled/mode/upstreams/dnssec_validate/prefetch_* /serve_stale_secs/
+(enabled/mode/upstreams/use_system_config/dnssec_validate/cache_size/
+min_cache_ttl/max_cache_ttl/negative_cache_ttl/failure_cache_ttl/
+prefetch_* /serve_stale_secs/
 conditional_zones/recursion_access/recursion_networks/root_hints/
-case_randomization/rebinding_protection/local_root), `dot`,
+case_randomization/rebinding_protection/local_root/opportunistic_encryption/
+client_policies), `dot`,
 `doh`, `doq` (enabled/port/self_signed/server_name [+ `doh.endpoint`]), `api`
-(gui_enabled/cors_origins), and `authoritative`
+(gui_enabled/cors_origins), `display` (the console's date/time defaults:
+`time_zone` = `system`, `UTC` or an IANA zone; `date_format` = `system`/`dmy`/
+`mdy`/`ymd`/`d_mon_y`; `time_format` = `system`/`24h`/`12h`), and `authoritative`
 (default_record_ttl/default_primary_ns/axfr_enabled/axfr_networks/
 allow_dynamic_updates/update_networks/notify_enabled/notify_targets/
 notify_listen_enabled/stub_zones). Runtime groups (`recursive`, `dot`, `doh`, `doq`,
-`policy`, `authoritative`) are stored in the database and survive restarts and
+`policy`, `authoritative`, `ai`, `display`) are stored in the database and survive restarts and
 config-file edits; `server.*` and `api.*` stay config-file-owned so a broken
 listener can always be fixed by editing the file. Login users are managed
 from the console's **Users** page (see [Console users and roles](#console-users-and-roles)).
@@ -307,6 +315,22 @@ answered from it; in forwarding mode names under top-level domains the root
 zone does not have are answered `NXDOMAIN` without asking the upstreams
 (conditional forwarders and stub zones still take precedence, so use one for
 a private TLD).
+
+`recursive.opportunistic_encryption` (recursive mode, off by default) turns on
+RFC 9539 opportunistic encryption: nameservers are probed for DNS over TLS or
+QUIC in the background and the encrypted transport is used where it works,
+with plain DNS as the fallback.
+
+`recursive.client_policies` resolves some clients differently. Each policy is
+`{ "name", "enabled", "clients": [CIDRs or IPs], "action", "upstreams" }` with
+`action` `"forward"` (to the policy's `upstreams`, same forms as
+`recursive.upstreams`), `"recursive"` (from the root servers, whatever the
+default mode) or `"refuse"` (REFUSED; local zones are still answered). The
+first enabled policy covering the client wins; `recursion_access` still
+decides who may use recursion at all, and conditional forwarders and stub
+zones still answer for their own names. Each policy keeps its own cached
+answers. The list is replaced as a whole; invalid upstreams are rejected with
+`400`.
 
 Recursive settings and stub zones apply to live traffic immediately: the
 resolver is rebuilt whenever `recursive.*` or `authoritative.stub_zones`
@@ -612,7 +636,11 @@ DELETE /api/certificates/{name}
 TLS certificates stored in the database and managed from the console; the
 `dot`/`doh`/`doq` listener sections select one with `certificate = "<name>"`
 (overriding `cert_path`/`key_path`/`self_signed`). `GET` lists metadata only
-- PEM material is never returned. `POST` creates a self-signed certificate
+- PEM material is never returned. Each entry has `name`, `server_name`,
+`created_at`, `in_use` (the listeners using it) and details read from the
+leaf certificate: `subject`, `issuer`, `self_signed`, `names` (DNS and IP
+subject alternative names) and `not_before`/`not_after` (RFC 3339); these
+are `null` if the certificate cannot be read. `POST` creates a self-signed certificate
 or uploads PEM material; uploading with the same `name` replaces the entry,
 and listeners referencing the name are rebuilt immediately. `DELETE`
 removes the certificate; one still referenced by a listener cannot be
@@ -640,12 +668,66 @@ zone.
 ```
 GET  /api/cache
 POST /api/cache/clear
+POST /api/cache/flush
 ```
 
-`GET` returns the current recursive cache configuration and runtime
-counters.
+`GET` returns the cache configuration (`capacity`, `prefetch_enabled`,
+`serve_stale_secs`), the resolution `mode` and runtime counters: `hits` and
+`misses` (a hit is a lookup answered without any query leaving the server,
+negative answers included) and `tracked_names`.
 
-`POST /api/cache/clear` flushes the recursive resolver cache.
+`POST /api/cache/clear` flushes the whole resolver cache.
+
+`POST /api/cache/flush` with `{ "name": "www.example.com", "type": "AAAA" }`
+drops one name from the cache (`type` is optional; without it the common
+record types are flushed). It answers `{ "name", "complete" }`: `complete` is
+`false` in recursive mode when the name is resolved by the recursor, whose
+cache cannot drop a single entry - the forwarding resolvers (conditional
+forwarders, stub zones, forwarding client policies) and the serve-stale and
+failure caches are still flushed, and the recursor's copy expires on its own
+or with `/api/cache/clear`. Invalid names or types are `400`; `409` when
+recursion is disabled.
+
+### Resolver dashboard
+
+```
+GET /api/resolver
+```
+
+Counters since the server started, behind the Status page's Resolver card:
+
+```json
+{
+  "enabled": true,
+  "mode": "recursive",
+  "dnssec_validation": true,
+  "opportunistic_encryption": true,
+  "local_root": { "enabled": true, "serving": true, "serial": 2026101901 },
+  "client_policies": 1,
+  "conditional_zones": 1,
+  "stub_zones": 0,
+  "queries": 18234,
+  "dnssec_validated": 9876,
+  "stats": {
+    "routes": { "recursive": 15210, "forwarding": 0, "conditional": 412,
+                "stub": 0, "client_policy": 2380, "local_root": 232 },
+    "outcomes": { "noerror": 15900, "nodata": 1210, "nxdomain": 980,
+                  "servfail": 96, "refused": 3, "other": 0, "failures": 45,
+                  "stale_served": 12, "failures_replayed": 310 },
+    "latency": { "bounds_ms": [1, 5, 10, 25, 50, 100, 250, 500, 1000, 2500],
+                 "counts": [9800, 1200, 900, 1700, 1600, 1100, 700, 160, 40, 30, 4],
+                 "p50_ms": 1, "p90_ms": 100, "p99_ms": 500, "mean_ms": 21.4 },
+    "connections": { "udp": 5400, "tcp": 620, "tls": 1310, "quic": 85 }
+  }
+}
+```
+
+`routes` counts lookups by the way they were resolved (`local_root` is
+NXDOMAIN answered from the local root zone without a lookup). `latency.counts`
+has one entry per bound plus a final one for slower lookups; the percentiles
+are bucket upper bounds. `connections` counts outbound connections to
+nameservers and upstreams by transport (`tls` and `quic` come from
+opportunistic encryption and from `tls://`/`quic://` upstreams).
 
 ### Local root zone
 
@@ -741,25 +823,40 @@ the URL fetched fine but the content does not parse as (or does not match)
 
 ```
 GET  /api/ai/status
-GET  /api/ai/verdicts?status=classified&page=1&per_page=50
+GET  /api/ai/verdicts?status=classified&q=example&page=1&per_page=50
+GET  /api/ai/overrides
 POST /api/ai/override          {"domain": "x.example", "action": "allow|clear", "reason": "..."}
 POST /api/ai/rescan
 ```
 
-Available when `[ai] enabled = true`. `GET /api/ai/status` reports the
-configured mode (`train`/`enforce`), the active backend (`heuristic` or
-`fasttext`), scanners' TTLs and thresholds, per-status verdict counts and
-fresh threat counts per category, plus the current block-snapshot size.
+Available when `[ai] enabled = true`. `GET /api/ai/status` reports the mode
+(`train`/`enforce`), the classification pipeline actually running
+(`backend`: `heuristic`, `fasttext` or `fasttext+minilm-onnx`; a configured
+model file that is missing falls back to `heuristic`), workers, intervals,
+TTLs and thresholds, per-status verdict counts, `blockable_counts` (domains
+that qualify for auto-blocking, by category: blocked in enforce mode, what
+would be blocked in train mode) and the current block-snapshot size.
 
-`GET /api/ai/verdicts` paginates the scanner's verdict store: domain,
-category, severity, status (`pending`/`classified`/`skipped`), confidence,
-backend, evidence text, observation count, `classified_at`/`expires_at` in
-RFC 3339 (expiry shows exactly when the verdict silently drops). An
-operator override (`POST /api/ai/override` with `action: "allow"`) exempts
-a domain from every AI block; `clear` removes the exemption.
+A domain qualifies for auto-blocking when its current verdict is in one of
+`ai.auto_block_categories` (any category, not only threats) with a
+confidence at or above `ai.block_threshold`, and neither it nor a parent
+domain is exempt. The built-in heuristic rules score at most 0.35, so they
+never auto-block on their own.
+
+`GET /api/ai/verdicts` pages through the verdict store, most recently
+classified first (pending rows last), optionally filtered by `status`
+(`pending`/`classified`/`skipped`) and a domain substring `q`: domain,
+category, severity, status, confidence, backend, evidence, observation count
+(scan cycles the domain appeared in), `overridden` (the domain is exempt) and
+`classified_at`/`expires_at` in RFC 3339 (the verdict is re-checked at
+expiry). `per_page` is capped at 500.
+
+`POST /api/ai/override` with `action: "allow"` exempts a domain and its
+subdomains from AI blocking; `clear` removes the exemption (`404` when there
+is none). `GET /api/ai/overrides` lists the exemptions, newest first.
 `POST /api/ai/rescan` wakes the scanner for one immediate cycle.
 
-All four endpoints return `404` when the AI subsystem is disabled.
+All of these return `404` when the AI subsystem is disabled.
 
 ### Advanced blocking
 
@@ -770,6 +867,7 @@ All four endpoints return `404` when the AI subsystem is disabled.
 GET    /api/policy/blocking
 POST   /api/policy/blocking
 DELETE /api/policy/blocking/{id}
+POST   /api/policy/blocking/{id}/move
 POST   /api/policy/blocking/test
 ```
 
@@ -778,8 +876,13 @@ criteria, including regular expressions (`allow_regex` / `block_regex`;
 invalid patterns are rejected with `400` instead of being silently dropped
 at engine-build time).
 `POST /api/policy/blocking` creates a group or updates the one with the same
-name; the dispatcher's blocking engine is rebuilt immediately.
+name; with an `id` it updates that group, so it can be renamed (`400` if
+another group has the new name, `404` if the id is unknown). The
+dispatcher's blocking engine is rebuilt immediately.
 `DELETE /api/policy/blocking/{id}` removes a group.
+`POST /api/policy/blocking/{id}/move` with `{"direction": "up"}` or
+`{"direction": "down"}` swaps the group with its neighbour and returns the
+reordered list. Groups are evaluated in this order.
 
 `POST /api/policy/blocking/test` evaluates a `{client, domain}` pair against
 the live blocking groups and reports whether (and why) it is blocked, so an

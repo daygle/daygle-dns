@@ -60,6 +60,11 @@ fn default_true() -> bool {
 /// Payload to create or update an Advanced Blocking group.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BlockingGroupInput {
+    /// The group being edited: updated by id, so it can be renamed. Without
+    /// one, a group with the same name is updated in place or a new one is
+    /// created.
+    #[serde(default)]
+    pub id: Option<String>,
     pub name: String,
     #[serde(default = "default_true")]
     pub enabled: bool,

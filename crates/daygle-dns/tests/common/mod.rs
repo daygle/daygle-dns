@@ -63,7 +63,18 @@ pub fn query_message(name: &str, rtype: RecordType) -> Message {
 
 /// Send a query over plaintext UDP and return the response.
 pub async fn udp_query(addr: SocketAddr, name: &str, rtype: RecordType) -> Message {
-    let socket = tokio::net::UdpSocket::bind("127.0.0.1:0")
+    udp_query_from([127, 0, 0, 1].into(), addr, name, rtype).await
+}
+
+/// Send a query over plaintext UDP from the loopback address `source` (so a
+/// test can act as different clients) and return the response.
+pub async fn udp_query_from(
+    source: std::net::IpAddr,
+    addr: SocketAddr,
+    name: &str,
+    rtype: RecordType,
+) -> Message {
+    let socket = tokio::net::UdpSocket::bind((source, 0))
         .await
         .expect("bind client socket");
     let bytes = query_message(name, rtype).to_vec().expect("encode query");

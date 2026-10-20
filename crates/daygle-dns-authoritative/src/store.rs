@@ -16,7 +16,7 @@ use crate::model::{
 };
 use crate::validate_name;
 use daygle_dns_core::blocking::{BlockingGroup, BlockingGroupInput};
-use daygle_dns_core::config::Role;
+use daygle_dns_core::config::{DisplaySettings, Role};
 use daygle_dns_core::error::{DaygleError, Result};
 
 /// Every zone paired with its records and signing keys, as consumed by the
@@ -124,7 +124,10 @@ CREATE TABLE IF NOT EXISTS console_users (
     first_name    TEXT NOT NULL DEFAULT '',
     last_name     TEXT NOT NULL DEFAULT '',
     email         TEXT NOT NULL DEFAULT '',
-    created_at    TEXT NOT NULL
+    created_at    TEXT NOT NULL,
+    time_zone     TEXT NOT NULL DEFAULT '',
+    date_format   TEXT NOT NULL DEFAULT '',
+    time_format   TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS tls_certificates (
@@ -530,8 +533,9 @@ impl ZoneStore {
         Ok(group)
     }
 
-    /// Create a blocking group, or update the one with the same name in place
-    /// (its id and position are preserved on update).
+    /// Create a blocking group, or update one in place (its id and position
+    /// are preserved): the group with `input.id` when given (which may rename
+    /// it), else the one with the same name.
     pub fn upsert_blocking_group(&self, input: &BlockingGroupInput) -> Result<BlockingGroup> {
         let name = input.name.trim().to_string();
         if name.is_empty() {
@@ -546,8 +550,44 @@ impl ZoneStore {
         let block_regex = encode_json(&input.block_regex, "block_regex")?;
         let response = serde_json::to_string(&input.response)
             .map_err(|e| DaygleError::Database(format!("encode response: {e}")))?;
-        let id = Uuid::new_v4().to_string();
         let conn = self.lock_conn()?;
+        if let Some(id) = &input.id {
+            let duplicate: bool = conn.query_row(
+                "SELECT EXISTS (SELECT 1 FROM blocking_groups WHERE name = ?1 AND id != ?2)",
+                params![name, id],
+                |r| r.get(0),
+            )?;
+            if duplicate {
+                return Err(DaygleError::InvalidRecord(format!(
+                    "a blocking group named '{name}' already exists"
+                )));
+            }
+            let updated = conn.execute(
+                "UPDATE blocking_groups SET name = ?2, enabled = ?3, clients = ?4,
+                    allow = ?5, block = ?6, allow_regex = ?7, block_regex = ?8,
+                    response = ?9
+                 WHERE id = ?1",
+                params![
+                    id,
+                    name,
+                    input.enabled as i64,
+                    clients,
+                    allow,
+                    block,
+                    allow_regex,
+                    block_regex,
+                    response,
+                ],
+            )?;
+            drop(conn);
+            if updated == 0 {
+                return Err(DaygleError::NotFound(format!("blocking group {id}")));
+            }
+            return self
+                .get_blocking_group(id)?
+                .ok_or_else(|| DaygleError::NotFound(format!("blocking group {id}")));
+        }
+        let id = Uuid::new_v4().to_string();
         // New rows land after every existing group; updates keep their spot.
         conn.execute(
             "INSERT INTO blocking_groups
@@ -886,6 +926,36 @@ impl ZoneStore {
         let conn = self.lock_conn()?;
         let changed = conn.execute("DELETE FROM split_horizon_networks WHERE name = ?1", [name])?;
         Ok(changed > 0)
+    }
+
+    /// Move a blocking group one place up (`-1`) or down (`1`) in the
+    /// evaluation order. Returns false when the group does not exist; moving
+    /// past either end is a no-op.
+    pub fn move_blocking_group(&self, id: &str, delta: i64) -> Result<bool> {
+        let mut ids: Vec<String> = self
+            .list_blocking_groups()?
+            .into_iter()
+            .map(|g| g.id)
+            .collect();
+        let Some(from) = ids.iter().position(|g| g == id) else {
+            return Ok(false);
+        };
+        let to = from as i64 + delta;
+        if to < 0 || to >= ids.len() as i64 {
+            return Ok(true);
+        }
+        ids.swap(from, to as usize);
+        // Renumber everything, which also repairs duplicate positions.
+        let mut conn = self.lock_conn()?;
+        let tx = conn.transaction()?;
+        for (position, group) in ids.iter().enumerate() {
+            tx.execute(
+                "UPDATE blocking_groups SET position = ?2 WHERE id = ?1",
+                params![group, position as i64],
+            )?;
+        }
+        tx.commit()?;
+        Ok(true)
     }
 
     /// List all split-horizon entries ordered by domain then position.
@@ -1314,6 +1384,11 @@ fn row_to_console_user(row: &rusqlite::Row<'_>) -> rusqlite::Result<ConsoleUser>
         last_name: row.get(5)?,
         email: row.get(6)?,
         created_at: row.get(7)?,
+        preferences: DisplaySettings {
+            time_zone: row.get(8)?,
+            date_format: row.get(9)?,
+            time_format: row.get(10)?,
+        },
     })
 }
 
@@ -1328,6 +1403,9 @@ pub struct ConsoleUser {
     pub last_name: String,
     pub email: String,
     pub created_at: String,
+    /// The account's own date and time display choices. An empty field
+    /// means the server default (`display` in the configuration) applies.
+    pub preferences: DisplaySettings,
 }
 
 impl ConsoleUser {
@@ -1443,7 +1521,8 @@ impl ZoneStore {
     pub fn list_console_users(&self) -> Result<Vec<ConsoleUser>> {
         let conn = self.lock_conn()?;
         let mut stmt = conn.prepare(
-            "SELECT username, password_hash, role, enabled, first_name, last_name, email, created_at
+            "SELECT username, password_hash, role, enabled, first_name, last_name, email, created_at,
+                    time_zone, date_format, time_format
              FROM console_users ORDER BY username",
         )?;
         let rows = stmt.query_map([], row_to_console_user)?;
@@ -1472,7 +1551,8 @@ impl ZoneStore {
     pub fn get_console_user(&self, username: &str) -> Result<Option<ConsoleUser>> {
         let conn = self.lock_conn()?;
         conn.query_row(
-            "SELECT username, password_hash, role, enabled, first_name, last_name, email, created_at
+            "SELECT username, password_hash, role, enabled, first_name, last_name, email, created_at,
+                    time_zone, date_format, time_format
              FROM console_users WHERE username = ?1",
             [username],
             row_to_console_user,
@@ -1497,6 +1577,11 @@ impl ZoneStore {
             last_name: input.last_name.clone(),
             email: input.email.clone(),
             created_at: Utc::now().to_rfc3339(),
+            preferences: DisplaySettings {
+                time_zone: String::new(),
+                date_format: String::new(),
+                time_format: String::new(),
+            },
         };
         let conn = self.lock_conn()?;
         conn.execute(
@@ -1522,6 +1607,33 @@ impl ZoneStore {
             ],
         )?;
         Ok(user)
+    }
+
+    /// Store a console account's own display preferences (empty fields
+    /// fall back to the server default).
+    pub fn set_console_user_preferences(
+        &self,
+        username: &str,
+        preferences: &DisplaySettings,
+    ) -> Result<()> {
+        preferences
+            .check(true)
+            .map_err(DaygleError::InvalidRecord)?;
+        let conn = self.lock_conn()?;
+        let n = conn.execute(
+            "UPDATE console_users SET time_zone = ?2, date_format = ?3, time_format = ?4
+             WHERE username = ?1",
+            params![
+                username,
+                preferences.time_zone,
+                preferences.date_format,
+                preferences.time_format
+            ],
+        )?;
+        if n == 0 {
+            return Err(DaygleError::NotFound(format!("user '{username}'")));
+        }
+        Ok(())
     }
 
     /// Set a console account's stored password hash.
@@ -1958,20 +2070,20 @@ impl ZoneStore {
         Ok(conn.execute("DELETE FROM query_logs", [])?)
     }
 
-    /// Distinct query names seen since `since_epoch`, newest first, capped at
-    /// `limit` (including previously-seen names). Used by the AI scanner to
-    /// harvest domains from live traffic without duplicating work; the query
-    /// log's qname index keeps this cheap even on large logs.
+    /// Distinct query names logged at or after `since_epoch` (UNIX seconds),
+    /// most recently queried first, capped at `limit`. Used by the AI
+    /// scanner to harvest domains from live traffic; the query log's `ts`
+    /// index keeps the time window cheap even on large logs.
     pub fn distinct_recent_query_names(&self, since_epoch: i64, limit: u32) -> Result<Vec<String>> {
-        let cutoff = Utc::now()
-            .checked_sub_signed(chrono::Duration::seconds(since_epoch))
+        let cutoff = chrono::DateTime::<Utc>::from_timestamp(since_epoch, 0)
             .unwrap_or(chrono::DateTime::<Utc>::UNIX_EPOCH)
             .to_rfc3339();
         let conn = self.lock_conn()?;
         let mut stmt = conn.prepare(
-            "SELECT DISTINCT qname FROM query_logs
+            "SELECT qname FROM query_logs
              WHERE ts >= ?1
-             ORDER BY qname
+             GROUP BY qname
+             ORDER BY MAX(ts) DESC
              LIMIT ?2",
         )?;
         let names = stmt
@@ -2274,10 +2386,18 @@ fn migrate_split_horizon_records(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-/// Add the personal profile columns (`first_name`, `last_name`, `email`) to
-/// `console_users` for databases created before user profiles existed.
+/// Add the personal profile columns (`first_name`, `last_name`, `email`) and
+/// display preference columns to `console_users` for databases created
+/// before they existed.
 fn migrate_console_user_profile(conn: &Connection) -> Result<()> {
-    for (column, default) in [("first_name", "''"), ("last_name", "''"), ("email", "''")] {
+    for (column, default) in [
+        ("first_name", "''"),
+        ("last_name", "''"),
+        ("email", "''"),
+        ("time_zone", "''"),
+        ("date_format", "''"),
+        ("time_format", "''"),
+    ] {
         let has: bool = conn.query_row(
             "SELECT EXISTS(
                 SELECT 1 FROM pragma_table_info('console_users') WHERE name = ?1
@@ -2406,6 +2526,7 @@ mod tests {
         let s = store();
         let created = s
             .upsert_blocking_group(&BlockingGroupInput {
+                id: None,
                 name: "  Kids  ".to_string(),
                 enabled: true,
                 clients: vec!["192.168.1.0/24".to_string()],
@@ -2426,6 +2547,7 @@ mod tests {
         // Upsert by the same name updates in place (id and position preserved).
         let updated = s
             .upsert_blocking_group(&BlockingGroupInput {
+                id: None,
                 name: "Kids".to_string(),
                 enabled: false,
                 clients: vec![],
@@ -2448,6 +2570,57 @@ mod tests {
         assert!(s.delete_blocking_group(&created.id).unwrap());
         assert!(s.list_blocking_groups().unwrap().is_empty());
         assert!(!s.delete_blocking_group(&created.id).unwrap());
+    }
+
+    #[test]
+    fn blocking_groups_rename_by_id_and_reorder() {
+        use daygle_dns_core::blocking::BlockingGroupInput;
+        let s = store();
+        let input = |id: Option<String>, name: &str| BlockingGroupInput {
+            id,
+            name: name.to_string(),
+            enabled: true,
+            clients: vec![],
+            allow: vec![],
+            block: vec![],
+            allow_regex: vec![],
+            block_regex: vec![],
+            response: Default::default(),
+        };
+        let a = s.upsert_blocking_group(&input(None, "A")).unwrap();
+        let b = s.upsert_blocking_group(&input(None, "B")).unwrap();
+
+        // Renaming by id updates the same group instead of adding one.
+        let renamed = s
+            .upsert_blocking_group(&input(Some(a.id.clone()), "Kids"))
+            .unwrap();
+        assert_eq!(renamed.id, a.id);
+        let names: Vec<String> = s
+            .list_blocking_groups()
+            .unwrap()
+            .into_iter()
+            .map(|g| g.name)
+            .collect();
+        assert_eq!(names, vec!["Kids", "B"]);
+        // ...but not onto another group's name, nor for a missing id.
+        assert!(s
+            .upsert_blocking_group(&input(Some(a.id.clone()), "B"))
+            .is_err());
+        assert!(s
+            .upsert_blocking_group(&input(Some("nope".into()), "C"))
+            .is_err());
+
+        // Reorder: B moves above Kids; moving past the top is a no-op.
+        assert!(s.move_blocking_group(&b.id, -1).unwrap());
+        assert!(s.move_blocking_group(&b.id, -1).unwrap());
+        let names: Vec<String> = s
+            .list_blocking_groups()
+            .unwrap()
+            .into_iter()
+            .map(|g| g.name)
+            .collect();
+        assert_eq!(names, vec!["B", "Kids"]);
+        assert!(!s.move_blocking_group("nope", 1).unwrap());
     }
 
     #[test]

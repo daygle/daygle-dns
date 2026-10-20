@@ -786,7 +786,13 @@ async fn db_settings_survive_restart_and_win_over_the_file() {
     let resp = client
         .put(api_url(server.api_addr, "/api/config"))
         .bearer_auth(&token)
-        .json(&json!({ "recursive": { "cache_size": 12345 } }))
+        // Every cache field the Settings page edits must be accepted.
+        .json(&json!({ "recursive": {
+            "cache_size": 12345,
+            "min_cache_ttl": 30,
+            "negative_cache_ttl": 120,
+            "use_system_config": false,
+        } }))
         .send()
         .await
         .unwrap();
@@ -812,6 +818,9 @@ async fn db_settings_survive_restart_and_win_over_the_file() {
         .await
         .unwrap();
     assert_eq!(cfg["recursive"]["cache_size"], json!(12345));
+    assert_eq!(cfg["recursive"]["min_cache_ttl"], json!(30));
+    assert_eq!(cfg["recursive"]["negative_cache_ttl"], json!(120));
+    assert_eq!(cfg["recursive"]["use_system_config"], json!(false));
 
     shutdown(server).await;
 }
@@ -1615,6 +1624,204 @@ async fn redirect_answers_nodata_for_types_the_target_cannot_serve() {
     let aaaa = udp_query(udp, "ads.test.", RecordType::AAAA).await;
     assert_eq!(aaaa.response_code, hickory_proto::op::ResponseCode::NoError);
     assert!(aaaa.answers.is_empty());
+
+    shutdown(server).await;
+}
+
+#[tokio::test]
+async fn display_defaults_and_personal_preferences() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = spawn_with_roles(&dir).await;
+    let client = reqwest::Client::new();
+    let base = api_url(server.api_addr, "");
+    let (admin, _) = login(server.api_addr, "admin", "secret").await;
+    let (viewer, _) = login(server.api_addr, "auditor", "watch").await;
+    let me = |token: String| {
+        let client = client.clone();
+        let url = format!("{base}/api/auth/me");
+        async move {
+            client
+                .get(url)
+                .bearer_auth(token)
+                .send()
+                .await
+                .unwrap()
+                .json::<serde_json::Value>()
+                .await
+                .unwrap()
+        }
+    };
+
+    // Out of the box everything follows the viewer's device, and nobody
+    // has personal preferences.
+    let m = me(viewer.clone()).await;
+    assert_eq!(m["display_defaults"]["time_zone"], json!("system"));
+    assert_eq!(m["preferences"]["time_zone"], json!(""));
+
+    // The admin sets the server-wide defaults; bad values are rejected.
+    let put = |body: serde_json::Value| {
+        client
+            .put(format!("{base}/api/config"))
+            .bearer_auth(&admin)
+            .json(&body)
+            .send()
+    };
+    let resp = put(json!({ "display": { "time_zone": "Not A Zone" } }))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+    let resp = put(json!({ "display": { "date_format": "yyyy" } }))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+    let resp = put(json!({ "display": {
+        "time_zone": "Australia/Sydney",
+        "date_format": "dmy",
+        "time_format": "24h",
+    } }))
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), 200);
+    let m = me(viewer.clone()).await;
+    assert_eq!(
+        m["display_defaults"]["time_zone"],
+        json!("Australia/Sydney")
+    );
+    assert_eq!(m["display_defaults"]["date_format"], json!("dmy"));
+
+    // A read-only account may set its own preferences (and only those).
+    let resp = client
+        .put(format!("{base}/api/auth/preferences"))
+        .bearer_auth(&viewer)
+        .json(&json!({ "time_zone": "UTC", "date_format": "", "time_format": "12h" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let resp = client
+        .put(format!("{base}/api/auth/preferences"))
+        .bearer_auth(&viewer)
+        .json(&json!({ "time_zone": "UTC", "date_format": "nope", "time_format": "" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+    let m = me(viewer.clone()).await;
+    assert_eq!(m["preferences"]["time_zone"], json!("UTC"));
+    assert_eq!(m["preferences"]["date_format"], json!(""));
+    assert_eq!(m["preferences"]["time_format"], json!("12h"));
+    // Another account's preferences are untouched.
+    let m = me(admin.clone()).await;
+    assert_eq!(m["preferences"]["time_zone"], json!(""));
+
+    // Without a session there is nothing to save to.
+    let resp = client
+        .put(format!("{base}/api/auth/preferences"))
+        .json(&json!({ "time_zone": "UTC", "date_format": "", "time_format": "" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 401);
+
+    shutdown(server).await;
+
+    // Both survive a restart: the defaults with the DB settings, the
+    // preferences with the account.
+    let server = spawn_with_roles(&dir).await;
+    let (viewer, _) = login(server.api_addr, "auditor", "watch").await;
+    let m: serde_json::Value = reqwest::Client::new()
+        .get(api_url(server.api_addr, "/api/auth/me"))
+        .bearer_auth(viewer)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        m["display_defaults"]["time_zone"],
+        json!("Australia/Sydney")
+    );
+    assert_eq!(m["preferences"]["time_format"], json!("12h"));
+    shutdown(server).await;
+}
+
+#[tokio::test]
+async fn certificates_report_their_details() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = spawn_with_roles(&dir).await;
+    let client = reqwest::Client::new();
+    let base = api_url(server.api_addr, "");
+    let (admin, _) = login(server.api_addr, "admin", "secret").await;
+    let list = || async {
+        client
+            .get(format!("{base}/api/certificates"))
+            .bearer_auth(&admin)
+            .send()
+            .await
+            .unwrap()
+            .json::<serde_json::Value>()
+            .await
+            .unwrap()
+    };
+
+    // A generated certificate lists who it is for and when it expires.
+    let resp = client
+        .post(format!("{base}/api/certificates"))
+        .bearer_auth(&admin)
+        .json(&json!({ "name": "lan", "server_name": "dns.lan.test" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let certs = list().await;
+    let lan = &certs[0];
+    assert_eq!(lan["name"], json!("lan"));
+    assert_eq!(lan["self_signed"], json!(true));
+    assert!(lan["names"]
+        .as_array()
+        .unwrap()
+        .contains(&json!("dns.lan.test")));
+    let not_after = chrono::DateTime::parse_from_rfc3339(lan["not_after"].as_str().unwrap())
+        .expect("not_after is RFC 3339");
+    assert!(not_after > chrono::Utc::now());
+
+    // Uploading under the same name replaces it (how a renewal is applied).
+    let (cert_pem, key_pem) = daygle_dns_dot::generate_self_signed_pem("dns2.lan.test").unwrap();
+    let resp = client
+        .post(format!("{base}/api/certificates"))
+        .bearer_auth(&admin)
+        .json(&json!({ "name": "lan", "cert_pem": cert_pem, "key_pem": key_pem }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let certs = list().await;
+    assert_eq!(certs.as_array().unwrap().len(), 1);
+    assert!(certs[0]["names"]
+        .as_array()
+        .unwrap()
+        .contains(&json!("dns2.lan.test")));
+
+    // A key that does not belong to the certificate is refused.
+    let (_, other_key) = daygle_dns_dot::generate_self_signed_pem("other.test").unwrap();
+    let resp = client
+        .post(format!("{base}/api/certificates"))
+        .bearer_auth(&admin)
+        .json(&json!({ "name": "bad", "cert_pem": cert_pem, "key_pem": other_key }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+
+    let resp = client
+        .delete(format!("{base}/api/certificates/lan"))
+        .bearer_auth(&admin)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 204);
+    assert_eq!(list().await, json!([]));
 
     shutdown(server).await;
 }

@@ -13,25 +13,25 @@
       id: 'blocklists',
       label: 'Blocklists',
       tagline:
-        'Fetch remote blocklists (domain lists, hosts files or adblock filters) and merge them into the blocklist. Add, edit and remove sources below - changes are stored in the server database and applied to the running server immediately. Sources are validated before they are saved.',
+        'Block ads, trackers and malware with published lists (plain domain lists, hosts files or adblock filters). Lists are checked before they are saved, refresh on their own schedule, and every change applies immediately.',
     },
     {
       id: 'domain-lists',
       label: 'Domain Lists',
       tagline:
-        'Add domains that should always be trusted or always blocked. Enter one domain per line; use *.example.com for subdomains. Trusted domains take precedence over domain blocking, including remote blocklist sources. Client access-control rules remain authoritative.',
+        'Your own lists of domains to always allow or always block, for every client. An allowed domain is never blocked by a blocklist or the AI.',
     },
     {
       id: 'client-groups',
       label: 'Client Groups',
       tagline:
-        'Per-client-group allow/block policies. Each group targets a set of client networks and applies its own allow list, block list and regex patterns; allow rules win over block rules, and groups are evaluated top to bottom.',
+        'Give a set of devices (by IP or network) their own allow and block rules, on top of everything else - for example, block social media on the kids\' devices.',
     },
     {
       id: 'response-filters',
       label: 'Response Filters',
       tagline:
-        'Rules that change DNS answers instead of blocking them. Filter AAAA removes IPv6 answers so dual-stack clients fall back to IPv4.',
+        'Rules that change DNS answers instead of blocking them.',
     },
   ];
 

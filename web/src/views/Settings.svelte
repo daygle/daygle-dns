@@ -1,8 +1,9 @@
 <script>
   import { api, formatApiError } from '../api.js';
   import PageHeader from '../PageHeader.svelte';
+  import ClientPolicies from './ClientPolicies.svelte';
   import { icons } from '../icons.svelte.js';
-  import { prefs, setDateTimePrefs, timeZoneOptions, FORMAT_OPTIONS, formatDateTime } from '../datetime.svelte.js';
+  import { display, setDisplayDefaults, timeZoneOptions, DATE_FORMAT_OPTIONS, TIME_FORMAT_OPTIONS, previewDateTime } from '../datetime.svelte.js';
 
   let config = $state(null);
   let notice = $state(null);
@@ -11,7 +12,10 @@
 
   // Settings is split into tabs (same pattern as the Logs page) so the page
   // stays navigable as more options are added.
-  let tab = $state('general');
+  // `initialTab` lets another page open a tab directly (the Cache page's
+  // "Change in Settings" link).
+  let { initialTab = 'general' } = $props();
+  let tab = $state(initialTab);
   const TABS = [
     ['general', 'General'],
     ['recursive', 'Recursive & Caching'],
@@ -30,6 +34,11 @@
   let doq = $state({});
   let api_ = $state({});
   let ai_ = $state({});
+  // AI values in the units the form shows (minutes, days, percent); turned
+  // back into seconds and fractions on save.
+  let aiForm = $state({});
+  // Whether a scanner is running now (it is only built at startup).
+  let aiRunning = $state(false);
   // Auto-block categories as a comma-separated text input.
   let aiCategoriesText = $state('');
   // The loaded backend's own category list (model labels / heuristic rules);
@@ -50,14 +59,13 @@
   let dohCertMode = $state('self');
   let doqCertMode = $state('self');
 
-  // Local copies of the display preferences (saved instantly on change).
-  let tzDraft = $state(prefs.tz);
-  let formatDraft = $state(prefs.format);
+  // Server-wide date and time display defaults (saved with the page).
+  let display_ = $state({ time_zone: 'system', date_format: 'system', time_format: 'system' });
   const zoneChoices = timeZoneOptions();
-
-  function applyDisplayPrefs() {
-    setDateTimePrefs({ tz: tzDraft, format: formatDraft });
-  }
+  // Users who chose their own settings don't see the defaults change.
+  const ownPrefsSet = $derived(
+    !!(display.mine && (display.mine.time_zone || display.mine.date_format || display.mine.time_format)),
+  );
 
   $effect(() => {
     load();
@@ -97,6 +105,7 @@
         doq = {};
         api_ = {};
         ai_ = {};
+        display_ = { time_zone: 'system', date_format: 'system', time_format: 'system' };
         aiCategoriesText = '';
         aiBackendCategories = [];
         upstreamText = '';
@@ -117,9 +126,26 @@
       doh = { ...config.doh };
       doq = { ...config.doq };
       api_ = { ...config.api };
+      display_ = { time_zone: 'system', date_format: 'system', time_format: 'system', ...config.display };
       ai_ = { ...config.ai, mode: config.ai?.mode || 'train' };
+      aiForm = {
+        scanMinutes: round2(ai_.scan_interval_secs / 60),
+        expireMinutes: round2(ai_.expire_check_secs / 60),
+        threatDays: round2(ai_.threat_ttl_secs / 86400),
+        categoryDays: round2(ai_.category_ttl_secs / 86400),
+        thresholdPct: round2(ai_.block_threshold * 100),
+        floorPct: round2(ai_.confidence_floor * 100),
+      };
       aiCategoriesText = (config.ai?.auto_block_categories || []).join(', ');
-      api.aiStatus().then((s) => { aiBackendCategories = s?.backend_categories || []; }).catch(() => {});
+      api
+        .aiStatus()
+        .then((s) => {
+          aiBackendCategories = s?.backend_categories || [];
+          aiRunning = true;
+        })
+        .catch(() => {
+          aiRunning = false;
+        });
       dotCertMode = certModeOf(dot);
       dohCertMode = certModeOf(doh);
       doqCertMode = certModeOf(doq);
@@ -142,19 +168,6 @@
     return text.split('\n').map((l) => l.trim()).filter(Boolean);
   }
 
-  async function clearCache() {
-    busy = true;
-    notice = null;
-    error = null;
-    try {
-      await api.clearCache();
-      notice = 'Recursive cache flushed.';
-    } catch (e) {
-      error = formatApiError(e);
-    } finally {
-      busy = false;
-    }
-  }
 
   async function save() {
     busy = true;
@@ -176,7 +189,12 @@
           recursion_networks: parseLines(recursionNetworksText),
           case_randomization: !!recursive.case_randomization,
           rebinding_protection: !!recursive.rebinding_protection,
+          opportunistic_encryption: !!recursive.opportunistic_encryption,
           upstreams: parseUpstreams(upstreamText),
+          use_system_config: !!recursive.use_system_config,
+          cache_size: Number(recursive.cache_size),
+          min_cache_ttl: Number(recursive.min_cache_ttl),
+          negative_cache_ttl: Number(recursive.negative_cache_ttl),
           dnssec_validate: !!recursive.dnssec_validate,
           prefetch_enabled: !!recursive.prefetch_enabled,
           prefetch_ttl_fraction_pct: Number(recursive.prefetch_ttl_fraction_pct),
@@ -219,6 +237,7 @@
           gui_enabled: !!api_.gui_enabled,
           cors_origins: api_.cors_origins || [],
         },
+        display: { ...display_ },
         authoritative: {
           default_record_ttl: Number(authoritative.default_record_ttl),
           default_primary_ns: authoritative.default_primary_ns || '',
@@ -236,20 +255,21 @@
           database: ai_.database || '',
           model_path: ai_.model_path || '',
           workers: Number(ai_.workers),
-          scan_interval_secs: Number(ai_.scan_interval_secs),
-          expire_check_secs: Number(ai_.expire_check_secs),
+          scan_interval_secs: Math.round(Number(aiForm.scanMinutes) * 60),
+          expire_check_secs: Math.round(Number(aiForm.expireMinutes) * 60),
           max_domains_per_scan: Number(ai_.max_domains_per_scan),
           auto_block_categories:
             aiBackendCategories.length
               ? aiBackendCategories.filter((c) => aiSelectedCategories().includes(c))
               : (aiCategoriesText || '').split(',').map((c) => c.trim()).filter(Boolean),
-          block_threshold: Number(ai_.block_threshold),
-          confidence_floor: Number(ai_.confidence_floor),
-          category_ttl_secs: Number(ai_.category_ttl_secs),
-          threat_ttl_secs: Number(ai_.threat_ttl_secs),
+          block_threshold: Number(aiForm.thresholdPct) / 100,
+          confidence_floor: Number(aiForm.floorPct) / 100,
+          category_ttl_secs: Math.round(Number(aiForm.categoryDays) * 86400),
+          threat_ttl_secs: Math.round(Number(aiForm.threatDays) * 86400),
         },
       };
       await api.updateSettings(body);
+      setDisplayDefaults(body.display);
       notice = 'Settings saved: applied live and stored in the database.';
       await load();
     } catch (e) {
@@ -272,6 +292,11 @@
     const sel = aiSelectedCategories();
     const next = sel.includes(cat) ? sel.filter((c) => c !== cat) : [...sel, cat];
     aiCategoriesText = next.join(', ');
+  }
+
+  // 4.999999 -> 5 (unit conversions in the AI form).
+  function round2(n) {
+    return Math.round(Number(n || 0) * 100) / 100;
   }
 
   function titleCase(s) {
@@ -298,9 +323,6 @@
   <div class="actions">
     <button onclick={save} disabled={busy}>{busy ? 'Saving…' : 'Save'}</button>
     <button class="secondary" onclick={load} disabled={busy}>Reload</button>
-    {#if tab === 'recursive'}
-      <button class="secondary" onclick={clearCache}>Flush Cache</button>
-    {/if}
   </div>
 
   {#if tab === 'general'}
@@ -332,6 +354,7 @@
       <div class="form-grid" style="margin-top: 4px">
         <label class="check"><input type="checkbox" bind:checked={recursive.case_randomization} /> <span>Randomize Query Case (0x20)</span></label>
         <label class="check"><input type="checkbox" bind:checked={recursive.rebinding_protection} /> <span>DNS Rebinding Protection</span></label>
+        <label class="check"><input type="checkbox" bind:checked={recursive.opportunistic_encryption} /> <span>Opportunistic Encryption</span></label>
       </div>
       <p class="muted help">
         Daygle resolves names itself, starting at the root servers, so no upstream
@@ -340,7 +363,9 @@
         spoofed answers harder to inject but can fail with the odd server that does
         not preserve case. Rebinding protection drops private and loopback addresses
         from public answers (your own zones, forwarders and stub zones are not
-        affected).
+        affected). Opportunistic encryption (RFC 9539) probes nameservers for DNS
+        over TLS or QUIC in the background and uses it where it works, falling back
+        to plain DNS; it is experimental and adds some connection overhead.
       </p>
     {:else}
       <div class="form-grid" style="margin-top: 4px">
@@ -402,6 +427,7 @@
       set it to 0 to disable.
     </p>
   </div>
+  <ClientPolicies />
   {:else if tab === 'zones'}
   <div class="card" style="margin-bottom: 14px">
     <h3 style="margin: 0 0 10px">Zones & Records</h3>
@@ -544,35 +570,54 @@
       <label>
         <span>Mode</span>
         <select bind:value={ai_.mode}>
-          <option value="train">Train - record verdicts only, never block</option>
-          <option value="enforce">Enforce - auto-block qualifying threats</option>
+          <option value="train">Train - Record Verdicts Only</option>
+          <option value="enforce">Enforce - Auto-Block Qualifying Domains</option>
         </select>
       </label>
-      <label><span>Classification Workers</span><input type="number" min="1" max="32" bind:value={ai_.workers} /></label>
-      <label><span>Scan Interval (Seconds)</span><input type="number" min="10" bind:value={ai_.scan_interval_secs} /></label>
-      <label><span>Expiry Check Interval (Seconds)</span><input type="number" min="10" bind:value={ai_.expire_check_secs} /></label>
-      <label><span>Domains Per Scan</span><input type="number" min="1" bind:value={ai_.max_domains_per_scan} /></label>
-      <label><span>Model Path</span><input bind:value={ai_.model_path} placeholder="/path/to/model.bin (empty = heuristic rules)" /></label>
-      <label><span>Verdict Database</span><input bind:value={ai_.database} placeholder="empty = ai.db next to the zone database" /></label>
+    </div>
+    {#if ai_.enabled && !aiRunning}
+      <p class="help restart">The scanner starts after the next restart.</p>
+    {/if}
+    <p class="muted help">
+      Classifies the domains seen in your DNS traffic in the background, never
+      on the query path. Start in Train mode and review the verdicts on the AI
+      page before switching to Enforce. Your allowlist and the AI page's exempt
+      domains are never blocked.
+    </p>
+
+    <h4>Classifier</h4>
+    <div class="form-grid">
+      <label><span>Model File</span><input bind:value={ai_.model_path} placeholder="Empty = built-in heuristic rules" /></label>
+      <label><span>Verdict Database</span><input bind:value={ai_.database} placeholder="Empty = ai.db next to the zone database" /></label>
     </div>
     <p class="muted help">
-      The scanner classifies domains seen in live queries and records verdicts
-      with TTLs. In Enforce mode verdicts can fire fastText auto-blocks;
-      the operator allowlist and overrides always win. Restarting is required:
-      enabling/disabling in-flight happens live once a scanner has been built
-      at startup, but switching the model or database path needs a restart.
+      A trained fastText model (<code>.bin</code>) classifies far better than the
+      built-in heuristic rules, which never score high enough to auto-block. The
+      AI page shows the installed model files. Changing either path takes effect
+      after a restart.
     </p>
+
+    <h4>Scanning</h4>
+    <div class="form-grid">
+      <label><span>Scan Every (Minutes)</span><input type="number" min="0.17" step="any" bind:value={aiForm.scanMinutes} /></label>
+      <label><span>Domains Classified Per Scan</span><input type="number" min="1" bind:value={ai_.max_domains_per_scan} /></label>
+      <label><span>Classification Workers</span><input type="number" min="1" max="32" bind:value={ai_.workers} /></label>
+    </div>
+    <p class="muted help">
+      Each scan picks up the domains queried since the previous one and
+      classifies up to the per-scan limit (the rest wait for the next scan),
+      on this many background threads.
+    </p>
+
     <h4>Enforcement</h4>
     <div class="form-grid">
-      <label><span>Block Threshold (0.5 - 1.0)</span><input type="number" step="0.01" min="0.5" max="1" bind:value={ai_.block_threshold} /></label>
-      <label><span>Confidence Floor (0 - 1)</span><input type="number" step="0.01" min="0" max="1" bind:value={ai_.confidence_floor} /></label>
-      <label><span>Category Verdict TTL (Seconds)</span><input type="number" min="60" bind:value={ai_.category_ttl_secs} /></label>
-      <label><span>Threat Verdict TTL (Seconds)</span><input type="number" min="60" bind:value={ai_.threat_ttl_secs} /></label>
+      <label><span>Block Threshold (%)</span><input type="number" min="50" max="100" step="any" bind:value={aiForm.thresholdPct} /></label>
+      <label><span>Confidence Floor (%)</span><input type="number" min="0" max="99" step="any" bind:value={aiForm.floorPct} /></label>
     </div>
-    <label class="stacked" style="margin-top: 12px">
-      <span>Auto-Block Categories</span>
+    <div class="stacked" style="margin-top: 12px">
+      <span class="field-label">Auto-Block Categories</span>
       {#if aiBackendCategories.length}
-        <div class="form-grid">
+        <div class="category-grid">
           {#each aiBackendCategories as cat (cat)}
             <label class="check">
               <input
@@ -587,32 +632,52 @@
       {:else}
         <input bind:value={aiCategoriesText} placeholder="malware, phishing (comma-separated)" />
       {/if}
-    </label>
+    </div>
     <p class="muted help">
-      Only threats in these categories auto-block, and only above the block
-      threshold. Lower confidence verdicts feed the verdict table for train-mode
-      review. Changes apply live when a scanner is already running; enabling for
-      the first time takes effect after a restart.
+      In Enforce mode a domain is blocked when its current verdict is in a
+      ticked category with a confidence at or above the block threshold (50 to
+      100%). Verdicts below the confidence floor are recorded as skipped.
+    </p>
+
+    <h4>Verdict Lifetime</h4>
+    <div class="form-grid">
+      <label><span>Re-Check Threat Verdicts After (Days)</span><input type="number" min="0.01" step="any" bind:value={aiForm.threatDays} /></label>
+      <label><span>Re-Check Other Verdicts After (Days)</span><input type="number" min="0.01" step="any" bind:value={aiForm.categoryDays} /></label>
+      <label><span>Look for Expired Verdicts Every (Minutes)</span><input type="number" min="0.17" step="any" bind:value={aiForm.expireMinutes} /></label>
+    </div>
+    <p class="muted help">
+      Sites change, so verdicts expire and the domain is classified again;
+      an expired verdict stops blocking until then. Threats (malware, phishing)
+      are re-checked sooner than other categories.
     </p>
   </div>
   {:else if tab === 'interface'}
   <div class="card" style="margin-bottom: 14px">
-    <h3 style="margin: 0 0 10px">Display</h3>
+    <h3 style="margin: 0 0 10px">Date & Time Defaults</h3>
     <div class="form-grid">
       <label><span>Time Zone</span>
-        <select bind:value={tzDraft} onchange={applyDisplayPrefs}>
+        <select bind:value={display_.time_zone}>
           {#each zoneChoices as [value, label]}<option value={value}>{label}</option>{/each}
         </select>
       </label>
-      <label><span>Date & Time Format</span>
-        <select bind:value={formatDraft} onchange={applyDisplayPrefs}>
-          {#each FORMAT_OPTIONS as [value, label]}<option value={value}>{label}</option>{/each}
+      <label><span>Date Format</span>
+        <select bind:value={display_.date_format}>
+          {#each DATE_FORMAT_OPTIONS as [value, label]}<option value={value}>{label}</option>{/each}
+        </select>
+      </label>
+      <label><span>Time Format</span>
+        <select bind:value={display_.time_format}>
+          {#each TIME_FORMAT_OPTIONS as [value, label]}<option value={value}>{label}</option>{/each}
         </select>
       </label>
     </div>
     <p class="muted help">
-      Example with the current choice: <strong>{formatDateTime(new Date())}</strong>. Display
-      preferences are per browser and apply everywhere dates and times are shown.
+      Example: <strong>{previewDateTime(display_)}</strong>. These are the
+      defaults for every user. Each user can choose their own under
+      <strong>My Preferences</strong> (below their name in the sidebar).
+      {#if ownPrefsSet}Your own preferences are set, so you won't see a change
+        here until you reset them.{/if}
+      "Device Time Zone" and "Browser Default" follow each viewer's computer.
     </p>
   </div>
 
@@ -666,4 +731,12 @@
   }
   label.check span { color: var(--text); }
   h4 { margin: 14px 0 8px; }
+  .field-label { font-size: 0.85rem; color: var(--muted); }
+  .category-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+    gap: 4px 12px;
+    margin-top: 6px;
+  }
+  .help.restart { color: #f5b041; margin-top: 8px; }
 </style>

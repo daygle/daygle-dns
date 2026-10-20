@@ -38,6 +38,78 @@ pub struct DaygleConfig {
     pub logging: LoggingSettings,
     /// AI scanner: background classification of observed domains.
     pub ai: AiSettings,
+    /// Console defaults for showing dates and times.
+    pub display: DisplaySettings,
+}
+
+/// How the console shows dates and times to users who have not chosen their
+/// own (each console account can override these in its preferences).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct DisplaySettings {
+    /// `system` (the viewer's own device), `UTC`, or an IANA zone name such
+    /// as `Europe/London`.
+    pub time_zone: String,
+    /// `system` (the browser's locale), `dmy`, `mdy`, `ymd` or `d_mon_y`.
+    pub date_format: String,
+    /// `system` (the browser's locale), `24h` or `12h`.
+    pub time_format: String,
+}
+
+impl Default for DisplaySettings {
+    fn default() -> Self {
+        Self {
+            time_zone: "system".to_string(),
+            date_format: "system".to_string(),
+            time_format: "system".to_string(),
+        }
+    }
+}
+
+/// Accepted `date_format` values.
+pub const DATE_FORMATS: &[&str] = &["system", "dmy", "mdy", "ymd", "d_mon_y"];
+/// Accepted `time_format` values.
+pub const TIME_FORMATS: &[&str] = &["system", "24h", "12h"];
+
+/// Check a display time zone: `system`, `UTC`, or something shaped like an
+/// IANA zone name (`Area/Location`, letters, digits, `_`, `-`, `+`). The
+/// browser does the real lookup and falls back to the device zone for a
+/// name it does not know.
+pub fn validate_time_zone(tz: &str) -> std::result::Result<(), String> {
+    if tz == "system" || tz.eq_ignore_ascii_case("utc") {
+        return Ok(());
+    }
+    let shaped = !tz.is_empty()
+        && tz.len() <= 64
+        && !tz.starts_with('/')
+        && !tz.ends_with('/')
+        && !tz.contains("//")
+        && tz
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '_' | '-' | '+'));
+    if shaped {
+        Ok(())
+    } else {
+        Err(format!("'{tz}' is not a time zone name"))
+    }
+}
+
+impl DisplaySettings {
+    /// Check every field; `allow_empty` accepts `""` as "not set" (a user's
+    /// preferences, where empty means use the server default).
+    pub fn check(&self, allow_empty: bool) -> std::result::Result<(), String> {
+        let unset = |v: &str| allow_empty && v.is_empty();
+        if !unset(&self.time_zone) {
+            validate_time_zone(&self.time_zone)?;
+        }
+        if !unset(&self.date_format) && !DATE_FORMATS.contains(&self.date_format.as_str()) {
+            return Err(format!("unknown date format '{}'", self.date_format));
+        }
+        if !unset(&self.time_format) && !TIME_FORMATS.contains(&self.time_format.as_str()) {
+            return Err(format!("unknown time format '{}'", self.time_format));
+        }
+        Ok(())
+    }
 }
 
 /// How AI scanner verdicts are applied.
@@ -149,6 +221,8 @@ pub struct RuntimeSettings {
     pub policy: Option<PolicyUpdate>,
     pub authoritative: Option<AuthoritativeUpdate>,
     pub ai: Option<AiUpdate>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display: Option<DisplaySettings>,
 }
 
 /// Partial updates for the recursive resolver (matches the API's shape).
@@ -173,6 +247,12 @@ pub struct RecursiveUpdate {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_cache_ttl: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub min_cache_ttl: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub negative_cache_ttl: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub use_system_config: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub failure_cache_ttl: Option<u32>,
     /// Conditional forwarder zones (the whole list; see
     /// [`ConditionalZoneConfig`]).
@@ -192,6 +272,12 @@ pub struct RecursiveUpdate {
     pub rebinding_protection: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub local_root: Option<LocalRootSettings>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub opportunistic_encryption: Option<bool>,
+    /// Client resolution policies (the whole list; see
+    /// [`ClientPolicyConfig`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_policies: Option<Vec<ClientPolicyConfig>>,
 }
 
 impl RecursiveUpdate {
@@ -215,6 +301,30 @@ impl RecursiveUpdate {
         }
         if let Some(v) = self.rebinding_protection {
             settings.rebinding_protection = v;
+        }
+        if let Some(v) = self.opportunistic_encryption {
+            settings.opportunistic_encryption = v;
+        }
+        if let Some(v) = self.min_cache_ttl {
+            settings.min_cache_ttl = v;
+        }
+        if let Some(v) = self.negative_cache_ttl {
+            settings.negative_cache_ttl = v;
+        }
+        if let Some(v) = self.use_system_config {
+            settings.use_system_config = v;
+        }
+        if let Some(v) = &self.client_policies {
+            settings.client_policies = v
+                .iter()
+                .map(|p| ClientPolicyConfig {
+                    name: p.name.trim().to_string(),
+                    enabled: p.enabled,
+                    clients: trim_list(&p.clients),
+                    action: p.action,
+                    upstreams: trim_list(&p.upstreams),
+                })
+                .collect();
         }
         if let Some(v) = &self.local_root {
             settings.local_root = LocalRootSettings {
@@ -479,6 +589,7 @@ impl RuntimeSettings {
             && self.policy.is_none()
             && self.authoritative.is_none()
             && self.ai.is_none()
+            && self.display.is_none()
     }
 
     /// Apply the overlay to `config` in place. `None` fields are untouched.
@@ -615,6 +726,9 @@ impl RuntimeSettings {
                 config.policy.filter_aaaa_except = v.clone();
             }
         }
+        if let Some(d) = &self.display {
+            config.display = d.clone();
+        }
         if let Some(a) = &self.ai {
             if let Some(v) = a.enabled {
                 config.ai.enabled = v;
@@ -721,6 +835,9 @@ impl RuntimeSettings {
                 prefetch_min_queries: Some(config.recursive.prefetch_min_queries),
                 serve_stale_secs: Some(config.recursive.serve_stale_secs),
                 max_cache_ttl: Some(config.recursive.max_cache_ttl),
+                min_cache_ttl: Some(config.recursive.min_cache_ttl),
+                negative_cache_ttl: Some(config.recursive.negative_cache_ttl),
+                use_system_config: Some(config.recursive.use_system_config),
                 failure_cache_ttl: Some(config.recursive.failure_cache_ttl),
                 conditional_zones: Some(config.recursive.conditional_zones.clone()),
                 // Store the effective mode so a later upstreams change cannot
@@ -732,6 +849,8 @@ impl RuntimeSettings {
                 case_randomization: Some(config.recursive.case_randomization),
                 rebinding_protection: Some(config.recursive.rebinding_protection),
                 local_root: Some(config.recursive.local_root.clone()),
+                opportunistic_encryption: Some(config.recursive.opportunistic_encryption),
+                client_policies: Some(config.recursive.client_policies.clone()),
             }),
             dot: Some(ListenerUpdate {
                 enabled: Some(config.dot.enabled),
@@ -789,6 +908,7 @@ impl RuntimeSettings {
                 stub_zones: Some(config.authoritative.stub_zones.clone()),
             }),
             ai: Some(AiUpdate::capture_ai(&config.ai)),
+            display: Some(config.display.clone()),
         }
     }
 }
@@ -1003,6 +1123,39 @@ impl DaygleConfig {
                         zone.name
                     )));
                 }
+            }
+        }
+        let mut policy_names = std::collections::HashSet::new();
+        for policy in &self.recursive.client_policies {
+            let name = policy.name.trim();
+            if name.is_empty() {
+                return Err(DaygleError::Config(
+                    "recursive.client_policies contains a policy with an empty name".to_string(),
+                ));
+            }
+            if !policy_names.insert(name.to_ascii_lowercase()) {
+                return Err(DaygleError::Config(format!(
+                    "client policy '{name}' is defined more than once"
+                )));
+            }
+            if policy.clients.is_empty() {
+                return Err(DaygleError::Config(format!(
+                    "client policy '{name}' has no client networks"
+                )));
+            }
+            for network in &policy.clients {
+                if parse_network(network).is_none() {
+                    return Err(DaygleError::Config(format!(
+                        "client policy '{name}' contains invalid network '{network}'"
+                    )));
+                }
+            }
+            if policy.action == ClientPolicyAction::Forward
+                && policy.upstreams.iter().all(|u| u.trim().is_empty())
+            {
+                return Err(DaygleError::Config(format!(
+                    "client policy '{name}' forwards but has no upstreams"
+                )));
             }
         }
         for network in &self.recursive.recursion_networks {
@@ -1260,6 +1413,9 @@ impl DaygleConfig {
                 ));
             }
         }
+        self.display
+            .check(false)
+            .map_err(|e| DaygleError::Config(format!("display: {e}")))?;
         Ok(())
     }
 }
@@ -1417,6 +1573,17 @@ pub struct RecursiveSettings {
     /// Local root zone (RFC 8806): keep a verified copy of the root zone and
     /// answer root queries from it instead of asking the root servers.
     pub local_root: LocalRootSettings,
+    /// Opportunistic encryption (RFC 9539, recursive mode): probe
+    /// nameservers for DNS over TLS / QUIC in the background and use it where
+    /// it works, falling back to plain DNS. Off by default: it is
+    /// experimental and adds connection overhead.
+    pub opportunistic_encryption: bool,
+    /// Client resolution policies: clients in a policy's networks are
+    /// resolved its way (forwarded to its own upstreams, resolved from the
+    /// root servers, or refused) instead of by the default mode. The first
+    /// enabled matching policy wins; conditional forwarders and stub zones
+    /// still take precedence for their names.
+    pub client_policies: Vec<ClientPolicyConfig>,
     /// Testing only: send recursive-mode queries to this port instead of 53
     /// and allow private/loopback nameservers, so tests can run a fake
     /// root -> TLD -> authoritative hierarchy without privileged ports.
@@ -1504,6 +1671,46 @@ impl LocalRootSettings {
     }
 }
 
+/// One client resolution policy (see `RecursiveSettings::client_policies`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct ClientPolicyConfig {
+    /// Display name, unique among the policies.
+    pub name: String,
+    pub enabled: bool,
+    /// Client networks (CIDRs or bare IPs) the policy applies to.
+    pub clients: Vec<String>,
+    pub action: ClientPolicyAction,
+    /// Upstreams for [`ClientPolicyAction::Forward`] (same forms as
+    /// `recursive.upstreams`).
+    pub upstreams: Vec<String>,
+}
+
+impl Default for ClientPolicyConfig {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            enabled: true,
+            clients: vec![],
+            action: ClientPolicyAction::Forward,
+            upstreams: vec![],
+        }
+    }
+}
+
+/// How a client resolution policy resolves its clients' queries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClientPolicyAction {
+    /// Send queries to the policy's own upstreams.
+    #[default]
+    Forward,
+    /// Resolve from the root servers, whatever the default mode.
+    Recursive,
+    /// Refuse recursion (local zones are still answered).
+    Refuse,
+}
+
 /// Client networks treated as private for [`RecursionAccess::PrivateNetworks`].
 pub const PRIVATE_NETWORKS: &[&str] = &[
     "127.0.0.0/8",
@@ -1556,6 +1763,8 @@ impl Default for RecursiveSettings {
             case_randomization: false,
             rebinding_protection: false,
             local_root: LocalRootSettings::default(),
+            opportunistic_encryption: false,
+            client_policies: vec![],
             test_outbound_port: None,
         }
     }
@@ -2242,6 +2451,38 @@ mod tests {
     }
 
     #[test]
+    fn display_settings_are_validated() {
+        let ok = |tz: &str, d: &str, t: &str| {
+            DisplaySettings {
+                time_zone: tz.into(),
+                date_format: d.into(),
+                time_format: t.into(),
+            }
+            .check(false)
+        };
+        assert!(ok("system", "system", "system").is_ok());
+        assert!(ok("UTC", "dmy", "24h").is_ok());
+        assert!(ok("America/Argentina/Buenos_Aires", "d_mon_y", "12h").is_ok());
+        assert!(ok("Etc/GMT+10", "ymd", "system").is_ok());
+        assert!(ok("Not A Zone", "dmy", "24h").is_err());
+        assert!(ok("/etc/passwd", "dmy", "24h").is_err());
+        assert!(ok("", "dmy", "24h").is_err());
+        assert!(ok("UTC", "yyyy", "24h").is_err());
+        assert!(ok("UTC", "dmy", "25h").is_err());
+        // A user's preferences may leave fields empty (server default).
+        assert!(DisplaySettings {
+            time_zone: String::new(),
+            date_format: String::new(),
+            time_format: "12h".into(),
+        }
+        .check(true)
+        .is_ok());
+        // A config without [display] gets the defaults.
+        let cfg: DaygleConfig = toml::from_str("").unwrap();
+        assert_eq!(cfg.display, DisplaySettings::default());
+    }
+
+    #[test]
     fn example_config_file_parses() {
         // The shipped example must stay valid for the real parser so users
         // who copy it as-is (the installer does exactly that) get a working
@@ -2670,6 +2911,30 @@ upstreams = ["192.0.2.20:5353"]
             .unwrap_err()
             .to_string();
         assert!(err.contains("root_hints"), "{err}");
+    }
+
+    #[test]
+    fn client_policies_validate() {
+        let ok = "[[recursive.client_policies]]\nname = \"kids\"\nclients = [\"192.168.1.0/24\"]\nupstreams = [\"1.1.1.3\"]\n";
+        let cfg = DaygleConfig::parse(ok).unwrap();
+        let policy = &cfg.recursive.client_policies[0];
+        assert!(policy.enabled);
+        assert_eq!(policy.action, ClientPolicyAction::Forward);
+
+        let cases = [
+            ("[[recursive.client_policies]]\nname = \"x\"\nupstreams = [\"1.1.1.3\"]\n", "no client networks"),
+            ("[[recursive.client_policies]]\nname = \"x\"\nclients = [\"nope\"]\naction = \"refuse\"\n", "invalid network"),
+            ("[[recursive.client_policies]]\nname = \"x\"\nclients = [\"10.0.0.1\"]\n", "no upstreams"),
+            ("[[recursive.client_policies]]\nclients = [\"10.0.0.1\"]\naction = \"refuse\"\n", "empty name"),
+            (
+                "[[recursive.client_policies]]\nname = \"x\"\nclients = [\"10.0.0.1\"]\naction = \"refuse\"\n[[recursive.client_policies]]\nname = \"X\"\nclients = [\"10.0.0.2\"]\naction = \"recursive\"\n",
+                "more than once",
+            ),
+        ];
+        for (text, expected) in cases {
+            let err = DaygleConfig::parse(text).unwrap_err().to_string();
+            assert!(err.contains(expected), "{expected}: {err}");
+        }
     }
 
     #[test]

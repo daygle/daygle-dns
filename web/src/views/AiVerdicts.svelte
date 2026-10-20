@@ -1,12 +1,13 @@
 <script>
   import { api, formatApiError } from '../api.js';
-  import { formatTime } from '../datetime.svelte.js';
+  import { formatDate, formatDateTime } from '../datetime.svelte.js';
+  import { backendLabel, percent, STATUS_LABELS, titleCase } from '../aiLabels.js';
 
   const PER_PAGE = 50;
   const STATUS_FILTERS = [
     { value: '', label: 'All Statuses' },
-    { value: 'pending', label: 'Pending' },
     { value: 'classified', label: 'Classified' },
+    { value: 'pending', label: 'Waiting' },
     { value: 'skipped', label: 'Skipped' },
   ];
 
@@ -14,21 +15,23 @@
   let total = $state(0);
   let page = $state(1); // 1-based; mirrors the server's clamped parameter
   let statusFilter = $state('');
+  let search = $state('');
   let loading = $state(true);
   let error = $state(null);
   let notice = $state(null);
-  let disabled = $state(false); // true when the [ai] section is off (404)
+  let disabled = $state(false); // true when the scanner is off (404)
 
   function qs() {
     const params = new URLSearchParams();
     if (statusFilter) params.set('status', statusFilter);
+    if (search.trim()) params.set('q', search.trim());
     params.set('page', String(page));
     params.set('per_page', String(PER_PAGE));
     return params.toString();
   }
 
   async function load() {
-    loading = true;
+    loading = rows.length === 0;
     error = null;
     try {
       const data = await api.aiVerdicts(qs());
@@ -40,7 +43,7 @@
     } catch (e) {
       rows = [];
       total = 0;
-      // 404 means the [ai] section is disabled: an empty state, not a failure.
+      // 404 means the scanner is off: an empty state, not a failure.
       if (e.status === 404) {
         disabled = true;
       } else {
@@ -56,24 +59,18 @@
     load();
   }
 
-  async function override(domain, action) {
+  async function setExempt(domain, exempt) {
     notice = null;
     error = null;
     try {
-      await api.aiOverride(domain, action);
-      notice =
-        action === 'allow'
-          ? `${domain} is now AI-exempt.`
-          : `Override cleared for ${domain}.`;
+      await api.aiOverride(domain, exempt ? 'allow' : 'clear');
+      notice = exempt
+        ? `${domain} and its subdomains are now exempt from AI blocking.`
+        : `${domain} is no longer exempt.`;
       await load();
     } catch (e) {
       error = formatApiError(e);
     }
-  }
-
-  // Category, severity and status are lowercase enum values; show them capitalized.
-  function title(s) {
-    return s ? s.charAt(0).toUpperCase() + s.slice(1) : s;
   }
 
   function pages() {
@@ -84,20 +81,25 @@
     return Number(n || 0).toLocaleString();
   }
 
-  function when(stamp) {
-    if (!stamp) return '-';
-    const ms = Date.parse(stamp);
-    return Number.isNaN(ms) ? '-' : formatTime(ms);
+  // Unset times come back as the UNIX epoch.
+  function stamp(value, format) {
+    if (!value) return '-';
+    const ms = Date.parse(value);
+    return Number.isNaN(ms) || ms <= 0 ? '-' : format(ms);
   }
 
-  // Severity pills: threats red, classified green, everything else neutral.
-
-  // Reload on mount and whenever the status filter changes (page resets to 1
-  // because the filter changed the meaning of the list).
+  // Reload on mount and whenever a filter changes (back to page 1, since the
+  // filter changed the list). Typing in the search box waits for a pause.
+  let searchTimer;
   $effect(() => {
     statusFilter;
-    page = 1;
-    load();
+    search;
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(() => {
+      page = 1;
+      load();
+    }, 250);
+    return () => clearTimeout(searchTimer);
   });
 </script>
 
@@ -114,17 +116,18 @@
   </div>
 {:else if disabled}
   <div class="card">
-    <h3 style="margin: 0 0 10px">AI Subsystem Disabled</h3>
-    <p class="muted" style="max-width: 70ch">
-      The <code>[ai]</code> section of the configuration is not enabled, so
-      there are no verdicts.
+    <h3 style="margin: 0 0 10px">AI Scanner Is Off</h3>
+    <p class="muted" style="max-width: 70ch; margin: 0">
+      There are no verdicts. Turn the scanner on in Settings → AI Scanner; it
+      starts after the next restart.
     </p>
   </div>
 {:else}
   <div class="card">
     <div class="spread" style="margin-bottom: 10px; gap: 10px; flex-wrap: wrap">
       <h3 style="margin: 0">Verdicts ({fmt(total)})</h3>
-      <div class="row" style="gap: 8px">
+      <div class="row" style="gap: 8px; flex-wrap: wrap">
+        <input type="search" placeholder="Search Domains" bind:value={search} style="min-width: 200px" />
         <select bind:value={statusFilter} style="min-width: 150px">
           {#each STATUS_FILTERS as f (f.label)}
             <option value={f.value}>{f.label}</option>
@@ -139,45 +142,44 @@
         <tr>
           <th>Domain</th>
           <th>Category</th>
-          <th>Severity</th>
           <th>Status</th>
-          <th style="text-align: right">Confidence</th>
-          <th>Backend</th>
+          <th class="num">Confidence</th>
           <th>Evidence</th>
-          <th>Classified</th>
-          <th>Expires</th>
-          <th></th>
+          <th>Re-Check</th>
+          <th class="num">Actions</th>
         </tr>
       </thead>
       <tbody>
         {#each rows as r (r.domain)}
           <tr>
-            <td><code>{r.domain}</code></td>
             <td>
-              {#if r.category}{title(r.category)}{:else}<span class="muted">-</span>{/if}
+              <code>{r.domain}</code>
+              {#if r.overridden}<span class="pill ok" title="Never auto-blocked by the AI">Exempt</span>{/if}
             </td>
             <td>
-              <span class="pill" class:err={r.severity === 'threat'}>
-                {title(r.severity)}
-              </span>
+              {#if r.category}
+                {titleCase(r.category)}
+                {#if r.severity === 'threat'}<span class="pill err">Threat</span>{/if}
+              {:else}<span class="muted">-</span>{/if}
             </td>
             <td>
-              <span class="pill" class:ok={r.status === 'classified'}>
-                {title(r.status)}
-              </span>
+              <span
+                class="pill"
+                class:ok={r.status === 'classified'}
+                title={r.status === 'pending' ? 'Classified on the next scan' : `${stamp(r.classified_at, formatDateTime)} by ${backendLabel(r.backend)}`}
+              >{STATUS_LABELS[r.status] || titleCase(r.status)}</span>
             </td>
-            <td class="num">{r.confidence.toFixed(3)}</td>
-            <td class="muted">{r.backend || '-'}</td>
-            <td class="muted evidence">{r.evidence || '-'}</td>
-            <td class="muted">{when(r.classified_at)}</td>
-            <td class="muted">{when(r.expires_at)}</td>
             <td class="num">
-              <button class="secondary" onclick={() => override(r.domain, 'allow')}>
-                Allow
-              </button>
-              <button class="secondary" onclick={() => override(r.domain, 'clear')}>
-                Clear
-              </button>
+              {r.status === 'pending' ? '-' : percent(r.confidence)}
+            </td>
+            <td class="muted evidence" title={r.evidence}>{r.evidence || '-'}</td>
+            <td class="muted nowrap">{stamp(r.expires_at, formatDate)}</td>
+            <td class="num">
+              {#if r.overridden}
+                <button class="secondary" onclick={() => setExempt(r.domain, false)} title="Let the AI block this domain again">Unexempt</button>
+              {:else}
+                <button class="secondary" onclick={() => setExempt(r.domain, true)} title="Never let the AI block this domain or its subdomains">Exempt</button>
+              {/if}
             </td>
           </tr>
         {/each}
@@ -186,23 +188,26 @@
     </div>
     {#if !rows.length}
       <p class="muted">
-        No verdicts{statusFilter ? ` with status "${statusFilter}"` : ''} yet -
-        they appear as the scanner classifies domains from live traffic.
+        {#if search.trim() || statusFilter}
+          No verdicts match these filters.
+        {:else}
+          No verdicts yet - they appear as the scanner classifies domains from
+          your DNS traffic.
+        {/if}
       </p>
     {/if}
   </div>
 
-  <div class="row" style="margin-top: 12px">
-    <button class="secondary" onclick={() => goPage(-1)} disabled={page <= 1}>
-      ← Prev
-    </button>
-    <span class="muted">Page {page} of {pages()}</span>
-    <button class="secondary" onclick={() => goPage(1)} disabled={page >= pages()}>
-      Next →
-    </button>
-  </div>
+  {#if total > PER_PAGE}
+    <div class="row" style="margin-top: 12px">
+      <button class="secondary" onclick={() => goPage(-1)} disabled={page <= 1}>← Prev</button>
+      <span class="muted">Page {page} of {pages()}</span>
+      <button class="secondary" onclick={() => goPage(1)} disabled={page >= pages()}>Next →</button>
+    </div>
+  {/if}
 {/if}
 
 <style>
-  .evidence { max-width: 260px; font-size: 0.78rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .nowrap { white-space: nowrap; }
+  .evidence { max-width: 200px; font-size: 0.78rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 </style>

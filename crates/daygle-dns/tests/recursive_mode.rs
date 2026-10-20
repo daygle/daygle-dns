@@ -12,7 +12,8 @@ use std::net::{Ipv4Addr, SocketAddr};
 use common::*;
 use daygle_dns_authoritative::model::{RecordInput, ZoneInput};
 use daygle_dns_core::config::{
-    ConditionalZoneConfig, DaygleConfig, RecursionAccess, ResolutionMode,
+    ClientPolicyAction, ClientPolicyConfig, ConditionalZoneConfig, DaygleConfig, RecursionAccess,
+    ResolutionMode,
 };
 use hickory_proto::op::{Message, MessageType, ResponseCode};
 use hickory_proto::rr::rdata::{NS, SOA};
@@ -313,6 +314,266 @@ async fn forwarding_mode_passes_nodata_through_as_noerror() {
     let msg = udp_query(udp, "v4only.test.", RecordType::A).await;
     assert_eq!(first_answer(&msg).as_deref(), Some("192.0.2.44"));
 
+    shutdown(server).await;
+}
+
+/// A second client address on loopback (the tests' default client is
+/// 127.0.0.1).
+const OTHER_CLIENT: Ipv4Addr = Ipv4Addr::new(127, 0, 0, 5);
+
+fn policy(
+    name: &str,
+    client: Ipv4Addr,
+    action: ClientPolicyAction,
+    upstreams: Vec<String>,
+) -> ClientPolicyConfig {
+    ClientPolicyConfig {
+        name: name.to_string(),
+        enabled: true,
+        clients: vec![format!("{client}/32")],
+        action,
+        upstreams,
+    }
+}
+
+async fn resolver_stats(server: &daygle_dns::BoundServer) -> serde_json::Value {
+    reqwest::get(format!("http://{}/api/resolver", server.api_addr))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn client_policies_route_forward_and_refuse_per_client() {
+    // Default clients forward to one upstream; the policy client to another.
+    let default_upstream = spawn_upstream_answering("test.", Ipv4Addr::new(192, 0, 2, 1)).await;
+    let family_upstream = spawn_upstream_answering("test.", Ipv4Addr::new(192, 0, 2, 2)).await;
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = base_config(&dir.path().join("daygle-dns.db"));
+    config.recursive.enabled = true;
+    config.recursive.mode = Some(ResolutionMode::Forwarding);
+    config.recursive.upstreams = vec![default_upstream.to_string()];
+    config.recursive.dnssec_validate = false;
+    config.recursive.client_policies = vec![policy(
+        "kids",
+        OTHER_CLIENT,
+        ClientPolicyAction::Forward,
+        vec![family_upstream.to_string()],
+    )];
+    let server = spawn(config).await;
+    let udp = server.udp_addr.unwrap();
+
+    // The same name, answered per client - and not from the other's cache.
+    for _ in 0..2 {
+        let msg = udp_query(udp, "www.site.test.", RecordType::A).await;
+        assert_eq!(first_answer(&msg).as_deref(), Some("192.0.2.1"));
+        let msg = udp_query_from(OTHER_CLIENT.into(), udp, "www.site.test.", RecordType::A).await;
+        assert_eq!(first_answer(&msg).as_deref(), Some("192.0.2.2"));
+    }
+
+    let stats = resolver_stats(&server).await;
+    assert_eq!(stats["client_policies"], 1);
+    assert_eq!(stats["stats"]["routes"]["client_policy"], 2);
+    assert_eq!(stats["stats"]["routes"]["forwarding"], 2);
+    assert_eq!(stats["stats"]["outcomes"]["noerror"], 4);
+    let latency: u64 = stats["stats"]["latency"]["counts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c.as_u64().unwrap())
+        .sum();
+    assert_eq!(latency, 4);
+    shutdown(server).await;
+
+    // A refuse policy turns the client away; everyone else still resolves.
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = base_config(&dir.path().join("daygle-dns.db"));
+    config.recursive.enabled = true;
+    config.recursive.mode = Some(ResolutionMode::Forwarding);
+    config.recursive.upstreams = vec![default_upstream.to_string()];
+    config.recursive.dnssec_validate = false;
+    config.recursive.client_policies = vec![policy(
+        "guests",
+        OTHER_CLIENT,
+        ClientPolicyAction::Refuse,
+        vec![],
+    )];
+    let server = spawn(config).await;
+    let udp = server.udp_addr.unwrap();
+    let msg = udp_query_from(OTHER_CLIENT.into(), udp, "www.site.test.", RecordType::A).await;
+    assert_eq!(msg.response_code, ResponseCode::Refused);
+    let msg = udp_query(udp, "www.site.test.", RecordType::A).await;
+    assert_eq!(first_answer(&msg).as_deref(), Some("192.0.2.1"));
+    shutdown(server).await;
+}
+
+#[tokio::test]
+async fn recursive_client_policy_while_the_default_forwards() {
+    let port = spawn_hierarchy().await;
+    let upstream = spawn_upstream_answering("example.test.", Ipv4Addr::new(192, 0, 2, 9)).await;
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = recursive_config(&dir, port);
+    config.recursive.mode = Some(ResolutionMode::Forwarding);
+    config.recursive.upstreams = vec![upstream.to_string()];
+    config.recursive.client_policies = vec![policy(
+        "lab",
+        OTHER_CLIENT,
+        ClientPolicyAction::Recursive,
+        vec![],
+    )];
+    let server = spawn(config).await;
+    let udp = server.udp_addr.unwrap();
+
+    // The policy client walks the fake hierarchy; others use the upstream.
+    let msg = udp_query_from(OTHER_CLIENT.into(), udp, "www.example.test.", RecordType::A).await;
+    assert_eq!(first_answer(&msg).as_deref(), Some("198.51.100.7"));
+    let msg = udp_query(udp, "www.example.test.", RecordType::A).await;
+    assert_eq!(first_answer(&msg).as_deref(), Some("192.0.2.9"));
+    shutdown(server).await;
+}
+
+async fn cache_counters(server: &daygle_dns::BoundServer) -> (u64, u64) {
+    let metrics: serde_json::Value =
+        reqwest::get(format!("http://{}/api/metrics", server.api_addr))
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+    (
+        metrics["cache_hits"].as_u64().unwrap(),
+        metrics["cache_misses"].as_u64().unwrap(),
+    )
+}
+
+#[tokio::test]
+async fn cache_hits_and_misses_are_counted_in_both_modes() {
+    // Recursive: the first lookup walks the hierarchy, the repeat is cached.
+    let port = spawn_hierarchy().await;
+    let dir = tempfile::tempdir().unwrap();
+    let server = spawn(recursive_config(&dir, port)).await;
+    let udp = server.udp_addr.unwrap();
+    let msg = udp_query(udp, "www.example.test.", RecordType::A).await;
+    assert_eq!(first_answer(&msg).as_deref(), Some("198.51.100.7"));
+    assert_eq!(cache_counters(&server).await, (0, 1));
+    let msg = udp_query(udp, "www.example.test.", RecordType::A).await;
+    assert_eq!(first_answer(&msg).as_deref(), Some("198.51.100.7"));
+    assert_eq!(cache_counters(&server).await, (1, 1));
+    shutdown(server).await;
+
+    // Forwarding: the same through an upstream.
+    let upstream = spawn_upstream_answering("site.test.", Ipv4Addr::new(192, 0, 2, 1)).await;
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = base_config(&dir.path().join("daygle-dns.db"));
+    config.recursive.enabled = true;
+    config.recursive.mode = Some(ResolutionMode::Forwarding);
+    config.recursive.upstreams = vec![upstream.to_string()];
+    config.recursive.dnssec_validate = false;
+    let server = spawn(config).await;
+    let udp = server.udp_addr.unwrap();
+    for expected in [(0, 1), (1, 1), (2, 1)] {
+        let msg = udp_query(udp, "www.site.test.", RecordType::A).await;
+        assert_eq!(first_answer(&msg).as_deref(), Some("192.0.2.1"));
+        assert_eq!(cache_counters(&server).await, expected);
+    }
+    shutdown(server).await;
+}
+
+async fn flush_name(
+    server: &daygle_dns::BoundServer,
+    body: serde_json::Value,
+) -> (u16, serde_json::Value) {
+    let resp = reqwest::Client::new()
+        .post(format!("http://{}/api/cache/flush", server.api_addr))
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    let status = resp.status().as_u16();
+    (status, resp.json().await.unwrap_or_default())
+}
+
+#[tokio::test]
+async fn flushing_one_name_drops_it_from_the_cache() {
+    let upstream = spawn_upstream_answering("site.test.", Ipv4Addr::new(192, 0, 2, 1)).await;
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = base_config(&dir.path().join("daygle-dns.db"));
+    config.recursive.enabled = true;
+    config.recursive.mode = Some(ResolutionMode::Forwarding);
+    config.recursive.upstreams = vec![upstream.to_string()];
+    config.recursive.dnssec_validate = false;
+    let server = spawn(config).await;
+    let udp = server.udp_addr.unwrap();
+
+    for name in ["www.site.test.", "other.site.test.", "www.site.test."] {
+        udp_query(udp, name, RecordType::A).await;
+    }
+    assert_eq!(cache_counters(&server).await, (1, 2));
+
+    // Flushing www (all types, as typed without the trailing dot) makes the
+    // next query go upstream again; other.site.test stays cached.
+    let (status, body) = flush_name(&server, serde_json::json!({ "name": "WWW.site.test" })).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["complete"], true);
+    udp_query(udp, "www.site.test.", RecordType::A).await;
+    assert_eq!(cache_counters(&server).await, (1, 3));
+    udp_query(udp, "other.site.test.", RecordType::A).await;
+    assert_eq!(cache_counters(&server).await, (2, 3));
+
+    // One type only, and input errors.
+    let (status, _) = flush_name(
+        &server,
+        serde_json::json!({ "name": "www.site.test", "type": "aaaa" }),
+    )
+    .await;
+    assert_eq!(status, 200);
+    let (status, _) = flush_name(
+        &server,
+        serde_json::json!({ "name": "www.site.test", "type": "NOPE" }),
+    )
+    .await;
+    assert_eq!(status, 400);
+    let (status, _) = flush_name(&server, serde_json::json!({ "name": " " })).await;
+    assert_eq!(status, 400);
+    shutdown(server).await;
+
+    // Recursive mode cannot drop one entry from the recursor's cache.
+    let port = spawn_hierarchy().await;
+    let dir = tempfile::tempdir().unwrap();
+    let server = spawn(recursive_config(&dir, port)).await;
+    let (status, body) =
+        flush_name(&server, serde_json::json!({ "name": "www.example.test" })).await;
+    assert_eq!(status, 200);
+    assert_eq!(body["complete"], false);
+    shutdown(server).await;
+}
+
+#[tokio::test]
+async fn opportunistic_encryption_falls_back_to_plain_dns() {
+    // The fake servers speak no TLS: probes fail and resolution carries on
+    // over UDP.
+    let port = spawn_hierarchy().await;
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = recursive_config(&dir, port);
+    config.recursive.opportunistic_encryption = true;
+    let server = spawn(config).await;
+    let udp = server.udp_addr.unwrap();
+
+    let msg = udp_query(udp, "www.example.test.", RecordType::A).await;
+    assert_eq!(first_answer(&msg).as_deref(), Some("198.51.100.7"));
+    let stats = resolver_stats(&server).await;
+    assert_eq!(stats["opportunistic_encryption"], true);
+    assert_eq!(stats["mode"], "recursive");
+    assert!(
+        stats["stats"]["connections"]["udp"].as_u64().unwrap() > 0,
+        "{stats}"
+    );
+    assert!(
+        stats["stats"]["routes"]["recursive"].as_u64().unwrap() >= 1,
+        "{stats}"
+    );
     shutdown(server).await;
 }
 

@@ -1,30 +1,80 @@
 <script>
-  import { onDestroy } from 'svelte';
-  import { api, getToken } from '../api.js';
+  import { onDestroy, onMount } from 'svelte';
+  import { api, getToken, formatApiError } from '../api.js';
   import PageHeader from '../PageHeader.svelte';
   import { icons } from '../icons.svelte.js';
-  import { formatDateTime } from '../datetime.svelte.js';
+  import { formatDateTime, displayZoneName, zonedInputToIso } from '../datetime.svelte.js';
 
-  // Two tabs: the in-memory server log and the searchable per-query history.
+  // Two tabs: the searchable per-query history and the in-memory server log.
   // Query Log opens first: it is what the Logs page is used for day to day.
+  const TABS = [
+    {
+      id: 'queries',
+      label: 'Query Log',
+      tagline:
+        'Every query the server answered, newest first. Filter by client, domain, type or result, export the matches as CSV, or follow new queries live. Click a client or domain to filter by it.',
+    },
+    {
+      id: 'server',
+      label: 'Server Log',
+      tagline:
+        "The server's own messages: startup, zone transfers, blocklist refreshes, settings changes and errors. Kept in memory, so it starts empty after a restart.",
+    },
+  ];
   let tab = $state('queries');
+  const current = $derived(TABS.find((t) => t.id === tab));
+
+  function openTab(id) {
+    tab = id;
+    if (id === 'queries') runQuery(1);
+    else {
+      stopLive();
+      refresh();
+    }
+  }
 
   // ---- Server log ----
   let logs = $state([]);
   let error = $state(null);
+  let logLevel = $state('');
+  let logSearch = $state('');
+  const LEVELS = [
+    ['error', 'Errors'],
+    ['warn', 'Warnings and Errors'],
+    ['info', 'Information and Above'],
+  ];
+  const RANK = { debug: 0, info: 1, warn: 2, error: 3 };
+  // Newest first, like the query log.
+  const shownLogs = $derived(
+    logs
+      .filter((e) => !logLevel || (RANK[e.level] ?? 0) >= RANK[logLevel])
+      .filter((e) => {
+        const q = logSearch.trim().toLowerCase();
+        return !q || e.message.toLowerCase().includes(q) || e.component.toLowerCase().includes(q);
+      })
+      .slice()
+      .reverse(),
+  );
 
   async function refresh() {
     error = null;
     try {
-      logs = await api.logs(300);
+      logs = await api.logs(500);
     } catch (e) {
-      error = String(e.message || e);
+      error = formatApiError(e);
     }
   }
 
-  // ---- Query logs ----
-  const QTYPES = ['A', 'AAAA', 'CNAME', 'MX', 'TXT', 'NS', 'SOA', 'PTR', 'SRV', 'CAA', 'DS', 'DNSKEY', 'ANY'];
-  const PROTOCOLS = ['udp', 'tcp', 'tls', 'https', 'quic'];
+  // ---- Query log ----
+  const QTYPES = ['A', 'AAAA', 'CNAME', 'MX', 'TXT', 'NS', 'SOA', 'PTR', 'SRV', 'CAA', 'HTTPS', 'SVCB', 'DS', 'DNSKEY', 'ANY'];
+  const PROTOCOLS = [
+    ['udp', 'UDP'],
+    ['tcp', 'TCP'],
+    ['tls', 'DNS over TLS'],
+    ['https', 'DNS over HTTPS'],
+    ['quic', 'DNS over QUIC'],
+  ];
+  const PROTOCOL_SHORT = { udp: 'UDP', tcp: 'TCP', tls: 'DoT', https: 'DoH', quic: 'DoQ' };
   const OUTCOMES = [
     ['authoritative', 'Authoritative'],
     ['recursive', 'Recursive'],
@@ -50,9 +100,15 @@
   let qEntries = $state([]);
   let qTotal = $state(0);
   let qError = $state(null);
+  let qNotice = $state(null);
   let qLoading = $state(false);
+  let qLoaded = $state(false);
   let live = $state(false);
   let liveTimer = null;
+
+  const filtersActive = $derived(
+    !!(fClient.trim() || fQname.trim() || fQtype || fProtocol || fOutcome || fRcode || fFrom || fTo),
+  );
 
   function buildQuery(overrides = {}) {
     const params = new URLSearchParams();
@@ -63,14 +119,11 @@
     put('protocol', fProtocol);
     put('outcome', fOutcome);
     put('rcode', fRcode);
-    put('from', fFrom);
-    put('to', fTo);
+    // The pickers show the display time zone; the API wants UTC.
+    put('from', zonedInputToIso(fFrom));
+    put('to', zonedInputToIso(fTo));
     for (const [key, value] of Object.entries(overrides)) put(key, value);
     return params.toString();
-  }
-
-  function currentQuery(overrides = {}) {
-    return buildQuery({ page, per_page: perPage, ...overrides });
   }
 
   async function runQuery(newPage = 1) {
@@ -78,19 +131,33 @@
     qLoading = true;
     qError = null;
     try {
-      const data = await api.queryLogs(currentQuery());
+      const data = await api.queryLogs(buildQuery({ page, per_page: perPage }));
       qEntries = data.entries || [];
       qTotal = data.total || 0;
     } catch (e) {
-      qError = String(e.message || e);
+      qError = formatApiError(e);
     } finally {
       qLoading = false;
+      qLoaded = true;
     }
+  }
+
+  // Selects apply as soon as they change; text and time fields on Enter or
+  // Search.
+  function apply() {
+    qNotice = null;
+    runQuery(1);
   }
 
   function resetFilters() {
     fClient = fQname = fQtype = fProtocol = fOutcome = fRcode = fFrom = fTo = '';
-    runQuery(1);
+    apply();
+  }
+
+  function filterBy(field, value) {
+    if (field === 'client') fClient = value;
+    else fQname = value;
+    apply();
   }
 
   function totalPages() {
@@ -102,7 +169,14 @@
     const token = getToken();
     const headers = token ? { Authorization: `Bearer ${token}` } : {};
     fetch(`/api/querylogs?${qs}`, { headers })
-      .then((res) => { if (!res.ok) throw new Error(res.statusText); return res.blob(); })
+      .then(async (res) => {
+        if (!res.ok) {
+          let detail = res.statusText;
+          try { detail = (await res.json()).error || detail; } catch (_) { /* not JSON */ }
+          throw new Error(detail);
+        }
+        return res.blob();
+      })
       .then((blob) => {
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
@@ -112,27 +186,32 @@
         // Revoking synchronously can cancel the download in some browsers.
         setTimeout(() => URL.revokeObjectURL(url), 0);
       })
-      .catch((e) => { qError = String(e.message || e); });
+      .catch((e) => { qError = formatApiError(e); });
   }
 
   async function clearLog() {
     if (!window.confirm('Delete every recorded query? This cannot be undone.')) return;
+    qNotice = null;
     try {
-      await api.clearQueryLogs();
+      const res = await api.clearQueryLogs();
+      qNotice = `Query log cleared (${Number(res?.deleted || 0).toLocaleString()} entries deleted).`;
       runQuery(1);
     } catch (e) {
-      qError = String(e.message || e);
+      qError = formatApiError(e);
     }
   }
 
-  function toggleLive() {
-    live = !live;
+  function stopLive() {
+    live = false;
     if (liveTimer) { clearInterval(liveTimer); liveTimer = null; }
-    if (live) liveTimer = setInterval(() => runQuery(page), 3000);
   }
 
-  function fmtTime(ts) {
-    return formatDateTime(ts);
+  // Live update follows the newest queries, so it shows the first page.
+  function toggleLive() {
+    if (live) { stopLive(); return; }
+    live = true;
+    runQuery(1);
+    liveTimer = setInterval(() => runQuery(1), 3000);
   }
 
   // Full-word, title-case severity names for the Level column.
@@ -156,19 +235,26 @@
     return outcome.replaceAll('_', ' ').replace(/\b\w/g, (c) => c.toUpperCase());
   }
 
+  function fmt(n) {
+    return Number(n || 0).toLocaleString();
+  }
+
   // Stop live polling when the view is left; the interval would otherwise
   // keep querying (and stack up) after navigating away.
-  onDestroy(() => { if (liveTimer) clearInterval(liveTimer); });
+  onDestroy(stopLive);
 
-  $effect(() => { refresh(); });
-  $effect(() => { if (tab === 'queries' && qTotal === 0 && qEntries.length === 0 && !qError && !qLoading) runQuery(1); });
+  // Load the first page once. (Re-running whenever the list came back empty
+  // would poll the server in a loop while the log is empty, and an effect
+  // would re-run on every keystroke in the filter fields it reads.)
+  onMount(() => runQuery(1));
 </script>
 
-<PageHeader icon={icons.logs} title="Logs" />
+<PageHeader icon={icons.logs} title="Logs" tagline={current.tagline} />
 
 <div class="tabs">
-  <button class="tab" class:active={tab === 'queries'} onclick={() => { tab = 'queries'; runQuery(1); }}>Query Log</button>
-  <button class="tab" class:active={tab === 'server'} onclick={() => { tab = 'server'; refresh(); }}>Server Log</button>
+  {#each TABS as t (t.id)}
+    <button class="tab" class:active={tab === t.id} onclick={() => openTab(t.id)}>{t.label}</button>
+  {/each}
 </div>
 
 {#if tab === 'server'}
@@ -177,26 +263,30 @@
   {/if}
   <div class="card">
     <div class="spread" style="margin-bottom: 10px; gap: 10px; flex-wrap: wrap">
-      <div>
-        <h3 style="margin: 0">Server Log</h3>
-        <span class="muted small">Showing the most recent {logs.length} entries</span>
+      <h3 style="margin: 0">Server Log ({fmt(shownLogs.length)}{shownLogs.length !== logs.length ? ` of ${fmt(logs.length)}` : ''})</h3>
+      <div class="row" style="gap: 8px; flex-wrap: wrap">
+        <input type="search" placeholder="Search Messages" bind:value={logSearch} style="min-width: 200px" />
+        <select bind:value={logLevel} aria-label="Level">
+          <option value="">All Levels</option>
+          {#each LEVELS as [value, label] (value)}<option value={value}>{label}</option>{/each}
+        </select>
+        <button class="secondary" onclick={refresh}>Reload</button>
       </div>
-      <button class="secondary" onclick={refresh}>Reload</button>
     </div>
     <div class="table-wrap" style="max-height: 70vh; overflow-y: auto">
       <table>
         <thead>
-          <tr><th>Time</th><th>Level</th><th>Component</th><th>Message</th></tr>
+          <tr><th title={`Shown in ${displayZoneName()}`}>Time</th><th>Level</th><th>Component</th><th>Message</th></tr>
         </thead>
         <tbody>
-          {#each logs as entry (entry.timestamp + entry.component + entry.message)}
+          {#each shownLogs as entry, i (i)}
             <tr>
-              <td style="white-space: nowrap">{fmtTime(entry.timestamp)}</td>
+              <td style="white-space: nowrap">{formatDateTime(entry.timestamp)}</td>
               <td><span class:pill={true} class:ok={entry.level === 'info'} class:err={entry.level === 'error'} class:warn={entry.level === 'warn'}>
                 {levelLabel(entry.level)}
               </span></td>
               <td>{entry.component}</td>
-              <td><code>{entry.message}</code></td>
+              <td class="message">{entry.message}</td>
             </tr>
           {/each}
         </tbody>
@@ -204,111 +294,139 @@
     </div>
     {#if logs.length === 0}
       <p class="muted">No log entries yet.</p>
+    {:else if shownLogs.length === 0}
+      <p class="muted">No entries match this search.</p>
     {/if}
+    <p class="muted help">Newest first. Shows the last 500 entries; older ones are dropped.</p>
   </div>
 {:else}
   <div class="card" style="margin-bottom: 14px">
-    <h3 style="margin: 0 0 10px">Filters</h3>
-    <form onsubmit={(e) => { e.preventDefault(); runQuery(1); }}>
+    <form onsubmit={(e) => { e.preventDefault(); apply(); }}>
       <div class="filter-grid">
         <label>Client IP
           <input placeholder="192.168.1.20" bind:value={fClient} />
         </label>
         <label>Domain
-          <input placeholder="example.com or *example.com" bind:value={fQname} />
+          <input placeholder="example.com or *.example.com" bind:value={fQname} />
         </label>
         <label>Type
-          <select bind:value={fQtype}>
+          <select bind:value={fQtype} onchange={apply}>
             <option value="">Any</option>
-            {#each QTYPES as t}<option value={t}>{t}</option>{/each}
+            {#each QTYPES as t (t)}<option value={t}>{t}</option>{/each}
           </select>
         </label>
         <label>Protocol
-          <select bind:value={fProtocol}>
+          <select bind:value={fProtocol} onchange={apply}>
             <option value="">Any</option>
-            {#each PROTOCOLS as p}<option value={p}>{p.toUpperCase()}</option>{/each}
+            {#each PROTOCOLS as [value, label] (value)}<option value={value}>{label}</option>{/each}
           </select>
         </label>
-        <label>Response
-          <select bind:value={fOutcome}>
+        <label>Result
+          <select bind:value={fOutcome} onchange={apply}>
             <option value="">Any</option>
-            {#each OUTCOMES as [value, label]}<option value={value}>{label}</option>{/each}
+            {#each OUTCOMES as [value, label] (value)}<option value={value}>{label}</option>{/each}
           </select>
         </label>
-        <label>RCODE
-          <select bind:value={fRcode}>
+        <label>Response Code
+          <select bind:value={fRcode} onchange={apply}>
             <option value="">Any</option>
-            {#each RCODES as r}<option value={r}>{r}</option>{/each}
+            {#each RCODES as r (r)}<option value={r}>{r}</option>{/each}
           </select>
         </label>
-        <label>From
+        <label>From <span class="tz">{displayZoneName()}</span>
           <input type="datetime-local" bind:value={fFrom} />
         </label>
-        <label>To
+        <label>To <span class="tz">{displayZoneName()}</span>
           <input type="datetime-local" bind:value={fTo} />
         </label>
-        <label>Per Page
-          <select bind:value={perPage}>
-            <option value={25}>25</option>
-            <option value={50}>50</option>
-            <option value={100}>100</option>
-            <option value={200}>200</option>
-          </select>
-        </label>
       </div>
-      <div class="row" style="margin-top: 10px; gap: 8px">
-        <button type="submit">Query</button>
-        <button type="button" class="secondary" onclick={exportCsv}>Export</button>
-        <button type="button" class="secondary" onclick={resetFilters}>Reset</button>
-        <button type="button" class="danger" onclick={clearLog}>Clear Log</button>
-        <label class="row" style="gap: 6px; align-items: center; margin-left: 8px">
-          <input type="checkbox" checked={live} onchange={toggleLive} />
-          <span>Live Update</span>
-        </label>
+      <div class="spread" style="margin-top: 12px; gap: 8px; flex-wrap: wrap">
+        <div class="row" style="gap: 8px">
+          <button type="submit">Search</button>
+          <button type="button" class="secondary" onclick={resetFilters} disabled={!filtersActive}>Reset Filters</button>
+          <label class="live">
+            <input type="checkbox" checked={live} onchange={toggleLive} />
+            <span>Live Update</span>
+          </label>
+        </div>
+        <div class="row" style="gap: 8px">
+          <button type="button" class="secondary" onclick={exportCsv} title="Download every matching query as CSV">Export CSV</button>
+          <button type="button" class="danger" onclick={clearLog}>Clear Log</button>
+        </div>
       </div>
     </form>
   </div>
 
+  {#if qNotice}
+    <div class="card" style="border-color: var(--ok); margin-bottom: 14px">{qNotice}</div>
+  {/if}
   {#if qError}
     <div class="card" style="border-color: var(--danger); color: var(--danger); margin-bottom: 14px">{qError}</div>
   {/if}
 
   <div class="card">
-    <h3 style="margin: 0 0 10px">Queries ({qTotal})</h3>
+    <div class="spread" style="margin-bottom: 10px; gap: 10px; flex-wrap: wrap">
+      <h3 style="margin: 0">{filtersActive ? 'Matching Queries' : 'Queries'} ({fmt(qTotal)})</h3>
+      <label class="per-page">Per Page
+        <select bind:value={perPage} onchange={apply}>
+          <option value={25}>25</option>
+          <option value={50}>50</option>
+          <option value={100}>100</option>
+          <option value={200}>200</option>
+        </select>
+      </label>
+    </div>
     <div class="table-wrap">
     <table>
       <thead>
-        <tr><th>Time</th><th>Client</th><th>Domain</th><th>Type</th><th>Protocol</th><th>Response</th><th>RCODE</th><th style="text-align: right">Took</th></tr>
+        <tr>
+          <th title={`Shown in ${displayZoneName()}`}>Time</th>
+          <th>Client</th>
+          <th>Domain</th>
+          <th>Type</th>
+          <th>Protocol</th>
+          <th>Result</th>
+          <th>Response Code</th>
+          <th class="num">Took</th>
+        </tr>
       </thead>
       <tbody>
         {#each qEntries as entry (entry.id)}
           <tr>
-            <td style="white-space: nowrap">{fmtTime(entry.ts)}</td>
-            <td><code>{entry.client}</code></td>
-            <td><code>{entry.qname}</code></td>
+            <td style="white-space: nowrap">{formatDateTime(entry.ts)}</td>
+            <td><button type="button" class="link" onclick={() => filterBy('client', entry.client)} title="Show only this client"><code>{entry.client}</code></button></td>
+            <td><button type="button" class="link" onclick={() => filterBy('qname', entry.qname)} title="Show only this domain"><code>{entry.qname}</code></button></td>
             <td>{entry.qtype}</td>
-            <td>{entry.protocol.toUpperCase()}</td>
+            <td title={PROTOCOLS.find(([v]) => v === entry.protocol)?.[1] || ''}>{PROTOCOL_SHORT[entry.protocol] || entry.protocol.toUpperCase()}</td>
             <td><span class:pill={true} class:ok={outcomeClass(entry.outcome) === 'ok'} class:err={outcomeClass(entry.outcome) === 'err'} class:warn={outcomeClass(entry.outcome) === 'warn'}>
               {outcomeLabel(entry.outcome)}
             </span></td>
             <td>{entry.rcode || '-'}</td>
-            <td style="text-align: right">{entry.elapsed_ms} ms</td>
+            <td class="num">{entry.elapsed_ms} ms</td>
           </tr>
         {/each}
       </tbody>
     </table>
     </div>
-    {#if !qLoading && qEntries.length === 0 && !qError}
-      <p class="muted">
-        No queries recorded yet{qTotal === 0 && buildQuery() === '' ? ' - make a DNS query or check that query logging is enabled in Settings' : ''}.
-      </p>
+    {#if qLoaded && !qLoading && qEntries.length === 0 && !qError}
+      {#if filtersActive}
+        <p class="muted">No queries match these filters.</p>
+      {:else}
+        <p class="muted">
+          No queries recorded yet. Queries appear here as clients use the
+          server. If they never do, check that <code>query_db_enabled</code>
+          is on in the <code>[logging]</code> section of the config file.
+        </p>
+      {/if}
     {/if}
-  </div>
 
-  <div class="row" style="margin-top: 10px; gap: 10px; align-items: center">
-    <button class="secondary" disabled={page <= 1} onclick={() => runQuery(page - 1)}>← Prev</button>
-    <span class="muted">Page {page} of {totalPages()} · {qTotal} quer{qTotal === 1 ? 'y' : 'ies'}</span>
-    <button class="secondary" disabled={page >= totalPages()} onclick={() => runQuery(page + 1)}>Next →</button>
+    {#if qTotal > perPage}
+      <div class="row pager">
+        <button class="secondary" disabled={page <= 1 || live} onclick={() => runQuery(page - 1)}>← Prev</button>
+        <span class="muted">Page {page} of {fmt(totalPages())}</span>
+        <button class="secondary" disabled={page >= totalPages() || live} onclick={() => runQuery(page + 1)}>Next →</button>
+      </div>
+    {/if}
   </div>
 {/if}
 
@@ -318,13 +436,31 @@
     grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
     gap: 10px 14px;
   }
-  .filter-grid label {
+  .filter-grid label, .per-page {
     display: flex;
     flex-direction: column;
     gap: 4px;
     font-size: 0.85rem;
     color: var(--muted);
   }
+  .filter-grid label { position: relative; }
+  .tz { position: absolute; right: 0; top: 0; font-size: 0.72rem; }
+  .per-page { flex-direction: row; align-items: center; gap: 8px; }
+  .live { display: flex; flex-direction: row; gap: 6px; align-items: center; margin-left: 8px; }
+  .live input { width: auto; }
+  .pager { margin-top: 12px; gap: 10px; align-items: center; }
+  .message { word-break: break-word; }
+  .help { margin-bottom: 0; }
+  /* Table values that filter the list when clicked. */
+  .link {
+    background: none;
+    border: none;
+    padding: 0;
+    color: inherit;
+    cursor: pointer;
+    text-align: left;
+  }
+  .link:hover code { color: var(--accent); text-decoration: underline; }
   .pill.warn {
     color: #e0a34e;
     border-color: #e0a34e;

@@ -220,6 +220,28 @@ impl AiEngine {
         self.snapshot.clone()
     }
 
+    /// The classification pipeline actually running (e.g. `heuristic`,
+    /// `fasttext`, `fasttext+minilm-onnx`): a missing model file falls back
+    /// to `heuristic`, whatever the settings say.
+    pub fn backend_name(&self) -> String {
+        self.scanner.backend_name().to_string()
+    }
+
+    /// Domains that qualify for auto-blocking now, counted by category:
+    /// blocked in enforce mode, what would be blocked in train mode.
+    pub fn blockable_counts(&self) -> Result<std::collections::BTreeMap<String, usize>> {
+        let cfg = self.settings.load();
+        let mut counts = std::collections::BTreeMap::new();
+        for block in self
+            .scanner
+            .eligible_blocks(&cfg, chrono::Utc::now().timestamp())?
+            .values()
+        {
+            *counts.entry(block.category.clone()).or_insert(0) += 1;
+        }
+        Ok(counts)
+    }
+
     /// Categories the loaded backend can emit (model labels or heuristic
     /// rules), for the console's auto-block category picker.
     pub fn backend_categories(&self) -> Vec<String> {

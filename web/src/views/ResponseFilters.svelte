@@ -70,15 +70,19 @@
       </label>
     </div>
     <p class="muted help" style="margin: 0 0 10px">
-      Answer AAAA (IPv6) queries with an empty response so dual-stack clients fall
-      back to IPv4. List any names - one per line, <code>*.suffix</code> allowed -
-      that must keep their IPv6 answers.
+      Answers IPv6 (AAAA) lookups with an empty response, so devices with both
+      IPv4 and IPv6 use IPv4. Useful when IPv6 is broken or slow on your
+      network.
     </p>
-    <textarea
-      rows="3"
-      placeholder={'*.ipv6.example.com\nnas.home.arpa'}
-      bind:value={filterAaaaExcept}
-    ></textarea>
+    <label class="field">
+      <span>Keep IPv6 For</span>
+      <textarea
+        rows="3"
+        placeholder={'*.ipv6.example.com\nnas.home.arpa'}
+        bind:value={filterAaaaExcept}
+      ></textarea>
+    </label>
+    <p class="muted help">Names that keep their IPv6 answers, one per line; <code>*.example.com</code> covers the subdomains.</p>
     <div class="row" style="margin-top: 10px">
       <button onclick={saveFilterAaaa} disabled={busy}>{busy ? 'Saving…' : 'Save'}</button>
     </div>
@@ -91,5 +95,6 @@
 
 <style>
   textarea { width: 100%; }
+  .field { display: flex; flex-direction: column; gap: 4px; font-size: 0.85rem; color: var(--muted); }
   .check { display: inline-flex; align-items: center; gap: 8px; }
 </style>

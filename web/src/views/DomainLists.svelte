@@ -5,6 +5,10 @@
   let trusted = $state('');
   let blocked = $state('');
   let busy = $state(false);
+  // What was last loaded, to tell whether there are unsaved edits.
+  let savedTrusted = $state('');
+  let savedBlocked = $state('');
+  const dirty = $derived(trusted !== savedTrusted || blocked !== savedBlocked);
   let error = $state(null);
   let notice = $state(null);
 
@@ -16,6 +20,8 @@
       // would erase them on the next save.
       trusted = (config?.policy?.allowlist || []).join('\n');
       blocked = (config?.policy?.blocklist || []).join('\n');
+      savedTrusted = trusted;
+      savedBlocked = blocked;
     } catch (e) {
       error = formatApiError(e);
     }
@@ -57,20 +63,29 @@
 {#if config}
   <div class="lists">
     <div class="card">
-      <h3 style="margin: 0 0 10px">Trusted Domains (Allowlist)</h3>
-      <p class="muted help" style="margin: 0 0 10px">These domains bypass the normal blocklist and remote sources.</p>
+      <h3 style="margin: 0 0 4px">Always Allow ({parse(trusted).length})</h3>
+      <p class="muted help" style="margin: 0 0 10px">
+        Never blocked by the blocklists, the list on the right or the AI.
+      </p>
       <textarea rows="14" bind:value={trusted} placeholder={"updates.example.com\n*.trusted.example"}></textarea>
     </div>
     <div class="card">
-      <h3 style="margin: 0 0 10px">Blocked Domains (Blocklist)</h3>
-      <p class="muted help" style="margin: 0 0 10px">These domains are blocked before normal resolution.</p>
+      <h3 style="margin: 0 0 4px">Always Block ({parse(blocked).length})</h3>
+      <p class="muted help" style="margin: 0 0 10px">
+        Blocked for every client, whatever the blocklists say.
+      </p>
       <textarea rows="14" bind:value={blocked} placeholder={"ads.example.com\n*.tracking.example"}></textarea>
     </div>
   </div>
   <div class="row" style="margin-top: 14px">
-    <button onclick={save} disabled={busy}>{busy ? 'Saving…' : 'Save'}</button>
-    <button class="secondary" onclick={load} disabled={busy}>Reload</button>
+    <button onclick={save} disabled={busy || !dirty}>{busy ? 'Saving…' : 'Save'}</button>
+    <button class="secondary" onclick={load} disabled={busy || !dirty}>Discard Changes</button>
+    {#if dirty}<span class="muted">Unsaved changes</span>{/if}
   </div>
+  <p class="muted help">
+    One domain per line. <code>example.com</code> matches that name only;
+    <code>*.example.com</code> also matches every subdomain.
+  </p>
 {:else}
   <div class="card">
     <p class="muted">Loading…</p>
