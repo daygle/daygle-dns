@@ -102,3 +102,90 @@ async fn conditional_zone_resolves_via_dedicated_upstream() {
 
     shutdown(server).await;
 }
+
+#[tokio::test]
+async fn console_conditional_zone_applies_live() {
+    // Default upstream hosts zonea.test only; zoneb.test is unknown to it
+    // until the console adds a conditional forwarder pointing at stub_b.
+    let stub_a = spawn_stub("zonea.test", "198.51.100.10").await;
+    let stub_b = spawn_stub("zoneb.test", "198.51.100.20").await;
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = base_config(&dir.path().join("daygle-dns.db"));
+    config.recursive.enabled = true;
+    config.recursive.use_system_config = false;
+    config.recursive.upstreams = vec![stub_a.to_string()];
+    config.recursive.dnssec_validate = false;
+    config.recursive.attempts = 2;
+    config.recursive.timeout_secs = 3;
+    // Real ports: validation rejects port 0, and that pre-existing error
+    // would otherwise mask the error this test expects from a bad update.
+    config.server.port = free_port();
+    config.api.port = free_port();
+
+    let server = spawn(config).await;
+    let udp = server.udp_addr.unwrap();
+    let api = format!("http://{}/api/config", server.api_addr);
+    let client = reqwest::Client::new();
+
+    let msg = udp_query(udp, "host.zoneb.test.", RecordType::A).await;
+    assert_eq!(msg.response_code, ResponseCode::NXDomain);
+
+    // A forwarder without upstreams is rejected and changes nothing.
+    let bad = client
+        .put(&api)
+        .json(&serde_json::json!({
+            "recursive": { "conditional_zones": [{ "name": "zoneb.test", "upstreams": [] }] }
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(bad.status(), 400);
+
+    // Names are normalized and blank upstreams dropped; the resolver is
+    // rebuilt so the forwarder serves immediately, without a restart.
+    let ok = client
+        .put(&api)
+        .json(&serde_json::json!({
+            "recursive": { "conditional_zones": [
+                { "name": " ZoneB.Test. ", "upstreams": [format!(" {stub_b} "), ""] }
+            ] }
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(ok.status(), 200);
+    let cfg: serde_json::Value = ok.json().await.unwrap();
+    assert_eq!(
+        cfg["recursive"]["conditional_zones"],
+        serde_json::json!([{ "name": "zoneb.test", "upstreams": [stub_b.to_string()] }])
+    );
+
+    let msg = udp_query(udp, "host.zoneb.test.", RecordType::A).await;
+    assert_eq!(msg.response_code, ResponseCode::NoError);
+    assert_eq!(first_answer(&msg).as_deref(), Some("198.51.100.20"));
+
+    // Removing it falls back to the default upstream again.
+    let cleared = client
+        .put(&api)
+        .json(&serde_json::json!({ "recursive": { "conditional_zones": [] } }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(cleared.status(), 200);
+    let msg = udp_query(udp, "fresh.zoneb.test.", RecordType::A).await;
+    assert_eq!(msg.response_code, ResponseCode::NXDomain);
+
+    shutdown(server).await;
+}
+
+/// A port that is currently free for both TCP and UDP on 127.0.0.1.
+fn free_port() -> u16 {
+    loop {
+        let tcp = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = tcp.local_addr().unwrap().port();
+        if std::net::UdpSocket::bind(("127.0.0.1", port)).is_ok() {
+            return port;
+        }
+    }
+}

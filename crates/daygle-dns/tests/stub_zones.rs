@@ -159,3 +159,74 @@ async fn deeper_stub_wins_and_disabled_stub_ignored() {
 
     shutdown(server).await;
 }
+
+#[tokio::test]
+async fn console_stub_zone_applies_live() {
+    let stub_ns = spawn_stub("stub.test", "198.51.100.40").await;
+    let default_upstream = spawn_stub("zonea.test", "198.51.100.10").await;
+
+    let mut config = base_config(&tempfile::tempdir().unwrap().path().join("daygle-dns.db"));
+    config.recursive.enabled = true;
+    config.recursive.use_system_config = false;
+    config.recursive.upstreams = vec![default_upstream.to_string()];
+    config.recursive.dnssec_validate = false;
+    config.recursive.attempts = 2;
+    config.recursive.timeout_secs = 3;
+    // Real ports: validation rejects port 0, which would mask the error
+    // this test expects from a bad update.
+    config.server.port = free_port();
+    config.api.port = free_port();
+
+    let server = spawn(config).await;
+    let udp = server.udp_addr.unwrap();
+    let api = format!("http://{}/api/config", server.api_addr);
+    let client = reqwest::Client::new();
+
+    let msg = udp_query(udp, "host.stub.test.", RecordType::A).await;
+    assert_eq!(msg.response_code, ResponseCode::NXDomain);
+
+    // An enabled stub without nameservers is rejected.
+    let bad = client
+        .put(&api)
+        .json(&serde_json::json!({
+            "authoritative": { "stub_zones": [{ "name": "stub.test", "nss": [] }] }
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(bad.status(), 400);
+
+    // refresh_secs and enabled default when omitted; the resolver is rebuilt
+    // so the stub serves immediately.
+    let ok = client
+        .put(&api)
+        .json(&serde_json::json!({
+            "authoritative": { "stub_zones": [{ "name": "Stub.Test.", "nss": [stub_ns.to_string()] }] }
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(ok.status(), 200);
+    let cfg: serde_json::Value = ok.json().await.unwrap();
+    let stub = &cfg["authoritative"]["stub_zones"][0];
+    assert_eq!(stub["name"], serde_json::json!("stub.test"));
+    assert_eq!(stub["enabled"], serde_json::json!(true));
+    assert_eq!(stub["refresh_secs"], serde_json::json!(3600));
+
+    let msg = udp_query(udp, "host.stub.test.", RecordType::A).await;
+    assert_eq!(msg.response_code, ResponseCode::NoError);
+    assert_eq!(first_answer(&msg).as_deref(), Some("198.51.100.40"));
+
+    shutdown(server).await;
+}
+
+/// A port that is currently free for both TCP and UDP on 127.0.0.1.
+fn free_port() -> u16 {
+    loop {
+        let tcp = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = tcp.local_addr().unwrap().port();
+        if std::net::UdpSocket::bind(("127.0.0.1", port)).is_ok() {
+            return port;
+        }
+    }
+}

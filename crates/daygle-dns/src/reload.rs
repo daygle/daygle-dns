@@ -99,9 +99,9 @@ pub fn apply_config(shared: &Shared, new: Arc<DaygleConfig>) -> bool {
         }
     }
 
-    // Recursive resolver / upstreams / stub zones. Stub zones are config-
-    // file-owned (see StubZoneConfig), so a change to them rebuilds the
-    // resolver together with the recursive settings.
+    // Recursive resolver / upstreams / stub zones. The resolver owns the stub
+    // zones (see StubZoneConfig), so a change to them rebuilds it together
+    // with the recursive settings.
     if old.recursive != new.recursive
         || old.authoritative.stub_zones != new.authoritative.stub_zones
     {
