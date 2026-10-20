@@ -164,10 +164,10 @@
 
 <PageHeader icon={icons.certificates} title="Certificates">
   {#snippet tagline()}
-    TLS certificates for the encrypted DNS listeners (DNS over TLS, HTTPS and
-    QUIC). Create a self-signed certificate, or upload one issued by a
-    certificate authority. Private keys stay on the server and are never sent
-    back to the browser.
+    TLS certificates for this web console (HTTPS) and the encrypted DNS
+    listeners (DNS over TLS, HTTPS and QUIC). Create a self-signed
+    certificate, or upload one issued by a certificate authority. Private
+    keys stay on the server and are never sent back to the browser.
   {/snippet}
 </PageHeader>
 
@@ -264,11 +264,16 @@
   {/if}
   <div class="spread foot">
     <p class="muted help" style="margin: 0">
-      Choose which certificate each listener uses in Settings → Encrypted
-      DNS. Replacing a certificate in use applies at once.
+      Choose the web console's certificate in Settings → General, and the
+      encrypted DNS listeners' in Settings → Encrypted DNS. Replacing a
+      certificate in use applies at once. For the web console, upload one
+      issued for the name you browse to, so browsers trust it.
     </p>
     {#if onOpenSettings}
-      <button class="secondary" onclick={() => onOpenSettings('listeners')}>Open Encrypted DNS Settings</button>
+      <div class="row" style="gap: 8px">
+        <button class="secondary" onclick={() => onOpenSettings('general')}>Web Console Settings</button>
+        <button class="secondary" onclick={() => onOpenSettings('listeners')}>Encrypted DNS Settings</button>
+      </div>
     {/if}
   </div>
 </div>
