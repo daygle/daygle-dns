@@ -306,12 +306,22 @@ pub async fn bind_with(
         inbound: notify_inbound,
     };
 
+    // Local root zone (RFC 8806): transferred, ZONEMD-verified and served
+    // to the resolver on loopback while `recursive.local_root.enabled`. The
+    // verified copy is cached next to the database across restarts.
+    let local_root = Arc::new(daygle_dns_authoritative::LocalRoot::new(
+        config.recursive.local_root.clone(),
+        local_root_cache_path(&config.authoritative.database),
+    ));
+    tokio::spawn(local_root.clone().run_forever(shutdown.clone()));
+
     // Recursive.
     let resolver = if config.recursive.enabled {
         Some(Arc::new(RecursiveResolver::build(
             &config.recursive,
             metrics.clone(),
             &config.authoritative.stub_zones,
+            Some(local_root.clone()),
         )?))
     } else {
         warn!("recursion is disabled");
@@ -402,6 +412,7 @@ pub async fn bind_with(
         stats: stats.clone(),
         notify_hooks: notify_hooks.clone(),
         tsig_keys: tsig_keys.clone(),
+        local_root: local_root.clone(),
     });
 
     // DNS listeners (bound immediately so the server serves right away).
@@ -475,6 +486,7 @@ pub async fn bind_with(
         policy: shared.policy.clone(),
         advanced_blocking: shared.advanced_blocking.clone(),
         secondary_refresher: refresher.clone(),
+        local_root: local_root.clone(),
         blocklist_sources: blocklist_sources.clone(),
         started_at,
         config_path: config_path.clone().map(Arc::new),
@@ -975,4 +987,13 @@ fn import_zone_files(
         );
     }
     catalog.reload()
+}
+
+/// Where the verified local root zone is cached: next to the database (none
+/// for an in-memory database).
+fn local_root_cache_path(database: &str) -> Option<std::path::PathBuf> {
+    if database.is_empty() || database == ":memory:" {
+        return None;
+    }
+    Some(std::path::Path::new(database).with_file_name("local-root.zone"))
 }

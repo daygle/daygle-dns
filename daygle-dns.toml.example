@@ -39,6 +39,15 @@ recursion_access = "private_networks"
 # rebinding_protection = false
 # root_hints = []   # custom root server IPs; empty uses the IANA roots
 #
+# Local root zone (RFC 8806, "Secondary ROOT Zone" in the console): keep a
+# copy of the root zone, accepted only when its ZONEMD digest and DNSSEC
+# signatures verify, and answer root queries from it. In forwarding mode,
+# names under top-level domains that do not exist are answered NXDOMAIN
+# locally (use a conditional zone for private TLDs such as .lan).
+# [recursive.local_root]
+# enabled = false
+# sources = []      # AXFR servers (IP, IP:port); empty uses ICANN/IANA defaults
+#
 # Forwarding mode: empty list + use_system_config = use /etc/resolv.conf.
 # Supported upstream forms:
 #   8.8.8.8             plaintext UDP+TCP, port 53

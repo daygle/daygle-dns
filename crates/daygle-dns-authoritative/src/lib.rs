@@ -17,23 +17,28 @@
 //! - [`notify`] - RFC 1996 NOTIFY: outbound to secondaries, inbound from masters.
 //! - [`dnssec`] - background RRSIG renewal and automatic DNSSEC key rollover.
 //! - [`update`] - RFC 2136 dynamic updates with write-through to SQLite.
+//! - [`root_zone`] - the local root zone (RFC 8806), verified with
+//!   [`zonemd`] (RFC 8976).
 
 pub mod catalog;
 pub mod dnssec;
 pub mod model;
 pub mod notify;
 pub mod parse;
+pub mod root_zone;
 pub mod secondary;
 pub mod split_horizon;
 pub mod store;
 pub mod transfer;
 pub mod tsig;
 pub mod update;
+pub mod zonemd;
 
 pub use catalog::{generate_signing_key, AuthorityCatalog};
 pub use dnssec::{DnssecMaintenance, MaintenanceConfig};
 pub use model::{Record, RecordInput, SigningKeyRecord, Zone, ZoneInput};
 pub use notify::{NotifyHooks, NotifyInbound, NotifySender};
+pub use root_zone::{LocalRoot, LocalRootStatus};
 pub use secondary::SecondaryRefresher;
 pub use split_horizon::{SplitHorizonIndex, SplitHorizonMatch};
 pub use store::{

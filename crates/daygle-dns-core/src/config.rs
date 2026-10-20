@@ -190,6 +190,8 @@ pub struct RecursiveUpdate {
     pub case_randomization: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rebinding_protection: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub local_root: Option<LocalRootSettings>,
 }
 
 impl RecursiveUpdate {
@@ -213,6 +215,14 @@ impl RecursiveUpdate {
         }
         if let Some(v) = self.rebinding_protection {
             settings.rebinding_protection = v;
+        }
+        if let Some(v) = &self.local_root {
+            settings.local_root = LocalRootSettings {
+                enabled: v.enabled,
+                sources: trim_list(&v.sources),
+                // Never set from the API or the database.
+                test_trust_anchor: settings.local_root.test_trust_anchor.clone(),
+            };
         }
     }
 
@@ -721,6 +731,7 @@ impl RuntimeSettings {
                 root_hints: Some(config.recursive.root_hints.clone()),
                 case_randomization: Some(config.recursive.case_randomization),
                 rebinding_protection: Some(config.recursive.rebinding_protection),
+                local_root: Some(config.recursive.local_root.clone()),
             }),
             dot: Some(ListenerUpdate {
                 enabled: Some(config.dot.enabled),
@@ -1007,6 +1018,13 @@ impl DaygleConfig {
             return Err(DaygleError::Config(
                 "recursive.recursion_access = \"custom\" requires recursion_networks".to_string(),
             ));
+        }
+        for source in &self.recursive.local_root.sources {
+            parse_master_addr(source).map_err(|e| {
+                DaygleError::Config(format!(
+                    "recursive.local_root.sources contains invalid server '{source}': {e}"
+                ))
+            })?;
         }
         for hint in &self.recursive.root_hints {
             if hint.trim().parse::<IpAddr>().is_err() {
@@ -1396,6 +1414,9 @@ pub struct RecursiveSettings {
     /// link-local addresses from public answers. Names served by local
     /// zones, conditional forwarders and stub zones are not affected.
     pub rebinding_protection: bool,
+    /// Local root zone (RFC 8806): keep a verified copy of the root zone and
+    /// answer root queries from it instead of asking the root servers.
+    pub local_root: LocalRootSettings,
     /// Testing only: send recursive-mode queries to this port instead of 53
     /// and allow private/loopback nameservers, so tests can run a fake
     /// root -> TLD -> authoritative hierarchy without privileged ports.
@@ -1427,6 +1448,60 @@ pub enum RecursionAccess {
     Custom,
     /// Nobody: only authoritative zones are answered.
     Deny,
+}
+
+/// Local root zone settings (RFC 8806, "Secondary ROOT Zone" in the
+/// console). The zone is transferred from `sources`, accepted only when its
+/// ZONEMD digest (RFC 8976) matches and is signed by a key chaining to the
+/// built-in root trust anchor, and kept in memory (and on disk next to the
+/// database). In recursive mode root queries are answered from it; in
+/// forwarding mode names under top-level domains that do not exist are
+/// answered NXDOMAIN without asking the upstreams.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct LocalRootSettings {
+    /// Keep a local copy of the root zone.
+    pub enabled: bool,
+    /// Servers to transfer the root zone from (AXFR over TCP), as `IP`,
+    /// `IP:port` or `[IPv6]:port`, tried in order. Empty uses
+    /// [`LOCAL_ROOT_SOURCES`].
+    pub sources: Vec<String>,
+    /// Testing only: trust this DNSKEY public key (wire format) instead of
+    /// the built-in root trust anchor, so tests can sign a fake root zone.
+    #[serde(skip)]
+    pub test_trust_anchor: Option<Vec<u8>>,
+}
+
+/// Servers that allow root zone transfers (RFC 8806 Appendix A): ICANN's
+/// transfer servers and the root servers that permit AXFR.
+pub const LOCAL_ROOT_SOURCES: &[&str] = &[
+    "192.0.32.132",  // lax.xfr.dns.icann.org
+    "192.0.47.132",  // iad.xfr.dns.icann.org
+    "170.247.170.2", // b.root-servers.net
+    "192.33.4.12",   // c.root-servers.net
+    "199.7.91.13",   // d.root-servers.net
+    "192.5.5.241",   // f.root-servers.net
+    "192.112.36.4",  // g.root-servers.net
+    "193.0.14.129",  // k.root-servers.net
+    "2620:0:2d0:202::132",
+    "2620:0:2830:202::132",
+    "2801:1b8:10::b",
+    "2001:500:2::c",
+    "2001:500:2d::d",
+    "2001:500:2f::f",
+    "2001:500:12::d0d",
+    "2001:7fd::1",
+];
+
+impl LocalRootSettings {
+    /// The transfer sources in effect (the configured list or the defaults).
+    pub fn effective_sources(&self) -> Vec<String> {
+        if self.sources.is_empty() {
+            LOCAL_ROOT_SOURCES.iter().map(|s| s.to_string()).collect()
+        } else {
+            self.sources.clone()
+        }
+    }
 }
 
 /// Client networks treated as private for [`RecursionAccess::PrivateNetworks`].
@@ -1480,6 +1555,7 @@ impl Default for RecursiveSettings {
             root_hints: vec![],
             case_randomization: false,
             rebinding_protection: false,
+            local_root: LocalRootSettings::default(),
             test_outbound_port: None,
         }
     }
@@ -2594,6 +2670,31 @@ upstreams = ["192.0.2.20:5353"]
             .unwrap_err()
             .to_string();
         assert!(err.contains("root_hints"), "{err}");
+    }
+
+    #[test]
+    fn local_root_settings_validate_and_survive_the_overlay() {
+        assert!(!DaygleConfig::default().recursive.local_root.enabled);
+        assert_eq!(
+            LocalRootSettings::default().effective_sources().len(),
+            LOCAL_ROOT_SOURCES.len()
+        );
+        let cfg = DaygleConfig::parse(
+            "[recursive.local_root]\nenabled = true\nsources = [\"192.0.32.132\", \"[2620:0:2d0:202::132]:53\"]\n",
+        )
+        .unwrap();
+        assert!(cfg.recursive.local_root.enabled);
+        assert_eq!(cfg.recursive.local_root.effective_sources().len(), 2);
+
+        let err = DaygleConfig::parse("[recursive.local_root]\nsources = [\"xfr.example\"]\n")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("local_root.sources"), "{err}");
+
+        // Stored in the database overlay like the other resolver settings.
+        let mut restored = DaygleConfig::default();
+        RuntimeSettings::capture(&cfg).apply_to(&mut restored);
+        assert_eq!(restored.recursive.local_root, cfg.recursive.local_root);
     }
 
     #[test]

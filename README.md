@@ -178,6 +178,8 @@ database = "/var/lib/daygle-dns/daygle.db"
 mode = "recursive"
 # Only private networks may use recursion by default (not an open resolver).
 recursion_access = "private_networks"
+# Local root zone (RFC 8806): answer root queries from a verified local copy.
+# local_root = { enabled = true }
 upstreams = []
 use_system_config = true
 dnssec_validate = true

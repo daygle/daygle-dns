@@ -53,6 +53,8 @@ pub struct Shared {
     /// TSIG key ring (RFC 8945) for transfer/update authentication, built
     /// once at startup and reused verbatim by every listener rebuild.
     pub tsig_keys: Arc<daygle_dns_authoritative::tsig::TsigKeyRing>,
+    /// The local root zone (RFC 8806), handed to every resolver rebuild.
+    pub local_root: Arc<daygle_dns_authoritative::LocalRoot>,
 }
 
 /// The currently bound DNS listener addresses.
@@ -102,6 +104,9 @@ pub fn apply_config(shared: &Shared, new: Arc<DaygleConfig>) -> bool {
     // Recursive resolver / upstreams / stub zones. The resolver owns the stub
     // zones (see StubZoneConfig), so a change to them rebuilds it together
     // with the recursive settings.
+    shared
+        .local_root
+        .set_settings(new.recursive.local_root.clone());
     if old.recursive != new.recursive
         || old.authoritative.stub_zones != new.authoritative.stub_zones
     {
@@ -110,6 +115,7 @@ pub fn apply_config(shared: &Shared, new: Arc<DaygleConfig>) -> bool {
                 &new.recursive,
                 shared.metrics.clone(),
                 &new.authoritative.stub_zones,
+                Some(shared.local_root.clone()),
             ) {
                 Ok(resolver) => {
                     shared.resolver.store(Some(Arc::new(resolver)));
@@ -328,6 +334,10 @@ mod tests {
             stats: Arc::new(daygle_dns_core::stats::QueryStats::new()),
             notify_hooks: Default::default(),
             tsig_keys: Arc::new(Default::default()),
+            local_root: Arc::new(daygle_dns_authoritative::LocalRoot::new(
+                Default::default(),
+                None,
+            )),
         }
     }
 

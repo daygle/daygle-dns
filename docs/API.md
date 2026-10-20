@@ -123,6 +123,7 @@ GET /api/status
   "recursion": true,
   "resolution_mode": "recursive",
   "recursion_access": "private_networks",
+  "local_root": false,
   "dnssec": true,
   "dot_enabled": true,
   "doh_enabled": false,
@@ -259,7 +260,7 @@ PUT /api/config
 Editable groups: `server` (listen/port/udp_enabled/tcp_enabled), `recursive`
 (enabled/mode/upstreams/dnssec_validate/prefetch_* /serve_stale_secs/
 conditional_zones/recursion_access/recursion_networks/root_hints/
-case_randomization/rebinding_protection), `dot`,
+case_randomization/rebinding_protection/local_root), `dot`,
 `doh`, `doq` (enabled/port/self_signed/server_name [+ `doh.endpoint`]), `api`
 (gui_enabled/cors_origins), and `authoritative`
 (default_record_ttl/default_primary_ns/axfr_enabled/axfr_networks/
@@ -292,6 +293,20 @@ server's own zones are answered for everyone. In recursive mode,
 `case_randomization` enables 0x20 query-case randomization and
 `rebinding_protection` drops private and loopback addresses from public
 answers; `root_hints` overrides the built-in root server addresses.
+
+`recursive.local_root` (`{ "enabled": true, "sources": [] }`) keeps a local
+copy of the root zone (RFC 8806; the console's **Secondary ROOT Zone**). It is
+transferred over AXFR from `sources` (IP, IP:port or [IPv6]:port, tried in
+order; empty uses ICANN's transfer servers and the root servers that allow
+transfers) and accepted only when its ZONEMD digest (RFC 8976) matches and
+the ZONEMD and DNSKEY records are signed by a key matching the built-in root
+trust anchor. The verified copy is cached next to the database, refreshed on
+the zone's SOA refresh interval, and dropped when it cannot be refreshed
+within the SOA expire time. In recursive mode the resolver's root queries are
+answered from it; in forwarding mode names under top-level domains the root
+zone does not have are answered `NXDOMAIN` without asking the upstreams
+(conditional forwarders and stub zones still take precedence, so use one for
+a private TLD).
 
 Recursive settings and stub zones apply to live traffic immediately: the
 resolver is rebuilt whenever `recursive.*` or `authoritative.stub_zones`
@@ -631,6 +646,35 @@ POST /api/cache/clear
 counters.
 
 `POST /api/cache/clear` flushes the recursive resolver cache.
+
+### Local root zone
+
+```
+GET  /api/local-root
+POST /api/local-root/refresh
+```
+
+`GET` reports the local root zone (see `recursive.local_root` above):
+
+```json
+{
+  "enabled": true,
+  "serving": true,
+  "serial": 2026101901,
+  "records": 22417,
+  "tlds": 1443,
+  "last_checked": "2026-10-20T04:10:00+00:00",
+  "expires": "2026-10-27T04:10:00+00:00",
+  "source": "192.0.32.132",
+  "last_error": null,
+  "last_error_at": null
+}
+```
+
+`serving` is true while a verified, unexpired copy is in use. `source` is the
+server the copy came from (`"cache"` after a restart). `POST .../refresh`
+checks the sources for a newer serial now (`409` when the local root zone is
+not enabled).
 
 ### Blocklist sources
 
