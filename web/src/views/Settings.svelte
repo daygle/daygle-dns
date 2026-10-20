@@ -34,6 +34,11 @@
   let doq = $state({});
   let api_ = $state({});
   let ai_ = $state({});
+  // AI values in the units the form shows (minutes, days, percent); turned
+  // back into seconds and fractions on save.
+  let aiForm = $state({});
+  // Whether a scanner is running now (it is only built at startup).
+  let aiRunning = $state(false);
   // Auto-block categories as a comma-separated text input.
   let aiCategoriesText = $state('');
   // The loaded backend's own category list (model labels / heuristic rules);
@@ -122,8 +127,24 @@
       doq = { ...config.doq };
       api_ = { ...config.api };
       ai_ = { ...config.ai, mode: config.ai?.mode || 'train' };
+      aiForm = {
+        scanMinutes: round2(ai_.scan_interval_secs / 60),
+        expireMinutes: round2(ai_.expire_check_secs / 60),
+        threatDays: round2(ai_.threat_ttl_secs / 86400),
+        categoryDays: round2(ai_.category_ttl_secs / 86400),
+        thresholdPct: round2(ai_.block_threshold * 100),
+        floorPct: round2(ai_.confidence_floor * 100),
+      };
       aiCategoriesText = (config.ai?.auto_block_categories || []).join(', ');
-      api.aiStatus().then((s) => { aiBackendCategories = s?.backend_categories || []; }).catch(() => {});
+      api
+        .aiStatus()
+        .then((s) => {
+          aiBackendCategories = s?.backend_categories || [];
+          aiRunning = true;
+        })
+        .catch(() => {
+          aiRunning = false;
+        });
       dotCertMode = certModeOf(dot);
       dohCertMode = certModeOf(doh);
       doqCertMode = certModeOf(doq);
@@ -232,17 +253,17 @@
           database: ai_.database || '',
           model_path: ai_.model_path || '',
           workers: Number(ai_.workers),
-          scan_interval_secs: Number(ai_.scan_interval_secs),
-          expire_check_secs: Number(ai_.expire_check_secs),
+          scan_interval_secs: Math.round(Number(aiForm.scanMinutes) * 60),
+          expire_check_secs: Math.round(Number(aiForm.expireMinutes) * 60),
           max_domains_per_scan: Number(ai_.max_domains_per_scan),
           auto_block_categories:
             aiBackendCategories.length
               ? aiBackendCategories.filter((c) => aiSelectedCategories().includes(c))
               : (aiCategoriesText || '').split(',').map((c) => c.trim()).filter(Boolean),
-          block_threshold: Number(ai_.block_threshold),
-          confidence_floor: Number(ai_.confidence_floor),
-          category_ttl_secs: Number(ai_.category_ttl_secs),
-          threat_ttl_secs: Number(ai_.threat_ttl_secs),
+          block_threshold: Number(aiForm.thresholdPct) / 100,
+          confidence_floor: Number(aiForm.floorPct) / 100,
+          category_ttl_secs: Math.round(Number(aiForm.categoryDays) * 86400),
+          threat_ttl_secs: Math.round(Number(aiForm.threatDays) * 86400),
         },
       };
       await api.updateSettings(body);
@@ -268,6 +289,11 @@
     const sel = aiSelectedCategories();
     const next = sel.includes(cat) ? sel.filter((c) => c !== cat) : [...sel, cat];
     aiCategoriesText = next.join(', ');
+  }
+
+  // 4.999999 -> 5 (unit conversions in the AI form).
+  function round2(n) {
+    return Math.round(Number(n || 0) * 100) / 100;
   }
 
   function titleCase(s) {
@@ -541,39 +567,54 @@
       <label>
         <span>Mode</span>
         <select bind:value={ai_.mode}>
-          <option value="train">Train - record verdicts only, never block</option>
-          <option value="enforce">Enforce - auto-block qualifying threats</option>
+          <option value="train">Train - Record Verdicts Only</option>
+          <option value="enforce">Enforce - Auto-Block Qualifying Domains</option>
         </select>
       </label>
-      <label><span>Classification Workers</span><input type="number" min="1" max="32" bind:value={ai_.workers} /></label>
-      <label><span>Scan Interval (Seconds)</span><input type="number" min="10" bind:value={ai_.scan_interval_secs} /></label>
-      <label><span>Expiry Check Interval (Seconds)</span><input type="number" min="10" bind:value={ai_.expire_check_secs} /></label>
-      <label><span>Domains Per Scan</span><input type="number" min="1" bind:value={ai_.max_domains_per_scan} /></label>
-      <label><span>Model Path</span><input bind:value={ai_.model_path} placeholder="/path/to/model.bin (empty = heuristic rules)" /></label>
-      <label><span>Verdict Database</span><input bind:value={ai_.database} placeholder="empty = ai.db next to the zone database" /></label>
+    </div>
+    {#if ai_.enabled && !aiRunning}
+      <p class="help restart">The scanner starts after the next restart.</p>
+    {/if}
+    <p class="muted help">
+      Classifies the domains seen in your DNS traffic in the background, never
+      on the query path. Start in Train mode and review the verdicts on the AI
+      page before switching to Enforce. Your allowlist and the AI page's exempt
+      domains are never blocked.
+    </p>
+
+    <h4>Classifier</h4>
+    <div class="form-grid">
+      <label><span>Model File</span><input bind:value={ai_.model_path} placeholder="Empty = built-in heuristic rules" /></label>
+      <label><span>Verdict Database</span><input bind:value={ai_.database} placeholder="Empty = ai.db next to the zone database" /></label>
     </div>
     <p class="muted help">
-      The scanner classifies the domains seen in your DNS traffic in the
-      background and records each verdict until it is re-checked. Train mode
-      only records; Enforce mode auto-blocks (see below). Your allowlist and
-      the AI page's exempt domains always win. Mode, workers, intervals and
-      everything under Enforcement apply immediately; turning the scanner on
-      for the first time, or changing the model or database path, takes
-      effect after a restart. With no model path the built-in heuristic rules
-      are used: they are good for exploring in Train mode but never score high
-      enough to auto-block.
+      A trained fastText model (<code>.bin</code>) classifies far better than the
+      built-in heuristic rules, which never score high enough to auto-block. The
+      AI page shows the installed model files. Changing either path takes effect
+      after a restart.
     </p>
+
+    <h4>Scanning</h4>
+    <div class="form-grid">
+      <label><span>Scan Every (Minutes)</span><input type="number" min="0.17" step="any" bind:value={aiForm.scanMinutes} /></label>
+      <label><span>Domains Classified Per Scan</span><input type="number" min="1" bind:value={ai_.max_domains_per_scan} /></label>
+      <label><span>Classification Workers</span><input type="number" min="1" max="32" bind:value={ai_.workers} /></label>
+    </div>
+    <p class="muted help">
+      Each scan picks up the domains queried since the previous one and
+      classifies up to the per-scan limit (the rest wait for the next scan),
+      on this many background threads.
+    </p>
+
     <h4>Enforcement</h4>
     <div class="form-grid">
-      <label><span>Block Threshold (0.5 - 1.0)</span><input type="number" step="0.01" min="0.5" max="1" bind:value={ai_.block_threshold} /></label>
-      <label><span>Confidence Floor (0 - 1)</span><input type="number" step="0.01" min="0" max="1" bind:value={ai_.confidence_floor} /></label>
-      <label><span>Category Verdict TTL (Seconds)</span><input type="number" min="60" bind:value={ai_.category_ttl_secs} /></label>
-      <label><span>Threat Verdict TTL (Seconds)</span><input type="number" min="60" bind:value={ai_.threat_ttl_secs} /></label>
+      <label><span>Block Threshold (%)</span><input type="number" min="50" max="100" step="any" bind:value={aiForm.thresholdPct} /></label>
+      <label><span>Confidence Floor (%)</span><input type="number" min="0" max="99" step="any" bind:value={aiForm.floorPct} /></label>
     </div>
-    <label class="stacked" style="margin-top: 12px">
-      <span>Auto-Block Categories</span>
+    <div class="stacked" style="margin-top: 12px">
+      <span class="field-label">Auto-Block Categories</span>
       {#if aiBackendCategories.length}
-        <div class="form-grid">
+        <div class="category-grid">
           {#each aiBackendCategories as cat (cat)}
             <label class="check">
               <input
@@ -588,13 +629,23 @@
       {:else}
         <input bind:value={aiCategoriesText} placeholder="malware, phishing (comma-separated)" />
       {/if}
-    </label>
+    </div>
     <p class="muted help">
-      In Enforce mode a domain is blocked when its current verdict is in one of
-      these categories and its confidence is at or above the block threshold.
-      Verdicts below the confidence floor are recorded as skipped. Threat
-      verdicts are re-checked after the threat verdict TTL, all others after
-      the category verdict TTL.
+      In Enforce mode a domain is blocked when its current verdict is in a
+      ticked category with a confidence at or above the block threshold (50 to
+      100%). Verdicts below the confidence floor are recorded as skipped.
+    </p>
+
+    <h4>Verdict Lifetime</h4>
+    <div class="form-grid">
+      <label><span>Re-Check Threat Verdicts After (Days)</span><input type="number" min="0.01" step="any" bind:value={aiForm.threatDays} /></label>
+      <label><span>Re-Check Other Verdicts After (Days)</span><input type="number" min="0.01" step="any" bind:value={aiForm.categoryDays} /></label>
+      <label><span>Look for Expired Verdicts Every (Minutes)</span><input type="number" min="0.17" step="any" bind:value={aiForm.expireMinutes} /></label>
+    </div>
+    <p class="muted help">
+      Sites change, so verdicts expire and the domain is classified again;
+      an expired verdict stops blocking until then. Threats (malware, phishing)
+      are re-checked sooner than other categories.
     </p>
   </div>
   {:else if tab === 'interface'}
@@ -668,4 +719,12 @@
   }
   label.check span { color: var(--text); }
   h4 { margin: 14px 0 8px; }
+  .field-label { font-size: 0.85rem; color: var(--muted); }
+  .category-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+    gap: 4px 12px;
+    margin-top: 6px;
+  }
+  .help.restart { color: #f5b041; margin-top: 8px; }
 </style>
