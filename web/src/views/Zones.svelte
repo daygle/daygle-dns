@@ -643,7 +643,7 @@
       <div class="section-title">SOA Settings</div>
       <div class="grid2">
         <label>Primary Nameserver <input placeholder={dnsServerDomain || 'ns1.example.com.'} bind:value={newZone.primary_ns} /></label>
-        <label>Administrator Mailbox <input placeholder={defaultMailbox || 'hostmaster.example.com.'} bind:value={newZone.admin_mailbox} /></label>
+        <label>Administrator Mailbox <input placeholder={defaultMailbox || `admin.${newZone.name.trim().replace(/\.$/, '') || 'example.com'}.`} bind:value={newZone.admin_mailbox} /></label>
         <label>Serial <input type="number" min="1" bind:value={newZone.serial} disabled={newZone.serial_date_scheme} /></label>
         <label class="checkbox"><input type="checkbox" bind:checked={newZone.serial_date_scheme} /><span>Date-Based Serial (YYYYMMDDnn)</span></label>
         <label>Refresh (Seconds) <span class="hint">{hint(newZone.refresh)}</span><input type="number" min="1" bind:value={newZone.refresh} /></label>

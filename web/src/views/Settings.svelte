@@ -4,6 +4,7 @@
   import ClientPolicies from './ClientPolicies.svelte';
   import { icons } from '../icons.svelte.js';
   import { display, setDisplayDefaults, timeZoneOptions, DATE_FORMAT_OPTIONS, TIME_FORMAT_OPTIONS, previewDateTime } from '../datetime.svelte.js';
+  import { duration } from '../aiLabels.js';
 
   let config = $state(null);
   let notice = $state(null);
@@ -24,6 +25,14 @@
     ['ai', 'AI Scanner'],
     ['interface', 'Interface'],
   ];
+  const TAGLINES = {
+    general: 'The DNS listeners this server was started with. They are set in the config file so a mistake can always be fixed there.',
+    recursive: 'How the server answers names it does not host: resolving them itself from the root servers or forwarding to upstreams, who may use it, and how answers are cached.',
+    listeners: 'Encrypted DNS: DNS over TLS, HTTPS and QUIC, and the certificate each one presents. Changes apply immediately.',
+    zones: 'Defaults for new zones and records, and how other DNS servers may copy, update and be notified about your zones.',
+    ai: 'The background scanner that classifies the domains in your DNS traffic and can block unsafe ones.',
+    interface: 'How the console shows dates and times by default.',
+  };
 
   // Local editable copies (bound to the form inputs).
   let server = $state({});
@@ -59,6 +68,16 @@
   let dohCertMode = $state('self');
   let doqCertMode = $state('self');
 
+  // The saved form, to tell whether anything has changed since.
+  let savedBody = $state('');
+  const dirty = $derived(config != null && savedBody !== '' && JSON.stringify(buildBody()) !== savedBody);
+
+  // "3600" -> "1 Hour", shown beside seconds fields.
+  function hint(secs) {
+    const n = Number(secs);
+    return Number.isInteger(n) && n > 0 ? duration(n) : '';
+  }
+
   // Server-wide date and time display defaults (saved with the page).
   let display_ = $state({ time_zone: 'system', date_format: 'system', time_format: 'system' });
   const zoneChoices = timeZoneOptions();
@@ -71,6 +90,14 @@
     load();
     api.certificates().then((list) => { certs = list || []; }).catch(() => {});
   });
+
+  // A managed certificate in the picker, flagged when it is not usable.
+  function certLabel(cert) {
+    const names = (cert.names || []).filter((n) => n !== 'localhost');
+    let label = names.length ? `${cert.name} - ${names[0]}` : cert.server_name ? `${cert.name} - ${cert.server_name}` : cert.name;
+    if (cert.not_after && Date.parse(cert.not_after) <= Date.now()) label += ' (Expired)';
+    return label;
+  }
 
   // Translate the config's certificate state into a picker value.
   function certModeOf(listener) {
@@ -145,6 +172,11 @@
         })
         .catch(() => {
           aiRunning = false;
+        })
+        // The category picker changes how the form reads; it is still the
+        // saved state.
+        .finally(() => {
+          savedBody = JSON.stringify(buildBody());
         });
       dotCertMode = certModeOf(dot);
       dohCertMode = certModeOf(doh);
@@ -153,9 +185,16 @@
       axfrNetworksText = (authoritative.axfr_networks || []).join('\n');
       updateNetworksText = (authoritative.update_networks || []).join('\n');
       notifyTargetsText = (authoritative.notify_targets || []).join('\n');
+      savedBody = JSON.stringify(buildBody());
     } catch (e) {
       error = formatApiError(e);
     }
+  }
+
+  function reload() {
+    if (dirty && !confirm('Discard your unsaved changes?')) return;
+    notice = null;
+    load();
   }
 
   function parseUpstreams(text) {
@@ -169,108 +208,106 @@
   }
 
 
+  // Everything the page edits, in the shape PUT /api/config takes. The
+  // General tab's listeners and the console switch are config-file owned
+  // (a broken listener can always be fixed by editing the file), so they
+  // are shown but not sent.
+  function buildBody() {
+    return {
+      recursive: {
+        enabled: !!recursive.enabled,
+        mode: recursive.mode,
+        recursion_access: recursive.recursion_access,
+        recursion_networks: parseLines(recursionNetworksText),
+        case_randomization: !!recursive.case_randomization,
+        rebinding_protection: !!recursive.rebinding_protection,
+        opportunistic_encryption: !!recursive.opportunistic_encryption,
+        upstreams: parseUpstreams(upstreamText),
+        use_system_config: !!recursive.use_system_config,
+        cache_size: Number(recursive.cache_size),
+        min_cache_ttl: Number(recursive.min_cache_ttl),
+        negative_cache_ttl: Number(recursive.negative_cache_ttl),
+        dnssec_validate: !!recursive.dnssec_validate,
+        prefetch_enabled: !!recursive.prefetch_enabled,
+        prefetch_ttl_fraction_pct: Number(recursive.prefetch_ttl_fraction_pct),
+        prefetch_min_queries: Number(recursive.prefetch_min_queries),
+        serve_stale_secs: Number(recursive.serve_stale_secs),
+        max_cache_ttl: Number(recursive.max_cache_ttl),
+        failure_cache_ttl: Number(recursive.failure_cache_ttl),
+      },
+      dot: {
+        enabled: !!dot.enabled,
+        port: Number(dot.port),
+        self_signed: !!dot.self_signed,
+        server_name: dot.server_name,
+        cert_path: dot.cert_path || '',
+        key_path: dot.key_path || '',
+        certificate: dot.certificate || '',
+        handshake_timeout_secs: Number(dot.handshake_timeout_secs),
+      },
+      doh: {
+        enabled: !!doh.enabled,
+        port: Number(doh.port),
+        self_signed: !!doh.self_signed,
+        server_name: doh.server_name,
+        cert_path: doh.cert_path || '',
+        key_path: doh.key_path || '',
+        certificate: doh.certificate || '',
+        endpoint: doh.endpoint,
+        handshake_timeout_secs: Number(doh.handshake_timeout_secs),
+      },
+      doq: {
+        enabled: !!doq.enabled,
+        port: Number(doq.port),
+        self_signed: !!doq.self_signed,
+        server_name: doq.server_name,
+        cert_path: doq.cert_path || '',
+        key_path: doq.key_path || '',
+        certificate: doq.certificate || '',
+      },
+      display: { ...display_ },
+      authoritative: {
+        default_record_ttl: Number(authoritative.default_record_ttl),
+        default_primary_ns: authoritative.default_primary_ns || '',
+        default_admin_mailbox: (authoritative.default_admin_mailbox || '').trim(),
+        axfr_enabled: !!authoritative.axfr_enabled,
+        axfr_networks: parseLines(axfrNetworksText),
+        allow_dynamic_updates: !!authoritative.allow_dynamic_updates,
+        update_networks: parseLines(updateNetworksText),
+        notify_enabled: !!authoritative.notify_enabled,
+        notify_targets: parseLines(notifyTargetsText),
+        notify_listen_enabled: !!authoritative.notify_listen_enabled,
+      },
+      ai: {
+        enabled: !!ai_.enabled,
+        mode: ai_.mode || 'train',
+        database: ai_.database || '',
+        model_path: ai_.model_path || '',
+        workers: Number(ai_.workers),
+        scan_interval_secs: Math.round(Number(aiForm.scanMinutes) * 60),
+        expire_check_secs: Math.round(Number(aiForm.expireMinutes) * 60),
+        max_domains_per_scan: Number(ai_.max_domains_per_scan),
+        auto_block_categories:
+          aiBackendCategories.length
+            ? aiBackendCategories.filter((c) => aiSelectedCategories().includes(c))
+            : (aiCategoriesText || '').split(',').map((c) => c.trim()).filter(Boolean),
+        block_threshold: Number(aiForm.thresholdPct) / 100,
+        confidence_floor: Number(aiForm.floorPct) / 100,
+        category_ttl_secs: Math.round(Number(aiForm.categoryDays) * 86400),
+        threat_ttl_secs: Math.round(Number(aiForm.threatDays) * 86400),
+      },
+    };
+  }
+
   async function save() {
     busy = true;
     notice = null;
     error = null;
     try {
-      const body = {
-        server: {
-          listen: server.listen,
-          port: Number(server.port),
-          udp_enabled: !!server.udp_enabled,
-          tcp_enabled: !!server.tcp_enabled,
-          reload_enabled: !!server.reload_enabled,
-        },
-        recursive: {
-          enabled: !!recursive.enabled,
-          mode: recursive.mode,
-          recursion_access: recursive.recursion_access,
-          recursion_networks: parseLines(recursionNetworksText),
-          case_randomization: !!recursive.case_randomization,
-          rebinding_protection: !!recursive.rebinding_protection,
-          opportunistic_encryption: !!recursive.opportunistic_encryption,
-          upstreams: parseUpstreams(upstreamText),
-          use_system_config: !!recursive.use_system_config,
-          cache_size: Number(recursive.cache_size),
-          min_cache_ttl: Number(recursive.min_cache_ttl),
-          negative_cache_ttl: Number(recursive.negative_cache_ttl),
-          dnssec_validate: !!recursive.dnssec_validate,
-          prefetch_enabled: !!recursive.prefetch_enabled,
-          prefetch_ttl_fraction_pct: Number(recursive.prefetch_ttl_fraction_pct),
-          prefetch_min_queries: Number(recursive.prefetch_min_queries),
-          serve_stale_secs: Number(recursive.serve_stale_secs),
-          max_cache_ttl: Number(recursive.max_cache_ttl),
-          failure_cache_ttl: Number(recursive.failure_cache_ttl),
-        },
-        dot: {
-          enabled: !!dot.enabled,
-          port: Number(dot.port),
-          self_signed: !!dot.self_signed,
-          server_name: dot.server_name,
-          cert_path: dot.cert_path || '',
-          key_path: dot.key_path || '',
-          certificate: dot.certificate || '',
-          handshake_timeout_secs: Number(dot.handshake_timeout_secs),
-        },
-        doh: {
-          enabled: !!doh.enabled,
-          port: Number(doh.port),
-          self_signed: !!doh.self_signed,
-          server_name: doh.server_name,
-          cert_path: doh.cert_path || '',
-          key_path: doh.key_path || '',
-          certificate: doh.certificate || '',
-          endpoint: doh.endpoint,
-          handshake_timeout_secs: Number(doh.handshake_timeout_secs),
-        },
-        doq: {
-          enabled: !!doq.enabled,
-          port: Number(doq.port),
-          self_signed: !!doq.self_signed,
-          server_name: doq.server_name,
-          cert_path: doq.cert_path || '',
-          key_path: doq.key_path || '',
-          certificate: doq.certificate || '',
-        },
-        api: {
-          gui_enabled: !!api_.gui_enabled,
-          cors_origins: api_.cors_origins || [],
-        },
-        display: { ...display_ },
-        authoritative: {
-          default_record_ttl: Number(authoritative.default_record_ttl),
-          default_primary_ns: authoritative.default_primary_ns || '',
-          axfr_enabled: !!authoritative.axfr_enabled,
-          axfr_networks: parseLines(axfrNetworksText),
-          allow_dynamic_updates: !!authoritative.allow_dynamic_updates,
-          update_networks: parseLines(updateNetworksText),
-          notify_enabled: !!authoritative.notify_enabled,
-          notify_targets: parseLines(notifyTargetsText),
-          notify_listen_enabled: !!authoritative.notify_listen_enabled,
-        },
-        ai: {
-          enabled: !!ai_.enabled,
-          mode: ai_.mode || 'train',
-          database: ai_.database || '',
-          model_path: ai_.model_path || '',
-          workers: Number(ai_.workers),
-          scan_interval_secs: Math.round(Number(aiForm.scanMinutes) * 60),
-          expire_check_secs: Math.round(Number(aiForm.expireMinutes) * 60),
-          max_domains_per_scan: Number(ai_.max_domains_per_scan),
-          auto_block_categories:
-            aiBackendCategories.length
-              ? aiBackendCategories.filter((c) => aiSelectedCategories().includes(c))
-              : (aiCategoriesText || '').split(',').map((c) => c.trim()).filter(Boolean),
-          block_threshold: Number(aiForm.thresholdPct) / 100,
-          confidence_floor: Number(aiForm.floorPct) / 100,
-          category_ttl_secs: Math.round(Number(aiForm.categoryDays) * 86400),
-          threat_ttl_secs: Math.round(Number(aiForm.threatDays) * 86400),
-        },
-      };
+      const body = buildBody();
       await api.updateSettings(body);
       setDisplayDefaults(body.display);
-      notice = 'Settings saved: applied live and stored in the database.';
+      notice = 'Settings saved and applied.';
       await load();
     } catch (e) {
       error = formatApiError(e);
@@ -304,7 +341,7 @@
   }
 </script>
 
-<PageHeader icon={icons.settings} title="Settings" />
+<PageHeader icon={icons.settings} title="Settings" tagline={TAGLINES[tab]} />
 
 {#if notice}
   <div class="card" style="border-color: var(--ok); margin-bottom: 14px">{notice}</div>
@@ -320,21 +357,32 @@
     {/each}
   </div>
 
-  <div class="actions">
-    <button onclick={save} disabled={busy}>{busy ? 'Saving…' : 'Save'}</button>
-    <button class="secondary" onclick={load} disabled={busy}>Reload</button>
+  <div class="actions" class:dirty>
+    <button onclick={save} disabled={busy || !dirty}>{busy ? 'Saving…' : 'Save Changes'}</button>
+    <button class="secondary" onclick={reload} disabled={busy}>{dirty ? 'Discard Changes' : 'Reload'}</button>
+    {#if dirty}<span class="unsaved">Unsaved changes (Save covers every tab)</span>{/if}
   </div>
 
   {#if tab === 'general'}
   <div class="card" style="margin-bottom: 14px">
     <h3 style="margin: 0 0 10px">DNS Listeners</h3>
-    <div class="form-grid">
-      <label><span>Listen Address</span><input bind:value={server.listen} /></label>
-      <label><span>UDP/TCP Port</span><input type="number" bind:value={server.port} /></label>
-      <label class="check"><input type="checkbox" bind:checked={server.udp_enabled} /> <span>UDP Enabled</span></label>
-      <label class="check"><input type="checkbox" bind:checked={server.tcp_enabled} /> <span>TCP Enabled</span></label>
-      <label class="check"><input type="checkbox" bind:checked={server.reload_enabled} /> <span>Live Config Reload</span></label>
-    </div>
+    <table class="facts">
+      <tbody>
+        <tr><th>Listen Address</th><td><code>{server.listen}</code></td></tr>
+        <tr><th>Port</th><td>{server.port}</td></tr>
+        <tr><th>UDP</th><td><span class="pill" class:ok={server.udp_enabled}>{server.udp_enabled ? 'On' : 'Off'}</span></td></tr>
+        <tr><th>TCP</th><td><span class="pill" class:ok={server.tcp_enabled}>{server.tcp_enabled ? 'On' : 'Off'}</span></td></tr>
+        <tr><th>Reload Config File on Change</th><td><span class="pill" class:ok={server.reload_enabled}>{server.reload_enabled ? 'On' : 'Off'}</span></td></tr>
+        <tr><th>Web Console</th><td><span class="pill" class:ok={api_.gui_enabled}>{api_.gui_enabled ? 'On' : 'Off'}</span></td></tr>
+      </tbody>
+    </table>
+    <p class="muted help">
+      To change these, edit the <code>[server]</code> and <code>[api]</code>
+      sections of <code>daygle-dns.toml</code> and restart (or let Reload
+      Config File pick it up). They live in the file rather than here so a
+      listener that stops working can always be fixed without the console.
+      Encrypted listeners are on the Protocol Listeners tab.
+    </p>
   </div>
   {:else if tab === 'recursive'}
   <div class="card" style="margin-bottom: 14px">
@@ -348,9 +396,14 @@
         </select>
       </label>
       <label class="check"><input type="checkbox" bind:checked={recursive.enabled} /> <span>Recursion Enabled</span></label>
-      <label class="check"><input type="checkbox" bind:checked={recursive.dnssec_validate} /> <span>DNSSEC Validation</span></label>
+      <label class="check"><input type="checkbox" bind:checked={recursive.dnssec_validate} disabled={!recursive.enabled} /> <span>DNSSEC Validation</span></label>
     </div>
-    {#if recursive.mode === 'recursive'}
+    {#if !recursive.enabled}
+      <p class="help restart">
+        Recursion is off: the server answers only for its own zones and
+        refuses everything else.
+      </p>
+    {:else if recursive.mode === 'recursive'}
       <div class="form-grid" style="margin-top: 4px">
         <label class="check"><input type="checkbox" bind:checked={recursive.case_randomization} /> <span>Randomize Query Case (0x20)</span></label>
         <label class="check"><input type="checkbox" bind:checked={recursive.rebinding_protection} /> <span>DNS Rebinding Protection</span></label>
@@ -372,8 +425,8 @@
         <label class="check"><input type="checkbox" bind:checked={recursive.use_system_config} /> <span>Use System DNS Configuration</span></label>
       </div>
       <label class="stacked" style="margin-top: 12px">
-        <span>Upstream Servers (one per line; supports <code>tls://</code> and <code>https://</code>)</span>
-        <textarea rows="4" bind:value={upstreamText}></textarea>
+        <span>Upstream Servers (one per line)</span>
+        <textarea rows="4" bind:value={upstreamText} placeholder={'1.1.1.1\n9.9.9.9:53\ntls://1.1.1.1:853@cloudflare-dns.com\nhttps://dns.quad9.net/dns-query'}></textarea>
       </label>
       <p class="muted help">
         Queries are sent to these upstream servers, or to the system's resolver when
@@ -407,24 +460,27 @@
     </p>
     <h4>Caching</h4>
     <div class="recursive-cache-grid">
-      <label><span>Minimum Cache TTL (Seconds)</span><input type="number" min="0" bind:value={recursive.min_cache_ttl} /></label>
-      <label><span>Negative Cache TTL (Seconds)</span><input type="number" min="0" bind:value={recursive.negative_cache_ttl} /></label>
-      <label><span>Maximum Cache TTL (Seconds)</span><input type="number" min="0" bind:value={recursive.max_cache_ttl} /></label>
-      <label><span>Failure Cache TTL (Seconds)</span><input type="number" min="0" bind:value={recursive.failure_cache_ttl} /></label>
+      <label><span>Minimum Cache TTL (Seconds)</span><span class="hint">{hint(recursive.min_cache_ttl)}</span><input type="number" min="0" bind:value={recursive.min_cache_ttl} /></label>
+      <label><span>Negative Cache TTL (Seconds)</span><span class="hint">{hint(recursive.negative_cache_ttl)}</span><input type="number" min="0" bind:value={recursive.negative_cache_ttl} /></label>
+      <label><span>Maximum Cache TTL (Seconds)</span><span class="hint">{hint(recursive.max_cache_ttl)}</span><input type="number" min="0" bind:value={recursive.max_cache_ttl} /></label>
+      <label><span>Failure Cache TTL (Seconds)</span><span class="hint">{hint(recursive.failure_cache_ttl)}</span><input type="number" min="0" bind:value={recursive.failure_cache_ttl} /></label>
       <label><span>Cache Size (Entries)</span><input type="number" min="0" bind:value={recursive.cache_size} /></label>
-      <label class="check"><input type="checkbox" bind:checked={recursive.prefetch_enabled} /> <span>Refresh Popular Names Early</span></label>
     </div>
     <div class="recursive-cache-grid">
-      <label><span>Prefetch Trigger (TTL Fraction %)</span><input type="number" min="1" max="99" bind:value={recursive.prefetch_ttl_fraction_pct} /></label>
-      <label><span>Prefetch Minimum Queries</span><input type="number" min="1" bind:value={recursive.prefetch_min_queries} /></label>
-      <label><span>Serve-Stale Window (Seconds)</span><input type="number" min="0" bind:value={recursive.serve_stale_secs} /></label>
+      <label class="check"><input type="checkbox" bind:checked={recursive.prefetch_enabled} /> <span>Refresh Popular Names Early</span></label>
+      <label><span>Refresh When TTL Left Is Below (%)</span><input type="number" min="1" max="99" bind:value={recursive.prefetch_ttl_fraction_pct} disabled={!recursive.prefetch_enabled} /></label>
+      <label><span>Refresh Names Queried At Least (Times)</span><input type="number" min="1" bind:value={recursive.prefetch_min_queries} disabled={!recursive.prefetch_enabled} /></label>
+      <label><span>Serve-Stale Window (Seconds)</span><span class="hint">{hint(recursive.serve_stale_secs)}</span><input type="number" min="0" bind:value={recursive.serve_stale_secs} /></label>
     </div>
     <p class="muted help">
       Minimum and negative TTLs bound how long records stay in cache. Maximum TTL
       clamps positive answers at insert time so tracking-heavy domains cannot pin
       themselves in cache for weeks. Failure Cache TTL caches SERVFAIL and other
       upstream errors briefly so a broken upstream is not hammered on every query;
-      set it to 0 to disable.
+      set it to 0 to disable. Refreshing popular names early re-fetches a name
+      before it expires once it has been asked for often enough, so clients
+      rarely wait. Serve-stale answers from an expired entry for this long when
+      the upstream cannot be reached.
     </p>
   </div>
   <ClientPolicies />
@@ -432,12 +488,16 @@
   <div class="card" style="margin-bottom: 14px">
     <h3 style="margin: 0 0 10px">Zones & Records</h3>
     <div class="form-grid">
-      <label><span>Default Record TTL (Seconds)</span><input type="number" min="1" bind:value={authoritative.default_record_ttl} /></label>
-      <label><span>DNS Server Domain</span><input placeholder="ns1.dns.example.com." bind:value={authoritative.default_primary_ns} /></label>
+      <label><span>Default Record TTL (Seconds)</span><span class="hint">{hint(authoritative.default_record_ttl)}</span><input type="number" min="1" bind:value={authoritative.default_record_ttl} /></label>
+      <label><span>DNS Server Domain</span><input placeholder="ns1.example.com." bind:value={authoritative.default_primary_ns} /></label>
+      <label><span>Default Administrator Mailbox</span><input placeholder="Empty = admin.<zone>." bind:value={authoritative.default_admin_mailbox} /></label>
     </div>
     <p class="muted help">
-      Pre-fills the TTL when adding records: existing records keep their
-      own TTL. Zones created without an explicit Primary Nameserver on the Zones page use DNS Server Domain as their SOA MNAME.
+      The TTL is pre-filled when adding records; existing records keep their
+      own. New zones without their own SOA values use this server's name as
+      the primary nameserver and this mailbox as the contact (written with a
+      dot for the @: <code>hostmaster.example.com.</code> is
+      hostmaster@example.com).
     </p>
   </div>
 
@@ -495,49 +555,51 @@
     <div class="form-grid">
       <label class="check"><input type="checkbox" bind:checked={dot.enabled} /> <span>Enabled</span></label>
       <label><span>Port</span><input type="number" bind:value={dot.port} /></label>
-      <label><span>TLS Handshake Timeout (Seconds)</span><input type="number" bind:value={dot.handshake_timeout_secs} /></label>
+      <label><span>Handshake Timeout (Seconds)</span><input type="number" min="1" bind:value={dot.handshake_timeout_secs} /></label>
       <label>
         <span>Certificate</span>
         <select bind:value={dotCertMode} onchange={(e) => applyCertMode(dot, e.currentTarget.value)}>
-          <option value="self">Self-signed (auto)</option>
+          <option value="self">Self-Signed (Generated Automatically)</option>
           {#each certs as cert (cert.name)}
-            <option value={cert.name}>{cert.name}{cert.server_name ? ` - ${cert.server_name}` : ''}</option>
+            <option value={cert.name}>{certLabel(cert)}</option>
           {/each}
-          <option value="custom">Custom files…</option>
+          <option value="custom">Certificate Files on the Server…</option>
         </select>
       </label>
       {#if dotCertMode === 'self'}
-        <label><span>Certificate Name</span><input bind:value={dot.server_name} placeholder="dns.example.com" /></label>
+        <label><span>Server Name</span><input bind:value={dot.server_name} placeholder="dns.example.com" /></label>
       {:else if dotCertMode === 'custom'}
         <label><span>Certificate Path</span><input bind:value={dot.cert_path} placeholder="/etc/daygle-dns/certs/server.crt" /></label>
         <label><span>Key Path</span><input bind:value={dot.key_path} placeholder="/etc/daygle-dns/certs/server.key" /></label>
       {/if}
     </div>
+    <p class="muted help">Clients connect to port {dot.port || 853} (the standard port is 853).</p>
   </div>
   <div class="card" style="margin-bottom: 14px">
     <h3 style="margin: 0 0 10px">DNS over HTTPS</h3>
     <div class="form-grid">
       <label class="check"><input type="checkbox" bind:checked={doh.enabled} /> <span>Enabled</span></label>
       <label><span>Port</span><input type="number" bind:value={doh.port} /></label>
-      <label><span>TLS Handshake Timeout (Seconds)</span><input type="number" bind:value={doh.handshake_timeout_secs} /></label>
+      <label><span>Handshake Timeout (Seconds)</span><input type="number" min="1" bind:value={doh.handshake_timeout_secs} /></label>
       <label>
         <span>Certificate</span>
         <select bind:value={dohCertMode} onchange={(e) => applyCertMode(doh, e.currentTarget.value)}>
-          <option value="self">Self-signed (auto)</option>
+          <option value="self">Self-Signed (Generated Automatically)</option>
           {#each certs as cert (cert.name)}
-            <option value={cert.name}>{cert.name}{cert.server_name ? ` - ${cert.server_name}` : ''}</option>
+            <option value={cert.name}>{certLabel(cert)}</option>
           {/each}
-          <option value="custom">Custom files…</option>
+          <option value="custom">Certificate Files on the Server…</option>
         </select>
       </label>
       {#if dohCertMode === 'self'}
-        <label><span>Certificate Name</span><input bind:value={doh.server_name} placeholder="dns.example.com" /></label>
+        <label><span>Server Name</span><input bind:value={doh.server_name} placeholder="dns.example.com" /></label>
       {:else if dohCertMode === 'custom'}
         <label><span>Certificate Path</span><input bind:value={doh.cert_path} placeholder="/etc/daygle-dns/certs/server.crt" /></label>
         <label><span>Key Path</span><input bind:value={doh.key_path} placeholder="/etc/daygle-dns/certs/server.key" /></label>
       {/if}
-      <label><span>Endpoint Path</span><input bind:value={doh.endpoint} /></label>
+      <label><span>Endpoint Path</span><input bind:value={doh.endpoint} placeholder="/dns-query" /></label>
     </div>
+    <p class="muted help">Clients use <code>https://{doh.server_name || 'this-server'}{Number(doh.port) === 443 ? '' : `:${doh.port}`}{doh.endpoint || '/dns-query'}</code>. The standard port is 443.</p>
   </div>
   <div class="card" style="margin-bottom: 14px">
     <h3 style="margin: 0 0 10px">DNS over QUIC</h3>
@@ -547,20 +609,24 @@
       <label>
         <span>Certificate</span>
         <select bind:value={doqCertMode} onchange={(e) => applyCertMode(doq, e.currentTarget.value)}>
-          <option value="self">Self-signed (auto)</option>
+          <option value="self">Self-Signed (Generated Automatically)</option>
           {#each certs as cert (cert.name)}
-            <option value={cert.name}>{cert.name}{cert.server_name ? ` - ${cert.server_name}` : ''}</option>
+            <option value={cert.name}>{certLabel(cert)}</option>
           {/each}
-          <option value="custom">Custom files…</option>
+          <option value="custom">Certificate Files on the Server…</option>
         </select>
       </label>
       {#if doqCertMode === 'self'}
-        <label><span>Certificate Name</span><input bind:value={doq.server_name} placeholder="dns.example.com" /></label>
+        <label><span>Server Name</span><input bind:value={doq.server_name} placeholder="dns.example.com" /></label>
       {:else if doqCertMode === 'custom'}
         <label><span>Certificate Path</span><input bind:value={doq.cert_path} placeholder="/etc/daygle-dns/certs/server.crt" /></label>
         <label><span>Key Path</span><input bind:value={doq.key_path} placeholder="/etc/daygle-dns/certs/server.key" /></label>
       {/if}
     </div>
+    <p class="muted help">
+      Clients connect to UDP port {doq.port || 853} (the standard port is 853).
+      Manage certificates, and see when they expire, on the Certificates page.
+    </p>
   </div>
   {:else if tab === 'ai'}
   <div class="card" style="margin-bottom: 14px">
@@ -681,19 +747,6 @@
     </p>
   </div>
 
-  <div class="card" style="margin-bottom: 14px">
-    <h3 style="margin: 0 0 10px">Console</h3>
-    <div class="form-grid">
-      <label class="check"><input type="checkbox" bind:checked={api_.gui_enabled} /> <span>Serve the Web GUI</span></label>
-    </div>
-    <p class="muted help">
-      The settings on this page are stored in the server database and survive
-      restarts. Bootstrap options (listen addresses, ports, certificate paths,
-      login accounts and zone signing) are edited in
-      <code>daygle-dns.toml</code>. Changes here are validated first - an
-      invalid value is rejected and nothing is applied.
-    </p>
-  </div>
   {/if}
 {:else}
   <div class="card">
@@ -719,8 +772,12 @@
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
     gap: 12px;
-    align-items: end;
+    align-items: start;
   }
+  /* Two lines for every label, so the inputs line up whether or not a
+     label wraps or a duration hint follows the field. */
+  .recursive-cache-grid label:not(.check) > span:first-child { min-height: 2.6em; display: flex; align-items: flex-end; }
+  .recursive-cache-grid label.check { padding-top: 2.6em; }
   label { display: flex; flex-direction: column; gap: 4px; font-size: 0.85rem; }
   label span { color: var(--muted); }
   label.check {
@@ -739,4 +796,18 @@
     margin-top: 6px;
   }
   .help.restart { color: #f5b041; margin-top: 8px; }
+  /* Save bar: stays in view while scrolling a long tab. */
+  .actions {
+    position: sticky;
+    top: 0;
+    z-index: 5;
+    align-items: center;
+    padding: 10px 0;
+    background: var(--bg);
+  }
+  .unsaved { color: #f5b041; font-size: 0.85rem; }
+  /* Below the field, so it never collides with a label that wraps. */
+  .hint { order: 3; font-size: 0.72rem; color: var(--muted); min-height: 1em; }
+  .facts { width: auto; }
+  .facts th { text-align: left; padding-right: 24px; color: var(--muted); font-weight: 500; }
 </style>

@@ -271,12 +271,14 @@ client_policies), `dot`,
 (gui_enabled/cors_origins), `display` (the console's date/time defaults:
 `time_zone` = `system`, `UTC` or an IANA zone; `date_format` = `system`/`dmy`/
 `mdy`/`ymd`/`d_mon_y`; `time_format` = `system`/`24h`/`12h`), and `authoritative`
-(default_record_ttl/default_primary_ns/axfr_enabled/axfr_networks/
+(default_record_ttl/default_primary_ns/default_admin_mailbox/axfr_enabled/axfr_networks/
 allow_dynamic_updates/update_networks/notify_enabled/notify_targets/
 notify_listen_enabled/stub_zones). Runtime groups (`recursive`, `dot`, `doh`, `doq`,
 `policy`, `authoritative`, `ai`, `display`) are stored in the database and survive restarts and
 config-file edits; `server.*` and `api.*` stay config-file-owned so a broken
-listener can always be fixed by editing the file. Login users are managed
+listener can always be fixed by editing the file. A `server` or `api` group
+in a `PUT` is applied to the running server but not stored, so it reverts
+at the next restart; the console shows these values read-only. Login users are managed
 from the console's **Users** page (see [Console users and roles](#console-users-and-roles)).
 
 The `authoritative` group holds zone-creation defaults. Of note:
@@ -287,6 +289,11 @@ zones created without an explicit `primary_ns`, instead of assuming
 `ns1.<zone>`. The value is normalized to a fully-qualified name (a trailing
 dot is added when missing) and a blank value keeps the current one; when the
 setting is unset, the server falls back to `ns1.<zone>.`.
+`authoritative.default_admin_mailbox` (Settings → Zones & Records →
+**Default Administrator Mailbox**) is likewise the SOA contact for zones
+created without an explicit `admin_mailbox` or an imported SOA. A trailing
+dot is added when missing; a blank value clears it, and new zones then use
+`admin.<zone>.`.
 
 `recursive.mode` is `"recursive"` (resolve from the root servers; DNSSEC is
 validated against the built-in root trust anchor and query names are

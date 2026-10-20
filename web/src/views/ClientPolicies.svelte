@@ -5,7 +5,11 @@
   // own, like the Zones page's forwarders, so editing them never touches the
   // unsaved Settings form around this card.
   let policies = $state([]);
+  // `error` shows in red, `notice` (success) in green; failures while the
+  // dialog is open show inside it.
   let notice = $state(null);
+  let error = $state(null);
+  let dialogError = $state(null);
   let saving = $state(false);
   // The policy being edited (a form copy), or null when the dialog is closed.
   let form = $state(null);
@@ -21,7 +25,7 @@
       const config = await api.config();
       policies = config?.recursive?.client_policies || [];
     } catch (e) {
-      notice = formatApiError(e);
+      error = formatApiError(e);
     }
   }
 
@@ -29,13 +33,19 @@
     return (text || '').split(/[\n,]+/).map((v) => v.trim()).filter(Boolean);
   }
 
-  function openAdd() {
+  function clearMessages() {
     notice = null;
+    error = null;
+    dialogError = null;
+  }
+
+  function openAdd() {
+    clearMessages();
     form = { index: null, name: '', enabled: true, clientsText: '', action: 'forward', upstreamsText: '' };
   }
 
   function openEdit(index) {
-    notice = null;
+    clearMessages();
     const p = policies[index];
     form = {
       index,
@@ -68,13 +78,13 @@
       action: form.action,
       upstreams: form.action === 'forward' ? lines(form.upstreamsText) : [],
     };
-    if (!name) return (notice = 'Error: Name is required');
-    if (policy.clients.length === 0) return (notice = 'Error: Add at least one client network');
+    if (!name) return (dialogError = 'Give the policy a name.');
+    if (policy.clients.length === 0) return (dialogError = 'Add at least one client network.');
     if (form.action === 'forward' && policy.upstreams.length === 0) {
-      return (notice = 'Error: Add at least one upstream server');
+      return (dialogError = 'Add at least one upstream server.');
     }
     saving = true;
-    notice = null;
+    dialogError = null;
     const editing = form.index;
     try {
       await store((list) => {
@@ -88,9 +98,9 @@
         return list;
       });
       form = null;
-      notice = editing === null ? 'Policy added and applied live.' : 'Policy updated and applied live.';
+      notice = editing === null ? `Policy ${name} added and applied live.` : `Policy ${name} saved and applied live.`;
     } catch (e) {
-      notice = formatApiError(e);
+      dialogError = formatApiError(e);
     } finally {
       saving = false;
     }
@@ -99,18 +109,19 @@
   async function remove(index) {
     const name = policies[index].name;
     if (!confirm(`Delete client policy ${name}?`)) return;
-    notice = null;
+    clearMessages();
     try {
       await store((list) => list.filter((p) => p.name !== name));
+      notice = `Policy ${name} deleted.`;
     } catch (e) {
-      notice = formatApiError(e);
+      error = formatApiError(e);
     }
   }
 
   // The first matching policy wins, so order matters.
   async function move(index, delta) {
     const name = policies[index].name;
-    notice = null;
+    clearMessages();
     try {
       await store((list) => {
         const from = list.findIndex((p) => p.name === name);
@@ -120,7 +131,7 @@
         return list;
       });
     } catch (e) {
-      notice = formatApiError(e);
+      error = formatApiError(e);
     }
   }
 
@@ -140,7 +151,10 @@
     <button onclick={openAdd}>Add Policy</button>
   </div>
   {#if notice}
-    <p class="notice" class:error={notice.startsWith('Error:')}>{notice}</p>
+    <p class="notice ok">{notice}</p>
+  {/if}
+  {#if error}
+    <p class="notice error">{error}</p>
   {/if}
   {#if policies.length}
     <div class="table-wrap">
@@ -162,7 +176,7 @@
                   <button class="secondary" onclick={() => move(i, -1)} disabled={i === 0} aria-label="Move up">↑</button>
                   <button class="secondary" onclick={() => move(i, 1)} disabled={i === policies.length - 1} aria-label="Move down">↓</button>
                   <button class="secondary" onclick={() => openEdit(i)}>Edit</button>
-                  <button class="danger" onclick={() => remove(i)}>✕</button>
+                  <button class="danger" onclick={() => remove(i)} aria-label="Delete {p.name}">✕</button>
                 </div>
               </td>
             </tr>
@@ -190,6 +204,7 @@
         <h3 id="policy-title" style="margin: 0">{form.index === null ? 'Add Client Policy' : `Edit Client Policy - ${policies[form.index].name}`}</h3>
         <button class="secondary" style="padding: 2px 10px" onclick={close} aria-label="Close">✕</button>
       </div>
+      {#if dialogError}<p class="notice error">{dialogError}</p>{/if}
       <div class="grid2">
         <label>Name <input placeholder="Kids' Devices" bind:value={form.name} /></label>
         <label>Resolution
@@ -220,6 +235,7 @@
 <style>
   .notice { margin: 0 0 10px; }
   .notice.error { color: var(--danger); }
+  .notice.ok { color: var(--ok); }
   .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
   label { display: flex; flex-direction: column; gap: 4px; font-size: 0.85rem; color: var(--muted); }
   .modal-backdrop { position: fixed; inset: 0; background: rgb(0 0 0 / 0.65); display: grid; place-items: center; padding: 20px; z-index: 10; }
