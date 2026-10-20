@@ -955,8 +955,8 @@ async fn send_records<R: ResponseHandler>(
 
 /// Synthesize a single-address redirect answer (policy `redirect` action).
 ///
-/// A query whose type the redirect target cannot answer (e.g. AAAA for an
-/// IPv4 sinkhole, or MX) gets an empty NOERROR (NODATA) response: the name is
+/// A query whose type the redirect target cannot answer (e.g. AAAA for a
+/// specific IPv4 address, or MX) gets an empty NOERROR (NODATA) response: the name is
 /// deliberately made to exist, so NXDOMAIN would wrongly tell caching
 /// resolvers that no record of *any* type exists for it (RFC 8020).
 async fn send_redirect<R: ResponseHandler>(
@@ -969,6 +969,15 @@ async fn send_redirect<R: ResponseHandler>(
     let rdata = match (ip, rtype) {
         (IpAddr::V4(v4), RecordType::A | RecordType::ANY) => RData::A(v4.into()),
         (IpAddr::V6(v6), RecordType::AAAA | RecordType::ANY) => RData::AAAA(v6.into()),
+        // A null sinkhole (0.0.0.0 or ::) answers the other family with its
+        // own null address too, as Pi-hole and AdGuard do, so IPv6 clients
+        // are blocked as plainly as IPv4 ones.
+        (IpAddr::V4(v4), RecordType::AAAA) if v4.is_unspecified() => {
+            RData::AAAA(std::net::Ipv6Addr::UNSPECIFIED.into())
+        }
+        (IpAddr::V6(v6), RecordType::A) if v6.is_unspecified() => {
+            RData::A(std::net::Ipv4Addr::UNSPECIFIED.into())
+        }
         _ => return send_empty(handle, request).await,
     };
     let record = Record::from_rdata(name.clone(), 60, rdata);

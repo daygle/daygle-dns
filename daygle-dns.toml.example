@@ -336,6 +336,10 @@ domain_max_queries = 600
 domain_window_secs = 60
 # Loopback clients (127.0.0.0/8, ::1) are never rate-limited.
 exempt_loopback = true
+# IPv6 clients are counted per prefix of this length (one host or network
+# normally holds a /64 or more, so single addresses could rotate past the
+# limit). 56 matches BIND; 128 counts single addresses.
+client_ipv6_prefix = 56
 
 [logging]
 level = "info"

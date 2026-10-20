@@ -1619,11 +1619,17 @@ async fn redirect_answers_nodata_for_types_the_target_cannot_serve() {
     assert_eq!(a.response_code, hickory_proto::op::ResponseCode::NoError);
     assert_eq!(first_answer(&a).as_deref(), Some("0.0.0.0"));
 
-    // The name exists (it redirects), so an AAAA query for an IPv4 sinkhole
-    // is NODATA, not NXDOMAIN (which would negatively cache every type).
+    // A null sinkhole answers IPv6 with its null address too (::), so
+    // IPv6 clients are blocked as plainly as IPv4 ones.
     let aaaa = udp_query(udp, "ads.test.", RecordType::AAAA).await;
     assert_eq!(aaaa.response_code, hickory_proto::op::ResponseCode::NoError);
-    assert!(aaaa.answers.is_empty());
+    assert_eq!(first_answer(&aaaa).as_deref(), Some("::"));
+
+    // The name exists (it redirects), so a type the target cannot serve is
+    // NODATA, not NXDOMAIN (which would negatively cache every type).
+    let mx = udp_query(udp, "ads.test.", RecordType::MX).await;
+    assert_eq!(mx.response_code, hickory_proto::op::ResponseCode::NoError);
+    assert!(mx.answers.is_empty());
 
     shutdown(server).await;
 }

@@ -385,7 +385,7 @@ pub fn detect_blocklist_format(text: &str) -> Option<BlocklistFormat> {
             continue;
         }
         // Hosts-file entries: a loopback/placeholder IP followed by a name.
-        let hosts_ip = ["0.0.0.0", "127.0.0.1", "::1", "255.255.255.255"]
+        let hosts_ip = ["0.0.0.0", "127.0.0.1", "::1", "::", "255.255.255.255"]
             .iter()
             .find(|p| line.starts_with(**p))
             .and_then(|p| line.get(p.len()..))

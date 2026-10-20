@@ -494,6 +494,14 @@ impl RecursiveResolver {
             Some(networks) => {
                 let client = unmap(client);
                 networks.iter().any(|n| n.contains(&client))
+                    // "Private networks" also means this host's own global
+                    // IPv6 networks: LANs mostly number IPv6 devices from
+                    // the ISP's prefix, not ULA.
+                    || (client.is_ipv6()
+                        && self.inner.settings.recursion_access == RecursionAccess::PrivateNetworks
+                        && daygle_dns_core::config::on_link_ipv6_networks()
+                            .iter()
+                            .any(|n| n.contains(&client)))
             }
         };
         allowed

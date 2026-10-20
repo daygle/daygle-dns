@@ -47,6 +47,7 @@ struct Inner {
     domain_limit: u32,
     domain_window: Duration,
     exempt_loopback: bool,
+    ipv6_prefix: u8,
     last_sweep: Instant,
 }
 
@@ -69,6 +70,7 @@ impl RateLimiter {
                 domain_limit: settings.domain_max_queries,
                 domain_window: Duration::from_secs(settings.domain_window_secs),
                 exempt_loopback: settings.exempt_loopback,
+                ipv6_prefix: settings.client_ipv6_prefix,
                 last_sweep: Instant::now(),
             }),
         }
@@ -84,6 +86,7 @@ impl RateLimiter {
         inner.domain_limit = settings.domain_max_queries;
         inner.domain_window = Duration::from_secs(settings.domain_window_secs);
         inner.exempt_loopback = settings.exempt_loopback;
+        inner.ipv6_prefix = settings.client_ipv6_prefix;
     }
 
     /// Whether rate limiting is currently enabled.
@@ -102,7 +105,14 @@ impl RateLimiter {
             return true;
         }
         let (window, limit) = (inner.client_window, inner.client_limit);
-        let allowed = check_bucket(inner.clients.entry(client), window, limit);
+        // IPv6 clients share a bucket per prefix (see client_ipv6_prefix).
+        let key = match client {
+            IpAddr::V6(v6) => ipnet::Ipv6Net::new(v6, inner.ipv6_prefix.min(128))
+                .map(|n| IpAddr::V6(n.network()))
+                .unwrap_or(client),
+            v4 => v4,
+        };
+        let allowed = check_bucket(inner.clients.entry(key), window, limit);
         maybe_sweep(&mut inner);
         allowed
     }
@@ -224,7 +234,21 @@ mod tests {
             domain_max_queries: 2,
             domain_window_secs: 60,
             exempt_loopback: true,
+            client_ipv6_prefix: 56,
         }
+    }
+
+    #[test]
+    fn ipv6_clients_share_a_bucket_per_prefix() {
+        let limiter = RateLimiter::new(&settings(true));
+        // Three queries from three addresses in one /56 use up the limit...
+        for host in ["2001:db8:0:1::1", "2001:db8:0:2::2", "2001:db8:0:3::3"] {
+            assert!(limiter.check_client(host.parse().unwrap()));
+        }
+        assert!(!limiter.check_client("2001:db8:0:ff::99".parse().unwrap()));
+        // ...while another /56 has its own.
+        assert!(limiter.check_client("2001:db8:0:100::1".parse().unwrap()));
+        assert_eq!(limiter.client_buckets(), 2);
     }
 
     #[test]

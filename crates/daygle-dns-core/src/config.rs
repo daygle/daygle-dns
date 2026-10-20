@@ -1325,6 +1325,11 @@ impl DaygleConfig {
                 "rate_limit.*_window_secs must be >= 1".to_string(),
             ));
         }
+        if !(1..=128).contains(&rl.client_ipv6_prefix) {
+            return Err(DaygleError::Config(
+                "rate_limit.client_ipv6_prefix must be 1-128".to_string(),
+            ));
+        }
         for upstream in &self.recursive.upstreams {
             if upstream.trim().is_empty() {
                 return Err(DaygleError::Config(
@@ -1956,7 +1961,77 @@ pub enum ClientPolicyAction {
     Refuse,
 }
 
-/// Client networks treated as private for [`RecursionAccess::PrivateNetworks`].
+/// Answers rebinding protection drops from public names: the private
+/// networks plus the "this host" ranges and IPv4-mapped IPv6, which would
+/// otherwise carry a private IPv4 address inside an AAAA record
+/// (`::ffff:192.168.1.1`).
+pub const REBINDING_DENY_NETWORKS: &[&str] = &[
+    "127.0.0.0/8",
+    "10.0.0.0/8",
+    "172.16.0.0/12",
+    "192.168.0.0/16",
+    "100.64.0.0/10",
+    "169.254.0.0/16",
+    "0.0.0.0/8",
+    "::1/128",
+    "::/128",
+    "::ffff:0:0/96",
+    "fc00::/7",
+    "fe80::/10",
+];
+
+/// The global IPv6 networks this host has addresses in (read from
+/// /proc/net/if_inet6 on Linux; empty elsewhere). Most LANs number their
+/// IPv6 devices from the ISP's global prefix rather than ULA, so "private
+/// networks" access also covers these. Cached for a minute, so a prefix the
+/// ISP renumbers is picked up without a restart.
+pub fn on_link_ipv6_networks() -> Vec<ipnet::IpNet> {
+    use std::sync::OnceLock;
+    use std::time::{Duration, Instant};
+    /// When the networks were last read, and what they were.
+    type Cached = Option<(Instant, Vec<ipnet::IpNet>)>;
+    static CACHE: OnceLock<parking_lot::Mutex<Cached>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| parking_lot::Mutex::new(None));
+    let mut guard = cache.lock();
+    if let Some((at, nets)) = guard.as_ref() {
+        if at.elapsed() < Duration::from_secs(60) {
+            return nets.clone();
+        }
+    }
+    let nets = std::fs::read_to_string("/proc/net/if_inet6")
+        .map(|text| parse_if_inet6(&text))
+        .unwrap_or_default();
+    *guard = Some((Instant::now(), nets.clone()));
+    nets
+}
+
+/// Parse /proc/net/if_inet6 lines (`address ifindex prefixlen scope flags
+/// name`, hex) into the global-scope networks.
+fn parse_if_inet6(text: &str) -> Vec<ipnet::IpNet> {
+    let mut nets: Vec<ipnet::IpNet> = text
+        .lines()
+        .filter_map(|line| {
+            let fields: Vec<&str> = line.split_whitespace().collect();
+            let (hex, prefix, scope) = (fields.first()?, fields.get(2)?, fields.get(3)?);
+            if *scope != "00" || hex.len() != 32 {
+                return None;
+            }
+            let bits = u128::from_str_radix(hex, 16).ok()?;
+            let prefix = u8::from_str_radix(prefix, 16).ok()?;
+            let addr = std::net::Ipv6Addr::from(bits);
+            ipnet::Ipv6Net::new(addr, prefix)
+                .ok()
+                .map(|n| ipnet::IpNet::V6(n.trunc()))
+        })
+        .collect();
+    nets.sort();
+    nets.dedup();
+    nets
+}
+
+/// Client networks treated as private for [`RecursionAccess::PrivateNetworks`]
+/// (plus this host's own global IPv6 networks; see
+/// [`on_link_ipv6_networks`]).
 pub const PRIVATE_NETWORKS: &[&str] = &[
     "127.0.0.0/8",
     "10.0.0.0/8",
@@ -2554,6 +2629,11 @@ pub struct RateLimitSettings {
     pub domain_window_secs: u64,
     /// Never rate-limit loopback clients (127.0.0.0/8, ::1).
     pub exempt_loopback: bool,
+    /// IPv6 clients are counted per prefix of this length: one host or
+    /// network normally holds a whole /64 or more, so counting single
+    /// addresses would let a client rotate past the limit. 56 matches
+    /// BIND's response rate limiting; 128 counts single addresses.
+    pub client_ipv6_prefix: u8,
 }
 
 impl Default for RateLimitSettings {
@@ -2565,6 +2645,7 @@ impl Default for RateLimitSettings {
             domain_max_queries: 600,
             domain_window_secs: 60,
             exempt_loopback: true,
+            client_ipv6_prefix: 56,
         }
     }
 }
@@ -2695,6 +2776,50 @@ mod tests {
         assert!(cfg.policy.allowlist.is_empty());
         assert_eq!(cfg.dot.port, 853);
         assert!(cfg.recursive.dnssec_validate);
+    }
+
+    #[test]
+    fn rebinding_deny_list_covers_ipv6_forms_of_private_addresses() {
+        let nets: Vec<ipnet::IpNet> = REBINDING_DENY_NETWORKS
+            .iter()
+            .map(|n| n.parse().unwrap())
+            .collect();
+        let denied = |ip: &str| {
+            let ip: IpAddr = ip.parse().unwrap();
+            nets.iter().any(|n| n.contains(&ip))
+        };
+        // A private IPv4 address smuggled inside an AAAA answer.
+        assert!(denied("::ffff:192.168.1.1"));
+        assert!(denied("::ffff:127.0.0.1"));
+        assert!(denied("fd12:3456::1"));
+        assert!(denied("fe80::1"));
+        assert!(denied("::1"));
+        assert!(denied("::"));
+        assert!(denied("0.0.0.0"));
+        // Public addresses pass.
+        assert!(!denied("2606:4700:4700::1111"));
+        assert!(!denied("1.1.1.1"));
+    }
+
+    #[test]
+    fn reads_global_ipv6_networks_from_if_inet6() {
+        let text = "\
+00000000000000000000000000000001 01 80 10 80       lo
+2a0204ab12340001021122fffe334455 02 40 00 00     eth0
+fe80000000000000021122fffe334455 02 40 20 80     eth0
+fd0000000000000000000000000000aa 02 40 00 80     eth0
+2a0204ab123400010000000000000053 02 80 00 80     eth0
+";
+        let nets: Vec<String> = parse_if_inet6(text).iter().map(|n| n.to_string()).collect();
+        // Global scope only (loopback and link-local skipped), as networks.
+        assert_eq!(
+            nets,
+            [
+                "2a02:4ab:1234:1::/64",
+                "2a02:4ab:1234:1::53/128",
+                "fd00::/64"
+            ]
+        );
     }
 
     #[test]

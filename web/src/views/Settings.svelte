@@ -551,8 +551,10 @@
     <p class="muted help">
       Applies to everything this server resolves rather than answers from its own
       zones; refused clients get REFUSED. Private Networks Only covers loopback,
-      10/8, 172.16/12, 192.168/16, 100.64/10 (CGNAT), link-local and IPv6 ULA, so
-      the server is not an open resolver if it is reachable from the internet.
+      10/8, 172.16/12, 192.168/16, 100.64/10 (CGNAT), link-local, IPv6 ULA and
+      the IPv6 networks this server is on (most LANs give devices addresses from
+      the ISP's prefix rather than ULA), so the server is not an open resolver
+      if it is reachable from the internet.
       Your own zones are answered for everyone.
     </p>
   </div>

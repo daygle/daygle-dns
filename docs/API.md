@@ -330,12 +330,14 @@ system resolver when that list is empty). When unset it is inferred:
 forwarding if upstreams are configured, otherwise recursive. Saving settings
 stores the effective mode explicitly. `recursive.recursion_access` decides who
 may use recursion - `"private_networks"` (default: loopback, RFC 1918, CGNAT,
-link-local, IPv6 ULA), `"allow"`, `"custom"` (the CIDRs or IPs in
+link-local, IPv6 ULA, and the global IPv6 networks this host has addresses
+in, re-read every minute from `/proc/net/if_inet6`), `"allow"`, `"custom"` (the CIDRs or IPs in
 `recursion_networks`) or `"deny"`; refused clients get `REFUSED`, while the
 server's own zones are answered for everyone. In recursive mode,
 `case_randomization` enables 0x20 query-case randomization and
-`rebinding_protection` drops private and loopback addresses from public
-answers; `root_hints` overrides the built-in root server addresses.
+`rebinding_protection` drops private, loopback and unspecified addresses
+from public answers, including IPv4-mapped IPv6 forms such as
+`::ffff:192.168.1.1`; `root_hints` overrides the built-in root server addresses.
 
 `recursive.local_root` (`{ "enabled": true, "sources": [] }`) keeps a local
 copy of the root zone (RFC 8806; the console's **Secondary ROOT Zone**). It is

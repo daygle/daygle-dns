@@ -13,7 +13,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use daygle_dns_core::config::{RecursiveSettings, PRIVATE_NETWORKS};
+use daygle_dns_core::config::{RecursiveSettings, REBINDING_DENY_NETWORKS};
 use daygle_dns_core::error::{DaygleError, Result};
 use daygle_dns_core::Metrics;
 use hickory_proto::op::{Query, ResponseCode};
@@ -231,7 +231,7 @@ pub fn build(
         ..RecursorOptions::default()
     };
     if settings.rebinding_protection {
-        options.deny_answers = PRIVATE_NETWORKS
+        options.deny_answers = REBINDING_DENY_NETWORKS
             .iter()
             .filter_map(|n| n.parse().ok())
             .collect();

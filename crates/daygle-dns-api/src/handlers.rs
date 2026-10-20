@@ -630,8 +630,16 @@ fn query_log_filter(
             .map(|v| query_log_bound(v, which))
             .transpose()
     };
+    // Clients are logged in canonical form (2001:db8::1); match however
+    // the address was typed (expanded, upper case, IPv4-mapped).
+    let client = query.client.as_deref().map(|c| {
+        c.trim()
+            .parse::<std::net::IpAddr>()
+            .map(|ip| ip.to_canonical().to_string())
+            .unwrap_or_else(|_| c.trim().to_string())
+    });
     Ok(daygle_dns_authoritative::QueryLogFilter {
-        client: query.client.clone(),
+        client,
         qname: query.qname.clone(),
         qtype: query.qtype.clone(),
         protocol: query.protocol.clone(),
