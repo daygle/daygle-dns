@@ -258,7 +258,9 @@ PUT /api/config
 ```
 
 Editable groups: `server` (listen/port/udp_enabled/tcp_enabled), `recursive`
-(enabled/mode/upstreams/dnssec_validate/prefetch_* /serve_stale_secs/
+(enabled/mode/upstreams/use_system_config/dnssec_validate/cache_size/
+min_cache_ttl/max_cache_ttl/negative_cache_ttl/failure_cache_ttl/
+prefetch_* /serve_stale_secs/
 conditional_zones/recursion_access/recursion_networks/root_hints/
 case_randomization/rebinding_protection/local_root/opportunistic_encryption/
 client_policies), `dot`,

@@ -2775,6 +2775,9 @@ pub struct RecursiveUpdate {
     /// Local root zone (RFC 8806): `enabled` and `sources`.
     pub local_root: Option<daygle_dns_core::config::LocalRootSettings>,
     pub opportunistic_encryption: Option<bool>,
+    pub min_cache_ttl: Option<u32>,
+    pub negative_cache_ttl: Option<u32>,
+    pub use_system_config: Option<bool>,
     /// Replaces the whole client policy list.
     pub client_policies: Option<Vec<daygle_dns_core::config::ClientPolicyConfig>>,
 }
@@ -2903,6 +2906,9 @@ pub async fn update_settings(
             local_root: r.local_root.clone(),
             opportunistic_encryption: r.opportunistic_encryption,
             client_policies: r.client_policies.clone(),
+            min_cache_ttl: r.min_cache_ttl,
+            negative_cache_ttl: r.negative_cache_ttl,
+            use_system_config: r.use_system_config,
             ..Default::default()
         }
         .apply_resolution(&mut config.recursive);

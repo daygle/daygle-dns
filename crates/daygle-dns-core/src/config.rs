@@ -173,6 +173,12 @@ pub struct RecursiveUpdate {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_cache_ttl: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub min_cache_ttl: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub negative_cache_ttl: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub use_system_config: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub failure_cache_ttl: Option<u32>,
     /// Conditional forwarder zones (the whole list; see
     /// [`ConditionalZoneConfig`]).
@@ -224,6 +230,15 @@ impl RecursiveUpdate {
         }
         if let Some(v) = self.opportunistic_encryption {
             settings.opportunistic_encryption = v;
+        }
+        if let Some(v) = self.min_cache_ttl {
+            settings.min_cache_ttl = v;
+        }
+        if let Some(v) = self.negative_cache_ttl {
+            settings.negative_cache_ttl = v;
+        }
+        if let Some(v) = self.use_system_config {
+            settings.use_system_config = v;
         }
         if let Some(v) = &self.client_policies {
             settings.client_policies = v
@@ -742,6 +757,9 @@ impl RuntimeSettings {
                 prefetch_min_queries: Some(config.recursive.prefetch_min_queries),
                 serve_stale_secs: Some(config.recursive.serve_stale_secs),
                 max_cache_ttl: Some(config.recursive.max_cache_ttl),
+                min_cache_ttl: Some(config.recursive.min_cache_ttl),
+                negative_cache_ttl: Some(config.recursive.negative_cache_ttl),
+                use_system_config: Some(config.recursive.use_system_config),
                 failure_cache_ttl: Some(config.recursive.failure_cache_ttl),
                 conditional_zones: Some(config.recursive.conditional_zones.clone()),
                 // Store the effective mode so a later upstreams change cannot

@@ -786,7 +786,13 @@ async fn db_settings_survive_restart_and_win_over_the_file() {
     let resp = client
         .put(api_url(server.api_addr, "/api/config"))
         .bearer_auth(&token)
-        .json(&json!({ "recursive": { "cache_size": 12345 } }))
+        // Every cache field the Settings page edits must be accepted.
+        .json(&json!({ "recursive": {
+            "cache_size": 12345,
+            "min_cache_ttl": 30,
+            "negative_cache_ttl": 120,
+            "use_system_config": false,
+        } }))
         .send()
         .await
         .unwrap();
@@ -812,6 +818,9 @@ async fn db_settings_survive_restart_and_win_over_the_file() {
         .await
         .unwrap();
     assert_eq!(cfg["recursive"]["cache_size"], json!(12345));
+    assert_eq!(cfg["recursive"]["min_cache_ttl"], json!(30));
+    assert_eq!(cfg["recursive"]["negative_cache_ttl"], json!(120));
+    assert_eq!(cfg["recursive"]["use_system_config"], json!(false));
 
     shutdown(server).await;
 }
