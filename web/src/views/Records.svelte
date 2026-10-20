@@ -5,7 +5,7 @@
   // The zone to preselect, passed when coming from the Zones page.
   let { zoneId = null, onSelectZone = () => {} } = $props();
 
-  // Server-wide default TTL (Settings → Zones & Records), used to pre-fill
+  // Server-wide default TTL (Settings → Zones), used to pre-fill
   // the TTL field of new records.
   let defaultTtl = $state(3600);
 

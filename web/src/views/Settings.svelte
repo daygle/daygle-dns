@@ -19,15 +19,17 @@
   let tab = $state(initialTab);
   const TABS = [
     ['general', 'General'],
-    ['recursive', 'Recursive & Caching'],
+    ['recursive', 'Resolver'],
+    ['cache', 'Cache'],
     ['listeners', 'Protocol Listeners'],
-    ['zones', 'Zones & Records'],
+    ['zones', 'Zones'],
     ['ai', 'AI Scanner'],
     ['interface', 'Interface'],
   ];
   const TAGLINES = {
     general: 'The DNS listeners this server was started with. They are set in the config file so a mistake can always be fixed there.',
-    recursive: 'How the server answers names it does not host: resolving them itself from the root servers or forwarding to upstreams, who may use it, and how answers are cached.',
+    recursive: 'How the server answers names it does not host: resolving them itself from the root servers or forwarding to upstreams, and who may use it.',
+    cache: 'How long answers are kept, how many, and how popular names are refreshed before they expire. Changes apply immediately.',
     listeners: 'Encrypted DNS: DNS over TLS, HTTPS and QUIC, and the certificate each one presents. Changes apply immediately.',
     zones: 'Defaults for new zones and records, and how other DNS servers may copy, update and be notified about your zones.',
     ai: 'The background scanner that classifies the domains in your DNS traffic and can block unsafe ones.',
@@ -87,7 +89,7 @@
   );
 
   // What empty SOA defaults resolve to (this server's name, the first
-  // administrator's email), for the Zones & Records placeholders.
+  // administrator's email), for the Zones tab placeholders.
   let zoneDefaults = $state(null);
 
   $effect(() => {
@@ -395,7 +397,7 @@
   </div>
   {:else if tab === 'recursive'}
   <div class="card" style="margin-bottom: 14px">
-    <h3 style="margin: 0 0 10px">Recursive Resolver</h3>
+    <h3 style="margin: 0 0 10px">Resolver</h3>
     <div class="form-grid">
       <label>
         <span>Resolution Mode</span>
@@ -467,7 +469,11 @@
       the server is not an open resolver if it is reachable from the internet.
       Your own zones are answered for everyone.
     </p>
-    <h4>Caching</h4>
+  </div>
+  <ClientPolicies />
+  {:else if tab === 'cache'}
+  <div class="card" style="margin-bottom: 14px">
+    <h3 style="margin: 0 0 10px">Cache Lifetimes</h3>
     <div class="recursive-cache-grid">
       <label><span>Minimum Cache TTL (Seconds)</span><span class="hint">{hint(recursive.min_cache_ttl)}</span><input type="number" min="0" bind:value={recursive.min_cache_ttl} /></label>
       <label><span>Negative Cache TTL (Seconds)</span><span class="hint">{hint(recursive.negative_cache_ttl)}</span><input type="number" min="0" bind:value={recursive.negative_cache_ttl} /></label>
@@ -475,6 +481,16 @@
       <label><span>Failure Cache TTL (Seconds)</span><span class="hint">{hint(recursive.failure_cache_ttl)}</span><input type="number" min="0" bind:value={recursive.failure_cache_ttl} /></label>
       <label><span>Cache Size (Entries)</span><input type="number" min="0" bind:value={recursive.cache_size} /></label>
     </div>
+    <p class="muted help">
+      Minimum and negative TTLs bound how long records stay in cache. Maximum TTL
+      clamps positive answers at insert time so tracking-heavy domains cannot pin
+      themselves in cache for weeks. Failure Cache TTL caches SERVFAIL and other
+      upstream errors briefly so a broken upstream is not hammered on every query;
+      set it to 0 to disable.
+    </p>
+  </div>
+  <div class="card" style="margin-bottom: 14px">
+    <h3 style="margin: 0 0 10px">Refreshing and Stale Answers</h3>
     <div class="recursive-cache-grid">
       <label class="check"><input type="checkbox" bind:checked={recursive.prefetch_enabled} /> <span>Refresh Popular Names Early</span></label>
       <label><span>Refresh When TTL Left Is Below (%)</span><input type="number" min="1" max="99" bind:value={recursive.prefetch_ttl_fraction_pct} disabled={!recursive.prefetch_enabled} /></label>
@@ -482,20 +498,15 @@
       <label><span>Serve-Stale Window (Seconds)</span><span class="hint">{hint(recursive.serve_stale_secs)}</span><input type="number" min="0" bind:value={recursive.serve_stale_secs} /></label>
     </div>
     <p class="muted help">
-      Minimum and negative TTLs bound how long records stay in cache. Maximum TTL
-      clamps positive answers at insert time so tracking-heavy domains cannot pin
-      themselves in cache for weeks. Failure Cache TTL caches SERVFAIL and other
-      upstream errors briefly so a broken upstream is not hammered on every query;
-      set it to 0 to disable. Refreshing popular names early re-fetches a name
-      before it expires once it has been asked for often enough, so clients
-      rarely wait. Serve-stale answers from an expired entry for this long when
-      the upstream cannot be reached.
+      Refreshing popular names early re-fetches a name before it expires once
+      it has been asked for often enough, so clients rarely wait. Serve-stale
+      answers from an expired entry for this long when the upstream cannot be
+      reached. The Cache page shows hit rates and can flush the cache.
     </p>
   </div>
-  <ClientPolicies />
   {:else if tab === 'zones'}
   <div class="card" style="margin-bottom: 14px">
-    <h3 style="margin: 0 0 10px">Zones & Records</h3>
+    <h3 style="margin: 0 0 10px">Zone Defaults</h3>
     <div class="form-grid top">
       <label><span>Default Record TTL (Seconds)</span><span class="hint">{hint(authoritative.default_record_ttl)}</span><input type="number" min="1" bind:value={authoritative.default_record_ttl} /></label>
       <label><span>DNS Server Domain</span><input placeholder={detectedName ? `This server: ${detectedName}` : 'ns1.example.com.'} bind:value={authoritative.default_primary_ns} /></label>

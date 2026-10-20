@@ -469,7 +469,7 @@
     }
   }
 
-  // DNS Server Domain (Settings -> Zones & Records) pre-fills and
+  // DNS Server Domain (Settings -> Zones) pre-fills and
   // placeholders the SOA Primary Nameserver for new zones.
   let dnsServerDomain = $derived(zoneDefaults?.primary_ns || config?.authoritative?.default_primary_ns || '');
 
@@ -668,7 +668,7 @@
         <p class="muted help">
           Queries for this zone and its subdomains are resolved through these
           servers instead of the default upstreams. Accepts the same forms as
-          Settings → Recursive &amp; Caching. One per line.
+          Settings → Resolver. One per line.
         </p>
       {:else}
       <div class="section-title">SOA Settings</div>
@@ -683,7 +683,7 @@
         <label>Minimum TTL (Seconds) <span class="hint">{hint(newZone.minimum)}</span><input type="number" min="1" bind:value={newZone.minimum} /></label>
       </div>
       <p class="muted help">
-        Pre-filled from Settings → Zones &amp; Records, or when those are
+        Pre-filled from Settings → Zones, or when those are
         empty, this server's name and the first administrator's email. The
         timers tell secondary servers how often to check for changes; the
         defaults suit most zones.
