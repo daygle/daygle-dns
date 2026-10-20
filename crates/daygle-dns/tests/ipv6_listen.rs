@@ -58,7 +58,10 @@ async fn wildcard_ipv6_listen_serves_both_families() {
         IpAddr::V6(Ipv6Addr::LOCALHOST),
         IpAddr::V4(Ipv4Addr::LOCALHOST),
     ] {
-        let reply = udp_query(
+        // Send from loopback in the target's family: an IPv4 socket cannot
+        // reach `::1`.
+        let reply = udp_query_from(
+            ip,
             SocketAddr::new(ip, udp_port),
             "www.dual.test.",
             RecordType::A,
