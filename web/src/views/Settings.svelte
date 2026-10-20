@@ -2,6 +2,7 @@
   import { api, formatApiError } from '../api.js';
   import PageHeader from '../PageHeader.svelte';
   import ClientPolicies from './ClientPolicies.svelte';
+  import BackupRestore from './BackupRestore.svelte';
   import { icons } from '../icons.svelte.js';
   import { display, setDisplayDefaults, timeZoneOptions, DATE_FORMAT_OPTIONS, TIME_FORMAT_OPTIONS, previewDateTime } from '../datetime.svelte.js';
   import { duration } from '../aiLabels.js';
@@ -25,6 +26,7 @@
     ['zones', 'Zones'],
     ['ai', 'AI Scanner'],
     ['interface', 'Interface'],
+    ['backup', 'Backup'],
   ];
   const TAGLINES = {
     general: 'How the web console is reached (HTTP, HTTPS or both), and the DNS listeners this server was started with.',
@@ -34,6 +36,7 @@
     zones: 'Defaults for new zones and records, and how other DNS servers may copy, update and be notified about your zones.',
     ai: 'The background scanner that classifies the domains in your DNS traffic and can block unsafe ones.',
     interface: 'How the console shows dates and times by default.',
+    backup: 'Download a backup of everything this server keeps, or restore one.',
   };
 
   // Local editable copies (bound to the form inputs).
@@ -436,11 +439,13 @@
     {/each}
   </div>
 
+  {#if tab !== 'backup'}
   <div class="actions" class:dirty>
     <button onclick={save} disabled={busy || !dirty}>{busy ? 'Saving…' : 'Save Changes'}</button>
     <button class="secondary" onclick={reload} disabled={busy}>{dirty ? 'Discard Changes' : 'Reload'}</button>
     {#if dirty}<span class="unsaved">Unsaved changes (Save covers every tab)</span>{/if}
   </div>
+  {/if}
 
   {#if tab === 'general'}
   <div class="card" style="margin-bottom: 14px">
@@ -900,7 +905,8 @@
       "Device Time Zone" and "Browser Default" follow each viewer's computer.
     </p>
   </div>
-
+  {:else if tab === 'backup'}
+  <BackupRestore />
   {/if}
 {:else}
   <div class="card">

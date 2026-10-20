@@ -1891,6 +1891,134 @@ pub async fn export_zone(State(state): State<AppState>, Path(id): Path<String>) 
     }
 }
 
+// ---- Backup and restore --------------------------------------------------
+
+/// A scratch file next to the database (or in the system temp directory
+/// for an in-memory one), removed when dropped.
+struct ScratchFile(std::path::PathBuf);
+
+impl ScratchFile {
+    fn new(database: &str, purpose: &str) -> Self {
+        let name = format!(
+            "daygle-dns-{purpose}-{}-{}.tmp",
+            std::process::id(),
+            rand::random::<u64>()
+        );
+        let dir = std::path::Path::new(database)
+            .parent()
+            .filter(|p| database != ":memory:" && !p.as_os_str().is_empty())
+            .map(std::path::Path::to_path_buf)
+            .unwrap_or_else(std::env::temp_dir);
+        Self(dir.join(name))
+    }
+}
+
+impl Drop for ScratchFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+#[derive(Deserialize)]
+pub struct BackupQuery {
+    #[serde(default)]
+    query_logs: bool,
+}
+
+/// `GET /api/backup[?query_logs=true]` - download a backup of the database
+/// (admin only: it holds private keys and password hashes).
+pub async fn download_backup(
+    State(state): State<AppState>,
+    Query(query): Query<BackupQuery>,
+) -> Response {
+    let config = state.config.load_full();
+    let database = config.authoritative.database.clone();
+    let ai_database = daygle_dns_ml::database_path(&config.ai, &database);
+    let store = state.catalog.store().clone();
+    let made = tokio::task::spawn_blocking(move || {
+        let scratch = ScratchFile::new(&database, "backup");
+        store.backup_to(&scratch.0, query.query_logs, Some(&ai_database))?;
+        Ok::<_, daygle_dns_core::error::DaygleError>(std::fs::read(&scratch.0)?)
+    })
+    .await;
+    match made {
+        Ok(Ok(bytes)) => {
+            let filename = format!(
+                "attachment; filename=\"daygle-dns-backup-{}.db\"",
+                chrono::Local::now().format("%Y%m%d-%H%M")
+            );
+            state.logs.info(
+                "backup",
+                format!("backup downloaded ({} bytes)", bytes.len()),
+            );
+            (
+                [
+                    (header::CONTENT_TYPE, "application/vnd.sqlite3"),
+                    (header::CONTENT_DISPOSITION, filename.as_str()),
+                    (header::CACHE_CONTROL, "no-store"),
+                ],
+                bytes,
+            )
+                .into_response()
+        }
+        Ok(Err(e)) => map_err(e),
+        Err(e) => error_response(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
+}
+
+/// `GET /api/backup/restore` - the restore waiting for a restart, if any.
+pub async fn pending_restore(State(state): State<AppState>) -> Response {
+    let database = state.config.load().authoritative.database.clone();
+    Json(serde_json::json!({
+        "pending": daygle_dns_authoritative::backup::pending_restore(&database),
+    }))
+    .into_response()
+}
+
+/// `POST /api/backup/restore` (the backup file as the body) - check the
+/// backup and stage it to replace the database on the next restart.
+pub async fn stage_restore(State(state): State<AppState>, body: axum::body::Bytes) -> Response {
+    let database = state.config.load().authoritative.database.clone();
+    if database == ":memory:" {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "this server runs on an in-memory database, which cannot be restored",
+        );
+    }
+    let staged = tokio::task::spawn_blocking(move || {
+        let scratch = ScratchFile::new(&database, "upload");
+        std::fs::write(&scratch.0, &body)?;
+        daygle_dns_authoritative::backup::stage_restore(&database, &scratch.0)
+    })
+    .await;
+    match staged {
+        Ok(Ok(info)) => {
+            state.logs.info(
+                "backup",
+                "restore staged: it replaces the database when the server restarts".to_string(),
+            );
+            Json(serde_json::json!({ "pending": info })).into_response()
+        }
+        Ok(Err(e)) => map_err(e),
+        Err(e) => error_response(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
+}
+
+/// `DELETE /api/backup/restore` - drop the staged restore.
+pub async fn cancel_restore(State(state): State<AppState>) -> Response {
+    let database = state.config.load().authoritative.database.clone();
+    match daygle_dns_authoritative::backup::cancel_restore(&database) {
+        Ok(true) => {
+            state
+                .logs
+                .info("backup", "staged restore cancelled".to_string());
+            StatusCode::NO_CONTENT.into_response()
+        }
+        Ok(false) => error_response(StatusCode::NOT_FOUND, "no restore is staged"),
+        Err(e) => map_err(e),
+    }
+}
+
 // ---- Advanced blocking --------------------------------------------------
 
 /// Rebuild the shared Advanced Blocking engine from the stored groups and

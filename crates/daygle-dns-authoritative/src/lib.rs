@@ -9,6 +9,7 @@
 //! - [`store`] - a SQLite-backed [`ZoneStore`] with full CRUD and schema
 //!   management.
 //! - [`parse`] - a BIND-style zone file parser for imports.
+//! - [`backup`] - backups of the database and staged restores.
 //! - [`catalog`] - converts stored zones into Hickory [`Record`]s/`RecordSet`s
 //!   and assembles them into a [`Catalog`] ready for serving, including
 //!   DNSSEC signing when keys are present.
@@ -20,6 +21,7 @@
 //! - [`root_zone`] - the local root zone (RFC 8806), verified with
 //!   [`zonemd`] (RFC 8976).
 
+pub mod backup;
 pub mod catalog;
 pub mod dnssec;
 pub mod model;

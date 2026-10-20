@@ -950,6 +950,44 @@ reordered list. Groups are evaluated in this order.
 the live blocking groups and reports whether (and why) it is blocked, so an
 operator can verify rules before relying on them.
 
+### Backup and restore
+
+```
+GET    /api/backup[?query_logs=true]
+GET    /api/backup/restore
+POST   /api/backup/restore
+DELETE /api/backup/restore
+```
+
+Admin only (viewers get `403`): a backup holds private keys and password
+hashes.
+
+`GET /api/backup` downloads a backup as one SQLite file
+(`daygle-dns-backup-YYYYMMDD-HHMM.db`): a consistent copy of the database
+(zones, records, DNSSEC keys, settings, console users, certificates,
+blocking groups, split horizon, secondary and stub zones) plus the AI
+scanner's operator overrides. AI verdicts are a cache and are not included.
+Query logs are left out unless `query_logs=true`.
+
+`POST /api/backup/restore` takes a backup file as the request body (up to
+1 GiB). It checks the file is an intact backup made by this or an earlier
+version, then stages it to replace the database when the server next
+starts; nothing changes while it runs. The response, and
+`GET /api/backup/restore`, report what is staged (`null` when nothing is):
+
+```json
+{ "pending": { "created_at": 1792000000, "app_version": "1.0.0", "zones": 4,
+  "records": 52, "users": 2, "certificates": 1, "query_logs": 0, "ai_overrides": 3 } }
+```
+
+A file that is not a backup gets `400`. `DELETE /api/backup/restore` drops
+the staged restore (`204`, or `404` when none is staged). On the next start
+the current database is renamed `<database>.before-restore-<unix time>` and
+the backup takes its place; the backup's AI overrides replace those in the
+AI database. The same is available from the command line:
+`daygle-dns backup FILE [--query-logs]` (safe while the server runs) and
+`daygle-dns restore FILE` (then restart).
+
 ### In-place updates
 
 ```

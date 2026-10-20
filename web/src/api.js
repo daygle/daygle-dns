@@ -34,7 +34,11 @@ async function request(method, path, body, opts = {}) {
   const init = { method, headers: {} };
   const token = getToken();
   if (token) init.headers['Authorization'] = `Bearer ${token}`;
-  if (body !== undefined) {
+  if (opts.raw) {
+    // A file or blob sent as-is (e.g. a backup to restore).
+    init.headers['Content-Type'] = 'application/octet-stream';
+    init.body = body;
+  } else if (body !== undefined) {
     init.headers['Content-Type'] = 'application/json';
     init.body = JSON.stringify(body);
   }
@@ -59,6 +63,10 @@ async function request(method, path, body, opts = {}) {
     throw err;
   }
   if (res.status === 204) return null;
+  if (opts.blob) {
+    const match = /filename="([^"]+)"/.exec(res.headers.get('Content-Disposition') || '');
+    return { blob: await res.blob(), filename: match ? match[1] : 'download' };
+  }
   return opts.text ? res.text() : res.json();
 }
 
@@ -176,6 +184,11 @@ export const api = {
     request('DELETE', `/zones/${zoneId}/records/${recordId}`),
   setRecordDisabled: (zoneId, recordId, disabled) =>
     request('PUT', `/zones/${zoneId}/records/${encodeURIComponent(recordId)}/disabled`, { disabled }),
+  downloadBackup: (queryLogs) =>
+    request('GET', `/backup${queryLogs ? '?query_logs=true' : ''}`, undefined, { blob: true }),
+  pendingRestore: () => request('GET', '/backup/restore'),
+  stageRestore: (file) => request('POST', '/backup/restore', file, { raw: true }),
+  cancelRestore: () => request('DELETE', '/backup/restore'),
   exportZone: (zoneId) => request('GET', `/zones/${zoneId}/export`, undefined, { text: true }),
   signZone: (zoneId) => request('POST', `/zones/${zoneId}/sign`),
   unsignZone: (zoneId) => request('POST', `/zones/${zoneId}/unsign`),

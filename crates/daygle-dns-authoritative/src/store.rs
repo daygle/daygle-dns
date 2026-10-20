@@ -208,6 +208,13 @@ impl ZoneStore {
             .map_err(|e| DaygleError::Internal(format!("database lock poisoned: {e}")))
     }
 
+    /// Run `f` with the connection locked (for whole-database operations
+    /// such as backups).
+    pub(crate) fn with_conn<T>(&self, f: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
+        let conn = self.lock_conn()?;
+        f(&conn)
+    }
+
     fn init(&self) -> Result<()> {
         let conn = self.lock_conn()?;
         conn.execute_batch(SCHEMA)?;

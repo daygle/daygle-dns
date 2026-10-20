@@ -167,6 +167,19 @@ pub async fn bind_with(
     let started_at = std::time::Instant::now();
     let shutdown = CancellationToken::new();
 
+    // A restore staged from the console or `daygle-dns restore` replaces
+    // the database before it is opened.
+    let restored = match daygle_dns_authoritative::backup::apply_pending_restore(
+        &config.authoritative.database,
+    ) {
+        Ok(aside) => aside,
+        Err(e) => {
+            warn!("{e}");
+            logs.push(daygle_dns_core::LogLevel::Error, "backup", e.to_string());
+            None
+        }
+    };
+
     // Authoritative.
     let store = daygle_dns_authoritative::ZoneStore::open(&config.authoritative.database)?;
     let catalog = Arc::new(AuthorityCatalog::new(
@@ -336,6 +349,26 @@ pub async fn bind_with(
 
     // Policy.
     let mut policy = daygle_dns_policy::build_engine(&config.policy)?;
+
+    // Finish a restore: the backup's AI overrides go into the AI database
+    // (whose path may come from the restored settings).
+    if let Some(aside) = &restored {
+        let ai_database = daygle_dns_ml::database_path(&config.ai, &config.authoritative.database);
+        if let Err(e) = store.finish_restore(&ai_database) {
+            warn!("restore: {e}");
+            logs.push(
+                daygle_dns_core::LogLevel::Error,
+                "backup",
+                format!("restore: {e}"),
+            );
+        }
+        let message = format!(
+            "restored from a backup; the previous database was kept as {}",
+            aside.display()
+        );
+        info!("{message}");
+        logs.push(daygle_dns_core::LogLevel::Info, "backup", message);
+    }
 
     // AI subsystem (daygle-dns-ml): a CPU-only background classifier over
     // domains observed in the query log. Opt-in via `[ai] enabled = true`.

@@ -1154,6 +1154,15 @@ async fn viewer_role_is_read_only_and_secrets_are_redacted() {
     let stats: serde_json::Value = resp.json().await.unwrap();
     assert!(stats.get("series").is_some());
 
+    // Backups hold password hashes and private keys: admins only.
+    let resp = client
+        .get(format!("{base}/api/backup"))
+        .bearer_auth(&viewer_token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 403);
+
     // ...but every mutating method is rejected with 403.
     let resp = client
         .post(format!("{base}/api/zones"))

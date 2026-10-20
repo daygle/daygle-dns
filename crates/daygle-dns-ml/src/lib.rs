@@ -251,7 +251,7 @@ impl AiEngine {
 
 /// Resolve the database path: the config value, or `ai.db` beside the
 /// authoritative zone database.
-fn database_path(settings: &AiSettings, authoritative_database: &str) -> PathBuf {
+pub fn database_path(settings: &AiSettings, authoritative_database: &str) -> PathBuf {
     if !settings.database.trim().is_empty() {
         PathBuf::from(&settings.database)
     } else if let Some(parent) = Path::new(authoritative_database).parent() {

@@ -390,6 +390,15 @@ pub fn router(state: AppState) -> Router {
             "/policy/blocking/{id}/move",
             post(handlers::move_blocking_group),
         )
+        .route("/backup", get(handlers::download_backup))
+        .route(
+            "/backup/restore",
+            get(handlers::pending_restore)
+                .post(handlers::stage_restore)
+                .delete(handlers::cancel_restore)
+                // Backups with query logs can be large.
+                .layer(axum::extract::DefaultBodyLimit::max(1024 * 1024 * 1024)),
+        )
         .route("/update", get(handlers::update_info))
         .route("/update/status", get(handlers::update_status))
         .route("/update/start", post(handlers::update_start))
@@ -467,7 +476,7 @@ fn is_privileged_read(path: &str) -> bool {
     let path = path.strip_prefix("/api").unwrap_or(path);
     matches!(
         path,
-        "/policy/blocklist/sources/validate" | "/update/preflight"
+        "/policy/blocklist/sources/validate" | "/update/preflight" | "/backup" | "/backup/restore"
     )
 }
 
