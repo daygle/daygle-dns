@@ -55,6 +55,8 @@ pub struct Shared {
     pub tsig_keys: Arc<daygle_dns_authoritative::tsig::TsigKeyRing>,
     /// The local root zone (RFC 8806), handed to every resolver rebuild.
     pub local_root: Arc<daygle_dns_authoritative::LocalRoot>,
+    /// Remote logging (syslog); `None` in tests.
+    pub syslog: Option<Arc<crate::syslog::SyslogSender>>,
 }
 
 /// The currently bound DNS listener addresses.
@@ -338,6 +340,7 @@ mod tests {
                 Default::default(),
                 None,
             )),
+            syslog: None,
         }
     }
 

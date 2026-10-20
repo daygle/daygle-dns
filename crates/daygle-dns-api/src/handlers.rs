@@ -3609,6 +3609,8 @@ pub struct SettingsUpdate {
     pub ai: Option<AiUpdate>,
     pub display: Option<DisplayUpdate>,
     pub web: Option<WebUpdate>,
+    /// Replaces the whole `[syslog]` section.
+    pub syslog: Option<daygle_dns_core::config::SyslogSettings>,
 }
 
 /// Partial update for how the web console is served (HTTP and/or HTTPS).
@@ -4010,6 +4012,18 @@ pub async fn update_settings(
         if let Some(v) = &a.cors_origins {
             config.api.cors_origins = v.clone();
         }
+    }
+    if let Some(syslog) = &update.syslog {
+        let syslog = daygle_dns_core::config::SyslogSettings {
+            server: syslog.server.trim().to_string(),
+            facility: syslog.facility.trim().to_string(),
+            level: syslog.level.trim().to_string(),
+            ..syslog.clone()
+        };
+        if let Err(msg) = syslog.check() {
+            return error_response(StatusCode::BAD_REQUEST, format!("syslog: {msg}"));
+        }
+        config.syslog = syslog;
     }
     if let Some(w) = &update.web {
         if let Some(v) = w.http_enabled {

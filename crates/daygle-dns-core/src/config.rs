@@ -42,6 +42,125 @@ pub struct DaygleConfig {
     pub display: DisplaySettings,
     /// How the web console and API are reached: HTTP and/or HTTPS.
     pub web: WebSettings,
+    /// Sending logs to a syslog server.
+    pub syslog: SyslogSettings,
+}
+
+/// Remote logging: send the server log (and optionally every query) to a
+/// syslog server, RFC 5424 format, over UDP or TCP. Edited in Settings ->
+/// General and stored in the database.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct SyslogSettings {
+    pub enabled: bool,
+    /// `host`, `host:port`, `udp://host:port` or `tcp://host:port`; UDP and
+    /// port 514 by default. The host may be a name or an address.
+    pub server: String,
+    /// Syslog facility: `daemon`, `user` or `local0`..`local7`.
+    pub facility: String,
+    /// Lowest server-log level sent: `error`, `warn` or `info`.
+    pub level: String,
+    /// Also send a line for every query answered.
+    pub queries: bool,
+}
+
+impl Default for SyslogSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            server: String::new(),
+            facility: "daemon".to_string(),
+            level: "info".to_string(),
+            queries: false,
+        }
+    }
+}
+
+/// Where syslog lines go, parsed from [`SyslogSettings::server`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SyslogTarget {
+    pub tcp: bool,
+    pub host: String,
+    pub port: u16,
+}
+
+impl SyslogSettings {
+    /// The facility code (RFC 5424 §6.2.1).
+    pub fn facility_code(&self) -> Option<u8> {
+        match self.facility.trim() {
+            "" | "daemon" => Some(3),
+            "user" => Some(1),
+            f => f
+                .strip_prefix("local")
+                .and_then(|n| n.parse::<u8>().ok())
+                .filter(|n| *n <= 7)
+                .map(|n| 16 + n),
+        }
+    }
+
+    /// The lowest level sent, as a rank (error 3, warn 2, info 1).
+    pub fn level_rank(&self) -> Option<u8> {
+        match self.level.trim() {
+            "error" => Some(3),
+            "warn" => Some(2),
+            "" | "info" => Some(1),
+            _ => None,
+        }
+    }
+
+    pub fn target(&self) -> std::result::Result<SyslogTarget, String> {
+        let text = self.server.trim();
+        let (tcp, rest) = if let Some(rest) = text.strip_prefix("tcp://") {
+            (true, rest)
+        } else {
+            (false, text.strip_prefix("udp://").unwrap_or(text))
+        };
+        let (host, port) = if let Some(bracketed) = rest.strip_prefix('[') {
+            let (host, tail) = bracketed
+                .split_once(']')
+                .ok_or_else(|| format!("'{text}': unbalanced '['"))?;
+            let port = match tail.strip_prefix(':') {
+                Some(p) => p.parse().map_err(|_| format!("'{text}': bad port"))?,
+                None if tail.is_empty() => 514,
+                None => return Err(format!("'{text}' is not host:port")),
+            };
+            (host.to_string(), port)
+        } else {
+            match rest.rsplit_once(':') {
+                Some((host, port)) if !host.contains(':') => (
+                    host.to_string(),
+                    port.parse().map_err(|_| format!("'{text}': bad port"))?,
+                ),
+                _ => (rest.to_string(), 514),
+            }
+        };
+        if host.is_empty() || host.contains(char::is_whitespace) || port == 0 {
+            return Err(format!(
+                "'{text}' is not a syslog server (host or host:port)"
+            ));
+        }
+        Ok(SyslogTarget { tcp, host, port })
+    }
+
+    /// Problems that stop the settings being used.
+    pub fn check(&self) -> std::result::Result<(), String> {
+        if self.facility_code().is_none() {
+            return Err(format!(
+                "unknown facility '{}': use daemon, user or local0-local7",
+                self.facility
+            ));
+        }
+        if self.level_rank().is_none() {
+            return Err(format!(
+                "unknown level '{}': use error, warn or info",
+                self.level
+            ));
+        }
+        if self.enabled {
+            self.target()?;
+        }
+        Ok(())
+    }
 }
 
 /// How the web console and REST API are served. Edited in Settings ->
@@ -287,6 +406,8 @@ impl AiSettings {
 pub struct RuntimeSettings {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub web: Option<WebSettings>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub syslog: Option<SyslogSettings>,
     pub recursive: Option<RecursiveUpdate>,
     pub dot: Option<ListenerUpdate>,
     pub doh: Option<DohUpdate>,
@@ -670,6 +791,7 @@ impl RuntimeSettings {
             && self.ai.is_none()
             && self.display.is_none()
             && self.web.is_none()
+            && self.syslog.is_none()
     }
 
     /// Apply the overlay to `config` in place. `None` fields are untouched.
@@ -808,6 +930,9 @@ impl RuntimeSettings {
         }
         if let Some(d) = &self.display {
             config.display = d.clone();
+        }
+        if let Some(s) = &self.syslog {
+            config.syslog = s.clone();
         }
         if let Some(w) = &self.web {
             config.web = w.clone();
@@ -996,6 +1121,7 @@ impl RuntimeSettings {
             ai: Some(AiUpdate::capture_ai(&config.ai)),
             display: Some(config.display.clone()),
             web: Some(config.web.clone()),
+            syslog: Some(config.syslog.clone()),
         }
     }
 }
@@ -1751,6 +1877,9 @@ impl DaygleConfig {
                 .check(self.api.port)
                 .map_err(|e| DaygleError::Config(format!("web: {e}")))?;
         }
+        self.syslog
+            .check()
+            .map_err(|e| DaygleError::Config(format!("syslog: {e}")))?;
         Ok(())
     }
 }
@@ -3049,6 +3178,48 @@ fd0000000000000000000000000000aa 02 40 00 80     eth0
             .unwrap_err()
             .to_string()
             .contains("server.listen"));
+    }
+
+    #[test]
+    fn syslog_targets_and_checks() {
+        let target = |server: &str| {
+            SyslogSettings {
+                enabled: true,
+                server: server.into(),
+                ..Default::default()
+            }
+            .target()
+        };
+        assert_eq!(
+            target("logs.example.com").unwrap(),
+            SyslogTarget {
+                tcp: false,
+                host: "logs.example.com".into(),
+                port: 514
+            }
+        );
+        assert_eq!(target("tcp://10.0.0.5:6514").unwrap().port, 6514);
+        assert!(target("tcp://10.0.0.5:6514").unwrap().tcp);
+        assert_eq!(
+            target("udp://[2001:db8::1]:1514").unwrap().host,
+            "2001:db8::1"
+        );
+        assert_eq!(target("2001:db8::1").unwrap().port, 514);
+        assert!(target("").is_err());
+        assert!(target("host:notaport").is_err());
+        let mut s = SyslogSettings::default();
+        assert!(s.check().is_ok(), "off and empty is fine");
+        assert_eq!(s.facility_code(), Some(3));
+        s.facility = "local7".into();
+        assert_eq!(s.facility_code(), Some(23));
+        s.facility = "local8".into();
+        assert!(s.check().is_err());
+        s.facility = "daemon".into();
+        s.level = "debug".into();
+        assert!(s.check().is_err());
+        s.level = "warn".into();
+        s.enabled = true;
+        assert!(s.check().is_err(), "enabled needs a server");
     }
 
     #[test]

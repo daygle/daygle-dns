@@ -10,6 +10,7 @@ mod doq;
 mod net;
 pub mod query_db_log;
 pub mod reload;
+pub mod syslog;
 pub mod web;
 
 use std::path::PathBuf;
@@ -438,6 +439,14 @@ pub async fn bind_with(
     );
 
     // Shared, atomically-swappable runtime state.
+    let config_swap = Arc::new(ArcSwap::from(config.clone()));
+    // Remote logging: the server log goes to syslog when `[syslog]` is on
+    // (settings are read per line, so console changes apply at once).
+    let syslog = syslog::SyslogSender::start(config_swap.clone(), shutdown.clone());
+    logs.set_forwarder({
+        let syslog = syslog.clone();
+        Arc::new(move |entry| syslog.log_entry(entry))
+    });
     let shared = Arc::new(Shared {
         catalog: catalog.clone(),
         policy: Arc::new(ArcSwap::from_pointee(policy)),
@@ -445,7 +454,7 @@ pub async fn bind_with(
         query_logger: query_logger.clone(),
         query_db_logger: query_db_logger.clone(),
         resolver: Arc::new(arc_swap::ArcSwapOption::from(resolver.clone())),
-        config: Arc::new(ArcSwap::from(config.clone())),
+        config: config_swap,
         rate_limiter: rate_limiter.clone(),
         metrics: metrics.clone(),
         logs: logs.clone(),
@@ -453,6 +462,7 @@ pub async fn bind_with(
         notify_hooks: notify_hooks.clone(),
         tsig_keys: tsig_keys.clone(),
         local_root: local_root.clone(),
+        syslog: Some(syslog),
     });
 
     // DNS listeners (bound immediately so the server serves right away).
@@ -751,6 +761,7 @@ fn build_dispatcher(shared: &Shared, config: &DaygleConfig) -> DnsDispatcher {
     )
     .with_client_timeout(Duration::from_millis(config.server.client_timeout_ms))
     .with_cookies(config.server.dns_cookies)
+    .with_syslog(shared.syslog.clone())
     .with_advanced_blocking(shared.advanced_blocking.clone())
     .with_query_logger(shared.query_logger.clone())
     .with_query_db_logger(shared.query_db_logger.clone())

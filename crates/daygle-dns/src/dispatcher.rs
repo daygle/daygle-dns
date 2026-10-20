@@ -60,6 +60,8 @@ pub struct DnsDispatcher {
     client_timeout: Duration,
     /// DNS cookies (RFC 7873, `server.dns_cookies`).
     cookies: Arc<crate::cookies::Cookies>,
+    /// Remote logging of queries (`[syslog] queries`).
+    syslog: Option<Arc<crate::syslog::SyslogSender>>,
 }
 
 impl DnsDispatcher {
@@ -119,6 +121,7 @@ impl DnsDispatcher {
             query_db_logger: None,
             client_timeout: Duration::from_millis(2000),
             cookies: Arc::new(crate::cookies::Cookies::new(true)),
+            syslog: None,
         }
     }
 
@@ -189,6 +192,12 @@ impl DnsDispatcher {
     /// SERVFAIL and the whole recursion is cancelled.
     pub fn with_client_timeout(mut self, client_timeout: Duration) -> Self {
         self.client_timeout = client_timeout;
+        self
+    }
+
+    /// Send query lines to syslog (when its settings ask for them).
+    pub fn with_syslog(mut self, syslog: Option<Arc<crate::syslog::SyslogSender>>) -> Self {
+        self.syslog = syslog;
         self
     }
 
@@ -300,6 +309,17 @@ impl DnsDispatcher {
         self.record_stats(client, qname, outcome);
         self.log_query(client, qname, qtype, outcome, rcode, started);
         self.db_log_query(client, qname, qtype, protocol, outcome, rcode, started);
+        if let Some(syslog) = &self.syslog {
+            syslog.query(crate::syslog::QueryLine {
+                client,
+                qname,
+                qtype,
+                protocol,
+                outcome: outcome_label(outcome),
+                rcode,
+                elapsed_ms: started.elapsed().as_millis() as u64,
+            });
+        }
     }
 
     /// Serve an AXFR/IXFR zone transfer from the stored zone data.
@@ -796,7 +816,17 @@ impl RequestHandler for DnsDispatcher {
         // reload; clone out the current one for this query.
         let resolver = self.resolver.load_full();
         let Some(resolver) = resolver else {
-            // Recursion disabled and not authoritative: REFUSED.
+            // Recursion disabled and not authoritative: REFUSED (recorded
+            // like the other refusals, so it shows in the logs and stats).
+            self.observe(
+                client,
+                &qname,
+                &rtype,
+                protocol,
+                Outcome::Error,
+                Some(&rcode_label(ResponseCode::Refused)),
+                started,
+            );
             return send_error(
                 &mut response_handle,
                 request,

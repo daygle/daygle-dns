@@ -89,6 +89,8 @@
   // the stored settings means the config file's api.port; the form shows
   // the real number.
   let web_ = $state({ http_enabled: true, http_port: 5380, https_enabled: false, https_port: 5443, https_certificate: '', redirect_http: false });
+  // Remote logging (Settings -> General).
+  let syslog_ = $state({ enabled: false, server: '', facility: 'daemon', level: 'info', queries: false });
   const zoneChoices = timeZoneOptions();
   // Users who chose their own settings don't see the defaults change.
   const ownPrefsSet = $derived(
@@ -181,6 +183,7 @@
         ...config.web,
         http_port: config.web?.http_port || config.api?.port || 5380,
       };
+      syslog_ = { enabled: false, server: '', facility: 'daemon', level: 'info', queries: false, ...config.syslog };
       ai_ = { ...config.ai, mode: config.ai?.mode || 'train' };
       aiForm = {
         scanMinutes: round2(ai_.scan_interval_secs / 60),
@@ -321,6 +324,13 @@
         https_port: Number(web_.https_port),
         https_certificate: web_.https_certificate || '',
         redirect_http: !!(web_.redirect_http && web_.http_enabled && web_.https_enabled),
+      },
+      syslog: {
+        enabled: !!syslog_.enabled,
+        server: (syslog_.server || '').trim(),
+        facility: syslog_.facility || 'daemon',
+        level: syslog_.level || 'info',
+        queries: !!syslog_.queries,
       },
       authoritative: {
         default_record_ttl: Number(authoritative.default_record_ttl),
@@ -509,6 +519,39 @@
       stops working can always be fixed without the console. The web console
       listens on {config?.api?.listen}. DNS over TLS, HTTPS and QUIC are on
       the Encrypted DNS tab.
+    </p>
+  </div>
+  <div class="card" style="margin-bottom: 14px">
+    <h3 style="margin: 0 0 10px">Remote Logging (Syslog)</h3>
+    <div class="form-grid">
+      <label class="check"><input type="checkbox" bind:checked={syslog_.enabled} /> <span>Send Logs to a Syslog Server</span></label>
+      <label>
+        <span>Syslog Server</span>
+        <input placeholder="logs.example.com or tcp://10.0.0.5:6514" bind:value={syslog_.server} disabled={!syslog_.enabled} spellcheck="false" />
+      </label>
+      <label>
+        <span>Facility</span>
+        <select bind:value={syslog_.facility} disabled={!syslog_.enabled}>
+          <option value="daemon">daemon</option>
+          <option value="user">user</option>
+          {#each [0, 1, 2, 3, 4, 5, 6, 7] as n (n)}<option value={`local${n}`}>local{n}</option>{/each}
+        </select>
+      </label>
+      <label>
+        <span>Server Log Messages</span>
+        <select bind:value={syslog_.level} disabled={!syslog_.enabled}>
+          <option value="info">Information and Above</option>
+          <option value="warn">Warnings and Errors</option>
+          <option value="error">Errors Only</option>
+        </select>
+      </label>
+      <label class="check"><input type="checkbox" bind:checked={syslog_.queries} disabled={!syslog_.enabled} /> <span>Also Send Every Query</span></label>
+    </div>
+    <p class="muted help">
+      Sends the server log (and, if chosen, a line per query) as RFC 5424
+      syslog, over UDP by default (port 514), or TCP with
+      <code>tcp://host:port</code>. Changes apply as soon as they are saved.
+      Every query can be a lot of traffic on a busy server.
     </p>
   </div>
   {:else if tab === 'recursive'}

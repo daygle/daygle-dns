@@ -319,7 +319,7 @@ outbound_ip_versions/client_policies), `dot`,
 `doh`, `doq` (enabled/port/self_signed/server_name [+ `doh.endpoint`]), `api`
 (gui_enabled/cors_origins), `display` (the console's date/time defaults:
 `time_zone` = `system`, `UTC` or an IANA zone; `date_format` = `system`/`dmy`/
-`mdy`/`ymd`/`d_mon_y`; `time_format` = `system`/`24h`/`12h`), and `authoritative`
+`mdy`/`ymd`/`d_mon_y`; `time_format` = `system`/`24h`/`12h`), `syslog` (see below), and `authoritative`
 (default_record_ttl/default_primary_ns/default_admin_mailbox/axfr_enabled/axfr_networks/
 allow_dynamic_updates/update_networks/notify_enabled/notify_targets/
 notify_listen_enabled/stub_zones). Runtime groups (`recursive`, `dot`, `doh`, `doq`,
@@ -427,6 +427,17 @@ listener's port. `::` next to IPv4 addresses covers every IPv6 address plus
 those IPv4 ones. A repeated address, or one a wildcard in the same list
 already covers (`"0.0.0.0, 192.168.1.2"`), is a config error, since the
 second socket could not be bound.
+
+`syslog` (`{enabled, server, facility, level, queries}`, replaced whole)
+sends the server log to a syslog server as RFC 5424 lines: `server` is
+`host`, `host:port`, `udp://host:port` or `tcp://host:port` (UDP and port
+514 by default; TCP frames are octet-counted, RFC 6587); `facility` is
+`daemon` (default), `user` or `local0`-`local7`; `level` is the lowest
+server-log level sent (`info`, `warn` or `error`); `queries` adds one line
+per answered query (`client=… qname=… qtype=… protocol=… outcome=… rcode=…
+ms=…`, message id `query`). Lines are queued and sent in the background;
+if the server cannot be reached they are dropped and counted, and the count
+is sent once it can be.
 
 `server.ipv6_only` (`false` by default; the console shows it but leaves it to the file) makes a `::` listen
 address, in `[server]` or in `[api]`, `[dot]`, `[doh]` or `[doq]`, accept

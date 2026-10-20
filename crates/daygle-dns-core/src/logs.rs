@@ -37,12 +37,23 @@ pub struct LogEntry {
     pub message: String,
 }
 
+/// Called with every new entry (remote logging).
+pub type LogForwarder = std::sync::Arc<dyn Fn(&LogEntry) + Send + Sync>;
+
 /// Bounded in-memory log buffer. Newest entries are appended; once full the
 /// oldest entries are dropped.
-#[derive(Debug)]
 pub struct LogStore {
     inner: Mutex<VecDeque<LogEntry>>,
     capacity: usize,
+    forwarder: parking_lot::RwLock<Option<LogForwarder>>,
+}
+
+impl std::fmt::Debug for LogStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LogStore")
+            .field("capacity", &self.capacity)
+            .finish_non_exhaustive()
+    }
 }
 
 impl LogStore {
@@ -50,7 +61,14 @@ impl LogStore {
         Self {
             inner: Mutex::new(VecDeque::with_capacity(capacity)),
             capacity: capacity.max(1),
+            forwarder: parking_lot::RwLock::new(None),
         }
+    }
+
+    /// Pass every entry from now on to `forwarder` as well (it must not
+    /// block: it runs on the caller's thread).
+    pub fn set_forwarder(&self, forwarder: LogForwarder) {
+        *self.forwarder.write() = Some(forwarder);
     }
 
     /// Append an entry, dropping the oldest entry if the buffer is full.
@@ -65,6 +83,9 @@ impl LogStore {
             component: component.to_string(),
             message: sentence_case(&message.into()),
         };
+        if let Some(forward) = self.forwarder.read().as_ref() {
+            forward(&entry);
+        }
         let mut inner = self.inner.lock();
         if inner.len() >= self.capacity {
             inner.pop_front();

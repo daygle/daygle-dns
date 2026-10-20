@@ -56,6 +56,10 @@ Daygle combines, in a single process:
 - A **dashboard with charts & top-N tables**: per-minute query time-series
   (1 h / 6 h / 24 h windows), top clients, top domains, and top blocked
   domains - all bounded in memory.
+- **Remote logging** to a syslog server (RFC 5424, UDP or TCP): the
+  server log, and optionally a line per query.
+- An **audit log** of every change and sign-in, with who, how and from where.
+- **Prometheus metrics** at `/api/metrics/prometheus`.
 - A **searchable query log**: every served query is recorded into SQLite
   (client, name, type, transport, outcome, rcode, duration) with retention,
   and the console's **Logs → Query Log** tab filters, paginates, live-updates
