@@ -3,7 +3,7 @@
   import PageHeader from '../PageHeader.svelte';
   import ClientPolicies from './ClientPolicies.svelte';
   import { icons } from '../icons.svelte.js';
-  import { prefs, setDateTimePrefs, timeZoneOptions, FORMAT_OPTIONS, formatDateTime } from '../datetime.svelte.js';
+  import { display, setDisplayDefaults, timeZoneOptions, DATE_FORMAT_OPTIONS, TIME_FORMAT_OPTIONS, previewDateTime } from '../datetime.svelte.js';
 
   let config = $state(null);
   let notice = $state(null);
@@ -59,14 +59,13 @@
   let dohCertMode = $state('self');
   let doqCertMode = $state('self');
 
-  // Local copies of the display preferences (saved instantly on change).
-  let tzDraft = $state(prefs.tz);
-  let formatDraft = $state(prefs.format);
+  // Server-wide date and time display defaults (saved with the page).
+  let display_ = $state({ time_zone: 'system', date_format: 'system', time_format: 'system' });
   const zoneChoices = timeZoneOptions();
-
-  function applyDisplayPrefs() {
-    setDateTimePrefs({ tz: tzDraft, format: formatDraft });
-  }
+  // Users who chose their own settings don't see the defaults change.
+  const ownPrefsSet = $derived(
+    !!(display.mine && (display.mine.time_zone || display.mine.date_format || display.mine.time_format)),
+  );
 
   $effect(() => {
     load();
@@ -106,6 +105,7 @@
         doq = {};
         api_ = {};
         ai_ = {};
+        display_ = { time_zone: 'system', date_format: 'system', time_format: 'system' };
         aiCategoriesText = '';
         aiBackendCategories = [];
         upstreamText = '';
@@ -126,6 +126,7 @@
       doh = { ...config.doh };
       doq = { ...config.doq };
       api_ = { ...config.api };
+      display_ = { time_zone: 'system', date_format: 'system', time_format: 'system', ...config.display };
       ai_ = { ...config.ai, mode: config.ai?.mode || 'train' };
       aiForm = {
         scanMinutes: round2(ai_.scan_interval_secs / 60),
@@ -236,6 +237,7 @@
           gui_enabled: !!api_.gui_enabled,
           cors_origins: api_.cors_origins || [],
         },
+        display: { ...display_ },
         authoritative: {
           default_record_ttl: Number(authoritative.default_record_ttl),
           default_primary_ns: authoritative.default_primary_ns || '',
@@ -267,6 +269,7 @@
         },
       };
       await api.updateSettings(body);
+      setDisplayDefaults(body.display);
       notice = 'Settings saved: applied live and stored in the database.';
       await load();
     } catch (e) {
@@ -650,22 +653,31 @@
   </div>
   {:else if tab === 'interface'}
   <div class="card" style="margin-bottom: 14px">
-    <h3 style="margin: 0 0 10px">Display</h3>
+    <h3 style="margin: 0 0 10px">Date & Time Defaults</h3>
     <div class="form-grid">
       <label><span>Time Zone</span>
-        <select bind:value={tzDraft} onchange={applyDisplayPrefs}>
+        <select bind:value={display_.time_zone}>
           {#each zoneChoices as [value, label]}<option value={value}>{label}</option>{/each}
         </select>
       </label>
-      <label><span>Date & Time Format</span>
-        <select bind:value={formatDraft} onchange={applyDisplayPrefs}>
-          {#each FORMAT_OPTIONS as [value, label]}<option value={value}>{label}</option>{/each}
+      <label><span>Date Format</span>
+        <select bind:value={display_.date_format}>
+          {#each DATE_FORMAT_OPTIONS as [value, label]}<option value={value}>{label}</option>{/each}
+        </select>
+      </label>
+      <label><span>Time Format</span>
+        <select bind:value={display_.time_format}>
+          {#each TIME_FORMAT_OPTIONS as [value, label]}<option value={value}>{label}</option>{/each}
         </select>
       </label>
     </div>
     <p class="muted help">
-      Example with the current choice: <strong>{formatDateTime(new Date())}</strong>. Display
-      preferences are per browser and apply everywhere dates and times are shown.
+      Example: <strong>{previewDateTime(display_)}</strong>. These are the
+      defaults for every user. Each user can choose their own under
+      <strong>My Preferences</strong> (below their name in the sidebar).
+      {#if ownPrefsSet}Your own preferences are set, so you won't see a change
+        here until you reset them.{/if}
+      "Device Time Zone" and "Browser Default" follow each viewer's computer.
     </p>
   </div>
 

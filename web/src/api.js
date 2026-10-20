@@ -121,6 +121,7 @@ export const api = {
     localStorage.removeItem(USER_KEY);
   },
   me: () => request('GET', '/auth/me'),
+  savePreferences: (prefs) => request('PUT', '/auth/preferences', prefs),
   // Self-service password rotation (keeps the current session, signs out others).
   changePassword: (currentPassword, newPassword) =>
     request('POST', '/auth/password', { current_password: currentPassword, new_password: newPassword }),
