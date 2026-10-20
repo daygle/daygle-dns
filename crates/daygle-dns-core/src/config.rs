@@ -40,6 +40,77 @@ pub struct DaygleConfig {
     pub ai: AiSettings,
     /// Console defaults for showing dates and times.
     pub display: DisplaySettings,
+    /// How the web console and API are reached: HTTP and/or HTTPS.
+    pub web: WebSettings,
+}
+
+/// How the web console and REST API are served. Edited in Settings ->
+/// General and stored in the database like other runtime settings; the
+/// `daygle-dns reset-web-access` command puts it back to plain HTTP on
+/// `api.port` if a change locks you out. Listen address, CORS and whether
+/// the GUI is served at all stay in `[api]`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct WebSettings {
+    /// Serve over plain HTTP.
+    pub http_enabled: bool,
+    /// HTTP port; 0 means `api.port` from the config file.
+    pub http_port: u16,
+    /// Serve over HTTPS.
+    pub https_enabled: bool,
+    /// HTTPS port.
+    pub https_port: u16,
+    /// Managed certificate (Certificates page) presented over HTTPS.
+    pub https_certificate: String,
+    /// With both enabled, answer HTTP requests with a redirect to HTTPS.
+    pub redirect_http: bool,
+}
+
+impl Default for WebSettings {
+    fn default() -> Self {
+        Self {
+            http_enabled: true,
+            http_port: 0,
+            https_enabled: false,
+            https_port: 5443,
+            https_certificate: String::new(),
+            redirect_http: false,
+        }
+    }
+}
+
+/// The managed certificate created for HTTPS when none is chosen.
+pub const WEB_SELF_SIGNED_CERT: &str = "web-console";
+
+impl WebSettings {
+    /// Check the settings a console user can change. `api_port` is the
+    /// config file's port, which an `http_port` of 0 stands for.
+    pub fn check(&self, api_port: u16) -> std::result::Result<(), String> {
+        if !self.http_enabled && !self.https_enabled {
+            return Err("enable HTTP, HTTPS or both, or the console cannot be reached".into());
+        }
+        let http_port = self.effective_http_port(api_port);
+        if self.https_enabled && self.https_port == 0 {
+            return Err("choose an HTTPS port".into());
+        }
+        if self.http_enabled && self.https_enabled && http_port == self.https_port && http_port != 0
+        {
+            return Err(format!("HTTP and HTTPS cannot share port {http_port}"));
+        }
+        if self.redirect_http && !(self.http_enabled && self.https_enabled) {
+            return Err("redirecting HTTP to HTTPS needs both enabled".into());
+        }
+        Ok(())
+    }
+
+    /// The HTTP port actually used.
+    pub fn effective_http_port(&self, api_port: u16) -> u16 {
+        if self.http_port == 0 {
+            api_port
+        } else {
+            self.http_port
+        }
+    }
 }
 
 /// How the console shows dates and times to users who have not chosen their
@@ -214,6 +285,8 @@ impl AiSettings {
 /// values: listeners, addresses, ports, paths, and certificates.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct RuntimeSettings {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub web: Option<WebSettings>,
     pub recursive: Option<RecursiveUpdate>,
     pub dot: Option<ListenerUpdate>,
     pub doh: Option<DohUpdate>,
@@ -274,6 +347,8 @@ pub struct RecursiveUpdate {
     pub local_root: Option<LocalRootSettings>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub opportunistic_encryption: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub outbound_ip_versions: Option<IpVersions>,
     /// Client resolution policies (the whole list; see
     /// [`ClientPolicyConfig`]).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -305,6 +380,9 @@ impl RecursiveUpdate {
         if let Some(v) = self.opportunistic_encryption {
             settings.opportunistic_encryption = v;
         }
+        if let Some(v) = self.outbound_ip_versions {
+            settings.outbound_ip_versions = v;
+        }
         if let Some(v) = self.min_cache_ttl {
             settings.min_cache_ttl = v;
         }
@@ -332,6 +410,7 @@ impl RecursiveUpdate {
                 sources: trim_list(&v.sources),
                 // Never set from the API or the database.
                 test_trust_anchor: settings.local_root.test_trust_anchor.clone(),
+                outbound_ip_versions: settings.local_root.outbound_ip_versions,
             };
         }
     }
@@ -590,6 +669,7 @@ impl RuntimeSettings {
             && self.authoritative.is_none()
             && self.ai.is_none()
             && self.display.is_none()
+            && self.web.is_none()
     }
 
     /// Apply the overlay to `config` in place. `None` fields are untouched.
@@ -729,6 +809,9 @@ impl RuntimeSettings {
         if let Some(d) = &self.display {
             config.display = d.clone();
         }
+        if let Some(w) = &self.web {
+            config.web = w.clone();
+        }
         if let Some(a) = &self.ai {
             if let Some(v) = a.enabled {
                 config.ai.enabled = v;
@@ -818,6 +901,8 @@ impl RuntimeSettings {
                 }
             }
         }
+        // Placeholders stored by earlier versions count as unset.
+        config.authoritative.clear_legacy_placeholders();
     }
 
     /// Capture the DB-owned fields of `config` as a full overlay, so a save
@@ -850,6 +935,7 @@ impl RuntimeSettings {
                 rebinding_protection: Some(config.recursive.rebinding_protection),
                 local_root: Some(config.recursive.local_root.clone()),
                 opportunistic_encryption: Some(config.recursive.opportunistic_encryption),
+                outbound_ip_versions: Some(config.recursive.outbound_ip_versions),
                 client_policies: Some(config.recursive.client_policies.clone()),
             }),
             dot: Some(ListenerUpdate {
@@ -909,15 +995,214 @@ impl RuntimeSettings {
             }),
             ai: Some(AiUpdate::capture_ai(&config.ai)),
             display: Some(config.display.clone()),
+            web: Some(config.web.clone()),
         }
     }
+}
+
+/// Join a listen setting and a port. The setting is one address or several
+/// separated by commas, IPv4 or IPv6, with or without brackets: `0.0.0.0`
+/// (every IPv4 address), `::` or `[::]` (every IPv6 address, and every IPv4
+/// one too unless the list also names IPv4 addresses or `server.ipv6_only`
+/// is set), `192.168.1.2`, `fd00::53`, `192.168.1.2, fd00::53`.
+///
+/// Repeats, and an address a wildcard in the list already covers, are
+/// refused: the second socket could not be bound.
+pub fn listen_socket_addrs(
+    listen: &str,
+    port: u16,
+) -> std::result::Result<Vec<std::net::SocketAddr>, String> {
+    let mut addrs: Vec<std::net::SocketAddr> = Vec::new();
+    for entry in listen.split(',') {
+        let addr = listen_socket_addr(entry, port)?;
+        if addrs.iter().any(|a| a.ip() == addr.ip()) {
+            return Err(format!("{} is listed twice", addr.ip()));
+        }
+        addrs.push(addr);
+    }
+    for (wildcard, family) in [
+        (IpAddr::from(std::net::Ipv4Addr::UNSPECIFIED), "IPv4"),
+        (IpAddr::from(std::net::Ipv6Addr::UNSPECIFIED), "IPv6"),
+    ] {
+        if addrs.iter().any(|a| a.ip() == wildcard)
+            && addrs
+                .iter()
+                .any(|a| a.ip() != wildcard && a.is_ipv4() == wildcard.is_ipv4())
+        {
+            return Err(format!(
+                "{wildcard} already covers every {family} address: list it alone, or list specific addresses instead"
+            ));
+        }
+    }
+    Ok(addrs)
+}
+
+/// Accept a listen setting written as a string or, in the config file, as
+/// an array of addresses (kept as the comma-separated form).
+fn listen_list<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result<String, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Listen {
+        One(String),
+        Many(Vec<String>),
+    }
+    Ok(match Listen::deserialize(d)? {
+        Listen::One(s) => s,
+        Listen::Many(v) => v.join(", "),
+    })
+}
+
+/// One listen address and a port (see [`listen_socket_addrs`]).
+fn listen_socket_addr(
+    listen: &str,
+    port: u16,
+) -> std::result::Result<std::net::SocketAddr, String> {
+    let text = listen.trim();
+    let bare = text
+        .strip_prefix('[')
+        .and_then(|t| t.strip_suffix(']'))
+        .unwrap_or(text);
+    bare.parse::<IpAddr>()
+        .map(|ip| std::net::SocketAddr::new(ip, port))
+        .map_err(|_| {
+            format!(
+                "'{text}' is not an IP address (use 0.0.0.0 for every IPv4 address, or :: for every IPv4 and IPv6 address)"
+            )
+        })
+}
+
+/// Placeholder SOA defaults that earlier versions shipped (and stored in
+/// the database on the first settings save). They name no real server or
+/// person, so they are treated as unset: the server's own name and the
+/// first administrator's email are used instead.
+const LEGACY_PLACEHOLDER_PRIMARY_NS: &str = "ns1.daygle.test.";
+const LEGACY_PLACEHOLDER_ADMIN_MAILBOX: &str = "admin.daygle.test.";
+
+impl AuthoritativeSettings {
+    /// Clear the legacy placeholder SOA defaults (see above).
+    pub fn clear_legacy_placeholders(&mut self) {
+        if self.default_primary_ns.trim() == LEGACY_PLACEHOLDER_PRIMARY_NS {
+            self.default_primary_ns.clear();
+        }
+        if self.default_admin_mailbox.trim() == LEGACY_PLACEHOLDER_ADMIN_MAILBOX {
+            self.default_admin_mailbox.clear();
+        }
+    }
+}
+
+/// Turn a mailbox as people write it into the SOA RNAME form:
+/// `jane.doe@example.com` becomes `jane\.doe.example.com.` (dots in the
+/// local part are escaped, the `@` becomes a dot). Input already in RNAME
+/// form gets its trailing dot. Empty stays empty.
+pub fn mailbox_to_rname(input: &str) -> std::result::Result<String, String> {
+    let input = input.trim();
+    if input.is_empty() {
+        return Ok(String::new());
+    }
+    if input.chars().any(|c| c.is_whitespace() || c.is_control()) || input.len() > 254 {
+        return Err(format!("'{input}' is not a mailbox"));
+    }
+    let rname = match input.split_once('@') {
+        Some((local, domain)) => {
+            let domain = domain.trim_end_matches('.');
+            if local.is_empty()
+                || domain.is_empty()
+                || domain.contains('@')
+                || domain.starts_with('.')
+            {
+                return Err(format!("'{input}' is not an email address"));
+            }
+            let local = local.replace('\\', "\\\\").replace('.', "\\.");
+            format!("{local}.{domain}.")
+        }
+        None if input.ends_with('.') => input.to_string(),
+        None => format!("{input}."),
+    };
+    if rname.starts_with('.') || rname.contains("..") {
+        return Err(format!("'{input}' is not a mailbox"));
+    }
+    Ok(rname.to_ascii_lowercase())
+}
+
+/// The inverse of [`mailbox_to_rname`] for display, when the first label
+/// is clearly the local part: `jane\.doe.example.com.` becomes
+/// `jane.doe@example.com`. Returns `None` for names with fewer than three
+/// labels (the split would be a guess).
+pub fn rname_to_email(rname: &str) -> Option<String> {
+    let rname = rname.trim().trim_end_matches('.');
+    let mut local = String::new();
+    let mut chars = rname.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => local.push(chars.next()?),
+            '.' => {
+                let domain: String = chars.collect();
+                return (domain.contains('.') && !local.is_empty())
+                    .then(|| format!("{local}@{domain}"));
+            }
+            c => local.push(c),
+        }
+    }
+    None
+}
+
+/// This server's host name as a fully qualified, absolute DNS name (e.g.
+/// `dns1.example.lan.`), for the SOA primary nameserver of new zones when no
+/// DNS Server Domain is set. A bare host name gets the resolver's `domain`
+/// (or first `search`) suffix from /etc/resolv.conf. `None` when the name
+/// cannot be read.
+pub fn detect_server_name() -> Option<String> {
+    let host = ["/proc/sys/kernel/hostname", "/etc/hostname"]
+        .iter()
+        .find_map(|p| std::fs::read_to_string(p).ok())
+        .or_else(|| std::env::var("HOSTNAME").ok())?;
+    let host = host.trim().trim_end_matches('.').to_ascii_lowercase();
+    let valid = |name: &str| {
+        !name.is_empty()
+            && name.len() <= 253
+            && name.split('.').all(|label| {
+                !label.is_empty()
+                    && label.len() <= 63
+                    && label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+            })
+    };
+    if !valid(&host) || host == "localhost" {
+        return None;
+    }
+    if host.contains('.') {
+        return Some(format!("{host}."));
+    }
+    let suffix = std::fs::read_to_string("/etc/resolv.conf")
+        .ok()
+        .and_then(|text| resolv_conf_domain(&text));
+    Some(match suffix {
+        Some(domain) if valid(&domain) => format!("{host}.{domain}."),
+        _ => format!("{host}."),
+    })
+}
+
+/// The `domain` entry of a resolv.conf, else the first `search` entry.
+fn resolv_conf_domain(text: &str) -> Option<String> {
+    let mut search = None;
+    for line in text.lines() {
+        let mut words = line.split_whitespace();
+        match (words.next(), words.next()) {
+            (Some("domain"), Some(d)) => return Some(d.trim_end_matches('.').to_ascii_lowercase()),
+            (Some("search"), Some(d)) if search.is_none() => {
+                search = Some(d.trim_end_matches('.').to_ascii_lowercase())
+            }
+            _ => {}
+        }
+    }
+    search
 }
 
 impl DaygleConfig {
     /// Parse a TOML document into a validated configuration.
     pub fn parse(text: &str) -> Result<Self> {
-        let cfg: DaygleConfig =
+        let mut cfg: DaygleConfig =
             toml::from_str(text).map_err(|e| DaygleError::Config(format!("invalid TOML: {e}")))?;
+        cfg.authoritative.clear_legacy_placeholders();
         cfg.validate()?;
         Ok(cfg)
     }
@@ -1097,6 +1382,11 @@ impl DaygleConfig {
                 "rate_limit.*_window_secs must be >= 1".to_string(),
             ));
         }
+        if !(1..=128).contains(&rl.client_ipv6_prefix) {
+            return Err(DaygleError::Config(
+                "rate_limit.client_ipv6_prefix must be 1-128".to_string(),
+            ));
+        }
         for upstream in &self.recursive.upstreams {
             if upstream.trim().is_empty() {
                 return Err(DaygleError::Config(
@@ -1185,6 +1475,34 @@ impl DaygleConfig {
                     "recursive.root_hints contains invalid IP address '{hint}'"
                 )));
             }
+        }
+        let versions = self.recursive.outbound_ip_versions;
+        if !self.recursive.root_hints.is_empty()
+            && !self
+                .recursive
+                .root_hints
+                .iter()
+                .filter_map(|h| h.trim().parse::<IpAddr>().ok())
+                .any(|ip| versions.allows(ip))
+        {
+            return Err(DaygleError::Config(format!(
+                "recursive.root_hints has no {} address, and outbound_ip_versions allows only {}",
+                versions.label(),
+                versions.label()
+            )));
+        }
+        if self.recursive.local_root.enabled
+            && self
+                .recursive
+                .local_root_in_effect()
+                .effective_sources()
+                .is_empty()
+        {
+            return Err(DaygleError::Config(format!(
+                "recursive.local_root.sources has no {} server, and outbound_ip_versions allows only {}",
+                versions.label(),
+                versions.label()
+            )));
         }
         if self.authoritative.notify_enabled && self.authoritative.notify_targets.is_empty() {
             return Err(DaygleError::Config(
@@ -1416,6 +1734,23 @@ impl DaygleConfig {
         self.display
             .check(false)
             .map_err(|e| DaygleError::Config(format!("display: {e}")))?;
+        for (name, listen, enabled) in [
+            ("server.listen", &self.server.listen, true),
+            ("api.listen", &self.api.listen, self.api.enabled),
+            ("dot.listen", &self.dot.listen, self.dot.enabled),
+            ("doh.listen", &self.doh.listen, self.doh.enabled),
+            ("doq.listen", &self.doq.listen, self.doq.enabled),
+        ] {
+            if enabled {
+                listen_socket_addrs(listen, 0)
+                    .map_err(|e| DaygleError::Config(format!("{name}: {e}")))?;
+            }
+        }
+        if self.api.enabled {
+            self.web
+                .check(self.api.port)
+                .map_err(|e| DaygleError::Config(format!("web: {e}")))?;
+        }
         Ok(())
     }
 }
@@ -1437,7 +1772,12 @@ pub fn parse_master_addr(entry: &str) -> std::result::Result<std::net::SocketAdd
 #[serde(default, deny_unknown_fields)]
 pub struct ServerSettings {
     /// Address the plaintext DNS listeners bind to.
+    #[serde(deserialize_with = "listen_list")]
     pub listen: String,
+    /// With a listen address of `::` (here or in `[api]`, `[dot]`, `[doh]`
+    /// or `[doq]`), accept IPv6 clients only. Off by default: `::` accepts
+    /// IPv4 clients too.
+    pub ipv6_only: bool,
     /// UDP/TCP port (default 53).
     pub port: u16,
     /// Serve plaintext UDP.
@@ -1472,6 +1812,7 @@ impl Default for ServerSettings {
     fn default() -> Self {
         Self {
             listen: "0.0.0.0".to_string(),
+            ipv6_only: false,
             port: 53,
             udp_enabled: true,
             tcp_enabled: true,
@@ -1578,6 +1919,11 @@ pub struct RecursiveSettings {
     /// it works, falling back to plain DNS. Off by default: it is
     /// experimental and adds connection overhead.
     pub opportunistic_encryption: bool,
+    /// Which IP versions the resolver uses for its own queries: to root and
+    /// domain name servers, forwarders, stub zone name servers and local
+    /// root zone sources. Zone transfers and NOTIFY go to the addresses
+    /// configured for them regardless.
+    pub outbound_ip_versions: IpVersions,
     /// Client resolution policies: clients in a policy's networks are
     /// resolved its way (forwarded to its own upstreams, resolved from the
     /// root servers, or refused) instead of by the default mode. The first
@@ -1617,6 +1963,39 @@ pub enum RecursionAccess {
     Deny,
 }
 
+/// Which IP versions outgoing queries use.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IpVersions {
+    /// IPv4 and IPv6.
+    #[default]
+    Both,
+    /// IPv4 only, e.g. on a host whose IPv6 does not reach the internet.
+    Ipv4,
+    /// IPv6 only.
+    Ipv6,
+}
+
+impl IpVersions {
+    /// Whether `ip` may be used (IPv4-mapped IPv6 counts as IPv4).
+    pub fn allows(self, ip: IpAddr) -> bool {
+        match (self, ip.to_canonical()) {
+            (Self::Both, _) => true,
+            (Self::Ipv4, ip) => ip.is_ipv4(),
+            (Self::Ipv6, ip) => ip.is_ipv6(),
+        }
+    }
+
+    /// How the setting reads in error messages ("IPv4", "IPv6").
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Both => "IPv4 or IPv6",
+            Self::Ipv4 => "IPv4",
+            Self::Ipv6 => "IPv6",
+        }
+    }
+}
+
 /// Local root zone settings (RFC 8806, "Secondary ROOT Zone" in the
 /// console). The zone is transferred from `sources`, accepted only when its
 /// ZONEMD digest (RFC 8976) matches and is signed by a key chaining to the
@@ -1637,6 +2016,11 @@ pub struct LocalRootSettings {
     /// the built-in root trust anchor, so tests can sign a fake root zone.
     #[serde(skip)]
     pub test_trust_anchor: Option<Vec<u8>>,
+    /// Copied from `recursive.outbound_ip_versions` (see
+    /// [`RecursiveSettings::local_root_in_effect`]): sources of other IP
+    /// versions are skipped.
+    #[serde(skip)]
+    pub outbound_ip_versions: IpVersions,
 }
 
 /// Servers that allow root zone transfers (RFC 8806 Appendix A): ICANN's
@@ -1662,12 +2046,21 @@ pub const LOCAL_ROOT_SOURCES: &[&str] = &[
 
 impl LocalRootSettings {
     /// The transfer sources in effect (the configured list or the defaults).
+    /// Sources of an IP version the resolver does not use are left out.
     pub fn effective_sources(&self) -> Vec<String> {
-        if self.sources.is_empty() {
+        let sources: Vec<String> = if self.sources.is_empty() {
             LOCAL_ROOT_SOURCES.iter().map(|s| s.to_string()).collect()
         } else {
             self.sources.clone()
-        }
+        };
+        sources
+            .into_iter()
+            .filter(|s| {
+                parse_master_addr(s)
+                    .map(|a| self.outbound_ip_versions.allows(a.ip()))
+                    .unwrap_or(true)
+            })
+            .collect()
     }
 }
 
@@ -1711,7 +2104,77 @@ pub enum ClientPolicyAction {
     Refuse,
 }
 
-/// Client networks treated as private for [`RecursionAccess::PrivateNetworks`].
+/// Answers rebinding protection drops from public names: the private
+/// networks plus the "this host" ranges and IPv4-mapped IPv6, which would
+/// otherwise carry a private IPv4 address inside an AAAA record
+/// (`::ffff:192.168.1.1`).
+pub const REBINDING_DENY_NETWORKS: &[&str] = &[
+    "127.0.0.0/8",
+    "10.0.0.0/8",
+    "172.16.0.0/12",
+    "192.168.0.0/16",
+    "100.64.0.0/10",
+    "169.254.0.0/16",
+    "0.0.0.0/8",
+    "::1/128",
+    "::/128",
+    "::ffff:0:0/96",
+    "fc00::/7",
+    "fe80::/10",
+];
+
+/// The global IPv6 networks this host has addresses in (read from
+/// /proc/net/if_inet6 on Linux; empty elsewhere). Most LANs number their
+/// IPv6 devices from the ISP's global prefix rather than ULA, so "private
+/// networks" access also covers these. Cached for a minute, so a prefix the
+/// ISP renumbers is picked up without a restart.
+pub fn on_link_ipv6_networks() -> Vec<ipnet::IpNet> {
+    use std::sync::OnceLock;
+    use std::time::{Duration, Instant};
+    /// When the networks were last read, and what they were.
+    type Cached = Option<(Instant, Vec<ipnet::IpNet>)>;
+    static CACHE: OnceLock<parking_lot::Mutex<Cached>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| parking_lot::Mutex::new(None));
+    let mut guard = cache.lock();
+    if let Some((at, nets)) = guard.as_ref() {
+        if at.elapsed() < Duration::from_secs(60) {
+            return nets.clone();
+        }
+    }
+    let nets = std::fs::read_to_string("/proc/net/if_inet6")
+        .map(|text| parse_if_inet6(&text))
+        .unwrap_or_default();
+    *guard = Some((Instant::now(), nets.clone()));
+    nets
+}
+
+/// Parse /proc/net/if_inet6 lines (`address ifindex prefixlen scope flags
+/// name`, hex) into the global-scope networks.
+fn parse_if_inet6(text: &str) -> Vec<ipnet::IpNet> {
+    let mut nets: Vec<ipnet::IpNet> = text
+        .lines()
+        .filter_map(|line| {
+            let fields: Vec<&str> = line.split_whitespace().collect();
+            let (hex, prefix, scope) = (fields.first()?, fields.get(2)?, fields.get(3)?);
+            if *scope != "00" || hex.len() != 32 {
+                return None;
+            }
+            let bits = u128::from_str_radix(hex, 16).ok()?;
+            let prefix = u8::from_str_radix(prefix, 16).ok()?;
+            let addr = std::net::Ipv6Addr::from(bits);
+            ipnet::Ipv6Net::new(addr, prefix)
+                .ok()
+                .map(|n| ipnet::IpNet::V6(n.trunc()))
+        })
+        .collect();
+    nets.sort();
+    nets.dedup();
+    nets
+}
+
+/// Client networks treated as private for [`RecursionAccess::PrivateNetworks`]
+/// (plus this host's own global IPv6 networks; see
+/// [`on_link_ipv6_networks`]).
 pub const PRIVATE_NETWORKS: &[&str] = &[
     "127.0.0.0/8",
     "10.0.0.0/8",
@@ -1725,6 +2188,14 @@ pub const PRIVATE_NETWORKS: &[&str] = &[
 ];
 
 impl RecursiveSettings {
+    /// The local root zone settings with the outbound IP versions applied.
+    pub fn local_root_in_effect(&self) -> LocalRootSettings {
+        LocalRootSettings {
+            outbound_ip_versions: self.outbound_ip_versions,
+            ..self.local_root.clone()
+        }
+    }
+
     /// The resolution mode in effect: the explicit `mode`, otherwise
     /// forwarding when upstreams are configured and recursive when not.
     pub fn effective_mode(&self) -> ResolutionMode {
@@ -1764,6 +2235,7 @@ impl Default for RecursiveSettings {
             rebinding_protection: false,
             local_root: LocalRootSettings::default(),
             opportunistic_encryption: false,
+            outbound_ip_versions: IpVersions::Both,
             client_policies: vec![],
             test_outbound_port: None,
         }
@@ -1790,9 +2262,11 @@ pub struct AuthoritativeSettings {
     pub database: String,
     /// Optional directory of BIND-style zone files imported at startup.
     pub zones_dir: Option<String>,
-    /// Default SOA primary nameserver used when a zone is created.
+    /// Default SOA primary nameserver used when a zone is created. Empty
+    /// means this server's own host name (see [`detect_server_name`]).
     pub default_primary_ns: String,
-    /// Default SOA contact mailbox used when a zone is created.
+    /// Default SOA contact mailbox used when a zone is created. Empty means
+    /// the first administrator's email address.
     pub default_admin_mailbox: String,
     /// Default TTL (seconds) used for records that do not specify one (e.g.
     /// the console's Records page pre-fills this value for new records).
@@ -1861,8 +2335,8 @@ impl Default for AuthoritativeSettings {
         Self {
             database: "daygle-dns.db".to_string(),
             zones_dir: None,
-            default_primary_ns: "ns1.daygle.test.".to_string(),
-            default_admin_mailbox: "admin.daygle.test.".to_string(),
+            default_primary_ns: String::new(),
+            default_admin_mailbox: String::new(),
             default_record_ttl: 3600,
             dnssec_enabled: true,
             dnssec_sig_validity_days: 14,
@@ -1951,6 +2425,7 @@ pub struct DotSettings {
     /// Serve DNS over TLS.
     pub enabled: bool,
     /// Address the DoT listener binds to.
+    #[serde(deserialize_with = "listen_list")]
     pub listen: String,
     /// DoT port (default 853).
     pub port: u16,
@@ -1996,6 +2471,7 @@ pub struct DohSettings {
     /// Serve DNS over HTTPS.
     pub enabled: bool,
     /// Address the DoH listener binds to.
+    #[serde(deserialize_with = "listen_list")]
     pub listen: String,
     /// DoH port (default 443).
     pub port: u16,
@@ -2080,6 +2556,7 @@ pub struct ApiSettings {
     /// Serve the REST API and GUI.
     pub enabled: bool,
     /// Address the HTTP server binds to.
+    #[serde(deserialize_with = "listen_list")]
     pub listen: String,
     /// HTTP port (default 5380).
     pub port: u16,
@@ -2130,6 +2607,7 @@ pub struct DoqSettings {
     /// Serve DNS over QUIC.
     pub enabled: bool,
     /// Address the DoQ listener binds to.
+    #[serde(deserialize_with = "listen_list")]
     pub listen: String,
     /// DoQ port (default 853, per RFC 9250).
     pub port: u16,
@@ -2307,6 +2785,11 @@ pub struct RateLimitSettings {
     pub domain_window_secs: u64,
     /// Never rate-limit loopback clients (127.0.0.0/8, ::1).
     pub exempt_loopback: bool,
+    /// IPv6 clients are counted per prefix of this length: one host or
+    /// network normally holds a whole /64 or more, so counting single
+    /// addresses would let a client rotate past the limit. 56 matches
+    /// BIND's response rate limiting; 128 counts single addresses.
+    pub client_ipv6_prefix: u8,
 }
 
 impl Default for RateLimitSettings {
@@ -2318,6 +2801,7 @@ impl Default for RateLimitSettings {
             domain_max_queries: 600,
             domain_window_secs: 60,
             exempt_loopback: true,
+            client_ipv6_prefix: 56,
         }
     }
 }
@@ -2448,6 +2932,244 @@ mod tests {
         assert!(cfg.policy.allowlist.is_empty());
         assert_eq!(cfg.dot.port, 853);
         assert!(cfg.recursive.dnssec_validate);
+    }
+
+    #[test]
+    fn rebinding_deny_list_covers_ipv6_forms_of_private_addresses() {
+        let nets: Vec<ipnet::IpNet> = REBINDING_DENY_NETWORKS
+            .iter()
+            .map(|n| n.parse().unwrap())
+            .collect();
+        let denied = |ip: &str| {
+            let ip: IpAddr = ip.parse().unwrap();
+            nets.iter().any(|n| n.contains(&ip))
+        };
+        // A private IPv4 address smuggled inside an AAAA answer.
+        assert!(denied("::ffff:192.168.1.1"));
+        assert!(denied("::ffff:127.0.0.1"));
+        assert!(denied("fd12:3456::1"));
+        assert!(denied("fe80::1"));
+        assert!(denied("::1"));
+        assert!(denied("::"));
+        assert!(denied("0.0.0.0"));
+        // Public addresses pass.
+        assert!(!denied("2606:4700:4700::1111"));
+        assert!(!denied("1.1.1.1"));
+    }
+
+    #[test]
+    fn reads_global_ipv6_networks_from_if_inet6() {
+        let text = "\
+00000000000000000000000000000001 01 80 10 80       lo
+2a0204ab12340001021122fffe334455 02 40 00 00     eth0
+fe80000000000000021122fffe334455 02 40 20 80     eth0
+fd0000000000000000000000000000aa 02 40 00 80     eth0
+2a0204ab123400010000000000000053 02 80 00 80     eth0
+";
+        let nets: Vec<String> = parse_if_inet6(text).iter().map(|n| n.to_string()).collect();
+        // Global scope only (loopback and link-local skipped), as networks.
+        assert_eq!(
+            nets,
+            [
+                "2a02:4ab:1234:1::/64",
+                "2a02:4ab:1234:1::53/128",
+                "fd00::/64"
+            ]
+        );
+    }
+
+    #[test]
+    fn outbound_ip_versions_limit_root_hints_and_sources() {
+        let ip = |s: &str| s.parse::<IpAddr>().unwrap();
+        assert!(IpVersions::Both.allows(ip("2001:db8::1")));
+        assert!(IpVersions::Ipv4.allows(ip("192.0.2.1")));
+        assert!(IpVersions::Ipv4.allows(ip("::ffff:192.0.2.1")));
+        assert!(!IpVersions::Ipv4.allows(ip("2001:db8::1")));
+        assert!(!IpVersions::Ipv6.allows(ip("192.0.2.1")));
+
+        let cfg = DaygleConfig::parse(
+            "[server]\nipv6_only = true\n[recursive]\noutbound_ip_versions = \"ipv4\"\n",
+        )
+        .unwrap();
+        assert!(cfg.server.ipv6_only);
+        assert_eq!(cfg.recursive.outbound_ip_versions, IpVersions::Ipv4);
+        // The default local root sources narrow to IPv4.
+        let sources = cfg.recursive.local_root_in_effect().effective_sources();
+        assert!(!sources.is_empty());
+        assert!(sources.iter().all(|s| !s.contains(':')), "{sources:?}");
+
+        // Root hints and local root sources must keep an allowed server.
+        let mut cfg = DaygleConfig::default();
+        cfg.recursive.outbound_ip_versions = IpVersions::Ipv6;
+        cfg.recursive.root_hints = vec!["198.41.0.4".into()];
+        assert!(cfg
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("root_hints"));
+        cfg.recursive.root_hints = vec!["198.41.0.4".into(), "2001:503:ba3e::2:30".into()];
+        cfg.validate().unwrap();
+        cfg.recursive.local_root.enabled = true;
+        cfg.recursive.local_root.sources = vec!["192.0.32.132".into()];
+        assert!(cfg
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("local_root.sources"));
+        // The setting survives the database overlay.
+        let overlay = RuntimeSettings::capture(&cfg);
+        let mut restored = DaygleConfig::default();
+        overlay.apply_to(&mut restored);
+        assert_eq!(restored.recursive.outbound_ip_versions, IpVersions::Ipv6);
+    }
+
+    #[test]
+    fn listen_addresses_take_ipv4_and_ipv6() {
+        let addr = |s: &str| listen_socket_addr(s, 53).map(|a| a.to_string());
+        assert_eq!(addr("0.0.0.0").unwrap(), "0.0.0.0:53");
+        assert_eq!(addr("::").unwrap(), "[::]:53");
+        assert_eq!(addr("[::]").unwrap(), "[::]:53");
+        assert_eq!(addr(" fd00::53 ").unwrap(), "[fd00::53]:53");
+        assert_eq!(addr("192.168.1.2").unwrap(), "192.168.1.2:53");
+        assert!(addr("dns.example.com").is_err());
+        assert!(addr("[::").is_err());
+        // Before this, "::" was joined into ":::53", which does not parse.
+        let mut cfg = DaygleConfig::default();
+        cfg.server.listen = "::".into();
+        cfg.api.listen = "[::1]".into();
+        cfg.validate().unwrap();
+        cfg.server.listen = "not-an-ip".into();
+        assert!(cfg
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("server.listen"));
+    }
+
+    #[test]
+    fn listen_settings_take_several_addresses() {
+        let addrs = |s: &str| {
+            listen_socket_addrs(s, 53).map(|v| v.iter().map(|a| a.to_string()).collect::<Vec<_>>())
+        };
+        assert_eq!(addrs("0.0.0.0").unwrap(), ["0.0.0.0:53"]);
+        assert_eq!(
+            addrs("192.168.1.2, [fd00::53]").unwrap(),
+            ["192.168.1.2:53", "[fd00::53]:53"]
+        );
+        // Every IPv6 address plus one IPv4 address, and both wildcards.
+        assert_eq!(
+            addrs("::,192.168.1.2").unwrap(),
+            ["[::]:53", "192.168.1.2:53"]
+        );
+        assert_eq!(addrs("0.0.0.0, ::").unwrap().len(), 2);
+        // A wildcard already covers its family; repeats cannot both bind.
+        assert!(addrs("0.0.0.0, 192.168.1.2")
+            .unwrap_err()
+            .contains("0.0.0.0 already covers"));
+        assert!(addrs(":: , fd00::53")
+            .unwrap_err()
+            .contains(":: already covers"));
+        assert!(addrs("192.168.1.2, 192.168.1.2")
+            .unwrap_err()
+            .contains("twice"));
+        assert!(addrs("192.168.1.2,").is_err());
+
+        // The file may use an array.
+        let cfg = DaygleConfig::parse(
+            "[server]\nlisten = [\"127.0.0.1\", \"::1\"]\n[api]\nlisten = \"127.0.0.1, ::1\"\n",
+        )
+        .unwrap();
+        assert_eq!(cfg.server.listen, "127.0.0.1, ::1");
+        assert_eq!(cfg.api.listen, "127.0.0.1, ::1");
+        let mut cfg = DaygleConfig::default();
+        cfg.dot.enabled = true;
+        cfg.dot.listen = "0.0.0.0, 10.0.0.1".into();
+        assert!(cfg
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("dot.listen"));
+    }
+
+    #[test]
+    fn mailboxes_convert_between_email_and_soa_form() {
+        assert_eq!(
+            mailbox_to_rname("Glen@Example.com").unwrap(),
+            "glen.example.com."
+        );
+        assert_eq!(
+            mailbox_to_rname("jane.doe@example.com").unwrap(),
+            "jane\\.doe.example.com."
+        );
+        assert_eq!(
+            mailbox_to_rname("hostmaster.example.com").unwrap(),
+            "hostmaster.example.com."
+        );
+        assert_eq!(
+            mailbox_to_rname("hostmaster.example.com.").unwrap(),
+            "hostmaster.example.com."
+        );
+        assert_eq!(mailbox_to_rname("  ").unwrap(), "");
+        for bad in [
+            "@example.com",
+            "jane@",
+            "a b@example.com",
+            "jane@@example.com",
+            "jane@.example.com",
+        ] {
+            assert!(mailbox_to_rname(bad).is_err(), "{bad}");
+        }
+        assert_eq!(
+            rname_to_email("jane\\.doe.example.com.").as_deref(),
+            Some("jane.doe@example.com")
+        );
+        assert_eq!(
+            rname_to_email("glen.example.com.").as_deref(),
+            Some("glen@example.com")
+        );
+        // Too short to tell the local part from the domain.
+        assert_eq!(rname_to_email("admin.lan."), None);
+    }
+
+    #[test]
+    fn resolv_conf_supplies_the_domain_suffix() {
+        assert_eq!(
+            resolv_conf_domain("domain example.lan\nsearch other.lan").as_deref(),
+            Some("example.lan")
+        );
+        assert_eq!(
+            resolv_conf_domain("# x\nsearch home.arpa corp.lan\nnameserver 1.1.1.1").as_deref(),
+            Some("home.arpa")
+        );
+        assert_eq!(resolv_conf_domain("nameserver 1.1.1.1"), None);
+    }
+
+    #[test]
+    fn legacy_placeholder_soa_defaults_count_as_unset() {
+        let cfg = DaygleConfig::parse(
+            "[authoritative]\ndefault_primary_ns = \"ns1.daygle.test.\"\ndefault_admin_mailbox = \"admin.daygle.test.\"\n",
+        )
+        .unwrap();
+        assert_eq!(cfg.authoritative.default_primary_ns, "");
+        assert_eq!(cfg.authoritative.default_admin_mailbox, "");
+        // Real values are kept.
+        let cfg =
+            DaygleConfig::parse("[authoritative]\ndefault_primary_ns = \"ns1.example.com.\"\n")
+                .unwrap();
+        assert_eq!(cfg.authoritative.default_primary_ns, "ns1.example.com.");
+        // A stored overlay from before is cleared the same way.
+        let mut cfg = DaygleConfig::default();
+        RuntimeSettings {
+            authoritative: Some(AuthoritativeUpdate {
+                default_primary_ns: Some("ns1.daygle.test.".into()),
+                default_admin_mailbox: Some("admin.daygle.test.".into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+        .apply_to(&mut cfg);
+        assert_eq!(cfg.authoritative.default_primary_ns, "");
+        assert_eq!(cfg.authoritative.default_admin_mailbox, "");
     }
 
     #[test]

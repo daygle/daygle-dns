@@ -3,6 +3,7 @@
 use std::net::IpAddr;
 use std::sync::Arc;
 
+use daygle_dns_core::config::IpVersions;
 use daygle_dns_core::error::{DaygleError, Result};
 use hickory_resolver::config::{ConnectionConfig, NameServerConfig, ProtocolConfig};
 
@@ -17,9 +18,30 @@ use hickory_resolver::config::{ConnectionConfig, NameServerConfig, ProtocolConfi
 ///   (DNS over HTTPS, RFC 8484; the host may be an IP literal or a name)
 /// - `quic://1.1.1.1:853@dns.adguard-dns.com` (DNS over QUIC, RFC 9250)
 pub fn parse_upstreams(entries: &[String]) -> Result<Vec<NameServerConfig>> {
+    parse_upstreams_for(entries, IpVersions::Both)
+}
+
+/// [`parse_upstreams`], keeping only the servers `versions` allows (a
+/// `https://` host name is resolved to an address of an allowed version).
+/// A list that names servers but keeps none is an error, so the resolver
+/// is never left with nobody to ask.
+pub fn parse_upstreams_for(
+    entries: &[String],
+    versions: IpVersions,
+) -> Result<Vec<NameServerConfig>> {
     let mut out = Vec::with_capacity(entries.len());
     for entry in entries {
-        out.push(parse_upstream(entry)?);
+        let config = parse_upstream(entry, versions)?;
+        if versions.allows(config.ip) {
+            out.push(config);
+        }
+    }
+    if out.is_empty() && !entries.is_empty() {
+        return Err(DaygleError::Config(format!(
+            "none of the upstream servers ({}) can be reached over {}, the only IP version Outbound IP Versions allows",
+            entries.join(", "),
+            versions.label()
+        )));
     }
     Ok(out)
 }
@@ -31,21 +53,23 @@ pub fn parse_upstreams(entries: &[String]) -> Result<Vec<NameServerConfig>> {
 /// `[IPv6]:port`, `udp://…`, `tcp://…`) plus plain DNS hostnames, which are
 /// resolved here through the system resolver (port 53). Entries that cannot
 /// be used are skipped; the caller decides whether the zone remains usable.
-pub fn parse_stub_nss(entries: &[String]) -> Vec<NameServerConfig> {
+pub fn parse_stub_nss(entries: &[String], versions: IpVersions) -> Vec<NameServerConfig> {
     let mut out = Vec::new();
     for entry in entries {
         let trimmed = entry.trim();
         if trimmed.is_empty() {
             continue;
         }
-        if let Ok(config) = parse_upstream(trimmed) {
-            out.push(config);
+        if let Ok(config) = parse_upstream(trimmed, versions) {
+            if versions.allows(config.ip) {
+                out.push(config);
+            }
             continue;
         }
         // A DNS hostname rather than an IP literal: resolve it once here.
         use std::net::ToSocketAddrs;
         if let Ok(mut addrs) = (trimmed.trim_end_matches('.'), 53u16).to_socket_addrs() {
-            if let Some(addr) = addrs.next() {
+            if let Some(addr) = addrs.find(|a| versions.allows(a.ip())) {
                 out.push(
                     parse_plain(&addr.to_string(), true, true)
                         .expect("a resolved socket address always parses"),
@@ -56,7 +80,7 @@ pub fn parse_stub_nss(entries: &[String]) -> Vec<NameServerConfig> {
     out
 }
 
-fn parse_upstream(entry: &str) -> Result<NameServerConfig> {
+fn parse_upstream(entry: &str, versions: IpVersions) -> Result<NameServerConfig> {
     let trimmed = entry.trim();
     if trimmed.is_empty() {
         return Err(DaygleError::Config("empty upstream entry".to_string()));
@@ -72,7 +96,7 @@ fn parse_upstream(entry: &str) -> Result<NameServerConfig> {
         return parse_plain(rest, false, true);
     }
     if let Some(rest) = trimmed.strip_prefix("https://") {
-        return parse_https(rest);
+        return parse_https(rest, versions);
     }
     if let Some(rest) = trimmed.strip_prefix("quic://") {
         return parse_quic(rest);
@@ -88,7 +112,7 @@ fn parse_upstream(entry: &str) -> Result<NameServerConfig> {
 /// `https://HOST[:port][/path]` - HOST may be an IP literal or a hostname
 /// (resolved by the system when the connection is made). The path defaults
 /// to `/dns-query`.
-fn parse_https(rest: &str) -> Result<NameServerConfig> {
+fn parse_https(rest: &str, versions: IpVersions) -> Result<NameServerConfig> {
     let (authority, path) = match rest.split_once('/') {
         Some((authority, tail)) => (authority, format!("/{tail}")),
         None => (rest, "/dns-query".to_string()),
@@ -103,7 +127,7 @@ fn parse_https(rest: &str) -> Result<NameServerConfig> {
     // internal bootstrap only when the config carries an IP; with a name we
     // must resolve it here via the system resolver (std, blocking, once at
     // config time - acceptable for static upstream lists).
-    let ip = resolve_host(&host)?;
+    let ip = resolve_host(&host, versions)?;
     Ok(NameServerConfig::new(ip, true, vec![conn]))
 }
 
@@ -125,10 +149,10 @@ fn parse_quic(rest: &str) -> Result<NameServerConfig> {
     Ok(NameServerConfig::new(ip, true, vec![conn]))
 }
 
-/// Resolve a hostname to its first address via the system resolver. Used
-/// only for `https://` upstreams whose host is a name (hickory needs the
-/// literal IP in `NameServerConfig`).
-fn resolve_host(host: &str) -> Result<IpAddr> {
+/// Resolve a hostname to its first address of an allowed IP version via
+/// the system resolver. Used only for `https://` upstreams whose host is a
+/// name (hickory needs the literal IP in `NameServerConfig`).
+fn resolve_host(host: &str, versions: IpVersions) -> Result<IpAddr> {
     if let Ok(ip) = host.parse::<IpAddr>() {
         return Ok(ip);
     }
@@ -136,9 +160,12 @@ fn resolve_host(host: &str) -> Result<IpAddr> {
     let resolved = (host, 443u16)
         .to_socket_addrs()
         .map_err(|e| DaygleError::Config(format!("cannot resolve DoH host '{host}': {e}")))?
-        .next()
+        .find(|a| versions.allows(a.ip()))
         .ok_or_else(|| {
-            DaygleError::Config(format!("DoH host '{host}' resolved to no addresses"))
+            DaygleError::Config(format!(
+                "DoH host '{host}' resolved to no {} addresses",
+                versions.label()
+            ))
         })?;
     Ok(resolved.ip())
 }
@@ -262,15 +289,63 @@ mod tests {
 
     #[test]
     fn stub_ns_literals_parse_and_keep_port() {
-        let ns = parse_stub_nss(&[
-            "192.0.2.1".to_string(),
-            "192.0.2.2:5353".to_string(),
-            "".to_string(),
-            "   ".to_string(),
-        ]);
+        let ns = parse_stub_nss(
+            &[
+                "192.0.2.1".to_string(),
+                "192.0.2.2:5353".to_string(),
+                "".to_string(),
+                "   ".to_string(),
+            ],
+            IpVersions::Both,
+        );
         assert_eq!(ns.len(), 2);
         assert_eq!(ns[0].connections[0].port, 53);
         assert_eq!(ns[1].connections[0].port, 5353);
+    }
+
+    #[test]
+    fn outbound_ip_versions_filter_servers() {
+        let mixed = vec![
+            "192.0.2.1".to_string(),
+            "tls://[2001:db8::1]:853@dns.example".to_string(),
+            "https://198.51.100.1/dns-query".to_string(),
+        ];
+        let ips = |versions| -> Vec<IpAddr> {
+            parse_upstreams_for(&mixed, versions)
+                .unwrap()
+                .iter()
+                .map(|ns| ns.ip)
+                .collect()
+        };
+        assert_eq!(ips(IpVersions::Both).len(), 3);
+        assert_eq!(
+            ips(IpVersions::Ipv4),
+            ["192.0.2.1", "198.51.100.1"].map(|a| a.parse::<IpAddr>().unwrap())
+        );
+        assert_eq!(
+            ips(IpVersions::Ipv6),
+            ["2001:db8::1".parse::<IpAddr>().unwrap()]
+        );
+        // A list left with nobody to ask is refused, naming the version.
+        let v6 = vec!["2001:db8::53".to_string()];
+        let err = parse_upstreams_for(&v6, IpVersions::Ipv4)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("IPv4"), "{err}");
+        // An empty list stays empty (the system resolver is used).
+        assert!(parse_upstreams_for(&[], IpVersions::Ipv4)
+            .unwrap()
+            .is_empty());
+        // Syntax errors are still reported.
+        assert!(parse_upstreams_for(&["bogus".to_string()], IpVersions::Ipv4).is_err());
+        assert_eq!(
+            parse_stub_nss(
+                &["192.0.2.1".to_string(), "2001:db8::1".to_string()],
+                IpVersions::Ipv6
+            )
+            .len(),
+            1
+        );
     }
 
     #[test]

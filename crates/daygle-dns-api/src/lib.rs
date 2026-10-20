@@ -15,6 +15,7 @@
 //! | `POST`   | `/api/config/reload`              | re-read the config file (live reload) |
 //! | `GET`    | `/api/zones`                      | list zones |
 //! | `POST`   | `/api/zones`                      | create a primary or secondary zone |
+//! | `GET`    | `/api/zones/defaults`             | SOA defaults a new zone would get |
 //! | `DELETE` | `/api/zones/:id`                  | delete a zone |
 //! | `PUT`    | `/api/zones/:id/soa`              | edit a primary zone's SOA metadata |
 //! | `GET`    | `/api/zones/:id/records`          | list records |
@@ -244,6 +245,9 @@ pub struct AppState {
     /// Hook that rebinds DNS listeners after a settings change; `None` when
     /// the caller does not support live listener rebinding.
     pub request_dns_rebuild: Option<Arc<dyn Fn() + Send + Sync>>,
+    /// Reconfigure the web console's HTTP/HTTPS listeners (Settings ->
+    /// General). `None` when the API runs without a server (tests).
+    pub web_apply: Option<WebApplyFn>,
     /// Dashboard time-series + top-N tables.
     pub stats: Arc<daygle_dns_core::stats::QueryStats>,
     /// AI subsystem (verdict store, scanner handles); `None` when the
@@ -253,6 +257,20 @@ pub struct AppState {
 }
 
 /// Build the API router (REST endpoints plus the embedded GUI).
+/// Moves the web console's listeners to new [`WebSettings`]: binds new
+/// ports and loads the certificate first, and on any failure changes
+/// nothing and returns the reason.
+///
+/// [`WebSettings`]: daygle_dns_core::config::WebSettings
+pub type WebApplyFn = Arc<
+    dyn Fn(
+            daygle_dns_core::config::WebSettings,
+        )
+            -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send>>
+        + Send
+        + Sync,
+>;
+
 pub fn router(state: AppState) -> Router {
     let api = Router::new()
         .route("/status", get(handlers::status))
@@ -304,6 +322,7 @@ pub fn router(state: AppState) -> Router {
             get(handlers::list_zones).post(handlers::create_zone),
         )
         .route("/zones/import", post(handlers::import_zone))
+        .route("/zones/defaults", get(handlers::zone_defaults_handler))
         .route("/zones/{id}", delete(handlers::delete_zone))
         .route("/zones/{id}/soa", put(handlers::update_zone_soa))
         .route(

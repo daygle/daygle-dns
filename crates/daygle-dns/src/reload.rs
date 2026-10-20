@@ -106,7 +106,7 @@ pub fn apply_config(shared: &Shared, new: Arc<DaygleConfig>) -> bool {
     // with the recursive settings.
     shared
         .local_root
-        .set_settings(new.recursive.local_root.clone());
+        .set_settings(new.recursive.local_root_in_effect());
     if old.recursive != new.recursive
         || old.authoritative.stub_zones != new.authoritative.stub_zones
     {

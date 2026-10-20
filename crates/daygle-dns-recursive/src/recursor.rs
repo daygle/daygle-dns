@@ -13,7 +13,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use daygle_dns_core::config::{RecursiveSettings, PRIVATE_NETWORKS};
+use daygle_dns_core::config::{IpVersions, RecursiveSettings, REBINDING_DENY_NETWORKS};
 use daygle_dns_core::error::{DaygleError, Result};
 use daygle_dns_core::Metrics;
 use hickory_proto::op::{Query, ResponseCode};
@@ -31,6 +31,7 @@ use hickory_resolver::recursor::{
     DnssecConfig, DnssecPolicy, QNameMinimization, Recursor, RecursorError, RecursorOptions,
 };
 use hickory_resolver::{ConnectionProvider, PoolContext, TtlConfig};
+use ipnet::{IpNet, Ipv4Net, Ipv6Net};
 
 /// The IANA root servers (a.root-servers.net .. m.root-servers.net), IPv4
 /// and IPv6. The recursor primes the current list from these on start-up, so
@@ -194,12 +195,18 @@ pub fn build(
     local_root: Option<SocketAddr>,
     metrics: Arc<Metrics>,
 ) -> Result<DaygleRecursor> {
+    let versions = settings.outbound_ip_versions;
     let hints: Vec<IpAddr> = if let Some(root) = local_root {
+        // The local root responder is on this host, whatever the version.
         vec![root.ip()]
     } else if settings.root_hints.is_empty() {
-        ROOT_HINTS.iter().filter_map(|h| h.parse().ok()).collect()
+        ROOT_HINTS
+            .iter()
+            .filter_map(|h| h.parse().ok())
+            .filter(|ip| versions.allows(*ip))
+            .collect()
     } else {
-        settings
+        let hints: Vec<IpAddr> = settings
             .root_hints
             .iter()
             .map(|h| {
@@ -207,7 +214,18 @@ pub fn build(
                     .parse()
                     .map_err(|_| DaygleError::Config(format!("invalid root hint '{h}'")))
             })
-            .collect::<Result<_>>()?
+            .collect::<Result<_>>()?;
+        let hints: Vec<IpAddr> = hints
+            .into_iter()
+            .filter(|ip| versions.allows(*ip))
+            .collect();
+        if hints.is_empty() {
+            return Err(DaygleError::Config(format!(
+                "no root hint is an {} address, the only IP version Outbound IP Versions allows",
+                versions.label()
+            )));
+        }
+        hints
     };
 
     let mut options = RecursorOptions {
@@ -231,7 +249,7 @@ pub fn build(
         ..RecursorOptions::default()
     };
     if settings.rebinding_protection {
-        options.deny_answers = PRIVATE_NETWORKS
+        options.deny_answers = REBINDING_DENY_NETWORKS
             .iter()
             .filter_map(|n| n.parse().ok())
             .collect();
@@ -246,6 +264,12 @@ pub fn build(
         // server filters (rightly) refuse to query.
         options.deny_server.clear();
         connections.port_override = Some(port);
+    }
+    // Never contact name servers of a version the resolver may not use.
+    match versions {
+        IpVersions::Both => {}
+        IpVersions::Ipv4 => options.deny_server.push(IpNet::V6(Ipv6Net::default())),
+        IpVersions::Ipv6 => options.deny_server.push(IpNet::V4(Ipv4Net::default())),
     }
 
     let dnssec = if settings.dnssec_validate {

@@ -164,6 +164,7 @@ export const api = {
   queryLogs: (qs) => request('GET', `/querylogs?${qs}`),
   clearQueryLogs: () => request('DELETE', '/querylogs'),
   zones: () => request('GET', '/zones'),
+  zoneDefaults: () => request('GET', '/zones/defaults'),
   createZone: (body) => request('POST', '/zones', body),
   deleteZone: (id) => request('DELETE', `/zones/${id}`),
   updateZoneSoa: (id, body) => request('PUT', `/zones/${id}/soa`, body),

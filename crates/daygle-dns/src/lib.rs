@@ -6,8 +6,10 @@
 
 pub mod dispatcher;
 mod doq;
+mod net;
 pub mod query_db_log;
 pub mod reload;
+pub mod web;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -44,7 +46,8 @@ pub struct BoundServer {
     pub doh_addr: Option<std::net::SocketAddr>,
     /// The initially bound DNS-over-QUIC address, if DoQ is enabled.
     pub doq_addr: Option<std::net::SocketAddr>,
-    /// The REST API + GUI address.
+    /// The REST API + GUI address as bound at startup: the HTTP listener,
+    /// or HTTPS when HTTP is off (see [`BoundServer::web_addrs`]).
     pub api_addr: std::net::SocketAddr,
     /// Shared runtime metrics.
     pub metrics: Arc<Metrics>,
@@ -63,7 +66,7 @@ pub struct BoundServer {
     addrs: Arc<ArcSwap<ListenerAddrs>>,
     shutdown: CancellationToken,
     dns_task: Option<tokio::task::JoinHandle<Result<()>>>,
-    api_task: Option<tokio::task::JoinHandle<()>>,
+    web: Arc<web::WebServer>,
     reload_task: Option<tokio::task::JoinHandle<()>>,
     reload_tx: mpsc::Sender<ReloadCommand>,
     config_path: Option<PathBuf>,
@@ -73,6 +76,11 @@ impl BoundServer {
     /// Clone the cancellation token used to shut every subsystem down.
     pub fn shutdown_token(&self) -> CancellationToken {
         self.shutdown.clone()
+    }
+
+    /// Where the web console is listening now (reflecting Settings changes).
+    pub async fn web_addrs(&self) -> web::WebAddrs {
+        self.web.addrs().await
     }
 
     /// The currently bound DNS listener addresses (reflecting any reloads).
@@ -134,9 +142,7 @@ impl BoundServer {
         if let Some(task) = self.reload_task.take() {
             task.abort();
         }
-        if let Some(task) = self.api_task.take() {
-            task.abort();
-        }
+
         dns
     }
 }
@@ -310,7 +316,7 @@ pub async fn bind_with(
     // to the resolver on loopback while `recursive.local_root.enabled`. The
     // verified copy is cached next to the database across restarts.
     let local_root = Arc::new(daygle_dns_authoritative::LocalRoot::new(
-        config.recursive.local_root.clone(),
+        config.recursive.local_root_in_effect(),
         local_root_cache_path(&config.authoritative.database),
     ));
     tokio::spawn(local_root.clone().run_forever(shutdown.clone()));
@@ -466,17 +472,29 @@ pub async fn bind_with(
         shutdown.clone(),
     );
 
-    // REST API.
-    let api_addr: std::net::SocketAddr = format!("{}:{}", config.api.listen, config.api.port)
-        .parse()
-        .map_err(|e| DaygleError::Config(format!("bad API listen address: {e}")))?;
-    let api_listener = tokio::net::TcpListener::bind(api_addr).await?;
-    let api_addr = api_listener.local_addr()?;
+    // REST API and web console, over HTTP and/or HTTPS (Settings ->
+    // General); the listeners are bound once the router exists below.
     // The API can request a DNS listener rebuild after settings changes.
     let rebuild_tx = reload_tx.clone();
     let request_dns_rebuild: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
         let _ = rebuild_tx.try_send(ReloadCommand::Rebuild { ack: None });
     });
+    // The web server needs the router, and the router's settings handler
+    // needs the web server: the handle is filled in right after.
+    let web_cell: Arc<std::sync::OnceLock<Arc<web::WebServer>>> =
+        Arc::new(std::sync::OnceLock::new());
+    let web_apply: daygle_dns_api::WebApplyFn = {
+        let cell = web_cell.clone();
+        Arc::new(move |settings| {
+            let cell = cell.clone();
+            Box::pin(async move {
+                match cell.get() {
+                    Some(web) => web.apply(settings).await.map(|_| ()),
+                    None => Err("the web console is still starting".to_string()),
+                }
+            })
+        })
+    };
     let app = router(AppState {
         catalog: catalog.clone(),
         resolver: shared.resolver.clone(),
@@ -494,20 +512,44 @@ pub async fn bind_with(
         sessions: Arc::new(daygle_dns_api::SessionStore::default()),
         login_throttle: Arc::new(daygle_dns_api::LoginThrottle::default()),
         request_dns_rebuild: Some(request_dns_rebuild),
+        web_apply: Some(web_apply),
         stats: stats.clone(),
         ai: ai_engine.clone(),
     });
-    info!(addr = %api_addr, "REST API and GUI listening");
-    let api_task = tokio::spawn(async move {
-        if let Err(e) = axum::serve(
-            api_listener,
-            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-        )
-        .await
-        {
-            warn!("api server error: {e}");
+    let web = Arc::new(web::WebServer::new(
+        app,
+        catalog.clone(),
+        config.api.listen.clone(),
+        config.server.ipv6_only,
+        config.api.port,
+        shutdown.clone(),
+    ));
+    let _ = web_cell.set(web.clone());
+    let web_addrs = match web.apply(config.web.clone()).await {
+        Ok(addrs) => addrs,
+        // The saved web settings cannot start (a port taken, a certificate
+        // gone): fall back to plain HTTP on the config file's port so the
+        // console stays reachable to fix them.
+        Err(e) if config.web != daygle_dns_core::config::WebSettings::default() => {
+            warn!("web console settings cannot be applied ({e}); serving plain HTTP on api.port");
+            logs.push(
+                daygle_dns_core::LogLevel::Error,
+                "api",
+                format!("web console settings cannot be applied ({e}); serving plain HTTP on port {} instead", config.api.port),
+            );
+            let mut fallback = shared.config.load_full().as_ref().clone();
+            fallback.web = daygle_dns_core::config::WebSettings::default();
+            shared.config.store(Arc::new(fallback));
+            web.apply(daygle_dns_core::config::WebSettings::default())
+                .await
+                .map_err(DaygleError::Config)?
         }
-    });
+        Err(e) => return Err(DaygleError::Config(e)),
+    };
+    let api_addr = web_addrs
+        .http
+        .or(web_addrs.https)
+        .ok_or_else(|| DaygleError::Config("the web console has no listener".into()))?;
 
     Ok(BoundServer {
         udp_addr: initial_addrs.udp,
@@ -525,7 +567,7 @@ pub async fn bind_with(
         addrs,
         shutdown,
         dns_task: Some(dns_task),
-        api_task: Some(api_task),
+        web,
         reload_task,
         reload_tx,
         config_path,
@@ -819,6 +861,21 @@ fn write_if_changed(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
     std::fs::rename(&tmp, path).map_err(DaygleError::Io)
 }
 
+/// `[section].listen` and a port as socket addresses (one or several, IPv4
+/// or IPv6), each with whether it is bound IPv6-only (see
+/// [`net::v6_only`]).
+fn listen_addrs(
+    section: &str,
+    listen: &str,
+    port: u16,
+    ipv6_only: bool,
+) -> Result<Vec<(std::net::SocketAddr, bool)>> {
+    let addrs = daygle_dns_core::config::listen_socket_addrs(listen, port)
+        .map_err(|e| DaygleError::Config(format!("{section}.listen: {e}")))?;
+    let v6_only = net::v6_only(&addrs, ipv6_only);
+    Ok(addrs.into_iter().map(|a| (a, v6_only)).collect())
+}
+
 async fn bind_listeners(
     config: &DaygleConfig,
     store: &daygle_dns_authoritative::ZoneStore,
@@ -830,109 +887,131 @@ async fn bind_listeners(
     // to the zone database so the file-based TLS loaders can read them.
     let mut config = config.clone();
     materialize_stored_certs(&mut config, store)?;
-    let listen: std::net::SocketAddr = format!("{}:{}", config.server.listen, config.server.port)
-        .parse()
-        .map_err(|e| DaygleError::Config(format!("bad server listen address: {e}")))?;
+    let ipv6_only = config.server.ipv6_only;
+    let listen = listen_addrs(
+        "server",
+        &config.server.listen,
+        config.server.port,
+        ipv6_only,
+    )?;
 
     // DoQ task, spawned below when QUIC is enabled.
     let mut doq_task = None;
 
+    // `addrs` records the first address of each listener.
     if config.server.udp_enabled {
-        // Bind through a std socket so the kernel send/receive buffers can be
-        // sized before the socket is wrapped for Tokio (the buffer sizes must
-        // be set before Windows picks them up on the first connect). These
-        // knobs use `socket2` because std::net::UdpSocket no longer exposes
-        // SO_SNDBUF/SO_RCVBUF setters.
-        let std_socket = std::net::UdpSocket::bind(listen)?;
         let buffer_bytes = |kb: u32| {
             (kb as usize)
                 .checked_mul(1024)
                 .ok_or_else(|| DaygleError::Config("udp buffer size is too large".to_string()))
         };
-        socket2::SockRef::from(&std_socket)
-            .set_send_buffer_size(buffer_bytes(config.server.udp_send_buffer_kb)?)?;
-        socket2::SockRef::from(&std_socket)
-            .set_recv_buffer_size(buffer_bytes(config.server.udp_recv_buffer_kb)?)?;
-        std_socket.set_nonblocking(true)?;
-        let socket = tokio::net::UdpSocket::from_std(std_socket)?;
-        addrs.udp = Some(socket.local_addr()?);
-        server.register_socket(socket);
-        info!(
-            addr = %addrs.udp.expect("addr set above"),
-            send_buffer_kb = config.server.udp_send_buffer_kb,
-            recv_buffer_kb = config.server.udp_recv_buffer_kb,
-            "plaintext UDP DNS listening"
-        );
+        for &(addr, v6_only) in &listen {
+            // Bind through a std socket so the kernel send/receive buffers
+            // can be sized before the socket is wrapped for Tokio (the
+            // buffer sizes must be set before Windows picks them up on the
+            // first connect). These knobs use `socket2` because
+            // std::net::UdpSocket no longer exposes SO_SNDBUF/SO_RCVBUF
+            // setters.
+            let std_socket = net::bind_udp_std(addr, v6_only)?;
+            socket2::SockRef::from(&std_socket)
+                .set_send_buffer_size(buffer_bytes(config.server.udp_send_buffer_kb)?)?;
+            socket2::SockRef::from(&std_socket)
+                .set_recv_buffer_size(buffer_bytes(config.server.udp_recv_buffer_kb)?)?;
+            std_socket.set_nonblocking(true)?;
+            let socket = tokio::net::UdpSocket::from_std(std_socket)?;
+            let bound = socket.local_addr()?;
+            addrs.udp.get_or_insert(bound);
+            server.register_socket(socket);
+            info!(
+                addr = %bound,
+                send_buffer_kb = config.server.udp_send_buffer_kb,
+                recv_buffer_kb = config.server.udp_recv_buffer_kb,
+                "plaintext UDP DNS listening"
+            );
+        }
     }
     if config.server.tcp_enabled {
-        let listener = tokio::net::TcpListener::bind(listen).await?;
-        addrs.tcp = Some(listener.local_addr()?);
-        server.register_listener(
-            listener,
-            Duration::from_millis(config.server.tcp_timeout_ms),
-            config.server.response_buffer_size,
-        );
-        info!(addr = %addrs.tcp.expect("addr set above"), "plaintext TCP DNS listening");
+        for &(addr, v6_only) in &listen {
+            let listener = net::bind_tcp(addr, v6_only)?;
+            let bound = listener.local_addr()?;
+            addrs.tcp.get_or_insert(bound);
+            server.register_listener(
+                listener,
+                Duration::from_millis(config.server.tcp_timeout_ms),
+                config.server.response_buffer_size,
+            );
+            info!(addr = %bound, "plaintext TCP DNS listening");
+        }
     }
 
     if config.dot.enabled {
-        let addr: std::net::SocketAddr = format!("{}:{}", config.dot.listen, config.dot.port)
-            .parse()
-            .map_err(|e| DaygleError::Config(format!("bad DoT listen address: {e}")))?;
-        let listener = tokio::net::TcpListener::bind(addr).await?;
-        addrs.dot = Some(listener.local_addr()?);
         let tls_config = daygle_dns_dot::build_tls_config(&config.dot)?;
-        daygle_dns_dot::register_dot(
-            server,
-            listener,
-            tls_config,
-            Duration::from_secs(config.dot.handshake_timeout_secs),
-        )?;
-        info!(addr = %addrs.dot.expect("addr set above"), "DNS over TLS listening");
+        for (addr, v6_only) in listen_addrs("dot", &config.dot.listen, config.dot.port, ipv6_only)?
+        {
+            let listener = net::bind_tcp(addr, v6_only)?;
+            let bound = listener.local_addr()?;
+            addrs.dot.get_or_insert(bound);
+            daygle_dns_dot::register_dot(
+                server,
+                listener,
+                tls_config.clone(),
+                Duration::from_secs(config.dot.handshake_timeout_secs),
+            )?;
+            info!(addr = %bound, "DNS over TLS listening");
+        }
     }
 
     if config.doh.enabled {
-        let addr: std::net::SocketAddr = format!("{}:{}", config.doh.listen, config.doh.port)
-            .parse()
-            .map_err(|e| DaygleError::Config(format!("bad DoH listen address: {e}")))?;
-        let listener = tokio::net::TcpListener::bind(addr).await?;
-        addrs.doh = Some(listener.local_addr()?);
         let tls_config = daygle_dns_dot::build_doh_tls_config(&config.doh)?;
-        daygle_dns_dot::register_doh(
-            server,
-            listener,
-            tls_config,
-            Duration::from_secs(config.doh.handshake_timeout_secs),
-            None,
-            &config.doh.endpoint,
-        )?;
-        info!(addr = %addrs.doh.expect("addr set above"), endpoint = %config.doh.endpoint, "DNS over HTTPS listening");
+        for (addr, v6_only) in listen_addrs("doh", &config.doh.listen, config.doh.port, ipv6_only)?
+        {
+            let listener = net::bind_tcp(addr, v6_only)?;
+            let bound = listener.local_addr()?;
+            addrs.doh.get_or_insert(bound);
+            daygle_dns_dot::register_doh(
+                server,
+                listener,
+                tls_config.clone(),
+                Duration::from_secs(config.doh.handshake_timeout_secs),
+                None,
+                &config.doh.endpoint,
+            )?;
+            info!(addr = %bound, endpoint = %config.doh.endpoint, "DNS over HTTPS listening");
+        }
     }
 
     if config.doq.enabled {
-        let addr: std::net::SocketAddr = format!("{}:{}", config.doq.listen, config.doq.port)
-            .parse()
-            .map_err(|e| DaygleError::Config(format!("bad DoQ listen address: {e}")))?;
-        let socket = tokio::net::UdpSocket::bind(addr).await?;
         let tls_config = daygle_dns_dot::build_doq_tls_config(&config.doq)?;
-        let endpoint = crate::doq::build_doq_endpoint(
-            socket,
-            tls_config,
-            Duration::from_secs(config.doq.idle_timeout_secs),
-        )
-        .map_err(|e| DaygleError::Config(format!("cannot build DoQ listener: {e}")))?;
-        addrs.doq = Some(endpoint.local_addr().map_err(DaygleError::Io)?);
-        let token = server.shutdown_token().clone();
-        doq_task = Some(tokio::spawn(crate::doq::serve_doq(
-            endpoint,
-            dispatcher.clone(),
-            token,
-        )));
-        info!(
-            addr = %addrs.doq.expect("addr set above"),
-            idle_timeout_s = config.doq.idle_timeout_secs,
-            "DNS over QUIC (RFC 9250) listening"
-        );
+        let mut tasks = Vec::new();
+        for (addr, v6_only) in listen_addrs("doq", &config.doq.listen, config.doq.port, ipv6_only)?
+        {
+            let socket = net::bind_udp(addr, v6_only)?;
+            let endpoint = crate::doq::build_doq_endpoint(
+                socket,
+                tls_config.clone(),
+                Duration::from_secs(config.doq.idle_timeout_secs),
+            )
+            .map_err(|e| DaygleError::Config(format!("cannot build DoQ listener: {e}")))?;
+            let bound = endpoint.local_addr().map_err(DaygleError::Io)?;
+            addrs.doq.get_or_insert(bound);
+            let token = server.shutdown_token().clone();
+            tasks.push(tokio::spawn(crate::doq::serve_doq(
+                endpoint,
+                dispatcher.clone(),
+                token,
+            )));
+            info!(
+                addr = %bound,
+                idle_timeout_s = config.doq.idle_timeout_secs,
+                "DNS over QUIC (RFC 9250) listening"
+            );
+        }
+        // One handle for the generation: done when every endpoint is.
+        doq_task = Some(tokio::spawn(async move {
+            for task in tasks {
+                let _ = task.await;
+            }
+        }));
     }
 
     Ok(doq_task)

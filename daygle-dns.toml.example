@@ -2,8 +2,18 @@
 # Copy to /etc/daygle-dns/daygle-dns.toml and adjust as needed.
 
 # Plaintext DNS listeners (UDP/TCP on port 53).
+# Every `listen` below takes an IPv4 or IPv6 address: "0.0.0.0" listens on
+# every IPv4 address, "::" on every IPv4 AND IPv6 address (dual-stack), and
+# a specific address such as "192.168.1.2" or "fd00::53" on just that one.
+# To listen on several, separate them with commas or use an array:
+#   listen = "192.168.1.2, fd00::53"   or   listen = ["192.168.1.2", "fd00::53"]
+# "::" next to IPv4 addresses ("::, 192.168.1.2") covers every IPv6 address
+# plus those IPv4 ones.
 [server]
 listen = "0.0.0.0"
+# With "::" (here or in [api], [dot], [doh], [doq]), accept IPv6 clients
+# only instead of IPv4 and IPv6.
+# ipv6_only = false
 port = 53
 udp_enabled = true
 tcp_enabled = true
@@ -50,6 +60,12 @@ recursion_access = "private_networks"
 # Recursive mode: probe nameservers for DNS over TLS/QUIC and use it where it
 # works (RFC 9539, experimental), falling back to plain DNS.
 # opportunistic_encryption = false
+#
+# IP versions this server uses for its own queries (root and domain name
+# servers, upstreams, conditional forwarders, stub zones, local root
+# sources): "both", "ipv4" or "ipv6". Use "ipv4" when the host has an IPv6
+# address but no working IPv6 route. Clients can still ask for AAAA records.
+# outbound_ip_versions = "both"
 #
 # Forwarding mode: empty list + use_system_config = use /etc/resolv.conf.
 # Supported upstream forms:
@@ -105,11 +121,12 @@ serve_stale_secs = 0
 database = "/var/lib/daygle-dns/daygle.db"
 # Optional: import BIND zone files (*.zone, *.db, *.txt) from this directory.
 zones_dir = "/etc/daygle-dns/zones"
-# SOA defaults for zones created by the console/API without their own:
-# the primary nameserver (this server's name) and the administrator mailbox
-# (written with a dot for the @). An empty mailbox means admin.<zone>.
-default_primary_ns = "ns1.daygle.test."
-default_admin_mailbox = "admin.daygle.test."
+# SOA defaults for zones created by the console/API without their own.
+# Empty (the default) uses this server's host name as the primary
+# nameserver and the first administrator's email as the mailbox; set them
+# to override (the mailbox may be an email address or the SOA form).
+default_primary_ns = ""
+default_admin_mailbox = ""
 # Default TTL (seconds) pre-filled when adding records in the console.
 # Also the fallback when an API record update omits the TTL.
 default_record_ttl = 3600
@@ -332,6 +349,10 @@ domain_max_queries = 600
 domain_window_secs = 60
 # Loopback clients (127.0.0.0/8, ::1) are never rate-limited.
 exempt_loopback = true
+# IPv6 clients are counted per prefix of this length (one host or network
+# normally holds a /64 or more, so single addresses could rotate past the
+# limit). 56 matches BIND; 128 counts single addresses.
+client_ipv6_prefix = 56
 
 [logging]
 level = "info"
@@ -392,6 +413,22 @@ threat_ttl_secs = 604800
 verifier_model_path = "/etc/daygle-dns/models/all-MiniLM-L6-v2-int8.onnx"
 verifier_reference_path = ""
 verifier_threshold = 0.35
+
+# ---------------------------------------------------------------------------
+# How the web console and REST API are served (also editable in Settings →
+# General, which wins over this file once saved). The listen address is
+# api.listen. If a change locks you out, run `daygle-dns reset-web-access`
+# and restart: the console is then plain HTTP on api.port again.
+# http_port = 0 means api.port. https_certificate names a certificate from
+# the console's Certificates page; empty generates a self-signed one.
+# ---------------------------------------------------------------------------
+[web]
+http_enabled = true
+http_port = 0
+https_enabled = false
+https_port = 5443
+https_certificate = ""
+redirect_http = false
 
 # ---------------------------------------------------------------------------
 # Console date & time defaults (also editable in Settings → Interface).

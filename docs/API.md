@@ -260,13 +260,13 @@ PUT /api/config
 }
 ```
 
-Editable groups: `server` (listen/port/udp_enabled/tcp_enabled), `recursive`
+Editable groups: `server` (listen/ipv6_only/port/udp_enabled/tcp_enabled), `recursive`
 (enabled/mode/upstreams/use_system_config/dnssec_validate/cache_size/
 min_cache_ttl/max_cache_ttl/negative_cache_ttl/failure_cache_ttl/
 prefetch_* /serve_stale_secs/
 conditional_zones/recursion_access/recursion_networks/root_hints/
 case_randomization/rebinding_protection/local_root/opportunistic_encryption/
-client_policies), `dot`,
+outbound_ip_versions/client_policies), `dot`,
 `doh`, `doq` (enabled/port/self_signed/server_name [+ `doh.endpoint`]), `api`
 (gui_enabled/cors_origins), `display` (the console's date/time defaults:
 `time_zone` = `system`, `UTC` or an IANA zone; `date_format` = `system`/`dmy`/
@@ -278,22 +278,50 @@ notify_listen_enabled/stub_zones). Runtime groups (`recursive`, `dot`, `doh`, `d
 config-file edits; `server.*` and `api.*` stay config-file-owned so a broken
 listener can always be fixed by editing the file. A `server` or `api` group
 in a `PUT` is applied to the running server but not stored, so it reverts
-at the next restart; the console shows these values read-only. Login users are managed
+at the next restart; the console shows these values read-only.
+
+`web` controls how the console and API themselves are served:
+`http_enabled`/`http_port` (0 = `api.port`), `https_enabled`/`https_port`,
+`https_certificate` (a certificate from `/api/certificates`; empty
+generates and selects a self-signed `web-console` certificate) and
+`redirect_http` (with both on, HTTP answers `308` to the same path over
+HTTPS). It is stored in the database and applied live. New ports are bound
+and the certificate loaded before the running listeners change, so a port
+in use, a missing or unusable certificate, or turning both off gets `400`
+and changes nothing. If the saved settings cannot start at boot, the server
+logs an error and serves plain HTTP on `api.port`. `daygle-dns
+reset-web-access` clears the stored settings (restart afterwards) for when
+a change locks you out. Login users are managed
 from the console's **Users** page (see [Console users and roles](#console-users-and-roles)).
 
-The `authoritative` group holds zone-creation defaults. Of note:
-`authoritative.default_primary_ns` (the console's **DNS Server Domain**
-setting under Settings → Zones & Records) is used as the SOA Primary
-Nameserver (MNAME) — and to synthesize the zone's default `@` NS record — for
-zones created without an explicit `primary_ns`, instead of assuming
-`ns1.<zone>`. The value is normalized to a fully-qualified name (a trailing
-dot is added when missing) and a blank value keeps the current one; when the
-setting is unset, the server falls back to `ns1.<zone>.`.
-`authoritative.default_admin_mailbox` (Settings → Zones & Records →
-**Default Administrator Mailbox**) is likewise the SOA contact for zones
-created without an explicit `admin_mailbox` or an imported SOA. A trailing
-dot is added when missing; a blank value clears it, and new zones then use
-`admin.<zone>.`.
+The `authoritative` group holds zone-creation defaults, used for zones
+created without their own SOA values (no explicit value and no imported
+SOA):
+
+- `authoritative.default_primary_ns` (Settings → **DNS Server Domain**) is
+  the SOA primary nameserver (MNAME), also used to synthesize the zone's
+  default `@` NS record. A trailing dot is added when missing. Empty (the
+  default) means this server's own host name, made fully qualified with the
+  `domain` (or first `search`) entry of `/etc/resolv.conf`; when that
+  cannot be read either, `ns1.<zone>.`.
+- `authoritative.default_admin_mailbox` (Settings → **Default
+  Administrator Email**) is the SOA contact (RNAME). It takes an email
+  address (`jane.doe@example.com`, stored as `jane\.doe.example.com.`) or
+  the SOA form. Empty (the default) means the email of the first
+  administrator account that has one (normally the account created at
+  first-run setup); with none, `admin.<zone>.`.
+
+Blank values clear a setting. The placeholder values earlier versions
+shipped (`ns1.daygle.test.`, `admin.daygle.test.`) count as empty.
+`admin_mailbox` on `POST /api/zones` and `PUT /api/zones/{id}/soa` also
+accepts an email address.
+
+`GET /api/zones/defaults` reports what a new zone would get:
+`primary_ns` and `admin_mailbox` (with `primary_ns_source` =
+`setting`/`hostname`/`none` and `admin_mailbox_source` =
+`setting`/`admin_email`/`none`), `admin_email` (the mailbox as an email
+address when unambiguous), and the automatic fallbacks `server_name` and
+`first_admin_email` whatever is set.
 
 `recursive.mode` is `"recursive"` (resolve from the root servers; DNSSEC is
 validated against the built-in root trust anchor and query names are
@@ -302,12 +330,14 @@ system resolver when that list is empty). When unset it is inferred:
 forwarding if upstreams are configured, otherwise recursive. Saving settings
 stores the effective mode explicitly. `recursive.recursion_access` decides who
 may use recursion - `"private_networks"` (default: loopback, RFC 1918, CGNAT,
-link-local, IPv6 ULA), `"allow"`, `"custom"` (the CIDRs or IPs in
+link-local, IPv6 ULA, and the global IPv6 networks this host has addresses
+in, re-read every minute from `/proc/net/if_inet6`), `"allow"`, `"custom"` (the CIDRs or IPs in
 `recursion_networks`) or `"deny"`; refused clients get `REFUSED`, while the
 server's own zones are answered for everyone. In recursive mode,
 `case_randomization` enables 0x20 query-case randomization and
-`rebinding_protection` drops private and loopback addresses from public
-answers; `root_hints` overrides the built-in root server addresses.
+`rebinding_protection` drops private, loopback and unspecified addresses
+from public answers, including IPv4-mapped IPv6 forms such as
+`::ffff:192.168.1.1`; `root_hints` overrides the built-in root server addresses.
 
 `recursive.local_root` (`{ "enabled": true, "sources": [] }`) keeps a local
 copy of the root zone (RFC 8806; the console's **Secondary ROOT Zone**). It is
@@ -327,6 +357,31 @@ a private TLD).
 RFC 9539 opportunistic encryption: nameservers are probed for DNS over TLS or
 QUIC in the background and the encrypted transport is used where it works,
 with plain DNS as the fallback.
+
+`recursive.outbound_ip_versions` (`"both"` by default, `"ipv4"` or `"ipv6"`)
+limits which IP versions the server uses for its own queries: root hints and
+the name servers the recursor is referred to, upstreams, conditional
+forwarders, forwarding client policies, stub zone name servers and local root
+sources. Servers of the other version are skipped (a `https://` upstream
+named by host is resolved to an address of an allowed version). A save that
+leaves an upstream, conditional-forwarder or client-policy list with no
+usable server is refused with `400`, as is a `root_hints` or
+`local_root.sources` list with none. When `/etc/resolv.conf` has no server of
+an allowed version, all of them are used and a warning is logged. Zone
+transfers and NOTIFY use the addresses configured for them regardless. This
+is about transport only: AAAA records are still resolved and served.
+
+Every `listen` setting (`server`, `api`, `dot`, `doh`, `doq`) takes one
+address or several separated by commas (in the config file, an array works
+too): `"192.168.1.2, fd00::53"`. Each address gets its own socket on the
+listener's port. `::` next to IPv4 addresses covers every IPv6 address plus
+those IPv4 ones. A repeated address, or one a wildcard in the same list
+already covers (`"0.0.0.0, 192.168.1.2"`), is a config error, since the
+second socket could not be bound.
+
+`server.ipv6_only` (`false` by default; the console shows it but leaves it to the file) makes a `::` listen
+address, in `[server]` or in `[api]`, `[dot]`, `[doh]` or `[doq]`, accept
+IPv6 clients only; by default `::` accepts IPv4 clients too.
 
 `recursive.client_policies` resolves some clients differently. Each policy is
 `{ "name", "enabled", "clients": [CIDRs or IPs], "action", "upstreams" }` with

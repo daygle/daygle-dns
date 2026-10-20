@@ -3,7 +3,7 @@
   import PageHeader from '../PageHeader.svelte';
   import { icons } from '../icons.svelte.js';
 
-  // The cache is configured in Settings -> Recursive & Caching; this page
+  // The cache is configured in Settings -> Cache; this page
   // shows how it is doing and flushes it (whole or one name).
   let { onOpenSettings = null } = $props();
 
@@ -120,12 +120,12 @@
         <span><span class="muted">Serve-Stale Window</span> {duration(cache.serve_stale_secs)}</span>
         <span><span class="muted">Refresh Popular Names Early</span> {cache.prefetch_enabled ? 'On' : 'Off'}</span>
         {#if onOpenSettings}
-          <button class="secondary" onclick={() => onOpenSettings('recursive')}>Change in Settings</button>
+          <button class="secondary" onclick={() => onOpenSettings('cache')}>Change in Settings</button>
         {/if}
       </div>
       <p class="muted help">
         Cache size, TTL limits, serve-stale and prefetch are configured in
-        Settings → Recursive &amp; Caching.
+        Settings → Cache.
       </p>
     {/if}
   </div>

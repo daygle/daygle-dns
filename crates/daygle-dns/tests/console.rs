@@ -1619,11 +1619,17 @@ async fn redirect_answers_nodata_for_types_the_target_cannot_serve() {
     assert_eq!(a.response_code, hickory_proto::op::ResponseCode::NoError);
     assert_eq!(first_answer(&a).as_deref(), Some("0.0.0.0"));
 
-    // The name exists (it redirects), so an AAAA query for an IPv4 sinkhole
-    // is NODATA, not NXDOMAIN (which would negatively cache every type).
+    // A null sinkhole answers IPv6 with its null address too (::), so
+    // IPv6 clients are blocked as plainly as IPv4 ones.
     let aaaa = udp_query(udp, "ads.test.", RecordType::AAAA).await;
     assert_eq!(aaaa.response_code, hickory_proto::op::ResponseCode::NoError);
-    assert!(aaaa.answers.is_empty());
+    assert_eq!(first_answer(&aaaa).as_deref(), Some("::"));
+
+    // The name exists (it redirects), so a type the target cannot serve is
+    // NODATA, not NXDOMAIN (which would negatively cache every type).
+    let mx = udp_query(udp, "ads.test.", RecordType::MX).await;
+    assert_eq!(mx.response_code, hickory_proto::op::ResponseCode::NoError);
+    assert!(mx.answers.is_empty());
 
     shutdown(server).await;
 }
@@ -1876,6 +1882,130 @@ async fn new_zones_use_the_default_admin_mailbox() {
     assert_eq!(resp.status(), 200);
     let zone = create(json!({ "name": "three.test" })).await;
     assert_eq!(zone["admin_mailbox"], json!("admin.three.test."));
+
+    shutdown(server).await;
+}
+
+#[tokio::test]
+async fn new_zones_default_to_this_server_and_the_first_admin() {
+    use hickory_proto::rr::{RData, RecordType};
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut cfg = base_config(&dir.path().join("daygle-dns.db"));
+    cfg.server.port = free_tcp_port();
+    cfg.api.port = free_tcp_port();
+    cfg.api.auth_required = true;
+    let server = bind_with_config(cfg, None).await;
+    let client = reqwest::Client::new();
+    let base = api_url(server.api_addr, "");
+
+    // First-run setup with an email address.
+    let resp = client
+        .post(format!("{base}/api/auth/setup"))
+        .json(&json!({
+            "username": "glen",
+            "password": "correct horse",
+            "email": "Glen.Day@example.com",
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let token = resp.json::<serde_json::Value>().await.unwrap()["token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Nothing set in Settings: the mailbox comes from that admin, and the
+    // nameserver from this machine's host name (when it can be read).
+    let defaults: serde_json::Value = client
+        .get(format!("{base}/api/zones/defaults"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(defaults["admin_mailbox"], json!("glen\\.day.example.com."));
+    assert_eq!(defaults["admin_email"], json!("Glen.Day@example.com"));
+    assert_eq!(defaults["admin_mailbox_source"], json!("admin_email"));
+    let detected = daygle_dns_core::config::detect_server_name();
+    assert_eq!(defaults["primary_ns"], json!(detected));
+    assert_eq!(defaults["server_name"], json!(detected));
+    assert_eq!(defaults["first_admin_email"], json!("Glen.Day@example.com"));
+
+    let zone: serde_json::Value = client
+        .post(format!("{base}/api/zones"))
+        .bearer_auth(&token)
+        .json(&json!({ "name": "home.test" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(zone["admin_mailbox"], json!("glen\\.day.example.com."));
+
+    // The escaped mailbox is served as a valid SOA.
+    server.catalog.reload().unwrap();
+    let udp = server.udp_addr.expect("UDP is enabled");
+    let reply = udp_query(udp, "home.test.", RecordType::SOA).await;
+    let soa = reply
+        .answers
+        .iter()
+        .find_map(|r| match &r.data {
+            RData::SOA(soa) => Some(soa.clone()),
+            _ => None,
+        })
+        .expect("SOA answer");
+    assert_eq!(soa.rname.to_string(), "glen\\.day.example.com.");
+
+    // Settings take an email address too, and override both defaults.
+    let resp = client
+        .put(format!("{base}/api/config"))
+        .bearer_auth(&token)
+        .json(&json!({ "authoritative": {
+            "default_admin_mailbox": "dns-admin@example.net",
+            "default_primary_ns": "ns.example.net",
+        } }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let resp = client
+        .put(format!("{base}/api/config"))
+        .bearer_auth(&token)
+        .json(&json!({ "authoritative": { "default_admin_mailbox": "not an address" } }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+    let zone: serde_json::Value = client
+        .post(format!("{base}/api/zones"))
+        .bearer_auth(&token)
+        .json(&json!({ "name": "work.test" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(zone["admin_mailbox"], json!("dns-admin.example.net."));
+    assert_eq!(zone["primary_ns"], json!("ns.example.net."));
+
+    // An explicit email on the zone is converted as well.
+    let zone: serde_json::Value = client
+        .post(format!("{base}/api/zones"))
+        .bearer_auth(&token)
+        .json(&json!({ "name": "lab.test", "admin_mailbox": "lab@example.org" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(zone["admin_mailbox"], json!("lab.example.org."));
 
     shutdown(server).await;
 }

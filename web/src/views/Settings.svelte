@@ -19,15 +19,17 @@
   let tab = $state(initialTab);
   const TABS = [
     ['general', 'General'],
-    ['recursive', 'Recursive & Caching'],
-    ['listeners', 'Protocol Listeners'],
-    ['zones', 'Zones & Records'],
+    ['recursive', 'Resolver'],
+    ['cache', 'Cache'],
+    ['listeners', 'Encrypted DNS'],
+    ['zones', 'Zones'],
     ['ai', 'AI Scanner'],
     ['interface', 'Interface'],
   ];
   const TAGLINES = {
-    general: 'The DNS listeners this server was started with. They are set in the config file so a mistake can always be fixed there.',
-    recursive: 'How the server answers names it does not host: resolving them itself from the root servers or forwarding to upstreams, who may use it, and how answers are cached.',
+    general: 'How the web console is reached (HTTP, HTTPS or both), and the DNS listeners this server was started with.',
+    recursive: 'How the server answers names it does not host: resolving them itself from the root servers or forwarding to upstreams, and who may use it.',
+    cache: 'How long answers are kept, how many, and how popular names are refreshed before they expire. Changes apply immediately.',
     listeners: 'Encrypted DNS: DNS over TLS, HTTPS and QUIC, and the certificate each one presents. Changes apply immediately.',
     zones: 'Defaults for new zones and records, and how other DNS servers may copy, update and be notified about your zones.',
     ai: 'The background scanner that classifies the domains in your DNS traffic and can block unsafe ones.',
@@ -80,15 +82,24 @@
 
   // Server-wide date and time display defaults (saved with the page).
   let display_ = $state({ time_zone: 'system', date_format: 'system', time_format: 'system' });
+  // How the web console is served (Settings -> General). `http_port` 0 in
+  // the stored settings means the config file's api.port; the form shows
+  // the real number.
+  let web_ = $state({ http_enabled: true, http_port: 5380, https_enabled: false, https_port: 5443, https_certificate: '', redirect_http: false });
   const zoneChoices = timeZoneOptions();
   // Users who chose their own settings don't see the defaults change.
   const ownPrefsSet = $derived(
     !!(display.mine && (display.mine.time_zone || display.mine.date_format || display.mine.time_format)),
   );
 
+  // What empty SOA defaults resolve to (this server's name, the first
+  // administrator's email), for the Zones tab placeholders.
+  let zoneDefaults = $state(null);
+
   $effect(() => {
     load();
     api.certificates().then((list) => { certs = list || []; }).catch(() => {});
+    api.zoneDefaults().then((d) => { zoneDefaults = d; }).catch(() => {});
   });
 
   // A managed certificate in the picker, flagged when it is not usable.
@@ -98,6 +109,10 @@
     if (cert.not_after && Date.parse(cert.not_after) <= Date.now()) label += ' (Expired)';
     return label;
   }
+
+  // The automatic values an empty SOA default falls back to.
+  const detectedName = $derived(zoneDefaults?.server_name || null);
+  const adminEmail = $derived(zoneDefaults?.first_admin_email || null);
 
   // Translate the config's certificate state into a picker value.
   function certModeOf(listener) {
@@ -121,6 +136,9 @@
 
   async function load() {
     error = null;
+    // Saving HTTPS can create the web-console certificate; keep the
+    // pickers current.
+    api.certificates().then((list) => { certs = list || []; }).catch(() => {});
     try {
       config = await api.config();
       if (config == null) {
@@ -147,6 +165,7 @@
       // An unset mode means: forwarding when upstreams exist, else recursive.
       recursive.mode = config.recursive.mode || (config.recursive.upstreams?.length ? 'forwarding' : 'recursive');
       recursive.recursion_access = config.recursive.recursion_access || 'private_networks';
+      recursive.outbound_ip_versions = config.recursive.outbound_ip_versions || 'both';
       recursionNetworksText = (config.recursive.recursion_networks || []).join('\n');
       authoritative = { ...config.authoritative };
       dot = { ...config.dot };
@@ -154,6 +173,11 @@
       doq = { ...config.doq };
       api_ = { ...config.api };
       display_ = { time_zone: 'system', date_format: 'system', time_format: 'system', ...config.display };
+      web_ = {
+        http_enabled: true, https_enabled: false, https_port: 5443, https_certificate: '', redirect_http: false,
+        ...config.web,
+        http_port: config.web?.http_port || config.api?.port || 5380,
+      };
       ai_ = { ...config.ai, mode: config.ai?.mode || 'train' };
       aiForm = {
         scanMinutes: round2(ai_.scan_interval_secs / 60),
@@ -201,6 +225,26 @@
     return text.split('\n').map((l) => l.trim()).filter(Boolean);
   }
 
+  // What a listen setting accepts, in words. It is one address or several
+  // separated by commas; `::` is dual-stack unless server.ipv6_only is set
+  // or the list also names IPv4 addresses.
+  function listenMeaning(listen, ipv6Only) {
+    const parts = String(listen || '').split(',').map((p) => p.trim().replace(/^\[(.*)\]$/, '$1')).filter(Boolean);
+    if (parts.length === 1) {
+      const a = parts[0];
+      if (a === '0.0.0.0') return 'All IPv4 addresses';
+      if (a === '::') return ipv6Only ? 'All IPv6 addresses (IPv6 only)' : 'All IPv4 and IPv6 addresses';
+      if (a === '127.0.0.1' || a === '::1') return 'This computer only';
+      return a.includes(':') ? 'This IPv6 address only' : 'This IPv4 address only';
+    }
+    const wildcards = parts.filter((p) => p === '0.0.0.0' || p === '::')
+      .map((p) => (p === '::' ? 'all IPv6 addresses' : 'all IPv4 addresses'));
+    const others = parts.length - wildcards.length;
+    const text = [...wildcards, others ? `${others} specific address${others > 1 ? 'es' : ''}` : '']
+      .filter(Boolean).join(' and ');
+    return text.charAt(0).toUpperCase() + text.slice(1);
+  }
+
   // Trim each line and drop empties (shared by the network allow-lists and
   // NOTIFY targets, which are all newline-separated textareas).
   function parseLines(text) {
@@ -222,6 +266,7 @@
         case_randomization: !!recursive.case_randomization,
         rebinding_protection: !!recursive.rebinding_protection,
         opportunistic_encryption: !!recursive.opportunistic_encryption,
+        outbound_ip_versions: recursive.outbound_ip_versions,
         upstreams: parseUpstreams(upstreamText),
         use_system_config: !!recursive.use_system_config,
         cache_size: Number(recursive.cache_size),
@@ -266,6 +311,14 @@
         certificate: doq.certificate || '',
       },
       display: { ...display_ },
+      web: {
+        http_enabled: !!web_.http_enabled,
+        http_port: Number(web_.http_port),
+        https_enabled: !!web_.https_enabled,
+        https_port: Number(web_.https_port),
+        https_certificate: web_.https_certificate || '',
+        redirect_http: !!(web_.redirect_http && web_.http_enabled && web_.https_enabled),
+      },
       authoritative: {
         default_record_ttl: Number(authoritative.default_record_ttl),
         default_primary_ns: authoritative.default_primary_ns || '',
@@ -307,6 +360,14 @@
       const body = buildBody();
       await api.updateSettings(body);
       setDisplayDefaults(body.display);
+      // If this page's own address stopped being served, follow the
+      // console to where it now is.
+      const next = consoleUrlAfter(body.web);
+      if (next) {
+        notice = `Settings saved. The console has moved: opening ${next} …`;
+        setTimeout(() => (window.location.href = next), 1500);
+        return;
+      }
       notice = 'Settings saved and applied.';
       await load();
     } catch (e) {
@@ -314,6 +375,24 @@
     } finally {
       busy = false;
     }
+  }
+
+  // Where this page should go after a web access change, or null if its
+  // current address still works. A port in the URL that matches the new
+  // settings is kept; the host name always is.
+  function consoleUrlAfter(web) {
+    const here = window.location;
+    const port = Number(here.port) || (here.protocol === 'https:' ? 443 : 80);
+    const path = here.pathname + here.search + here.hash;
+    // location.hostname keeps the brackets of an IPv6 literal ([::1]).
+    const host = here.hostname.includes(':') && !here.hostname.startsWith('[') ? `[${here.hostname}]` : here.hostname;
+    const url = (scheme, p) => `${scheme}://${host}${(scheme === 'https' && p === 443) || (scheme === 'http' && p === 80) ? '' : `:${p}`}${path}`;
+    const servesHttp = web.http_enabled && !web.redirect_http && port === web.http_port;
+    const servesHttps = web.https_enabled && port === web.https_port;
+    if (here.protocol === 'http:' && servesHttp) return null;
+    if (here.protocol === 'https:' && servesHttps) return null;
+    if (web.https_enabled) return url('https', web.https_port);
+    return url('http', web.http_port);
   }
 
   // Auto-block category picker: checked state lives in aiCategoriesText so
@@ -365,28 +444,71 @@
 
   {#if tab === 'general'}
   <div class="card" style="margin-bottom: 14px">
+    <h3 style="margin: 0 0 10px">Web Console Access</h3>
+    <div class="access">
+      <div class="access-row">
+        <label class="check"><input type="checkbox" bind:checked={web_.http_enabled} /> <span>HTTP</span></label>
+        <label><span>Port</span><input type="number" min="1" max="65535" bind:value={web_.http_port} disabled={!web_.http_enabled} /></label>
+        <label class="check"><input type="checkbox" bind:checked={web_.redirect_http} disabled={!web_.http_enabled || !web_.https_enabled} /> <span>Redirect to HTTPS</span></label>
+      </div>
+      <div class="access-row">
+        <label class="check"><input type="checkbox" bind:checked={web_.https_enabled} /> <span>HTTPS</span></label>
+        <label><span>Port</span><input type="number" min="1" max="65535" bind:value={web_.https_port} disabled={!web_.https_enabled} /></label>
+        <label><span>Certificate</span>
+          <select bind:value={web_.https_certificate} disabled={!web_.https_enabled}>
+            <option value="">Self-Signed (Generated Automatically)</option>
+            {#each certs.filter((c) => c.name !== 'web-console' || web_.https_certificate !== '') as cert (cert.name)}
+              <option value={cert.name}>{cert.name === 'web-console' ? 'web-console - Self-Signed' : certLabel(cert)}</option>
+            {/each}
+          </select>
+        </label>
+      </div>
+    </div>
+    {#if !web_.http_enabled && !web_.https_enabled}
+      <p class="help restart">Turn on HTTP, HTTPS or both, or the console cannot be reached.</p>
+    {:else if consoleUrlAfter({ ...web_, http_port: Number(web_.http_port), https_port: Number(web_.https_port), redirect_http: web_.redirect_http && web_.http_enabled && web_.https_enabled })}
+      <p class="help restart">
+        After saving, this page moves to
+        <strong>{consoleUrlAfter({ ...web_, http_port: Number(web_.http_port), https_port: Number(web_.https_port), redirect_http: web_.redirect_http && web_.http_enabled && web_.https_enabled })}</strong>.
+      </p>
+    {/if}
+    <p class="muted help">
+      Upload a certificate for this server's name on the Certificates page
+      to use one browsers trust; the self-signed one makes browsers show a
+      warning until you accept it. A change applies straight away: new ports
+      are opened before old ones close, and a change that cannot work
+      (a port in use, a certificate that does not load) is refused. If you
+      lock yourself out anyway, run <code>daygle-dns reset-web-access</code>
+      on the server and restart it to get plain HTTP back on port
+      {config?.api?.port}.
+    </p>
+  </div>
+  <div class="card" style="margin-bottom: 14px">
     <h3 style="margin: 0 0 10px">DNS Listeners</h3>
     <table class="facts">
       <tbody>
-        <tr><th>Listen Address</th><td><code>{server.listen}</code></td></tr>
+        <tr><th>Listen Address</th><td><code>{server.listen}</code> <span class="muted">{listenMeaning(server.listen, server.ipv6_only)}</span></td></tr>
         <tr><th>Port</th><td>{server.port}</td></tr>
         <tr><th>UDP</th><td><span class="pill" class:ok={server.udp_enabled}>{server.udp_enabled ? 'On' : 'Off'}</span></td></tr>
         <tr><th>TCP</th><td><span class="pill" class:ok={server.tcp_enabled}>{server.tcp_enabled ? 'On' : 'Off'}</span></td></tr>
         <tr><th>Reload Config File on Change</th><td><span class="pill" class:ok={server.reload_enabled}>{server.reload_enabled ? 'On' : 'Off'}</span></td></tr>
-        <tr><th>Web Console</th><td><span class="pill" class:ok={api_.gui_enabled}>{api_.gui_enabled ? 'On' : 'Off'}</span></td></tr>
       </tbody>
     </table>
     <p class="muted help">
-      To change these, edit the <code>[server]</code> and <code>[api]</code>
-      sections of <code>daygle-dns.toml</code> and restart (or let Reload
-      Config File pick it up). They live in the file rather than here so a
-      listener that stops working can always be fixed without the console.
-      Encrypted listeners are on the Protocol Listeners tab.
+      To change these, edit the <code>[server]</code> section of
+      <code>daygle-dns.toml</code> and restart (or let Reload Config File
+      pick it up). Use <code>0.0.0.0</code> for IPv4 only, <code>::</code>
+      for IPv4 and IPv6, or <code>::</code> with <code>ipv6_only = true</code>
+      for IPv6 only. To listen on particular addresses, list them separated
+      by commas, for example <code>192.168.1.2, fd00::53</code>. They live in the file rather than here so a listener that
+      stops working can always be fixed without the console. The web console
+      listens on {config?.api?.listen}. DNS over TLS, HTTPS and QUIC are on
+      the Encrypted DNS tab.
     </p>
   </div>
   {:else if tab === 'recursive'}
   <div class="card" style="margin-bottom: 14px">
-    <h3 style="margin: 0 0 10px">Recursive Resolver</h3>
+    <h3 style="margin: 0 0 10px">Resolver</h3>
     <div class="form-grid">
       <label>
         <span>Resolution Mode</span>
@@ -433,6 +555,28 @@
         the list is empty or Use System DNS Configuration is set.
       </p>
     {/if}
+    {#if recursive.enabled}
+      <h4>Outbound IP Versions</h4>
+      <div class="form-grid">
+        <label>
+          <span>Send Queries Over</span>
+          <select bind:value={recursive.outbound_ip_versions}>
+            <option value="both">IPv4 and IPv6</option>
+            <option value="ipv4">IPv4 Only</option>
+            <option value="ipv6">IPv6 Only</option>
+          </select>
+        </label>
+      </div>
+      <p class="muted help">
+        Which IP versions this server uses for its own lookups: root and domain
+        name servers, upstream servers, conditional forwarders, stub zones and the
+        root zone download. Choose IPv4 Only when this host has an IPv6 address
+        but IPv6 does not reach the internet, which otherwise shows up as slow or
+        failing lookups. Servers of the other version are skipped, and a list
+        left with none is refused. This does not change what clients can ask
+        for: IPv6 (AAAA) records are still resolved and served.
+      </p>
+    {/if}
     <h4>Recursion Access</h4>
     <div class="form-grid">
       <label>
@@ -454,11 +598,17 @@
     <p class="muted help">
       Applies to everything this server resolves rather than answers from its own
       zones; refused clients get REFUSED. Private Networks Only covers loopback,
-      10/8, 172.16/12, 192.168/16, 100.64/10 (CGNAT), link-local and IPv6 ULA, so
-      the server is not an open resolver if it is reachable from the internet.
+      10/8, 172.16/12, 192.168/16, 100.64/10 (CGNAT), link-local, IPv6 ULA and
+      the IPv6 networks this server is on (most LANs give devices addresses from
+      the ISP's prefix rather than ULA), so the server is not an open resolver
+      if it is reachable from the internet.
       Your own zones are answered for everyone.
     </p>
-    <h4>Caching</h4>
+  </div>
+  <ClientPolicies />
+  {:else if tab === 'cache'}
+  <div class="card" style="margin-bottom: 14px">
+    <h3 style="margin: 0 0 10px">Cache Lifetimes</h3>
     <div class="recursive-cache-grid">
       <label><span>Minimum Cache TTL (Seconds)</span><span class="hint">{hint(recursive.min_cache_ttl)}</span><input type="number" min="0" bind:value={recursive.min_cache_ttl} /></label>
       <label><span>Negative Cache TTL (Seconds)</span><span class="hint">{hint(recursive.negative_cache_ttl)}</span><input type="number" min="0" bind:value={recursive.negative_cache_ttl} /></label>
@@ -466,6 +616,16 @@
       <label><span>Failure Cache TTL (Seconds)</span><span class="hint">{hint(recursive.failure_cache_ttl)}</span><input type="number" min="0" bind:value={recursive.failure_cache_ttl} /></label>
       <label><span>Cache Size (Entries)</span><input type="number" min="0" bind:value={recursive.cache_size} /></label>
     </div>
+    <p class="muted help">
+      Minimum and negative TTLs bound how long records stay in cache. Maximum TTL
+      clamps positive answers at insert time so tracking-heavy domains cannot pin
+      themselves in cache for weeks. Failure Cache TTL caches SERVFAIL and other
+      upstream errors briefly so a broken upstream is not hammered on every query;
+      set it to 0 to disable.
+    </p>
+  </div>
+  <div class="card" style="margin-bottom: 14px">
+    <h3 style="margin: 0 0 10px">Refreshing and Stale Answers</h3>
     <div class="recursive-cache-grid">
       <label class="check"><input type="checkbox" bind:checked={recursive.prefetch_enabled} /> <span>Refresh Popular Names Early</span></label>
       <label><span>Refresh When TTL Left Is Below (%)</span><input type="number" min="1" max="99" bind:value={recursive.prefetch_ttl_fraction_pct} disabled={!recursive.prefetch_enabled} /></label>
@@ -473,31 +633,25 @@
       <label><span>Serve-Stale Window (Seconds)</span><span class="hint">{hint(recursive.serve_stale_secs)}</span><input type="number" min="0" bind:value={recursive.serve_stale_secs} /></label>
     </div>
     <p class="muted help">
-      Minimum and negative TTLs bound how long records stay in cache. Maximum TTL
-      clamps positive answers at insert time so tracking-heavy domains cannot pin
-      themselves in cache for weeks. Failure Cache TTL caches SERVFAIL and other
-      upstream errors briefly so a broken upstream is not hammered on every query;
-      set it to 0 to disable. Refreshing popular names early re-fetches a name
-      before it expires once it has been asked for often enough, so clients
-      rarely wait. Serve-stale answers from an expired entry for this long when
-      the upstream cannot be reached.
+      Refreshing popular names early re-fetches a name before it expires once
+      it has been asked for often enough, so clients rarely wait. Serve-stale
+      answers from an expired entry for this long when the upstream cannot be
+      reached. The Cache page shows hit rates and can flush the cache.
     </p>
   </div>
-  <ClientPolicies />
   {:else if tab === 'zones'}
   <div class="card" style="margin-bottom: 14px">
-    <h3 style="margin: 0 0 10px">Zones & Records</h3>
-    <div class="form-grid">
+    <h3 style="margin: 0 0 10px">Zone Defaults</h3>
+    <div class="form-grid top">
       <label><span>Default Record TTL (Seconds)</span><span class="hint">{hint(authoritative.default_record_ttl)}</span><input type="number" min="1" bind:value={authoritative.default_record_ttl} /></label>
-      <label><span>DNS Server Domain</span><input placeholder="ns1.example.com." bind:value={authoritative.default_primary_ns} /></label>
-      <label><span>Default Administrator Mailbox</span><input placeholder="Empty = admin.<zone>." bind:value={authoritative.default_admin_mailbox} /></label>
+      <label><span>DNS Server Domain</span><input placeholder={detectedName ? `This server: ${detectedName}` : 'ns1.example.com.'} bind:value={authoritative.default_primary_ns} /></label>
+      <label><span>Default Administrator Email</span><input placeholder={adminEmail ? `First administrator: ${adminEmail}` : 'hostmaster@example.com'} bind:value={authoritative.default_admin_mailbox} /></label>
     </div>
     <p class="muted help">
       The TTL is pre-filled when adding records; existing records keep their
-      own. New zones without their own SOA values use this server's name as
-      the primary nameserver and this mailbox as the contact (written with a
-      dot for the @: <code>hostmaster.example.com.</code> is
-      hostmaster@example.com).
+      own. New zones use the DNS Server Domain as their primary nameserver
+      and the email as their contact; leave either empty to use this
+      server's own name and the first administrator's email.
     </p>
   </div>
 
@@ -806,6 +960,13 @@
     background: var(--bg);
   }
   .unsaved { color: #f5b041; font-size: 0.85rem; }
+  .form-grid.top { align-items: start; }
+  .access { display: flex; flex-direction: column; gap: 10px; }
+  .access-row { display: grid; grid-template-columns: 110px 140px minmax(0, 1fr); gap: 12px; align-items: end; }
+  .access-row label.check { padding-bottom: 8px; }
+  @media (max-width: 640px) {
+    .access-row { grid-template-columns: 1fr 1fr; }
+  }
   /* Below the field, so it never collides with a label that wraps. */
   .hint { order: 3; font-size: 0.72rem; color: var(--muted); min-height: 1em; }
   .facts { width: auto; }

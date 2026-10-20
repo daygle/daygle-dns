@@ -6,6 +6,8 @@
 //!
 //! - *(default)* run the server with the given config file
 //! - `hash-password` - print a PBKDF2 hash for `[[api.users]]` entries
+//! - `seed-ai-settings` - copy the config file's `[ai]` into the database
+//! - `reset-web-access` - put the web console back to plain HTTP on `api.port`
 
 use std::io::Write as _;
 use std::sync::Arc;
@@ -53,6 +55,13 @@ enum Command {
     /// AI settings are only replaced when they are still exactly the
     /// defaults - anything the console actively edited is left alone.
     SeedAiSettings,
+    /// Put web console access back to plain HTTP on `api.port`.
+    ///
+    /// For when a Settings change (HTTPS only, a port, a certificate) left
+    /// the console unreachable: clears the web settings stored in the
+    /// database so the config file's `[api]` applies again. Restart the
+    /// service afterwards.
+    ResetWebAccess,
 }
 
 fn main() {
@@ -125,6 +134,49 @@ fn main() {
                 std::process::exit(1);
             }
         }
+        return;
+    }
+
+    if let Some(Command::ResetWebAccess) = &args.command {
+        let config = match DaygleConfig::load(&args.config) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("daygle-dns: failed to load configuration: {e}");
+                std::process::exit(1);
+            }
+        };
+        let store = match ZoneStore::open(&config.authoritative.database) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!(
+                    "daygle-dns: cannot open zone database '{}': {e}",
+                    config.authoritative.database
+                );
+                std::process::exit(1);
+            }
+        };
+        match store.get_runtime_settings::<RuntimeSettings>() {
+            Ok(Some(mut overlay)) if overlay.web.is_some() => {
+                overlay.web = None;
+                if let Err(e) = store.put_runtime_settings(&overlay) {
+                    eprintln!("daygle-dns: cannot write runtime settings: {e}");
+                    std::process::exit(1);
+                }
+            }
+            Ok(_) => {}
+            Err(e) => {
+                eprintln!("daygle-dns: cannot read runtime settings: {e}");
+                std::process::exit(1);
+            }
+        }
+        let addr =
+            daygle_dns_core::config::listen_socket_addrs(&config.api.listen, config.api.port)
+                .ok()
+                .and_then(|addrs| addrs.first().map(|a| a.to_string()))
+                .unwrap_or_else(|| format!("{}:{}", config.api.listen, config.api.port));
+        println!(
+            "web console access reset: after a restart it is served over plain HTTP at http://{addr}/"
+        );
         return;
     }
 

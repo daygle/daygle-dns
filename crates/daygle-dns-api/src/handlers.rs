@@ -630,8 +630,16 @@ fn query_log_filter(
             .map(|v| query_log_bound(v, which))
             .transpose()
     };
+    // Clients are logged in canonical form (2001:db8::1); match however
+    // the address was typed (expanded, upper case, IPv4-mapped).
+    let client = query.client.as_deref().map(|c| {
+        c.trim()
+            .parse::<std::net::IpAddr>()
+            .map(|ip| ip.to_canonical().to_string())
+            .unwrap_or_else(|_| c.trim().to_string())
+    });
     Ok(daygle_dns_authoritative::QueryLogFilter {
-        client: query.client.clone(),
+        client,
         qname: query.qname.clone(),
         qtype: query.qtype.clone(),
         protocol: query.protocol.clone(),
@@ -1232,6 +1240,78 @@ pub async fn list_zones(State(state): State<AppState>) -> Response {
     Json(views).into_response()
 }
 
+/// The SOA defaults a new zone gets, with where each came from.
+pub(crate) struct ZoneDefaults {
+    pub primary_ns: Option<String>,
+    /// `setting`, `hostname` or `none`.
+    pub primary_ns_source: &'static str,
+    pub admin_mailbox: Option<String>,
+    /// `setting`, `admin_email` or `none`.
+    pub admin_mailbox_source: &'static str,
+    /// The mailbox as an email address, when that reading is unambiguous.
+    pub admin_email: Option<String>,
+}
+
+/// Resolve the SOA defaults for new zones: the Settings values when set,
+/// else this server's host name and the first administrator's email.
+pub(crate) fn zone_defaults(state: &AppState) -> ZoneDefaults {
+    let config = state.config.load_full();
+    let configured_ns = config.authoritative.default_primary_ns.trim();
+    let (primary_ns, primary_ns_source) = if !configured_ns.is_empty() {
+        let ns = if configured_ns.ends_with('.') {
+            configured_ns.to_string()
+        } else {
+            format!("{configured_ns}.")
+        };
+        (Some(ns), "setting")
+    } else {
+        match daygle_dns_core::config::detect_server_name() {
+            Some(name) => (Some(name), "hostname"),
+            None => (None, "none"),
+        }
+    };
+    let configured_mailbox = config.authoritative.default_admin_mailbox.trim();
+    let (admin_mailbox, admin_email, admin_mailbox_source) = if !configured_mailbox.is_empty() {
+        let rname = daygle_dns_core::config::mailbox_to_rname(configured_mailbox)
+            .unwrap_or_else(|_| configured_mailbox.to_string());
+        let email = daygle_dns_core::config::rname_to_email(&rname);
+        (Some(rname), email, "setting")
+    } else {
+        let email = state.catalog.store().first_admin_email().ok().flatten();
+        match email
+            .as_deref()
+            .map(daygle_dns_core::config::mailbox_to_rname)
+        {
+            Some(Ok(rname)) if !rname.is_empty() => (Some(rname), email, "admin_email"),
+            _ => (None, None, "none"),
+        }
+    };
+    ZoneDefaults {
+        primary_ns,
+        primary_ns_source,
+        admin_mailbox,
+        admin_mailbox_source,
+        admin_email,
+    }
+}
+
+/// `GET /api/zones/defaults` - the SOA values a new zone would get, so the
+/// console can pre-fill Add Zone and explain empty Settings fields.
+pub async fn zone_defaults_handler(State(state): State<AppState>) -> Response {
+    let d = zone_defaults(&state);
+    Json(serde_json::json!({
+        "primary_ns": d.primary_ns,
+        "primary_ns_source": d.primary_ns_source,
+        "admin_mailbox": d.admin_mailbox,
+        "admin_mailbox_source": d.admin_mailbox_source,
+        "admin_email": d.admin_email,
+        // What an empty setting falls back to, whatever is set now.
+        "server_name": daygle_dns_core::config::detect_server_name(),
+        "first_admin_email": state.catalog.store().first_admin_email().ok().flatten(),
+    }))
+    .into_response()
+}
+
 /// Payload used by the GUI's Add Zone form. `zone_type` currently accepts
 /// `primary` or `secondary`; the other zone kinds need recursive forwarding or
 /// catalog-specific behavior and are intentionally not represented as hosted
@@ -1393,13 +1473,21 @@ pub async fn create_zone(
         None
     };
 
+    // People type email addresses; the SOA wants the RNAME form.
+    let admin_mailbox = match input
+        .admin_mailbox
+        .clone()
+        .or_else(|| input.default_admin_mailbox.clone())
+        .map(|m| daygle_dns_core::config::mailbox_to_rname(&m))
+        .transpose()
+    {
+        Ok(m) => m.filter(|m| !m.is_empty()),
+        Err(msg) => return error_response(StatusCode::BAD_REQUEST, msg),
+    };
     let mut zone_input = ZoneInput {
         name: input.name.clone(),
         primary_ns: input.primary_ns.clone(),
-        admin_mailbox: input
-            .admin_mailbox
-            .clone()
-            .or_else(|| input.default_admin_mailbox.clone()),
+        admin_mailbox,
         serial: input.serial,
         refresh: input.refresh,
         retry: input.retry,
@@ -1417,42 +1505,17 @@ pub async fn create_zone(
         zone_input.expire.get_or_insert(expire);
         zone_input.minimum.get_or_insert(minimum);
     }
-    // No explicit nameserver and the imported zone file carried no SOA:
-    // default the SOA MNAME to the server's own DNS domain (Settings ->
-    // DNS Server Domain) rather than guessing "ns1.<zone>".
-    if zone_input.primary_ns.is_none() && !has_imported_soa {
-        let default_ns = state
-            .config
-            .load_full()
-            .authoritative
-            .default_primary_ns
-            .trim()
-            .to_string();
-        if !default_ns.is_empty() {
-            zone_input.primary_ns = Some(if default_ns.ends_with('.') {
-                default_ns
-            } else {
-                format!("{default_ns}.")
-            });
+    // No explicit nameserver or mailbox, and the imported zone file carried
+    // no SOA: use the server's defaults (Settings, else this server's host
+    // name and the first administrator's email), else the store's
+    // ns1.<zone>. / admin.<zone>. fallbacks.
+    if !has_imported_soa {
+        let defaults = zone_defaults(&state);
+        if zone_input.primary_ns.is_none() {
+            zone_input.primary_ns = defaults.primary_ns;
         }
-    }
-    // Likewise the SOA contact: the server's default mailbox (Settings ->
-    // Default Administrator Mailbox) when set, else the store's
-    // "admin.<zone>." fallback.
-    if zone_input.admin_mailbox.is_none() && !has_imported_soa {
-        let default_mailbox = state
-            .config
-            .load_full()
-            .authoritative
-            .default_admin_mailbox
-            .trim()
-            .to_string();
-        if !default_mailbox.is_empty() {
-            zone_input.admin_mailbox = Some(if default_mailbox.ends_with('.') {
-                default_mailbox
-            } else {
-                format!("{default_mailbox}.")
-            });
+        if zone_input.admin_mailbox.is_none() {
+            zone_input.admin_mailbox = defaults.admin_mailbox;
         }
     }
     if input.serial_date_scheme {
@@ -1635,7 +1698,9 @@ pub async fn update_zone_soa(
         Ok(v) => v,
         Err(msg) => return error_response(StatusCode::BAD_REQUEST, msg),
     };
-    let admin_mailbox = match require_non_empty(input.admin_mailbox, "administrator mailbox") {
+    let admin_mailbox = match require_non_empty(input.admin_mailbox, "administrator mailbox")
+        .and_then(|v| daygle_dns_core::config::mailbox_to_rname(&v))
+    {
         Ok(v) if v.is_empty() => current.admin_mailbox,
         Ok(v) => v,
         Err(msg) => return error_response(StatusCode::BAD_REQUEST, msg),
@@ -2858,6 +2923,21 @@ pub struct SettingsUpdate {
     pub authoritative: Option<AuthoritativeUpdate>,
     pub ai: Option<AiUpdate>,
     pub display: Option<DisplayUpdate>,
+    pub web: Option<WebUpdate>,
+}
+
+/// Partial update for how the web console is served (HTTP and/or HTTPS).
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebUpdate {
+    pub http_enabled: Option<bool>,
+    pub http_port: Option<u16>,
+    pub https_enabled: Option<bool>,
+    pub https_port: Option<u16>,
+    /// A managed certificate name; empty means the generated self-signed
+    /// `web-console` certificate.
+    pub https_certificate: Option<String>,
+    pub redirect_http: Option<bool>,
 }
 
 /// Partial update for the console's date and time display defaults.
@@ -2929,6 +3009,7 @@ pub struct AiUpdate {
 #[serde(deny_unknown_fields)]
 pub struct ServerUpdate {
     pub listen: Option<String>,
+    pub ipv6_only: Option<bool>,
     pub port: Option<u16>,
     pub udp_enabled: Option<bool>,
     pub tcp_enabled: Option<bool>,
@@ -2959,11 +3040,41 @@ pub struct RecursiveUpdate {
     /// Local root zone (RFC 8806): `enabled` and `sources`.
     pub local_root: Option<daygle_dns_core::config::LocalRootSettings>,
     pub opportunistic_encryption: Option<bool>,
+    pub outbound_ip_versions: Option<daygle_dns_core::config::IpVersions>,
     pub min_cache_ttl: Option<u32>,
     pub negative_cache_ttl: Option<u32>,
     pub use_system_config: Option<bool>,
     /// Replaces the whole client policy list.
     pub client_policies: Option<Vec<daygle_dns_core::config::ClientPolicyConfig>>,
+}
+
+/// Check that every forwarder list keeps a server of an IP version the
+/// resolver may use: the default upstreams (unless the system resolver is
+/// used), conditional forwarders and forwarding client policies.
+fn check_outbound_servers(r: &daygle_dns_core::config::RecursiveSettings) -> Result<(), String> {
+    let versions = r.outbound_ip_versions;
+    if versions == daygle_dns_core::config::IpVersions::Both {
+        return Ok(());
+    }
+    if r.effective_mode() == daygle_dns_core::config::ResolutionMode::Forwarding
+        && !r.use_system_config
+    {
+        daygle_dns_recursive::parse_upstreams_for(&r.upstreams, versions)
+            .map_err(|e| format!("upstreams: {e}"))?;
+    }
+    for zone in &r.conditional_zones {
+        daygle_dns_recursive::parse_upstreams_for(&zone.upstreams, versions)
+            .map_err(|e| format!("conditional forwarder '{}': {e}", zone.name))?;
+    }
+    for policy in r
+        .client_policies
+        .iter()
+        .filter(|p| p.enabled && p.action == daygle_dns_core::config::ClientPolicyAction::Forward)
+    {
+        daygle_dns_recursive::parse_upstreams_for(&policy.upstreams, versions)
+            .map_err(|e| format!("client policy '{}': {e}", policy.name))?;
+    }
+    Ok(())
 }
 
 /// Fields shared by the DoT and DoQ listeners.
@@ -3017,6 +3128,10 @@ pub async fn update_settings(
     if let Some(s) = &update.server {
         if let Some(v) = &s.listen {
             config.server.listen = v.clone();
+            listeners_affected = true;
+        }
+        if let Some(v) = s.ipv6_only {
+            config.server.ipv6_only = v;
             listeners_affected = true;
         }
         if let Some(v) = s.port {
@@ -3089,6 +3204,7 @@ pub async fn update_settings(
             rebinding_protection: r.rebinding_protection,
             local_root: r.local_root.clone(),
             opportunistic_encryption: r.opportunistic_encryption,
+            outbound_ip_versions: r.outbound_ip_versions,
             client_policies: r.client_policies.clone(),
             min_cache_ttl: r.min_cache_ttl,
             negative_cache_ttl: r.negative_cache_ttl,
@@ -3210,6 +3326,57 @@ pub async fn update_settings(
             config.api.cors_origins = v.clone();
         }
     }
+    if let Some(w) = &update.web {
+        if let Some(v) = w.http_enabled {
+            config.web.http_enabled = v;
+        }
+        if let Some(v) = w.http_port {
+            config.web.http_port = v;
+        }
+        if let Some(v) = w.https_enabled {
+            config.web.https_enabled = v;
+        }
+        if let Some(v) = w.https_port {
+            config.web.https_port = v;
+        }
+        if let Some(v) = &w.https_certificate {
+            config.web.https_certificate = v.trim().to_string();
+        }
+        if let Some(v) = w.redirect_http {
+            config.web.redirect_http = v;
+        }
+        if let Err(msg) = config.web.check(config.api.port) {
+            return error_response(StatusCode::BAD_REQUEST, msg);
+        }
+        // HTTPS with no certificate chosen: generate (once) a self-signed
+        // one, kept as a managed certificate so it stays the same across
+        // restarts and can be replaced on the Certificates page.
+        if config.web.https_enabled && config.web.https_certificate.is_empty() {
+            let name = daygle_dns_core::config::WEB_SELF_SIGNED_CERT;
+            let exists = matches!(state.catalog.store().get_tls_certificate(name), Ok(Some(_)));
+            if !exists {
+                let server_name = daygle_dns_core::config::detect_server_name()
+                    .map(|n| n.trim_end_matches('.').to_string())
+                    .unwrap_or_else(|| "daygle.local".to_string());
+                let (cert_pem, key_pem) =
+                    match daygle_dns_dot::generate_self_signed_pem(&server_name) {
+                        Ok(pair) => pair,
+                        Err(e) => return map_err(e),
+                    };
+                let cert = daygle_dns_authoritative::TlsCertificate {
+                    name: name.to_string(),
+                    server_name,
+                    cert_pem,
+                    key_pem,
+                    created_at: chrono::Utc::now().to_rfc3339(),
+                };
+                if let Err(e) = state.catalog.store().put_tls_certificate(&cert) {
+                    return map_err(e);
+                }
+            }
+            config.web.https_certificate = name.to_string();
+        }
+    }
     if let Some(d) = &update.display {
         if let Some(v) = &d.time_zone {
             config.display.time_zone = v.trim().to_string();
@@ -3230,24 +3397,23 @@ pub async fn update_settings(
         if let Some(v) = &a.default_primary_ns {
             // Normalize to the fully-qualified form so the SOA MNAME is
             // absolute regardless of whether the user typed the trailing
-            // dot; blank input keeps the current value.
+            // dot; blank clears it (new zones then use this server's name).
             let v = v.trim();
-            if !v.is_empty() {
-                config.authoritative.default_primary_ns = if v.ends_with('.') {
-                    v.to_string()
-                } else {
-                    format!("{v}.")
-                };
-            }
-            authoritative_changed = true;
-        }
-        if let Some(v) = &a.default_admin_mailbox {
-            let v = v.trim();
-            config.authoritative.default_admin_mailbox = if v.is_empty() || v.ends_with('.') {
+            config.authoritative.default_primary_ns = if v.is_empty() || v.ends_with('.') {
                 v.to_string()
             } else {
                 format!("{v}.")
             };
+            authoritative_changed = true;
+        }
+        if let Some(v) = &a.default_admin_mailbox {
+            // An email address or the SOA form; blank clears it (new zones
+            // then use the first administrator's email).
+            config.authoritative.default_admin_mailbox =
+                match daygle_dns_core::config::mailbox_to_rname(v) {
+                    Ok(m) => m,
+                    Err(msg) => return error_response(StatusCode::BAD_REQUEST, msg),
+                };
             authoritative_changed = true;
         }
         if let Some(v) = a.axfr_enabled {
@@ -3364,6 +3530,7 @@ pub async fn update_settings(
         ("DoT", &config.dot.certificate),
         ("DoH", &config.doh.certificate),
         ("DoQ", &config.doq.certificate),
+        ("HTTPS", &config.web.https_certificate),
     ] {
         if !name.is_empty()
             && state
@@ -3384,6 +3551,23 @@ pub async fn update_settings(
     // reject it (a pre-existing failure on a hand-managed file is kept).
     if let Err(response) = validate_config_update(&state, &old_config, &config, "settings") {
         return response;
+    }
+    // Outbound IP Versions must leave every forwarder list someone to ask.
+    if config.recursive != old_config.recursive {
+        if let Err(e) = check_outbound_servers(&config.recursive) {
+            return error_response(StatusCode::BAD_REQUEST, e);
+        }
+    }
+
+    // Move the web listeners first: a port that cannot be bound or a
+    // certificate that does not load rejects the whole update, so the
+    // console is never left unreachable by a save.
+    if old_config.web != config.web {
+        if let Some(apply) = &state.web_apply {
+            if let Err(msg) = apply(config.web.clone()).await {
+                return error_response(StatusCode::BAD_REQUEST, msg);
+            }
+        }
     }
 
     // Persist the DB-owned runtime settings to the database, then publish
@@ -3413,7 +3597,7 @@ pub async fn update_settings(
     }
     state
         .local_root
-        .set_settings(config.recursive.local_root.clone());
+        .set_settings(config.recursive.local_root_in_effect());
     // Rebuild the recursive resolver when its settings or the stub zones
     // changed, so upstreams, cache settings, conditional forwarders and stub
     // zones apply to live traffic immediately (mirrors the config-file
@@ -3551,6 +3735,9 @@ fn certificate_references(
             refs.push((name.clone(), label));
         }
     }
+    if config.web.https_enabled && !config.web.https_certificate.is_empty() {
+        refs.push((config.web.https_certificate.clone(), "Web Console"));
+    }
     refs
 }
 
@@ -3658,6 +3845,15 @@ pub async fn create_certificate(
     if referenced {
         if let Some(rebuild) = &state.request_dns_rebuild {
             rebuild();
+        }
+        // The console's HTTPS listener picks the new pair up in place.
+        let web = state.config.load_full().web.clone();
+        if web.https_enabled && web.https_certificate == name {
+            if let Some(apply) = &state.web_apply {
+                if let Err(e) = apply(web).await {
+                    tracing::warn!("web console certificate reload failed: {e}");
+                }
+            }
         }
     }
     state.logs.push(
