@@ -175,6 +175,25 @@
     }
   }
 
+  // For an account that lost its authenticator app and recovery codes.
+  async function resetTwoFactor() {
+    if (!confirm(`Turn off two-factor login for '${editUser.username}'? They sign in with their password alone until they set it up again, and their sessions are signed out.`)) return;
+    resetError = null;
+    resetNotice = null;
+    editSaving = true;
+    try {
+      await api.resetUserTwoFactor(editUser.username);
+      editUser.two_factor = false;
+      editOriginal.two_factor = false;
+      resetNotice = `Two-factor login turned off for ${editUser.username}.`;
+      await load();
+    } catch (err) {
+      resetError = formatApiError(err);
+    } finally {
+      editSaving = false;
+    }
+  }
+
   async function remove(user) {
     const again = fromConfig(user)
       ? `\n\nThis account is also listed in daygle-dns.toml, so it will be created again (with its old password) at the next restart unless you remove it there too.`
@@ -246,7 +265,7 @@
     <div class="table-wrap">
       <table>
         <thead>
-          <tr><th>Username</th><th>Name</th><th>Email</th><th>Role</th><th>Status</th><th>Created</th><th class="num">Actions</th></tr>
+          <tr><th>Username</th><th>Name</th><th>Email</th><th>Role</th><th>Status</th><th>Two-Factor</th><th>Created</th><th class="num">Actions</th></tr>
         </thead>
         <tbody>
           {#each users as user (user.username)}
@@ -262,6 +281,7 @@
               <td>
                 <span class="pill" class:ok={user.enabled}>{user.enabled ? 'Enabled' : 'Disabled'}</span>
               </td>
+              <td><span class="pill" class:ok={user.two_factor}>{user.two_factor ? 'On' : 'Off'}</span></td>
               <td class="muted nowrap">{formatDate(user.created_at)}</td>
               <td class="num">
                 <button class="secondary" onclick={(e) => { e.stopPropagation(); openEdit(user); }}>Edit</button>
@@ -391,6 +411,27 @@
         {#if resetError}<p class="dialog-error" style="margin-top: 8px">{resetError}</p>{/if}
         {#if resetNotice}<p class="reset-ok">{resetNotice}</p>{/if}
         <p class="muted help">Applies immediately and signs out this account's sessions.</p>
+      {/if}
+
+      <div class="section-title">Two-Factor Login</div>
+      {#if isMe(editUser)}
+        <p class="muted help">
+          Use <strong>Two-Factor Login</strong> below your name in the sidebar.
+        </p>
+      {:else if editUser.two_factor}
+        <div class="row" style="gap: 10px; align-items: center">
+          <span class="pill ok">On</span>
+          <button type="button" class="secondary" disabled={editSaving} onclick={resetTwoFactor}>Reset Two-Factor Login</button>
+        </div>
+        <p class="muted help">
+          For someone who lost their phone and their recovery codes: they sign in
+          with their password alone until they set it up again.
+        </p>
+      {:else}
+        <p class="muted help">
+          Off. Each person turns it on for their own account, from
+          <strong>Two-Factor Login</strong> below their name in the sidebar.
+        </p>
       {/if}
 
       <div class="row actions" style="justify-content: space-between">

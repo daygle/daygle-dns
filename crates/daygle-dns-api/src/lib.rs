@@ -300,6 +300,17 @@ pub fn router(state: AppState) -> Router {
         .route("/auth/me", get(handlers::auth_me))
         .route("/auth/preferences", put(handlers::auth_set_preferences))
         .route("/auth/password", post(handlers::auth_change_password))
+        .route("/auth/two-factor", get(handlers::two_factor_status))
+        .route("/auth/two-factor/setup", post(handlers::two_factor_setup))
+        .route("/auth/two-factor/enable", post(handlers::two_factor_enable))
+        .route(
+            "/auth/two-factor/recovery-codes",
+            post(handlers::two_factor_new_recovery_codes),
+        )
+        .route(
+            "/auth/two-factor/disable",
+            post(handlers::two_factor_disable),
+        )
         .route(
             "/auth/setup",
             get(handlers::auth_setup_status).post(handlers::auth_setup),
@@ -311,6 +322,10 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/users/{username}",
             patch(handlers::update_user).delete(handlers::delete_user),
+        )
+        .route(
+            "/users/{username}/two-factor",
+            delete(handlers::reset_user_two_factor),
         )
         .route(
             "/certificates",
@@ -558,17 +573,13 @@ async fn require_auth(
                     *req.method(),
                     axum::http::Method::GET | axum::http::Method::HEAD
                 );
-            // The self-service password change is a mutation on the caller's
-            // own credential (the handler re-verifies the current password),
-            // and display preferences only change the caller's own view, so
-            // read-only accounts may use both.
-            let is_own_account_change = matches!(
-                path,
-                "/api/auth/password"
-                    | "/auth/password"
-                    | "/api/auth/preferences"
-                    | "/auth/preferences"
-            );
+            // The self-service password change and two-factor settings are
+            // mutations on the caller's own credentials (the handlers
+            // re-verify the password), and display preferences only change
+            // the caller's own view, so read-only accounts may use them.
+            let own_path = path.strip_prefix("/api").unwrap_or(path);
+            let is_own_account_change = matches!(own_path, "/auth/password" | "/auth/preferences")
+                || own_path.starts_with("/auth/two-factor");
             if mutating
                 && session.role == daygle_dns_core::config::Role::Viewer
                 && !is_own_account_change

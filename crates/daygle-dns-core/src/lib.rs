@@ -16,6 +16,7 @@ pub mod metrics;
 pub mod query_log;
 pub mod rate_limit;
 pub mod stats;
+pub mod totp;
 
 pub use auth::{hash_password, verify_password};
 pub use blocking::{BlockResponse, BlockingGroup, BlockingGroupInput};

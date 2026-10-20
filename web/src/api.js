@@ -46,8 +46,9 @@ async function request(method, path, body, opts = {}) {
   if (!res.ok) {
     let detail = res.statusText;
     let needsLogin = false;
+    let data = null;
     try {
-      const data = await res.json();
+      data = await res.json();
       detail = data.error || detail;
       needsLogin = res.status === 401 && data.login === true;
     } catch (_) { /* ignore */ }
@@ -60,6 +61,7 @@ async function request(method, path, body, opts = {}) {
     const err = new Error(detail);
     err.status = res.status;
     err.needsLogin = needsLogin;
+    err.data = data;
     throw err;
   }
   if (res.status === 204) return null;
@@ -108,8 +110,11 @@ export function formatUptime(totalSecs) {
 
 export const api = {
   // ---- auth ----
-  login: async (username, password) => {
-    const data = await request('POST', '/auth/login', { username, password }, { noLoginRedirect: true });
+  // `code`: the authenticator app's code (or a recovery code) when the
+  // account uses two-factor login. Without one, such an account fails with
+  // `err.data.two_factor` set.
+  login: async (username, password, code = '') => {
+    const data = await request('POST', '/auth/login', { username, password, code }, { noLoginRedirect: true });
     if (data?.token) {
       setToken(data.token);
       localStorage.setItem(
@@ -119,6 +124,13 @@ export const api = {
     }
     return data;
   },
+  twoFactorStatus: () => request('GET', '/auth/two-factor'),
+  twoFactorSetup: (password) => request('POST', '/auth/two-factor/setup', { password }),
+  twoFactorEnable: (code) => request('POST', '/auth/two-factor/enable', { code }),
+  twoFactorRecoveryCodes: (password) => request('POST', '/auth/two-factor/recovery-codes', { password }),
+  twoFactorDisable: (password) => request('POST', '/auth/two-factor/disable', { password }),
+  resetUserTwoFactor: (username) =>
+    request('DELETE', `/users/${encodeURIComponent(username)}/two-factor`),
   logout: async () => {
     try { await request('POST', '/auth/logout', {}); } catch (_) { /* ignore */ }
     localStorage.removeItem(TOKEN_KEY);

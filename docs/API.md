@@ -59,17 +59,32 @@ Additional endpoints:
 | `PUT /api/auth/preferences` | signed-in user sets their own `{time_zone, date_format, time_format}`; an empty field means the server default (viewers may use it too) |
 | `POST /api/auth/logout` | revoke the presented token |
 | `POST /api/auth/password` | signed-in user rotates their own password (current password required; other sessions revoked) |
+| `GET /api/auth/two-factor` | whether the signed-in account uses two-factor login (`enabled`) and its `recovery_codes_left` |
+| `POST /api/auth/two-factor/setup` | `{password}`: start setting up two-factor login; returns a new `secret` and its `otpauth://` `uri` (for a QR code). Nothing changes until `/enable` |
+| `POST /api/auth/two-factor/enable` | `{code}` from the app: turn two-factor login on; returns 10 `recovery_codes`, shown only now. Other sessions are signed out |
+| `POST /api/auth/two-factor/recovery-codes` | `{password}`: replace the recovery codes |
+| `POST /api/auth/two-factor/disable` | `{password}`: turn two-factor login off |
 | `GET /api/auth/setup` | whether the one-time first-run setup is still pending |
 | `POST /api/auth/setup` | one-time creation of the first admin account (returns a session); body: `{ "username", "password" }` plus optional `name` (first/last display name), `email` |
 | `GET /api/users` | list accounts (password hashes redacted) |
 | `POST /api/users` | create an account (`username`, `password`, optional `role`) |
 | `PATCH /api/users/{username}` | reset password / change role / enable-disable |
 | `DELETE /api/users/{username}` | delete an account |
+| `DELETE /api/users/{username}/two-factor` | turn off two-factor login for an account that lost its app and recovery codes (signs its sessions out) |
+
+**Two-factor login.** An account with two-factor login on needs a code as
+well as its password. `POST /api/auth/login` without one answers `401` with
+`"two_factor": true`; send the same body again with `"code"`: the 6-digit
+code from the authenticator app (TOTP, RFC 6238: SHA-1, 30-second steps, one
+step of clock drift allowed) or one of the recovery codes (`xxxx-xxxx`, case
+and dashes ignored). Each code works once. A wrong code counts as a failed
+login for the throttle below, which is only reset once both steps pass. Each
+account sets up its own two-factor login, viewers included; the setup,
+recovery-code and disable calls ask for the password again. The users list
+shows `two_factor` for each account.
 
 The last enabled `admin` account cannot be deleted, demoted, or disabled. The initial admin account may be created with an optional display name (`name`, stored as `first_name`/`last_name`) and `email`; these follow the same profile fields as accounts created through `POST /api/users` and can be edited later.
 
-Password, role, and enabled changes (and deletions) immediately revoke the
-affected account's sessions; disabled accounts cannot log in.
 Password, role, and enabled changes (and deletions) immediately revoke the
 affected account's sessions; disabled accounts cannot log in.
 

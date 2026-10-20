@@ -2444,6 +2444,10 @@ pub async fn clear_cache(State(state): State<AppState>) -> Response {
 pub struct LoginInput {
     username: String,
     password: String,
+    /// The authenticator app's code (or a recovery code) for an account
+    /// with two-factor login.
+    #[serde(default)]
+    code: String,
 }
 
 /// `POST /api/auth/login` - verify username/password against the console
@@ -2506,11 +2510,18 @@ pub async fn auth_login(
         );
         return error_response(StatusCode::UNAUTHORIZED, "invalid username or password");
     }
+    let user = user.expect("checked above");
+
+    // Two-factor login: the password was right, now the code. A wrong code
+    // counts as a failed login, and the throttle is only cleared once both
+    // pass, so codes cannot be guessed at full speed.
+    if let Err(response) = check_two_factor(&state, &user.username, &input.code, client_ip) {
+        return response;
+    }
     if let Some(ip) = client_ip {
         state.login_throttle.clear(ip);
     }
 
-    let user = user.expect("checked above");
     let ttl = Duration::from_secs(state.config.load().api.session_ttl_secs.max(60));
     let token = state.sessions.create(&user.username, user.role, ttl);
     state.logs.push(
@@ -2673,6 +2684,344 @@ pub async fn auth_change_password(
         format!("user '{}' changed their password", session.username),
     );
     StatusCode::NO_CONTENT.into_response()
+}
+
+// ---- Two-factor login -----------------------------------------------------
+
+/// `401` asking for (another) two-factor code: `two_factor: true` tells the
+/// console to show the code field.
+fn two_factor_required(message: &str) -> Response {
+    (
+        StatusCode::UNAUTHORIZED,
+        Json(serde_json::json!({ "error": message, "two_factor": true })),
+    )
+        .into_response()
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// For an account with two-factor login, check `code` (from the
+/// authenticator app, or a recovery code, which is then used up). Accounts
+/// without it pass.
+#[allow(clippy::result_large_err)]
+fn check_two_factor(
+    state: &AppState,
+    username: &str,
+    code: &str,
+    client_ip: Option<IpAddr>,
+) -> Result<(), Response> {
+    let store = state.catalog.store();
+    let two_factor = store
+        .get_two_factor(username)
+        .map_err(map_err)?
+        .filter(|t| !t.secret.is_empty());
+    let Some(two_factor) = two_factor else {
+        return Ok(());
+    };
+    let code = code.trim();
+    if code.is_empty() {
+        return Err(two_factor_required(
+            "enter the code from your authenticator app",
+        ));
+    }
+    let recovery = daygle_dns_core::totp::is_recovery_code(code);
+    let accepted = if recovery {
+        store.use_two_factor_recovery_code(
+            username,
+            &daygle_dns_core::totp::hash_recovery_code(code),
+        )
+    } else {
+        match daygle_dns_core::totp::verify(
+            &two_factor.secret,
+            code,
+            unix_now(),
+            two_factor.last_step,
+        ) {
+            Some(step) => store.use_two_factor_step(username, step),
+            None => Ok(false),
+        }
+    }
+    .map_err(map_err)?;
+    let from = client_ip
+        .map(|ip| format!(" from {ip}"))
+        .unwrap_or_default();
+    if !accepted {
+        if let Some(ip) = client_ip {
+            state.login_throttle.record_failure(ip);
+        }
+        state.logs.push(
+            daygle_dns_core::LogLevel::Warn,
+            "api",
+            format!("wrong two-factor code for user '{username}'{from}"),
+        );
+        return Err(two_factor_required(
+            "that code is not right, or was already used",
+        ));
+    }
+    if recovery {
+        let left = store
+            .get_two_factor(username)
+            .ok()
+            .flatten()
+            .map_or(0, |t| t.recovery_hashes.len());
+        state.logs.push(
+            daygle_dns_core::LogLevel::Warn,
+            "api",
+            format!("user '{username}' signed in with a recovery code{from} ({left} left)"),
+        );
+    }
+    Ok(())
+}
+
+/// The signed-in account, for the self-service two-factor endpoints.
+#[allow(clippy::result_large_err)]
+fn session_user(
+    state: &AppState,
+    headers: &axum::http::HeaderMap,
+) -> Result<daygle_dns_authoritative::store::ConsoleUser, Response> {
+    let token = bearer_token(headers).unwrap_or_default();
+    let session = state.sessions.verify(&token).ok_or_else(|| {
+        error_response(
+            StatusCode::BAD_REQUEST,
+            "two-factor login belongs to a console account: sign in as one",
+        )
+    })?;
+    match state.catalog.store().get_console_user(&session.username) {
+        Ok(Some(user)) if user.enabled => Ok(user),
+        Ok(Some(_)) => Err(error_response(StatusCode::FORBIDDEN, "account is disabled")),
+        Ok(None) => Err(error_response(
+            StatusCode::NOT_FOUND,
+            "account no longer exists",
+        )),
+        Err(e) => Err(map_err(e)),
+    }
+}
+
+/// Re-check the account's password before a two-factor change.
+async fn confirm_password(
+    state: &AppState,
+    user: &daygle_dns_authoritative::store::ConsoleUser,
+    password: &str,
+) -> Result<(), Response> {
+    if password.len() > MAX_PASSWORD_LEN || !verify_password(password, &user.password_hash).await {
+        state.logs.push(
+            daygle_dns_core::LogLevel::Warn,
+            "api",
+            format!(
+                "wrong password for a two-factor change by user '{}'",
+                user.username
+            ),
+        );
+        return Err(error_response(
+            StatusCode::UNAUTHORIZED,
+            "password is incorrect",
+        ));
+    }
+    Ok(())
+}
+
+#[derive(Deserialize)]
+pub struct PasswordInput {
+    #[serde(default)]
+    password: String,
+}
+
+#[derive(Deserialize)]
+pub struct CodeInput {
+    #[serde(default)]
+    code: String,
+}
+
+/// `GET /api/auth/two-factor` - whether the signed-in account uses
+/// two-factor login, and how many recovery codes it has left.
+pub async fn two_factor_status(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+) -> Response {
+    let user = match session_user(&state, &headers) {
+        Ok(u) => u,
+        Err(r) => return r,
+    };
+    match state.catalog.store().get_two_factor(&user.username) {
+        Ok(t) => {
+            let t = t.unwrap_or_default();
+            Json(serde_json::json!({
+                "enabled": !t.secret.is_empty(),
+                "recovery_codes_left": if t.secret.is_empty() { 0 } else { t.recovery_hashes.len() },
+            }))
+            .into_response()
+        }
+        Err(e) => map_err(e),
+    }
+}
+
+/// `POST /api/auth/two-factor/setup` `{password}` - start setting up
+/// two-factor login: a new secret, and the `otpauth://` URI for a QR code.
+/// Nothing changes until `/enable` confirms a code.
+pub async fn two_factor_setup(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    axum::Json(input): axum::Json<PasswordInput>,
+) -> Response {
+    let user = match session_user(&state, &headers) {
+        Ok(u) => u,
+        Err(r) => return r,
+    };
+    if let Err(r) = confirm_password(&state, &user, &input.password).await {
+        return r;
+    }
+    let secret = daygle_dns_core::totp::generate_secret();
+    if let Err(e) = state
+        .catalog
+        .store()
+        .set_two_factor_pending(&user.username, &secret)
+    {
+        return map_err(e);
+    }
+    Json(serde_json::json!({
+        "secret": secret,
+        "uri": daygle_dns_core::totp::otpauth_uri("Daygle DNS", &user.username, &secret),
+    }))
+    .into_response()
+}
+
+/// `POST /api/auth/two-factor/enable` `{code}` - confirm the app works and
+/// turn two-factor login on. Returns the recovery codes, shown only now.
+pub async fn two_factor_enable(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    axum::Json(input): axum::Json<CodeInput>,
+) -> Response {
+    let user = match session_user(&state, &headers) {
+        Ok(u) => u,
+        Err(r) => return r,
+    };
+    let store = state.catalog.store();
+    let pending = match store.get_two_factor(&user.username) {
+        Ok(t) => t.map(|t| t.pending_secret).unwrap_or_default(),
+        Err(e) => return map_err(e),
+    };
+    if pending.is_empty() {
+        return error_response(StatusCode::BAD_REQUEST, "start two-factor setup first");
+    }
+    let Some(step) = daygle_dns_core::totp::verify(&pending, &input.code, unix_now(), 0) else {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "that code is not right: check the app's clock and try the newest code",
+        );
+    };
+    let (codes, hashes) = daygle_dns_core::totp::generate_recovery_codes();
+    if let Err(e) = store.enable_two_factor(&user.username, step, &hashes) {
+        return map_err(e);
+    }
+    // Other devices must sign in again, now with a code.
+    let token = bearer_token(&headers).unwrap_or_default();
+    state.sessions.revoke_user_except(&user.username, &token);
+    state.logs.info(
+        "api",
+        format!("user '{}' turned on two-factor login", user.username),
+    );
+    Json(serde_json::json!({ "recovery_codes": codes })).into_response()
+}
+
+/// `POST /api/auth/two-factor/recovery-codes` `{password}` - replace the
+/// recovery codes (the old ones stop working).
+pub async fn two_factor_new_recovery_codes(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    axum::Json(input): axum::Json<PasswordInput>,
+) -> Response {
+    let user = match session_user(&state, &headers) {
+        Ok(u) => u,
+        Err(r) => return r,
+    };
+    if let Err(r) = confirm_password(&state, &user, &input.password).await {
+        return r;
+    }
+    if !user.two_factor {
+        return error_response(StatusCode::BAD_REQUEST, "two-factor login is not on");
+    }
+    let (codes, hashes) = daygle_dns_core::totp::generate_recovery_codes();
+    if let Err(e) = state
+        .catalog
+        .store()
+        .set_two_factor_recovery(&user.username, &hashes)
+    {
+        return map_err(e);
+    }
+    state.logs.info(
+        "api",
+        format!("user '{}' made new recovery codes", user.username),
+    );
+    Json(serde_json::json!({ "recovery_codes": codes })).into_response()
+}
+
+/// `POST /api/auth/two-factor/disable` `{password}` - turn two-factor
+/// login off for the signed-in account.
+pub async fn two_factor_disable(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    axum::Json(input): axum::Json<PasswordInput>,
+) -> Response {
+    let user = match session_user(&state, &headers) {
+        Ok(u) => u,
+        Err(r) => return r,
+    };
+    if let Err(r) = confirm_password(&state, &user, &input.password).await {
+        return r;
+    }
+    match state.catalog.store().disable_two_factor(&user.username) {
+        Ok(was_on) => {
+            if was_on {
+                state.logs.push(
+                    daygle_dns_core::LogLevel::Warn,
+                    "api",
+                    format!("user '{}' turned off two-factor login", user.username),
+                );
+            }
+            StatusCode::NO_CONTENT.into_response()
+        }
+        Err(e) => map_err(e),
+    }
+}
+
+/// `DELETE /api/users/{username}/two-factor` (admin) - turn two-factor
+/// login off for an account that lost its authenticator app and recovery
+/// codes. It signs in with its password alone until it sets it up again.
+pub async fn reset_user_two_factor(
+    State(state): State<AppState>,
+    Path(username): Path<String>,
+) -> Response {
+    let store = state.catalog.store();
+    match store.get_console_user(&username) {
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            return error_response(
+                StatusCode::NOT_FOUND,
+                format!("user '{username}' not found"),
+            )
+        }
+        Err(e) => return map_err(e),
+    }
+    match store.disable_two_factor(&username) {
+        Ok(was_on) => {
+            if was_on {
+                state.sessions.revoke_user(&username);
+                state.logs.push(
+                    daygle_dns_core::LogLevel::Warn,
+                    "api",
+                    format!("two-factor login reset for user '{username}'"),
+                );
+            }
+            StatusCode::NO_CONTENT.into_response()
+        }
+        Err(e) => map_err(e),
+    }
 }
 
 fn bearer_token(headers: &axum::http::HeaderMap) -> Option<String> {

@@ -130,6 +130,14 @@ CREATE TABLE IF NOT EXISTS console_users (
     time_format   TEXT NOT NULL DEFAULT ''
 );
 
+CREATE TABLE IF NOT EXISTS console_user_two_factor (
+    username        TEXT PRIMARY KEY REFERENCES console_users(username) ON DELETE CASCADE,
+    secret          TEXT NOT NULL DEFAULT '',
+    pending_secret  TEXT NOT NULL DEFAULT '',
+    recovery_hashes TEXT NOT NULL DEFAULT '[]',
+    last_step       INTEGER NOT NULL DEFAULT 0
+);
+
 CREATE TABLE IF NOT EXISTS tls_certificates (
     name        TEXT PRIMARY KEY,
     server_name TEXT NOT NULL DEFAULT '',
@@ -1396,6 +1404,7 @@ fn row_to_console_user(row: &rusqlite::Row<'_>) -> rusqlite::Result<ConsoleUser>
             date_format: row.get(9)?,
             time_format: row.get(10)?,
         },
+        two_factor: row.get(11)?,
     })
 }
 
@@ -1413,6 +1422,9 @@ pub struct ConsoleUser {
     /// The account's own date and time display choices. An empty field
     /// means the server default (`display` in the configuration) applies.
     pub preferences: DisplaySettings,
+    /// Whether the account signs in with a code from an authenticator app
+    /// as well as its password.
+    pub two_factor: bool,
 }
 
 impl ConsoleUser {
@@ -1521,6 +1533,168 @@ impl ZoneStore {
     }
 }
 
+// ---- Two-factor login --------------------------------------------------
+
+/// An account's two-factor state. `secret` is set once two-factor login is
+/// on; `pending_secret` while it is being set up (until a first code
+/// confirms the authenticator app has it).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TwoFactor {
+    pub secret: String,
+    pub pending_secret: String,
+    /// Hashes of the unused recovery codes.
+    pub recovery_hashes: Vec<String>,
+    /// Time step of the last code accepted (a code works once).
+    pub last_step: u64,
+}
+
+impl ZoneStore {
+    pub fn get_two_factor(&self, username: &str) -> Result<Option<TwoFactor>> {
+        let conn = self.lock_conn()?;
+        let row: Option<(String, String, String, i64)> = conn
+            .query_row(
+                "SELECT secret, pending_secret, recovery_hashes, last_step
+                 FROM console_user_two_factor WHERE username = ?1",
+                [username],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .optional()?;
+        Ok(
+            row.map(|(secret, pending_secret, hashes, last_step)| TwoFactor {
+                secret,
+                pending_secret,
+                recovery_hashes: serde_json::from_str(&hashes).unwrap_or_default(),
+                last_step: last_step.max(0) as u64,
+            }),
+        )
+    }
+
+    /// Start setting up two-factor login: keep `secret` until a code
+    /// confirms it. Two-factor login already on stays on meanwhile.
+    pub fn set_two_factor_pending(&self, username: &str, secret: &str) -> Result<()> {
+        let conn = self.lock_conn()?;
+        conn.execute(
+            "INSERT INTO console_user_two_factor (username, pending_secret) VALUES (?1, ?2)
+             ON CONFLICT(username) DO UPDATE SET pending_secret = excluded.pending_secret",
+            params![username, secret],
+        )
+        .map_err(|e| match e {
+            rusqlite::Error::SqliteFailure(f, _)
+                if f.code == rusqlite::ErrorCode::ConstraintViolation =>
+            {
+                DaygleError::NotFound(format!("user '{username}'"))
+            }
+            other => other.into(),
+        })?;
+        Ok(())
+    }
+
+    /// Turn two-factor login on with the pending secret, confirmed by the
+    /// code for `step`, and these recovery code hashes.
+    pub fn enable_two_factor(
+        &self,
+        username: &str,
+        step: u64,
+        recovery_hashes: &[String],
+    ) -> Result<()> {
+        let conn = self.lock_conn()?;
+        let n = conn.execute(
+            "UPDATE console_user_two_factor
+             SET secret = pending_secret, pending_secret = '', recovery_hashes = ?2, last_step = ?3
+             WHERE username = ?1 AND pending_secret != ''",
+            params![
+                username,
+                serde_json::to_string(recovery_hashes).expect("strings serialize"),
+                step as i64
+            ],
+        )?;
+        if n == 0 {
+            return Err(DaygleError::Config(
+                "start two-factor setup first".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Replace the recovery codes.
+    pub fn set_two_factor_recovery(
+        &self,
+        username: &str,
+        recovery_hashes: &[String],
+    ) -> Result<()> {
+        let conn = self.lock_conn()?;
+        conn.execute(
+            "UPDATE console_user_two_factor SET recovery_hashes = ?2 WHERE username = ?1",
+            params![
+                username,
+                serde_json::to_string(recovery_hashes).expect("strings serialize")
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Record that the code for `step` was used. False when it (or a later
+    /// one) already was: a code works once, even when two sign-ins race.
+    pub fn use_two_factor_step(&self, username: &str, step: u64) -> Result<bool> {
+        let conn = self.lock_conn()?;
+        Ok(conn.execute(
+            "UPDATE console_user_two_factor SET last_step = ?2
+             WHERE username = ?1 AND last_step < ?2",
+            params![username, step as i64],
+        )? > 0)
+    }
+
+    /// Use up the recovery code with this hash. False when it is not one of
+    /// the account's unused codes.
+    pub fn use_two_factor_recovery_code(&self, username: &str, hash: &str) -> Result<bool> {
+        let mut conn = self.lock_conn()?;
+        let tx = conn.transaction()?;
+        let stored: Option<String> = tx
+            .query_row(
+                "SELECT recovery_hashes FROM console_user_two_factor WHERE username = ?1",
+                [username],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let mut hashes: Vec<String> = stored
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default();
+        let before = hashes.len();
+        hashes.retain(|h| h != hash);
+        if hashes.len() == before {
+            return Ok(false);
+        }
+        tx.execute(
+            "UPDATE console_user_two_factor SET recovery_hashes = ?2 WHERE username = ?1",
+            params![
+                username,
+                serde_json::to_string(&hashes).expect("strings serialize")
+            ],
+        )?;
+        tx.commit()?;
+        Ok(true)
+    }
+
+    /// Turn two-factor login off (and drop any setup in progress). Returns
+    /// whether it was on.
+    pub fn disable_two_factor(&self, username: &str) -> Result<bool> {
+        let conn = self.lock_conn()?;
+        let was_on: bool = conn
+            .query_row(
+                "SELECT secret != '' FROM console_user_two_factor WHERE username = ?1",
+                [username],
+                |r| r.get(0),
+            )
+            .optional()?
+            .unwrap_or(false);
+        conn.execute(
+            "DELETE FROM console_user_two_factor WHERE username = ?1",
+            [username],
+        )?;
+        Ok(was_on)
+    }
+}
+
 // ---- Console users (login accounts) ------------------------------------
 
 impl ZoneStore {
@@ -1529,7 +1703,9 @@ impl ZoneStore {
         let conn = self.lock_conn()?;
         let mut stmt = conn.prepare(
             "SELECT username, password_hash, role, enabled, first_name, last_name, email, created_at,
-                    time_zone, date_format, time_format
+                    time_zone, date_format, time_format,
+                    EXISTS(SELECT 1 FROM console_user_two_factor t
+                           WHERE t.username = console_users.username AND t.secret != '')
              FROM console_users ORDER BY username",
         )?;
         let rows = stmt.query_map([], row_to_console_user)?;
@@ -1559,7 +1735,9 @@ impl ZoneStore {
         let conn = self.lock_conn()?;
         conn.query_row(
             "SELECT username, password_hash, role, enabled, first_name, last_name, email, created_at,
-                    time_zone, date_format, time_format
+                    time_zone, date_format, time_format,
+                    EXISTS(SELECT 1 FROM console_user_two_factor t
+                           WHERE t.username = console_users.username AND t.secret != '')
              FROM console_users WHERE username = ?1",
             [username],
             row_to_console_user,
@@ -1589,6 +1767,7 @@ impl ZoneStore {
                 date_format: String::new(),
                 time_format: String::new(),
             },
+            two_factor: false,
         };
         let conn = self.lock_conn()?;
         conn.execute(

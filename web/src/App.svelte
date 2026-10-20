@@ -14,6 +14,7 @@
   import Certificates from './views/Certificates.svelte';
   import About from './views/About.svelte';
   import Update from './views/Update.svelte';
+  import TwoFactorDialog from './views/TwoFactorDialog.svelte';
   import { icons } from './icons.svelte.js';
   import { sidebar, setSidebar, isNarrow, toggleSidebar } from './nav.svelte.js';
   import {
@@ -145,6 +146,9 @@
     }
   }
 
+  // Two-factor login (sidebar user box).
+  let showTwoFactor = $state(false);
+
   // Self-service password change (sidebar user box).
   let showPassword = $state(false);
   let currentPassword = $state('');
@@ -251,6 +255,9 @@
       </form>
     </div>
   {/if}
+  {#if showTwoFactor}
+    <TwoFactorDialog onClose={() => (showTwoFactor = false)} />
+  {/if}
   {#if showPrefs}
     <div class="modal-backdrop" role="presentation" onclick={(e) => { if (e.target === e.currentTarget) showPrefs = false; }}>
       <form class="card modal" onsubmit={submitPrefs}>
@@ -354,6 +361,7 @@
           <div class="user-actions">
             {#if display.mine}
               <button class="secondary wide" onclick={openPrefs} title="Your time zone and date format">My Preferences</button>
+              <button class="secondary wide" onclick={() => (showTwoFactor = true)} title="Ask for a code from your phone when signing in">Two-Factor Login</button>
             {/if}
             <button class="secondary" onclick={openPassword} title="Change your password">Change Password</button>
             <button class="secondary" onclick={handleLogout} title="End this session">Sign Out</button>
