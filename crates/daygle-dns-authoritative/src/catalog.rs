@@ -44,6 +44,37 @@ pub struct AuthorityCatalog {
     /// Pre-resolved split-horizon rules (client network → synthetic answer),
     /// rebuilt alongside the catalog so DNS and API changes stay in sync.
     split_horizon: arc_swap::ArcSwap<SplitHorizonIndex>,
+    /// ALIAS records by owner name (lowercase, no trailing dot), rebuilt
+    /// with the catalog.
+    aliases: arc_swap::ArcSwap<std::collections::HashMap<String, Alias>>,
+}
+
+/// An ALIAS record: A and AAAA queries for its name are answered with its
+/// target's addresses, looked up when asked.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Alias {
+    /// The target (lowercase, trailing dot).
+    pub target: String,
+    pub ttl: u32,
+}
+
+/// Every enabled ALIAS record in the store, by owner name.
+fn build_aliases(store: &ZoneStore) -> Result<std::collections::HashMap<String, Alias>> {
+    let mut aliases = std::collections::HashMap::new();
+    for (_, records, _) in store.load_catalog_data()? {
+        for record in records {
+            if record.rtype == "ALIAS" && !record.disabled {
+                aliases.insert(
+                    record.name.trim_end_matches('.').to_ascii_lowercase(),
+                    Alias {
+                        target: record.content.clone(),
+                        ttl: record.ttl,
+                    },
+                );
+            }
+        }
+    }
+    Ok(aliases)
 }
 
 impl AuthorityCatalog {
@@ -51,11 +82,13 @@ impl AuthorityCatalog {
     pub fn new(store: ZoneStore, settings: AuthoritativeSettings) -> Result<Self> {
         let catalog = build_catalog(&store, &settings, false)?;
         let split_horizon = Arc::new(build_split_horizon(&store)?);
+        let aliases = build_aliases(&store)?;
         Ok(Self {
             store,
             settings: arc_swap::ArcSwap::from_pointee(settings),
             catalog: arc_swap::ArcSwap::from_pointee(catalog),
             split_horizon: arc_swap::ArcSwap::from(split_horizon),
+            aliases: arc_swap::ArcSwap::from_pointee(aliases),
         })
     }
 
@@ -154,8 +187,43 @@ impl AuthorityCatalog {
         self.catalog.store(Arc::new(catalog));
         let split_horizon = Arc::new(build_split_horizon(&self.store)?);
         self.split_horizon.store(split_horizon);
+        self.aliases.store(Arc::new(build_aliases(&self.store)?));
         info!("authoritative catalog reloaded");
         Ok(())
+    }
+
+    /// The ALIAS record at `name` (lowercase, with or without the trailing
+    /// dot), if any.
+    pub fn alias(&self, name: &str) -> Option<Alias> {
+        let aliases = self.aliases.load();
+        if aliases.is_empty() {
+            return None;
+        }
+        aliases.get(name.trim_end_matches('.')).cloned()
+    }
+
+    /// The enabled `rtype` records stored at `name` (lowercase, no trailing
+    /// dot), for answering an ALIAS whose target is hosted here.
+    pub fn local_records(&self, name: &str, rtype: RecordType) -> Result<Vec<Record>> {
+        let name = name.trim_end_matches('.').to_ascii_lowercase();
+        // The most specific hosted zone holding the name.
+        let Some(zone) = self
+            .store
+            .list_zones()?
+            .into_iter()
+            .filter(|z| name == z.name || name.ends_with(&format!(".{}", z.name)))
+            .max_by_key(|z| z.name.len())
+        else {
+            return Ok(Vec::new());
+        };
+        let wanted = rtype.to_string();
+        Ok(self
+            .store
+            .list_records(&zone.id)?
+            .iter()
+            .filter(|r| !r.disabled && r.rtype == wanted && r.name.eq_ignore_ascii_case(&name))
+            .filter_map(|r| record_to_hickory(r).ok())
+            .collect())
     }
 
     /// Clone out the current split-horizon index (cheap `Arc` bump).
@@ -166,6 +234,16 @@ impl AuthorityCatalog {
     /// Generate (if necessary) a DNSSEC signing key for `zone_id`, sign the
     /// zone, and reload the catalog.
     pub fn sign_zone(&self, zone_id: &str) -> Result<()> {
+        if self
+            .store
+            .list_records(zone_id)?
+            .iter()
+            .any(|r| r.rtype == "ALIAS")
+        {
+            return Err(DaygleError::InvalidRecord(
+                "the zone has ALIAS records, whose answers are made when asked and cannot be signed: replace them with A/AAAA or CNAME records first".to_string(),
+            ));
+        }
         if self.store.list_signing_keys(zone_id)?.is_empty() {
             let (algorithm, der) = generate_signing_key()?;
             self.store.store_signing_key(zone_id, algorithm, &der)?;
@@ -355,7 +433,8 @@ fn zone_rrsets(
 
     // Insert every enabled record.
     for record in records {
-        if record.disabled {
+        // ALIAS is answered by the dispatcher, not served as a record.
+        if record.disabled || record.rtype == "ALIAS" {
             continue;
         }
         match record_to_hickory(record) {

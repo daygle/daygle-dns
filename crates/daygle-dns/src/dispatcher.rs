@@ -788,7 +788,39 @@ impl RequestHandler for DnsDispatcher {
                 .await;
         }
 
-        // 2b. Authoritative zones.
+        // 2b. ALIAS records: A/AAAA at an ALIAS name are answered with the
+        // target's addresses, looked up now (the catalog has no record for
+        // them).
+        if matches!(info.query.query_type(), RecordType::A | RecordType::AAAA) {
+            if let Some(alias) = self.catalog.alias(&qname) {
+                let (rcode, records, ede) =
+                    self.resolve_alias(alias, info.query.query_type()).await;
+                self.metrics.inc(&self.metrics.authoritative);
+                self.observe(
+                    client,
+                    &qname,
+                    &rtype,
+                    protocol,
+                    Outcome::Authoritative,
+                    Some(&rcode_label(rcode)),
+                    started,
+                );
+                if rcode != ResponseCode::NoError {
+                    return send_error(&mut response_handle, request, rcode, ede).await;
+                }
+                if records.is_empty() {
+                    return send_empty(&mut response_handle, request, None).await;
+                }
+                let owner = Name::from(info.query.name().clone());
+                let answers: Vec<Record> = records
+                    .into_iter()
+                    .map(|(ttl, rdata)| Record::from_rdata(owner.clone(), ttl, rdata))
+                    .collect();
+                return send_records(&mut response_handle, request, &answers, None).await;
+            }
+        }
+
+        // 2c. Authoritative zones.
         if self.catalog.contains(info.query.name()) {
             self.metrics.inc(&self.metrics.authoritative);
             // The catalog builds and sends the response itself; its exact
@@ -1042,6 +1074,87 @@ fn response_edns(request: &Request, ede: Option<&Ede>) -> Option<hickory_proto::
             .insert(hickory_proto::rr::rdata::opt::EdnsOption::Unknown(15, data));
     }
     Some(edns)
+}
+
+impl DnsDispatcher {
+    /// Look up an ALIAS target's `rtype` records: from the zones here when
+    /// the target is hosted (following ALIAS chains a few steps), otherwise
+    /// through the resolver. Returns the response code, the answers' TTLs
+    /// (capped by the ALIAS's) and data, and an EDE for a failure.
+    async fn resolve_alias(
+        &self,
+        alias: daygle_dns_authoritative::catalog::Alias,
+        rtype: RecordType,
+    ) -> (ResponseCode, Vec<(u32, RData)>, Option<Ede>) {
+        let mut target = alias.target;
+        let mut ttl = alias.ttl;
+        for _ in 0..8 {
+            match self.catalog.alias(&target) {
+                Some(next) => {
+                    ttl = ttl.min(next.ttl);
+                    target = next.target;
+                }
+                None => break,
+            }
+        }
+        let collect = |records: Vec<Record>| -> Vec<(u32, RData)> {
+            records
+                .into_iter()
+                .filter(|r| r.record_type() == rtype)
+                .map(|r| (r.ttl.min(ttl), r.data.clone()))
+                .collect()
+        };
+        let hosted = Name::from_utf8(&target)
+            .map(|n| self.catalog.contains(&n.into()))
+            .unwrap_or(false);
+        if hosted {
+            return match self.catalog.local_records(&target, rtype) {
+                Ok(records) => (ResponseCode::NoError, collect(records), None),
+                Err(e) => (
+                    ResponseCode::ServFail,
+                    Vec::new(),
+                    Ede::new(ede::OTHER, format!("ALIAS target {target}: {e}")),
+                ),
+            };
+        }
+        let Some(resolver) = self.resolver.load_full() else {
+            return (
+                ResponseCode::ServFail,
+                Vec::new(),
+                Ede::new(
+                    ede::NOT_AUTHORITATIVE,
+                    format!("recursion is off, so the ALIAS target {target} cannot be looked up"),
+                ),
+            );
+        };
+        let lookup = tokio::time::timeout(
+            self.client_timeout,
+            resolver.lookup(target.trim_end_matches('.'), rtype),
+        )
+        .await;
+        match lookup {
+            Ok(Ok(found)) => (
+                ResponseCode::NoError,
+                collect(found.answers().to_vec()),
+                None,
+            ),
+            // The target has no such records (or does not exist): the alias
+            // name exists here, so that is NODATA, not NXDOMAIN.
+            Ok(Err(DaygleError::Resolution {
+                response_code: Some(0 | 3),
+                ..
+            })) => (ResponseCode::NoError, Vec::new(), None),
+            Ok(Err(e)) => (ResponseCode::ServFail, Vec::new(), failure_ede(&e)),
+            Err(_) => (
+                ResponseCode::ServFail,
+                Vec::new(),
+                Ede::new(
+                    ede::NO_REACHABLE_AUTHORITY,
+                    format!("no answer for the ALIAS target {target} in time"),
+                ),
+            ),
+        }
+    }
 }
 
 /// Send a response with only an error code.

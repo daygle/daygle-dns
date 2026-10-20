@@ -15,6 +15,7 @@
     A: '192.0.2.1',
     AAAA: '2001:db8::1',
     CNAME: 'target.example.com.',
+    ALIAS: 'myapp.cdn.example.net.',
     MX: '10 mail.example.com.',
     TXT: '"v=spf1 mx -all"',
     NS: 'ns1.example.com.',
@@ -389,6 +390,12 @@
       <label class="full">Value <input placeholder={EXAMPLES[edit.rtype]} bind:value={edit.content} /></label>
       <p class="muted help value-help">
         Format: <code>{EXAMPLES[edit.rtype]}</code>{#if edit.rtype === 'MX' || edit.rtype === 'SRV'} (the priority is the first number){/if}.
+        {#if edit.rtype === 'ALIAS'}
+          Like a CNAME, but allowed at the zone's own name (<code>@</code>) and
+          next to its other records: A and AAAA questions are answered with the
+          target's current addresses. The name cannot also have A, AAAA or
+          CNAME records, and a DNSSEC-signed zone cannot have ALIAS records.
+        {/if}
         End a host name with a dot when it is a full name.
       </p>
       <div class="grid2" style="margin-top: 10px">

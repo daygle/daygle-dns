@@ -12,6 +12,8 @@ Daygle combines, in a single process:
   import, and **DNSSEC zone signing** with **automatic key rollover** and
   **background RRSIG renewal**, so signed zones never go bogus after the
   signature window passes.
+- **ALIAS (ANAME) records**: point a zone apex at another host name (a CDN or
+  load balancer) and answer A/AAAA with that host's current addresses.
 - **Zone transfers**: serve **AXFR/IXFR** (RFC 5936, with per-network ACLs)
   and replicate **secondary zones** from remote masters on a refresh interval.
 - **NOTIFY (RFC 1996)**: primary zones send NOTIFY to configured secondaries

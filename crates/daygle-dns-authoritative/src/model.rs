@@ -132,7 +132,7 @@ fn default_ttl() -> u32 {
 /// The set of record types Daygle understands.
 pub const KNOWN_RECORD_TYPES: &[&str] = &[
     "A", "AAAA", "CNAME", "MX", "TXT", "NS", "SOA", "SRV", "PTR", "CAA", "HTTPS", "SVCB", "DS",
-    "TLSA", "SSHFP", "NAPTR",
+    "TLSA", "SSHFP", "NAPTR", "ALIAS",
 ];
 
 /// One deletion in an RFC 2136 dynamic update: an RRset (name + type), a

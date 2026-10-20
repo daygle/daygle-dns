@@ -2853,20 +2853,37 @@ fn insert_record_in_tx(
 
     // Reject content the catalog could not serve: it parses records with the
     // same presentation-format parser and would otherwise skip them silently.
-    let content = input.content.trim();
-    let rr_type = rtype
-        .parse::<RecordType>()
-        .map_err(|e| DaygleError::InvalidRecord(format!("record type '{rtype}': {e}")))?;
-    RData::try_from_str(rr_type, content).map_err(|e| {
-        DaygleError::InvalidRecord(format!("invalid {rtype} record '{content}': {e}"))
-    })?;
+    let mut content = input.content.trim().to_string();
+    if rtype == "ALIAS" {
+        content = check_alias(tx, zone_id, &name, &content)?;
+    } else {
+        let rr_type = rtype
+            .parse::<RecordType>()
+            .map_err(|e| DaygleError::InvalidRecord(format!("record type '{rtype}': {e}")))?;
+        RData::try_from_str(rr_type, &content).map_err(|e| {
+            DaygleError::InvalidRecord(format!("invalid {rtype} record '{content}': {e}"))
+        })?;
+        if matches!(rtype.as_str(), "A" | "AAAA" | "CNAME") && !input.disabled {
+            let alias: i64 = tx.query_row(
+                "SELECT COUNT(*) FROM records
+                 WHERE zone_id = ?1 AND name = ?2 AND rtype = 'ALIAS' AND disabled = 0",
+                params![zone_id, name],
+                |r| r.get(0),
+            )?;
+            if alias > 0 {
+                return Err(DaygleError::InvalidRecord(format!(
+                    "{name} has an ALIAS record, which supplies its addresses: remove it to add {rtype} records"
+                )));
+            }
+        }
+    }
 
     let record = Record {
         id: Uuid::new_v4().to_string(),
         zone_id: zone_id.to_string(),
         name,
         rtype,
-        content: content.to_string(),
+        content,
         ttl: input.ttl,
         priority: input.priority,
         disabled: input.disabled,
@@ -2886,6 +2903,54 @@ fn insert_record_in_tx(
         ],
     )?;
     Ok(record)
+}
+
+/// Check an ALIAS record (a name whose A and AAAA answers are looked up from
+/// its target when asked) and return its target in stored form
+/// (lowercase, trailing dot). ALIAS answers are made at query time, so they
+/// cannot be DNSSEC-signed; they are kept out of signed zones.
+fn check_alias(
+    tx: &rusqlite::Transaction<'_>,
+    zone_id: &str,
+    name: &str,
+    target: &str,
+) -> Result<String> {
+    let target = target.trim().trim_end_matches('.').to_ascii_lowercase();
+    validate_name(&target, false).map_err(|_| {
+        DaygleError::InvalidRecord(format!("ALIAS target '{target}' is not a domain name"))
+    })?;
+    if target == name {
+        return Err(DaygleError::InvalidRecord(
+            "an ALIAS cannot point to itself".to_string(),
+        ));
+    }
+    let signed: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM dnssec_keys WHERE zone_id = ?1",
+        [zone_id],
+        |r| r.get(0),
+    )?;
+    if signed > 0 {
+        return Err(DaygleError::InvalidRecord(
+            "ALIAS records cannot be used in a DNSSEC-signed zone: their answers are made when asked and cannot be signed".to_string(),
+        ));
+    }
+    let clash: Option<String> = tx
+        .query_row(
+            "SELECT rtype FROM records
+             WHERE zone_id = ?1 AND name = ?2 AND rtype IN ('A', 'AAAA', 'CNAME', 'ALIAS')
+             LIMIT 1",
+            params![zone_id, name],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if let Some(rtype) = clash {
+        return Err(DaygleError::InvalidRecord(if rtype == "ALIAS" {
+            format!("{name} already has an ALIAS record")
+        } else {
+            format!("{name} has {rtype} records: an ALIAS supplies the addresses itself, so remove them first")
+        }));
+    }
+    Ok(format!("{target}."))
 }
 
 /// Resolve `@`, bare relative names, and trailing dots against the zone name.

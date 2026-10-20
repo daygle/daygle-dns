@@ -625,10 +625,20 @@ PUT /api/zones/{id}/records
 ```
 
 Supported `rtype` values: `A`, `AAAA`, `CNAME`, `MX`, `TXT`, `NS`, `SOA`,
-`SRV`, `PTR`, `CAA`, `HTTPS`, `SVCB`, `DS`, `TLSA`, `SSHFP`, `NAPTR`.
+`SRV`, `PTR`, `CAA`, `HTTPS`, `SVCB`, `DS`, `TLSA`, `SSHFP`, `NAPTR`, `ALIAS`.
 `content` must parse as that type's RDATA, otherwise the request fails with
 400. `priority` is stored but not served: MX and SRV take their priority from
 `content`.
+
+An `ALIAS` record (also called ANAME) lets a name - including the zone apex,
+where a CNAME is not allowed - follow another host's addresses: its `content`
+is the target name (e.g. `"myapp.cdn.example.net."`), and A and AAAA queries
+for the name are answered with the target's current addresses, looked up
+when asked (from the server's own zones, or recursively) and served under
+the alias's name with the lower of the two TTLs. Other types at that name are
+answered from the zone as usual. An alias cannot share its name with an A,
+AAAA, CNAME or another ALIAS record, cannot point at itself, and cannot be
+added to a DNSSEC-signed zone (nor can a zone holding one be signed).
 
 `PUT /api/zones/{id}/records/{rid}` replaces an existing record in place with
 the same body, keeping its id and disabled state (the collection `PUT` above
