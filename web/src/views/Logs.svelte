@@ -6,7 +6,8 @@
   import { formatDateTime } from '../datetime.svelte.js';
 
   // Two tabs: the in-memory server log and the searchable per-query history.
-  let tab = $state('server');
+  // Query Log opens first: it is what the Logs page is used for day to day.
+  let tab = $state('queries');
 
   // ---- Server log ----
   let logs = $state([]);
@@ -166,8 +167,8 @@
 <PageHeader icon={icons.logs} title="Logs" />
 
 <div class="tabs">
+  <button class="tab" class:active={tab === 'queries'} onclick={() => { tab = 'queries'; runQuery(1); }}>Query Log</button>
   <button class="tab" class:active={tab === 'server'} onclick={() => { tab = 'server'; refresh(); }}>Server Log</button>
-  <button class="tab" class:active={tab === 'queries'} onclick={() => { tab = 'queries'; runQuery(1); }}>Query Logs</button>
 </div>
 
 {#if tab === 'server'}

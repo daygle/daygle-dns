@@ -44,7 +44,7 @@ Daygle combines, in a single process:
   domains - all bounded in memory.
 - A **searchable query log**: every served query is recorded into SQLite
   (client, name, type, transport, outcome, rcode, duration) with retention,
-  and the console's **Logs → Query Logs** tab filters, paginates, live-updates
+  and the console's **Logs → Query Log** tab filters, paginates, live-updates
   and CSV-exports the history.
 - An **AI scanner** (`daygle-dns-ml`): a small CPU-only classifier
   ships with the install (a bundled fastText starter model under

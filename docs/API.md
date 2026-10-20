@@ -219,7 +219,7 @@ Every served DNS query is recorded into the SQLite database (when
 name/type, transport (`udp`, `tcp`, `tls`, `https`, `quic`), outcome
 (`authoritative`, `recursive`, `split_horizon`, `blocked`, `rate_limited`,
 `error`), response code and server-side handling time. The console's
-**Logs → Query Logs** tab searches this history.
+**Logs → Query Log** tab searches this history.
 
 `GET` returns a page of entries (newest first) plus the total count under
 the same filter. `qname` accepts `*` wildcards (`*.example.com`, `www.*`)
