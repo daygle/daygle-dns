@@ -255,12 +255,13 @@ PUT /api/config
 ```
 
 Editable groups: `server` (listen/port/udp_enabled/tcp_enabled), `recursive`
-(enabled/upstreams/dnssec_validate/prefetch_* /serve_stale_secs), `dot`,
+(enabled/upstreams/dnssec_validate/prefetch_* /serve_stale_secs/
+conditional_zones), `dot`,
 `doh`, `doq` (enabled/port/self_signed/server_name [+ `doh.endpoint`]), `api`
 (gui_enabled/cors_origins), and `authoritative`
 (default_record_ttl/default_primary_ns/axfr_enabled/axfr_networks/
 allow_dynamic_updates/update_networks/notify_enabled/notify_targets/
-notify_listen_enabled). Runtime groups (`recursive`, `dot`, `doh`, `doq`,
+notify_listen_enabled/stub_zones). Runtime groups (`recursive`, `dot`, `doh`, `doq`,
 `policy`, `authoritative`) are stored in the database and survive restarts and
 config-file edits; `server.*` and `api.*` stay config-file-owned so a broken
 listener can always be fixed by editing the file. Login users are managed
@@ -274,6 +275,30 @@ zones created without an explicit `primary_ns`, instead of assuming
 `ns1.<zone>`. The value is normalized to a fully-qualified name (a trailing
 dot is added when missing) and a blank value keeps the current one; when the
 setting is unset, the server falls back to `ns1.<zone>.`.
+
+Recursive settings and stub zones apply to live traffic immediately: the
+resolver is rebuilt whenever `recursive.*` or `authoritative.stub_zones`
+changes (a failed rebuild keeps the previous resolver and logs a warning).
+`recursive.conditional_zones` and `authoritative.stub_zones` replace the whole
+list. Zone names are lowercased with any trailing dot removed, and blank
+upstream / nameserver entries are dropped. A forwarder needs at least one
+upstream and an enabled stub at least one nameserver, otherwise the update is
+rejected with `400`:
+
+```json
+PUT /api/config
+{
+  "recursive": {
+    "conditional_zones": [{ "name": "corp.internal", "upstreams": ["10.0.0.53"] }]
+  },
+  "authoritative": {
+    "stub_zones": [{ "name": "branch.example.com", "nss": ["192.0.2.53"], "refresh_secs": 3600, "enabled": true }]
+  }
+}
+```
+
+The console manages both from **Zones → Zones** (Add Zone → Stub Zone /
+Conditional Forwarder Zone).
 
 `POST /api/config` asks the server to re-read its configuration file and
 apply policy, upstream and listener changes immediately, without waiting for

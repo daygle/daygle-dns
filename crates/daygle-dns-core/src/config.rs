@@ -174,6 +174,36 @@ pub struct RecursiveUpdate {
     pub max_cache_ttl: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub failure_cache_ttl: Option<u32>,
+    /// Conditional forwarder zones (the whole list; see
+    /// [`ConditionalZoneConfig`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub conditional_zones: Option<Vec<ConditionalZoneConfig>>,
+}
+
+impl RecursiveUpdate {
+    /// Trim conditional zones: names lose surrounding whitespace and a
+    /// trailing dot and are lowercased; blank upstream entries are dropped.
+    pub fn normalize_conditional_zones(
+        zones: &[ConditionalZoneConfig],
+    ) -> Vec<ConditionalZoneConfig> {
+        zones
+            .iter()
+            .map(|z| ConditionalZoneConfig {
+                name: normalize_zone_name(&z.name),
+                upstreams: z
+                    .upstreams
+                    .iter()
+                    .map(|u| u.trim().to_string())
+                    .filter(|u| !u.is_empty())
+                    .collect(),
+            })
+            .collect()
+    }
+}
+
+/// Normalize a zone apex for storage: trim, drop one trailing dot, lowercase.
+pub fn normalize_zone_name(name: &str) -> String {
+    name.trim().trim_end_matches('.').to_ascii_lowercase()
 }
 
 /// Partial updates for authoritative-zone defaults (the runtime-tunable
@@ -210,9 +240,30 @@ pub struct AuthoritativeUpdate {
     pub notify_targets: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub notify_listen_enabled: Option<bool>,
+    /// Stub zones (the whole list; see [`StubZoneConfig`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stub_zones: Option<Vec<StubZoneConfig>>,
 }
 
 impl AuthoritativeUpdate {
+    /// Trim stub zones: names are normalized like conditional zones and blank
+    /// nameserver entries are dropped.
+    pub fn normalize_stub_zones(zones: &[StubZoneConfig]) -> Vec<StubZoneConfig> {
+        zones
+            .iter()
+            .map(|z| StubZoneConfig {
+                name: normalize_zone_name(&z.name),
+                nss: z
+                    .nss
+                    .iter()
+                    .map(|n| n.trim().to_string())
+                    .filter(|n| !n.is_empty())
+                    .collect(),
+                ..z.clone()
+            })
+            .collect()
+    }
+
     /// Normalize user-supplied network lists (trim entries, drop empties).
     fn normalize_networks(items: Vec<String>) -> Vec<String> {
         items
@@ -401,6 +452,10 @@ impl RuntimeSettings {
             if let Some(v) = r.failure_cache_ttl {
                 config.recursive.failure_cache_ttl = v;
             }
+            if let Some(v) = &r.conditional_zones {
+                config.recursive.conditional_zones =
+                    RecursiveUpdate::normalize_conditional_zones(v);
+            }
         }
         if let Some(d) = &self.dot {
             if let Some(v) = d.enabled {
@@ -566,6 +621,9 @@ impl RuntimeSettings {
             if let Some(v) = a.notify_listen_enabled {
                 config.authoritative.notify_listen_enabled = v;
             }
+            if let Some(v) = &a.stub_zones {
+                config.authoritative.stub_zones = AuthoritativeUpdate::normalize_stub_zones(v);
+            }
             if let Some(v) = &a.default_admin_mailbox {
                 config.authoritative.default_admin_mailbox = v.clone();
             }
@@ -601,6 +659,7 @@ impl RuntimeSettings {
                 serve_stale_secs: Some(config.recursive.serve_stale_secs),
                 max_cache_ttl: Some(config.recursive.max_cache_ttl),
                 failure_cache_ttl: Some(config.recursive.failure_cache_ttl),
+                conditional_zones: Some(config.recursive.conditional_zones.clone()),
             }),
             dot: Some(ListenerUpdate {
                 enabled: Some(config.dot.enabled),
@@ -655,6 +714,7 @@ impl RuntimeSettings {
                 notify_enabled: Some(config.authoritative.notify_enabled),
                 notify_targets: Some(config.authoritative.notify_targets.clone()),
                 notify_listen_enabled: Some(config.authoritative.notify_listen_enabled),
+                stub_zones: Some(config.authoritative.stub_zones.clone()),
             }),
             ai: Some(AiUpdate::capture_ai(&config.ai)),
         }

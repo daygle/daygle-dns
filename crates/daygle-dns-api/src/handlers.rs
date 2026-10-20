@@ -163,10 +163,13 @@ fn validate_config_update(
     what: &str,
 ) -> std::result::Result<(), Response> {
     if let Err(e) = new.validate() {
+        // Only the identical error counts as pre-existing: every config error
+        // shares one kind, so comparing kinds let any new error through
+        // whenever the old config had an unrelated problem.
         let pre_existing = old
             .validate()
             .err()
-            .map(|old_err| old_err.kind() == e.kind())
+            .map(|old_err| old_err.to_string() == e.to_string())
             .unwrap_or(false);
         if !pre_existing {
             return Err(map_err(e));
@@ -2598,6 +2601,8 @@ pub struct AuthoritativeUpdate {
     pub notify_enabled: Option<bool>,
     pub notify_targets: Option<Vec<String>>,
     pub notify_listen_enabled: Option<bool>,
+    /// Replaces the whole stub-zone list.
+    pub stub_zones: Option<Vec<daygle_dns_core::config::StubZoneConfig>>,
 }
 
 /// Partial update for policy-engine settings surfaced in the console (only the
@@ -2657,6 +2662,8 @@ pub struct RecursiveUpdate {
     pub serve_stale_secs: Option<u64>,
     pub max_cache_ttl: Option<u32>,
     pub failure_cache_ttl: Option<u32>,
+    /// Replaces the whole conditional-forwarder list.
+    pub conditional_zones: Option<Vec<daygle_dns_core::config::ConditionalZoneConfig>>,
 }
 
 /// Fields shared by the DoT and DoQ listeners.
@@ -2755,6 +2762,10 @@ pub async fn update_settings(
         }
         if let Some(v) = r.max_cache_ttl {
             config.recursive.max_cache_ttl = v;
+        }
+        if let Some(v) = &r.conditional_zones {
+            config.recursive.conditional_zones =
+                daygle_dns_core::config::RecursiveUpdate::normalize_conditional_zones(v);
         }
         if let Some(v) = r.failure_cache_ttl {
             config.recursive.failure_cache_ttl = v;
@@ -2918,6 +2929,10 @@ pub async fn update_settings(
             config.authoritative.notify_listen_enabled = v;
             authoritative_changed = true;
         }
+        if let Some(v) = &a.stub_zones {
+            config.authoritative.stub_zones =
+                daygle_dns_core::config::AuthoritativeUpdate::normalize_stub_zones(v);
+        }
     }
     let mut policy_changed = false;
     if let Some(p) = &update.policy {
@@ -3045,6 +3060,29 @@ pub async fn update_settings(
     if listeners_affected {
         if let Some(rebuild) = &state.request_dns_rebuild {
             rebuild();
+        }
+    }
+    // Rebuild the recursive resolver when its settings or the stub zones
+    // changed, so upstreams, cache settings, conditional forwarders and stub
+    // zones apply to live traffic immediately (mirrors the config-file
+    // reload path). A failed build keeps the previous resolver serving.
+    if old_config.recursive != config.recursive
+        || old_config.authoritative.stub_zones != config.authoritative.stub_zones
+    {
+        if config.recursive.enabled {
+            match daygle_dns_recursive::RecursiveResolver::build(
+                &config.recursive,
+                state.metrics.clone(),
+                &config.authoritative.stub_zones,
+            ) {
+                Ok(resolver) => state.resolver.store(Some(Arc::new(resolver))),
+                Err(e) => state.logs.warn(
+                    "api",
+                    format!("recursive resolver rebuild failed, keeping the previous one: {e}"),
+                ),
+            }
+        } else {
+            state.resolver.store(None);
         }
     }
     // Hot-swap the per-request authoritative gates (AXFR + dynamic-update

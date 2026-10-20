@@ -53,6 +53,8 @@ serve_stale_secs = 0
 # own upstreams instead of the defaults above. Useful for split-horizon DNS,
 # e.g. forwarding an internal domain to the company AD DNS servers. The most
 # specific (deepest) zone wins; upstreams accept the same forms as above.
+# Also manageable from the console (Zones -> Add Zone); like the settings
+# above, the console's list is stored in the database and wins over this file.
 #
 # [[recursive.conditional_zones]]
 # name = "corp.internal"
@@ -133,7 +135,8 @@ notify_listen_enabled = false
 # you know a sibling nameserver hosts `internal.example.com` and want
 # queries for it to land there directly. NSS entries accept IP, IP:port, or
 # hostname (resolved through the system resolver at startup); disabled stub
-# zones are ignored.
+# zones are ignored. Also manageable from the console (Zones -> Add Zone);
+# once saved there, the database copy wins over this file.
 #
 # [[authoritative.stub_zones]]
 # name = "internal.example.com"
