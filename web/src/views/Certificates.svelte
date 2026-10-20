@@ -264,11 +264,11 @@
   {/if}
   <div class="spread foot">
     <p class="muted help" style="margin: 0">
-      Choose which certificate each listener uses in Settings → Protocol
-      Listeners. Replacing a certificate in use applies at once.
+      Choose which certificate each listener uses in Settings → Encrypted
+      DNS. Replacing a certificate in use applies at once.
     </p>
     {#if onOpenSettings}
-      <button class="secondary" onclick={() => onOpenSettings('listeners')}>Open Protocol Listeners</button>
+      <button class="secondary" onclick={() => onOpenSettings('listeners')}>Open Encrypted DNS Settings</button>
     {/if}
   </div>
 </div>

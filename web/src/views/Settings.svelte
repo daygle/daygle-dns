@@ -21,7 +21,7 @@
     ['general', 'General'],
     ['recursive', 'Resolver'],
     ['cache', 'Cache'],
-    ['listeners', 'Protocol Listeners'],
+    ['listeners', 'Encrypted DNS'],
     ['zones', 'Zones'],
     ['ai', 'AI Scanner'],
     ['interface', 'Interface'],
@@ -392,7 +392,7 @@
       sections of <code>daygle-dns.toml</code> and restart (or let Reload
       Config File pick it up). They live in the file rather than here so a
       listener that stops working can always be fixed without the console.
-      Encrypted listeners are on the Protocol Listeners tab.
+      DNS over TLS, HTTPS and QUIC are on the Encrypted DNS tab.
     </p>
   </div>
   {:else if tab === 'recursive'}
