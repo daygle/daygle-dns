@@ -40,7 +40,7 @@
 
     loading = true;
     try {
-      const resp = await api.setup(username.trim(), password, firstName, email);
+      const resp = await api.setup(username.trim(), password, firstName, lastName, email);
       if (resp && resp.token) {
         window.location.href = '/';
       } else {

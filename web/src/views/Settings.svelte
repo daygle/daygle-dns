@@ -269,7 +269,7 @@
 
   {#if tab === 'general'}
   <div class="card" style="margin-bottom: 14px">
-    <h3 style="margin-top: 0">DNS Listeners</h3>
+    <h3 style="margin: 0 0 10px">DNS Listeners</h3>
     <div class="form-grid">
       <label><span>Listen Address</span><input bind:value={server.listen} /></label>
       <label><span>UDP/TCP Port</span><input type="number" bind:value={server.port} /></label>
@@ -280,7 +280,7 @@
   </div>
   {:else if tab === 'recursive'}
   <div class="card" style="margin-bottom: 14px">
-    <h3 style="margin-top: 0">Recursive Resolver</h3>
+    <h3 style="margin: 0 0 10px">Recursive Resolver</h3>
     <div class="form-grid">
       <label class="check"><input type="checkbox" bind:checked={recursive.enabled} /> <span>Recursion Enabled</span></label>
       <label class="check"><input type="checkbox" bind:checked={recursive.dnssec_validate} /> <span>DNSSEC Validation</span></label>
@@ -314,7 +314,7 @@
   </div>
   {:else if tab === 'zones'}
   <div class="card" style="margin-bottom: 14px">
-    <h3 style="margin-top: 0">Zones & Records</h3>
+    <h3 style="margin: 0 0 10px">Zones & Records</h3>
     <div class="form-grid">
       <label><span>Default Record TTL (Seconds)</span><input type="number" min="1" bind:value={authoritative.default_record_ttl} /></label>
       <label><span>DNS Server Domain</span><input placeholder="ns1.dns.example.com." bind:value={authoritative.default_primary_ns} /></label>
@@ -326,13 +326,13 @@
   </div>
 
   <div class="card" style="margin-bottom: 14px">
-    <h3 style="margin-top: 0">Zone Transfers (AXFR/IXFR)</h3>
+    <h3 style="margin: 0 0 10px">Zone Transfers (AXFR/IXFR)</h3>
     <div class="form-grid">
       <label class="check"><input type="checkbox" bind:checked={authoritative.axfr_enabled} /> <span>Allow Zone Transfers</span></label>
     </div>
     <label class="stacked">
       <span>Allowed Networks (one CIDR per line, e.g. 192.168.1.0/24)</span>
-      <textarea rows="3" placeholder="192.168.1.0/24\n10.0.0.0/8" bind:value={axfrNetworksText}></textarea>
+      <textarea rows="3" placeholder={"192.168.1.0/24\n10.0.0.0/8"} bind:value={axfrNetworksText}></textarea>
     </label>
     <p class="muted help">
       Only these networks may request a copy of your zones. An empty list allows
@@ -342,13 +342,13 @@
   </div>
 
   <div class="card" style="margin-bottom: 14px">
-    <h3 style="margin-top: 0">Dynamic Updates (RFC 2136)</h3>
+    <h3 style="margin: 0 0 10px">Dynamic Updates (RFC 2136)</h3>
     <div class="form-grid">
       <label class="check"><input type="checkbox" bind:checked={authoritative.allow_dynamic_updates} /> <span>Accept Dynamic Updates</span></label>
     </div>
     <label class="stacked">
       <span>Allowed Networks (one CIDR per line)</span>
-      <textarea rows="3" placeholder="192.168.1.0/24" bind:value={updateNetworksText}></textarea>
+      <textarea rows="3" placeholder={"192.168.1.0/24\n10.0.0.0/8"} bind:value={updateNetworksText}></textarea>
     </label>
     <p class="muted help">
       Clients on these networks may add, change, or delete records in primary
@@ -358,14 +358,14 @@
   </div>
 
   <div class="card" style="margin-bottom: 14px">
-    <h3 style="margin-top: 0">NOTIFY (RFC 1996)</h3>
+    <h3 style="margin: 0 0 10px">NOTIFY (RFC 1996)</h3>
     <div class="form-grid">
       <label class="check"><input type="checkbox" bind:checked={authoritative.notify_enabled} /> <span>Send NOTIFY to Secondaries</span></label>
-      <label class="check"><input type="checkbox" bind:checked={authoritative.notify_listen_enabled} /> <span>Accept NOTIFY From Masters</span></label>
+      <label class="check"><input type="checkbox" bind:checked={authoritative.notify_listen_enabled} /> <span>Accept NOTIFY from Masters</span></label>
     </div>
     <label class="stacked">
       <span>NOTIFY Targets (one per line: IP, IP:port, or [IPv6]:port)</span>
-      <textarea rows="3" placeholder="198.51.100.10\n198.51.100.11:5353" bind:value={notifyTargetsText}></textarea>
+      <textarea rows="3" placeholder={"198.51.100.10\n198.51.100.11:5353"} bind:value={notifyTargetsText}></textarea>
     </label>
     <p class="muted help">
       When a primary zone changes, the server notifies these targets so their
@@ -374,83 +374,81 @@
     </p>
   </div>
   {:else if tab === 'listeners'}
-  <div class="row" style="margin-bottom: 14px; align-items: stretch">
-    <div class="card" style="flex: 1">
-      <h3 style="margin-top: 0">DNS over TLS</h3>
-      <div class="form-grid">
-        <label class="check"><input type="checkbox" bind:checked={dot.enabled} /> <span>Enabled</span></label>
-        <label><span>Port</span><input type="number" bind:value={dot.port} /></label>
-        <label><span>TLS Handshake Timeout (Sec)</span><input type="number" bind:value={dot.handshake_timeout_secs} /></label>
-        <label>
-          <span>Certificate</span>
-          <select bind:value={dotCertMode} onchange={(e) => applyCertMode(dot, e.currentTarget.value)}>
-            <option value="self">Self-signed (auto)</option>
-            {#each certs as cert (cert.name)}
-              <option value={cert.name}>{cert.name}{cert.server_name ? ` - ${cert.server_name}` : ''}</option>
-            {/each}
-            <option value="custom">Custom files…</option>
-          </select>
-        </label>
-        {#if dotCertMode === 'self'}
-          <label><span>Certificate Name</span><input bind:value={dot.server_name} placeholder="dns.example.com" /></label>
-        {:else if dotCertMode === 'custom'}
-          <label><span>Certificate Path</span><input bind:value={dot.cert_path} placeholder="/etc/daygle-dns/certs/server.crt" /></label>
-          <label><span>Key Path</span><input bind:value={dot.key_path} placeholder="/etc/daygle-dns/certs/server.key" /></label>
-        {/if}
-      </div>
+  <div class="card" style="margin-bottom: 14px">
+    <h3 style="margin: 0 0 10px">DNS over TLS</h3>
+    <div class="form-grid">
+      <label class="check"><input type="checkbox" bind:checked={dot.enabled} /> <span>Enabled</span></label>
+      <label><span>Port</span><input type="number" bind:value={dot.port} /></label>
+      <label><span>TLS Handshake Timeout (Seconds)</span><input type="number" bind:value={dot.handshake_timeout_secs} /></label>
+      <label>
+        <span>Certificate</span>
+        <select bind:value={dotCertMode} onchange={(e) => applyCertMode(dot, e.currentTarget.value)}>
+          <option value="self">Self-signed (auto)</option>
+          {#each certs as cert (cert.name)}
+            <option value={cert.name}>{cert.name}{cert.server_name ? ` - ${cert.server_name}` : ''}</option>
+          {/each}
+          <option value="custom">Custom files…</option>
+        </select>
+      </label>
+      {#if dotCertMode === 'self'}
+        <label><span>Certificate Name</span><input bind:value={dot.server_name} placeholder="dns.example.com" /></label>
+      {:else if dotCertMode === 'custom'}
+        <label><span>Certificate Path</span><input bind:value={dot.cert_path} placeholder="/etc/daygle-dns/certs/server.crt" /></label>
+        <label><span>Key Path</span><input bind:value={dot.key_path} placeholder="/etc/daygle-dns/certs/server.key" /></label>
+      {/if}
     </div>
-    <div class="card" style="flex: 1">
-      <h3 style="margin-top: 0">DNS over HTTPS</h3>
-      <div class="form-grid">
-        <label class="check"><input type="checkbox" bind:checked={doh.enabled} /> <span>Enabled</span></label>
-        <label><span>Port</span><input type="number" bind:value={doh.port} /></label>
-        <label><span>TLS Handshake Timeout (Sec)</span><input type="number" bind:value={doh.handshake_timeout_secs} /></label>
-        <label>
-          <span>Certificate</span>
-          <select bind:value={dohCertMode} onchange={(e) => applyCertMode(doh, e.currentTarget.value)}>
-            <option value="self">Self-signed (auto)</option>
-            {#each certs as cert (cert.name)}
-              <option value={cert.name}>{cert.name}{cert.server_name ? ` - ${cert.server_name}` : ''}</option>
-            {/each}
-            <option value="custom">Custom files…</option>
-          </select>
-        </label>
-        {#if dohCertMode === 'self'}
-          <label><span>Certificate Name</span><input bind:value={doh.server_name} placeholder="dns.example.com" /></label>
-        {:else if dohCertMode === 'custom'}
-          <label><span>Certificate Path</span><input bind:value={doh.cert_path} placeholder="/etc/daygle-dns/certs/server.crt" /></label>
-          <label><span>Key Path</span><input bind:value={doh.key_path} placeholder="/etc/daygle-dns/certs/server.key" /></label>
-        {/if}
-        <label><span>Endpoint Path</span><input bind:value={doh.endpoint} /></label>
-      </div>
+  </div>
+  <div class="card" style="margin-bottom: 14px">
+    <h3 style="margin: 0 0 10px">DNS over HTTPS</h3>
+    <div class="form-grid">
+      <label class="check"><input type="checkbox" bind:checked={doh.enabled} /> <span>Enabled</span></label>
+      <label><span>Port</span><input type="number" bind:value={doh.port} /></label>
+      <label><span>TLS Handshake Timeout (Seconds)</span><input type="number" bind:value={doh.handshake_timeout_secs} /></label>
+      <label>
+        <span>Certificate</span>
+        <select bind:value={dohCertMode} onchange={(e) => applyCertMode(doh, e.currentTarget.value)}>
+          <option value="self">Self-signed (auto)</option>
+          {#each certs as cert (cert.name)}
+            <option value={cert.name}>{cert.name}{cert.server_name ? ` - ${cert.server_name}` : ''}</option>
+          {/each}
+          <option value="custom">Custom files…</option>
+        </select>
+      </label>
+      {#if dohCertMode === 'self'}
+        <label><span>Certificate Name</span><input bind:value={doh.server_name} placeholder="dns.example.com" /></label>
+      {:else if dohCertMode === 'custom'}
+        <label><span>Certificate Path</span><input bind:value={doh.cert_path} placeholder="/etc/daygle-dns/certs/server.crt" /></label>
+        <label><span>Key Path</span><input bind:value={doh.key_path} placeholder="/etc/daygle-dns/certs/server.key" /></label>
+      {/if}
+      <label><span>Endpoint Path</span><input bind:value={doh.endpoint} /></label>
     </div>
-    <div class="card" style="flex: 1">
-      <h3 style="margin-top: 0">DNS over QUIC</h3>
-      <div class="form-grid">
-        <label class="check"><input type="checkbox" bind:checked={doq.enabled} /> <span>Enabled</span></label>
-        <label><span>Port</span><input type="number" bind:value={doq.port} /></label>
-        <label>
-          <span>Certificate</span>
-          <select bind:value={doqCertMode} onchange={(e) => applyCertMode(doq, e.currentTarget.value)}>
-            <option value="self">Self-signed (auto)</option>
-            {#each certs as cert (cert.name)}
-              <option value={cert.name}>{cert.name}{cert.server_name ? ` - ${cert.server_name}` : ''}</option>
-            {/each}
-            <option value="custom">Custom files…</option>
-          </select>
-        </label>
-        {#if doqCertMode === 'self'}
-          <label><span>Certificate Name</span><input bind:value={doq.server_name} placeholder="dns.example.com" /></label>
-        {:else if doqCertMode === 'custom'}
-          <label><span>Certificate Path</span><input bind:value={doq.cert_path} placeholder="/etc/daygle-dns/certs/server.crt" /></label>
-          <label><span>Key Path</span><input bind:value={doq.key_path} placeholder="/etc/daygle-dns/certs/server.key" /></label>
-        {/if}
-      </div>
+  </div>
+  <div class="card" style="margin-bottom: 14px">
+    <h3 style="margin: 0 0 10px">DNS over QUIC</h3>
+    <div class="form-grid">
+      <label class="check"><input type="checkbox" bind:checked={doq.enabled} /> <span>Enabled</span></label>
+      <label><span>Port</span><input type="number" bind:value={doq.port} /></label>
+      <label>
+        <span>Certificate</span>
+        <select bind:value={doqCertMode} onchange={(e) => applyCertMode(doq, e.currentTarget.value)}>
+          <option value="self">Self-signed (auto)</option>
+          {#each certs as cert (cert.name)}
+            <option value={cert.name}>{cert.name}{cert.server_name ? ` - ${cert.server_name}` : ''}</option>
+          {/each}
+          <option value="custom">Custom files…</option>
+        </select>
+      </label>
+      {#if doqCertMode === 'self'}
+        <label><span>Certificate Name</span><input bind:value={doq.server_name} placeholder="dns.example.com" /></label>
+      {:else if doqCertMode === 'custom'}
+        <label><span>Certificate Path</span><input bind:value={doq.cert_path} placeholder="/etc/daygle-dns/certs/server.crt" /></label>
+        <label><span>Key Path</span><input bind:value={doq.key_path} placeholder="/etc/daygle-dns/certs/server.key" /></label>
+      {/if}
     </div>
   </div>
   {:else if tab === 'ai'}
   <div class="card" style="margin-bottom: 14px">
-    <h3 style="margin-top: 0">AI Safety Scanner</h3>
+    <h3 style="margin: 0 0 10px">AI Safety Scanner</h3>
     <div class="form-grid">
       <label class="check"><input type="checkbox" bind:checked={ai_.enabled} /> <span>Enable AI Scanner</span></label>
       <label>
@@ -494,7 +492,7 @@
   </div>
   {:else if tab === 'interface'}
   <div class="card" style="margin-bottom: 14px">
-    <h3 style="margin-top: 0">Display</h3>
+    <h3 style="margin: 0 0 10px">Display</h3>
     <div class="form-grid">
       <label><span>Time Zone</span>
         <select bind:value={tzDraft} onchange={applyDisplayPrefs}>
@@ -507,18 +505,18 @@
         </select>
       </label>
     </div>
-    <p class="muted" style="font-size: 0.85rem; margin-bottom: 0">
+    <p class="muted help">
       Example with the current choice: <strong>{formatDateTime(new Date())}</strong>. Display
       preferences are per browser and apply everywhere dates and times are shown.
     </p>
   </div>
 
   <div class="card" style="margin-bottom: 14px">
-    <h3 style="margin-top: 0">Console</h3>
+    <h3 style="margin: 0 0 10px">Console</h3>
     <div class="form-grid">
       <label class="check"><input type="checkbox" bind:checked={api_.gui_enabled} /> <span>Serve the Web GUI</span></label>
     </div>
-    <p class="muted" style="font-size: 0.85rem">
+    <p class="muted help">
       The settings on this page are stored in the server database and survive
       restarts. Bootstrap options (listen addresses, ports, certificate paths,
       login accounts and zone signing) are edited in
@@ -528,41 +526,18 @@
   </div>
   {/if}
 {:else}
-  <p class="muted">Loading…</p>
+  <div class="card">
+    <p class="muted">Loading…</p>
+  </div>
 {/if}
 
 <style>
   .actions { display: flex; gap: 10px; margin-bottom: 16px; }
-  .tabs {
-    display: flex;
-    gap: 4px;
-    margin-bottom: 14px;
-    border-bottom: 1px solid var(--border);
-    flex-wrap: wrap;
-  }
-  .tab {
-    background: none;
-    border: none;
-    border-bottom: 2px solid transparent;
-    padding: 8px 14px;
-    cursor: pointer;
-    color: var(--muted);
-    font: inherit;
-  }
-  .tab.active {
-    color: var(--text);
-    border-bottom-color: var(--accent);
-  }
   .stacked {
     display: flex;
     flex-direction: column;
     gap: 4px;
     margin-bottom: 4px;
-  }
-  .help {
-    font-size: 0.82rem;
-    line-height: 1.45;
-    margin: 6px 0 0;
   }
   .form-grid {
     display: grid;
@@ -585,14 +560,5 @@
     padding-bottom: 8px;
   }
   label.check span { color: var(--text); }
-  textarea {
-    background: var(--panel-2);
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    padding: 6px 8px;
-    font: inherit;
-    color: inherit;
-    resize: vertical;
-  }
   h4 { margin: 14px 0 8px; }
 </style>

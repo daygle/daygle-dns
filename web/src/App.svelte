@@ -4,26 +4,21 @@
   import Login from './views/Login.svelte';
   import Setup from './views/Setup.svelte';
   import Status from './views/Status.svelte';
-  import Zones from './views/Zones.svelte';
-  import Records from './views/Records.svelte';
-  import SplitHorizon from './views/SplitHorizon.svelte';
+  import ZonesPage from './views/ZonesPage.svelte';
   import Logs from './views/Logs.svelte';
-  import Blocklists from './views/Blocklists.svelte';
-  import AdvancedBlocking from './views/AdvancedBlocking.svelte';
+  import Filtering from './views/Filtering.svelte';
   import Settings from './views/Settings.svelte';
-  import AiStatus from './views/AiStatus.svelte';
-  import AiVerdicts from './views/AiVerdicts.svelte';
+  import Ai from './views/Ai.svelte';
   import Cache from './views/Cache.svelte';
   import Users from './views/Users.svelte';
   import Certificates from './views/Certificates.svelte';
-  import DomainLists from './views/DomainLists.svelte';
   import About from './views/About.svelte';
   import Update from './views/Update.svelte';
   import { icons } from './icons.svelte.js';
   import { sidebar, setSidebar, isNarrow, toggleSidebar } from './nav.svelte.js';
 
   let view = $state('status');
-  // Zone preselected for the Records page (set when opening records from the Zones page).
+  // Zone preselected on the Zones page's Records tab (remembered across visits).
   let recordZoneId = $state(null);
   let user = $state(getStoredUser());
   // Console auth is on by default, so start at the login/setup screen unless
@@ -88,7 +83,7 @@
     authed = true;
     user = getStoredUser();
     needsSetup = false;
-    if (isViewer && (view === 'zones' || view === 'records' || view === 'split-horizon' || view === 'blocklists')) {
+    if (isViewer && (view === 'zones' || view === 'filtering')) {
       view = 'status';
     }
   }
@@ -145,13 +140,7 @@
     }
   }
 
-  // Open the Records page for a given zone (used from the Zones page).
-  function openZoneRecords(zoneId) {
-    recordZoneId = zoneId;
-    view = 'records';
-  }
-
-  // Remember the zone chosen on the Records page so it is restored next visit.
+  // Remember the zone chosen on the Records tab so it is restored next visit.
   function setRecordZone(zoneId) {
     recordZoneId = zoneId;
   }
@@ -159,17 +148,12 @@
   const tabs = [
     { id: 'status', label: 'Status', icon: icons.status },
     { id: 'zones', label: 'Zones', icon: icons.zones, viewer: true },
-    { id: 'records', label: 'Records', icon: icons.records, viewer: true },
-    { id: 'split-horizon', label: 'Split Horizon', icon: icons['split-horizon'], viewer: true },
-    { id: 'blocklists', label: 'Blocklists', icon: icons.blocklists, viewer: true },
-    { id: 'domain-lists', label: 'Domain Lists', icon: icons['domain-lists'], viewer: true },
-    { id: 'advanced-blocking', label: 'Advanced Blocking', icon: icons['advanced-blocking'], viewer: true },
-    { id: 'ai-status', label: 'AI Scanner', icon: icons.ai, viewer: true },
-    { id: 'ai-verdicts', label: 'AI Verdicts', icon: icons.ai, viewer: true },
+    { id: 'filtering', label: 'Filtering', icon: icons.filtering, viewer: true },
+    { id: 'ai', label: 'AI', icon: icons.ai, viewer: true },
+    { id: 'logs', label: 'Logs', icon: icons.logs },
     { id: 'cache', label: 'Cache', icon: icons.cache },
     { id: 'users', label: 'Users', icon: icons.users },
     { id: 'certificates', label: 'Certificates', icon: icons.certificates },
-    { id: 'logs', label: 'Logs', icon: icons.logs },
     { id: 'settings', label: 'Settings', icon: icons.settings, viewer: true },
     { id: 'update', label: 'Update', icon: icons.update },
     { id: 'about', label: 'About', icon: icons.about },
@@ -224,17 +208,6 @@
       aria-label="Close navigation"
       onclick={() => setSidebar(false)}
     ></button>
-    <button
-      type="button"
-      class="fab"
-      class:hidden={sidebar.open}
-      aria-label="Open navigation"
-      onclick={() => setSidebar(true)}
-    >
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-        <path d="M3 6h18M3 12h18M3 18h18" />
-      </svg>
-    </button>
     <aside class:open={sidebar.open} class:closed={!sidebar.open}>
       <div class="side-head">
         <div class="brand">
@@ -299,27 +272,17 @@
       {#if view === 'status' || (isViewer && !tabs.some((t) => t.id === view))}
         <Status />
       {:else if view === 'zones'}
-        <Zones onOpenRecords={openZoneRecords} />
-      {:else if view === 'records'}
-        <Records zoneId={recordZoneId} onSelectZone={setRecordZone} />
-      {:else if view === 'split-horizon'}
-        <SplitHorizon />
-      {:else if view === 'blocklists'}
-        <Blocklists />
-      {:else if view === 'domain-lists'}
-        <DomainLists />
+        <ZonesPage {recordZoneId} onSelectZone={setRecordZone} />
+      {:else if view === 'filtering'}
+        <Filtering />
       {:else if view === 'cache'}
         <Cache />
       {:else if view === 'users'}
         <Users />
       {:else if view === 'certificates'}
         <Certificates />
-      {:else if view === 'advanced-blocking'}
-        <AdvancedBlocking />
-      {:else if view === 'ai-status'}
-        <AiStatus />
-      {:else if view === 'ai-verdicts'}
-        <AiVerdicts />
+      {:else if view === 'ai'}
+        <Ai />
       {:else if view === 'about'}
         <About />
       {:else if view === 'update'}
@@ -466,47 +429,47 @@
 
   .backdrop { display: none; }
 
-  .fab { display: none; }
+  main { flex: 1; min-width: 0; padding: 24px 28px; }
 
-  main { flex: 1; padding: 24px 28px; }
-
-  /* Wide screens: the sidebar is in-flow; collapsed it becomes a slim icon rail
-     so navigation stays available while saving horizontal space. */
-  @media (min-width: 900px) {
-    aside.closed {
-      width: 52px;
-      padding: 16px 6px;
-    }
-    aside.closed .side-head { justify-content: center; }
-    aside.closed .brand,
-    aside.closed .user-box,
-    aside.closed .password-notice { display: none; }
-    /* Icon-only navigation: labels are hidden and the buttons center. */
-    aside.closed nav {
-      min-height: 0;
-      overflow-y: auto;
-    }
-    aside.closed .nav-btn {
-      justify-content: center;
-      padding: 9px 0;
-    }
-    aside.closed .nav-btn span { display: none; }
+  /* Collapsed, the sidebar is a slim icon rail on every screen size so
+     navigation stays one tap away without covering the page. */
+  aside.closed {
+    width: 52px;
+    padding: 16px 6px;
   }
+  aside.closed .side-head { justify-content: center; }
+  aside.closed .brand,
+  aside.closed .user-box,
+  aside.closed .password-notice { display: none; }
+  /* Icon-only navigation: labels are hidden and the buttons center. */
+  aside.closed nav {
+    min-height: 0;
+    overflow-y: auto;
+  }
+  aside.closed .nav-btn {
+    justify-content: center;
+    padding: 9px 0;
+  }
+  aside.closed .nav-btn span { display: none; }
 
-  /* Narrow screens: the sidebar becomes a slide-in overlay drawer. */
+  /* Narrow screens: the rail is pinned to the left edge and expanding it
+     opens the full sidebar as an overlay drawer over the page. */
   @media (max-width: 899px) {
     aside {
       position: fixed;
       top: 0;
       left: 0;
-      height: 100vh;
-      width: 240px;
       z-index: 40;
-      transform: translateX(-100%);
-      transition: transform 0.2s ease;
+      transition: width 0.2s ease;
     }
-    aside.open { transform: translateX(0); }
-    main { padding: 16px 14px; }
+    aside.open {
+      width: 240px;
+      overflow-y: auto;
+    }
+    main {
+      margin-left: 52px;
+      padding: 16px 12px;
+    }
 
     .backdrop {
       display: block;
@@ -521,30 +484,6 @@
       transition: opacity 0.2s ease;
     }
     .backdrop.show { opacity: 1; pointer-events: auto; }
-
-    .fab {
-      display: inline-flex;
-      position: fixed;
-      top: 10px;
-      left: 10px;
-      z-index: 35;
-      width: 40px;
-      height: 40px;
-      border-radius: 8px;
-      background: var(--panel-2);
-      border: 1px solid var(--border);
-      color: var(--text);
-      cursor: pointer;
-      padding: 0;
-      align-items: center;
-      justify-content: center;
-    }
-    .fab:hover {
-      border-color: var(--accent);
-      color: var(--accent);
-    }
-    .fab svg { width: 22px; height: 22px; }
-    .fab.hidden { display: none; pointer-events: none; }
   }
 
   .modal-backdrop {

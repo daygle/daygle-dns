@@ -1,11 +1,7 @@
 <script>
   import { api } from '../api.js';
-  import PageHeader from '../PageHeader.svelte';
-  import { icons } from '../icons.svelte.js';
 
   let groups = $state([]);
-  let filterAaaa = $state(false);
-  let filterAaaaExcept = $state('');
   let error = $state(null);
   let notice = $state(null);
 
@@ -20,17 +16,13 @@
     { value: 'nx_domain', label: 'NXDOMAIN (does not exist)' },
     { value: 'refused', label: 'REFUSED' },
     { value: 'no_data', label: 'NODATA (empty answer)' },
-    { value: 'redirect', label: 'Redirect to address' },
+    { value: 'redirect', label: 'Redirect to Address' },
   ];
 
   async function load() {
     error = null;
     try {
-      const [g, cfg] = await Promise.all([api.blockingGroups(), api.config()]);
-      groups = g;
-      filterAaaa = !!cfg.policy?.filter_aaaa;
-      // Filter AAAA exceptions start empty until the user types values and saves them.
-      filterAaaaExcept = '';
+      groups = await api.blockingGroups();
     } catch (e) {
       error = String(e.message || e);
     }
@@ -44,20 +36,6 @@
       .filter(Boolean);
   }
 
-  async function saveFilterAaaa() {
-    notice = null;
-    try {
-      await api.updateSettings({
-        policy: {
-          filter_aaaa: filterAaaa,
-          filter_aaaa_except: parseList(filterAaaaExcept),
-        },
-      });
-      notice = 'Filter AAAA settings saved.';
-    } catch (e) {
-      notice = `Error: ${e.message || e}`;
-    }
-  }
 
   function startEdit(group) {
     testResult = null;
@@ -139,7 +117,7 @@
 
   function responseLabel(response) {
     if (!response) return '-';
-    if (response.kind === 'redirect') return `redirect → ${response.address}`;
+    if (response.kind === 'redirect') return `Redirect → ${response.address}`;
     return RESPONSES.find((r) => r.value === response.kind)?.label || response.kind;
   }
 
@@ -148,54 +126,25 @@
   });
 </script>
 
-<PageHeader
-  icon={icons['advanced-blocking']}
-  title="Advanced Blocking"
-  tagline="Per-client-group allow/block policies. Each group targets a set of client networks and applies its own allow list, block list and regex patterns; allow rules win over block rules, and groups are evaluated top to bottom."
-/>
-
 {#if error}
   <div class="card" style="border-color: var(--danger); color: var(--danger); margin-bottom: 14px">
     Failed to load: {error}
   </div>
 {/if}
 {#if notice}
-  <div class="card" style="border-color: var(--accent); margin-bottom: 14px">{notice}</div>
+  <div class="card" style="border-color: var(--ok); margin-bottom: 14px">{notice}</div>
 {/if}
 
-<!-- Filter AAAA -->
 <div class="card" style="margin-bottom: 14px">
-  <div class="spread">
-    <h3 style="margin: 0">Filter AAAA (Force IPv4)</h3>
-    <label class="check">
-      <input type="checkbox" bind:checked={filterAaaa} /> <span>Enabled</span>
-    </label>
-  </div>
-  <p class="muted" style="margin: 8px 0">
-    Answer AAAA (IPv6) queries with an empty response so dual-stack clients fall
-    back to IPv4. List any names - one per line, <code>*.suffix</code> allowed -
-    that must keep their IPv6 answers.
-  </p>
-  <textarea
-    rows="3"
-    placeholder={'*.ipv6.example.com\nnas.home.arpa'}
-    bind:value={filterAaaaExcept}
-  ></textarea>
-  <div class="row" style="margin-top: 8px">
-    <button onclick={saveFilterAaaa}>Save</button>
-  </div>
-</div>
-
-<!-- Groups -->
-<div class="card" style="margin-bottom: 14px">
-  <div class="spread">
-    <h3 style="margin: 0">Blocking Groups</h3>
-    <button onclick={() => startEdit(null)}>New Group</button>
+  <div class="spread" style="margin-bottom: 10px">
+    <h3 style="margin: 0">Client Groups ({groups.length})</h3>
+    <button onclick={() => startEdit(null)}>Add Group</button>
   </div>
 
   {#if groups.length === 0}
     <p class="muted">No blocking groups yet.</p>
   {:else}
+    <div class="table-wrap">
     <table>
       <thead>
         <tr><th>Name</th><th>Clients</th><th>Allow / Block</th><th>Response</th><th></th></tr>
@@ -207,7 +156,7 @@
               <strong>{g.name}</strong>
               {#if !g.enabled}<span class="pill">Disabled</span>{/if}
             </td>
-            <td class="muted">{g.clients.length ? g.clients.join(', ') : 'all clients'}</td>
+            <td class="muted">{g.clients.length ? g.clients.join(', ') : 'All Clients'}</td>
             <td class="muted">
               {g.allow.length + g.allow_regex.length} allow ·
               {g.block.length + g.block_regex.length} block
@@ -221,46 +170,47 @@
         {/each}
       </tbody>
     </table>
+    </div>
   {/if}
 </div>
 
 <!-- Editor -->
 {#if edit}
   <div class="card" style="border-color: var(--accent); margin-bottom: 14px">
-    <h3 style="margin-top: 0">{edit.isNew ? 'New Group' : `Edit "${edit.name}"`}</h3>
+    <h3 style="margin: 0 0 10px">{edit.isNew ? 'New Group' : `Edit "${edit.name}"`}</h3>
     <div class="form-grid">
       <label><span>Name</span><input bind:value={edit.name} placeholder="Kids devices" /></label>
       <label class="check" style="align-self: end">
         <input type="checkbox" bind:checked={edit.enabled} /> <span>Enabled</span>
       </label>
       <label class="wide">
-        <span>Client networks (one per line; blank = all clients)</span>
+        <span>Client Networks (one per line; blank = all clients)</span>
         <textarea rows="2" bind:value={edit.clients} placeholder={'192.168.1.0/24\n10.0.0.5'}></textarea>
       </label>
       <label>
-        <span>Allow - domains (override block)</span>
+        <span>Allow Domains (override block)</span>
         <textarea rows="4" bind:value={edit.allow} placeholder={'safe.example.com\n*.work.example'}></textarea>
       </label>
       <label>
-        <span>Block - domains</span>
+        <span>Block Domains</span>
         <textarea rows="4" bind:value={edit.block} placeholder={'*.doubleclick.net\ntracker.test'}></textarea>
       </label>
       <label>
-        <span>Allow - regex (override block)</span>
+        <span>Allow Regex (override block)</span>
         <textarea rows="3" bind:value={edit.allow_regex} placeholder={'^cdn\\d+\\.'}></textarea>
       </label>
       <label>
-        <span>Block - regex</span>
+        <span>Block Regex</span>
         <textarea rows="3" bind:value={edit.block_regex} placeholder={'^ads?[0-9]*\\.'}></textarea>
       </label>
       <label>
-        <span>Response when blocked</span>
+        <span>Response When Blocked</span>
         <select bind:value={edit.responseKind}>
           {#each RESPONSES as r (r.value)}<option value={r.value}>{r.label}</option>{/each}
         </select>
       </label>
       {#if edit.responseKind === 'redirect'}
-        <label><span>Redirect address</span><input bind:value={edit.redirectAddr} placeholder="0.0.0.0" /></label>
+        <label><span>Redirect Address</span><input bind:value={edit.redirectAddr} placeholder="0.0.0.0" /></label>
       {/if}
     </div>
     <div class="row" style="margin-top: 12px">
@@ -272,13 +222,13 @@
 
 <!-- Tester -->
 <div class="card">
-  <h3 style="margin-top: 0">Query Tester</h3>
-  <p class="muted" style="margin: 8px 0">
+  <h3 style="margin: 0 0 10px">Query Tester</h3>
+  <p class="muted help" style="margin: 0 0 10px">
     Check what the live groups would do with a given client and domain.
   </p>
   <div class="row" style="flex-wrap: wrap; gap: 8px">
-    <input style="flex: 1; min-width: 140px" bind:value={testClient} placeholder="client IP e.g. 192.168.1.50" />
-    <input style="flex: 1; min-width: 140px" bind:value={testDomain} placeholder="domain e.g. ads.example.com" />
+    <input style="flex: 1; min-width: 140px" bind:value={testClient} placeholder="Client IP, e.g. 192.168.1.50" />
+    <input style="flex: 1; min-width: 140px" bind:value={testDomain} placeholder="Domain, e.g. ads.example.com" />
     <button onclick={runTest}>Test</button>
   </div>
   {#if testResult}
@@ -297,22 +247,9 @@
 
 <style>
   p { max-width: 70ch; }
-  table { width: 100%; border-collapse: collapse; margin-top: 10px; }
-  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); vertical-align: top; }
-  th { font-size: 0.78rem; color: var(--muted); font-weight: 600; }
-  tr.disabled { opacity: 0.55; }
-  .num { text-align: right; white-space: nowrap; }
+  td { vertical-align: top; }
+  textarea { width: 100%; }
   .check { display: inline-flex; align-items: center; gap: 6px; }
-  textarea {
-    width: 100%;
-    background: var(--panel-2);
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    padding: 6px 8px;
-    font: inherit;
-    color: inherit;
-    resize: vertical;
-  }
   .form-grid {
     display: grid;
     grid-template-columns: repeat(2, 1fr);
@@ -321,6 +258,9 @@
   .form-grid label { display: flex; flex-direction: column; gap: 4px; font-size: 0.85rem; }
   .form-grid label.wide { grid-column: 1 / -1; }
   .form-grid label > span { color: var(--muted); }
+  /* Checkboxes keep their box beside full-contrast text inside the grid. */
+  .form-grid label.check { flex-direction: row; align-items: center; gap: 8px; padding-bottom: 8px; }
+  .form-grid label.check > span { color: var(--text); }
   .result { margin-top: 12px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
   .pill.group { border-color: var(--accent); color: var(--accent); }
   @media (max-width: 640px) {

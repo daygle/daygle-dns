@@ -80,8 +80,10 @@
   }
 
   function openEdit(user) {
-    editOriginal = structuredClone(user);
-    editUser = structuredClone(user);
+    // `user` is a $state proxy, which structuredClone cannot copy; take a
+    // plain snapshot instead.
+    editOriginal = $state.snapshot(user);
+    editUser = $state.snapshot(user);
     editError = null;
     resetPassword = '';
     resetError = null;
@@ -185,7 +187,7 @@
 
 <div class="card">
   <div class="spread" style="margin-bottom: 10px">
-    <h3 style="margin: 0">Accounts</h3>
+    <h3 style="margin: 0">Accounts ({users.length})</h3>
     <button onclick={() => (showForm = !showForm)}>{showForm ? 'Close' : 'Add User'}</button>
   </div>
 
@@ -300,14 +302,14 @@
           </label>
           <label class="checkbox-row">
             <input type="checkbox" bind:checked={editUser.enabled} disabled={editSaving || isLastAdmin(editUser)} />
-            <span>Account enabled</span>
+            <span>Account Enabled</span>
           </label>
         </div>
       </div>
 
       <form class="modal-section" onsubmit={saveReset}>
         <h4>Reset Password</h4>
-        <p class="muted" style="margin-top: 0">
+        <p class="muted help" style="margin-top: 0">
           Applies immediately and signs out this account's sessions.
         </p>
         <input type="password" bind:value={resetPassword} placeholder="New password (at least 8 characters)" autocomplete="new-password" />
@@ -333,18 +335,14 @@
 {/if}
 
 <style>
-  table { width: 100%; border-collapse: collapse; }
-  th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--border); }
-  th { color: var(--muted); font-size: 0.8rem; font-weight: 600; }
   tr.clickable { cursor: pointer; }
   tr.clickable:hover td { background: var(--panel-2); }
-  .row { display: flex; align-items: center; }
   .form-grid {
     display: grid;
-    grid-template-columns: 1fr 1fr 140px;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) 140px;
     gap: 12px;
   }
-  .modal-grid { grid-template-columns: 1fr 1fr; }
+  .modal-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   label { display: flex; flex-direction: column; gap: 4px; font-size: 0.85rem; }
   label span { color: var(--muted); }
   .checkbox-row { flex-direction: row; align-items: center; gap: 8px; margin-top: 18px; }

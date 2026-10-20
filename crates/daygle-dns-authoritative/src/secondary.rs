@@ -299,8 +299,10 @@ fn records_to_inputs(zone: &Name, records: &[Record]) -> (Option<SoaFields>, Vec
             }
             continue;
         }
-        // Skip DNSSEC and meta record types we do not store.
-        if record.record_type().is_dnssec() || record.record_type() == RecordType::OPT {
+        // Skip DNSSEC and meta record types we do not store. DS is kept: it is
+        // ordinary delegation data in the parent zone, not signing output.
+        let rr_type = record.record_type();
+        if (rr_type.is_dnssec() && rr_type != RecordType::DS) || rr_type == RecordType::OPT {
             continue;
         }
         let rtype = record.record_type().to_string();

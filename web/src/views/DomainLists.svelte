@@ -1,7 +1,5 @@
 <script>
   import { api, formatApiError } from '../api.js';
-  import PageHeader from '../PageHeader.svelte';
-  import { icons } from '../icons.svelte.js';
 
   let config = $state(null);
   let trusted = $state('');
@@ -14,14 +12,10 @@
     error = null;
     try {
       config = await api.config();
-      if (config == null) {
-        trusted = '';
-        blocked = '';
-        return;
-      }
-      // Domain lists start empty until the user types values and saves them.
-      trusted = '';
-      blocked = '';
+      // Load the saved lists: Save sends both lists whole, so starting empty
+      // would erase them on the next save.
+      trusted = (config?.policy?.allowlist || []).join('\n');
+      blocked = (config?.policy?.blocklist || []).join('\n');
     } catch (e) {
       error = formatApiError(e);
     }
@@ -53,15 +47,6 @@
   $effect(() => load());
 </script>
 
-<PageHeader icon={icons['domain-lists']} title="Domain Lists">
-  {#snippet tagline()}
-    Add domains that should always be trusted or always blocked. Enter one
-    domain per line; use <code>*.example.com</code> for subdomains. Trusted
-    domains take precedence over domain blocking, including remote blocklist
-    sources. Client access-control rules remain authoritative.
-  {/snippet}
-</PageHeader>
-
 {#if notice}
   <div class="card" style="border-color: var(--ok); margin-bottom: 14px">{notice}</div>
 {/if}
@@ -72,14 +57,14 @@
 {#if config}
   <div class="lists">
     <div class="card">
-      <h3 style="margin-top: 0">Trusted Domains (Allowlist)</h3>
-      <p class="muted small">These domains bypass the normal blocklist and remote sources.</p>
-      <textarea rows="14" bind:value={trusted} placeholder="updates.example.com\n*.trusted.example"></textarea>
+      <h3 style="margin: 0 0 10px">Trusted Domains (Allowlist)</h3>
+      <p class="muted help" style="margin: 0 0 10px">These domains bypass the normal blocklist and remote sources.</p>
+      <textarea rows="14" bind:value={trusted} placeholder={"updates.example.com\n*.trusted.example"}></textarea>
     </div>
     <div class="card">
-      <h3 style="margin-top: 0">Blocked Domains (Blocklist)</h3>
-      <p class="muted small">These domains are blocked before normal resolution.</p>
-      <textarea rows="14" bind:value={blocked} placeholder="ads.example.com\n*.tracking.example"></textarea>
+      <h3 style="margin: 0 0 10px">Blocked Domains (Blocklist)</h3>
+      <p class="muted help" style="margin: 0 0 10px">These domains are blocked before normal resolution.</p>
+      <textarea rows="14" bind:value={blocked} placeholder={"ads.example.com\n*.tracking.example"}></textarea>
     </div>
   </div>
   <div class="row" style="margin-top: 14px">
@@ -87,12 +72,13 @@
     <button class="secondary" onclick={load} disabled={busy}>Reload</button>
   </div>
 {:else}
-  <p class="muted">Loading…</p>
+  <div class="card">
+    <p class="muted">Loading…</p>
+  </div>
 {/if}
 
 <style>
   .lists { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
-  textarea { width: 100%; min-height: 260px; background: var(--panel-2); border: 1px solid var(--border); border-radius: 6px; padding: 8px; font: inherit; color: inherit; resize: vertical; }
-  .small { font-size: 0.8rem; }
+  textarea { width: 100%; min-height: 260px; padding: 8px; }
   @media (max-width: 760px) { .lists { grid-template-columns: 1fr; } }
 </style>

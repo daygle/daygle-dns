@@ -155,7 +155,9 @@
     Failed to load status: {error}
   </div>
 {:else if !status}
-  <p class="muted">Loading…</p>
+  <div class="card">
+    <p class="muted">Loading…</p>
+  </div>
 {:else}
   <div class="grid">
     {#each cards as card (card.label)}
@@ -166,7 +168,7 @@
     {/each}
   </div>
 
-  <div class="card" style="margin-top: 18px">
+  <div class="card" style="margin-top: 14px">
     <div class="spread" style="margin-bottom: 10px">
       <h3 style="margin: 0">Query Volume</h3>
       <div class="row">
@@ -243,7 +245,7 @@
 
   <div class="tops">
     <div class="card">
-      <h3 style="margin-top: 0">Top Clients</h3>
+      <h3 style="margin: 0 0 10px">Top Clients</h3>
       {#if stats?.top_clients?.length}
         <table>
           <tbody>
@@ -257,7 +259,7 @@
       {/if}
     </div>
     <div class="card">
-      <h3 style="margin-top: 0">Top Domains</h3>
+      <h3 style="margin: 0 0 10px">Top Domains</h3>
       {#if stats?.top_domains?.length}
         <table>
           <tbody>
@@ -271,7 +273,7 @@
       {/if}
     </div>
     <div class="card">
-      <h3 style="margin-top: 0">Top Blocked</h3>
+      <h3 style="margin: 0 0 10px">Top Blocked</h3>
       {#if stats?.top_blocked?.length}
         <table>
           <tbody>
@@ -286,34 +288,40 @@
     </div>
   </div>
 
-  <div class="card" style="margin-top: 18px">
-    <h3 style="margin-top: 0">Runtime</h3>
+  <div class="card" style="margin-top: 14px">
+    <h3 style="margin: 0 0 10px">Runtime</h3>
     <table>
       <tbody>
-        <tr><td>Version</td><td><code>v{status.version}</code></td></tr>
-        <tr><td>Uptime</td><td>{formatUptime(status.uptime_secs)}</td></tr>
-        <tr><td>Zones</td><td>{status.zones}</td></tr>
-        <tr><td>Records</td><td>{status.records}</td></tr>
+        <tr><td class="muted">Version</td><td><code>v{status.version}</code></td></tr>
+        <tr><td class="muted">Uptime</td><td>{formatUptime(status.uptime_secs)}</td></tr>
+        <tr><td class="muted">Zones</td><td>{status.zones}</td></tr>
+        <tr><td class="muted">Records</td><td>{status.records}</td></tr>
         <tr>
-          <td>Recursion</td>
+          <td class="muted">Recursion</td>
           <td><span class:pill={true} class:ok={status.recursion} class:err={!status.recursion}>
             {status.recursion ? 'Enabled' : 'Disabled'}
           </span></td>
         </tr>
         <tr>
-          <td>DNSSEC validation</td>
+          <td class="muted">DNSSEC Validation</td>
           <td><span class:pill={true} class:ok={status.dnssec} class:err={!status.dnssec}>
             {status.dnssec ? 'Enabled' : 'Disabled'}
           </span></td>
         </tr>
         <tr>
-          <td>DoT</td>
+          <td class="muted">DoT</td>
           <td><span class:pill={true} class:ok={status.dot_enabled} class:err={!status.dot_enabled}>
             {status.dot_enabled ? 'Enabled' : 'Disabled'}
           </span></td>
         </tr>
         <tr>
-          <td>DoQ</td>
+          <td class="muted">DoH</td>
+          <td><span class:pill={true} class:ok={status.doh_enabled} class:err={!status.doh_enabled}>
+            {status.doh_enabled ? 'Enabled' : 'Disabled'}
+          </span></td>
+        </tr>
+        <tr>
+          <td class="muted">DoQ</td>
           <td><span class:pill={true} class:ok={status.doq_enabled} class:err={!status.doq_enabled}>
             {status.doq_enabled ? 'Enabled' : 'Disabled'}
           </span></td>
@@ -326,7 +334,7 @@
 <style>
   .grid {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
     gap: 12px;
   }
   .stat .big { font-size: 1.6rem; font-weight: 700; margin-top: 6px; }
@@ -387,7 +395,6 @@
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
     gap: 12px;
-    margin-top: 18px;
+    margin-top: 14px;
   }
-  .num { text-align: right; font-variant-numeric: tabular-nums; }
 </style>

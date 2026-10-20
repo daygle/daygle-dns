@@ -90,16 +90,18 @@ dnssec_rollover_retire_days = 14
 dnssec_maintenance_secs = 3600
 
 # Serve AXFR/IXFR zone transfers (RFC 5936) for hosted zones.
-# axfr_networks limits which clients may transfer (empty = anyone).
+# axfr_networks limits which clients may transfer (empty = anyone),
+# e.g. ["10.0.0.0/8", "192.168.0.0/16"].
 axfr_enabled = false
-axfr_networks = ["10.0.0.0/8", "192.168.0.0/16"]
+axfr_networks = []
 
 # Accept RFC 2136 dynamic updates (UPDATE messages) for primary zones.
 # Changes are written through to SQLite and go live immediately. Off by
 # default: anyone who can reach the server could otherwise add records.
-# update_networks limits which clients may update (empty = anyone).
+# update_networks limits which clients may update (empty = anyone),
+# e.g. ["10.0.0.0/8", "192.168.0.0/16"].
 allow_dynamic_updates = false
-update_networks = ["10.0.0.0/8", "192.168.0.0/16"]
+update_networks = []
 
 # Secondary zones: replicated from a master via AXFR/IXFR. The zone's
 # records and SOA are re-pulled from the first reachable master on
@@ -115,9 +117,10 @@ update_networks = ["10.0.0.0/8", "192.168.0.0/16"]
 #
 # Outbound: when a primary zone changes (e.g. a dynamic update is applied),
 # send a NOTIFY to each target so secondaries pull immediately instead of
-# waiting out their refresh interval. Requires at least one target.
+# waiting out their refresh interval. Requires at least one target,
+# e.g. ["192.0.2.20", "192.0.2.21:5353"].
 notify_enabled = false
-notify_targets = ["192.0.2.20", "192.0.2.21:5353"]
+notify_targets = []
 #
 # Inbound: accept NOTIFYs from masters for the secondary zones above and
 # refresh the affected zone immediately. The NOTIFY is answered with the
@@ -219,10 +222,12 @@ cors_origins = []
 [policy]
 enabled = true
 # Allowlist / trusted domains are evaluated before every domain block rule.
-# These names are never blocked by the policy engine (ACLs still apply).
-allowlist = ["updates.example.com"]
-# Blocklist / blocked domains are always answered with NXDOMAIN.
-blocklist = ["*.doubleclick.net", "*.ads.example.com"]
+# These names are never blocked by the policy engine (ACLs still apply),
+# e.g. ["updates.example.com"].
+allowlist = []
+# Blocklist / blocked domains are always answered with NXDOMAIN,
+# e.g. ["*.doubleclick.net", "*.ads.example.com"].
+blocklist = []
 # Optional: extra blocklist files on disk (one domain per line). Only
 # reference files that exist - a missing file aborts startup. You can
 # add your own lists here and reload, or fetch remote lists with
@@ -232,9 +237,10 @@ blocklist_files = []
 # Filter AAAA (IPv6): answer AAAA queries with an empty NODATA response so
 # dual-stack clients fall back to IPv4 (the equivalent of Technitium's
 # "Block AAAA" app). `filter_aaaa_except` lists names - or `*.suffix`
-# wildcards - that must stay reachable over IPv6.
+# wildcards - that must stay reachable over IPv6, e.g.
+# ["*.ipv6.example.com", "nas.home.arpa"].
 filter_aaaa = false
-filter_aaaa_except = ["*.ipv6.example.com", "nas.home.arpa"]
+filter_aaaa_except = []
 
 # Remote blocklist sources: fetched over HTTP(S) and merged into the
 # blocklist, refreshed on a schedule (like Technitium's blocklist manager).

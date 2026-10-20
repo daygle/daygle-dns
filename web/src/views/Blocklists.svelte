@@ -1,7 +1,5 @@
 <script>
   import { api, formatApiError } from '../api.js';
-  import PageHeader from '../PageHeader.svelte';
-  import { icons } from '../icons.svelte.js';
 
   let sources = $state([]);
   let total = $state(0);
@@ -16,18 +14,18 @@
   let draft = $state(null);
 
   const FORMAT_OPTIONS = [
-    { value: 'auto', label: 'Auto-detect' },
+    { value: 'auto', label: 'Auto-Detect' },
     { value: 'domains', label: 'Domains (one per line)' },
-    { value: 'hosts', label: 'Hosts file (e.g. StevenBlack)' },
+    { value: 'hosts', label: 'Hosts File (e.g. StevenBlack)' },
     { value: 'adblock', label: 'Adblock (AdGuard / uBlock)' },
   ];
   const REFRESH_OPTIONS = [
-    { hours: 1, label: '1 hour' },
-    { hours: 6, label: '6 hours' },
-    { hours: 12, label: '12 hours' },
-    { hours: 24, label: '24 hours' },
-    { hours: 72, label: '3 days' },
-    { hours: 168, label: '7 days' },
+    { hours: 1, label: '1 Hour' },
+    { hours: 6, label: '6 Hours' },
+    { hours: 12, label: '12 Hours' },
+    { hours: 24, label: '24 Hours' },
+    { hours: 72, label: '3 Days' },
+    { hours: 168, label: '7 Days' },
   ];
 
   async function load() {
@@ -232,8 +230,8 @@
   }
 
   function ago(secs) {
-    if (secs === null || secs === undefined) return 'never';
-    if (secs < 60) return 'just now';
+    if (secs === null || secs === undefined) return 'Never';
+    if (secs < 60) return 'Just Now';
     if (secs < 3600) return `${Math.floor(secs / 60)}m ago`;
     if (secs < 86400) return `${Math.floor(secs / 3600)}h ago`;
     return `${Math.floor(secs / 86400)}d ago`;
@@ -248,25 +246,6 @@
   });
 </script>
 
-<PageHeader
-  icon={icons.blocklists}
-  title="Blocklists"
-  tagline="Fetch remote blocklists (domain lists, hosts files or adblock filters) and merge them into the blocklist. Add, edit and remove sources below - changes are stored in the server database and applied to the running server immediately. Sources are validated before they are saved."
-/>
-
-<div class="row" style="margin-bottom: 14px">
-  <button onclick={openAdd}>Add Source</button>
-  <button class="secondary" onclick={refreshNow} disabled={refreshing || !configured}>
-    {refreshing ? 'Refreshing…' : 'Refresh All'}
-  </button>
-  <button class="secondary" onclick={load}>Refresh</button>
-  {#if configured}
-    <span class="muted">
-      {sources.length} source{sources.length === 1 ? '' : 's'} · {fmt(total)} domains blocked
-    </span>
-  {/if}
-</div>
-
 {#if notice}
   <div class="card" style="border-color: var(--ok); margin-bottom: 14px">{notice}</div>
 {/if}
@@ -280,7 +259,7 @@
   </div>
 {:else if !configured}
   <div class="card">
-    <h3 style="margin-top: 0">No Remote Blocklist Sources Configured</h3>
+    <h3 style="margin: 0 0 10px">No Remote Blocklist Sources Configured</h3>
     <p class="muted" style="max-width: 70ch">
       Add your first source to start blocking from a remote list. Give it a
       name, paste the URL, and pick the content format - or leave the format
@@ -292,15 +271,29 @@
     </div>
   </div>
 {:else}
-  <div class="card" style="padding: 0; overflow: auto">
+  <div class="card">
+    <div class="spread" style="margin-bottom: 10px; gap: 10px; flex-wrap: wrap">
+      <div>
+        <h3 style="margin: 0">Sources ({sources.length})</h3>
+        <span class="muted small">{fmt(total)} domains blocked</span>
+      </div>
+      <div class="row" style="gap: 8px">
+        <button class="secondary" onclick={load}>Reload</button>
+        <button class="secondary" onclick={refreshNow} disabled={refreshing}>
+          {refreshing ? 'Refreshing…' : 'Refresh All'}
+        </button>
+        <button onclick={openAdd}>Add Source</button>
+      </div>
+    </div>
+    <div class="table-wrap">
     <table>
       <thead>
         <tr>
           <th>Source</th>
           <th>Format</th>
-          <th>Refresh</th>
+          <th>Refresh Interval</th>
           <th style="text-align: right">Domains</th>
-          <th>Last refresh</th>
+          <th>Last Refresh</th>
           <th>Status</th>
           <th></th>
         </tr>
@@ -335,19 +328,19 @@
         {/each}
       </tbody>
     </table>
+    </div>
+    <p class="muted help">
+      Refresh All fetches every source immediately. Sources also refresh
+      automatically on their configured interval; a failed fetch is reported
+      here and retried on the next cycle.
+    </p>
   </div>
-
-  <p class="muted" style="font-size: 0.8rem">
-    Refresh All fetches every source immediately. Sources also refresh
-    automatically on their configured interval; a failed fetch is reported
-    here and retried on the next cycle.
-  </p>
 {/if}
 
 <!-- Source editor -->
 {#if draft}
-  <div class="card" style="border-color: var(--accent); margin-bottom: 14px">
-    <div class="spread">
+  <div class="card" style="border-color: var(--accent); margin: 14px 0">
+    <div class="spread" style="margin-bottom: 10px">
       <h3 style="margin: 0">
         {draft.originalName ? `Edit "${draft.originalName}"` : 'New Source'}
       </h3>
@@ -356,13 +349,13 @@
       </label>
     </div>
 
-    <div class="form-grid" style="margin-top: 12px">
+    <div class="form-grid">
       <label>
         <span>Name</span>
         <input bind:value={draft.name} placeholder="StevenBlack hosts" />
       </label>
       <label>
-        <span>Refresh interval</span>
+        <span>Refresh Interval</span>
         <select bind:value={draft.refreshHours}>
           {#each REFRESH_OPTIONS as o (o.hours)}
             <option value={o.hours}>{o.label}</option>
@@ -383,8 +376,8 @@
             <option value={o.value}>{o.label}</option>
           {/each}
         </select>
-        <small class="muted">
-          Auto-detect probes the URL and picks hosts, domains or adblock from
+        <small class="muted help">
+          Auto-Detect probes the URL and picks hosts, domains or adblock from
           the content. Picking a concrete format also checks the content
           matches before saving.
         </small>
@@ -397,9 +390,9 @@
         style="border-color: {draft.result.ok ? 'var(--ok)' : 'var(--danger)'}"
       >
         {#if draft.result.ok}
-          <span class="pill ok">valid</span>
+          <span class="pill ok">Valid</span>
         {:else}
-          <span class="pill err">{draft.result.transport ? 'unreachable' : 'invalid'}</span>
+          <span class="pill err">{draft.result.transport ? 'Unreachable' : 'Invalid'}</span>
         {/if}
         <span class="muted">{draft.result.msg}</span>
       </div>
@@ -418,13 +411,6 @@
 {/if}
 
 <style>
-  tr.disabled { opacity: 0.55; }
-  .pill.ok { color: var(--ok); border-color: var(--ok); }
-  .pill.err { color: var(--danger); border-color: var(--danger); }
-  table { width: 100%; border-collapse: collapse; margin-top: 10px; }
-  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); vertical-align: middle; }
-  th { font-size: 0.78rem; color: var(--muted); font-weight: 600; }
-  .num { text-align: right; white-space: nowrap; }
   .check { display: inline-flex; align-items: center; gap: 6px; }
   .form-grid {
     display: grid;
@@ -434,7 +420,6 @@
   .form-grid label { display: flex; flex-direction: column; gap: 4px; font-size: 0.85rem; }
   .form-grid label.wide { grid-column: 1 / -1; }
   .form-grid label > span { color: var(--muted); }
-  .form-grid small { font-size: 0.78rem; }
   .result {
     margin-top: 12px;
     display: flex;

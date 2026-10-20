@@ -1,7 +1,5 @@
 <script>
   import { api, formatApiError } from '../api.js';
-  import PageHeader from '../PageHeader.svelte';
-  import { icons } from '../icons.svelte.js';
 
   // The zone to preselect, passed when coming from the Zones page.
   let { zoneId = null, onSelectZone = () => {} } = $props();
@@ -10,7 +8,26 @@
   // the TTL field of new records.
   let defaultTtl = $state(3600);
 
-  const TYPES = ['A', 'AAAA', 'CNAME', 'MX', 'TXT', 'NS', 'SRV', 'PTR', 'CAA'];
+  // Value examples in zone-file presentation format, which is what the server
+  // parses. MX and SRV carry their priority inside the value.
+  const EXAMPLES = {
+    A: '192.0.2.1',
+    AAAA: '2001:db8::1',
+    CNAME: 'target.example.com.',
+    MX: '10 mail.example.com.',
+    TXT: '"v=spf1 mx -all"',
+    NS: 'ns1.example.com.',
+    SRV: '10 5 5060 sip.example.com.',
+    PTR: 'host.example.com.',
+    CAA: '0 issue "letsencrypt.org"',
+    HTTPS: '1 . alpn=h2,h3',
+    SVCB: '1 svc.example.com. port=8443',
+    DS: '12345 13 2 3F2A6B1C…',
+    TLSA: '3 1 1 0C72AC70B745…',
+    SSHFP: '4 2 9F6B2C1D0E3A…',
+    NAPTR: '100 10 "S" "SIP+D2U" "" _sip._udp.example.com.',
+  };
+  const TYPES = Object.keys(EXAMPLES);
 
   let zones = $state([]);
   let zonesLoaded = $state(false);
@@ -112,13 +129,16 @@
     if (!edit || !selected) return;
     notice = null;
     try {
-      await api.upsertRecord(selected.id, {
+      const body = {
         name: edit.name,
         rtype: edit.rtype,
         content: edit.content,
         ttl: Number(edit.ttl) || defaultTtl,
         priority: Number(edit.priority) || 0,
-      });
+      };
+      // Editing replaces the record in place; only new records are added.
+      if (edit.isNew) await api.upsertRecord(selected.id, body);
+      else await api.replaceRecord(selected.id, edit.id, body);
       edit = null;
       notice = 'Record saved and applied live.';
       await loadRecords(selected.id);
@@ -148,12 +168,6 @@
   });
 </script>
 
-<PageHeader
-  icon={icons.records}
-  title="Records"
-  tagline="View and edit the DNS records of an authoritative zone. Pick a zone below; secondary zones are refreshed from their master and are read-only here."
-/>
-
 {#if notice}
   <div class="card notice" class:error={notice.startsWith('Error:')}>{notice}</div>
 {/if}
@@ -162,7 +176,9 @@
 {/if}
 
 {#if !zonesLoaded}
-  <p class="muted">Loading…</p>
+  <div class="card">
+    <p class="muted">Loading…</p>
+  </div>
 {:else if zones.length === 0}
   <div class="card">
     <p class="muted" style="margin: 0">
@@ -219,13 +235,15 @@
   </div>
 
   {#if !selected}
-    <p class="muted">Select a zone to view and edit its records.</p>
+    <div class="card">
+      <p class="muted" style="margin: 0">Select a zone to view and edit its records.</p>
+    </div>
   {:else}
     <div class="card">
-      <div class="spread" style="margin-bottom: 12px">
-        <strong>Records for <code>{selected.name}</code></strong>
+      <div class="spread" style="margin-bottom: 10px">
+        <h3 style="margin: 0">Records for <code>{selected.name}</code> ({records.length})</h3>
         {#if selected.zone_type !== 'secondary'}
-          <button onclick={() => startEdit(null)}>+ Record</button>
+          <button onclick={() => startEdit(null)}>Add Record</button>
         {/if}
       </div>
 
@@ -250,7 +268,7 @@
                       <button class="danger" onclick={() => removeRecord(record)}>✕</button>
                     </div>
                   {:else}
-                    <span class="muted">Read-only</span>
+                    <span class="muted">Read-Only</span>
                   {/if}
                 </td>
               </tr>
@@ -261,21 +279,19 @@
       {#if recordsLoading}
         <p class="muted">Loading records…</p>
       {:else if records.length === 0}
-        <p class="muted">No records yet. Add one with the + Record button.</p>
+        <p class="muted">No records yet. Add one with the Add Record button.</p>
       {/if}
 
       {#if edit}
         <div class="card" style="margin-top: 14px; background: var(--panel-2)">
-          <h4 style="margin-top: 0">{edit.isNew ? 'New Record' : 'Edit Record'}</h4>
+          <h4 style="margin: 0 0 10px">{edit.isNew ? 'New Record' : 'Edit Record'}</h4>
           <div class="grid2">
             <label>Name <input placeholder="www" bind:value={edit.name} /></label>
             <label>Type<select bind:value={edit.rtype}>{#each TYPES as t (t)}<option value={t}>{t}</option>{/each}</select></label>
-            <label>Value <input placeholder="192.0.2.1" bind:value={edit.content} /></label>
+            <label>Value <input placeholder={EXAMPLES[edit.rtype]} bind:value={edit.content} /></label>
             <label>TTL <input type="number" bind:value={edit.ttl} /></label>
-            {#if edit.rtype === 'MX' || edit.rtype === 'SRV'}
-              <label>Priority <input type="number" bind:value={edit.priority} /></label>
-            {/if}
           </div>
+          <p class="muted help value-help">Format: <code>{EXAMPLES[edit.rtype]}</code>{#if edit.rtype === 'MX' || edit.rtype === 'SRV'} (the priority is the first number){/if}</p>
           <div class="row" style="margin-top: 10px">
             <button onclick={saveEdit}>Save</button>
             <button class="secondary" onclick={() => (edit = null)}>Cancel</button>
@@ -287,6 +303,7 @@
 {/if}
 
 <style>
+  .value-help { margin-top: 8px; }
   .picker { margin-bottom: 14px; gap: 10px; align-items: center; }
   .picker-label { font-size: 0.85rem; color: var(--muted); margin: 0; }
   .picker-box { position: relative; flex: 0 1 340px; min-width: 240px; }
@@ -337,12 +354,6 @@
   .notice { margin-bottom: 14px; }
   .notice.error { border-color: var(--danger); color: var(--danger); }
   .zone-help { margin-top: -4px; }
-  .table-wrap { overflow-x: auto; }
-  table { width: 100%; border-collapse: collapse; }
-  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); vertical-align: middle; }
-  th { font-size: 0.78rem; color: var(--muted); font-weight: 600; }
-  .num { text-align: right; white-space: nowrap; }
-  td.num button { padding: 4px 9px; }
   .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
   label { display: flex; flex-direction: column; gap: 4px; font-size: 0.85rem; color: var(--muted); }
 </style>

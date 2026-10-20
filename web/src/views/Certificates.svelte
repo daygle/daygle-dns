@@ -138,7 +138,7 @@
     <h3 style="margin: 0">Managed Certificates</h3>
     {#if !isViewer}
       <button onclick={() => { showForm = !showForm; if (!showForm) resetForm(); }}>
-        {showForm ? 'Close' : 'New Certificate'}
+        {showForm ? 'Close' : 'Add Certificate'}
       </button>
     {/if}
   </div>
@@ -148,11 +148,11 @@
       <div class="row" style="gap: 16px; flex-wrap: wrap">
         <label class="radio-label">
           <input type="radio" bind:group={mode} value="self" />
-          <span>Generate self-signed</span>
+          <span>Generate Self-Signed</span>
         </label>
         <label class="radio-label">
           <input type="radio" bind:group={mode} value="upload" />
-          <span>Upload certificate + key</span>
+          <span>Upload Certificate + Key</span>
         </label>
       </div>
 
@@ -227,11 +227,10 @@
                 <span class="muted">-</span>
               {/if}
             </td>
-            <td class="row" style="justify-content: flex-end; gap: 6px">
+            <td class="num">
               {#if !isViewer}
                 <button
                   class="danger"
-                  style="padding: 4px 10px"
                   disabled={busy || (cert.in_use && cert.in_use.length > 0)}
                   title={cert.in_use && cert.in_use.length > 0 ? 'Change the listener on Settings first' : undefined}
                   onclick={() => remove(cert)}
@@ -246,10 +245,6 @@
 </div>
 
 <style>
-  table { width: 100%; border-collapse: collapse; }
-  th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--border); }
-  th { color: var(--muted); font-size: 0.8rem; font-weight: 600; }
-  .row { display: flex; align-items: center; }
   label { display: flex; flex-direction: column; gap: 4px; font-size: 0.85rem; }
   label span { color: var(--muted); }
   .radio-label { flex-direction: row; align-items: center; gap: 6px; font-size: 0.9rem; }
@@ -257,14 +252,6 @@
   .file-label { font-size: 0.85rem; }
   .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
   .pem-grid { grid-template-columns: 1fr 1fr; margin-top: 12px; }
-  textarea {
-    background: var(--panel);
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    padding: 6px 8px;
-    font: 0.8rem/1.4 ui-monospace, 'Cascadia Code', Consolas, monospace;
-    color: inherit;
-    resize: vertical;
-  }
+  textarea { font: 0.8rem/1.4 ui-monospace, 'Cascadia Code', Consolas, monospace; }
   .form-error { margin-top: 10px; color: var(--danger); font-size: 0.85rem; }
 </style>

@@ -123,6 +123,8 @@ GET /api/status
   "recursion": true,
   "dnssec": true,
   "dot_enabled": true,
+  "doh_enabled": false,
+  "doq_enabled": false,
   "api_enabled": true
 }
 ```
@@ -217,7 +219,7 @@ Every served DNS query is recorded into the SQLite database (when
 name/type, transport (`udp`, `tcp`, `tls`, `https`, `quic`), outcome
 (`authoritative`, `recursive`, `split_horizon`, `blocked`, `rate_limited`,
 `error`), response code and server-side handling time. The console's
-**Logs → Query Logs** tab searches this history.
+**Logs → Query Log** tab searches this history.
 
 `GET` returns a page of entries (newest first) plus the total count under
 the same filter. `qname` accepts `*` wildcards (`*.example.com`, `www.*`)
@@ -420,7 +422,15 @@ PUT /api/zones/{id}/records
 ```
 
 Supported `rtype` values: `A`, `AAAA`, `CNAME`, `MX`, `TXT`, `NS`, `SOA`,
-`SRV`, `PTR`, `CAA`.
+`SRV`, `PTR`, `CAA`, `HTTPS`, `SVCB`, `DS`, `TLSA`, `SSHFP`, `NAPTR`.
+`content` must parse as that type's RDATA, otherwise the request fails with
+400. `priority` is stored but not served: MX and SRV take their priority from
+`content`.
+
+`PUT /api/zones/{id}/records/{rid}` replaces an existing record in place with
+the same body, keeping its id and disabled state (the collection `PUT` above
+always adds a new record). It returns 404 when the record does not exist in
+that zone.
 
 `PUT /api/zones/{id}/records/{rid}/disabled` stages (or re-enables) a single
 record without deleting it - a disabled record stays in the zone but stops

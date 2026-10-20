@@ -1,12 +1,10 @@
 <script>
   import { api, formatApiError } from '../api.js';
-  import PageHeader from '../PageHeader.svelte';
-  import { icons } from '../icons.svelte.js';
   import { formatTime } from '../datetime.svelte.js';
 
   const PER_PAGE = 50;
   const STATUS_FILTERS = [
-    { value: '', label: 'All statuses' },
+    { value: '', label: 'All Statuses' },
     { value: 'pending', label: 'Pending' },
     { value: 'classified', label: 'Classified' },
     { value: 'skipped', label: 'Skipped' },
@@ -73,6 +71,11 @@
     }
   }
 
+  // Severity and status are lowercase enum values; show them capitalized.
+  function title(s) {
+    return s ? s.charAt(0).toUpperCase() + s.slice(1) : s;
+  }
+
   function pages() {
     return Math.max(1, Math.ceil(total / PER_PAGE));
   }
@@ -98,12 +101,6 @@
   });
 </script>
 
-<PageHeader
-  icon={icons.ai}
-  title="AI Verdicts"
-  tagline="Per-domain classifications from the AI scanner, newest activity first. Allow overrides a verdict permanently; every auto-block decision respects cleared and allow overrides."
-/>
-
 {#if notice}
   <div class="card" style="border-color: var(--ok); margin-bottom: 14px">{notice}</div>
 {/if}
@@ -111,39 +108,32 @@
   <div class="card" style="border-color: var(--danger); color: var(--danger); margin-bottom: 14px">{error}</div>
 {/if}
 
-<div class="row" style="margin-bottom: 14px">
-  <select bind:value={statusFilter} style="min-width: 150px">
-    {#each STATUS_FILTERS as f (f.label)}
-      <option value={f.value}>{f.label}</option>
-    {/each}
-  </select>
-  <button class="secondary" onclick={load}>Refresh</button>
-  {#if !disabled}
-    <span class="muted">{fmt(total)} verdict{total === 1 ? '' : 's'}</span>
-  {/if}
-</div>
-
 {#if loading}
   <div class="card">
     <p class="muted">Loading…</p>
   </div>
 {:else if disabled}
   <div class="card">
-    <h3 style="margin-top: 0">AI Subsystem Disabled</h3>
+    <h3 style="margin: 0 0 10px">AI Subsystem Disabled</h3>
     <p class="muted" style="max-width: 70ch">
       The <code>[ai]</code> section of the configuration is not enabled, so
       there are no verdicts.
     </p>
   </div>
-{:else if !rows.length}
-  <div class="card">
-    <p class="muted">
-      No verdicts{statusFilter ? ` with status "${statusFilter}"` : ''} yet -
-      they appear as the scanner classifies domains from live traffic.
-    </p>
-  </div>
 {:else}
-  <div class="card" style="padding: 0; overflow: auto">
+  <div class="card">
+    <div class="spread" style="margin-bottom: 10px; gap: 10px; flex-wrap: wrap">
+      <h3 style="margin: 0">Verdicts ({fmt(total)})</h3>
+      <div class="row" style="gap: 8px">
+        <select bind:value={statusFilter} style="min-width: 150px">
+          {#each STATUS_FILTERS as f (f.label)}
+            <option value={f.value}>{f.label}</option>
+          {/each}
+        </select>
+        <button class="secondary" onclick={load}>Reload</button>
+      </div>
+    </div>
+    <div class="table-wrap">
     <table>
       <thead>
         <tr>
@@ -168,12 +158,12 @@
             </td>
             <td>
               <span class="pill" class:err={r.severity === 'threat'}>
-                {r.severity}
+                {title(r.severity)}
               </span>
             </td>
             <td>
               <span class="pill" class:ok={r.status === 'classified'}>
-                {r.status}
+                {title(r.status)}
               </span>
             </td>
             <td class="num">{r.confidence.toFixed(3)}</td>
@@ -193,6 +183,13 @@
         {/each}
       </tbody>
     </table>
+    </div>
+    {#if !rows.length}
+      <p class="muted">
+        No verdicts{statusFilter ? ` with status "${statusFilter}"` : ''} yet -
+        they appear as the scanner classifies domains from live traffic.
+      </p>
+    {/if}
   </div>
 
   <div class="row" style="margin-top: 12px">
@@ -207,12 +204,5 @@
 {/if}
 
 <style>
-  table { width: 100%; border-collapse: collapse; }
-  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); vertical-align: middle; }
-  th { font-size: 0.78rem; color: var(--muted); font-weight: 600; white-space: nowrap; }
-  .num { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
-  .muted { color: var(--muted); }
   .evidence { max-width: 260px; font-size: 0.78rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .pill.ok { color: var(--ok); border-color: var(--ok); }
-  .pill.err { color: var(--danger); border-color: var(--danger); }
 </style>

@@ -199,6 +199,7 @@ pub async fn status(State(state): State<AppState>) -> Response {
         "recursion": state.resolver.load_full().is_some(),
         "dnssec": config.recursive.dnssec_validate,
         "dot_enabled": config.dot.enabled,
+        "doh_enabled": config.doh.enabled,
         "doq_enabled": config.doq.enabled,
         "users_configured": state
             .catalog
@@ -1627,6 +1628,27 @@ pub async fn upsert_record(
             let _ = state.catalog.reload();
             Json(record).into_response()
         }
+        Err(e) => map_err(e),
+    }
+}
+
+/// Replace an existing record in place (the console's Edit action). Unlike
+/// the collection `PUT`, which always adds a record, this keeps the record's
+/// id so editing never leaves the old value behind.
+pub async fn replace_record(
+    State(state): State<AppState>,
+    Path((zone_id, rid)): Path<(String, String)>,
+    Json(input): Json<RecordInput>,
+) -> Response {
+    if let Some(response) = reject_secondary_mutation(&state, &zone_id) {
+        return response;
+    }
+    match state.catalog.store().replace_record(&zone_id, &rid, &input) {
+        Ok(Some(record)) => {
+            let _ = state.catalog.reload();
+            Json(record).into_response()
+        }
+        Ok(None) => error_response(StatusCode::NOT_FOUND, "record not found"),
         Err(e) => map_err(e),
     }
 }

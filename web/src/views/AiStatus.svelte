@@ -1,7 +1,5 @@
 <script>
   import { api, formatApiError, getStoredUser } from '../api.js';
-  import PageHeader from '../PageHeader.svelte';
-  import { icons } from '../icons.svelte.js';
   import { onDestroy } from 'svelte';
 
   let status = $state(null);
@@ -155,12 +153,6 @@
   });
 </script>
 
-<PageHeader
-  icon={icons.ai}
-  title="AI Safety Scanner"
-  tagline="The background scanner classifies domains from live query traffic into categories (using the heuristic rules or a fastText model) and threat verdicts can auto-block. Overrides here take precedence over verdicts."
-/>
-
 {#if notice}
   <div class="card" style="border-color: var(--ok); margin-bottom: 14px">{notice}</div>
 {/if}
@@ -174,7 +166,7 @@
   </div>
 {:else if !status}
   <div class="card">
-    <h3 style="margin-top: 0">AI Subsystem Disabled</h3>
+    <h3 style="margin: 0 0 10px">AI Subsystem Disabled</h3>
     <p class="muted" style="max-width: 70ch">
       The <code>[ai]</code> section of the configuration is not enabled, so no
       domains are being classified. Enable it to activate the scanner.
@@ -200,22 +192,27 @@
     </div>
   </div>
 
-  <div class="row" style="margin: 14px 0">
-    <button onclick={rescan}>Rescan Now</button>
-    <span class="muted">
-      Mode <span class="pill">{status.mode}</span> · backend
-      <span class="pill">{status.backend}</span> · {status.workers} worker{status.workers === 1 ? '' : 's'} ·
-      every {status.scan_interval_secs}s
-    </span>
+  <div class="card" style="margin-top: 14px">
+    <div class="spread" style="gap: 10px; flex-wrap: wrap">
+      <div>
+        <h3 style="margin: 0 0 6px">Scanner</h3>
+        <span class="muted small">
+          Mode <span class="pill">{status.mode}</span> · Backend
+          <span class="pill">{status.backend}</span> · {status.workers} Worker{status.workers === 1 ? '' : 's'} ·
+          Every {status.scan_interval_secs}s
+        </span>
+      </div>
+      <button onclick={rescan}>Rescan Now</button>
+    </div>
   </div>
 
   <div class="two-col">
     <div class="card">
-      <h3 style="margin-top: 0">Threat Categories</h3>
+      <h3 style="margin: 0 0 10px">Threat Categories</h3>
       {#if Object.keys(status.threat_counts || {}).length}
         <table>
           <thead>
-            <tr><th>Category</th><th style="text-align: right">Domains</th></tr>
+            <tr><th>Category</th><th class="num">Domains</th></tr>
           </thead>
           <tbody>
             {#each Object.entries(status.threat_counts) as [category, n] (category)}
@@ -232,21 +229,21 @@
     </div>
 
     <div class="card">
-      <h3 style="margin-top: 0">Enforcement</h3>
+      <h3 style="margin: 0 0 10px">Enforcement</h3>
       <table>
         <tbody>
-          <tr><td>Blocking threshold</td><td class="num">{status.block_threshold}</td></tr>
-          <tr><td>Category verdict TTL</td><td class="num">{status.category_ttl_secs}s</td></tr>
-          <tr><td>Threat verdict TTL</td><td class="num">{status.threat_ttl_secs}s</td></tr>
+          <tr><td class="muted">Blocking Threshold</td><td class="num">{status.block_threshold}</td></tr>
+          <tr><td class="muted">Category Verdict TTL</td><td class="num">{status.category_ttl_secs}s</td></tr>
+          <tr><td class="muted">Threat Verdict TTL</td><td class="num">{status.threat_ttl_secs}s</td></tr>
           <tr>
-            <td>Auto-block categories</td>
+            <td class="muted">Auto-Block Categories</td>
             <td>
               {#if status.auto_block_categories?.length}
                 {#each status.auto_block_categories as c, i (c)}
                   <span class="pill">{c}</span>{i < status.auto_block_categories.length - 1 ? ' ' : ''}
                 {/each}
               {:else}
-                <span class="muted">none</span>
+                <span class="muted">None</span>
               {/if}
             </td>
           </tr>
@@ -255,9 +252,9 @@
     </div>
   </div>
 
-  <div class="card" style="margin-top: 18px">
-    <h3 style="margin-top: 0">AI Models</h3>
-    <p class="muted" style="margin-top: 4px">
+  <div class="card" style="margin-top: 14px">
+    <h3 style="margin: 0 0 10px">AI Models</h3>
+    <p class="muted help" style="margin: 0 0 10px">
       The bundled classifier and verifier files. Updating downloads the
       models bundle from the latest GitHub release, verifies it, installs the
       files and restarts the service (a brief DNS pause) with automatic
@@ -268,13 +265,13 @@
     {:else if models}
       <table>
         <thead>
-          <tr><th>File</th><th style="text-align: right">Size</th><th>sha256</th></tr>
+          <tr><th>File</th><th class="num">Size</th><th>SHA-256</th></tr>
         </thead>
         <tbody>
           {#each models.files as f (f.file)}
             <tr>
               <td><code>{f.file}</code></td>
-              <td class="num">{f.present ? fmtSize(f.size) : 'missing'}</td>
+              <td class="num">{f.present ? fmtSize(f.size) : 'Missing'}</td>
               <td><code class="muted">{f.sha256 ? f.sha256.slice(0, 16) + '…' : '—'}</code></td>
             </tr>
           {/each}
@@ -298,9 +295,9 @@
     {/if}
   </div>
 
-  <div class="card" style="margin-top: 18px">
-    <h3 style="margin-top: 0">Domain Override</h3>
-    <p class="muted" style="margin-top: 4px">
+  <div class="card" style="margin-top: 14px">
+    <h3 style="margin: 0 0 10px">Domain Override</h3>
+    <p class="muted help" style="margin: 0 0 10px">
       <strong>Allow</strong> exempts a domain from every AI verdict (it is
       never auto-blocked). <strong>Clear</strong> removes an existing override
       so the verdict applies again.
@@ -308,12 +305,12 @@
     <form class="override-row" onsubmit={(e) => { e.preventDefault(); saveOverride('allow'); }}>
       <input
         bind:value={overrideDomain}
-        placeholder="domain e.g. news.example.com"
+        placeholder="Domain, e.g. news.example.com"
         style="flex: 1; min-width: 200px"
       />
       <input
         bind:value={overrideReason}
-        placeholder="reason (optional)"
+        placeholder="Reason (Optional)"
         style="flex: 1; min-width: 160px"
       />
       <button type="submit" disabled={overrideBusy}>Allow</button>
@@ -330,7 +327,7 @@
 <style>
   .grid {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
     gap: 12px;
   }
   .stat .big { font-size: 1.6rem; font-weight: 700; margin-top: 6px; }
@@ -338,11 +335,7 @@
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
     gap: 12px;
-    margin-top: 18px;
+    margin-top: 14px;
   }
-  table { width: 100%; border-collapse: collapse; }
-  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); }
-  th { font-size: 0.78rem; color: var(--muted); font-weight: 600; }
-  .num { text-align: right; font-variant-numeric: tabular-nums; }
   .override-row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
 </style>
