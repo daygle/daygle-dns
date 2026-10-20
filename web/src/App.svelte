@@ -203,7 +203,7 @@
     { id: 'ai', label: 'AI', icon: icons.ai, viewer: true },
     { id: 'logs', label: 'Logs', icon: icons.logs },
     { id: 'cache', label: 'Cache', icon: icons.cache },
-    { id: 'users', label: 'Users', icon: icons.users },
+    { id: 'users', label: 'Users', icon: icons.users, viewer: true },
     { id: 'certificates', label: 'Certificates', icon: icons.certificates },
     { id: 'settings', label: 'Settings', icon: icons.settings, viewer: true },
     { id: 'update', label: 'Update', icon: icons.update },
