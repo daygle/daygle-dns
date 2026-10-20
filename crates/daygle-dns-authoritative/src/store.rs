@@ -146,6 +146,15 @@ CREATE TABLE IF NOT EXISTS tls_certificates (
     created_at  TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS acme_certificates (
+    name         TEXT PRIMARY KEY,
+    domains      TEXT NOT NULL DEFAULT '[]',
+    challenge    TEXT NOT NULL DEFAULT 'http',
+    status       TEXT NOT NULL DEFAULT 'pending',
+    last_error   TEXT NOT NULL DEFAULT '',
+    last_attempt INTEGER NOT NULL DEFAULT 0
+);
+
 CREATE TABLE IF NOT EXISTS runtime_settings (
     name  TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -1525,11 +1534,105 @@ impl ZoneStore {
         Ok(())
     }
 
-    /// Delete a managed TLS certificate by name. Returns whether one existed.
+    /// Delete a managed TLS certificate by name (and stop renewing it, if
+    /// it came from an ACME CA). Returns whether one existed.
     pub fn delete_tls_certificate(&self, name: &str) -> Result<bool> {
         let conn = self.lock_conn()?;
         let n = conn.execute("DELETE FROM tls_certificates WHERE name = ?1", [name])?;
-        Ok(n > 0)
+        let acme = conn.execute("DELETE FROM acme_certificates WHERE name = ?1", [name])?;
+        Ok(n > 0 || acme > 0)
+    }
+}
+
+/// A certificate issued and renewed by an ACME CA such as Let's Encrypt.
+/// Its key and chain live in `tls_certificates` under the same name once
+/// issued.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AcmeCertificate {
+    pub name: String,
+    pub domains: Vec<String>,
+    /// How control of the names is proven: `http` (HTTP-01, served by the
+    /// web console) or `dns` (DNS-01, a TXT record in a zone hosted here).
+    pub challenge: String,
+    /// `pending` (being issued), `valid` or `failed`.
+    pub status: String,
+    pub last_error: String,
+    /// UNIX time of the last issue or renewal attempt.
+    pub last_attempt: i64,
+}
+
+fn row_to_acme_certificate(row: &rusqlite::Row<'_>) -> rusqlite::Result<AcmeCertificate> {
+    let domains: String = row.get(1)?;
+    Ok(AcmeCertificate {
+        name: row.get(0)?,
+        domains: serde_json::from_str(&domains).unwrap_or_default(),
+        challenge: row.get(2)?,
+        status: row.get(3)?,
+        last_error: row.get(4)?,
+        last_attempt: row.get(5)?,
+    })
+}
+
+impl ZoneStore {
+    pub fn list_acme_certificates(&self) -> Result<Vec<AcmeCertificate>> {
+        let conn = self.lock_conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT name, domains, challenge, status, last_error, last_attempt
+             FROM acme_certificates ORDER BY name",
+        )?;
+        let rows = stmt.query_map([], row_to_acme_certificate)?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    pub fn get_acme_certificate(&self, name: &str) -> Result<Option<AcmeCertificate>> {
+        let conn = self.lock_conn()?;
+        conn.query_row(
+            "SELECT name, domains, challenge, status, last_error, last_attempt
+             FROM acme_certificates WHERE name = ?1",
+            [name],
+            row_to_acme_certificate,
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    /// Insert or replace an ACME certificate's settings and state.
+    pub fn put_acme_certificate(&self, cert: &AcmeCertificate) -> Result<()> {
+        let conn = self.lock_conn()?;
+        conn.execute(
+            "INSERT INTO acme_certificates (name, domains, challenge, status, last_error, last_attempt)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(name) DO UPDATE SET
+                domains = excluded.domains, challenge = excluded.challenge,
+                status = excluded.status, last_error = excluded.last_error,
+                last_attempt = excluded.last_attempt",
+            params![
+                cert.name,
+                serde_json::to_string(&cert.domains).expect("strings serialize"),
+                cert.challenge,
+                cert.status,
+                cert.last_error,
+                cert.last_attempt
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Record the outcome of an issue or renewal attempt.
+    pub fn set_acme_certificate_status(
+        &self,
+        name: &str,
+        status: &str,
+        last_error: &str,
+        last_attempt: i64,
+    ) -> Result<()> {
+        let conn = self.lock_conn()?;
+        conn.execute(
+            "UPDATE acme_certificates SET status = ?2, last_error = ?3, last_attempt = ?4
+             WHERE name = ?1",
+            params![name, status, last_error, last_attempt],
+        )?;
+        Ok(())
     }
 }
 
@@ -2028,6 +2131,45 @@ impl ZoneStore {
     }
 
     /// Persist the DB-backed runtime settings, replacing any previous value.
+    /// A setting stored on its own (beside the runtime overlay) under
+    /// `name`, such as the ACME settings and account.
+    pub fn get_named_setting<T: serde::de::DeserializeOwned>(
+        &self,
+        name: &str,
+    ) -> Result<Option<T>> {
+        let conn = self.lock_conn()?;
+        let text: Option<String> = conn
+            .query_row(
+                "SELECT value FROM runtime_settings WHERE name = ?1",
+                [name],
+                |r| r.get(0),
+            )
+            .optional()?;
+        text.map(|text| {
+            serde_json::from_str(&text).map_err(|e| {
+                DaygleError::Config(format!("stored setting '{name}' is invalid: {e}"))
+            })
+        })
+        .transpose()
+    }
+
+    pub fn put_named_setting<T: serde::Serialize>(&self, name: &str, value: &T) -> Result<()> {
+        if name == "runtime" {
+            return Err(DaygleError::Config(
+                "'runtime' is the settings overlay".into(),
+            ));
+        }
+        let text = serde_json::to_string(value)
+            .map_err(|e| DaygleError::Config(format!("cannot serialize setting '{name}': {e}")))?;
+        let conn = self.lock_conn()?;
+        conn.execute(
+            "INSERT INTO runtime_settings (name, value) VALUES (?1, ?2)
+             ON CONFLICT(name) DO UPDATE SET value = excluded.value",
+            params![name, text],
+        )?;
+        Ok(())
+    }
+
     pub fn put_runtime_settings<T: serde::Serialize>(&self, settings: &T) -> Result<()> {
         let text = serde_json::to_string(settings)
             .map_err(|e| DaygleError::Config(format!("cannot serialize settings: {e}")))?;

@@ -66,6 +66,7 @@
 //! resolver in `ArcSwap` containers so the live-reload machinery can publish
 //! new values without locking or restarting.
 
+pub mod acme;
 mod handlers;
 mod update;
 
@@ -254,6 +255,8 @@ pub struct AppState {
     /// `[ai]` section is disabled. All `/api/ai/...` endpoints read through
     /// this handle.
     pub ai: Option<Arc<daygle_dns_ml::AiEngine>>,
+    /// Certificates from an ACME CA: HTTP-01 answers and issues running.
+    pub acme: Arc<acme::Acme>,
 }
 
 /// Build the API router (REST endpoints plus the embedded GUI).
@@ -332,6 +335,18 @@ pub fn router(state: AppState) -> Router {
             get(handlers::list_certificates).post(handlers::create_certificate),
         )
         .route("/certificates/{name}", delete(handlers::delete_certificate))
+        .route(
+            "/certificates/acme",
+            post(handlers::request_acme_certificate),
+        )
+        .route(
+            "/certificates/{name}/renew",
+            post(handlers::renew_acme_certificate),
+        )
+        .route(
+            "/acme",
+            get(handlers::get_acme_settings).put(handlers::put_acme_settings),
+        )
         .route(
             "/zones",
             get(handlers::list_zones).post(handlers::create_zone),
@@ -422,7 +437,15 @@ pub fn router(state: AppState) -> Router {
         .layer(middleware::from_fn_with_state(state.clone(), require_auth))
         .with_state(state.clone());
 
-    let mut app = Router::new().nest("/api", api);
+    // ACME HTTP-01 challenge answers: open, outside the API, on every
+    // listener (the CA connects over plain HTTP on port 80).
+    let mut app = Router::new()
+        .route(
+            "/.well-known/acme-challenge/{token}",
+            get(handlers::acme_http_challenge),
+        )
+        .with_state(state.clone())
+        .nest("/api", api);
 
     if state.config.load().api.gui_enabled {
         app = app

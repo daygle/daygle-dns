@@ -723,6 +723,46 @@ and listeners referencing the name are rebuilt immediately. `DELETE`
 removes the certificate; one still referenced by a listener cannot be
 deleted.
 
+#### Let's Encrypt (ACME)
+
+```
+GET  /api/acme
+PUT  /api/acme
+POST /api/certificates/acme
+POST /api/certificates/{name}/renew
+GET  /.well-known/acme-challenge/{token}
+```
+
+Certificates can be issued and renewed automatically by an ACME CA: Let's
+Encrypt, or a private one such as step-ca. `PUT /api/acme` sets
+`{email, directory, agree_terms, ca_certificate, renew_days}`: `directory`
+empty means Let's Encrypt; `ca_certificate` is a PEM root to trust for a
+private CA's directory; `renew_days` (default 30) is how long before expiry
+to renew. `GET /api/acme` returns the `settings`, the `directory_url` in use,
+and the Let's Encrypt (`lets_encrypt`, `lets_encrypt_staging`) directories.
+An account with the CA is created on first use and kept in the database.
+
+`POST /api/certificates/acme` `{name, domains, challenge}` requests a
+certificate (`agree_terms` must be set). It answers `202` and runs in the
+background; the certificate list then carries an `acme` object
+(`domains`, `challenge`, `status`: `pending`/`valid`/`failed`,
+`last_error`, `last_attempt`), and lists the entry even before the CA has
+issued it. Control of each name is proven by:
+
+- `http` (HTTP-01): the CA fetches `/.well-known/acme-challenge/{token}` on
+  port 80, which the web console's HTTP listener answers (open, outside
+  `/api`, and never redirected to HTTPS). The name must reach that listener
+  on port 80.
+- `dns` (DNS-01): a TXT record at `_acme-challenge.<name>` is added to the
+  primary zone hosted here that holds it, and removed afterwards. The zone
+  must be delegated to this server. Wildcard names need `dns`.
+
+Certificates are checked a minute after start and then twice a day, and
+renewed `renew_days` before expiry; `POST /api/certificates/{name}/renew`
+renews one now. A renewal is stored like an upload, so listeners using the
+certificate switch to it straight away. An ACME certificate cannot be
+replaced by an upload (`409`); deleting it stops its renewals.
+
 ### DNSSEC signing
 
 ```

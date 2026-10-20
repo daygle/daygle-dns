@@ -48,6 +48,7 @@ rustls = "0.23"
 quinn = "0.11"
 rustls-pki-types = "1"
 rcgen = "0.14"
+instant-acme = { version = "0.8", default-features = false, features = ["ring", "hyper-rustls", "rcgen"] }
 async-trait = "0.1"
 
 axum = "0.8"

@@ -4246,11 +4246,25 @@ fn certificate_json(
 /// only; PEM material is never returned to the GUI).
 pub async fn list_certificates(State(state): State<AppState>) -> Response {
     let refs = certificate_references(&state.config.load_full());
-    let list = match state.catalog.store().list_tls_certificates() {
+    let store = state.catalog.store();
+    let list = match store.list_tls_certificates() {
         Ok(list) => list,
         Err(e) => return map_err(e),
     };
-    let items: Vec<serde_json::Value> = list
+    let mut acme: std::collections::BTreeMap<String, _> = match store.list_acme_certificates() {
+        Ok(certs) => certs.into_iter().map(|c| (c.name.clone(), c)).collect(),
+        Err(e) => return map_err(e),
+    };
+    let acme_json = |cert: &daygle_dns_authoritative::store::AcmeCertificate| {
+        serde_json::json!({
+            "domains": cert.domains,
+            "challenge": cert.challenge,
+            "status": if state.acme.is_issuing(&cert.name) { "pending" } else { cert.status.as_str() },
+            "last_error": cert.last_error,
+            "last_attempt": cert.last_attempt,
+        })
+    };
+    let mut items: Vec<serde_json::Value> = list
         .iter()
         .map(|cert| {
             let in_use: Vec<&'static str> = refs
@@ -4258,9 +4272,31 @@ pub async fn list_certificates(State(state): State<AppState>) -> Response {
                 .filter(|(name, _)| name == &cert.name)
                 .map(|(_, label)| *label)
                 .collect();
-            certificate_json(cert, in_use)
+            let mut value = certificate_json(cert, in_use);
+            value["acme"] = acme
+                .remove(&cert.name)
+                .as_ref()
+                .map_or(serde_json::Value::Null, acme_json);
+            value
         })
         .collect();
+    // Requested but not issued yet.
+    for cert in acme.values() {
+        items.push(serde_json::json!({
+            "name": cert.name,
+            "server_name": cert.domains.first(),
+            "created_at": null,
+            "in_use": [],
+            "subject": null,
+            "issuer": null,
+            "self_signed": null,
+            "names": cert.domains,
+            "not_before": null,
+            "not_after": null,
+            "acme": acme_json(cert),
+        }));
+    }
+    items.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
     Json(items).into_response()
 }
 
@@ -4303,6 +4339,17 @@ pub async fn create_certificate(
         }
     };
 
+    // An ACME certificate is replaced by its CA, not by hand.
+    match state.catalog.store().get_acme_certificate(&name) {
+        Ok(Some(_)) => {
+            return error_response(
+                StatusCode::CONFLICT,
+                format!("certificate '{name}' comes from an ACME CA and renews itself; delete it first to replace it"),
+            )
+        }
+        Ok(None) => {}
+        Err(e) => return map_err(e),
+    }
     let cert = daygle_dns_authoritative::TlsCertificate {
         name: name.clone(),
         server_name,
@@ -4310,12 +4357,26 @@ pub async fn create_certificate(
         key_pem,
         created_at: chrono::Utc::now().to_rfc3339(),
     };
-    if let Err(e) = state.catalog.store().put_tls_certificate(&cert) {
+    if let Err(e) = install_certificate(&state, cert.clone()).await {
         return map_err(e);
     }
 
-    // Refresh listeners that reference this certificate so a replacement
-    // takes effect immediately.
+    let in_use: Vec<&'static str> = certificate_references(&state.config.load_full())
+        .into_iter()
+        .filter(|(n, _)| n == &name)
+        .map(|(_, l)| l)
+        .collect();
+    Json(certificate_json(&cert, in_use)).into_response()
+}
+
+/// Store a certificate and refresh the listeners that use it, so a
+/// replacement (an upload, or an ACME renewal) applies straight away.
+pub(crate) async fn install_certificate(
+    state: &AppState,
+    cert: daygle_dns_authoritative::TlsCertificate,
+) -> Result<(), daygle_dns_core::error::DaygleError> {
+    let name = cert.name.clone();
+    state.catalog.store().put_tls_certificate(&cert)?;
     let referenced = certificate_references(&state.config.load_full())
         .into_iter()
         .any(|(n, _)| n == name);
@@ -4345,13 +4406,152 @@ pub async fn create_certificate(
             }
         ),
     );
+    Ok(())
+}
 
-    let in_use: Vec<&'static str> = certificate_references(&state.config.load_full())
-        .into_iter()
-        .filter(|(n, _)| n == &name)
-        .map(|(_, l)| l)
-        .collect();
-    Json(certificate_json(&cert, in_use)).into_response()
+// ---- ACME (Let's Encrypt) ---------------------------------------------------
+
+/// `GET /.well-known/acme-challenge/{token}` - HTTP-01 challenge answers
+/// while an ACME certificate is being issued.
+pub async fn acme_http_challenge(
+    State(state): State<AppState>,
+    Path(token): Path<String>,
+) -> Response {
+    match state.acme.http_response(&token) {
+        Some(answer) => {
+            ([(header::CONTENT_TYPE, "application/octet-stream")], answer).into_response()
+        }
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+/// `GET /api/acme` - the ACME settings.
+pub async fn get_acme_settings(State(state): State<AppState>) -> Response {
+    let settings = crate::acme::settings(&state);
+    Json(serde_json::json!({
+        "settings": settings,
+        "directory_url": settings.directory_url(),
+        "lets_encrypt": crate::acme::LETS_ENCRYPT,
+        "lets_encrypt_staging": crate::acme::LETS_ENCRYPT_STAGING,
+    }))
+    .into_response()
+}
+
+/// `PUT /api/acme` - save the ACME settings.
+pub async fn put_acme_settings(
+    State(state): State<AppState>,
+    axum::Json(settings): axum::Json<crate::acme::AcmeSettings>,
+) -> Response {
+    let settings = crate::acme::AcmeSettings {
+        email: settings.email.trim().to_string(),
+        directory: settings.directory.trim().to_string(),
+        ..settings
+    };
+    match crate::acme::save_settings(&state, &settings) {
+        Ok(()) => get_acme_settings(State(state)).await,
+        Err(e) => error_response(StatusCode::BAD_REQUEST, e),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct AcmeCertificateInput {
+    name: String,
+    domains: Vec<String>,
+    #[serde(default)]
+    challenge: String,
+}
+
+/// Start issuing an ACME certificate in the background.
+fn spawn_acme_issue(state: &AppState, name: String) {
+    let state = state.clone();
+    tokio::spawn(async move {
+        let _ = crate::acme::issue(&state, &name).await;
+    });
+}
+
+/// `POST /api/certificates/acme` `{name, domains, challenge}` - request a
+/// certificate from the ACME CA. Issuing runs in the background (`202`);
+/// the certificate list shows how it went.
+pub async fn request_acme_certificate(
+    State(state): State<AppState>,
+    axum::Json(input): axum::Json<AcmeCertificateInput>,
+) -> Response {
+    let name = input.name.trim().to_string();
+    if let Err(msg) = validate_certificate_name(&name) {
+        return error_response(StatusCode::BAD_REQUEST, msg);
+    }
+    let challenge = match input.challenge.trim() {
+        "" | "http" => "http",
+        "dns" => "dns",
+        other => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                format!("unknown challenge '{other}': use http or dns"),
+            )
+        }
+    };
+    let domains = match crate::acme::check_domains(&input.domains, challenge) {
+        Ok(d) => d,
+        Err(e) => return error_response(StatusCode::BAD_REQUEST, e),
+    };
+    if !crate::acme::settings(&state).agree_terms {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "accept the CA's terms of service in the Let's Encrypt settings first",
+        );
+    }
+    let store = state.catalog.store();
+    match (
+        store.get_tls_certificate(&name),
+        store.get_acme_certificate(&name),
+    ) {
+        (Ok(None), Ok(None)) => {}
+        (Ok(_), Ok(_)) => {
+            return error_response(
+                StatusCode::CONFLICT,
+                format!("a certificate named '{name}' already exists"),
+            )
+        }
+        (Err(e), _) | (_, Err(e)) => return map_err(e),
+    }
+    let cert = daygle_dns_authoritative::store::AcmeCertificate {
+        name: name.clone(),
+        domains,
+        challenge: challenge.to_string(),
+        status: "pending".to_string(),
+        last_error: String::new(),
+        last_attempt: 0,
+    };
+    if let Err(e) = store.put_acme_certificate(&cert) {
+        return map_err(e);
+    }
+    spawn_acme_issue(&state, name);
+    (StatusCode::ACCEPTED, Json(cert)).into_response()
+}
+
+/// `POST /api/certificates/{name}/renew` - renew an ACME certificate now.
+pub async fn renew_acme_certificate(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> Response {
+    match state.catalog.store().get_acme_certificate(&name) {
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            return error_response(
+                StatusCode::NOT_FOUND,
+                format!("'{name}' is not an ACME certificate"),
+            )
+        }
+        Err(e) => return map_err(e),
+    }
+    if state.acme.is_issuing(&name) {
+        return error_response(
+            StatusCode::CONFLICT,
+            format!("certificate '{name}' is already being requested"),
+        );
+    }
+    spawn_acme_issue(&state, name);
+    StatusCode::ACCEPTED.into_response()
 }
 
 /// `DELETE /api/certificates/{name}` - remove a managed certificate. A

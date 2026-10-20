@@ -20,11 +20,15 @@ tower-http.workspace = true
 tokio.workspace = true
 arc-swap.workspace = true
 parking_lot.workspace = true
+tokio-util.workspace = true
 rand.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 chrono.workspace = true
 sha2.workspace = true
+instant-acme.workspace = true
+rustls.workspace = true
+rustls-pki-types.workspace = true
 tracing.workspace = true
 
 [features]

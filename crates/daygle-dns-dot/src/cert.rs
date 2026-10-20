@@ -201,7 +201,7 @@ pub fn validate_pem_pair(cert_pem: &str, key_pem: &str) -> Result<()> {
 /// with), then falls back to `ring` explicitly. Previously we hardcoded
 /// `ring::default_provider()` which panics at runtime if the binary was built
 /// with only `aws-lc-rs` enabled.
-pub(crate) fn crypto_provider() -> Option<Arc<rustls::crypto::CryptoProvider>> {
+pub fn crypto_provider() -> Option<Arc<rustls::crypto::CryptoProvider>> {
     if let Some(p) = rustls::crypto::CryptoProvider::get_default() {
         return Some(p.clone());
     }

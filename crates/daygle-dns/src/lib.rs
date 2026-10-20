@@ -528,7 +528,7 @@ pub async fn bind_with(
             })
         })
     };
-    let app = router(AppState {
+    let app_state = AppState {
         catalog: catalog.clone(),
         resolver: shared.resolver.clone(),
         metrics: metrics.clone(),
@@ -548,7 +548,14 @@ pub async fn bind_with(
         web_apply: Some(web_apply),
         stats: stats.clone(),
         ai: ai_engine.clone(),
-    });
+        acme: Arc::new(daygle_dns_api::acme::Acme::default()),
+    };
+    // Issue and renew ACME (Let's Encrypt) certificates in the background.
+    tokio::spawn(daygle_dns_api::acme::run_renewals(
+        app_state.clone(),
+        shutdown.clone(),
+    ));
+    let app = router(app_state);
     let web = Arc::new(web::WebServer::new(
         app,
         catalog.clone(),
