@@ -748,7 +748,7 @@ impl RequestHandler for DnsDispatcher {
         self.metrics.inc(&self.metrics.recursive);
         let lookup = match tokio::time::timeout(
             self.client_timeout,
-            resolver.lookup(&qname, info.query.query_type()),
+            resolver.lookup_for_client(client, &qname, info.query.query_type()),
         )
         .await
         {

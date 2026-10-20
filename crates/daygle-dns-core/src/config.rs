@@ -192,6 +192,12 @@ pub struct RecursiveUpdate {
     pub rebinding_protection: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub local_root: Option<LocalRootSettings>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub opportunistic_encryption: Option<bool>,
+    /// Client resolution policies (the whole list; see
+    /// [`ClientPolicyConfig`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_policies: Option<Vec<ClientPolicyConfig>>,
 }
 
 impl RecursiveUpdate {
@@ -215,6 +221,21 @@ impl RecursiveUpdate {
         }
         if let Some(v) = self.rebinding_protection {
             settings.rebinding_protection = v;
+        }
+        if let Some(v) = self.opportunistic_encryption {
+            settings.opportunistic_encryption = v;
+        }
+        if let Some(v) = &self.client_policies {
+            settings.client_policies = v
+                .iter()
+                .map(|p| ClientPolicyConfig {
+                    name: p.name.trim().to_string(),
+                    enabled: p.enabled,
+                    clients: trim_list(&p.clients),
+                    action: p.action,
+                    upstreams: trim_list(&p.upstreams),
+                })
+                .collect();
         }
         if let Some(v) = &self.local_root {
             settings.local_root = LocalRootSettings {
@@ -732,6 +753,8 @@ impl RuntimeSettings {
                 case_randomization: Some(config.recursive.case_randomization),
                 rebinding_protection: Some(config.recursive.rebinding_protection),
                 local_root: Some(config.recursive.local_root.clone()),
+                opportunistic_encryption: Some(config.recursive.opportunistic_encryption),
+                client_policies: Some(config.recursive.client_policies.clone()),
             }),
             dot: Some(ListenerUpdate {
                 enabled: Some(config.dot.enabled),
@@ -1003,6 +1026,39 @@ impl DaygleConfig {
                         zone.name
                     )));
                 }
+            }
+        }
+        let mut policy_names = std::collections::HashSet::new();
+        for policy in &self.recursive.client_policies {
+            let name = policy.name.trim();
+            if name.is_empty() {
+                return Err(DaygleError::Config(
+                    "recursive.client_policies contains a policy with an empty name".to_string(),
+                ));
+            }
+            if !policy_names.insert(name.to_ascii_lowercase()) {
+                return Err(DaygleError::Config(format!(
+                    "client policy '{name}' is defined more than once"
+                )));
+            }
+            if policy.clients.is_empty() {
+                return Err(DaygleError::Config(format!(
+                    "client policy '{name}' has no client networks"
+                )));
+            }
+            for network in &policy.clients {
+                if parse_network(network).is_none() {
+                    return Err(DaygleError::Config(format!(
+                        "client policy '{name}' contains invalid network '{network}'"
+                    )));
+                }
+            }
+            if policy.action == ClientPolicyAction::Forward
+                && policy.upstreams.iter().all(|u| u.trim().is_empty())
+            {
+                return Err(DaygleError::Config(format!(
+                    "client policy '{name}' forwards but has no upstreams"
+                )));
             }
         }
         for network in &self.recursive.recursion_networks {
@@ -1417,6 +1473,17 @@ pub struct RecursiveSettings {
     /// Local root zone (RFC 8806): keep a verified copy of the root zone and
     /// answer root queries from it instead of asking the root servers.
     pub local_root: LocalRootSettings,
+    /// Opportunistic encryption (RFC 9539, recursive mode): probe
+    /// nameservers for DNS over TLS / QUIC in the background and use it where
+    /// it works, falling back to plain DNS. Off by default: it is
+    /// experimental and adds connection overhead.
+    pub opportunistic_encryption: bool,
+    /// Client resolution policies: clients in a policy's networks are
+    /// resolved its way (forwarded to its own upstreams, resolved from the
+    /// root servers, or refused) instead of by the default mode. The first
+    /// enabled matching policy wins; conditional forwarders and stub zones
+    /// still take precedence for their names.
+    pub client_policies: Vec<ClientPolicyConfig>,
     /// Testing only: send recursive-mode queries to this port instead of 53
     /// and allow private/loopback nameservers, so tests can run a fake
     /// root -> TLD -> authoritative hierarchy without privileged ports.
@@ -1504,6 +1571,46 @@ impl LocalRootSettings {
     }
 }
 
+/// One client resolution policy (see `RecursiveSettings::client_policies`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct ClientPolicyConfig {
+    /// Display name, unique among the policies.
+    pub name: String,
+    pub enabled: bool,
+    /// Client networks (CIDRs or bare IPs) the policy applies to.
+    pub clients: Vec<String>,
+    pub action: ClientPolicyAction,
+    /// Upstreams for [`ClientPolicyAction::Forward`] (same forms as
+    /// `recursive.upstreams`).
+    pub upstreams: Vec<String>,
+}
+
+impl Default for ClientPolicyConfig {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            enabled: true,
+            clients: vec![],
+            action: ClientPolicyAction::Forward,
+            upstreams: vec![],
+        }
+    }
+}
+
+/// How a client resolution policy resolves its clients' queries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClientPolicyAction {
+    /// Send queries to the policy's own upstreams.
+    #[default]
+    Forward,
+    /// Resolve from the root servers, whatever the default mode.
+    Recursive,
+    /// Refuse recursion (local zones are still answered).
+    Refuse,
+}
+
 /// Client networks treated as private for [`RecursionAccess::PrivateNetworks`].
 pub const PRIVATE_NETWORKS: &[&str] = &[
     "127.0.0.0/8",
@@ -1556,6 +1663,8 @@ impl Default for RecursiveSettings {
             case_randomization: false,
             rebinding_protection: false,
             local_root: LocalRootSettings::default(),
+            opportunistic_encryption: false,
+            client_policies: vec![],
             test_outbound_port: None,
         }
     }
@@ -2670,6 +2779,30 @@ upstreams = ["192.0.2.20:5353"]
             .unwrap_err()
             .to_string();
         assert!(err.contains("root_hints"), "{err}");
+    }
+
+    #[test]
+    fn client_policies_validate() {
+        let ok = "[[recursive.client_policies]]\nname = \"kids\"\nclients = [\"192.168.1.0/24\"]\nupstreams = [\"1.1.1.3\"]\n";
+        let cfg = DaygleConfig::parse(ok).unwrap();
+        let policy = &cfg.recursive.client_policies[0];
+        assert!(policy.enabled);
+        assert_eq!(policy.action, ClientPolicyAction::Forward);
+
+        let cases = [
+            ("[[recursive.client_policies]]\nname = \"x\"\nupstreams = [\"1.1.1.3\"]\n", "no client networks"),
+            ("[[recursive.client_policies]]\nname = \"x\"\nclients = [\"nope\"]\naction = \"refuse\"\n", "invalid network"),
+            ("[[recursive.client_policies]]\nname = \"x\"\nclients = [\"10.0.0.1\"]\n", "no upstreams"),
+            ("[[recursive.client_policies]]\nclients = [\"10.0.0.1\"]\naction = \"refuse\"\n", "empty name"),
+            (
+                "[[recursive.client_policies]]\nname = \"x\"\nclients = [\"10.0.0.1\"]\naction = \"refuse\"\n[[recursive.client_policies]]\nname = \"X\"\nclients = [\"10.0.0.2\"]\naction = \"recursive\"\n",
+                "more than once",
+            ),
+        ];
+        for (text, expected) in cases {
+            let err = DaygleConfig::parse(text).unwrap_err().to_string();
+            assert!(err.contains(expected), "{expected}: {err}");
+        }
     }
 
     #[test]

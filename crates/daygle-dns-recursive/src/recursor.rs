@@ -13,9 +13,13 @@ use std::time::{Duration, Instant};
 
 use daygle_dns_core::config::{RecursiveSettings, PRIVATE_NETWORKS};
 use daygle_dns_core::error::{DaygleError, Result};
+use daygle_dns_core::Metrics;
 use hickory_proto::op::{Query, ResponseCode};
 use hickory_proto::rr::{Name, RecordType};
-use hickory_resolver::config::{ConnectionConfig, ResolverOpts};
+use hickory_resolver::config::{
+    ConnectionConfig, OpportunisticEncryption, OpportunisticEncryptionConfig, ProtocolConfig,
+    ResolverOpts,
+};
 use hickory_resolver::lookup::Lookup;
 use hickory_resolver::net::runtime::TokioRuntimeProvider;
 use hickory_resolver::net::NetError;
@@ -65,6 +69,8 @@ pub struct RecursorConnections {
     runtime: TokioRuntimeProvider,
     local_root: Option<SocketAddr>,
     port_override: Option<u16>,
+    /// Counts outbound connections by transport for the dashboard.
+    metrics: Option<Arc<Metrics>>,
 }
 
 impl ConnectionProvider for RecursorConnections {
@@ -78,6 +84,23 @@ impl ConnectionProvider for RecursorConnections {
         config: &ConnectionConfig,
         cx: &PoolContext,
     ) -> std::result::Result<Self::FutureConn, NetError> {
+        let encrypted = !matches!(config.protocol, ProtocolConfig::Udp | ProtocolConfig::Tcp);
+        if encrypted && self.local_root.is_some_and(|root| root.ip() == ip) {
+            // The local root responder only speaks plain DNS on loopback:
+            // fail the opportunistic encryption probe right away.
+            return Err(NetError::from(
+                "the local root zone is served without encryption",
+            ));
+        }
+        if let Some(metrics) = &self.metrics {
+            let r = &metrics.resolver;
+            metrics.inc(match config.protocol {
+                ProtocolConfig::Udp => &r.conn_udp,
+                ProtocolConfig::Tcp => &r.conn_tcp,
+                ProtocolConfig::Quic { .. } => &r.conn_quic,
+                _ => &r.conn_tls,
+            });
+        }
         let port = match self.local_root {
             // The responder listens on an unprivileged loopback port.
             Some(root) if root.ip() == ip => Some(root.port()),
@@ -103,10 +126,12 @@ pub type DaygleRecursor = Recursor<RecursorConnections>;
 
 /// Build a recursor from the recursive settings. With `local_root` (the
 /// address of the local root zone responder, RFC 8806) every root query goes
-/// there instead of to the root servers.
+/// there instead of to the root servers. Outbound connections are counted in
+/// `metrics`.
 pub fn build(
     settings: &RecursiveSettings,
     local_root: Option<SocketAddr>,
+    metrics: Arc<Metrics>,
 ) -> Result<DaygleRecursor> {
     let hints: Vec<IpAddr> = if let Some(root) = local_root {
         vec![root.ip()]
@@ -133,6 +158,15 @@ pub fn build(
         // empty non-terminals, which strict RFC 8020 handling would turn into
         // false NXDOMAINs for the names below them.
         qname_minimization: QNameMinimization::Relaxed,
+        opportunistic_encryption: if settings.opportunistic_encryption {
+            // RFC 9539 defaults: remember a working encrypted transport for
+            // 3 days and a failed probe for 1 day.
+            OpportunisticEncryption::Enabled {
+                config: OpportunisticEncryptionConfig::default(),
+            }
+        } else {
+            OpportunisticEncryption::Disabled
+        },
         ..RecursorOptions::default()
     };
     if settings.rebinding_protection {
@@ -143,6 +177,7 @@ pub fn build(
     }
     let mut connections = RecursorConnections {
         local_root,
+        metrics: Some(metrics),
         ..RecursorConnections::default()
     };
     if let Some(port) = settings.test_outbound_port {

@@ -27,13 +27,14 @@ mod cache_assist;
 pub mod recursor;
 mod upstream;
 
+use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use cache_assist::{cache_key, CacheAssistant, PrefetchConfig};
 use daygle_dns_core::config::{
-    parse_network, ConditionalZoneConfig, RecursionAccess, RecursiveSettings, ResolutionMode,
-    StubZoneConfig, PRIVATE_NETWORKS,
+    parse_network, ClientPolicyAction, ConditionalZoneConfig, RecursionAccess, RecursiveSettings,
+    ResolutionMode, StubZoneConfig, PRIVATE_NETWORKS,
 };
 use daygle_dns_core::error::{DaygleError, Result};
 use daygle_dns_core::{LocalRootView, Metrics};
@@ -61,8 +62,15 @@ pub struct RecursiveResolver {
 }
 
 struct Inner {
-    /// Resolves everything outside the conditional and stub zones.
+    /// Resolves everything outside the conditional and stub zones (and the
+    /// client policies).
     default: DefaultBackend,
+    /// The recursor, built when the default mode or a client policy
+    /// resolves from the root servers. Swappable so a cache flush can
+    /// rebuild it (the recursor has no clear call).
+    recursor: Option<recursor::SharedRecursor>,
+    /// Client resolution policies, in match order.
+    policies: Vec<ClientPolicy>,
     /// Conditional forwarding zones: `zone suffix` -> dedicated resolver.
     conditional: Vec<ConditionalResolver>,
     /// Stub zones: like conditional zones, but the upstreams are the zone's
@@ -84,10 +92,43 @@ struct Inner {
 enum DefaultBackend {
     /// Forwarding mode: upstreams or the system resolver.
     Forward(Box<TokioResolver>),
-    /// Recursive mode: iteration from the root servers. Swappable so a cache
-    /// flush can rebuild it (the recursor has no clear call).
-    Recursive(recursor::SharedRecursor),
+    /// Recursive mode: iteration from the root servers ([`Inner::recursor`]).
+    Recursive,
 }
+
+/// One client resolution policy, ready to route.
+struct ClientPolicy {
+    networks: Vec<ipnet::IpNet>,
+    backend: PolicyBackend,
+}
+
+enum PolicyBackend {
+    /// The policy's own upstreams.
+    Forward(Box<TokioResolver>),
+    /// Iteration from the root servers ([`Inner::recursor`]).
+    Recursive,
+    /// No recursion for these clients.
+    Refuse,
+}
+
+/// Which way a lookup went, for the resolver dashboard.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RouteKind {
+    Recursive,
+    Forwarding,
+    Conditional,
+    Stub,
+    ClientPolicy,
+    LocalRoot,
+}
+
+/// Cache-assistant scope of lookups on the default backend (and of the
+/// conditional and stub zones, which route by name only).
+const SCOPE_DEFAULT: u16 = 0;
+/// Scope of recursive client policies when the default mode forwards.
+const SCOPE_RECURSOR: u16 = 1;
+/// Forwarding client policy `i` uses scope `SCOPE_POLICY + i`.
+const SCOPE_POLICY: u16 = 2;
 
 /// A resolver chosen for one query, cloned out of [`Inner`] so no borrow is
 /// held across the lookup.
@@ -97,6 +138,9 @@ enum Route {
     /// Forwarding mode with a local root zone: the top-level domain does
     /// not exist, so the name cannot either.
     NoSuchTld,
+    /// A recursive route without a recursor (cannot happen: one is built
+    /// whenever a route can need it).
+    NoRecursor,
 }
 
 impl Route {
@@ -118,6 +162,10 @@ impl Route {
             Route::NoSuchTld => Err(DaygleError::Resolution {
                 message: "top-level domain not in the root zone".to_string(),
                 response_code: Some(hickory_proto::op::ResponseCode::NXDomain.into()),
+            }),
+            Route::NoRecursor => Err(DaygleError::Resolution {
+                message: "no recursive resolver is configured".to_string(),
+                response_code: Some(hickory_proto::op::ResponseCode::ServFail.into()),
             }),
         }
     }
@@ -161,16 +209,24 @@ impl RecursiveResolver {
     ) -> Result<Self> {
         let mode = settings.effective_mode();
         let local_root = local_root.filter(|_| settings.local_root.enabled);
+        let policies = build_policies(settings)?;
+        let needs_recursor = mode == ResolutionMode::Recursive
+            || policies
+                .iter()
+                .any(|p| matches!(p.backend, PolicyBackend::Recursive));
+        let recursor = if needs_recursor {
+            let addr = local_root.as_ref().and_then(|v| v.serving_addr());
+            Some(Arc::new(arc_swap::ArcSwap::from_pointee(
+                recursor::RecursorSlot {
+                    recursor: Arc::new(recursor::build(settings, addr, metrics.clone())?),
+                    local_root: addr,
+                },
+            )))
+        } else {
+            None
+        };
         let default = match mode {
-            ResolutionMode::Recursive => {
-                let addr = local_root.as_ref().and_then(|v| v.serving_addr());
-                DefaultBackend::Recursive(Arc::new(arc_swap::ArcSwap::from_pointee(
-                    recursor::RecursorSlot {
-                        recursor: Arc::new(recursor::build(settings, addr)?),
-                        local_root: addr,
-                    },
-                )))
-            }
+            ResolutionMode::Recursive => DefaultBackend::Recursive,
             ResolutionMode::Forwarding => {
                 let (config, opts) = build_config(settings)?;
                 DefaultBackend::Forward(Box::new(
@@ -259,6 +315,8 @@ impl RecursiveResolver {
             conditional_zones = conditional.len(),
             stub_zones = stubs.len(),
             local_root = local_root.is_some(),
+            client_policies = policies.len(),
+            opportunistic_encryption = settings.opportunistic_encryption,
             "recursive resolver ready"
         );
 
@@ -277,6 +335,8 @@ impl RecursiveResolver {
                 local_root,
                 rebuild: std::sync::Mutex::new(()),
                 default,
+                recursor,
+                policies,
                 conditional,
                 stubs,
                 settings: settings.clone(),
@@ -294,18 +354,37 @@ impl RecursiveResolver {
     /// window is served with a short TTL when `serve_stale_secs` is set.
     pub async fn lookup(&self, name: &str, record_type: RecordType) -> Result<Lookup> {
         Arc::clone(&self.inner)
-            .lookup_owned(name, record_type)
+            .lookup_owned(name, record_type, None)
+            .await
+    }
+
+    /// Like [`Self::lookup`], applying the client resolution policy that
+    /// matches `client` (if any).
+    pub async fn lookup_for_client(
+        &self,
+        client: IpAddr,
+        name: &str,
+        record_type: RecordType,
+    ) -> Result<Lookup> {
+        let policy = self.inner.policy_for(client);
+        Arc::clone(&self.inner)
+            .lookup_owned(name, record_type, policy)
             .await
     }
 
     /// Flush the response cache.
     pub fn clear_cache(&self) {
-        match &self.inner.default {
-            DefaultBackend::Forward(resolver) => resolver.clear_cache(),
-            DefaultBackend::Recursive(shared) => {
-                if let Err(e) = self.inner.rebuild_recursor(shared) {
-                    warn!("cannot rebuild the recursive resolver to clear its cache: {e}");
-                }
+        if let DefaultBackend::Forward(resolver) = &self.inner.default {
+            resolver.clear_cache();
+        }
+        if let Some(shared) = &self.inner.recursor {
+            if let Err(e) = self.inner.rebuild_recursor(shared) {
+                warn!("cannot rebuild the recursive resolver to clear its cache: {e}");
+            }
+        }
+        for policy in &self.inner.policies {
+            if let PolicyBackend::Forward(resolver) = &policy.backend {
+                resolver.clear_cache();
             }
         }
         for zone in &self.inner.conditional {
@@ -327,25 +406,28 @@ impl RecursiveResolver {
         self.inner.settings.dnssec_validate
     }
 
-    /// Whether `client` may use recursion under `recursion_access`.
-    /// Authoritative zones are answered for every client regardless; this
-    /// only gates queries that would be resolved here.
-    pub fn allows_client(&self, client: std::net::IpAddr) -> bool {
-        match &self.inner.allowed_clients {
+    /// Whether `client` may use recursion under `recursion_access` and is
+    /// not refused by a client policy. Authoritative zones are answered for
+    /// every client regardless; this only gates queries that would be
+    /// resolved here.
+    pub fn allows_client(&self, client: IpAddr) -> bool {
+        let allowed = match &self.inner.allowed_clients {
             None => true,
             Some(networks) => {
-                // IPv4-mapped IPv6 clients (dual-stack sockets) match the
-                // IPv4 networks.
-                let client = match client {
-                    std::net::IpAddr::V6(v6) => v6
-                        .to_ipv4_mapped()
-                        .map(std::net::IpAddr::V4)
-                        .unwrap_or(client),
-                    v4 => v4,
-                };
+                let client = unmap(client);
                 networks.iter().any(|n| n.contains(&client))
             }
-        }
+        };
+        allowed
+            && !self
+                .inner
+                .policy_for(client)
+                .is_some_and(|i| matches!(self.inner.policies[i].backend, PolicyBackend::Refuse))
+    }
+
+    /// Whether opportunistic encryption (RFC 9539) is in use.
+    pub fn opportunistic_encryption(&self) -> bool {
+        self.inner.settings.opportunistic_encryption && self.inner.recursor.is_some()
     }
 
     /// The resolution mode this resolver was built with.
@@ -378,57 +460,124 @@ impl RecursiveResolver {
 }
 
 impl Inner {
-    /// Pick the resolver for `name` (see [`route_resolver`]), applying the
-    /// local root zone: in recursive mode the recursor is rebuilt when the
-    /// zone starts or stops being served; in forwarding mode names under a
-    /// top-level domain the root zone does not have are answered NXDOMAIN.
-    fn route(&self, name: &Name) -> Route {
-        match route_resolver(&self.default, &self.conditional, &self.stubs, name) {
-            Route::Recursive(recursor) => {
-                let DefaultBackend::Recursive(shared) = &self.default else {
-                    return Route::Recursive(recursor);
-                };
-                let wanted = self.local_root.as_ref().and_then(|v| v.serving_addr());
-                if shared.load().local_root == wanted {
-                    return Route::Recursive(recursor);
-                }
-                // Another query may already be rebuilding: use the current
-                // recursor rather than wait.
-                if let Ok(_guard) = self.rebuild.try_lock() {
-                    if shared.load().local_root != wanted {
-                        match self.rebuild_recursor(shared) {
-                            Ok(()) => info!(
-                                local_root = wanted.is_some(),
-                                "recursive resolver switched root servers"
-                            ),
-                            Err(e) => warn!("cannot rebuild the recursive resolver: {e}"),
-                        }
-                    }
-                }
-                Route::Recursive(shared.load().recursor.clone())
-            }
-            Route::Forward(resolver) => {
-                let default_route = match_conditional_zones(&self.conditional, name).is_none()
-                    && match_conditional_zones(&self.stubs, name).is_none();
-                if default_route && name.num_labels() > 0 {
-                    let tld = name.iter().next_back().map(String::from_utf8_lossy);
-                    let exists = tld
-                        .and_then(|tld| self.local_root.as_ref().and_then(|v| v.tld_exists(&tld)));
-                    if exists == Some(false) {
-                        return Route::NoSuchTld;
-                    }
-                }
-                Route::Forward(resolver)
-            }
-            Route::NoSuchTld => Route::NoSuchTld,
+    /// The first enabled client policy covering `client`.
+    fn policy_for(&self, client: IpAddr) -> Option<usize> {
+        if self.policies.is_empty() {
+            return None;
         }
+        let client = unmap(client);
+        self.policies
+            .iter()
+            .position(|p| p.networks.iter().any(|n| n.contains(&client)))
+    }
+
+    /// The policy a cache scope belongs to (for prefetch refreshes, which
+    /// only have the scoped cache key).
+    fn policy_for_scope(&self, scope: u16) -> Option<usize> {
+        match scope {
+            SCOPE_DEFAULT => None,
+            SCOPE_RECURSOR => self
+                .policies
+                .iter()
+                .position(|p| matches!(p.backend, PolicyBackend::Recursive)),
+            _ => Some(usize::from(scope - SCOPE_POLICY)),
+        }
+    }
+
+    /// Pick the resolver for `name` asked under `policy`: conditional and
+    /// stub zones first (see [`zone_resolver`]), then the client policy,
+    /// then the default backend. Returns the route, its kind, and the
+    /// cache-assistant scope its answers belong to.
+    ///
+    /// The local root zone applies here: the recursor is rebuilt when the
+    /// zone starts or stops being served, and a forwarded name under a
+    /// top-level domain the root zone does not have is answered NXDOMAIN.
+    fn route(&self, name: &Name, policy: Option<usize>) -> (Route, RouteKind, u16) {
+        if let Some((resolver, kind)) = zone_resolver(&self.conditional, &self.stubs, name) {
+            return (Route::Forward(Box::new(resolver)), kind, SCOPE_DEFAULT);
+        }
+        let policy = policy.and_then(|i| self.policies.get(i).map(|p| (i, p)));
+        match (policy, &self.default) {
+            (Some((i, p)), _) => match &p.backend {
+                PolicyBackend::Forward(resolver) => {
+                    if self.tld_missing(name) {
+                        return (Route::NoSuchTld, RouteKind::LocalRoot, SCOPE_DEFAULT);
+                    }
+                    let scope = SCOPE_POLICY + i as u16;
+                    (
+                        Route::Forward(resolver.clone()),
+                        RouteKind::ClientPolicy,
+                        scope,
+                    )
+                }
+                // Refused clients never get here (see `allows_client`).
+                PolicyBackend::Recursive | PolicyBackend::Refuse => {
+                    let scope = match self.default {
+                        DefaultBackend::Recursive => SCOPE_DEFAULT,
+                        DefaultBackend::Forward(_) => SCOPE_RECURSOR,
+                    };
+                    (self.recursive_route(), RouteKind::ClientPolicy, scope)
+                }
+            },
+            (None, DefaultBackend::Recursive) => {
+                (self.recursive_route(), RouteKind::Recursive, SCOPE_DEFAULT)
+            }
+            (None, DefaultBackend::Forward(resolver)) => {
+                if self.tld_missing(name) {
+                    return (Route::NoSuchTld, RouteKind::LocalRoot, SCOPE_DEFAULT);
+                }
+                (
+                    Route::Forward(resolver.clone()),
+                    RouteKind::Forwarding,
+                    SCOPE_DEFAULT,
+                )
+            }
+        }
+    }
+
+    /// Whether the local root zone says `name`'s top-level domain does not
+    /// exist (never true without a served local root zone).
+    fn tld_missing(&self, name: &Name) -> bool {
+        let Some(view) = &self.local_root else {
+            return false;
+        };
+        name.iter()
+            .next_back()
+            .and_then(|tld| view.tld_exists(&String::from_utf8_lossy(tld)))
+            == Some(false)
+    }
+
+    /// The current recursor, rebuilt first when the local root zone started
+    /// or stopped being served since it was built.
+    fn recursive_route(&self) -> Route {
+        let Some(shared) = &self.recursor else {
+            // Built whenever a route can lead here.
+            return Route::NoRecursor;
+        };
+        let wanted = self.local_root.as_ref().and_then(|v| v.serving_addr());
+        if shared.load().local_root != wanted {
+            // Another query may already be rebuilding: use the current
+            // recursor rather than wait.
+            if let Ok(_guard) = self.rebuild.try_lock() {
+                if shared.load().local_root != wanted {
+                    match self.rebuild_recursor(shared) {
+                        Ok(()) => info!(
+                            local_root = wanted.is_some(),
+                            "recursive resolver switched root servers"
+                        ),
+                        Err(e) => warn!("cannot rebuild the recursive resolver: {e}"),
+                    }
+                }
+            }
+        }
+        Route::Recursive(shared.load().recursor.clone())
     }
 
     /// Build a fresh recursor (empty caches) for the current local root
     /// zone state.
     fn rebuild_recursor(&self, shared: &recursor::SharedRecursor) -> Result<()> {
         let addr = self.local_root.as_ref().and_then(|v| v.serving_addr());
-        let recursor = recursor::build(&self.settings, addr)?;
+        let recursor = recursor::build(&self.settings, addr, self.metrics.clone())?;
         shared.store(Arc::new(recursor::RecursorSlot {
             recursor: Arc::new(recursor),
             local_root: addr,
@@ -444,13 +593,17 @@ impl Inner {
         self: Arc<Self>,
         name: &str,
         record_type: RecordType,
+        policy: Option<usize>,
     ) -> Result<Lookup> {
         let inner = self;
         let name = Name::from_utf8(name).map_err(|e| DaygleError::Resolution {
             message: format!("invalid name '{name}': {e}"),
             response_code: None,
         })?;
-        let key = cache_key(&name, record_type);
+        // Answers are kept per route so one policy's answers (say, a
+        // filtering upstream's) are never replayed to another's clients.
+        let (route, kind, scope) = inner.route(&name, policy);
+        let key = cache_key(&name, record_type).scoped(scope);
 
         // Replay a fresh cached failure before any upstream round trip, so a
         // broken or refusing upstream is not hammered on every client query.
@@ -462,13 +615,24 @@ impl Inner {
                 code,
                 "serving cached failure response"
             );
+            inner.metrics.inc(&inner.metrics.resolver.failures_replayed);
             return Err(DaygleError::Resolution {
                 message: "cached failure response".to_string(),
                 response_code: Some(code),
             });
         }
 
-        match Self::resolve(Arc::clone(&inner), name, record_type, true).await {
+        match Self::resolve(
+            Arc::clone(&inner),
+            route,
+            kind,
+            key.clone(),
+            name,
+            record_type,
+            true,
+        )
+        .await
+        {
             Ok(lookup) => Ok(lookup),
             Err(e @ DaygleError::Resolution { response_code, .. }) => {
                 // True transport/timeout failures (no response code) may be
@@ -481,6 +645,7 @@ impl Inner {
                             error = %e,
                             "upstream failed; serving stale answer"
                         );
+                        inner.metrics.inc(&inner.metrics.resolver.stale_served);
                         return Ok(stale);
                     }
                 } else if let Some(code) = response_code {
@@ -516,7 +681,7 @@ impl Inner {
         // Clone the routed resolver out of `inner` before awaiting so no
         // borrow of `Inner` is held across the lookup, and never spawn
         // again here (acyclic => provably `Send`).
-        let route = self.route(&name);
+        let (route, _, _) = self.route(&name, self.policy_for_scope(key.scope));
         match route.lookup(name, record_type).await {
             Ok(lookup) => {
                 self.cache_assist.on_success(&key, &lookup);
@@ -537,24 +702,37 @@ impl Inner {
     /// future `Send` despite the generic Hickory lookup future).
     async fn resolve(
         inner: Arc<Self>,
+        route: Route,
+        kind: RouteKind,
+        key: cache_assist::CacheKey,
         name: Name,
         record_type: RecordType,
         allow_prefetch: bool,
     ) -> Result<Lookup> {
-        let conditional_match = match_conditional_zones(&inner.conditional, &name);
-        let stub_match = match_conditional_zones(&inner.stubs, &name);
-        let route = inner.route(&name);
-        let via_conditional = conditional_match.is_some();
-        let key = cache_key(&name, record_type);
-        debug!(
-            query = %name,
-            rtype = ?record_type,
-            conditional = via_conditional,
-            stub = stub_match.is_some(),
-            "lookup routing"
-        );
+        debug!(query = %name, rtype = ?record_type, route = ?kind, "lookup routing");
+        let r = &inner.metrics.resolver;
+        inner.metrics.inc(match kind {
+            RouteKind::Recursive => &r.route_recursive,
+            RouteKind::Forwarding => &r.route_forwarding,
+            RouteKind::Conditional => &r.route_conditional,
+            RouteKind::Stub => &r.route_stub,
+            RouteKind::ClientPolicy => &r.route_client_policy,
+            RouteKind::LocalRoot => &r.route_local_root,
+        });
+        let started = Instant::now();
+        let result = route.lookup(name, record_type).await;
+        if kind != RouteKind::LocalRoot {
+            r.observe_latency(started.elapsed());
+        }
+        match &result {
+            Ok(_) => r.observe_outcome(Some(0), false),
+            Err(DaygleError::Resolution { response_code, .. }) => {
+                r.observe_outcome(*response_code, *response_code == Some(0))
+            }
+            Err(_) => r.observe_outcome(None, false),
+        }
 
-        match route.lookup(name, record_type).await {
+        match result {
             Ok(lookup) => {
                 inner.metrics.inc(&inner.metrics.cache_misses);
                 if allow_prefetch && inner.cache_assist.on_success(&key, &lookup) {
@@ -568,8 +746,8 @@ impl Inner {
                 debug!(
                     query = %lookup.query().name(),
                     rtype = ?record_type,
-                    conditional = via_conditional,
-                    "resolved recursively"
+                    route = ?kind,
+                    "resolved"
                 );
                 Ok(lookup)
             }
@@ -650,36 +828,69 @@ where
         .map(|(idx, _)| idx)
 }
 
-/// Route `name` to the most specific configured zone resolver. A stub zone
-/// wins only when it is strictly deeper than the best conditional match
-/// (a depth tie falls back to conditional forwarding); with no zone match
-/// the default upstreams are used.
-fn route_resolver(
-    default: &DefaultBackend,
+/// The most specific conditional or stub zone resolver for `name`, if any.
+/// A stub zone wins only when it is strictly deeper than the best
+/// conditional match (a depth tie falls back to conditional forwarding).
+fn zone_resolver(
     conditional: &[ConditionalResolver],
     stubs: &[ConditionalResolver],
     name: &Name,
-) -> Route {
+) -> Option<(TokioResolver, RouteKind)> {
     let conditional_match = match_conditional_zones(conditional, name);
     let stub_match = match_conditional_zones(stubs, name);
-    let zone = match (conditional_match, stub_match) {
-        (None, None) => None,
-        (None, Some(i)) => Some(&stubs[i]),
-        (Some(i), None) => Some(&conditional[i]),
+    let (zone, kind) = match (conditional_match, stub_match) {
+        (None, None) => return None,
+        (None, Some(j)) => (&stubs[j], RouteKind::Stub),
+        (Some(i), None) => (&conditional[i], RouteKind::Conditional),
         (Some(i), Some(j)) => {
             if stubs[j].zone.len() > conditional[i].zone.len() {
-                Some(&stubs[j])
+                (&stubs[j], RouteKind::Stub)
             } else {
-                Some(&conditional[i])
+                (&conditional[i], RouteKind::Conditional)
             }
         }
     };
-    match (zone, default) {
-        (Some(zone), _) => Route::Forward(Box::new(zone.resolver.clone())),
-        (None, DefaultBackend::Forward(resolver)) => Route::Forward(resolver.clone()),
-        (None, DefaultBackend::Recursive(shared)) => {
-            Route::Recursive(shared.load().recursor.clone())
-        }
+    Some((zone.resolver.clone(), kind))
+}
+
+/// Build the client policies (forwarding ones get their own resolver).
+fn build_policies(settings: &RecursiveSettings) -> Result<Vec<ClientPolicy>> {
+    let mut policies = Vec::new();
+    for policy in settings.client_policies.iter().filter(|p| p.enabled) {
+        let networks = policy
+            .clients
+            .iter()
+            .filter_map(|n| parse_network(n))
+            .collect();
+        let backend = match policy.action {
+            ClientPolicyAction::Forward => {
+                let config =
+                    ResolverConfig::from_parts(None, vec![], parse_upstreams(&policy.upstreams)?);
+                let resolver =
+                    TokioResolver::builder_with_config(config, TokioRuntimeProvider::default())
+                        .with_options(resolver_opts(settings))
+                        .build()
+                        .map_err(|e| {
+                            DaygleError::Config(format!(
+                                "cannot build the resolver for client policy '{}': {e}",
+                                policy.name
+                            ))
+                        })?;
+                PolicyBackend::Forward(Box::new(resolver))
+            }
+            ClientPolicyAction::Recursive => PolicyBackend::Recursive,
+            ClientPolicyAction::Refuse => PolicyBackend::Refuse,
+        };
+        policies.push(ClientPolicy { networks, backend });
+    }
+    Ok(policies)
+}
+
+/// IPv4-mapped IPv6 clients (dual-stack sockets) match IPv4 networks.
+fn unmap(client: IpAddr) -> IpAddr {
+    match client {
+        IpAddr::V6(v6) => v6.to_ipv4_mapped().map(IpAddr::V4).unwrap_or(client),
+        v4 => v4,
     }
 }
 

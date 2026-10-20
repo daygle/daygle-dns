@@ -2017,6 +2017,41 @@ pub async fn cache_status(State(state): State<AppState>) -> Response {
     .into_response()
 }
 
+/// `GET /api/resolver` - the resolver dashboard: how lookups were routed
+/// and how they ended, a latency histogram, the DNSSEC share and the
+/// recursor's outbound transports (counters since the server started).
+pub async fn resolver_stats(State(state): State<AppState>) -> Response {
+    let config = state.config.load_full();
+    let resolver = state.resolver.load_full();
+    let metrics = &state.metrics;
+    let local_root = state.local_root.status();
+    Json(serde_json::json!({
+        "enabled": resolver.is_some(),
+        "mode": resolver.as_ref().map(|r| r.mode()),
+        "dnssec_validation": config.recursive.dnssec_validate,
+        "opportunistic_encryption": resolver
+            .as_ref()
+            .is_some_and(|r| r.opportunistic_encryption()),
+        "local_root": {
+            "enabled": local_root.enabled,
+            "serving": local_root.serving,
+            "serial": local_root.serial,
+        },
+        "client_policies": config
+            .recursive
+            .client_policies
+            .iter()
+            .filter(|p| p.enabled)
+            .count(),
+        "conditional_zones": config.recursive.conditional_zones.len(),
+        "stub_zones": config.authoritative.stub_zones.len(),
+        "queries": metrics.get(&metrics.recursive),
+        "dnssec_validated": metrics.get(&metrics.dnssec_validated),
+        "stats": metrics.resolver.snapshot(),
+    }))
+    .into_response()
+}
+
 /// `GET /api/local-root` - the local root zone (RFC 8806): whether it is
 /// enabled and served, its serial and size, and the last refresh outcome.
 pub async fn local_root_status(State(state): State<AppState>) -> Response {
@@ -2694,6 +2729,9 @@ pub struct RecursiveUpdate {
     pub rebinding_protection: Option<bool>,
     /// Local root zone (RFC 8806): `enabled` and `sources`.
     pub local_root: Option<daygle_dns_core::config::LocalRootSettings>,
+    pub opportunistic_encryption: Option<bool>,
+    /// Replaces the whole client policy list.
+    pub client_policies: Option<Vec<daygle_dns_core::config::ClientPolicyConfig>>,
 }
 
 /// Fields shared by the DoT and DoQ listeners.
@@ -2797,6 +2835,19 @@ pub async fn update_settings(
             config.recursive.conditional_zones =
                 daygle_dns_core::config::RecursiveUpdate::normalize_conditional_zones(v);
         }
+        // Policy upstreams use the resolver's own syntax, which the config
+        // validation cannot check: parse them here so a typo is a 400, not a
+        // resolver rebuild that silently keeps the old policies.
+        for policy in r.client_policies.iter().flatten() {
+            if policy.action == daygle_dns_core::config::ClientPolicyAction::Forward {
+                if let Err(e) = daygle_dns_recursive::parse_upstreams(&policy.upstreams) {
+                    return error_response(
+                        StatusCode::BAD_REQUEST,
+                        format!("client policy '{}': {e}", policy.name.trim()),
+                    );
+                }
+            }
+        }
         daygle_dns_core::config::RecursiveUpdate {
             mode: r.mode,
             recursion_access: r.recursion_access,
@@ -2805,6 +2856,8 @@ pub async fn update_settings(
             case_randomization: r.case_randomization,
             rebinding_protection: r.rebinding_protection,
             local_root: r.local_root.clone(),
+            opportunistic_encryption: r.opportunistic_encryption,
+            client_policies: r.client_policies.clone(),
             ..Default::default()
         }
         .apply_resolution(&mut config.recursive);

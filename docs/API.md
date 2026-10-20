@@ -260,7 +260,8 @@ PUT /api/config
 Editable groups: `server` (listen/port/udp_enabled/tcp_enabled), `recursive`
 (enabled/mode/upstreams/dnssec_validate/prefetch_* /serve_stale_secs/
 conditional_zones/recursion_access/recursion_networks/root_hints/
-case_randomization/rebinding_protection/local_root), `dot`,
+case_randomization/rebinding_protection/local_root/opportunistic_encryption/
+client_policies), `dot`,
 `doh`, `doq` (enabled/port/self_signed/server_name [+ `doh.endpoint`]), `api`
 (gui_enabled/cors_origins), and `authoritative`
 (default_record_ttl/default_primary_ns/axfr_enabled/axfr_networks/
@@ -307,6 +308,22 @@ answered from it; in forwarding mode names under top-level domains the root
 zone does not have are answered `NXDOMAIN` without asking the upstreams
 (conditional forwarders and stub zones still take precedence, so use one for
 a private TLD).
+
+`recursive.opportunistic_encryption` (recursive mode, off by default) turns on
+RFC 9539 opportunistic encryption: nameservers are probed for DNS over TLS or
+QUIC in the background and the encrypted transport is used where it works,
+with plain DNS as the fallback.
+
+`recursive.client_policies` resolves some clients differently. Each policy is
+`{ "name", "enabled", "clients": [CIDRs or IPs], "action", "upstreams" }` with
+`action` `"forward"` (to the policy's `upstreams`, same forms as
+`recursive.upstreams`), `"recursive"` (from the root servers, whatever the
+default mode) or `"refuse"` (REFUSED; local zones are still answered). The
+first enabled policy covering the client wins; `recursion_access` still
+decides who may use recursion at all, and conditional forwarders and stub
+zones still answer for their own names. Each policy keeps its own cached
+answers. The list is replaced as a whole; invalid upstreams are rejected with
+`400`.
 
 Recursive settings and stub zones apply to live traffic immediately: the
 resolver is rebuilt whenever `recursive.*` or `authoritative.stub_zones`
@@ -646,6 +663,47 @@ POST /api/cache/clear
 counters.
 
 `POST /api/cache/clear` flushes the recursive resolver cache.
+
+### Resolver dashboard
+
+```
+GET /api/resolver
+```
+
+Counters since the server started, behind the Status page's Resolver card:
+
+```json
+{
+  "enabled": true,
+  "mode": "recursive",
+  "dnssec_validation": true,
+  "opportunistic_encryption": true,
+  "local_root": { "enabled": true, "serving": true, "serial": 2026101901 },
+  "client_policies": 1,
+  "conditional_zones": 1,
+  "stub_zones": 0,
+  "queries": 18234,
+  "dnssec_validated": 9876,
+  "stats": {
+    "routes": { "recursive": 15210, "forwarding": 0, "conditional": 412,
+                "stub": 0, "client_policy": 2380, "local_root": 232 },
+    "outcomes": { "noerror": 15900, "nodata": 1210, "nxdomain": 980,
+                  "servfail": 96, "refused": 3, "other": 0, "failures": 45,
+                  "stale_served": 12, "failures_replayed": 310 },
+    "latency": { "bounds_ms": [1, 5, 10, 25, 50, 100, 250, 500, 1000, 2500],
+                 "counts": [9800, 1200, 900, 1700, 1600, 1100, 700, 160, 40, 30, 4],
+                 "p50_ms": 1, "p90_ms": 100, "p99_ms": 500, "mean_ms": 21.4 },
+    "connections": { "udp": 5400, "tcp": 620, "tls": 1310, "quic": 85 }
+  }
+}
+```
+
+`routes` counts lookups by the way they were resolved (`local_root` is
+NXDOMAIN answered from the local root zone without a lookup). `latency.counts`
+has one entry per bound plus a final one for slower lookups; the percentiles
+are bucket upper bounds. `connections` counts the recursor's outbound
+connections by transport (`tls` and `quic` come from opportunistic
+encryption).
 
 ### Local root zone
 

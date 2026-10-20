@@ -94,6 +94,17 @@ pub struct CacheAssistant {
 pub struct CacheKey {
     pub name: String,
     pub rtype: u16,
+    /// Which resolver the answers came from (client policies keep their
+    /// own); 0 for the default one.
+    pub scope: u16,
+}
+
+impl CacheKey {
+    /// The same name and type under another resolver's scope.
+    pub fn scoped(mut self, scope: u16) -> Self {
+        self.scope = scope;
+        self
+    }
 }
 
 impl CacheAssistant {
@@ -381,6 +392,7 @@ pub fn cache_key(name: &hickory_proto::rr::Name, rtype: RecordType) -> CacheKey 
     CacheKey {
         name: name.to_string().to_ascii_lowercase(),
         rtype: u16::from(rtype),
+        scope: 0,
     }
 }
 

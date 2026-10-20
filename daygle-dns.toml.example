@@ -43,10 +43,13 @@ recursion_access = "private_networks"
 # copy of the root zone, accepted only when its ZONEMD digest and DNSSEC
 # signatures verify, and answer root queries from it. In forwarding mode,
 # names under top-level domains that do not exist are answered NXDOMAIN
-# locally (use a conditional zone for private TLDs such as .lan).
-# [recursive.local_root]
-# enabled = false
-# sources = []      # AXFR servers (IP, IP:port); empty uses ICANN/IANA defaults
+# locally (use a conditional zone for private TLDs such as .lan). `sources`
+# lists AXFR servers (IP, IP:port); empty uses the ICANN/IANA defaults.
+# local_root = { enabled = false, sources = [] }
+#
+# Recursive mode: probe nameservers for DNS over TLS/QUIC and use it where it
+# works (RFC 9539, experimental), falling back to plain DNS.
+# opportunistic_encryption = false
 #
 # Forwarding mode: empty list + use_system_config = use /etc/resolv.conf.
 # Supported upstream forms:
@@ -86,6 +89,16 @@ serve_stale_secs = 0
 # [[recursive.conditional_zones]]
 # name = "corp.internal"
 # upstreams = ["192.0.2.10", "192.0.2.11:5353"]
+#
+# Client resolution policies: clients in `clients` are resolved this way
+# instead of the default; the first enabled match wins. action is "forward"
+# (to `upstreams`), "recursive" (from the root servers) or "refuse". Also
+# manageable from the console (Settings -> Recursive & Caching).
+# [[recursive.client_policies]]
+# name = "Kids' devices"
+# clients = ["192.168.1.64/27"]
+# action = "forward"
+# upstreams = ["1.1.1.3", "1.0.0.3"]
 
 # Authoritative zone storage (SQLite).
 [authoritative]
