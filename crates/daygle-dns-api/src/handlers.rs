@@ -1821,6 +1821,44 @@ pub async fn upsert_blocking_group(
     }
 }
 
+/// `POST /api/policy/blocking/{id}/move` body.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MoveGroupInput {
+    /// `up` or `down`.
+    pub direction: String,
+}
+
+/// `POST /api/policy/blocking/{id}/move` - move a group one place up or down
+/// in the evaluation order (the first matching group decides).
+pub async fn move_blocking_group(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(input): Json<MoveGroupInput>,
+) -> Response {
+    let delta = match input.direction.as_str() {
+        "up" => -1,
+        "down" => 1,
+        other => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                format!("direction must be 'up' or 'down', not '{other}'"),
+            )
+        }
+    };
+    match state.catalog.store().move_blocking_group(&id, delta) {
+        Ok(true) => {
+            rebuild_advanced_blocking(&state);
+            match state.catalog.store().list_blocking_groups() {
+                Ok(groups) => Json(groups).into_response(),
+                Err(e) => map_err(e),
+            }
+        }
+        Ok(false) => error_response(StatusCode::NOT_FOUND, "blocking group not found"),
+        Err(e) => map_err(e),
+    }
+}
+
 /// `DELETE /api/policy/blocking/{id}` - remove a group and rebuild the engine.
 pub async fn delete_blocking_group(
     State(state): State<AppState>,

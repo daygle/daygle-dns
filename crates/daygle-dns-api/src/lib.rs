@@ -365,6 +365,10 @@ pub fn router(state: AppState) -> Router {
             "/policy/blocking/{id}",
             delete(handlers::delete_blocking_group),
         )
+        .route(
+            "/policy/blocking/{id}/move",
+            post(handlers::move_blocking_group),
+        )
         .route("/update", get(handlers::update_info))
         .route("/update/status", get(handlers::update_status))
         .route("/update/start", post(handlers::update_start))

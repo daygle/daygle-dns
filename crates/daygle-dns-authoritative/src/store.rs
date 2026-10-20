@@ -530,8 +530,9 @@ impl ZoneStore {
         Ok(group)
     }
 
-    /// Create a blocking group, or update the one with the same name in place
-    /// (its id and position are preserved on update).
+    /// Create a blocking group, or update one in place (its id and position
+    /// are preserved): the group with `input.id` when given (which may rename
+    /// it), else the one with the same name.
     pub fn upsert_blocking_group(&self, input: &BlockingGroupInput) -> Result<BlockingGroup> {
         let name = input.name.trim().to_string();
         if name.is_empty() {
@@ -546,8 +547,44 @@ impl ZoneStore {
         let block_regex = encode_json(&input.block_regex, "block_regex")?;
         let response = serde_json::to_string(&input.response)
             .map_err(|e| DaygleError::Database(format!("encode response: {e}")))?;
-        let id = Uuid::new_v4().to_string();
         let conn = self.lock_conn()?;
+        if let Some(id) = &input.id {
+            let duplicate: bool = conn.query_row(
+                "SELECT EXISTS (SELECT 1 FROM blocking_groups WHERE name = ?1 AND id != ?2)",
+                params![name, id],
+                |r| r.get(0),
+            )?;
+            if duplicate {
+                return Err(DaygleError::InvalidRecord(format!(
+                    "a blocking group named '{name}' already exists"
+                )));
+            }
+            let updated = conn.execute(
+                "UPDATE blocking_groups SET name = ?2, enabled = ?3, clients = ?4,
+                    allow = ?5, block = ?6, allow_regex = ?7, block_regex = ?8,
+                    response = ?9
+                 WHERE id = ?1",
+                params![
+                    id,
+                    name,
+                    input.enabled as i64,
+                    clients,
+                    allow,
+                    block,
+                    allow_regex,
+                    block_regex,
+                    response,
+                ],
+            )?;
+            drop(conn);
+            if updated == 0 {
+                return Err(DaygleError::NotFound(format!("blocking group {id}")));
+            }
+            return self
+                .get_blocking_group(id)?
+                .ok_or_else(|| DaygleError::NotFound(format!("blocking group {id}")));
+        }
+        let id = Uuid::new_v4().to_string();
         // New rows land after every existing group; updates keep their spot.
         conn.execute(
             "INSERT INTO blocking_groups
@@ -886,6 +923,36 @@ impl ZoneStore {
         let conn = self.lock_conn()?;
         let changed = conn.execute("DELETE FROM split_horizon_networks WHERE name = ?1", [name])?;
         Ok(changed > 0)
+    }
+
+    /// Move a blocking group one place up (`-1`) or down (`1`) in the
+    /// evaluation order. Returns false when the group does not exist; moving
+    /// past either end is a no-op.
+    pub fn move_blocking_group(&self, id: &str, delta: i64) -> Result<bool> {
+        let mut ids: Vec<String> = self
+            .list_blocking_groups()?
+            .into_iter()
+            .map(|g| g.id)
+            .collect();
+        let Some(from) = ids.iter().position(|g| g == id) else {
+            return Ok(false);
+        };
+        let to = from as i64 + delta;
+        if to < 0 || to >= ids.len() as i64 {
+            return Ok(true);
+        }
+        ids.swap(from, to as usize);
+        // Renumber everything, which also repairs duplicate positions.
+        let mut conn = self.lock_conn()?;
+        let tx = conn.transaction()?;
+        for (position, group) in ids.iter().enumerate() {
+            tx.execute(
+                "UPDATE blocking_groups SET position = ?2 WHERE id = ?1",
+                params![group, position as i64],
+            )?;
+        }
+        tx.commit()?;
+        Ok(true)
     }
 
     /// List all split-horizon entries ordered by domain then position.
@@ -2406,6 +2473,7 @@ mod tests {
         let s = store();
         let created = s
             .upsert_blocking_group(&BlockingGroupInput {
+                id: None,
                 name: "  Kids  ".to_string(),
                 enabled: true,
                 clients: vec!["192.168.1.0/24".to_string()],
@@ -2426,6 +2494,7 @@ mod tests {
         // Upsert by the same name updates in place (id and position preserved).
         let updated = s
             .upsert_blocking_group(&BlockingGroupInput {
+                id: None,
                 name: "Kids".to_string(),
                 enabled: false,
                 clients: vec![],
@@ -2448,6 +2517,57 @@ mod tests {
         assert!(s.delete_blocking_group(&created.id).unwrap());
         assert!(s.list_blocking_groups().unwrap().is_empty());
         assert!(!s.delete_blocking_group(&created.id).unwrap());
+    }
+
+    #[test]
+    fn blocking_groups_rename_by_id_and_reorder() {
+        use daygle_dns_core::blocking::BlockingGroupInput;
+        let s = store();
+        let input = |id: Option<String>, name: &str| BlockingGroupInput {
+            id,
+            name: name.to_string(),
+            enabled: true,
+            clients: vec![],
+            allow: vec![],
+            block: vec![],
+            allow_regex: vec![],
+            block_regex: vec![],
+            response: Default::default(),
+        };
+        let a = s.upsert_blocking_group(&input(None, "A")).unwrap();
+        let b = s.upsert_blocking_group(&input(None, "B")).unwrap();
+
+        // Renaming by id updates the same group instead of adding one.
+        let renamed = s
+            .upsert_blocking_group(&input(Some(a.id.clone()), "Kids"))
+            .unwrap();
+        assert_eq!(renamed.id, a.id);
+        let names: Vec<String> = s
+            .list_blocking_groups()
+            .unwrap()
+            .into_iter()
+            .map(|g| g.name)
+            .collect();
+        assert_eq!(names, vec!["Kids", "B"]);
+        // ...but not onto another group's name, nor for a missing id.
+        assert!(s
+            .upsert_blocking_group(&input(Some(a.id.clone()), "B"))
+            .is_err());
+        assert!(s
+            .upsert_blocking_group(&input(Some("nope".into()), "C"))
+            .is_err());
+
+        // Reorder: B moves above Kids; moving past the top is a no-op.
+        assert!(s.move_blocking_group(&b.id, -1).unwrap());
+        assert!(s.move_blocking_group(&b.id, -1).unwrap());
+        let names: Vec<String> = s
+            .list_blocking_groups()
+            .unwrap()
+            .into_iter()
+            .map(|g| g.name)
+            .collect();
+        assert_eq!(names, vec!["B", "Kids"]);
+        assert!(!s.move_blocking_group("nope", 1).unwrap());
     }
 
     #[test]
