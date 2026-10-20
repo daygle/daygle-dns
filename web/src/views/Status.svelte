@@ -49,8 +49,6 @@
     { label: 'Total Queries', value: metrics?.total_queries ?? 0 },
     { label: 'Authoritative', value: metrics?.authoritative ?? 0 },
     { label: 'Recursive', value: metrics?.recursive ?? 0 },
-    { label: 'Cache Hits', value: metrics?.cache_hits ?? 0 },
-    { label: 'Cache Misses', value: metrics?.cache_misses ?? 0 },
     { label: 'Blocked', value: metrics?.blocked ?? 0 },
     { label: 'DNSSEC Validated', value: metrics?.dnssec_validated ?? 0 },
     { label: 'Errors', value: metrics?.errors ?? 0 },
@@ -347,10 +345,18 @@
 {/if}
 
 <style>
+  /* Six tiles: one row, or two even rows of three, or three of two - never
+     a lone tile on its own row. */
   .grid {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    grid-template-columns: repeat(6, minmax(0, 1fr));
     gap: 12px;
+  }
+  @media (max-width: 1180px) {
+    .grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  }
+  @media (max-width: 560px) {
+    .grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   }
   .stat .big { font-size: 1.6rem; font-weight: 700; margin-top: 6px; }
 
