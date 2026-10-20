@@ -38,6 +38,78 @@ pub struct DaygleConfig {
     pub logging: LoggingSettings,
     /// AI scanner: background classification of observed domains.
     pub ai: AiSettings,
+    /// Console defaults for showing dates and times.
+    pub display: DisplaySettings,
+}
+
+/// How the console shows dates and times to users who have not chosen their
+/// own (each console account can override these in its preferences).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct DisplaySettings {
+    /// `system` (the viewer's own device), `UTC`, or an IANA zone name such
+    /// as `Europe/London`.
+    pub time_zone: String,
+    /// `system` (the browser's locale), `dmy`, `mdy`, `ymd` or `d_mon_y`.
+    pub date_format: String,
+    /// `system` (the browser's locale), `24h` or `12h`.
+    pub time_format: String,
+}
+
+impl Default for DisplaySettings {
+    fn default() -> Self {
+        Self {
+            time_zone: "system".to_string(),
+            date_format: "system".to_string(),
+            time_format: "system".to_string(),
+        }
+    }
+}
+
+/// Accepted `date_format` values.
+pub const DATE_FORMATS: &[&str] = &["system", "dmy", "mdy", "ymd", "d_mon_y"];
+/// Accepted `time_format` values.
+pub const TIME_FORMATS: &[&str] = &["system", "24h", "12h"];
+
+/// Check a display time zone: `system`, `UTC`, or something shaped like an
+/// IANA zone name (`Area/Location`, letters, digits, `_`, `-`, `+`). The
+/// browser does the real lookup and falls back to the device zone for a
+/// name it does not know.
+pub fn validate_time_zone(tz: &str) -> std::result::Result<(), String> {
+    if tz == "system" || tz.eq_ignore_ascii_case("utc") {
+        return Ok(());
+    }
+    let shaped = !tz.is_empty()
+        && tz.len() <= 64
+        && !tz.starts_with('/')
+        && !tz.ends_with('/')
+        && !tz.contains("//")
+        && tz
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '_' | '-' | '+'));
+    if shaped {
+        Ok(())
+    } else {
+        Err(format!("'{tz}' is not a time zone name"))
+    }
+}
+
+impl DisplaySettings {
+    /// Check every field; `allow_empty` accepts `""` as "not set" (a user's
+    /// preferences, where empty means use the server default).
+    pub fn check(&self, allow_empty: bool) -> std::result::Result<(), String> {
+        let unset = |v: &str| allow_empty && v.is_empty();
+        if !unset(&self.time_zone) {
+            validate_time_zone(&self.time_zone)?;
+        }
+        if !unset(&self.date_format) && !DATE_FORMATS.contains(&self.date_format.as_str()) {
+            return Err(format!("unknown date format '{}'", self.date_format));
+        }
+        if !unset(&self.time_format) && !TIME_FORMATS.contains(&self.time_format.as_str()) {
+            return Err(format!("unknown time format '{}'", self.time_format));
+        }
+        Ok(())
+    }
 }
 
 /// How AI scanner verdicts are applied.
@@ -149,6 +221,8 @@ pub struct RuntimeSettings {
     pub policy: Option<PolicyUpdate>,
     pub authoritative: Option<AuthoritativeUpdate>,
     pub ai: Option<AiUpdate>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display: Option<DisplaySettings>,
 }
 
 /// Partial updates for the recursive resolver (matches the API's shape).
@@ -515,6 +589,7 @@ impl RuntimeSettings {
             && self.policy.is_none()
             && self.authoritative.is_none()
             && self.ai.is_none()
+            && self.display.is_none()
     }
 
     /// Apply the overlay to `config` in place. `None` fields are untouched.
@@ -650,6 +725,9 @@ impl RuntimeSettings {
             if let Some(v) = &p.filter_aaaa_except {
                 config.policy.filter_aaaa_except = v.clone();
             }
+        }
+        if let Some(d) = &self.display {
+            config.display = d.clone();
         }
         if let Some(a) = &self.ai {
             if let Some(v) = a.enabled {
@@ -830,6 +908,7 @@ impl RuntimeSettings {
                 stub_zones: Some(config.authoritative.stub_zones.clone()),
             }),
             ai: Some(AiUpdate::capture_ai(&config.ai)),
+            display: Some(config.display.clone()),
         }
     }
 }
@@ -1334,6 +1413,9 @@ impl DaygleConfig {
                 ));
             }
         }
+        self.display
+            .check(false)
+            .map_err(|e| DaygleError::Config(format!("display: {e}")))?;
         Ok(())
     }
 }
@@ -2366,6 +2448,38 @@ mod tests {
         assert!(cfg.policy.allowlist.is_empty());
         assert_eq!(cfg.dot.port, 853);
         assert!(cfg.recursive.dnssec_validate);
+    }
+
+    #[test]
+    fn display_settings_are_validated() {
+        let ok = |tz: &str, d: &str, t: &str| {
+            DisplaySettings {
+                time_zone: tz.into(),
+                date_format: d.into(),
+                time_format: t.into(),
+            }
+            .check(false)
+        };
+        assert!(ok("system", "system", "system").is_ok());
+        assert!(ok("UTC", "dmy", "24h").is_ok());
+        assert!(ok("America/Argentina/Buenos_Aires", "d_mon_y", "12h").is_ok());
+        assert!(ok("Etc/GMT+10", "ymd", "system").is_ok());
+        assert!(ok("Not A Zone", "dmy", "24h").is_err());
+        assert!(ok("/etc/passwd", "dmy", "24h").is_err());
+        assert!(ok("", "dmy", "24h").is_err());
+        assert!(ok("UTC", "yyyy", "24h").is_err());
+        assert!(ok("UTC", "dmy", "25h").is_err());
+        // A user's preferences may leave fields empty (server default).
+        assert!(DisplaySettings {
+            time_zone: String::new(),
+            date_format: String::new(),
+            time_format: "12h".into(),
+        }
+        .check(true)
+        .is_ok());
+        // A config without [display] gets the defaults.
+        let cfg: DaygleConfig = toml::from_str("").unwrap();
+        assert_eq!(cfg.display, DisplaySettings::default());
     }
 
     #[test]

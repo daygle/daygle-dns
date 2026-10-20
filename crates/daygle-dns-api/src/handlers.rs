@@ -2283,22 +2283,70 @@ pub async fn auth_logout(
     StatusCode::NO_CONTENT.into_response()
 }
 
-/// `GET /api/auth/me` - identity of the presented session.
+/// `GET /api/auth/me` - identity of the presented session, with the
+/// account's display preferences and the server's display defaults.
+/// `preferences` is null for accounts defined in the config file, which
+/// have nowhere to store them.
 pub async fn auth_me(State(state): State<AppState>, headers: axum::http::HeaderMap) -> Response {
     let token = bearer_token(&headers).unwrap_or_default();
     match state.sessions.verify(&token) {
-        Some(session) => Json(serde_json::json!({
-            "username": session.username,
-            "role": session.role.as_str(),
-            "expires_at_secs": session
-                .expires_at
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0),
-        }))
-        .into_response(),
+        Some(session) => {
+            let preferences = state
+                .catalog
+                .store()
+                .get_console_user(&session.username)
+                .ok()
+                .flatten()
+                .map(|u| u.preferences);
+            Json(serde_json::json!({
+                "username": session.username,
+                "role": session.role.as_str(),
+                "expires_at_secs": session
+                    .expires_at
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0),
+                "preferences": preferences,
+                "display_defaults": state.config.load().display,
+            }))
+            .into_response()
+        }
         None => error_response(StatusCode::UNAUTHORIZED, "not authenticated"),
     }
+}
+
+/// `PUT /api/auth/preferences` - the signed-in user sets their own date and
+/// time display preferences. An empty field means "use the server default".
+/// Available to `viewer` accounts too (it only affects their own view).
+pub async fn auth_set_preferences(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    axum::Json(input): axum::Json<daygle_dns_core::config::DisplaySettings>,
+) -> Response {
+    let token = bearer_token(&headers).unwrap_or_default();
+    let Some(session) = state.sessions.verify(&token) else {
+        return error_response(StatusCode::UNAUTHORIZED, "not authenticated");
+    };
+    let preferences = daygle_dns_core::config::DisplaySettings {
+        time_zone: input.time_zone.trim().to_string(),
+        date_format: input.date_format.trim().to_string(),
+        time_format: input.time_format.trim().to_string(),
+    };
+    let store = state.catalog.store();
+    match store.get_console_user(&session.username) {
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            return error_response(
+                StatusCode::CONFLICT,
+                "accounts defined in the configuration file cannot store preferences",
+            )
+        }
+        Err(e) => return map_err(e),
+    }
+    if let Err(e) = store.set_console_user_preferences(&session.username, &preferences) {
+        return map_err(e);
+    }
+    Json(serde_json::json!({ "preferences": preferences })).into_response()
 }
 
 // ---- Self-service password change ---------------------------------------
@@ -2748,6 +2796,16 @@ pub struct SettingsUpdate {
     pub policy: Option<PolicyUpdate>,
     pub authoritative: Option<AuthoritativeUpdate>,
     pub ai: Option<AiUpdate>,
+    pub display: Option<DisplayUpdate>,
+}
+
+/// Partial update for the console's date and time display defaults.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DisplayUpdate {
+    pub time_zone: Option<String>,
+    pub date_format: Option<String>,
+    pub time_format: Option<String>,
 }
 
 /// Partial update for authoritative-zone settings surfaced in the console.
@@ -3087,6 +3145,17 @@ pub async fn update_settings(
         }
         if let Some(v) = &a.cors_origins {
             config.api.cors_origins = v.clone();
+        }
+    }
+    if let Some(d) = &update.display {
+        if let Some(v) = &d.time_zone {
+            config.display.time_zone = v.trim().to_string();
+        }
+        if let Some(v) = &d.date_format {
+            config.display.date_format = v.clone();
+        }
+        if let Some(v) = &d.time_format {
+            config.display.time_format = v.clone();
         }
     }
     let mut authoritative_changed = false;

@@ -55,7 +55,8 @@ Additional endpoints:
 
 | Endpoint | Purpose |
 |----------|---------|
-| `GET /api/auth/me` | identity of the presented session (`username`, `role`, `expires_at_secs`) |
+| `GET /api/auth/me` | identity of the presented session (`username`, `role`, `expires_at_secs`), the account's own date/time `preferences` and the server's `display_defaults` |
+| `PUT /api/auth/preferences` | signed-in user sets their own `{time_zone, date_format, time_format}`; an empty field means the server default (viewers may use it too) |
 | `POST /api/auth/logout` | revoke the presented token |
 | `POST /api/auth/password` | signed-in user rotates their own password (current password required; other sessions revoked) |
 | `GET /api/auth/setup` | whether the one-time first-run setup is still pending |
@@ -265,11 +266,13 @@ conditional_zones/recursion_access/recursion_networks/root_hints/
 case_randomization/rebinding_protection/local_root/opportunistic_encryption/
 client_policies), `dot`,
 `doh`, `doq` (enabled/port/self_signed/server_name [+ `doh.endpoint`]), `api`
-(gui_enabled/cors_origins), and `authoritative`
+(gui_enabled/cors_origins), `display` (the console's date/time defaults:
+`time_zone` = `system`, `UTC` or an IANA zone; `date_format` = `system`/`dmy`/
+`mdy`/`ymd`/`d_mon_y`; `time_format` = `system`/`24h`/`12h`), and `authoritative`
 (default_record_ttl/default_primary_ns/axfr_enabled/axfr_networks/
 allow_dynamic_updates/update_networks/notify_enabled/notify_targets/
 notify_listen_enabled/stub_zones). Runtime groups (`recursive`, `dot`, `doh`, `doq`,
-`policy`, `authoritative`) are stored in the database and survive restarts and
+`policy`, `authoritative`, `ai`, `display`) are stored in the database and survive restarts and
 config-file edits; `server.*` and `api.*` stay config-file-owned so a broken
 listener can always be fixed by editing the file. Login users are managed
 from the console's **Users** page (see [Console users and roles](#console-users-and-roles)).

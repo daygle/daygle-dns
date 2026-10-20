@@ -16,7 +16,7 @@ use crate::model::{
 };
 use crate::validate_name;
 use daygle_dns_core::blocking::{BlockingGroup, BlockingGroupInput};
-use daygle_dns_core::config::Role;
+use daygle_dns_core::config::{DisplaySettings, Role};
 use daygle_dns_core::error::{DaygleError, Result};
 
 /// Every zone paired with its records and signing keys, as consumed by the
@@ -124,7 +124,10 @@ CREATE TABLE IF NOT EXISTS console_users (
     first_name    TEXT NOT NULL DEFAULT '',
     last_name     TEXT NOT NULL DEFAULT '',
     email         TEXT NOT NULL DEFAULT '',
-    created_at    TEXT NOT NULL
+    created_at    TEXT NOT NULL,
+    time_zone     TEXT NOT NULL DEFAULT '',
+    date_format   TEXT NOT NULL DEFAULT '',
+    time_format   TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS tls_certificates (
@@ -1381,6 +1384,11 @@ fn row_to_console_user(row: &rusqlite::Row<'_>) -> rusqlite::Result<ConsoleUser>
         last_name: row.get(5)?,
         email: row.get(6)?,
         created_at: row.get(7)?,
+        preferences: DisplaySettings {
+            time_zone: row.get(8)?,
+            date_format: row.get(9)?,
+            time_format: row.get(10)?,
+        },
     })
 }
 
@@ -1395,6 +1403,9 @@ pub struct ConsoleUser {
     pub last_name: String,
     pub email: String,
     pub created_at: String,
+    /// The account's own date and time display choices. An empty field
+    /// means the server default (`display` in the configuration) applies.
+    pub preferences: DisplaySettings,
 }
 
 impl ConsoleUser {
@@ -1510,7 +1521,8 @@ impl ZoneStore {
     pub fn list_console_users(&self) -> Result<Vec<ConsoleUser>> {
         let conn = self.lock_conn()?;
         let mut stmt = conn.prepare(
-            "SELECT username, password_hash, role, enabled, first_name, last_name, email, created_at
+            "SELECT username, password_hash, role, enabled, first_name, last_name, email, created_at,
+                    time_zone, date_format, time_format
              FROM console_users ORDER BY username",
         )?;
         let rows = stmt.query_map([], row_to_console_user)?;
@@ -1539,7 +1551,8 @@ impl ZoneStore {
     pub fn get_console_user(&self, username: &str) -> Result<Option<ConsoleUser>> {
         let conn = self.lock_conn()?;
         conn.query_row(
-            "SELECT username, password_hash, role, enabled, first_name, last_name, email, created_at
+            "SELECT username, password_hash, role, enabled, first_name, last_name, email, created_at,
+                    time_zone, date_format, time_format
              FROM console_users WHERE username = ?1",
             [username],
             row_to_console_user,
@@ -1564,6 +1577,11 @@ impl ZoneStore {
             last_name: input.last_name.clone(),
             email: input.email.clone(),
             created_at: Utc::now().to_rfc3339(),
+            preferences: DisplaySettings {
+                time_zone: String::new(),
+                date_format: String::new(),
+                time_format: String::new(),
+            },
         };
         let conn = self.lock_conn()?;
         conn.execute(
@@ -1589,6 +1607,33 @@ impl ZoneStore {
             ],
         )?;
         Ok(user)
+    }
+
+    /// Store a console account's own display preferences (empty fields
+    /// fall back to the server default).
+    pub fn set_console_user_preferences(
+        &self,
+        username: &str,
+        preferences: &DisplaySettings,
+    ) -> Result<()> {
+        preferences
+            .check(true)
+            .map_err(DaygleError::InvalidRecord)?;
+        let conn = self.lock_conn()?;
+        let n = conn.execute(
+            "UPDATE console_users SET time_zone = ?2, date_format = ?3, time_format = ?4
+             WHERE username = ?1",
+            params![
+                username,
+                preferences.time_zone,
+                preferences.date_format,
+                preferences.time_format
+            ],
+        )?;
+        if n == 0 {
+            return Err(DaygleError::NotFound(format!("user '{username}'")));
+        }
+        Ok(())
     }
 
     /// Set a console account's stored password hash.
@@ -2341,10 +2386,18 @@ fn migrate_split_horizon_records(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-/// Add the personal profile columns (`first_name`, `last_name`, `email`) to
-/// `console_users` for databases created before user profiles existed.
+/// Add the personal profile columns (`first_name`, `last_name`, `email`) and
+/// display preference columns to `console_users` for databases created
+/// before they existed.
 fn migrate_console_user_profile(conn: &Connection) -> Result<()> {
-    for (column, default) in [("first_name", "''"), ("last_name", "''"), ("email", "''")] {
+    for (column, default) in [
+        ("first_name", "''"),
+        ("last_name", "''"),
+        ("email", "''"),
+        ("time_zone", "''"),
+        ("date_format", "''"),
+        ("time_format", "''"),
+    ] {
         let has: bool = conn.query_row(
             "SELECT EXISTS(
                 SELECT 1 FROM pragma_table_info('console_users') WHERE name = ?1

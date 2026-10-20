@@ -1627,3 +1627,121 @@ async fn redirect_answers_nodata_for_types_the_target_cannot_serve() {
 
     shutdown(server).await;
 }
+
+#[tokio::test]
+async fn display_defaults_and_personal_preferences() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = spawn_with_roles(&dir).await;
+    let client = reqwest::Client::new();
+    let base = api_url(server.api_addr, "");
+    let (admin, _) = login(server.api_addr, "admin", "secret").await;
+    let (viewer, _) = login(server.api_addr, "auditor", "watch").await;
+    let me = |token: String| {
+        let client = client.clone();
+        let url = format!("{base}/api/auth/me");
+        async move {
+            client
+                .get(url)
+                .bearer_auth(token)
+                .send()
+                .await
+                .unwrap()
+                .json::<serde_json::Value>()
+                .await
+                .unwrap()
+        }
+    };
+
+    // Out of the box everything follows the viewer's device, and nobody
+    // has personal preferences.
+    let m = me(viewer.clone()).await;
+    assert_eq!(m["display_defaults"]["time_zone"], json!("system"));
+    assert_eq!(m["preferences"]["time_zone"], json!(""));
+
+    // The admin sets the server-wide defaults; bad values are rejected.
+    let put = |body: serde_json::Value| {
+        client
+            .put(format!("{base}/api/config"))
+            .bearer_auth(&admin)
+            .json(&body)
+            .send()
+    };
+    let resp = put(json!({ "display": { "time_zone": "Not A Zone" } }))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+    let resp = put(json!({ "display": { "date_format": "yyyy" } }))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+    let resp = put(json!({ "display": {
+        "time_zone": "Australia/Sydney",
+        "date_format": "dmy",
+        "time_format": "24h",
+    } }))
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), 200);
+    let m = me(viewer.clone()).await;
+    assert_eq!(
+        m["display_defaults"]["time_zone"],
+        json!("Australia/Sydney")
+    );
+    assert_eq!(m["display_defaults"]["date_format"], json!("dmy"));
+
+    // A read-only account may set its own preferences (and only those).
+    let resp = client
+        .put(format!("{base}/api/auth/preferences"))
+        .bearer_auth(&viewer)
+        .json(&json!({ "time_zone": "UTC", "date_format": "", "time_format": "12h" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let resp = client
+        .put(format!("{base}/api/auth/preferences"))
+        .bearer_auth(&viewer)
+        .json(&json!({ "time_zone": "UTC", "date_format": "nope", "time_format": "" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+    let m = me(viewer.clone()).await;
+    assert_eq!(m["preferences"]["time_zone"], json!("UTC"));
+    assert_eq!(m["preferences"]["date_format"], json!(""));
+    assert_eq!(m["preferences"]["time_format"], json!("12h"));
+    // Another account's preferences are untouched.
+    let m = me(admin.clone()).await;
+    assert_eq!(m["preferences"]["time_zone"], json!(""));
+
+    // Without a session there is nothing to save to.
+    let resp = client
+        .put(format!("{base}/api/auth/preferences"))
+        .json(&json!({ "time_zone": "UTC", "date_format": "", "time_format": "" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 401);
+
+    shutdown(server).await;
+
+    // Both survive a restart: the defaults with the DB settings, the
+    // preferences with the account.
+    let server = spawn_with_roles(&dir).await;
+    let (viewer, _) = login(server.api_addr, "auditor", "watch").await;
+    let m: serde_json::Value = reqwest::Client::new()
+        .get(api_url(server.api_addr, "/api/auth/me"))
+        .bearer_auth(viewer)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        m["display_defaults"]["time_zone"],
+        json!("Australia/Sydney")
+    );
+    assert_eq!(m["preferences"]["time_format"], json!("12h"));
+    shutdown(server).await;
+}

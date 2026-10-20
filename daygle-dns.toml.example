@@ -391,3 +391,15 @@ threat_ttl_secs = 604800
 verifier_model_path = "/etc/daygle-dns/models/all-MiniLM-L6-v2-int8.onnx"
 verifier_reference_path = ""
 verifier_threshold = 0.35
+
+# ---------------------------------------------------------------------------
+# Console date & time defaults (also editable in Settings → Interface).
+# Each console user can override these under My Preferences.
+# time_zone: "system" (each viewer's device), "UTC", or an IANA zone name.
+# date_format: "system" (browser locale), "dmy", "mdy", "ymd", "d_mon_y".
+# time_format: "system" (browser locale), "24h", "12h".
+# ---------------------------------------------------------------------------
+[display]
+time_zone = "system"
+date_format = "system"
+time_format = "system"

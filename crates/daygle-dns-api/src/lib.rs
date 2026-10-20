@@ -22,6 +22,7 @@
 //! | `PUT`    | `/api/zones/:id/records/:rid`     | replace a record in place |
 //! | `DELETE` | `/api/zones/:id/records/:rid`     | delete a record |
 //! | `POST`   | `/api/auth/password`              | signed-in user rotates their own password |
+//! | `PUT`    | `/api/auth/preferences`           | signed-in user sets their own date/time display |
 //! | `GET`    | `/api/users`                      | list console accounts (hashes redacted) |
 //! | `POST`   | `/api/users`                      | create a console account |
 //! | `PATCH`  | `/api/users/:username`            | reset password / change role / enable-disable |
@@ -279,6 +280,7 @@ pub fn router(state: AppState) -> Router {
         .route("/auth/login", post(handlers::auth_login))
         .route("/auth/logout", post(handlers::auth_logout))
         .route("/auth/me", get(handlers::auth_me))
+        .route("/auth/preferences", put(handlers::auth_set_preferences))
         .route("/auth/password", post(handlers::auth_change_password))
         .route(
             "/auth/setup",
@@ -530,11 +532,18 @@ async fn require_auth(
                 );
             // The self-service password change is a mutation on the caller's
             // own credential (the handler re-verifies the current password),
-            // so read-only accounts may use it too.
-            let is_own_password_change = path == "/api/auth/password" || path == "/auth/password";
+            // and display preferences only change the caller's own view, so
+            // read-only accounts may use both.
+            let is_own_account_change = matches!(
+                path,
+                "/api/auth/password"
+                    | "/auth/password"
+                    | "/api/auth/preferences"
+                    | "/auth/preferences"
+            );
             if mutating
                 && session.role == daygle_dns_core::config::Role::Viewer
-                && !is_own_password_change
+                && !is_own_account_change
             {
                 return (
                     StatusCode::FORBIDDEN,
