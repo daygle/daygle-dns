@@ -231,7 +231,7 @@
         <div class="row" style="gap: 8px">
           <button onclick={rescan}>Scan Now</button>
           {#if onOpenSettings}
-            <button class="secondary" onclick={() => onOpenSettings('ai')}>Change in Settings</button>
+            <button class="secondary" onclick={() => onOpenSettings('ai')}>Settings</button>
           {/if}
         </div>
       </div>
@@ -360,9 +360,9 @@
         <button onclick={updateModels} disabled={modelBusy || !models?.models_dir}>
           Update AI Models
         </button>
-        <span class="muted">
-          {models?.models_dir ? `Installed in ${models.models_dir}` : 'No model directory found (models update unavailable)'}
-        </span>
+        {#if !models?.models_dir}
+          <span class="muted">No model directory found (models update unavailable)</span>
+        {/if}
       </div>
     {/if}
   </div>

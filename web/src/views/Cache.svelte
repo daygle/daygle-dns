@@ -120,7 +120,7 @@
         <span><span class="muted">Serve-Stale Window</span> {duration(cache.serve_stale_secs)}</span>
         <span><span class="muted">Refresh Popular Names Early</span> {cache.prefetch_enabled ? 'On' : 'Off'}</span>
         {#if onOpenSettings}
-          <button class="secondary" onclick={() => onOpenSettings('cache')}>Change in Settings</button>
+          <button class="secondary" onclick={() => onOpenSettings('cache')}>Settings</button>
         {/if}
       </div>
       <p class="muted help">

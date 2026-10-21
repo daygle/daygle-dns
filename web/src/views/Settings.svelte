@@ -15,7 +15,7 @@
   // Settings is split into tabs (same pattern as the Logs page) so the page
   // stays navigable as more options are added.
   // `initialTab` lets another page open a tab directly (the Cache page's
-  // "Change in Settings" link).
+  // "Settings" button).
   let { initialTab = 'general' } = $props();
   let tab = $state(initialTab);
   const TABS = [
@@ -959,18 +959,6 @@
       on the query path. Start in Train mode and review the verdicts on the AI
       page before switching to Enforce. Your allowlist and the AI page's exempt
       domains are never blocked.
-    </p>
-
-    <h4>Classifier</h4>
-    <div class="form-grid">
-      <label><span>Model File</span><input bind:value={ai_.model_path} placeholder="Empty = built-in heuristic rules" /></label>
-      <label><span>Verdict Database</span><input bind:value={ai_.database} placeholder="Empty = ai.db next to the zone database" /></label>
-    </div>
-    <p class="muted help">
-      A trained fastText model (<code>.bin</code>) classifies far better than the
-      built-in heuristic rules, which never score high enough to auto-block. The
-      AI page shows the installed model files. Changing either path takes effect
-      after a restart.
     </p>
 
     <h4>Scanning</h4>
