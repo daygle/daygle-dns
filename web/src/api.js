@@ -232,8 +232,8 @@ export const api = {
   importZone: (name, text) => request('POST', '/zones/import', { name, text }),
   blocklistSources: () => request('GET', '/policy/blocklist/sources'),
   refreshBlocklistSources: () => request('POST', '/policy/blocklist/sources'),
-  replaceBlocklistSources: (sources) =>
-    request('PUT', '/policy/blocklist/sources', { sources }),
+  replaceBlocklistSources: (sources, renames = {}) =>
+    request('PUT', '/policy/blocklist/sources', { sources, renames }),
   validateBlocklistSource: (url, format) =>
     request(
       'GET',

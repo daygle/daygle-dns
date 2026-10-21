@@ -251,9 +251,10 @@ fn last_modified(path: &Path) -> Option<std::time::SystemTime> {
 pub fn spawn_blocklist_refresh(
     shared: Arc<Shared>,
     sources: Vec<daygle_dns_core::config::BlocklistSourceConfig>,
+    group_lists: Arc<daygle_dns_policy::GroupBlocklists>,
     shutdown: CancellationToken,
 ) -> Option<Arc<BlocklistSourceManager>> {
-    let manager = match BlocklistSourceManager::new(sources) {
+    let manager = match BlocklistSourceManager::new(sources, group_lists) {
         Ok(m) => m,
         Err(e) => {
             warn!("blocklist sources disabled: {e}");

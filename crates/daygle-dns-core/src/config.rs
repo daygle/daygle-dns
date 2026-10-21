@@ -947,6 +947,9 @@ pub struct PolicyUpdate {
     pub filter_aaaa: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub filter_aaaa_except: Option<Vec<String>>,
+    /// The remote blocklist sources (Filtering -> Blocklists).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocklist_sources: Option<Vec<BlocklistSourceConfig>>,
 }
 
 /// Partial update for the AI scanner (matches the API's shape): the fields
@@ -1169,6 +1172,9 @@ impl RuntimeSettings {
             if let Some(v) = &p.filter_aaaa_except {
                 config.policy.filter_aaaa_except = v.clone();
             }
+            if let Some(v) = &p.blocklist_sources {
+                config.policy.blocklist_sources = v.clone();
+            }
         }
         if let Some(d) = &self.display {
             config.display = d.clone();
@@ -1359,6 +1365,7 @@ impl RuntimeSettings {
                 blocklist: Some(config.policy.blocklist.clone()),
                 filter_aaaa: Some(config.policy.filter_aaaa),
                 filter_aaaa_except: Some(config.policy.filter_aaaa_except.clone()),
+                blocklist_sources: Some(config.policy.blocklist_sources.clone()),
             }),
             authoritative: Some(AuthoritativeUpdate {
                 default_record_ttl: Some(config.authoritative.default_record_ttl),
@@ -3181,7 +3188,8 @@ pub struct BlocklistSourceConfig {
     pub name: String,
     /// HTTP(S) URL of the blocklist.
     pub url: String,
-    /// Content format: `domains` (one domain per line), `hosts` (a hosts
+    /// Content format: `domains` (one domain per line), `wildcard` (one
+    /// domain per line, each covering its subdomains), `hosts` (a hosts
     /// file, e.g. StevenBlack), `adblock` (AdGuard/uBlock syntax), or `rpz`
     /// (a Response Policy Zone file).
     pub format: BlocklistFormat,
@@ -3189,6 +3197,9 @@ pub struct BlocklistSourceConfig {
     pub refresh_secs: u64,
     /// Whether this source is fetched at all.
     pub enabled: bool,
+    /// Who the source blocks for: `everyone` (the default), or only the
+    /// client groups that select it (`groups`).
+    pub scope: BlocklistScope,
 }
 
 impl Default for BlocklistSourceConfig {
@@ -3199,8 +3210,20 @@ impl Default for BlocklistSourceConfig {
             format: BlocklistFormat::Domains,
             refresh_secs: 86400,
             enabled: true,
+            scope: BlocklistScope::Everyone,
         }
     }
+}
+
+/// Who a remote blocklist source applies to.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum BlocklistScope {
+    /// Every client (merged into the server-wide blocklist).
+    #[default]
+    Everyone,
+    /// Only clients in a client group that selects this source.
+    Groups,
 }
 
 /// The wire format of a remote blocklist source.
@@ -3210,6 +3233,10 @@ pub enum BlocklistFormat {
     /// One domain per line; comments (`#`, `!`) are skipped.
     #[default]
     Domains,
+    /// One domain per line, each also covering its subdomains (oisd's
+    /// `domainswild2`): `example.com` blocks `example.com` and
+    /// `ads.example.com`.
+    Wildcard,
     /// A hosts file: lines like `0.0.0.0 example.com`. The hostname column is
     /// used; localhost/loopback entries are ignored.
     Hosts,

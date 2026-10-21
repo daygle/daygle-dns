@@ -16,11 +16,12 @@
   const FORMAT_OPTIONS = [
     { value: 'auto', label: 'Auto-Detect' },
     { value: 'domains', label: 'Domains (One per Line)' },
+    { value: 'wildcard', label: 'Domains With Subdomains (e.g. oisd domainswild2)' },
     { value: 'hosts', label: 'Hosts File (e.g. StevenBlack)' },
     { value: 'adblock', label: 'Adblock (AdGuard / uBlock)' },
     { value: 'rpz', label: 'Response Policy Zone (RPZ)' },
   ];
-  const FORMAT_NAMES = { domains: 'Domains', hosts: 'Hosts File', adblock: 'Adblock', rpz: 'RPZ', auto: 'Auto-Detect' };
+  const FORMAT_NAMES = { domains: 'Domains', wildcard: 'Domains + Subdomains', hosts: 'Hosts File', adblock: 'Adblock', rpz: 'RPZ', auto: 'Auto-Detect' };
   const REFRESH_OPTIONS = [
     { hours: 1, label: '1 Hour' },
     { hours: 6, label: '6 Hours' },
@@ -74,6 +75,7 @@
       format: 'auto',
       refreshHours: 24,
       enabled: true,
+      scope: 'everyone',
       result: null,
     };
   }
@@ -87,6 +89,7 @@
       format: source.format,
       refreshHours: Math.max(1, Math.round(source.refresh_secs / 3600)),
       enabled: source.enabled,
+      scope: source.scope || 'everyone',
       result: null,
     };
   }
@@ -114,6 +117,7 @@
       format: source.format,
       refresh_secs: source.refresh_secs,
       enabled: source.enabled,
+      scope: source.scope || 'everyone',
     };
   }
 
@@ -208,9 +212,12 @@
         format,
         refresh_secs: Number(draft.refreshHours) * 3600,
         enabled: draft.enabled,
+        scope: draft.scope,
       });
 
-      await api.replaceBlocklistSources(next);
+      // Client groups that select a renamed source follow the rename.
+      const renamed = draft.originalName && draft.originalName !== name;
+      await api.replaceBlocklistSources(next, renamed ? { [draft.originalName]: name } : {});
       draft = null;
       await load();
       notice = `Source "${name}" saved - fetching it now.`;
@@ -225,7 +232,8 @@
   }
 
   async function removeSource(source) {
-    if (!confirm(`Delete blocklist source "${source.name}"? Its domains stop being blocked.`)) return;
+    const groupsNote = source.scope === 'groups' ? ' It is also removed from the client groups that use it.' : '';
+    if (!confirm(`Delete blocklist source "${source.name}"? Its domains stop being blocked.${groupsNote}`)) return;
     error = null;
     notice = null;
     try {
@@ -285,7 +293,7 @@
     <div class="spread" style="margin-bottom: 10px; gap: 10px; flex-wrap: wrap">
       <div>
         <h3 style="margin: 0">Blocklists ({sources.length})</h3>
-        <span class="muted small">{fmt(total)} domains blocked</span>
+        <span class="muted small">{fmt(total)} domains blocked for everyone</span>
       </div>
       <div class="row" style="gap: 8px">
         <button class="secondary" onclick={load}>Reload</button>
@@ -301,6 +309,7 @@
         <tr>
           <th>Source</th>
           <th>Format</th>
+          <th>Applies To</th>
           <th>Refreshes Every</th>
           <th class="num">Domains</th>
           <th>Last Refresh</th>
@@ -319,6 +328,7 @@
               {/if}
             </td>
             <td><span class="pill">{FORMAT_NAMES[s.format] || s.format}</span></td>
+            <td>{s.scope === 'groups' ? 'Client Groups' : 'Everyone'}</td>
             <td class="muted">{interval(s.refresh_secs)}</td>
             <td class="num">{fmt(s.domains)}</td>
             <td class="muted">{ago(s.last_fetch)}</td>
@@ -380,7 +390,7 @@
             placeholder="https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts"
           />
         </label>
-        <label class="wide">
+        <label>
           <span>Format</span>
           <select bind:value={draft.format}>
             {#each FORMAT_OPTIONS as o (o.value)}
@@ -388,12 +398,20 @@
             {/each}
           </select>
         </label>
+        <label>
+          <span>Applies To</span>
+          <select bind:value={draft.scope}>
+            <option value="everyone">Everyone</option>
+            <option value="groups">Selected Client Groups Only</option>
+          </select>
+        </label>
       </div>
       <label class="checkbox"><input type="checkbox" bind:checked={draft.enabled} /> <span>Enabled</span></label>
       <p class="muted help">
         The list is downloaded and checked before it is saved: Auto-Detect
         works out the format, a chosen format must match the content.
-        Validate checks it without saving.
+        Validate checks it without saving. A list for selected client groups
+        only blocks for the groups that tick it on the Client Groups tab.
       </p>
 
       {#if draft.result}

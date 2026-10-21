@@ -2,6 +2,8 @@
   import { api, formatApiError } from '../api.js';
 
   let groups = $state([]);
+  // Blocklists (Filtering -> Blocklists) set to apply to selected groups only.
+  let groupLists = $state([]);
   let error = $state(null);
   let notice = $state(null);
   let saving = $state(false);
@@ -27,6 +29,19 @@
     } catch (e) {
       error = formatApiError(e);
     }
+    try {
+      const data = await api.blocklistSources();
+      groupLists = (data.sources || []).filter((s) => s.scope === 'groups');
+    } catch {
+      // 404: no blocklists configured.
+      groupLists = [];
+    }
+  }
+
+  function toggleList(name) {
+    edit.blocklists = edit.blocklists.includes(name)
+      ? edit.blocklists.filter((n) => n !== name)
+      : [...edit.blocklists, name];
   }
 
   // Split a textarea into a trimmed list on newlines or commas.
@@ -51,6 +66,7 @@
           block: group.block.join('\n'),
           allow_regex: group.allow_regex.join('\n'),
           block_regex: group.block_regex.join('\n'),
+          blocklists: [...(group.blocklists || [])],
           responseKind: group.response?.kind || 'nx_domain',
           redirectAddr: group.response?.address || '0.0.0.0',
         }
@@ -64,6 +80,7 @@
           block: '',
           allow_regex: '',
           block_regex: '',
+          blocklists: [],
           responseKind: 'nx_domain',
           redirectAddr: '0.0.0.0',
         };
@@ -94,6 +111,7 @@
       block: parseList(edit.block),
       allow_regex: parseList(edit.allow_regex),
       block_regex: parseList(edit.block_regex),
+      blocklists: edit.blocklists,
       response,
     };
     saving = true;
@@ -194,6 +212,9 @@
               <td class="muted">
                 {count(g.allow.length + g.allow_regex.length, 'Allow Rule')} ·
                 {count(g.block.length + g.block_regex.length, 'Block Rule')}
+                {#if g.blocklists?.length}
+                  <div title={g.blocklists.join(', ')}>{count(g.blocklists.length, 'Blocklist')}</div>
+                {/if}
               </td>
               <td class="muted">{responseLabel(g.response)}</td>
               <td class="num">
@@ -213,9 +234,9 @@
   <p class="muted help">
     Groups covering the client are checked top to bottom. The first one that
     lists the domain decides: on its allow list, the domain is never blocked
-    (later groups are skipped); on its block list, it is blocked with that
-    group's response. Otherwise the next group is checked. A group with no
-    client networks covers every client.
+    (later groups are skipped); on its block list or one of its blocklists,
+    it is blocked with that group's response. Otherwise the next group is
+    checked. A group with no client networks covers every client.
   </p>
 </div>
 
@@ -269,6 +290,30 @@
       <label>Client Networks <textarea rows="2" bind:value={edit.clients} placeholder={'192.168.1.0/24\n10.0.0.5'}></textarea></label>
       <p class="muted help">CIDRs or single IPs, one per line. Leave empty for every client.</p>
 
+      <div class="section-title">Blocklists</div>
+      {#if groupLists.length}
+        <div class="lists">
+          {#each groupLists as l (l.name)}
+            <label class="checkbox">
+              <input type="checkbox" checked={edit.blocklists.includes(l.name)} onchange={() => toggleList(l.name)} />
+              <span>{l.name}</span>
+              <span class="muted small">{Number(l.domains || 0).toLocaleString()} domains{l.enabled ? '' : ' · Disabled'}</span>
+            </label>
+          {/each}
+        </div>
+        <p class="muted help">
+          Blocks the domains on the ticked lists for this group's clients; the
+          Allow list below still wins. Lists set to Everyone already apply to
+          every client.
+        </p>
+      {:else}
+        <p class="muted help">
+          No blocklists are set to apply to selected client groups. On the
+          Blocklists tab, add or edit a list and set <strong>Applies To</strong>
+          to <strong>Selected Client Groups Only</strong>, then tick it here.
+        </p>
+      {/if}
+
       <div class="section-title">Domains</div>
       <div class="grid2">
         <label>Allow <textarea rows="4" bind:value={edit.allow} placeholder={'school.example.com\n*.work.example'}></textarea></label>
@@ -314,6 +359,9 @@
   .checkbox { flex-direction: row; align-items: center; gap: 8px; margin-top: 10px; }
   .checkbox input { width: auto; }
   .checkbox span { color: var(--text); }
+  .checkbox span.muted { color: var(--muted); }
+  .lists { display: flex; flex-direction: column; gap: 2px; }
+  .lists .checkbox { margin-top: 4px; }
   .actions { margin-top: 22px; padding-top: 14px; border-top: 1px solid var(--border); }
   .dialog-error { color: var(--danger); margin: 0 0 10px; }
   .result { margin-top: 12px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }

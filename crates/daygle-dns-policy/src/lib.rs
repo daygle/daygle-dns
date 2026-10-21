@@ -27,7 +27,8 @@ pub use acl::Acl;
 pub use advanced::{validate_regex, AdvancedBlocking};
 pub use blocklist::Blocklist;
 pub use blocklist_source::{
-    detect_blocklist_format, parse_blocklist, BlocklistSourceManager, SourceStatus,
+    detect_blocklist_format, detect_blocklist_format_at, domain_count, parse_blocklist,
+    BlocklistSourceManager, GroupBlocklists, SourceStatus,
 };
 pub use engine::{Decision, PolicyEngine};
 pub use plugin::{PluginRegistry, PolicyContext, PolicyPlugin};

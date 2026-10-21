@@ -47,6 +47,10 @@ pub struct BlockingGroup {
     pub allow_regex: Vec<String>,
     /// Block regex patterns.
     pub block_regex: Vec<String>,
+    /// Names of the remote blocklist sources (scope `groups`) this group
+    /// blocks with.
+    #[serde(default)]
+    pub blocklists: Vec<String>,
     /// Response returned for blocked queries.
     pub response: BlockResponse,
     /// Ordering position (lower groups are evaluated first).
@@ -78,6 +82,8 @@ pub struct BlockingGroupInput {
     pub allow_regex: Vec<String>,
     #[serde(default)]
     pub block_regex: Vec<String>,
+    #[serde(default)]
+    pub blocklists: Vec<String>,
     #[serde(default)]
     pub response: BlockResponse,
 }
