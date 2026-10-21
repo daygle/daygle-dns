@@ -1925,6 +1925,105 @@ pub async fn set_record_disabled(
     }
 }
 
+// ---- Health checks (failover records) ----------------------------------
+
+/// The health check to put on a record (the record comes from the path).
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HealthCheckInput {
+    pub kind: String,
+    pub port: u16,
+    #[serde(default)]
+    pub path: String,
+    #[serde(default)]
+    pub host: String,
+    #[serde(default = "default_health_interval")]
+    pub interval_secs: u32,
+}
+
+fn default_health_interval() -> u32 {
+    30
+}
+
+/// `GET /api/health-checks` - every health check, with its record and
+/// whether it is passing.
+pub async fn list_health_checks(State(state): State<AppState>) -> Response {
+    match &state.health {
+        Some(health) => Json(health.status()).into_response(),
+        None => Json(Vec::<()>::new()).into_response(),
+    }
+}
+
+/// `PUT /api/zones/{id}/records/{rid}/health` - add or change the health
+/// check on an A or AAAA record.
+pub async fn set_health_check(
+    State(state): State<AppState>,
+    Path((zone_id, rid)): Path<(String, String)>,
+    axum::Json(input): axum::Json<HealthCheckInput>,
+) -> Response {
+    if let Some(response) = reject_secondary_mutation(&state, &zone_id) {
+        return response;
+    }
+    let record = match state.catalog.store().get_record(&rid) {
+        Ok(Some(r)) if r.zone_id == zone_id => r,
+        Ok(_) => return error_response(StatusCode::NOT_FOUND, "record not found"),
+        Err(e) => return map_err(e),
+    };
+    if !matches!(record.rtype.as_str(), "A" | "AAAA") {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "only A and AAAA records can be health-checked",
+        );
+    }
+    let mut check = daygle_dns_authoritative::model::HealthCheck {
+        record_id: rid.clone(),
+        kind: input.kind,
+        port: input.port,
+        path: input.path,
+        host: input.host,
+        interval_secs: input.interval_secs,
+    };
+    if let Err(msg) = check.validate() {
+        return error_response(StatusCode::BAD_REQUEST, msg);
+    }
+    if let Err(e) = state.catalog.store().set_health_check(&check) {
+        return map_err(e);
+    }
+    let _ = state.catalog.reload();
+    if let Some(health) = &state.health {
+        health.recheck(&rid);
+    }
+    Json(check).into_response()
+}
+
+/// `DELETE /api/zones/{id}/records/{rid}/health` - stop checking a record
+/// (it is served again whatever its state).
+pub async fn delete_health_check(
+    State(state): State<AppState>,
+    Path((zone_id, rid)): Path<(String, String)>,
+) -> Response {
+    if let Some(response) = reject_secondary_mutation(&state, &zone_id) {
+        return response;
+    }
+    match state.catalog.store().get_record(&rid) {
+        Ok(Some(r)) if r.zone_id == zone_id => {}
+        Ok(_) => return error_response(StatusCode::NOT_FOUND, "record not found"),
+        Err(e) => return map_err(e),
+    }
+    match state.catalog.store().delete_health_check(&rid) {
+        Ok(true) => {
+            let mut unhealthy = (*state.catalog.unhealthy()).clone();
+            unhealthy.remove(&rid);
+            if state.catalog.set_unhealthy(unhealthy).is_ok() {
+                let _ = state.catalog.reload();
+            }
+            StatusCode::NO_CONTENT.into_response()
+        }
+        Ok(false) => error_response(StatusCode::NOT_FOUND, "the record has no health check"),
+        Err(e) => map_err(e),
+    }
+}
+
 /// `GET /api/zones/{id}/export` - the zone as a BIND-style zone file
 /// (`text/plain`), including SOA and every record. Disabled records are
 /// included as `; disabled:` comments, so an export doubles as a full-zone

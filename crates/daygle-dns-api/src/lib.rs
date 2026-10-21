@@ -356,6 +356,8 @@ pub struct AppState {
     /// Runtime secondary-zone refresher, used by the zone form to apply master
     /// changes without requiring a process restart.
     pub secondary_refresher: Option<Arc<SecondaryRefresher>>,
+    /// Health checks on failover records.
+    pub health: Option<Arc<daygle_dns_authoritative::HealthMonitor>>,
     /// The local root zone (RFC 8806): settings changes, status and
     /// on-demand refresh.
     pub local_root: Arc<daygle_dns_authoritative::LocalRoot>,
@@ -497,6 +499,11 @@ pub fn router(state: AppState) -> Router {
             "/zones/{id}/records/{rid}/disabled",
             put(handlers::set_record_disabled),
         )
+        .route(
+            "/zones/{id}/records/{rid}/health",
+            put(handlers::set_health_check).delete(handlers::delete_health_check),
+        )
+        .route("/health-checks", get(handlers::list_health_checks))
         .route("/zones/{id}/export", get(handlers::export_zone))
         .route(
             "/zones/{id}/records/{rid}",

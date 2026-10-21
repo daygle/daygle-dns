@@ -290,6 +290,12 @@ pub async fn bind_with(
         Some(refresher)
     };
 
+    // Health checks on failover records.
+    let health = Arc::new(daygle_dns_authoritative::HealthMonitor::new(
+        catalog.clone(),
+    ));
+    tokio::spawn(health.clone().run_forever(shutdown.clone()));
+
     // Consumed catalog zones (RFC 9432): their member zones become
     // secondary zones, refreshed by the refresher above.
     let catalog_consumer = refresher.clone().map(|refresher| {
@@ -590,6 +596,7 @@ pub async fn bind_with(
         policy: shared.policy.clone(),
         advanced_blocking: shared.advanced_blocking.clone(),
         secondary_refresher: refresher.clone(),
+        health: Some(health.clone()),
         local_root: local_root.clone(),
         blocklist_sources: blocklist_sources.clone(),
         started_at,

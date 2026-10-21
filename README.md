@@ -12,6 +12,8 @@ Daygle combines, in a single process:
   import, and **DNSSEC zone signing** (NSEC or **NSEC3**) with **automatic key rollover** and
   **background RRSIG renewal**, so signed zones never go bogus after the
   signature window passes.
+- **Health-checked failover**: A/AAAA records checked over TCP, HTTP or
+  HTTPS are left out of answers while down, with backups by priority.
 - **ALIAS (ANAME) records**: point a zone apex at another host name (a CDN or
   load balancer) and answer A/AAAA with that host's current addresses.
 - **Zone transfers**: serve **AXFR/IXFR** (RFC 5936, with per-network ACLs)

@@ -690,8 +690,29 @@ PUT /api/zones/{id}/records
 Supported `rtype` values: `A`, `AAAA`, `CNAME`, `MX`, `TXT`, `NS`, `SOA`,
 `SRV`, `PTR`, `CAA`, `HTTPS`, `SVCB`, `DS`, `TLSA`, `SSHFP`, `NAPTR`, `ALIAS`.
 `content` must parse as that type's RDATA, otherwise the request fails with
-400. `priority` is stored but not served: MX and SRV take their priority from
-`content`.
+400. `priority` is not served: MX and SRV take their priority from `content`.
+For A and AAAA records with health checks it is the failover priority (see
+below).
+
+**Health-checked failover.** An A or AAAA record can carry a health check:
+
+```
+PUT    /api/zones/{id}/records/{rid}/health   { "kind": "https", "port": 443, "path": "/health", "host": "", "interval_secs": 30 }
+DELETE /api/zones/{id}/records/{rid}/health
+GET    /api/health-checks
+```
+
+`kind` is `tcp` (a connection opens), `http` or `https` (a GET answers with a
+status below 400; certificates are not verified). `host` is the name sent
+in the Host header and SNI (empty: the record's name); the request goes to
+the record's address. `interval_secs` is 5-86400 (default 30). After 2
+failed checks in a row a record is left out of answers, and it returns
+after 2 passes. At a name whose A (or AAAA) records include a checked one,
+only the healthy records with the lowest `priority` are served, so a higher
+priority makes a record a backup; when none is healthy, all are served.
+`GET /api/health-checks` lists every check with its record (`zone_id`,
+`name`, `rtype`, `address`, `priority`) and `healthy`, `last_checked` (UNIX
+seconds) and `last_error`. Zone transfers still carry every record.
 
 An `ALIAS` record (also called ANAME) lets a name - including the zone apex,
 where a CNAME is not allowed - follow another host's addresses: its `content`

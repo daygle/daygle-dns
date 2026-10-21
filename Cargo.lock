@@ -691,6 +691,7 @@ dependencies = [
  "hickory-proto",
  "hickory-server",
  "ipnet",
+ "reqwest",
  "rusqlite",
  "rustls-pki-types",
  "serde",

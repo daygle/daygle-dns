@@ -206,6 +206,11 @@ export const api = {
     request('DELETE', `/zones/${zoneId}/records/${recordId}`),
   setRecordDisabled: (zoneId, recordId, disabled) =>
     request('PUT', `/zones/${zoneId}/records/${encodeURIComponent(recordId)}/disabled`, { disabled }),
+  healthChecks: () => request('GET', '/health-checks'),
+  setHealthCheck: (zoneId, recordId, body) =>
+    request('PUT', `/zones/${zoneId}/records/${encodeURIComponent(recordId)}/health`, body),
+  deleteHealthCheck: (zoneId, recordId) =>
+    request('DELETE', `/zones/${zoneId}/records/${encodeURIComponent(recordId)}/health`),
   downloadBackup: (queryLogs) =>
     request('GET', `/backup${queryLogs ? '?query_logs=true' : ''}`, undefined, { blob: true }),
   pendingRestore: () => request('GET', '/backup/restore'),

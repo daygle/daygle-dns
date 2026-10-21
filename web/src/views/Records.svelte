@@ -43,6 +43,10 @@
   let dialogError = $state(null);
   let saving = $state(false);
   let edit = $state(null);
+  // Health checks of this zone's records, by record id, and the one being
+  // edited (null when the dialog is closed).
+  let health = $state({});
+  let healthEdit = $state(null);
 
   // Record list filter.
   let filterText = $state('');
@@ -101,6 +105,8 @@
     error = null;
     try {
       records = await api.records(zoneId);
+      const checks = await api.healthChecks().catch(() => []);
+      health = Object.fromEntries(checks.filter((c) => c.zone_id === zoneId).map((c) => [c.record_id, c]));
     } catch (e) {
       error = formatApiError(e);
       records = [];
@@ -199,6 +205,58 @@
       await loadRecords(selected.id);
     } catch (e) {
       error = formatApiError(e);
+    }
+  }
+
+  function openHealth(record) {
+    dialogError = null;
+    const c = health[record.id];
+    healthEdit = {
+      record,
+      exists: !!c,
+      kind: c?.kind || 'tcp',
+      port: c?.port || 443,
+      path: c?.path || '/',
+      host: c?.host || '',
+      interval_secs: c?.interval_secs || 30,
+    };
+  }
+
+  async function saveHealth() {
+    if (!healthEdit || !selected) return;
+    dialogError = null;
+    saving = true;
+    try {
+      const h = healthEdit;
+      await api.setHealthCheck(selected.id, h.record.id, {
+        kind: h.kind,
+        port: Number(h.port),
+        path: h.kind === 'tcp' ? '' : h.path,
+        host: h.host.trim(),
+        interval_secs: Number(h.interval_secs),
+      });
+      notice = `Health check saved for ${h.record.content}.`;
+      healthEdit = null;
+      await loadRecords(selected.id);
+    } catch (e) {
+      dialogError = formatApiError(e);
+    } finally {
+      saving = false;
+    }
+  }
+
+  async function removeHealth() {
+    if (!healthEdit || !selected) return;
+    saving = true;
+    try {
+      await api.deleteHealthCheck(selected.id, healthEdit.record.id);
+      notice = `Health check removed: ${healthEdit.record.content} is served again whatever its state.`;
+      healthEdit = null;
+      await loadRecords(selected.id);
+    } catch (e) {
+      dialogError = formatApiError(e);
+    } finally {
+      saving = false;
     }
   }
 
@@ -330,6 +388,14 @@
                 <td>
                   <code title={record.name}>{relativeName(record.name)}</code>
                   {#if record.disabled}<span class="pill">Disabled</span>{/if}
+                  {#if health[record.id]}
+                    <span
+                      class="pill"
+                      class:ok={health[record.id].healthy}
+                      class:bad={!health[record.id].healthy}
+                      title={health[record.id].last_error || `${health[record.id].kind.toUpperCase()} check on port ${health[record.id].port}`}
+                    >{health[record.id].healthy ? 'Healthy' : 'Down'}{record.priority ? ` · Backup ${record.priority}` : ''}</span>
+                  {/if}
                 </td>
                 <td>{record.rtype}</td>
                 <td class="value"><code>{record.content}</code></td>
@@ -338,6 +404,9 @@
                   {#if selected.zone_type !== 'secondary'}
                     <div class="row" style="gap: 6px; justify-content: flex-end; flex-wrap: nowrap">
                       <button class="secondary" onclick={() => startEdit(record)}>Edit</button>
+                      {#if record.rtype === 'A' || record.rtype === 'AAAA'}
+                        <button class="secondary" onclick={() => openHealth(record)} title="Check this address and fail over when it is down">Health</button>
+                      {/if}
                       <button
                         class="secondary"
                         onclick={() => toggleDisabled(record)}
@@ -400,10 +469,61 @@
       </p>
       <div class="grid2" style="margin-top: 10px">
         <label>TTL (Seconds) <span class="hint">{duration(Number(edit.ttl) || 0)}</span><input type="number" min="0" bind:value={edit.ttl} /></label>
+        {#if edit.rtype === 'A' || edit.rtype === 'AAAA'}
+          <label>Failover Priority <span class="hint">0 = primary</span><input type="number" min="0" bind:value={edit.priority} /></label>
+        {/if}
       </div>
       <div class="row actions">
         <button type="submit" disabled={saving || !edit.content.trim()}>{saving ? 'Saving…' : edit.isNew ? 'Add Record' : 'Save Record'}</button>
         <button type="button" class="secondary" onclick={closeEdit} disabled={saving}>Cancel</button>
+      </div>
+    </form>
+  </div>
+{/if}
+
+{#if healthEdit}
+  <div class="modal-backdrop" role="presentation" onclick={(e) => e.target === e.currentTarget && !saving && (healthEdit = null)}>
+    <form
+      class="modal card"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="health-title"
+      onsubmit={(e) => { e.preventDefault(); saveHealth(); }}
+    >
+      <div class="spread modal-title">
+        <h3 id="health-title" style="margin: 0">Health Check - {relativeName(healthEdit.record.name)} {healthEdit.record.rtype} {healthEdit.record.content}</h3>
+        <button type="button" class="secondary" style="padding: 2px 10px" onclick={() => (healthEdit = null)} aria-label="Close">✕</button>
+      </div>
+      {#if dialogError}<p class="dialog-error">{dialogError}</p>{/if}
+      <div class="grid2">
+        <label>Check
+          <select bind:value={healthEdit.kind}>
+            <option value="tcp">TCP Connection</option>
+            <option value="http">HTTP Request</option>
+            <option value="https">HTTPS Request</option>
+          </select>
+        </label>
+        <label>Port <input type="number" min="1" max="65535" bind:value={healthEdit.port} /></label>
+        {#if healthEdit.kind !== 'tcp'}
+          <label>Path <input placeholder="/health" bind:value={healthEdit.path} /></label>
+          <label>Host Name <input placeholder={relativeName(healthEdit.record.name) === '@' ? selected.name : healthEdit.record.name} bind:value={healthEdit.host} /></label>
+        {/if}
+        <label>Every (Seconds) <input type="number" min="5" max="86400" bind:value={healthEdit.interval_secs} /></label>
+      </div>
+      <p class="muted help">
+        The address is checked on this schedule; after 2 failures in a row it is
+        left out of answers, and it returns after 2 passes. At a name with
+        several addresses, only the healthy ones with the lowest Failover
+        Priority are served (set a higher priority on a record to make it a
+        backup). If every address is down, all are served. HTTP(S) checks pass
+        on any status below 400 and do not verify certificates.
+      </p>
+      <div class="row actions">
+        <button type="submit" disabled={saving}>{saving ? 'Saving…' : 'Save Check'}</button>
+        {#if healthEdit.exists}
+          <button type="button" class="danger" onclick={removeHealth} disabled={saving}>Remove Check</button>
+        {/if}
+        <button type="button" class="secondary" onclick={() => (healthEdit = null)} disabled={saving}>Cancel</button>
       </div>
     </form>
   </div>

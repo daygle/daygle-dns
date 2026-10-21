@@ -62,6 +62,18 @@ CREATE TABLE IF NOT EXISTS dnssec_keys (
 
 CREATE INDEX IF NOT EXISTS idx_dnssec_keys_zone ON dnssec_keys(zone_id);
 
+-- Health checks on A/AAAA records (no foreign key: editing a record
+-- re-inserts its row, which must not drop the check; orphans are cleared at
+-- start-up and ignored when read).
+CREATE TABLE IF NOT EXISTS health_checks (
+    record_id      TEXT PRIMARY KEY,
+    kind           TEXT NOT NULL,
+    port           INTEGER NOT NULL,
+    path           TEXT NOT NULL DEFAULT '',
+    host           TEXT NOT NULL DEFAULT '',
+    interval_secs  INTEGER NOT NULL DEFAULT 30
+);
+
 -- Zones added by a consumed catalog zone (RFC 9432), and which catalog.
 CREATE TABLE IF NOT EXISTS catalog_members (
     zone_id  TEXT PRIMARY KEY REFERENCES zones(id) ON DELETE CASCADE,
@@ -300,6 +312,7 @@ impl ZoneStore {
              DELETE FROM dnssec_keys WHERE zone_id NOT IN (SELECT id FROM zones);
              DELETE FROM zone_dnssec WHERE zone_id NOT IN (SELECT id FROM zones);
              DELETE FROM catalog_members WHERE zone_id NOT IN (SELECT id FROM zones);
+             DELETE FROM health_checks WHERE record_id NOT IN (SELECT id FROM records);
              DELETE FROM secondary_zones WHERE zone_id NOT IN (SELECT id FROM zones);
              PRAGMA foreign_keys = ON;",
         )?;
@@ -1258,6 +1271,65 @@ impl ZoneStore {
         let conn = self.lock_conn()?;
         let changed = conn.execute("DELETE FROM tsig_keys WHERE name = ?1", [name])?;
         Ok(changed > 0)
+    }
+
+    // ---- Health checks ---------------------------------------------------
+
+    /// Every health check on an existing A or AAAA record, with the record.
+    pub fn list_health_checks(&self) -> Result<Vec<(crate::model::HealthCheck, Record)>> {
+        let conn = self.lock_conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT r.id, r.zone_id, r.name, r.rtype, r.content, r.ttl, r.priority, r.disabled,
+                    h.kind, h.port, h.path, h.host, h.interval_secs
+             FROM health_checks h JOIN records r ON r.id = h.record_id
+             WHERE r.rtype IN ('A', 'AAAA')
+             ORDER BY r.name",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            let record = row_to_record(row)?;
+            Ok((
+                crate::model::HealthCheck {
+                    record_id: record.id.clone(),
+                    kind: row.get(8)?,
+                    port: row.get(9)?,
+                    path: row.get(10)?,
+                    host: row.get(11)?,
+                    interval_secs: row.get(12)?,
+                },
+                record,
+            ))
+        })?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    /// Add or replace the health check on a record.
+    pub fn set_health_check(&self, check: &crate::model::HealthCheck) -> Result<()> {
+        let conn = self.lock_conn()?;
+        conn.execute(
+            "INSERT INTO health_checks (record_id, kind, port, path, host, interval_secs)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(record_id) DO UPDATE SET kind = excluded.kind, port = excluded.port,
+                 path = excluded.path, host = excluded.host,
+                 interval_secs = excluded.interval_secs",
+            params![
+                check.record_id,
+                check.kind,
+                check.port,
+                check.path,
+                check.host,
+                check.interval_secs
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Remove a record's health check. Returns whether it had one.
+    pub fn delete_health_check(&self, record_id: &str) -> Result<bool> {
+        let conn = self.lock_conn()?;
+        Ok(conn.execute(
+            "DELETE FROM health_checks WHERE record_id = ?1",
+            [record_id],
+        )? > 0)
     }
 
     // ---- Catalog zones (RFC 9432) ----------------------------------------

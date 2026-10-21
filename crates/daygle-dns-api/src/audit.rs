@@ -25,6 +25,8 @@ pub fn action_for(method: &Method, path: &str) -> String {
         ("PUT", ["zones", _, "records", _]) => "Changed record",
         ("DELETE", ["zones", _, "records", _]) => "Deleted record",
         ("PUT", ["zones", _, "records", _, "disabled"]) => "Enabled or disabled record",
+        ("PUT", ["zones", _, "records", _, "health"]) => "Set a record health check",
+        ("DELETE", ["zones", _, "records", _, "health"]) => "Removed a record health check",
         ("POST", ["zones", _, "sign"]) => "Signed zone",
         ("POST", ["zones", _, "unsign"]) => "Unsigned zone",
         ("POST", ["users"]) => "Created user",

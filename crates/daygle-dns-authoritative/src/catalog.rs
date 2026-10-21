@@ -50,6 +50,8 @@ pub struct AuthorityCatalog {
     /// Woken when the published catalog zone's member list changes, so
     /// its secondaries can be sent a NOTIFY.
     catalog_zone_changed: Arc<tokio::sync::Notify>,
+    /// Ids of health-checked records currently failing their check.
+    unhealthy: arc_swap::ArcSwap<std::collections::HashSet<String>>,
 }
 
 /// An ALIAS record: A and AAAA queries for its name are answered with its
@@ -83,7 +85,7 @@ fn build_aliases(store: &ZoneStore) -> Result<std::collections::HashMap<String, 
 impl AuthorityCatalog {
     /// Build a catalog from the store without any DNSSEC signing.
     pub fn new(store: ZoneStore, settings: AuthoritativeSettings) -> Result<Self> {
-        let (catalog, _) = build_catalog(&store, &settings, false)?;
+        let (catalog, _) = build_catalog(&store, &settings, false, &Default::default())?;
         let split_horizon = Arc::new(build_split_horizon(&store)?);
         let aliases = build_aliases(&store)?;
         Ok(Self {
@@ -93,7 +95,23 @@ impl AuthorityCatalog {
             split_horizon: arc_swap::ArcSwap::from(split_horizon),
             aliases: arc_swap::ArcSwap::from_pointee(aliases),
             catalog_zone_changed: Arc::new(tokio::sync::Notify::new()),
+            unhealthy: Default::default(),
         })
+    }
+
+    /// The health-checked records now failing their check.
+    pub fn unhealthy(&self) -> Arc<std::collections::HashSet<String>> {
+        self.unhealthy.load_full()
+    }
+
+    /// Record which health-checked records are failing, and reload when
+    /// that changed (so answers fail over to the healthy ones).
+    pub fn set_unhealthy(&self, unhealthy: std::collections::HashSet<String>) -> Result<()> {
+        if *self.unhealthy.load_full() == unhealthy {
+            return Ok(());
+        }
+        self.unhealthy.store(Arc::new(unhealthy));
+        self.reload()
     }
 
     /// Woken whenever the published catalog zone's member list changes.
@@ -204,8 +222,12 @@ impl AuthorityCatalog {
     /// applying DNSSEC signing when keys are present and signing is enabled.
     pub fn reload(&self) -> Result<()> {
         let settings = self.settings.load_full();
-        let (catalog, catalog_zone_changed) =
-            build_catalog(&self.store, &settings, settings.dnssec_enabled)?;
+        let (catalog, catalog_zone_changed) = build_catalog(
+            &self.store,
+            &settings,
+            settings.dnssec_enabled,
+            &self.unhealthy.load(),
+        )?;
         self.catalog.store(Arc::new(catalog));
         if catalog_zone_changed {
             self.catalog_zone_changed.notify_waiters();
@@ -359,8 +381,14 @@ fn build_catalog(
     store: &ZoneStore,
     settings: &AuthoritativeSettings,
     sign_zones: bool,
+    unhealthy: &std::collections::HashSet<String>,
 ) -> Result<(Catalog, bool)> {
     let mut catalog = Catalog::new();
+    let checked: std::collections::HashSet<String> = store
+        .list_health_checks()?
+        .into_iter()
+        .map(|(check, _)| check.record_id)
+        .collect();
     let data = store.load_catalog_data()?;
     let secondary_ids: std::collections::HashSet<String> = store
         .list_secondary()?
@@ -379,6 +407,7 @@ fn build_catalog(
         };
         let active: Vec<&SigningKeyRecord> = keys.iter().filter(|k| k.is_active()).collect();
         let retired: Vec<&SigningKeyRecord> = keys.iter().filter(|k| k.is_retired()).collect();
+        let records = failover(records, &checked, unhealthy);
         let mut map = zone_rrsets(&zone, &records)?;
 
         // Retired keys no longer sign, but their DNSKEY stays published for
@@ -486,6 +515,53 @@ fn build_catalog(
     }
 
     Ok((catalog, catalog_changed))
+}
+
+/// Health-checked failover: in each A or AAAA RRset holding a
+/// health-checked record, serve only the healthy records with the lowest
+/// priority (lower numbers are primaries, higher ones backups). Records
+/// without a check count as healthy. When none is healthy, the whole RRset
+/// is served: answering with every address beats answering with none.
+fn failover(
+    records: Vec<DbRecord>,
+    checked: &std::collections::HashSet<String>,
+    unhealthy: &std::collections::HashSet<String>,
+) -> Vec<DbRecord> {
+    if checked.is_empty() {
+        return records;
+    }
+    let key = |r: &DbRecord| (r.name.to_ascii_lowercase(), r.rtype.clone());
+    let mut keep: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut groups: BTreeMap<(String, String), Vec<&DbRecord>> = BTreeMap::new();
+    for record in &records {
+        if matches!(record.rtype.as_str(), "A" | "AAAA") && !record.disabled {
+            groups.entry(key(record)).or_default().push(record);
+        }
+    }
+    let mut filtered: std::collections::HashSet<(String, String)> = Default::default();
+    for (group_key, group) in &groups {
+        if !group.iter().any(|r| checked.contains(&r.id)) {
+            continue;
+        }
+        let healthy: Vec<&&DbRecord> = group
+            .iter()
+            .filter(|r| !unhealthy.contains(&r.id))
+            .collect();
+        let Some(best) = healthy.iter().map(|r| r.priority).min() else {
+            continue;
+        };
+        filtered.insert(group_key.clone());
+        keep.extend(
+            healthy
+                .iter()
+                .filter(|r| r.priority == best)
+                .map(|r| r.id.clone()),
+        );
+    }
+    records
+        .into_iter()
+        .filter(|r| !filtered.contains(&key(r)) || r.disabled || keep.contains(&r.id))
+        .collect()
 }
 
 /// The catalog zone (RFC 9432, schema version 2) this server publishes as
@@ -701,6 +777,51 @@ pub(crate) fn build_dnskey_record(
 mod tests {
     use super::*;
     use crate::model::{RecordInput, ZoneInput};
+
+    #[test]
+    fn failover_serves_the_healthy_records_of_the_best_priority() {
+        let rec = |id: &str, name: &str, rtype: &str, priority: u16| DbRecord {
+            id: id.to_string(),
+            zone_id: "z".to_string(),
+            name: name.to_string(),
+            rtype: rtype.to_string(),
+            content: String::new(),
+            ttl: 60,
+            priority,
+            disabled: false,
+        };
+        let records = vec![
+            rec("p1", "www.example.com", "A", 0),
+            rec("p2", "www.example.com", "A", 0),
+            rec("b1", "www.example.com", "A", 10),
+            rec("v6", "www.example.com", "AAAA", 0),
+            rec("other", "api.example.com", "A", 5),
+            rec("mx", "www.example.com", "TXT", 0),
+        ];
+        let set = |ids: &[&str]| ids.iter().map(|s| s.to_string()).collect();
+        let served = |unhealthy: &[&str]| {
+            let mut ids: Vec<String> =
+                failover(records.clone(), &set(&["p1", "p2", "b1"]), &set(unhealthy))
+                    .into_iter()
+                    .map(|r| r.id)
+                    .collect();
+            ids.sort();
+            ids
+        };
+        // All up: the primaries (priority 0); the backup waits.
+        assert_eq!(served(&[]), ["mx", "other", "p1", "p2", "v6"]);
+        // One primary down: the other primary.
+        assert_eq!(served(&["p1"]), ["mx", "other", "p2", "v6"]);
+        // Both primaries down: the backup.
+        assert_eq!(served(&["p1", "p2"]), ["b1", "mx", "other", "v6"]);
+        // Everything down: all of them, rather than nothing.
+        assert_eq!(
+            served(&["p1", "p2", "b1"]),
+            ["b1", "mx", "other", "p1", "p2", "v6"]
+        );
+        // No checks: untouched.
+        assert_eq!(failover(records.clone(), &set(&[]), &set(&["p1"])).len(), 6);
+    }
 
     fn catalog() -> AuthorityCatalog {
         let store = ZoneStore::open(":memory:").unwrap();
