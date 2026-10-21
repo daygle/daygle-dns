@@ -1,4 +1,4 @@
-// Thin API client for the Daygle REST API.
+// Thin API client for the Daygle DNS REST API.
 //
 // Auth: when the server has console users configured, a session token from
 // `POST /api/auth/login` is stored and sent as a Bearer token on every call.

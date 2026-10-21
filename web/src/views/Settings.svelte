@@ -615,7 +615,7 @@
         <label class="check"><input type="checkbox" bind:checked={recursive.opportunistic_encryption} /> <span>Opportunistic Encryption</span></label>
       </div>
       <p class="muted help">
-        Daygle resolves names itself, starting at the root servers, so no upstream
+        Daygle DNS resolves names itself, starting at the root servers, so no upstream
         provider sees your queries. Query names are minimized (RFC 9156) and DNSSEC
         is validated against the root trust anchor. Query-case randomization makes
         spoofed answers harder to inject but can fail with the odd server that does
@@ -833,7 +833,7 @@
     </div>
     <p class="muted help">
       Lists every primary zone on this server in a catalog zone, so secondaries
-      that follow it (BIND, Knot, PowerDNS or another Daygle server) add and
+      that follow it (BIND, Knot, PowerDNS or another Daygle DNS server) add and
       remove zones on their own. They transfer it like any zone, so allow them
       under Zone Transfers; with NOTIFY on, they are told when the list changes.
       Leave empty to publish no catalog.
