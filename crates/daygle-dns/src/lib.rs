@@ -8,6 +8,7 @@ pub mod cookies;
 pub mod dispatcher;
 mod doq;
 mod net;
+pub mod proxy_protocol;
 pub mod query_db_log;
 pub mod reload;
 pub mod syslog;
@@ -993,6 +994,29 @@ async fn bind_listeners(
     // DoQ task, spawned below when QUIC is enabled.
     let mut doq_task = None;
 
+    // PROXY protocol: TCP-based listeners are fronted (see
+    // `proxy_protocol`), and Hickory serves a hidden loopback listener.
+    let proxy_trusted: Option<Arc<Vec<ipnet::IpNet>>> = (!config.server.proxy_protocol.is_empty())
+        .then(|| {
+            Arc::new(
+                config
+                    .server
+                    .proxy_protocol
+                    .iter()
+                    .filter_map(|n| daygle_dns_core::config::parse_network(n))
+                    .collect(),
+            )
+        });
+    let token = server.shutdown_token().clone();
+    let serve = |public: tokio::net::TcpListener| -> Result<tokio::net::TcpListener> {
+        let Some(trusted) = &proxy_trusted else {
+            return Ok(public);
+        };
+        let hidden = net::bind_tcp(([127, 0, 0, 1], 0).into(), false)?;
+        proxy_protocol::spawn_front(public, hidden.local_addr()?, trusted.clone(), token.clone());
+        Ok(hidden)
+    };
+
     // `addrs` records the first address of each listener.
     if config.server.udp_enabled {
         let buffer_bytes = |kb: u32| {
@@ -1031,7 +1055,7 @@ async fn bind_listeners(
             let bound = listener.local_addr()?;
             addrs.tcp.get_or_insert(bound);
             server.register_listener(
-                listener,
+                serve(listener)?,
                 Duration::from_millis(config.server.tcp_timeout_ms),
                 config.server.response_buffer_size,
             );
@@ -1048,7 +1072,7 @@ async fn bind_listeners(
             addrs.dot.get_or_insert(bound);
             daygle_dns_dot::register_dot(
                 server,
-                listener,
+                serve(listener)?,
                 tls_config.clone(),
                 Duration::from_secs(config.dot.handshake_timeout_secs),
             )?;
@@ -1065,7 +1089,7 @@ async fn bind_listeners(
             addrs.doh.get_or_insert(bound);
             daygle_dns_dot::register_doh(
                 server,
-                listener,
+                serve(listener)?,
                 tls_config.clone(),
                 Duration::from_secs(config.doh.handshake_timeout_secs),
                 None,

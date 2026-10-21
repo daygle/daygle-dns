@@ -40,6 +40,8 @@ Daygle combines, in a single process:
   get AAAA answers inside the gateway's prefix.
 - **EDNS Client Subnet (RFC 7871)** to forwarding upstreams, so CDNs answer
   with servers near your clients.
+- **PROXY protocol** (v1/v2) on TCP, DoT and DoH, so clients behind a load
+  balancer keep their real address.
 - **Conditional forwarding** so specific zones resolve via dedicated
   upstreams, plus **stub zones** that send queries straight to a zone's own
   nameservers (no root→TLD walk) - both matched by longest suffix.

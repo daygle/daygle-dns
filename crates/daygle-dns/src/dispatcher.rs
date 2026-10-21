@@ -506,7 +506,10 @@ impl RequestHandler for DnsDispatcher {
         // IPv4-mapped IPv6 sources (an IPv4 client on a dual-stack `::`
         // listener) are canonicalized to plain IPv4 so IPv4 ACLs, rate
         // limits, split-horizon networks and transfer allow-lists match them.
-        let client = request.src().ip().to_canonical();
+        // Behind a PROXY protocol front, the client it names.
+        let client = crate::proxy_protocol::real_client(request.src())
+            .ip()
+            .to_canonical();
 
         // DNS cookies (RFC 7873): every response to a client that sent one
         // carries a fresh server cookie, and a request whose server cookie
@@ -569,6 +572,7 @@ impl RequestHandler for DnsDispatcher {
             return daygle_dns_authoritative::handle_update_with_notify(
                 &self.catalog,
                 request,
+                client,
                 edns,
                 response_handle,
                 self.notify.sender.as_deref(),

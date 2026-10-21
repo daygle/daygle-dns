@@ -31,15 +31,27 @@ pub async fn handle_update<R: ResponseHandler>(
     response_edns: Option<&Edns>,
     response_handle: R,
 ) -> ResponseInfo {
-    handle_update_with_notify(catalog, update, response_edns, response_handle, None).await
+    let client = update.src().ip().to_canonical();
+    handle_update_with_notify(
+        catalog,
+        update,
+        client,
+        response_edns,
+        response_handle,
+        None,
+    )
+    .await
 }
 
 /// Like [`handle_update`], but sends RFC 1996 NOTIFY to `notify` targets when
 /// the update is applied successfully. Passing `None` keeps the update silent
 /// (used by tests and deployments without configured secondaries).
+/// `client` is the address `update_networks` is checked against (the real
+/// client behind a PROXY protocol front).
 pub async fn handle_update_with_notify<R: ResponseHandler>(
     catalog: &AuthorityCatalog,
     update: &Request,
+    client: std::net::IpAddr,
     response_edns: Option<&Edns>,
     response_handle: R,
     notify: Option<&crate::notify::NotifySender>,
@@ -84,12 +96,11 @@ pub async fn handle_update_with_notify<R: ResponseHandler>(
     let zone_name = lower_name(&zone_query.name().to_string());
 
     // -- Policy gate ------------------------------------------------------
-    if !settings.allow_dynamic_updates
-        || !update_client_allowed(&settings.update_networks, update.src().ip().to_canonical())
+    if !settings.allow_dynamic_updates || !update_client_allowed(&settings.update_networks, client)
     {
         debug!(
             zone = %zone_name,
-            client = %update.src(),
+            client = %client,
             "dynamic update refused by policy"
         );
         return respond(

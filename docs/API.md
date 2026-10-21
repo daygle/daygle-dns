@@ -309,7 +309,7 @@ PUT /api/config
 }
 ```
 
-Editable groups: `server` (listen/ipv6_only/port/udp_enabled/tcp_enabled; `dns_cookies` is file-only), `recursive`
+Editable groups: `server` (listen/ipv6_only/port/udp_enabled/tcp_enabled; `dns_cookies` and `proxy_protocol` are file-only), `recursive`
 (enabled/mode/upstreams/use_system_config/dnssec_validate/cache_size/
 min_cache_ttl/max_cache_ttl/negative_cache_ttl/failure_cache_ttl/
 prefetch_* /serve_stale_secs/
@@ -460,6 +460,15 @@ addresses. It is never sent when walking the hierarchy from the root, so
 root and TLD servers do not see it. The cache is shared between clients:
 with per-client subnets, an answer fetched for one network can be given to
 another for its TTL.
+
+`server.proxy_protocol` (file-only) lists the networks of trusted load
+balancers that speak the PROXY protocol (HAProxy v1 or v2) on the TCP, DoT
+and DoH listeners. A connection from one of them must start with a PROXY
+header (5 s to send it, else it is closed); the client it names is used
+everywhere a client address matters (recursion access, policies, rate
+limits, transfer and update ACLs, logs). A v2 `LOCAL` header (a health
+check) or `UNKNOWN` v1 header keeps the proxy's own address. Connections
+from other addresses are served directly. UDP and DoQ are not affected.
 
 `server.ipv6_only` (`false` by default; the console shows it but leaves it to the file) makes a `::` listen
 address, in `[server]` or in `[api]`, `[dot]`, `[doh]` or `[doq]`, accept

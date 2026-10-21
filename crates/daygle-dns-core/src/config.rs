@@ -2030,6 +2030,13 @@ impl DaygleConfig {
             }
         }
         let catalog = self.authoritative.catalog_zone.trim();
+        for entry in &self.server.proxy_protocol {
+            if parse_network(entry).is_none() {
+                return Err(DaygleError::Config(format!(
+                    "server.proxy_protocol: '{entry}' is not a network or address"
+                )));
+            }
+        }
         let not_a_name = |n: &str| n.contains('*') || validate_domain_pattern(n).is_err();
         if !catalog.is_empty() && not_a_name(catalog) {
             return Err(DaygleError::Config(format!(
@@ -2205,6 +2212,11 @@ pub struct ServerSettings {
     /// server cookie, and let clients whose server cookie checks out skip
     /// the per-client rate limit. On by default.
     pub dns_cookies: bool,
+    /// PROXY protocol (v1/v2): networks of trusted load balancers. A TCP,
+    /// DoT or DoH connection from one of them must start with a PROXY
+    /// header, and the client it names is treated as the real client.
+    /// Empty (the default) turns it off.
+    pub proxy_protocol: Vec<String>,
     /// UDP/TCP port (default 53).
     pub port: u16,
     /// Serve plaintext UDP.
@@ -2241,6 +2253,7 @@ impl Default for ServerSettings {
             listen: "0.0.0.0".to_string(),
             ipv6_only: false,
             dns_cookies: true,
+            proxy_protocol: vec![],
             port: 53,
             udp_enabled: true,
             tcp_enabled: true,

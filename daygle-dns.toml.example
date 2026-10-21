@@ -18,6 +18,12 @@ listen = "0.0.0.0"
 # back, and ones whose server cookie checks out (so cannot be spoofing their
 # address) skip the per-client rate limit.
 # dns_cookies = true
+#
+# PROXY protocol (HAProxy v1/v2) for load balancers in front of the TCP, DoT
+# and DoH listeners: connections from these networks must start with a PROXY
+# header, and the client it names is used for ACLs, rate limits, policies and
+# logs. Other clients connect directly as usual. Empty (default) turns it off.
+# proxy_protocol = ["10.0.0.5/32"]
 port = 53
 udp_enabled = true
 tcp_enabled = true
