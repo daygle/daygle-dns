@@ -3,6 +3,7 @@
   import PageHeader from '../PageHeader.svelte';
   import ClientPolicies from './ClientPolicies.svelte';
   import BackupRestore from './BackupRestore.svelte';
+  import Networks from './Networks.svelte';
   import { icons } from '../icons.svelte.js';
   import { display, setDisplayDefaults, timeZoneOptions, DATE_FORMAT_OPTIONS, TIME_FORMAT_OPTIONS, previewDateTime } from '../datetime.svelte.js';
   import { duration } from '../aiLabels.js';
@@ -20,6 +21,7 @@
   let tab = $state(initialTab);
   const TABS = [
     ['general', 'General'],
+    ['networks', 'Networks'],
     ['recursive', 'Resolver'],
     ['cache', 'Cache'],
     ['listeners', 'Encrypted DNS'],
@@ -30,6 +32,7 @@
   ];
   const TAGLINES = {
     general: 'How the web console is reached (HTTP, HTTPS or both), and the DNS listeners this server was started with.',
+    networks: 'Named networks (LAN, VPN, IoT…) that the settings taking client networks can pick instead of repeating the addresses.',
     recursive: 'How the server answers names it does not host: resolving them itself from the root servers or forwarding to upstreams, and who may use it.',
     cache: 'How long answers are kept, how many, and how popular names are refreshed before they expire. Changes apply immediately.',
     listeners: 'Encrypted DNS: DNS over TLS, HTTPS and QUIC, and the certificate each one presents. Changes apply immediately.',
@@ -484,7 +487,7 @@
     {/each}
   </div>
 
-  {#if tab !== 'backup'}
+  {#if tab !== 'backup' && tab !== 'networks'}
   <div class="actions" class:dirty>
     <button onclick={save} disabled={busy || !dirty}>{busy ? 'Saving…' : 'Save Changes'}</button>
     <button class="secondary" onclick={reload} disabled={busy}>{dirty ? 'Discard Changes' : 'Reload'}</button>
@@ -1044,6 +1047,8 @@
       "Device Time Zone" and "Browser Default" follow each viewer's computer.
     </p>
   </div>
+  {:else if tab === 'networks'}
+    <Networks />
   {:else if tab === 'backup'}
   <BackupRestore />
   {/if}

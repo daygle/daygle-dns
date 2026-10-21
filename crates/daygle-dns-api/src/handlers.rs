@@ -25,7 +25,7 @@ struct ApiError {
     error: String,
 }
 
-fn error_response(status: StatusCode, message: impl Into<String>) -> Response {
+pub(crate) fn error_response(status: StatusCode, message: impl Into<String>) -> Response {
     (
         status,
         Json(ApiError {
@@ -35,7 +35,7 @@ fn error_response(status: StatusCode, message: impl Into<String>) -> Response {
         .into_response()
 }
 
-fn map_err(e: daygle_dns_core::error::DaygleError) -> Response {
+pub(crate) fn map_err(e: daygle_dns_core::error::DaygleError) -> Response {
     let status = match &e {
         daygle_dns_core::error::DaygleError::NotFound(_) => StatusCode::NOT_FOUND,
         daygle_dns_core::error::DaygleError::AlreadyExists(_) => StatusCode::CONFLICT,
@@ -156,7 +156,7 @@ fn is_http_url(url: &str) -> bool {
 // The Err variant carries a full axum `Response`; boxing it would churn every
 // call site for no real gain.
 #[allow(clippy::result_large_err)]
-fn validate_config_update(
+pub(crate) fn validate_config_update(
     state: &AppState,
     old: &daygle_dns_core::config::DaygleConfig,
     new: &daygle_dns_core::config::DaygleConfig,
@@ -2465,12 +2465,15 @@ pub async fn unsign_zone(State(state): State<AppState>, Path(id): Path<String>) 
 
 // ---- Split horizon ------------------------------------------------------
 
-/// All split-horizon networks and domain entries.
+/// The named networks (Settings -> Networks) and the split-horizon entries.
 pub async fn get_split_horizon(State(state): State<AppState>) -> Response {
-    let networks = match state.catalog.store().list_split_horizon_networks() {
-        Ok(n) => n,
-        Err(e) => return map_err(e),
-    };
+    let networks: Vec<serde_json::Value> = state
+        .config
+        .load()
+        .all_networks()
+        .into_iter()
+        .map(|n| serde_json::json!({ "id": n.name, "name": n.name, "cidrs": n.cidrs }))
+        .collect();
     let entries = match state.catalog.store().list_split_horizon_entries() {
         Ok(e) => e,
         Err(e) => return map_err(e),
@@ -2478,32 +2481,48 @@ pub async fn get_split_horizon(State(state): State<AppState>) -> Response {
     Json(serde_json::json!({ "networks": networks, "entries": entries })).into_response()
 }
 
-/// Create a network, or update the CIDRs of an existing one (matched by name).
+/// Add a named network, or change the addresses of one (matched by name).
+/// The older form of `POST /api/networks`, kept for API clients.
 pub async fn upsert_split_horizon_network(
     State(state): State<AppState>,
     Json(input): Json<SplitHorizonNetworkInput>,
 ) -> Response {
-    match state.catalog.store().upsert_split_horizon_network(&input) {
-        Ok(network) => {
-            let _ = state.catalog.reload();
-            Json(network).into_response()
-        }
-        Err(e) => map_err(e),
-    }
+    let existing = state
+        .config
+        .load()
+        .networks
+        .iter()
+        .find(|n| n.name.eq_ignore_ascii_case(input.name.trim()))
+        .cloned();
+    crate::networks::save_network(
+        State(state),
+        Json(crate::networks::NetworkInput {
+            original_name: existing.as_ref().map(|n| n.name.clone()),
+            name: input.name,
+            cidrs: input.cidrs,
+            description: existing.map(|n| n.description).unwrap_or_default(),
+        }),
+    )
+    .await
 }
 
+/// Delete an unused named network (older form of `DELETE /api/networks`).
 pub async fn delete_split_horizon_network(
     State(state): State<AppState>,
     Path(name): Path<String>,
 ) -> Response {
-    match state.catalog.store().delete_split_horizon_network(&name) {
-        Ok(true) => {
-            let _ = state.catalog.reload();
-            StatusCode::NO_CONTENT.into_response()
-        }
-        Ok(false) => error_response(StatusCode::NOT_FOUND, "network not found"),
-        Err(e) => map_err(e),
-    }
+    crate::networks::delete_network(State(state), Path(name)).await
+}
+
+/// Reject a split-horizon entry naming a network that does not exist (it
+/// would never match).
+fn check_entry_networks(state: &AppState, input: &SplitHorizonEntryInput) -> Option<Response> {
+    state
+        .config
+        .load()
+        .resolve_networks(&input.networks)
+        .err()
+        .map(|e| error_response(StatusCode::BAD_REQUEST, e))
 }
 
 /// Create a split-horizon entry (appended after existing entries for the
@@ -2512,6 +2531,9 @@ pub async fn create_split_horizon_entry(
     State(state): State<AppState>,
     Json(input): Json<SplitHorizonEntryInput>,
 ) -> Response {
+    if let Some(response) = check_entry_networks(&state, &input) {
+        return response;
+    }
     match state.catalog.store().create_split_horizon_entry(&input) {
         Ok(entry) => {
             let _ = state.catalog.reload();
@@ -2526,6 +2548,9 @@ pub async fn update_split_horizon_entry(
     Path(id): Path<String>,
     Json(input): Json<SplitHorizonEntryInput>,
 ) -> Response {
+    if let Some(response) = check_entry_networks(&state, &input) {
+        return response;
+    }
     match state
         .catalog
         .store()

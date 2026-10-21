@@ -1,6 +1,10 @@
 <script>
   import { api, formatApiError } from '../api.js';
   import { duration } from '../aiLabels.js';
+  import NetworkPicker from '../NetworkPicker.svelte';
+
+  // Opens Settings on a tab (absent for read-only accounts).
+  let { onOpenSettings = null } = $props();
 
   let networks = $state([]);
   let entries = $state([]);
@@ -11,11 +15,6 @@
   let dialogError = $state(null);
   let saving = $state(false);
 
-  // Network form. `netEditing` is the name being edited (names are the key,
-  // so they cannot be renamed), or null when adding.
-  let netName = $state('');
-  let netCidrs = $state('');
-  let netEditing = $state(null);
   // Entry dialog, or null when closed.
   let edit = $state(null);
 
@@ -39,56 +38,9 @@
     }
   }
 
-  function parseList(text) {
-    return (text || '')
-      .split(/[\n,]/)
-      .map((s) => s.trim())
-      .filter(Boolean);
-  }
-
   function clearMessages() {
     notice = null;
     error = null;
-  }
-
-  function editNetwork(network) {
-    clearMessages();
-    netEditing = network.name;
-    netName = network.name;
-    netCidrs = network.cidrs.join(', ');
-  }
-
-  function cancelNetwork() {
-    netEditing = null;
-    netName = '';
-    netCidrs = '';
-  }
-
-  async function saveNetwork() {
-    const name = netName.trim();
-    if (!name) return;
-    clearMessages();
-    try {
-      await api.saveSplitHorizonNetwork({ name, cidrs: parseList(netCidrs) });
-      notice = netEditing ? `Network ${name} saved.` : `Network ${name} added.`;
-      cancelNetwork();
-      await load();
-    } catch (e) {
-      error = formatApiError(e);
-    }
-  }
-
-  async function removeNetwork(network) {
-    if (!confirm(`Delete network "${network.name}"? Entries that use it will stop matching those clients.`)) return;
-    clearMessages();
-    try {
-      await api.deleteSplitHorizonNetwork(network.name);
-      notice = `Network ${network.name} deleted.`;
-      if (netEditing === network.name) cancelNetwork();
-      await load();
-    } catch (e) {
-      error = formatApiError(e);
-    }
   }
 
   // An entry's networks are named networks (ticked in the dialog) plus any
@@ -96,13 +48,11 @@
   function startEdit(entry) {
     clearMessages();
     dialogError = null;
-    const names = new Set(networks.map((n) => n.name));
     edit = entry
       ? {
           id: entry.id,
           domain: entry.domain,
-          named: entry.networks.filter((n) => names.has(n)),
-          cidrs: entry.networks.filter((n) => !names.has(n)).join(', '),
+          networks: [...entry.networks],
           // The store keeps ips and records in sync; fall back to deriving
           // A/AAAA records for legacy entries that only carry ips.
           records: (entry.records.length
@@ -119,8 +69,7 @@
       : {
           id: null,
           domain: '',
-          named: [],
-          cidrs: '',
+          networks: [],
           records: [{ rtype: 'A', content: '' }],
           ttl: 60,
           disabled: false,
@@ -130,10 +79,6 @@
 
   function closeEdit() {
     if (!saving) edit = null;
-  }
-
-  function toggleNamed(name) {
-    edit.named = edit.named.includes(name) ? edit.named.filter((n) => n !== name) : [...edit.named, name];
   }
 
   function addRecord() {
@@ -148,7 +93,7 @@
     if (!edit) return;
     const body = {
       domain: edit.domain.trim(),
-      networks: [...edit.named, ...parseList(edit.cidrs)],
+      networks: edit.networks,
       records: edit.records
         .filter((r) => r.rtype && r.content.trim())
         .map((r) => ({ rtype: r.rtype, content: r.content.trim() })),
@@ -220,57 +165,20 @@
 
 <div class="split">
   <div class="card">
-    <h3 style="margin: 0 0 6px">Networks ({networks.length})</h3>
-    <p class="muted help" style="margin: 0 0 10px">
-      Name groups of client addresses (LAN, VPN, IoT…) to pick them in entries
-      below.
-    </p>
-    <form class="net-form" onsubmit={(e) => { e.preventDefault(); saveNetwork(); }}>
-      <label>Name <input placeholder="LAN" bind:value={netName} disabled={netEditing !== null} /></label>
-      <label class="grow">Addresses (CIDRs or IPs, comma-separated) <input placeholder="192.168.20.0/24, 10.0.0.0/8" bind:value={netCidrs} /></label>
-      <div class="row net-actions">
-        <button type="submit" disabled={!netName.trim()}>{netEditing ? 'Save Network' : 'Add Network'}</button>
-        {#if netEditing}<button type="button" class="secondary" onclick={cancelNetwork}>Cancel</button>{/if}
-      </div>
-    </form>
-    {#if networks.length === 0}
-      <p class="muted">No networks yet.</p>
-    {:else}
-      <div class="table-wrap">
-        <table>
-          <thead>
-            <tr><th>Name</th><th>Addresses</th><th class="num">Actions</th></tr>
-          </thead>
-          <tbody>
-            {#each networks as network (network.id)}
-              <tr>
-                <td><code>{network.name}</code></td>
-                <td>
-                  <div class="row" style="gap: 6px">
-                    {#each network.cidrs as c (c)}
-                      <span class="pill">{c}</span>
-                    {/each}
-                  </div>
-                </td>
-                <td class="num">
-                  <div class="row" style="gap: 6px; justify-content: flex-end">
-                    <button class="secondary" onclick={() => editNetwork(network)}>Edit</button>
-                    <button class="danger" onclick={() => removeNetwork(network)} aria-label="Delete {network.name}">✕</button>
-                  </div>
-                </td>
-              </tr>
-            {/each}
-          </tbody>
-        </table>
-      </div>
-    {/if}
-  </div>
-
-  <div class="card">
     <div class="spread" style="margin-bottom: 10px">
       <h3 style="margin: 0">Domain Entries ({entries.length})</h3>
-      <button onclick={() => startEdit(null)}>Add Entry</button>
+      <div class="row" style="gap: 8px">
+        {#if onOpenSettings}
+          <button class="secondary" onclick={() => onOpenSettings('networks')}>Manage Networks</button>
+        {/if}
+        <button onclick={() => startEdit(null)}>Add Entry</button>
+      </div>
     </div>
+    <p class="muted help" style="margin: 0 0 10px">
+      Each entry answers the clients in the networks it names. Networks such
+      as LAN or VPN are set up once in Settings → Networks and shared with the
+      other settings that take client networks.
+    </p>
     {#if entries.length === 0}
       <p class="muted">
         No entries yet. Add one with a domain, the networks that get the
@@ -373,19 +281,9 @@
       </div>
 
       <div class="section-title">Clients</div>
-      {#if networks.length}
-        <div class="chips" role="group" aria-label="Networks">
-          {#each networks as n (n.id)}
-            <label class="chip" class:on={edit.named.includes(n.name)}>
-              <input type="checkbox" checked={edit.named.includes(n.name)} onchange={() => toggleNamed(n.name)} />
-              {n.name}
-            </label>
-          {/each}
-        </div>
-      {/if}
-      <label>Other Addresses (CIDRs or IPs, comma-separated) <input placeholder="10.8.0.0/16" bind:value={edit.cidrs} /></label>
+      <NetworkPicker {networks} bind:value={edit.networks} />
       <p class="muted help">
-        {#if edit.named.length === 0 && !edit.cidrs.trim()}
+        {#if edit.networks.length === 0}
           No networks chosen: this entry answers <strong>every client</strong> (a public fallback).
         {:else}
           Only clients in the chosen networks get this answer.
@@ -444,24 +342,7 @@
     color: var(--muted);
   }
   .help { max-width: 90ch; }
-  .net-form { display: flex; gap: 10px; align-items: flex-end; flex-wrap: wrap; margin-bottom: 12px; }
-  .net-form label:first-child { width: 140px; }
-  .net-form .grow { flex: 1; min-width: 220px; }
-  .net-actions { gap: 6px; }
   .answers { display: flex; flex-direction: column; gap: 4px; }
-  .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
-  .chip {
-    flex-direction: row;
-    align-items: center;
-    gap: 6px;
-    padding: 4px 10px;
-    border: 1px solid var(--border);
-    border-radius: 999px;
-    cursor: pointer;
-    color: var(--text);
-  }
-  .chip.on { border-color: var(--accent); background: rgb(91 140 255 / 0.15); }
-  .chip input { width: auto; margin: 0; }
   .checkbox { flex-direction: row; align-items: center; gap: 8px; margin-top: 12px; }
   .checkbox input { width: auto; }
   .checkbox span { color: var(--text); }

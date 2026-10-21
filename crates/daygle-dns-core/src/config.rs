@@ -49,6 +49,9 @@ pub struct DaygleConfig {
     pub dns64: Dns64Settings,
     /// EDNS Client Subnet (RFC 7871) sent to forwarding upstreams.
     pub ecs: EcsSettings,
+    /// Named networks (`[[networks]]`), e.g. `LAN` = `192.168.1.0/24`, that
+    /// network settings can name instead of repeating the addresses.
+    pub networks: Vec<NamedNetwork>,
 }
 
 /// EDNS Client Subnet (RFC 7871): tell forwarding upstreams which network a
@@ -623,6 +626,8 @@ pub struct RuntimeSettings {
     pub dns64: Option<Dns64Settings>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ecs: Option<EcsSettings>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub networks: Option<Vec<NamedNetwork>>,
     pub recursive: Option<RecursiveUpdate>,
     pub dot: Option<ListenerUpdate>,
     pub doh: Option<DohUpdate>,
@@ -778,6 +783,185 @@ fn trim_list(items: &[String]) -> Vec<String> {
         .map(|i| i.trim().to_string())
         .filter(|i| !i.is_empty())
         .collect()
+}
+
+/// A named set of networks (Settings -> Networks), e.g. `LAN` =
+/// `192.168.1.0/24`. Network settings can list the name instead of the
+/// addresses; changing the network changes every setting that names it.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct NamedNetwork {
+    /// Unique name (case-insensitive), e.g. `LAN`.
+    pub name: String,
+    /// CIDR networks or single addresses.
+    pub cidrs: Vec<String>,
+    /// Optional note shown in the console.
+    pub description: String,
+}
+
+/// The networks every server has, which can be named but not changed.
+pub fn builtin_networks() -> Vec<NamedNetwork> {
+    vec![
+        NamedNetwork {
+            name: "Private".to_string(),
+            cidrs: PRIVATE_NETWORKS.iter().map(|n| n.to_string()).collect(),
+            description: "Private, shared, link-local and loopback addresses".to_string(),
+        },
+        NamedNetwork {
+            name: "This Server".to_string(),
+            cidrs: vec!["127.0.0.0/8".to_string(), "::1/128".to_string()],
+            description: "Loopback: queries from this machine".to_string(),
+        },
+    ]
+}
+
+impl DaygleConfig {
+    /// The built-in networks followed by the configured ones.
+    pub fn all_networks(&self) -> Vec<NamedNetwork> {
+        let mut all = builtin_networks();
+        all.extend(self.networks.iter().cloned());
+        all
+    }
+
+    /// The network called `name` (any case), built-in or configured.
+    pub fn find_network(&self, name: &str) -> Option<NamedNetwork> {
+        let name = name.trim();
+        self.all_networks()
+            .into_iter()
+            .find(|n| n.name.eq_ignore_ascii_case(name))
+    }
+
+    /// Resolve a network list whose entries are CIDRs, single addresses or
+    /// network names into networks. An unknown name is an error, never
+    /// skipped: dropping it could turn an allow list into "nobody".
+    pub fn resolve_networks(
+        &self,
+        entries: &[String],
+    ) -> std::result::Result<Vec<ipnet::IpNet>, String> {
+        let mut out = Vec::new();
+        for entry in entries {
+            let entry = entry.trim();
+            if entry.is_empty() {
+                continue;
+            }
+            if let Some(net) = parse_network(entry) {
+                out.push(net);
+            } else if let Some(network) = self.find_network(entry) {
+                out.extend(network.cidrs.iter().filter_map(|c| parse_network(c)));
+            } else {
+                return Err(format!(
+                    "'{entry}' is not a network, an address or a network name"
+                ));
+            }
+        }
+        Ok(out)
+    }
+
+    /// Every network list in the config that may name networks, labelled
+    /// for "used by" in the console.
+    pub fn network_lists(&self) -> Vec<(String, &Vec<String>)> {
+        let mut lists = vec![
+            (
+                "Recursion access".to_string(),
+                &self.recursive.recursion_networks,
+            ),
+            ("Denied networks".to_string(), &self.policy.denied_networks),
+            (
+                "Allowed networks".to_string(),
+                &self.policy.allowed_networks,
+            ),
+            ("DNS64".to_string(), &self.dns64.clients),
+            (
+                "Zone transfers".to_string(),
+                &self.authoritative.axfr_networks,
+            ),
+            (
+                "Dynamic updates".to_string(),
+                &self.authoritative.update_networks,
+            ),
+            ("PROXY protocol".to_string(), &self.server.proxy_protocol),
+        ];
+        for p in &self.recursive.client_policies {
+            lists.push((format!("Client policy '{}'", p.name), &p.clients));
+        }
+        for (i, r) in self.policy.rules.iter().enumerate() {
+            lists.push((format!("Policy rule {}", i + 1), &r.clients));
+        }
+        lists
+    }
+
+    /// Mutable form of [`Self::network_lists`] (for renames).
+    fn network_lists_mut(&mut self) -> Vec<&mut Vec<String>> {
+        let mut lists = vec![
+            &mut self.recursive.recursion_networks,
+            &mut self.policy.denied_networks,
+            &mut self.policy.allowed_networks,
+            &mut self.dns64.clients,
+            &mut self.authoritative.axfr_networks,
+            &mut self.authoritative.update_networks,
+            &mut self.server.proxy_protocol,
+        ];
+        for p in &mut self.recursive.client_policies {
+            lists.push(&mut p.clients);
+        }
+        for r in &mut self.policy.rules {
+            lists.push(&mut r.clients);
+        }
+        lists
+    }
+
+    /// The config settings that name the network `name` (any case).
+    pub fn network_users(&self, name: &str) -> Vec<String> {
+        self.network_lists()
+            .into_iter()
+            .filter(|(_, list)| {
+                list.iter()
+                    .any(|e| e.trim().eq_ignore_ascii_case(name.trim()))
+            })
+            .map(|(label, _)| label)
+            .collect()
+    }
+
+    /// Rename every reference to the network `old` (any case) to `new`.
+    pub fn rename_network_refs(&mut self, old: &str, new: &str) {
+        for list in self.network_lists_mut() {
+            for entry in list.iter_mut() {
+                if entry.trim().eq_ignore_ascii_case(old.trim()) {
+                    *entry = new.to_string();
+                }
+            }
+        }
+    }
+}
+
+/// Check a named network's name and addresses.
+pub fn validate_named_network(network: &NamedNetwork) -> std::result::Result<(), String> {
+    let name = network.name.trim();
+    if name.is_empty() {
+        return Err("a network needs a name".to_string());
+    }
+    if name.len() > 64 {
+        return Err(format!(
+            "network name '{name}' is longer than 64 characters"
+        ));
+    }
+    if parse_network(name).is_some() || name.contains('/') || name.contains(',') {
+        return Err(format!(
+            "'{name}' looks like an address; give the network a name such as LAN"
+        ));
+    }
+    if network.cidrs.iter().all(|c| c.trim().is_empty()) {
+        return Err(format!("network '{name}' has no addresses"));
+    }
+    for cidr in &network.cidrs {
+        if !cidr.trim().is_empty() && parse_network(cidr).is_none() {
+            return Err(format!(
+                "network '{name}': '{}' is not a network or address",
+                cidr.trim()
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Parse a CIDR network, or a bare IP address as a single-host network.
@@ -1037,6 +1221,7 @@ impl RuntimeSettings {
             && self.syslog.is_none()
             && self.dns64.is_none()
             && self.ecs.is_none()
+            && self.networks.is_none()
     }
 
     /// Apply the overlay to `config` in place. `None` fields are untouched.
@@ -1184,6 +1369,9 @@ impl RuntimeSettings {
         }
         if let Some(e) = &self.ecs {
             config.ecs = e.clone();
+        }
+        if let Some(n) = &self.networks {
+            config.networks = n.clone();
         }
         if let Some(s) = &self.syslog {
             config.syslog = s.clone();
@@ -1388,6 +1576,7 @@ impl RuntimeSettings {
             syslog: Some(config.syslog.clone()),
             dns64: Some(config.dns64.clone()),
             ecs: Some(config.ecs.clone()),
+            networks: Some(config.networks.clone()),
         }
     }
 }
@@ -1615,6 +1804,26 @@ impl DaygleConfig {
 
     /// Enforce cross-field invariants (ports, upstreams, etc.).
     pub fn validate(&self) -> Result<()> {
+        let mut names = std::collections::HashSet::new();
+        for network in &self.networks {
+            validate_named_network(network).map_err(DaygleError::Config)?;
+            let key = network.name.trim().to_ascii_lowercase();
+            if builtin_networks()
+                .iter()
+                .any(|b| b.name.eq_ignore_ascii_case(&key))
+            {
+                return Err(DaygleError::Config(format!(
+                    "'{}' is a built-in network name",
+                    network.name.trim()
+                )));
+            }
+            if !names.insert(key) {
+                return Err(DaygleError::Config(format!(
+                    "two networks are named '{}'",
+                    network.name.trim()
+                )));
+            }
+        }
         // Only *enabled* listeners need a concrete port; a disabled service
         // may keep port 0 (e.g. ephemeral test setups).
         for (name, port, enabled) in [
@@ -4419,5 +4628,68 @@ masters = ["not-an-addr"]
             parse_master_addr("[2001:db8::1]:5353").unwrap(),
             "[2001:db8::1]:5353".parse().unwrap()
         );
+    }
+
+    #[test]
+    fn named_networks_resolve_and_validate() {
+        let mut cfg = DaygleConfig {
+            networks: vec![NamedNetwork {
+                name: "LAN".to_string(),
+                cidrs: vec!["192.168.1.0/24".to_string(), "10.0.0.5".to_string()],
+                description: String::new(),
+            }],
+            ..Default::default()
+        };
+        cfg.validate().unwrap();
+        let nets = cfg
+            .resolve_networks(&["lan".to_string(), "172.16.0.0/12".to_string()])
+            .unwrap();
+        assert_eq!(nets.len(), 3);
+        assert!(
+            cfg.resolve_networks(&["This Server".to_string()]).unwrap()[0]
+                .contains(&"127.0.0.1".parse::<IpAddr>().unwrap())
+        );
+        let err = cfg.resolve_networks(&["Office".to_string()]).unwrap_err();
+        assert!(err.contains("Office"), "{err}");
+
+        // References follow a rename and are reported as users.
+        cfg.dns64.clients = vec!["LAN".to_string()];
+        assert_eq!(cfg.network_users("lan"), vec!["DNS64".to_string()]);
+        cfg.rename_network_refs("lan", "Home");
+        assert_eq!(cfg.dns64.clients, vec!["Home".to_string()]);
+
+        for bad in [
+            NamedNetwork {
+                name: "".into(),
+                cidrs: vec!["10.0.0.0/8".into()],
+                ..Default::default()
+            },
+            NamedNetwork {
+                name: "10.0.0.0/8".into(),
+                cidrs: vec!["10.0.0.0/8".into()],
+                ..Default::default()
+            },
+            NamedNetwork {
+                name: "X".into(),
+                cidrs: vec![],
+                ..Default::default()
+            },
+            NamedNetwork {
+                name: "X".into(),
+                cidrs: vec!["nope".into()],
+                ..Default::default()
+            },
+        ] {
+            assert!(validate_named_network(&bad).is_err(), "{bad:?}");
+        }
+        let mut dup = cfg.clone();
+        dup.networks.push(NamedNetwork {
+            name: "lan".into(),
+            ..cfg.networks[0].clone()
+        });
+        assert!(dup.validate().is_err());
+        let mut builtin = cfg.clone();
+        builtin.networks[0].name = "private".to_string();
+        assert!(builtin.validate().is_err());
     }
 }

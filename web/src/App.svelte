@@ -212,7 +212,7 @@
       {:else if view === 'status' || (isViewer && !tabs.some((t) => t.id === view))}
         <Status />
       {:else if view === 'zones'}
-        <ZonesPage {recordZoneId} onSelectZone={setRecordZone} />
+        <ZonesPage {recordZoneId} onSelectZone={setRecordZone} onOpenSettings={isViewer ? null : openSettings} />
       {:else if view === 'filtering'}
         <Filtering />
       {:else if view === 'cache'}

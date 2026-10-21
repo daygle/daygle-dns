@@ -490,3 +490,12 @@ redirect_http = false
 time_zone = "system"
 date_format = "system"
 time_format = "system"
+
+# Named networks (Settings -> Networks): give a set of addresses a name that
+# settings taking client networks can use instead of the addresses. `Private`
+# and `This Server` (loopback) are built in.
+#
+# [[networks]]
+# name = "LAN"
+# cidrs = ["192.168.20.0/24", "fd00:20::/64"]
+# description = "Home devices"

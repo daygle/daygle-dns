@@ -32,8 +32,12 @@ Daygle DNS combines, in a single process:
   updates with HMAC-signed requests (HMAC-SHA256, HMAC-SHA384,
   HMAC-SHA512). Per-zone key binding, signed responses, and request-MAC
   chaining.
+- **Named networks**: name a set of addresses once (`LAN`, `VPN`, `IoT`…)
+  in Settings -> Networks and pick it wherever a setting takes client
+  networks; changing it changes them all, renaming it keeps them pointing at
+  it, and a network in use cannot be deleted.
 - **Split horizon**: serve different answers for the same domain depending
-  on the client's network (named client groups like `LAN`/`VPN`/`IoT` or
+  on the client's network (named networks like `LAN`/`VPN`/`IoT` or
   literal CIDRs), managed from the GUI - internal clients see internal
   answers (A, AAAA, MX, TXT, CNAME, SRV), everyone else gets the public view.
 - **Recursive resolution** (root → TLD → authoritative) with **caching**,

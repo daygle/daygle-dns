@@ -9,16 +9,24 @@ mod common;
 
 use common::*;
 use daygle_dns_authoritative::model::{
-    MoveDirection, RecordInput, SplitHorizonEntryInput, SplitHorizonNetworkInput,
-    SplitHorizonRecord, ZoneInput,
+    MoveDirection, RecordInput, SplitHorizonEntryInput, SplitHorizonRecord, ZoneInput,
 };
 use daygle_dns_authoritative::store::MoveResult;
 use daygle_dns_core::config::DaygleConfig;
 use hickory_proto::op::ResponseCode;
 use hickory_proto::rr::RecordType;
 
+/// A config whose named networks are `LAN` (the loopback test client) and
+/// `VPN` (not the test client).
 fn config_with_zone(db: &std::path::Path) -> DaygleConfig {
-    base_config(db)
+    let mut config = base_config(db);
+    let network = |name: &str, cidr: &str| daygle_dns_core::config::NamedNetwork {
+        name: name.to_string(),
+        cidrs: vec![cidr.to_string()],
+        description: String::new(),
+    };
+    config.networks = vec![network("LAN", "127.0.0.0/8"), network("VPN", "10.8.0.0/24")];
+    config
 }
 
 fn zone_with_www(store: &daygle_dns_authoritative::ZoneStore, zone_name: &str, ip: &str) {
@@ -54,12 +62,6 @@ async fn matching_client_gets_synthetic_answer_over_authoritative() {
     zone_with_www(store, "example.test", "192.0.2.42");
 
     // Split horizon: clients on the loopback network see 10.0.0.5 instead.
-    store
-        .upsert_split_horizon_network(&SplitHorizonNetworkInput {
-            name: "LAN".to_string(),
-            cidrs: vec!["127.0.0.0/8".to_string()],
-        })
-        .unwrap();
     store
         .create_split_horizon_entry(&SplitHorizonEntryInput {
             domain: "www.example.test".to_string(),
@@ -103,12 +105,6 @@ async fn non_matching_client_falls_through_to_authoritative() {
     zone_with_www(store, "example.test", "192.0.2.42");
 
     // The VPN network does not contain the loopback test client.
-    store
-        .upsert_split_horizon_network(&SplitHorizonNetworkInput {
-            name: "VPN".to_string(),
-            cidrs: vec!["10.8.0.0/24".to_string()],
-        })
-        .unwrap();
     store
         .create_split_horizon_entry(&SplitHorizonEntryInput {
             domain: "www.example.test".to_string(),
@@ -216,12 +212,6 @@ async fn reorder_changes_which_view_wins() {
     let server = spawn(config_with_zone(&db)).await;
     let store = server.catalog.store();
 
-    store
-        .upsert_split_horizon_network(&SplitHorizonNetworkInput {
-            name: "LAN".to_string(),
-            cidrs: vec!["127.0.0.0/8".to_string()],
-        })
-        .unwrap();
     let public = store
         .create_split_horizon_entry(&SplitHorizonEntryInput {
             domain: "www.example.test".to_string(),

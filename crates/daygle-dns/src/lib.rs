@@ -198,7 +198,10 @@ pub async fn bind_with(
     // boot (nothing stored yet) the file's values are seeded into the DB so
     // file-based installs transition seamlessly.
     let mut config = Arc::unwrap_or_clone(config);
-    match store.get_runtime_settings::<daygle_dns_core::config::RuntimeSettings>()? {
+    let overlay = store.get_runtime_settings::<daygle_dns_core::config::RuntimeSettings>()?;
+    // Stored settings from before networks were shared hold none yet.
+    let adopt_split_horizon_networks = overlay.as_ref().is_none_or(|o| o.networks.is_none());
+    match overlay {
         Some(overlay) => {
             // No `validate()` here: `bind` accepts pre-validated configs and
             // test setups legitimately keep ephemeral port 0. The overlay was
@@ -216,6 +219,10 @@ pub async fn bind_with(
             );
         }
     }
+    if adopt_split_horizon_networks && config.networks.is_empty() {
+        adopt_legacy_networks(&store, &mut config, &logs)?;
+    }
+    catalog.set_networks(config.all_networks())?;
     // Note: no `validate()` here - `bind` accepts pre-validated configs, and
     // test setups legitimately use ephemeral port 0.
     let config = Arc::new(config);
@@ -1150,6 +1157,51 @@ async fn bind_listeners(
 }
 
 /// Import BIND zone files from `authoritative.zones_dir` (if configured).
+/// Split horizon kept its own named networks before networks were shared
+/// (Settings -> Networks): adopt them as the server's networks, once. A name
+/// taken by a built-in network is renamed, along with what refers to it.
+fn adopt_legacy_networks(
+    store: &daygle_dns_authoritative::ZoneStore,
+    config: &mut DaygleConfig,
+    logs: &LogStore,
+) -> Result<()> {
+    let legacy = store.list_split_horizon_networks()?;
+    if legacy.is_empty() {
+        return Ok(());
+    }
+    for network in legacy {
+        let mut name = network.name.trim().to_string();
+        if daygle_dns_core::config::builtin_networks()
+            .iter()
+            .any(|b| b.name.eq_ignore_ascii_case(&name))
+        {
+            let renamed = format!("{name} (Split Horizon)");
+            store.rename_network_refs(&name, &renamed)?;
+            name = renamed;
+        }
+        config.networks.push(daygle_dns_core::config::NamedNetwork {
+            name,
+            cidrs: network.cidrs,
+            description: String::new(),
+        });
+    }
+    store.put_runtime_settings(&daygle_dns_core::config::RuntimeSettings::capture(config))?;
+    logs.push(
+        daygle_dns_core::LogLevel::Info,
+        "api",
+        format!(
+            "split horizon networks are now shared networks (Settings -> Networks): {}",
+            config
+                .networks
+                .iter()
+                .map(|n| n.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    );
+    Ok(())
+}
+
 fn import_zone_files(
     catalog: &AuthorityCatalog,
     config: &DaygleConfig,

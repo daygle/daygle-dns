@@ -32,9 +32,12 @@
 //! | `POST`   | `/api/zones/:id/unsign`           | remove DNSSEC signing |
 //! | `POST`   | `/api/zones/import`               | import a BIND zone file |
 //! |          |                                  | `POST /api/zones` accepts SOA/import/master options for the GUI |
-//! | `GET`    | `/api/split-horizon`              | list split-horizon networks and entries |
-//! | `POST`   | `/api/split-horizon/networks`     | create/update a network (by name) |
-//! | `DELETE` | `/api/split-horizon/networks/:name` | delete a network |
+//! | `GET`    | `/api/networks`                   | list named networks and what uses each |
+//! | `POST`   | `/api/networks`                   | add, change or rename a named network |
+//! | `DELETE` | `/api/networks/:name`             | delete an unused named network |
+//! | `GET`    | `/api/split-horizon`              | list the named networks and split-horizon entries |
+//! | `POST`   | `/api/split-horizon/networks`     | add or change a named network (older form of `/api/networks`) |
+//! | `DELETE` | `/api/split-horizon/networks/:name` | delete an unused named network |
 //! | `POST`   | `/api/split-horizon/entries`      | create a split-horizon entry |
 //! | `PUT`    | `/api/split-horizon/entries/:id`  | update a split-horizon entry |
 //! | `POST`   | `/api/split-horizon/entries/:id/move` | move an entry up/down in its domain's order |
@@ -69,6 +72,7 @@
 pub mod acme;
 mod audit;
 mod handlers;
+mod networks;
 mod update;
 
 use std::collections::HashMap;
@@ -517,6 +521,11 @@ pub fn router(state: AppState) -> Router {
         .route("/local-root", get(handlers::local_root_status))
         .route("/resolver", get(handlers::resolver_stats))
         .route("/local-root/refresh", post(handlers::local_root_refresh))
+        .route(
+            "/networks",
+            get(networks::list_networks).post(networks::save_network),
+        )
+        .route("/networks/{name}", delete(networks::delete_network))
         .route("/split-horizon", get(handlers::get_split_horizon))
         .route(
             "/split-horizon/networks",
