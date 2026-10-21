@@ -81,10 +81,7 @@
       <tbody>
         <tr><td class="muted">Version</td><td>{#if status?.version}<code>v{status.version}</code>{:else if error}<span class="muted">Unavailable</span>{:else}<span class="muted">Loading…</span>{/if}</td></tr>
         <tr><td class="muted">License</td><td>Apache License 2.0</td></tr>
-        <tr><td class="muted">Authoritative Storage</td><td>SQLite</td></tr>
-        <tr><td class="muted">DNS Engine</td><td>Hickory DNS</td></tr>
-        <tr><td class="muted">Web Console</td><td>Svelte</td></tr>
-        <tr><td class="muted">Implementation</td><td>Rust</td></tr>
+        <tr><td class="muted">Built With</td><td>Rust, Hickory DNS, SQLite and Svelte</td></tr>
       </tbody>
     </table>
   </div>
