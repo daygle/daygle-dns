@@ -908,20 +908,25 @@ impl RequestHandler for DnsDispatcher {
         }
 
         self.metrics.inc(&self.metrics.recursive);
-        let lookup = match tokio::time::timeout(
-            self.client_timeout,
-            daygle_dns_recursive::with_client_subnet(
+        // The lookup runs as its own task, so one that outlasts the client
+        // timeout still finishes and fills the cache for the client's retry.
+        let lookup_task = {
+            let resolver = Arc::clone(&resolver);
+            let name = qname.clone();
+            let rtype = info.query.query_type();
+            tokio::spawn(daygle_dns_recursive::with_client_subnet(
                 self.client_subnet(client),
-                daygle_dns_recursive::track_stale(resolver.lookup_for_client(
-                    client,
-                    &qname,
-                    info.query.query_type(),
-                )),
-            ),
-        )
-        .await
-        {
-            Ok((result, stale)) => result.map(|lookup| (lookup, stale)),
+                daygle_dns_recursive::track_stale(async move {
+                    resolver.lookup_for_client(client, &name, rtype).await
+                }),
+            ))
+        };
+        let lookup = match tokio::time::timeout(self.client_timeout, lookup_task).await {
+            Ok(Ok((result, stale))) => result.map(|lookup| (lookup, stale)),
+            Ok(Err(e)) => Err(DaygleError::Resolution {
+                message: format!("lookup task failed: {e}"),
+                response_code: None,
+            }),
             Err(_elapsed) => {
                 debug!(
                     query = %qname,
@@ -1023,7 +1028,6 @@ impl RequestHandler for DnsDispatcher {
             }
             Err(e) => {
                 debug!(query = %qname, error = %e, "recursive resolution failed");
-                self.metrics.inc(&self.metrics.errors);
                 // Negative answers (NXDOMAIN, NODATA) carry their response
                 // code so they pass through instead of SERVFAIL.
                 let code = match &e {
@@ -1033,6 +1037,11 @@ impl RequestHandler for DnsDispatcher {
                     } => <ResponseCode as From<u16>>::from(*code),
                     _ => ResponseCode::ServFail,
                 };
+                // A negative answer is a normal resolution, not an error.
+                let negative = matches!(code, ResponseCode::NoError | ResponseCode::NXDomain);
+                if !negative {
+                    self.metrics.inc(&self.metrics.errors);
+                }
                 // NODATA for AAAA: DNS64 may have an answer after all.
                 if code == ResponseCode::NoError && info.query.query_type() == RecordType::AAAA {
                     if let Some(dns64) = self.dns64_for(client, request) {
@@ -1059,7 +1068,11 @@ impl RequestHandler for DnsDispatcher {
                     &qname,
                     &rtype,
                     protocol,
-                    Outcome::Error,
+                    if negative {
+                        Outcome::Recursive
+                    } else {
+                        Outcome::Error
+                    },
                     Some(&rcode_label(code)),
                     started,
                 );
