@@ -537,7 +537,7 @@
     <h3 style="margin: 0 0 10px">DNS Listeners</h3>
     <table class="facts">
       <tbody>
-        <tr><th>Listen Address</th><td><code>{server.listen}</code> <span class="muted">{listenMeaning(server.listen, server.ipv6_only)}</span></td></tr>
+        <tr><th>Listen Address</th><td>{listenMeaning(server.listen, server.ipv6_only)} <span class="muted">({server.listen})</span></td></tr>
         <tr><th>Port</th><td>{server.port}</td></tr>
         <tr><th>UDP</th><td><span class="pill" class:ok={server.udp_enabled}>{server.udp_enabled ? 'On' : 'Off'}</span></td></tr>
         <tr><th>TCP</th><td><span class="pill" class:ok={server.tcp_enabled}>{server.tcp_enabled ? 'On' : 'Off'}</span></td></tr>
