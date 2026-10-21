@@ -294,8 +294,8 @@
   {/if}
   <p class="muted help">
     Changing an account's role, disabling it or resetting its password signs
-    out its sessions straight away. To change your own password, use
-    <strong>Change Password</strong> below your name in the sidebar.
+    out its sessions straight away. To change your own password, use the
+    <strong>Account</strong> page (below your name in the sidebar).
   </p>
 </div>
 
@@ -400,8 +400,8 @@
       <div class="section-title">Reset Password</div>
       {#if isMe(editUser)}
         <p class="muted help">
-          Use <strong>Change Password</strong> below your name in the sidebar;
-          it asks for your current password and keeps this session signed in.
+          Use the Password tab of your <strong>Account</strong> page; it asks
+          for your current password and keeps this session signed in.
         </p>
       {:else}
         <form class="reset" onsubmit={saveReset}>
@@ -416,7 +416,7 @@
       <div class="section-title">Two-Factor Login</div>
       {#if isMe(editUser)}
         <p class="muted help">
-          Use <strong>Two-Factor Login</strong> below your name in the sidebar.
+          Use the Two-Factor Login tab of your <strong>Account</strong> page.
         </p>
       {:else if editUser.two_factor}
         <div class="row" style="gap: 10px; align-items: center">
@@ -429,8 +429,8 @@
         </p>
       {:else}
         <p class="muted help">
-          Off. Each person turns it on for their own account, from
-          <strong>Two-Factor Login</strong> below their name in the sidebar.
+          Off. Each person turns it on for their own account, on their
+          <strong>Account</strong> page.
         </p>
       {/if}
 

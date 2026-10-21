@@ -1038,7 +1038,7 @@
     <p class="muted help">
       Example: <strong>{previewDateTime(display_)}</strong>. These are the
       defaults for every user. Each user can choose their own under
-      <strong>My Preferences</strong> (below their name in the sidebar).
+      the Preferences tab of their <strong>Account</strong> page.
       {#if ownPrefsSet}Your own preferences are set, so you won't see a change
         here until you reset them.{/if}
       "Device Time Zone" and "Browser Default" follow each viewer's computer.
