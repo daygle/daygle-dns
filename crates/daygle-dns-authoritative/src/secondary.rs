@@ -31,12 +31,29 @@ pub struct SecondaryRefresher {
 }
 
 impl SecondaryRefresher {
+    ///
+    /// Secondary zones in the store that `zones` does not name (added in
+    /// the console, or by a catalog zone) are refreshed too, from the
+    /// masters stored with them.
     pub fn new(
         store: ZoneStore,
         catalog: Arc<AuthorityCatalog>,
-        zones: Vec<SecondaryZoneConfig>,
+        mut zones: Vec<SecondaryZoneConfig>,
         client: XfrClient,
     ) -> Self {
+        match stored_secondaries(&store) {
+            Ok(stored) => {
+                for zone in stored {
+                    if !zones
+                        .iter()
+                        .any(|z| z.name.eq_ignore_ascii_case(&zone.name))
+                    {
+                        zones.push(zone);
+                    }
+                }
+            }
+            Err(e) => warn!(error = %e, "cannot read the stored secondary zones"),
+        }
         Self {
             store,
             catalog,
@@ -59,6 +76,17 @@ impl SecondaryRefresher {
         }
         drop(zones);
         self.changed.notify_waiters();
+    }
+
+    /// The configuration of the secondary zone `name`, if it is one.
+    pub fn zone_config(&self, name: &str) -> Option<SecondaryZoneConfig> {
+        let name = name.trim_end_matches('.');
+        self.zones
+            .read()
+            .expect("secondary zone lock poisoned")
+            .iter()
+            .find(|z| z.name.trim_end_matches('.').eq_ignore_ascii_case(name))
+            .cloned()
     }
 
     /// Remove a secondary zone configuration and wake the refresh loop.
@@ -227,6 +255,25 @@ impl SecondaryRefresher {
             .set_secondary(&zone.id, &config.masters, config.refresh_secs)?;
         Ok(zone)
     }
+}
+
+/// The secondary zones recorded in the store, as refresh configurations.
+fn stored_secondaries(store: &ZoneStore) -> Result<Vec<SecondaryZoneConfig>> {
+    let mut out = Vec::new();
+    for item in store.list_secondary()? {
+        if item.masters.is_empty() {
+            continue;
+        }
+        if let Some(zone) = store.get_zone(&item.zone_id)? {
+            out.push(SecondaryZoneConfig {
+                name: zone.name,
+                masters: item.masters,
+                refresh_secs: item.refresh_secs,
+                ..Default::default()
+            });
+        }
+    }
+    Ok(out)
 }
 
 /// True when `master` is a newer serial than `local` under RFC 1982 serial

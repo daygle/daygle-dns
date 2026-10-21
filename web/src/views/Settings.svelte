@@ -64,6 +64,9 @@
   let axfrNetworksText = $state('');
   let updateNetworksText = $state('');
   let notifyTargetsText = $state('');
+  // Consumed catalog zones, as edited: masters as one comma-separated line
+  // and the refresh in minutes.
+  let catalogConsumers = $state([]);
 
   // Console-managed certificates available for the DoT/DoH/DoQ listeners.
   let certs = $state([]);
@@ -215,6 +218,12 @@
       axfrNetworksText = (authoritative.axfr_networks || []).join('\n');
       updateNetworksText = (authoritative.update_networks || []).join('\n');
       notifyTargetsText = (authoritative.notify_targets || []).join('\n');
+      catalogConsumers = (authoritative.catalog_consumers || []).map((c) => ({
+        name: c.name,
+        masters: (c.masters || []).join(', '),
+        refresh_minutes: Math.max(1, Math.round((c.refresh_secs || 3600) / 60)),
+        enabled: c.enabled !== false,
+      }));
       savedBody = JSON.stringify(buildBody());
     } catch (e) {
       error = formatApiError(e);
@@ -343,6 +352,15 @@
         notify_enabled: !!authoritative.notify_enabled,
         notify_targets: parseLines(notifyTargetsText),
         notify_listen_enabled: !!authoritative.notify_listen_enabled,
+        catalog_zone: (authoritative.catalog_zone || '').trim(),
+        catalog_consumers: catalogConsumers
+          .filter((c) => c.name.trim())
+          .map((c) => ({
+            name: c.name.trim(),
+            masters: c.masters.split(/[\s,]+/).filter(Boolean),
+            refresh_secs: Math.round(Number(c.refresh_minutes) * 60),
+            enabled: !!c.enabled,
+          })),
       },
       ai: {
         enabled: !!ai_.enabled,
@@ -749,6 +767,40 @@
       When a primary zone changes, the server notifies these targets so their
       secondary copies refresh immediately. Enabling or disabling NOTIFY takes
       effect after a restart; the target list is saved right away.
+    </p>
+  </div>
+
+  <div class="card" style="margin-bottom: 14px">
+    <h3 style="margin: 0 0 10px">Catalog Zones (RFC 9432)</h3>
+    <div class="form-grid">
+      <label><span>Publish a Catalog Named</span><input placeholder="catalog.example.com" bind:value={authoritative.catalog_zone} /></label>
+    </div>
+    <p class="muted help">
+      Lists every primary zone on this server in a catalog zone, so secondaries
+      that follow it (BIND, Knot, PowerDNS or another Daygle server) add and
+      remove zones on their own. They transfer it like any zone, so allow them
+      under Zone Transfers; with NOTIFY on, they are told when the list changes.
+      Leave empty to publish no catalog.
+    </p>
+    <h4 style="margin: 14px 0 8px">Follow Catalogs</h4>
+    {#each catalogConsumers as consumer, i}
+      <div class="form-grid" style="align-items: end; margin-bottom: 8px">
+        <label><span>Catalog Zone</span><input placeholder="catalog.example.com" bind:value={consumer.name} /></label>
+        <label><span>Masters (IP, IP:port; comma-separated)</span><input placeholder="198.51.100.10" bind:value={consumer.masters} /></label>
+        <label><span>Check Every (Minutes)</span><input type="number" min="1" bind:value={consumer.refresh_minutes} /></label>
+        <div class="row" style="gap: 10px">
+          <label class="check"><input type="checkbox" bind:checked={consumer.enabled} /> <span>Enabled</span></label>
+          <button class="danger" onclick={() => (catalogConsumers = catalogConsumers.filter((_, j) => j !== i))} aria-label="Stop following {consumer.name || 'this catalog'}">✕</button>
+        </div>
+      </div>
+    {/each}
+    <button class="secondary" onclick={() => (catalogConsumers = [...catalogConsumers, { name: '', masters: '', refresh_minutes: 60, enabled: true }])}>Add Catalog</button>
+    <p class="muted help">
+      Every zone a followed catalog lists is served here as a secondary zone,
+      transferred from the catalog's masters; zones it drops are removed. A
+      disabled catalog keeps its zones but stops changing them; removing it
+      removes them. With Accept NOTIFY on, a NOTIFY from a master checks the
+      catalog at once. Applies immediately, no restart needed.
     </p>
   </div>
   {:else if tab === 'listeners'}

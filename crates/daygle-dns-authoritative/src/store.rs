@@ -62,6 +62,20 @@ CREATE TABLE IF NOT EXISTS dnssec_keys (
 
 CREATE INDEX IF NOT EXISTS idx_dnssec_keys_zone ON dnssec_keys(zone_id);
 
+-- Zones added by a consumed catalog zone (RFC 9432), and which catalog.
+CREATE TABLE IF NOT EXISTS catalog_members (
+    zone_id  TEXT PRIMARY KEY REFERENCES zones(id) ON DELETE CASCADE,
+    catalog  TEXT NOT NULL
+);
+
+-- The published catalog zone's serial, and a digest of the member list it
+-- was last bumped for.
+CREATE TABLE IF NOT EXISTS catalog_state (
+    name    TEXT PRIMARY KEY,
+    digest  TEXT NOT NULL,
+    serial  INTEGER NOT NULL
+);
+
 -- How a signed zone proves names and types do not exist (NSEC or NSEC3).
 CREATE TABLE IF NOT EXISTS zone_dnssec (
     zone_id  TEXT PRIMARY KEY REFERENCES zones(id) ON DELETE CASCADE,
@@ -285,6 +299,7 @@ impl ZoneStore {
             "DELETE FROM records WHERE zone_id NOT IN (SELECT id FROM zones);
              DELETE FROM dnssec_keys WHERE zone_id NOT IN (SELECT id FROM zones);
              DELETE FROM zone_dnssec WHERE zone_id NOT IN (SELECT id FROM zones);
+             DELETE FROM catalog_members WHERE zone_id NOT IN (SELECT id FROM zones);
              DELETE FROM secondary_zones WHERE zone_id NOT IN (SELECT id FROM zones);
              PRAGMA foreign_keys = ON;",
         )?;
@@ -1243,6 +1258,60 @@ impl ZoneStore {
         let conn = self.lock_conn()?;
         let changed = conn.execute("DELETE FROM tsig_keys WHERE name = ?1", [name])?;
         Ok(changed > 0)
+    }
+
+    // ---- Catalog zones (RFC 9432) ----------------------------------------
+
+    /// Record that `catalog` added the zone `zone_id`.
+    pub fn add_catalog_member(&self, zone_id: &str, catalog: &str) -> Result<()> {
+        let conn = self.lock_conn()?;
+        conn.execute(
+            "INSERT INTO catalog_members (zone_id, catalog) VALUES (?1, ?2)
+             ON CONFLICT(zone_id) DO UPDATE SET catalog = excluded.catalog",
+            params![zone_id, catalog],
+        )?;
+        Ok(())
+    }
+
+    /// Every zone added by a consumed catalog: zone id → catalog name.
+    pub fn catalog_members(&self) -> Result<std::collections::HashMap<String, String>> {
+        let conn = self.lock_conn()?;
+        let mut stmt = conn.prepare("SELECT zone_id, catalog FROM catalog_members")?;
+        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
+
+    /// The serial of the published catalog zone `name` for a member list
+    /// with this `digest`: bumped (and `true` returned) when the list
+    /// changed since last time.
+    pub fn catalog_serial(&self, name: &str, digest: &str) -> Result<(u32, bool)> {
+        let conn = self.lock_conn()?;
+        let current: Option<(String, u32)> = conn
+            .query_row(
+                "SELECT digest, serial FROM catalog_state WHERE name = ?1",
+                [name],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        match current {
+            Some((d, serial)) if d == digest => Ok((serial, false)),
+            current => {
+                // Start from the time, so a catalog that is turned off and
+                // on again (or renamed back) still moves forward.
+                let now = u32::try_from(chrono::Utc::now().timestamp()).unwrap_or(u32::MAX);
+                let serial = current
+                    .map(|(_, s)| s.wrapping_add(1))
+                    .unwrap_or(now)
+                    .max(1);
+                conn.execute(
+                    "INSERT INTO catalog_state (name, digest, serial) VALUES (?1, ?2, ?3)
+                     ON CONFLICT(name) DO UPDATE SET digest = excluded.digest,
+                         serial = excluded.serial",
+                    params![name, digest, serial],
+                )?;
+                Ok((serial, true))
+            }
+        }
     }
 
     // ---- DNSSEC signing keys --------------------------------------------

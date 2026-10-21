@@ -103,6 +103,17 @@ pub fn apply_config(shared: &Shared, new: Arc<DaygleConfig>) -> bool {
         }
     }
 
+    // The published catalog zone (consumed catalogs are read live).
+    if old.authoritative.catalog_zone != new.authoritative.catalog_zone {
+        match shared
+            .catalog
+            .set_catalog_zone(&new.authoritative.catalog_zone)
+        {
+            Ok(()) => info!("catalog zone setting reloaded"),
+            Err(e) => warn!("cannot publish the catalog zone: {e}"),
+        }
+    }
+
     // Recursive resolver / upstreams / stub zones. The resolver owns the stub
     // zones (see StubZoneConfig), so a change to them rebuilds it together
     // with the recursive settings.

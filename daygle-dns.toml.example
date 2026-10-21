@@ -177,6 +177,23 @@ update_networks = []
 # refresh_secs = 600
 # enabled = true
 
+# Catalog zones (RFC 9432). Publish one listing every primary zone here, so
+# secondaries that follow it add and remove zones on their own (they fetch it
+# by AXFR, so allow them above):
+#
+# catalog_zone = "catalog.example.com"
+#
+# And/or follow other servers' catalogs: every zone a catalog lists is served
+# here as a secondary zone from the catalog's masters; zones it drops are
+# removed. Also manageable in Settings -> Zones; once saved there, the
+# database copy wins over this file.
+#
+# [[authoritative.catalog_consumers]]
+# name = "catalog.example.net"
+# masters = ["198.51.100.10"]
+# refresh_secs = 3600
+# enabled = true
+
 # RFC 1996 NOTIFY.
 #
 # Outbound: when a primary zone changes (e.g. a dynamic update is applied),

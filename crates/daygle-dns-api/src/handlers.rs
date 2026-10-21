@@ -1227,6 +1227,8 @@ struct ZoneView {
     /// Whether a signed zone uses NSEC3 rather than NSEC.
     nsec3: bool,
     zone_type: &'static str,
+    /// The consumed catalog zone that added this zone, if any.
+    catalog: Option<String>,
     masters: Vec<String>,
     refresh_secs: Option<u64>,
 }
@@ -1243,6 +1245,10 @@ pub async fn list_zones(State(state): State<AppState>) -> Response {
             .collect::<std::collections::HashMap<_, _>>(),
         Err(e) => return map_err(e),
     };
+    let catalog_members = match state.catalog.store().catalog_members() {
+        Ok(m) => m,
+        Err(e) => return map_err(e),
+    };
     let views = zones
         .into_iter()
         .map(|zone| {
@@ -1253,12 +1259,14 @@ pub async fn list_zones(State(state): State<AppState>) -> Response {
                 .map(|k| k.is_some())
                 .unwrap_or(false);
             let nsec3 = dnssec && state.catalog.store().zone_nsec3(&zone.id).unwrap_or(false);
+            let catalog = catalog_members.get(&zone.id).cloned();
             if let Some(item) = secondary.get(&zone.id) {
                 ZoneView {
                     zone,
                     dnssec,
                     nsec3,
                     zone_type: "secondary",
+                    catalog,
                     masters: item.masters.clone(),
                     refresh_secs: Some(item.refresh_secs),
                 }
@@ -1268,6 +1276,7 @@ pub async fn list_zones(State(state): State<AppState>) -> Response {
                     dnssec,
                     nsec3,
                     zone_type: "primary",
+                    catalog,
                     masters: Vec::new(),
                     refresh_secs: None,
                 }
@@ -1613,6 +1622,20 @@ pub async fn delete_zone(State(state): State<AppState>, Path(id): Path<String>) 
         Ok(items) => items.into_iter().find(|item| item.zone_id == id),
         Err(e) => return map_err(e),
     };
+    match state.catalog.store().catalog_members() {
+        Ok(members) => {
+            if let Some(catalog) = members.get(&id) {
+                return error_response(
+                    StatusCode::CONFLICT,
+                    format!(
+                        "{} was added by the catalog zone {catalog}: remove it from the catalog, or stop following the catalog",
+                        existing.name
+                    ),
+                );
+            }
+        }
+        Err(e) => return map_err(e),
+    }
     let old_config = (*state.config.load_full()).clone();
     let mut new_config = old_config.clone();
     if secondary.is_some() {
@@ -3675,6 +3698,10 @@ pub struct AuthoritativeUpdate {
     pub notify_listen_enabled: Option<bool>,
     /// Replaces the whole stub-zone list.
     pub stub_zones: Option<Vec<daygle_dns_core::config::StubZoneConfig>>,
+    /// The catalog zone to publish; blank stops publishing it.
+    pub catalog_zone: Option<String>,
+    /// Replaces the whole list of consumed catalog zones.
+    pub catalog_consumers: Option<Vec<daygle_dns_core::config::CatalogConsumerConfig>>,
 }
 
 /// Partial update for policy-engine settings surfaced in the console (only the
@@ -4166,6 +4193,13 @@ pub async fn update_settings(
             config.authoritative.stub_zones =
                 daygle_dns_core::config::AuthoritativeUpdate::normalize_stub_zones(v);
         }
+        if let Some(v) = &a.catalog_zone {
+            config.authoritative.catalog_zone = daygle_dns_core::config::normalize_zone_name(v);
+        }
+        if let Some(v) = &a.catalog_consumers {
+            config.authoritative.catalog_consumers =
+                daygle_dns_core::config::AuthoritativeUpdate::normalize_catalog_consumers(v);
+        }
     }
     let mut policy_changed = false;
     if let Some(p) = &update.policy {
@@ -4344,6 +4378,18 @@ pub async fn update_settings(
     // policy) so the change applies to in-flight DNS traffic immediately,
     // not just after a restart. NOTIFY hooks are startup-built and need a
     // restart; the persisted config already carries them.
+    // The published catalog zone is rebuilt at once; consumed catalogs are
+    // read from the live config by their refresh loop.
+    if old_config.authoritative.catalog_zone != config.authoritative.catalog_zone {
+        if let Err(e) = state
+            .catalog
+            .set_catalog_zone(&config.authoritative.catalog_zone)
+        {
+            state
+                .logs
+                .warn("api", format!("cannot publish the catalog zone: {e}"));
+        }
+    }
     if authoritative_changed {
         state.catalog.update_gate_settings(
             config.authoritative.axfr_enabled,

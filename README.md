@@ -16,6 +16,9 @@ Daygle combines, in a single process:
   load balancer) and answer A/AAAA with that host's current addresses.
 - **Zone transfers**: serve **AXFR/IXFR** (RFC 5936, with per-network ACLs)
   and replicate **secondary zones** from remote masters on a refresh interval.
+- **Catalog zones (RFC 9432)**: publish a catalog of your zones so
+  secondaries provision themselves, and follow other servers' catalogs to
+  add and remove secondary zones automatically.
 - **NOTIFY (RFC 1996)**: primary zones send NOTIFY to configured secondaries
   when they change (e.g. after a dynamic update), and secondary zones accept
   NOTIFYs from their masters to pull immediately instead of waiting out the

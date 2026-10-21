@@ -23,6 +23,7 @@
 
 pub mod backup;
 pub mod catalog;
+pub mod catalog_zone;
 pub mod dnssec;
 pub mod model;
 pub mod notify;
@@ -37,6 +38,7 @@ pub mod update;
 pub mod zonemd;
 
 pub use catalog::{generate_signing_key, AuthorityCatalog};
+pub use catalog_zone::CatalogConsumer;
 pub use dnssec::{DnssecMaintenance, MaintenanceConfig};
 pub use model::{Record, RecordInput, SigningKeyRecord, Zone, ZoneInput};
 pub use notify::{NotifyHooks, NotifyInbound, NotifySender};

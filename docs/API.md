@@ -322,7 +322,7 @@ outbound_ip_versions/client_policies), `dot`,
 `mdy`/`ymd`/`d_mon_y`; `time_format` = `system`/`24h`/`12h`), `syslog` (see below), and `authoritative`
 (default_record_ttl/default_primary_ns/default_admin_mailbox/axfr_enabled/axfr_networks/
 allow_dynamic_updates/update_networks/notify_enabled/notify_targets/
-notify_listen_enabled/stub_zones). Runtime groups (`recursive`, `dot`, `doh`, `doq`,
+notify_listen_enabled/stub_zones/catalog_zone/catalog_consumers). Runtime groups (`recursive`, `dot`, `doh`, `doq`,
 `policy`, `authoritative`, `ai`, `display`) are stored in the database and survive restarts and
 config-file edits; `server.*` and `api.*` stay config-file-owned so a broken
 listener can always be fixed by editing the file. A `server` or `api` group
@@ -542,15 +542,11 @@ POST /api/zones
 }
 ```
 
-Secondary zones are added to `authoritative.secondary_zones`, persisted to the
-configuration file, applied to the running refresher immediately, and pulled
+Secondary zones are stored in the database with their masters, applied to
+the running refresher immediately (and again at every start), and pulled
 over AXFR/IXFR from the first reachable master. Their records are read-only in
-the GUI and record mutation endpoints return `409 Conflict`.
-
-> Note: secondary-zone definitions are still config-file-owned (they describe
-> infrastructure that must be available before the database is consulted),
-> unlike runtime settings such as upstreams and policy lists, which live in
-> the database.
+the GUI and record mutation endpoints return `409 Conflict`. Secondary zones
+can also be listed in `daygle-dns.toml` under `[[authoritative.secondary_zones]]`.
 
 Import a BIND zone file (creates the zone and replaces its records):
 
@@ -584,9 +580,45 @@ NOTIFY (OpCode 4, QTYPE SOA, UDP) to every address in
 `authoritative.notify_targets`; secondaries that receive it immediately query
 our SOA and pull an IXFR/AXFR when the serial advanced. When
 `authoritative.notify_listen_enabled` is set, the server also accepts
-NOTIFYs for its configured secondary zones on the main UDP port, replies with
+NOTIFYs for its secondary zones (and followed catalog zones) on the main UDP port, replies with
 the current SOA, and refreshes that zone immediately (the refresh interval
 remains the fallback and serials are always compared before a transfer).
+
+### Catalog zones (RFC 9432)
+
+A catalog zone is a zone listing other zones, so secondaries can follow a
+whole server instead of being told about each zone. Both directions are set
+under `authoritative` (in Settings, or `PUT /api/config`):
+
+```json
+{
+  "authoritative": {
+    "catalog_zone": "catalog.example.com",
+    "catalog_consumers": [
+      { "name": "catalog.example.net", "masters": ["198.51.100.10"], "refresh_secs": 3600, "enabled": true }
+    ]
+  }
+}
+```
+
+- `catalog_zone` publishes a schema-version-2 catalog of this server's
+  primary zones under that name (empty: none). Each zone gets a PTR at
+  `<unique-id>.zones.<catalog>` that stays the same for the life of the zone;
+  the serial moves forward whenever the list changes, and with NOTIFY on the
+  `notify_targets` are told. Secondaries fetch it by AXFR, so it obeys
+  `axfr_enabled`/`axfr_networks` like any zone. A hosted zone of the same
+  name takes precedence (the catalog is then not published).
+- `catalog_consumers` (the whole list) follows remote catalogs. Each catalog
+  is checked every `refresh_secs` (at least 30) and transferred again when
+  its serial changed; every member zone it lists is added as a secondary
+  zone from the catalog's `masters`, and the zones it drops are removed. A
+  zone this server already has is left alone. With `notify_listen_enabled`,
+  a NOTIFY for the catalog from one of its masters checks it at once. A
+  disabled catalog keeps its zones; removing it from the list removes them.
+
+Zones added by a catalog show `"catalog": "<name>"` in `GET /api/zones`, and
+`DELETE /api/zones/{id}` refuses them with `409` (remove them from the catalog
+instead).
 
 `PUT /api/zones/{id}/soa` edits a primary zone's SOA metadata. Every field is
 optional; omitted fields keep their current value. `bump_serial` increments

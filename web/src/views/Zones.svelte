@@ -534,7 +534,7 @@
             <td><code>{zone.name}</code></td>
             <td><span class="pill">{zone.zone_type === 'secondary' ? 'Secondary' : 'Primary'}</span></td>
             <td class="muted">
-              Serial {zone.serial}{#if zone.zone_type === 'secondary' && zone.masters?.length}{` · from ${zone.masters.join(', ')}`}{/if}
+              Serial {zone.serial}{#if zone.zone_type === 'secondary' && zone.masters?.length}{` · from ${zone.masters.join(', ')}`}{/if}{#if zone.catalog}{` · catalog ${zone.catalog}`}{/if}
             </td>
             <td><span class:pill={true} class:ok={zone.dnssec}>{zone.dnssec ? (zone.nsec3 ? 'Signed · NSEC3' : 'Signed · NSEC') : 'Unsigned'}</span></td>
             <td class="num">
@@ -548,7 +548,9 @@
                   {/if}
                 {/if}
                 <button class="secondary" onclick={() => exportZone(zone)} title="Download as a zone file">Export</button>
-                <button class="danger" onclick={() => removeZone(zone)} aria-label="Delete {zone.name}">✕</button>
+                {#if !zone.catalog}
+                  <button class="danger" onclick={() => removeZone(zone)} aria-label="Delete {zone.name}">✕</button>
+                {/if}
               </div>
             </td>
           </tr>

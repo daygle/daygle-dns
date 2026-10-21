@@ -615,6 +615,11 @@ pub struct AuthoritativeUpdate {
     /// Stub zones (the whole list; see [`StubZoneConfig`]).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stub_zones: Option<Vec<StubZoneConfig>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub catalog_zone: Option<String>,
+    /// Consumed catalog zones (the whole list).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub catalog_consumers: Option<Vec<CatalogConsumerConfig>>,
 }
 
 impl AuthoritativeUpdate {
@@ -632,6 +637,26 @@ impl AuthoritativeUpdate {
                     .filter(|n| !n.is_empty())
                     .collect(),
                 ..z.clone()
+            })
+            .collect()
+    }
+
+    /// Trim consumed catalogs: names normalized like zone names, blank
+    /// master entries dropped.
+    pub fn normalize_catalog_consumers(
+        consumers: &[CatalogConsumerConfig],
+    ) -> Vec<CatalogConsumerConfig> {
+        consumers
+            .iter()
+            .map(|c| CatalogConsumerConfig {
+                name: normalize_zone_name(&c.name),
+                masters: c
+                    .masters
+                    .iter()
+                    .map(|m| m.trim().to_string())
+                    .filter(|m| !m.is_empty())
+                    .collect(),
+                ..c.clone()
             })
             .collect()
     }
@@ -1009,6 +1034,13 @@ impl RuntimeSettings {
             if let Some(v) = &a.stub_zones {
                 config.authoritative.stub_zones = AuthoritativeUpdate::normalize_stub_zones(v);
             }
+            if let Some(v) = &a.catalog_zone {
+                config.authoritative.catalog_zone = normalize_zone_name(v);
+            }
+            if let Some(v) = &a.catalog_consumers {
+                config.authoritative.catalog_consumers =
+                    AuthoritativeUpdate::normalize_catalog_consumers(v);
+            }
             if let Some(v) = &a.default_admin_mailbox {
                 config.authoritative.default_admin_mailbox = v.clone();
             }
@@ -1117,6 +1149,8 @@ impl RuntimeSettings {
                 notify_targets: Some(config.authoritative.notify_targets.clone()),
                 notify_listen_enabled: Some(config.authoritative.notify_listen_enabled),
                 stub_zones: Some(config.authoritative.stub_zones.clone()),
+                catalog_zone: Some(config.authoritative.catalog_zone.clone()),
+                catalog_consumers: Some(config.authoritative.catalog_consumers.clone()),
             }),
             ai: Some(AiUpdate::capture_ai(&config.ai)),
             display: Some(config.display.clone()),
@@ -1642,12 +1676,6 @@ impl DaygleConfig {
                 )));
             }
         }
-        if self.authoritative.notify_listen_enabled && self.authoritative.secondary_zones.is_empty()
-        {
-            return Err(DaygleError::Config(
-                "authoritative.notify_listen_enabled requires secondary_zones".to_string(),
-            ));
-        }
         for (label, networks) in [
             ("policy.denied_networks", &self.policy.denied_networks),
             ("policy.allowed_networks", &self.policy.allowed_networks),
@@ -1774,6 +1802,41 @@ impl DaygleConfig {
                         zone.name
                     ))
                 })?;
+            }
+        }
+        let catalog = self.authoritative.catalog_zone.trim();
+        let not_a_name = |n: &str| n.contains('*') || validate_domain_pattern(n).is_err();
+        if !catalog.is_empty() && not_a_name(catalog) {
+            return Err(DaygleError::Config(format!(
+                "authoritative.catalog_zone '{catalog}' is not a domain name"
+            )));
+        }
+        for consumer in &self.authoritative.catalog_consumers {
+            if not_a_name(&consumer.name) {
+                return Err(DaygleError::Config(format!(
+                    "catalog zone '{}' is not a domain name",
+                    consumer.name
+                )));
+            }
+            if consumer.masters.is_empty() {
+                return Err(DaygleError::Config(format!(
+                    "catalog zone '{}' has no masters",
+                    consumer.name
+                )));
+            }
+            for master in &consumer.masters {
+                parse_master_addr(master).map_err(|e| {
+                    DaygleError::Config(format!(
+                        "catalog zone '{}' has invalid master '{master}': {e}",
+                        consumer.name
+                    ))
+                })?;
+            }
+            if consumer.refresh_secs < 30 {
+                return Err(DaygleError::Config(format!(
+                    "catalog zone '{}': refresh_secs must be at least 30",
+                    consumer.name
+                )));
             }
         }
         for zone in &self.authoritative.stub_zones {
@@ -2437,6 +2500,14 @@ pub struct AuthoritativeSettings {
     pub update_networks: Vec<String>,
     /// Secondary zones replicated from remote masters via AXFR/IXFR.
     pub secondary_zones: Vec<SecondaryZoneConfig>,
+    /// Publish a catalog zone (RFC 9432) of this name listing every primary
+    /// zone, so secondaries that consume it pick up new and deleted zones
+    /// on their own. Empty turns it off.
+    pub catalog_zone: String,
+    /// Catalog zones (RFC 9432) to consume: each is transferred from its
+    /// masters, and every zone it lists is served here as a secondary zone
+    /// from the same masters (zones it drops are removed).
+    pub catalog_consumers: Vec<CatalogConsumerConfig>,
     /// Send RFC 1996 NOTIFY to `notify_targets` when a primary zone changes.
     pub notify_enabled: bool,
     /// NOTIFY targets (secondaries), each `IP`, `IP:port`, or `[IPv6]:port`
@@ -2483,6 +2554,8 @@ impl Default for AuthoritativeSettings {
             allow_dynamic_updates: false,
             update_networks: vec![],
             secondary_zones: vec![],
+            catalog_zone: String::new(),
+            catalog_consumers: vec![],
             notify_enabled: false,
             notify_targets: vec![],
             notify_listen_enabled: false,
@@ -2548,6 +2621,33 @@ impl Default for SecondaryZoneConfig {
             refresh_secs: 3600,
             enabled: true,
             tsig_key: String::new(),
+        }
+    }
+}
+
+/// A catalog zone (RFC 9432) consumed from remote masters.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct CatalogConsumerConfig {
+    /// The catalog zone's name, e.g. `catalog.example.com`.
+    pub name: String,
+    /// The servers to transfer the catalog, and its member zones, from:
+    /// each `IP`, `IP:port`, or `[IPv6]:port` (port 53 when omitted).
+    pub masters: Vec<String>,
+    /// How often to check the catalog, and its members, for changes.
+    pub refresh_secs: u64,
+    /// Whether the catalog is followed. A disabled catalog keeps the zones
+    /// it already added, but stops adding and removing them.
+    pub enabled: bool,
+}
+
+impl Default for CatalogConsumerConfig {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            masters: vec![],
+            refresh_secs: 3600,
+            enabled: true,
         }
     }
 }
@@ -3507,8 +3607,9 @@ masters = ["192.0.2.1"]
             "[authoritative]\nnotify_enabled = true\nnotify_targets = [\"nope\"]\n"
         )
         .is_err());
-        // Inbound NOTIFY without any secondary zone is rejected.
-        assert!(DaygleConfig::parse("[authoritative]\nnotify_listen_enabled = true\n").is_err());
+        // Inbound NOTIFY needs no secondary zone in the file: they can also
+        // be added in the console or by a followed catalog zone.
+        assert!(DaygleConfig::parse("[authoritative]\nnotify_listen_enabled = true\n").is_ok());
     }
 
     #[test]

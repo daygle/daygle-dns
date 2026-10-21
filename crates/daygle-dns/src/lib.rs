@@ -218,6 +218,8 @@ pub async fn bind_with(
     // Note: no `validate()` here - `bind` accepts pre-validated configs, and
     // test setups legitimately use ephemeral port 0.
     let config = Arc::new(config);
+    // Shared, atomically-swappable runtime config.
+    let config_swap = Arc::new(ArcSwap::from(config.clone()));
 
     // Console accounts live in the database (the GUI manages them at
     // runtime). `[[api.users]]` entries in the config file are a seed source:
@@ -287,6 +289,24 @@ pub async fn bind_with(
         Some(refresher)
     };
 
+    // Consumed catalog zones (RFC 9432): their member zones become
+    // secondary zones, refreshed by the refresher above.
+    let catalog_consumer = refresher.clone().map(|refresher| {
+        let consumer = Arc::new(daygle_dns_authoritative::CatalogConsumer::new(
+            store.clone(),
+            catalog.clone(),
+            refresher,
+            daygle_dns_authoritative::XfrClient::default(),
+            config_swap.clone(),
+        ));
+        tokio::spawn({
+            let consumer = consumer.clone();
+            let shutdown = shutdown.clone();
+            async move { consumer.run_forever(shutdown).await }
+        });
+        consumer
+    });
+
     // Outbound NOTIFY: sent to secondaries when a primary zone changes.
     let notify_sender = if config.authoritative.notify_enabled {
         match daygle_dns_authoritative::NotifySender::new(&config.authoritative.notify_targets) {
@@ -307,12 +327,16 @@ pub async fn bind_with(
         config.authoritative.notify_listen_enabled,
         refresher.clone(),
     ) {
-        (true, Some(refresher)) => Some(Arc::new(
-            daygle_dns_authoritative::notify::NotifyInbound::new(
+        (true, Some(refresher)) => {
+            let inbound = daygle_dns_authoritative::notify::NotifyInbound::new(
                 config.authoritative.secondary_zones.clone(),
                 refresher,
-            ),
-        )),
+            );
+            Some(Arc::new(match &catalog_consumer {
+                Some(consumer) => inbound.with_catalogs(consumer.clone()),
+                None => inbound,
+            }))
+        }
         (true, None) => {
             warn!(
                 "notify_listen_enabled is set but no secondary zones are configured; \
@@ -322,6 +346,25 @@ pub async fn bind_with(
         }
         _ => None,
     };
+    // The published catalog zone: NOTIFY its secondaries when its member
+    // list changes (the catalog's name is read live, as it can change).
+    if let Some(sender) = notify_sender.clone() {
+        let changed = catalog.catalog_zone_changed();
+        let catalog = catalog.clone();
+        let shutdown = shutdown.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = shutdown.cancelled() => return,
+                    _ = changed.notified() => {}
+                }
+                let name = catalog.settings().catalog_zone.clone();
+                if !name.is_empty() {
+                    sender.notify_zone(&name).await;
+                }
+            }
+        });
+    }
     let notify_hooks = daygle_dns_authoritative::notify::NotifyHooks {
         sender: notify_sender,
         inbound: notify_inbound,
@@ -438,8 +481,6 @@ pub async fn bind_with(
             .map_err(DaygleError::Config)?,
     );
 
-    // Shared, atomically-swappable runtime state.
-    let config_swap = Arc::new(ArcSwap::from(config.clone()));
     // Remote logging: the server log goes to syslog when `[syslog]` is on
     // (settings are read per line, so console changes apply at once).
     let syslog = syslog::SyslogSender::start(config_swap.clone(), shutdown.clone());
