@@ -126,27 +126,29 @@
     <p class="note">
       "Server Default" follows the setting an administrator chose for everyone.
     </p>
-    <label>
-      <span>Time Zone</span>
-      <select bind:value={prefsDraft.time_zone}>
-        <option value="">Server Default ({choiceLabel('time_zone', display.defaults.time_zone)})</option>
-        {#each zoneChoices as [value, label]}<option value={value}>{label}</option>{/each}
-      </select>
-    </label>
-    <label>
-      <span>Date Format</span>
-      <select bind:value={prefsDraft.date_format}>
-        <option value="">Server Default ({choiceLabel('date_format', display.defaults.date_format)})</option>
-        {#each DATE_FORMAT_OPTIONS as [value, label]}<option value={value}>{label}</option>{/each}
-      </select>
-    </label>
-    <label>
-      <span>Time Format</span>
-      <select bind:value={prefsDraft.time_format}>
-        <option value="">Server Default ({choiceLabel('time_format', display.defaults.time_format)})</option>
-        {#each TIME_FORMAT_OPTIONS as [value, label]}<option value={value}>{label}</option>{/each}
-      </select>
-    </label>
+    <div class="form-grid">
+      <label>
+        <span>Time Zone</span>
+        <select bind:value={prefsDraft.time_zone}>
+          <option value="">Server Default ({choiceLabel('time_zone', display.defaults.time_zone)})</option>
+          {#each zoneChoices as [value, label]}<option value={value}>{label}</option>{/each}
+        </select>
+      </label>
+      <label>
+        <span>Date Format</span>
+        <select bind:value={prefsDraft.date_format}>
+          <option value="">Server Default ({choiceLabel('date_format', display.defaults.date_format)})</option>
+          {#each DATE_FORMAT_OPTIONS as [value, label]}<option value={value}>{label}</option>{/each}
+        </select>
+      </label>
+      <label>
+        <span>Time Format</span>
+        <select bind:value={prefsDraft.time_format}>
+          <option value="">Server Default ({choiceLabel('time_format', display.defaults.time_format)})</option>
+          {#each TIME_FORMAT_OPTIONS as [value, label]}<option value={value}>{label}</option>{/each}
+        </select>
+      </label>
+    </div>
     <p class="note">Example: <strong>{previewDateTime(prefsDraft)}</strong></p>
     {#if prefsError}<div class="form-error">{prefsError}</div>{/if}
     {#if prefsNotice}<div class="form-ok">{prefsNotice}</div>{/if}
@@ -161,18 +163,20 @@
       Changing your password signs out your other sessions; this device stays
       signed in.
     </p>
-    <label>
-      <span>Current Password</span>
-      <input type="password" autocomplete="current-password" bind:value={currentPassword} placeholder="••••••••" />
-    </label>
-    <label>
-      <span>New Password</span>
-      <input type="password" autocomplete="new-password" bind:value={newPassword} placeholder="At least 8 characters" />
-    </label>
-    <label>
-      <span>Confirm New Password</span>
-      <input type="password" autocomplete="new-password" bind:value={newPassword2} placeholder="Repeat the new password" />
-    </label>
+    <div class="form-grid">
+      <label>
+        <span>Current Password</span>
+        <input type="password" autocomplete="current-password" bind:value={currentPassword} placeholder="••••••••" />
+      </label>
+      <label>
+        <span>New Password</span>
+        <input type="password" autocomplete="new-password" bind:value={newPassword} placeholder="At least 8 characters" />
+      </label>
+      <label>
+        <span>Confirm New Password</span>
+        <input type="password" autocomplete="new-password" bind:value={newPassword2} placeholder="Repeat the new password" />
+      </label>
+    </div>
     {#if passwordError}<div class="form-error">{passwordError}</div>{/if}
     {#if passwordNotice}<div class="form-ok">{passwordNotice}</div>{/if}
     <div class="actions">
@@ -188,7 +192,13 @@
 {/if}
 
 <style>
-  .panel { max-width: 560px; display: flex; flex-direction: column; gap: 12px; }
+  .panel { display: flex; flex-direction: column; gap: 12px; }
+  .form-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+    gap: 12px;
+    align-items: end;
+  }
   .note { margin: 0; font-size: 0.85rem; color: var(--muted); line-height: 1.45; }
   label { display: flex; flex-direction: column; gap: 4px; font-size: 0.85rem; }
   label span { color: var(--muted); }

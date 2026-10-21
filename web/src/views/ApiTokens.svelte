@@ -139,12 +139,12 @@
 </div>
 
 <style>
-  .panel { max-width: 720px; display: flex; flex-direction: column; gap: 12px; }
+  .panel { display: flex; flex-direction: column; gap: 12px; }
   .panel form { display: flex; flex-direction: column; gap: 10px; }
   .modal-note { margin: 0; font-size: 0.85rem; color: var(--muted); line-height: 1.45; }
   .form-error { color: var(--danger); font-size: 0.85rem; }
   .modal-actions { display: flex; gap: 8px; }
-  .grid { display: grid; grid-template-columns: minmax(0, 1fr) 160px; gap: 10px; }
+  .grid { display: grid; grid-template-columns: minmax(0, 360px) 160px; gap: 10px; }
   label { display: flex; flex-direction: column; gap: 4px; font-size: 0.85rem; }
   label span { color: var(--muted); }
   .check { flex-direction: row; align-items: center; gap: 8px; }

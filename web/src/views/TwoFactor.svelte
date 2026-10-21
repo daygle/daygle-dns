@@ -186,7 +186,8 @@
 </div>
 
 <style>
-  .panel { max-width: 560px; display: flex; flex-direction: column; gap: 12px; }
+  .panel { display: flex; flex-direction: column; gap: 12px; }
+  .panel label { max-width: 360px; }
   .panel form { display: flex; flex-direction: column; gap: 12px; }
   .modal-note { margin: 0; font-size: 0.85rem; color: var(--muted); line-height: 1.45; }
   .form-error { color: var(--danger); font-size: 0.85rem; }
