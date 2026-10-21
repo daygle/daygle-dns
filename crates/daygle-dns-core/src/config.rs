@@ -47,6 +47,105 @@ pub struct DaygleConfig {
     /// DNS64 (RFC 6147): AAAA answers made from A records for IPv6-only
     /// clients behind NAT64.
     pub dns64: Dns64Settings,
+    /// EDNS Client Subnet (RFC 7871) sent to forwarding upstreams.
+    pub ecs: EcsSettings,
+}
+
+/// EDNS Client Subnet (RFC 7871): tell forwarding upstreams which network a
+/// query comes from, so CDNs that pick servers by location answer with ones
+/// near the client rather than near this server. Edited in Settings ->
+/// Resolver and stored in the database.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct EcsSettings {
+    pub enabled: bool,
+    /// Send this network for every query (e.g. this site's public
+    /// `203.0.113.0/24`). Empty: send each client's own network, cut to
+    /// `ipv4_prefix` / `ipv6_prefix` bits (private addresses are not sent).
+    pub subnet: String,
+    /// How much of a client's IPv4 address is sent (RFC 7871 advises 24).
+    pub ipv4_prefix: u8,
+    /// How much of a client's IPv6 address is sent (RFC 7871 advises 56).
+    pub ipv6_prefix: u8,
+}
+
+impl Default for EcsSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            subnet: String::new(),
+            ipv4_prefix: 24,
+            ipv6_prefix: 56,
+        }
+    }
+}
+
+/// [`EcsSettings`], parsed.
+#[derive(Debug, Clone)]
+pub struct Ecs {
+    fixed: Option<ipnet::IpNet>,
+    ipv4_prefix: u8,
+    ipv6_prefix: u8,
+}
+
+impl EcsSettings {
+    /// Parse the settings (`None` when ECS is off).
+    pub fn compile(&self) -> std::result::Result<Option<Ecs>, String> {
+        if !(1..=32).contains(&self.ipv4_prefix) {
+            return Err("ipv4_prefix must be 1 to 32".to_string());
+        }
+        if !(1..=128).contains(&self.ipv6_prefix) {
+            return Err("ipv6_prefix must be 1 to 128".to_string());
+        }
+        let subnet = self.subnet.trim();
+        let fixed = if subnet.is_empty() {
+            None
+        } else {
+            Some(
+                parse_network(subnet)
+                    .ok_or_else(|| format!("'{subnet}' is not a network or address"))?
+                    .trunc(),
+            )
+        };
+        Ok(self.enabled.then_some(Ecs {
+            fixed,
+            ipv4_prefix: self.ipv4_prefix,
+            ipv6_prefix: self.ipv6_prefix,
+        }))
+    }
+}
+
+impl Ecs {
+    /// The subnet to send for `client`: the fixed one, else the client's
+    /// network when its address is public.
+    pub fn subnet_for(&self, client: IpAddr) -> Option<ipnet::IpNet> {
+        if let Some(fixed) = self.fixed {
+            return Some(fixed);
+        }
+        let net = match client.to_canonical() {
+            IpAddr::V4(v4) if is_global_v4(v4) => {
+                ipnet::IpNet::V4(ipnet::Ipv4Net::new(v4, self.ipv4_prefix).ok()?)
+            }
+            IpAddr::V6(v6) if is_global_v6(v6) => {
+                ipnet::IpNet::V6(ipnet::Ipv6Net::new(v6, self.ipv6_prefix).ok()?)
+            }
+            _ => return None,
+        };
+        Some(net.trunc())
+    }
+}
+
+/// Whether `ip` is a global unicast address (not loopback, unspecified,
+/// unique-local, link-local, multicast or documentation).
+fn is_global_v6(ip: Ipv6Addr) -> bool {
+    let first = ip.segments()[0];
+    !(ip.is_loopback()
+        || ip.is_unspecified()
+        || ip.is_multicast()
+        || (first & 0xfe00) == 0xfc00
+        || (first & 0xffc0) == 0xfe80
+        || (first == 0x2001 && ip.segments()[1] == 0x0db8)
+        || ip.to_ipv4_mapped().is_some())
 }
 
 /// DNS64 (RFC 6147): when a recursive AAAA query finds no IPv6 address, the
@@ -522,6 +621,8 @@ pub struct RuntimeSettings {
     pub syslog: Option<SyslogSettings>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dns64: Option<Dns64Settings>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ecs: Option<EcsSettings>,
     pub recursive: Option<RecursiveUpdate>,
     pub dot: Option<ListenerUpdate>,
     pub doh: Option<DohUpdate>,
@@ -932,6 +1033,7 @@ impl RuntimeSettings {
             && self.web.is_none()
             && self.syslog.is_none()
             && self.dns64.is_none()
+            && self.ecs.is_none()
     }
 
     /// Apply the overlay to `config` in place. `None` fields are untouched.
@@ -1073,6 +1175,9 @@ impl RuntimeSettings {
         }
         if let Some(d) = &self.dns64 {
             config.dns64 = d.clone();
+        }
+        if let Some(e) = &self.ecs {
+            config.ecs = e.clone();
         }
         if let Some(s) = &self.syslog {
             config.syslog = s.clone();
@@ -1275,6 +1380,7 @@ impl RuntimeSettings {
             web: Some(config.web.clone()),
             syslog: Some(config.syslog.clone()),
             dns64: Some(config.dns64.clone()),
+            ecs: Some(config.ecs.clone()),
         }
     }
 }
@@ -2065,6 +2171,9 @@ impl DaygleConfig {
         self.dns64
             .compile()
             .map_err(|e| DaygleError::Config(format!("dns64: {e}")))?;
+        self.ecs
+            .compile()
+            .map_err(|e| DaygleError::Config(format!("ecs: {e}")))?;
         Ok(())
     }
 }
@@ -3478,6 +3587,75 @@ fd0000000000000000000000000000aa 02 40 00 80     eth0
         .unwrap();
         assert!(only.applies_to("2001:db8:1::5".parse().unwrap()));
         assert!(!only.applies_to("2001:db8:2::5".parse().unwrap()));
+    }
+
+    #[test]
+    fn ecs_subnets_are_cut_and_private_ones_kept_back() {
+        let ecs = |subnet: &str| {
+            EcsSettings {
+                enabled: true,
+                subnet: subnet.to_string(),
+                ..Default::default()
+            }
+            .compile()
+            .unwrap()
+            .unwrap()
+        };
+        let per_client = ecs("");
+        let at = |ip: &str| {
+            per_client
+                .subnet_for(ip.parse().unwrap())
+                .map(|n| n.to_string())
+        };
+        assert_eq!(at("93.184.216.34").as_deref(), Some("93.184.216.0/24"));
+        assert_eq!(
+            at("::ffff:93.184.216.34").as_deref(),
+            Some("93.184.216.0/24")
+        );
+        assert_eq!(
+            at("2a00:1450:4001:82a::200e").as_deref(),
+            Some("2a00:1450:4001:800::/56")
+        );
+        for private in [
+            "192.168.1.5",
+            "10.0.0.1",
+            "127.0.0.1",
+            "100.64.1.1",
+            "fd00::1",
+            "fe80::1",
+            "::1",
+        ] {
+            assert_eq!(at(private), None, "{private}");
+        }
+        // A fixed subnet is sent for everyone, host bits cleared.
+        let fixed = ecs("203.0.113.77/24");
+        assert_eq!(
+            fixed
+                .subnet_for("192.168.1.5".parse().unwrap())
+                .map(|n| n.to_string())
+                .as_deref(),
+            Some("203.0.113.0/24")
+        );
+        assert!(EcsSettings::default().compile().unwrap().is_none());
+        for bad in [
+            EcsSettings {
+                enabled: true,
+                ipv4_prefix: 0,
+                ..Default::default()
+            },
+            EcsSettings {
+                enabled: true,
+                ipv6_prefix: 129,
+                ..Default::default()
+            },
+            EcsSettings {
+                enabled: true,
+                subnet: "nope".into(),
+                ..Default::default()
+            },
+        ] {
+            assert!(bad.compile().is_err(), "{bad:?}");
+        }
     }
 
     #[test]

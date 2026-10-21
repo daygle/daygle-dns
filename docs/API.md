@@ -319,7 +319,7 @@ outbound_ip_versions/client_policies), `dot`,
 `doh`, `doq` (enabled/port/self_signed/server_name [+ `doh.endpoint`]), `api`
 (gui_enabled/cors_origins), `display` (the console's date/time defaults:
 `time_zone` = `system`, `UTC` or an IANA zone; `date_format` = `system`/`dmy`/
-`mdy`/`ymd`/`d_mon_y`; `time_format` = `system`/`24h`/`12h`), `syslog` and `dns64` (see below), and `authoritative`
+`mdy`/`ymd`/`d_mon_y`; `time_format` = `system`/`24h`/`12h`), `syslog`, `dns64` and `ecs` (see below), and `authoritative`
 (default_record_ttl/default_primary_ns/default_admin_mailbox/axfr_enabled/axfr_networks/
 allow_dynamic_updates/update_networks/notify_enabled/notify_targets/
 notify_listen_enabled/stub_zones/catalog_zone/catalog_consumers). Runtime groups (`recursive`, `dot`, `doh`, `doq`,
@@ -449,6 +449,17 @@ addresses only. `clients` limits it to those networks (empty: every
 client). Clients that set both DO and CD get the real answer, as they
 validate for themselves; synthesized answers never carry the AD bit.
 Answers from this server's own zones are not changed.
+
+`ecs` (`{enabled, subnet, ipv4_prefix, ipv6_prefix}`, replaced whole) sends
+EDNS Client Subnet (RFC 7871) to forwarding upstreams (and when looking up
+ALIAS targets), so CDNs answer with servers near the client. `subnet` (e.g.
+`203.0.113.0/24`) is sent for every query; when empty, each client's own
+address is sent cut to `ipv4_prefix` (24) / `ipv6_prefix` (56) bits, and
+nothing is sent for private, loopback, link-local or documentation
+addresses. It is never sent when walking the hierarchy from the root, so
+root and TLD servers do not see it. The cache is shared between clients:
+with per-client subnets, an answer fetched for one network can be given to
+another for its TTL.
 
 `server.ipv6_only` (`false` by default; the console shows it but leaves it to the file) makes a `::` listen
 address, in `[server]` or in `[api]`, `[dot]`, `[doh]` or `[doq]`, accept

@@ -129,6 +129,16 @@ serve_stale_secs = 0
 # prefix = "64:ff9b::/96"
 # clients = ["2001:db8:1::/48"]
 
+# EDNS Client Subnet (RFC 7871): tell forwarding upstreams which network a
+# query comes from, so CDNs answer with servers near the client. `subnet` is
+# sent for every query; empty sends each client's own public network cut to
+# ipv4_prefix / ipv6_prefix bits. Also in Settings -> Resolver.
+# [ecs]
+# enabled = true
+# subnet = "203.0.113.0/24"
+# ipv4_prefix = 24
+# ipv6_prefix = 56
+
 # Authoritative zone storage (SQLite).
 [authoritative]
 database = "/var/lib/daygle-dns/daygle.db"

@@ -45,6 +45,7 @@ use hickory_resolver::lookup::Lookup;
 use hickory_resolver::Resolver;
 use tracing::{debug, info, warn};
 
+pub use recursor::with_client_subnet;
 pub use upstream::{parse_upstreams, parse_upstreams_for};
 
 tokio::task_local! {

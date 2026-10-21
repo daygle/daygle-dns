@@ -3655,6 +3655,8 @@ pub struct SettingsUpdate {
     pub syslog: Option<daygle_dns_core::config::SyslogSettings>,
     /// Replaces the whole `[dns64]` section.
     pub dns64: Option<daygle_dns_core::config::Dns64Settings>,
+    /// Replaces the whole `[ecs]` section.
+    pub ecs: Option<daygle_dns_core::config::EcsSettings>,
 }
 
 /// Partial update for how the web console is served (HTTP and/or HTTPS).
@@ -4076,6 +4078,16 @@ pub async fn update_settings(
             return error_response(StatusCode::BAD_REQUEST, format!("dns64: {msg}"));
         }
         config.dns64 = dns64;
+    }
+    if let Some(ecs) = &update.ecs {
+        let ecs = daygle_dns_core::config::EcsSettings {
+            subnet: ecs.subnet.trim().to_string(),
+            ..ecs.clone()
+        };
+        if let Err(msg) = ecs.compile() {
+            return error_response(StatusCode::BAD_REQUEST, format!("ecs: {msg}"));
+        }
+        config.ecs = ecs;
     }
     if let Some(syslog) = &update.syslog {
         let syslog = daygle_dns_core::config::SyslogSettings {

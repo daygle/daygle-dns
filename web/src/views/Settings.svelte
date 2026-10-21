@@ -95,6 +95,7 @@
   // Remote logging (Settings -> General).
   let dns64 = $state({ enabled: false, prefix: '64:ff9b::/96' });
   let dns64ClientsText = $state('');
+  let ecs = $state({ enabled: false, subnet: '', ipv4_prefix: 24, ipv6_prefix: 56 });
   let syslog_ = $state({ enabled: false, server: '', facility: 'daemon', level: 'info', queries: false });
   const zoneChoices = timeZoneOptions();
   // Users who chose their own settings don't see the defaults change.
@@ -191,6 +192,7 @@
       syslog_ = { enabled: false, server: '', facility: 'daemon', level: 'info', queries: false, ...config.syslog };
       dns64 = { enabled: !!config.dns64?.enabled, prefix: config.dns64?.prefix || '64:ff9b::/96' };
       dns64ClientsText = (config.dns64?.clients || []).join('\n');
+      ecs = { enabled: false, subnet: '', ipv4_prefix: 24, ipv6_prefix: 56, ...config.ecs };
       ai_ = { ...config.ai, mode: config.ai?.mode || 'train' };
       aiForm = {
         scanMinutes: round2(ai_.scan_interval_secs / 60),
@@ -342,6 +344,12 @@
         enabled: !!dns64.enabled,
         prefix: (dns64.prefix || '').trim(),
         clients: parseLines(dns64ClientsText),
+      },
+      ecs: {
+        enabled: !!ecs.enabled,
+        subnet: (ecs.subnet || '').trim(),
+        ipv4_prefix: Number(ecs.ipv4_prefix),
+        ipv6_prefix: Number(ecs.ipv6_prefix),
       },
       syslog: {
         enabled: !!syslog_.enabled,
@@ -698,6 +706,25 @@
       64:ff9b::/96 only carries public IPv4 addresses. Clients that validate
       DNSSEC themselves get the real answer. Only turn this on for networks
       behind NAT64: elsewhere the made-up addresses lead nowhere.
+    </p>
+  </div>
+  <div class="card" style="margin-bottom: 14px">
+    <h3 style="margin: 0 0 10px">EDNS Client Subnet (RFC 7871)</h3>
+    <div class="form-grid">
+      <label class="check"><input type="checkbox" bind:checked={ecs.enabled} /> <span>Tell Upstreams Where Queries Come From</span></label>
+      <label><span>Send This Network for Everyone</span><input placeholder="Each client's own network" bind:value={ecs.subnet} disabled={!ecs.enabled} spellcheck="false" /></label>
+      <label><span>IPv4 Bits Sent per Client</span><input type="number" min="1" max="32" bind:value={ecs.ipv4_prefix} disabled={!ecs.enabled || !!ecs.subnet.trim()} /></label>
+      <label><span>IPv6 Bits Sent per Client</span><input type="number" min="1" max="128" bind:value={ecs.ipv6_prefix} disabled={!ecs.enabled || !!ecs.subnet.trim()} /></label>
+    </div>
+    <p class="muted help">
+      CDNs pick the server nearest the network a query comes from. When this
+      server forwards to a distant upstream, sending the network lets them pick
+      one near your clients instead. Set your site's public network (e.g.
+      203.0.113.0/24) to send it for every query; leave it empty to send each
+      client's own public network, cut to the bits above (private addresses are
+      never sent). Only forwarding upstreams get it, not the root and TLD
+      servers. The cache is shared, so per-client networks are best when clients
+      are near each other.
     </p>
   </div>
   <ClientPolicies />

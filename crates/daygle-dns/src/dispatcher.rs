@@ -805,8 +805,9 @@ impl RequestHandler for DnsDispatcher {
         // them).
         if matches!(info.query.query_type(), RecordType::A | RecordType::AAAA) {
             if let Some(alias) = self.catalog.alias(&qname) {
-                let (rcode, records, ede) =
-                    self.resolve_alias(alias, info.query.query_type()).await;
+                let (rcode, records, ede) = self
+                    .resolve_alias(alias, client, info.query.query_type())
+                    .await;
                 self.metrics.inc(&self.metrics.authoritative);
                 self.observe(
                     client,
@@ -905,11 +906,14 @@ impl RequestHandler for DnsDispatcher {
         self.metrics.inc(&self.metrics.recursive);
         let lookup = match tokio::time::timeout(
             self.client_timeout,
-            daygle_dns_recursive::track_stale(resolver.lookup_for_client(
-                client,
-                &qname,
-                info.query.query_type(),
-            )),
+            daygle_dns_recursive::with_client_subnet(
+                self.client_subnet(client),
+                daygle_dns_recursive::track_stale(resolver.lookup_for_client(
+                    client,
+                    &qname,
+                    info.query.query_type(),
+                )),
+            ),
         )
         .await
         {
@@ -1135,6 +1139,12 @@ fn response_edns(request: &Request, ede: Option<&Ede>) -> Option<hickory_proto::
 }
 
 impl DnsDispatcher {
+    /// The EDNS Client Subnet to send upstream for `client` (`[ecs]`).
+    fn client_subnet(&self, client: IpAddr) -> Option<ipnet::IpNet> {
+        let config = self.config.as_ref()?.load();
+        config.ecs.compile().ok().flatten()?.subnet_for(client)
+    }
+
     /// The DNS64 settings, when they apply to this request: DNS64 is on,
     /// the client is one it serves, and the client did not ask to validate
     /// for itself (DO and CD both set, RFC 6147 §5.5).
@@ -1171,7 +1181,10 @@ impl DnsDispatcher {
             .unwrap_or(600);
         let lookup = tokio::time::timeout(
             self.client_timeout,
-            resolver.lookup_for_client(client, qname, RecordType::A),
+            daygle_dns_recursive::with_client_subnet(
+                self.client_subnet(client),
+                resolver.lookup_for_client(client, qname, RecordType::A),
+            ),
         )
         .await
         .ok()?
@@ -1204,6 +1217,7 @@ impl DnsDispatcher {
     async fn resolve_alias(
         &self,
         alias: daygle_dns_authoritative::catalog::Alias,
+        client: IpAddr,
         rtype: RecordType,
     ) -> (ResponseCode, Vec<(u32, RData)>, Option<Ede>) {
         let mut target = alias.target;
@@ -1249,7 +1263,10 @@ impl DnsDispatcher {
         };
         let lookup = tokio::time::timeout(
             self.client_timeout,
-            resolver.lookup(target.trim_end_matches('.'), rtype),
+            daygle_dns_recursive::with_client_subnet(
+                self.client_subnet(client),
+                resolver.lookup(target.trim_end_matches('.'), rtype),
+            ),
         )
         .await;
         match lookup {
