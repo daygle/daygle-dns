@@ -120,6 +120,15 @@ serve_stale_secs = 0
 # action = "forward"
 # upstreams = ["1.1.1.3", "1.0.0.3"]
 
+# DNS64 (RFC 6147), for IPv6-only networks behind a NAT64 gateway: names
+# with no IPv6 address get AAAA answers made from their IPv4 addresses inside
+# the gateway's prefix. Also in Settings -> Resolver; once saved there, the
+# database copy wins over this file.
+# [dns64]
+# enabled = true
+# prefix = "64:ff9b::/96"
+# clients = ["2001:db8:1::/48"]
+
 # Authoritative zone storage (SQLite).
 [authoritative]
 database = "/var/lib/daygle-dns/daygle.db"

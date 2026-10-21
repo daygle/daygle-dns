@@ -802,6 +802,7 @@ fn build_dispatcher(shared: &Shared, config: &DaygleConfig) -> DnsDispatcher {
     )
     .with_client_timeout(Duration::from_millis(config.server.client_timeout_ms))
     .with_cookies(config.server.dns_cookies)
+    .with_config(shared.config.clone())
     .with_syslog(shared.syslog.clone())
     .with_advanced_blocking(shared.advanced_blocking.clone())
     .with_query_logger(shared.query_logger.clone())

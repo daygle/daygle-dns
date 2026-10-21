@@ -93,6 +93,8 @@
   // the real number.
   let web_ = $state({ http_enabled: true, http_port: 5380, https_enabled: false, https_port: 5443, https_certificate: '', redirect_http: false });
   // Remote logging (Settings -> General).
+  let dns64 = $state({ enabled: false, prefix: '64:ff9b::/96' });
+  let dns64ClientsText = $state('');
   let syslog_ = $state({ enabled: false, server: '', facility: 'daemon', level: 'info', queries: false });
   const zoneChoices = timeZoneOptions();
   // Users who chose their own settings don't see the defaults change.
@@ -187,6 +189,8 @@
         http_port: config.web?.http_port || config.api?.port || 5380,
       };
       syslog_ = { enabled: false, server: '', facility: 'daemon', level: 'info', queries: false, ...config.syslog };
+      dns64 = { enabled: !!config.dns64?.enabled, prefix: config.dns64?.prefix || '64:ff9b::/96' };
+      dns64ClientsText = (config.dns64?.clients || []).join('\n');
       ai_ = { ...config.ai, mode: config.ai?.mode || 'train' };
       aiForm = {
         scanMinutes: round2(ai_.scan_interval_secs / 60),
@@ -333,6 +337,11 @@
         https_port: Number(web_.https_port),
         https_certificate: web_.https_certificate || '',
         redirect_http: !!(web_.redirect_http && web_.http_enabled && web_.https_enabled),
+      },
+      dns64: {
+        enabled: !!dns64.enabled,
+        prefix: (dns64.prefix || '').trim(),
+        clients: parseLines(dns64ClientsText),
       },
       syslog: {
         enabled: !!syslog_.enabled,
@@ -669,6 +678,26 @@
       the ISP's prefix rather than ULA), so the server is not an open resolver
       if it is reachable from the internet.
       Your own zones are answered for everyone.
+    </p>
+  </div>
+  <div class="card" style="margin-bottom: 14px">
+    <h3 style="margin: 0 0 10px">DNS64 (RFC 6147)</h3>
+    <div class="form-grid">
+      <label class="check"><input type="checkbox" bind:checked={dns64.enabled} /> <span>Make IPv6 Answers for IPv4-Only Names</span></label>
+      <label><span>NAT64 Prefix</span><input placeholder="64:ff9b::/96" bind:value={dns64.prefix} disabled={!dns64.enabled} spellcheck="false" /></label>
+    </div>
+    <label class="stacked" style="margin-top: 12px">
+      <span>Clients (one network per line; empty means every client)</span>
+      <textarea rows="2" placeholder={'2001:db8:1::/48'} bind:value={dns64ClientsText} disabled={!dns64.enabled}></textarea>
+    </label>
+    <p class="muted help">
+      For IPv6-only networks with a NAT64 gateway: when a name has no IPv6
+      address, its IPv4 addresses are answered as IPv6 addresses inside the
+      gateway's prefix, so IPv6-only devices can still reach it. Use your
+      gateway's prefix (/32, /40, /48, /56, /64 or /96); the well-known
+      64:ff9b::/96 only carries public IPv4 addresses. Clients that validate
+      DNSSEC themselves get the real answer. Only turn this on for networks
+      behind NAT64: elsewhere the made-up addresses lead nowhere.
     </p>
   </div>
   <ClientPolicies />

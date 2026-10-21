@@ -319,7 +319,7 @@ outbound_ip_versions/client_policies), `dot`,
 `doh`, `doq` (enabled/port/self_signed/server_name [+ `doh.endpoint`]), `api`
 (gui_enabled/cors_origins), `display` (the console's date/time defaults:
 `time_zone` = `system`, `UTC` or an IANA zone; `date_format` = `system`/`dmy`/
-`mdy`/`ymd`/`d_mon_y`; `time_format` = `system`/`24h`/`12h`), `syslog` (see below), and `authoritative`
+`mdy`/`ymd`/`d_mon_y`; `time_format` = `system`/`24h`/`12h`), `syslog` and `dns64` (see below), and `authoritative`
 (default_record_ttl/default_primary_ns/default_admin_mailbox/axfr_enabled/axfr_networks/
 allow_dynamic_updates/update_networks/notify_enabled/notify_targets/
 notify_listen_enabled/stub_zones/catalog_zone/catalog_consumers). Runtime groups (`recursive`, `dot`, `doh`, `doq`,
@@ -438,6 +438,17 @@ per answered query (`client=… qname=… qtype=… protocol=… outcome=… rco
 ms=…`, message id `query`). Lines are queued and sent in the background;
 if the server cannot be reached they are dropped and counted, and the count
 is sent once it can be.
+
+`dns64` (`{enabled, prefix, clients}`, replaced whole) turns on DNS64
+(RFC 6147) for IPv6-only networks behind NAT64: when a recursive AAAA query
+finds no IPv6 address (NODATA, or only `::ffff:` mapped addresses), the
+name's A records are answered as AAAA records inside `prefix` (RFC 6052:
+a /32, /40, /48, /56, /64 or /96; `64:ff9b::/96` by default), along with
+any CNAMEs leading to them. The well-known prefix carries public IPv4
+addresses only. `clients` limits it to those networks (empty: every
+client). Clients that set both DO and CD get the real answer, as they
+validate for themselves; synthesized answers never carry the AD bit.
+Answers from this server's own zones are not changed.
 
 `server.ipv6_only` (`false` by default; the console shows it but leaves it to the file) makes a `::` listen
 address, in `[server]` or in `[api]`, `[dot]`, `[doh]` or `[doq]`, accept

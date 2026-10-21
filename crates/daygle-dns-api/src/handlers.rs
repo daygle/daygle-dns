@@ -3653,6 +3653,8 @@ pub struct SettingsUpdate {
     pub web: Option<WebUpdate>,
     /// Replaces the whole `[syslog]` section.
     pub syslog: Option<daygle_dns_core::config::SyslogSettings>,
+    /// Replaces the whole `[dns64]` section.
+    pub dns64: Option<daygle_dns_core::config::Dns64Settings>,
 }
 
 /// Partial update for how the web console is served (HTTP and/or HTTPS).
@@ -4058,6 +4060,22 @@ pub async fn update_settings(
         if let Some(v) = &a.cors_origins {
             config.api.cors_origins = v.clone();
         }
+    }
+    if let Some(dns64) = &update.dns64 {
+        let dns64 = daygle_dns_core::config::Dns64Settings {
+            prefix: dns64.prefix.trim().to_string(),
+            clients: dns64
+                .clients
+                .iter()
+                .map(|c| c.trim().to_string())
+                .filter(|c| !c.is_empty())
+                .collect(),
+            ..dns64.clone()
+        };
+        if let Err(msg) = dns64.compile() {
+            return error_response(StatusCode::BAD_REQUEST, format!("dns64: {msg}"));
+        }
+        config.dns64 = dns64;
     }
     if let Some(syslog) = &update.syslog {
         let syslog = daygle_dns_core::config::SyslogSettings {

@@ -62,6 +62,8 @@ pub struct DnsDispatcher {
     cookies: Arc<crate::cookies::Cookies>,
     /// Remote logging of queries (`[syslog] queries`).
     syslog: Option<Arc<crate::syslog::SyslogSender>>,
+    /// The live config, for settings read per query (`[dns64]`).
+    config: Option<Arc<ArcSwap<daygle_dns_core::config::DaygleConfig>>>,
 }
 
 impl DnsDispatcher {
@@ -122,6 +124,7 @@ impl DnsDispatcher {
             client_timeout: Duration::from_millis(2000),
             cookies: Arc::new(crate::cookies::Cookies::new(true)),
             syslog: None,
+            config: None,
         }
     }
 
@@ -198,6 +201,15 @@ impl DnsDispatcher {
     /// Send query lines to syslog (when its settings ask for them).
     pub fn with_syslog(mut self, syslog: Option<Arc<crate::syslog::SyslogSender>>) -> Self {
         self.syslog = syslog;
+        self
+    }
+
+    /// Read per-query settings (DNS64) from the live config.
+    pub fn with_config(
+        mut self,
+        config: Arc<ArcSwap<daygle_dns_core::config::DaygleConfig>>,
+    ) -> Self {
+        self.config = Some(config);
         self
     }
 
@@ -919,13 +931,38 @@ impl RequestHandler for DnsDispatcher {
         };
         match lookup {
             Ok((lookup, stale)) => {
-                let answers = lookup.answers().to_vec();
-                let authorities = lookup.authorities().to_vec();
-                let additionals = lookup.additionals().to_vec();
+                let mut answers = lookup.answers().to_vec();
+                let mut authorities = lookup.authorities().to_vec();
+                let mut additionals = lookup.additionals().to_vec();
+                // DNS64 (RFC 6147): no AAAA, so make them from the A records.
+                let mut synthesized = false;
+                if info.query.query_type() == RecordType::AAAA
+                    && lookup.message().response_code == ResponseCode::NoError
+                    && !answers.iter().any(|r| match &r.data {
+                        // Mapped addresses count as none (RFC 6147 §5.1.4).
+                        RData::AAAA(a) => a.0.to_ipv4_mapped().is_none(),
+                        _ => false,
+                    })
+                {
+                    if let Some(dns64) = self.dns64_for(client, request) {
+                        if let Some(records) = self
+                            .synthesize_aaaa(&dns64, &resolver, client, &qname, &authorities)
+                            .await
+                        {
+                            answers = records;
+                            authorities.clear();
+                            additionals.clear();
+                            synthesized = true;
+                        }
+                    }
+                }
                 // Forwarding: the upstream's AD bit. Recursive mode validates
                 // locally and records the outcome on each record instead.
-                let validated = lookup.message().authentic_data
-                    || (!answers.is_empty() && answers.iter().all(|r| r.proof == Proof::Secure));
+                // Synthesized answers are never validated (RFC 6147 §5.5).
+                let validated = !synthesized
+                    && (lookup.message().authentic_data
+                        || (!answers.is_empty()
+                            && answers.iter().all(|r| r.proof == Proof::Secure)));
                 if validated {
                     self.metrics.inc(&self.metrics.dnssec_validated);
                 }
@@ -988,6 +1025,27 @@ impl RequestHandler for DnsDispatcher {
                     } => <ResponseCode as From<u16>>::from(*code),
                     _ => ResponseCode::ServFail,
                 };
+                // NODATA for AAAA: DNS64 may have an answer after all.
+                if code == ResponseCode::NoError && info.query.query_type() == RecordType::AAAA {
+                    if let Some(dns64) = self.dns64_for(client, request) {
+                        if let Some(records) = self
+                            .synthesize_aaaa(&dns64, &resolver, client, &qname, &[])
+                            .await
+                        {
+                            self.observe(
+                                client,
+                                &qname,
+                                &rtype,
+                                protocol,
+                                Outcome::Recursive,
+                                Some(&rcode_label(ResponseCode::NoError)),
+                                started,
+                            );
+                            return send_recursive_answer(&mut response_handle, request, &records)
+                                .await;
+                        }
+                    }
+                }
                 self.observe(
                     client,
                     &qname,
@@ -1077,6 +1135,68 @@ fn response_edns(request: &Request, ede: Option<&Ede>) -> Option<hickory_proto::
 }
 
 impl DnsDispatcher {
+    /// The DNS64 settings, when they apply to this request: DNS64 is on,
+    /// the client is one it serves, and the client did not ask to validate
+    /// for itself (DO and CD both set, RFC 6147 §5.5).
+    fn dns64_for(
+        &self,
+        client: IpAddr,
+        request: &Request,
+    ) -> Option<daygle_dns_core::config::Dns64> {
+        let config = self.config.as_ref()?.load();
+        let dns64 = config.dns64.compile().ok().flatten()?;
+        let validating = request.metadata.checking_disabled
+            && request.edns.as_ref().is_some_and(|e| e.flags().dnssec_ok);
+        (dns64.applies_to(client) && !validating).then_some(dns64)
+    }
+
+    /// AAAA records made from `qname`'s A records (with any CNAMEs leading
+    /// to them), or `None` when it has no A records to map. Their TTL is
+    /// capped by the negative-caching TTL of the empty AAAA answer
+    /// (RFC 6147 §5.1.7).
+    async fn synthesize_aaaa(
+        &self,
+        dns64: &daygle_dns_core::config::Dns64,
+        resolver: &RecursiveResolver,
+        client: IpAddr,
+        qname: &str,
+        aaaa_authorities: &[Record],
+    ) -> Option<Vec<Record>> {
+        let negative_ttl = aaaa_authorities
+            .iter()
+            .find_map(|r| match &r.data {
+                RData::SOA(soa) => Some(soa.minimum.min(r.ttl)),
+                _ => None,
+            })
+            .unwrap_or(600);
+        let lookup = tokio::time::timeout(
+            self.client_timeout,
+            resolver.lookup_for_client(client, qname, RecordType::A),
+        )
+        .await
+        .ok()?
+        .ok()?;
+        let mut records = Vec::new();
+        let mut mapped = 0usize;
+        for record in lookup.answers() {
+            match &record.data {
+                RData::A(a) => {
+                    if let Some(v6) = dns64.synthesize(a.0) {
+                        records.push(Record::from_rdata(
+                            record.name.clone(),
+                            record.ttl.min(negative_ttl),
+                            RData::AAAA(v6.into()),
+                        ));
+                        mapped += 1;
+                    }
+                }
+                RData::CNAME(_) => records.push(record.clone()),
+                _ => {}
+            }
+        }
+        (mapped > 0).then_some(records)
+    }
+
     /// Look up an ALIAS target's `rtype` records: from the zones here when
     /// the target is hosted (following ALIAS chains a few steps), otherwise
     /// through the resolver. Returns the response code, the answers' TTLs
@@ -1269,6 +1389,38 @@ async fn send_records<R: ResponseHandler>(
     metadata.recursion_available = true;
 
     let edns = response_edns(request, ede.as_ref());
+    let mut builder = MessageResponseBuilder::from_message_request(request);
+    if let Some(edns) = &edns {
+        builder.edns(edns);
+    }
+    let response = builder.build(
+        metadata,
+        records.iter(),
+        std::iter::empty(),
+        std::iter::empty(),
+        std::iter::empty(),
+    );
+    match handle.send_response(response).await {
+        Ok(info) => info,
+        Err(e) => {
+            warn!("failed to send answer: {e}");
+            fallback_response()
+        }
+    }
+}
+
+/// Send `records` as a recursive (not authoritative, not validated) answer.
+async fn send_recursive_answer<R: ResponseHandler>(
+    handle: &mut R,
+    request: &Request,
+    records: &[Record],
+) -> ResponseInfo {
+    let mut metadata = request.metadata;
+    metadata.message_type = MessageType::Response;
+    metadata.response_code = ResponseCode::NoError;
+    metadata.recursion_available = true;
+    metadata.authentic_data = false;
+    let edns = response_edns(request, None);
     let mut builder = MessageResponseBuilder::from_message_request(request);
     if let Some(edns) = &edns {
         builder.edns(edns);

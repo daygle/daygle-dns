@@ -36,6 +36,8 @@ Daygle combines, in a single process:
   answers (A, AAAA, MX, TXT, CNAME, SRV), everyone else gets the public view.
 - **Recursive resolution** (root → TLD → authoritative) with **caching**,
   **negative caching**, **retries**, **timeouts**, and **DNSSEC validation**,
+- **DNS64 (RFC 6147)** for IPv6-only networks behind NAT64: IPv4-only names
+  get AAAA answers inside the gateway's prefix.
 - **Conditional forwarding** so specific zones resolve via dedicated
   upstreams, plus **stub zones** that send queries straight to a zone's own
   nameservers (no root→TLD walk) - both matched by longest suffix.

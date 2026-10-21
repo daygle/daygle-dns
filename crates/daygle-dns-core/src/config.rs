@@ -4,7 +4,7 @@
 //! installer writes the example file to `/etc/daygle-dns/daygle-dns.toml`.
 
 use std::collections::BTreeSet;
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::path::Path;
 
 use base64::Engine as _;
@@ -44,6 +44,118 @@ pub struct DaygleConfig {
     pub web: WebSettings,
     /// Sending logs to a syslog server.
     pub syslog: SyslogSettings,
+    /// DNS64 (RFC 6147): AAAA answers made from A records for IPv6-only
+    /// clients behind NAT64.
+    pub dns64: Dns64Settings,
+}
+
+/// DNS64 (RFC 6147): when a recursive AAAA query finds no IPv6 address, the
+/// name's IPv4 addresses are returned as AAAA records inside a NAT64 prefix
+/// (RFC 6052), so IPv6-only clients can reach IPv4-only hosts through a
+/// NAT64 gateway. Edited in Settings -> Recursive and stored in the database.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct Dns64Settings {
+    pub enabled: bool,
+    /// The NAT64 prefix: a /32, /40, /48, /56, /64 or /96. The well-known
+    /// `64:ff9b::/96` by default.
+    pub prefix: String,
+    /// Client networks that get synthesized answers (CIDRs or addresses);
+    /// empty means every client.
+    pub clients: Vec<String>,
+}
+
+impl Default for Dns64Settings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            prefix: "64:ff9b::/96".to_string(),
+            clients: vec![],
+        }
+    }
+}
+
+/// [`Dns64Settings`], parsed.
+#[derive(Debug, Clone)]
+pub struct Dns64 {
+    prefix: ipnet::Ipv6Net,
+    clients: Vec<ipnet::IpNet>,
+}
+
+/// The well-known NAT64 prefix (RFC 6052 §2.1).
+const DNS64_WELL_KNOWN: Ipv6Addr = Ipv6Addr::new(0x64, 0xff9b, 0, 0, 0, 0, 0, 0);
+
+impl Dns64Settings {
+    /// Parse the settings (`None` when DNS64 is off).
+    pub fn compile(&self) -> std::result::Result<Option<Dns64>, String> {
+        let prefix: ipnet::Ipv6Net = self
+            .prefix
+            .trim()
+            .parse()
+            .map_err(|_| format!("'{}' is not an IPv6 prefix", self.prefix.trim()))?;
+        if ![32, 40, 48, 56, 64, 96].contains(&prefix.prefix_len()) {
+            return Err(format!(
+                "the prefix must be a /32, /40, /48, /56, /64 or /96 (RFC 6052), not /{}",
+                prefix.prefix_len()
+            ));
+        }
+        let prefix = prefix.trunc();
+        if prefix.addr().octets()[8] != 0 {
+            return Err("bits 64 to 71 of the prefix must be zero (RFC 6052)".to_string());
+        }
+        let mut clients = Vec::new();
+        for entry in &self.clients {
+            let net = parse_network(entry)
+                .ok_or_else(|| format!("'{}' is not a network or address", entry.trim()))?;
+            clients.push(net);
+        }
+        Ok(self.enabled.then_some(Dns64 { prefix, clients }))
+    }
+}
+
+impl Dns64 {
+    /// Whether `client` gets synthesized answers.
+    pub fn applies_to(&self, client: IpAddr) -> bool {
+        let client = client.to_canonical();
+        self.clients.is_empty() || self.clients.iter().any(|n| n.contains(&client))
+    }
+
+    /// The IPv6 address for `v4` (RFC 6052 §2.2), or `None` for an address
+    /// the well-known prefix must not carry (non-global ones, §3.1).
+    pub fn synthesize(&self, v4: Ipv4Addr) -> Option<Ipv6Addr> {
+        if self.prefix.addr() == DNS64_WELL_KNOWN && !is_global_v4(v4) {
+            return None;
+        }
+        let mut octets = self.prefix.addr().octets();
+        let mut at = usize::from(self.prefix.prefix_len() / 8);
+        for byte in v4.octets() {
+            // Octet 8 (bits 64-71) is the reserved "u" octet.
+            if at == 8 {
+                at += 1;
+            }
+            octets[at] = byte;
+            at += 1;
+        }
+        Some(Ipv6Addr::from(octets))
+    }
+}
+
+/// Whether `ip` is globally reachable (not private, shared, loopback,
+/// link-local, documentation, benchmarking, reserved or multicast).
+fn is_global_v4(ip: Ipv4Addr) -> bool {
+    let [a, b, c, _] = ip.octets();
+    !(ip.is_private()
+        || ip.is_loopback()
+        || ip.is_link_local()
+        || ip.is_unspecified()
+        || ip.is_broadcast()
+        || ip.is_documentation()
+        || ip.is_multicast()
+        || a == 0
+        || (a == 100 && (64..128).contains(&b))
+        || (a == 192 && b == 0 && c == 0)
+        || (a == 198 && (18..20).contains(&b))
+        || a >= 240)
 }
 
 /// Remote logging: send the server log (and optionally every query) to a
@@ -408,6 +520,8 @@ pub struct RuntimeSettings {
     pub web: Option<WebSettings>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub syslog: Option<SyslogSettings>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dns64: Option<Dns64Settings>,
     pub recursive: Option<RecursiveUpdate>,
     pub dot: Option<ListenerUpdate>,
     pub doh: Option<DohUpdate>,
@@ -817,6 +931,7 @@ impl RuntimeSettings {
             && self.display.is_none()
             && self.web.is_none()
             && self.syslog.is_none()
+            && self.dns64.is_none()
     }
 
     /// Apply the overlay to `config` in place. `None` fields are untouched.
@@ -955,6 +1070,9 @@ impl RuntimeSettings {
         }
         if let Some(d) = &self.display {
             config.display = d.clone();
+        }
+        if let Some(d) = &self.dns64 {
+            config.dns64 = d.clone();
         }
         if let Some(s) = &self.syslog {
             config.syslog = s.clone();
@@ -1156,6 +1274,7 @@ impl RuntimeSettings {
             display: Some(config.display.clone()),
             web: Some(config.web.clone()),
             syslog: Some(config.syslog.clone()),
+            dns64: Some(config.dns64.clone()),
         }
     }
 }
@@ -1943,6 +2062,9 @@ impl DaygleConfig {
         self.syslog
             .check()
             .map_err(|e| DaygleError::Config(format!("syslog: {e}")))?;
+        self.dns64
+            .compile()
+            .map_err(|e| DaygleError::Config(format!("dns64: {e}")))?;
         Ok(())
     }
 }
@@ -3283,6 +3405,79 @@ fd0000000000000000000000000000aa 02 40 00 80     eth0
             .unwrap_err()
             .to_string()
             .contains("server.listen"));
+    }
+
+    #[test]
+    fn dns64_embeds_addresses_per_rfc_6052() {
+        let dns64 = |prefix: &str| {
+            Dns64Settings {
+                enabled: true,
+                prefix: prefix.to_string(),
+                clients: vec![],
+            }
+            .compile()
+            .unwrap()
+            .unwrap()
+        };
+        let v4: Ipv4Addr = "192.0.2.33".parse().unwrap();
+        // RFC 6052 §2.4's examples.
+        for (prefix, expected) in [
+            ("2001:db8::/32", "2001:db8:c000:221::"),
+            ("2001:db8:100::/40", "2001:db8:1c0:2:21::"),
+            ("2001:db8:122::/48", "2001:db8:122:c000:2:2100::"),
+            ("2001:db8:122:300::/56", "2001:db8:122:3c0:0:221::"),
+            ("2001:db8:122:344::/64", "2001:db8:122:344:c0:2:2100:0"),
+            ("2001:db8:122:344::/96", "2001:db8:122:344::c000:221"),
+        ] {
+            assert_eq!(
+                dns64(prefix).synthesize(v4),
+                Some(expected.parse().unwrap()),
+                "{prefix}"
+            );
+        }
+        // The well-known prefix carries global addresses only.
+        let wkp = dns64("64:ff9b::/96");
+        assert_eq!(
+            wkp.synthesize("198.51.100.1".parse().unwrap()),
+            None,
+            "documentation range"
+        );
+        assert_eq!(wkp.synthesize("10.1.2.3".parse().unwrap()), None);
+        assert_eq!(
+            wkp.synthesize("93.184.216.34".parse().unwrap()),
+            Some("64:ff9b::5db8:d822".parse().unwrap())
+        );
+        // A network-specific prefix carries any.
+        assert!(dns64("2001:db8:64::/96")
+            .synthesize("10.1.2.3".parse().unwrap())
+            .is_some());
+
+        // Checks.
+        let bad = |prefix: &str, clients: Vec<&str>| {
+            Dns64Settings {
+                enabled: true,
+                prefix: prefix.to_string(),
+                clients: clients.into_iter().map(String::from).collect(),
+            }
+            .compile()
+            .is_err()
+        };
+        assert!(bad("64:ff9b::/80", vec![]));
+        assert!(bad("10.0.0.0/8", vec![]));
+        assert!(bad("2001:db8:0:0:ff00::/96", vec![]), "u octet set");
+        assert!(bad("64:ff9b::/96", vec!["nope"]));
+        assert!(Dns64Settings::default().compile().unwrap().is_none());
+
+        let only = Dns64Settings {
+            enabled: true,
+            clients: vec!["2001:db8:1::/48".into()],
+            ..Default::default()
+        }
+        .compile()
+        .unwrap()
+        .unwrap();
+        assert!(only.applies_to("2001:db8:1::5".parse().unwrap()));
+        assert!(!only.applies_to("2001:db8:2::5".parse().unwrap()));
     }
 
     #[test]
