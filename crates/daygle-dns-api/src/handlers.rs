@@ -1224,6 +1224,8 @@ struct ZoneView {
     #[serde(flatten)]
     zone: daygle_dns_authoritative::model::Zone,
     dnssec: bool,
+    /// Whether a signed zone uses NSEC3 rather than NSEC.
+    nsec3: bool,
     zone_type: &'static str,
     masters: Vec<String>,
     refresh_secs: Option<u64>,
@@ -1250,10 +1252,12 @@ pub async fn list_zones(State(state): State<AppState>) -> Response {
                 .get_signing_key(&zone.id)
                 .map(|k| k.is_some())
                 .unwrap_or(false);
+            let nsec3 = dnssec && state.catalog.store().zone_nsec3(&zone.id).unwrap_or(false);
             if let Some(item) = secondary.get(&zone.id) {
                 ZoneView {
                     zone,
                     dnssec,
+                    nsec3,
                     zone_type: "secondary",
                     masters: item.masters.clone(),
                     refresh_secs: Some(item.refresh_secs),
@@ -1262,6 +1266,7 @@ pub async fn list_zones(State(state): State<AppState>) -> Response {
                 ZoneView {
                     zone,
                     dnssec,
+                    nsec3,
                     zone_type: "primary",
                     masters: Vec::new(),
                     refresh_secs: None,
@@ -2208,11 +2213,24 @@ pub async fn test_blocking(
 
 // ---- DNSSEC -------------------------------------------------------------
 
-pub async fn sign_zone(State(state): State<AppState>, Path(id): Path<String>) -> Response {
+#[derive(Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+pub struct SignZoneBody {
+    /// Prove non-existence with NSEC3 (`true`) or NSEC (`false`); absent
+    /// keeps the zone's current choice.
+    nsec3: Option<bool>,
+}
+
+pub async fn sign_zone(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    body: Option<Json<SignZoneBody>>,
+) -> Response {
     if let Some(response) = reject_secondary_mutation(&state, &id) {
         return response;
     }
-    match state.catalog.sign_zone(&id) {
+    let nsec3 = body.and_then(|Json(b)| b.nsec3);
+    match state.catalog.sign_zone_with(&id, nsec3) {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(e) => map_err(e),
     }

@@ -828,6 +828,15 @@ POST /api/zones/{id}/unsign
 `sign` generates a signing key (if absent), signs the zone, and reloads the
 catalog. `unsign` removes the key.
 
+`sign` takes an optional body `{ "nsec3": true }` to prove that names and
+types do not exist with NSEC3 (hashed owner names, so the zone's contents
+cannot be listed by walking its NSEC chain) instead of NSEC, the default.
+NSEC3 uses the RFC 9276 parameters: SHA-1, no extra iterations, no salt and
+no opt-out (NSEC3PARAM is published at the apex). Calling `sign` on a signed
+zone with `nsec3` switches between the two without changing keys; without a
+body it keeps the zone's current choice. `GET /api/zones` reports `dnssec`
+and `nsec3` for each zone.
+
 Once signed, a zone is maintained automatically: RRSIGs are renewed before
 they expire and keys are rolled over on schedule (double-signing during the
 overlap, the old key retired and eventually removed) - see the `dnssec_*`

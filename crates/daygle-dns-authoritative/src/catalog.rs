@@ -234,6 +234,14 @@ impl AuthorityCatalog {
     /// Generate (if necessary) a DNSSEC signing key for `zone_id`, sign the
     /// zone, and reload the catalog.
     pub fn sign_zone(&self, zone_id: &str) -> Result<()> {
+        self.sign_zone_with(zone_id, None)
+    }
+
+    /// [`sign_zone`](Self::sign_zone), also choosing NSEC3 (`Some(true)`)
+    /// or NSEC (`Some(false)`) for denial of existence; `None` keeps the
+    /// zone's current choice (NSEC for a zone never signed before). Signing
+    /// an already-signed zone again just switches the proof.
+    pub fn sign_zone_with(&self, zone_id: &str, nsec3: Option<bool>) -> Result<()> {
         if self
             .store
             .list_records(zone_id)?
@@ -243,6 +251,9 @@ impl AuthorityCatalog {
             return Err(DaygleError::InvalidRecord(
                 "the zone has ALIAS records, whose answers are made when asked and cannot be signed: replace them with A/AAAA or CNAME records first".to_string(),
             ));
+        }
+        if let Some(nsec3) = nsec3 {
+            self.store.set_zone_nsec3(zone_id, nsec3)?;
         }
         if self.store.list_signing_keys(zone_id)?.is_empty() {
             let (algorithm, der) = generate_signing_key()?;
@@ -356,10 +367,18 @@ fn build_catalog(
             }
         }
 
-        let nx_proof_kind = if sign_zones && !active.is_empty() {
-            Some(NxProofKind::Nsec)
-        } else {
+        let nx_proof_kind = if !(sign_zones && !active.is_empty()) {
             None
+        } else if store.zone_nsec3(&zone.id).unwrap_or(false) {
+            // RFC 9276: SHA-1, no extra iterations, no salt, no opt-out.
+            Some(NxProofKind::Nsec3 {
+                algorithm: Default::default(),
+                salt: Arc::new([]),
+                iterations: 0,
+                opt_out: false,
+            })
+        } else {
+            Some(NxProofKind::Nsec)
         };
 
         let mut handler: InMemoryZoneHandler = InMemoryZoneHandler::new(

@@ -9,7 +9,7 @@ the old names are deprecated per RUSTSEC-2025-0017).
 Daygle combines, in a single process:
 
 - **Authoritative DNS** with zone storage backed by **SQLite**, BIND zone-file
-  import, and **DNSSEC zone signing** with **automatic key rollover** and
+  import, and **DNSSEC zone signing** (NSEC or **NSEC3**) with **automatic key rollover** and
   **background RRSIG renewal**, so signed zones never go bogus after the
   signature window passes.
 - **ALIAS (ANAME) records**: point a zone apex at another host name (a CDN or

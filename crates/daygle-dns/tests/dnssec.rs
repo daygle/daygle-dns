@@ -205,3 +205,131 @@ async fn rollover_transitions_are_served() {
 
     shutdown(server).await;
 }
+
+fn authority_types(msg: &Message) -> Vec<RecordType> {
+    msg.authorities.iter().map(|r| r.record_type()).collect()
+}
+
+/// A zone signed with NSEC3 proves non-existence with NSEC3 records and
+/// publishes NSEC3PARAM; signing it again with NSEC switches back.
+#[tokio::test]
+async fn nsec3_denial_of_existence() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("daygle-dns.db");
+    let server = spawn(dnssec_config(&db)).await;
+    let zone_id = seed_zone(&server, "hashed.test").await;
+    server.catalog.sign_zone_with(&zone_id, Some(true)).unwrap();
+    assert!(server.catalog.store().zone_nsec3(&zone_id).unwrap());
+
+    let udp = server.udp_addr.expect("UDP enabled");
+    let reply = udp_query_do(udp, "missing.hashed.test.", RecordType::A).await;
+    assert_eq!(reply.response_code, ResponseCode::NXDomain);
+    let types = authority_types(&reply);
+    assert!(types.contains(&RecordType::NSEC3), "{types:?}");
+    assert!(!types.contains(&RecordType::NSEC), "{types:?}");
+
+    let reply = udp_query_do(udp, "hashed.test.", RecordType::NSEC3PARAM).await;
+    assert_eq!(reply.response_code, ResponseCode::NoError);
+    let param = reply
+        .answers
+        .iter()
+        .find(|r| r.record_type() == RecordType::NSEC3PARAM)
+        .expect("NSEC3PARAM at the apex");
+    match &param.data {
+        hickory_proto::rr::RData::DNSSEC(
+            hickory_proto::dnssec::rdata::DNSSECRData::NSEC3PARAM(p),
+        ) => {
+            assert_eq!(p.iterations(), 0, "RFC 9276: no extra iterations");
+            assert!(p.salt().is_empty(), "RFC 9276: no salt");
+        }
+        other => panic!("unexpected NSEC3PARAM rdata: {other:?}"),
+    }
+
+    // NODATA is proven with NSEC3 too.
+    let reply = udp_query_do(udp, "www.hashed.test.", RecordType::TXT).await;
+    assert_eq!(reply.response_code, ResponseCode::NoError);
+    assert!(authority_types(&reply).contains(&RecordType::NSEC3));
+
+    // Back to NSEC; the key stays the same.
+    let keys = server.catalog.store().list_signing_keys(&zone_id).unwrap();
+    server
+        .catalog
+        .sign_zone_with(&zone_id, Some(false))
+        .unwrap();
+    assert_eq!(
+        server
+            .catalog
+            .store()
+            .list_signing_keys(&zone_id)
+            .unwrap()
+            .len(),
+        keys.len()
+    );
+    let reply = udp_query_do(udp, "missing.hashed.test.", RecordType::A).await;
+    assert_eq!(reply.response_code, ResponseCode::NXDomain);
+    let types = authority_types(&reply);
+    assert!(types.contains(&RecordType::NSEC), "{types:?}");
+    assert!(!types.contains(&RecordType::NSEC3), "{types:?}");
+
+    shutdown(server).await;
+}
+
+/// Over the API: `sign` with no body signs with NSEC, `{nsec3}` switches,
+/// and the zone list reports the choice.
+#[tokio::test]
+async fn api_signs_with_nsec_or_nsec3() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("daygle-dns.db");
+    let server = spawn(dnssec_config(&db)).await;
+    let zone_id = seed_zone(&server, "api.test").await;
+    let client = reqwest::Client::new();
+    let api = format!("http://{}/api", server.api_addr);
+    let zone = || async {
+        let zones: serde_json::Value = client
+            .get(format!("{api}/zones"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        zones
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|z| z["id"] == zone_id.as_str())
+            .unwrap()
+            .clone()
+    };
+    let sign = format!("{api}/zones/{zone_id}/sign");
+
+    let resp = client.post(&sign).send().await.unwrap();
+    assert_eq!(resp.status(), 204);
+    let z = zone().await;
+    assert_eq!(
+        (z["dnssec"].as_bool(), z["nsec3"].as_bool()),
+        (Some(true), Some(false))
+    );
+
+    let resp = client
+        .post(&sign)
+        .json(&serde_json::json!({ "nsec3": true }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 204);
+    assert_eq!(zone().await["nsec3"], true);
+    // No body keeps the choice.
+    client.post(&sign).send().await.unwrap();
+    assert_eq!(zone().await["nsec3"], true);
+
+    let resp = client
+        .post(&sign)
+        .json(&serde_json::json!({ "nsec3": "yes" }))
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_client_error());
+
+    shutdown(server).await;
+}

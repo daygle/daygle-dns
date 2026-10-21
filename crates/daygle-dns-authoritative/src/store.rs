@@ -62,6 +62,12 @@ CREATE TABLE IF NOT EXISTS dnssec_keys (
 
 CREATE INDEX IF NOT EXISTS idx_dnssec_keys_zone ON dnssec_keys(zone_id);
 
+-- How a signed zone proves names and types do not exist (NSEC or NSEC3).
+CREATE TABLE IF NOT EXISTS zone_dnssec (
+    zone_id  TEXT PRIMARY KEY REFERENCES zones(id) ON DELETE CASCADE,
+    nsec3    INTEGER NOT NULL DEFAULT 0
+);
+
 CREATE TABLE IF NOT EXISTS secondary_zones (
     zone_id      TEXT PRIMARY KEY REFERENCES zones(id) ON DELETE CASCADE,
     masters      TEXT NOT NULL,
@@ -278,6 +284,7 @@ impl ZoneStore {
         conn.execute_batch(
             "DELETE FROM records WHERE zone_id NOT IN (SELECT id FROM zones);
              DELETE FROM dnssec_keys WHERE zone_id NOT IN (SELECT id FROM zones);
+             DELETE FROM zone_dnssec WHERE zone_id NOT IN (SELECT id FROM zones);
              DELETE FROM secondary_zones WHERE zone_id NOT IN (SELECT id FROM zones);
              PRAGMA foreign_keys = ON;",
         )?;
@@ -1239,6 +1246,31 @@ impl ZoneStore {
     }
 
     // ---- DNSSEC signing keys --------------------------------------------
+
+    /// Whether a signed zone uses NSEC3 (rather than NSEC) for denial of
+    /// existence.
+    pub fn zone_nsec3(&self, zone_id: &str) -> Result<bool> {
+        let conn = self.lock_conn()?;
+        let nsec3: Option<bool> = conn
+            .query_row(
+                "SELECT nsec3 FROM zone_dnssec WHERE zone_id = ?1",
+                [zone_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(nsec3.unwrap_or(false))
+    }
+
+    /// Choose NSEC3 (`true`) or NSEC for a zone's denial of existence.
+    pub fn set_zone_nsec3(&self, zone_id: &str, nsec3: bool) -> Result<()> {
+        let conn = self.lock_conn()?;
+        conn.execute(
+            "INSERT INTO zone_dnssec (zone_id, nsec3) VALUES (?1, ?2)
+             ON CONFLICT(zone_id) DO UPDATE SET nsec3 = excluded.nsec3",
+            rusqlite::params![zone_id, nsec3],
+        )?;
+        Ok(())
+    }
 
     /// List every stored signing key for a zone (active and retired), oldest
     /// first.
