@@ -71,6 +71,7 @@ async fn blocklist_source_blocks_domains_and_refreshes() {
         format: BlocklistFormat::Hosts,
         refresh_secs: 1,
         enabled: true,
+        scope: Default::default(),
     }];
     config.recursive.enabled = true;
     config.recursive.use_system_config = false;

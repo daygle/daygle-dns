@@ -1033,8 +1033,9 @@ GET  /api/policy/blocklist/sources/validate?url=...&format=...
 ```
 
 `GET` returns per-source status for the remote blocklist sources configured
-under `[[policy.blocklist_sources]]`: name, URL, format, refresh interval,
-last-fetch age, and the number of domains each source contributed.
+under `[[policy.blocklist_sources]]`: name, URL, format, scope, refresh
+interval, last-fetch age, and the number of domains each source contributed.
+`total_domains` counts the sources that apply to everyone.
 
 `POST` forces an immediate refresh of every source and applies the merged
 result, returning the new total domain count.
@@ -1047,6 +1048,7 @@ result, returning the new total domain count.
       "url": "https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts",
       "enabled": true,
       "format": "hosts",
+      "scope": "everyone",
       "refresh_secs": 43200,
       "last_fetch": 3600,
       "domains": 182344,
@@ -1061,7 +1063,13 @@ Returns `404` when no sources are configured.
 
 `PUT` replaces the complete source list (body: `{"sources": [...]}` with the
 same fields as the config file) - this is what the console's add / edit /
-remove flow calls. Each source is validated, the list is persisted to the
+remove flow calls. An optional `"renames": {"old name": "new name"}` keeps
+the client groups that select a renamed source pointing at it; groups drop
+any source that is no longer in the list.
+
+A source's `scope` is `everyone` (the default: it blocks for every client)
+or `groups` (it blocks only for the client groups that list it in their
+`blocklists`; see Blocking groups below). Each source is validated, the list is persisted to the
 **SQLite database** (the config file is no longer rewritten), and the
 running server swaps its sources and refetches
 them in the background immediately; the change survives a restart.
@@ -1081,8 +1089,13 @@ caught before it is added:
 }
 ```
 
-`format` accepts `domains`, `hosts`, `adblock`, `rpz`, or `auto` (empty =
-auto) to auto-detect the format from the content. An `rpz` source is a
+`format` accepts `domains`, `wildcard`, `hosts`, `adblock`, `rpz`, or `auto`
+(empty = auto) to auto-detect the format from the content. A `wildcard`
+source is a list of names that each also cover their subdomains (oisd's
+`domainswild2`: `example.com` blocks `ads.example.com` too); auto-detect
+picks it for a plain list of names when the URL or the list's comments say
+"wild". `domains` and `wildcard` content looks the same, so either can be
+chosen for such a list. An `rpz` source is a
 Response Policy Zone in zone-file form (as served over HTTP by most RPZ
 feeds): every QNAME trigger in it is blocked, wildcards (`*.example.com`)
 included, whatever its action (NXDOMAIN, NODATA, drop, a walled-garden CNAME
@@ -1146,7 +1159,10 @@ POST   /api/policy/blocking/test
 Blocking groups extend the policy engine with per-group client and domain
 criteria, including regular expressions (`allow_regex` / `block_regex`;
 invalid patterns are rejected with `400` instead of being silently dropped
-at engine-build time).
+at engine-build time). `blocklists` names remote blocklist sources whose
+`scope` is `groups`: their domains are blocked for the group's clients, and
+the group's `allow` list still overrides them (`400` for a name that is not
+a configured source).
 `POST /api/policy/blocking` creates a group or updates the one with the same
 name; with an `id` it updates that group, so it can be renamed (`400` if
 another group has the new name, `404` if the id is unknown). The

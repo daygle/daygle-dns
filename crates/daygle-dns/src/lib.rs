@@ -450,9 +450,14 @@ pub async fn bind_with(
     }
 
     // Advanced Blocking groups (per-client allow/block policies) built from
-    // the store; swapped atomically when the groups change via the API.
+    // the store; swapped atomically when the groups change via the API. The
+    // blocklist sources scoped to groups are filled in by the refresher.
+    let group_blocklists = Arc::new(daygle_dns_policy::GroupBlocklists::default());
     let advanced_blocking = Arc::new(ArcSwap::from_pointee(
-        daygle_dns_policy::AdvancedBlocking::build(&catalog.store().list_blocking_groups()?),
+        daygle_dns_policy::AdvancedBlocking::build(
+            &catalog.store().list_blocking_groups()?,
+            group_blocklists.clone(),
+        ),
     ));
 
     // Persistent query logging (daily JSON-lines files), when enabled.
@@ -561,6 +566,7 @@ pub async fn bind_with(
     let blocklist_sources = spawn_blocklist_refresh(
         shared.clone(),
         config.policy.blocklist_sources.clone(),
+        group_blocklists,
         shutdown.clone(),
     );
 

@@ -323,6 +323,7 @@ pub async fn blocklist_sources(State(state): State<AppState>) -> Response {
                 "url": s.url,
                 "enabled": s.enabled,
                 "format": format!("{:?}", s.format).to_ascii_lowercase(),
+                "scope": s.scope,
                 "refresh_secs": s.refresh_secs,
                 "last_fetch": s.last_fetch.map(|t| t.elapsed().as_secs()),
                 "domains": s.domains,
@@ -343,6 +344,10 @@ pub async fn blocklist_sources(State(state): State<AppState>) -> Response {
 pub struct BlocklistSourcesInput {
     /// The complete desired source list; replaces whatever is configured.
     pub sources: Vec<daygle_dns_core::config::BlocklistSourceConfig>,
+    /// Sources renamed in this edit (old name -> new name), so the client
+    /// groups that select them follow the rename.
+    #[serde(default)]
+    pub renames: std::collections::HashMap<String, String>,
 }
 
 /// `PUT /api/policy/blocklist/sources` - replace the configured remote
@@ -424,6 +429,11 @@ pub async fn replace_blocklist_sources(
     // background refresher, which rebuilds the remote blocklist from the
     // per-source caches and fetches anything new or changed.
 
+    // Client groups follow renamed sources and drop removed ones.
+    if let Err(e) = retarget_group_blocklists(&state, &input.sources, &input.renames) {
+        return map_err(e);
+    }
+
     state.logs.push(
         daygle_dns_core::LogLevel::Info,
         "api",
@@ -439,6 +449,55 @@ pub async fn replace_blocklist_sources(
         "total_domains": state.policy.load_full().remote_blocklist_len(),
     }))
     .into_response()
+}
+
+/// Point client groups' selected blocklists at the new source list: a renamed
+/// source keeps its groups, and a removed one is dropped from them.
+fn retarget_group_blocklists(
+    state: &AppState,
+    sources: &[daygle_dns_core::config::BlocklistSourceConfig],
+    renames: &std::collections::HashMap<String, String>,
+) -> daygle_dns_core::error::Result<()> {
+    let renames: std::collections::HashMap<String, &String> = renames
+        .iter()
+        .map(|(old, new)| (old.to_ascii_lowercase(), new))
+        .collect();
+    let mut changed = false;
+    for group in state.catalog.store().list_blocking_groups()? {
+        let mut kept: Vec<String> = Vec::new();
+        for name in &group.blocklists {
+            let name = renames
+                .get(&name.to_ascii_lowercase())
+                .map_or(name, |new| *new);
+            let current = sources.iter().find(|s| s.name.eq_ignore_ascii_case(name));
+            if let Some(source) = current {
+                if !kept.contains(&source.name) {
+                    kept.push(source.name.clone());
+                }
+            }
+        }
+        if kept != group.blocklists {
+            state.catalog.store().upsert_blocking_group(
+                &daygle_dns_core::blocking::BlockingGroupInput {
+                    id: Some(group.id.clone()),
+                    name: group.name.clone(),
+                    enabled: group.enabled,
+                    clients: group.clients.clone(),
+                    allow: group.allow.clone(),
+                    block: group.block.clone(),
+                    allow_regex: group.allow_regex.clone(),
+                    block_regex: group.block_regex.clone(),
+                    blocklists: kept,
+                    response: group.response.clone(),
+                },
+            )?;
+            changed = true;
+        }
+    }
+    if changed {
+        rebuild_advanced_blocking(state);
+    }
+    Ok(())
 }
 
 /// Query for `GET /api/policy/blocklist/sources/validate`.
@@ -480,13 +539,16 @@ pub async fn validate_blocklist_source(
     {
         "" | "auto" | "detect" => None,
         "domains" => Some(daygle_dns_core::config::BlocklistFormat::Domains),
+        "wildcard" => Some(daygle_dns_core::config::BlocklistFormat::Wildcard),
         "hosts" => Some(daygle_dns_core::config::BlocklistFormat::Hosts),
         "adblock" => Some(daygle_dns_core::config::BlocklistFormat::Adblock),
         "rpz" => Some(daygle_dns_core::config::BlocklistFormat::Rpz),
         other => {
             return error_response(
                 StatusCode::BAD_REQUEST,
-                format!("unknown format '{other}' (use domains, hosts, adblock, rpz or auto)"),
+                format!(
+                    "unknown format '{other}' (use domains, wildcard, hosts, adblock, rpz or auto)"
+                ),
             );
         }
     };
@@ -507,11 +569,18 @@ pub async fn validate_blocklist_source(
         |f: daygle_dns_core::config::BlocklistFormat| format!("{f:?}").to_ascii_lowercase();
     let verdict = |format: daygle_dns_core::config::BlocklistFormat| {
         let domains = daygle_dns_policy::parse_blocklist(&text, format);
-        let sample: Vec<String> = domains.iter().take(5).cloned().collect();
+        let sample: Vec<String> = domains
+            .iter()
+            .filter(|d| {
+                format != daygle_dns_core::config::BlocklistFormat::Wildcard || !d.starts_with("*.")
+            })
+            .take(5)
+            .cloned()
+            .collect();
         serde_json::json!({
             "ok": !domains.is_empty(),
             "format": fmt_name(format),
-            "domains": domains.len(),
+            "domains": daygle_dns_policy::domain_count(&domains, format),
             "sample": sample,
             "reason": if domains.is_empty() {
                 serde_json::Value::String(format!(
@@ -524,14 +593,18 @@ pub async fn validate_blocklist_source(
         })
     };
 
-    let detected = daygle_dns_policy::detect_blocklist_format(&text);
+    let detected = daygle_dns_policy::detect_blocklist_format_at(url, &text);
     let response = match requested {
         Some(format) => {
             // A source whose content clearly reads as another format is a
             // mistake (e.g. an adblock filter saved as `hosts`), even when the
-            // declared parser would extract junk from it.
+            // declared parser would extract junk from it. A plain list of
+            // names reads the same either way, so `domains` and `wildcard`
+            // are the user's call.
+            use daygle_dns_core::config::BlocklistFormat::{Domains, Wildcard};
+            let plain = |f| matches!(f, Domains | Wildcard);
             if let Some(detected) = detected {
-                if detected != format {
+                if detected != format && !(plain(detected) && plain(format)) {
                     return Json(serde_json::json!({
                         "ok": false,
                         "format": fmt_name(format),
@@ -2190,6 +2263,7 @@ fn rebuild_advanced_blocking(state: &AppState) {
                 .advanced_blocking
                 .store(Arc::new(daygle_dns_policy::AdvancedBlocking::build(
                     &groups,
+                    state.advanced_blocking.load().lists(),
                 )))
         }
         Err(e) => tracing::warn!("failed to rebuild advanced blocking: {e}"),
@@ -2220,11 +2294,32 @@ pub async fn list_blocking_groups(State(state): State<AppState>) -> Response {
 /// same name. The dispatcher's blocking engine is rebuilt immediately.
 pub async fn upsert_blocking_group(
     State(state): State<AppState>,
-    Json(input): Json<daygle_dns_core::blocking::BlockingGroupInput>,
+    Json(mut input): Json<daygle_dns_core::blocking::BlockingGroupInput>,
 ) -> Response {
     if let Err(msg) = validate_group_regexes(&input) {
         return error_response(StatusCode::BAD_REQUEST, msg);
     }
+    // Selected blocklists must name configured sources; store each under the
+    // source's own spelling.
+    let config = state.config.load_full();
+    let mut blocklists: Vec<String> = Vec::new();
+    for name in &input.blocklists {
+        let Some(source) = config
+            .policy
+            .blocklist_sources
+            .iter()
+            .find(|s| s.name.eq_ignore_ascii_case(name.trim()))
+        else {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                format!("no blocklist source named '{}'", name.trim()),
+            );
+        };
+        if !blocklists.contains(&source.name) {
+            blocklists.push(source.name.clone());
+        }
+    }
+    input.blocklists = blocklists;
     match state.catalog.store().upsert_blocking_group(&input) {
         Ok(group) => {
             rebuild_advanced_blocking(&state);

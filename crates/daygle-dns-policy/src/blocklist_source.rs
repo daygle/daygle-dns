@@ -3,16 +3,21 @@
 //! A [`BlocklistSourceManager`] fetches one or more HTTP(S) blocklist URLs,
 //! parses each in its declared format (`domains`, `hosts`, `adblock`, or
 //! `rpz`),
-//! merges the results into a single domain set, and hands it to the policy
-//! engine as the *remote* blocklist. Sources are refreshed on their
+//! merges the sources that apply to everyone into a single domain set, and
+//! hands it to the policy engine as the *remote* blocklist. Sources scoped to
+//! client groups are compiled one by one into [`GroupBlocklists`] instead,
+//! where the client groups that select them look them up. Sources are
+//! refreshed on their
 //! `refresh_secs` schedule; the refresh loop lives in `daygle` and calls
 //! [`BlocklistSourceManager::refresh_all`].
 
-use std::collections::BTreeSet;
-use std::sync::{Arc, Mutex};
+use std::collections::{BTreeSet, HashMap};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
-use daygle_dns_core::config::{normalize_domains, BlocklistFormat, BlocklistSourceConfig};
+use daygle_dns_core::config::{
+    normalize_domains, BlocklistFormat, BlocklistScope, BlocklistSourceConfig,
+};
 use daygle_dns_core::error::{DaygleError, Result};
 
 use crate::Blocklist;
@@ -20,6 +25,32 @@ use crate::Blocklist;
 /// Fetch limits: a body larger than this is rejected (hosts files and adblock
 /// lists can be large, but 32 MiB is beyond any reasonable blocklist).
 const MAX_BODY_BYTES: usize = 32 * 1024 * 1024;
+
+/// The enabled sources scoped to client groups, each compiled on its own and
+/// keyed by lower-cased source name. Shared between the refresh loop, which
+/// fills it, and the client-group matcher, which reads it on every query; a
+/// list selected by several groups is held once.
+#[derive(Debug, Default)]
+pub struct GroupBlocklists {
+    lists: RwLock<Arc<HashMap<String, Arc<Blocklist>>>>,
+}
+
+impl GroupBlocklists {
+    /// The current lists (cheap: one `Arc` clone).
+    pub fn snapshot(&self) -> Arc<HashMap<String, Arc<Blocklist>>> {
+        self.lists.read().unwrap().clone()
+    }
+
+    /// The compiled list for the source called `name` (any case), if it is
+    /// enabled and scoped to groups.
+    pub fn get(&self, name: &str) -> Option<Arc<Blocklist>> {
+        self.snapshot().get(&name.to_ascii_lowercase()).cloned()
+    }
+
+    pub(crate) fn set(&self, lists: HashMap<String, Arc<Blocklist>>) {
+        *self.lists.write().unwrap() = Arc::new(lists);
+    }
+}
 
 /// Per-source runtime status, surfaced through the API.
 #[derive(Debug, Clone)]
@@ -29,6 +60,7 @@ pub struct SourceStatus {
     pub enabled: bool,
     pub format: BlocklistFormat,
     pub refresh_secs: u64,
+    pub scope: BlocklistScope,
     /// When the source was last fetched successfully.
     pub last_fetch: Option<Instant>,
     /// Domains contributed by this source on its last successful fetch.
@@ -41,6 +73,9 @@ pub struct SourceStatus {
     /// Human-readable error from the last failed fetch, if any.
     pub last_error: Option<String>,
 }
+
+/// A group-scoped source's domain set and the list compiled from it.
+type CompiledSource = (Arc<BTreeSet<String>>, Arc<Blocklist>);
 
 /// Fetches and parses remote blocklist sources and merges their domains.
 pub struct BlocklistSourceManager {
@@ -59,12 +94,21 @@ pub struct BlocklistSourceManager {
     /// Sticky "sources changed" flag inspected by the refresh loop after
     /// each tick. Set in `set_sources`; cleared by `take_change`.
     changed_flag: std::sync::atomic::AtomicBool,
+    /// Group-scoped sources, published for the client-group matcher.
+    group_lists: Arc<GroupBlocklists>,
+    /// The compiled form of each group-scoped source and the domain set it
+    /// was built from, so an unchanged source is not recompiled every cycle.
+    compiled: Mutex<HashMap<String, CompiledSource>>,
 }
 
 impl BlocklistSourceManager {
-    /// Build a manager for `sources`. The client follows redirects, enforces
-    /// TLS (rustls) and caps response size.
-    pub fn new(sources: Vec<BlocklistSourceConfig>) -> Result<Self> {
+    /// Build a manager for `sources` that publishes group-scoped sources to
+    /// `group_lists`. The client follows redirects, enforces TLS (rustls) and
+    /// caps response size.
+    pub fn new(
+        sources: Vec<BlocklistSourceConfig>,
+        group_lists: Arc<GroupBlocklists>,
+    ) -> Result<Self> {
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(30))
             .user_agent(concat!("daygle-dns/", env!("CARGO_PKG_VERSION")))
@@ -79,6 +123,7 @@ impl BlocklistSourceManager {
                 enabled: s.enabled,
                 format: s.format,
                 refresh_secs: s.refresh_secs,
+                scope: s.scope,
                 last_fetch: None,
                 domains: 0,
                 cached_domains: Arc::default(),
@@ -91,7 +136,14 @@ impl BlocklistSourceManager {
             status: Mutex::new(status),
             changed: tokio::sync::Notify::new(),
             changed_flag: std::sync::atomic::AtomicBool::new(false),
+            group_lists,
+            compiled: Mutex::default(),
         })
+    }
+
+    /// The group-scoped sources this manager publishes.
+    pub fn group_lists(&self) -> Arc<GroupBlocklists> {
+        Arc::clone(&self.group_lists)
     }
 
     pub fn is_empty(&self) -> bool {
@@ -137,6 +189,7 @@ impl BlocklistSourceManager {
                     enabled: s.enabled,
                     format: s.format,
                     refresh_secs: s.refresh_secs,
+                    scope: s.scope,
                     last_fetch: None,
                     domains: 0,
                     cached_domains: Arc::default(),
@@ -199,7 +252,8 @@ impl BlocklistSourceManager {
     }
 
     /// Fetch every enabled source whose refresh interval has elapsed since
-    /// its last successful fetch, and return the merged remote blocklist.
+    /// its last successful fetch, publish the group-scoped sources and return
+    /// the merged remote blocklist of the sources that apply to everyone.
     ///
     /// A source that fails is logged and skipped; its previously cached
     /// domains are kept so a transient error never blanks the list.
@@ -252,7 +306,7 @@ impl BlocklistSourceManager {
                         if let Some(st) = status.get_mut(i) {
                             if st.name == source.name {
                                 st.last_fetch = Some(now);
-                                st.domains = domains.len();
+                                st.domains = domain_count(&domains, source.format);
                                 st.cached_domains = Arc::new(domains);
                                 st.last_error = None;
                             }
@@ -274,6 +328,8 @@ impl BlocklistSourceManager {
         // Merge the per-source caches so the effective set follows the
         // current source list, not the last fetch cycle. A source removed or
         // disabled on the latest edit stops contributing here immediately.
+        // Group-scoped sources are compiled one by one instead.
+        let mut group_sets: Vec<(String, Arc<BTreeSet<String>>)> = Vec::new();
         {
             let status = self.status.lock().unwrap();
             for (i, source) in sources.iter().enumerate() {
@@ -282,17 +338,46 @@ impl BlocklistSourceManager {
                 }
                 if let Some(st) = status.get(i) {
                     if st.name == source.name {
-                        merged.extend(st.cached_domains.iter().cloned());
+                        match source.scope {
+                            BlocklistScope::Everyone => {
+                                merged.extend(st.cached_domains.iter().cloned())
+                            }
+                            BlocklistScope::Groups => group_sets.push((
+                                source.name.to_ascii_lowercase(),
+                                st.cached_domains.clone(),
+                            )),
+                        }
                     }
                 }
             }
         }
+        self.publish_group_lists(group_sets);
 
         // Always hand back the current effective set (possibly empty): a
         // source removed, disabled, or emptied on its last fetch must stop
         // blocking immediately. Callers persist the engine only when the set
         // actually differs, so an unchanged result is a no-op.
         Ok(Blocklist::from_set(merged))
+    }
+
+    /// Compile the group-scoped sources (reusing the compiled form of any
+    /// whose domain set is unchanged) and publish them.
+    fn publish_group_lists(&self, sets: Vec<(String, Arc<BTreeSet<String>>)>) {
+        let mut compiled = self.compiled.lock().unwrap();
+        let mut next = HashMap::with_capacity(sets.len());
+        for (name, domains) in sets {
+            let list = match compiled.get(&name) {
+                Some((built_from, list)) if Arc::ptr_eq(built_from, &domains) => list.clone(),
+                _ => Arc::new(Blocklist::from_set(domains.as_ref().clone())),
+            };
+            next.insert(name, (domains, list));
+        }
+        self.group_lists.set(
+            next.iter()
+                .map(|(name, (_, list))| (name.clone(), list.clone()))
+                .collect(),
+        );
+        *compiled = next;
     }
 
     /// Force a refresh of every enabled source now (used by `POST
@@ -372,15 +457,32 @@ impl BlocklistSourceManager {
 /// declared format does not match its content (e.g. an adblock filter saved
 /// as `hosts`), not as a substitute for parsing.
 pub fn detect_blocklist_format(text: &str) -> Option<BlocklistFormat> {
+    detect_blocklist_format_at("", text)
+}
+
+/// [`detect_blocklist_format`] with the source's URL as a hint: a plain
+/// domains list whose URL or header comments say it is a wildcard list
+/// (oisd's `domainswild2`), and which has no `*.` entries of its own, is
+/// [`BlocklistFormat::Wildcard`].
+pub fn detect_blocklist_format_at(url: &str, text: &str) -> Option<BlocklistFormat> {
     let mut adblock = 0usize;
     let mut hosts = 0usize;
     let mut domains = 0usize;
     let mut rpz = 0usize;
+    let mut starred = 0usize;
+    let mut wild_hint = url.to_ascii_lowercase().contains("wild");
 
     for raw in text.lines() {
         let line = raw.trim();
-        if line.is_empty() || line.starts_with('#') || line.starts_with('!') {
+        if line.starts_with('#') || line.starts_with('!') {
+            wild_hint |= line.to_ascii_lowercase().contains("wild");
             continue;
+        }
+        if line.is_empty() {
+            continue;
+        }
+        if line.starts_with("*.") {
+            starred += 1;
         }
         // Zone-file records and directives (RPZ).
         if line.starts_with("$ORIGIN") || line.starts_with("$TTL") {
@@ -431,11 +533,24 @@ pub fn detect_blocklist_format(text: &str) -> Option<BlocklistFormat> {
     } else if hosts > 0 {
         Some(BlocklistFormat::Hosts)
     } else if domains > 0 {
-        Some(BlocklistFormat::Domains)
+        Some(if wild_hint && starred == 0 {
+            BlocklistFormat::Wildcard
+        } else {
+            BlocklistFormat::Domains
+        })
     } else if adblock > 0 {
         Some(BlocklistFormat::Adblock)
     } else {
         None
+    }
+}
+
+/// How many domains a parsed list names: a wildcard list holds two entries
+/// (`x` and `*.x`) per listed name.
+pub fn domain_count(domains: &BTreeSet<String>, format: BlocklistFormat) -> usize {
+    match format {
+        BlocklistFormat::Wildcard => domains.iter().filter(|d| !d.starts_with("*.")).count(),
+        _ => domains.len(),
     }
 }
 
@@ -451,6 +566,18 @@ pub fn parse_blocklist(text: &str, format: BlocklistFormat) -> BTreeSet<String> 
                     .filter(|l| !l.is_empty() && !l.starts_with('#') && !l.starts_with('!'))
                     .map(|l| l.to_string()),
             ));
+        }
+        BlocklistFormat::Wildcard => {
+            // Each name stands for itself and every subdomain.
+            for domain in normalize_domains(
+                text.lines()
+                    .map(str::trim)
+                    .filter(|l| !l.is_empty() && !l.starts_with('#') && !l.starts_with('!'))
+                    .map(|l| l.trim_start_matches("*.").to_string()),
+            ) {
+                out.insert(format!("*.{domain}"));
+                out.insert(domain);
+            }
         }
         BlocklistFormat::Hosts => {
             for line in text.lines() {
@@ -740,7 +867,7 @@ ads.tracker.com.rpz.local. 300 IN CNAME .
 
     #[test]
     fn manager_is_empty_with_no_sources() {
-        let m = BlocklistSourceManager::new(vec![]).unwrap();
+        let m = BlocklistSourceManager::new(vec![], Arc::default()).unwrap();
         assert!(m.is_empty());
     }
 
@@ -781,8 +908,45 @@ ads.tracker.com.rpz.local. 300 IN CNAME .
     }
 
     #[test]
+    fn wildcard_format_covers_subdomains() {
+        let set = parse_blocklist(
+            "# comment\nAds.Test\n*.track.test\n",
+            BlocklistFormat::Wildcard,
+        );
+        let list = Blocklist::from_set(set.clone());
+        assert!(list.contains("ads.test"));
+        assert!(list.contains("a.b.ads.test"));
+        assert!(list.contains("track.test"));
+        assert!(list.contains("x.track.test"));
+        assert!(!list.contains("notads.test"));
+        assert_eq!(domain_count(&set, BlocklistFormat::Wildcard), 2);
+    }
+
+    #[test]
+    fn wildcard_lists_are_detected_from_hints() {
+        let plain = "example.com\nads.example.net\n";
+        assert_eq!(
+            detect_blocklist_format(plain),
+            Some(BlocklistFormat::Domains)
+        );
+        assert_eq!(
+            detect_blocklist_format_at("https://big.oisd.nl/domainswild2", plain),
+            Some(BlocklistFormat::Wildcard)
+        );
+        assert_eq!(
+            detect_blocklist_format(&format!("# Syntax: wildcard domains\n{plain}")),
+            Some(BlocklistFormat::Wildcard)
+        );
+        // Explicit `*.` entries mean the list spells out its wildcards.
+        assert_eq!(
+            detect_blocklist_format_at("https://big.oisd.nl/domainswild", "*.example.com\n"),
+            Some(BlocklistFormat::Domains)
+        );
+    }
+
+    #[test]
     fn set_sources_replaces_runtime_list() {
-        let m = BlocklistSourceManager::new(vec![]).unwrap();
+        let m = BlocklistSourceManager::new(vec![], Arc::default()).unwrap();
         assert!(m.is_empty());
         m.set_sources(vec![BlocklistSourceConfig {
             name: "a".to_string(),
@@ -790,6 +954,7 @@ ads.tracker.com.rpz.local. 300 IN CNAME .
             format: BlocklistFormat::Domains,
             refresh_secs: 3600,
             enabled: true,
+            scope: BlocklistScope::Everyone,
         }]);
         assert_eq!(m.sources().len(), 1);
         assert!(!m.is_empty());

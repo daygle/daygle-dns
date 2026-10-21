@@ -144,6 +144,7 @@ CREATE TABLE IF NOT EXISTS blocking_groups (
     block       TEXT NOT NULL DEFAULT '[]',
     allow_regex TEXT NOT NULL DEFAULT '[]',
     block_regex TEXT NOT NULL DEFAULT '[]',
+    blocklists  TEXT NOT NULL DEFAULT '[]',
     response    TEXT NOT NULL DEFAULT '{"kind":"nx_domain"}',
     position    INTEGER NOT NULL DEFAULT 0
 );
@@ -301,6 +302,7 @@ impl ZoneStore {
         migrate_split_horizon_records(&conn)?;
         migrate_dnssec_keys(&conn)?;
         migrate_console_user_profile(&conn)?;
+        migrate_blocking_group_lists(&conn)?;
         // SQLite ships with foreign-key enforcement off (per connection), so
         // the schema's `ON DELETE CASCADE` never fired and deleting a zone
         // left its records, DNSSEC private keys and secondary state behind.
@@ -601,7 +603,7 @@ impl ZoneStore {
         let conn = self.lock_conn()?;
         let mut stmt = conn.prepare(
             "SELECT id, name, enabled, clients, allow, block, allow_regex, block_regex,
-                    response, position
+                    response, position, blocklists
              FROM blocking_groups ORDER BY position, name",
         )?;
         let rows = stmt.query_map([], row_to_blocking_group)?;
@@ -614,7 +616,7 @@ impl ZoneStore {
         let group = conn
             .query_row(
                 "SELECT id, name, enabled, clients, allow, block, allow_regex, block_regex,
-                        response, position
+                        response, position, blocklists
                  FROM blocking_groups WHERE id = ?1",
                 [id],
                 row_to_blocking_group,
@@ -638,6 +640,7 @@ impl ZoneStore {
         let block = encode_json(&input.block, "block")?;
         let allow_regex = encode_json(&input.allow_regex, "allow_regex")?;
         let block_regex = encode_json(&input.block_regex, "block_regex")?;
+        let blocklists = encode_json(&input.blocklists, "blocklists")?;
         let response = serde_json::to_string(&input.response)
             .map_err(|e| DaygleError::Database(format!("encode response: {e}")))?;
         let conn = self.lock_conn()?;
@@ -655,7 +658,7 @@ impl ZoneStore {
             let updated = conn.execute(
                 "UPDATE blocking_groups SET name = ?2, enabled = ?3, clients = ?4,
                     allow = ?5, block = ?6, allow_regex = ?7, block_regex = ?8,
-                    response = ?9
+                    response = ?9, blocklists = ?10
                  WHERE id = ?1",
                 params![
                     id,
@@ -667,6 +670,7 @@ impl ZoneStore {
                     allow_regex,
                     block_regex,
                     response,
+                    blocklists,
                 ],
             )?;
             drop(conn);
@@ -682,12 +686,12 @@ impl ZoneStore {
         conn.execute(
             "INSERT INTO blocking_groups
                 (id, name, enabled, clients, allow, block, allow_regex, block_regex,
-                 response, position)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9,
+                 response, blocklists, position)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
                  (SELECT COALESCE(MAX(position), -1) + 1 FROM blocking_groups))
              ON CONFLICT(name) DO UPDATE SET
                 enabled = ?3, clients = ?4, allow = ?5, block = ?6,
-                allow_regex = ?7, block_regex = ?8, response = ?9",
+                allow_regex = ?7, block_regex = ?8, response = ?9, blocklists = ?10",
             params![
                 id,
                 name,
@@ -698,6 +702,7 @@ impl ZoneStore {
                 allow_regex,
                 block_regex,
                 response,
+                blocklists,
             ],
         )?;
         drop(conn);
@@ -1589,6 +1594,7 @@ fn row_to_blocking_group(row: &rusqlite::Row<'_>) -> rusqlite::Result<BlockingGr
         block: decode_list(row, 5)?,
         allow_regex: decode_list(row, 6)?,
         block_regex: decode_list(row, 7)?,
+        blocklists: decode_list(row, 10)?,
         response,
         position: row.get(9)?,
     })
@@ -3282,6 +3288,25 @@ fn migrate_split_horizon_records(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// Add the `blocklists` column (remote blocklist sources a group selects) to
+/// `blocking_groups` for databases created before it existed.
+fn migrate_blocking_group_lists(conn: &Connection) -> Result<()> {
+    let has: bool = conn.query_row(
+        "SELECT EXISTS(
+            SELECT 1 FROM pragma_table_info('blocking_groups') WHERE name = 'blocklists'
+         )",
+        [],
+        |r| r.get(0),
+    )?;
+    if !has {
+        conn.execute(
+            "ALTER TABLE blocking_groups ADD COLUMN blocklists TEXT NOT NULL DEFAULT '[]'",
+            [],
+        )?;
+    }
+    Ok(())
+}
+
 /// Add the personal profile columns (`first_name`, `last_name`, `email`) and
 /// display preference columns to `console_users` for databases created
 /// before they existed.
@@ -3430,6 +3455,7 @@ mod tests {
                 block: vec!["*.games.test".to_string()],
                 allow_regex: vec![],
                 block_regex: vec![r"^ad".to_string()],
+                blocklists: vec![],
                 response: BlockResponse::Redirect("0.0.0.0".parse().unwrap()),
             })
             .unwrap();
@@ -3451,6 +3477,7 @@ mod tests {
                 block: vec!["*.social.test".to_string()],
                 allow_regex: vec![],
                 block_regex: vec![],
+                blocklists: vec![],
                 response: BlockResponse::NxDomain,
             })
             .unwrap();
@@ -3481,6 +3508,7 @@ mod tests {
             block: vec![],
             allow_regex: vec![],
             block_regex: vec![],
+            blocklists: vec![],
             response: Default::default(),
         };
         let a = s.upsert_blocking_group(&input(None, "A")).unwrap();

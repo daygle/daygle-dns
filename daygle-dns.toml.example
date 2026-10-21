@@ -351,8 +351,11 @@ filter_aaaa_except = []
 
 # Remote blocklist sources: fetched over HTTP(S) and merged into the
 # blocklist, refreshed on a schedule (like Technitium's blocklist manager).
-# format: "domains" (one per line) | "hosts" (hosts file, e.g. StevenBlack)
-#         | "adblock" (AdGuard/uBlock syntax).
+# format: "domains" (one per line) | "wildcard" (one per line, each also
+#         covering its subdomains, e.g. oisd domainswild2) | "hosts" (hosts
+#         file, e.g. StevenBlack) | "adblock" (AdGuard/uBlock syntax) | "rpz".
+# scope: "everyone" (default) blocks for every client; "groups" blocks only
+#        for the client groups (Filtering -> Client Groups) that select it.
 #
 # [[policy.blocklist_sources]]
 # name = "StevenBlack hosts"
