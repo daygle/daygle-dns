@@ -397,9 +397,6 @@
       <tbody>
         <tr><td class="muted">Installed Version</td><td><code>v{info.version}</code></td></tr>
         <tr><td class="muted">Latest Release</td><td>{#if info.latest_release}<code>v{info.latest_release}</code>{:else}Unknown{/if}</td></tr>
-        <tr><td class="muted">Config File</td><td>{info.has_config_file ? 'Detected' : 'Not Detected'}</td></tr>
-        <tr><td class="muted">Service Manager</td><td>{info.has_systemd ? 'systemd' : 'Not Detected'}</td></tr>
-        <tr><td class="muted">How to Update</td><td>{info.can_update ? 'From This Page' : 'Manual Command Only'}</td></tr>
       </tbody>
     </table>
     {#if !info.can_update}

@@ -1,6 +1,6 @@
 # Daygle DNS architecture
 
-Daygle is a Cargo workspace of eight crates. One binary (`daygle-dns`) composes
+Daygle DNS is a Cargo workspace of eight crates. One binary (`daygle-dns`) composes
 them into a single process that serves plaintext DNS, DNS over TLS,
 DNS over HTTPS, DNS over QUIC, and an HTTP API/GUI.
 
@@ -193,7 +193,7 @@ same path for per-source status.
   only active key, does not stack a third key while one is in flight, and
   skips secondary zones. Caveat: automatic rollover cannot update the
   parent's DS record - submit the new DS (or CDS/CDNSKEY) to the registrar
-  during the overlap window; Daygle keeps the old key published long enough
+  during the overlap window; Daygle DNS keeps the old key published long enough
   for that exchange.
 
 ## AI scanner (`daygle-dns-ml`)

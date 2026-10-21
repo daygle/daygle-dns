@@ -6,7 +6,7 @@ maintained continuation of the `trust-dns` crates - `trust-dns-proto`,
 `trust-dns-server`, and `trust-dns-resolver` were rebranded to `hickory-*` and
 the old names are deprecated per RUSTSEC-2025-0017).
 
-Daygle combines, in a single process:
+Daygle DNS combines, in a single process:
 
 - **Authoritative DNS** with zone storage backed by **SQLite**, BIND zone-file
   import, and **DNSSEC zone signing** (NSEC or **NSEC3**) with **automatic key rollover** and
@@ -278,7 +278,7 @@ from masters - see [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for details.
 
 ### Live reload
 
-With `server.reload_enabled = true` (the default), Daygle polls the config
+With `server.reload_enabled = true` (the default), Daygle DNS polls the config
 file (every `server.reload_interval_ms`, default 2000) and applies edits
 **without restarting** - the UDP/TCP listener settings update in place.
 A bad config is rejected and the previous configuration stays active. You

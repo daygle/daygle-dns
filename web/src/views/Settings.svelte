@@ -15,7 +15,7 @@
   // Settings is split into tabs (same pattern as the Logs page) so the page
   // stays navigable as more options are added.
   // `initialTab` lets another page open a tab directly (the Cache page's
-  // "Change in Settings" link).
+  // "Settings" button).
   let { initialTab = 'general' } = $props();
   let tab = $state(initialTab);
   const TABS = [
@@ -537,7 +537,7 @@
     <h3 style="margin: 0 0 10px">DNS Listeners</h3>
     <table class="facts">
       <tbody>
-        <tr><th>Listen Address</th><td><code>{server.listen}</code> <span class="muted">{listenMeaning(server.listen, server.ipv6_only)}</span></td></tr>
+        <tr><th>Listen Address</th><td>{listenMeaning(server.listen, server.ipv6_only)} <span class="muted">({server.listen})</span></td></tr>
         <tr><th>Port</th><td>{server.port}</td></tr>
         <tr><th>UDP</th><td><span class="pill" class:ok={server.udp_enabled}>{server.udp_enabled ? 'On' : 'Off'}</span></td></tr>
         <tr><th>TCP</th><td><span class="pill" class:ok={server.tcp_enabled}>{server.tcp_enabled ? 'On' : 'Off'}</span></td></tr>
@@ -615,7 +615,7 @@
         <label class="check"><input type="checkbox" bind:checked={recursive.opportunistic_encryption} /> <span>Opportunistic Encryption</span></label>
       </div>
       <p class="muted help">
-        Daygle resolves names itself, starting at the root servers, so no upstream
+        Daygle DNS resolves names itself, starting at the root servers, so no upstream
         provider sees your queries. Query names are minimized (RFC 9156) and DNSSEC
         is validated against the root trust anchor. Query-case randomization makes
         spoofed answers harder to inject but can fail with the odd server that does
@@ -833,7 +833,7 @@
     </div>
     <p class="muted help">
       Lists every primary zone on this server in a catalog zone, so secondaries
-      that follow it (BIND, Knot, PowerDNS or another Daygle server) add and
+      that follow it (BIND, Knot, PowerDNS or another Daygle DNS server) add and
       remove zones on their own. They transfer it like any zone, so allow them
       under Zone Transfers; with NOTIFY on, they are told when the list changes.
       Leave empty to publish no catalog.
@@ -961,18 +961,6 @@
       domains are never blocked.
     </p>
 
-    <h4>Classifier</h4>
-    <div class="form-grid">
-      <label><span>Model File</span><input bind:value={ai_.model_path} placeholder="Empty = built-in heuristic rules" /></label>
-      <label><span>Verdict Database</span><input bind:value={ai_.database} placeholder="Empty = ai.db next to the zone database" /></label>
-    </div>
-    <p class="muted help">
-      A trained fastText model (<code>.bin</code>) classifies far better than the
-      built-in heuristic rules, which never score high enough to auto-block. The
-      AI page shows the installed model files. Changing either path takes effect
-      after a restart.
-    </p>
-
     <h4>Scanning</h4>
     <div class="form-grid">
       <label><span>Scan Every (Minutes)</span><input type="number" min="0.17" step="any" bind:value={aiForm.scanMinutes} /></label>
@@ -1050,7 +1038,7 @@
     <p class="muted help">
       Example: <strong>{previewDateTime(display_)}</strong>. These are the
       defaults for every user. Each user can choose their own under
-      <strong>My Preferences</strong> (below their name in the sidebar).
+      the Preferences tab of their <strong>Account</strong> page.
       {#if ownPrefsSet}Your own preferences are set, so you won't see a change
         here until you reset them.{/if}
       "Device Time Zone" and "Browser Default" follow each viewer's computer.
