@@ -34,7 +34,11 @@ async function request(method, path, body, opts = {}) {
   const init = { method, headers: {} };
   const token = getToken();
   if (token) init.headers['Authorization'] = `Bearer ${token}`;
-  if (body !== undefined) {
+  if (opts.raw) {
+    // A file or blob sent as-is (e.g. a backup to restore).
+    init.headers['Content-Type'] = 'application/octet-stream';
+    init.body = body;
+  } else if (body !== undefined) {
     init.headers['Content-Type'] = 'application/json';
     init.body = JSON.stringify(body);
   }
@@ -42,8 +46,9 @@ async function request(method, path, body, opts = {}) {
   if (!res.ok) {
     let detail = res.statusText;
     let needsLogin = false;
+    let data = null;
     try {
-      const data = await res.json();
+      data = await res.json();
       detail = data.error || detail;
       needsLogin = res.status === 401 && data.login === true;
     } catch (_) { /* ignore */ }
@@ -56,9 +61,14 @@ async function request(method, path, body, opts = {}) {
     const err = new Error(detail);
     err.status = res.status;
     err.needsLogin = needsLogin;
+    err.data = data;
     throw err;
   }
   if (res.status === 204) return null;
+  if (opts.blob) {
+    const match = /filename="([^"]+)"/.exec(res.headers.get('Content-Disposition') || '');
+    return { blob: await res.blob(), filename: match ? match[1] : 'download' };
+  }
   return opts.text ? res.text() : res.json();
 }
 
@@ -100,8 +110,11 @@ export function formatUptime(totalSecs) {
 
 export const api = {
   // ---- auth ----
-  login: async (username, password) => {
-    const data = await request('POST', '/auth/login', { username, password }, { noLoginRedirect: true });
+  // `code`: the authenticator app's code (or a recovery code) when the
+  // account uses two-factor login. Without one, such an account fails with
+  // `err.data.two_factor` set.
+  login: async (username, password, code = '') => {
+    const data = await request('POST', '/auth/login', { username, password, code }, { noLoginRedirect: true });
     if (data?.token) {
       setToken(data.token);
       localStorage.setItem(
@@ -111,6 +124,23 @@ export const api = {
     }
     return data;
   },
+  auditLog: ({ before_id, user, q, limit = 100 } = {}) => {
+    const params = new URLSearchParams({ limit: String(limit) });
+    if (before_id) params.set('before_id', String(before_id));
+    if (user) params.set('user', user);
+    if (q) params.set('q', q);
+    return request('GET', `/audit?${params}`);
+  },
+  apiTokens: () => request('GET', '/auth/tokens'),
+  createApiToken: (body) => request('POST', '/auth/tokens', body),
+  deleteApiToken: (id) => request('DELETE', `/auth/tokens/${encodeURIComponent(id)}`),
+  twoFactorStatus: () => request('GET', '/auth/two-factor'),
+  twoFactorSetup: (password) => request('POST', '/auth/two-factor/setup', { password }),
+  twoFactorEnable: (code) => request('POST', '/auth/two-factor/enable', { code }),
+  twoFactorRecoveryCodes: (password) => request('POST', '/auth/two-factor/recovery-codes', { password }),
+  twoFactorDisable: (password) => request('POST', '/auth/two-factor/disable', { password }),
+  resetUserTwoFactor: (username) =>
+    request('DELETE', `/users/${encodeURIComponent(username)}/two-factor`),
   logout: async () => {
     try { await request('POST', '/auth/logout', {}); } catch (_) { /* ignore */ }
     localStorage.removeItem(TOKEN_KEY);
@@ -176,8 +206,22 @@ export const api = {
     request('DELETE', `/zones/${zoneId}/records/${recordId}`),
   setRecordDisabled: (zoneId, recordId, disabled) =>
     request('PUT', `/zones/${zoneId}/records/${encodeURIComponent(recordId)}/disabled`, { disabled }),
+  healthChecks: () => request('GET', '/health-checks'),
+  setHealthCheck: (zoneId, recordId, body) =>
+    request('PUT', `/zones/${zoneId}/records/${encodeURIComponent(recordId)}/health`, body),
+  deleteHealthCheck: (zoneId, recordId) =>
+    request('DELETE', `/zones/${zoneId}/records/${encodeURIComponent(recordId)}/health`),
+  downloadBackup: (queryLogs) =>
+    request('GET', `/backup${queryLogs ? '?query_logs=true' : ''}`, undefined, { blob: true }),
+  pendingRestore: () => request('GET', '/backup/restore'),
+  stageRestore: (file) => request('POST', '/backup/restore', file, { raw: true }),
+  cancelRestore: () => request('DELETE', '/backup/restore'),
+  acmeSettings: () => request('GET', '/acme'),
+  saveAcmeSettings: (settings) => request('PUT', '/acme', settings),
+  requestAcmeCertificate: (body) => request('POST', '/certificates/acme', body),
+  renewCertificate: (name) => request('POST', `/certificates/${encodeURIComponent(name)}/renew`),
   exportZone: (zoneId) => request('GET', `/zones/${zoneId}/export`, undefined, { text: true }),
-  signZone: (zoneId) => request('POST', `/zones/${zoneId}/sign`),
+  signZone: (zoneId, body) => request('POST', `/zones/${zoneId}/sign`, body),
   unsignZone: (zoneId) => request('POST', `/zones/${zoneId}/unsign`),
   cache: () => request('GET', '/cache'),
   clearCache: () => request('POST', '/cache/clear'),

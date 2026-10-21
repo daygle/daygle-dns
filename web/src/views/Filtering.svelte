@@ -13,7 +13,7 @@
       id: 'blocklists',
       label: 'Blocklists',
       tagline:
-        'Block ads, trackers and malware with published lists (plain domain lists, hosts files or adblock filters). Lists are checked before they are saved, refresh on their own schedule, and every change applies immediately.',
+        'Block ads, trackers and malware with published lists (plain domain lists, hosts files, adblock filters or response policy zones). Lists are checked before they are saved, refresh on their own schedule, and every change applies immediately.',
     },
     {
       id: 'domain-lists',

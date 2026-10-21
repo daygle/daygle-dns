@@ -1,12 +1,14 @@
 <script>
   import { onDestroy, onMount } from 'svelte';
-  import { api, getToken, formatApiError } from '../api.js';
+  import { api, getToken, formatApiError, getStoredUser } from '../api.js';
   import PageHeader from '../PageHeader.svelte';
   import { icons } from '../icons.svelte.js';
   import { formatDateTime, displayZoneName, zonedInputToIso } from '../datetime.svelte.js';
 
-  // Two tabs: the searchable per-query history and the in-memory server log.
-  // Query Log opens first: it is what the Logs page is used for day to day.
+  // The searchable per-query history, the in-memory server log, and (for
+  // admins) the audit log of changes. Query Log opens first: it is what the
+  // Logs page is used for day to day.
+  const isAdmin = getStoredUser()?.role !== 'viewer';
   const TABS = [
     {
       id: 'queries',
@@ -20,7 +22,14 @@
       tagline:
         "The server's own messages: startup, zone transfers, blocklist refreshes, settings changes and errors. Kept in memory, so it starts empty after a restart.",
     },
-  ];
+    {
+      id: 'audit',
+      label: 'Audit Log',
+      tagline:
+        'Who changed what and when: every change made in the console or through the API, and every sign-in, with the result. Kept for a year.',
+      admin: true,
+    },
+  ].filter((t) => !t.admin || isAdmin);
   let tab = $state('queries');
   const current = $derived(TABS.find((t) => t.id === tab));
 
@@ -29,7 +38,39 @@
     if (id === 'queries') runQuery(1);
     else {
       stopLive();
-      refresh();
+      if (id === 'audit') loadAudit();
+      else refresh();
+    }
+  }
+
+  // ---- Audit log ----
+  let audit = $state([]);
+  let auditMore = $state(false);
+  let auditError = $state(null);
+  let auditUser = $state('');
+  let auditSearch = $state('');
+  const AUDIT_PAGE = 100;
+  const VIA = {
+    session: 'Console',
+    password: 'Password',
+    api_token: 'API Token',
+    static_token: 'Config Token',
+    open: 'No Sign-In',
+  };
+
+  async function loadAudit(more = false) {
+    auditError = null;
+    try {
+      const page = await api.auditLog({
+        before_id: more && audit.length ? audit[audit.length - 1].id : undefined,
+        user: auditUser.trim(),
+        q: auditSearch.trim(),
+        limit: AUDIT_PAGE,
+      });
+      audit = more ? [...audit, ...page] : page;
+      auditMore = page.length === AUDIT_PAGE;
+    } catch (e) {
+      auditError = formatApiError(e);
     }
   }
 
@@ -257,7 +298,57 @@
   {/each}
 </div>
 
-{#if tab === 'server'}
+{#if tab === 'audit'}
+  {#if auditError}
+    <div class="card" style="border-color: var(--danger); color: var(--danger); margin-bottom: 14px">{auditError}</div>
+  {/if}
+  <div class="card">
+    <form class="spread" style="margin-bottom: 10px; gap: 10px; flex-wrap: wrap" onsubmit={(e) => { e.preventDefault(); loadAudit(); }}>
+      <h3 style="margin: 0">Audit Log</h3>
+      <div class="row" style="gap: 8px; flex-wrap: wrap">
+        <input type="search" placeholder="User" bind:value={auditUser} style="width: 140px" />
+        <input type="search" placeholder="Search Actions" bind:value={auditSearch} style="min-width: 200px" />
+        <button type="submit" class="secondary">Search</button>
+      </div>
+    </form>
+    <div class="table-wrap" style="max-height: 70vh; overflow-y: auto">
+      <table>
+        <thead>
+          <tr><th title={`Shown in ${displayZoneName()}`}>Time</th><th>User</th><th>Action</th><th>Result</th><th>From</th></tr>
+        </thead>
+        <tbody>
+          {#each audit as entry (entry.id)}
+            <tr>
+              <td style="white-space: nowrap">{formatDateTime(new Date(entry.ts * 1000))}</td>
+              <td>
+                {entry.username || '-'}
+                <div class="muted small">{VIA[entry.via] || entry.via}</div>
+              </td>
+              <td>
+                {entry.action}
+                <div class="muted small"><code>{entry.method} {entry.path}</code></div>
+              </td>
+              <td>
+                <span class="pill" class:ok={entry.status < 400} class:err={entry.status >= 400}>
+                  {entry.status < 400 ? 'Done' : entry.status === 401 ? 'Refused' : entry.status === 403 ? 'Not Allowed' : 'Failed'}
+                </span>
+                <div class="muted small">HTTP {entry.status}</div>
+              </td>
+              <td><code>{entry.client || '-'}</code></td>
+            </tr>
+          {/each}
+        </tbody>
+      </table>
+    </div>
+    {#if audit.length === 0}
+      <p class="muted">No audit entries{auditUser || auditSearch ? ' match this search' : ' yet'}.</p>
+    {/if}
+    {#if auditMore}
+      <button class="secondary" style="margin-top: 10px" onclick={() => loadAudit(true)}>Load More</button>
+    {/if}
+    <p class="muted help">Newest first. What was sent is never stored, only what was done.</p>
+  </div>
+{:else if tab === 'server'}
   {#if error}
     <div class="card" style="border-color: var(--danger); color: var(--danger); margin-bottom: 14px">{error}</div>
   {/if}
@@ -431,6 +522,7 @@
 {/if}
 
 <style>
+  .small { font-size: 0.78rem; margin-top: 2px; }
   .filter-grid {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));

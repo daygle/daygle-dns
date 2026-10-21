@@ -237,6 +237,37 @@ pub async fn metrics(State(state): State<AppState>) -> Response {
     Json(state.metrics.snapshot()).into_response()
 }
 
+/// `GET /api/metrics/prometheus` - every counter in the Prometheus text
+/// format, for scraping (authorize with a read-only API token).
+pub async fn metrics_prometheus(State(state): State<AppState>) -> Response {
+    let zones = state
+        .catalog
+        .store()
+        .list_zones()
+        .map(|z| z.len())
+        .unwrap_or(0);
+    let text = state.metrics.render_prometheus(&[
+        daygle_dns_core::metrics::Gauge {
+            name: "uptime_seconds",
+            help: "Seconds since the server started.",
+            value: state.started_at.elapsed().as_secs_f64().floor(),
+        },
+        daygle_dns_core::metrics::Gauge {
+            name: "zones",
+            help: "Zones served by this server.",
+            value: zones as f64,
+        },
+    ]);
+    (
+        [(
+            header::CONTENT_TYPE,
+            "text/plain; version=0.0.4; charset=utf-8",
+        )],
+        text,
+    )
+        .into_response()
+}
+
 /// Dashboard statistics: time-series over a window plus top-N tables.
 /// `?window=1h` (default), `6h` or `24h`.
 #[derive(Deserialize)]
@@ -451,10 +482,11 @@ pub async fn validate_blocklist_source(
         "domains" => Some(daygle_dns_core::config::BlocklistFormat::Domains),
         "hosts" => Some(daygle_dns_core::config::BlocklistFormat::Hosts),
         "adblock" => Some(daygle_dns_core::config::BlocklistFormat::Adblock),
+        "rpz" => Some(daygle_dns_core::config::BlocklistFormat::Rpz),
         other => {
             return error_response(
                 StatusCode::BAD_REQUEST,
-                format!("unknown format '{other}' (use domains, hosts, adblock or auto)"),
+                format!("unknown format '{other}' (use domains, hosts, adblock, rpz or auto)"),
             );
         }
     };
@@ -1192,7 +1224,11 @@ struct ZoneView {
     #[serde(flatten)]
     zone: daygle_dns_authoritative::model::Zone,
     dnssec: bool,
+    /// Whether a signed zone uses NSEC3 rather than NSEC.
+    nsec3: bool,
     zone_type: &'static str,
+    /// The consumed catalog zone that added this zone, if any.
+    catalog: Option<String>,
     masters: Vec<String>,
     refresh_secs: Option<u64>,
 }
@@ -1209,6 +1245,10 @@ pub async fn list_zones(State(state): State<AppState>) -> Response {
             .collect::<std::collections::HashMap<_, _>>(),
         Err(e) => return map_err(e),
     };
+    let catalog_members = match state.catalog.store().catalog_members() {
+        Ok(m) => m,
+        Err(e) => return map_err(e),
+    };
     let views = zones
         .into_iter()
         .map(|zone| {
@@ -1218,11 +1258,15 @@ pub async fn list_zones(State(state): State<AppState>) -> Response {
                 .get_signing_key(&zone.id)
                 .map(|k| k.is_some())
                 .unwrap_or(false);
+            let nsec3 = dnssec && state.catalog.store().zone_nsec3(&zone.id).unwrap_or(false);
+            let catalog = catalog_members.get(&zone.id).cloned();
             if let Some(item) = secondary.get(&zone.id) {
                 ZoneView {
                     zone,
                     dnssec,
+                    nsec3,
                     zone_type: "secondary",
+                    catalog,
                     masters: item.masters.clone(),
                     refresh_secs: Some(item.refresh_secs),
                 }
@@ -1230,7 +1274,9 @@ pub async fn list_zones(State(state): State<AppState>) -> Response {
                 ZoneView {
                     zone,
                     dnssec,
+                    nsec3,
                     zone_type: "primary",
+                    catalog,
                     masters: Vec::new(),
                     refresh_secs: None,
                 }
@@ -1576,6 +1622,20 @@ pub async fn delete_zone(State(state): State<AppState>, Path(id): Path<String>) 
         Ok(items) => items.into_iter().find(|item| item.zone_id == id),
         Err(e) => return map_err(e),
     };
+    match state.catalog.store().catalog_members() {
+        Ok(members) => {
+            if let Some(catalog) = members.get(&id) {
+                return error_response(
+                    StatusCode::CONFLICT,
+                    format!(
+                        "{} was added by the catalog zone {catalog}: remove it from the catalog, or stop following the catalog",
+                        existing.name
+                    ),
+                );
+            }
+        }
+        Err(e) => return map_err(e),
+    }
     let old_config = (*state.config.load_full()).clone();
     let mut new_config = old_config.clone();
     if secondary.is_some() {
@@ -1865,6 +1925,105 @@ pub async fn set_record_disabled(
     }
 }
 
+// ---- Health checks (failover records) ----------------------------------
+
+/// The health check to put on a record (the record comes from the path).
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HealthCheckInput {
+    pub kind: String,
+    pub port: u16,
+    #[serde(default)]
+    pub path: String,
+    #[serde(default)]
+    pub host: String,
+    #[serde(default = "default_health_interval")]
+    pub interval_secs: u32,
+}
+
+fn default_health_interval() -> u32 {
+    30
+}
+
+/// `GET /api/health-checks` - every health check, with its record and
+/// whether it is passing.
+pub async fn list_health_checks(State(state): State<AppState>) -> Response {
+    match &state.health {
+        Some(health) => Json(health.status()).into_response(),
+        None => Json(Vec::<()>::new()).into_response(),
+    }
+}
+
+/// `PUT /api/zones/{id}/records/{rid}/health` - add or change the health
+/// check on an A or AAAA record.
+pub async fn set_health_check(
+    State(state): State<AppState>,
+    Path((zone_id, rid)): Path<(String, String)>,
+    axum::Json(input): axum::Json<HealthCheckInput>,
+) -> Response {
+    if let Some(response) = reject_secondary_mutation(&state, &zone_id) {
+        return response;
+    }
+    let record = match state.catalog.store().get_record(&rid) {
+        Ok(Some(r)) if r.zone_id == zone_id => r,
+        Ok(_) => return error_response(StatusCode::NOT_FOUND, "record not found"),
+        Err(e) => return map_err(e),
+    };
+    if !matches!(record.rtype.as_str(), "A" | "AAAA") {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "only A and AAAA records can be health-checked",
+        );
+    }
+    let mut check = daygle_dns_authoritative::model::HealthCheck {
+        record_id: rid.clone(),
+        kind: input.kind,
+        port: input.port,
+        path: input.path,
+        host: input.host,
+        interval_secs: input.interval_secs,
+    };
+    if let Err(msg) = check.validate() {
+        return error_response(StatusCode::BAD_REQUEST, msg);
+    }
+    if let Err(e) = state.catalog.store().set_health_check(&check) {
+        return map_err(e);
+    }
+    let _ = state.catalog.reload();
+    if let Some(health) = &state.health {
+        health.recheck(&rid);
+    }
+    Json(check).into_response()
+}
+
+/// `DELETE /api/zones/{id}/records/{rid}/health` - stop checking a record
+/// (it is served again whatever its state).
+pub async fn delete_health_check(
+    State(state): State<AppState>,
+    Path((zone_id, rid)): Path<(String, String)>,
+) -> Response {
+    if let Some(response) = reject_secondary_mutation(&state, &zone_id) {
+        return response;
+    }
+    match state.catalog.store().get_record(&rid) {
+        Ok(Some(r)) if r.zone_id == zone_id => {}
+        Ok(_) => return error_response(StatusCode::NOT_FOUND, "record not found"),
+        Err(e) => return map_err(e),
+    }
+    match state.catalog.store().delete_health_check(&rid) {
+        Ok(true) => {
+            let mut unhealthy = (*state.catalog.unhealthy()).clone();
+            unhealthy.remove(&rid);
+            if state.catalog.set_unhealthy(unhealthy).is_ok() {
+                let _ = state.catalog.reload();
+            }
+            StatusCode::NO_CONTENT.into_response()
+        }
+        Ok(false) => error_response(StatusCode::NOT_FOUND, "the record has no health check"),
+        Err(e) => map_err(e),
+    }
+}
+
 /// `GET /api/zones/{id}/export` - the zone as a BIND-style zone file
 /// (`text/plain`), including SOA and every record. Disabled records are
 /// included as `; disabled:` comments, so an export doubles as a full-zone
@@ -1887,6 +2046,134 @@ pub async fn export_zone(State(state): State<AppState>, Path(id): Path<String>) 
             ];
             (headers, text).into_response()
         }
+        Err(e) => map_err(e),
+    }
+}
+
+// ---- Backup and restore --------------------------------------------------
+
+/// A scratch file next to the database (or in the system temp directory
+/// for an in-memory one), removed when dropped.
+struct ScratchFile(std::path::PathBuf);
+
+impl ScratchFile {
+    fn new(database: &str, purpose: &str) -> Self {
+        let name = format!(
+            "daygle-dns-{purpose}-{}-{}.tmp",
+            std::process::id(),
+            rand::random::<u64>()
+        );
+        let dir = std::path::Path::new(database)
+            .parent()
+            .filter(|p| database != ":memory:" && !p.as_os_str().is_empty())
+            .map(std::path::Path::to_path_buf)
+            .unwrap_or_else(std::env::temp_dir);
+        Self(dir.join(name))
+    }
+}
+
+impl Drop for ScratchFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+#[derive(Deserialize)]
+pub struct BackupQuery {
+    #[serde(default)]
+    query_logs: bool,
+}
+
+/// `GET /api/backup[?query_logs=true]` - download a backup of the database
+/// (admin only: it holds private keys and password hashes).
+pub async fn download_backup(
+    State(state): State<AppState>,
+    Query(query): Query<BackupQuery>,
+) -> Response {
+    let config = state.config.load_full();
+    let database = config.authoritative.database.clone();
+    let ai_database = daygle_dns_ml::database_path(&config.ai, &database);
+    let store = state.catalog.store().clone();
+    let made = tokio::task::spawn_blocking(move || {
+        let scratch = ScratchFile::new(&database, "backup");
+        store.backup_to(&scratch.0, query.query_logs, Some(&ai_database))?;
+        Ok::<_, daygle_dns_core::error::DaygleError>(std::fs::read(&scratch.0)?)
+    })
+    .await;
+    match made {
+        Ok(Ok(bytes)) => {
+            let filename = format!(
+                "attachment; filename=\"daygle-dns-backup-{}.db\"",
+                chrono::Local::now().format("%Y%m%d-%H%M")
+            );
+            state.logs.info(
+                "backup",
+                format!("backup downloaded ({} bytes)", bytes.len()),
+            );
+            (
+                [
+                    (header::CONTENT_TYPE, "application/vnd.sqlite3"),
+                    (header::CONTENT_DISPOSITION, filename.as_str()),
+                    (header::CACHE_CONTROL, "no-store"),
+                ],
+                bytes,
+            )
+                .into_response()
+        }
+        Ok(Err(e)) => map_err(e),
+        Err(e) => error_response(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
+}
+
+/// `GET /api/backup/restore` - the restore waiting for a restart, if any.
+pub async fn pending_restore(State(state): State<AppState>) -> Response {
+    let database = state.config.load().authoritative.database.clone();
+    Json(serde_json::json!({
+        "pending": daygle_dns_authoritative::backup::pending_restore(&database),
+    }))
+    .into_response()
+}
+
+/// `POST /api/backup/restore` (the backup file as the body) - check the
+/// backup and stage it to replace the database on the next restart.
+pub async fn stage_restore(State(state): State<AppState>, body: axum::body::Bytes) -> Response {
+    let database = state.config.load().authoritative.database.clone();
+    if database == ":memory:" {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "this server runs on an in-memory database, which cannot be restored",
+        );
+    }
+    let staged = tokio::task::spawn_blocking(move || {
+        let scratch = ScratchFile::new(&database, "upload");
+        std::fs::write(&scratch.0, &body)?;
+        daygle_dns_authoritative::backup::stage_restore(&database, &scratch.0)
+    })
+    .await;
+    match staged {
+        Ok(Ok(info)) => {
+            state.logs.info(
+                "backup",
+                "restore staged: it replaces the database when the server restarts".to_string(),
+            );
+            Json(serde_json::json!({ "pending": info })).into_response()
+        }
+        Ok(Err(e)) => map_err(e),
+        Err(e) => error_response(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
+}
+
+/// `DELETE /api/backup/restore` - drop the staged restore.
+pub async fn cancel_restore(State(state): State<AppState>) -> Response {
+    let database = state.config.load().authoritative.database.clone();
+    match daygle_dns_authoritative::backup::cancel_restore(&database) {
+        Ok(true) => {
+            state
+                .logs
+                .info("backup", "staged restore cancelled".to_string());
+            StatusCode::NO_CONTENT.into_response()
+        }
+        Ok(false) => error_response(StatusCode::NOT_FOUND, "no restore is staged"),
         Err(e) => map_err(e),
     }
 }
@@ -2048,11 +2335,24 @@ pub async fn test_blocking(
 
 // ---- DNSSEC -------------------------------------------------------------
 
-pub async fn sign_zone(State(state): State<AppState>, Path(id): Path<String>) -> Response {
+#[derive(Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+pub struct SignZoneBody {
+    /// Prove non-existence with NSEC3 (`true`) or NSEC (`false`); absent
+    /// keeps the zone's current choice.
+    nsec3: Option<bool>,
+}
+
+pub async fn sign_zone(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    body: Option<Json<SignZoneBody>>,
+) -> Response {
     if let Some(response) = reject_secondary_mutation(&state, &id) {
         return response;
     }
-    match state.catalog.sign_zone(&id) {
+    let nsec3 = body.and_then(|Json(b)| b.nsec3);
+    match state.catalog.sign_zone_with(&id, nsec3) {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(e) => map_err(e),
     }
@@ -2316,6 +2616,10 @@ pub async fn clear_cache(State(state): State<AppState>) -> Response {
 pub struct LoginInput {
     username: String,
     password: String,
+    /// The authenticator app's code (or a recovery code) for an account
+    /// with two-factor login.
+    #[serde(default)]
+    code: String,
 }
 
 /// `POST /api/auth/login` - verify username/password against the console
@@ -2376,15 +2680,48 @@ pub async fn auth_login(
                     .unwrap_or_default()
             ),
         );
+        crate::audit::record_sign_in(
+            &state,
+            "/auth/login",
+            input.username.trim(),
+            client_ip,
+            "Failed sign-in",
+            401,
+        );
         return error_response(StatusCode::UNAUTHORIZED, "invalid username or password");
+    }
+    let user = user.expect("checked above");
+
+    // Two-factor login: the password was right, now the code. A wrong code
+    // counts as a failed login, and the throttle is only cleared once both
+    // pass, so codes cannot be guessed at full speed.
+    if let Err(response) = check_two_factor(&state, &user.username, &input.code, client_ip) {
+        if !input.code.trim().is_empty() {
+            crate::audit::record_sign_in(
+                &state,
+                "/auth/login",
+                &user.username,
+                client_ip,
+                "Failed sign-in (wrong two-factor code)",
+                401,
+            );
+        }
+        return response;
     }
     if let Some(ip) = client_ip {
         state.login_throttle.clear(ip);
     }
 
-    let user = user.expect("checked above");
     let ttl = Duration::from_secs(state.config.load().api.session_ttl_secs.max(60));
     let token = state.sessions.create(&user.username, user.role, ttl);
+    crate::audit::record_sign_in(
+        &state,
+        "/auth/login",
+        &user.username,
+        client_ip,
+        "Signed in",
+        200,
+    );
     state.logs.push(
         daygle_dns_core::LogLevel::Info,
         "api",
@@ -2397,6 +2734,31 @@ pub async fn auth_login(
         "expires_in_secs": ttl.as_secs(),
     }))
     .into_response()
+}
+
+#[derive(Deserialize)]
+pub struct AuditQueryParams {
+    before_id: Option<i64>,
+    user: Option<String>,
+    q: Option<String>,
+    limit: Option<u32>,
+}
+
+/// `GET /api/audit` (admin) - the audit log, newest first.
+pub async fn audit_log(
+    State(state): State<AppState>,
+    Query(params): Query<AuditQueryParams>,
+) -> Response {
+    let query = daygle_dns_authoritative::store::AuditQuery {
+        before_id: params.before_id,
+        username: params.user,
+        text: params.q,
+        limit: params.limit.unwrap_or(100),
+    };
+    match state.catalog.store().search_audit_log(&query) {
+        Ok(entries) => Json(entries).into_response(),
+        Err(e) => map_err(e),
+    }
 }
 
 /// `POST /api/auth/logout` - revoke the presented session token.
@@ -2415,7 +2777,7 @@ pub async fn auth_logout(
 /// have nowhere to store them.
 pub async fn auth_me(State(state): State<AppState>, headers: axum::http::HeaderMap) -> Response {
     let token = bearer_token(&headers).unwrap_or_default();
-    match state.sessions.verify(&token) {
+    match state.sessions.authenticate(&token) {
         Some(session) => {
             let preferences = state
                 .catalog
@@ -2434,6 +2796,8 @@ pub async fn auth_me(State(state): State<AppState>, headers: axum::http::HeaderM
                     .unwrap_or(0),
                 "preferences": preferences,
                 "display_defaults": state.config.load().display,
+                // Signed in with a personal API token rather than a login.
+                "api_token": session.api_token.is_some(),
             }))
             .into_response()
         }
@@ -2545,6 +2909,460 @@ pub async fn auth_change_password(
         format!("user '{}' changed their password", session.username),
     );
     StatusCode::NO_CONTENT.into_response()
+}
+
+// ---- Two-factor login -----------------------------------------------------
+
+/// `401` asking for (another) two-factor code: `two_factor: true` tells the
+/// console to show the code field.
+fn two_factor_required(message: &str) -> Response {
+    (
+        StatusCode::UNAUTHORIZED,
+        Json(serde_json::json!({ "error": message, "two_factor": true })),
+    )
+        .into_response()
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// For an account with two-factor login, check `code` (from the
+/// authenticator app, or a recovery code, which is then used up). Accounts
+/// without it pass.
+#[allow(clippy::result_large_err)]
+fn check_two_factor(
+    state: &AppState,
+    username: &str,
+    code: &str,
+    client_ip: Option<IpAddr>,
+) -> Result<(), Response> {
+    let store = state.catalog.store();
+    let two_factor = store
+        .get_two_factor(username)
+        .map_err(map_err)?
+        .filter(|t| !t.secret.is_empty());
+    let Some(two_factor) = two_factor else {
+        return Ok(());
+    };
+    let code = code.trim();
+    if code.is_empty() {
+        return Err(two_factor_required(
+            "enter the code from your authenticator app",
+        ));
+    }
+    let recovery = daygle_dns_core::totp::is_recovery_code(code);
+    let accepted = if recovery {
+        store.use_two_factor_recovery_code(
+            username,
+            &daygle_dns_core::totp::hash_recovery_code(code),
+        )
+    } else {
+        match daygle_dns_core::totp::verify(
+            &two_factor.secret,
+            code,
+            unix_now(),
+            two_factor.last_step,
+        ) {
+            Some(step) => store.use_two_factor_step(username, step),
+            None => Ok(false),
+        }
+    }
+    .map_err(map_err)?;
+    let from = client_ip
+        .map(|ip| format!(" from {ip}"))
+        .unwrap_or_default();
+    if !accepted {
+        if let Some(ip) = client_ip {
+            state.login_throttle.record_failure(ip);
+        }
+        state.logs.push(
+            daygle_dns_core::LogLevel::Warn,
+            "api",
+            format!("wrong two-factor code for user '{username}'{from}"),
+        );
+        return Err(two_factor_required(
+            "that code is not right, or was already used",
+        ));
+    }
+    if recovery {
+        let left = store
+            .get_two_factor(username)
+            .ok()
+            .flatten()
+            .map_or(0, |t| t.recovery_hashes.len());
+        state.logs.push(
+            daygle_dns_core::LogLevel::Warn,
+            "api",
+            format!("user '{username}' signed in with a recovery code{from} ({left} left)"),
+        );
+    }
+    Ok(())
+}
+
+/// The signed-in account (a login session, not an API token), for the
+/// self-service credential endpoints.
+#[allow(clippy::result_large_err)]
+fn session_user(
+    state: &AppState,
+    headers: &axum::http::HeaderMap,
+) -> Result<daygle_dns_authoritative::store::ConsoleUser, Response> {
+    let token = bearer_token(headers).unwrap_or_default();
+    let session = state.sessions.verify(&token).ok_or_else(|| {
+        error_response(
+            StatusCode::BAD_REQUEST,
+            "this needs a signed-in console account (not an API token)",
+        )
+    })?;
+    match state.catalog.store().get_console_user(&session.username) {
+        Ok(Some(user)) if user.enabled => Ok(user),
+        Ok(Some(_)) => Err(error_response(StatusCode::FORBIDDEN, "account is disabled")),
+        Ok(None) => Err(error_response(
+            StatusCode::NOT_FOUND,
+            "account no longer exists",
+        )),
+        Err(e) => Err(map_err(e)),
+    }
+}
+
+/// Re-check the account's password before a two-factor change.
+#[allow(clippy::result_large_err)]
+async fn confirm_password(
+    state: &AppState,
+    user: &daygle_dns_authoritative::store::ConsoleUser,
+    password: &str,
+) -> Result<(), Response> {
+    if password.len() > MAX_PASSWORD_LEN || !verify_password(password, &user.password_hash).await {
+        state.logs.push(
+            daygle_dns_core::LogLevel::Warn,
+            "api",
+            format!(
+                "wrong password for a two-factor change by user '{}'",
+                user.username
+            ),
+        );
+        return Err(error_response(
+            StatusCode::UNAUTHORIZED,
+            "password is incorrect",
+        ));
+    }
+    Ok(())
+}
+
+#[derive(Deserialize)]
+pub struct PasswordInput {
+    #[serde(default)]
+    password: String,
+}
+
+#[derive(Deserialize)]
+pub struct CodeInput {
+    #[serde(default)]
+    code: String,
+}
+
+/// `GET /api/auth/two-factor` - whether the signed-in account uses
+/// two-factor login, and how many recovery codes it has left.
+pub async fn two_factor_status(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+) -> Response {
+    let user = match session_user(&state, &headers) {
+        Ok(u) => u,
+        Err(r) => return r,
+    };
+    match state.catalog.store().get_two_factor(&user.username) {
+        Ok(t) => {
+            let t = t.unwrap_or_default();
+            Json(serde_json::json!({
+                "enabled": !t.secret.is_empty(),
+                "recovery_codes_left": if t.secret.is_empty() { 0 } else { t.recovery_hashes.len() },
+            }))
+            .into_response()
+        }
+        Err(e) => map_err(e),
+    }
+}
+
+/// `POST /api/auth/two-factor/setup` `{password}` - start setting up
+/// two-factor login: a new secret, and the `otpauth://` URI for a QR code.
+/// Nothing changes until `/enable` confirms a code.
+pub async fn two_factor_setup(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    axum::Json(input): axum::Json<PasswordInput>,
+) -> Response {
+    let user = match session_user(&state, &headers) {
+        Ok(u) => u,
+        Err(r) => return r,
+    };
+    if let Err(r) = confirm_password(&state, &user, &input.password).await {
+        return r;
+    }
+    let secret = daygle_dns_core::totp::generate_secret();
+    if let Err(e) = state
+        .catalog
+        .store()
+        .set_two_factor_pending(&user.username, &secret)
+    {
+        return map_err(e);
+    }
+    Json(serde_json::json!({
+        "secret": secret,
+        "uri": daygle_dns_core::totp::otpauth_uri("Daygle DNS", &user.username, &secret),
+    }))
+    .into_response()
+}
+
+/// `POST /api/auth/two-factor/enable` `{code}` - confirm the app works and
+/// turn two-factor login on. Returns the recovery codes, shown only now.
+pub async fn two_factor_enable(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    axum::Json(input): axum::Json<CodeInput>,
+) -> Response {
+    let user = match session_user(&state, &headers) {
+        Ok(u) => u,
+        Err(r) => return r,
+    };
+    let store = state.catalog.store();
+    let pending = match store.get_two_factor(&user.username) {
+        Ok(t) => t.map(|t| t.pending_secret).unwrap_or_default(),
+        Err(e) => return map_err(e),
+    };
+    if pending.is_empty() {
+        return error_response(StatusCode::BAD_REQUEST, "start two-factor setup first");
+    }
+    let Some(step) = daygle_dns_core::totp::verify(&pending, &input.code, unix_now(), 0) else {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "that code is not right: check the app's clock and try the newest code",
+        );
+    };
+    let (codes, hashes) = daygle_dns_core::totp::generate_recovery_codes();
+    if let Err(e) = store.enable_two_factor(&user.username, step, &hashes) {
+        return map_err(e);
+    }
+    // Other devices must sign in again, now with a code.
+    let token = bearer_token(&headers).unwrap_or_default();
+    state.sessions.revoke_user_except(&user.username, &token);
+    state.logs.info(
+        "api",
+        format!("user '{}' turned on two-factor login", user.username),
+    );
+    Json(serde_json::json!({ "recovery_codes": codes })).into_response()
+}
+
+/// `POST /api/auth/two-factor/recovery-codes` `{password}` - replace the
+/// recovery codes (the old ones stop working).
+pub async fn two_factor_new_recovery_codes(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    axum::Json(input): axum::Json<PasswordInput>,
+) -> Response {
+    let user = match session_user(&state, &headers) {
+        Ok(u) => u,
+        Err(r) => return r,
+    };
+    if let Err(r) = confirm_password(&state, &user, &input.password).await {
+        return r;
+    }
+    if !user.two_factor {
+        return error_response(StatusCode::BAD_REQUEST, "two-factor login is not on");
+    }
+    let (codes, hashes) = daygle_dns_core::totp::generate_recovery_codes();
+    if let Err(e) = state
+        .catalog
+        .store()
+        .set_two_factor_recovery(&user.username, &hashes)
+    {
+        return map_err(e);
+    }
+    state.logs.info(
+        "api",
+        format!("user '{}' made new recovery codes", user.username),
+    );
+    Json(serde_json::json!({ "recovery_codes": codes })).into_response()
+}
+
+/// `POST /api/auth/two-factor/disable` `{password}` - turn two-factor
+/// login off for the signed-in account.
+pub async fn two_factor_disable(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    axum::Json(input): axum::Json<PasswordInput>,
+) -> Response {
+    let user = match session_user(&state, &headers) {
+        Ok(u) => u,
+        Err(r) => return r,
+    };
+    if let Err(r) = confirm_password(&state, &user, &input.password).await {
+        return r;
+    }
+    match state.catalog.store().disable_two_factor(&user.username) {
+        Ok(was_on) => {
+            if was_on {
+                state.logs.push(
+                    daygle_dns_core::LogLevel::Warn,
+                    "api",
+                    format!("user '{}' turned off two-factor login", user.username),
+                );
+            }
+            StatusCode::NO_CONTENT.into_response()
+        }
+        Err(e) => map_err(e),
+    }
+}
+
+// ---- Personal API tokens ---------------------------------------------------
+
+#[derive(Deserialize)]
+pub struct ApiTokenInput {
+    name: String,
+    #[serde(default)]
+    read_only: bool,
+    /// Days until the token stops working; 0 or absent: never.
+    #[serde(default)]
+    expires_in_days: u32,
+}
+
+/// `GET /api/auth/tokens` - the signed-in account's API tokens.
+pub async fn list_api_tokens(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+) -> Response {
+    let user = match session_user(&state, &headers) {
+        Ok(u) => u,
+        Err(r) => return r,
+    };
+    match state.catalog.store().list_api_tokens(&user.username) {
+        Ok(tokens) => Json(tokens).into_response(),
+        Err(e) => map_err(e),
+    }
+}
+
+/// `POST /api/auth/tokens` `{name, read_only, expires_in_days}` - make an
+/// API token for the signed-in account. The token is returned only now.
+pub async fn create_api_token(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    axum::Json(input): axum::Json<ApiTokenInput>,
+) -> Response {
+    let user = match session_user(&state, &headers) {
+        Ok(u) => u,
+        Err(r) => return r,
+    };
+    let name = input.name.trim().to_string();
+    if name.is_empty() || name.chars().count() > 64 {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "give the token a name (up to 64 characters)",
+        );
+    }
+    if input.expires_in_days > 3650 {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "a token can last at most 3650 days",
+        );
+    }
+    let store = state.catalog.store();
+    match store.list_api_tokens(&user.username) {
+        Ok(tokens) if tokens.len() >= 50 => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "an account can have at most 50 API tokens: delete some first",
+            )
+        }
+        Ok(_) => {}
+        Err(e) => return map_err(e),
+    }
+    let now = unix_now() as i64;
+    let secret = crate::new_api_token();
+    let token = daygle_dns_authoritative::store::ApiToken {
+        id: format!("{:016x}", rand::random::<u64>()),
+        username: user.username.clone(),
+        name: name.clone(),
+        token_hash: daygle_dns_core::auth::hash_token(&secret),
+        read_only: input.read_only || user.role == daygle_dns_core::config::Role::Viewer,
+        created_at: now,
+        last_used_at: 0,
+        expires_at: if input.expires_in_days == 0 {
+            0
+        } else {
+            now + i64::from(input.expires_in_days) * 86_400
+        },
+    };
+    if let Err(e) = store.create_api_token(&token) {
+        return map_err(e);
+    }
+    state.logs.info(
+        "api",
+        format!("user '{}' created API token '{name}'", user.username),
+    );
+    let mut body = serde_json::to_value(&token).expect("token serializes");
+    body["token"] = serde_json::json!(secret);
+    (StatusCode::CREATED, Json(body)).into_response()
+}
+
+/// `DELETE /api/auth/tokens/{id}` - revoke one of the signed-in account's
+/// API tokens.
+pub async fn delete_api_token(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<String>,
+) -> Response {
+    let user = match session_user(&state, &headers) {
+        Ok(u) => u,
+        Err(r) => return r,
+    };
+    match state.catalog.store().delete_api_token(&user.username, &id) {
+        Ok(true) => {
+            state.logs.info(
+                "api",
+                format!("user '{}' revoked an API token", user.username),
+            );
+            StatusCode::NO_CONTENT.into_response()
+        }
+        Ok(false) => error_response(StatusCode::NOT_FOUND, "no such token"),
+        Err(e) => map_err(e),
+    }
+}
+
+/// `DELETE /api/users/{username}/two-factor` (admin) - turn two-factor
+/// login off for an account that lost its authenticator app and recovery
+/// codes. It signs in with its password alone until it sets it up again.
+pub async fn reset_user_two_factor(
+    State(state): State<AppState>,
+    Path(username): Path<String>,
+) -> Response {
+    let store = state.catalog.store();
+    match store.get_console_user(&username) {
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            return error_response(
+                StatusCode::NOT_FOUND,
+                format!("user '{username}' not found"),
+            )
+        }
+        Err(e) => return map_err(e),
+    }
+    match store.disable_two_factor(&username) {
+        Ok(was_on) => {
+            if was_on {
+                state.sessions.revoke_user(&username);
+                state.logs.push(
+                    daygle_dns_core::LogLevel::Warn,
+                    "api",
+                    format!("two-factor login reset for user '{username}'"),
+                );
+            }
+            StatusCode::NO_CONTENT.into_response()
+        }
+        Err(e) => map_err(e),
+    }
 }
 
 fn bearer_token(headers: &axum::http::HeaderMap) -> Option<String> {
@@ -2662,6 +3480,14 @@ pub async fn auth_setup(
     let token = state
         .sessions
         .create(&username, daygle_dns_core::config::Role::Admin, ttl);
+    crate::audit::record_sign_in(
+        &state,
+        "/auth/setup",
+        &username,
+        None,
+        "Created the first administrator",
+        200,
+    );
     state.logs.push(
         daygle_dns_core::LogLevel::Info,
         "api",
@@ -2924,6 +3750,12 @@ pub struct SettingsUpdate {
     pub ai: Option<AiUpdate>,
     pub display: Option<DisplayUpdate>,
     pub web: Option<WebUpdate>,
+    /// Replaces the whole `[syslog]` section.
+    pub syslog: Option<daygle_dns_core::config::SyslogSettings>,
+    /// Replaces the whole `[dns64]` section.
+    pub dns64: Option<daygle_dns_core::config::Dns64Settings>,
+    /// Replaces the whole `[ecs]` section.
+    pub ecs: Option<daygle_dns_core::config::EcsSettings>,
 }
 
 /// Partial update for how the web console is served (HTTP and/or HTTPS).
@@ -2969,6 +3801,10 @@ pub struct AuthoritativeUpdate {
     pub notify_listen_enabled: Option<bool>,
     /// Replaces the whole stub-zone list.
     pub stub_zones: Option<Vec<daygle_dns_core::config::StubZoneConfig>>,
+    /// The catalog zone to publish; blank stops publishing it.
+    pub catalog_zone: Option<String>,
+    /// Replaces the whole list of consumed catalog zones.
+    pub catalog_consumers: Option<Vec<daygle_dns_core::config::CatalogConsumerConfig>>,
 }
 
 /// Partial update for policy-engine settings surfaced in the console (only the
@@ -3326,6 +4162,44 @@ pub async fn update_settings(
             config.api.cors_origins = v.clone();
         }
     }
+    if let Some(dns64) = &update.dns64 {
+        let dns64 = daygle_dns_core::config::Dns64Settings {
+            prefix: dns64.prefix.trim().to_string(),
+            clients: dns64
+                .clients
+                .iter()
+                .map(|c| c.trim().to_string())
+                .filter(|c| !c.is_empty())
+                .collect(),
+            ..dns64.clone()
+        };
+        if let Err(msg) = dns64.compile() {
+            return error_response(StatusCode::BAD_REQUEST, format!("dns64: {msg}"));
+        }
+        config.dns64 = dns64;
+    }
+    if let Some(ecs) = &update.ecs {
+        let ecs = daygle_dns_core::config::EcsSettings {
+            subnet: ecs.subnet.trim().to_string(),
+            ..ecs.clone()
+        };
+        if let Err(msg) = ecs.compile() {
+            return error_response(StatusCode::BAD_REQUEST, format!("ecs: {msg}"));
+        }
+        config.ecs = ecs;
+    }
+    if let Some(syslog) = &update.syslog {
+        let syslog = daygle_dns_core::config::SyslogSettings {
+            server: syslog.server.trim().to_string(),
+            facility: syslog.facility.trim().to_string(),
+            level: syslog.level.trim().to_string(),
+            ..syslog.clone()
+        };
+        if let Err(msg) = syslog.check() {
+            return error_response(StatusCode::BAD_REQUEST, format!("syslog: {msg}"));
+        }
+        config.syslog = syslog;
+    }
     if let Some(w) = &update.web {
         if let Some(v) = w.http_enabled {
             config.web.http_enabled = v;
@@ -3447,6 +4321,13 @@ pub async fn update_settings(
         if let Some(v) = &a.stub_zones {
             config.authoritative.stub_zones =
                 daygle_dns_core::config::AuthoritativeUpdate::normalize_stub_zones(v);
+        }
+        if let Some(v) = &a.catalog_zone {
+            config.authoritative.catalog_zone = daygle_dns_core::config::normalize_zone_name(v);
+        }
+        if let Some(v) = &a.catalog_consumers {
+            config.authoritative.catalog_consumers =
+                daygle_dns_core::config::AuthoritativeUpdate::normalize_catalog_consumers(v);
         }
     }
     let mut policy_changed = false;
@@ -3626,6 +4507,18 @@ pub async fn update_settings(
     // policy) so the change applies to in-flight DNS traffic immediately,
     // not just after a restart. NOTIFY hooks are startup-built and need a
     // restart; the persisted config already carries them.
+    // The published catalog zone is rebuilt at once; consumed catalogs are
+    // read from the live config by their refresh loop.
+    if old_config.authoritative.catalog_zone != config.authoritative.catalog_zone {
+        if let Err(e) = state
+            .catalog
+            .set_catalog_zone(&config.authoritative.catalog_zone)
+        {
+            state
+                .logs
+                .warn("api", format!("cannot publish the catalog zone: {e}"));
+        }
+    }
     if authoritative_changed {
         state.catalog.update_gate_settings(
             config.authoritative.axfr_enabled,
@@ -3769,11 +4662,25 @@ fn certificate_json(
 /// only; PEM material is never returned to the GUI).
 pub async fn list_certificates(State(state): State<AppState>) -> Response {
     let refs = certificate_references(&state.config.load_full());
-    let list = match state.catalog.store().list_tls_certificates() {
+    let store = state.catalog.store();
+    let list = match store.list_tls_certificates() {
         Ok(list) => list,
         Err(e) => return map_err(e),
     };
-    let items: Vec<serde_json::Value> = list
+    let mut acme: std::collections::BTreeMap<String, _> = match store.list_acme_certificates() {
+        Ok(certs) => certs.into_iter().map(|c| (c.name.clone(), c)).collect(),
+        Err(e) => return map_err(e),
+    };
+    let acme_json = |cert: &daygle_dns_authoritative::store::AcmeCertificate| {
+        serde_json::json!({
+            "domains": cert.domains,
+            "challenge": cert.challenge,
+            "status": if state.acme.is_issuing(&cert.name) { "pending" } else { cert.status.as_str() },
+            "last_error": cert.last_error,
+            "last_attempt": cert.last_attempt,
+        })
+    };
+    let mut items: Vec<serde_json::Value> = list
         .iter()
         .map(|cert| {
             let in_use: Vec<&'static str> = refs
@@ -3781,9 +4688,31 @@ pub async fn list_certificates(State(state): State<AppState>) -> Response {
                 .filter(|(name, _)| name == &cert.name)
                 .map(|(_, label)| *label)
                 .collect();
-            certificate_json(cert, in_use)
+            let mut value = certificate_json(cert, in_use);
+            value["acme"] = acme
+                .remove(&cert.name)
+                .as_ref()
+                .map_or(serde_json::Value::Null, acme_json);
+            value
         })
         .collect();
+    // Requested but not issued yet.
+    for cert in acme.values() {
+        items.push(serde_json::json!({
+            "name": cert.name,
+            "server_name": cert.domains.first(),
+            "created_at": null,
+            "in_use": [],
+            "subject": null,
+            "issuer": null,
+            "self_signed": null,
+            "names": cert.domains,
+            "not_before": null,
+            "not_after": null,
+            "acme": acme_json(cert),
+        }));
+    }
+    items.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
     Json(items).into_response()
 }
 
@@ -3826,6 +4755,17 @@ pub async fn create_certificate(
         }
     };
 
+    // An ACME certificate is replaced by its CA, not by hand.
+    match state.catalog.store().get_acme_certificate(&name) {
+        Ok(Some(_)) => {
+            return error_response(
+                StatusCode::CONFLICT,
+                format!("certificate '{name}' comes from an ACME CA and renews itself; delete it first to replace it"),
+            )
+        }
+        Ok(None) => {}
+        Err(e) => return map_err(e),
+    }
     let cert = daygle_dns_authoritative::TlsCertificate {
         name: name.clone(),
         server_name,
@@ -3833,12 +4773,26 @@ pub async fn create_certificate(
         key_pem,
         created_at: chrono::Utc::now().to_rfc3339(),
     };
-    if let Err(e) = state.catalog.store().put_tls_certificate(&cert) {
+    if let Err(e) = install_certificate(&state, cert.clone()).await {
         return map_err(e);
     }
 
-    // Refresh listeners that reference this certificate so a replacement
-    // takes effect immediately.
+    let in_use: Vec<&'static str> = certificate_references(&state.config.load_full())
+        .into_iter()
+        .filter(|(n, _)| n == &name)
+        .map(|(_, l)| l)
+        .collect();
+    Json(certificate_json(&cert, in_use)).into_response()
+}
+
+/// Store a certificate and refresh the listeners that use it, so a
+/// replacement (an upload, or an ACME renewal) applies straight away.
+pub(crate) async fn install_certificate(
+    state: &AppState,
+    cert: daygle_dns_authoritative::TlsCertificate,
+) -> Result<(), daygle_dns_core::error::DaygleError> {
+    let name = cert.name.clone();
+    state.catalog.store().put_tls_certificate(&cert)?;
     let referenced = certificate_references(&state.config.load_full())
         .into_iter()
         .any(|(n, _)| n == name);
@@ -3868,13 +4822,152 @@ pub async fn create_certificate(
             }
         ),
     );
+    Ok(())
+}
 
-    let in_use: Vec<&'static str> = certificate_references(&state.config.load_full())
-        .into_iter()
-        .filter(|(n, _)| n == &name)
-        .map(|(_, l)| l)
-        .collect();
-    Json(certificate_json(&cert, in_use)).into_response()
+// ---- ACME (Let's Encrypt) ---------------------------------------------------
+
+/// `GET /.well-known/acme-challenge/{token}` - HTTP-01 challenge answers
+/// while an ACME certificate is being issued.
+pub async fn acme_http_challenge(
+    State(state): State<AppState>,
+    Path(token): Path<String>,
+) -> Response {
+    match state.acme.http_response(&token) {
+        Some(answer) => {
+            ([(header::CONTENT_TYPE, "application/octet-stream")], answer).into_response()
+        }
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+/// `GET /api/acme` - the ACME settings.
+pub async fn get_acme_settings(State(state): State<AppState>) -> Response {
+    let settings = crate::acme::settings(&state);
+    Json(serde_json::json!({
+        "settings": settings,
+        "directory_url": settings.directory_url(),
+        "lets_encrypt": crate::acme::LETS_ENCRYPT,
+        "lets_encrypt_staging": crate::acme::LETS_ENCRYPT_STAGING,
+    }))
+    .into_response()
+}
+
+/// `PUT /api/acme` - save the ACME settings.
+pub async fn put_acme_settings(
+    State(state): State<AppState>,
+    axum::Json(settings): axum::Json<crate::acme::AcmeSettings>,
+) -> Response {
+    let settings = crate::acme::AcmeSettings {
+        email: settings.email.trim().to_string(),
+        directory: settings.directory.trim().to_string(),
+        ..settings
+    };
+    match crate::acme::save_settings(&state, &settings) {
+        Ok(()) => get_acme_settings(State(state)).await,
+        Err(e) => error_response(StatusCode::BAD_REQUEST, e),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct AcmeCertificateInput {
+    name: String,
+    domains: Vec<String>,
+    #[serde(default)]
+    challenge: String,
+}
+
+/// Start issuing an ACME certificate in the background.
+fn spawn_acme_issue(state: &AppState, name: String) {
+    let state = state.clone();
+    tokio::spawn(async move {
+        let _ = crate::acme::issue(&state, &name).await;
+    });
+}
+
+/// `POST /api/certificates/acme` `{name, domains, challenge}` - request a
+/// certificate from the ACME CA. Issuing runs in the background (`202`);
+/// the certificate list shows how it went.
+pub async fn request_acme_certificate(
+    State(state): State<AppState>,
+    axum::Json(input): axum::Json<AcmeCertificateInput>,
+) -> Response {
+    let name = input.name.trim().to_string();
+    if let Err(msg) = validate_certificate_name(&name) {
+        return error_response(StatusCode::BAD_REQUEST, msg);
+    }
+    let challenge = match input.challenge.trim() {
+        "" | "http" => "http",
+        "dns" => "dns",
+        other => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                format!("unknown challenge '{other}': use http or dns"),
+            )
+        }
+    };
+    let domains = match crate::acme::check_domains(&input.domains, challenge) {
+        Ok(d) => d,
+        Err(e) => return error_response(StatusCode::BAD_REQUEST, e),
+    };
+    if !crate::acme::settings(&state).agree_terms {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "accept the CA's terms of service in the Let's Encrypt settings first",
+        );
+    }
+    let store = state.catalog.store();
+    match (
+        store.get_tls_certificate(&name),
+        store.get_acme_certificate(&name),
+    ) {
+        (Ok(None), Ok(None)) => {}
+        (Ok(_), Ok(_)) => {
+            return error_response(
+                StatusCode::CONFLICT,
+                format!("a certificate named '{name}' already exists"),
+            )
+        }
+        (Err(e), _) | (_, Err(e)) => return map_err(e),
+    }
+    let cert = daygle_dns_authoritative::store::AcmeCertificate {
+        name: name.clone(),
+        domains,
+        challenge: challenge.to_string(),
+        status: "pending".to_string(),
+        last_error: String::new(),
+        last_attempt: 0,
+    };
+    if let Err(e) = store.put_acme_certificate(&cert) {
+        return map_err(e);
+    }
+    spawn_acme_issue(&state, name);
+    (StatusCode::ACCEPTED, Json(cert)).into_response()
+}
+
+/// `POST /api/certificates/{name}/renew` - renew an ACME certificate now.
+pub async fn renew_acme_certificate(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> Response {
+    match state.catalog.store().get_acme_certificate(&name) {
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            return error_response(
+                StatusCode::NOT_FOUND,
+                format!("'{name}' is not an ACME certificate"),
+            )
+        }
+        Err(e) => return map_err(e),
+    }
+    if state.acme.is_issuing(&name) {
+        return error_response(
+            StatusCode::CONFLICT,
+            format!("certificate '{name}' is already being requested"),
+        );
+    }
+    spawn_acme_issue(&state, name);
+    StatusCode::ACCEPTED.into_response()
 }
 
 /// `DELETE /api/certificates/{name}` - remove a managed certificate. A

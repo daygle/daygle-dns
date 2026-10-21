@@ -452,6 +452,20 @@
     }
   }
 
+  // Switch a signed zone between NSEC and NSEC3 proofs of non-existence.
+  async function toggleNsec3(zone) {
+    clearMessages();
+    try {
+      await api.signZone(zone.id, { nsec3: !zone.nsec3 });
+      notice = zone.nsec3
+        ? `${zone.name} now proves missing names with NSEC.`
+        : `${zone.name} now proves missing names with NSEC3 (hashed names, so the zone cannot be listed by walking it).`;
+      await loadZones();
+    } catch (e) {
+      error = formatApiError(e);
+    }
+  }
+
   // Download the zone as a BIND-style zone file (a full backup that imports
   // back through Add Zone).
   async function exportZone(zone) {
@@ -520,18 +534,23 @@
             <td><code>{zone.name}</code></td>
             <td><span class="pill">{zone.zone_type === 'secondary' ? 'Secondary' : 'Primary'}</span></td>
             <td class="muted">
-              Serial {zone.serial}{#if zone.zone_type === 'secondary' && zone.masters?.length}{` · from ${zone.masters.join(', ')}`}{/if}
+              Serial {zone.serial}{#if zone.zone_type === 'secondary' && zone.masters?.length}{` · from ${zone.masters.join(', ')}`}{/if}{#if zone.catalog}{` · catalog ${zone.catalog}`}{/if}
             </td>
-            <td><span class:pill={true} class:ok={zone.dnssec}>{zone.dnssec ? 'Signed' : 'Unsigned'}</span></td>
+            <td><span class:pill={true} class:ok={zone.dnssec}>{zone.dnssec ? (zone.nsec3 ? 'Signed · NSEC3' : 'Signed · NSEC') : 'Unsigned'}</span></td>
             <td class="num">
               <div class="row" style="gap: 6px; justify-content: flex-end">
                 <button class="secondary" onclick={() => onOpenRecords(zone.id)}>Records</button>
                 {#if zone.zone_type !== 'secondary'}
                   <button class="secondary" onclick={() => openSoa(zone)} title="Edit the zone's SOA (nameserver, contact, timers)">SOA</button>
                   <button class="secondary" onclick={() => toggleSign(zone)} title={zone.dnssec ? 'Stop DNSSEC signing' : 'Sign the zone with DNSSEC'}>{zone.dnssec ? 'Unsign' : 'Sign'}</button>
+                  {#if zone.dnssec}
+                    <button class="secondary" onclick={() => toggleNsec3(zone)} title={zone.nsec3 ? 'Prove missing names with NSEC' : 'Prove missing names with NSEC3, which keeps the zone from being listed by walking it'}>{zone.nsec3 ? 'Use NSEC' : 'Use NSEC3'}</button>
+                  {/if}
                 {/if}
                 <button class="secondary" onclick={() => exportZone(zone)} title="Download as a zone file">Export</button>
-                <button class="danger" onclick={() => removeZone(zone)} aria-label="Delete {zone.name}">✕</button>
+                {#if !zone.catalog}
+                  <button class="danger" onclick={() => removeZone(zone)} aria-label="Delete {zone.name}">✕</button>
+                {/if}
               </div>
             </td>
           </tr>

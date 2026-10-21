@@ -17,6 +17,7 @@ use daygle_dns_core::config::{IpVersions, RecursiveSettings, REBINDING_DENY_NETW
 use daygle_dns_core::error::{DaygleError, Result};
 use daygle_dns_core::Metrics;
 use hickory_proto::op::{Query, ResponseCode};
+use hickory_proto::rr::rdata::opt::{ClientSubnet, EdnsOption};
 use hickory_proto::rr::{Name, RecordType};
 use hickory_resolver::config::{
     ConnectionConfig, OpportunisticEncryption, OpportunisticEncryptionConfig, ProtocolConfig,
@@ -78,6 +79,10 @@ pub struct UpstreamConnections {
     port_override: Option<u16>,
     /// Counts outbound connections by transport for the dashboard.
     metrics: Option<Arc<Metrics>>,
+    /// Add the EDNS Client Subnet option set by [`with_client_subnet`]
+    /// (forwarding only: walking the hierarchy would hand the client's
+    /// network to every root and TLD server).
+    client_subnet: bool,
 }
 
 impl UpstreamConnections {
@@ -85,6 +90,7 @@ impl UpstreamConnections {
     pub fn forwarding(metrics: Arc<Metrics>) -> Self {
         Self {
             metrics: Some(metrics),
+            client_subnet: true,
             ..Self::default()
         }
     }
@@ -93,6 +99,15 @@ impl UpstreamConnections {
 tokio::task_local! {
     /// Set when the lookup running in this task sends a query upstream.
     static SENT_UPSTREAM: std::cell::Cell<bool>;
+    /// The EDNS Client Subnet (RFC 7871) to send upstream for the lookup
+    /// running in this task.
+    static CLIENT_SUBNET: Option<IpNet>;
+}
+
+/// Run a lookup sending `subnet` upstream as its EDNS Client Subnet (to
+/// forwarding upstreams; the subnet's host bits must be zero).
+pub async fn with_client_subnet<F: Future>(subnet: Option<IpNet>, lookup: F) -> F::Output {
+    CLIENT_SUBNET.scope(subnet, lookup).await
 }
 
 /// Run a lookup and report whether it sent any query upstream. A lookup
@@ -109,25 +124,41 @@ pub async fn track_upstream<F: Future>(lookup: F) -> (F::Output, bool) {
 /// A connection handle that flags each request it sends (see
 /// [`track_upstream`]).
 #[derive(Clone)]
-pub struct TrackedConn<C>(C);
+pub struct TrackedConn<C> {
+    conn: C,
+    client_subnet: bool,
+}
 
 impl<C: DnsHandle> DnsHandle for TrackedConn<C> {
     type Response = C::Response;
     type Runtime = C::Runtime;
 
     fn is_verifying_dnssec(&self) -> bool {
-        self.0.is_verifying_dnssec()
+        self.conn.is_verifying_dnssec()
     }
 
     fn is_using_edns(&self) -> bool {
-        self.0.is_using_edns()
+        self.conn.is_using_edns()
     }
 
-    fn send(&self, request: DnsRequest) -> Self::Response {
+    fn send(&self, mut request: DnsRequest) -> Self::Response {
         // Outside a tracked lookup (prefetch refreshes, probes) there is
         // nothing to flag.
         let _ = SENT_UPSTREAM.try_with(|sent| sent.set(true));
-        self.0.send(request)
+        if self.client_subnet {
+            if let Ok(Some(subnet)) = CLIENT_SUBNET.try_with(|s| *s) {
+                // Only on requests already using EDNS (not a retry without).
+                if let Some(edns) = request.edns.as_mut() {
+                    edns.options_mut()
+                        .insert(EdnsOption::Subnet(ClientSubnet::new(
+                            subnet.network(),
+                            subnet.prefix_len(),
+                            0,
+                        )));
+                }
+            }
+        }
+        self.conn.send(request)
     }
 }
 
@@ -175,7 +206,13 @@ impl ConnectionProvider for UpstreamConnections {
             }
             None => self.runtime.new_connection(ip, config, cx)?,
         };
-        Ok(Box::pin(async move { connecting.await.map(TrackedConn) }))
+        let client_subnet = self.client_subnet;
+        Ok(Box::pin(async move {
+            connecting.await.map(|conn| TrackedConn {
+                conn,
+                client_subnet,
+            })
+        }))
     }
 
     fn runtime_provider(&self) -> &Self::RuntimeProvider {

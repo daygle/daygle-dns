@@ -4,11 +4,14 @@
 //! [`DnsDispatcher`] and a [`bind`] helper that wires every subsystem into a
 //! runnable server. The `daygle-dns` binary is a thin CLI wrapper around this.
 
+pub mod cookies;
 pub mod dispatcher;
 mod doq;
 mod net;
+pub mod proxy_protocol;
 pub mod query_db_log;
 pub mod reload;
+pub mod syslog;
 pub mod web;
 
 use std::path::PathBuf;
@@ -167,6 +170,19 @@ pub async fn bind_with(
     let started_at = std::time::Instant::now();
     let shutdown = CancellationToken::new();
 
+    // A restore staged from the console or `daygle-dns restore` replaces
+    // the database before it is opened.
+    let restored = match daygle_dns_authoritative::backup::apply_pending_restore(
+        &config.authoritative.database,
+    ) {
+        Ok(aside) => aside,
+        Err(e) => {
+            warn!("{e}");
+            logs.push(daygle_dns_core::LogLevel::Error, "backup", e.to_string());
+            None
+        }
+    };
+
     // Authoritative.
     let store = daygle_dns_authoritative::ZoneStore::open(&config.authoritative.database)?;
     let catalog = Arc::new(AuthorityCatalog::new(
@@ -203,6 +219,8 @@ pub async fn bind_with(
     // Note: no `validate()` here - `bind` accepts pre-validated configs, and
     // test setups legitimately use ephemeral port 0.
     let config = Arc::new(config);
+    // Shared, atomically-swappable runtime config.
+    let config_swap = Arc::new(ArcSwap::from(config.clone()));
 
     // Console accounts live in the database (the GUI manages them at
     // runtime). `[[api.users]]` entries in the config file are a seed source:
@@ -272,6 +290,30 @@ pub async fn bind_with(
         Some(refresher)
     };
 
+    // Health checks on failover records.
+    let health = Arc::new(daygle_dns_authoritative::HealthMonitor::new(
+        catalog.clone(),
+    ));
+    tokio::spawn(health.clone().run_forever(shutdown.clone()));
+
+    // Consumed catalog zones (RFC 9432): their member zones become
+    // secondary zones, refreshed by the refresher above.
+    let catalog_consumer = refresher.clone().map(|refresher| {
+        let consumer = Arc::new(daygle_dns_authoritative::CatalogConsumer::new(
+            store.clone(),
+            catalog.clone(),
+            refresher,
+            daygle_dns_authoritative::XfrClient::default(),
+            config_swap.clone(),
+        ));
+        tokio::spawn({
+            let consumer = consumer.clone();
+            let shutdown = shutdown.clone();
+            async move { consumer.run_forever(shutdown).await }
+        });
+        consumer
+    });
+
     // Outbound NOTIFY: sent to secondaries when a primary zone changes.
     let notify_sender = if config.authoritative.notify_enabled {
         match daygle_dns_authoritative::NotifySender::new(&config.authoritative.notify_targets) {
@@ -292,12 +334,16 @@ pub async fn bind_with(
         config.authoritative.notify_listen_enabled,
         refresher.clone(),
     ) {
-        (true, Some(refresher)) => Some(Arc::new(
-            daygle_dns_authoritative::notify::NotifyInbound::new(
+        (true, Some(refresher)) => {
+            let inbound = daygle_dns_authoritative::notify::NotifyInbound::new(
                 config.authoritative.secondary_zones.clone(),
                 refresher,
-            ),
-        )),
+            );
+            Some(Arc::new(match &catalog_consumer {
+                Some(consumer) => inbound.with_catalogs(consumer.clone()),
+                None => inbound,
+            }))
+        }
         (true, None) => {
             warn!(
                 "notify_listen_enabled is set but no secondary zones are configured; \
@@ -307,6 +353,25 @@ pub async fn bind_with(
         }
         _ => None,
     };
+    // The published catalog zone: NOTIFY its secondaries when its member
+    // list changes (the catalog's name is read live, as it can change).
+    if let Some(sender) = notify_sender.clone() {
+        let changed = catalog.catalog_zone_changed();
+        let catalog = catalog.clone();
+        let shutdown = shutdown.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = shutdown.cancelled() => return,
+                    _ = changed.notified() => {}
+                }
+                let name = catalog.settings().catalog_zone.clone();
+                if !name.is_empty() {
+                    sender.notify_zone(&name).await;
+                }
+            }
+        });
+    }
     let notify_hooks = daygle_dns_authoritative::notify::NotifyHooks {
         sender: notify_sender,
         inbound: notify_inbound,
@@ -336,6 +401,26 @@ pub async fn bind_with(
 
     // Policy.
     let mut policy = daygle_dns_policy::build_engine(&config.policy)?;
+
+    // Finish a restore: the backup's AI overrides go into the AI database
+    // (whose path may come from the restored settings).
+    if let Some(aside) = &restored {
+        let ai_database = daygle_dns_ml::database_path(&config.ai, &config.authoritative.database);
+        if let Err(e) = store.finish_restore(&ai_database) {
+            warn!("restore: {e}");
+            logs.push(
+                daygle_dns_core::LogLevel::Error,
+                "backup",
+                format!("restore: {e}"),
+            );
+        }
+        let message = format!(
+            "restored from a backup; the previous database was kept as {}",
+            aside.display()
+        );
+        info!("{message}");
+        logs.push(daygle_dns_core::LogLevel::Info, "backup", message);
+    }
 
     // AI subsystem (daygle-dns-ml): a CPU-only background classifier over
     // domains observed in the query log. Opt-in via `[ai] enabled = true`.
@@ -403,7 +488,13 @@ pub async fn bind_with(
             .map_err(DaygleError::Config)?,
     );
 
-    // Shared, atomically-swappable runtime state.
+    // Remote logging: the server log goes to syslog when `[syslog]` is on
+    // (settings are read per line, so console changes apply at once).
+    let syslog = syslog::SyslogSender::start(config_swap.clone(), shutdown.clone());
+    logs.set_forwarder({
+        let syslog = syslog.clone();
+        Arc::new(move |entry| syslog.log_entry(entry))
+    });
     let shared = Arc::new(Shared {
         catalog: catalog.clone(),
         policy: Arc::new(ArcSwap::from_pointee(policy)),
@@ -411,7 +502,7 @@ pub async fn bind_with(
         query_logger: query_logger.clone(),
         query_db_logger: query_db_logger.clone(),
         resolver: Arc::new(arc_swap::ArcSwapOption::from(resolver.clone())),
-        config: Arc::new(ArcSwap::from(config.clone())),
+        config: config_swap,
         rate_limiter: rate_limiter.clone(),
         metrics: metrics.clone(),
         logs: logs.clone(),
@@ -419,6 +510,7 @@ pub async fn bind_with(
         notify_hooks: notify_hooks.clone(),
         tsig_keys: tsig_keys.clone(),
         local_root: local_root.clone(),
+        syslog: Some(syslog),
     });
 
     // DNS listeners (bound immediately so the server serves right away).
@@ -495,7 +587,7 @@ pub async fn bind_with(
             })
         })
     };
-    let app = router(AppState {
+    let app_state = AppState {
         catalog: catalog.clone(),
         resolver: shared.resolver.clone(),
         metrics: metrics.clone(),
@@ -504,18 +596,26 @@ pub async fn bind_with(
         policy: shared.policy.clone(),
         advanced_blocking: shared.advanced_blocking.clone(),
         secondary_refresher: refresher.clone(),
+        health: Some(health.clone()),
         local_root: local_root.clone(),
         blocklist_sources: blocklist_sources.clone(),
         started_at,
         config_path: config_path.clone().map(Arc::new),
         reload_notify,
-        sessions: Arc::new(daygle_dns_api::SessionStore::default()),
+        sessions: Arc::new(daygle_dns_api::SessionStore::with_store(store.clone())),
         login_throttle: Arc::new(daygle_dns_api::LoginThrottle::default()),
         request_dns_rebuild: Some(request_dns_rebuild),
         web_apply: Some(web_apply),
         stats: stats.clone(),
         ai: ai_engine.clone(),
-    });
+        acme: Arc::new(daygle_dns_api::acme::Acme::default()),
+    };
+    // Issue and renew ACME (Let's Encrypt) certificates in the background.
+    tokio::spawn(daygle_dns_api::acme::run_renewals(
+        app_state.clone(),
+        shutdown.clone(),
+    ));
+    let app = router(app_state);
     let web = Arc::new(web::WebServer::new(
         app,
         catalog.clone(),
@@ -709,6 +809,9 @@ fn build_dispatcher(shared: &Shared, config: &DaygleConfig) -> DnsDispatcher {
         shared.stats.clone(),
     )
     .with_client_timeout(Duration::from_millis(config.server.client_timeout_ms))
+    .with_cookies(config.server.dns_cookies)
+    .with_config(shared.config.clone())
+    .with_syslog(shared.syslog.clone())
     .with_advanced_blocking(shared.advanced_blocking.clone())
     .with_query_logger(shared.query_logger.clone())
     .with_query_db_logger(shared.query_db_logger.clone())
@@ -898,6 +1001,29 @@ async fn bind_listeners(
     // DoQ task, spawned below when QUIC is enabled.
     let mut doq_task = None;
 
+    // PROXY protocol: TCP-based listeners are fronted (see
+    // `proxy_protocol`), and Hickory serves a hidden loopback listener.
+    let proxy_trusted: Option<Arc<Vec<ipnet::IpNet>>> = (!config.server.proxy_protocol.is_empty())
+        .then(|| {
+            Arc::new(
+                config
+                    .server
+                    .proxy_protocol
+                    .iter()
+                    .filter_map(|n| daygle_dns_core::config::parse_network(n))
+                    .collect(),
+            )
+        });
+    let token = server.shutdown_token().clone();
+    let serve = |public: tokio::net::TcpListener| -> Result<tokio::net::TcpListener> {
+        let Some(trusted) = &proxy_trusted else {
+            return Ok(public);
+        };
+        let hidden = net::bind_tcp(([127, 0, 0, 1], 0).into(), false)?;
+        proxy_protocol::spawn_front(public, hidden.local_addr()?, trusted.clone(), token.clone());
+        Ok(hidden)
+    };
+
     // `addrs` records the first address of each listener.
     if config.server.udp_enabled {
         let buffer_bytes = |kb: u32| {
@@ -936,7 +1062,7 @@ async fn bind_listeners(
             let bound = listener.local_addr()?;
             addrs.tcp.get_or_insert(bound);
             server.register_listener(
-                listener,
+                serve(listener)?,
                 Duration::from_millis(config.server.tcp_timeout_ms),
                 config.server.response_buffer_size,
             );
@@ -953,7 +1079,7 @@ async fn bind_listeners(
             addrs.dot.get_or_insert(bound);
             daygle_dns_dot::register_dot(
                 server,
-                listener,
+                serve(listener)?,
                 tls_config.clone(),
                 Duration::from_secs(config.dot.handshake_timeout_secs),
             )?;
@@ -970,7 +1096,7 @@ async fn bind_listeners(
             addrs.doh.get_or_insert(bound);
             daygle_dns_dot::register_doh(
                 server,
-                listener,
+                serve(listener)?,
                 tls_config.clone(),
                 Duration::from_secs(config.doh.handshake_timeout_secs),
                 None,

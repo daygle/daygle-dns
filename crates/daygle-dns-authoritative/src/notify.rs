@@ -138,11 +138,23 @@ pub struct NotifyInbound {
     /// sender is one of the zone's configured masters.
     zones: Vec<SecondaryZoneConfig>,
     refresher: Arc<SecondaryRefresher>,
+    /// Consumed catalog zones, which a NOTIFY checks at once.
+    catalogs: Option<Arc<crate::catalog_zone::CatalogConsumer>>,
 }
 
 impl NotifyInbound {
     pub fn new(zones: Vec<SecondaryZoneConfig>, refresher: Arc<SecondaryRefresher>) -> Self {
-        Self { zones, refresher }
+        Self {
+            zones,
+            refresher,
+            catalogs: None,
+        }
+    }
+
+    /// Also accept NOTIFYs for the consumed catalog zones.
+    pub fn with_catalogs(mut self, catalogs: Arc<crate::catalog_zone::CatalogConsumer>) -> Self {
+        self.catalogs = Some(catalogs);
+        self
     }
 
     /// Process one NOTIFY request. Replies with the zone's current SOA and
@@ -169,10 +181,46 @@ impl NotifyInbound {
         }
 
         let zone = normalize(query.name().to_string());
+        let src_ip = request.src().ip().to_canonical();
+        let from_master = |masters: &[String]| {
+            masters.iter().any(|m| {
+                daygle_dns_core::config::parse_master_addr(m)
+                    .map(|addr| addr.ip() == src_ip)
+                    .unwrap_or(false)
+            })
+        };
+        // A consumed catalog zone: check it now.
+        if let Some(catalogs) = &self.catalogs {
+            if let Some(consumer) = catalogs.consumer(&zone).filter(|c| c.enabled) {
+                if !from_master(&consumer.masters) {
+                    debug!(zone = %zone, %src_ip, "catalog NOTIFY from a non-master address");
+                    return send_notify_reply(
+                        &mut response_handle,
+                        request,
+                        ResponseCode::NotImp,
+                        None,
+                    )
+                    .await;
+                }
+                info!(zone = %zone, %src_ip, "catalog zone NOTIFY received");
+                catalogs.wake(&zone);
+                return send_notify_reply(
+                    &mut response_handle,
+                    request,
+                    ResponseCode::NoError,
+                    None,
+                )
+                .await;
+            }
+        }
+        // Configured secondaries, then those added in the console or by a
+        // catalog zone.
         let Some(config) = self
             .zones
             .iter()
             .find(|c| c.enabled && normalize(c.name.clone()) == zone)
+            .cloned()
+            .or_else(|| self.refresher.zone_config(&zone).filter(|c| c.enabled))
         else {
             debug!(zone = %zone, src = %request.src(), "NOTIFY for unconfigured secondary zone");
             return send_notify_reply(&mut response_handle, request, ResponseCode::NotImp, None)
@@ -183,13 +231,7 @@ impl NotifyInbound {
         // (source ports are ephemeral, so compare IPs only). The refresh path
         // re-checks serials, so an accepted spoof could only cause an extra
         // SOA query - but there is no reason to accept one.
-        let src_ip = request.src().ip().to_canonical();
-        let is_master = config.masters.iter().any(|m| {
-            daygle_dns_core::config::parse_master_addr(m)
-                .map(|addr| addr.ip() == src_ip)
-                .unwrap_or(false)
-        });
-        if !is_master {
+        if !from_master(&config.masters) {
             debug!(zone = %zone, %src_ip, "NOTIFY from a non-master address");
             return send_notify_reply(&mut response_handle, request, ResponseCode::NotImp, None)
                 .await;
@@ -209,7 +251,6 @@ impl NotifyInbound {
         .await;
 
         let refresher = self.refresher.clone();
-        let config = config.clone();
         tokio::spawn(async move {
             match refresher.refresh_zone(&config).await {
                 Ok(true) => info!(zone = %config.name, "secondary zone refreshed after NOTIFY"),

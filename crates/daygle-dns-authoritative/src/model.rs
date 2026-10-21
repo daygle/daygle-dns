@@ -132,7 +132,7 @@ fn default_ttl() -> u32 {
 /// The set of record types Daygle understands.
 pub const KNOWN_RECORD_TYPES: &[&str] = &[
     "A", "AAAA", "CNAME", "MX", "TXT", "NS", "SOA", "SRV", "PTR", "CAA", "HTTPS", "SVCB", "DS",
-    "TLSA", "SSHFP", "NAPTR",
+    "TLSA", "SSHFP", "NAPTR", "ALIAS",
 ];
 
 /// One deletion in an RFC 2136 dynamic update: an RRset (name + type), a
@@ -313,4 +313,52 @@ pub enum MoveDirection {
     Up,
     /// Move later (lower precedence).
     Down,
+}
+
+/// A health check on an A or AAAA record: while it fails, the record is
+/// left out of answers in favour of its healthy siblings (see
+/// [`crate::catalog`]).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HealthCheck {
+    pub record_id: String,
+    /// `tcp` (a connection opens), `http` or `https` (a GET answers with a
+    /// status below 400).
+    pub kind: String,
+    pub port: u16,
+    /// Request path for HTTP(S) checks, e.g. `/health`.
+    #[serde(default)]
+    pub path: String,
+    /// Host name sent (Host header, and SNI for HTTPS); empty: the
+    /// record's own name.
+    #[serde(default)]
+    pub host: String,
+    /// Seconds between checks.
+    pub interval_secs: u32,
+}
+
+impl HealthCheck {
+    /// Check the fields, normalizing the path.
+    pub fn validate(&mut self) -> std::result::Result<(), String> {
+        self.kind = self.kind.trim().to_ascii_lowercase();
+        if !matches!(self.kind.as_str(), "tcp" | "http" | "https") {
+            return Err("kind must be tcp, http or https".to_string());
+        }
+        if self.port == 0 {
+            return Err("port must be 1 to 65535".to_string());
+        }
+        if !(5..=86_400).contains(&self.interval_secs) {
+            return Err("interval_secs must be 5 to 86400".to_string());
+        }
+        self.path = self.path.trim().to_string();
+        if self.kind == "tcp" {
+            self.path.clear();
+        } else if !self.path.starts_with('/') {
+            self.path.insert(0, '/');
+        }
+        self.host = self.host.trim().trim_end_matches('.').to_string();
+        if self.host.chars().any(|c| c.is_whitespace() || c == '/') {
+            return Err("host must be a host name".to_string());
+        }
+        Ok(())
+    }
 }

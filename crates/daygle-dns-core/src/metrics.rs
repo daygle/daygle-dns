@@ -262,6 +262,220 @@ impl Metrics {
     }
 }
 
+/// A gauge to add to the Prometheus output (values the counters here do
+/// not hold, such as uptime or the number of zones).
+pub struct Gauge<'a> {
+    pub name: &'a str,
+    pub help: &'a str,
+    pub value: f64,
+}
+
+impl Metrics {
+    /// Every counter in the Prometheus text exposition format (0.0.4),
+    /// followed by `gauges`. Names are prefixed `daygle_dns_`.
+    pub fn render_prometheus(&self, gauges: &[Gauge<'_>]) -> String {
+        use std::fmt::Write as _;
+        let mut out = String::with_capacity(4096);
+        let family = |out: &mut String, name: &str, kind: &str, help: &str| {
+            let _ = writeln!(out, "# HELP daygle_dns_{name} {help}");
+            let _ = writeln!(out, "# TYPE daygle_dns_{name} {kind}");
+        };
+        let get = |c: &AtomicU64| c.load(Ordering::Relaxed);
+
+        family(
+            &mut out,
+            "queries_total",
+            "counter",
+            "DNS queries received.",
+        );
+        let _ = writeln!(out, "daygle_dns_queries_total {}", get(&self.total_queries));
+
+        family(
+            &mut out,
+            "answers_total",
+            "counter",
+            "Queries by how they were answered.",
+        );
+        for (source, counter) in [
+            ("authoritative", &self.authoritative),
+            ("recursive", &self.recursive),
+            ("split_horizon", &self.split_horizon),
+            ("blocked", &self.blocked),
+            ("rate_limited", &self.rate_limited),
+            ("error", &self.errors),
+        ] {
+            let _ = writeln!(
+                out,
+                "daygle_dns_answers_total{{source=\"{source}\"}} {}",
+                get(counter)
+            );
+        }
+
+        family(
+            &mut out,
+            "cache_lookups_total",
+            "counter",
+            "Resolver cache lookups.",
+        );
+        let _ = writeln!(
+            out,
+            "daygle_dns_cache_lookups_total{{result=\"hit\"}} {}",
+            get(&self.cache_hits)
+        );
+        let _ = writeln!(
+            out,
+            "daygle_dns_cache_lookups_total{{result=\"miss\"}} {}",
+            get(&self.cache_misses)
+        );
+
+        family(
+            &mut out,
+            "dnssec_validated_total",
+            "counter",
+            "Recursive answers that passed DNSSEC validation.",
+        );
+        let _ = writeln!(
+            out,
+            "daygle_dns_dnssec_validated_total {}",
+            get(&self.dnssec_validated)
+        );
+
+        family(&mut out, "bytes_total", "counter", "DNS message bytes.");
+        let _ = writeln!(
+            out,
+            "daygle_dns_bytes_total{{direction=\"in\"}} {}",
+            get(&self.bytes_in)
+        );
+        let _ = writeln!(
+            out,
+            "daygle_dns_bytes_total{{direction=\"out\"}} {}",
+            get(&self.bytes_out)
+        );
+
+        let r = &self.resolver;
+        family(
+            &mut out,
+            "resolver_routes_total",
+            "counter",
+            "Recursive lookups by the route that answered them.",
+        );
+        for (route, counter) in [
+            ("recursive", &r.route_recursive),
+            ("forwarding", &r.route_forwarding),
+            ("conditional", &r.route_conditional),
+            ("stub", &r.route_stub),
+            ("client_policy", &r.route_client_policy),
+            ("local_root", &r.route_local_root),
+        ] {
+            let _ = writeln!(
+                out,
+                "daygle_dns_resolver_routes_total{{route=\"{route}\"}} {}",
+                get(counter)
+            );
+        }
+
+        family(
+            &mut out,
+            "resolver_responses_total",
+            "counter",
+            "Recursive lookups by outcome.",
+        );
+        for (outcome, counter) in [
+            ("noerror", &r.rcode_noerror),
+            ("nodata", &r.rcode_nodata),
+            ("nxdomain", &r.rcode_nxdomain),
+            ("servfail", &r.rcode_servfail),
+            ("refused", &r.rcode_refused),
+            ("other", &r.rcode_other),
+            ("failure", &r.failures),
+        ] {
+            let _ = writeln!(
+                out,
+                "daygle_dns_resolver_responses_total{{outcome=\"{outcome}\"}} {}",
+                get(counter)
+            );
+        }
+
+        family(
+            &mut out,
+            "resolver_stale_answers_total",
+            "counter",
+            "Expired answers served while upstreams were failing.",
+        );
+        let _ = writeln!(
+            out,
+            "daygle_dns_resolver_stale_answers_total {}",
+            get(&r.stale_served)
+        );
+        family(
+            &mut out,
+            "resolver_cached_failures_total",
+            "counter",
+            "Failures answered from the failure cache.",
+        );
+        let _ = writeln!(
+            out,
+            "daygle_dns_resolver_cached_failures_total {}",
+            get(&r.failures_replayed)
+        );
+
+        family(
+            &mut out,
+            "resolver_upstream_connections_total",
+            "counter",
+            "Connections opened to upstream servers, by transport.",
+        );
+        for (transport, counter) in [
+            ("udp", &r.conn_udp),
+            ("tcp", &r.conn_tcp),
+            ("tls", &r.conn_tls),
+            ("quic", &r.conn_quic),
+        ] {
+            let _ = writeln!(
+                out,
+                "daygle_dns_resolver_upstream_connections_total{{transport=\"{transport}\"}} {}",
+                get(counter)
+            );
+        }
+
+        family(
+            &mut out,
+            "resolver_lookup_duration_seconds",
+            "histogram",
+            "How long recursive lookups took.",
+        );
+        let mut cumulative = 0u64;
+        for (i, bound) in LATENCY_BUCKETS_MS.iter().enumerate() {
+            cumulative += get(&r.latency[i]);
+            let _ = writeln!(
+                out,
+                "daygle_dns_resolver_lookup_duration_seconds_bucket{{le=\"{}\"}} {cumulative}",
+                *bound as f64 / 1000.0
+            );
+        }
+        cumulative += get(&r.latency[LATENCY_BUCKETS_MS.len()]);
+        let _ = writeln!(
+            out,
+            "daygle_dns_resolver_lookup_duration_seconds_bucket{{le=\"+Inf\"}} {cumulative}"
+        );
+        let _ = writeln!(
+            out,
+            "daygle_dns_resolver_lookup_duration_seconds_sum {}",
+            get(&r.latency_sum_us) as f64 / 1_000_000.0
+        );
+        let _ = writeln!(
+            out,
+            "daygle_dns_resolver_lookup_duration_seconds_count {cumulative}"
+        );
+
+        for gauge in gauges {
+            family(&mut out, gauge.name, "gauge", gauge.help);
+            let _ = writeln!(out, "daygle_dns_{} {}", gauge.name, gauge.value);
+        }
+        out
+    }
+}
+
 /// Serializable snapshot of [`Metrics`].
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct MetricSnapshot {
@@ -294,6 +508,44 @@ mod tests {
         assert_eq!(m.get(&m.bytes_in), 42);
         let snap = m.snapshot();
         assert_eq!(snap.total_queries, 2);
+    }
+
+    #[test]
+    fn prometheus_text_format() {
+        let m = Metrics::default();
+        m.inc(&m.total_queries);
+        m.inc(&m.blocked);
+        m.resolver
+            .observe_latency(std::time::Duration::from_millis(3));
+        m.resolver
+            .observe_latency(std::time::Duration::from_secs(9));
+        let text = m.render_prometheus(&[Gauge {
+            name: "zones",
+            help: "Zones served.",
+            value: 4.0,
+        }]);
+        assert!(
+            text.contains("# TYPE daygle_dns_queries_total counter\ndaygle_dns_queries_total 1\n")
+        );
+        assert!(text.contains("daygle_dns_answers_total{source=\"blocked\"} 1\n"));
+        // Cumulative buckets in seconds, ending at +Inf with the count.
+        assert!(
+            text.contains("daygle_dns_resolver_lookup_duration_seconds_bucket{le=\"0.001\"} 0\n")
+        );
+        assert!(
+            text.contains("daygle_dns_resolver_lookup_duration_seconds_bucket{le=\"0.005\"} 1\n")
+        );
+        assert!(
+            text.contains("daygle_dns_resolver_lookup_duration_seconds_bucket{le=\"+Inf\"} 2\n")
+        );
+        assert!(text.contains("daygle_dns_resolver_lookup_duration_seconds_count 2\n"));
+        assert!(text.contains("# TYPE daygle_dns_zones gauge\ndaygle_dns_zones 4\n"));
+        // Every sample line is a name, optional labels and a number.
+        for line in text.lines().filter(|l| !l.starts_with('#')) {
+            let (series, value) = line.rsplit_once(' ').unwrap();
+            assert!(series.starts_with("daygle_dns_"), "{line}");
+            assert!(value.parse::<f64>().is_ok(), "{line}");
+        }
     }
 
     #[test]

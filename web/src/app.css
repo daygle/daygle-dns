@@ -113,6 +113,7 @@ tr.disabled td:not(:last-child) { opacity: 0.55; }
   border: 1px solid var(--border);
 }
 .pill.ok { color: var(--ok); border-color: var(--ok); }
+.pill.bad { color: var(--danger); border-color: var(--danger); }
 .pill.err { color: var(--danger); border-color: var(--danger); }
 
 code, pre { font-family: ui-monospace, "Cascadia Code", monospace; }

@@ -8,6 +8,8 @@
 //! - `hash-password` - print a PBKDF2 hash for `[[api.users]]` entries
 //! - `seed-ai-settings` - copy the config file's `[ai]` into the database
 //! - `reset-web-access` - put the web console back to plain HTTP on `api.port`
+//! - `backup` - write a backup of the database to a file
+//! - `restore` - stage a backup to replace the database on the next start
 
 use std::io::Write as _;
 use std::sync::Arc;
@@ -62,6 +64,44 @@ enum Command {
     /// database so the config file's `[api]` applies again. Restart the
     /// service afterwards.
     ResetWebAccess,
+    /// Write a backup of the database (zones, settings, users,
+    /// certificates, AI overrides) to a file. Safe while the server runs.
+    ///
+    /// The file holds private keys and password hashes: keep it safe.
+    Backup {
+        /// Where to write the backup (must not exist).
+        file: std::path::PathBuf,
+        /// Include the query logs (left out by default: they can be large).
+        #[arg(long)]
+        query_logs: bool,
+    },
+    /// Check a backup and stage it to replace the database on the next
+    /// start. The current database is kept as
+    /// `<database>.before-restore-<time>`. Restart the service afterwards.
+    Restore {
+        /// The backup file.
+        file: std::path::PathBuf,
+    },
+}
+
+/// Load the config file, or exit with the reason.
+fn load_config_or_exit(path: &str) -> DaygleConfig {
+    match DaygleConfig::load(path) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("daygle-dns: failed to load configuration: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+/// A one-line summary of a backup (counts only; the console shows the
+/// rest).
+fn print_backup_info(info: &daygle_dns_authoritative::backup::BackupInfo) {
+    println!(
+        "  {} zones, {} records, {} users, {} AI overrides, {} query log entries",
+        info.zones, info.records, info.users, info.ai_overrides, info.query_logs
+    );
 }
 
 fn main() {
@@ -131,6 +171,59 @@ fn main() {
             }
             Err(e) => {
                 eprintln!("daygle-dns: cannot read runtime settings: {e}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+
+    if let Some(Command::Backup { file, query_logs }) = &args.command {
+        let mut config = load_config_or_exit(&args.config);
+        let store = match ZoneStore::open(&config.authoritative.database) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!(
+                    "daygle-dns: cannot open zone database '{}': {e}",
+                    config.authoritative.database
+                );
+                std::process::exit(1);
+            }
+        };
+        // The AI database path may be a console setting.
+        if let Ok(Some(overlay)) = store.get_runtime_settings::<RuntimeSettings>() {
+            overlay.apply_to(&mut config);
+        }
+        if file.exists() {
+            eprintln!("daygle-dns: {} already exists", file.display());
+            std::process::exit(1);
+        }
+        let ai_database = daygle_dns_ml::database_path(&config.ai, &config.authoritative.database);
+        match store.backup_to(file, *query_logs, Some(&ai_database)) {
+            Ok(info) => {
+                println!("backup written to {}", file.display());
+                print_backup_info(&info);
+            }
+            Err(e) => {
+                eprintln!("daygle-dns: backup failed: {e}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+
+    if let Some(Command::Restore { file }) = &args.command {
+        let config = load_config_or_exit(&args.config);
+        match daygle_dns_authoritative::backup::stage_restore(&config.authoritative.database, file)
+        {
+            Ok(info) => {
+                println!(
+                    "restore staged: restart the service to replace the database with {}",
+                    file.display()
+                );
+                print_backup_info(&info);
+            }
+            Err(e) => {
+                eprintln!("daygle-dns: cannot restore {}: {e}", file.display());
                 std::process::exit(1);
             }
         }

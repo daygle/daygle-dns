@@ -2,6 +2,7 @@
   import { api, formatApiError } from '../api.js';
   import PageHeader from '../PageHeader.svelte';
   import ClientPolicies from './ClientPolicies.svelte';
+  import BackupRestore from './BackupRestore.svelte';
   import { icons } from '../icons.svelte.js';
   import { display, setDisplayDefaults, timeZoneOptions, DATE_FORMAT_OPTIONS, TIME_FORMAT_OPTIONS, previewDateTime } from '../datetime.svelte.js';
   import { duration } from '../aiLabels.js';
@@ -25,6 +26,7 @@
     ['zones', 'Zones'],
     ['ai', 'AI Scanner'],
     ['interface', 'Interface'],
+    ['backup', 'Backup'],
   ];
   const TAGLINES = {
     general: 'How the web console is reached (HTTP, HTTPS or both), and the DNS listeners this server was started with.',
@@ -34,6 +36,7 @@
     zones: 'Defaults for new zones and records, and how other DNS servers may copy, update and be notified about your zones.',
     ai: 'The background scanner that classifies the domains in your DNS traffic and can block unsafe ones.',
     interface: 'How the console shows dates and times by default.',
+    backup: 'Download a backup of everything this server keeps, or restore one.',
   };
 
   // Local editable copies (bound to the form inputs).
@@ -61,6 +64,9 @@
   let axfrNetworksText = $state('');
   let updateNetworksText = $state('');
   let notifyTargetsText = $state('');
+  // Consumed catalog zones, as edited: masters as one comma-separated line
+  // and the refresh in minutes.
+  let catalogConsumers = $state([]);
 
   // Console-managed certificates available for the DoT/DoH/DoQ listeners.
   let certs = $state([]);
@@ -86,6 +92,11 @@
   // the stored settings means the config file's api.port; the form shows
   // the real number.
   let web_ = $state({ http_enabled: true, http_port: 5380, https_enabled: false, https_port: 5443, https_certificate: '', redirect_http: false });
+  // Remote logging (Settings -> General).
+  let dns64 = $state({ enabled: false, prefix: '64:ff9b::/96' });
+  let dns64ClientsText = $state('');
+  let ecs = $state({ enabled: false, subnet: '', ipv4_prefix: 24, ipv6_prefix: 56 });
+  let syslog_ = $state({ enabled: false, server: '', facility: 'daemon', level: 'info', queries: false });
   const zoneChoices = timeZoneOptions();
   // Users who chose their own settings don't see the defaults change.
   const ownPrefsSet = $derived(
@@ -178,6 +189,10 @@
         ...config.web,
         http_port: config.web?.http_port || config.api?.port || 5380,
       };
+      syslog_ = { enabled: false, server: '', facility: 'daemon', level: 'info', queries: false, ...config.syslog };
+      dns64 = { enabled: !!config.dns64?.enabled, prefix: config.dns64?.prefix || '64:ff9b::/96' };
+      dns64ClientsText = (config.dns64?.clients || []).join('\n');
+      ecs = { enabled: false, subnet: '', ipv4_prefix: 24, ipv6_prefix: 56, ...config.ecs };
       ai_ = { ...config.ai, mode: config.ai?.mode || 'train' };
       aiForm = {
         scanMinutes: round2(ai_.scan_interval_secs / 60),
@@ -209,6 +224,12 @@
       axfrNetworksText = (authoritative.axfr_networks || []).join('\n');
       updateNetworksText = (authoritative.update_networks || []).join('\n');
       notifyTargetsText = (authoritative.notify_targets || []).join('\n');
+      catalogConsumers = (authoritative.catalog_consumers || []).map((c) => ({
+        name: c.name,
+        masters: (c.masters || []).join(', '),
+        refresh_minutes: Math.max(1, Math.round((c.refresh_secs || 3600) / 60)),
+        enabled: c.enabled !== false,
+      }));
       savedBody = JSON.stringify(buildBody());
     } catch (e) {
       error = formatApiError(e);
@@ -319,6 +340,24 @@
         https_certificate: web_.https_certificate || '',
         redirect_http: !!(web_.redirect_http && web_.http_enabled && web_.https_enabled),
       },
+      dns64: {
+        enabled: !!dns64.enabled,
+        prefix: (dns64.prefix || '').trim(),
+        clients: parseLines(dns64ClientsText),
+      },
+      ecs: {
+        enabled: !!ecs.enabled,
+        subnet: (ecs.subnet || '').trim(),
+        ipv4_prefix: Number(ecs.ipv4_prefix),
+        ipv6_prefix: Number(ecs.ipv6_prefix),
+      },
+      syslog: {
+        enabled: !!syslog_.enabled,
+        server: (syslog_.server || '').trim(),
+        facility: syslog_.facility || 'daemon',
+        level: syslog_.level || 'info',
+        queries: !!syslog_.queries,
+      },
       authoritative: {
         default_record_ttl: Number(authoritative.default_record_ttl),
         default_primary_ns: authoritative.default_primary_ns || '',
@@ -330,6 +369,15 @@
         notify_enabled: !!authoritative.notify_enabled,
         notify_targets: parseLines(notifyTargetsText),
         notify_listen_enabled: !!authoritative.notify_listen_enabled,
+        catalog_zone: (authoritative.catalog_zone || '').trim(),
+        catalog_consumers: catalogConsumers
+          .filter((c) => c.name.trim())
+          .map((c) => ({
+            name: c.name.trim(),
+            masters: c.masters.split(/[\s,]+/).filter(Boolean),
+            refresh_secs: Math.round(Number(c.refresh_minutes) * 60),
+            enabled: !!c.enabled,
+          })),
       },
       ai: {
         enabled: !!ai_.enabled,
@@ -436,11 +484,13 @@
     {/each}
   </div>
 
+  {#if tab !== 'backup'}
   <div class="actions" class:dirty>
     <button onclick={save} disabled={busy || !dirty}>{busy ? 'Saving…' : 'Save Changes'}</button>
     <button class="secondary" onclick={reload} disabled={busy}>{dirty ? 'Discard Changes' : 'Reload'}</button>
     {#if dirty}<span class="unsaved">Unsaved changes (Save covers every tab)</span>{/if}
   </div>
+  {/if}
 
   {#if tab === 'general'}
   <div class="card" style="margin-bottom: 14px">
@@ -504,6 +554,39 @@
       stops working can always be fixed without the console. The web console
       listens on {config?.api?.listen}. DNS over TLS, HTTPS and QUIC are on
       the Encrypted DNS tab.
+    </p>
+  </div>
+  <div class="card" style="margin-bottom: 14px">
+    <h3 style="margin: 0 0 10px">Remote Logging (Syslog)</h3>
+    <div class="form-grid">
+      <label class="check"><input type="checkbox" bind:checked={syslog_.enabled} /> <span>Send Logs to a Syslog Server</span></label>
+      <label>
+        <span>Syslog Server</span>
+        <input placeholder="logs.example.com or tcp://10.0.0.5:6514" bind:value={syslog_.server} disabled={!syslog_.enabled} spellcheck="false" />
+      </label>
+      <label>
+        <span>Facility</span>
+        <select bind:value={syslog_.facility} disabled={!syslog_.enabled}>
+          <option value="daemon">daemon</option>
+          <option value="user">user</option>
+          {#each [0, 1, 2, 3, 4, 5, 6, 7] as n (n)}<option value={`local${n}`}>local{n}</option>{/each}
+        </select>
+      </label>
+      <label>
+        <span>Server Log Messages</span>
+        <select bind:value={syslog_.level} disabled={!syslog_.enabled}>
+          <option value="info">Information and Above</option>
+          <option value="warn">Warnings and Errors</option>
+          <option value="error">Errors Only</option>
+        </select>
+      </label>
+      <label class="check"><input type="checkbox" bind:checked={syslog_.queries} disabled={!syslog_.enabled} /> <span>Also Send Every Query</span></label>
+    </div>
+    <p class="muted help">
+      Sends the server log (and, if chosen, a line per query) as RFC 5424
+      syslog, over UDP by default (port 514), or TCP with
+      <code>tcp://host:port</code>. Changes apply as soon as they are saved.
+      Every query can be a lot of traffic on a busy server.
     </p>
   </div>
   {:else if tab === 'recursive'}
@@ -605,6 +688,45 @@
       Your own zones are answered for everyone.
     </p>
   </div>
+  <div class="card" style="margin-bottom: 14px">
+    <h3 style="margin: 0 0 10px">DNS64 (RFC 6147)</h3>
+    <div class="form-grid">
+      <label class="check"><input type="checkbox" bind:checked={dns64.enabled} /> <span>Make IPv6 Answers for IPv4-Only Names</span></label>
+      <label><span>NAT64 Prefix</span><input placeholder="64:ff9b::/96" bind:value={dns64.prefix} disabled={!dns64.enabled} spellcheck="false" /></label>
+    </div>
+    <label class="stacked" style="margin-top: 12px">
+      <span>Clients (one network per line; empty means every client)</span>
+      <textarea rows="2" placeholder={'2001:db8:1::/48'} bind:value={dns64ClientsText} disabled={!dns64.enabled}></textarea>
+    </label>
+    <p class="muted help">
+      For IPv6-only networks with a NAT64 gateway: when a name has no IPv6
+      address, its IPv4 addresses are answered as IPv6 addresses inside the
+      gateway's prefix, so IPv6-only devices can still reach it. Use your
+      gateway's prefix (/32, /40, /48, /56, /64 or /96); the well-known
+      64:ff9b::/96 only carries public IPv4 addresses. Clients that validate
+      DNSSEC themselves get the real answer. Only turn this on for networks
+      behind NAT64: elsewhere the made-up addresses lead nowhere.
+    </p>
+  </div>
+  <div class="card" style="margin-bottom: 14px">
+    <h3 style="margin: 0 0 10px">EDNS Client Subnet (RFC 7871)</h3>
+    <div class="form-grid">
+      <label class="check"><input type="checkbox" bind:checked={ecs.enabled} /> <span>Tell Upstreams Where Queries Come From</span></label>
+      <label><span>Send This Network for Everyone</span><input placeholder="Each client's own network" bind:value={ecs.subnet} disabled={!ecs.enabled} spellcheck="false" /></label>
+      <label><span>IPv4 Bits Sent per Client</span><input type="number" min="1" max="32" bind:value={ecs.ipv4_prefix} disabled={!ecs.enabled || !!ecs.subnet.trim()} /></label>
+      <label><span>IPv6 Bits Sent per Client</span><input type="number" min="1" max="128" bind:value={ecs.ipv6_prefix} disabled={!ecs.enabled || !!ecs.subnet.trim()} /></label>
+    </div>
+    <p class="muted help">
+      CDNs pick the server nearest the network a query comes from. When this
+      server forwards to a distant upstream, sending the network lets them pick
+      one near your clients instead. Set your site's public network (e.g.
+      203.0.113.0/24) to send it for every query; leave it empty to send each
+      client's own public network, cut to the bits above (private addresses are
+      never sent). Only forwarding upstreams get it, not the root and TLD
+      servers. The cache is shared, so per-client networks are best when clients
+      are near each other.
+    </p>
+  </div>
   <ClientPolicies />
   {:else if tab === 'cache'}
   <div class="card" style="margin-bottom: 14px">
@@ -701,6 +823,40 @@
       When a primary zone changes, the server notifies these targets so their
       secondary copies refresh immediately. Enabling or disabling NOTIFY takes
       effect after a restart; the target list is saved right away.
+    </p>
+  </div>
+
+  <div class="card" style="margin-bottom: 14px">
+    <h3 style="margin: 0 0 10px">Catalog Zones (RFC 9432)</h3>
+    <div class="form-grid">
+      <label><span>Publish a Catalog Named</span><input placeholder="catalog.example.com" bind:value={authoritative.catalog_zone} /></label>
+    </div>
+    <p class="muted help">
+      Lists every primary zone on this server in a catalog zone, so secondaries
+      that follow it (BIND, Knot, PowerDNS or another Daygle server) add and
+      remove zones on their own. They transfer it like any zone, so allow them
+      under Zone Transfers; with NOTIFY on, they are told when the list changes.
+      Leave empty to publish no catalog.
+    </p>
+    <h4 style="margin: 14px 0 8px">Follow Catalogs</h4>
+    {#each catalogConsumers as consumer, i}
+      <div class="form-grid" style="align-items: end; margin-bottom: 8px">
+        <label><span>Catalog Zone</span><input placeholder="catalog.example.com" bind:value={consumer.name} /></label>
+        <label><span>Masters (IP, IP:port; comma-separated)</span><input placeholder="198.51.100.10" bind:value={consumer.masters} /></label>
+        <label><span>Check Every (Minutes)</span><input type="number" min="1" bind:value={consumer.refresh_minutes} /></label>
+        <div class="row" style="gap: 10px">
+          <label class="check"><input type="checkbox" bind:checked={consumer.enabled} /> <span>Enabled</span></label>
+          <button class="danger" onclick={() => (catalogConsumers = catalogConsumers.filter((_, j) => j !== i))} aria-label="Stop following {consumer.name || 'this catalog'}">✕</button>
+        </div>
+      </div>
+    {/each}
+    <button class="secondary" onclick={() => (catalogConsumers = [...catalogConsumers, { name: '', masters: '', refresh_minutes: 60, enabled: true }])}>Add Catalog</button>
+    <p class="muted help">
+      Every zone a followed catalog lists is served here as a secondary zone,
+      transferred from the catalog's masters; zones it drops are removed. A
+      disabled catalog keeps its zones but stops changing them; removing it
+      removes them. With Accept NOTIFY on, a NOTIFY from a master checks the
+      catalog at once. Applies immediately, no restart needed.
     </p>
   </div>
   {:else if tab === 'listeners'}
@@ -900,7 +1056,8 @@
       "Device Time Zone" and "Browser Default" follow each viewer's computer.
     </p>
   </div>
-
+  {:else if tab === 'backup'}
+  <BackupRestore />
   {/if}
 {:else}
   <div class="card">

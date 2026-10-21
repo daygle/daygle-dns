@@ -3,6 +3,9 @@
 
   let username = '';
   let password = '';
+  // Second step for accounts with two-factor login.
+  let needCode = false;
+  let code = '';
   let error = '';
   let loading = false;
 
@@ -17,15 +20,28 @@
       return;
     }
 
+    if (needCode && code.trim().length < 1) {
+      error = 'Enter the code from your authenticator app.';
+      return;
+    }
+
     loading = true;
     try {
-      const resp = await api.login(username.trim(), password);
+      const resp = await api.login(username.trim(), password, needCode ? code.trim() : '');
       if (resp && resp.token) {
         window.location.href = '/';
       } else {
         error = 'Login failed.';
       }
     } catch (e) {
+      if (e?.data?.two_factor) {
+        // The password was right; ask for the code (or say it was wrong).
+        if (needCode) error = e.message;
+        needCode = true;
+        code = '';
+        setTimeout(() => document.getElementById('code')?.focus(), 0);
+        return;
+      }
       error = e && e.message ? e.message : (String(e) || 'Login failed.');
     } finally {
       loading = false;
@@ -38,23 +54,49 @@
     <div class="brand"><span class="logo" aria-hidden="true">⬡</span> Daygle DNS</div>
     <h2>Sign In</h2>
     <form on:submit|preventDefault={submit} class="form">
-      <label for="username">Username</label>
-      <!-- svelte-ignore a11y_autofocus -->
-      <input id="username" type="text" bind:value={username} autocomplete="username" autofocus spellcheck="false" />
+      {#if needCode}
+        <p class="hint">
+          Enter the 6-digit code from your authenticator app for <strong>{username.trim()}</strong>.
+          Lost your phone? Use one of your recovery codes instead.
+        </p>
+        <label for="code">Code</label>
+        <input id="code" type="text" bind:value={code} autocomplete="one-time-code" inputmode="text" spellcheck="false" />
+      {:else}
+        <label for="username">Username</label>
+        <!-- svelte-ignore a11y_autofocus -->
+        <input id="username" type="text" bind:value={username} autocomplete="username" autofocus spellcheck="false" />
 
-      <label for="password">Password</label>
-      <input id="password" type="password" bind:value={password} autocomplete="current-password" />
+        <label for="password">Password</label>
+        <input id="password" type="password" bind:value={password} autocomplete="current-password" />
+      {/if}
 
       {#if error}
         <div class="error">{error}</div>
       {/if}
 
-      <button type="submit" disabled={loading}>{loading ? 'Signing In…' : 'Sign In'}</button>
+      <button type="submit" disabled={loading}>{loading ? 'Signing In…' : needCode ? 'Verify' : 'Sign In'}</button>
+      {#if needCode}
+        <button type="button" class="link" on:click={() => { needCode = false; code = ''; error = ''; password = ''; }}>Start Over</button>
+      {/if}
     </form>
   </section>
 </main>
 
 <style>
+  .hint {
+    margin: 0 0 0.5rem 0;
+    color: var(--muted, #8b93a7);
+    font-size: 0.9rem;
+    line-height: 1.4;
+  }
+  .link {
+    background: none;
+    border: none;
+    color: var(--muted, #8b93a7);
+    text-decoration: underline;
+    cursor: pointer;
+    padding: 0.25rem;
+  }
   .page {
     display: flex;
     align-items: center;

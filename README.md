@@ -9,11 +9,18 @@ the old names are deprecated per RUSTSEC-2025-0017).
 Daygle combines, in a single process:
 
 - **Authoritative DNS** with zone storage backed by **SQLite**, BIND zone-file
-  import, and **DNSSEC zone signing** with **automatic key rollover** and
+  import, and **DNSSEC zone signing** (NSEC or **NSEC3**) with **automatic key rollover** and
   **background RRSIG renewal**, so signed zones never go bogus after the
   signature window passes.
+- **Health-checked failover**: A/AAAA records checked over TCP, HTTP or
+  HTTPS are left out of answers while down, with backups by priority.
+- **ALIAS (ANAME) records**: point a zone apex at another host name (a CDN or
+  load balancer) and answer A/AAAA with that host's current addresses.
 - **Zone transfers**: serve **AXFR/IXFR** (RFC 5936, with per-network ACLs)
   and replicate **secondary zones** from remote masters on a refresh interval.
+- **Catalog zones (RFC 9432)**: publish a catalog of your zones so
+  secondaries provision themselves, and follow other servers' catalogs to
+  add and remove secondary zones automatically.
 - **NOTIFY (RFC 1996)**: primary zones send NOTIFY to configured secondaries
   when they change (e.g. after a dynamic update), and secondary zones accept
   NOTIFYs from their masters to pull immediately instead of waiting out the
@@ -31,17 +38,41 @@ Daygle combines, in a single process:
   answers (A, AAAA, MX, TXT, CNAME, SRV), everyone else gets the public view.
 - **Recursive resolution** (root → TLD → authoritative) with **caching**,
   **negative caching**, **retries**, **timeouts**, and **DNSSEC validation**,
+- **DNS64 (RFC 6147)** for IPv6-only networks behind NAT64: IPv4-only names
+  get AAAA answers inside the gateway's prefix.
+- **EDNS Client Subnet (RFC 7871)** to forwarding upstreams, so CDNs answer
+  with servers near your clients.
+- **PROXY protocol** (v1/v2) on TCP, DoT and DoH, so clients behind a load
+  balancer keep their real address.
 - **Conditional forwarding** so specific zones resolve via dedicated
   upstreams, plus **stub zones** that send queries straight to a zone's own
   nameservers (no root→TLD walk) - both matched by longest suffix.
 - **DNS over TLS (DoT)**, **DNS over HTTPS (DoH, RFC 8484)**, and
   **DNS over QUIC (DoQ, RFC 9250)** using **rustls**.
+- **DNS cookies** (RFC 7873, with RFC 9018 server cookies): clients that
+  send a cookie get a server cookie back, and ones that prove their address
+  with it are spared the per-client rate limit, so spoofed floods cannot
+  lock real clients out.
+- **Extended DNS Errors** (RFC 8914): blocked, filtered, refused, stale and
+  failed answers say why (`dig` shows it as `EDE: 15 (Blocked)` and so on),
+  and every response to an EDNS client carries an OPT record.
+- **Let's Encrypt certificates** (ACME): issued from the Certificates page
+  and renewed automatically, proving control over HTTP (the web console) or
+  DNS (a TXT record in a zone hosted here, so wildcards work too). A private
+  ACME CA such as step-ca works as well.
+- **Backup and restore** of everything the server keeps (zones, keys,
+  settings, users, certificates) as one file, from the console or
+  `daygle-dns backup` / `daygle-dns restore`.
 - **Cache prefetch & serve-stale**: popular names are refreshed in the
   background as their TTLs near expiry, and the last-known-good answers keep
   being served during upstream outages (bounded staleness, e.g. 1 h).
 - A **dashboard with charts & top-N tables**: per-minute query time-series
   (1 h / 6 h / 24 h windows), top clients, top domains, and top blocked
   domains - all bounded in memory.
+- **Remote logging** to a syslog server (RFC 5424, UDP or TCP): the
+  server log, and optionally a line per query.
+- An **audit log** of every change and sign-in, with who, how and from where.
+- **Prometheus metrics** at `/api/metrics/prometheus`.
 - A **searchable query log**: every served query is recorded into SQLite
   (client, name, type, transport, outcome, rcode, duration) with retention,
   and the console's **Logs → Query Log** tab filters, paginates, live-updates
@@ -61,12 +92,14 @@ Daygle combines, in a single process:
 - A **REST API** (tower/axum) for configuration, zone management, logs, and
 metrics.
 - An embedded **Svelte** web GUI with **username/password login and roles**
-  (`admin` = full access, `viewer` = read-only), editable settings forms for
+  (`admin` = full access, `viewer` = read-only), optional **two-factor
+  login** (authenticator app codes, recovery codes), sessions that survive
+  restarts, **personal API tokens** for scripts, editable settings forms for
   server/recursive/DoT/DoH/DoQ/API, zones, records, split horizon, status,
   logs, and settings.
 - A **plugin-style policy engine** for blocklists, ACLs, and per-client rules,
   including **remote blocklist sources** (hosts files, AdGuard lists, plain
-  domain lists) fetched over HTTP(S) and refreshed on a schedule.
+  domain lists, response policy zones) fetched over HTTP(S) and refreshed on a schedule.
 - **Rate limiting** per client (source IP) and per domain (query name) with
   configurable fixed windows, loopback exemption, and live reload - queries
   over the limit get SERVFAIL and are counted in the `rate_limited` metric.

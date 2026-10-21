@@ -14,6 +14,16 @@ listen = "0.0.0.0"
 # With "::" (here or in [api], [dot], [doh], [doq]), accept IPv6 clients
 # only instead of IPv4 and IPv6.
 # ipv6_only = false
+# DNS cookies (RFC 7873): clients that send a cookie get a server cookie
+# back, and ones whose server cookie checks out (so cannot be spoofing their
+# address) skip the per-client rate limit.
+# dns_cookies = true
+#
+# PROXY protocol (HAProxy v1/v2) for load balancers in front of the TCP, DoT
+# and DoH listeners: connections from these networks must start with a PROXY
+# header, and the client it names is used for ACLs, rate limits, policies and
+# logs. Other clients connect directly as usual. Empty (default) turns it off.
+# proxy_protocol = ["10.0.0.5/32"]
 port = 53
 udp_enabled = true
 tcp_enabled = true
@@ -116,6 +126,25 @@ serve_stale_secs = 0
 # action = "forward"
 # upstreams = ["1.1.1.3", "1.0.0.3"]
 
+# DNS64 (RFC 6147), for IPv6-only networks behind a NAT64 gateway: names
+# with no IPv6 address get AAAA answers made from their IPv4 addresses inside
+# the gateway's prefix. Also in Settings -> Resolver; once saved there, the
+# database copy wins over this file.
+# [dns64]
+# enabled = true
+# prefix = "64:ff9b::/96"
+# clients = ["2001:db8:1::/48"]
+
+# EDNS Client Subnet (RFC 7871): tell forwarding upstreams which network a
+# query comes from, so CDNs answer with servers near the client. `subnet` is
+# sent for every query; empty sends each client's own public network cut to
+# ipv4_prefix / ipv6_prefix bits. Also in Settings -> Resolver.
+# [ecs]
+# enabled = true
+# subnet = "203.0.113.0/24"
+# ipv4_prefix = 24
+# ipv6_prefix = 56
+
 # Authoritative zone storage (SQLite).
 [authoritative]
 database = "/var/lib/daygle-dns/daygle.db"
@@ -171,6 +200,23 @@ update_networks = []
 # name = "internal.example.com"
 # masters = ["192.0.2.1", "192.0.2.2:5353"]
 # refresh_secs = 600
+# enabled = true
+
+# Catalog zones (RFC 9432). Publish one listing every primary zone here, so
+# secondaries that follow it add and remove zones on their own (they fetch it
+# by AXFR, so allow them above):
+#
+# catalog_zone = "catalog.example.com"
+#
+# And/or follow other servers' catalogs: every zone a catalog lists is served
+# here as a secondary zone from the catalog's masters; zones it drops are
+# removed. Also manageable in Settings -> Zones; once saved there, the
+# database copy wins over this file.
+#
+# [[authoritative.catalog_consumers]]
+# name = "catalog.example.net"
+# masters = ["198.51.100.10"]
+# refresh_secs = 3600
 # enabled = true
 
 # RFC 1996 NOTIFY.

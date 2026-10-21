@@ -19,6 +19,11 @@
   let form = $state(null);
   let formError = $state(null);
 
+  // ACME (Let's Encrypt) settings, and its dialog (null when closed).
+  let acme = $state(null);
+  let acmeForm = $state(null);
+  let acmeError = $state(null);
+
   const me = getStoredUser();
   const isViewer = me?.role === 'viewer';
   const DAY = 86400000;
@@ -28,6 +33,7 @@
     error = null;
     try {
       certs = await api.certificates();
+      if (!isViewer && !acme) acme = await api.acmeSettings();
     } catch (e) {
       error = formatApiError(e);
     } finally {
@@ -39,10 +45,81 @@
     load();
   });
 
+  // Follow certificates being requested from the CA.
+  const requesting = $derived(certs.some((c) => c.acme?.status === 'pending'));
+  $effect(() => {
+    if (!requesting) return;
+    const id = setInterval(load, 2000);
+    return () => clearInterval(id);
+  });
+
+  // Which CA the settings point at, for the dialog's picker.
+  function caChoice(settings) {
+    const dir = (settings.directory || '').trim();
+    if (!dir || dir === acme?.lets_encrypt) return 'letsencrypt';
+    if (dir === acme?.lets_encrypt_staging) return 'staging';
+    return 'custom';
+  }
+
+  function openAcme() {
+    acmeError = null;
+    const s = acme?.settings || {};
+    acmeForm = { ...s, ca: caChoice(s), renew_days: s.renew_days || 30 };
+  }
+
+  function acmePayload(f) {
+    return {
+      email: (f.email || '').trim(),
+      directory: f.ca === 'letsencrypt' ? '' : f.ca === 'staging' ? acme.lets_encrypt_staging : (f.directory || '').trim(),
+      agree_terms: !!f.agree_terms,
+      ca_certificate: f.ca === 'custom' ? (f.ca_certificate || '') : '',
+      renew_days: Number(f.renew_days) || 30,
+    };
+  }
+
+  async function saveAcme(e) {
+    e.preventDefault();
+    acmeError = null;
+    busy = true;
+    try {
+      acme = await api.saveAcmeSettings(acmePayload(acmeForm));
+      acmeForm = null;
+      notice = 'Let\'s Encrypt settings saved.';
+    } catch (err) {
+      acmeError = formatApiError(err);
+    } finally {
+      busy = false;
+    }
+  }
+
+  async function renew(cert) {
+    busy = true;
+    notice = warning = error = null;
+    try {
+      await api.renewCertificate(cert.name);
+      notice = `Renewing '${cert.name}'…`;
+      await load();
+    } catch (err) {
+      error = formatApiError(err);
+    } finally {
+      busy = false;
+    }
+  }
+
+  function caName() {
+    const dir = acme?.directory_url || '';
+    if (dir === acme?.lets_encrypt) return 'Let\'s Encrypt';
+    if (dir === acme?.lets_encrypt_staging) return 'Let\'s Encrypt (Staging)';
+    return 'the ACME CA';
+  }
+
   function openAdd() {
     notice = warning = null;
     formError = null;
-    form = { replacing: null, mode: 'self', name: '', serverName: '', certPem: '', keyPem: '' };
+    form = {
+      replacing: null, mode: 'self', name: '', serverName: '', certPem: '', keyPem: '',
+      domains: '', challenge: 'http', email: acme?.settings?.email || '', agree: !!acme?.settings?.agree_terms,
+    };
   }
 
   function openReplace(cert) {
@@ -96,6 +173,10 @@
       formError = 'Enter the name clients will use to reach this server.';
       return;
     }
+    if (form.mode === 'acme') {
+      await requestAcme(name);
+      return;
+    }
     busy = true;
     try {
       const payload = form.mode === 'self'
@@ -110,6 +191,32 @@
           : `Certificate '${name}' uploaded.`;
       const st = status(saved || {});
       if (st.kind === 'expired' || st.kind === 'future') warning = `Note: ${st.text.toLowerCase()} - clients will reject it.`;
+      form = null;
+      await load();
+    } catch (err) {
+      formError = formatApiError(err);
+    } finally {
+      busy = false;
+    }
+  }
+
+  async function requestAcme(name) {
+    const domains = form.domains.split(/[\s,]+/).map((d) => d.trim()).filter(Boolean);
+    if (!domains.length) {
+      formError = 'Enter the domain names the certificate is for.';
+      return;
+    }
+    if (!form.agree) {
+      formError = `Accept the terms of service of ${caName()} to continue.`;
+      return;
+    }
+    busy = true;
+    try {
+      if (!acme.settings.agree_terms || (form.email.trim() && form.email.trim() !== acme.settings.email)) {
+        acme = await api.saveAcmeSettings({ ...acme.settings, email: form.email.trim(), agree_terms: true });
+      }
+      await api.requestAcmeCertificate({ name, domains, challenge: form.challenge });
+      notice = `Requesting '${name}' from ${caName()}. This usually takes under a minute.`;
       form = null;
       await load();
     } catch (err) {
@@ -165,9 +272,10 @@
 <PageHeader icon={icons.certificates} title="Certificates">
   {#snippet tagline()}
     TLS certificates for this web console (HTTPS) and the encrypted DNS
-    listeners (DNS over TLS, HTTPS and QUIC). Create a self-signed
-    certificate, or upload one issued by a certificate authority. Private
-    keys stay on the server and are never sent back to the browser.
+    listeners (DNS over TLS, HTTPS and QUIC). Get one from Let's Encrypt
+    (renewed automatically), create a self-signed one, or upload one from
+    any certificate authority. Private keys stay on the server and are
+    never sent back to the browser.
   {/snippet}
 </PageHeader>
 
@@ -184,7 +292,14 @@
   <div class="card warn-card" class:expired={status(cert).kind !== 'soon'} style="margin-bottom: 14px">
     <strong>{cert.name}</strong> is used by {listJoin(cert.in_use)} and
     {status(cert).kind === 'expired' ? 'has expired' : status(cert).text.toLowerCase()}.
-    {#if !isViewer}Upload a renewed certificate with <strong>Replace</strong>.{/if}
+    {#if !isViewer}
+      {#if cert.acme}It renews automatically; use <strong>Renew Now</strong> to try straight away.{:else}Upload a renewed certificate with <strong>Replace</strong>.{/if}
+    {/if}
+  </div>
+{/each}
+{#each certs.filter((c) => c.acme?.status === 'failed') as cert (cert.name)}
+  <div class="card warn-card expired" style="margin-bottom: 14px">
+    <strong>{cert.name}</strong> could not be {cert.not_after ? 'renewed' : 'issued'}: {cert.acme.last_error}
   </div>
 {/each}
 
@@ -192,7 +307,10 @@
   <div class="spread" style="margin-bottom: 10px">
     <h3 style="margin: 0">Certificates ({certs.length})</h3>
     {#if !isViewer}
-      <button onclick={openAdd}>Add Certificate</button>
+      <div class="row" style="gap: 8px">
+        <button class="secondary" onclick={openAcme} disabled={!acme}>Let's Encrypt Settings</button>
+        <button onclick={openAdd}>Add Certificate</button>
+      </div>
     {/if}
   </div>
 
@@ -222,8 +340,19 @@
                   <span class="pill" title="Clients must be told to trust this certificate">Self-Signed</span>
                 {:else if cert.issuer}
                   {cert.issuer}
-                {:else}
+                {:else if !cert.acme}
                   <span class="muted">-</span>
+                {/if}
+                {#if cert.acme}
+                  <div class="acme">
+                    {#if cert.acme.status === 'pending'}
+                      <span class="pill warn">{cert.not_after ? 'Renewing…' : 'Requesting…'}</span>
+                    {:else if cert.acme.status === 'failed'}
+                      <span class="pill err" title={cert.acme.last_error}>{cert.not_after ? 'Renewal Failed' : 'Request Failed'}</span>
+                    {:else}
+                      <span class="muted">Renews Automatically</span>
+                    {/if}
+                  </div>
                 {/if}
               </td>
               <td class="nowrap">
@@ -245,7 +374,11 @@
               {#if !isViewer}
                 <td class="num">
                   <div class="row" style="gap: 6px; justify-content: flex-end; flex-wrap: nowrap">
-                    <button class="secondary" onclick={() => openReplace(cert)} title="Upload a renewed certificate under this name">Replace</button>
+                    {#if cert.acme}
+                      <button class="secondary" disabled={busy || cert.acme.status === 'pending'} onclick={() => renew(cert)} title="Ask the CA for a new certificate now">{cert.not_after ? 'Renew Now' : 'Retry'}</button>
+                    {:else}
+                      <button class="secondary" onclick={() => openReplace(cert)} title="Upload a renewed certificate under this name">Replace</button>
+                    {/if}
                     <button
                       class="danger"
                       disabled={busy || cert.in_use?.length > 0}
@@ -296,11 +429,18 @@
               <small>Quick and free. Clients will only accept it if they are told to trust it, so it suits testing and private networks.</small>
             </span>
           </label>
+          <label class="choice" class:on={form.mode === 'acme'}>
+            <input type="radio" bind:group={form.mode} value="acme" />
+            <span>
+              <strong>Let's Encrypt</strong>
+              <small>Free and trusted everywhere, issued and renewed automatically. The names must be reachable from the internet.</small>
+            </span>
+          </label>
           <label class="choice" class:on={form.mode === 'upload'}>
             <input type="radio" bind:group={form.mode} value="upload" />
             <span>
               <strong>Upload Certificate</strong>
-              <small>From a certificate authority such as Let's Encrypt. Trusted by clients automatically.</small>
+              <small>From any certificate authority. Trusted by clients automatically; you replace it before it expires.</small>
             </span>
           </label>
         </div>
@@ -316,7 +456,42 @@
         </p>
       {/if}
 
-      {#if form.mode === 'self'}
+      {#if form.mode === 'acme'}
+        <label class="full">
+          <span>Domain Names (one per line)</span>
+          <textarea rows="3" bind:value={form.domains} placeholder={'dns.example.com\n*.example.com'} spellcheck="false"></textarea>
+        </label>
+        <div class="choices two" role="radiogroup" aria-label="How to prove the names are yours">
+          <label class="choice" class:on={form.challenge === 'http'}>
+            <input type="radio" bind:group={form.challenge} value="http" />
+            <span>
+              <strong>Web Console (HTTP)</strong>
+              <small>{caName()} connects to each name on port 80, which must reach this console's HTTP listener (directly, or forwarded by your router).</small>
+            </span>
+          </label>
+          <label class="choice" class:on={form.challenge === 'dns'}>
+            <input type="radio" bind:group={form.challenge} value="dns" />
+            <span>
+              <strong>DNS Zone Hosted Here</strong>
+              <small>A temporary TXT record in the name's zone on this server, which must be the zone's public DNS server. Needed for wildcards (*.example.com).</small>
+            </span>
+          </label>
+        </div>
+        {#if !acme?.settings?.agree_terms}
+          <label class="full">
+            <span>Email for Expiry Notices (Optional)</span>
+            <input type="email" bind:value={form.email} placeholder="you@example.com" autocomplete="email" />
+          </label>
+          <label class="check full">
+            <input type="checkbox" bind:checked={form.agree} />
+            <span>I accept the terms of service of {caName()}{#if caName().startsWith('Let')}{' '}(<a href="https://letsencrypt.org/repository/" target="_blank" rel="noopener">Subscriber Agreement</a>){/if}.</span>
+          </label>
+        {/if}
+        <p class="muted help">
+          The certificate is renewed {acme?.settings?.renew_days || 30} days before it expires, and listeners
+          using it switch to the renewal straight away.
+        </p>
+      {:else if form.mode === 'self'}
         <label class="full">
           <span>Server Name</span>
           <input type="text" bind:value={form.serverName} placeholder="dns.example.com" autocomplete="off" spellcheck="false" />
@@ -344,7 +519,7 @@
 
       <div class="row actions">
         <button type="submit" disabled={busy || !form.name.trim()}>
-          {busy ? 'Saving…' : form.replacing ? 'Replace Certificate' : form.mode === 'self' ? 'Create Certificate' : 'Upload Certificate'}
+          {busy ? 'Saving…' : form.replacing ? 'Replace Certificate' : form.mode === 'self' ? 'Create Certificate' : form.mode === 'acme' ? 'Request Certificate' : 'Upload Certificate'}
         </button>
         <button type="button" class="secondary" onclick={closeForm} disabled={busy}>Cancel</button>
       </div>
@@ -352,7 +527,65 @@
   </div>
 {/if}
 
+{#if acmeForm}
+  <div class="modal-backdrop" role="presentation" onclick={(e) => e.target === e.currentTarget && !busy && (acmeForm = null)}>
+    <form class="card modal" role="dialog" aria-modal="true" aria-labelledby="acme-title" onsubmit={saveAcme}>
+      <div class="spread modal-title">
+        <h3 id="acme-title" style="margin: 0">Let's Encrypt Settings</h3>
+        <button type="button" class="secondary" style="padding: 2px 10px" onclick={() => (acmeForm = null)} aria-label="Close">✕</button>
+      </div>
+      {#if acmeError}<p class="dialog-error">{acmeError}</p>{/if}
+      <label>
+        <span>Certificate Authority</span>
+        <select bind:value={acmeForm.ca}>
+          <option value="letsencrypt">Let's Encrypt</option>
+          <option value="staging">Let's Encrypt Staging (for testing, not trusted)</option>
+          <option value="custom">Another ACME CA</option>
+        </select>
+      </label>
+      {#if acmeForm.ca === 'custom'}
+        <label class="full">
+          <span>Directory URL</span>
+          <input type="url" bind:value={acmeForm.directory} placeholder="https://ca.internal/acme/acme/directory" spellcheck="false" />
+        </label>
+        <label class="full">
+          <span>CA Root Certificate (PEM, if not publicly trusted)</span>
+          <textarea rows="4" bind:value={acmeForm.ca_certificate} placeholder="-----BEGIN CERTIFICATE-----" spellcheck="false"></textarea>
+        </label>
+      {/if}
+      <div class="grid2">
+        <label>
+          <span>Email for Expiry Notices (Optional)</span>
+          <input type="email" bind:value={acmeForm.email} placeholder="you@example.com" autocomplete="email" />
+        </label>
+        <label>
+          <span>Renew Days Before Expiry</span>
+          <input type="number" min="1" max="60" bind:value={acmeForm.renew_days} />
+        </label>
+      </div>
+      <label class="check full">
+        <input type="checkbox" bind:checked={acmeForm.agree_terms} />
+        <span>I accept the CA's terms of service{#if acmeForm.ca !== 'custom'}{' '}(<a href="https://letsencrypt.org/repository/" target="_blank" rel="noopener">Let's Encrypt Subscriber Agreement</a>){/if}.</span>
+      </label>
+      <p class="muted help">
+        Certificates are checked twice a day and renewed automatically. A
+        private CA such as step-ca works too: give its ACME directory and,
+        if browsers do not trust it, its root certificate.
+      </p>
+      <div class="row actions">
+        <button type="submit" disabled={busy}>{busy ? 'Saving…' : 'Save Settings'}</button>
+        <button type="button" class="secondary" onclick={() => (acmeForm = null)} disabled={busy}>Cancel</button>
+      </div>
+    </form>
+  </div>
+{/if}
+
 <style>
+  .check { flex-direction: row; align-items: flex-start; gap: 8px; }
+  .check input { width: auto; margin-top: 2px; }
+  .check span { color: var(--text); }
+  .acme { margin-top: 4px; font-size: 0.8rem; }
+  .choices.two { margin-top: 12px; }
   label { display: flex; flex-direction: column; gap: 4px; font-size: 0.85rem; }
   label span { color: var(--muted); }
   .full { margin-top: 12px; }
@@ -367,7 +600,8 @@
   .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 12px; }
   textarea { font: 0.8rem/1.4 ui-monospace, 'Cascadia Code', Consolas, monospace; width: 100%; }
   input[type='file'] { font-size: 0.8rem; }
-  .choices { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .choices { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+  .choices.two { grid-template-columns: 1fr 1fr; }
   .choice {
     flex-direction: row;
     align-items: flex-start;

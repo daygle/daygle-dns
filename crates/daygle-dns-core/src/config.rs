@@ -4,7 +4,7 @@
 //! installer writes the example file to `/etc/daygle-dns/daygle-dns.toml`.
 
 use std::collections::BTreeSet;
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::path::Path;
 
 use base64::Engine as _;
@@ -42,6 +42,336 @@ pub struct DaygleConfig {
     pub display: DisplaySettings,
     /// How the web console and API are reached: HTTP and/or HTTPS.
     pub web: WebSettings,
+    /// Sending logs to a syslog server.
+    pub syslog: SyslogSettings,
+    /// DNS64 (RFC 6147): AAAA answers made from A records for IPv6-only
+    /// clients behind NAT64.
+    pub dns64: Dns64Settings,
+    /// EDNS Client Subnet (RFC 7871) sent to forwarding upstreams.
+    pub ecs: EcsSettings,
+}
+
+/// EDNS Client Subnet (RFC 7871): tell forwarding upstreams which network a
+/// query comes from, so CDNs that pick servers by location answer with ones
+/// near the client rather than near this server. Edited in Settings ->
+/// Resolver and stored in the database.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct EcsSettings {
+    pub enabled: bool,
+    /// Send this network for every query (e.g. this site's public
+    /// `203.0.113.0/24`). Empty: send each client's own network, cut to
+    /// `ipv4_prefix` / `ipv6_prefix` bits (private addresses are not sent).
+    pub subnet: String,
+    /// How much of a client's IPv4 address is sent (RFC 7871 advises 24).
+    pub ipv4_prefix: u8,
+    /// How much of a client's IPv6 address is sent (RFC 7871 advises 56).
+    pub ipv6_prefix: u8,
+}
+
+impl Default for EcsSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            subnet: String::new(),
+            ipv4_prefix: 24,
+            ipv6_prefix: 56,
+        }
+    }
+}
+
+/// [`EcsSettings`], parsed.
+#[derive(Debug, Clone)]
+pub struct Ecs {
+    fixed: Option<ipnet::IpNet>,
+    ipv4_prefix: u8,
+    ipv6_prefix: u8,
+}
+
+impl EcsSettings {
+    /// Parse the settings (`None` when ECS is off).
+    pub fn compile(&self) -> std::result::Result<Option<Ecs>, String> {
+        if !(1..=32).contains(&self.ipv4_prefix) {
+            return Err("ipv4_prefix must be 1 to 32".to_string());
+        }
+        if !(1..=128).contains(&self.ipv6_prefix) {
+            return Err("ipv6_prefix must be 1 to 128".to_string());
+        }
+        let subnet = self.subnet.trim();
+        let fixed = if subnet.is_empty() {
+            None
+        } else {
+            Some(
+                parse_network(subnet)
+                    .ok_or_else(|| format!("'{subnet}' is not a network or address"))?
+                    .trunc(),
+            )
+        };
+        Ok(self.enabled.then_some(Ecs {
+            fixed,
+            ipv4_prefix: self.ipv4_prefix,
+            ipv6_prefix: self.ipv6_prefix,
+        }))
+    }
+}
+
+impl Ecs {
+    /// The subnet to send for `client`: the fixed one, else the client's
+    /// network when its address is public.
+    pub fn subnet_for(&self, client: IpAddr) -> Option<ipnet::IpNet> {
+        if let Some(fixed) = self.fixed {
+            return Some(fixed);
+        }
+        let net = match client.to_canonical() {
+            IpAddr::V4(v4) if is_global_v4(v4) => {
+                ipnet::IpNet::V4(ipnet::Ipv4Net::new(v4, self.ipv4_prefix).ok()?)
+            }
+            IpAddr::V6(v6) if is_global_v6(v6) => {
+                ipnet::IpNet::V6(ipnet::Ipv6Net::new(v6, self.ipv6_prefix).ok()?)
+            }
+            _ => return None,
+        };
+        Some(net.trunc())
+    }
+}
+
+/// Whether `ip` is a global unicast address (not loopback, unspecified,
+/// unique-local, link-local, multicast or documentation).
+fn is_global_v6(ip: Ipv6Addr) -> bool {
+    let first = ip.segments()[0];
+    !(ip.is_loopback()
+        || ip.is_unspecified()
+        || ip.is_multicast()
+        || (first & 0xfe00) == 0xfc00
+        || (first & 0xffc0) == 0xfe80
+        || (first == 0x2001 && ip.segments()[1] == 0x0db8)
+        || ip.to_ipv4_mapped().is_some())
+}
+
+/// DNS64 (RFC 6147): when a recursive AAAA query finds no IPv6 address, the
+/// name's IPv4 addresses are returned as AAAA records inside a NAT64 prefix
+/// (RFC 6052), so IPv6-only clients can reach IPv4-only hosts through a
+/// NAT64 gateway. Edited in Settings -> Recursive and stored in the database.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct Dns64Settings {
+    pub enabled: bool,
+    /// The NAT64 prefix: a /32, /40, /48, /56, /64 or /96. The well-known
+    /// `64:ff9b::/96` by default.
+    pub prefix: String,
+    /// Client networks that get synthesized answers (CIDRs or addresses);
+    /// empty means every client.
+    pub clients: Vec<String>,
+}
+
+impl Default for Dns64Settings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            prefix: "64:ff9b::/96".to_string(),
+            clients: vec![],
+        }
+    }
+}
+
+/// [`Dns64Settings`], parsed.
+#[derive(Debug, Clone)]
+pub struct Dns64 {
+    prefix: ipnet::Ipv6Net,
+    clients: Vec<ipnet::IpNet>,
+}
+
+/// The well-known NAT64 prefix (RFC 6052 §2.1).
+const DNS64_WELL_KNOWN: Ipv6Addr = Ipv6Addr::new(0x64, 0xff9b, 0, 0, 0, 0, 0, 0);
+
+impl Dns64Settings {
+    /// Parse the settings (`None` when DNS64 is off).
+    pub fn compile(&self) -> std::result::Result<Option<Dns64>, String> {
+        let prefix: ipnet::Ipv6Net = self
+            .prefix
+            .trim()
+            .parse()
+            .map_err(|_| format!("'{}' is not an IPv6 prefix", self.prefix.trim()))?;
+        if ![32, 40, 48, 56, 64, 96].contains(&prefix.prefix_len()) {
+            return Err(format!(
+                "the prefix must be a /32, /40, /48, /56, /64 or /96 (RFC 6052), not /{}",
+                prefix.prefix_len()
+            ));
+        }
+        let prefix = prefix.trunc();
+        if prefix.addr().octets()[8] != 0 {
+            return Err("bits 64 to 71 of the prefix must be zero (RFC 6052)".to_string());
+        }
+        let mut clients = Vec::new();
+        for entry in &self.clients {
+            let net = parse_network(entry)
+                .ok_or_else(|| format!("'{}' is not a network or address", entry.trim()))?;
+            clients.push(net);
+        }
+        Ok(self.enabled.then_some(Dns64 { prefix, clients }))
+    }
+}
+
+impl Dns64 {
+    /// Whether `client` gets synthesized answers.
+    pub fn applies_to(&self, client: IpAddr) -> bool {
+        let client = client.to_canonical();
+        self.clients.is_empty() || self.clients.iter().any(|n| n.contains(&client))
+    }
+
+    /// The IPv6 address for `v4` (RFC 6052 §2.2), or `None` for an address
+    /// the well-known prefix must not carry (non-global ones, §3.1).
+    pub fn synthesize(&self, v4: Ipv4Addr) -> Option<Ipv6Addr> {
+        if self.prefix.addr() == DNS64_WELL_KNOWN && !is_global_v4(v4) {
+            return None;
+        }
+        let mut octets = self.prefix.addr().octets();
+        let mut at = usize::from(self.prefix.prefix_len() / 8);
+        for byte in v4.octets() {
+            // Octet 8 (bits 64-71) is the reserved "u" octet.
+            if at == 8 {
+                at += 1;
+            }
+            octets[at] = byte;
+            at += 1;
+        }
+        Some(Ipv6Addr::from(octets))
+    }
+}
+
+/// Whether `ip` is globally reachable (not private, shared, loopback,
+/// link-local, documentation, benchmarking, reserved or multicast).
+fn is_global_v4(ip: Ipv4Addr) -> bool {
+    let [a, b, c, _] = ip.octets();
+    !(ip.is_private()
+        || ip.is_loopback()
+        || ip.is_link_local()
+        || ip.is_unspecified()
+        || ip.is_broadcast()
+        || ip.is_documentation()
+        || ip.is_multicast()
+        || a == 0
+        || (a == 100 && (64..128).contains(&b))
+        || (a == 192 && b == 0 && c == 0)
+        || (a == 198 && (18..20).contains(&b))
+        || a >= 240)
+}
+
+/// Remote logging: send the server log (and optionally every query) to a
+/// syslog server, RFC 5424 format, over UDP or TCP. Edited in Settings ->
+/// General and stored in the database.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct SyslogSettings {
+    pub enabled: bool,
+    /// `host`, `host:port`, `udp://host:port` or `tcp://host:port`; UDP and
+    /// port 514 by default. The host may be a name or an address.
+    pub server: String,
+    /// Syslog facility: `daemon`, `user` or `local0`..`local7`.
+    pub facility: String,
+    /// Lowest server-log level sent: `error`, `warn` or `info`.
+    pub level: String,
+    /// Also send a line for every query answered.
+    pub queries: bool,
+}
+
+impl Default for SyslogSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            server: String::new(),
+            facility: "daemon".to_string(),
+            level: "info".to_string(),
+            queries: false,
+        }
+    }
+}
+
+/// Where syslog lines go, parsed from [`SyslogSettings::server`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SyslogTarget {
+    pub tcp: bool,
+    pub host: String,
+    pub port: u16,
+}
+
+impl SyslogSettings {
+    /// The facility code (RFC 5424 §6.2.1).
+    pub fn facility_code(&self) -> Option<u8> {
+        match self.facility.trim() {
+            "" | "daemon" => Some(3),
+            "user" => Some(1),
+            f => f
+                .strip_prefix("local")
+                .and_then(|n| n.parse::<u8>().ok())
+                .filter(|n| *n <= 7)
+                .map(|n| 16 + n),
+        }
+    }
+
+    /// The lowest level sent, as a rank (error 3, warn 2, info 1).
+    pub fn level_rank(&self) -> Option<u8> {
+        match self.level.trim() {
+            "error" => Some(3),
+            "warn" => Some(2),
+            "" | "info" => Some(1),
+            _ => None,
+        }
+    }
+
+    pub fn target(&self) -> std::result::Result<SyslogTarget, String> {
+        let text = self.server.trim();
+        let (tcp, rest) = if let Some(rest) = text.strip_prefix("tcp://") {
+            (true, rest)
+        } else {
+            (false, text.strip_prefix("udp://").unwrap_or(text))
+        };
+        let (host, port) = if let Some(bracketed) = rest.strip_prefix('[') {
+            let (host, tail) = bracketed
+                .split_once(']')
+                .ok_or_else(|| format!("'{text}': unbalanced '['"))?;
+            let port = match tail.strip_prefix(':') {
+                Some(p) => p.parse().map_err(|_| format!("'{text}': bad port"))?,
+                None if tail.is_empty() => 514,
+                None => return Err(format!("'{text}' is not host:port")),
+            };
+            (host.to_string(), port)
+        } else {
+            match rest.rsplit_once(':') {
+                Some((host, port)) if !host.contains(':') => (
+                    host.to_string(),
+                    port.parse().map_err(|_| format!("'{text}': bad port"))?,
+                ),
+                _ => (rest.to_string(), 514),
+            }
+        };
+        if host.is_empty() || host.contains(char::is_whitespace) || port == 0 {
+            return Err(format!(
+                "'{text}' is not a syslog server (host or host:port)"
+            ));
+        }
+        Ok(SyslogTarget { tcp, host, port })
+    }
+
+    /// Problems that stop the settings being used.
+    pub fn check(&self) -> std::result::Result<(), String> {
+        if self.facility_code().is_none() {
+            return Err(format!(
+                "unknown facility '{}': use daemon, user or local0-local7",
+                self.facility
+            ));
+        }
+        if self.level_rank().is_none() {
+            return Err(format!(
+                "unknown level '{}': use error, warn or info",
+                self.level
+            ));
+        }
+        if self.enabled {
+            self.target()?;
+        }
+        Ok(())
+    }
 }
 
 /// How the web console and REST API are served. Edited in Settings ->
@@ -287,6 +617,12 @@ impl AiSettings {
 pub struct RuntimeSettings {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub web: Option<WebSettings>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub syslog: Option<SyslogSettings>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dns64: Option<Dns64Settings>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ecs: Option<EcsSettings>,
     pub recursive: Option<RecursiveUpdate>,
     pub dot: Option<ListenerUpdate>,
     pub doh: Option<DohUpdate>,
@@ -494,6 +830,11 @@ pub struct AuthoritativeUpdate {
     /// Stub zones (the whole list; see [`StubZoneConfig`]).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stub_zones: Option<Vec<StubZoneConfig>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub catalog_zone: Option<String>,
+    /// Consumed catalog zones (the whole list).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub catalog_consumers: Option<Vec<CatalogConsumerConfig>>,
 }
 
 impl AuthoritativeUpdate {
@@ -511,6 +852,26 @@ impl AuthoritativeUpdate {
                     .filter(|n| !n.is_empty())
                     .collect(),
                 ..z.clone()
+            })
+            .collect()
+    }
+
+    /// Trim consumed catalogs: names normalized like zone names, blank
+    /// master entries dropped.
+    pub fn normalize_catalog_consumers(
+        consumers: &[CatalogConsumerConfig],
+    ) -> Vec<CatalogConsumerConfig> {
+        consumers
+            .iter()
+            .map(|c| CatalogConsumerConfig {
+                name: normalize_zone_name(&c.name),
+                masters: c
+                    .masters
+                    .iter()
+                    .map(|m| m.trim().to_string())
+                    .filter(|m| !m.is_empty())
+                    .collect(),
+                ..c.clone()
             })
             .collect()
     }
@@ -670,6 +1031,9 @@ impl RuntimeSettings {
             && self.ai.is_none()
             && self.display.is_none()
             && self.web.is_none()
+            && self.syslog.is_none()
+            && self.dns64.is_none()
+            && self.ecs.is_none()
     }
 
     /// Apply the overlay to `config` in place. `None` fields are untouched.
@@ -809,6 +1173,15 @@ impl RuntimeSettings {
         if let Some(d) = &self.display {
             config.display = d.clone();
         }
+        if let Some(d) = &self.dns64 {
+            config.dns64 = d.clone();
+        }
+        if let Some(e) = &self.ecs {
+            config.ecs = e.clone();
+        }
+        if let Some(s) = &self.syslog {
+            config.syslog = s.clone();
+        }
         if let Some(w) = &self.web {
             config.web = w.clone();
         }
@@ -883,6 +1256,13 @@ impl RuntimeSettings {
             }
             if let Some(v) = &a.stub_zones {
                 config.authoritative.stub_zones = AuthoritativeUpdate::normalize_stub_zones(v);
+            }
+            if let Some(v) = &a.catalog_zone {
+                config.authoritative.catalog_zone = normalize_zone_name(v);
+            }
+            if let Some(v) = &a.catalog_consumers {
+                config.authoritative.catalog_consumers =
+                    AuthoritativeUpdate::normalize_catalog_consumers(v);
             }
             if let Some(v) = &a.default_admin_mailbox {
                 config.authoritative.default_admin_mailbox = v.clone();
@@ -992,10 +1372,15 @@ impl RuntimeSettings {
                 notify_targets: Some(config.authoritative.notify_targets.clone()),
                 notify_listen_enabled: Some(config.authoritative.notify_listen_enabled),
                 stub_zones: Some(config.authoritative.stub_zones.clone()),
+                catalog_zone: Some(config.authoritative.catalog_zone.clone()),
+                catalog_consumers: Some(config.authoritative.catalog_consumers.clone()),
             }),
             ai: Some(AiUpdate::capture_ai(&config.ai)),
             display: Some(config.display.clone()),
             web: Some(config.web.clone()),
+            syslog: Some(config.syslog.clone()),
+            dns64: Some(config.dns64.clone()),
+            ecs: Some(config.ecs.clone()),
         }
     }
 }
@@ -1516,12 +1901,6 @@ impl DaygleConfig {
                 )));
             }
         }
-        if self.authoritative.notify_listen_enabled && self.authoritative.secondary_zones.is_empty()
-        {
-            return Err(DaygleError::Config(
-                "authoritative.notify_listen_enabled requires secondary_zones".to_string(),
-            ));
-        }
         for (label, networks) in [
             ("policy.denied_networks", &self.policy.denied_networks),
             ("policy.allowed_networks", &self.policy.allowed_networks),
@@ -1650,6 +2029,48 @@ impl DaygleConfig {
                 })?;
             }
         }
+        let catalog = self.authoritative.catalog_zone.trim();
+        for entry in &self.server.proxy_protocol {
+            if parse_network(entry).is_none() {
+                return Err(DaygleError::Config(format!(
+                    "server.proxy_protocol: '{entry}' is not a network or address"
+                )));
+            }
+        }
+        let not_a_name = |n: &str| n.contains('*') || validate_domain_pattern(n).is_err();
+        if !catalog.is_empty() && not_a_name(catalog) {
+            return Err(DaygleError::Config(format!(
+                "authoritative.catalog_zone '{catalog}' is not a domain name"
+            )));
+        }
+        for consumer in &self.authoritative.catalog_consumers {
+            if not_a_name(&consumer.name) {
+                return Err(DaygleError::Config(format!(
+                    "catalog zone '{}' is not a domain name",
+                    consumer.name
+                )));
+            }
+            if consumer.masters.is_empty() {
+                return Err(DaygleError::Config(format!(
+                    "catalog zone '{}' has no masters",
+                    consumer.name
+                )));
+            }
+            for master in &consumer.masters {
+                parse_master_addr(master).map_err(|e| {
+                    DaygleError::Config(format!(
+                        "catalog zone '{}' has invalid master '{master}': {e}",
+                        consumer.name
+                    ))
+                })?;
+            }
+            if consumer.refresh_secs < 30 {
+                return Err(DaygleError::Config(format!(
+                    "catalog zone '{}': refresh_secs must be at least 30",
+                    consumer.name
+                )));
+            }
+        }
         for zone in &self.authoritative.stub_zones {
             if zone.name.trim().is_empty() {
                 return Err(DaygleError::Config(
@@ -1751,6 +2172,15 @@ impl DaygleConfig {
                 .check(self.api.port)
                 .map_err(|e| DaygleError::Config(format!("web: {e}")))?;
         }
+        self.syslog
+            .check()
+            .map_err(|e| DaygleError::Config(format!("syslog: {e}")))?;
+        self.dns64
+            .compile()
+            .map_err(|e| DaygleError::Config(format!("dns64: {e}")))?;
+        self.ecs
+            .compile()
+            .map_err(|e| DaygleError::Config(format!("ecs: {e}")))?;
         Ok(())
     }
 }
@@ -1778,6 +2208,15 @@ pub struct ServerSettings {
     /// or `[doq]`), accept IPv6 clients only. Off by default: `::` accepts
     /// IPv4 clients too.
     pub ipv6_only: bool,
+    /// DNS cookies (RFC 7873): answer clients that send a cookie with a
+    /// server cookie, and let clients whose server cookie checks out skip
+    /// the per-client rate limit. On by default.
+    pub dns_cookies: bool,
+    /// PROXY protocol (v1/v2): networks of trusted load balancers. A TCP,
+    /// DoT or DoH connection from one of them must start with a PROXY
+    /// header, and the client it names is treated as the real client.
+    /// Empty (the default) turns it off.
+    pub proxy_protocol: Vec<String>,
     /// UDP/TCP port (default 53).
     pub port: u16,
     /// Serve plaintext UDP.
@@ -1813,6 +2252,8 @@ impl Default for ServerSettings {
         Self {
             listen: "0.0.0.0".to_string(),
             ipv6_only: false,
+            dns_cookies: true,
+            proxy_protocol: vec![],
             port: 53,
             udp_enabled: true,
             tcp_enabled: true,
@@ -2303,6 +2744,14 @@ pub struct AuthoritativeSettings {
     pub update_networks: Vec<String>,
     /// Secondary zones replicated from remote masters via AXFR/IXFR.
     pub secondary_zones: Vec<SecondaryZoneConfig>,
+    /// Publish a catalog zone (RFC 9432) of this name listing every primary
+    /// zone, so secondaries that consume it pick up new and deleted zones
+    /// on their own. Empty turns it off.
+    pub catalog_zone: String,
+    /// Catalog zones (RFC 9432) to consume: each is transferred from its
+    /// masters, and every zone it lists is served here as a secondary zone
+    /// from the same masters (zones it drops are removed).
+    pub catalog_consumers: Vec<CatalogConsumerConfig>,
     /// Send RFC 1996 NOTIFY to `notify_targets` when a primary zone changes.
     pub notify_enabled: bool,
     /// NOTIFY targets (secondaries), each `IP`, `IP:port`, or `[IPv6]:port`
@@ -2349,6 +2798,8 @@ impl Default for AuthoritativeSettings {
             allow_dynamic_updates: false,
             update_networks: vec![],
             secondary_zones: vec![],
+            catalog_zone: String::new(),
+            catalog_consumers: vec![],
             notify_enabled: false,
             notify_targets: vec![],
             notify_listen_enabled: false,
@@ -2414,6 +2865,33 @@ impl Default for SecondaryZoneConfig {
             refresh_secs: 3600,
             enabled: true,
             tsig_key: String::new(),
+        }
+    }
+}
+
+/// A catalog zone (RFC 9432) consumed from remote masters.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct CatalogConsumerConfig {
+    /// The catalog zone's name, e.g. `catalog.example.com`.
+    pub name: String,
+    /// The servers to transfer the catalog, and its member zones, from:
+    /// each `IP`, `IP:port`, or `[IPv6]:port` (port 53 when omitted).
+    pub masters: Vec<String>,
+    /// How often to check the catalog, and its members, for changes.
+    pub refresh_secs: u64,
+    /// Whether the catalog is followed. A disabled catalog keeps the zones
+    /// it already added, but stops adding and removing them.
+    pub enabled: bool,
+}
+
+impl Default for CatalogConsumerConfig {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            masters: vec![],
+            refresh_secs: 3600,
+            enabled: true,
         }
     }
 }
@@ -2704,7 +3182,8 @@ pub struct BlocklistSourceConfig {
     /// HTTP(S) URL of the blocklist.
     pub url: String,
     /// Content format: `domains` (one domain per line), `hosts` (a hosts
-    /// file, e.g. StevenBlack), or `adblock` (AdGuard/uBlock syntax).
+    /// file, e.g. StevenBlack), `adblock` (AdGuard/uBlock syntax), or `rpz`
+    /// (a Response Policy Zone file).
     pub format: BlocklistFormat,
     /// How often to re-fetch the source, in seconds (default 24 h).
     pub refresh_secs: u64,
@@ -2737,6 +3216,10 @@ pub enum BlocklistFormat {
     /// AdGuard/uBlock origin syntax: `||example.com^`, `@@` exceptions are
     /// ignored (treated as not-blocked).
     Adblock,
+    /// A Response Policy Zone (RPZ) in zone-file form: every QNAME trigger is
+    /// blocked, except `rpz-passthru.` exceptions; IP and NSDNAME triggers
+    /// are ignored.
+    Rpz,
 }
 
 /// A single ordered policy rule.
@@ -3047,6 +3530,190 @@ fd0000000000000000000000000000aa 02 40 00 80     eth0
     }
 
     #[test]
+    fn dns64_embeds_addresses_per_rfc_6052() {
+        let dns64 = |prefix: &str| {
+            Dns64Settings {
+                enabled: true,
+                prefix: prefix.to_string(),
+                clients: vec![],
+            }
+            .compile()
+            .unwrap()
+            .unwrap()
+        };
+        let v4: Ipv4Addr = "192.0.2.33".parse().unwrap();
+        // RFC 6052 §2.4's examples.
+        for (prefix, expected) in [
+            ("2001:db8::/32", "2001:db8:c000:221::"),
+            ("2001:db8:100::/40", "2001:db8:1c0:2:21::"),
+            ("2001:db8:122::/48", "2001:db8:122:c000:2:2100::"),
+            ("2001:db8:122:300::/56", "2001:db8:122:3c0:0:221::"),
+            ("2001:db8:122:344::/64", "2001:db8:122:344:c0:2:2100:0"),
+            ("2001:db8:122:344::/96", "2001:db8:122:344::c000:221"),
+        ] {
+            assert_eq!(
+                dns64(prefix).synthesize(v4),
+                Some(expected.parse().unwrap()),
+                "{prefix}"
+            );
+        }
+        // The well-known prefix carries global addresses only.
+        let wkp = dns64("64:ff9b::/96");
+        assert_eq!(
+            wkp.synthesize("198.51.100.1".parse().unwrap()),
+            None,
+            "documentation range"
+        );
+        assert_eq!(wkp.synthesize("10.1.2.3".parse().unwrap()), None);
+        assert_eq!(
+            wkp.synthesize("93.184.216.34".parse().unwrap()),
+            Some("64:ff9b::5db8:d822".parse().unwrap())
+        );
+        // A network-specific prefix carries any.
+        assert!(dns64("2001:db8:64::/96")
+            .synthesize("10.1.2.3".parse().unwrap())
+            .is_some());
+
+        // Checks.
+        let bad = |prefix: &str, clients: Vec<&str>| {
+            Dns64Settings {
+                enabled: true,
+                prefix: prefix.to_string(),
+                clients: clients.into_iter().map(String::from).collect(),
+            }
+            .compile()
+            .is_err()
+        };
+        assert!(bad("64:ff9b::/80", vec![]));
+        assert!(bad("10.0.0.0/8", vec![]));
+        assert!(bad("2001:db8:0:0:ff00::/96", vec![]), "u octet set");
+        assert!(bad("64:ff9b::/96", vec!["nope"]));
+        assert!(Dns64Settings::default().compile().unwrap().is_none());
+
+        let only = Dns64Settings {
+            enabled: true,
+            clients: vec!["2001:db8:1::/48".into()],
+            ..Default::default()
+        }
+        .compile()
+        .unwrap()
+        .unwrap();
+        assert!(only.applies_to("2001:db8:1::5".parse().unwrap()));
+        assert!(!only.applies_to("2001:db8:2::5".parse().unwrap()));
+    }
+
+    #[test]
+    fn ecs_subnets_are_cut_and_private_ones_kept_back() {
+        let ecs = |subnet: &str| {
+            EcsSettings {
+                enabled: true,
+                subnet: subnet.to_string(),
+                ..Default::default()
+            }
+            .compile()
+            .unwrap()
+            .unwrap()
+        };
+        let per_client = ecs("");
+        let at = |ip: &str| {
+            per_client
+                .subnet_for(ip.parse().unwrap())
+                .map(|n| n.to_string())
+        };
+        assert_eq!(at("93.184.216.34").as_deref(), Some("93.184.216.0/24"));
+        assert_eq!(
+            at("::ffff:93.184.216.34").as_deref(),
+            Some("93.184.216.0/24")
+        );
+        assert_eq!(
+            at("2a00:1450:4001:82a::200e").as_deref(),
+            Some("2a00:1450:4001:800::/56")
+        );
+        for private in [
+            "192.168.1.5",
+            "10.0.0.1",
+            "127.0.0.1",
+            "100.64.1.1",
+            "fd00::1",
+            "fe80::1",
+            "::1",
+        ] {
+            assert_eq!(at(private), None, "{private}");
+        }
+        // A fixed subnet is sent for everyone, host bits cleared.
+        let fixed = ecs("203.0.113.77/24");
+        assert_eq!(
+            fixed
+                .subnet_for("192.168.1.5".parse().unwrap())
+                .map(|n| n.to_string())
+                .as_deref(),
+            Some("203.0.113.0/24")
+        );
+        assert!(EcsSettings::default().compile().unwrap().is_none());
+        for bad in [
+            EcsSettings {
+                enabled: true,
+                ipv4_prefix: 0,
+                ..Default::default()
+            },
+            EcsSettings {
+                enabled: true,
+                ipv6_prefix: 129,
+                ..Default::default()
+            },
+            EcsSettings {
+                enabled: true,
+                subnet: "nope".into(),
+                ..Default::default()
+            },
+        ] {
+            assert!(bad.compile().is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn syslog_targets_and_checks() {
+        let target = |server: &str| {
+            SyslogSettings {
+                enabled: true,
+                server: server.into(),
+                ..Default::default()
+            }
+            .target()
+        };
+        assert_eq!(
+            target("logs.example.com").unwrap(),
+            SyslogTarget {
+                tcp: false,
+                host: "logs.example.com".into(),
+                port: 514
+            }
+        );
+        assert_eq!(target("tcp://10.0.0.5:6514").unwrap().port, 6514);
+        assert!(target("tcp://10.0.0.5:6514").unwrap().tcp);
+        assert_eq!(
+            target("udp://[2001:db8::1]:1514").unwrap().host,
+            "2001:db8::1"
+        );
+        assert_eq!(target("2001:db8::1").unwrap().port, 514);
+        assert!(target("").is_err());
+        assert!(target("host:notaport").is_err());
+        let mut s = SyslogSettings::default();
+        assert!(s.check().is_ok(), "off and empty is fine");
+        assert_eq!(s.facility_code(), Some(3));
+        s.facility = "local7".into();
+        assert_eq!(s.facility_code(), Some(23));
+        s.facility = "local8".into();
+        assert!(s.check().is_err());
+        s.facility = "daemon".into();
+        s.level = "debug".into();
+        assert!(s.check().is_err());
+        s.level = "warn".into();
+        s.enabled = true;
+        assert!(s.check().is_err(), "enabled needs a server");
+    }
+
+    #[test]
     fn listen_settings_take_several_addresses() {
         let addrs = |s: &str| {
             listen_socket_addrs(s, 53).map(|v| v.iter().map(|a| a.to_string()).collect::<Vec<_>>())
@@ -3326,8 +3993,9 @@ masters = ["192.0.2.1"]
             "[authoritative]\nnotify_enabled = true\nnotify_targets = [\"nope\"]\n"
         )
         .is_err());
-        // Inbound NOTIFY without any secondary zone is rejected.
-        assert!(DaygleConfig::parse("[authoritative]\nnotify_listen_enabled = true\n").is_err());
+        // Inbound NOTIFY needs no secondary zone in the file: they can also
+        // be added in the console or by a followed catalog zone.
+        assert!(DaygleConfig::parse("[authoritative]\nnotify_listen_enabled = true\n").is_ok());
     }
 
     #[test]

@@ -41,6 +41,17 @@ POST /api/auth/login
 ```
 
 Send the returned token as the `Authorization: Bearer` header on every call.
+Sessions are kept in the database (only a hash of each token), so they
+survive a restart until they expire (`api.session_ttl_secs`) or sign out.
+
+**Personal API tokens.** For scripts, each account can make long-lived
+tokens (`dgl_…`) from **API Tokens** below its name in the sidebar, or with
+the endpoints below. A token acts as its account (or as a viewer when made
+read-only, and always for a viewer account), works until it expires or is
+revoked, and skips two-factor login. Only its hash is stored; the token is
+shown once. A token cannot manage tokens, two-factor login or the
+password: those need a login session. Disabling or deleting the account
+stops its tokens.
 Password hashes for the config file are generated with
 `daygle-dns hash-password 'your-password'` (PBKDF2-HMAC-SHA256).
 
@@ -55,21 +66,39 @@ Additional endpoints:
 
 | Endpoint | Purpose |
 |----------|---------|
-| `GET /api/auth/me` | identity of the presented session (`username`, `role`, `expires_at_secs`), the account's own date/time `preferences` and the server's `display_defaults` |
+| `GET /api/auth/me` | identity of the presented session or API token (`username`, `role`, `expires_at_secs`, `api_token`), the account's own date/time `preferences` and the server's `display_defaults` |
 | `PUT /api/auth/preferences` | signed-in user sets their own `{time_zone, date_format, time_format}`; an empty field means the server default (viewers may use it too) |
 | `POST /api/auth/logout` | revoke the presented token |
 | `POST /api/auth/password` | signed-in user rotates their own password (current password required; other sessions revoked) |
+| `GET /api/auth/tokens` | the signed-in account's API tokens (`id`, `name`, `read_only`, `created_at`, `last_used_at`, `expires_at`; UNIX seconds, 0 = never) |
+| `POST /api/auth/tokens` | `{name, read_only, expires_in_days}` (0 or absent: never expires): make an API token; the response's `token` is shown only now. At most 50 per account |
+| `DELETE /api/auth/tokens/{id}` | revoke one of the signed-in account's tokens |
+| `GET /api/auth/two-factor` | whether the signed-in account uses two-factor login (`enabled`) and its `recovery_codes_left` |
+| `POST /api/auth/two-factor/setup` | `{password}`: start setting up two-factor login; returns a new `secret` and its `otpauth://` `uri` (for a QR code). Nothing changes until `/enable` |
+| `POST /api/auth/two-factor/enable` | `{code}` from the app: turn two-factor login on; returns 10 `recovery_codes`, shown only now. Other sessions are signed out |
+| `POST /api/auth/two-factor/recovery-codes` | `{password}`: replace the recovery codes |
+| `POST /api/auth/two-factor/disable` | `{password}`: turn two-factor login off |
 | `GET /api/auth/setup` | whether the one-time first-run setup is still pending |
 | `POST /api/auth/setup` | one-time creation of the first admin account (returns a session); body: `{ "username", "password" }` plus optional `name` (first/last display name), `email` |
 | `GET /api/users` | list accounts (password hashes redacted) |
 | `POST /api/users` | create an account (`username`, `password`, optional `role`) |
 | `PATCH /api/users/{username}` | reset password / change role / enable-disable |
 | `DELETE /api/users/{username}` | delete an account |
+| `DELETE /api/users/{username}/two-factor` | turn off two-factor login for an account that lost its app and recovery codes (signs its sessions out) |
+
+**Two-factor login.** An account with two-factor login on needs a code as
+well as its password. `POST /api/auth/login` without one answers `401` with
+`"two_factor": true`; send the same body again with `"code"`: the 6-digit
+code from the authenticator app (TOTP, RFC 6238: SHA-1, 30-second steps, one
+step of clock drift allowed) or one of the recovery codes (`xxxx-xxxx`, case
+and dashes ignored). Each code works once. A wrong code counts as a failed
+login for the throttle below, which is only reset once both steps pass. Each
+account sets up its own two-factor login, viewers included; the setup,
+recovery-code and disable calls ask for the password again. The users list
+shows `two_factor` for each account.
 
 The last enabled `admin` account cannot be deleted, demoted, or disabled. The initial admin account may be created with an optional display name (`name`, stored as `first_name`/`last_name`) and `email`; these follow the same profile fields as accounts created through `POST /api/users` and can be edited later.
 
-Password, role, and enabled changes (and deletions) immediately revoke the
-affected account's sessions; disabled accounts cannot log in.
 Password, role, and enabled changes (and deletions) immediately revoke the
 affected account's sessions; disabled accounts cannot log in.
 
@@ -156,6 +185,26 @@ Returns a flat snapshot of the atomic counters:
   "bytes_in": 45056,
   "bytes_out": 0
 }
+```
+
+```
+GET /api/metrics/prometheus
+```
+
+The same counters, plus the resolver's routes, outcomes, upstream
+connections and lookup-time histogram, and `uptime_seconds` and `zones`
+gauges, in the Prometheus text format (`text/plain; version=0.0.4`), every
+name prefixed `daygle_dns_`. It needs the same authorization as the rest of
+the API; give Prometheus a read-only personal API token:
+
+```yaml
+scrape_configs:
+  - job_name: daygle-dns
+    metrics_path: /api/metrics/prometheus
+    authorization:
+      credentials: dgl_…
+    static_configs:
+      - targets: ["dns.example.com:5380"]
 ```
 
 ### Dashboard statistics
@@ -260,7 +309,7 @@ PUT /api/config
 }
 ```
 
-Editable groups: `server` (listen/ipv6_only/port/udp_enabled/tcp_enabled), `recursive`
+Editable groups: `server` (listen/ipv6_only/port/udp_enabled/tcp_enabled; `dns_cookies` and `proxy_protocol` are file-only), `recursive`
 (enabled/mode/upstreams/use_system_config/dnssec_validate/cache_size/
 min_cache_ttl/max_cache_ttl/negative_cache_ttl/failure_cache_ttl/
 prefetch_* /serve_stale_secs/
@@ -270,10 +319,10 @@ outbound_ip_versions/client_policies), `dot`,
 `doh`, `doq` (enabled/port/self_signed/server_name [+ `doh.endpoint`]), `api`
 (gui_enabled/cors_origins), `display` (the console's date/time defaults:
 `time_zone` = `system`, `UTC` or an IANA zone; `date_format` = `system`/`dmy`/
-`mdy`/`ymd`/`d_mon_y`; `time_format` = `system`/`24h`/`12h`), and `authoritative`
+`mdy`/`ymd`/`d_mon_y`; `time_format` = `system`/`24h`/`12h`), `syslog`, `dns64` and `ecs` (see below), and `authoritative`
 (default_record_ttl/default_primary_ns/default_admin_mailbox/axfr_enabled/axfr_networks/
 allow_dynamic_updates/update_networks/notify_enabled/notify_targets/
-notify_listen_enabled/stub_zones). Runtime groups (`recursive`, `dot`, `doh`, `doq`,
+notify_listen_enabled/stub_zones/catalog_zone/catalog_consumers). Runtime groups (`recursive`, `dot`, `doh`, `doq`,
 `policy`, `authoritative`, `ai`, `display`) are stored in the database and survive restarts and
 config-file edits; `server.*` and `api.*` stay config-file-owned so a broken
 listener can always be fixed by editing the file. A `server` or `api` group
@@ -379,6 +428,48 @@ those IPv4 ones. A repeated address, or one a wildcard in the same list
 already covers (`"0.0.0.0, 192.168.1.2"`), is a config error, since the
 second socket could not be bound.
 
+`syslog` (`{enabled, server, facility, level, queries}`, replaced whole)
+sends the server log to a syslog server as RFC 5424 lines: `server` is
+`host`, `host:port`, `udp://host:port` or `tcp://host:port` (UDP and port
+514 by default; TCP frames are octet-counted, RFC 6587); `facility` is
+`daemon` (default), `user` or `local0`-`local7`; `level` is the lowest
+server-log level sent (`info`, `warn` or `error`); `queries` adds one line
+per answered query (`client=… qname=… qtype=… protocol=… outcome=… rcode=…
+ms=…`, message id `query`). Lines are queued and sent in the background;
+if the server cannot be reached they are dropped and counted, and the count
+is sent once it can be.
+
+`dns64` (`{enabled, prefix, clients}`, replaced whole) turns on DNS64
+(RFC 6147) for IPv6-only networks behind NAT64: when a recursive AAAA query
+finds no IPv6 address (NODATA, or only `::ffff:` mapped addresses), the
+name's A records are answered as AAAA records inside `prefix` (RFC 6052:
+a /32, /40, /48, /56, /64 or /96; `64:ff9b::/96` by default), along with
+any CNAMEs leading to them. The well-known prefix carries public IPv4
+addresses only. `clients` limits it to those networks (empty: every
+client). Clients that set both DO and CD get the real answer, as they
+validate for themselves; synthesized answers never carry the AD bit.
+Answers from this server's own zones are not changed.
+
+`ecs` (`{enabled, subnet, ipv4_prefix, ipv6_prefix}`, replaced whole) sends
+EDNS Client Subnet (RFC 7871) to forwarding upstreams (and when looking up
+ALIAS targets), so CDNs answer with servers near the client. `subnet` (e.g.
+`203.0.113.0/24`) is sent for every query; when empty, each client's own
+address is sent cut to `ipv4_prefix` (24) / `ipv6_prefix` (56) bits, and
+nothing is sent for private, loopback, link-local or documentation
+addresses. It is never sent when walking the hierarchy from the root, so
+root and TLD servers do not see it. The cache is shared between clients:
+with per-client subnets, an answer fetched for one network can be given to
+another for its TTL.
+
+`server.proxy_protocol` (file-only) lists the networks of trusted load
+balancers that speak the PROXY protocol (HAProxy v1 or v2) on the TCP, DoT
+and DoH listeners. A connection from one of them must start with a PROXY
+header (5 s to send it, else it is closed); the client it names is used
+everywhere a client address matters (recursion access, policies, rate
+limits, transfer and update ACLs, logs). A v2 `LOCAL` header (a health
+check) or `UNKNOWN` v1 header keeps the proxy's own address. Connections
+from other addresses are served directly. UDP and DoQ are not affected.
+
 `server.ipv6_only` (`false` by default; the console shows it but leaves it to the file) makes a `::` listen
 address, in `[server]` or in `[api]`, `[dot]`, `[doh]` or `[doq]`, accept
 IPv6 clients only; by default `::` accepts IPv4 clients too.
@@ -482,15 +573,11 @@ POST /api/zones
 }
 ```
 
-Secondary zones are added to `authoritative.secondary_zones`, persisted to the
-configuration file, applied to the running refresher immediately, and pulled
+Secondary zones are stored in the database with their masters, applied to
+the running refresher immediately (and again at every start), and pulled
 over AXFR/IXFR from the first reachable master. Their records are read-only in
-the GUI and record mutation endpoints return `409 Conflict`.
-
-> Note: secondary-zone definitions are still config-file-owned (they describe
-> infrastructure that must be available before the database is consulted),
-> unlike runtime settings such as upstreams and policy lists, which live in
-> the database.
+the GUI and record mutation endpoints return `409 Conflict`. Secondary zones
+can also be listed in `daygle-dns.toml` under `[[authoritative.secondary_zones]]`.
 
 Import a BIND zone file (creates the zone and replaces its records):
 
@@ -524,9 +611,45 @@ NOTIFY (OpCode 4, QTYPE SOA, UDP) to every address in
 `authoritative.notify_targets`; secondaries that receive it immediately query
 our SOA and pull an IXFR/AXFR when the serial advanced. When
 `authoritative.notify_listen_enabled` is set, the server also accepts
-NOTIFYs for its configured secondary zones on the main UDP port, replies with
+NOTIFYs for its secondary zones (and followed catalog zones) on the main UDP port, replies with
 the current SOA, and refreshes that zone immediately (the refresh interval
 remains the fallback and serials are always compared before a transfer).
+
+### Catalog zones (RFC 9432)
+
+A catalog zone is a zone listing other zones, so secondaries can follow a
+whole server instead of being told about each zone. Both directions are set
+under `authoritative` (in Settings, or `PUT /api/config`):
+
+```json
+{
+  "authoritative": {
+    "catalog_zone": "catalog.example.com",
+    "catalog_consumers": [
+      { "name": "catalog.example.net", "masters": ["198.51.100.10"], "refresh_secs": 3600, "enabled": true }
+    ]
+  }
+}
+```
+
+- `catalog_zone` publishes a schema-version-2 catalog of this server's
+  primary zones under that name (empty: none). Each zone gets a PTR at
+  `<unique-id>.zones.<catalog>` that stays the same for the life of the zone;
+  the serial moves forward whenever the list changes, and with NOTIFY on the
+  `notify_targets` are told. Secondaries fetch it by AXFR, so it obeys
+  `axfr_enabled`/`axfr_networks` like any zone. A hosted zone of the same
+  name takes precedence (the catalog is then not published).
+- `catalog_consumers` (the whole list) follows remote catalogs. Each catalog
+  is checked every `refresh_secs` (at least 30) and transferred again when
+  its serial changed; every member zone it lists is added as a secondary
+  zone from the catalog's `masters`, and the zones it drops are removed. A
+  zone this server already has is left alone. With `notify_listen_enabled`,
+  a NOTIFY for the catalog from one of its masters checks it at once. A
+  disabled catalog keeps its zones; removing it from the list removes them.
+
+Zones added by a catalog show `"catalog": "<name>"` in `GET /api/zones`, and
+`DELETE /api/zones/{id}` refuses them with `409` (remove them from the catalog
+instead).
 
 `PUT /api/zones/{id}/soa` edits a primary zone's SOA metadata. Every field is
 optional; omitted fields keep their current value. `bump_serial` increments
@@ -565,10 +688,41 @@ PUT /api/zones/{id}/records
 ```
 
 Supported `rtype` values: `A`, `AAAA`, `CNAME`, `MX`, `TXT`, `NS`, `SOA`,
-`SRV`, `PTR`, `CAA`, `HTTPS`, `SVCB`, `DS`, `TLSA`, `SSHFP`, `NAPTR`.
+`SRV`, `PTR`, `CAA`, `HTTPS`, `SVCB`, `DS`, `TLSA`, `SSHFP`, `NAPTR`, `ALIAS`.
 `content` must parse as that type's RDATA, otherwise the request fails with
-400. `priority` is stored but not served: MX and SRV take their priority from
-`content`.
+400. `priority` is not served: MX and SRV take their priority from `content`.
+For A and AAAA records with health checks it is the failover priority (see
+below).
+
+**Health-checked failover.** An A or AAAA record can carry a health check:
+
+```
+PUT    /api/zones/{id}/records/{rid}/health   { "kind": "https", "port": 443, "path": "/health", "host": "", "interval_secs": 30 }
+DELETE /api/zones/{id}/records/{rid}/health
+GET    /api/health-checks
+```
+
+`kind` is `tcp` (a connection opens), `http` or `https` (a GET answers with a
+status below 400; certificates are not verified). `host` is the name sent
+in the Host header and SNI (empty: the record's name); the request goes to
+the record's address. `interval_secs` is 5-86400 (default 30). After 2
+failed checks in a row a record is left out of answers, and it returns
+after 2 passes. At a name whose A (or AAAA) records include a checked one,
+only the healthy records with the lowest `priority` are served, so a higher
+priority makes a record a backup; when none is healthy, all are served.
+`GET /api/health-checks` lists every check with its record (`zone_id`,
+`name`, `rtype`, `address`, `priority`) and `healthy`, `last_checked` (UNIX
+seconds) and `last_error`. Zone transfers still carry every record.
+
+An `ALIAS` record (also called ANAME) lets a name - including the zone apex,
+where a CNAME is not allowed - follow another host's addresses: its `content`
+is the target name (e.g. `"myapp.cdn.example.net."`), and A and AAAA queries
+for the name are answered with the target's current addresses, looked up
+when asked (from the server's own zones, or recursively) and served under
+the alias's name with the lower of the two TTLs. Other types at that name are
+answered from the zone as usual. An alias cannot share its name with an A,
+AAAA, CNAME or another ALIAS record, cannot point at itself, and cannot be
+added to a DNSSEC-signed zone (nor can a zone holding one be signed).
 
 `PUT /api/zones/{id}/records/{rid}` replaces an existing record in place with
 the same body, keeping its id and disabled state (the collection `PUT` above
@@ -708,6 +862,46 @@ and listeners referencing the name are rebuilt immediately. `DELETE`
 removes the certificate; one still referenced by a listener cannot be
 deleted.
 
+#### Let's Encrypt (ACME)
+
+```
+GET  /api/acme
+PUT  /api/acme
+POST /api/certificates/acme
+POST /api/certificates/{name}/renew
+GET  /.well-known/acme-challenge/{token}
+```
+
+Certificates can be issued and renewed automatically by an ACME CA: Let's
+Encrypt, or a private one such as step-ca. `PUT /api/acme` sets
+`{email, directory, agree_terms, ca_certificate, renew_days}`: `directory`
+empty means Let's Encrypt; `ca_certificate` is a PEM root to trust for a
+private CA's directory; `renew_days` (default 30) is how long before expiry
+to renew. `GET /api/acme` returns the `settings`, the `directory_url` in use,
+and the Let's Encrypt (`lets_encrypt`, `lets_encrypt_staging`) directories.
+An account with the CA is created on first use and kept in the database.
+
+`POST /api/certificates/acme` `{name, domains, challenge}` requests a
+certificate (`agree_terms` must be set). It answers `202` and runs in the
+background; the certificate list then carries an `acme` object
+(`domains`, `challenge`, `status`: `pending`/`valid`/`failed`,
+`last_error`, `last_attempt`), and lists the entry even before the CA has
+issued it. Control of each name is proven by:
+
+- `http` (HTTP-01): the CA fetches `/.well-known/acme-challenge/{token}` on
+  port 80, which the web console's HTTP listener answers (open, outside
+  `/api`, and never redirected to HTTPS). The name must reach that listener
+  on port 80.
+- `dns` (DNS-01): a TXT record at `_acme-challenge.<name>` is added to the
+  primary zone hosted here that holds it, and removed afterwards. The zone
+  must be delegated to this server. Wildcard names need `dns`.
+
+Certificates are checked a minute after start and then twice a day, and
+renewed `renew_days` before expiry; `POST /api/certificates/{name}/renew`
+renews one now. A renewal is stored like an upload, so listeners using the
+certificate switch to it straight away. An ACME certificate cannot be
+replaced by an upload (`409`); deleting it stops its renewals.
+
 ### DNSSEC signing
 
 ```
@@ -717,6 +911,15 @@ POST /api/zones/{id}/unsign
 
 `sign` generates a signing key (if absent), signs the zone, and reloads the
 catalog. `unsign` removes the key.
+
+`sign` takes an optional body `{ "nsec3": true }` to prove that names and
+types do not exist with NSEC3 (hashed owner names, so the zone's contents
+cannot be listed by walking its NSEC chain) instead of NSEC, the default.
+NSEC3 uses the RFC 9276 parameters: SHA-1, no extra iterations, no salt and
+no opt-out (NSEC3PARAM is published at the apex). Calling `sign` on a signed
+zone with `nsec3` switches between the two without changing keys; without a
+body it keeps the zone's current choice. `GET /api/zones` reports `dnssec`
+and `nsec3` for each zone.
 
 Once signed, a zone is maintained automatically: RRSIGs are renewed before
 they expire and keys are rolled over on schedule (double-signing during the
@@ -876,8 +1079,15 @@ caught before it is added:
   "domains": 182344,
   "sample": ["0.0.0.0", "ads.example.com"]
 }
-````format` accepts `domains`, `hosts`, `adblock`, or `auto` (empty = auto) to
-auto-detect the format from the content. `ok: false` with a `reason` means
+```
+
+`format` accepts `domains`, `hosts`, `adblock`, `rpz`, or `auto` (empty =
+auto) to auto-detect the format from the content. An `rpz` source is a
+Response Policy Zone in zone-file form (as served over HTTP by most RPZ
+feeds): every QNAME trigger in it is blocked, wildcards (`*.example.com`)
+included, whatever its action (NXDOMAIN, NODATA, drop, a walled-garden CNAME
+or local data); `rpz-passthru.` entries are exceptions and are left out, and
+IP and NSDNAME triggers are ignored. `ok: false` with a `reason` means
 the URL fetched fine but the content does not parse as (or does not match)
 `format`; a `502` means the URL itself could not be fetched.
 
@@ -949,6 +1159,68 @@ reordered list. Groups are evaluated in this order.
 `POST /api/policy/blocking/test` evaluates a `{client, domain}` pair against
 the live blocking groups and reports whether (and why) it is blocked, so an
 operator can verify rules before relying on them.
+
+### Backup and restore
+
+```
+GET    /api/backup[?query_logs=true]
+GET    /api/backup/restore
+POST   /api/backup/restore
+DELETE /api/backup/restore
+```
+
+Admin only (viewers get `403`): a backup holds private keys and password
+hashes.
+
+`GET /api/backup` downloads a backup as one SQLite file
+(`daygle-dns-backup-YYYYMMDD-HHMM.db`): a consistent copy of the database
+(zones, records, DNSSEC keys, settings, console users, certificates,
+blocking groups, split horizon, secondary and stub zones) plus the AI
+scanner's operator overrides. AI verdicts are a cache and are not included.
+Query logs are left out unless `query_logs=true`.
+
+`POST /api/backup/restore` takes a backup file as the request body (up to
+1 GiB). It checks the file is an intact backup made by this or an earlier
+version, then stages it to replace the database when the server next
+starts; nothing changes while it runs. The response, and
+`GET /api/backup/restore`, report what is staged (`null` when nothing is):
+
+```json
+{ "pending": { "created_at": 1792000000, "app_version": "1.0.0", "zones": 4,
+  "records": 52, "users": 2, "certificates": 1, "query_logs": 0, "ai_overrides": 3 } }
+```
+
+A file that is not a backup gets `400`. `DELETE /api/backup/restore` drops
+the staged restore (`204`, or `404` when none is staged). On the next start
+the current database is renamed `<database>.before-restore-<unix time>` and
+the backup takes its place; the backup's AI overrides replace those in the
+AI database. The same is available from the command line:
+`daygle-dns backup FILE [--query-logs]` (safe while the server runs) and
+`daygle-dns restore FILE` (then restart).
+
+### Audit log
+
+```
+GET /api/audit[?user=NAME][&q=TEXT][&before_id=ID][&limit=100]
+```
+
+Admin only. Every change made through the API (any method other than
+`GET`/`HEAD`/`OPTIONS`), every backup download, and every sign-in attempt
+and first-run setup is recorded once it has run, newest first:
+
+```json
+[{ "id": 42, "ts": 1792540000, "username": "glen", "via": "session",
+   "client": "192.168.1.20", "action": "Changed settings",
+   "method": "PUT", "path": "/api/config", "status": 200 }]
+```
+
+`via` is how the caller signed in: `session`, `api_token`, `static_token`,
+`open` (authentication off), or `password` for a sign-in. `action` says
+what was done in words, falling back to the method and path. Request
+bodies are never stored. Requests refused before they ran (`401`/`403` from
+authorization) are not recorded, apart from failed sign-ins. `q` matches the
+action or path; `before_id` pages back. Entries are kept for a year, and
+backups carry them.
 
 ### In-place updates
 

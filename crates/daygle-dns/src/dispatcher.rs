@@ -58,6 +58,12 @@ pub struct DnsDispatcher {
     /// Client Timeout (`server.client_timeout_ms`): how long the recursive
     /// path may take before the client receives SERVFAIL. Default 2000 ms.
     client_timeout: Duration,
+    /// DNS cookies (RFC 7873, `server.dns_cookies`).
+    cookies: Arc<crate::cookies::Cookies>,
+    /// Remote logging of queries (`[syslog] queries`).
+    syslog: Option<Arc<crate::syslog::SyslogSender>>,
+    /// The live config, for settings read per query (`[dns64]`).
+    config: Option<Arc<ArcSwap<daygle_dns_core::config::DaygleConfig>>>,
 }
 
 impl DnsDispatcher {
@@ -116,6 +122,9 @@ impl DnsDispatcher {
             query_logger: None,
             query_db_logger: None,
             client_timeout: Duration::from_millis(2000),
+            cookies: Arc::new(crate::cookies::Cookies::new(true)),
+            syslog: None,
+            config: None,
         }
     }
 
@@ -186,6 +195,27 @@ impl DnsDispatcher {
     /// SERVFAIL and the whole recursion is cancelled.
     pub fn with_client_timeout(mut self, client_timeout: Duration) -> Self {
         self.client_timeout = client_timeout;
+        self
+    }
+
+    /// Send query lines to syslog (when its settings ask for them).
+    pub fn with_syslog(mut self, syslog: Option<Arc<crate::syslog::SyslogSender>>) -> Self {
+        self.syslog = syslog;
+        self
+    }
+
+    /// Read per-query settings (DNS64) from the live config.
+    pub fn with_config(
+        mut self,
+        config: Arc<ArcSwap<daygle_dns_core::config::DaygleConfig>>,
+    ) -> Self {
+        self.config = Some(config);
+        self
+    }
+
+    /// Turn DNS cookies (RFC 7873) on or off.
+    pub fn with_cookies(mut self, enabled: bool) -> Self {
+        self.cookies = Arc::new(crate::cookies::Cookies::new(enabled));
         self
     }
 
@@ -291,6 +321,17 @@ impl DnsDispatcher {
         self.record_stats(client, qname, outcome);
         self.log_query(client, qname, qtype, outcome, rcode, started);
         self.db_log_query(client, qname, qtype, protocol, outcome, rcode, started);
+        if let Some(syslog) = &self.syslog {
+            syslog.query(crate::syslog::QueryLine {
+                client,
+                qname,
+                qtype,
+                protocol,
+                outcome: outcome_label(outcome),
+                rcode,
+                elapsed_ms: started.elapsed().as_millis() as u64,
+            });
+        }
     }
 
     /// Serve an AXFR/IXFR zone transfer from the stored zone data.
@@ -309,7 +350,7 @@ impl DnsDispatcher {
         let settings = self.catalog.settings();
         if !settings.axfr_enabled || !transfer_client_allowed(&settings.axfr_networks, client) {
             debug!(query = %qname, %client, "zone transfer refused by policy");
-            return send_error(&mut response_handle, request, ResponseCode::Refused).await;
+            return send_error(&mut response_handle, request, ResponseCode::Refused, None).await;
         }
 
         // TSIG gate (RFC 8945): when the zone requires a signed transfer,
@@ -331,15 +372,15 @@ impl DnsDispatcher {
                     }
                     daygle_dns_authoritative::tsig::TsigVerifyOutcome::Valid { .. } => {
                         debug!(query = %qname, %client, "zone transfer signed with wrong TSIG key");
-                        return send_error(&mut response_handle, request, ResponseCode::Refused).await;
+                        return send_error(&mut response_handle, request, ResponseCode::Refused, None).await;
                     }
                     daygle_dns_authoritative::tsig::TsigVerifyOutcome::Invalid(failure) => {
                         debug!(query = %qname, %client, ?failure, "zone transfer TSIG verification failed");
-                        return send_error(&mut response_handle, request, ResponseCode::Refused).await;
+                        return send_error(&mut response_handle, request, ResponseCode::Refused, None).await;
                     }
                     daygle_dns_authoritative::tsig::TsigVerifyOutcome::Unsigned => {
                         debug!(query = %qname, %client, "zone transfer requires TSIG");
-                        return send_error(&mut response_handle, request, ResponseCode::Refused).await;
+                        return send_error(&mut response_handle, request, ResponseCode::Refused, None).await;
                     }
                 }
             }
@@ -387,8 +428,13 @@ impl DnsDispatcher {
                     );
                     if let Err(e) = tbs_response.destructive_emit(&mut encoder) {
                         warn!(query = %qname, error = %e, "failed to encode signed transfer");
-                        return send_error(&mut response_handle, request, ResponseCode::ServFail)
-                            .await;
+                        return send_error(
+                            &mut response_handle,
+                            request,
+                            ResponseCode::ServFail,
+                            None,
+                        )
+                        .await;
                     }
                     match context.sign(&tbs_buf) {
                         Ok(signature) => response.set_signature(signature),
@@ -398,6 +444,7 @@ impl DnsDispatcher {
                                 &mut response_handle,
                                 request,
                                 ResponseCode::ServFail,
+                                None,
                             )
                             .await;
                         }
@@ -413,12 +460,12 @@ impl DnsDispatcher {
             }
             Ok(None) => {
                 debug!(query = %qname, "zone transfer for unknown zone");
-                send_error(&mut response_handle, request, ResponseCode::Refused).await
+                send_error(&mut response_handle, request, ResponseCode::Refused, None).await
             }
             Err(e) => {
                 warn!(query = %qname, error = %e, "zone transfer failed");
                 self.log_error("transfer", format!("transfer for {qname} failed: {e}"));
-                send_error(&mut response_handle, request, ResponseCode::ServFail).await
+                send_error(&mut response_handle, request, ResponseCode::ServFail, None).await
             }
         }
     }
@@ -459,8 +506,31 @@ impl RequestHandler for DnsDispatcher {
         // IPv4-mapped IPv6 sources (an IPv4 client on a dual-stack `::`
         // listener) are canonicalized to plain IPv4 so IPv4 ACLs, rate
         // limits, split-horizon networks and transfer allow-lists match them.
-        let client = request.src().ip().to_canonical();
-        if !self.rate_limiter.check_client(client) {
+        // Behind a PROXY protocol front, the client it names.
+        let client = crate::proxy_protocol::real_client(request.src())
+            .ip()
+            .to_canonical();
+
+        // DNS cookies (RFC 7873): every response to a client that sent one
+        // carries a fresh server cookie, and a request whose server cookie
+        // checks out provably comes from its source address, so it is not
+        // held to the per-client rate limit (which exists for spoofed
+        // floods).
+        let (cookie_ok, cookie_reply) =
+            match self
+                .cookies
+                .check(request.edns.as_ref(), client, unix_now() as u32)
+            {
+                crate::cookies::CookieCheck::Absent => (false, None),
+                crate::cookies::CookieCheck::Malformed => {
+                    return send_error(&mut response_handle, request, ResponseCode::FormErr, None)
+                        .await;
+                }
+                crate::cookies::CookieCheck::Present { valid, reply } => (valid, Some(reply)),
+            };
+        let mut response_handle =
+            crate::cookies::CookieResponder::new(response_handle, cookie_reply);
+        if !cookie_ok && !self.rate_limiter.check_client(client) {
             debug!(%client, "query rate-limited by client");
             self.metrics.inc(&self.metrics.rate_limited);
             let protocol = request
@@ -476,7 +546,13 @@ impl RequestHandler for DnsDispatcher {
                 Some("SERVFAIL"),
                 started,
             );
-            return send_error(&mut response_handle, request, ResponseCode::ServFail).await;
+            return send_error(
+                &mut response_handle,
+                request,
+                ResponseCode::ServFail,
+                Ede::new(ede::OTHER, "rate limit exceeded"),
+            )
+            .await;
         }
 
         // DNS labels are case-insensitive by design, so queries are normalized to
@@ -496,6 +572,7 @@ impl RequestHandler for DnsDispatcher {
             return daygle_dns_authoritative::handle_update_with_notify(
                 &self.catalog,
                 request,
+                client,
                 edns,
                 response_handle,
                 self.notify.sender.as_deref(),
@@ -506,7 +583,7 @@ impl RequestHandler for DnsDispatcher {
             return match &self.notify.inbound {
                 Some(inbound) => inbound.handle(request, response_handle).await,
                 // No inbound NOTIFY configured: NOTIMP, per RFC 1996 §3.9.
-                None => send_error(&mut response_handle, request, ResponseCode::NotImp).await,
+                None => send_error(&mut response_handle, request, ResponseCode::NotImp, None).await,
             };
         }
 
@@ -515,7 +592,8 @@ impl RequestHandler for DnsDispatcher {
             Err(e) => {
                 warn!("malformed request from {}: {e}", request.src());
                 self.metrics.inc(&self.metrics.errors);
-                return send_error(&mut response_handle, request, ResponseCode::FormErr).await;
+                return send_error(&mut response_handle, request, ResponseCode::FormErr, None)
+                    .await;
             }
         };
 
@@ -543,7 +621,13 @@ impl RequestHandler for DnsDispatcher {
                 Some("SERVFAIL"),
                 started,
             );
-            return send_error(&mut response_handle, request, ResponseCode::ServFail).await;
+            return send_error(
+                &mut response_handle,
+                request,
+                ResponseCode::ServFail,
+                Ede::new(ede::OTHER, "rate limit exceeded"),
+            )
+            .await;
         }
 
         // 1. Policy. The engine is swapped atomically on reload; clone out the
@@ -564,7 +648,13 @@ impl RequestHandler for DnsDispatcher {
                     Some("REFUSED"),
                     started,
                 );
-                return send_error(&mut response_handle, request, ResponseCode::Refused).await;
+                return send_error(
+                    &mut response_handle,
+                    request,
+                    ResponseCode::Refused,
+                    Ede::new(ede::BLOCKED, decision.reason.clone()),
+                )
+                .await;
             }
             Action::Block => {
                 debug!(query = %qname, reason = %decision.reason, "blocked by policy");
@@ -578,7 +668,13 @@ impl RequestHandler for DnsDispatcher {
                     Some("NXDOMAIN"),
                     started,
                 );
-                return send_error(&mut response_handle, request, ResponseCode::NXDomain).await;
+                return send_error(
+                    &mut response_handle,
+                    request,
+                    ResponseCode::NXDomain,
+                    Ede::new(ede::BLOCKED, decision.reason.clone()),
+                )
+                .await;
             }
             Action::Redirect(ip) => {
                 debug!(query = %qname, %ip, "redirected by policy");
@@ -598,6 +694,7 @@ impl RequestHandler for DnsDispatcher {
                     info.query.name(),
                     info.query.query_type(),
                     *ip,
+                    Ede::new(ede::BLOCKED, decision.reason.clone()),
                 )
                 .await;
             }
@@ -614,7 +711,12 @@ impl RequestHandler for DnsDispatcher {
                     Some("NOERROR"),
                     started,
                 );
-                return send_empty(&mut response_handle, request).await;
+                return send_empty(
+                    &mut response_handle,
+                    request,
+                    Ede::new(ede::FILTERED, decision.reason.clone()),
+                )
+                .await;
             }
         }
 
@@ -640,9 +742,11 @@ impl RequestHandler for DnsDispatcher {
                     Some(rcode),
                     started,
                 );
+                // Per-client-group filtering (RFC 8914 "Filtered").
+                let why = Ede::new(ede::FILTERED, decision.reason.clone());
                 return match decision.action {
                     Action::Refused => {
-                        send_error(&mut response_handle, request, ResponseCode::Refused).await
+                        send_error(&mut response_handle, request, ResponseCode::Refused, why).await
                     }
                     Action::Redirect(ip) => {
                         send_redirect(
@@ -651,12 +755,15 @@ impl RequestHandler for DnsDispatcher {
                             info.query.name(),
                             info.query.query_type(),
                             ip,
+                            why,
                         )
                         .await
                     }
-                    Action::NoData => send_empty(&mut response_handle, request).await,
+                    Action::NoData => send_empty(&mut response_handle, request, why).await,
                     // Block (NXDOMAIN) and any future action default to NXDOMAIN.
-                    _ => send_error(&mut response_handle, request, ResponseCode::NXDomain).await,
+                    _ => {
+                        send_error(&mut response_handle, request, ResponseCode::NXDomain, why).await
+                    }
                 };
             }
         }
@@ -683,7 +790,7 @@ impl RequestHandler for DnsDispatcher {
                     Some("NOERROR"),
                     started,
                 );
-                return send_records(&mut response_handle, request, &m.records).await;
+                return send_records(&mut response_handle, request, &m.records, None).await;
             }
         }
 
@@ -697,7 +804,40 @@ impl RequestHandler for DnsDispatcher {
                 .await;
         }
 
-        // 2b. Authoritative zones.
+        // 2b. ALIAS records: A/AAAA at an ALIAS name are answered with the
+        // target's addresses, looked up now (the catalog has no record for
+        // them).
+        if matches!(info.query.query_type(), RecordType::A | RecordType::AAAA) {
+            if let Some(alias) = self.catalog.alias(&qname) {
+                let (rcode, records, ede) = self
+                    .resolve_alias(alias, client, info.query.query_type())
+                    .await;
+                self.metrics.inc(&self.metrics.authoritative);
+                self.observe(
+                    client,
+                    &qname,
+                    &rtype,
+                    protocol,
+                    Outcome::Authoritative,
+                    Some(&rcode_label(rcode)),
+                    started,
+                );
+                if rcode != ResponseCode::NoError {
+                    return send_error(&mut response_handle, request, rcode, ede).await;
+                }
+                if records.is_empty() {
+                    return send_empty(&mut response_handle, request, None).await;
+                }
+                let owner = Name::from(info.query.name().clone());
+                let answers: Vec<Record> = records
+                    .into_iter()
+                    .map(|(ttl, rdata)| Record::from_rdata(owner.clone(), ttl, rdata))
+                    .collect();
+                return send_records(&mut response_handle, request, &answers, None).await;
+            }
+        }
+
+        // 2c. Authoritative zones.
         if self.catalog.contains(info.query.name()) {
             self.metrics.inc(&self.metrics.authoritative);
             // The catalog builds and sends the response itself; its exact
@@ -725,8 +865,24 @@ impl RequestHandler for DnsDispatcher {
         // reload; clone out the current one for this query.
         let resolver = self.resolver.load_full();
         let Some(resolver) = resolver else {
-            // Recursion disabled and not authoritative: REFUSED.
-            return send_error(&mut response_handle, request, ResponseCode::Refused).await;
+            // Recursion disabled and not authoritative: REFUSED (recorded
+            // like the other refusals, so it shows in the logs and stats).
+            self.observe(
+                client,
+                &qname,
+                &rtype,
+                protocol,
+                Outcome::Error,
+                Some(&rcode_label(ResponseCode::Refused)),
+                started,
+            );
+            return send_error(
+                &mut response_handle,
+                request,
+                ResponseCode::Refused,
+                Ede::new(ede::NOT_AUTHORITATIVE, "recursion is not available"),
+            )
+            .await;
         };
         // Recursion access control (`recursive.recursion_access`): clients
         // outside the allowed networks get REFUSED for anything not answered
@@ -742,17 +898,30 @@ impl RequestHandler for DnsDispatcher {
                 Some(&rcode_label(ResponseCode::Refused)),
                 started,
             );
-            return send_error(&mut response_handle, request, ResponseCode::Refused).await;
+            return send_error(
+                &mut response_handle,
+                request,
+                ResponseCode::Refused,
+                Ede::new(ede::PROHIBITED, "recursion is not allowed for this client"),
+            )
+            .await;
         }
 
         self.metrics.inc(&self.metrics.recursive);
         let lookup = match tokio::time::timeout(
             self.client_timeout,
-            resolver.lookup_for_client(client, &qname, info.query.query_type()),
+            daygle_dns_recursive::with_client_subnet(
+                self.client_subnet(client),
+                daygle_dns_recursive::track_stale(resolver.lookup_for_client(
+                    client,
+                    &qname,
+                    info.query.query_type(),
+                )),
+            ),
         )
         .await
         {
-            Ok(result) => result,
+            Ok((result, stale)) => result.map(|lookup| (lookup, stale)),
             Err(_elapsed) => {
                 debug!(
                     query = %qname,
@@ -769,14 +938,39 @@ impl RequestHandler for DnsDispatcher {
             }
         };
         match lookup {
-            Ok(lookup) => {
-                let answers = lookup.answers().to_vec();
-                let authorities = lookup.authorities().to_vec();
-                let additionals = lookup.additionals().to_vec();
+            Ok((lookup, stale)) => {
+                let mut answers = lookup.answers().to_vec();
+                let mut authorities = lookup.authorities().to_vec();
+                let mut additionals = lookup.additionals().to_vec();
+                // DNS64 (RFC 6147): no AAAA, so make them from the A records.
+                let mut synthesized = false;
+                if info.query.query_type() == RecordType::AAAA
+                    && lookup.message().response_code == ResponseCode::NoError
+                    && !answers.iter().any(|r| match &r.data {
+                        // Mapped addresses count as none (RFC 6147 §5.1.4).
+                        RData::AAAA(a) => a.0.to_ipv4_mapped().is_none(),
+                        _ => false,
+                    })
+                {
+                    if let Some(dns64) = self.dns64_for(client, request) {
+                        if let Some(records) = self
+                            .synthesize_aaaa(&dns64, &resolver, client, &qname, &authorities)
+                            .await
+                        {
+                            answers = records;
+                            authorities.clear();
+                            additionals.clear();
+                            synthesized = true;
+                        }
+                    }
+                }
                 // Forwarding: the upstream's AD bit. Recursive mode validates
                 // locally and records the outcome on each record instead.
-                let validated = lookup.message().authentic_data
-                    || (!answers.is_empty() && answers.iter().all(|r| r.proof == Proof::Secure));
+                // Synthesized answers are never validated (RFC 6147 §5.5).
+                let validated = !synthesized
+                    && (lookup.message().authentic_data
+                        || (!answers.is_empty()
+                            && answers.iter().all(|r| r.proof == Proof::Secure)));
                 if validated {
                     self.metrics.inc(&self.metrics.dnssec_validated);
                 }
@@ -799,7 +993,20 @@ impl RequestHandler for DnsDispatcher {
                     started,
                 );
 
-                let response = MessageResponseBuilder::from_message_request(request).build(
+                let ede = if stale {
+                    Ede::new(
+                        ede::STALE_ANSWER,
+                        "upstream unreachable; serving an expired answer",
+                    )
+                } else {
+                    None
+                };
+                let edns = response_edns(request, ede.as_ref());
+                let mut builder = MessageResponseBuilder::from_message_request(request);
+                if let Some(edns) = &edns {
+                    builder.edns(edns);
+                }
+                let response = builder.build(
                     metadata,
                     answers.iter(),
                     authorities.iter(),
@@ -826,6 +1033,27 @@ impl RequestHandler for DnsDispatcher {
                     } => <ResponseCode as From<u16>>::from(*code),
                     _ => ResponseCode::ServFail,
                 };
+                // NODATA for AAAA: DNS64 may have an answer after all.
+                if code == ResponseCode::NoError && info.query.query_type() == RecordType::AAAA {
+                    if let Some(dns64) = self.dns64_for(client, request) {
+                        if let Some(records) = self
+                            .synthesize_aaaa(&dns64, &resolver, client, &qname, &[])
+                            .await
+                        {
+                            self.observe(
+                                client,
+                                &qname,
+                                &rtype,
+                                protocol,
+                                Outcome::Recursive,
+                                Some(&rcode_label(ResponseCode::NoError)),
+                                started,
+                            );
+                            return send_recursive_answer(&mut response_handle, request, &records)
+                                .await;
+                        }
+                    }
+                }
                 self.observe(
                     client,
                     &qname,
@@ -835,8 +1063,237 @@ impl RequestHandler for DnsDispatcher {
                     Some(&rcode_label(code)),
                     started,
                 );
-                send_error(&mut response_handle, request, code).await
+                let why = if code == ResponseCode::ServFail {
+                    failure_ede(&e)
+                } else {
+                    None
+                };
+                send_error(&mut response_handle, request, code, why).await
             }
+        }
+    }
+}
+
+/// An Extended DNS Error (RFC 8914): says why a response is what it is
+/// (blocked, filtered, refused, failed upstream...), for clients and tools
+/// such as `dig` that show it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Ede {
+    code: u16,
+    text: String,
+}
+
+/// RFC 8914 info codes used here.
+mod ede {
+    pub const OTHER: u16 = 0;
+    pub const STALE_ANSWER: u16 = 3;
+    pub const DNSSEC_BOGUS: u16 = 6;
+    pub const BLOCKED: u16 = 15;
+    pub const FILTERED: u16 = 17;
+    pub const PROHIBITED: u16 = 18;
+    pub const NOT_AUTHORITATIVE: u16 = 20;
+    pub const NO_REACHABLE_AUTHORITY: u16 = 22;
+}
+
+impl Ede {
+    fn new(code: u16, text: impl Into<String>) -> Option<Self> {
+        let mut text: String = text.into();
+        // Keep the OPT record small: a short explanation is enough.
+        if text.len() > 200 {
+            let mut end = 200;
+            while !text.is_char_boundary(end) {
+                end -= 1;
+            }
+            text.truncate(end);
+        }
+        Some(Self { code, text })
+    }
+}
+
+/// The EDE for a recursive lookup that failed without an answer.
+fn failure_ede(error: &DaygleError) -> Option<Ede> {
+    let message = error.to_string();
+    let lower = message.to_ascii_lowercase();
+    if lower.contains("dnssec") || lower.contains("bogus") {
+        Ede::new(ede::DNSSEC_BOGUS, "DNSSEC validation failed")
+    } else {
+        Ede::new(ede::NO_REACHABLE_AUTHORITY, message)
+    }
+}
+
+/// Largest UDP response offered in our OPT record (the DNS Flag Day 2020
+/// value, which avoids IP fragmentation).
+const RESPONSE_UDP_PAYLOAD: u16 = 1232;
+
+/// The OPT record for a response: only when the client sent one (RFC 6891),
+/// echoing its DO bit, and carrying `ede` when given.
+fn response_edns(request: &Request, ede: Option<&Ede>) -> Option<hickory_proto::op::Edns> {
+    let asked = request.edns.as_ref()?;
+    let mut edns = hickory_proto::op::Edns::new();
+    edns.set_max_payload(asked.max_payload().clamp(512, RESPONSE_UDP_PAYLOAD));
+    edns.set_version(0);
+    edns.set_dnssec_ok(asked.flags().dnssec_ok);
+    if let Some(ede) = ede {
+        let mut data = ede.code.to_be_bytes().to_vec();
+        data.extend_from_slice(ede.text.as_bytes());
+        edns.options_mut()
+            .insert(hickory_proto::rr::rdata::opt::EdnsOption::Unknown(15, data));
+    }
+    Some(edns)
+}
+
+impl DnsDispatcher {
+    /// The EDNS Client Subnet to send upstream for `client` (`[ecs]`).
+    fn client_subnet(&self, client: IpAddr) -> Option<ipnet::IpNet> {
+        let config = self.config.as_ref()?.load();
+        config.ecs.compile().ok().flatten()?.subnet_for(client)
+    }
+
+    /// The DNS64 settings, when they apply to this request: DNS64 is on,
+    /// the client is one it serves, and the client did not ask to validate
+    /// for itself (DO and CD both set, RFC 6147 §5.5).
+    fn dns64_for(
+        &self,
+        client: IpAddr,
+        request: &Request,
+    ) -> Option<daygle_dns_core::config::Dns64> {
+        let config = self.config.as_ref()?.load();
+        let dns64 = config.dns64.compile().ok().flatten()?;
+        let validating = request.metadata.checking_disabled
+            && request.edns.as_ref().is_some_and(|e| e.flags().dnssec_ok);
+        (dns64.applies_to(client) && !validating).then_some(dns64)
+    }
+
+    /// AAAA records made from `qname`'s A records (with any CNAMEs leading
+    /// to them), or `None` when it has no A records to map. Their TTL is
+    /// capped by the negative-caching TTL of the empty AAAA answer
+    /// (RFC 6147 §5.1.7).
+    async fn synthesize_aaaa(
+        &self,
+        dns64: &daygle_dns_core::config::Dns64,
+        resolver: &RecursiveResolver,
+        client: IpAddr,
+        qname: &str,
+        aaaa_authorities: &[Record],
+    ) -> Option<Vec<Record>> {
+        let negative_ttl = aaaa_authorities
+            .iter()
+            .find_map(|r| match &r.data {
+                RData::SOA(soa) => Some(soa.minimum.min(r.ttl)),
+                _ => None,
+            })
+            .unwrap_or(600);
+        let lookup = tokio::time::timeout(
+            self.client_timeout,
+            daygle_dns_recursive::with_client_subnet(
+                self.client_subnet(client),
+                resolver.lookup_for_client(client, qname, RecordType::A),
+            ),
+        )
+        .await
+        .ok()?
+        .ok()?;
+        let mut records = Vec::new();
+        let mut mapped = 0usize;
+        for record in lookup.answers() {
+            match &record.data {
+                RData::A(a) => {
+                    if let Some(v6) = dns64.synthesize(a.0) {
+                        records.push(Record::from_rdata(
+                            record.name.clone(),
+                            record.ttl.min(negative_ttl),
+                            RData::AAAA(v6.into()),
+                        ));
+                        mapped += 1;
+                    }
+                }
+                RData::CNAME(_) => records.push(record.clone()),
+                _ => {}
+            }
+        }
+        (mapped > 0).then_some(records)
+    }
+
+    /// Look up an ALIAS target's `rtype` records: from the zones here when
+    /// the target is hosted (following ALIAS chains a few steps), otherwise
+    /// through the resolver. Returns the response code, the answers' TTLs
+    /// (capped by the ALIAS's) and data, and an EDE for a failure.
+    async fn resolve_alias(
+        &self,
+        alias: daygle_dns_authoritative::catalog::Alias,
+        client: IpAddr,
+        rtype: RecordType,
+    ) -> (ResponseCode, Vec<(u32, RData)>, Option<Ede>) {
+        let mut target = alias.target;
+        let mut ttl = alias.ttl;
+        for _ in 0..8 {
+            match self.catalog.alias(&target) {
+                Some(next) => {
+                    ttl = ttl.min(next.ttl);
+                    target = next.target;
+                }
+                None => break,
+            }
+        }
+        let collect = |records: Vec<Record>| -> Vec<(u32, RData)> {
+            records
+                .into_iter()
+                .filter(|r| r.record_type() == rtype)
+                .map(|r| (r.ttl.min(ttl), r.data.clone()))
+                .collect()
+        };
+        let hosted = Name::from_utf8(&target)
+            .map(|n| self.catalog.contains(&n.into()))
+            .unwrap_or(false);
+        if hosted {
+            return match self.catalog.local_records(&target, rtype) {
+                Ok(records) => (ResponseCode::NoError, collect(records), None),
+                Err(e) => (
+                    ResponseCode::ServFail,
+                    Vec::new(),
+                    Ede::new(ede::OTHER, format!("ALIAS target {target}: {e}")),
+                ),
+            };
+        }
+        let Some(resolver) = self.resolver.load_full() else {
+            return (
+                ResponseCode::ServFail,
+                Vec::new(),
+                Ede::new(
+                    ede::NOT_AUTHORITATIVE,
+                    format!("recursion is off, so the ALIAS target {target} cannot be looked up"),
+                ),
+            );
+        };
+        let lookup = tokio::time::timeout(
+            self.client_timeout,
+            daygle_dns_recursive::with_client_subnet(
+                self.client_subnet(client),
+                resolver.lookup(target.trim_end_matches('.'), rtype),
+            ),
+        )
+        .await;
+        match lookup {
+            Ok(Ok(found)) => (
+                ResponseCode::NoError,
+                collect(found.answers().to_vec()),
+                None,
+            ),
+            // The target has no such records (or does not exist): the alias
+            // name exists here, so that is NODATA, not NXDOMAIN.
+            Ok(Err(DaygleError::Resolution {
+                response_code: Some(0 | 3),
+                ..
+            })) => (ResponseCode::NoError, Vec::new(), None),
+            Ok(Err(e)) => (ResponseCode::ServFail, Vec::new(), failure_ede(&e)),
+            Err(_) => (
+                ResponseCode::ServFail,
+                Vec::new(),
+                Ede::new(
+                    ede::NO_REACHABLE_AUTHORITY,
+                    format!("no answer for the ALIAS target {target} in time"),
+                ),
+            ),
         }
     }
 }
@@ -846,9 +1303,14 @@ async fn send_error<R: ResponseHandler>(
     handle: &mut R,
     request: &Request,
     code: ResponseCode,
+    ede: Option<Ede>,
 ) -> ResponseInfo {
-    let response =
-        MessageResponseBuilder::from_message_request(request).error_msg(&request.metadata, code);
+    let edns = response_edns(request, ede.as_ref());
+    let mut builder = MessageResponseBuilder::from_message_request(request);
+    if let Some(edns) = &edns {
+        builder.edns(edns);
+    }
+    let response = builder.error_msg(&request.metadata, code);
     match handle.send_response(response).await {
         Ok(info) => info,
         Err(e) => {
@@ -899,13 +1361,22 @@ fn outcome_label(outcome: Outcome) -> &'static str {
 /// Send an empty NODATA response: NOERROR with no answer records, echoing the
 /// question. Used by the AAAA filter so dual-stack clients fall back to IPv4
 /// (an NXDOMAIN would wrongly claim the whole name does not exist).
-async fn send_empty<R: ResponseHandler>(handle: &mut R, request: &Request) -> ResponseInfo {
+async fn send_empty<R: ResponseHandler>(
+    handle: &mut R,
+    request: &Request,
+    ede: Option<Ede>,
+) -> ResponseInfo {
     let mut metadata = request.metadata;
     metadata.message_type = MessageType::Response;
     metadata.response_code = ResponseCode::NoError;
     metadata.recursion_available = true;
 
-    let response = MessageResponseBuilder::from_message_request(request).build(
+    let edns = response_edns(request, ede.as_ref());
+    let mut builder = MessageResponseBuilder::from_message_request(request);
+    if let Some(edns) = &edns {
+        builder.edns(edns);
+    }
+    let response = builder.build(
         metadata,
         std::iter::empty(),
         std::iter::empty(),
@@ -926,9 +1397,10 @@ async fn send_records<R: ResponseHandler>(
     handle: &mut R,
     request: &Request,
     records: &[Record],
+    ede: Option<Ede>,
 ) -> ResponseInfo {
     if records.is_empty() {
-        return send_error(handle, request, ResponseCode::NXDomain).await;
+        return send_error(handle, request, ResponseCode::NXDomain, ede).await;
     }
 
     let mut metadata = request.metadata;
@@ -937,7 +1409,44 @@ async fn send_records<R: ResponseHandler>(
     metadata.authoritative = true;
     metadata.recursion_available = true;
 
-    let response = MessageResponseBuilder::from_message_request(request).build(
+    let edns = response_edns(request, ede.as_ref());
+    let mut builder = MessageResponseBuilder::from_message_request(request);
+    if let Some(edns) = &edns {
+        builder.edns(edns);
+    }
+    let response = builder.build(
+        metadata,
+        records.iter(),
+        std::iter::empty(),
+        std::iter::empty(),
+        std::iter::empty(),
+    );
+    match handle.send_response(response).await {
+        Ok(info) => info,
+        Err(e) => {
+            warn!("failed to send answer: {e}");
+            fallback_response()
+        }
+    }
+}
+
+/// Send `records` as a recursive (not authoritative, not validated) answer.
+async fn send_recursive_answer<R: ResponseHandler>(
+    handle: &mut R,
+    request: &Request,
+    records: &[Record],
+) -> ResponseInfo {
+    let mut metadata = request.metadata;
+    metadata.message_type = MessageType::Response;
+    metadata.response_code = ResponseCode::NoError;
+    metadata.recursion_available = true;
+    metadata.authentic_data = false;
+    let edns = response_edns(request, None);
+    let mut builder = MessageResponseBuilder::from_message_request(request);
+    if let Some(edns) = &edns {
+        builder.edns(edns);
+    }
+    let response = builder.build(
         metadata,
         records.iter(),
         std::iter::empty(),
@@ -965,6 +1474,7 @@ async fn send_redirect<R: ResponseHandler>(
     name: &Name,
     rtype: RecordType,
     ip: IpAddr,
+    ede: Option<Ede>,
 ) -> ResponseInfo {
     let rdata = match (ip, rtype) {
         (IpAddr::V4(v4), RecordType::A | RecordType::ANY) => RData::A(v4.into()),
@@ -978,10 +1488,10 @@ async fn send_redirect<R: ResponseHandler>(
         (IpAddr::V6(v6), RecordType::A) if v6.is_unspecified() => {
             RData::A(std::net::Ipv4Addr::UNSPECIFIED.into())
         }
-        _ => return send_empty(handle, request).await,
+        _ => return send_empty(handle, request, ede).await,
     };
     let record = Record::from_rdata(name.clone(), 60, rdata);
-    send_records(handle, request, std::slice::from_ref(&record)).await
+    send_records(handle, request, std::slice::from_ref(&record), ede).await
 }
 
 fn unix_now() -> u64 {
@@ -997,4 +1507,33 @@ fn fallback_response() -> ResponseInfo {
         metadata: hickory_proto::op::Metadata::new(0, MessageType::Response, OpCode::Query),
         counts: hickory_proto::op::HeaderCounts::default(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn failures_map_to_extended_errors() {
+        let failure = |message: &str| DaygleError::Resolution {
+            message: message.to_string(),
+            response_code: None,
+        };
+        assert_eq!(
+            failure_ede(&failure("DNSSEC validation failed")).map(|e| e.code),
+            Some(ede::DNSSEC_BOGUS)
+        );
+        let timeout =
+            failure_ede(&failure("no answer within the client timeout of 2000 ms")).unwrap();
+        assert_eq!(timeout.code, ede::NO_REACHABLE_AUTHORITY);
+        assert!(timeout.text.contains("client timeout"));
+    }
+
+    #[test]
+    fn extended_error_text_is_kept_short() {
+        let long = "é".repeat(300);
+        let e = Ede::new(ede::BLOCKED, long).unwrap();
+        assert!(e.text.len() <= 200);
+        assert!(e.text.chars().all(|c| c == 'é'));
+    }
 }

@@ -62,6 +62,38 @@ CREATE TABLE IF NOT EXISTS dnssec_keys (
 
 CREATE INDEX IF NOT EXISTS idx_dnssec_keys_zone ON dnssec_keys(zone_id);
 
+-- Health checks on A/AAAA records (no foreign key: editing a record
+-- re-inserts its row, which must not drop the check; orphans are cleared at
+-- start-up and ignored when read).
+CREATE TABLE IF NOT EXISTS health_checks (
+    record_id      TEXT PRIMARY KEY,
+    kind           TEXT NOT NULL,
+    port           INTEGER NOT NULL,
+    path           TEXT NOT NULL DEFAULT '',
+    host           TEXT NOT NULL DEFAULT '',
+    interval_secs  INTEGER NOT NULL DEFAULT 30
+);
+
+-- Zones added by a consumed catalog zone (RFC 9432), and which catalog.
+CREATE TABLE IF NOT EXISTS catalog_members (
+    zone_id  TEXT PRIMARY KEY REFERENCES zones(id) ON DELETE CASCADE,
+    catalog  TEXT NOT NULL
+);
+
+-- The published catalog zone's serial, and a digest of the member list it
+-- was last bumped for.
+CREATE TABLE IF NOT EXISTS catalog_state (
+    name    TEXT PRIMARY KEY,
+    digest  TEXT NOT NULL,
+    serial  INTEGER NOT NULL
+);
+
+-- How a signed zone proves names and types do not exist (NSEC or NSEC3).
+CREATE TABLE IF NOT EXISTS zone_dnssec (
+    zone_id  TEXT PRIMARY KEY REFERENCES zones(id) ON DELETE CASCADE,
+    nsec3    INTEGER NOT NULL DEFAULT 0
+);
+
 CREATE TABLE IF NOT EXISTS secondary_zones (
     zone_id      TEXT PRIMARY KEY REFERENCES zones(id) ON DELETE CASCADE,
     masters      TEXT NOT NULL,
@@ -130,12 +162,60 @@ CREATE TABLE IF NOT EXISTS console_users (
     time_format   TEXT NOT NULL DEFAULT ''
 );
 
+CREATE TABLE IF NOT EXISTS console_user_two_factor (
+    username        TEXT PRIMARY KEY REFERENCES console_users(username) ON DELETE CASCADE,
+    secret          TEXT NOT NULL DEFAULT '',
+    pending_secret  TEXT NOT NULL DEFAULT '',
+    recovery_hashes TEXT NOT NULL DEFAULT '[]',
+    last_step       INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS console_sessions (
+    token_hash TEXT PRIMARY KEY,
+    username   TEXT NOT NULL REFERENCES console_users(username) ON DELETE CASCADE,
+    role       TEXT NOT NULL,
+    expires_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS api_tokens (
+    id           TEXT PRIMARY KEY,
+    username     TEXT NOT NULL REFERENCES console_users(username) ON DELETE CASCADE,
+    name         TEXT NOT NULL,
+    token_hash   TEXT NOT NULL UNIQUE,
+    read_only    INTEGER NOT NULL DEFAULT 0,
+    created_at   INTEGER NOT NULL,
+    last_used_at INTEGER NOT NULL DEFAULT 0,
+    expires_at   INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS audit_log (
+    id       INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts       INTEGER NOT NULL,
+    username TEXT NOT NULL,
+    via      TEXT NOT NULL,
+    client   TEXT NOT NULL DEFAULT '',
+    action   TEXT NOT NULL,
+    method   TEXT NOT NULL,
+    path     TEXT NOT NULL,
+    status   INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_audit_log_ts ON audit_log (ts DESC);
+
 CREATE TABLE IF NOT EXISTS tls_certificates (
     name        TEXT PRIMARY KEY,
     server_name TEXT NOT NULL DEFAULT '',
     cert_pem    TEXT NOT NULL,
     key_pem     TEXT NOT NULL,
     created_at  TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS acme_certificates (
+    name         TEXT PRIMARY KEY,
+    domains      TEXT NOT NULL DEFAULT '[]',
+    challenge    TEXT NOT NULL DEFAULT 'http',
+    status       TEXT NOT NULL DEFAULT 'pending',
+    last_error   TEXT NOT NULL DEFAULT '',
+    last_attempt INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS runtime_settings (
@@ -208,6 +288,13 @@ impl ZoneStore {
             .map_err(|e| DaygleError::Internal(format!("database lock poisoned: {e}")))
     }
 
+    /// Run `f` with the connection locked (for whole-database operations
+    /// such as backups).
+    pub(crate) fn with_conn<T>(&self, f: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
+        let conn = self.lock_conn()?;
+        f(&conn)
+    }
+
     fn init(&self) -> Result<()> {
         let conn = self.lock_conn()?;
         conn.execute_batch(SCHEMA)?;
@@ -223,6 +310,9 @@ impl ZoneStore {
         conn.execute_batch(
             "DELETE FROM records WHERE zone_id NOT IN (SELECT id FROM zones);
              DELETE FROM dnssec_keys WHERE zone_id NOT IN (SELECT id FROM zones);
+             DELETE FROM zone_dnssec WHERE zone_id NOT IN (SELECT id FROM zones);
+             DELETE FROM catalog_members WHERE zone_id NOT IN (SELECT id FROM zones);
+             DELETE FROM health_checks WHERE record_id NOT IN (SELECT id FROM records);
              DELETE FROM secondary_zones WHERE zone_id NOT IN (SELECT id FROM zones);
              PRAGMA foreign_keys = ON;",
         )?;
@@ -1183,7 +1273,145 @@ impl ZoneStore {
         Ok(changed > 0)
     }
 
+    // ---- Health checks ---------------------------------------------------
+
+    /// Every health check on an existing A or AAAA record, with the record.
+    pub fn list_health_checks(&self) -> Result<Vec<(crate::model::HealthCheck, Record)>> {
+        let conn = self.lock_conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT r.id, r.zone_id, r.name, r.rtype, r.content, r.ttl, r.priority, r.disabled,
+                    h.kind, h.port, h.path, h.host, h.interval_secs
+             FROM health_checks h JOIN records r ON r.id = h.record_id
+             WHERE r.rtype IN ('A', 'AAAA')
+             ORDER BY r.name",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            let record = row_to_record(row)?;
+            Ok((
+                crate::model::HealthCheck {
+                    record_id: record.id.clone(),
+                    kind: row.get(8)?,
+                    port: row.get(9)?,
+                    path: row.get(10)?,
+                    host: row.get(11)?,
+                    interval_secs: row.get(12)?,
+                },
+                record,
+            ))
+        })?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    /// Add or replace the health check on a record.
+    pub fn set_health_check(&self, check: &crate::model::HealthCheck) -> Result<()> {
+        let conn = self.lock_conn()?;
+        conn.execute(
+            "INSERT INTO health_checks (record_id, kind, port, path, host, interval_secs)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(record_id) DO UPDATE SET kind = excluded.kind, port = excluded.port,
+                 path = excluded.path, host = excluded.host,
+                 interval_secs = excluded.interval_secs",
+            params![
+                check.record_id,
+                check.kind,
+                check.port,
+                check.path,
+                check.host,
+                check.interval_secs
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Remove a record's health check. Returns whether it had one.
+    pub fn delete_health_check(&self, record_id: &str) -> Result<bool> {
+        let conn = self.lock_conn()?;
+        Ok(conn.execute(
+            "DELETE FROM health_checks WHERE record_id = ?1",
+            [record_id],
+        )? > 0)
+    }
+
+    // ---- Catalog zones (RFC 9432) ----------------------------------------
+
+    /// Record that `catalog` added the zone `zone_id`.
+    pub fn add_catalog_member(&self, zone_id: &str, catalog: &str) -> Result<()> {
+        let conn = self.lock_conn()?;
+        conn.execute(
+            "INSERT INTO catalog_members (zone_id, catalog) VALUES (?1, ?2)
+             ON CONFLICT(zone_id) DO UPDATE SET catalog = excluded.catalog",
+            params![zone_id, catalog],
+        )?;
+        Ok(())
+    }
+
+    /// Every zone added by a consumed catalog: zone id → catalog name.
+    pub fn catalog_members(&self) -> Result<std::collections::HashMap<String, String>> {
+        let conn = self.lock_conn()?;
+        let mut stmt = conn.prepare("SELECT zone_id, catalog FROM catalog_members")?;
+        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
+
+    /// The serial of the published catalog zone `name` for a member list
+    /// with this `digest`: bumped (and `true` returned) when the list
+    /// changed since last time.
+    pub fn catalog_serial(&self, name: &str, digest: &str) -> Result<(u32, bool)> {
+        let conn = self.lock_conn()?;
+        let current: Option<(String, u32)> = conn
+            .query_row(
+                "SELECT digest, serial FROM catalog_state WHERE name = ?1",
+                [name],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        match current {
+            Some((d, serial)) if d == digest => Ok((serial, false)),
+            current => {
+                // Start from the time, so a catalog that is turned off and
+                // on again (or renamed back) still moves forward.
+                let now = u32::try_from(chrono::Utc::now().timestamp()).unwrap_or(u32::MAX);
+                let serial = current
+                    .map(|(_, s)| s.wrapping_add(1))
+                    .unwrap_or(now)
+                    .max(1);
+                conn.execute(
+                    "INSERT INTO catalog_state (name, digest, serial) VALUES (?1, ?2, ?3)
+                     ON CONFLICT(name) DO UPDATE SET digest = excluded.digest,
+                         serial = excluded.serial",
+                    params![name, digest, serial],
+                )?;
+                Ok((serial, true))
+            }
+        }
+    }
+
     // ---- DNSSEC signing keys --------------------------------------------
+
+    /// Whether a signed zone uses NSEC3 (rather than NSEC) for denial of
+    /// existence.
+    pub fn zone_nsec3(&self, zone_id: &str) -> Result<bool> {
+        let conn = self.lock_conn()?;
+        let nsec3: Option<bool> = conn
+            .query_row(
+                "SELECT nsec3 FROM zone_dnssec WHERE zone_id = ?1",
+                [zone_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(nsec3.unwrap_or(false))
+    }
+
+    /// Choose NSEC3 (`true`) or NSEC for a zone's denial of existence.
+    pub fn set_zone_nsec3(&self, zone_id: &str, nsec3: bool) -> Result<()> {
+        let conn = self.lock_conn()?;
+        conn.execute(
+            "INSERT INTO zone_dnssec (zone_id, nsec3) VALUES (?1, ?2)
+             ON CONFLICT(zone_id) DO UPDATE SET nsec3 = excluded.nsec3",
+            rusqlite::params![zone_id, nsec3],
+        )?;
+        Ok(())
+    }
 
     /// List every stored signing key for a zone (active and retired), oldest
     /// first.
@@ -1389,6 +1617,7 @@ fn row_to_console_user(row: &rusqlite::Row<'_>) -> rusqlite::Result<ConsoleUser>
             date_format: row.get(9)?,
             time_format: row.get(10)?,
         },
+        two_factor: row.get(11)?,
     })
 }
 
@@ -1406,6 +1635,9 @@ pub struct ConsoleUser {
     /// The account's own date and time display choices. An empty field
     /// means the server default (`display` in the configuration) applies.
     pub preferences: DisplaySettings,
+    /// Whether the account signs in with a code from an authenticator app
+    /// as well as its password.
+    pub two_factor: bool,
 }
 
 impl ConsoleUser {
@@ -1506,11 +1738,550 @@ impl ZoneStore {
         Ok(())
     }
 
-    /// Delete a managed TLS certificate by name. Returns whether one existed.
+    /// Delete a managed TLS certificate by name (and stop renewing it, if
+    /// it came from an ACME CA). Returns whether one existed.
     pub fn delete_tls_certificate(&self, name: &str) -> Result<bool> {
         let conn = self.lock_conn()?;
         let n = conn.execute("DELETE FROM tls_certificates WHERE name = ?1", [name])?;
-        Ok(n > 0)
+        let acme = conn.execute("DELETE FROM acme_certificates WHERE name = ?1", [name])?;
+        Ok(n > 0 || acme > 0)
+    }
+}
+
+/// A certificate issued and renewed by an ACME CA such as Let's Encrypt.
+/// Its key and chain live in `tls_certificates` under the same name once
+/// issued.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AcmeCertificate {
+    pub name: String,
+    pub domains: Vec<String>,
+    /// How control of the names is proven: `http` (HTTP-01, served by the
+    /// web console) or `dns` (DNS-01, a TXT record in a zone hosted here).
+    pub challenge: String,
+    /// `pending` (being issued), `valid` or `failed`.
+    pub status: String,
+    pub last_error: String,
+    /// UNIX time of the last issue or renewal attempt.
+    pub last_attempt: i64,
+}
+
+fn row_to_acme_certificate(row: &rusqlite::Row<'_>) -> rusqlite::Result<AcmeCertificate> {
+    let domains: String = row.get(1)?;
+    Ok(AcmeCertificate {
+        name: row.get(0)?,
+        domains: serde_json::from_str(&domains).unwrap_or_default(),
+        challenge: row.get(2)?,
+        status: row.get(3)?,
+        last_error: row.get(4)?,
+        last_attempt: row.get(5)?,
+    })
+}
+
+impl ZoneStore {
+    pub fn list_acme_certificates(&self) -> Result<Vec<AcmeCertificate>> {
+        let conn = self.lock_conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT name, domains, challenge, status, last_error, last_attempt
+             FROM acme_certificates ORDER BY name",
+        )?;
+        let rows = stmt.query_map([], row_to_acme_certificate)?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    pub fn get_acme_certificate(&self, name: &str) -> Result<Option<AcmeCertificate>> {
+        let conn = self.lock_conn()?;
+        conn.query_row(
+            "SELECT name, domains, challenge, status, last_error, last_attempt
+             FROM acme_certificates WHERE name = ?1",
+            [name],
+            row_to_acme_certificate,
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    /// Insert or replace an ACME certificate's settings and state.
+    pub fn put_acme_certificate(&self, cert: &AcmeCertificate) -> Result<()> {
+        let conn = self.lock_conn()?;
+        conn.execute(
+            "INSERT INTO acme_certificates (name, domains, challenge, status, last_error, last_attempt)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(name) DO UPDATE SET
+                domains = excluded.domains, challenge = excluded.challenge,
+                status = excluded.status, last_error = excluded.last_error,
+                last_attempt = excluded.last_attempt",
+            params![
+                cert.name,
+                serde_json::to_string(&cert.domains).expect("strings serialize"),
+                cert.challenge,
+                cert.status,
+                cert.last_error,
+                cert.last_attempt
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Record the outcome of an issue or renewal attempt.
+    pub fn set_acme_certificate_status(
+        &self,
+        name: &str,
+        status: &str,
+        last_error: &str,
+        last_attempt: i64,
+    ) -> Result<()> {
+        let conn = self.lock_conn()?;
+        conn.execute(
+            "UPDATE acme_certificates SET status = ?2, last_error = ?3, last_attempt = ?4
+             WHERE name = ?1",
+            params![name, status, last_error, last_attempt],
+        )?;
+        Ok(())
+    }
+}
+
+// ---- Two-factor login --------------------------------------------------
+
+/// An account's two-factor state. `secret` is set once two-factor login is
+/// on; `pending_secret` while it is being set up (until a first code
+/// confirms the authenticator app has it).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TwoFactor {
+    pub secret: String,
+    pub pending_secret: String,
+    /// Hashes of the unused recovery codes.
+    pub recovery_hashes: Vec<String>,
+    /// Time step of the last code accepted (a code works once).
+    pub last_step: u64,
+}
+
+impl ZoneStore {
+    pub fn get_two_factor(&self, username: &str) -> Result<Option<TwoFactor>> {
+        let conn = self.lock_conn()?;
+        let row: Option<(String, String, String, i64)> = conn
+            .query_row(
+                "SELECT secret, pending_secret, recovery_hashes, last_step
+                 FROM console_user_two_factor WHERE username = ?1",
+                [username],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .optional()?;
+        Ok(
+            row.map(|(secret, pending_secret, hashes, last_step)| TwoFactor {
+                secret,
+                pending_secret,
+                recovery_hashes: serde_json::from_str(&hashes).unwrap_or_default(),
+                last_step: last_step.max(0) as u64,
+            }),
+        )
+    }
+
+    /// Start setting up two-factor login: keep `secret` until a code
+    /// confirms it. Two-factor login already on stays on meanwhile.
+    pub fn set_two_factor_pending(&self, username: &str, secret: &str) -> Result<()> {
+        let conn = self.lock_conn()?;
+        conn.execute(
+            "INSERT INTO console_user_two_factor (username, pending_secret) VALUES (?1, ?2)
+             ON CONFLICT(username) DO UPDATE SET pending_secret = excluded.pending_secret",
+            params![username, secret],
+        )
+        .map_err(|e| match e {
+            rusqlite::Error::SqliteFailure(f, _)
+                if f.code == rusqlite::ErrorCode::ConstraintViolation =>
+            {
+                DaygleError::NotFound(format!("user '{username}'"))
+            }
+            other => other.into(),
+        })?;
+        Ok(())
+    }
+
+    /// Turn two-factor login on with the pending secret, confirmed by the
+    /// code for `step`, and these recovery code hashes.
+    pub fn enable_two_factor(
+        &self,
+        username: &str,
+        step: u64,
+        recovery_hashes: &[String],
+    ) -> Result<()> {
+        let conn = self.lock_conn()?;
+        let n = conn.execute(
+            "UPDATE console_user_two_factor
+             SET secret = pending_secret, pending_secret = '', recovery_hashes = ?2, last_step = ?3
+             WHERE username = ?1 AND pending_secret != ''",
+            params![
+                username,
+                serde_json::to_string(recovery_hashes).expect("strings serialize"),
+                step as i64
+            ],
+        )?;
+        if n == 0 {
+            return Err(DaygleError::Config(
+                "start two-factor setup first".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Replace the recovery codes.
+    pub fn set_two_factor_recovery(
+        &self,
+        username: &str,
+        recovery_hashes: &[String],
+    ) -> Result<()> {
+        let conn = self.lock_conn()?;
+        conn.execute(
+            "UPDATE console_user_two_factor SET recovery_hashes = ?2 WHERE username = ?1",
+            params![
+                username,
+                serde_json::to_string(recovery_hashes).expect("strings serialize")
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Record that the code for `step` was used. False when it (or a later
+    /// one) already was: a code works once, even when two sign-ins race.
+    pub fn use_two_factor_step(&self, username: &str, step: u64) -> Result<bool> {
+        let conn = self.lock_conn()?;
+        Ok(conn.execute(
+            "UPDATE console_user_two_factor SET last_step = ?2
+             WHERE username = ?1 AND last_step < ?2",
+            params![username, step as i64],
+        )? > 0)
+    }
+
+    /// Use up the recovery code with this hash. False when it is not one of
+    /// the account's unused codes.
+    pub fn use_two_factor_recovery_code(&self, username: &str, hash: &str) -> Result<bool> {
+        let mut conn = self.lock_conn()?;
+        let tx = conn.transaction()?;
+        let stored: Option<String> = tx
+            .query_row(
+                "SELECT recovery_hashes FROM console_user_two_factor WHERE username = ?1",
+                [username],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let mut hashes: Vec<String> = stored
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default();
+        let before = hashes.len();
+        hashes.retain(|h| h != hash);
+        if hashes.len() == before {
+            return Ok(false);
+        }
+        tx.execute(
+            "UPDATE console_user_two_factor SET recovery_hashes = ?2 WHERE username = ?1",
+            params![
+                username,
+                serde_json::to_string(&hashes).expect("strings serialize")
+            ],
+        )?;
+        tx.commit()?;
+        Ok(true)
+    }
+
+    /// Turn two-factor login off (and drop any setup in progress). Returns
+    /// whether it was on.
+    pub fn disable_two_factor(&self, username: &str) -> Result<bool> {
+        let conn = self.lock_conn()?;
+        let was_on: bool = conn
+            .query_row(
+                "SELECT secret != '' FROM console_user_two_factor WHERE username = ?1",
+                [username],
+                |r| r.get(0),
+            )
+            .optional()?
+            .unwrap_or(false);
+        conn.execute(
+            "DELETE FROM console_user_two_factor WHERE username = ?1",
+            [username],
+        )?;
+        Ok(was_on)
+    }
+}
+
+// ---- Login sessions and API tokens ---------------------------------------
+
+/// A stored login session (the token itself is never stored, only its
+/// hash).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredSession {
+    pub token_hash: String,
+    pub username: String,
+    pub role: Role,
+    /// UNIX seconds.
+    pub expires_at: i64,
+}
+
+/// A personal API token: a long-lived credential for scripts, made by a
+/// signed-in account for itself.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ApiToken {
+    pub id: String,
+    pub username: String,
+    pub name: String,
+    #[serde(skip)]
+    pub token_hash: String,
+    /// Limited to reading, whatever the account's role.
+    pub read_only: bool,
+    /// UNIX seconds; `last_used_at` 0 = never, `expires_at` 0 = never.
+    pub created_at: i64,
+    pub last_used_at: i64,
+    pub expires_at: i64,
+}
+
+fn role_from_str(role: &str) -> Role {
+    if role == Role::Viewer.as_str() {
+        Role::Viewer
+    } else {
+        Role::Admin
+    }
+}
+
+fn row_to_api_token(row: &rusqlite::Row<'_>) -> rusqlite::Result<ApiToken> {
+    Ok(ApiToken {
+        id: row.get(0)?,
+        username: row.get(1)?,
+        name: row.get(2)?,
+        token_hash: row.get(3)?,
+        read_only: row.get::<_, i64>(4)? != 0,
+        created_at: row.get(5)?,
+        last_used_at: row.get(6)?,
+        expires_at: row.get(7)?,
+    })
+}
+
+const API_TOKEN_COLUMNS: &str =
+    "id, username, name, token_hash, read_only, created_at, last_used_at, expires_at";
+
+impl ZoneStore {
+    pub fn put_session(&self, session: &StoredSession) -> Result<()> {
+        let conn = self.lock_conn()?;
+        conn.execute(
+            "INSERT OR REPLACE INTO console_sessions (token_hash, username, role, expires_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![
+                session.token_hash,
+                session.username,
+                session.role.as_str(),
+                session.expires_at
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Unexpired sessions (expired ones are deleted).
+    pub fn load_sessions(&self, now: i64) -> Result<Vec<StoredSession>> {
+        let conn = self.lock_conn()?;
+        conn.execute("DELETE FROM console_sessions WHERE expires_at <= ?1", [now])?;
+        let mut stmt =
+            conn.prepare("SELECT token_hash, username, role, expires_at FROM console_sessions")?;
+        let rows = stmt.query_map([], |r| {
+            let role: String = r.get(2)?;
+            Ok(StoredSession {
+                token_hash: r.get(0)?,
+                username: r.get(1)?,
+                role: role_from_str(&role),
+                expires_at: r.get(3)?,
+            })
+        })?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    pub fn delete_session(&self, token_hash: &str) -> Result<()> {
+        let conn = self.lock_conn()?;
+        conn.execute(
+            "DELETE FROM console_sessions WHERE token_hash = ?1",
+            [token_hash],
+        )?;
+        Ok(())
+    }
+
+    /// Delete `username`'s sessions, except the one with `keep_hash`.
+    pub fn delete_user_sessions(&self, username: &str, keep_hash: Option<&str>) -> Result<()> {
+        let conn = self.lock_conn()?;
+        conn.execute(
+            "DELETE FROM console_sessions WHERE username = ?1 AND token_hash != ?2",
+            params![username, keep_hash.unwrap_or("")],
+        )?;
+        Ok(())
+    }
+
+    pub fn create_api_token(&self, token: &ApiToken) -> Result<()> {
+        let conn = self.lock_conn()?;
+        conn.execute(
+            &format!("INSERT INTO api_tokens ({API_TOKEN_COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)"),
+            params![
+                token.id,
+                token.username,
+                token.name,
+                token.token_hash,
+                token.read_only as i64,
+                token.created_at,
+                token.last_used_at,
+                token.expires_at
+            ],
+        )
+        .map_err(|e| match e {
+            rusqlite::Error::SqliteFailure(f, _)
+                if f.code == rusqlite::ErrorCode::ConstraintViolation =>
+            {
+                DaygleError::NotFound(format!("user '{}'", token.username))
+            }
+            other => other.into(),
+        })?;
+        Ok(())
+    }
+
+    /// `username`'s tokens, newest first.
+    pub fn list_api_tokens(&self, username: &str) -> Result<Vec<ApiToken>> {
+        let conn = self.lock_conn()?;
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {API_TOKEN_COLUMNS} FROM api_tokens WHERE username = ?1
+             ORDER BY created_at DESC, name"
+        ))?;
+        let rows = stmt.query_map([username], row_to_api_token)?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    pub fn find_api_token(&self, token_hash: &str) -> Result<Option<ApiToken>> {
+        let conn = self.lock_conn()?;
+        conn.query_row(
+            &format!("SELECT {API_TOKEN_COLUMNS} FROM api_tokens WHERE token_hash = ?1"),
+            [token_hash],
+            row_to_api_token,
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    /// Note that the token was used (at most once a minute).
+    pub fn touch_api_token(&self, id: &str, now: i64) -> Result<()> {
+        let conn = self.lock_conn()?;
+        conn.execute(
+            "UPDATE api_tokens SET last_used_at = ?2 WHERE id = ?1 AND last_used_at < ?2 - 60",
+            params![id, now],
+        )?;
+        Ok(())
+    }
+
+    /// Delete one of `username`'s tokens. Returns whether it existed.
+    pub fn delete_api_token(&self, username: &str, id: &str) -> Result<bool> {
+        let conn = self.lock_conn()?;
+        Ok(conn.execute(
+            "DELETE FROM api_tokens WHERE id = ?1 AND username = ?2",
+            params![id, username],
+        )? > 0)
+    }
+}
+
+// ---- Audit log ------------------------------------------------------------
+
+/// One change made through the API (or a sign-in): who, how, what, and
+/// whether it worked. Request bodies are never kept.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct AuditEntry {
+    pub id: i64,
+    /// UNIX seconds.
+    pub ts: i64,
+    pub username: String,
+    /// How the caller signed in: `session`, `api_token`, `static_token`,
+    /// `open` (authentication turned off), or `password` for a sign-in.
+    pub via: String,
+    pub client: String,
+    /// What was done, in words ("Created zone", "Signed in"...).
+    pub action: String,
+    pub method: String,
+    pub path: String,
+    /// HTTP status of the response.
+    pub status: u16,
+}
+
+/// Filters for [`ZoneStore::search_audit_log`].
+#[derive(Debug, Clone, Default)]
+pub struct AuditQuery {
+    /// Only entries older than this id (paging).
+    pub before_id: Option<i64>,
+    pub username: Option<String>,
+    /// Matches the action or path.
+    pub text: Option<String>,
+    pub limit: u32,
+}
+
+/// Audit entries older than this are dropped.
+const AUDIT_KEEP_SECS: i64 = 365 * 86_400;
+
+impl ZoneStore {
+    pub fn add_audit_entry(&self, entry: &AuditEntry) -> Result<()> {
+        let conn = self.lock_conn()?;
+        conn.execute(
+            "INSERT INTO audit_log (ts, username, via, client, action, method, path, status)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                entry.ts,
+                entry.username,
+                entry.via,
+                entry.client,
+                entry.action,
+                entry.method,
+                entry.path,
+                entry.status
+            ],
+        )?;
+        // Trim now and then rather than on every write.
+        if conn.last_insert_rowid() % 500 == 0 {
+            conn.execute(
+                "DELETE FROM audit_log WHERE ts < ?1",
+                [entry.ts - AUDIT_KEEP_SECS],
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Newest first.
+    pub fn search_audit_log(&self, query: &AuditQuery) -> Result<Vec<AuditEntry>> {
+        let conn = self.lock_conn()?;
+        let mut sql = String::from(
+            "SELECT id, ts, username, via, client, action, method, path, status
+             FROM audit_log WHERE 1 = 1",
+        );
+        let mut values: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+        if let Some(before) = query.before_id {
+            sql.push_str(" AND id < ?");
+            values.push(Box::new(before));
+        }
+        if let Some(user) = query.username.as_ref().filter(|u| !u.is_empty()) {
+            sql.push_str(" AND username = ?");
+            values.push(Box::new(user.clone()));
+        }
+        if let Some(text) = query.text.as_ref().filter(|t| !t.is_empty()) {
+            sql.push_str(" AND (action LIKE ? OR path LIKE ?)");
+            let pattern = format!("%{}%", text.replace(['%', '_'], ""));
+            values.push(Box::new(pattern.clone()));
+            values.push(Box::new(pattern));
+        }
+        sql.push_str(" ORDER BY id DESC LIMIT ?");
+        values.push(Box::new(i64::from(query.limit.clamp(1, 1000))));
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(
+            rusqlite::params_from_iter(values.iter().map(|v| v.as_ref())),
+            |r| {
+                Ok(AuditEntry {
+                    id: r.get(0)?,
+                    ts: r.get(1)?,
+                    username: r.get(2)?,
+                    via: r.get(3)?,
+                    client: r.get(4)?,
+                    action: r.get(5)?,
+                    method: r.get(6)?,
+                    path: r.get(7)?,
+                    status: r.get::<_, i64>(8)? as u16,
+                })
+            },
+        )?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 }
 
@@ -1522,7 +2293,9 @@ impl ZoneStore {
         let conn = self.lock_conn()?;
         let mut stmt = conn.prepare(
             "SELECT username, password_hash, role, enabled, first_name, last_name, email, created_at,
-                    time_zone, date_format, time_format
+                    time_zone, date_format, time_format,
+                    EXISTS(SELECT 1 FROM console_user_two_factor t
+                           WHERE t.username = console_users.username AND t.secret != '')
              FROM console_users ORDER BY username",
         )?;
         let rows = stmt.query_map([], row_to_console_user)?;
@@ -1552,7 +2325,9 @@ impl ZoneStore {
         let conn = self.lock_conn()?;
         conn.query_row(
             "SELECT username, password_hash, role, enabled, first_name, last_name, email, created_at,
-                    time_zone, date_format, time_format
+                    time_zone, date_format, time_format,
+                    EXISTS(SELECT 1 FROM console_user_two_factor t
+                           WHERE t.username = console_users.username AND t.secret != '')
              FROM console_users WHERE username = ?1",
             [username],
             row_to_console_user,
@@ -1582,6 +2357,7 @@ impl ZoneStore {
                 date_format: String::new(),
                 time_format: String::new(),
             },
+            two_factor: false,
         };
         let conn = self.lock_conn()?;
         conn.execute(
@@ -1842,6 +2618,45 @@ impl ZoneStore {
     }
 
     /// Persist the DB-backed runtime settings, replacing any previous value.
+    /// A setting stored on its own (beside the runtime overlay) under
+    /// `name`, such as the ACME settings and account.
+    pub fn get_named_setting<T: serde::de::DeserializeOwned>(
+        &self,
+        name: &str,
+    ) -> Result<Option<T>> {
+        let conn = self.lock_conn()?;
+        let text: Option<String> = conn
+            .query_row(
+                "SELECT value FROM runtime_settings WHERE name = ?1",
+                [name],
+                |r| r.get(0),
+            )
+            .optional()?;
+        text.map(|text| {
+            serde_json::from_str(&text).map_err(|e| {
+                DaygleError::Config(format!("stored setting '{name}' is invalid: {e}"))
+            })
+        })
+        .transpose()
+    }
+
+    pub fn put_named_setting<T: serde::Serialize>(&self, name: &str, value: &T) -> Result<()> {
+        if name == "runtime" {
+            return Err(DaygleError::Config(
+                "'runtime' is the settings overlay".into(),
+            ));
+        }
+        let text = serde_json::to_string(value)
+            .map_err(|e| DaygleError::Config(format!("cannot serialize setting '{name}': {e}")))?;
+        let conn = self.lock_conn()?;
+        conn.execute(
+            "INSERT INTO runtime_settings (name, value) VALUES (?1, ?2)
+             ON CONFLICT(name) DO UPDATE SET value = excluded.value",
+            params![name, text],
+        )?;
+        Ok(())
+    }
+
     pub fn put_runtime_settings<T: serde::Serialize>(&self, settings: &T) -> Result<()> {
         let text = serde_json::to_string(settings)
             .map_err(|e| DaygleError::Config(format!("cannot serialize settings: {e}")))?;
@@ -2211,20 +3026,37 @@ fn insert_record_in_tx(
 
     // Reject content the catalog could not serve: it parses records with the
     // same presentation-format parser and would otherwise skip them silently.
-    let content = input.content.trim();
-    let rr_type = rtype
-        .parse::<RecordType>()
-        .map_err(|e| DaygleError::InvalidRecord(format!("record type '{rtype}': {e}")))?;
-    RData::try_from_str(rr_type, content).map_err(|e| {
-        DaygleError::InvalidRecord(format!("invalid {rtype} record '{content}': {e}"))
-    })?;
+    let mut content = input.content.trim().to_string();
+    if rtype == "ALIAS" {
+        content = check_alias(tx, zone_id, &name, &content)?;
+    } else {
+        let rr_type = rtype
+            .parse::<RecordType>()
+            .map_err(|e| DaygleError::InvalidRecord(format!("record type '{rtype}': {e}")))?;
+        RData::try_from_str(rr_type, &content).map_err(|e| {
+            DaygleError::InvalidRecord(format!("invalid {rtype} record '{content}': {e}"))
+        })?;
+        if matches!(rtype.as_str(), "A" | "AAAA" | "CNAME") && !input.disabled {
+            let alias: i64 = tx.query_row(
+                "SELECT COUNT(*) FROM records
+                 WHERE zone_id = ?1 AND name = ?2 AND rtype = 'ALIAS' AND disabled = 0",
+                params![zone_id, name],
+                |r| r.get(0),
+            )?;
+            if alias > 0 {
+                return Err(DaygleError::InvalidRecord(format!(
+                    "{name} has an ALIAS record, which supplies its addresses: remove it to add {rtype} records"
+                )));
+            }
+        }
+    }
 
     let record = Record {
         id: Uuid::new_v4().to_string(),
         zone_id: zone_id.to_string(),
         name,
         rtype,
-        content: content.to_string(),
+        content,
         ttl: input.ttl,
         priority: input.priority,
         disabled: input.disabled,
@@ -2244,6 +3076,54 @@ fn insert_record_in_tx(
         ],
     )?;
     Ok(record)
+}
+
+/// Check an ALIAS record (a name whose A and AAAA answers are looked up from
+/// its target when asked) and return its target in stored form
+/// (lowercase, trailing dot). ALIAS answers are made at query time, so they
+/// cannot be DNSSEC-signed; they are kept out of signed zones.
+fn check_alias(
+    tx: &rusqlite::Transaction<'_>,
+    zone_id: &str,
+    name: &str,
+    target: &str,
+) -> Result<String> {
+    let target = target.trim().trim_end_matches('.').to_ascii_lowercase();
+    validate_name(&target, false).map_err(|_| {
+        DaygleError::InvalidRecord(format!("ALIAS target '{target}' is not a domain name"))
+    })?;
+    if target == name {
+        return Err(DaygleError::InvalidRecord(
+            "an ALIAS cannot point to itself".to_string(),
+        ));
+    }
+    let signed: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM dnssec_keys WHERE zone_id = ?1",
+        [zone_id],
+        |r| r.get(0),
+    )?;
+    if signed > 0 {
+        return Err(DaygleError::InvalidRecord(
+            "ALIAS records cannot be used in a DNSSEC-signed zone: their answers are made when asked and cannot be signed".to_string(),
+        ));
+    }
+    let clash: Option<String> = tx
+        .query_row(
+            "SELECT rtype FROM records
+             WHERE zone_id = ?1 AND name = ?2 AND rtype IN ('A', 'AAAA', 'CNAME', 'ALIAS')
+             LIMIT 1",
+            params![zone_id, name],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if let Some(rtype) = clash {
+        return Err(DaygleError::InvalidRecord(if rtype == "ALIAS" {
+            format!("{name} already has an ALIAS record")
+        } else {
+            format!("{name} has {rtype} records: an ALIAS supplies the addresses itself, so remove them first")
+        }));
+    }
+    Ok(format!("{target}."))
 }
 
 /// Resolve `@`, bare relative names, and trailing dots against the zone name.

@@ -55,6 +55,8 @@ pub struct Shared {
     pub tsig_keys: Arc<daygle_dns_authoritative::tsig::TsigKeyRing>,
     /// The local root zone (RFC 8806), handed to every resolver rebuild.
     pub local_root: Arc<daygle_dns_authoritative::LocalRoot>,
+    /// Remote logging (syslog); `None` in tests.
+    pub syslog: Option<Arc<crate::syslog::SyslogSender>>,
 }
 
 /// The currently bound DNS listener addresses.
@@ -98,6 +100,17 @@ pub fn apply_config(shared: &Shared, new: Arc<DaygleConfig>) -> bool {
                 info!("policy engine reloaded");
             }
             Err(e) => warn!("policy reload failed, keeping previous engine: {e}"),
+        }
+    }
+
+    // The published catalog zone (consumed catalogs are read live).
+    if old.authoritative.catalog_zone != new.authoritative.catalog_zone {
+        match shared
+            .catalog
+            .set_catalog_zone(&new.authoritative.catalog_zone)
+        {
+            Ok(()) => info!("catalog zone setting reloaded"),
+            Err(e) => warn!("cannot publish the catalog zone: {e}"),
         }
     }
 
@@ -338,6 +351,7 @@ mod tests {
                 Default::default(),
                 None,
             )),
+            syslog: None,
         }
     }
 

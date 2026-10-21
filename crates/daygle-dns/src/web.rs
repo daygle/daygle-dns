@@ -305,7 +305,10 @@ async fn redirect_to_https(
     next: Next,
 ) -> Response {
     let s = settings.load();
-    if !(s.redirect_http && s.https_enabled) {
+    // ACME HTTP-01 challenges are answered over plain HTTP.
+    if !(s.redirect_http && s.https_enabled)
+        || req.uri().path().starts_with("/.well-known/acme-challenge/")
+    {
         return next.run(req).await;
     }
     let host = req

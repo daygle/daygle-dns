@@ -48,6 +48,7 @@ rustls = "0.23"
 quinn = "0.11"
 rustls-pki-types = "1"
 rcgen = "0.14"
+instant-acme = { version = "0.8", default-features = false, features = ["ring", "hyper-rustls", "rcgen"] }
 async-trait = "0.1"
 
 axum = "0.8"
@@ -64,7 +65,10 @@ ipnet = "2"
 base64 = "0.23"
 sha2 = "0.11"
 hmac = "0.13"
+sha1 = "0.11"
+data-encoding = "2"
 getrandom = "0.4"
+siphasher = "1"
 uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 thiserror = "2"

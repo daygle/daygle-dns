@@ -44,19 +44,91 @@ pub struct AuthorityCatalog {
     /// Pre-resolved split-horizon rules (client network → synthetic answer),
     /// rebuilt alongside the catalog so DNS and API changes stay in sync.
     split_horizon: arc_swap::ArcSwap<SplitHorizonIndex>,
+    /// ALIAS records by owner name (lowercase, no trailing dot), rebuilt
+    /// with the catalog.
+    aliases: arc_swap::ArcSwap<std::collections::HashMap<String, Alias>>,
+    /// Woken when the published catalog zone's member list changes, so
+    /// its secondaries can be sent a NOTIFY.
+    catalog_zone_changed: Arc<tokio::sync::Notify>,
+    /// Ids of health-checked records currently failing their check.
+    unhealthy: arc_swap::ArcSwap<std::collections::HashSet<String>>,
+}
+
+/// An ALIAS record: A and AAAA queries for its name are answered with its
+/// target's addresses, looked up when asked.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Alias {
+    /// The target (lowercase, trailing dot).
+    pub target: String,
+    pub ttl: u32,
+}
+
+/// Every enabled ALIAS record in the store, by owner name.
+fn build_aliases(store: &ZoneStore) -> Result<std::collections::HashMap<String, Alias>> {
+    let mut aliases = std::collections::HashMap::new();
+    for (_, records, _) in store.load_catalog_data()? {
+        for record in records {
+            if record.rtype == "ALIAS" && !record.disabled {
+                aliases.insert(
+                    record.name.trim_end_matches('.').to_ascii_lowercase(),
+                    Alias {
+                        target: record.content.clone(),
+                        ttl: record.ttl,
+                    },
+                );
+            }
+        }
+    }
+    Ok(aliases)
 }
 
 impl AuthorityCatalog {
     /// Build a catalog from the store without any DNSSEC signing.
     pub fn new(store: ZoneStore, settings: AuthoritativeSettings) -> Result<Self> {
-        let catalog = build_catalog(&store, &settings, false)?;
+        let (catalog, _) = build_catalog(&store, &settings, false, &Default::default())?;
         let split_horizon = Arc::new(build_split_horizon(&store)?);
+        let aliases = build_aliases(&store)?;
         Ok(Self {
             store,
             settings: arc_swap::ArcSwap::from_pointee(settings),
             catalog: arc_swap::ArcSwap::from_pointee(catalog),
             split_horizon: arc_swap::ArcSwap::from(split_horizon),
+            aliases: arc_swap::ArcSwap::from_pointee(aliases),
+            catalog_zone_changed: Arc::new(tokio::sync::Notify::new()),
+            unhealthy: Default::default(),
         })
+    }
+
+    /// The health-checked records now failing their check.
+    pub fn unhealthy(&self) -> Arc<std::collections::HashSet<String>> {
+        self.unhealthy.load_full()
+    }
+
+    /// Record which health-checked records are failing, and reload when
+    /// that changed (so answers fail over to the healthy ones).
+    pub fn set_unhealthy(&self, unhealthy: std::collections::HashSet<String>) -> Result<()> {
+        if *self.unhealthy.load_full() == unhealthy {
+            return Ok(());
+        }
+        self.unhealthy.store(Arc::new(unhealthy));
+        self.reload()
+    }
+
+    /// Woken whenever the published catalog zone's member list changes.
+    pub fn catalog_zone_changed(&self) -> Arc<tokio::sync::Notify> {
+        self.catalog_zone_changed.clone()
+    }
+
+    /// Publish the catalog zone under `name` (empty: stop publishing it)
+    /// and reload.
+    pub fn set_catalog_zone(&self, name: &str) -> Result<()> {
+        let name = daygle_dns_core::config::normalize_zone_name(name);
+        self.settings.rcu(|s| {
+            let mut s = AuthoritativeSettings::clone(s);
+            s.catalog_zone = name.clone();
+            s
+        });
+        self.reload()
     }
 
     pub fn store(&self) -> &ZoneStore {
@@ -150,12 +222,55 @@ impl AuthorityCatalog {
     /// applying DNSSEC signing when keys are present and signing is enabled.
     pub fn reload(&self) -> Result<()> {
         let settings = self.settings.load_full();
-        let catalog = build_catalog(&self.store, &settings, settings.dnssec_enabled)?;
+        let (catalog, catalog_zone_changed) = build_catalog(
+            &self.store,
+            &settings,
+            settings.dnssec_enabled,
+            &self.unhealthy.load(),
+        )?;
         self.catalog.store(Arc::new(catalog));
+        if catalog_zone_changed {
+            self.catalog_zone_changed.notify_waiters();
+        }
         let split_horizon = Arc::new(build_split_horizon(&self.store)?);
         self.split_horizon.store(split_horizon);
+        self.aliases.store(Arc::new(build_aliases(&self.store)?));
         info!("authoritative catalog reloaded");
         Ok(())
+    }
+
+    /// The ALIAS record at `name` (lowercase, with or without the trailing
+    /// dot), if any.
+    pub fn alias(&self, name: &str) -> Option<Alias> {
+        let aliases = self.aliases.load();
+        if aliases.is_empty() {
+            return None;
+        }
+        aliases.get(name.trim_end_matches('.')).cloned()
+    }
+
+    /// The enabled `rtype` records stored at `name` (lowercase, no trailing
+    /// dot), for answering an ALIAS whose target is hosted here.
+    pub fn local_records(&self, name: &str, rtype: RecordType) -> Result<Vec<Record>> {
+        let name = name.trim_end_matches('.').to_ascii_lowercase();
+        // The most specific hosted zone holding the name.
+        let Some(zone) = self
+            .store
+            .list_zones()?
+            .into_iter()
+            .filter(|z| name == z.name || name.ends_with(&format!(".{}", z.name)))
+            .max_by_key(|z| z.name.len())
+        else {
+            return Ok(Vec::new());
+        };
+        let wanted = rtype.to_string();
+        Ok(self
+            .store
+            .list_records(&zone.id)?
+            .iter()
+            .filter(|r| !r.disabled && r.rtype == wanted && r.name.eq_ignore_ascii_case(&name))
+            .filter_map(|r| record_to_hickory(r).ok())
+            .collect())
     }
 
     /// Clone out the current split-horizon index (cheap `Arc` bump).
@@ -166,6 +281,27 @@ impl AuthorityCatalog {
     /// Generate (if necessary) a DNSSEC signing key for `zone_id`, sign the
     /// zone, and reload the catalog.
     pub fn sign_zone(&self, zone_id: &str) -> Result<()> {
+        self.sign_zone_with(zone_id, None)
+    }
+
+    /// [`sign_zone`](Self::sign_zone), also choosing NSEC3 (`Some(true)`)
+    /// or NSEC (`Some(false)`) for denial of existence; `None` keeps the
+    /// zone's current choice (NSEC for a zone never signed before). Signing
+    /// an already-signed zone again just switches the proof.
+    pub fn sign_zone_with(&self, zone_id: &str, nsec3: Option<bool>) -> Result<()> {
+        if self
+            .store
+            .list_records(zone_id)?
+            .iter()
+            .any(|r| r.rtype == "ALIAS")
+        {
+            return Err(DaygleError::InvalidRecord(
+                "the zone has ALIAS records, whose answers are made when asked and cannot be signed: replace them with A/AAAA or CNAME records first".to_string(),
+            ));
+        }
+        if let Some(nsec3) = nsec3 {
+            self.store.set_zone_nsec3(zone_id, nsec3)?;
+        }
         if self.store.list_signing_keys(zone_id)?.is_empty() {
             let (algorithm, der) = generate_signing_key()?;
             self.store.store_signing_key(zone_id, algorithm, &der)?;
@@ -187,11 +323,21 @@ impl AuthorityCatalog {
     ///
     /// Returns `None` when no zone with exactly `zone_name` exists.
     pub fn transfer_records(&self, zone_name: &str) -> Result<Option<(Record, Vec<Record>)>> {
-        let Some(zone) = self.store.find_zone_by_name(zone_name)? else {
-            return Ok(None);
+        let map = match self.store.find_zone_by_name(zone_name)? {
+            Some(zone) => {
+                let records = self.store.list_records(&zone.id)?;
+                zone_rrsets(&zone, &records)?
+            }
+            None => {
+                let catalog = self.settings.load().catalog_zone.clone();
+                if catalog.is_empty()
+                    || daygle_dns_core::config::normalize_zone_name(zone_name) != catalog
+                {
+                    return Ok(None);
+                }
+                catalog_zone_rrsets(&self.store, &catalog)?.0
+            }
         };
-        let records = self.store.list_records(&zone.id)?;
-        let map = zone_rrsets(&zone, &records)?;
 
         let mut soa = None;
         let mut others = Vec::with_capacity(map.len() * 2);
@@ -229,12 +375,20 @@ fn build_split_horizon(store: &ZoneStore) -> Result<SplitHorizonIndex> {
 }
 
 /// Build a fresh Hickory `Catalog` from the store.
+///
+/// Also returns whether the published catalog zone's member list changed.
 fn build_catalog(
     store: &ZoneStore,
     settings: &AuthoritativeSettings,
     sign_zones: bool,
-) -> Result<Catalog> {
+    unhealthy: &std::collections::HashSet<String>,
+) -> Result<(Catalog, bool)> {
     let mut catalog = Catalog::new();
+    let checked: std::collections::HashSet<String> = store
+        .list_health_checks()?
+        .into_iter()
+        .map(|(check, _)| check.record_id)
+        .collect();
     let data = store.load_catalog_data()?;
     let secondary_ids: std::collections::HashSet<String> = store
         .list_secondary()?
@@ -253,6 +407,7 @@ fn build_catalog(
         };
         let active: Vec<&SigningKeyRecord> = keys.iter().filter(|k| k.is_active()).collect();
         let retired: Vec<&SigningKeyRecord> = keys.iter().filter(|k| k.is_retired()).collect();
+        let records = failover(records, &checked, unhealthy);
         let mut map = zone_rrsets(&zone, &records)?;
 
         // Retired keys no longer sign, but their DNSKEY stays published for
@@ -278,10 +433,18 @@ fn build_catalog(
             }
         }
 
-        let nx_proof_kind = if sign_zones && !active.is_empty() {
-            Some(NxProofKind::Nsec)
-        } else {
+        let nx_proof_kind = if !(sign_zones && !active.is_empty()) {
             None
+        } else if store.zone_nsec3(&zone.id).unwrap_or(false) {
+            // RFC 9276: SHA-1, no extra iterations, no salt, no opt-out.
+            Some(NxProofKind::Nsec3 {
+                algorithm: Default::default(),
+                salt: Arc::new([]),
+                iterations: 0,
+                opt_out: false,
+            })
+        } else {
+            Some(NxProofKind::Nsec)
         };
 
         let mut handler: InMemoryZoneHandler = InMemoryZoneHandler::new(
@@ -324,7 +487,159 @@ fn build_catalog(
         catalog.upsert(lower, vec![Arc::new(handler) as Arc<dyn ZoneHandler>]);
     }
 
-    Ok(catalog)
+    let mut catalog_changed = false;
+    let catalog_zone = &settings.catalog_zone;
+    if !catalog_zone.is_empty() {
+        if store.find_zone_by_name(catalog_zone)?.is_some() {
+            warn!(
+                zone = %catalog_zone,
+                "a hosted zone has the catalog zone's name; not publishing the catalog"
+            );
+        } else {
+            let (map, changed) = catalog_zone_rrsets(store, catalog_zone)?;
+            catalog_changed = changed;
+            let origin = fqdn_name(catalog_zone)?;
+            let handler: InMemoryZoneHandler = InMemoryZoneHandler::new(
+                origin.clone(),
+                map,
+                ZoneType::Primary,
+                AxfrPolicy::Deny,
+                None,
+            )
+            .map_err(DaygleError::InvalidRecord)?;
+            catalog.upsert(
+                LowerName::from(origin),
+                vec![Arc::new(handler) as Arc<dyn ZoneHandler>],
+            );
+        }
+    }
+
+    Ok((catalog, catalog_changed))
+}
+
+/// Health-checked failover: in each A or AAAA RRset holding a
+/// health-checked record, serve only the healthy records with the lowest
+/// priority (lower numbers are primaries, higher ones backups). Records
+/// without a check count as healthy. When none is healthy, the whole RRset
+/// is served: answering with every address beats answering with none.
+fn failover(
+    records: Vec<DbRecord>,
+    checked: &std::collections::HashSet<String>,
+    unhealthy: &std::collections::HashSet<String>,
+) -> Vec<DbRecord> {
+    if checked.is_empty() {
+        return records;
+    }
+    let key = |r: &DbRecord| (r.name.to_ascii_lowercase(), r.rtype.clone());
+    let mut keep: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut groups: BTreeMap<(String, String), Vec<&DbRecord>> = BTreeMap::new();
+    for record in &records {
+        if matches!(record.rtype.as_str(), "A" | "AAAA") && !record.disabled {
+            groups.entry(key(record)).or_default().push(record);
+        }
+    }
+    let mut filtered: std::collections::HashSet<(String, String)> = Default::default();
+    for (group_key, group) in &groups {
+        if !group.iter().any(|r| checked.contains(&r.id)) {
+            continue;
+        }
+        let healthy: Vec<&&DbRecord> = group
+            .iter()
+            .filter(|r| !unhealthy.contains(&r.id))
+            .collect();
+        let Some(best) = healthy.iter().map(|r| r.priority).min() else {
+            continue;
+        };
+        filtered.insert(group_key.clone());
+        keep.extend(
+            healthy
+                .iter()
+                .filter(|r| r.priority == best)
+                .map(|r| r.id.clone()),
+        );
+    }
+    records
+        .into_iter()
+        .filter(|r| !filtered.contains(&key(r)) || r.disabled || keep.contains(&r.id))
+        .collect()
+}
+
+/// The catalog zone (RFC 9432, schema version 2) this server publishes as
+/// `name`: one PTR per primary zone, under `zones.<name>`, with a unique
+/// label that stays the same for the life of the zone. Also returns whether
+/// the member list changed since the serial was last bumped.
+fn catalog_zone_rrsets(
+    store: &ZoneStore,
+    name: &str,
+) -> Result<(BTreeMap<RrKey, RecordSet>, bool)> {
+    use hickory_proto::rr::rdata::{NS, PTR, SOA, TXT};
+
+    let origin = fqdn_name(name)?;
+    let secondary: std::collections::HashSet<String> = store
+        .list_secondary()?
+        .into_iter()
+        .map(|s| s.zone_id)
+        .collect();
+    let mut members: Vec<(String, Name)> = Vec::new();
+    for zone in store.list_zones()? {
+        if secondary.contains(&zone.id) || zone.name.eq_ignore_ascii_case(name) {
+            continue;
+        }
+        let label: String = zone
+            .id
+            .chars()
+            .filter(char::is_ascii_alphanumeric)
+            .take(63)
+            .collect::<String>()
+            .to_ascii_lowercase();
+        members.push((label, fqdn_name(&zone.name)?));
+    }
+    members.sort();
+    let digest = members
+        .iter()
+        .map(|(label, zone)| format!("{label}={zone}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let (serial, changed) = store.catalog_serial(name, &digest)?;
+
+    let invalid = Name::from_ascii("invalid.").expect("valid name");
+    let at = |prefix: &str| -> Result<Name> {
+        Name::from_ascii(prefix)
+            .and_then(|p| p.append_domain(&origin))
+            .map_err(|e| DaygleError::InvalidRecord(format!("catalog name {prefix}: {e}")))
+    };
+    let mut map = BTreeMap::new();
+    let records = [
+        Record::from_rdata(
+            origin.clone(),
+            0,
+            RData::SOA(SOA::new(
+                invalid.clone(),
+                invalid.clone(),
+                serial,
+                600,
+                300,
+                2_419_200,
+                0,
+            )),
+        ),
+        Record::from_rdata(origin.clone(), 0, RData::NS(NS(invalid))),
+        Record::from_rdata(
+            at("version")?,
+            0,
+            RData::TXT(TXT::new(vec!["2".to_string()])),
+        ),
+    ];
+    for record in records {
+        insert_record_set(&mut map, record)?;
+    }
+    for (label, zone) in members {
+        insert_record_set(
+            &mut map,
+            Record::from_rdata(at(&format!("{label}.zones"))?, 0, RData::PTR(PTR(zone))),
+        )?;
+    }
+    Ok((map, changed))
 }
 
 /// Build the full set of `RrKey -> RecordSet` for one zone, including the
@@ -355,7 +670,8 @@ fn zone_rrsets(
 
     // Insert every enabled record.
     for record in records {
-        if record.disabled {
+        // ALIAS is answered by the dispatcher, not served as a record.
+        if record.disabled || record.rtype == "ALIAS" {
             continue;
         }
         match record_to_hickory(record) {
@@ -461,6 +777,51 @@ pub(crate) fn build_dnskey_record(
 mod tests {
     use super::*;
     use crate::model::{RecordInput, ZoneInput};
+
+    #[test]
+    fn failover_serves_the_healthy_records_of_the_best_priority() {
+        let rec = |id: &str, name: &str, rtype: &str, priority: u16| DbRecord {
+            id: id.to_string(),
+            zone_id: "z".to_string(),
+            name: name.to_string(),
+            rtype: rtype.to_string(),
+            content: String::new(),
+            ttl: 60,
+            priority,
+            disabled: false,
+        };
+        let records = vec![
+            rec("p1", "www.example.com", "A", 0),
+            rec("p2", "www.example.com", "A", 0),
+            rec("b1", "www.example.com", "A", 10),
+            rec("v6", "www.example.com", "AAAA", 0),
+            rec("other", "api.example.com", "A", 5),
+            rec("mx", "www.example.com", "TXT", 0),
+        ];
+        let set = |ids: &[&str]| ids.iter().map(|s| s.to_string()).collect();
+        let served = |unhealthy: &[&str]| {
+            let mut ids: Vec<String> =
+                failover(records.clone(), &set(&["p1", "p2", "b1"]), &set(unhealthy))
+                    .into_iter()
+                    .map(|r| r.id)
+                    .collect();
+            ids.sort();
+            ids
+        };
+        // All up: the primaries (priority 0); the backup waits.
+        assert_eq!(served(&[]), ["mx", "other", "p1", "p2", "v6"]);
+        // One primary down: the other primary.
+        assert_eq!(served(&["p1"]), ["mx", "other", "p2", "v6"]);
+        // Both primaries down: the backup.
+        assert_eq!(served(&["p1", "p2"]), ["b1", "mx", "other", "v6"]);
+        // Everything down: all of them, rather than nothing.
+        assert_eq!(
+            served(&["p1", "p2", "b1"]),
+            ["b1", "mx", "other", "p1", "p2", "v6"]
+        );
+        // No checks: untouched.
+        assert_eq!(failover(records.clone(), &set(&[]), &set(&["p1"])).len(), 6);
+    }
 
     fn catalog() -> AuthorityCatalog {
         let store = ZoneStore::open(":memory:").unwrap();
