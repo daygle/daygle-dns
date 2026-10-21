@@ -7,7 +7,7 @@
 
   // `recordZoneId` lives in the shell so the zone picked on the Records tab
   // is remembered across visits.
-  let { recordZoneId = null, onSelectZone = () => {} } = $props();
+  let { recordZoneId = null, onSelectZone = () => {}, onOpenSettings = null } = $props();
 
   // The Zones page groups authoritative zone management as tabs (same
   // pattern as Settings, Logs, AI and Filtering).
@@ -55,5 +55,5 @@
 {:else if tab === 'records'}
   <Records zoneId={recordZoneId} {onSelectZone} />
 {:else}
-  <SplitHorizon />
+  <SplitHorizon {onOpenSettings} />
 {/if}

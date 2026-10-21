@@ -103,6 +103,14 @@ pub fn apply_config(shared: &Shared, new: Arc<DaygleConfig>) -> bool {
         }
     }
 
+    // Named networks (split horizon resolves them in its index).
+    if old.networks != new.networks {
+        match shared.catalog.set_networks(new.all_networks()) {
+            Ok(()) => info!("networks reloaded"),
+            Err(e) => warn!("cannot apply the networks: {e}"),
+        }
+    }
+
     // The published catalog zone (consumed catalogs are read live).
     if old.authoritative.catalog_zone != new.authoritative.catalog_zone {
         match shared

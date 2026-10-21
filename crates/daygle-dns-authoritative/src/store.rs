@@ -714,6 +714,68 @@ impl ZoneStore {
             })
     }
 
+    /// The stored settings that name the network `name` (any case): split
+    /// horizon entries and client groups, labelled for the console.
+    pub fn network_users(&self, name: &str) -> Result<Vec<String>> {
+        let named = |list: &[String]| {
+            list.iter()
+                .any(|e| e.trim().eq_ignore_ascii_case(name.trim()))
+        };
+        let mut users = Vec::new();
+        for entry in self.list_split_horizon_entries()? {
+            if named(&entry.networks) {
+                users.push(format!("Split horizon '{}'", entry.domain));
+            }
+        }
+        for group in self.list_blocking_groups()? {
+            if named(&group.clients) {
+                users.push(format!("Client group '{}'", group.name));
+            }
+        }
+        Ok(users)
+    }
+
+    /// Point the stored references to the network `old` (any case) at
+    /// `new`: split horizon entries and client groups.
+    pub fn rename_network_refs(&self, old: &str, new: &str) -> Result<()> {
+        let rename = |list: &[String]| -> Option<Vec<String>> {
+            let hit = list
+                .iter()
+                .any(|e| e.trim().eq_ignore_ascii_case(old.trim()));
+            hit.then(|| {
+                list.iter()
+                    .map(|e| {
+                        if e.trim().eq_ignore_ascii_case(old.trim()) {
+                            new.to_string()
+                        } else {
+                            e.clone()
+                        }
+                    })
+                    .collect()
+            })
+        };
+        let entries = self.list_split_horizon_entries()?;
+        let groups = self.list_blocking_groups()?;
+        let conn = self.lock_conn()?;
+        for entry in entries {
+            if let Some(networks) = rename(&entry.networks) {
+                conn.execute(
+                    "UPDATE split_horizon_entries SET networks = ?2 WHERE id = ?1",
+                    params![entry.id, encode_json(&networks, "networks")?],
+                )?;
+            }
+        }
+        for group in groups {
+            if let Some(clients) = rename(&group.clients) {
+                conn.execute(
+                    "UPDATE blocking_groups SET clients = ?2 WHERE id = ?1",
+                    params![group.id, encode_json(&clients, "clients")?],
+                )?;
+            }
+        }
+        Ok(())
+    }
+
     /// Delete a blocking group by id. Returns whether a row was removed.
     pub fn delete_blocking_group(&self, id: &str) -> Result<bool> {
         let conn = self.lock_conn()?;

@@ -44,6 +44,9 @@ pub struct AuthorityCatalog {
     /// Pre-resolved split-horizon rules (client network → synthetic answer),
     /// rebuilt alongside the catalog so DNS and API changes stay in sync.
     split_horizon: arc_swap::ArcSwap<SplitHorizonIndex>,
+    /// The named networks split-horizon entries refer to (built-in and
+    /// configured; see [`Self::set_networks`]).
+    networks: arc_swap::ArcSwap<Vec<daygle_dns_core::config::NamedNetwork>>,
     /// ALIAS records by owner name (lowercase, no trailing dot), rebuilt
     /// with the catalog.
     aliases: arc_swap::ArcSwap<std::collections::HashMap<String, Alias>>,
@@ -86,13 +89,15 @@ impl AuthorityCatalog {
     /// Build a catalog from the store without any DNSSEC signing.
     pub fn new(store: ZoneStore, settings: AuthoritativeSettings) -> Result<Self> {
         let (catalog, _) = build_catalog(&store, &settings, false, &Default::default())?;
-        let split_horizon = Arc::new(build_split_horizon(&store)?);
+        let networks = daygle_dns_core::config::builtin_networks();
+        let split_horizon = Arc::new(build_split_horizon(&store, &networks)?);
         let aliases = build_aliases(&store)?;
         Ok(Self {
             store,
             settings: arc_swap::ArcSwap::from_pointee(settings),
             catalog: arc_swap::ArcSwap::from_pointee(catalog),
             split_horizon: arc_swap::ArcSwap::from(split_horizon),
+            networks: arc_swap::ArcSwap::from_pointee(networks),
             aliases: arc_swap::ArcSwap::from_pointee(aliases),
             catalog_zone_changed: Arc::new(tokio::sync::Notify::new()),
             unhealthy: Default::default(),
@@ -232,7 +237,7 @@ impl AuthorityCatalog {
         if catalog_zone_changed {
             self.catalog_zone_changed.notify_waiters();
         }
-        let split_horizon = Arc::new(build_split_horizon(&self.store)?);
+        let split_horizon = Arc::new(build_split_horizon(&self.store, &self.networks.load())?);
         self.split_horizon.store(split_horizon);
         self.aliases.store(Arc::new(build_aliases(&self.store)?));
         info!("authoritative catalog reloaded");
@@ -274,6 +279,18 @@ impl AuthorityCatalog {
     }
 
     /// Clone out the current split-horizon index (cheap `Arc` bump).
+    /// Replace the named networks (built-in and configured) and rebuild the
+    /// split-horizon index that refers to them.
+    pub fn set_networks(&self, networks: Vec<daygle_dns_core::config::NamedNetwork>) -> Result<()> {
+        if **self.networks.load() == networks {
+            return Ok(());
+        }
+        let index = build_split_horizon(&self.store, &networks)?;
+        self.networks.store(Arc::new(networks));
+        self.split_horizon.store(Arc::new(index));
+        Ok(())
+    }
+
     pub fn split_horizon(&self) -> Arc<SplitHorizonIndex> {
         self.split_horizon.load_full()
     }
@@ -367,11 +384,14 @@ pub fn generate_signing_key() -> Result<(u8, Vec<u8>)> {
     ))
 }
 
-/// Build the split-horizon index from the store's networks and entries.
-fn build_split_horizon(store: &ZoneStore) -> Result<SplitHorizonIndex> {
-    let networks = store.list_split_horizon_networks()?;
+/// Build the split-horizon index from the named networks and the store's
+/// entries.
+fn build_split_horizon(
+    store: &ZoneStore,
+    networks: &[daygle_dns_core::config::NamedNetwork],
+) -> Result<SplitHorizonIndex> {
     let entries = store.list_split_horizon_entries()?;
-    Ok(SplitHorizonIndex::build(&networks, &entries))
+    Ok(SplitHorizonIndex::build(networks, &entries))
 }
 
 /// Build a fresh Hickory `Catalog` from the store.

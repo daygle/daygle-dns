@@ -734,6 +734,45 @@ record without deleting it - a disabled record stays in the zone but stops
 being served. The serial is bumped and the catalog reloaded, so the change
 is live immediately.
 
+### Networks
+
+```
+GET    /api/networks
+POST   /api/networks
+DELETE /api/networks/{name}
+```
+
+Named networks (Settings -> Networks) give a set of addresses a name, such
+as `LAN` = `192.168.20.0/24`, so settings that take client networks can name
+it instead of repeating the addresses. They are part of the configuration
+(`[[networks]]` in the config file, saved with the console's settings).
+Names are matched without regard to case. Two built-in networks always
+exist and cannot be changed: `Private` (private, shared, link-local and
+loopback addresses) and `This Server` (loopback).
+
+`GET` lists them, each with `builtin` and `used_by` (the settings that name
+it):
+
+```json
+{
+  "networks": [
+    { "name": "LAN", "cidrs": ["192.168.20.0/24"], "description": "Home devices",
+      "builtin": false, "used_by": ["Split horizon 'nas.home.example'"] }
+  ]
+}
+```
+
+`POST` adds a network, or changes one when `original_name` is given; a
+different `name` renames it and every reference to it:
+
+```json
+{ "original_name": "LAN", "name": "Home", "cidrs": ["192.168.20.0/24", "fd00:20::/64"], "description": "" }
+```
+
+A name must not look like an address and must not be taken (`409`); every
+address must be a CIDR or a single address (`400`). `DELETE` removes a
+network nothing uses; a network still in use is `409` with `used_by`.
+
 ### Split horizon
 
 ```
@@ -747,10 +786,10 @@ DELETE /api/split-horizon/entries/{id}
 ```
 
 Split horizon serves different answers for the same domain depending on the
-client's network. A **network** is a named group of CIDRs (e.g. `LAN =
-["192.168.20.0/24"]`); an **entry** maps a domain to a list of typed records
-for a set of networks (network names and/or literal CIDRs; empty = every
-client).
+client's network. An **entry** maps a domain to a list of typed records for
+a set of networks: names of named networks (see Networks above) and/or
+literal CIDRs or addresses; empty = every client. An entry naming a network
+that does not exist is rejected with `400`.
 
 `GET` returns everything. `ips` is kept for backward compatibility and always
 holds the A/AAAA subset of `records`:
@@ -778,16 +817,13 @@ holds the A/AAAA subset of `records`:
 }
 ```
 
-Create or update a network (matched by `name`; the `id` is kept stable on
-update):
-
-```json
-POST /api/split-horizon/networks
-{
-  "name": "LAN",
-  "cidrs": ["192.168.20.0/24", "10.0.0.0/8"]
-}
-```
+`networks` in the `GET` response lists the named networks (built-in ones
+included). `POST /api/split-horizon/networks` (`{"name", "cidrs"}`) and
+`DELETE /api/split-horizon/networks/{name}` are the older forms of the
+Networks endpoints and behave the same way. Networks that split horizon kept
+on its own before networks were shared become named networks on the first
+start after upgrading (one named like a built-in network gets
+` (Split Horizon)` added, along with the entries that use it).
 
 Create an entry (appended after existing entries for the same domain).
 `records` entries hold the query type and its RDATA in zone-file presentation

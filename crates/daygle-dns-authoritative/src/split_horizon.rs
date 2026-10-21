@@ -1,6 +1,7 @@
 //! Split-horizon DNS: per-client synthetic answers for a domain.
 //!
-//! A [`SplitHorizonIndex`] is built from the stored networks and entries. For
+//! A [`SplitHorizonIndex`] is built from the named networks (Settings ->
+//! Networks) and the stored entries. For
 //! each query the dispatcher asks the index which records a given client
 //! should receive for a domain and query type; the first entry whose domain
 //! matches and whose networks contain the client wins. Entries with no
@@ -16,10 +17,11 @@
 use std::collections::HashMap;
 use std::net::IpAddr;
 
+use daygle_dns_core::config::{parse_network, NamedNetwork};
 use hickory_proto::rr::{Name, RData, Record, RecordType};
 use ipnet::IpNet;
 
-use crate::model::{SplitHorizonEntry, SplitHorizonNetwork};
+use crate::model::SplitHorizonEntry;
 
 /// The result of a split-horizon lookup: the records to synthesize for the
 /// queried name. An empty `records` list would mean the entry matched but has
@@ -57,22 +59,18 @@ struct ResolvedEntry {
 }
 
 impl SplitHorizonIndex {
-    /// Build the index from stored networks and entries.
+    /// Build the index from the named networks and the stored entries.
     ///
-    /// Network names are resolved to their CIDR lists; a name with no
-    /// matching network (deleted or never created) is treated as an empty
+    /// Network names (any case) are resolved to their addresses; a name with
+    /// no matching network (deleted or never created) is treated as an empty
     /// network, so the entry can never match. Disabled, empty, and malformed
     /// entries are skipped entirely.
-    pub fn build(networks: &[SplitHorizonNetwork], entries: &[SplitHorizonEntry]) -> Self {
-        let mut by_name: HashMap<&str, Vec<IpNet>> = HashMap::new();
+    pub fn build(networks: &[NamedNetwork], entries: &[SplitHorizonEntry]) -> Self {
+        let mut by_name: HashMap<String, Vec<IpNet>> = HashMap::new();
         for net in networks {
-            let cidrs: Vec<IpNet> = net
-                .cidrs
-                .iter()
-                .filter_map(|c| c.parse::<IpNet>().ok())
-                .collect();
+            let cidrs: Vec<IpNet> = net.cidrs.iter().filter_map(|c| parse_network(c)).collect();
             if !cidrs.is_empty() {
-                by_name.insert(net.name.as_str(), cidrs);
+                by_name.insert(net.name.trim().to_ascii_lowercase(), cidrs);
             }
         }
 
@@ -86,11 +84,14 @@ impl SplitHorizonIndex {
                     e.networks
                         .iter()
                         .flat_map(|n| {
-                            // A literal CIDR, or the name of a configured network.
-                            if let Ok(ipnet) = n.parse::<IpNet>() {
+                            // A literal CIDR or address, or a network's name.
+                            if let Some(ipnet) = parse_network(n) {
                                 vec![ipnet]
                             } else {
-                                by_name.get(n.as_str()).cloned().unwrap_or_default()
+                                by_name
+                                    .get(&n.trim().to_ascii_lowercase())
+                                    .cloned()
+                                    .unwrap_or_default()
                             }
                         })
                         .collect()
@@ -203,7 +204,7 @@ fn parse_records(e: &SplitHorizonEntry) -> Vec<(RecordType, RData)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{SplitHorizonEntryInput, SplitHorizonNetworkInput, SplitHorizonRecord};
+    use crate::model::{SplitHorizonEntryInput, SplitHorizonRecord};
     use crate::store::ZoneStore;
 
     fn entry(
@@ -231,12 +232,12 @@ mod tests {
     }
 
     fn index(networks: &[(&str, &[&str])], entries: &[SplitHorizonEntry]) -> SplitHorizonIndex {
-        let networks: Vec<SplitHorizonNetwork> = networks
+        let networks: Vec<NamedNetwork> = networks
             .iter()
-            .map(|(name, cidrs)| SplitHorizonNetwork {
-                id: name.to_string(),
+            .map(|(name, cidrs)| NamedNetwork {
                 name: name.to_string(),
                 cidrs: cidrs.iter().map(|c| c.to_string()).collect(),
+                description: String::new(),
             })
             .collect();
         SplitHorizonIndex::build(&networks, entries)
@@ -350,12 +351,11 @@ mod tests {
     #[test]
     fn disabled_entries_are_skipped() {
         let store = ZoneStore::open(":memory:").unwrap();
-        let network = store
-            .upsert_split_horizon_network(&SplitHorizonNetworkInput {
-                name: "LAN".to_string(),
-                cidrs: vec!["192.168.20.0/24".to_string()],
-            })
-            .unwrap();
+        let network = NamedNetwork {
+            name: "LAN".to_string(),
+            cidrs: vec!["192.168.20.0/24".to_string()],
+            description: String::new(),
+        };
         let entry = store
             .create_split_horizon_entry(&SplitHorizonEntryInput {
                 domain: "www.example.com".to_string(),
