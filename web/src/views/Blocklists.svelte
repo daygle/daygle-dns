@@ -221,13 +221,26 @@
       draft = null;
       await load();
       notice = `Source "${name}" saved - fetching it now.`;
-      // The save triggers a background fetch; poll once until the source's last fetch time updates
+      // The save triggers a background fetch; poll until the source's last fetch time updates
       // or a short timeout passes.
       await waitForSourceUpdate(name);
     } catch (e) {
       error = formatApiError(e);
     } finally {
       saving = false;
+    }
+  }
+
+  // Poll the source status until `name` has been fetched or failed (last_fetch
+  // or last_error is set) or the attempts run out. Bounded so a slow feed never hangs the UI.
+  async function waitForSourceUpdate(name, attempts = 10, delayMs = 1500) {
+    for (let i = 0; i < attempts; i++) {
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+      const data = await api.blocklistSources();
+      sources = data.sources || [];
+      total = data.total_domains || 0;
+      const source = sources.find((s) => s.name === name);
+      if (source && (source.last_fetch != null || source.last_error)) return;
     }
   }
 
