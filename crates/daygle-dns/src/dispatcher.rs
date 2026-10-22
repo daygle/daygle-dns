@@ -585,7 +585,7 @@ impl RequestHandler for DnsDispatcher {
                 &mut response_handle,
                 request,
                 ResponseCode::ServFail,
-                Ede::new(ede::OTHER, "rate limit exceeded"),
+                Some(Ede::new(ede::OTHER, "rate limit exceeded")),
             )
             .await;
         }
@@ -660,7 +660,7 @@ impl RequestHandler for DnsDispatcher {
                 &mut response_handle,
                 request,
                 ResponseCode::ServFail,
-                Ede::new(ede::OTHER, "rate limit exceeded"),
+                Some(Ede::new(ede::OTHER, "rate limit exceeded")),
             )
             .await;
         }
@@ -687,7 +687,7 @@ impl RequestHandler for DnsDispatcher {
                     &mut response_handle,
                     request,
                     ResponseCode::Refused,
-                    Ede::new(ede::BLOCKED, decision.reason.clone()),
+                    Some(Ede::new(ede::BLOCKED, decision.reason.clone())),
                 )
                 .await;
             }
@@ -707,7 +707,7 @@ impl RequestHandler for DnsDispatcher {
                     &mut response_handle,
                     request,
                     ResponseCode::NXDomain,
-                    Ede::new(ede::BLOCKED, decision.reason.clone()),
+                    Some(Ede::new(ede::BLOCKED, decision.reason.clone())),
                 )
                 .await;
             }
@@ -729,7 +729,7 @@ impl RequestHandler for DnsDispatcher {
                     info.query.name(),
                     info.query.query_type(),
                     *ip,
-                    Ede::new(ede::BLOCKED, decision.reason.clone()),
+                    Some(Ede::new(ede::BLOCKED, decision.reason.clone())),
                 )
                 .await;
             }
@@ -749,7 +749,7 @@ impl RequestHandler for DnsDispatcher {
                 return send_empty(
                     &mut response_handle,
                     request,
-                    Ede::new(ede::FILTERED, decision.reason.clone()),
+                    Some(Ede::new(ede::FILTERED, decision.reason.clone())),
                 )
                 .await;
             }
@@ -778,7 +778,7 @@ impl RequestHandler for DnsDispatcher {
                     started,
                 );
                 // Per-client-group filtering (RFC 8914 "Filtered").
-                let why = Ede::new(ede::FILTERED, decision.reason.clone());
+                let why = Some(Ede::new(ede::FILTERED, decision.reason.clone()));
                 return match decision.action {
                     Action::Refused => {
                         send_error(&mut response_handle, request, ResponseCode::Refused, why).await
@@ -920,7 +920,7 @@ impl RequestHandler for DnsDispatcher {
                 &mut response_handle,
                 request,
                 ResponseCode::Refused,
-                Ede::new(ede::NOT_AUTHORITATIVE, "recursion is not available"),
+                Some(Ede::new(ede::NOT_AUTHORITATIVE, "recursion is not available")),
             )
             .await;
         };
@@ -942,7 +942,10 @@ impl RequestHandler for DnsDispatcher {
                 &mut response_handle,
                 request,
                 ResponseCode::Refused,
-                Ede::new(ede::PROHIBITED, "recursion is not allowed for this client"),
+                Some(Ede::new(
+                    ede::PROHIBITED,
+                    "recursion is not allowed for this client",
+                )),
             )
             .await;
         }
@@ -1039,10 +1042,10 @@ impl RequestHandler for DnsDispatcher {
                 );
 
                 let ede = if stale {
-                    Ede::new(
+                    Some(Ede::new(
                         ede::STALE_ANSWER,
                         "upstream unreachable; serving an expired answer",
-                    )
+                    ))
                 } else {
                     None
                 };
@@ -1117,7 +1120,7 @@ impl RequestHandler for DnsDispatcher {
                     started,
                 );
                 let why = if code == ResponseCode::ServFail {
-                    failure_ede(&e)
+                    Some(failure_ede(&e))
                 } else {
                     None
                 };
@@ -1149,7 +1152,7 @@ mod ede {
 }
 
 impl Ede {
-    fn new(code: u16, text: impl Into<String>) -> Option<Self> {
+    fn new(code: u16, text: impl Into<String>) -> Self {
         let mut text: String = text.into();
         // Keep the OPT record small: a short explanation is enough.
         if text.len() > 200 {
@@ -1159,12 +1162,12 @@ impl Ede {
             }
             text.truncate(end);
         }
-        Some(Self { code, text })
+        Self { code, text }
     }
 }
 
 /// The EDE for a recursive lookup that failed without an answer.
-fn failure_ede(error: &DaygleError) -> Option<Ede> {
+fn failure_ede(error: &DaygleError) -> Ede {
     let message = error.to_string();
     let lower = message.to_ascii_lowercase();
     if lower.contains("dnssec") || lower.contains("bogus") {
@@ -1308,7 +1311,7 @@ impl DnsDispatcher {
                 Err(e) => (
                     ResponseCode::ServFail,
                     Vec::new(),
-                    Ede::new(ede::OTHER, format!("ALIAS target {target}: {e}")),
+                    Some(Ede::new(ede::OTHER, format!("ALIAS target {target}: {e}"))),
                 ),
             };
         }
@@ -1316,10 +1319,10 @@ impl DnsDispatcher {
             return (
                 ResponseCode::ServFail,
                 Vec::new(),
-                Ede::new(
+                Some(Ede::new(
                     ede::NOT_AUTHORITATIVE,
                     format!("recursion is off, so the ALIAS target {target} cannot be looked up"),
-                ),
+                )),
             );
         };
         let lookup = tokio::time::timeout(
@@ -1342,14 +1345,14 @@ impl DnsDispatcher {
                 response_code: Some(0 | 3),
                 ..
             })) => (ResponseCode::NoError, Vec::new(), None),
-            Ok(Err(e)) => (ResponseCode::ServFail, Vec::new(), failure_ede(&e)),
+            Ok(Err(e)) => (ResponseCode::ServFail, Vec::new(), Some(failure_ede(&e))),
             Err(_) => (
                 ResponseCode::ServFail,
                 Vec::new(),
-                Ede::new(
+                Some(Ede::new(
                     ede::NO_REACHABLE_AUTHORITY,
                     format!("no answer for the ALIAS target {target} in time"),
-                ),
+                )),
             ),
         }
     }
@@ -1577,11 +1580,10 @@ mod tests {
             response_code: None,
         };
         assert_eq!(
-            failure_ede(&failure("DNSSEC validation failed")).map(|e| e.code),
-            Some(ede::DNSSEC_BOGUS)
+            failure_ede(&failure("DNSSEC validation failed")).code,
+            ede::DNSSEC_BOGUS
         );
-        let timeout =
-            failure_ede(&failure("no answer within the client timeout of 2000 ms")).unwrap();
+        let timeout = failure_ede(&failure("no answer within the client timeout of 2000 ms"));
         assert_eq!(timeout.code, ede::NO_REACHABLE_AUTHORITY);
         assert!(timeout.text.contains("client timeout"));
     }
@@ -1589,7 +1591,7 @@ mod tests {
     #[test]
     fn extended_error_text_is_kept_short() {
         let long = "é".repeat(300);
-        let e = Ede::new(ede::BLOCKED, long).unwrap();
+        let e = Ede::new(ede::BLOCKED, long);
         assert!(e.text.len() <= 200);
         assert!(e.text.chars().all(|c| c == 'é'));
     }
