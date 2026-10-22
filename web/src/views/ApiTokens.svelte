@@ -110,13 +110,13 @@
     </label>
     {#if error}<div class="form-error">{error}</div>{/if}
     <div class="modal-actions">
-      <button type="submit" disabled={busy || !name.trim()}>{busy ? 'Creating…' : 'Create Token'}</button>
+      <button type="submit" disabled={busy || !name.trim()}>{busy ? 'Creating...' : 'Create Token'}</button>
     </div>
   </form>
 
   <div class="list">
     {#if loading}
-      <p class="muted">Loading…</p>
+      <p class="muted">Loading...</p>
     {:else if tokens.length === 0}
       <p class="muted">No API tokens yet.</p>
     {:else}

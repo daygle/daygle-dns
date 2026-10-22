@@ -33,7 +33,7 @@ POST /api/auth/login
 
 ```json
 {
-  "token": "1f2e3d4c5b6a7988…",
+  "token": "1f2e3d4c5b6a7988...",
   "username": "admin",
   "role": "admin",
   "expires_in_secs": 43200
@@ -45,7 +45,7 @@ Sessions are kept in the database (only a hash of each token), so they
 survive a restart until they expire (`api.session_ttl_secs`) or sign out.
 
 **Personal API tokens.** For scripts, each account can make long-lived
-tokens (`dgl_…`) from **API Tokens** below its name in the sidebar, or with
+tokens (`dgl_...`) from **API Tokens** below its name in the sidebar, or with
 the endpoints below. A token acts as its account (or as a viewer when made
 read-only, and always for a viewer account), works until it expires or is
 revoked, and skips two-factor login. Only its hash is stored; the token is
@@ -202,7 +202,7 @@ scrape_configs:
   - job_name: daygle-dns
     metrics_path: /api/metrics/prometheus
     authorization:
-      credentials: dgl_…
+      credentials: dgl_...
     static_configs:
       - targets: ["dns.example.com:5380"]
 ```
@@ -434,8 +434,8 @@ sends the server log to a syslog server as RFC 5424 lines: `server` is
 514 by default; TCP frames are octet-counted, RFC 6587); `facility` is
 `daemon` (default), `user` or `local0`-`local7`; `level` is the lowest
 server-log level sent (`info`, `warn` or `error`); `queries` adds one line
-per answered query (`client=… qname=… qtype=… protocol=… outcome=… rcode=…
-ms=…`, message id `query`). Lines are queued and sent in the background;
+per answered query (`client=... qname=... qtype=... protocol=... outcome=... rcode=...
+ms=...`, message id `query`). Lines are queued and sent in the background;
 if the server cannot be reached they are dropped and counted, and the count
 is sent once it can be.
 
@@ -552,8 +552,8 @@ POST /api/zones
 
 Only `name` is required for a primary zone. If `primary_ns` is omitted (and
 `import_text` carries no SOA), it defaults to
-`authoritative.default_primary_ns` — the **DNS Server Domain** setting (see
-[Configuration](#configuration)) — falling back to `ns1.<zone>.` when that is
+`authoritative.default_primary_ns` - the **DNS Server Domain** setting (see
+[Configuration](#configuration)) - falling back to `ns1.<zone>.` when that is
 unset. `zone_type` defaults to `primary`.
 Set `serial_date_scheme` to `true` to generate a `YYYYMMDDnn`-style SOA
 serial. When `import_text` contains a BIND zone file, it is parsed and its
@@ -585,7 +585,7 @@ Import a BIND zone file (creates the zone and replaces its records):
 POST /api/zones/import
 {
   "name": "example.com",
-  "text": "$ORIGIN example.com.\n$TTL 3600\n@ IN SOA …\n"
+  "text": "$ORIGIN example.com.\n$TTL 3600\n@ IN SOA ...\n"
 }
 ```
 
@@ -603,7 +603,7 @@ They are gated by `authoritative.allow_dynamic_updates` (default off) and the
 `authoritative.update_networks` client allow-list, and are always refused for
 secondary zones. Prerequisites (value-dependent / value-independent /
 not-exists forms) are fully checked; failed updates return their RFC 2136
-RCODE (YXDOMAIN, YXRRSet, NXDOMAIN, NXRRSet, NOTAUTH, …).
+RCODE (YXDOMAIN, YXRRSet, NXDOMAIN, NXRRSet, NOTAUTH, ...).
 
 NOTIFY (RFC 1996) is likewise a DNS-protocol feature. When
 `authoritative.notify_enabled` is set, a successful dynamic update sends a
@@ -803,11 +803,11 @@ holds the A/AAAA subset of `records`:
 ```json
 {
   "networks": [
-    { "id": "…", "name": "LAN", "cidrs": ["192.168.20.0/24"] }
+    { "id": "...", "name": "LAN", "cidrs": ["192.168.20.0/24"] }
   ],
   "entries": [
     {
-      "id": "…",
+      "id": "...",
       "domain": "www.example.com",
       "networks": ["LAN"],
       "ips": ["10.0.0.5"],

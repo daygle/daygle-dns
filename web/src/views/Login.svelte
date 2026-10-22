@@ -74,7 +74,7 @@
         <div class="error">{error}</div>
       {/if}
 
-      <button type="submit" disabled={loading}>{loading ? 'Signing In…' : needCode ? 'Verify' : 'Sign In'}</button>
+      <button type="submit" disabled={loading}>{loading ? 'Signing In...' : needCode ? 'Verify' : 'Sign In'}</button>
       {#if needCode}
         <button type="button" class="link" on:click={() => { needCode = false; code = ''; error = ''; password = ''; }}>Start Over</button>
       {/if}

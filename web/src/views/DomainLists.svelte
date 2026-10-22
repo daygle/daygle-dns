@@ -78,7 +78,7 @@
     </div>
   </div>
   <div class="row" style="margin-top: 14px">
-    <button onclick={save} disabled={busy || !dirty}>{busy ? 'Saving…' : 'Save'}</button>
+    <button onclick={save} disabled={busy || !dirty}>{busy ? 'Saving...' : 'Save'}</button>
     <button class="secondary" onclick={load} disabled={busy || !dirty}>Discard Changes</button>
     {#if dirty}<span class="muted">Unsaved changes</span>{/if}
   </div>
@@ -88,7 +88,7 @@
   </p>
 {:else}
   <div class="card">
-    <p class="muted">Loading…</p>
+    <p class="muted">Loading...</p>
   </div>
 {/if}
 

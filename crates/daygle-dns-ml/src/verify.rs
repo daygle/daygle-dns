@@ -4,7 +4,7 @@
 //! Design table from [`crate::backend`]: the fastText/heuristic classifier is
 //! the primary; the MiniLM/ONNX verifier corroborates or refutes threat
 //! verdicts. Content-category verdicts (severity `Info`) pass through
-//! untouched — the verifier's job is to raise confidence in (or veto)
+//! untouched - the verifier's job is to raise confidence in (or veto)
 //! something that could auto-block.
 //!
 //! Rules (deliberately conservative, train-first stays the default):

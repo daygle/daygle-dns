@@ -322,7 +322,7 @@ impl SecondaryRefresher {
 }
 
 /// Convert transfer records into store inputs, extracting the SOA separately.
-/// DNSSEC records (RRSIG, NSEC, DNSKEY, …) and OPT are dropped - the local
+/// DNSSEC records (RRSIG, NSEC, DNSKEY, ...) and OPT are dropped - the local
 /// catalog re-signs zones that have signing keys.
 /// SOA fields extracted from a transferred zone: `(mname, rname, serial,
 /// refresh, retry, expire, minimum)`.

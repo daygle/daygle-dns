@@ -79,7 +79,7 @@
     <h3 style="margin: 0 0 10px">Application Details</h3>
     <table>
       <tbody>
-        <tr><td class="muted">Version</td><td>{#if status?.version}<code>v{status.version}</code>{:else if error}<span class="muted">Unavailable</span>{:else}<span class="muted">Loading…</span>{/if}</td></tr>
+        <tr><td class="muted">Version</td><td>{#if status?.version}<code>v{status.version}</code>{:else if error}<span class="muted">Unavailable</span>{:else}<span class="muted">Loading...</span>{/if}</td></tr>
         <tr><td class="muted">License</td><td>Apache License 2.0</td></tr>
         <tr><td class="muted">Built With</td><td>Rust, Hickory DNS, SQLite and Svelte</td></tr>
       </tbody>

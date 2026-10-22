@@ -134,7 +134,7 @@ fn main() {
 
 fn panic_if_bad(failures: usize) {
     if failures > 0 {
-        panic!("{failures} probe(s) misclassified — fix the dataset or keep the committed model");
+        panic!("{failures} probe(s) misclassified - fix the dataset or keep the committed model");
     }
     println!("all probes classified as expected");
 }

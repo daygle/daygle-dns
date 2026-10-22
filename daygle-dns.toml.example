@@ -323,7 +323,7 @@ session_ttl_secs = 43200
 # role = "admin" (full access) or "viewer" (read-only; mutations get 403).
 # [[api.users]]
 # username = "admin"
-# password_hash = "pbkdf2-sha256$210000$…$…"
+# password_hash = "pbkdf2-sha256$210000$...$..."
 # role = "admin"
 gui_enabled = true
 cors_origins = []

@@ -828,7 +828,7 @@ impl std::fmt::Display for StartError {
 /// Begin an update run. Resets the state file, writes the embedded helper and
 /// spawns it detached; returns the helper's pid.
 pub fn start(exe: &Path, config_dir: Option<&Path>) -> Result<u32, StartError> {
-    launch_run(None, exe, config_dir, "Preparing update…")
+    launch_run(None, exe, config_dir, "Preparing update...")
 }
 
 /// Begin a **model-only** update run: download the `daygle-dns-models.tar.gz`
@@ -845,7 +845,7 @@ pub fn start_models(exe: &Path, config_dir: Option<&Path>) -> Result<u32, StartE
         Some("--models"),
         exe,
         config_dir,
-        "Preparing AI model update…",
+        "Preparing AI model update...",
     )
 }
 
@@ -1074,7 +1074,7 @@ mod tests {
             phase: "building".to_string(),
             pid: 4242,
             started_at: "2026-09-07T00:00:00Z".to_string(),
-            message: "compiling…".to_string(),
+            message: "compiling...".to_string(),
             exit_code: 0,
         };
         let json = serde_json::to_string(&st).unwrap();
@@ -1302,7 +1302,7 @@ mod tests {
             phase: "building".to_string(),
             pid,
             started_at: "2026-09-07T00:00:00Z".to_string(),
-            message: "compiling…".to_string(),
+            message: "compiling...".to_string(),
             exit_code: 0,
         };
 

@@ -229,7 +229,7 @@
         <p class="muted help">Same forms as the default upstreams, one per line.</p>
       {/if}
       <div class="row actions">
-        <button onclick={save} disabled={saving}>{saving ? 'Saving…' : form.index === null ? 'Add Policy' : 'Save Policy'}</button>
+        <button onclick={save} disabled={saving}>{saving ? 'Saving...' : form.index === null ? 'Add Policy' : 'Save Policy'}</button>
         <button class="secondary" onclick={close} disabled={saving}>Cancel</button>
       </div>
     </div>

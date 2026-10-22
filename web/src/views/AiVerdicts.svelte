@@ -112,7 +112,7 @@
 
 {#if loading}
   <div class="card">
-    <p class="muted">Loading…</p>
+    <p class="muted">Loading...</p>
   </div>
 {:else if disabled}
   <div class="card">

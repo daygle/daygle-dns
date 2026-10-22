@@ -334,7 +334,7 @@
 
       <div class="row actions">
         <button onclick={saveGroup} disabled={saving || !edit.name.trim()}>
-          {saving ? 'Saving…' : edit.id ? 'Save Group' : 'Add Group'}
+          {saving ? 'Saving...' : edit.id ? 'Save Group' : 'Add Group'}
         </button>
         <button class="secondary" onclick={closeEdit} disabled={saving}>Cancel</button>
       </div>

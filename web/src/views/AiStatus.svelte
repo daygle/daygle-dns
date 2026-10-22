@@ -25,7 +25,7 @@
   const RUNNING = ['preparing', 'downloading', 'installing', 'applying', 'restarting', 'rolling_back'];
 
   function fmtSize(bytes) {
-    if (bytes == null) return '—';
+    if (bytes == null) return '-';
     if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
     if (bytes >= 1024) return `${(bytes / 1024).toFixed(0)} KB`;
     return `${bytes} B`;
@@ -72,7 +72,7 @@
     notice = null;
     try {
       await api.aiUpdateModels();
-      modelRun = { phase: 'preparing', message: 'Preparing AI model update…' };
+      modelRun = { phase: 'preparing', message: 'Preparing AI model update...' };
       notice = 'AI model update started - see progress below.';
       scheduleModelPoll();
     } catch (e) {
@@ -182,7 +182,7 @@
 
 {#if loading}
   <div class="card">
-    <p class="muted">Loading…</p>
+    <p class="muted">Loading...</p>
   </div>
 {:else if !status}
   <div class="card">
@@ -344,7 +344,7 @@
             <tr>
               <td><code>{f.file}</code></td>
               <td class="num">{f.present ? fmtSize(f.size) : 'Missing'}</td>
-              <td><code class="muted">{f.sha256 ? f.sha256.slice(0, 16) + '…' : '—'}</code></td>
+              <td><code class="muted">{f.sha256 ? f.sha256.slice(0, 16) + '...' : '-'}</code></td>
             </tr>
           {/each}
         </tbody>

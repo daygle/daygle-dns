@@ -601,7 +601,7 @@
               {:else if rootStatus?.last_error}
                 <span style="color: var(--danger)">Not in Use: {rootStatus.last_error}</span>
               {:else}
-                Transferring and Verifying the Root Zone…
+                Transferring and Verifying the Root Zone...
               {/if}
             </td>
             <td class="muted">-</td>
@@ -747,7 +747,7 @@
 
       <div class="row actions">
         <button onclick={createZone} disabled={savingZone || !newZone.name.trim()}>
-          {savingZone ? 'Saving…' : editingName ? 'Save Zone' : 'Create Zone'}
+          {savingZone ? 'Saving...' : editingName ? 'Save Zone' : 'Create Zone'}
         </button>
         <button class="secondary" onclick={closeAddZone} disabled={savingZone}>Cancel</button>
       </div>
@@ -782,7 +782,7 @@
       {/if}
 
       <div class="row actions">
-        <button onclick={saveSoa} disabled={savingSoa}>{savingSoa ? 'Saving…' : 'Save SOA'}</button>
+        <button onclick={saveSoa} disabled={savingSoa}>{savingSoa ? 'Saving...' : 'Save SOA'}</button>
         <button class="secondary" onclick={closeSoa} disabled={savingSoa}>Cancel</button>
       </div>
     </div>

@@ -157,7 +157,7 @@
   {/if}
 {:else}
   <div class="card">
-    <p class="muted">Loading…</p>
+    <p class="muted">Loading...</p>
   </div>
 {/if}
 

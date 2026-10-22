@@ -50,7 +50,7 @@ pub fn parse_upstreams_for(
 /// time so a bad entry does not disable the whole zone.
 ///
 /// Supported forms are the plain upstream forms (`IP`, `IP:port`,
-/// `[IPv6]:port`, `udp://…`, `tcp://…`) plus plain DNS hostnames, which are
+/// `[IPv6]:port`, `udp://...`, `tcp://...`) plus plain DNS hostnames, which are
 /// resolved here through the system resolver (port 53). Entries that cannot
 /// be used are skipped; the caller decides whether the zone remains usable.
 pub fn parse_stub_nss(entries: &[String], versions: IpVersions) -> Vec<NameServerConfig> {

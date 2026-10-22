@@ -314,7 +314,7 @@
           type="submit"
           disabled={saving || !edit.domain.trim() || edit.records.filter((r) => r.rtype && r.content.trim()).length === 0}
         >
-          {saving ? 'Saving…' : edit.isNew ? 'Add Entry' : 'Save Entry'}
+          {saving ? 'Saving...' : edit.isNew ? 'Add Entry' : 'Save Entry'}
         </button>
         <button type="button" class="secondary" onclick={closeEdit} disabled={saving}>Cancel</button>
       </div>

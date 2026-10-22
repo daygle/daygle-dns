@@ -100,7 +100,7 @@
   <h3 style="margin: 0">Two-Factor Login</h3>
 
   {#if step === 'loading'}
-    <p class="muted">Loading…</p>
+    <p class="muted">Loading...</p>
   {:else if step === 'off'}
     <form onsubmit={start}>
       <p class="modal-note">
@@ -114,7 +114,7 @@
       </label>
       {#if error}<div class="form-error">{error}</div>{/if}
       <div class="modal-actions">
-        <button type="submit" disabled={busy || !password}>{busy ? 'Checking…' : 'Set Up'}</button>
+        <button type="submit" disabled={busy || !password}>{busy ? 'Checking...' : 'Set Up'}</button>
       </div>
     </form>
   {:else if step === 'scan'}
@@ -134,7 +134,7 @@
       </label>
       {#if error}<div class="form-error">{error}</div>{/if}
       <div class="modal-actions">
-        <button type="submit" disabled={busy || code.trim().length < 6}>{busy ? 'Checking…' : 'Turn On'}</button>
+        <button type="submit" disabled={busy || code.trim().length < 6}>{busy ? 'Checking...' : 'Turn On'}</button>
         <button type="button" class="secondary" onclick={() => { step = 'off'; setup = null; error = null; }}>Cancel</button>
       </div>
     </form>

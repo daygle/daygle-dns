@@ -87,7 +87,7 @@
         <div class="error">{error}</div>
       {/if}
 
-      <button type="submit" disabled={loading}>{loading ? 'Creating…' : 'Create Account and Sign In'}</button>
+      <button type="submit" disabled={loading}>{loading ? 'Creating...' : 'Create Account and Sign In'}</button>
     </form>
   </section>
 </main>

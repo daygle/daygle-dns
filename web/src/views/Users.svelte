@@ -258,7 +258,7 @@
   </div>
 
   {#if loading}
-    <p class="muted">Loading…</p>
+    <p class="muted">Loading...</p>
   {:else if users.length === 0}
     <p class="muted">No accounts yet.</p>
   {:else}
@@ -345,7 +345,7 @@
       </label>
 
       <div class="row actions">
-        <button type="submit" disabled={busy || !add.username.trim() || !add.password}>{busy ? 'Creating…' : 'Create Account'}</button>
+        <button type="submit" disabled={busy || !add.username.trim() || !add.password}>{busy ? 'Creating...' : 'Create Account'}</button>
         <button type="button" class="secondary" onclick={closeAdd} disabled={busy}>Cancel</button>
       </div>
     </form>
@@ -437,7 +437,7 @@
 
       <div class="row actions" style="justify-content: space-between">
         <div class="row" style="gap: 8px">
-          <button type="button" disabled={editSaving} onclick={saveEdit}>{editSaving ? 'Saving…' : 'Save Changes'}</button>
+          <button type="button" disabled={editSaving} onclick={saveEdit}>{editSaving ? 'Saving...' : 'Save Changes'}</button>
           <button type="button" class="secondary" onclick={closeEdit} disabled={editSaving}>Cancel</button>
         </div>
         {#if !isLastAdmin(editOriginal) && !isMe(editUser)}

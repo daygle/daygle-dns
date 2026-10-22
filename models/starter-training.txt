@@ -1,5 +1,5 @@
 # Daygle DNS starter AI dataset (fastText supervised format).
-# Lines: __label__<category> <domain> — the train-starter-model tool expands
+# Lines: __label__<category> <domain> - the train-starter-model tool expands
 # www/hyphen/space variants. Categories match the AI console + heuristic set.
 # ── threats ───────────────────────────────────────────────────────────────
 __label__malware emotet-c2-server.top

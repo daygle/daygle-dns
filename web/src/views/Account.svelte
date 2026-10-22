@@ -153,7 +153,7 @@
     {#if prefsError}<div class="form-error">{prefsError}</div>{/if}
     {#if prefsNotice}<div class="form-ok">{prefsNotice}</div>{/if}
     <div class="actions">
-      <button type="submit" disabled={savingPrefs}>{savingPrefs ? 'Saving…' : 'Save Preferences'}</button>
+      <button type="submit" disabled={savingPrefs}>{savingPrefs ? 'Saving...' : 'Save Preferences'}</button>
     </div>
   </form>
 {:else if current.id === 'password'}
@@ -181,7 +181,7 @@
     {#if passwordNotice}<div class="form-ok">{passwordNotice}</div>{/if}
     <div class="actions">
       <button type="submit" disabled={changingPassword || !currentPassword || !newPassword || !newPassword2}>
-        {changingPassword ? 'Saving…' : 'Save Password'}
+        {changingPassword ? 'Saving...' : 'Save Password'}
       </button>
     </div>
   </form>

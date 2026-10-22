@@ -5,7 +5,7 @@
 //! This is the "second, more expensive pass" from the backend design table:
 //! the fastText/heuristic classifier stays the cheap primary; the verifier
 //! corroborates (or refutes) *threat* verdicts with an independent signal.
-//! It never sees the DNS hot path — the scanner calls it from background
+//! It never sees the DNS hot path - the scanner calls it from background
 //! classification cycles only.
 //!
 //! Model artifacts (shipped under `models/`, installed to the config dir):
@@ -118,7 +118,7 @@ fn load_centroids(path: &Path) -> Result<CentroidMap> {
 impl MiniLmVerifier {
     /// Loader for tools that only need embeddings (the centroid generator).
     /// Otherwise identical to [`Self::load`], but the centroid reference is
-    /// left empty — `classify` returns None on such an instance.
+    /// left empty - `classify` returns None on such an instance.
     pub fn load_embedder(model_path: impl AsRef<Path>) -> Result<Self> {
         let model_path = model_path.as_ref();
         let tokenizer = load_tokenizer(model_path)?;

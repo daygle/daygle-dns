@@ -203,7 +203,7 @@ fi
 # account, restart, health-check and roll the files back on failure. The
 # binary path below never runs for this kind.
 if [ "$KIND" = "models" ]; then
-  state applying "Applying AI model files (v${VERSION})…"
+  state applying "Applying AI model files (v${VERSION})..."
   log "applying models bundle v${VERSION} into $MODELS_DIR"
 
   WORK="$PRIV/models"
@@ -276,7 +276,7 @@ if [ "$KIND" = "models" ]; then
     chown "$SERVICE_USER":"$SERVICE_USER" "$MODELS_DIR/$f" 2>/dev/null || true
   done
 
-  state restarting "Restarting the service to load the new AI models…"
+  state restarting "Restarting the service to load the new AI models..."
   if ! systemctl restart daygle-dns; then
     log "systemctl restart daygle-dns failed after model install"
     for f in $VALID; do
@@ -300,7 +300,7 @@ if [ "$KIND" = "models" ]; then
   fi
 
   log "health check failed after model update - rolling back"
-  state rolling_back "Model update failed - rolling back the AI model files…"
+  state rolling_back "Model update failed - rolling back the AI model files..."
   for f in $VALID; do
     if [ -f "$PRIV/model-backup/$f" ]; then cp -f "$PRIV/model-backup/$f" "$MODELS_DIR/$f" 2>/dev/null || true; fi
   done
@@ -310,7 +310,7 @@ if [ "$KIND" = "models" ]; then
   exit 1
 fi
 
-state applying "Applying release v${VERSION}…"
+state applying "Applying release v${VERSION}..."
 log "applying v${VERSION} from $BIN"
 
 # Back up the current binary for rollback (best effort). Prefer the image of
@@ -339,7 +339,7 @@ if ! mv -f "$EXE.new" "$EXE"; then
   exit 1
 fi
 
-state restarting "Restarting the service…"
+state restarting "Restarting the service..."
 if ! systemctl restart daygle-dns; then
   log "systemctl restart daygle-dns failed after install"
   rm -f "$REQ.processing"
@@ -368,7 +368,7 @@ fi
 
 log "health check failed after update - rolling back"
 if [ -f "$EXE.bak" ]; then
-  state rolling_back "Update failed - rolling back to the previous version…"
+  state rolling_back "Update failed - rolling back to the previous version..."
   mv -f "$EXE.bak" "$EXE"
   systemctl restart daygle-dns 2>>"$LOG" || true
   fail "Update failed - successfully rolled back to the previous version. Release v${VERSION} did not pass its health check."

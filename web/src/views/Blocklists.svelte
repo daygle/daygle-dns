@@ -287,7 +287,7 @@
 
 {#if loading}
   <div class="card">
-    <p class="muted">Loading…</p>
+    <p class="muted">Loading...</p>
   </div>
 {:else if !configured}
   <div class="card">
@@ -311,7 +311,7 @@
       <div class="row" style="gap: 8px">
         <button class="secondary" onclick={load}>Reload</button>
         <button class="secondary" onclick={refreshNow} disabled={refreshing}>
-          {refreshing ? 'Refreshing…' : 'Refresh All'}
+          {refreshing ? 'Refreshing...' : 'Refresh All'}
         </button>
         <button onclick={openAdd}>Add Blocklist</button>
       </div>
@@ -443,7 +443,7 @@
 
       <div class="row actions">
         <button onclick={saveSource} disabled={saving}>
-          {saving ? 'Saving…' : draft.originalName ? 'Save Blocklist' : 'Add Blocklist'}
+          {saving ? 'Saving...' : draft.originalName ? 'Save Blocklist' : 'Add Blocklist'}
         </button>
         <button class="secondary" onclick={validateDraft} disabled={saving}>Validate</button>
         <button class="secondary" onclick={closeEditor} disabled={saving}>Cancel</button>

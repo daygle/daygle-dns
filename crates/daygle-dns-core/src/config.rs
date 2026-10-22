@@ -2990,7 +2990,7 @@ impl Default for RecursiveSettings {
 
 /// A conditional forwarding zone: `name` is resolved via `upstreams` instead
 /// of the global `recursive.upstreams`. Accepts the same upstream forms
-/// (plain IP, `tls://IP:port@hostname`, …).
+/// (plain IP, `tls://IP:port@hostname`, ...).
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct ConditionalZoneConfig {

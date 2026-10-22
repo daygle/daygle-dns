@@ -4,7 +4,7 @@
 //!
 //! Embeds every (expanded) dataset domain with the bundled MiniLM ONNX
 //! model, averages per category, L2-normalizes, and writes the centroid map
-//! the verifier classifies against. Commit the JSON alongside the model —
+//! the verifier classifies against. Commit the JSON alongside the model -
 //! the pair must be regenerated together.
 
 #[cfg(feature = "verifier-onnx")]

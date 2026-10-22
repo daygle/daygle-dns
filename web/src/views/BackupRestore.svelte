@@ -110,7 +110,7 @@
   <h3 style="margin: 0 0 10px">Back Up</h3>
   <div class="row">
     <label class="check"><input type="checkbox" bind:checked={includeLogs} /> <span>Include Query Logs</span></label>
-    <button onclick={download} disabled={downloading}>{downloading ? 'Preparing…' : 'Download Backup'}</button>
+    <button onclick={download} disabled={downloading}>{downloading ? 'Preparing...' : 'Download Backup'}</button>
   </div>
   <p class="muted help">
     One file with everything this server keeps: zones and records, DNSSEC keys,
@@ -125,7 +125,7 @@
   <h3 style="margin: 0 0 10px">Restore</h3>
   <div class="row">
     <input type="file" accept=".db,application/vnd.sqlite3,application/octet-stream" onchange={(e) => (file = e.currentTarget.files?.[0] || null)} />
-    <button class="danger" onclick={restore} disabled={!file || restoring}>{restoring ? 'Checking…' : 'Restore Backup'}</button>
+    <button class="danger" onclick={restore} disabled={!file || restoring}>{restoring ? 'Checking...' : 'Restore Backup'}</button>
   </div>
   <p class="muted help">
     The backup is checked first, then applied when Daygle DNS next restarts, so

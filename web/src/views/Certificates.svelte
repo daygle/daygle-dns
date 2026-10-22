@@ -97,7 +97,7 @@
     notice = warning = error = null;
     try {
       await api.renewCertificate(cert.name);
-      notice = `Renewing '${cert.name}'…`;
+      notice = `Renewing '${cert.name}'...`;
       await load();
     } catch (err) {
       error = formatApiError(err);
@@ -315,7 +315,7 @@
   </div>
 
   {#if loading}
-    <p class="muted">Loading…</p>
+    <p class="muted">Loading...</p>
   {:else if certs.length === 0}
     <p class="muted">
       No certificates yet.
@@ -346,7 +346,7 @@
                 {#if cert.acme}
                   <div class="acme">
                     {#if cert.acme.status === 'pending'}
-                      <span class="pill warn">{cert.not_after ? 'Renewing…' : 'Requesting…'}</span>
+                      <span class="pill warn">{cert.not_after ? 'Renewing...' : 'Requesting...'}</span>
                     {:else if cert.acme.status === 'failed'}
                       <span class="pill err" title={cert.acme.last_error}>{cert.not_after ? 'Renewal Failed' : 'Request Failed'}</span>
                     {:else}
@@ -502,12 +502,12 @@
           <label>
             <span>Certificate (PEM)</span>
             <input type="file" accept=".pem,.crt,.cer" onchange={(e) => pickFile(e.currentTarget, 'cert')} />
-            <textarea rows="5" bind:value={form.certPem} placeholder="-----BEGIN CERTIFICATE-----&#10;… or paste here" spellcheck="false"></textarea>
+            <textarea rows="5" bind:value={form.certPem} placeholder="-----BEGIN CERTIFICATE-----&#10;... or paste here" spellcheck="false"></textarea>
           </label>
           <label>
             <span>Private Key (PEM)</span>
             <input type="file" accept=".pem,.key" onchange={(e) => pickFile(e.currentTarget, 'key')} />
-            <textarea rows="5" bind:value={form.keyPem} placeholder="-----BEGIN PRIVATE KEY-----&#10;… or paste here" spellcheck="false"></textarea>
+            <textarea rows="5" bind:value={form.keyPem} placeholder="-----BEGIN PRIVATE KEY-----&#10;... or paste here" spellcheck="false"></textarea>
           </label>
         </div>
         <p class="muted help">
@@ -519,7 +519,7 @@
 
       <div class="row actions">
         <button type="submit" disabled={busy || !form.name.trim()}>
-          {busy ? 'Saving…' : form.replacing ? 'Replace Certificate' : form.mode === 'self' ? 'Create Certificate' : form.mode === 'acme' ? 'Request Certificate' : 'Upload Certificate'}
+          {busy ? 'Saving...' : form.replacing ? 'Replace Certificate' : form.mode === 'self' ? 'Create Certificate' : form.mode === 'acme' ? 'Request Certificate' : 'Upload Certificate'}
         </button>
         <button type="button" class="secondary" onclick={closeForm} disabled={busy}>Cancel</button>
       </div>
@@ -573,7 +573,7 @@
         if browsers do not trust it, its root certificate.
       </p>
       <div class="row actions">
-        <button type="submit" disabled={busy}>{busy ? 'Saving…' : 'Save Settings'}</button>
+        <button type="submit" disabled={busy}>{busy ? 'Saving...' : 'Save Settings'}</button>
         <button type="button" class="secondary" onclick={() => (acmeForm = null)} disabled={busy}>Cancel</button>
       </div>
     </form>

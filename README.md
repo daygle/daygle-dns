@@ -32,7 +32,7 @@ Daygle DNS combines, in a single process:
   updates with HMAC-signed requests (HMAC-SHA256, HMAC-SHA384,
   HMAC-SHA512). Per-zone key binding, signed responses, and request-MAC
   chaining.
-- **Named networks**: name a set of addresses once (`LAN`, `VPN`, `IoT`…)
+- **Named networks**: name a set of addresses once (`LAN`, `VPN`, `IoT`...)
   in Settings -> Networks and pick it wherever a setting takes client
   networks; changing it changes them all, renaming it keeps them pointing at
   it, and a network in use cannot be deleted.
@@ -117,7 +117,7 @@ metrics.
 # One-line installer (Linux/macOS; auto-installs Rust, a C compiler, and git if missing)
 curl -fsSL https://raw.githubusercontent.com/daygle/daygle-dns/main/install.sh | sh
 
-# …or build and run directly from source
+# ...or build and run directly from source
 cargo run --release -p daygle-dns -- --config daygle-dns.toml.example
 ```
 
@@ -370,7 +370,7 @@ If you cloned the repository, pull, rebuild, and restart:
 git pull
 cargo build --release -p daygle-dns
 sudo systemctl restart daygle-dns   # systemd installs
-# …or copy the binary over your existing one:
+# ...or copy the binary over your existing one:
 sudo install -m 0755 target/release/daygle-dns /usr/local/bin/daygle-dns
 ```
 

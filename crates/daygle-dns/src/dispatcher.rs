@@ -371,7 +371,7 @@ impl DnsDispatcher {
 
     /// Serve an AXFR/IXFR zone transfer from the stored zone data.
     ///
-    /// The response answer section is `SOA, records…, SOA` as RFC 5936
+    /// The response answer section is `SOA, records..., SOA` as RFC 5936
     /// requires. IXFR is answered with a full transfer, which RFC 1995 always
     /// permits (a server may answer IXFR with the full zone when it does not
     /// implement incremental deltas).

@@ -33,7 +33,7 @@
   ];
   const TAGLINES = {
     general: 'How the web console is reached (HTTP, HTTPS or both), and the DNS listeners this server was started with.',
-    networks: 'Named networks (LAN, VPN, IoT…) that the settings taking client networks can pick instead of repeating the addresses.',
+    networks: 'Named networks (LAN, VPN, IoT...) that the settings taking client networks can pick instead of repeating the addresses.',
     recursive: 'How the server answers names it does not host: resolving them itself from the root servers or forwarding to upstreams, and who may use it.',
     cache: 'How long answers are kept, how many, and how popular names are refreshed before they expire. Changes apply immediately.',
     listeners: 'Encrypted DNS: DNS over TLS, HTTPS and QUIC, and the certificate each one presents. Changes apply immediately.',
@@ -429,7 +429,7 @@
       // console to where it now is.
       const next = consoleUrlAfter(body.web);
       if (next) {
-        notice = `Settings saved. The console has moved: opening ${next} …`;
+        notice = `Settings saved. The console has moved: opening ${next} ...`;
         setTimeout(() => (window.location.href = next), 1500);
         return;
       }
@@ -503,7 +503,7 @@
 
   {#if tab !== 'backup' && tab !== 'networks'}
   <div class="actions" class:dirty>
-    <button onclick={save} disabled={busy || !dirty}>{busy ? 'Saving…' : 'Save Changes'}</button>
+    <button onclick={save} disabled={busy || !dirty}>{busy ? 'Saving...' : 'Save Changes'}</button>
     <button class="secondary" onclick={reload} disabled={busy}>{dirty ? 'Discard Changes' : 'Reload'}</button>
     {#if dirty}<span class="unsaved">Unsaved changes (Save covers every tab)</span>{/if}
   </div>
@@ -899,7 +899,7 @@
           {#each certs as cert (cert.name)}
             <option value={cert.name}>{certLabel(cert)}</option>
           {/each}
-          <option value="custom">Certificate Files on the Server…</option>
+          <option value="custom">Certificate Files on the Server...</option>
         </select>
       </label>
       {#if dotCertMode === 'self'}
@@ -924,7 +924,7 @@
           {#each certs as cert (cert.name)}
             <option value={cert.name}>{certLabel(cert)}</option>
           {/each}
-          <option value="custom">Certificate Files on the Server…</option>
+          <option value="custom">Certificate Files on the Server...</option>
         </select>
       </label>
       {#if dohCertMode === 'self'}
@@ -949,7 +949,7 @@
           {#each certs as cert (cert.name)}
             <option value={cert.name}>{certLabel(cert)}</option>
           {/each}
-          <option value="custom">Certificate Files on the Server…</option>
+          <option value="custom">Certificate Files on the Server...</option>
         </select>
       </label>
       {#if doqCertMode === 'self'}
@@ -1077,7 +1077,7 @@
   {/if}
 {:else}
   <div class="card">
-    <p class="muted">Loading…</p>
+    <p class="muted">Loading...</p>
   </div>
 {/if}
 

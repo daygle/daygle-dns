@@ -177,7 +177,7 @@
 {/if}
 {#if !status}
   <div class="card">
-    <p class="muted">Loading…</p>
+    <p class="muted">Loading...</p>
   </div>
 {:else}
   <p class="muted since">Since the server started {formatUptime(status.uptime_secs)} ago:</p>

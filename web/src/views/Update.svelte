@@ -27,15 +27,15 @@
 
   const RUNNING = ['preparing', 'downloading', 'cloning', 'building', 'installing', 'applying', 'restarting', 'rolling_back'];
   const PHASE_LABEL = {
-    preparing: 'Preparing…',
-    downloading: 'Downloading the prebuilt release…',
-    cloning: 'Fetching source (no prebuilt release matched, building from source)…',
-    building: 'Building release binary (a few minutes)…',
-    installing: 'Installing new binary…',
-    applying: 'Applying the new release…',
-    restarting: 'Restarting the service…',
-    checking: 'Verifying update…',
-    rolling_back: 'Rolling back to previous version…',
+    preparing: 'Preparing...',
+    downloading: 'Downloading the prebuilt release...',
+    cloning: 'Fetching source (no prebuilt release matched, building from source)...',
+    building: 'Building release binary (a few minutes)...',
+    installing: 'Installing new binary...',
+    applying: 'Applying the new release...',
+    restarting: 'Restarting the service...',
+    checking: 'Verifying update...',
+    rolling_back: 'Rolling back to previous version...',
     done: 'Complete',
     error: 'Failed',
   };
@@ -247,7 +247,7 @@
       <div class="spread">
         <h3 style="margin: 0">Update</h3>
         {#if updating || runRunning()}
-          <span class="pill"><span class="spin" aria-hidden="true"></span> Updating…</span>
+          <span class="pill"><span class="spin" aria-hidden="true"></span> Updating...</span>
         {:else if run?.phase === 'done' && isRollback(run)}
           <span class="pill err">Failed</span>
         {:else if run?.phase === 'done'}
@@ -316,11 +316,11 @@
 
       {#if updating || runRunning()}
         <p style="margin: 8px 0">
-          <strong>{run?.message || PHASE_LABEL[run?.phase] || 'Working…'}</strong>
+          <strong>{run?.message || PHASE_LABEL[run?.phase] || 'Working...'}</strong>
         </p>
         {#if serverDown}
           <div class="form-error" style="margin: 8px 0">
-            The server is restarting with the new build - reconnecting…
+            The server is restarting with the new build - reconnecting...
           </div>
         {/if}
         {#if logTail}
@@ -344,7 +344,7 @@
           </div>
           {#if waitingForServer}
             <p class="muted small" style="margin-top: 10px">
-              Waiting for the restarted service to come back, then reloading automatically…
+              Waiting for the restarted service to come back, then reloading automatically...
             </p>
           {/if}
         {/if}
@@ -372,7 +372,7 @@
           <div style="display: flex; gap: 8px; margin-top: 8px">
             <button onclick={startUpdate} disabled={busy || updating || preflightLoading}>Update Now</button>
             <button class="secondary" onclick={runPreflight} disabled={busy || updating || preflightLoading}>
-              {preflightLoading ? 'Checking…' : 'Check Health'}
+              {preflightLoading ? 'Checking...' : 'Check Health'}
             </button>
           </div>
         {:else}
@@ -445,7 +445,7 @@
   </div>
 {:else if busy}
   <div class="card">
-    <p class="muted">Loading update details…</p>
+    <p class="muted">Loading update details...</p>
   </div>
 {/if}
 

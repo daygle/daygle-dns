@@ -85,7 +85,7 @@ listener:
 3. **Zone transfers.** AXFR/IXFR queries are intercepted before the normal
    lookup path (`DnsDispatcher::handle_transfer`). Transfers are gated by
    `authoritative.axfr_enabled` and the `axfr_networks` client allow-list, and
-   answered with the full zone record set (`SOA, records…, SOA` per RFC 5936;
+   answered with the full zone record set (`SOA, records..., SOA` per RFC 5936;
    IXFR always gets a full transfer, which RFC 1995 permits).
 4. **Recursive.** Otherwise the query goes to `daygle-dns-recursive`; the
    `RecursiveResolver` routes by name - the most specific configured
@@ -259,7 +259,7 @@ Opt-in via `[ai] enabled = true`; the DNS hot path nevers runs a model.
 - **Dashboard statistics.** `QueryStats` (`daygle-dns-core/src/stats.rs`)
   records every served query into a 24-hour ring of one-minute buckets plus
   bounded top-N tables (clients, domains, blocked domains; pruned to 2 000
-  keys at 5 000). `GET /api/stats?window=…` renders the time-series and top
+  keys at 5 000). `GET /api/stats?window=...` renders the time-series and top
   tables; the dispatcher tags each query with its outcome (authoritative,
   recursive, split-horizon, blocked, rate-limited, error) as it is answered.
   Stats are in-memory only and reset on restart.

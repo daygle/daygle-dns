@@ -103,7 +103,7 @@ SRC="$(mktemp -d)"
 
 trap 'rm -rf "$SRC"' EXIT HUP INT TERM
 
-state preparing "Preparing update…"
+state preparing "Preparing update..."
 
 # The hand-off requires the installer-provisioned update service; fail early
 # (before any download) so the operator gets the repair without waiting.
@@ -194,7 +194,7 @@ if [ "$MODE" = "models" ]; then
     fail "could not resolve the latest release (GitHub unreachable or rate-limited) - see update.log."
     exit 1
   fi
-  state downloading "Downloading the AI models bundle (${REL_TAG})…"
+  state downloading "Downloading the AI models bundle (${REL_TAG})..."
   BUNDLE_TMP="$SRC/models.tar.gz"
   BUNDLE_SUM="$SRC/models.sha256"
   if fetch "$BASE_URL/$REL_TAG/daygle-dns-models.tar.gz" "$BUNDLE_TMP" 2>>"$LOG" \
@@ -206,7 +206,7 @@ if [ "$MODE" = "models" ]; then
     exit 1
   fi
 elif [ -n "$DOWNLOADER" ]; then
-  state downloading "Downloading the prebuilt release (${ASSET} build)…"
+  state downloading "Downloading the prebuilt release (${ASSET} build)..."
   # Resolve the latest release tag: the GitHub API is authoritative (and
   # cheap); the /releases/latest HTML redirect is the fallback if the API is
   # unreachable or rate-limited. Naming the tag lets errors say exactly
@@ -247,7 +247,7 @@ NEW_BIN=""
 TARGET_VERSION=""
 if [ "$MODE" = "models" ]; then
   # Verify the bundle checksum BEFORE staging; a mismatch is fatal.
-  state downloading "Verifying the models bundle checksum…"
+  state downloading "Verifying the models bundle checksum..."
   EXPECTED="$(cut -d' ' -f1 "$BUNDLE_SUM" 2>/dev/null | tr -d '[:space:]')"
   ACTUAL="$( (sha256sum "$BUNDLE_TMP" 2>/dev/null || shasum -a 256 "$BUNDLE_TMP" 2>/dev/null) | cut -d' ' -f1 | tr -d '[:space:]')"
   if [ -z "$EXPECTED" ] || [ "$EXPECTED" != "$ACTUAL" ]; then
@@ -258,7 +258,7 @@ if [ "$MODE" = "models" ]; then
   TARGET_VERSION="$(printf '%s' "$REL_TAG" | sed 's/^v//')"
 elif [ "$DOWNLOAD_OK" -eq 1 ]; then
   # Verify the checksum BEFORE the file is used; a mismatch is fatal.
-  state downloading "Verifying the download checksum…"
+  state downloading "Verifying the download checksum..."
   EXPECTED="$(cut -d' ' -f1 "$SRC/daygle-dns.sha256" 2>/dev/null | tr -d '[:space:]')"
   ACTUAL="$( (sha256sum "$SRC/daygle-dns" 2>/dev/null || shasum -a 256 "$SRC/daygle-dns" 2>/dev/null) | cut -d' ' -f1 | tr -d '[:space:]')"
   if [ -z "$EXPECTED" ] || [ "$EXPECTED" != "$ACTUAL" ]; then
@@ -288,7 +288,7 @@ else
     exit 1
   fi
 
-  state cloning "No prebuilt release matched ($DL_WHY) - building from source (this can take several minutes)…"
+  state cloning "No prebuilt release matched ($DL_WHY) - building from source (this can take several minutes)..."
   # Clone into a fresh subdirectory: $SRC already holds the release lookup
   # files, and git refuses to clone into a non-empty directory.
   BUILD_DIR="$SRC/source"
@@ -299,7 +299,7 @@ else
 
   cd "$BUILD_DIR"
 
-  state building "Building the release binary (this can take a few minutes)…"
+  state building "Building the release binary (this can take a few minutes)..."
   # cargo writes its registry to $CARGO_HOME (default $HOME/.cargo). systemd
   # accounts may have no usable home directory; fall back to a writable dir
   # so the build can proceed and cache across runs.
@@ -350,7 +350,7 @@ stage_and_trigger() { # staged-file target-version kind
   : > "$UPDATES_DIR/request" || return 1
 }
 
-state installing "Update ready - handing off to the systemd update service (${MODE} v${TARGET_VERSION})…"
+state installing "Update ready - handing off to the systemd update service (${MODE} v${TARGET_VERSION})..."
 if ! stage_and_trigger "$NEW_BIN" "$TARGET_VERSION" "$MODE"; then
   WHY="$(last_log_error)"
   fail "the update binary could not be staged into $STAGING${WHY:+: $WHY}. Re-run the installer to repair the update service, then retry."

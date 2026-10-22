@@ -84,12 +84,12 @@
     </label>
     <p class="muted help">Names that keep their IPv6 answers, one per line; <code>*.example.com</code> covers the subdomains.</p>
     <div class="row" style="margin-top: 10px">
-      <button onclick={saveFilterAaaa} disabled={busy}>{busy ? 'Saving…' : 'Save'}</button>
+      <button onclick={saveFilterAaaa} disabled={busy}>{busy ? 'Saving...' : 'Save'}</button>
     </div>
   </div>
 {:else if !error}
   <div class="card">
-    <p class="muted">Loading…</p>
+    <p class="muted">Loading...</p>
   </div>
 {/if}
 

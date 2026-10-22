@@ -137,7 +137,7 @@ install_dns_tools() {
     if have_cmd dig; then
         return 0
     fi
-    log "Installing DNS test tools (dig)…"
+    log "Installing DNS test tools (dig)..."
     if have_cmd apt-get; then
         run_as_root apt-get install -y --no-install-recommends dnsutils || true
     elif have_cmd dnf || have_cmd yum; then
@@ -157,7 +157,7 @@ install_dns_tools() {
 }
 
 install_rust() {
-    log "Installing Rust via rustup (minimal profile)…"
+    log "Installing Rust via rustup (minimal profile)..."
     if have_cmd curl; then
         curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal || return 1
     elif have_cmd wget; then
@@ -313,7 +313,7 @@ fi
 SRC_DIR="$(mktemp -d)"
 trap 'rm -rf "$SRC_DIR"' EXIT
 
-log "Downloading Daygle DNS source…"
+log "Downloading Daygle DNS source..."
 if need_git; then
     printf '%s\n' \
         'error: git is required to download the Daygle source.' \
@@ -331,10 +331,10 @@ fi
 git clone --depth 1 https://github.com/daygle/daygle-dns.git "$SRC_DIR"
 cd "$SRC_DIR"
 
-log "Building release binary (this may take a few minutes)…"
+log "Building release binary (this may take a few minutes)..."
 cargo build --release -p daygle-dns
 
-log "Installing binary to $PREFIX/bin/daygle-dns…"
+log "Installing binary to $PREFIX/bin/daygle-dns..."
 install -d "$PREFIX/bin"
 # Install beside the target and rename: writing over the running executable
 # fails with "Text file busy" (ETXTBSY); rename(2) swaps the directory entry
@@ -343,7 +343,7 @@ rm -f "$PREFIX/bin/daygle-dns.new"
 install -m 0755 target/release/daygle-dns "$PREFIX/bin/daygle-dns.new"
 mv -f "$PREFIX/bin/daygle-dns.new" "$PREFIX/bin/daygle-dns"
 
-log "Installing configuration to $CONFIG_DIR…"
+log "Installing configuration to $CONFIG_DIR..."
 install -d "$CONFIG_DIR" "$CONFIG_DIR/zones" "$CONFIG_DIR/certs" "$DATA_DIR"
 if [ ! -f "$CONFIG_DIR/daygle-dns.toml" ]; then
     install -m 0644 daygle-dns.toml.example "$CONFIG_DIR/daygle-dns.toml"
@@ -406,7 +406,7 @@ fi
 
 # ---- systemd unit (Linux with systemd only) -----------------------------
 if [ -d /etc/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
-    log "Installing systemd unit…"
+    log "Installing systemd unit..."
     cat > /etc/systemd/system/daygle-dns.service <<EOF
 [Unit]
 Description=Daygle DNS server

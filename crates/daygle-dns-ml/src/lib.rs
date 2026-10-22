@@ -106,7 +106,7 @@ impl AiEngine {
         // Optional verifying second pass (feature-gated): threat verdicts
         // from the primary classifier get re-checked against the bundled
         // MiniLM/ONNX embedding verifier. A load failure degrades gracefully
-        // to the primary classifier — it never disables the AI subsystem.
+        // to the primary classifier - it never disables the AI subsystem.
         #[cfg(feature = "verifier-onnx")]
         let classifier: Box<dyn DomainClassifier + Send + Sync> = if !settings
             .verifier_model_path

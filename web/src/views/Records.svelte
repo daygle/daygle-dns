@@ -25,9 +25,9 @@
     CAA: '0 issue "letsencrypt.org"',
     HTTPS: '1 . alpn=h2,h3',
     SVCB: '1 svc.example.com. port=8443',
-    DS: '12345 13 2 3F2A6B1C…',
-    TLSA: '3 1 1 0C72AC70B745…',
-    SSHFP: '4 2 9F6B2C1D0E3A…',
+    DS: '12345 13 2 3F2A6B1C...',
+    TLSA: '3 1 1 0C72AC70B745...',
+    SSHFP: '4 2 9F6B2C1D0E3A...',
     NAPTR: '100 10 "S" "SIP+D2U" "" _sip._udp.example.com.',
   };
   const TYPES = Object.keys(EXAMPLES);
@@ -295,7 +295,7 @@
 
 {#if !zonesLoaded}
   <div class="card">
-    <p class="muted">Loading…</p>
+    <p class="muted">Loading...</p>
   </div>
 {:else if zones.length === 0}
   <div class="card">
@@ -317,7 +317,7 @@
         aria-autocomplete="list"
         autocomplete="off"
         spellcheck="false"
-        placeholder="Search zones…"
+        placeholder="Search zones..."
         bind:value={query}
         onfocus={openPicker}
         onblur={onPickerBlur}
@@ -427,7 +427,7 @@
         </table>
       </div>
       {#if recordsLoading}
-        <p class="muted">Loading records…</p>
+        <p class="muted">Loading records...</p>
       {:else if records.length === 0}
         <p class="muted">No records yet. Add one with the Add Record button.</p>
       {:else if shown.length === 0}
@@ -477,7 +477,7 @@
         {/if}
       </div>
       <div class="row actions">
-        <button type="submit" disabled={saving || !edit.content.trim()}>{saving ? 'Saving…' : edit.isNew ? 'Add Record' : 'Save Record'}</button>
+        <button type="submit" disabled={saving || !edit.content.trim()}>{saving ? 'Saving...' : edit.isNew ? 'Add Record' : 'Save Record'}</button>
         <button type="button" class="secondary" onclick={closeEdit} disabled={saving}>Cancel</button>
       </div>
     </form>
@@ -522,7 +522,7 @@
         on any status below 400 and do not verify certificates.
       </p>
       <div class="row actions">
-        <button type="submit" disabled={saving}>{saving ? 'Saving…' : 'Save Check'}</button>
+        <button type="submit" disabled={saving}>{saving ? 'Saving...' : 'Save Check'}</button>
         {#if healthEdit.exists}
           <button type="button" class="danger" onclick={removeHealth} disabled={saving}>Remove Check</button>
         {/if}

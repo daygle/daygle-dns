@@ -65,7 +65,7 @@
           const lo = i === 0 ? 0 : stats.latency.bounds_ms[i - 1];
           // Columns are labelled by their upper bound; the last has none.
           const label = hi == null ? 'more' : hi >= 1000 ? `${hi / 1000} s` : `${hi}`;
-          const range = hi == null ? `${lo} ms or more` : `${lo}–${hi} ms`;
+          const range = hi == null ? `${lo} ms or more` : `${lo}-${hi} ms`;
           return { count, label, range };
         })
       : [],

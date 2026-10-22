@@ -27,7 +27,7 @@ Report privately through one of these channels:
 ### What to include
 
 - A description of the vulnerability and its **impact** (what an attacker
-  gains, and from where - LAN, WAN, a secondary, an API client…).
+  gains, and from where - LAN, WAN, a secondary, an API client...).
 - The affected component and version (`daygle-dns --version`).
 - Reproduction steps or a proof of concept: the config used (with secrets
   redacted), the client commands (`dig`, `curl`, a TSIG/DNSSEC script), and

@@ -6,9 +6,9 @@
 //! whole subsystem can be deleted/trained/rebuilt without touching serving
 //! data. The layout:
 //!
-//! - `ai_verdicts` – one row per observed domain (UNIQUE), with category,
+//! - `ai_verdicts` - one row per observed domain (UNIQUE), with category,
 //!   severity, confidence, TTL metadata and observation counters.
-//! - `ai_overrides` – operator vetoes: `allow` rows that the policy plugin
+//! - `ai_overrides` - operator vetoes: `allow` rows that the policy plugin
 //!   honours over its own block snapshot (manual operator blocks go through
 //!   the normal policy blocklist instead of this table).
 //!

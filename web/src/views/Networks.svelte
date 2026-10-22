@@ -98,7 +98,7 @@
     <button onclick={() => startEdit(null)}>Add Network</button>
   </div>
   {#if loading}
-    <p class="muted">Loading…</p>
+    <p class="muted">Loading...</p>
   {:else}
     <div class="table-wrap">
       <table>
@@ -145,7 +145,7 @@
     </div>
   {/if}
   <p class="muted help">
-    Name your networks once (LAN, VPN, IoT…) and pick them wherever a setting
+    Name your networks once (LAN, VPN, IoT...) and pick them wherever a setting
     asks for client networks: split horizon, client groups, client policies,
     recursion access and more. Changing a network's addresses changes every
     setting that uses it straight away; renaming it keeps them pointing at it.
@@ -178,7 +178,7 @@
       {/if}
       <div class="row actions">
         <button onclick={save} disabled={saving || !edit.name.trim() || !edit.cidrs.trim()}>
-          {saving ? 'Saving…' : edit.originalName ? 'Save Network' : 'Add Network'}
+          {saving ? 'Saving...' : edit.originalName ? 'Save Network' : 'Add Network'}
         </button>
         <button class="secondary" onclick={closeEdit} disabled={saving}>Cancel</button>
       </div>
