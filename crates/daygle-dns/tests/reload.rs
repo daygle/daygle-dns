@@ -34,6 +34,37 @@ async fn free_port() -> u16 {
     }
 }
 
+/// Send one raw DNS query over TCP (length-prefixed) and read the response.
+async fn tcp_transfer_query(
+    addr: SocketAddr,
+    name: &str,
+    rtype: RecordType,
+) -> hickory_proto::op::Message {
+    use hickory_proto::op::{Message, MessageType, OpCode, Query};
+    use hickory_proto::rr::Name;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let mut stream = tokio::net::TcpStream::connect(addr)
+        .await
+        .expect("connect TCP");
+    let mut msg = Message::new(0x2223, MessageType::Query, OpCode::Query);
+    msg.add_query(Query::query(
+        Name::from_utf8(name).expect("valid name"),
+        rtype,
+    ));
+    let bytes = msg.to_vec().expect("encode query");
+    let mut framed = Vec::with_capacity(bytes.len() + 2);
+    framed.extend_from_slice(&(bytes.len() as u16).to_be_bytes());
+    framed.extend_from_slice(&bytes);
+    stream.write_all(&framed).await.expect("write query");
+
+    let mut len_buf = [0u8; 2];
+    stream.read_exact(&mut len_buf).await.expect("read length");
+    let mut resp = vec![0u8; u16::from_be_bytes(len_buf) as usize];
+    stream.read_exact(&mut resp).await.expect("read body");
+    Message::from_vec(&resp).expect("decode response")
+}
+
 /// Write `cfg` to `path` as TOML.
 fn write_config(path: &PathBuf, cfg: &DaygleConfig) {
     let text = toml::to_string(cfg).expect("serialize config");
@@ -172,6 +203,83 @@ async fn reloads_recursive_upstreams() {
 
     let msg = udp_query(udp, "host.b.test.", RecordType::A).await;
     assert_eq!(first_answer(&msg).as_deref(), Some("198.51.100.2"));
+
+    shutdown(server).await;
+}
+
+/// Named networks saved from the console are the live source: once a network
+/// is in the database overlay, editing it in the file does not change the
+/// transfer gate (the overlay owns console-managed settings), but the console
+/// change does.
+#[tokio::test]
+async fn console_owned_network_ignores_file_edits() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("daygle-dns.db");
+    let cfg_path = dir.path().join("daygle-dns.toml");
+
+    let mut cfg = base_config(&db);
+    cfg.server.port = free_port().await;
+    cfg.server.reload_enabled = true;
+    cfg.server.reload_interval_ms = 50;
+    cfg.recursive.enabled = false;
+    cfg.dot.port = free_port().await;
+    cfg.doh.port = free_port().await;
+    cfg.api.port = free_port().await;
+    cfg.authoritative.axfr_enabled = true;
+    cfg.authoritative.axfr_networks = vec!["LAN".to_string()];
+    cfg.networks = vec![daygle_dns_core::config::NamedNetwork {
+        name: "LAN".to_string(),
+        cidrs: vec!["10.0.0.0/8".to_string()],
+        description: String::new(),
+    }];
+    write_config(&cfg_path, &cfg);
+
+    let server = bind_with(
+        Arc::new(DaygleConfig::load(&cfg_path).unwrap()),
+        Some(cfg_path.clone()),
+    )
+    .await
+    .expect("bind");
+    let tcp = server.tcp_addr.expect("TCP enabled");
+    server.catalog.reload().unwrap();
+    server
+        .catalog
+        .store()
+        .create_zone(&daygle_dns_authoritative::model::ZoneInput {
+            name: "filed.test".to_string(),
+            ..Default::default()
+        })
+        .unwrap();
+    server.catalog.reload().unwrap();
+
+    // 127.0.0.1 is outside LAN: refused.
+    let resp = tcp_transfer_query(tcp, "filed.test.", RecordType::AXFR).await;
+    assert_eq!(resp.response_code, ResponseCode::Refused);
+
+    // Widen LAN in the file so it covers the test client. The overlay (the
+    // stored network) wins, so the transfer stays refused after the watcher
+    // has had time to read the file.
+    cfg.networks[0].cidrs = vec!["127.0.0.0/8".to_string()];
+    write_config(&cfg_path, &cfg);
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let resp = tcp_transfer_query(tcp, "filed.test.", RecordType::AXFR).await;
+    assert_eq!(resp.response_code, ResponseCode::Refused);
+
+    // The console change does reach the gate.
+    let api = format!("http://{}/api", server.api_addr);
+    let resp = reqwest::Client::new()
+        .post(format!("{api}/networks"))
+        .json(&serde_json::json!({
+            "original_name": "LAN",
+            "name": "LAN",
+            "cidrs": ["127.0.0.0/8"],
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_success(), "{}", resp.text().await.unwrap());
+    let resp = tcp_transfer_query(tcp, "filed.test.", RecordType::AXFR).await;
+    assert_eq!(resp.response_code, ResponseCode::NoError);
 
     shutdown(server).await;
 }

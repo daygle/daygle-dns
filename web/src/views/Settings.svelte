@@ -4,6 +4,7 @@
   import ClientPolicies from './ClientPolicies.svelte';
   import BackupRestore from './BackupRestore.svelte';
   import Networks from './Networks.svelte';
+  import NetworkPicker from '../NetworkPicker.svelte';
   import { icons } from '../icons.svelte.js';
   import { display, setDisplayDefaults, timeZoneOptions, DATE_FORMAT_OPTIONS, TIME_FORMAT_OPTIONS, previewDateTime } from '../datetime.svelte.js';
   import { duration } from '../aiLabels.js';
@@ -62,10 +63,14 @@
   // empty when unavailable, in which case the text field is the only UI.
   let aiBackendCategories = $state([]);
   let upstreamText = $state('');
-  let recursionNetworksText = $state('');
+  // Named networks (Settings -> Networks) for the pickers below.
+  let networks = $state([]);
+  let recursionNetworks = $state([]);
+  let deniedNetworks = $state([]);
+  let allowedNetworks = $state([]);
   // Multi-line textareas for the network allow-lists and NOTIFY targets.
-  let axfrNetworksText = $state('');
-  let updateNetworksText = $state('');
+  let axfrNetworks = $state([]);
+  let updateNetworks = $state([]);
   let notifyTargetsText = $state('');
   // Consumed catalog zones, as edited: masters as one comma-separated line
   // and the refresh in minutes.
@@ -97,7 +102,7 @@
   let web_ = $state({ http_enabled: true, http_port: 5380, https_enabled: false, https_port: 5443, https_certificate: '', redirect_http: false });
   // Remote logging (Settings -> General).
   let dns64 = $state({ enabled: false, prefix: '64:ff9b::/96' });
-  let dns64ClientsText = $state('');
+  let dns64Clients = $state([]);
   let ecs = $state({ enabled: false, subnet: '', ipv4_prefix: 24, ipv6_prefix: 56 });
   let syslog_ = $state({ enabled: false, server: '', facility: 'daemon', level: 'info', queries: false });
   const zoneChoices = timeZoneOptions();
@@ -153,6 +158,7 @@
     // Saving HTTPS can create the web-console certificate; keep the
     // pickers current.
     api.certificates().then((list) => { certs = list || []; }).catch(() => {});
+    api.networks().then((data) => { networks = data.networks || []; }).catch(() => {});
     try {
       config = await api.config();
       if (config == null) {
@@ -168,9 +174,11 @@
         aiCategoriesText = '';
         aiBackendCategories = [];
         upstreamText = '';
-        recursionNetworksText = '';
-        axfrNetworksText = '';
-        updateNetworksText = '';
+        recursionNetworks = [];
+        deniedNetworks = [];
+        allowedNetworks = [];
+        axfrNetworks = [];
+        updateNetworks = [];
         notifyTargetsText = '';
         return;
       }
@@ -180,7 +188,9 @@
       recursive.mode = config.recursive.mode || (config.recursive.upstreams?.length ? 'forwarding' : 'recursive');
       recursive.recursion_access = config.recursive.recursion_access || 'private_networks';
       recursive.outbound_ip_versions = config.recursive.outbound_ip_versions || 'both';
-      recursionNetworksText = (config.recursive.recursion_networks || []).join('\n');
+      recursionNetworks = [...(config.recursive.recursion_networks || [])];
+      deniedNetworks = [...(config.policy?.denied_networks || [])];
+      allowedNetworks = [...(config.policy?.allowed_networks || [])];
       authoritative = { ...config.authoritative };
       dot = { ...config.dot };
       doh = { ...config.doh };
@@ -194,7 +204,7 @@
       };
       syslog_ = { enabled: false, server: '', facility: 'daemon', level: 'info', queries: false, ...config.syslog };
       dns64 = { enabled: !!config.dns64?.enabled, prefix: config.dns64?.prefix || '64:ff9b::/96' };
-      dns64ClientsText = (config.dns64?.clients || []).join('\n');
+      dns64Clients = [...(config.dns64?.clients || [])];
       ecs = { enabled: false, subnet: '', ipv4_prefix: 24, ipv6_prefix: 56, ...config.ecs };
       ai_ = { ...config.ai, mode: config.ai?.mode || 'train' };
       aiForm = {
@@ -224,8 +234,8 @@
       dohCertMode = certModeOf(doh);
       doqCertMode = certModeOf(doq);
       upstreamText = (recursive.upstreams || []).join('\n');
-      axfrNetworksText = (authoritative.axfr_networks || []).join('\n');
-      updateNetworksText = (authoritative.update_networks || []).join('\n');
+      axfrNetworks = [...(authoritative.axfr_networks || [])];
+      updateNetworks = [...(authoritative.update_networks || [])];
       notifyTargetsText = (authoritative.notify_targets || []).join('\n');
       catalogConsumers = (authoritative.catalog_consumers || []).map((c) => ({
         name: c.name,
@@ -282,11 +292,15 @@
   // are shown but not sent.
   function buildBody() {
     return {
+      policy: {
+        denied_networks: [...deniedNetworks],
+        allowed_networks: [...allowedNetworks],
+      },
       recursive: {
         enabled: !!recursive.enabled,
         mode: recursive.mode,
         recursion_access: recursive.recursion_access,
-        recursion_networks: parseLines(recursionNetworksText),
+        recursion_networks: [...recursionNetworks],
         case_randomization: !!recursive.case_randomization,
         rebinding_protection: !!recursive.rebinding_protection,
         opportunistic_encryption: !!recursive.opportunistic_encryption,
@@ -346,7 +360,7 @@
       dns64: {
         enabled: !!dns64.enabled,
         prefix: (dns64.prefix || '').trim(),
-        clients: parseLines(dns64ClientsText),
+        clients: [...dns64Clients],
       },
       ecs: {
         enabled: !!ecs.enabled,
@@ -366,9 +380,9 @@
         default_primary_ns: authoritative.default_primary_ns || '',
         default_admin_mailbox: (authoritative.default_admin_mailbox || '').trim(),
         axfr_enabled: !!authoritative.axfr_enabled,
-        axfr_networks: parseLines(axfrNetworksText),
+        axfr_networks: [...axfrNetworks],
         allow_dynamic_updates: !!authoritative.allow_dynamic_updates,
-        update_networks: parseLines(updateNetworksText),
+        update_networks: [...updateNetworks],
         notify_enabled: !!authoritative.notify_enabled,
         notify_targets: parseLines(notifyTargetsText),
         notify_listen_enabled: !!authoritative.notify_listen_enabled,
@@ -542,6 +556,7 @@
       <tbody>
         <tr><th>Listen Address</th><td>{listenMeaning(server.listen, server.ipv6_only)} <span class="muted">({server.listen})</span></td></tr>
         <tr><th>Port</th><td>{server.port}</td></tr>
+        <tr><th>PROXY Protocol From</th><td>{(server.proxy_protocol || []).length ? server.proxy_protocol.join(', ') : 'Off'}</td></tr>
         <tr><th>UDP</th><td><span class="pill" class:ok={server.udp_enabled}>{server.udp_enabled ? 'On' : 'Off'}</span></td></tr>
         <tr><th>TCP</th><td><span class="pill" class:ok={server.tcp_enabled}>{server.tcp_enabled ? 'On' : 'Off'}</span></td></tr>
         <tr><th>Reload Config File on Change</th><td><span class="pill" class:ok={server.reload_enabled}>{server.reload_enabled ? 'On' : 'Off'}</span></td></tr>
@@ -675,11 +690,19 @@
         </select>
       </label>
     </div>
+    <div class="stacked" style="margin-top: 12px">
+      <span>Always Refused Networks (denied)</span>
+      <NetworkPicker {networks} bind:value={deniedNetworks} />
+    </div>
+    <div class="stacked" style="margin-top: 12px">
+      <span>Exempt From the Denied List (allowed)</span>
+      <NetworkPicker {networks} bind:value={allowedNetworks} />
+    </div>
     {#if recursive.recursion_access === 'custom'}
-      <label class="stacked" style="margin-top: 12px">
-        <span>Allowed Networks (one per line, e.g. 192.168.1.0/24 or a single IP)</span>
-        <textarea rows="3" placeholder={'192.168.1.0/24\n2001:db8::/48'} bind:value={recursionNetworksText}></textarea>
-      </label>
+      <div class="stacked" style="margin-top: 12px">
+        <span>Allowed Networks</span>
+        <NetworkPicker {networks} bind:value={recursionNetworks} />
+      </div>
     {/if}
     <p class="muted help">
       Applies to everything this server resolves rather than answers from its own
@@ -697,10 +720,10 @@
       <label class="check"><input type="checkbox" bind:checked={dns64.enabled} /> <span>Make IPv6 Answers for IPv4-Only Names</span></label>
       <label><span>NAT64 Prefix</span><input placeholder="64:ff9b::/96" bind:value={dns64.prefix} disabled={!dns64.enabled} spellcheck="false" /></label>
     </div>
-    <label class="stacked" style="margin-top: 12px">
-      <span>Clients (one network per line; empty means every client)</span>
-      <textarea rows="2" placeholder={'2001:db8:1::/48'} bind:value={dns64ClientsText} disabled={!dns64.enabled}></textarea>
-    </label>
+    <div class="stacked" style="margin-top: 12px" inert={!dns64.enabled}>
+      <span>Clients (empty means every client)</span>
+      <NetworkPicker {networks} bind:value={dns64Clients} />
+    </div>
     <p class="muted help">
       For IPv6-only networks with a NAT64 gateway: when a name has no IPv6
       address, its IPv4 addresses are answered as IPv6 addresses inside the
@@ -785,10 +808,10 @@
     <div class="form-grid">
       <label class="check"><input type="checkbox" bind:checked={authoritative.axfr_enabled} /> <span>Allow Zone Transfers</span></label>
     </div>
-    <label class="stacked">
-      <span>Allowed Networks (one CIDR per line, e.g. 192.168.1.0/24)</span>
-      <textarea rows="3" placeholder={"192.168.1.0/24\n10.0.0.0/8"} bind:value={axfrNetworksText}></textarea>
-    </label>
+    <div class="stacked">
+      <span>Allowed Networks</span>
+      <NetworkPicker {networks} bind:value={axfrNetworks} />
+    </div>
     <p class="muted help">
       Only these networks may request a copy of your zones. An empty list allows
       every client when transfers are enabled - restrict this to trusted hosts.
@@ -801,10 +824,10 @@
     <div class="form-grid">
       <label class="check"><input type="checkbox" bind:checked={authoritative.allow_dynamic_updates} /> <span>Accept Dynamic Updates</span></label>
     </div>
-    <label class="stacked">
-      <span>Allowed Networks (one CIDR per line)</span>
-      <textarea rows="3" placeholder={"192.168.1.0/24\n10.0.0.0/8"} bind:value={updateNetworksText}></textarea>
-    </label>
+    <div class="stacked">
+      <span>Allowed Networks</span>
+      <NetworkPicker {networks} bind:value={updateNetworks} />
+    </div>
     <p class="muted help">
       Clients on these networks may add, change, or delete records in primary
       zones with UPDATE messages. An empty list allows every client when

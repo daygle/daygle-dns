@@ -13,9 +13,10 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use daygle_dns_core::config::{DaygleConfig, NamedNetwork, RuntimeSettings};
+use daygle_dns_recursive::RecursiveResolver;
 use serde::Deserialize;
 
-use crate::handlers::{error_response, map_err, validate_config_update};
+use crate::handlers::{error_response, map_err, rebuild_advanced_blocking, validate_config_update};
 use crate::AppState;
 
 /// Where the network `name` is used: config settings and stored ones.
@@ -125,7 +126,7 @@ pub async fn save_network(
             return map_err(e);
         }
     }
-    if let Err(e) = apply(&state, config) {
+    if let Err(e) = apply(&state, &old, config) {
         return map_err(e);
     }
     Json(network).into_response()
@@ -159,15 +160,21 @@ pub async fn delete_network(State(state): State<AppState>, Path(name): Path<Stri
     }
     let mut config = (*old).clone();
     config.networks.remove(index);
-    if let Err(e) = apply(&state, config) {
+    if let Err(e) = apply(&state, &old, config) {
         return map_err(e);
     }
     StatusCode::NO_CONTENT.into_response()
 }
 
-/// Save a config whose networks changed and apply it to everything that
-/// resolves network names.
-pub(crate) fn apply(state: &AppState, config: DaygleConfig) -> daygle_dns_core::error::Result<()> {
+/// Save a config whose networks changed (`old` is the config it replaces) and
+/// apply it to everything that names networks: split horizon, the policy
+/// engine, the recursive resolver, the zone-transfer and update gates, the
+/// Advanced Blocking groups and the PROXY-protocol listeners.
+pub(crate) fn apply(
+    state: &AppState,
+    old: &DaygleConfig,
+    config: DaygleConfig,
+) -> daygle_dns_core::error::Result<()> {
     state
         .catalog
         .store()
@@ -175,5 +182,71 @@ pub(crate) fn apply(state: &AppState, config: DaygleConfig) -> daygle_dns_core::
     let networks = config.all_networks();
     state.config.store(Arc::new(config));
     state.catalog.set_networks(networks)?;
+    apply_resolved_changes(state, old, &state.config.load_full());
     Ok(())
+}
+
+/// Rebuild what a network change alters. Every component is built from the
+/// config with its names resolved to addresses, so this compares those
+/// copies: only a setting whose addresses really changed is rebuilt.
+fn apply_resolved_changes(state: &AppState, old: &DaygleConfig, new: &DaygleConfig) {
+    let old_r = old.with_networks_resolved();
+    let new_r = new.with_networks_resolved();
+    if old_r.policy != new_r.policy {
+        match daygle_dns_policy::build_engine(&new_r.policy) {
+            Ok(mut engine) => {
+                // Keep the remote blocklist; the source refresher owns it.
+                if let Some(remote) = state.policy.load_full().remote_blocklist_snapshot() {
+                    engine.set_remote_blocklist(remote.as_ref().clone());
+                }
+                state.policy.store(Arc::new(engine));
+            }
+            Err(e) => state.logs.warn(
+                "api",
+                format!(
+                    "policy rebuild after a network change failed, keeping the previous one: {e}"
+                ),
+            ),
+        }
+    }
+    if old_r.recursive != new_r.recursive
+        || old_r.authoritative.stub_zones != new_r.authoritative.stub_zones
+    {
+        if new_r.recursive.enabled {
+            match RecursiveResolver::build(
+                &new_r.recursive,
+                state.metrics.clone(),
+                &new_r.authoritative.stub_zones,
+                Some(state.local_root.clone()),
+            ) {
+                Ok(resolver) => state.resolver.store(Some(Arc::new(resolver))),
+                Err(e) => state.logs.warn(
+                    "api",
+                    format!("recursive resolver rebuild after a network change failed, keeping the previous one: {e}"),
+                ),
+            }
+        } else {
+            state.resolver.store(None);
+        }
+    }
+    let (old_gates, new_gates) = (&old_r.authoritative, &new_r.authoritative);
+    if old_gates.axfr_enabled != new_gates.axfr_enabled
+        || old_gates.axfr_networks != new_gates.axfr_networks
+        || old_gates.allow_dynamic_updates != new_gates.allow_dynamic_updates
+        || old_gates.update_networks != new_gates.update_networks
+    {
+        state.catalog.update_gate_settings(
+            new_gates.axfr_enabled,
+            new_gates.axfr_networks.clone(),
+            new_gates.allow_dynamic_updates,
+            new_gates.update_networks.clone(),
+        );
+    }
+    // Advanced Blocking groups can name networks too.
+    rebuild_advanced_blocking(state);
+    if old_r.server != new_r.server {
+        if let Some(rebuild) = &state.request_dns_rebuild {
+            rebuild();
+        }
+    }
 }

@@ -188,8 +188,9 @@ pub struct Dns64 {
 const DNS64_WELL_KNOWN: Ipv6Addr = Ipv6Addr::new(0x64, 0xff9b, 0, 0, 0, 0, 0, 0);
 
 impl Dns64Settings {
-    /// Parse the settings (`None` when DNS64 is off).
-    pub fn compile(&self) -> std::result::Result<Option<Dns64>, String> {
+    /// Parse the settings (`None` when DNS64 is off). `networks` resolves
+    /// the network names in `clients`.
+    pub fn compile(&self, networks: &[NamedNetwork]) -> std::result::Result<Option<Dns64>, String> {
         let prefix: ipnet::Ipv6Net = self
             .prefix
             .trim()
@@ -206,9 +207,10 @@ impl Dns64Settings {
             return Err("bits 64 to 71 of the prefix must be zero (RFC 6052)".to_string());
         }
         let mut clients = Vec::new();
-        for entry in &self.clients {
-            let net = parse_network(entry)
-                .ok_or_else(|| format!("'{}' is not a network or address", entry.trim()))?;
+        for entry in resolve_network_list(networks, &self.clients) {
+            let net = parse_network(&entry).ok_or_else(|| {
+                format!("'{entry}' is not a network, an address or a network name")
+            })?;
             clients.push(net);
         }
         Ok(self.enabled.then_some(Dns64 { prefix, clients }))
@@ -857,6 +859,43 @@ impl DaygleConfig {
         Ok(out)
     }
 
+    /// Whether `entry` is an address, a CIDR network or the name of a
+    /// network (built-in or configured).
+    pub fn is_network_entry(&self, entry: &str) -> bool {
+        parse_network(entry).is_some() || self.find_network(entry).is_some()
+    }
+
+    /// A copy of the config in which every network name in the lists that
+    /// may name networks is replaced by the addresses it stands for. Runtime
+    /// components are built from this copy. The stored config keeps the
+    /// names, so a change to a network reaches every setting that names it.
+    pub fn with_networks_resolved(&self) -> DaygleConfig {
+        let networks = self.all_networks();
+        let mut resolved = self.clone();
+        for list in resolved.network_lists_mut() {
+            let expanded = resolve_network_list(&networks, list);
+            *list = expanded;
+        }
+        resolved
+    }
+
+    /// The Advanced Blocking groups with the network names in their client
+    /// lists resolved to addresses. Groups are stored in the database, so
+    /// they are resolved here rather than through [`Self::with_networks_resolved`].
+    pub fn resolve_blocking_groups(
+        &self,
+        groups: Vec<crate::blocking::BlockingGroup>,
+    ) -> Vec<crate::blocking::BlockingGroup> {
+        let networks = self.all_networks();
+        groups
+            .into_iter()
+            .map(|mut group| {
+                group.clients = resolve_network_list(&networks, &group.clients);
+                group
+            })
+            .collect()
+    }
+
     /// Every network list in the config that may name networks, labelled
     /// for "used by" in the console.
     pub fn network_lists(&self) -> Vec<(String, &Vec<String>)> {
@@ -962,6 +1001,38 @@ pub fn validate_named_network(network: &NamedNetwork) -> std::result::Result<(),
         }
     }
     Ok(())
+}
+
+/// Expand the names in a network list into the addresses they stand for,
+/// keeping addresses as they are. An unknown name is kept unchanged: the
+/// config check refuses it, so it never reaches a running server.
+pub fn resolve_network_list(networks: &[NamedNetwork], entries: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    for entry in entries {
+        let entry = entry.trim();
+        if entry.is_empty() {
+            continue;
+        }
+        if parse_network(entry).is_some() {
+            out.push(entry.to_string());
+            continue;
+        }
+        match networks
+            .iter()
+            .find(|n| n.name.trim().eq_ignore_ascii_case(entry))
+        {
+            Some(network) => out.extend(
+                network
+                    .cidrs
+                    .iter()
+                    .map(|c| c.trim())
+                    .filter(|c| parse_network(c).is_some())
+                    .map(str::to_string),
+            ),
+            None => out.push(entry.to_string()),
+        }
+    }
+    out
 }
 
 /// Parse a CIDR network, or a bare IP address as a single-host network.
@@ -1125,6 +1196,12 @@ pub struct DohUpdate {
 pub struct PolicyUpdate {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub allowlist: Option<Vec<String>>,
+    /// Client networks always refused (addresses or network names).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub denied_networks: Option<Vec<String>>,
+    /// Client networks that bypass the denied list (addresses or network names).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub allowed_networks: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub blocklist: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1550,6 +1627,8 @@ impl RuntimeSettings {
             }),
             policy: Some(PolicyUpdate {
                 allowlist: Some(config.policy.allowlist.clone()),
+                denied_networks: Some(config.policy.denied_networks.clone()),
+                allowed_networks: Some(config.policy.allowed_networks.clone()),
                 blocklist: Some(config.policy.blocklist.clone()),
                 filter_aaaa: Some(config.policy.filter_aaaa),
                 filter_aaaa_except: Some(config.policy.filter_aaaa_except.clone()),
@@ -2035,7 +2114,7 @@ impl DaygleConfig {
                 )));
             }
             for network in &policy.clients {
-                if parse_network(network).is_none() {
+                if !self.is_network_entry(network) {
                     return Err(DaygleError::Config(format!(
                         "client policy '{name}' contains invalid network '{network}'"
                     )));
@@ -2050,7 +2129,7 @@ impl DaygleConfig {
             }
         }
         for network in &self.recursive.recursion_networks {
-            if parse_network(network).is_none() {
+            if !self.is_network_entry(network) {
                 return Err(DaygleError::Config(format!(
                     "recursive.recursion_networks contains invalid network '{network}'"
                 )));
@@ -2130,7 +2209,7 @@ impl DaygleConfig {
             ),
         ] {
             for net in networks {
-                if net.parse::<ipnet::IpNet>().is_err() {
+                if !self.is_network_entry(net) {
                     return Err(DaygleError::Config(format!(
                         "{label} contains invalid network '{net}'"
                     )));
@@ -2247,10 +2326,20 @@ impl DaygleConfig {
         }
         let catalog = self.authoritative.catalog_zone.trim();
         for entry in &self.server.proxy_protocol {
-            if parse_network(entry).is_none() {
+            if !self.is_network_entry(entry) {
                 return Err(DaygleError::Config(format!(
                     "server.proxy_protocol: '{entry}' is not a network or address"
                 )));
+            }
+        }
+        for (i, rule) in self.policy.rules.iter().enumerate() {
+            for network in &rule.clients {
+                if !self.is_network_entry(network) {
+                    return Err(DaygleError::Config(format!(
+                        "policy rule {} contains invalid network '{network}'",
+                        i + 1
+                    )));
+                }
             }
         }
         let not_a_name = |n: &str| n.contains('*') || validate_domain_pattern(n).is_err();
@@ -2392,7 +2481,7 @@ impl DaygleConfig {
             .check()
             .map_err(|e| DaygleError::Config(format!("syslog: {e}")))?;
         self.dns64
-            .compile()
+            .compile(&self.all_networks())
             .map_err(|e| DaygleError::Config(format!("dns64: {e}")))?;
         self.ecs
             .compile()
@@ -3773,7 +3862,7 @@ fd0000000000000000000000000000aa 02 40 00 80     eth0
                 prefix: prefix.to_string(),
                 clients: vec![],
             }
-            .compile()
+            .compile(&[])
             .unwrap()
             .unwrap()
         };
@@ -3817,21 +3906,21 @@ fd0000000000000000000000000000aa 02 40 00 80     eth0
                 prefix: prefix.to_string(),
                 clients: clients.into_iter().map(String::from).collect(),
             }
-            .compile()
+            .compile(&[])
             .is_err()
         };
         assert!(bad("64:ff9b::/80", vec![]));
         assert!(bad("10.0.0.0/8", vec![]));
         assert!(bad("2001:db8:0:0:ff00::/96", vec![]), "u octet set");
         assert!(bad("64:ff9b::/96", vec!["nope"]));
-        assert!(Dns64Settings::default().compile().unwrap().is_none());
+        assert!(Dns64Settings::default().compile(&[]).unwrap().is_none());
 
         let only = Dns64Settings {
             enabled: true,
             clients: vec!["2001:db8:1::/48".into()],
             ..Default::default()
         }
-        .compile()
+        .compile(&[])
         .unwrap()
         .unwrap();
         assert!(only.applies_to("2001:db8:1::5".parse().unwrap()));
@@ -4586,6 +4675,79 @@ upstreams = ["192.0.2.20:5353"]
         let mut restored = DaygleConfig::default();
         RuntimeSettings::capture(&cfg).apply_to(&mut restored);
         assert_eq!(restored.recursive.local_root, cfg.recursive.local_root);
+    }
+
+    #[test]
+    fn network_names_resolve_to_addresses_in_every_list() {
+        let cfg = DaygleConfig::parse(
+            r#"
+[[networks]]
+name = "LAN"
+cidrs = ["192.168.20.0/24"]
+
+[recursive]
+recursion_access = "custom"
+recursion_networks = ["lan", "10.9.0.0/16"]
+
+[dns64]
+enabled = true
+clients = ["LAN"]
+
+[[recursive.client_policies]]
+name = "lab"
+clients = ["Private"]
+action = "refuse"
+
+[[policy.rules]]
+clients = ["LAN"]
+action = "block"
+"#,
+        )
+        .unwrap();
+
+        let resolved = cfg.with_networks_resolved();
+        assert_eq!(
+            resolved.recursive.recursion_networks,
+            ["192.168.20.0/24", "10.9.0.0/16"]
+        );
+        assert_eq!(resolved.dns64.clients, ["192.168.20.0/24"]);
+        let proxy = DaygleConfig::parse(
+            "[[networks]]\nname = \"LAN\"\ncidrs = [\"127.0.0.0/8\"]\n\n[server]\nproxy_protocol = [\"lan\"]\n",
+        )
+        .unwrap();
+        assert_eq!(
+            proxy.with_networks_resolved().server.proxy_protocol,
+            ["127.0.0.0/8"]
+        );
+        assert_eq!(resolved.policy.rules[0].clients, ["192.168.20.0/24"]);
+        assert_eq!(
+            resolved.recursive.client_policies[0].clients,
+            builtin_networks()[0].cidrs
+        );
+        // The stored config keeps the names.
+        assert_eq!(cfg.recursive.recursion_networks, ["lan", "10.9.0.0/16"]);
+        assert_eq!(cfg.dns64.clients, ["LAN"]);
+
+        // DNS64 compiles its names only with the networks to resolve them.
+        let dns64 = cfg.dns64.compile(&cfg.all_networks()).unwrap().unwrap();
+        assert!(dns64.applies_to("192.168.20.7".parse().unwrap()));
+        assert!(!dns64.applies_to("10.1.2.3".parse().unwrap()));
+        assert!(cfg.dns64.compile(&[]).is_err());
+    }
+
+    #[test]
+    fn unknown_network_names_are_refused_in_every_list() {
+        let refused = |text: &str| DaygleConfig::parse(text).unwrap_err().to_string();
+        assert!(
+            refused("[recursive]\nrecursion_networks = [\"Office\"]\n").contains("invalid network")
+        );
+        assert!(refused("[policy]\ndenied_networks = [\"Office\"]\n").contains("invalid network"));
+        assert!(refused("[dns64]\nenabled = true\nclients = [\"Office\"]\n").contains("dns64"));
+        assert!(refused("[server]\nproxy_protocol = [\"Office\"]\n").contains("proxy_protocol"));
+        assert!(
+            refused("[[policy.rules]]\nclients = [\"Office\"]\naction = \"block\"\n")
+                .contains("policy rule 1")
+        );
     }
 
     #[test]

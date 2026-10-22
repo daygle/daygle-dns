@@ -750,6 +750,12 @@ Names are matched without regard to case. Two built-in networks always
 exist and cannot be changed: `Private` (private, shared, link-local and
 loopback addresses) and `This Server` (loopback).
 
+Every setting that takes client networks accepts these names as well as
+addresses: recursion access, allow/deny lists, zone transfers, dynamic
+updates, PROXY protocol, DNS64 clients, client policies and policy rules.
+A name that is not a configured network is refused. A change to a network
+applies to every setting that names it, at once.
+
 `GET` lists them, each with `builtin` and `used_by` (the settings that name
 it):
 

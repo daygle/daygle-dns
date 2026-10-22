@@ -53,6 +53,7 @@ mode = "recursive"
 # or "deny". Your own zones are answered for everyone regardless.
 recursion_access = "private_networks"
 # recursion_networks = ["192.168.1.0/24", "2001:db8::/48"]
+# Entries may also name a network from [[networks]], e.g. ["LAN", "10.9.0.0/16"].
 # Recursive mode only: randomize query-name case (0x20) to harden against
 # spoofing, and drop private/loopback addresses from public answers.
 # case_randomization = false
@@ -122,7 +123,7 @@ serve_stale_secs = 0
 # manageable from the console (Settings -> Recursive & Caching).
 # [[recursive.client_policies]]
 # name = "Kids' devices"
-# clients = ["192.168.1.64/27"]
+# clients = ["192.168.1.64/27"]  # or a [[networks]] name, e.g. "IoT"
 # action = "forward"
 # upstreams = ["1.1.1.3", "1.0.0.3"]
 
@@ -182,6 +183,7 @@ dnssec_maintenance_secs = 3600
 # axfr_networks limits which clients may transfer (empty = anyone),
 # e.g. ["10.0.0.0/8", "192.168.0.0/16"].
 axfr_enabled = false
+# Entries may name a [[networks]] network as well as an address.
 axfr_networks = []
 
 # Accept RFC 2136 dynamic updates (UPDATE messages) for primary zones.
@@ -190,6 +192,7 @@ axfr_networks = []
 # update_networks limits which clients may update (empty = anyone),
 # e.g. ["10.0.0.0/8", "192.168.0.0/16"].
 allow_dynamic_updates = false
+# Entries may name a [[networks]] network as well as an address.
 update_networks = []
 
 # Secondary zones: replicated from a master via AXFR/IXFR. The zone's
@@ -369,6 +372,7 @@ filter_aaaa_except = []
 # format = "adblock"
 # refresh_secs = 43200
 
+# Entries may name a [[networks]] network as well as an address.
 denied_networks = []
 allowed_networks = []
 

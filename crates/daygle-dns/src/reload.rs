@@ -84,17 +84,23 @@ pub enum ReloadCommand {
 /// caller must ask the supervisor to rebind the sockets.
 pub fn apply_config(shared: &Shared, new: Arc<DaygleConfig>) -> bool {
     let old = shared.config.load_full();
+    // Compare and build from the network names resolved to addresses, so a
+    // change to a named network reaches every setting that names it.
+    let old_r = old.with_networks_resolved();
+    let new_r = new.with_networks_resolved();
 
-    let listeners_changed =
-        old.server != new.server || old.dot != new.dot || old.doh != new.doh || old.doq != new.doq;
+    let listeners_changed = old_r.server != new_r.server
+        || old_r.dot != new_r.dot
+        || old_r.doh != new_r.doh
+        || old_r.doq != new_r.doq;
 
     // Publish the new configuration first so the API token, `/api/config` and
     // the listener supervisor all observe the requested state immediately.
     shared.config.store(Arc::clone(&new));
 
     // Policy engine.
-    if old.policy != new.policy {
-        match daygle_dns_policy::build_engine(&new.policy) {
+    if old_r.policy != new_r.policy {
+        match daygle_dns_policy::build_engine(&new_r.policy) {
             Ok(engine) => {
                 shared.policy.store(Arc::new(engine));
                 info!("policy engine reloaded");
@@ -128,14 +134,14 @@ pub fn apply_config(shared: &Shared, new: Arc<DaygleConfig>) -> bool {
     shared
         .local_root
         .set_settings(new.recursive.local_root_in_effect());
-    if old.recursive != new.recursive
-        || old.authoritative.stub_zones != new.authoritative.stub_zones
+    if old_r.recursive != new_r.recursive
+        || old_r.authoritative.stub_zones != new_r.authoritative.stub_zones
     {
-        if new.recursive.enabled {
+        if new_r.recursive.enabled {
             match RecursiveResolver::build(
-                &new.recursive,
+                &new_r.recursive,
                 shared.metrics.clone(),
-                &new.authoritative.stub_zones,
+                &new_r.authoritative.stub_zones,
                 Some(shared.local_root.clone()),
             ) {
                 Ok(resolver) => {
@@ -148,6 +154,23 @@ pub fn apply_config(shared: &Shared, new: Arc<DaygleConfig>) -> bool {
             shared.resolver.store(None);
             info!("recursion disabled by reload");
         }
+    }
+
+    // Zone-transfer and dynamic-update gates: read per request, so a changed
+    // list (or a changed network it names) applies at once.
+    let (old_gates, new_gates) = (&old_r.authoritative, &new_r.authoritative);
+    if old_gates.axfr_enabled != new_gates.axfr_enabled
+        || old_gates.axfr_networks != new_gates.axfr_networks
+        || old_gates.allow_dynamic_updates != new_gates.allow_dynamic_updates
+        || old_gates.update_networks != new_gates.update_networks
+    {
+        shared.catalog.update_gate_settings(
+            new_gates.axfr_enabled,
+            new_gates.axfr_networks.clone(),
+            new_gates.allow_dynamic_updates,
+            new_gates.update_networks.clone(),
+        );
+        info!("zone transfer and dynamic update settings reloaded");
     }
 
     // Rate limiting. The shared limiter holds its own settings snapshot and

@@ -1,7 +1,10 @@
 <script>
   import { api, formatApiError } from '../api.js';
+  import NetworkPicker from '../NetworkPicker.svelte';
 
   let groups = $state([]);
+  // Named networks (Settings -> Networks) for the client picker.
+  let networks = $state([]);
   // Blocklists (Filtering -> Blocklists) set to apply to selected groups only.
   let groupLists = $state([]);
   let error = $state(null);
@@ -24,6 +27,7 @@
   ];
 
   async function load() {
+    api.networks().then((data) => { networks = data.networks || []; }).catch(() => {});
     try {
       groups = await api.blockingGroups();
     } catch (e) {
@@ -61,7 +65,7 @@
           originalName: group.name,
           name: group.name,
           enabled: group.enabled,
-          clients: group.clients.join('\n'),
+          clients: [...group.clients],
           allow: group.allow.join('\n'),
           block: group.block.join('\n'),
           allow_regex: group.allow_regex.join('\n'),
@@ -75,7 +79,7 @@
           originalName: null,
           name: '',
           enabled: true,
-          clients: '',
+          clients: [],
           allow: '',
           block: '',
           allow_regex: '',
@@ -106,7 +110,7 @@
       id: edit.id,
       name,
       enabled: edit.enabled,
-      clients: parseList(edit.clients),
+      clients: [...edit.clients],
       allow: parseList(edit.allow),
       block: parseList(edit.block),
       allow_regex: parseList(edit.allow_regex),
@@ -287,8 +291,8 @@
       <label class="checkbox"><input type="checkbox" bind:checked={edit.enabled} /><span>Enabled</span></label>
 
       <div class="section-title">Clients</div>
-      <label>Client Networks <textarea rows="2" bind:value={edit.clients} placeholder={'192.168.1.0/24\n10.0.0.5'}></textarea></label>
-      <p class="muted help">CIDRs or single IPs, one per line. Leave empty for every client.</p>
+      <NetworkPicker {networks} bind:value={edit.clients} />
+      <p class="muted help">Tick named networks and/or type addresses. Leave empty for every client.</p>
 
       <div class="section-title">Blocklists</div>
       {#if groupLists.length}

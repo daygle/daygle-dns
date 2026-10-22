@@ -41,6 +41,36 @@ fn v2(command: u8, src: [u8; 4]) -> Vec<u8> {
     header
 }
 
+/// The trusted proxies can be a named network: `LAN` stands for the
+/// load balancer's address, and trust follows the network.
+#[tokio::test]
+async fn trusted_proxies_accept_named_networks() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = base_config(&dir.path().join("daygle-dns.db"));
+    config.networks = vec![daygle_dns_core::config::NamedNetwork {
+        name: "LAN".to_string(),
+        cidrs: vec!["127.0.0.0/8".to_string()],
+        description: String::new(),
+    }];
+    config.server.proxy_protocol = vec!["lan".to_string()];
+    config.policy.rules = vec![PolicyRule {
+        clients: vec!["203.0.113.7/32".to_string()],
+        domains: vec!["who.test".to_string()],
+        action: "redirect".to_string(),
+        redirect: Some("192.0.2.77".parse().unwrap()),
+    }];
+    let server = spawn(config).await;
+    let tcp = server.tcp_addr.unwrap();
+
+    // The LAN proxy (the test connects from loopback, inside LAN) names the
+    // client: the rule applies. Refusing untrusted proxies is covered by
+    // `trusted_proxies_name_the_client`.
+    let msg = ask(tcp, &v2(1, [203, 0, 113, 7])).await.expect("answer");
+    assert_eq!(first_answer(&msg).as_deref(), Some("192.0.2.77"));
+
+    shutdown(server).await;
+}
+
 #[tokio::test]
 async fn trusted_proxies_name_the_client() {
     let dir = tempfile::tempdir().unwrap();
