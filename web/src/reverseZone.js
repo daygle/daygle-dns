@@ -37,6 +37,20 @@ export function reverseZoneName(input) {
   };
 }
 
+// Convert a single IP address into its full reverse-DNS owner name. Returns
+// null for invalid addresses; the caller can then match the name against an
+// already-hosted reverse zone without creating one implicitly.
+export function reverseRecordName(address) {
+  const text = (address || '').trim();
+  if (!text || text.includes('/')) return null;
+  if (text.includes(':')) {
+    const zone = reverseZoneName(`${text}/128`);
+    return zone?.name || null;
+  }
+  const zone = reverseZoneName(`${text}/32`);
+  return zone?.name || null;
+}
+
 // Expand an IPv6 address into its 32 hex nibbles, or null when invalid.
 function ipv6Nibbles(addr) {
   if (!/^[0-9a-fA-F:]+$/.test(addr) || (addr.match(/::/g) || []).length > 1) return null;

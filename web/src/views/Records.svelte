@@ -2,6 +2,7 @@
   import { api, formatApiError } from '../api.js';
   import { formatDateTime } from '../datetime.svelte.js';
   import { duration } from '../aiLabels.js';
+  import { reverseRecordName } from '../reverseZone.js';
 
   // The zone to preselect, passed when coming from the Zones page.
   let { zoneId = null, onSelectZone = () => {} } = $props();
@@ -33,6 +34,26 @@
   const TYPES = Object.keys(EXAMPLES);
 
   let zones = $state([]);
+  const ptrTarget = $derived.by(() => {
+    if (!edit || !['A', 'AAAA'].includes(edit.rtype)) return null;
+    const name = reverseRecordName(edit.content);
+    if (!name) return null;
+    const lowerName = name.toLowerCase();
+    const zone = zones
+      .filter((candidate) => {
+        if (candidate.enabled === false) return false;
+        const zoneName = candidate.name.replace(/\.$/, '').toLowerCase();
+        return lowerName === zoneName || lowerName.endsWith(`.${zoneName}`);
+      })
+      .sort((a, b) => b.name.length - a.name.length)[0] || null;
+    const zoneName = zone?.name.replace(/\.$/, '').toLowerCase();
+    const owner = zone
+      ? lowerName === zoneName
+        ? '@'
+        : name.slice(0, name.length - zoneName.length - 1)
+      : null;
+    return { name, zone, owner };
+  });
   let zonesLoaded = $state(false);
   let selected = $state(null);
   let records = $state([]);
@@ -162,8 +183,8 @@
     error = null;
     dialogError = null;
     edit = record
-      ? { ...record, name: relativeName(record.name), isNew: false }
-      : { name: '', rtype: 'A', content: '', ttl: defaultTtl, priority: 0, isNew: true };
+      ? { ...record, name: relativeName(record.name), createPtr: false, isNew: false }
+      : { name: '', rtype: 'A', content: '', ttl: defaultTtl, priority: 0, createPtr: false, isNew: true };
   }
 
   function closeEdit() {
@@ -182,10 +203,40 @@
         ttl: Number(edit.ttl) || defaultTtl,
         priority: Number(edit.priority) || 0,
       };
+      const createPtr = Boolean(edit.createPtr && ptrTarget?.zone && ptrTarget.zone.zone_type !== 'secondary');
       // Editing replaces the record in place; only new records are added.
-      if (edit.isNew) await api.upsertRecord(selected.id, body);
-      else await api.replaceRecord(selected.id, edit.id, body);
-      notice = `${body.rtype} record ${edit.isNew ? 'added' : 'saved'} and applied live.`;
+      const savedRecord = edit.isNew
+        ? await api.upsertRecord(selected.id, body)
+        : await api.replaceRecord(selected.id, edit.id, body);
+      let ptrNotice = '';
+      if (createPtr) {
+        try {
+          const reverseRecords = await api.records(ptrTarget.zone.id);
+          const ownerName = ptrTarget.name.toLowerCase();
+          const existing = reverseRecords.filter(
+            (record) => record.rtype === 'PTR' && record.name.replace(/\.$/, '').toLowerCase() === ownerName,
+          );
+          const targetName = (value) => value.trim().replace(/\.$/, '').toLowerCase();
+          const expectedTarget = targetName(savedRecord.name);
+          if (existing.some((record) => targetName(record.content) === expectedTarget)) {
+            ptrNotice = ' The matching PTR record already exists.';
+          } else if (existing.length > 0) {
+            ptrNotice = ` A PTR record already exists for ${body.content} with a different target; it was not overwritten.`;
+          } else {
+            await api.upsertRecord(ptrTarget.zone.id, {
+              name: ptrTarget.owner,
+              rtype: 'PTR',
+              content: `${savedRecord.name}.`,
+              ttl: savedRecord.ttl,
+              priority: 0,
+            });
+            ptrNotice = ` A PTR record was added in ${ptrTarget.zone.name}.`;
+          }
+        } catch (e) {
+          ptrNotice = ` The forward record was saved, but PTR creation failed: ${formatApiError(e)}`;
+        }
+      }
+      notice = `${body.rtype} record ${edit.isNew ? 'added' : 'saved'} and applied live.${ptrNotice}`;
       edit = null;
       await loadRecords(selected.id);
     } catch (e) {
@@ -460,6 +511,18 @@
         <label>Type<select bind:value={edit.rtype}>{#each TYPES as t (t)}<option value={t}>{t}</option>{/each}</select></label>
       </div>
       <label class="full">Value <input placeholder={EXAMPLES[edit.rtype]} bind:value={edit.content} /></label>
+      {#if (edit.rtype === 'A' || edit.rtype === 'AAAA') && ptrTarget}
+        {#if ptrTarget.zone && ptrTarget.zone.zone_type !== 'secondary'}
+          <label class="checkbox ptr-option">
+            <input type="checkbox" bind:checked={edit.createPtr} />
+            <span>Also create matching PTR record in <code>{ptrTarget.zone.name}</code></span>
+          </label>
+        {:else if ptrTarget.zone}
+          <p class="muted help">The matching reverse zone <code>{ptrTarget.zone.name}</code> is secondary and read-only; add PTR records on its master.</p>
+        {:else}
+          <p class="muted help">No editable matching reverse zone is hosted, so Daygle cannot create a PTR record. Create the reverse zone first on the Zones page.</p>
+        {/if}
+      {/if}
       <p class="muted help value-help">
         Format: <code>{EXAMPLES[edit.rtype]}</code>{#if edit.rtype === 'MX' || edit.rtype === 'SRV'} (the priority is the first number){/if}.
         {#if edit.rtype === 'ALIAS'}
@@ -534,6 +597,9 @@
 
 <style>
   .value-help { margin-top: 8px; }
+  .ptr-option { flex-direction: row; align-items: center; gap: 8px; margin-top: 10px; }
+  .ptr-option input { width: auto; }
+  .ptr-option span { color: var(--text); }
   .picker { margin-bottom: 14px; gap: 10px; align-items: center; }
   .picker-label { font-size: 0.85rem; color: var(--muted); margin: 0; }
   .picker-box { position: relative; flex: 0 1 340px; min-width: 240px; }
