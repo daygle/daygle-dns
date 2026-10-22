@@ -1429,6 +1429,7 @@ impl ZoneStore {
         let conn = self.lock_conn()?;
         let mut stmt = conn.prepare(
             "SELECT r.id, r.zone_id, r.name, r.rtype, r.content, r.ttl, r.priority, r.disabled,
+                    r.last_modified_at, r.last_used_at,
                     h.kind, h.port, h.path, h.host, h.interval_secs
              FROM health_checks h JOIN records r ON r.id = h.record_id
              WHERE r.rtype IN ('A', 'AAAA')
@@ -1439,11 +1440,11 @@ impl ZoneStore {
             Ok((
                 crate::model::HealthCheck {
                     record_id: record.id.clone(),
-                    kind: row.get(8)?,
-                    port: row.get(9)?,
-                    path: row.get(10)?,
-                    host: row.get(11)?,
-                    interval_secs: row.get(12)?,
+                    kind: row.get(10)?,
+                    port: row.get(11)?,
+                    path: row.get(12)?,
+                    host: row.get(13)?,
+                    interval_secs: row.get(14)?,
                 },
                 record,
             ))
