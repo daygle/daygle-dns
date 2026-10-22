@@ -2256,9 +2256,10 @@ pub async fn cancel_restore(State(state): State<AppState>) -> Response {
 /// Rebuild the shared Advanced Blocking engine from the stored groups and
 /// publish it to the dispatcher. Best-effort: a store read failure leaves the
 /// previous engine in place and is logged.
-fn rebuild_advanced_blocking(state: &AppState) {
+pub(crate) fn rebuild_advanced_blocking(state: &AppState) {
     match state.catalog.store().list_blocking_groups() {
         Ok(groups) => {
+            let groups = state.config.load().resolve_blocking_groups(groups);
             state
                 .advanced_blocking
                 .store(Arc::new(daygle_dns_policy::AdvancedBlocking::build(
@@ -2299,9 +2300,23 @@ pub async fn upsert_blocking_group(
     if let Err(msg) = validate_group_regexes(&input) {
         return error_response(StatusCode::BAD_REQUEST, msg);
     }
+    // Client networks are addresses or names of configured networks.
+    let config = state.config.load_full();
+    if let Some(entry) = input
+        .clients
+        .iter()
+        .find(|c| !config.is_network_entry(c.trim()))
+    {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            format!(
+                "'{}' is not a network, an address or a network name",
+                entry.trim()
+            ),
+        );
+    }
     // Selected blocklists must name configured sources; store each under the
     // source's own spelling.
-    let config = state.config.load_full();
     let mut blocklists: Vec<String> = Vec::new();
     for name in &input.blocklists {
         let Some(source) = config
@@ -3933,6 +3948,10 @@ pub struct AuthoritativeUpdate {
 #[serde(deny_unknown_fields)]
 pub struct PolicyUpdate {
     pub allowlist: Option<Vec<String>>,
+    /// Client networks always refused (addresses or network names).
+    pub denied_networks: Option<Vec<String>>,
+    /// Client networks that bypass the denied list (addresses or network names).
+    pub allowed_networks: Option<Vec<String>>,
     pub blocklist: Option<Vec<String>>,
     pub filter_aaaa: Option<bool>,
     pub filter_aaaa_except: Option<Vec<String>>,
@@ -3970,6 +3989,9 @@ pub struct ServerUpdate {
     pub udp_enabled: Option<bool>,
     pub tcp_enabled: Option<bool>,
     pub reload_enabled: Option<bool>,
+    /// Load balancers trusted to send PROXY protocol headers (addresses or
+    /// network names).
+    pub proxy_protocol: Option<Vec<String>>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -4092,6 +4114,10 @@ pub async fn update_settings(
         }
         if let Some(v) = s.port {
             config.server.port = v;
+            listeners_affected = true;
+        }
+        if let Some(v) = &s.proxy_protocol {
+            config.server.proxy_protocol = normalize_policy_networks(v);
             listeners_affected = true;
         }
         if let Some(v) = s.udp_enabled {
@@ -4293,7 +4319,7 @@ pub async fn update_settings(
                 .collect(),
             ..dns64.clone()
         };
-        if let Err(msg) = dns64.compile() {
+        if let Err(msg) = dns64.compile(&config.all_networks()) {
             return error_response(StatusCode::BAD_REQUEST, format!("dns64: {msg}"));
         }
         config.dns64 = dns64;
@@ -4460,6 +4486,14 @@ pub async fn update_settings(
             config.policy.blocklist = normalize_policy_domains(v);
             policy_changed = true;
         }
+        if let Some(v) = &p.denied_networks {
+            config.policy.denied_networks = normalize_policy_networks(v);
+            policy_changed = true;
+        }
+        if let Some(v) = &p.allowed_networks {
+            config.policy.allowed_networks = normalize_policy_networks(v);
+            policy_changed = true;
+        }
         if let Some(v) = p.filter_aaaa {
             config.policy.filter_aaaa = v;
             policy_changed = true;
@@ -4603,14 +4637,16 @@ pub async fn update_settings(
     // changed, so upstreams, cache settings, conditional forwarders and stub
     // zones apply to live traffic immediately (mirrors the config-file
     // reload path). A failed build keeps the previous resolver serving.
+    // Runtime components take the network names resolved to addresses.
+    let resolved = config.with_networks_resolved();
     if old_config.recursive != config.recursive
         || old_config.authoritative.stub_zones != config.authoritative.stub_zones
     {
         if config.recursive.enabled {
             match daygle_dns_recursive::RecursiveResolver::build(
-                &config.recursive,
+                &resolved.recursive,
                 state.metrics.clone(),
-                &config.authoritative.stub_zones,
+                &resolved.authoritative.stub_zones,
                 Some(state.local_root.clone()),
             ) {
                 Ok(resolver) => state.resolver.store(Some(Arc::new(resolver))),
@@ -4641,16 +4677,16 @@ pub async fn update_settings(
     }
     if authoritative_changed {
         state.catalog.update_gate_settings(
-            config.authoritative.axfr_enabled,
-            config.authoritative.axfr_networks.clone(),
-            config.authoritative.allow_dynamic_updates,
-            config.authoritative.update_networks.clone(),
+            resolved.authoritative.axfr_enabled,
+            resolved.authoritative.axfr_networks.clone(),
+            resolved.authoritative.allow_dynamic_updates,
+            resolved.authoritative.update_networks.clone(),
         );
     }
     // Rebuild the policy engine so a Filter-AAAA change applies immediately,
     // regardless of whether the config-file watcher is enabled.
     if policy_changed {
-        match daygle_dns_policy::build_engine(&config.policy) {
+        match daygle_dns_policy::build_engine(&resolved.policy) {
             Ok(mut engine) => {
                 // Rebuilding static policy must not discard domains already
                 // fetched from remote sources; the source refresher owns that

@@ -260,6 +260,52 @@ async fn update_delete_rrset_and_persistence_across_restart() {
     shutdown(restarted).await;
 }
 
+/// A named network gates dynamic updates: the list names `LAN`, and
+/// widening LAN through the API lets the update through.
+#[tokio::test]
+async fn update_acl_accepts_named_networks() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("daygle-dns.db");
+    let mut config = config_with_updates(&db);
+    config.authoritative.update_networks = vec!["LAN".to_string()];
+    config.networks = vec![daygle_dns_core::config::NamedNetwork {
+        name: "LAN".to_string(),
+        cidrs: vec!["10.0.0.0/8".to_string()],
+        description: String::new(),
+    }];
+    let server = spawn(config).await;
+    setup_zone(&server, "named-upd.test").await;
+    let udp = server.udp_addr.expect("UDP is enabled");
+    let api = format!("http://{}/api", server.api_addr);
+    let client = reqwest::Client::new();
+
+    // 127.0.0.1 is not in LAN, so the update is refused.
+    let msg = update_message(
+        "named-upd.test.",
+        vec![],
+        vec![add_a_record("x.named-upd.test.", [192, 0, 2, 7], 60)],
+    );
+    let resp = udp_send(udp, &msg).await;
+    assert_eq!(resp.response_code, ResponseCode::Refused);
+
+    // Widening LAN to cover the test client lets the update through.
+    let resp = client
+        .post(format!("{api}/networks"))
+        .json(&serde_json::json!({
+            "original_name": "LAN",
+            "name": "LAN",
+            "cidrs": ["127.0.0.0/8"],
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_success(), "{}", resp.text().await.unwrap());
+    let resp = udp_send(udp, &msg).await;
+    assert_eq!(resp.response_code, ResponseCode::NoError);
+
+    shutdown(server).await;
+}
+
 #[tokio::test]
 async fn update_refused_when_disabled() {
     let dir = tempfile::tempdir().unwrap();

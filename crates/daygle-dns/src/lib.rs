@@ -185,9 +185,12 @@ pub async fn bind_with(
 
     // Authoritative.
     let store = daygle_dns_authoritative::ZoneStore::open(&config.authoritative.database)?;
+    // Runtime components take the network names resolved to addresses; the
+    // stored config keeps the names.
+    let resolved = config.with_networks_resolved();
     let catalog = Arc::new(AuthorityCatalog::new(
         store.clone(),
-        config.authoritative.clone(),
+        resolved.authoritative.clone(),
     )?);
     catalog.reload()?;
     import_zone_files(&catalog, &config, &logs)?;
@@ -396,9 +399,9 @@ pub async fn bind_with(
     // Recursive.
     let resolver = if config.recursive.enabled {
         Some(Arc::new(RecursiveResolver::build(
-            &config.recursive,
+            &resolved.recursive,
             metrics.clone(),
-            &config.authoritative.stub_zones,
+            &resolved.authoritative.stub_zones,
             Some(local_root.clone()),
         )?))
     } else {
@@ -407,7 +410,7 @@ pub async fn bind_with(
     };
 
     // Policy.
-    let mut policy = daygle_dns_policy::build_engine(&config.policy)?;
+    let mut policy = daygle_dns_policy::build_engine(&resolved.policy)?;
 
     // Finish a restore: the backup's AI overrides go into the AI database
     // (whose path may come from the restored settings).
@@ -462,7 +465,7 @@ pub async fn bind_with(
     let group_blocklists = Arc::new(daygle_dns_policy::GroupBlocklists::default());
     let advanced_blocking = Arc::new(ArcSwap::from_pointee(
         daygle_dns_policy::AdvancedBlocking::build(
-            &catalog.store().list_blocking_groups()?,
+            &resolved.resolve_blocking_groups(catalog.store().list_blocking_groups()?),
             group_blocklists.clone(),
         ),
     ));
@@ -1016,17 +1019,15 @@ async fn bind_listeners(
 
     // PROXY protocol: TCP-based listeners are fronted (see
     // `proxy_protocol`), and Hickory serves a hidden loopback listener.
-    let proxy_trusted: Option<Arc<Vec<ipnet::IpNet>>> = (!config.server.proxy_protocol.is_empty())
-        .then(|| {
-            Arc::new(
-                config
-                    .server
-                    .proxy_protocol
-                    .iter()
-                    .filter_map(|n| daygle_dns_core::config::parse_network(n))
-                    .collect(),
-            )
-        });
+    let proxy_protocol = config.with_networks_resolved().server.proxy_protocol;
+    let proxy_trusted: Option<Arc<Vec<ipnet::IpNet>>> = (!proxy_protocol.is_empty()).then(|| {
+        Arc::new(
+            proxy_protocol
+                .iter()
+                .filter_map(|n| daygle_dns_core::config::parse_network(n))
+                .collect(),
+        )
+    });
     let token = server.shutdown_token().clone();
     let serve = |public: tokio::net::TcpListener| -> Result<tokio::net::TcpListener> {
         let Some(trusted) = &proxy_trusted else {

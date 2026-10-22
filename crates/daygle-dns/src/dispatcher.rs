@@ -1171,7 +1171,11 @@ impl DnsDispatcher {
         request: &Request,
     ) -> Option<daygle_dns_core::config::Dns64> {
         let config = self.config.as_ref()?.load();
-        let dns64 = config.dns64.compile().ok().flatten()?;
+        let dns64 = config
+            .dns64
+            .compile(&config.all_networks())
+            .ok()
+            .flatten()?;
         let validating = request.metadata.checking_disabled
             && request.edns.as_ref().is_some_and(|e| e.flags().dnssec_ok);
         (dns64.applies_to(client) && !validating).then_some(dns64)

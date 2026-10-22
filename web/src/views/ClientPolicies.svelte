@@ -1,10 +1,13 @@
 <script>
   import { api, formatApiError } from '../api.js';
+  import NetworkPicker from '../NetworkPicker.svelte';
 
   // Client resolution policies (recursive.client_policies). Saved on their
   // own, like the Zones page's forwarders, so editing them never touches the
   // unsaved Settings form around this card.
   let policies = $state([]);
+  // Named networks (Settings -> Networks) for the client picker.
+  let networks = $state([]);
   // `error` shows in red, `notice` (success) in green; failures while the
   // dialog is open show inside it.
   let notice = $state(null);
@@ -21,6 +24,7 @@
   };
 
   async function load() {
+    api.networks().then((data) => { networks = data.networks || []; }).catch(() => {});
     try {
       const config = await api.config();
       policies = config?.recursive?.client_policies || [];
@@ -41,7 +45,7 @@
 
   function openAdd() {
     clearMessages();
-    form = { index: null, name: '', enabled: true, clientsText: '', action: 'forward', upstreamsText: '' };
+    form = { index: null, name: '', enabled: true, clients: [], action: 'forward', upstreamsText: '' };
   }
 
   function openEdit(index) {
@@ -51,7 +55,7 @@
       index,
       name: p.name,
       enabled: p.enabled,
-      clientsText: p.clients.join('\n'),
+      clients: [...p.clients],
       action: p.action,
       upstreamsText: p.upstreams.join('\n'),
     };
@@ -74,7 +78,7 @@
     const policy = {
       name,
       enabled: form.enabled,
-      clients: lines(form.clientsText),
+      clients: [...form.clients],
       action: form.action,
       upstreams: form.action === 'forward' ? lines(form.upstreamsText) : [],
     };
@@ -217,8 +221,8 @@
       </div>
       <label class="checkbox"><input type="checkbox" bind:checked={form.enabled} /><span>Enabled</span></label>
       <div class="section-title">Clients</div>
-      <label>Client Networks <textarea rows="3" placeholder={'192.168.1.64/27\n192.168.1.20'} bind:value={form.clientsText}></textarea></label>
-      <p class="muted help">CIDRs or single IPs, one per line.</p>
+      <NetworkPicker {networks} bind:value={form.clients} />
+      <p class="muted help">Tick named networks and/or type addresses.</p>
       {#if form.action === 'forward'}
         <div class="section-title">Upstreams</div>
         <label>Upstream Servers <textarea rows="3" placeholder={'1.1.1.3\ntls://1.1.1.3:853@family.cloudflare-dns.com'} bind:value={form.upstreamsText}></textarea></label>

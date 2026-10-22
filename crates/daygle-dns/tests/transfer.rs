@@ -148,6 +148,47 @@ async fn axfr_refused_when_disabled() {
     shutdown(server).await;
 }
 
+/// A named network gates zone transfers: the list names `LAN`, and the
+/// network it stands for decides who may transfer.
+#[tokio::test]
+async fn axfr_acl_accepts_named_networks() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("daygle-dns.db");
+    let mut config = config_with_axfr(&db, true, vec!["LAN".to_string()]);
+    config.networks = vec![daygle_dns_core::config::NamedNetwork {
+        name: "LAN".to_string(),
+        cidrs: vec!["10.0.0.0/8".to_string()],
+        description: String::new(),
+    }];
+    let server = spawn(config).await;
+    seed_zone(&server, "named.test").await;
+    let api = format!("http://{}/api", server.api_addr);
+    let client = reqwest::Client::new();
+
+    // 127.0.0.1 is not in LAN, so it is refused.
+    let tcp = server.tcp_addr.expect("TCP enabled");
+    let resp = tcp_transfer_query(tcp, "named.test.", RecordType::AXFR).await;
+    assert_eq!(resp.response_code, ResponseCode::Refused);
+
+    // Widening LAN to cover the test client lets the transfer through,
+    // without touching the transfer setting itself.
+    let resp = client
+        .post(format!("{api}/networks"))
+        .json(&serde_json::json!({
+            "original_name": "LAN",
+            "name": "LAN",
+            "cidrs": ["127.0.0.0/8"],
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_success(), "{}", resp.text().await.unwrap());
+    let resp = tcp_transfer_query(tcp, "named.test.", RecordType::AXFR).await;
+    assert_eq!(resp.response_code, ResponseCode::NoError);
+
+    shutdown(server).await;
+}
+
 #[tokio::test]
 async fn axfr_acl_restricts_clients() {
     let dir = tempfile::tempdir().unwrap();
