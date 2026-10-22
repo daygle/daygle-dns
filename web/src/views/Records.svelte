@@ -1,5 +1,6 @@
 <script>
   import { api, formatApiError } from '../api.js';
+  import { formatDateTime } from '../datetime.svelte.js';
   import { duration } from '../aiLabels.js';
 
   // The zone to preselect, passed when coming from the Zones page.
@@ -381,7 +382,7 @@
 
       <div class="table-wrap">
         <table>
-          <thead><tr><th>Name</th><th>Type</th><th>Value</th><th class="num">TTL</th><th class="num">Actions</th></tr></thead>
+          <thead><tr><th>Name</th><th>Type</th><th>Value</th><th class="num">TTL</th><th>Last Used</th><th>Last Modified</th><th class="num">Actions</th></tr></thead>
           <tbody>
             {#each shown as record (record.id)}
               <tr class:disabled={record.disabled}>
@@ -400,6 +401,8 @@
                 <td>{record.rtype}</td>
                 <td class="value"><code>{record.content}</code></td>
                 <td class="num" title={duration(record.ttl)}>{record.ttl}</td>
+                <td class="muted" title={record.last_used_at || ''}>{record.last_used_at ? formatDateTime(record.last_used_at) : 'Never'}</td>
+                <td class="muted" title={record.last_modified_at || ''}>{record.last_modified_at ? formatDateTime(record.last_modified_at) : '-'}</td>
                 <td class="num">
                   {#if selected.zone_type !== 'secondary'}
                     <div class="row" style="gap: 6px; justify-content: flex-end; flex-wrap: nowrap">

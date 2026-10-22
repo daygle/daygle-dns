@@ -197,6 +197,7 @@ export const api = {
   zoneDefaults: () => request('GET', '/zones/defaults'),
   createZone: (body) => request('POST', '/zones', body),
   deleteZone: (id) => request('DELETE', `/zones/${id}`),
+  setZoneEnabled: (id, enabled) => request('PUT', `/zones/${id}/enabled`, { enabled }),
   updateZoneSoa: (id, body) => request('PUT', `/zones/${id}/soa`, body),
   records: (zoneId) => request('GET', `/zones/${zoneId}/records`),
   upsertRecord: (zoneId, body) => request('PUT', `/zones/${zoneId}/records`, body),

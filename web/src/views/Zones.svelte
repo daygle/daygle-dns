@@ -426,6 +426,17 @@
     }
   }
 
+  async function toggleZoneEnabled(zone) {
+    clearMessages();
+    try {
+      await api.setZoneEnabled(zone.id, !zone.enabled);
+      notice = `${zone.name} ${zone.enabled ? 'disabled and is no longer being served' : 'enabled and is now being served'}.`;
+      await loadZones();
+    } catch (e) {
+      error = formatApiError(e);
+    }
+  }
+
   async function toggleSign(zone) {
     // Unsigning while the parent zone still publishes a DS record makes the
     // zone fail validation everywhere, so say so before doing it.
@@ -526,20 +537,25 @@
   <div class="table-wrap">
     <table>
       <thead>
-        <tr><th>Name</th><th>Type</th><th>Details</th><th>DNSSEC</th><th class="num">Actions</th></tr>
+        <tr><th>Name</th><th>Type</th><th>Details</th><th>Last Modified</th><th>DNSSEC</th><th class="num">Actions</th></tr>
       </thead>
       <tbody>
         {#each zones as zone (zone.id)}
-          <tr>
-            <td><code>{zone.name}</code></td>
+          <tr class:disabled={!zone.enabled}>
+            <td>
+              <code>{zone.name}</code>
+              {#if !zone.enabled}<span class="pill">Disabled</span>{/if}
+            </td>
             <td><span class="pill">{zone.zone_type === 'secondary' ? 'Secondary' : 'Primary'}</span></td>
             <td class="muted">
               Serial {zone.serial}{#if zone.zone_type === 'secondary' && zone.masters?.length}{` · from ${zone.masters.join(', ')}`}{/if}{#if zone.catalog}{` · catalog ${zone.catalog}`}{/if}
             </td>
+            <td class="muted" title={zone.last_modified_at || zone.created_at}>{formatTime(zone.last_modified_at || zone.created_at)}</td>
             <td><span class:pill={true} class:ok={zone.dnssec}>{zone.dnssec ? (zone.nsec3 ? 'Signed · NSEC3' : 'Signed · NSEC') : 'Unsigned'}</span></td>
             <td class="num">
               <div class="row" style="gap: 6px; justify-content: flex-end">
                 <button class="secondary" onclick={() => onOpenRecords(zone.id)}>Records</button>
+                <button class="secondary" onclick={() => toggleZoneEnabled(zone)} title={zone.enabled ? 'Stop serving this zone but keep its records' : 'Serve this zone again'}>{zone.enabled ? 'Disable' : 'Enable'}</button>
                 {#if zone.zone_type !== 'secondary'}
                   <button class="secondary" onclick={() => openSoa(zone)} title="Edit the zone's SOA (nameserver, contact, timers)">SOA</button>
                   <button class="secondary" onclick={() => toggleSign(zone)} title={zone.dnssec ? 'Stop DNSSEC signing' : 'Sign the zone with DNSSEC'}>{zone.dnssec ? 'Unsign' : 'Sign'}</button>
@@ -564,6 +580,7 @@
             </td>
             <td class="muted">NS {stub.nss.join(', ') || '-'}</td>
             <td class="muted">-</td>
+            <td class="muted">-</td>
             <td class="num">
               <div class="row" style="gap: 6px; justify-content: flex-end">
                 <button class="secondary" onclick={() => openEditStub(stub)}>Edit</button>
@@ -587,6 +604,7 @@
                 Transferring and Verifying the Root Zone…
               {/if}
             </td>
+            <td class="muted">-</td>
             <td>
               {#if rootStatus?.serving}
                 <span class="pill ok" title="ZONEMD digest and DNSSEC signatures verified">Verified</span>
@@ -608,6 +626,7 @@
             <td><code>{fwd.name}</code></td>
             <td><span class="pill">Forwarder</span></td>
             <td class="muted">→ {fwd.upstreams.join(', ')}</td>
+            <td class="muted">-</td>
             <td class="muted">-</td>
             <td class="num">
               <div class="row" style="gap: 6px; justify-content: flex-end">

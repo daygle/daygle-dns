@@ -159,8 +159,8 @@ pub async fn handle_update_with_notify<R: ResponseHandler>(
 
     // -- Zone must exist and be a primary zone ----------------------------
     let zone = match store.find_zone_by_name(&zone_name) {
-        Ok(Some(zone)) => zone,
-        Ok(None) => {
+        Ok(Some(zone)) if zone.enabled => zone,
+        Ok(Some(_)) | Ok(None) => {
             debug!(zone = %zone_name, "dynamic update for unhosted zone");
             return respond(
                 update,
@@ -622,6 +622,8 @@ mod tests {
             expire: 86400,
             minimum: 300,
             created_at: String::new(),
+            enabled: true,
+            last_modified_at: String::new(),
         };
         assert!(rrset_exists(&zone, &[], "example.com", RecordType::SOA));
         assert!(!rrset_exists(&zone, &[], "www.example.com", RecordType::A));

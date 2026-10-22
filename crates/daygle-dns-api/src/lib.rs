@@ -494,6 +494,7 @@ pub fn router(state: AppState) -> Router {
         .route("/zones/import", post(handlers::import_zone))
         .route("/zones/defaults", get(handlers::zone_defaults_handler))
         .route("/zones/{id}", delete(handlers::delete_zone))
+        .route("/zones/{id}/enabled", put(handlers::set_zone_enabled))
         .route("/zones/{id}/soa", put(handlers::update_zone_soa))
         .route(
             "/zones/{id}/records",

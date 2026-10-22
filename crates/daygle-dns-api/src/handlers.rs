@@ -1685,6 +1685,35 @@ pub async fn create_zone(
     (StatusCode::CREATED, Json(zone)).into_response()
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ZoneEnabledInput {
+    enabled: bool,
+}
+
+/// `PUT /api/zones/{id}/enabled` - stop or resume serving a zone while
+/// retaining its records and metadata.
+pub async fn set_zone_enabled(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    axum::Json(input): axum::Json<ZoneEnabledInput>,
+) -> Response {
+    match state.catalog.store().set_zone_enabled(&id, input.enabled) {
+        Ok(true) => {
+            if let Err(e) = state.catalog.reload() {
+                return map_err(e);
+            }
+            match state.catalog.store().get_zone(&id) {
+                Ok(Some(zone)) => Json(zone).into_response(),
+                Ok(None) => error_response(StatusCode::NOT_FOUND, "zone not found"),
+                Err(e) => map_err(e),
+            }
+        }
+        Ok(false) => error_response(StatusCode::NOT_FOUND, "zone not found"),
+        Err(e) => map_err(e),
+    }
+}
+
 pub async fn delete_zone(State(state): State<AppState>, Path(id): Path<String>) -> Response {
     let existing = match state.catalog.store().get_zone(&id) {
         Ok(Some(zone)) => zone,
@@ -2845,6 +2874,13 @@ pub async fn auth_login(
     }
     if let Some(ip) = client_ip {
         state.login_throttle.clear(ip);
+    }
+    if let Err(e) = state
+        .catalog
+        .store()
+        .touch_console_user_login(&user.username)
+    {
+        return map_err(e);
     }
 
     let ttl = Duration::from_secs(state.config.load().api.session_ttl_secs.max(60));

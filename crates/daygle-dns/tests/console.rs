@@ -121,7 +121,7 @@ async fn console_users_live_in_the_database() {
     let (token, role) = login(server.api_addr, "admin", "secret").await;
     assert_eq!(role, "admin");
 
-    // The config-seeded account is listed, with its hash redacted.
+    // The config-seeded account is listed with its hash redacted and its successful login recorded.
     let resp = client
         .get(format!("{base}/api/users"))
         .bearer_auth(&token)
@@ -137,6 +137,7 @@ async fn console_users_live_in_the_database() {
         .find(|u| u["username"] == "admin")
         .unwrap();
     assert_eq!(admin["password_hash"], json!("[redacted]"));
+    assert!(admin["last_login_at"].as_str().is_some());
 
     // Create a viewer and an extra admin through the API.
     for (name, user_role) in [("auditor", "viewer"), ("root2", "admin")] {
@@ -536,7 +537,8 @@ async fn login_flow_full_auth() {
     assert_eq!(resp.status(), 401);
 
     // Correct credentials issue a token.
-    let resp = reqwest::Client::new()
+    let client = reqwest::Client::new();
+    let resp = client
         .post(api_url(server.api_addr, "/api/auth/login"))
         .json(&json!({ "username": "admin", "password": "secret" }))
         .send()
@@ -550,6 +552,24 @@ async fn login_flow_full_auth() {
     );
     let body: serde_json::Value = resp.json().await.unwrap();
     let token = body["token"].as_str().unwrap().to_string();
+
+    // Only a fully authenticated login updates the account's last-login time.
+    let users: serde_json::Value = client
+        .get(api_url(server.api_addr, "/api/users"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let admin = users
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|user| user["username"] == "admin")
+        .unwrap();
+    assert!(admin["last_login_at"].as_str().is_some());
 
     // The token authorizes reads and mutations.
     let client = reqwest::Client::new();

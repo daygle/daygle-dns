@@ -1,7 +1,8 @@
 //! The combined DNS dispatcher: policy → authoritative → recursive.
 
+use std::collections::HashMap;
 use std::net::IpAddr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use arc_swap::{ArcSwap, ArcSwapOption};
@@ -55,6 +56,9 @@ pub struct DnsDispatcher {
     /// Async SQLite query-log sink feeding the console's searchable Query
     /// Logs view. `None` unless `logging.query_db_enabled`; best-effort.
     query_db_logger: Option<Arc<crate::query_db_log::QueryDbLogger>>,
+    /// Coalesces recent authoritative record-use updates so queries do not
+    /// serialize SQLite writes at request volume.
+    record_use_cache: Arc<Mutex<HashMap<(String, String), i64>>>,
     /// Client Timeout (`server.client_timeout_ms`): how long the recursive
     /// path may take before the client receives SERVFAIL. Default 2000 ms.
     client_timeout: Duration,
@@ -121,6 +125,7 @@ impl DnsDispatcher {
             stats: None,
             query_logger: None,
             query_db_logger: None,
+            record_use_cache: Arc::new(Mutex::new(HashMap::new())),
             client_timeout: Duration::from_millis(2000),
             cookies: Arc::new(crate::cookies::Cookies::new(true)),
             syslog: None,
@@ -332,6 +337,36 @@ impl DnsDispatcher {
                 elapsed_ms: started.elapsed().as_millis() as u64,
             });
         }
+    }
+
+    /// Mark eligible stored records at an authoritative owner as used,
+    /// coalescing database writes for each name/type within each clock minute.
+    fn mark_authoritative_records_used(&self, qname: &str, qtype: &str) {
+        if tokio::runtime::Handle::try_current().is_err() {
+            return;
+        }
+        let key = (qname.to_ascii_lowercase(), qtype.to_ascii_uppercase());
+        let current_minute = chrono::Utc::now().timestamp().div_euclid(60);
+        {
+            let Ok(mut recent) = self.record_use_cache.lock() else {
+                return;
+            };
+            if recent
+                .get(&key)
+                .is_some_and(|last_minute| *last_minute >= current_minute)
+            {
+                return;
+            }
+            recent.insert(key, current_minute);
+            if recent.len() > 4096 {
+                recent.retain(|_, minute| *minute >= current_minute - 1);
+            }
+        }
+        let store = self.catalog.store_handle();
+        let name = qname.to_string();
+        let rtype = qtype.to_string();
+        let used_at = chrono::Utc::now().to_rfc3339();
+        tokio::task::spawn_blocking(move || store.mark_records_used(&name, &rtype, &used_at));
     }
 
     /// Serve an AXFR/IXFR zone transfer from the stored zone data.
@@ -828,6 +863,7 @@ impl RequestHandler for DnsDispatcher {
                 if records.is_empty() {
                     return send_empty(&mut response_handle, request, None).await;
                 }
+                self.mark_authoritative_records_used(&qname, &rtype);
                 let owner = Name::from(info.query.name().clone());
                 let answers: Vec<Record> = records
                     .into_iter()
@@ -854,11 +890,15 @@ impl RequestHandler for DnsDispatcher {
             );
             let now = unix_now();
             let edns = request.edns.as_ref();
-            return self
+            let response = self
                 .catalog
                 .read()
                 .lookup(request, edns, now, response_handle)
                 .await;
+            if response.counts().answers > 0 {
+                self.mark_authoritative_records_used(&qname, &rtype);
+            }
+            return response;
         }
 
         // 3. Recursive resolution. The resolver is swapped atomically on

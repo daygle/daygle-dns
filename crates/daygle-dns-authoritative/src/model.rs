@@ -15,12 +15,22 @@ pub struct Zone {
     pub admin_mailbox: String,
     /// SOA serial number.
     pub serial: u32,
+    /// Whether this zone is currently served.
+    #[serde(default = "default_zone_enabled")]
+    pub enabled: bool,
     pub refresh: u32,
     pub retry: u32,
     pub expire: u32,
     pub minimum: u32,
     /// RFC 3339 creation timestamp.
     pub created_at: String,
+    /// RFC 3339 timestamp of the most recent zone change.
+    #[serde(default)]
+    pub last_modified_at: String,
+}
+
+fn default_zone_enabled() -> bool {
+    true
 }
 
 /// Payload used to create a zone.
@@ -108,6 +118,12 @@ pub struct Record {
     /// `content`).
     pub priority: u16,
     pub disabled: bool,
+    /// RFC 3339 timestamp of the most recent content or state change.
+    #[serde(default)]
+    pub last_modified_at: String,
+    /// RFC 3339 timestamp of the latest successful DNS answer using this record.
+    #[serde(default)]
+    pub last_used_at: Option<String>,
 }
 
 /// Payload used to upsert a record.

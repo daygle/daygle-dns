@@ -69,7 +69,10 @@ pub struct Alias {
 /// Every enabled ALIAS record in the store, by owner name.
 fn build_aliases(store: &ZoneStore) -> Result<std::collections::HashMap<String, Alias>> {
     let mut aliases = std::collections::HashMap::new();
-    for (_, records, _) in store.load_catalog_data()? {
+    for (zone, records, _) in store.load_catalog_data()? {
+        if !zone.enabled {
+            continue;
+        }
         for record in records {
             if record.rtype == "ALIAS" && !record.disabled {
                 aliases.insert(
@@ -138,6 +141,11 @@ impl AuthorityCatalog {
 
     pub fn store(&self) -> &ZoneStore {
         &self.store
+    }
+
+    /// Clone the store handle for best-effort background writes.
+    pub fn store_handle(&self) -> ZoneStore {
+        self.store.clone()
     }
 
     /// A snapshot of the authoritative settings. Returned owned (not a
@@ -263,7 +271,7 @@ impl AuthorityCatalog {
             .store
             .list_zones()?
             .into_iter()
-            .filter(|z| name == z.name || name.ends_with(&format!(".{}", z.name)))
+            .filter(|z| z.enabled && (name == z.name || name.ends_with(&format!(".{}", z.name))))
             .max_by_key(|z| z.name.len())
         else {
             return Ok(Vec::new());
@@ -341,10 +349,11 @@ impl AuthorityCatalog {
     /// Returns `None` when no zone with exactly `zone_name` exists.
     pub fn transfer_records(&self, zone_name: &str) -> Result<Option<(Record, Vec<Record>)>> {
         let map = match self.store.find_zone_by_name(zone_name)? {
-            Some(zone) => {
+            Some(zone) if zone.enabled => {
                 let records = self.store.list_records(&zone.id)?;
                 zone_rrsets(&zone, &records)?
             }
+            Some(_) => return Ok(None),
             None => {
                 let catalog = self.settings.load().catalog_zone.clone();
                 if catalog.is_empty()
@@ -419,6 +428,9 @@ fn build_catalog(
     let sig_validity = sig_duration(settings);
 
     for (zone, records, keys) in data {
+        if !zone.enabled {
+            continue;
+        }
         let origin = fqdn_name(&zone.name)?;
         let zone_type = if secondary_ids.contains(&zone.id) {
             ZoneType::Secondary
@@ -510,7 +522,10 @@ fn build_catalog(
     let mut catalog_changed = false;
     let catalog_zone = &settings.catalog_zone;
     if !catalog_zone.is_empty() {
-        if store.find_zone_by_name(catalog_zone)?.is_some() {
+        if store
+            .find_zone_by_name(catalog_zone)?
+            .is_some_and(|zone| zone.enabled)
+        {
             warn!(
                 zone = %catalog_zone,
                 "a hosted zone has the catalog zone's name; not publishing the catalog"
@@ -602,7 +617,7 @@ fn catalog_zone_rrsets(
         .collect();
     let mut members: Vec<(String, Name)> = Vec::new();
     for zone in store.list_zones()? {
-        if secondary.contains(&zone.id) || zone.name.eq_ignore_ascii_case(name) {
+        if !zone.enabled || secondary.contains(&zone.id) || zone.name.eq_ignore_ascii_case(name) {
             continue;
         }
         let label: String = zone
@@ -809,6 +824,8 @@ mod tests {
             ttl: 60,
             priority,
             disabled: false,
+            last_modified_at: String::new(),
+            last_used_at: None,
         };
         let records = vec![
             rec("p1", "www.example.com", "A", 0),
@@ -885,5 +902,34 @@ mod tests {
         catalog.reload().unwrap();
         let lower: LowerName = "example.com.".parse().unwrap();
         assert!(catalog.contains(&lower));
+    }
+
+    #[test]
+    fn disabled_zone_is_removed_from_serving_catalog_and_transfers() {
+        let catalog = catalog();
+        let zone = catalog
+            .store()
+            .find_zone_by_name("example.com")
+            .unwrap()
+            .unwrap();
+        let lower: LowerName = "example.com.".parse().unwrap();
+        assert!(catalog.contains(&lower));
+        assert!(catalog.transfer_records("example.com").unwrap().is_some());
+
+        assert!(catalog.store().set_zone_enabled(&zone.id, false).unwrap());
+        catalog.reload().unwrap();
+
+        assert!(!catalog.contains(&lower));
+        assert!(catalog.alias("example.com").is_none());
+        assert!(catalog.transfer_records("example.com").unwrap().is_none());
+        assert!(catalog
+            .local_records("www.example.com", RecordType::A)
+            .unwrap()
+            .is_empty());
+
+        assert!(catalog.store().set_zone_enabled(&zone.id, true).unwrap());
+        catalog.reload().unwrap();
+        assert!(catalog.contains(&lower));
+        assert!(catalog.transfer_records("example.com").unwrap().is_some());
     }
 }

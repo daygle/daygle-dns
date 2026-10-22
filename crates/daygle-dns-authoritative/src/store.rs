@@ -3,7 +3,7 @@
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-use chrono::Utc;
+use chrono::{Timelike, Utc};
 use hickory_proto::rr::{RData, RecordType};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
@@ -34,7 +34,9 @@ CREATE TABLE IF NOT EXISTS zones (
     retry          INTEGER NOT NULL DEFAULT 600,
     expire         INTEGER NOT NULL DEFAULT 86400,
     minimum        INTEGER NOT NULL DEFAULT 3600,
-    created_at     TEXT NOT NULL
+    created_at     TEXT NOT NULL,
+    enabled        INTEGER NOT NULL DEFAULT 1,
+    last_modified_at TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS records (
@@ -45,7 +47,9 @@ CREATE TABLE IF NOT EXISTS records (
     content  TEXT NOT NULL,
     ttl      INTEGER NOT NULL DEFAULT 3600,
     priority INTEGER NOT NULL DEFAULT 0,
-    disabled INTEGER NOT NULL DEFAULT 0
+    disabled INTEGER NOT NULL DEFAULT 0,
+    last_modified_at TEXT NOT NULL DEFAULT '',
+    last_used_at TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_records_zone ON records(zone_id);
@@ -160,7 +164,8 @@ CREATE TABLE IF NOT EXISTS console_users (
     created_at    TEXT NOT NULL,
     time_zone     TEXT NOT NULL DEFAULT '',
     date_format   TEXT NOT NULL DEFAULT '',
-    time_format   TEXT NOT NULL DEFAULT ''
+    time_format   TEXT NOT NULL DEFAULT '',
+    last_login_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS console_user_two_factor (
@@ -299,6 +304,8 @@ impl ZoneStore {
     fn init(&self) -> Result<()> {
         let conn = self.lock_conn()?;
         conn.execute_batch(SCHEMA)?;
+        migrate_zone_metadata(&conn)?;
+        migrate_record_metadata(&conn)?;
         migrate_split_horizon_records(&conn)?;
         migrate_dnssec_keys(&conn)?;
         migrate_console_user_profile(&conn)?;
@@ -328,7 +335,7 @@ impl ZoneStore {
         let conn = self.lock_conn()?;
         let mut stmt = conn.prepare(
             "SELECT id, name, primary_ns, admin_mailbox, serial, refresh,
-                    retry, expire, minimum, created_at
+                    retry, expire, minimum, created_at, enabled, last_modified_at
              FROM zones ORDER BY name",
         )?;
         let rows = stmt.query_map([], row_to_zone)?;
@@ -339,7 +346,7 @@ impl ZoneStore {
         let conn = self.lock_conn()?;
         conn.query_row(
             "SELECT id, name, primary_ns, admin_mailbox, serial, refresh,
-                    retry, expire, minimum, created_at
+                    retry, expire, minimum, created_at, enabled, last_modified_at
              FROM zones WHERE id = ?1",
             [id],
             row_to_zone,
@@ -353,7 +360,7 @@ impl ZoneStore {
         let conn = self.lock_conn()?;
         conn.query_row(
             "SELECT id, name, primary_ns, admin_mailbox, serial, refresh,
-                    retry, expire, minimum, created_at
+                    retry, expire, minimum, created_at, enabled, last_modified_at
              FROM zones WHERE name = ?1",
             [&normalized],
             row_to_zone,
@@ -376,6 +383,7 @@ impl ZoneStore {
             .clone()
             .unwrap_or_else(|| format!("admin.{name}."));
 
+        let now = Utc::now().to_rfc3339();
         let zone = Zone {
             id: Uuid::new_v4().to_string(),
             name,
@@ -386,15 +394,17 @@ impl ZoneStore {
             retry: input.retry.unwrap_or(600),
             expire: input.expire.unwrap_or(86400),
             minimum: input.minimum.unwrap_or(3600),
-            created_at: Utc::now().to_rfc3339(),
+            created_at: now.clone(),
+            enabled: true,
+            last_modified_at: now,
         };
 
         let mut conn = self.lock_conn()?;
         let tx = conn.transaction()?;
         tx.execute(
             "INSERT INTO zones (id, name, primary_ns, admin_mailbox, serial,
-                                refresh, retry, expire, minimum, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                                refresh, retry, expire, minimum, created_at, enabled, last_modified_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             params![
                 zone.id,
                 zone.name,
@@ -406,6 +416,8 @@ impl ZoneStore {
                 zone.expire,
                 zone.minimum,
                 zone.created_at,
+                zone.enabled,
+                zone.last_modified_at,
             ],
         )
         .map_err(map_unique_violation)?;
@@ -421,9 +433,17 @@ impl ZoneStore {
             disabled: false,
         };
         insert_record_in_tx(&tx, &zone.id, &zone.name, &ns_record)?;
+        let last_modified_at = Utc::now().to_rfc3339();
+        tx.execute(
+            "UPDATE zones SET last_modified_at = ?2 WHERE id = ?1",
+            params![zone.id, last_modified_at],
+        )?;
         tx.commit()?;
 
-        Ok(zone)
+        Ok(Zone {
+            last_modified_at,
+            ..zone
+        })
     }
 
     pub fn delete_zone(&self, id: &str) -> Result<bool> {
@@ -457,7 +477,8 @@ impl ZoneStore {
         let conn = self.lock_conn()?;
         let changed = conn.execute(
             "UPDATE zones SET primary_ns = ?2, admin_mailbox = ?3, serial = ?4,
-                             refresh = ?5, retry = ?6, expire = ?7, minimum = ?8
+                             refresh = ?5, retry = ?6, expire = ?7, minimum = ?8,
+                             last_modified_at = ?9
              WHERE id = ?1",
             params![
                 id,
@@ -467,13 +488,32 @@ impl ZoneStore {
                 refresh,
                 retry,
                 expire,
-                minimum
+                minimum,
+                Utc::now().to_rfc3339(),
             ],
         )?;
         if changed == 0 {
             return Err(DaygleError::NotFound(format!("zone {id}")));
         }
         Ok(())
+    }
+
+    /// Enable or disable a zone while retaining its data and configuration.
+    pub fn set_zone_enabled(&self, id: &str, enabled: bool) -> Result<bool> {
+        let conn = self.lock_conn()?;
+        let changed = conn.execute(
+            "UPDATE zones SET enabled = ?2, last_modified_at = ?3 WHERE id = ?1 AND enabled != ?2",
+            params![id, enabled, Utc::now().to_rfc3339()],
+        )?;
+        if changed > 0 {
+            return Ok(true);
+        }
+        let exists: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM zones WHERE id = ?1)",
+            [id],
+            |row| row.get(0),
+        )?;
+        Ok(exists)
     }
 
     // ---- Secondary zones --------------------------------------------------
@@ -788,7 +828,7 @@ impl ZoneStore {
     pub fn list_records(&self, zone_id: &str) -> Result<Vec<Record>> {
         let conn = self.lock_conn()?;
         let mut stmt = conn.prepare(
-            "SELECT id, zone_id, name, rtype, content, ttl, priority, disabled
+            "SELECT id, zone_id, name, rtype, content, ttl, priority, disabled, last_modified_at, last_used_at
              FROM records WHERE zone_id = ?1 ORDER BY name, rtype",
         )?;
         let rows = stmt.query_map([zone_id], row_to_record)?;
@@ -799,7 +839,7 @@ impl ZoneStore {
     pub fn list_all_records(&self) -> Result<Vec<Record>> {
         let conn = self.lock_conn()?;
         let mut stmt = conn.prepare(
-            "SELECT id, zone_id, name, rtype, content, ttl, priority, disabled
+            "SELECT id, zone_id, name, rtype, content, ttl, priority, disabled, last_modified_at, last_used_at
              FROM records ORDER BY zone_id, name, rtype",
         )?;
         let rows = stmt.query_map([], row_to_record)?;
@@ -809,13 +849,40 @@ impl ZoneStore {
     pub fn get_record(&self, id: &str) -> Result<Option<Record>> {
         let conn = self.lock_conn()?;
         conn.query_row(
-            "SELECT id, zone_id, name, rtype, content, ttl, priority, disabled
+            "SELECT id, zone_id, name, rtype, content, ttl, priority, disabled, last_modified_at, last_used_at
              FROM records WHERE id = ?1",
             [id],
             row_to_record,
         )
         .optional()
         .map_err(Into::into)
+    }
+
+    /// Mark stored records at an owner name as used after a successful
+    /// authoritative answer. Only the first answer per record and minute is
+    /// written, but the stored timestamp retains that answer's exact time.
+    pub fn mark_records_used(&self, name: &str, rtype: &str, used_at: &str) -> Result<usize> {
+        let parsed = chrono::DateTime::parse_from_rfc3339(used_at)
+            .map_err(|e| DaygleError::Internal(format!("invalid record-use timestamp: {e}")))?;
+        let minute_start = parsed
+            .with_second(0)
+            .and_then(|time| time.with_nanosecond(0))
+            .ok_or_else(|| DaygleError::Internal("invalid record-use minute".to_string()))?
+            .to_rfc3339();
+        let used_at = parsed.to_rfc3339();
+        let conn = self.lock_conn()?;
+        Ok(conn.execute(
+            "UPDATE records SET last_used_at = ?3
+             WHERE name = ?1 AND disabled = 0
+               AND (rtype = ?2 OR rtype = 'CNAME' OR (?2 IN ('A', 'AAAA') AND rtype = 'ALIAS') OR ?2 = 'ANY')
+               AND (last_used_at IS NULL OR julianday(last_used_at) < julianday(?4))",
+            params![
+                name.trim_end_matches('.').to_ascii_lowercase(),
+                rtype.to_ascii_uppercase(),
+                used_at,
+                minute_start,
+            ],
+        )?)
     }
 
     /// Insert or update a record, returning the stored record. The zone serial
@@ -840,17 +907,22 @@ impl ZoneStore {
     pub fn set_record_disabled(&self, id: &str, disabled: bool) -> Result<bool> {
         let mut conn = self.lock_conn()?;
         let tx = conn.transaction()?;
-        let zone_id: Option<String> = tx
-            .query_row("SELECT zone_id FROM records WHERE id = ?1", [id], |r| {
-                r.get(0)
-            })
+        let state: Option<(String, bool)> = tx
+            .query_row(
+                "SELECT zone_id, disabled FROM records WHERE id = ?1",
+                [id],
+                |row| Ok((row.get(0)?, row.get::<_, i64>(1)? != 0)),
+            )
             .optional()?;
-        let Some(zone_id) = zone_id else {
+        let Some((zone_id, was_disabled)) = state else {
             return Ok(false);
         };
+        if was_disabled == disabled {
+            return Ok(true);
+        }
         tx.execute(
-            "UPDATE records SET disabled = ?2 WHERE id = ?1",
-            params![id, disabled as i64],
+            "UPDATE records SET disabled = ?2, last_modified_at = ?3 WHERE id = ?1",
+            params![id, disabled as i64, Utc::now().to_rfc3339()],
         )?;
         bump_serial_in(&tx, &zone_id)?;
         tx.commit()?;
@@ -869,7 +941,8 @@ impl ZoneStore {
 
     /// Delete a record by id. When a record is removed, the owning zone's
     /// serial is bumped in the same transaction (matching [`Self::upsert_record`]),
-    /// so callers no longer need a separate [`Self::bump_serial`].
+    /// so callers no longer need a separate [`Self::bump_serial`]. The zone's
+    /// last-modified timestamp is updated at the same time.
     pub fn delete_record(&self, id: &str) -> Result<bool> {
         let mut conn = self.lock_conn()?;
         let tx = conn.transaction()?;
@@ -903,14 +976,14 @@ impl ZoneStore {
             .ok_or_else(|| DaygleError::NotFound(format!("zone {zone_id}")))?;
         let mut conn = self.lock_conn()?;
         let tx = conn.transaction()?;
-        let disabled: Option<bool> = tx
+        let prior: Option<(bool, Option<String>)> = tx
             .query_row(
-                "SELECT disabled FROM records WHERE id = ?1 AND zone_id = ?2",
+                "SELECT disabled, last_used_at FROM records WHERE id = ?1 AND zone_id = ?2",
                 params![record_id, zone_id],
-                |r| Ok(r.get::<_, i64>(0)? != 0),
+                |row| Ok((row.get::<_, i64>(0)? != 0, row.get(1)?)),
             )
             .optional()?;
-        let Some(disabled) = disabled else {
+        let Some((disabled, last_used_at)) = prior else {
             return Ok(None);
         };
         tx.execute("DELETE FROM records WHERE id = ?1", [record_id])?;
@@ -919,11 +992,14 @@ impl ZoneStore {
             ..input.clone()
         };
         let mut record = insert_record_in_tx(&tx, zone_id, &zone.name, &input)?;
+        let last_modified_at = Utc::now().to_rfc3339();
         tx.execute(
-            "UPDATE records SET id = ?1 WHERE id = ?2",
-            params![record_id, record.id],
+            "UPDATE records SET id = ?1, last_modified_at = ?3, last_used_at = ?4 WHERE id = ?2",
+            params![record_id, record.id, last_modified_at, last_used_at],
         )?;
         record.id = record_id.to_string();
+        record.last_modified_at = last_modified_at;
+        record.last_used_at = last_used_at;
         bump_serial_in(&tx, zone_id)?;
         tx.commit()?;
         Ok(Some(record))
@@ -969,7 +1045,8 @@ impl ZoneStore {
             Some(soa) => {
                 let changed = tx.execute(
                     "UPDATE zones SET primary_ns = ?2, admin_mailbox = ?3, serial = ?4,
-                                     refresh = ?5, retry = ?6, expire = ?7, minimum = ?8
+                                     refresh = ?5, retry = ?6, expire = ?7, minimum = ?8,
+                                     last_modified_at = ?9
                      WHERE id = ?1",
                     params![
                         zone_id,
@@ -980,6 +1057,7 @@ impl ZoneStore {
                         soa.retry,
                         soa.expire,
                         soa.minimum,
+                        Utc::now().to_rfc3339(),
                     ],
                 )?;
                 if changed == 0 {
@@ -989,8 +1067,8 @@ impl ZoneStore {
             None => {
                 let next = zone.serial.wrapping_add(1).max(1);
                 tx.execute(
-                    "UPDATE zones SET serial = ?2 WHERE id = ?1",
-                    params![zone_id, next],
+                    "UPDATE zones SET serial = ?2, last_modified_at = ?3 WHERE id = ?1",
+                    params![zone_id, next, Utc::now().to_rfc3339()],
                 )?;
             }
         }
@@ -1010,6 +1088,10 @@ impl ZoneStore {
         for record in records {
             insert_record_in_tx(&tx, zone_id, &zone.name, record)?;
         }
+        tx.execute(
+            "UPDATE zones SET last_modified_at = ?2 WHERE id = ?1",
+            params![zone_id, Utc::now().to_rfc3339()],
+        )?;
         tx.commit()?;
         Ok(())
     }
@@ -1606,6 +1688,8 @@ fn row_to_zone(row: &rusqlite::Row<'_>) -> rusqlite::Result<Zone> {
         expire: row.get(7)?,
         minimum: row.get(8)?,
         created_at: row.get(9)?,
+        enabled: row.get::<_, i64>(10)? != 0,
+        last_modified_at: row.get(11)?,
     })
 }
 
@@ -1619,6 +1703,8 @@ fn row_to_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<Record> {
         ttl: row.get(5)?,
         priority: row.get(6)?,
         disabled: row.get::<_, i64>(7)? != 0,
+        last_modified_at: row.get(8)?,
+        last_used_at: row.get(9)?,
     })
 }
 
@@ -1662,9 +1748,6 @@ fn row_to_blocking_group(row: &rusqlite::Row<'_>) -> rusqlite::Result<BlockingGr
     })
 }
 
-/// Increment a zone's SOA serial by one (wrapping, never landing on 0).
-/// Works against either a plain [`Connection`] or a transaction (which derefs
-/// to `Connection`), so the bump can share the caller's transaction.
 /// Build a [`ConsoleUser`] from a `console_users` row.
 fn row_to_console_user(row: &rusqlite::Row<'_>) -> rusqlite::Result<ConsoleUser> {
     let role: String = row.get(2)?;
@@ -1686,6 +1769,7 @@ fn row_to_console_user(row: &rusqlite::Row<'_>) -> rusqlite::Result<ConsoleUser>
             time_format: row.get(10)?,
         },
         two_factor: row.get(11)?,
+        last_login_at: row.get(12)?,
     })
 }
 
@@ -1706,6 +1790,8 @@ pub struct ConsoleUser {
     /// Whether the account signs in with a code from an authenticator app
     /// as well as its password.
     pub two_factor: bool,
+    /// RFC 3339 time of the most recent successful password sign-in.
+    pub last_login_at: Option<String>,
 }
 
 impl ConsoleUser {
@@ -2363,7 +2449,8 @@ impl ZoneStore {
             "SELECT username, password_hash, role, enabled, first_name, last_name, email, created_at,
                     time_zone, date_format, time_format,
                     EXISTS(SELECT 1 FROM console_user_two_factor t
-                           WHERE t.username = console_users.username AND t.secret != '')
+                           WHERE t.username = console_users.username AND t.secret != ''),
+                    last_login_at
              FROM console_users ORDER BY username",
         )?;
         let rows = stmt.query_map([], row_to_console_user)?;
@@ -2395,7 +2482,8 @@ impl ZoneStore {
             "SELECT username, password_hash, role, enabled, first_name, last_name, email, created_at,
                     time_zone, date_format, time_format,
                     EXISTS(SELECT 1 FROM console_user_two_factor t
-                           WHERE t.username = console_users.username AND t.secret != '')
+                           WHERE t.username = console_users.username AND t.secret != ''),
+                    last_login_at
              FROM console_users WHERE username = ?1",
             [username],
             row_to_console_user,
@@ -2426,6 +2514,7 @@ impl ZoneStore {
                 time_format: String::new(),
             },
             two_factor: false,
+            last_login_at: None,
         };
         let conn = self.lock_conn()?;
         conn.execute(
@@ -2451,6 +2540,19 @@ impl ZoneStore {
             ],
         )?;
         Ok(user)
+    }
+
+    /// Record a successful interactive login for an existing console user.
+    pub fn touch_console_user_login(&self, username: &str) -> Result<()> {
+        let conn = self.lock_conn()?;
+        let changed = conn.execute(
+            "UPDATE console_users SET last_login_at = ?2 WHERE username = ?1",
+            params![username, Utc::now().to_rfc3339()],
+        )?;
+        if changed == 0 {
+            return Err(DaygleError::NotFound(format!("user '{username}'")));
+        }
+        Ok(())
     }
 
     /// Store a console account's own display preferences (empty fields
@@ -3069,8 +3171,8 @@ fn bump_serial_in(conn: &Connection, zone_id: &str) -> Result<u32> {
         .ok_or_else(|| DaygleError::NotFound(format!("zone {zone_id}")))?;
     let next = current.wrapping_add(1).max(1);
     conn.execute(
-        "UPDATE zones SET serial = ?2 WHERE id = ?1",
-        params![zone_id, next],
+        "UPDATE zones SET serial = ?2, last_modified_at = ?3 WHERE id = ?1",
+        params![zone_id, next, Utc::now().to_rfc3339()],
     )?;
     Ok(next)
 }
@@ -3128,19 +3230,23 @@ fn insert_record_in_tx(
         ttl: input.ttl,
         priority: input.priority,
         disabled: input.disabled,
+        last_modified_at: Utc::now().to_rfc3339(),
+        last_used_at: None,
     };
     tx.execute(
-        "INSERT INTO records (id, zone_id, name, rtype, content, ttl, priority, disabled)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        "INSERT INTO records (id, zone_id, name, rtype, content, ttl, priority, disabled, last_modified_at, last_used_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
         params![
-            record.id,
-            record.zone_id,
-            record.name,
-            record.rtype,
-            record.content,
+            &record.id,
+            &record.zone_id,
+            &record.name,
+            &record.rtype,
+            &record.content,
             record.ttl,
             record.priority,
             record.disabled as i64,
+            &record.last_modified_at,
+            record.last_used_at.as_deref(),
         ],
     )?;
     Ok(record)
@@ -3330,6 +3436,63 @@ fn canonicalize_split_horizon_records(
     Ok((ips, canonical))
 }
 
+/// Add per-record last-modified/last-used metadata to older databases.
+fn migrate_record_metadata(conn: &Connection) -> Result<()> {
+    for (column, definition) in [
+        ("last_modified_at", "TEXT NOT NULL DEFAULT ''"),
+        ("last_used_at", "TEXT"),
+    ] {
+        let has: bool = conn.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM pragma_table_info('records') WHERE name = ?1
+             )",
+            [column],
+            |row| row.get(0),
+        )?;
+        if !has {
+            conn.execute(
+                &format!("ALTER TABLE records ADD COLUMN {column} {definition}"),
+                [],
+            )?;
+        }
+    }
+    conn.execute(
+        "UPDATE records SET last_modified_at = (
+            SELECT zones.created_at FROM zones WHERE zones.id = records.zone_id
+         ) WHERE last_modified_at = ''",
+        [],
+    )?;
+    Ok(())
+}
+
+/// Add zone enablement and modification metadata to older databases.
+/// Add zone enablement and modification metadata to older databases.
+fn migrate_zone_metadata(conn: &Connection) -> Result<()> {
+    for (column, definition) in [
+        ("enabled", "INTEGER NOT NULL DEFAULT 1"),
+        ("last_modified_at", "TEXT NOT NULL DEFAULT ''"),
+    ] {
+        let has: bool = conn.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM pragma_table_info('zones') WHERE name = ?1
+             )",
+            [column],
+            |r| r.get(0),
+        )?;
+        if !has {
+            conn.execute(
+                &format!("ALTER TABLE zones ADD COLUMN {column} {definition}"),
+                [],
+            )?;
+        }
+    }
+    conn.execute(
+        "UPDATE zones SET last_modified_at = created_at WHERE last_modified_at = ''",
+        [],
+    )?;
+    Ok(())
+}
+
 /// Add the `records` column to `split_horizon_entries` for databases created
 /// before typed records existed. Rows written with only `ips` keep working:
 /// the A/AAAA records are derived on read.
@@ -3396,6 +3559,19 @@ fn migrate_console_user_profile(conn: &Connection) -> Result<()> {
                 [],
             )?;
         }
+    }
+    let has_last_login: bool = conn.query_row(
+        "SELECT EXISTS(
+            SELECT 1 FROM pragma_table_info('console_users') WHERE name = 'last_login_at'
+         )",
+        [],
+        |r| r.get(0),
+    )?;
+    if !has_last_login {
+        conn.execute(
+            "ALTER TABLE console_users ADD COLUMN last_login_at TEXT",
+            [],
+        )?;
     }
     Ok(())
 }
@@ -3610,6 +3786,31 @@ mod tests {
     }
 
     #[test]
+    fn console_user_last_login_starts_empty_and_persists_after_touch() {
+        let s = store();
+        let user = s
+            .create_console_user("login-user", &console_admin("login-user"))
+            .unwrap();
+        assert_eq!(user.last_login_at, None);
+        assert_eq!(
+            s.get_console_user("login-user")
+                .unwrap()
+                .unwrap()
+                .last_login_at,
+            None
+        );
+
+        s.touch_console_user_login("login-user").unwrap();
+        let logged_in = s.get_console_user("login-user").unwrap().unwrap();
+        assert!(logged_in.last_login_at.is_some());
+        assert_eq!(
+            s.list_console_users().unwrap()[0].last_login_at,
+            logged_in.last_login_at
+        );
+        assert!(s.touch_console_user_login("missing").is_err());
+    }
+
+    #[test]
     fn creates_and_lists_zones() {
         let s = store();
         let zone = s
@@ -3619,8 +3820,42 @@ mod tests {
             })
             .unwrap();
         assert_eq!(zone.name, "example.com");
+        assert!(!zone.last_modified_at.is_empty());
+        assert_eq!(
+            s.get_zone(&zone.id).unwrap().unwrap().last_modified_at,
+            zone.last_modified_at
+        );
+        assert!(zone.enabled);
         assert_eq!(s.list_zones().unwrap().len(), 1);
         assert_eq!(s.count_zones().unwrap(), 1);
+    }
+
+    #[test]
+    fn toggling_zone_enablement_updates_state_and_last_modified() {
+        let s = store();
+        let zone = s
+            .create_zone(&ZoneInput {
+                name: "example.com".to_string(),
+                ..zone_input_defaults()
+            })
+            .unwrap();
+
+        assert!(s.set_zone_enabled(&zone.id, false).unwrap());
+        let disabled = s.get_zone(&zone.id).unwrap().unwrap();
+        assert!(!disabled.enabled);
+        assert!(disabled.last_modified_at >= zone.last_modified_at);
+
+        // Repeating the current state is a successful no-op, not a new edit.
+        let unchanged_timestamp = disabled.last_modified_at.clone();
+        assert!(s.set_zone_enabled(&zone.id, false).unwrap());
+        assert_eq!(
+            s.get_zone(&zone.id).unwrap().unwrap().last_modified_at,
+            unchanged_timestamp
+        );
+
+        assert!(s.set_zone_enabled(&zone.id, true).unwrap());
+        assert!(s.get_zone(&zone.id).unwrap().unwrap().enabled);
+        assert!(!s.set_zone_enabled("missing", true).unwrap());
     }
 
     #[test]
@@ -3737,6 +3972,101 @@ mod tests {
         // Deleting a non-existent record neither succeeds nor bumps the serial.
         assert!(!s.delete_record("does-not-exist").unwrap());
         assert_eq!(s.get_zone(&zone.id).unwrap().unwrap().serial, 12);
+    }
+
+    #[test]
+    fn record_usage_updates_matching_enabled_rrsets_without_bumping_serial() {
+        let s = store();
+        let zone = s
+            .create_zone(&ZoneInput {
+                name: "example.com".to_string(),
+                serial: Some(10),
+                ..zone_input_defaults()
+            })
+            .unwrap();
+        let input = |name: &str, rtype: &str, content: &str, disabled| RecordInput {
+            name: name.to_string(),
+            rtype: rtype.to_string(),
+            content: content.to_string(),
+            ttl: 300,
+            priority: 0,
+            disabled,
+        };
+        let a = s
+            .upsert_record(&zone.id, &input("www", "A", "192.0.2.1", false))
+            .unwrap();
+        let cname = s
+            .upsert_record(
+                &zone.id,
+                &input("alias", "CNAME", "target.example.com.", false),
+            )
+            .unwrap();
+        let disabled = s
+            .upsert_record(&zone.id, &input("www", "AAAA", "2001:db8::1", true))
+            .unwrap();
+        let unrelated = s
+            .upsert_record(&zone.id, &input("mail", "A", "192.0.2.2", false))
+            .unwrap();
+        let serial = s.get_zone(&zone.id).unwrap().unwrap().serial;
+
+        assert_eq!(
+            s.mark_records_used("WWW.example.com.", "a", "2026-10-20T12:34:56Z")
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            s.get_record(&a.id)
+                .unwrap()
+                .unwrap()
+                .last_used_at
+                .as_deref(),
+            Some("2026-10-20T12:34:56+00:00")
+        );
+        assert_eq!(
+            s.mark_records_used("www.example.com", "A", "2026-10-20T12:34:59Z")
+                .unwrap(),
+            0,
+            "same-minute queries do not rewrite the timestamp"
+        );
+        assert_eq!(s.get_record(&cname.id).unwrap().unwrap().last_used_at, None);
+        assert_eq!(
+            s.get_record(&disabled.id).unwrap().unwrap().last_used_at,
+            None
+        );
+        assert_eq!(
+            s.get_record(&unrelated.id).unwrap().unwrap().last_used_at,
+            None
+        );
+
+        // CNAME queries match the CNAME, while ANY marks each enabled RRset
+        // at that owner. Usage metadata never changes the DNS serial.
+        assert_eq!(
+            s.mark_records_used("alias.example.com", "TXT", "2026-10-20T12:35:30Z")
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            s.get_record(&cname.id)
+                .unwrap()
+                .unwrap()
+                .last_used_at
+                .as_deref(),
+            Some("2026-10-20T12:35:30+00:00")
+        );
+        assert_eq!(
+            s.mark_records_used("www.example.com", "ANY", "2026-10-20T12:36:10Z")
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            s.get_record(&a.id)
+                .unwrap()
+                .unwrap()
+                .last_used_at
+                .as_deref(),
+            Some("2026-10-20T12:36:10+00:00")
+        );
+        assert_eq!(s.get_zone(&zone.id).unwrap().unwrap().serial, serial);
     }
 
     #[test]
@@ -3872,6 +4202,14 @@ mod tests {
             disabled: false,
         };
         let original = s.upsert_record(&zone.id, &input("192.0.2.1")).unwrap();
+        assert!(!original.last_modified_at.is_empty());
+        assert_eq!(original.last_used_at, None);
+        let last_used_at = "2026-10-20T12:00:00+00:00";
+        assert_eq!(
+            s.mark_records_used("www.example.com", "A", last_used_at)
+                .unwrap(),
+            1
+        );
         s.set_record_disabled(&original.id, true).unwrap();
         let serial = s.get_zone(&zone.id).unwrap().unwrap().serial;
 
@@ -3881,6 +4219,8 @@ mod tests {
             .expect("record exists");
         assert_eq!(replaced.id, original.id);
         assert!(replaced.disabled, "staged state is kept");
+        assert!(replaced.last_modified_at >= original.last_modified_at);
+        assert_eq!(replaced.last_used_at.as_deref(), Some(last_used_at));
 
         let a_records: Vec<_> = s
             .list_records(&zone.id)

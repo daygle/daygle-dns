@@ -2,7 +2,7 @@
   import { api, formatApiError, getStoredUser } from '../api.js';
   import PageHeader from '../PageHeader.svelte';
   import { icons } from '../icons.svelte.js';
-  import { formatDate } from '../datetime.svelte.js';
+  import { formatDate, formatDateTime } from '../datetime.svelte.js';
 
   let users = $state([]);
   let loading = $state(true);
@@ -265,7 +265,7 @@
     <div class="table-wrap">
       <table>
         <thead>
-          <tr><th>Username</th><th>Name</th><th>Email</th><th>Role</th><th>Status</th><th>Two-Factor</th><th>Created</th><th class="num">Actions</th></tr>
+          <tr><th>Username</th><th>Name</th><th>Email</th><th>Role</th><th>Status</th><th>Two-Factor</th><th>Created</th><th>Last Login</th><th class="num">Actions</th></tr>
         </thead>
         <tbody>
           {#each users as user (user.username)}
@@ -283,6 +283,7 @@
               </td>
               <td><span class="pill" class:ok={user.two_factor}>{user.two_factor ? 'On' : 'Off'}</span></td>
               <td class="muted nowrap">{formatDate(user.created_at)}</td>
+              <td class="muted nowrap" title={user.last_login_at || ''}>{user.last_login_at ? formatDateTime(user.last_login_at) : 'Never'}</td>
               <td class="num">
                 <button class="secondary" onclick={(e) => { e.stopPropagation(); openEdit(user); }}>Edit</button>
               </td>
