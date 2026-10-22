@@ -165,10 +165,9 @@ pub fn first_answer(msg: &Message) -> Option<String> {
     msg.answers.first().map(|r| r.data.to_string())
 }
 
-/// Stop a bound server by cancelling its shutdown token.
+/// Stop a bound server and wait until its tasks (and so the database) are released.
 pub async fn shutdown(server: BoundServer) {
-    server.shutdown_token().cancel();
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    server.stop().await.expect("server stops cleanly");
 }
 
 /// Spawn a minimal authoritative-only upstream server serving `zone_name`.

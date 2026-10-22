@@ -128,6 +128,25 @@ impl BoundServer {
         Ok(())
     }
 
+    /// Stop every subsystem and wait for the DNS listeners to finish, so the
+    /// database is released before this returns (a restart can then replace
+    /// it).
+    pub async fn stop(mut self) -> Result<()> {
+        self.shutdown.cancel();
+        if let Some(task) = self.reload_task.take() {
+            task.abort();
+        }
+        match self.dns_task.take() {
+            Some(task) => match task.await {
+                Ok(result) => result,
+                Err(e) => Err(DaygleError::Internal(format!(
+                    "DNS supervisor panicked: {e}"
+                ))),
+            },
+            None => Ok(()),
+        }
+    }
+
     /// Run until the server is shut down (or a listener fails fatally).
     pub async fn run(mut self) -> Result<()> {
         let dns = match self.dns_task.take() {
@@ -589,14 +608,16 @@ pub async fn bind_with(
     });
     // The web server needs the router, and the router's settings handler
     // needs the web server: the handle is filled in right after.
-    let web_cell: Arc<std::sync::OnceLock<Arc<web::WebServer>>> =
+    // Weak: the router's state holds this closure, so a strong reference here
+    // would keep the web server (and with it the database) alive forever.
+    let web_cell: Arc<std::sync::OnceLock<std::sync::Weak<web::WebServer>>> =
         Arc::new(std::sync::OnceLock::new());
     let web_apply: daygle_dns_api::WebApplyFn = {
         let cell = web_cell.clone();
         Arc::new(move |settings| {
             let cell = cell.clone();
             Box::pin(async move {
-                match cell.get() {
+                match cell.get().and_then(|web| web.upgrade()) {
                     Some(web) => web.apply(settings).await.map(|_| ()),
                     None => Err("the web console is still starting".to_string()),
                 }
@@ -640,7 +661,7 @@ pub async fn bind_with(
         config.api.port,
         shutdown.clone(),
     ));
-    let _ = web_cell.set(web.clone());
+    let _ = web_cell.set(Arc::downgrade(&web));
     let web_addrs = match web.apply(config.web.clone()).await {
         Ok(addrs) => addrs,
         // The saved web settings cannot start (a port taken, a certificate
