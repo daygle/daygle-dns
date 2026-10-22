@@ -156,7 +156,7 @@ must use POST.
 ### Remote blocklist sources
 
 `daygle-dns-policy`'s `BlocklistSourceManager` fetches each configured
-`[[policy.blocklist_sources]]` URL over HTTP(S) (reqwest/rustls, 32 MiB body
+`[[policy.blocklist_sources]]` URL over HTTP(S) (reqwest/rustls, 64 MiB body
 cap, redirects, 30 s timeout) and parses the body in its declared format
 (`domains`, `hosts`, `adblock`, or `rpz`). A background task in `daygle-dns` polls on the
 smallest configured refresh interval and, when a source is due, swaps the

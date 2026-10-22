@@ -22,9 +22,8 @@ use daygle_dns_core::error::{DaygleError, Result};
 
 use crate::Blocklist;
 
-/// Fetch limits: a body larger than this is rejected (hosts files and adblock
-/// lists can be large, but 32 MiB is beyond any reasonable blocklist).
-const MAX_BODY_BYTES: usize = 32 * 1024 * 1024;
+/// Fetch limits: allow large hosts and adblock lists while bounding memory use.
+const MAX_BODY_BYTES: usize = 64 * 1024 * 1024;
 
 /// The enabled sources scoped to client groups, each compiled on its own and
 /// keyed by lower-cased source name. Shared between the refresh loop, which
