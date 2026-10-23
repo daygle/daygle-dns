@@ -920,7 +920,10 @@ impl RequestHandler for DnsDispatcher {
                 &mut response_handle,
                 request,
                 ResponseCode::Refused,
-                Some(Ede::new(ede::NOT_AUTHORITATIVE, "recursion is not available")),
+                Some(Ede::new(
+                    ede::NOT_AUTHORITATIVE,
+                    "recursion is not available",
+                )),
             )
             .await;
         };
