@@ -316,7 +316,9 @@ prefetch_* /serve_stale_secs/
 conditional_zones/recursion_access/recursion_networks/root_hints/
 case_randomization/rebinding_protection/local_root/opportunistic_encryption/
 outbound_ip_versions/client_policies), `dot`,
-`doh`, `doq` (enabled/port/self_signed/server_name [+ `doh.endpoint`]), `api`
+`doh`, `doq` (enabled/port/self_signed/server_name/cert_path/key_path/
+certificate/handshake_timeout_secs [+ `doh.endpoint`, `doq.idle_timeout_secs`]
+/allowed_networks), `api`
 (gui_enabled/cors_origins), `display` (the console's date/time defaults:
 `time_zone` = `system`, `UTC` or an IANA zone; `date_format` = `system`/`dmy`/
 `mdy`/`ymd`/`d_mon_y`; `time_format` = `system`/`24h`/`12h`), `syslog`, `dns64` and `ecs` (see below), and `authoritative`

@@ -919,6 +919,18 @@ impl DaygleConfig {
                 &self.authoritative.update_networks,
             ),
             ("PROXY protocol".to_string(), &self.server.proxy_protocol),
+            (
+                "DoT allowed networks".to_string(),
+                &self.dot.allowed_networks,
+            ),
+            (
+                "DoH allowed networks".to_string(),
+                &self.doh.allowed_networks,
+            ),
+            (
+                "DoQ allowed networks".to_string(),
+                &self.doq.allowed_networks,
+            ),
         ];
         for p in &self.recursive.client_policies {
             lists.push((format!("Client policy '{}'", p.name), &p.clients));
@@ -939,6 +951,9 @@ impl DaygleConfig {
             &mut self.authoritative.axfr_networks,
             &mut self.authoritative.update_networks,
             &mut self.server.proxy_protocol,
+            &mut self.dot.allowed_networks,
+            &mut self.doh.allowed_networks,
+            &mut self.doq.allowed_networks,
         ];
         for p in &mut self.recursive.client_policies {
             lists.push(&mut p.clients);
@@ -1165,6 +1180,10 @@ pub struct ListenerUpdate {
     /// governs its own handshake).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub handshake_timeout_secs: Option<u64>,
+    /// Client networks allowed to use this listener (addresses or network
+    /// names); empty or absent means everyone.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub allowed_networks: Option<Vec<String>>,
 }
 
 /// Partial updates for DoH.
@@ -1189,6 +1208,10 @@ pub struct DohUpdate {
     /// TLS handshake timeout in seconds.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub handshake_timeout_secs: Option<u64>,
+    /// Client networks allowed to use this listener (addresses or network
+    /// names); empty or absent means everyone.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub allowed_networks: Option<Vec<String>>,
 }
 
 /// Partial updates for the policy engine (allow/block lists and Filter AAAA).
@@ -1365,6 +1388,9 @@ impl RuntimeSettings {
             if let Some(v) = d.handshake_timeout_secs {
                 config.dot.handshake_timeout_secs = v;
             }
+            if let Some(v) = &d.allowed_networks {
+                config.dot.allowed_networks = trim_list(v);
+            }
         }
         if let Some(d) = &self.doh {
             if let Some(v) = d.enabled {
@@ -1394,6 +1420,9 @@ impl RuntimeSettings {
             if let Some(v) = d.handshake_timeout_secs {
                 config.doh.handshake_timeout_secs = v;
             }
+            if let Some(v) = &d.allowed_networks {
+                config.doh.allowed_networks = trim_list(v);
+            }
         }
         if let Some(d) = &self.doq {
             if let Some(v) = d.enabled {
@@ -1419,6 +1448,9 @@ impl RuntimeSettings {
             }
             if let Some(v) = d.idle_timeout_secs {
                 config.doq.idle_timeout_secs = v;
+            }
+            if let Some(v) = &d.allowed_networks {
+                config.doq.allowed_networks = trim_list(v);
             }
         }
         if let Some(p) = &self.policy {
@@ -1600,6 +1632,7 @@ impl RuntimeSettings {
                     .then(|| config.dot.certificate.clone()),
                 idle_timeout_secs: None,
                 handshake_timeout_secs: Some(config.dot.handshake_timeout_secs),
+                allowed_networks: Some(config.dot.allowed_networks.clone()),
             }),
             doh: Some(DohUpdate {
                 enabled: Some(config.doh.enabled),
@@ -1612,6 +1645,7 @@ impl RuntimeSettings {
                 certificate: (!config.doh.certificate.is_empty())
                     .then(|| config.doh.certificate.clone()),
                 handshake_timeout_secs: Some(config.doh.handshake_timeout_secs),
+                allowed_networks: Some(config.doh.allowed_networks.clone()),
             }),
             doq: Some(ListenerUpdate {
                 enabled: Some(config.doq.enabled),
@@ -1624,6 +1658,7 @@ impl RuntimeSettings {
                     .then(|| config.doq.certificate.clone()),
                 idle_timeout_secs: Some(config.doq.idle_timeout_secs),
                 handshake_timeout_secs: None,
+                allowed_networks: Some(config.doq.allowed_networks.clone()),
             }),
             policy: Some(PolicyUpdate {
                 allowlist: Some(config.policy.allowlist.clone()),
@@ -2133,6 +2168,19 @@ impl DaygleConfig {
                 return Err(DaygleError::Config(format!(
                     "recursive.recursion_networks contains invalid network '{network}'"
                 )));
+            }
+        }
+        for (section, networks) in [
+            ("dot", &self.dot.allowed_networks),
+            ("doh", &self.doh.allowed_networks),
+            ("doq", &self.doq.allowed_networks),
+        ] {
+            for network in networks {
+                if !self.is_network_entry(network) {
+                    return Err(DaygleError::Config(format!(
+                        "{section}.allowed_networks contains invalid network '{network}'"
+                    )));
+                }
             }
         }
         if self.recursive.recursion_access == RecursionAccess::Custom
@@ -3229,6 +3277,10 @@ pub struct DotSettings {
     /// complete the TLS handshake before the connection is dropped
     /// (1..=600, default 10).
     pub handshake_timeout_secs: u64,
+    /// Client networks allowed to use this listener (addresses or network
+    /// names). Empty means everyone; clients outside the list get REFUSED
+    /// and, on this listener only, are treated as allowed for recursion.
+    pub allowed_networks: Vec<String>,
 }
 
 impl Default for DotSettings {
@@ -3243,6 +3295,7 @@ impl Default for DotSettings {
             server_name: "daygle.local".to_string(),
             certificate: String::new(),
             handshake_timeout_secs: 10,
+            allowed_networks: vec![],
         }
     }
 }
@@ -3276,6 +3329,10 @@ pub struct DohSettings {
     /// complete the TLS handshake before the connection is dropped
     /// (1..=600, default 10).
     pub handshake_timeout_secs: u64,
+    /// Client networks allowed to use this listener (addresses or network
+    /// names). Empty means everyone; clients outside the list get REFUSED
+    /// and, on this listener only, are treated as allowed for recursion.
+    pub allowed_networks: Vec<String>,
 }
 
 impl Default for DohSettings {
@@ -3291,6 +3348,7 @@ impl Default for DohSettings {
             endpoint: "/dns-query".to_string(),
             certificate: String::new(),
             handshake_timeout_secs: 10,
+            allowed_networks: vec![],
         }
     }
 }
@@ -3409,6 +3467,10 @@ pub struct DoqSettings {
     /// Name of a console-managed certificate (stored in the database) to use.
     #[serde(default)]
     pub certificate: String,
+    /// Client networks allowed to use this listener (addresses or network
+    /// names). Empty means everyone; clients outside the list get REFUSED
+    /// and, on this listener only, are treated as allowed for recursion.
+    pub allowed_networks: Vec<String>,
 }
 
 impl Default for DoqSettings {
@@ -3423,6 +3485,7 @@ impl Default for DoqSettings {
             server_name: "daygle.local".to_string(),
             idle_timeout_secs: 600,
             certificate: String::new(),
+            allowed_networks: vec![],
         }
     }
 }
@@ -4675,6 +4738,67 @@ upstreams = ["192.0.2.20:5353"]
         let mut restored = DaygleConfig::default();
         RuntimeSettings::capture(&cfg).apply_to(&mut restored);
         assert_eq!(restored.recursive.local_root, cfg.recursive.local_root);
+    }
+
+    #[test]
+    fn listener_allowed_networks_validate_and_resolve() {
+        // A literal address or CIDR parses on its own...
+        DaygleConfig::parse("[dot]\nallowed_networks = [\"10.0.0.0/8\"]\n").unwrap();
+        // ...and so does the name of a configured network.
+        let cfg = DaygleConfig::parse(
+            r#"
+[[networks]]
+name = "LAN"
+cidrs = ["192.168.30.0/24"]
+
+[dot]
+allowed_networks = ["lan"]
+
+[doh]
+allowed_networks = ["192.168.31.0/24"]
+
+[doq]
+allowed_networks = ["LAN"]
+"#,
+        )
+        .unwrap();
+        let resolved = cfg.with_networks_resolved();
+        assert_eq!(resolved.dot.allowed_networks, ["192.168.30.0/24"]);
+        assert_eq!(resolved.doh.allowed_networks, ["192.168.31.0/24"]);
+        assert_eq!(resolved.doq.allowed_networks, ["192.168.30.0/24"]);
+        // The stored config keeps the names.
+        assert_eq!(cfg.dot.allowed_networks, ["lan"]);
+
+        // Unknown names are refused, labelled with their section.
+        for section in ["dot", "doh", "doq"] {
+            let text = format!("[{section}]\nallowed_networks = [\"Office\"]\n");
+            let err = DaygleConfig::parse(&text).unwrap_err().to_string();
+            assert!(
+                err.contains(&format!("{section}.allowed_networks")),
+                "{err}"
+            );
+        }
+    }
+
+    #[test]
+    fn listener_allowed_networks_capture_apply_round_trip() {
+        let mut cfg = DaygleConfig::default();
+        cfg.dot.allowed_networks = vec!["LAN".to_string()];
+        cfg.doh.allowed_networks = vec!["10.0.0.0/8".to_string(), "  ".to_string()];
+        cfg.doq.allowed_networks = vec!["VPN".to_string()];
+
+        let overlay = RuntimeSettings::capture(&cfg);
+        assert_eq!(
+            overlay.dot.as_ref().unwrap().allowed_networks.as_deref(),
+            Some(cfg.dot.allowed_networks.as_slice())
+        );
+
+        let mut restored = DaygleConfig::default();
+        overlay.apply_to(&mut restored);
+        assert_eq!(restored.dot.allowed_networks, ["LAN"]);
+        // Blank entries are dropped on apply.
+        assert_eq!(restored.doh.allowed_networks, ["10.0.0.0/8"]);
+        assert_eq!(restored.doq.allowed_networks, ["VPN"]);
     }
 
     #[test]

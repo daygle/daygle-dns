@@ -66,6 +66,15 @@ fn doq_endpoint(cert_path: &Path) -> quinn::Endpoint {
 /// Spawn a server with DoQ enabled on an ephemeral loopback port serving the
 /// `quic.test` zone (`secure.quic.test` -> 203.0.113.7).
 async fn doq_server(dir: &Path) -> (BoundServer, std::path::PathBuf) {
+    doq_server_with(dir, |_| {}).await
+}
+
+/// Like [`doq_server`], with `tweak` applied to the config before the server
+/// spawns (for tests that vary one listener setting).
+async fn doq_server_with(
+    dir: &Path,
+    tweak: impl FnOnce(&mut daygle_dns_core::config::DaygleConfig),
+) -> (BoundServer, std::path::PathBuf) {
     let db = dir.join("daygle-dns.db");
     let cert = dir.join("server.crt");
     let key = dir.join("server.key");
@@ -79,6 +88,7 @@ async fn doq_server(dir: &Path) -> (BoundServer, std::path::PathBuf) {
     config.doq.key_path = key.to_string_lossy().to_string();
     config.doq.server_name = "daygle.test".to_string();
     config.doq.idle_timeout_secs = 600;
+    tweak(&mut config);
 
     let server = spawn(config).await;
     let zone = server
@@ -130,6 +140,29 @@ async fn serves_queries_over_doq() {
     let second = doq_query("secure.quic.test.", RecordType::A, &connection).await;
     assert_eq!(second.response_code, ResponseCode::NoError);
     assert_eq!(first_answer(&second).as_deref(), Some("203.0.113.7"));
+
+    shutdown(server).await;
+}
+
+#[tokio::test]
+async fn allowed_networks_refuse_clients_outside_the_list() {
+    let dir = tempfile::tempdir().unwrap();
+    let (server, cert) = doq_server_with(dir.path(), |config| {
+        // The test client is 127.0.0.1, outside this list.
+        config.doq.allowed_networks = vec!["10.9.9.0/24".to_string()];
+    })
+    .await;
+
+    let doq = server.doq_addr.expect("DoQ is enabled");
+    let endpoint = doq_endpoint(&cert);
+    let connection = endpoint
+        .connect(doq, "daygle.test")
+        .expect("connect")
+        .await
+        .expect("handshake");
+
+    let msg = doq_query("secure.quic.test.", RecordType::A, &connection).await;
+    assert_eq!(msg.response_code, ResponseCode::Refused);
 
     shutdown(server).await;
 }

@@ -68,6 +68,10 @@
   let recursionNetworks = $state([]);
   let deniedNetworks = $state([]);
   let allowedNetworks = $state([]);
+  // Encrypted-listener client networks (Settings -> Listeners).
+  let dotNetworks = $state([]);
+  let dohNetworks = $state([]);
+  let doqNetworks = $state([]);
   // Multi-line textareas for the network allow-lists and NOTIFY targets.
   let axfrNetworks = $state([]);
   let updateNetworks = $state([]);
@@ -177,6 +181,9 @@
         recursionNetworks = [];
         deniedNetworks = [];
         allowedNetworks = [];
+        dotNetworks = [];
+        dohNetworks = [];
+        doqNetworks = [];
         axfrNetworks = [];
         updateNetworks = [];
         notifyTargetsText = '';
@@ -195,6 +202,9 @@
       dot = { ...config.dot };
       doh = { ...config.doh };
       doq = { ...config.doq };
+      dotNetworks = [...(config.dot?.allowed_networks || [])];
+      dohNetworks = [...(config.doh?.allowed_networks || [])];
+      doqNetworks = [...(config.doq?.allowed_networks || [])];
       api_ = { ...config.api };
       display_ = { time_zone: 'system', date_format: 'system', time_format: 'system', ...config.display };
       web_ = {
@@ -327,6 +337,7 @@
         key_path: dot.key_path || '',
         certificate: dot.certificate || '',
         handshake_timeout_secs: Number(dot.handshake_timeout_secs),
+        allowed_networks: [...dotNetworks],
       },
       doh: {
         enabled: !!doh.enabled,
@@ -338,6 +349,7 @@
         certificate: doh.certificate || '',
         endpoint: doh.endpoint,
         handshake_timeout_secs: Number(doh.handshake_timeout_secs),
+        allowed_networks: [...dohNetworks],
       },
       doq: {
         enabled: !!doq.enabled,
@@ -347,6 +359,7 @@
         cert_path: doq.cert_path || '',
         key_path: doq.key_path || '',
         certificate: doq.certificate || '',
+        allowed_networks: [...doqNetworks],
       },
       display: { ...display_ },
       web: {
@@ -909,7 +922,16 @@
         <label><span>Key Path</span><input bind:value={dot.key_path} placeholder="/etc/daygle-dns/certs/server.key" /></label>
       {/if}
     </div>
-    <p class="muted help">Clients connect to port {dot.port || 853} (the standard port is 853).</p>
+    <div class="stacked" style="margin-top: 12px">
+      <span>Client Networks (empty means everyone)</span>
+      <NetworkPicker {networks} bind:value={dotNetworks} />
+    </div>
+    <p class="muted help">
+      Clients connect to port {dot.port || 853} (the standard port is 853).
+      Clients outside these networks get REFUSED on this listener; clients
+      inside it may use recursion here even when Recursion Access is set to
+      Private Networks Only.
+    </p>
   </div>
   <div class="card" style="margin-bottom: 14px">
     <h3 style="margin: 0 0 10px">DNS over HTTPS</h3>
@@ -935,7 +957,11 @@
       {/if}
       <label><span>Endpoint Path</span><input bind:value={doh.endpoint} placeholder="/dns-query" /></label>
     </div>
-    <p class="muted help">Clients use <code>https://{doh.server_name || 'this-server'}{Number(doh.port) === 443 ? '' : `:${doh.port}`}{doh.endpoint || '/dns-query'}</code>. The standard port is 443.</p>
+    <div class="stacked" style="margin-top: 12px">
+      <span>Client Networks (empty means everyone)</span>
+      <NetworkPicker {networks} bind:value={dohNetworks} />
+    </div>
+    <p class="muted help">Clients use <code>https://{doh.server_name || 'this-server'}{Number(doh.port) === 443 ? '' : `:${doh.port}`}{doh.endpoint || '/dns-query'}</code>. The standard port is 443. Clients outside these networks get REFUSED on this listener; clients inside it may use recursion here even when Recursion Access is set to Private Networks Only.</p>
   </div>
   <div class="card" style="margin-bottom: 14px">
     <h3 style="margin: 0 0 10px">DNS over QUIC</h3>
@@ -959,8 +985,15 @@
         <label><span>Key Path</span><input bind:value={doq.key_path} placeholder="/etc/daygle-dns/certs/server.key" /></label>
       {/if}
     </div>
+    <div class="stacked" style="margin-top: 12px">
+      <span>Client Networks (empty means everyone)</span>
+      <NetworkPicker {networks} bind:value={doqNetworks} />
+    </div>
     <p class="muted help">
       Clients connect to UDP port {doq.port || 853} (the standard port is 853).
+      Clients outside these networks get REFUSED on this listener; clients
+      inside it may use recursion here even when Recursion Access is set to
+      Private Networks Only.
       Manage certificates, and see when they expire, on the Certificates page.
     </p>
   </div>

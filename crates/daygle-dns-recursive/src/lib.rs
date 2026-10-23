@@ -507,21 +507,33 @@ impl RecursiveResolver {
     /// every client regardless; this only gates queries that would be
     /// resolved here.
     pub fn allows_client(&self, client: IpAddr) -> bool {
-        let allowed = match &self.inner.allowed_clients {
-            None => true,
-            Some(networks) => {
-                let client = unmap(client);
-                networks.iter().any(|n| n.contains(&client))
-                    // "Private networks" also means this host's own global
-                    // IPv6 networks: LANs mostly number IPv6 devices from
-                    // the ISP's prefix, not ULA.
-                    || (client.is_ipv6()
-                        && self.inner.settings.recursion_access == RecursionAccess::PrivateNetworks
-                        && daygle_dns_core::config::on_link_ipv6_networks()
-                            .iter()
-                            .any(|n| n.contains(&client)))
-            }
-        };
+        self.allows_client_with_listener(client, false)
+    }
+
+    /// [`Self::allows_client`], where `listener_allowed` marks a client
+    /// listed on the encrypted listener the query arrived on
+    /// (`dot`/`doh`/`doq.allowed_networks`): such a client is treated as
+    /// network-permitted for recursion on that listener alone, so an
+    /// access list can serve remote encrypted clients without opening
+    /// plain-DNS recursion. A client policy of `refuse` still wins.
+    pub fn allows_client_with_listener(&self, client: IpAddr, listener_allowed: bool) -> bool {
+        let allowed = listener_allowed
+            || match &self.inner.allowed_clients {
+                None => true,
+                Some(networks) => {
+                    let client = unmap(client);
+                    networks.iter().any(|n| n.contains(&client))
+                        // "Private networks" also means this host's own global
+                        // IPv6 networks: LANs mostly number IPv6 devices from
+                        // the ISP's prefix, not ULA.
+                        || (client.is_ipv6()
+                            && self.inner.settings.recursion_access
+                                == RecursionAccess::PrivateNetworks
+                            && daygle_dns_core::config::on_link_ipv6_networks()
+                                .iter()
+                                .any(|n| n.contains(&client)))
+                }
+            };
         allowed
             && !self
                 .inner

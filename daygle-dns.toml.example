@@ -256,6 +256,11 @@ notify_listen_enabled = false
 enabled = false
 listen = "0.0.0.0"
 port = 853
+# Client networks allowed on this listener: addresses, CIDRs or names of
+# Settings -> Networks. Clients outside the list get REFUSED on it, and
+# clients inside may use recursion here even when recursion_access is
+# "private_networks". Empty (the default) serves everyone.
+# allowed_networks = ["192.168.0.0/16", "LAN"]
 # How long a client may take to complete the TLS handshake before its
 # connection is dropped (seconds, 1..=600; default 10).
 # handshake_timeout_secs = 10
@@ -279,6 +284,8 @@ listen = "0.0.0.0"
 port = 443
 # TLS handshake timeout in seconds (1..=600; default 10).
 # handshake_timeout_secs = 10
+# As [dot]: who may use this listener; empty serves everyone.
+# allowed_networks = ["192.168.0.0/16"]
 # May reuse the same certificate as DoT.
 cert_path = "/etc/daygle-dns/certs/server.crt"
 key_path = "/etc/daygle-dns/certs/server.key"
@@ -293,6 +300,8 @@ endpoint = "/dns-query"
 enabled = false
 listen = "0.0.0.0"
 port = 853
+# As [dot]: who may use this listener; empty serves everyone.
+# allowed_networks = ["192.168.0.0/16"]
 cert_path = "/etc/daygle-dns/certs/server.crt"
 key_path = "/etc/daygle-dns/certs/server.key"
 self_signed = true

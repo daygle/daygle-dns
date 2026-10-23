@@ -4103,6 +4103,9 @@ pub struct ListenerUpdate {
     pub key_path: Option<String>,
     pub certificate: Option<String>,
     pub handshake_timeout_secs: Option<u64>,
+    /// Client networks allowed to use this listener (addresses or network
+    /// names); empty or absent means everyone.
+    pub allowed_networks: Option<Vec<String>>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -4117,6 +4120,9 @@ pub struct DohUpdate {
     pub endpoint: Option<String>,
     pub certificate: Option<String>,
     pub handshake_timeout_secs: Option<u64>,
+    /// Client networks allowed to use this listener (addresses or network
+    /// names); empty or absent means everyone.
+    pub allowed_networks: Option<Vec<String>>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -4267,6 +4273,9 @@ pub async fn update_settings(
             config.dot.handshake_timeout_secs = v;
             listeners_affected = true;
         }
+        if let Some(v) = &d.allowed_networks {
+            config.dot.allowed_networks = normalize_policy_networks(v);
+        }
     }
     if let Some(d) = &update.doh {
         if let Some(v) = d.enabled {
@@ -4305,6 +4314,9 @@ pub async fn update_settings(
             config.doh.handshake_timeout_secs = v;
             listeners_affected = true;
         }
+        if let Some(v) = &d.allowed_networks {
+            config.doh.allowed_networks = normalize_policy_networks(v);
+        }
     }
     if let Some(d) = &update.doq {
         if let Some(v) = d.enabled {
@@ -4334,6 +4346,9 @@ pub async fn update_settings(
         if let Some(v) = &d.certificate {
             config.doq.certificate = v.clone();
             listeners_affected = true;
+        }
+        if let Some(v) = &d.allowed_networks {
+            config.doq.allowed_networks = normalize_policy_networks(v);
         }
     }
     if let Some(a) = &update.api {

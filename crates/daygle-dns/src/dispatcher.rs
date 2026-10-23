@@ -665,6 +665,37 @@ impl RequestHandler for DnsDispatcher {
             .await;
         }
 
+        // 0c. Listener access control (`dot`/`doh`/`doq.allowed_networks`):
+        // an encrypted listener may list the client networks it serves.
+        // A client outside the list is refused before any other processing,
+        // and being inside the list also counts as recursion permission on
+        // this listener (see the recursion gate below). Plain UDP/TCP and
+        // empty lists have no gate.
+        let listener_allowed = self.listener_gate(client, info.protocol);
+        if matches!(listener_allowed, Some(false)) {
+            debug!(query = %qname, %client, "client not allowed on this listener");
+            self.metrics.inc(&self.metrics.blocked);
+            self.observe(
+                client,
+                &qname,
+                &rtype,
+                protocol,
+                Outcome::Blocked,
+                Some("REFUSED"),
+                started,
+            );
+            return send_error(
+                &mut response_handle,
+                request,
+                ResponseCode::Refused,
+                Some(Ede::new(
+                    ede::PROHIBITED,
+                    "client is not allowed on this listener",
+                )),
+            )
+            .await;
+        }
+
         // 1. Policy. The engine is swapped atomically on reload; clone out the
         // current one so a single query sees one consistent snapshot.
         let policy = self.policy.load_full();
@@ -930,7 +961,7 @@ impl RequestHandler for DnsDispatcher {
         // Recursion access control (`recursive.recursion_access`): clients
         // outside the allowed networks get REFUSED for anything not answered
         // above, so the server is not an open resolver by default.
-        if !resolver.allows_client(client) {
+        if !resolver.allows_client_with_listener(client, matches!(listener_allowed, Some(true))) {
             debug!(query = %qname, %client, "recursion refused for this client");
             self.observe(
                 client,
@@ -1225,6 +1256,44 @@ impl DnsDispatcher {
         let validating = request.metadata.checking_disabled
             && request.edns.as_ref().is_some_and(|e| e.flags().dnssec_ok);
         (dns64.applies_to(client) && !validating).then_some(dns64)
+    }
+
+    /// Whether the encrypted listener a query arrived on carries a
+    /// non-empty `allowed_networks` list, and whether `client` is in it:
+    /// `Some(allowed)` for a transport with a list, `None` for plain
+    /// UDP/TCP, an empty list (the default), or no live config. Entries
+    /// are literal addresses/CIDRs or names of Settings -> Networks (the
+    /// stored config keeps names).
+    fn listener_gate(
+        &self,
+        client: IpAddr,
+        protocol: hickory_server::net::xfer::Protocol,
+    ) -> Option<bool> {
+        use hickory_server::net::xfer::Protocol as P;
+        let config = self.config.as_ref()?.load();
+        let networks = match protocol {
+            P::Tls => &config.dot.allowed_networks,
+            P::Quic => &config.doq.allowed_networks,
+            P::Https => &config.doh.allowed_networks,
+            _ => return None,
+        };
+        if networks.is_empty() {
+            return None;
+        }
+        Some(networks.iter().any(|entry| {
+            match daygle_dns_core::config::parse_network(entry) {
+                Some(net) => net.contains(&client),
+                // A Settings -> Networks name. An unresolvable entry
+                // matches nobody - the config validator rejects those,
+                // and failing open here could expose the listener.
+                None => config.find_network(entry).is_some_and(|n| {
+                    n.cidrs
+                        .iter()
+                        .filter_map(|c| daygle_dns_core::config::parse_network(c))
+                        .any(|net| net.contains(&client))
+                }),
+            }
+        }))
     }
 
     /// AAAA records made from `qname`'s A records (with any CNAMEs leading

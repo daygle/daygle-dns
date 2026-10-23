@@ -79,3 +79,75 @@ async fn serves_queries_over_doh() {
 
     shutdown(server).await;
 }
+
+#[tokio::test]
+async fn allowed_networks_refuse_clients_outside_the_list() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("daygle-dns.db");
+    let cert = dir.path().join("server.crt");
+    let key = dir.path().join("server.key");
+
+    let mut config = base_config(&db);
+    config.doh.enabled = true;
+    config.doh.self_signed = true;
+    config.doh.cert_path = cert.to_string_lossy().to_string();
+    config.doh.key_path = key.to_string_lossy().to_string();
+    config.doh.server_name = "daygle.test".to_string();
+    // The test client is 127.0.0.1, outside this list.
+    config.doh.allowed_networks = vec!["10.9.9.0/24".to_string()];
+
+    let server = spawn(config).await;
+    let zone = server
+        .catalog
+        .store()
+        .create_zone(&ZoneInput {
+            name: "https.test".to_string(),
+            ..Default::default()
+        })
+        .unwrap();
+    server
+        .catalog
+        .store()
+        .upsert_record(
+            &zone.id,
+            &RecordInput {
+                name: "secure".to_string(),
+                rtype: "A".to_string(),
+                content: "203.0.113.7".to_string(),
+                ttl: 300,
+                priority: 0,
+                disabled: false,
+            },
+        )
+        .unwrap();
+    server.catalog.reload().unwrap();
+
+    let doh = server.doh_addr.expect("DoH is enabled");
+
+    let mut query = Message::new(0x1234, MessageType::Query, OpCode::Query);
+    query.add_query(Query::query(
+        Name::from_utf8("secure.https.test.").unwrap(),
+        RecordType::A,
+    ));
+    let body = query.to_vec().expect("encode query");
+
+    let client = reqwest::Client::builder()
+        .danger_accept_invalid_certs(true) // lgtm
+        .build()
+        .unwrap();
+    let resp = client
+        .post(format!("https://{doh}/dns-query")) // lgtm
+        .header("Content-Type", "application/dns-message")
+        .header("Accept", "application/dns-message")
+        .body(body)
+        .send()
+        .await
+        .expect("DoH request");
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+
+    let bytes = resp.bytes().await.unwrap();
+    let response = Message::from_vec(&bytes).expect("decode DoH response");
+    assert_eq!(response.response_code, ResponseCode::Refused);
+
+    shutdown(server).await;
+}

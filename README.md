@@ -234,18 +234,24 @@ dnssec_validate = true
 enabled = false
 port = 853
 self_signed = true
+# Clients outside these networks get REFUSED on the DoT listener; clients
+# inside it may recurse there even when recursion_access is private_networks.
+# Empty (default) serves everyone. Addresses, CIDRs or Settings->Network names.
+# allowed_networks = ["192.168.0.0/16", "LAN"]
 
 [doh]
 enabled = false
 port = 443
 self_signed = true
 endpoint = "/dns-query"
+# allowed_networks = ["192.168.0.0/16"]   # as [dot]: empty serves everyone
 
 [doq]
 # DNS over QUIC (RFC 9250), default port 853/udp.
 enabled = false
 port = 853
 self_signed = true
+# allowed_networks = ["192.168.0.0/16"]   # as [dot]: empty serves everyone
 
 # ── Policy: blocklist_sources are file-owned (via file watcher), ─────
 # allowlist/blocklist are DB-backed (GUI or PUT /api/config).
