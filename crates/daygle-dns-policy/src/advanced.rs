@@ -225,6 +225,7 @@ mod tests {
             blocklists: vec![],
             response: BlockResponse::NxDomain,
             position: 0,
+            last_modified_at: None,
         }
     }
 

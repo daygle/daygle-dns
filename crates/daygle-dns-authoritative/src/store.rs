@@ -152,7 +152,8 @@ CREATE TABLE IF NOT EXISTS blocking_groups (
     block_regex TEXT NOT NULL DEFAULT '[]',
     blocklists  TEXT NOT NULL DEFAULT '[]',
     response    TEXT NOT NULL DEFAULT '{"kind":"nx_domain"}',
-    position    INTEGER NOT NULL DEFAULT 0
+    position    INTEGER NOT NULL DEFAULT 0,
+    last_modified_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS console_users (
@@ -313,6 +314,7 @@ impl ZoneStore {
         migrate_dnssec_keys(&conn)?;
         migrate_console_user_profile(&conn)?;
         migrate_blocking_group_lists(&conn)?;
+        migrate_blocking_group_timestamps(&conn)?;
         // SQLite ships with foreign-key enforcement off (per connection), so
         // the schema's `ON DELETE CASCADE` never fired and deleting a zone
         // left its records, DNSSEC private keys and secondary state behind.
@@ -646,7 +648,7 @@ impl ZoneStore {
         let conn = self.lock_conn()?;
         let mut stmt = conn.prepare(
             "SELECT id, name, enabled, clients, allow, block, allow_regex, block_regex,
-                    response, position, blocklists
+                    response, position, blocklists, last_modified_at
              FROM blocking_groups ORDER BY position, name",
         )?;
         let rows = stmt.query_map([], row_to_blocking_group)?;
@@ -659,7 +661,7 @@ impl ZoneStore {
         let group = conn
             .query_row(
                 "SELECT id, name, enabled, clients, allow, block, allow_regex, block_regex,
-                        response, position, blocklists
+                        response, position, blocklists, last_modified_at
                  FROM blocking_groups WHERE id = ?1",
                 [id],
                 row_to_blocking_group,
@@ -686,6 +688,8 @@ impl ZoneStore {
         let blocklists = encode_json(&input.blocklists, "blocklists")?;
         let response = serde_json::to_string(&input.response)
             .map_err(|e| DaygleError::Database(format!("encode response: {e}")))?;
+        // Both branches below stamp the wall-clock time of this create/edit.
+        let now = Utc::now().to_rfc3339();
         let conn = self.lock_conn()?;
         if let Some(id) = &input.id {
             let duplicate: bool = conn.query_row(
@@ -701,7 +705,7 @@ impl ZoneStore {
             let updated = conn.execute(
                 "UPDATE blocking_groups SET name = ?2, enabled = ?3, clients = ?4,
                     allow = ?5, block = ?6, allow_regex = ?7, block_regex = ?8,
-                    response = ?9, blocklists = ?10
+                    response = ?9, blocklists = ?10, last_modified_at = ?11
                  WHERE id = ?1",
                 params![
                     id,
@@ -714,6 +718,7 @@ impl ZoneStore {
                     block_regex,
                     response,
                     blocklists,
+                    now,
                 ],
             )?;
             drop(conn);
@@ -729,12 +734,13 @@ impl ZoneStore {
         conn.execute(
             "INSERT INTO blocking_groups
                 (id, name, enabled, clients, allow, block, allow_regex, block_regex,
-                 response, blocklists, position)
+                 response, blocklists, position, last_modified_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
-                 (SELECT COALESCE(MAX(position), -1) + 1 FROM blocking_groups))
+                 (SELECT COALESCE(MAX(position), -1) + 1 FROM blocking_groups), ?11)
              ON CONFLICT(name) DO UPDATE SET
                 enabled = ?3, clients = ?4, allow = ?5, block = ?6,
-                allow_regex = ?7, block_regex = ?8, response = ?9, blocklists = ?10",
+                allow_regex = ?7, block_regex = ?8, response = ?9, blocklists = ?10,
+                last_modified_at = ?11",
             params![
                 id,
                 name,
@@ -746,6 +752,7 @@ impl ZoneStore {
                 block_regex,
                 response,
                 blocklists,
+                now,
             ],
         )?;
         drop(conn);
@@ -1779,6 +1786,7 @@ fn row_to_blocking_group(row: &rusqlite::Row<'_>) -> rusqlite::Result<BlockingGr
         blocklists: decode_list(row, 10)?,
         response,
         position: row.get(9)?,
+        last_modified_at: row.get(11)?,
     })
 }
 
@@ -3588,6 +3596,25 @@ fn migrate_blocking_group_lists(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// Add the `last_modified_at` column to `blocking_groups` for databases
+/// created before it existed (existing rows stay `NULL` until first edited).
+fn migrate_blocking_group_timestamps(conn: &Connection) -> Result<()> {
+    let has: bool = conn.query_row(
+        "SELECT EXISTS(
+            SELECT 1 FROM pragma_table_info('blocking_groups') WHERE name = 'last_modified_at'
+         )",
+        [],
+        |r| r.get(0),
+    )?;
+    if !has {
+        conn.execute(
+            "ALTER TABLE blocking_groups ADD COLUMN last_modified_at TEXT",
+            [],
+        )?;
+    }
+    Ok(())
+}
+
 /// Add the personal profile columns (`first_name`, `last_name`, `email`) and
 /// display preference columns to `console_users` for databases created
 /// before they existed.
@@ -3759,8 +3786,12 @@ mod tests {
             created.response,
             BlockResponse::Redirect("0.0.0.0".parse().unwrap())
         );
+        // Creating records a wall-clock last-modified time.
+        assert!(created.last_modified_at.is_some());
 
         // Upsert by the same name updates in place (id and position preserved).
+        // A second passes first so the rewritten timestamp is observable.
+        std::thread::sleep(std::time::Duration::from_millis(1100));
         let updated = s
             .upsert_blocking_group(&BlockingGroupInput {
                 id: None,
@@ -3778,6 +3809,10 @@ mod tests {
         assert_eq!(updated.id, created.id);
         assert_eq!(updated.position, created.position);
         assert!(!updated.enabled);
+        assert_ne!(
+            created.last_modified_at, updated.last_modified_at,
+            "editing a group rewrites its last-modified time"
+        );
         assert_eq!(s.list_blocking_groups().unwrap().len(), 1);
 
         assert_eq!(

@@ -1,6 +1,7 @@
 <script>
   import { api, formatApiError } from '../api.js';
   import NetworkPicker from '../NetworkPicker.svelte';
+  import { formatDateTime } from '../datetime.svelte.js';
 
   let groups = $state([]);
   // Named networks (Settings -> Networks) for the client picker.
@@ -203,7 +204,7 @@
     <div class="table-wrap">
       <table>
         <thead>
-          <tr><th>Name</th><th>Clients</th><th>Rules</th><th>Blocked Response</th><th class="num">Actions</th></tr>
+          <tr><th>Name</th><th>Clients</th><th>Rules</th><th>Blocked Response</th><th>Last Modified</th><th class="num">Actions</th></tr>
         </thead>
         <tbody>
           {#each groups as g, i (g.id)}
@@ -221,6 +222,9 @@
                 {/if}
               </td>
               <td class="muted">{responseLabel(g.response)}</td>
+              <td class="muted nowrap" title={g.last_modified_at || ''}>
+                {g.last_modified_at ? formatDateTime(g.last_modified_at) : '-'}
+              </td>
               <td class="num">
                 <div class="row" style="gap: 6px; justify-content: flex-end">
                   <button class="secondary" onclick={() => move(g, 'up')} disabled={i === 0} aria-label="Move {g.name} up">↑</button>

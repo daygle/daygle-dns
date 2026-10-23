@@ -55,6 +55,11 @@ pub struct BlockingGroup {
     pub response: BlockResponse,
     /// Ordering position (lower groups are evaluated first).
     pub position: i64,
+    /// When the group was last created or edited through the console or API,
+    /// as RFC 3339. `null` for rows that predate this field and have not been
+    /// edited since; reordering alone does not change it.
+    #[serde(default)]
+    pub last_modified_at: Option<String>,
 }
 
 fn default_true() -> bool {

@@ -905,7 +905,9 @@ TLS certificates stored in the database and managed from the console; the
 `dot`/`doh`/`doq` listener sections select one with `certificate = "<name>"`
 (overriding `cert_path`/`key_path`/`self_signed`). `GET` lists metadata only
 - PEM material is never returned. Each entry has `name`, `server_name`,
-`created_at`, `in_use` (the listeners using it) and details read from the
+`created_at` (rewritten whenever the stored material is replaced - by a
+re-upload or an ACME renewal - so it doubles as "last modified"),
+`in_use` (the listeners using it) and details read from the
 leaf certificate: `subject`, `issuer`, `self_signed`, `names` (DNS and IP
 subject alternative names) and `not_before`/`not_after` (RFC 3339); these
 are `null` if the certificate cannot be read. `POST` creates a self-signed certificate
@@ -1086,7 +1088,9 @@ GET  /api/policy/blocklist/sources/validate?url=...&format=...
 
 `GET` returns per-source status for the remote blocklist sources configured
 under `[[policy.blocklist_sources]]`: name, URL, format, scope, refresh
-interval, last-fetch age, and the number of domains each source contributed.
+interval, last-fetch age (`last_fetch`, seconds since the last successful
+fetch) with its wall-clock time (`last_fetch_at`, RFC 3339, `null` before
+the first fetch), and the number of domains each source contributed.
 `total_domains` counts the sources that apply to everyone.
 
 `POST` forces an immediate refresh of every source and applies the merged
@@ -1103,6 +1107,7 @@ result, returning the new total domain count.
       "scope": "everyone",
       "refresh_secs": 43200,
       "last_fetch": 3600,
+      "last_fetch_at": "2026-10-24T09:15:00+00:00",
       "domains": 182344,
       "last_error": null
     }
@@ -1218,7 +1223,10 @@ a configured source).
 `POST /api/policy/blocking` creates a group or updates the one with the same
 name; with an `id` it updates that group, so it can be renamed (`400` if
 another group has the new name, `404` if the id is unknown). The
-dispatcher's blocking engine is rebuilt immediately.
+dispatcher's blocking engine is rebuilt immediately. Group objects carry
+`last_modified_at` (RFC 3339): the time of the last create or edit.
+Reordering with `move` does not change it, and rows written before the
+field existed read `null` until their next edit.
 `DELETE /api/policy/blocking/{id}` removes a group.
 `POST /api/policy/blocking/{id}/move` with `{"direction": "up"}` or
 `{"direction": "down"}` swaps the group with its neighbour and returns the

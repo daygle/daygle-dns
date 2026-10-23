@@ -1642,6 +1642,12 @@ async fn redirect_answers_nodata_for_types_the_target_cannot_serve() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 200);
+    // The created group reports when it was last changed.
+    let created: serde_json::Value = resp.json().await.unwrap();
+    assert!(
+        created["last_modified_at"].is_string(),
+        "expected an RFC 3339 last_modified_at: {created}"
+    );
     let udp = server.addrs().udp.unwrap();
 
     let a = udp_query(udp, "ads.test.", RecordType::A).await;
