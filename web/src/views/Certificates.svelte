@@ -2,7 +2,7 @@
   import { api, formatApiError, getStoredUser } from '../api.js';
   import PageHeader from '../PageHeader.svelte';
   import { icons } from '../icons.svelte.js';
-  import { formatDate } from '../datetime.svelte.js';
+  import { formatDate, formatDateTime } from '../datetime.svelte.js';
 
   // Opens Settings on a tab (null for viewers, who cannot).
   let { onOpenSettings = null } = $props();
@@ -325,7 +325,7 @@
     <div class="table-wrap">
       <table>
         <thead>
-          <tr><th>Name</th><th>For</th><th>Issued By</th><th>Expires</th><th>Used By</th>{#if !isViewer}<th class="num">Actions</th>{/if}</tr>
+          <tr><th>Name</th><th>For</th><th>Issued By</th><th>Last Modified</th><th>Expires</th><th>Used By</th>{#if !isViewer}<th class="num">Actions</th>{/if}</tr>
         </thead>
         <tbody>
           {#each certs as cert (cert.name)}
@@ -354,6 +354,11 @@
                     {/if}
                   </div>
                 {/if}
+              </td>
+              <!-- created_at is rewritten on every replace/renewal, so it is
+                   the last-modified time. Pending ACME requests have none. -->
+              <td class="muted nowrap" title={cert.created_at || ''}>
+                {cert.created_at ? formatDateTime(cert.created_at) : '-'}
               </td>
               <td class="nowrap">
                 {#if cert.not_after && st.text !== 'Does Not Expire'}<div>{formatDate(cert.not_after)}</div>{/if}
