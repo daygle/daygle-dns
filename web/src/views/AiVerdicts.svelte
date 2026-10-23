@@ -153,13 +153,11 @@
         {#each rows as r (r.domain)}
           <tr>
             <td>
-              <code>{r.domain}</code>
-              {#if r.overridden}<span class="pill ok" title="Never auto-blocked by the AI">Exempt</span>{/if}
+              <code>{r.domain}</code>{#if r.overridden} <span class="pill ok" title="Never auto-blocked by the AI">Exempt</span>{/if}
             </td>
             <td>
               {#if r.category}
-                {titleCase(r.category)}
-                {#if r.severity === 'threat'}<span class="pill err">Threat</span>{/if}
+                {titleCase(r.category)} {#if r.severity === 'threat'}<span class="pill err">Threat</span>{/if}
               {:else}<span class="muted">-</span>{/if}
             </td>
             <td>
