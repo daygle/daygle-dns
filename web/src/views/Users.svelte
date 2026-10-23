@@ -2,7 +2,7 @@
   import { api, formatApiError, getStoredUser } from '../api.js';
   import PageHeader from '../PageHeader.svelte';
   import { icons } from '../icons.svelte.js';
-  import { formatDate, formatDateTime } from '../datetime.svelte.js';
+  import { formatDateTime } from '../datetime.svelte.js';
 
   let users = $state([]);
   let loading = $state(true);
@@ -282,7 +282,7 @@
                 <span class="pill" class:ok={user.enabled}>{user.enabled ? 'Enabled' : 'Disabled'}</span>
               </td>
               <td><span class="pill" class:ok={user.two_factor}>{user.two_factor ? 'On' : 'Off'}</span></td>
-              <td class="muted nowrap">{formatDate(user.created_at)}</td>
+              <td class="muted nowrap" title={user.created_at || ''}>{formatDateTime(user.created_at)}</td>
               <td class="muted nowrap" title={user.last_login_at || ''}>{user.last_login_at ? formatDateTime(user.last_login_at) : 'Never'}</td>
               <td class="num">
                 <button class="secondary" onclick={(e) => { e.stopPropagation(); openEdit(user); }}>Edit</button>

@@ -13,6 +13,7 @@
   import Users from './views/Users.svelte';
   import Certificates from './views/Certificates.svelte';
   import About from './views/About.svelte';
+  import Donate from './views/Donate.svelte';
   import Update from './views/Update.svelte';
   import Account from './views/Account.svelte';
   import { icons } from './icons.svelte.js';
@@ -130,6 +131,7 @@
     { id: 'settings', label: 'Settings', icon: icons.settings, viewer: true },
     { id: 'update', label: 'Update', icon: icons.update },
     { id: 'about', label: 'About', icon: icons.about },
+    { id: 'donate', label: 'Donate', icon: icons.heart },
   ].filter((t) => !isViewer || !t.viewer);
 </script>
 
@@ -225,6 +227,8 @@
         <Ai onOpenSettings={isViewer ? null : openSettings} />
       {:else if view === 'about'}
         <About />
+      {:else if view === 'donate'}
+        <Donate />
       {:else if view === 'update'}
         <Update />
       {:else if view === 'logs'}
