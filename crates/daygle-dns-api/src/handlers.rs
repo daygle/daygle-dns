@@ -326,6 +326,9 @@ pub async fn blocklist_sources(State(state): State<AppState>) -> Response {
                 "scope": s.scope,
                 "refresh_secs": s.refresh_secs,
                 "last_fetch": s.last_fetch.map(|t| t.elapsed().as_secs()),
+                "last_fetch_at": s
+                    .last_fetch_at
+                    .map(|t| chrono::DateTime::<chrono::Utc>::from(t).to_rfc3339()),
                 "domains": s.domains,
                 "last_error": s.last_error,
             })

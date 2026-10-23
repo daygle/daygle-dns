@@ -13,7 +13,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 use std::sync::{Arc, Mutex, RwLock};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use daygle_dns_core::config::{
     normalize_domains, BlocklistFormat, BlocklistScope, BlocklistSourceConfig,
@@ -62,6 +62,10 @@ pub struct SourceStatus {
     pub scope: BlocklistScope,
     /// When the source was last fetched successfully.
     pub last_fetch: Option<Instant>,
+    /// The same event as wall-clock time: `last_fetch` only yields a
+    /// relative age (and dies with the process), so this is what lets the
+    /// console show an absolute "Last Updated" date and time.
+    pub last_fetch_at: Option<SystemTime>,
     /// Domains contributed by this source on its last successful fetch.
     pub domains: usize,
     /// Cached domain set from the last successful fetch. Kept so a source
@@ -124,6 +128,7 @@ impl BlocklistSourceManager {
                 refresh_secs: s.refresh_secs,
                 scope: s.scope,
                 last_fetch: None,
+                last_fetch_at: None,
                 domains: 0,
                 cached_domains: Arc::default(),
                 last_error: None,
@@ -162,14 +167,16 @@ impl BlocklistSourceManager {
     /// the current status and already-fetched domains.
     ///
     /// Sources that already had a successful fetch keep their `last_fetch`
-    /// timestamp; only newly-added or changed entries are marked stale. This
+    /// and `last_fetch_at` timestamps; only newly-added or changed entries
+    /// are marked stale. This
     /// avoids a thundering-herd refetch on every source edit.
     pub fn set_sources(&self, sources: Vec<BlocklistSourceConfig>) {
         let mut guard = self.sources.lock().unwrap();
         if *guard == sources {
             return;
         }
-        // Carry forward `last_fetch`, `domains`, and `last_error` for sources
+        // Carry forward `last_fetch`, `last_fetch_at`, `domains`, and
+        // `last_error` for sources
         // whose identity is unchanged. The (name, url) tuple is the identity.
         let prev_status = self.status.lock().unwrap();
         let prev_index: std::collections::HashMap<(String, String), SourceStatus> = prev_status
@@ -190,6 +197,7 @@ impl BlocklistSourceManager {
                     refresh_secs: s.refresh_secs,
                     scope: s.scope,
                     last_fetch: None,
+                    last_fetch_at: None,
                     domains: 0,
                     cached_domains: Arc::default(),
                     last_error: None,
@@ -202,6 +210,7 @@ impl BlocklistSourceManager {
                         && prev.enabled == new.enabled
                     {
                         new.last_fetch = prev.last_fetch;
+                        new.last_fetch_at = prev.last_fetch_at;
                         new.domains = prev.domains;
                         new.cached_domains = prev.cached_domains.clone();
                         new.last_error = prev.last_error.clone();
@@ -305,6 +314,7 @@ impl BlocklistSourceManager {
                         if let Some(st) = status.get_mut(i) {
                             if st.name == source.name {
                                 st.last_fetch = Some(now);
+                                st.last_fetch_at = Some(SystemTime::now());
                                 st.domains = domain_count(&domains, source.format);
                                 st.cached_domains = Arc::new(domains);
                                 st.last_error = None;
@@ -383,6 +393,8 @@ impl BlocklistSourceManager {
     /// /api/policy/blocklist/refresh`).
     pub async fn refresh_all(&self) -> Result<Blocklist> {
         // Reset the per-source due-tracking so everything is considered due.
+        // Only the schedule marker is cleared: `last_fetch_at` keeps the
+        // wall-clock time of the last success until a refresh replaces it.
         {
             let mut status = self.status.lock().unwrap();
             for st in status.iter_mut() {

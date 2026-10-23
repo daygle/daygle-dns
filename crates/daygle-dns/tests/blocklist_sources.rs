@@ -117,6 +117,20 @@ async fn blocklist_source_blocks_domains_and_refreshes() {
         "expected >= 2 domains, got {fetched_domains}"
     );
 
+    // The status also carries the wall-clock time of the last successful
+    // fetch as an RFC 3339 timestamp (the console's "Last Updated" column).
+    let last_fetch_at = json["sources"][0]["last_fetch_at"]
+        .as_str()
+        .unwrap_or_else(|| panic!("last_fetch_at missing: {json}"));
+    let fetched_at = chrono::DateTime::parse_from_rfc3339(last_fetch_at)
+        .unwrap_or_else(|e| panic!("last_fetch_at not RFC 3339 ({e}): {last_fetch_at}"))
+        .with_timezone(&chrono::Utc);
+    let age = chrono::Utc::now() - fetched_at;
+    assert!(
+        age > -chrono::Duration::seconds(5) && age < chrono::Duration::minutes(5),
+        "last_fetch_at {last_fetch_at} is not within the last 5 minutes"
+    );
+
     // Change the source content and trigger a manual refresh; the new domain
     // must start being blocked.
     source.set("127.0.0.1 ads-new.test\n");

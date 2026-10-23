@@ -1,5 +1,6 @@
 <script>
   import { api, formatApiError } from '../api.js';
+  import { formatDateTime } from '../datetime.svelte.js';
 
   let sources = $state([]);
   let total = $state(0);
@@ -325,7 +326,7 @@
           <th>Applies To</th>
           <th>Refreshes Every</th>
           <th class="num">Domains</th>
-          <th>Last Refresh</th>
+          <th>Last Updated</th>
           <th>Status</th>
           <th class="num">Actions</th>
         </tr>
@@ -344,7 +345,9 @@
             <td>{s.scope === 'groups' ? 'Client Groups' : 'Everyone'}</td>
             <td class="muted">{interval(s.refresh_secs)}</td>
             <td class="num">{fmt(s.domains)}</td>
-            <td class="muted">{ago(s.last_fetch)}</td>
+            <td class="muted" style="white-space: nowrap" title={ago(s.last_fetch)}>
+              {s.last_fetch_at ? formatDateTime(s.last_fetch_at) : 'Never'}
+            </td>
             <td>
               {#if s.last_error}
                 <span class="pill err">Fetch Failed</span>
