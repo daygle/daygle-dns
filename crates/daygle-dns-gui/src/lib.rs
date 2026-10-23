@@ -129,6 +129,15 @@ mod tests {
     }
 
     #[test]
+    fn serves_favicon() {
+        let asset = lookup("/favicon.svg").expect("favicon is embedded");
+        assert_eq!(asset.content_type, "image/svg+xml");
+        assert!(!asset.bytes.is_empty());
+        // Un-hashed at the dist root: revalidated on every load.
+        assert_eq!(asset.cache_control(), "no-cache");
+    }
+
+    #[test]
     fn cache_policy_for_shell_and_hashed_assets() {
         // The shell must never be cached long-term.
         assert_eq!(cache_control("index.html"), "no-cache");
