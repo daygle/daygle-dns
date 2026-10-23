@@ -375,6 +375,7 @@
         oninput={() => (pickerOpen = true)}
         onkeydown={onPickerKeydown}
       />
+      <span class="picker-chevron" class:open={pickerOpen} aria-hidden="true">▾</span>
       {#if pickerOpen}
         <div id="zone-list" class="picker-list" role="listbox" onmousedown={(e) => e.preventDefault()}>
           {#if zoneMatches.length === 0}
@@ -608,10 +609,21 @@
     background: var(--panel-2);
     border: 1px solid var(--border);
     border-radius: 6px;
-    padding: 6px 8px;
+    padding: 6px 26px 6px 8px;
     font: inherit;
     color: inherit;
   }
+  .picker-chevron {
+    position: absolute;
+    right: 9px;
+    top: 50%;
+    transform: translateY(-50%);
+    pointer-events: none;
+    color: var(--muted);
+    font-size: 0.8rem;
+    transition: transform 0.12s ease;
+  }
+  .picker-chevron.open { transform: translateY(-50%) rotate(180deg); }
   .picker-list {
     position: absolute;
     top: calc(100% + 4px);
