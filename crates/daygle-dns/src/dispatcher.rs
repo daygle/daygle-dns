@@ -369,6 +369,36 @@ impl DnsDispatcher {
         tokio::task::spawn_blocking(move || store.mark_records_used(&name, &rtype, &used_at));
     }
 
+    /// Mark a split-horizon entry as used, coalescing database writes per
+    /// entry within each clock minute (the record-use cache under a
+    /// namespaced key).
+    fn mark_split_horizon_entry_used(&self, entry_id: &str) {
+        if tokio::runtime::Handle::try_current().is_err() {
+            return;
+        }
+        let key = ("@split-horizon".to_string(), entry_id.to_string());
+        let current_minute = chrono::Utc::now().timestamp().div_euclid(60);
+        {
+            let Ok(mut recent) = self.record_use_cache.lock() else {
+                return;
+            };
+            if recent
+                .get(&key)
+                .is_some_and(|last_minute| *last_minute >= current_minute)
+            {
+                return;
+            }
+            recent.insert(key, current_minute);
+            if recent.len() > 4096 {
+                recent.retain(|_, minute| *minute >= current_minute - 1);
+            }
+        }
+        let store = self.catalog.store_handle();
+        let id = entry_id.to_string();
+        let used_at = chrono::Utc::now().to_rfc3339();
+        tokio::task::spawn_blocking(move || store.mark_split_horizon_used(&id, &used_at));
+    }
+
     /// Serve an AXFR/IXFR zone transfer from the stored zone data.
     ///
     /// The response answer section is `SOA, records..., SOA` as RFC 5936
@@ -847,6 +877,7 @@ impl RequestHandler for DnsDispatcher {
             if let Some(m) = index.lookup(client, &qname, info.query.query_type()) {
                 debug!(query = %qname, %client, "split-horizon answer");
                 self.metrics.inc(&self.metrics.split_horizon);
+                self.mark_split_horizon_entry_used(&m.entry_id);
                 self.observe(
                     client,
                     &qname,

@@ -819,11 +819,19 @@ holds the A/AAAA subset of `records`:
       ],
       "ttl": 60,
       "disabled": false,
-      "position": 0
+      "position": 0,
+      "last_modified_at": "2026-10-24T09:30:00+00:00",
+      "last_used_at": "2026-10-24T10:02:11+00:00"
     }
   ]
 }
 ```
+
+`last_modified_at` is RFC 3339 and is set when an entry is created or edited;
+`last_used_at` is set when the entry last served a split-horizon answer
+(written at most once per entry per minute). Both are absent when unknown:
+entries created before timestamps were tracked carry neither until edited,
+and a never-used entry has no `last_used_at`.
 
 `networks` in the `GET` response lists the named networks (built-in ones
 included). `POST /api/split-horizon/networks` (`{"name", "cidrs"}`) and

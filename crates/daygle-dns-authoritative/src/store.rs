@@ -119,7 +119,9 @@ CREATE TABLE IF NOT EXISTS split_horizon_entries (
     records  TEXT NOT NULL DEFAULT '[]',
     ttl      INTEGER NOT NULL DEFAULT 60,
     disabled INTEGER NOT NULL DEFAULT 0,
-    position INTEGER NOT NULL DEFAULT 0
+    position INTEGER NOT NULL DEFAULT 0,
+    last_modified_at TEXT,
+    last_used_at     TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_split_horizon_domain ON split_horizon_entries(domain);
@@ -307,6 +309,7 @@ impl ZoneStore {
         migrate_zone_metadata(&conn)?;
         migrate_record_metadata(&conn)?;
         migrate_split_horizon_records(&conn)?;
+        migrate_split_horizon_timestamps(&conn)?;
         migrate_dnssec_keys(&conn)?;
         migrate_console_user_profile(&conn)?;
         migrate_blocking_group_lists(&conn)?;
@@ -1201,7 +1204,8 @@ impl ZoneStore {
     pub fn list_split_horizon_entries(&self) -> Result<Vec<SplitHorizonEntry>> {
         let conn = self.lock_conn()?;
         let mut stmt = conn.prepare(
-            "SELECT id, domain, networks, ips, records, ttl, disabled, position
+            "SELECT id, domain, networks, ips, records, ttl, disabled, position,
+                    last_modified_at, last_used_at
              FROM split_horizon_entries ORDER BY domain, position",
         )?;
         let rows = stmt.query_map([], |row| {
@@ -1225,6 +1229,8 @@ impl ZoneStore {
                 ttl: row.get(5)?,
                 disabled: row.get::<_, i64>(6)? != 0,
                 position: row.get(7)?,
+                last_modified_at: row.get(8)?,
+                last_used_at: row.get(9)?,
             })
         })?;
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
@@ -1253,6 +1259,7 @@ impl ZoneStore {
             [&domain],
             |r| r.get(0),
         )?;
+        let now = chrono::Utc::now().to_rfc3339();
         let entry = SplitHorizonEntry {
             id: Uuid::new_v4().to_string(),
             domain,
@@ -1262,11 +1269,13 @@ impl ZoneStore {
             ttl: input.ttl,
             disabled: input.disabled,
             position: next_position,
+            last_modified_at: Some(now.clone()),
+            last_used_at: None,
         };
         conn.execute(
             "INSERT INTO split_horizon_entries
-                (id, domain, networks, ips, records, ttl, disabled, position)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                (id, domain, networks, ips, records, ttl, disabled, position, last_modified_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 entry.id,
                 entry.domain,
@@ -1276,6 +1285,7 @@ impl ZoneStore {
                 entry.ttl as i64,
                 entry.disabled as i64,
                 entry.position,
+                now,
             ],
         )?;
         Ok(entry)
@@ -1299,7 +1309,8 @@ impl ZoneStore {
         let conn = self.lock_conn()?;
         let changed = conn.execute(
             "UPDATE split_horizon_entries
-             SET domain = ?2, networks = ?3, ips = ?4, records = ?5, ttl = ?6, disabled = ?7
+             SET domain = ?2, networks = ?3, ips = ?4, records = ?5, ttl = ?6, disabled = ?7,
+                 last_modified_at = ?8
              WHERE id = ?1",
             params![
                 id,
@@ -1309,6 +1320,7 @@ impl ZoneStore {
                 records_json,
                 input.ttl as i64,
                 input.disabled as i64,
+                chrono::Utc::now().to_rfc3339(),
             ],
         )?;
         if changed == 0 {
@@ -1327,6 +1339,27 @@ impl ZoneStore {
         let conn = self.lock_conn()?;
         let changed = conn.execute("DELETE FROM split_horizon_entries WHERE id = ?1", [id])?;
         Ok(changed > 0)
+    }
+
+    /// Mark a split-horizon entry as having served an answer. Only the first
+    /// use per minute is written, but the stored timestamp keeps that use's
+    /// exact time (the same coalescing as [`Self::mark_records_used`]).
+    pub fn mark_split_horizon_used(&self, id: &str, used_at: &str) -> Result<usize> {
+        let parsed = chrono::DateTime::parse_from_rfc3339(used_at)
+            .map_err(|e| DaygleError::Internal(format!("invalid record-use timestamp: {e}")))?;
+        let minute_start = parsed
+            .with_second(0)
+            .and_then(|time| time.with_nanosecond(0))
+            .ok_or_else(|| DaygleError::Internal("invalid record-use minute".to_string()))?
+            .to_rfc3339();
+        let used_at = parsed.to_rfc3339();
+        let conn = self.lock_conn()?;
+        Ok(conn.execute(
+            "UPDATE split_horizon_entries SET last_used_at = ?2
+             WHERE id = ?1
+               AND (last_used_at IS NULL OR julianday(last_used_at) < julianday(?3))",
+            params![id, used_at, minute_start],
+        )?)
     }
 
     /// Move a split-horizon entry one position up or down within the ordering
@@ -3491,6 +3524,28 @@ fn migrate_zone_metadata(conn: &Connection) -> Result<()> {
         "UPDATE zones SET last_modified_at = created_at WHERE last_modified_at = ''",
         [],
     )?;
+    Ok(())
+}
+
+/// Add the `last_modified_at` / `last_used_at` columns to
+/// `split_horizon_entries` for databases created before entry usage was
+/// tracked. Existing rows keep NULL (shown as never / unknown).
+fn migrate_split_horizon_timestamps(conn: &Connection) -> Result<()> {
+    for column in ["last_modified_at", "last_used_at"] {
+        let has: bool = conn.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM pragma_table_info('split_horizon_entries') WHERE name = ?1
+             )",
+            [column],
+            |r| r.get(0),
+        )?;
+        if !has {
+            conn.execute(
+                &format!("ALTER TABLE split_horizon_entries ADD COLUMN {column} TEXT"),
+                [],
+            )?;
+        }
+    }
     Ok(())
 }
 

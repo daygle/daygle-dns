@@ -371,3 +371,49 @@ async fn split_horizon_cname_answers_all_types() {
 
     shutdown(server).await;
 }
+
+#[tokio::test]
+async fn entries_track_last_modified_and_last_used() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("daygle-dns.db");
+    let server = spawn(config_with_zone(&db)).await;
+    let store = server.catalog.store();
+
+    let input = SplitHorizonEntryInput {
+        domain: "lan.example.test".to_string(),
+        networks: vec!["LAN".to_string()],
+        ips: vec!["10.0.0.5".to_string()],
+        records: vec![],
+        ttl: 60,
+        disabled: false,
+    };
+    let entry = store.create_split_horizon_entry(&input).unwrap();
+    // A created entry carries a modification time and has never been used.
+    assert!(entry.last_modified_at.is_some());
+    assert!(entry.last_used_at.is_none());
+    server.catalog.reload().unwrap();
+    let udp = server.udp_addr.expect("UDP is enabled");
+
+    // Serving the entry records its use.
+    let msg = udp_query(udp, "lan.example.test.", RecordType::A).await;
+    assert_eq!(msg.response_code, ResponseCode::NoError);
+    assert_eq!(first_answer(&msg).as_deref(), Some("10.0.0.5"));
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    let list = store.list_split_horizon_entries().unwrap();
+    assert!(
+        list[0].last_used_at.is_some(),
+        "serving the entry records use"
+    );
+    assert!(list[0].last_modified_at.is_some());
+
+    // Editing refreshes the modification time and keeps the use time.
+    let edited = store
+        .update_split_horizon_entry(&entry.id, &SplitHorizonEntryInput { ttl: 120, ..input })
+        .unwrap()
+        .unwrap();
+    assert_eq!(edited.ttl, 120);
+    assert!(edited.last_modified_at.is_some());
+    assert!(edited.last_used_at.is_some());
+
+    shutdown(server).await;
+}

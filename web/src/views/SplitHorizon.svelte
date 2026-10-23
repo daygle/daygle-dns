@@ -1,6 +1,7 @@
 <script>
   import { api, formatApiError } from '../api.js';
   import { duration } from '../aiLabels.js';
+  import { formatDateTime } from '../datetime.svelte.js';
   import NetworkPicker from '../NetworkPicker.svelte';
 
   // Opens Settings on a tab (absent for read-only accounts).
@@ -194,6 +195,8 @@
               <th>Answers</th>
               <th class="num">TTL</th>
               <th>Status</th>
+              <th>Last Used</th>
+              <th>Last Modified</th>
               <th class="num">Actions</th>
             </tr>
           </thead>
@@ -224,6 +227,12 @@
                   <span class="pill" class:ok={!entry.disabled}>
                     {entry.disabled ? 'Disabled' : 'Active'}
                   </span>
+                </td>
+                <td class="muted" title={entry.last_used_at || ''}>
+                  {entry.last_used_at ? formatDateTime(entry.last_used_at) : 'Never'}
+                </td>
+                <td class="muted" title={entry.last_modified_at || ''}>
+                  {entry.last_modified_at ? formatDateTime(entry.last_modified_at) : '-'}
                 </td>
                 <td class="num">
                   <div class="row" style="gap: 6px; justify-content: flex-end; flex-wrap: nowrap">

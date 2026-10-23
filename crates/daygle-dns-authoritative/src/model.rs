@@ -297,6 +297,13 @@ pub struct SplitHorizonEntry {
     pub disabled: bool,
     /// Ordering for entries of the same domain (first match wins on ties).
     pub position: i64,
+    /// When the entry was created or last edited (RFC 3339). `None` for
+    /// entries last written before timestamps were tracked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_modified_at: Option<String>,
+    /// When a split-horizon answer last served this entry (RFC 3339).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_used_at: Option<String>,
 }
 
 /// Payload to create or update a split-horizon entry.

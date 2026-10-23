@@ -28,6 +28,8 @@ use crate::model::SplitHorizonEntry;
 /// nothing for the query type; [`SplitHorizonIndex::lookup`] returns `None`
 /// in that case instead, so callers fall through to normal resolution.
 pub struct SplitHorizonMatch {
+    /// The matched entry's id, for usage tracking.
+    pub entry_id: String,
     pub records: Vec<Record>,
 }
 
@@ -41,6 +43,8 @@ pub struct SplitHorizonIndex {
 
 /// One rule with network names resolved to CIDRs and records pre-parsed.
 struct ResolvedEntry {
+    /// The stored entry's id (for usage tracking).
+    id: String,
     /// Fully qualified domain, lowercase, no trailing dot.
     domain: String,
     /// Client networks that match; empty means every client *only when the
@@ -97,6 +101,7 @@ impl SplitHorizonIndex {
                         .collect()
                 };
                 ResolvedEntry {
+                    id: e.id.clone(),
                     domain: e.domain.trim().trim_end_matches('.').to_ascii_lowercase(),
                     networks,
                     match_all: e.networks.is_empty(),
@@ -166,7 +171,10 @@ impl SplitHorizonIndex {
                 .into_iter()
                 .map(|(_, rdata)| Record::from_rdata(name.clone(), entry.ttl, rdata.clone()))
                 .collect();
-            return Some(SplitHorizonMatch { records });
+            return Some(SplitHorizonMatch {
+                entry_id: entry.id.clone(),
+                records,
+            });
         }
         None
     }
@@ -228,6 +236,8 @@ mod tests {
             ttl: 60,
             disabled: false,
             position: position as i64,
+            last_modified_at: None,
+            last_used_at: None,
         }
     }
 
@@ -502,6 +512,8 @@ mod tests {
             ttl: 60,
             disabled: false,
             position: 0,
+            last_modified_at: None,
+            last_used_at: None,
         };
         let idx = SplitHorizonIndex::build(&[], &[e]);
         let a = idx.lookup(lan(), "www.example.com", RecordType::A).unwrap();
