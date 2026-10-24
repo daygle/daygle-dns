@@ -555,7 +555,7 @@
                 <button class="secondary" onclick={() => onOpenRecords(zone.id)}>Records</button>
                 <button class="secondary" onclick={() => toggleZoneEnabled(zone)} title={zone.enabled ? 'Stop serving this zone but keep its records' : 'Serve this zone again'}>{zone.enabled ? 'Disable' : 'Enable'}</button>
                 {#if zone.zone_type !== 'secondary'}
-                  <button class="secondary" onclick={() => openSoa(zone)} title="Edit the zone's SOA (nameserver, contact, timers)">SOA</button>
+                  <button class="secondary" onclick={() => openSoa(zone)} title="Edit the zone's settings: primary nameserver, contact and timers (its SOA record)">Edit</button>
                   <button class="secondary" onclick={() => toggleSign(zone)} title={zone.dnssec ? 'Stop DNSSEC signing' : 'Sign the zone with DNSSEC'}>{zone.dnssec ? 'Unsign' : 'Sign'}</button>
                   {#if zone.dnssec}
                     <button class="secondary" onclick={() => toggleNsec3(zone)} title={zone.nsec3 ? 'Prove missing names with NSEC' : 'Prove missing names with NSEC3, which keeps the zone from being listed by walking it'}>{zone.nsec3 ? 'Use NSEC' : 'Use NSEC3'}</button>
