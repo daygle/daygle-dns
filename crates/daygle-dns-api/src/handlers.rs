@@ -194,6 +194,11 @@ pub async fn status(State(state): State<AppState>) -> Response {
         Err(e) => return map_err(e),
     };
     let config = state.config.load_full();
+    // Update availability for the dashboard's banner. The release cache is
+    // kept warm in the background (refresh_release_forever), so this is a
+    // cache hit in steady state; the blocking variant keeps the - rare -
+    // cold refresh and the filesystem evidence checks off the async workers.
+    let release = run_blocking(crate::update::release_comparison).await;
     Json(serde_json::json!({
         "version": VERSION,
         "uptime_secs": state.started_at.elapsed().as_secs(),
@@ -216,6 +221,10 @@ pub async fn status(State(state): State<AppState>) -> Response {
             .is_ok_and(|n| n > 0),
         "setup_pending": setup_pending(&state),
         "api_enabled": config.api.enabled,
+        // Update availability (both null on hosts that cannot self-update):
+        // the dashboard shows a banner with a link to the Update page.
+        "update_available": release.as_ref().map(|r| r.outdated),
+        "latest_release": release.as_ref().map(|r| r.latest.clone()),
         "blocklist_sources": config.policy.blocklist_sources.len(),
         "remote_blocklist_domains": state.policy.load_full().remote_blocklist_len(),
     }))

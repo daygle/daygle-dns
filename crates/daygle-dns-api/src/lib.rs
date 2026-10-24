@@ -75,6 +75,10 @@ mod handlers;
 mod networks;
 mod update;
 
+// The release-cache warmer is spawned by the binary next to the ACME
+// renewals; `update` itself stays internal.
+pub use update::refresh_release_forever;
+
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;

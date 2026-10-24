@@ -169,9 +169,18 @@ GET /api/status
   "dot_enabled": true,
   "doh_enabled": false,
   "doq_enabled": false,
-  "api_enabled": true
+  "api_enabled": true,
+  "update_available": true,
+  "latest_release": "1.0.2"
 }
 ```
+
+`update_available` (whether the running binary is older than the latest
+published release) and `latest_release` are compared against GitHub; both
+are `null` on hosts that cannot self-update (dev installs, non-Linux), so
+the dashboard hides the update banner there. The release lookup is cached
+for 120 s and refreshed in the background, so status polls never wait on
+the network.
 
 ### Metrics
 

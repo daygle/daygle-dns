@@ -661,6 +661,10 @@ pub async fn bind_with(
         app_state.clone(),
         shutdown.clone(),
     ));
+    // Keep the latest-release lookup warm so /api/status (polled by the
+    // dashboard every 10 s) can report update availability without ever
+    // waiting on GitHub. No-op on hosts that cannot self-update.
+    tokio::spawn(daygle_dns_api::refresh_release_forever(shutdown.clone()));
     let app = router(app_state);
     let web = Arc::new(web::WebServer::new(
         app,

@@ -689,6 +689,38 @@ fn config_dir_hint() -> Option<&'static Path> {
     }
 }
 
+/// Keep the latest-release lookup warm in the background.
+///
+/// `/api/status` (polled every few seconds by every open console page, so the
+/// dashboard can flag an available update) would otherwise refresh the
+/// 120 s release cache **inline** once per cycle, stalling that response for
+/// up to the curl timeout every two minutes. A warmer cycle just ahead of
+/// the cache TTL keeps every status read a pure cache hit. Returns
+/// immediately on hosts that cannot self-update (dev, non-Linux), where the
+/// console gets no update information at all.
+pub async fn refresh_release_forever(shutdown: tokio_util::sync::CancellationToken) {
+    // The install-evidence checks are filesystem-only and static for the
+    // process lifetime; decide once whether probing GitHub is worthwhile.
+    if !can_update(config_dir_hint()) {
+        return;
+    }
+    // Refresh right away so an operator opening the console just after a
+    // start sees the availability banner without waiting for a first cycle.
+    let mut wait = std::time::Duration::ZERO;
+    loop {
+        tokio::select! {
+            _ = shutdown.cancelled() => return,
+            _ = tokio::time::sleep(wait) => {}
+        }
+        // curl with up-to-5 s timeouts: keep it off the async workers, and
+        // ignore the outcome (a failure leaves the last-known cache value).
+        let _ = tokio::task::spawn_blocking(fetch_latest_release_version).await;
+        // Slightly under the cache TTL so the cache is fresh again before
+        // any status request can notice it went stale.
+        wait = std::time::Duration::from_secs(RELEASE_CACHE_SECS.saturating_sub(15));
+    }
+}
+
 /// The AI model files managed by the models-bundle update flow (flat names
 /// inside `$CONFIG_DIR/models`). The bundle manifest may only ever select
 /// these names - the apply side re-validates.

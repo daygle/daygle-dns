@@ -6,6 +6,9 @@
   import { icons } from '../icons.svelte.js';
   import { formatTime, formatTimeShort, formatDateTime } from '../datetime.svelte.js';
 
+  // Navigate to the Update page (passed by the app shell).
+  let { onOpenUpdate = null } = $props();
+
   let status = $state(null);
   let metrics = $state(null);
   let stats = $state(null);
@@ -170,6 +173,22 @@
 
 <PageHeader icon={icons.status} title="Server Status" tagline="Live traffic and health at a glance. Updates every 10 seconds." />
 
+{#if status?.update_available}
+  <div class="card update-available">
+    <div class="spread">
+      <div>
+        <strong>Update available</strong>
+        <p class="muted small" style="margin: 2px 0 0">
+          Release v{status.latest_release} is available; this server runs
+          v{status.version}. Open the Update page to install it.
+        </p>
+      </div>
+      {#if onOpenUpdate}
+        <button class="secondary" onclick={onOpenUpdate}>Open Update</button>
+      {/if}
+    </div>
+  </div>
+{/if}
 {#if error}
   <div class="card" style="border-color: var(--danger); color: var(--danger); margin-bottom: 14px">
     Could not refresh ({error.replace(/\.$/, '')}).{#if loadedAt}{' '}Showing the data from {formatDateTime(loadedAt)}.{/if}
@@ -332,6 +351,9 @@
 {/if}
 
 <style>
+  .update-available { border-color: var(--warn, #b58900); background: rgba(181, 137, 0, 0.08); margin-bottom: 14px; }
+  .update-available strong { color: var(--warn, #b58900); }
+
   /* Five tiles: one row, or rows of three and two, or (on phones) Total
      Queries across the top over two rows of two - never a lone tile. */
   .grid {
