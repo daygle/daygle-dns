@@ -505,6 +505,21 @@ time_zone = "system"
 date_format = "system"
 time_format = "system"
 
+# ---------------------------------------------------------------------------
+# Update checks (Settings -> General: "Update Checks"). Background-only
+# probing of GitHub for a newer release; the dashboard flags one with a
+# banner on the Status page. Never touches DNS traffic. Do not shorten
+# check_interval_secs much: GitHub's unauthenticated API allows 60 requests
+# per hour per client address, shared with everything else using it - the
+# floor is 600 (10 minutes). enabled = false removes the banner; "Update
+# Now" on the Update page and the manual updater command keep working.
+# Changes made in the console are stored in the database and win after the
+# first boot. Interval choices in the console: 15 min, 1 h, 6 h, 1 day.
+# ---------------------------------------------------------------------------
+[updates]
+enabled = true
+check_interval_secs = 3600
+
 # Named networks (Settings -> Networks): give a set of addresses a name that
 # settings taking client networks can use instead of the addresses. `Private`
 # and `This Server` (loopback) are built in.

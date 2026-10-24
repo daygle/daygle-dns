@@ -109,6 +109,8 @@
   let dns64Clients = $state([]);
   let ecs = $state({ enabled: false, subnet: '', ipv4_prefix: 24, ipv6_prefix: 56 });
   let syslog_ = $state({ enabled: false, server: '', facility: 'daemon', level: 'info', queries: false });
+  // Update checks (Settings -> General). Background only; never on DNS traffic.
+  let updates_ = $state({ enabled: true, check_interval_secs: 3600 });
   const zoneChoices = timeZoneOptions();
   // Users who chose their own settings don't see the defaults change.
   const ownPrefsSet = $derived(
@@ -213,6 +215,7 @@
         http_port: config.web?.http_port || config.api?.port || 5380,
       };
       syslog_ = { enabled: false, server: '', facility: 'daemon', level: 'info', queries: false, ...config.syslog };
+      updates_ = { enabled: true, check_interval_secs: 3600, ...config.updates };
       dns64 = { enabled: !!config.dns64?.enabled, prefix: config.dns64?.prefix || '64:ff9b::/96' };
       dns64Clients = [...(config.dns64?.clients || [])];
       ecs = { enabled: false, subnet: '', ipv4_prefix: 24, ipv6_prefix: 56, ...config.ecs };
@@ -387,6 +390,10 @@
         facility: syslog_.facility || 'daemon',
         level: syslog_.level || 'info',
         queries: !!syslog_.queries,
+      },
+      updates: {
+        enabled: !!updates_.enabled,
+        check_interval_secs: Number(updates_.check_interval_secs) || 3600,
       },
       authoritative: {
         default_record_ttl: Number(authoritative.default_record_ttl),
@@ -618,6 +625,29 @@
       syslog, over UDP by default (port 514), or TCP with
       <code>tcp://host:port</code>. Changes apply as soon as they are saved.
       Every query can be a lot of traffic on a busy server.
+    </p>
+  </div>
+  <div class="card" style="margin-bottom: 14px">
+    <h3 style="margin: 0 0 10px">Update Checks</h3>
+    <div class="form-grid">
+      <label class="check"><input type="checkbox" bind:checked={updates_.enabled} /> <span>Check GitHub for Newer Releases</span></label>
+      <label>
+        <span>Check Interval</span>
+        <select bind:value={updates_.check_interval_secs} disabled={!updates_.enabled}>
+          <option value={900}>Every 15 Minutes</option>
+          <option value={3600}>Hourly</option>
+          <option value={21600}>Every 6 Hours</option>
+          <option value={86400}>Daily</option>
+        </select>
+      </label>
+    </div>
+    <p class="muted help">
+      Checks run in the background, away from DNS traffic, and flag a newer
+      release with a banner on the Status page. Intervals under 10 minutes
+      are refused: GitHub's unauthenticated API allows 60 requests per hour
+      per address, shared with everything else using this network. Turning
+      checks off removes the banner; "Update Now" on the Update page and the
+      manual update command still work.
     </p>
   </div>
   {:else if tab === 'recursive'}

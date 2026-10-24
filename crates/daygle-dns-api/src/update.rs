@@ -545,43 +545,29 @@ fn check_github_connectivity() -> Option<PreflightCheck> {
     }
 }
 
-/// Cached latest-release version (tag without the leading `v`) and when it
-/// was fetched, shared across status polls: the console hits this endpoint
-/// every few seconds during a run, and GitHub rate-limits unauthenticated
-/// API calls per IP.
-static LATEST_RELEASE: std::sync::Mutex<Option<(String, std::time::Instant)>> =
-    std::sync::Mutex::new(None);
+/// The latest published release version read off the server, cached across
+/// the console's status polls. Only the background warmer writes it (at the
+/// configured `[updates].check_interval_secs` cadence), so the console's
+/// frequent reads never count against GitHub's unauthenticated API budget
+/// (60 requests per hour per client IP, shared with everything else using
+/// that address).
+static LATEST_RELEASE: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
 
-/// Cache lifetime for the latest-release lookup. Short enough that a freshly
-/// published release shows up in the console within ~2 minutes, long enough
-/// to stay well under GitHub's unauthenticated API budget.
-const RELEASE_CACHE_SECS: u64 = 120;
+/// The cached latest published release version (e.g. `"1.0.2"`), or `None`
+/// until the first successful check. Pure cache read: no network.
+pub fn latest_release_cached() -> Option<String> {
+    LATEST_RELEASE.lock().ok().and_then(|g| g.clone())
+}
 
-/// Fetch the latest published release version (e.g. `"1.0.2"`), or `None`
-/// when GitHub is unreachable, rate-limited, or has no release. Mirrors the
-/// updater helper's resolution strategy: the GitHub API first, the
-/// `/releases/latest` HTML redirect as fallback.
-fn fetch_latest_release_version() -> Option<String> {
-    // Serve the cached value while it is fresh. After the TTL, attempt a
-    // refresh but fall back to the last-known value on failure rather than
-    // forgetting it, so a rate-limited or unreachable GitHub shows the last
-    // known release instead of "unknown".
-    let cached = LATEST_RELEASE
-        .lock()
-        .ok()
-        .and_then(|g| g.as_ref().map(|(ver, at)| (ver.clone(), *at)));
-    if let Some((ver, at)) = cached.as_ref() {
-        if at.elapsed().as_secs() < RELEASE_CACHE_SECS {
-            return Some(ver.clone());
-        }
-    }
+/// Refresh the cached latest release. Blocking (curl with multi-second
+/// timeouts); called only by the background warmer. On an unreachable or
+/// rate-limited GitHub the previous value stays, so the console keeps
+/// showing the last known release instead of "unknown".
+fn refresh_latest_release_cache() {
     if let Some(version) = fetch_latest_release_uncached() {
         if let Ok(mut guard) = LATEST_RELEASE.lock() {
-            *guard = Some((version.clone(), std::time::Instant::now()));
+            *guard = Some(version);
         }
-        Some(version)
-    } else {
-        cached.map(|(ver, _)| ver)
     }
 }
 
@@ -661,14 +647,15 @@ pub struct ReleaseComparison {
     pub bootstrap_required: bool,
 }
 
-/// Compare the running binary with the latest published release. Runs the
-/// network lookup only on hosts that can actually self-update, so dev and
-/// non-Linux consoles never wait on GitHub.
+/// Compare the running binary with the latest published release. A pure
+/// cache read (the background warmer keeps it fresh), so the console's
+/// frequent status polls never touch GitHub; nothing on a host that cannot
+/// self-update (dev, non-Linux).
 pub fn release_comparison() -> Option<ReleaseComparison> {
     if !can_update(config_dir_hint()) {
         return None;
     }
-    let latest = fetch_latest_release_version()?;
+    let latest = latest_release_cached()?;
     let installed = daygle_dns_core::VERSION.to_string();
     let outdated = version_lt(&installed, &latest);
     let bootstrap_required = version_lt(&installed, updater_min_version());
@@ -689,16 +676,22 @@ fn config_dir_hint() -> Option<&'static Path> {
     }
 }
 
-/// Keep the latest-release lookup warm in the background.
+/// Check for a newer release in the background at the cadence configured
+/// under `[updates]` (Settings -> General: "Update Checks").
 ///
-/// `/api/status` (polled every few seconds by every open console page, so the
-/// dashboard can flag an available update) would otherwise refresh the
-/// 120 s release cache **inline** once per cycle, stalling that response for
-/// up to the curl timeout every two minutes. A warmer cycle just ahead of
-/// the cache TTL keeps every status read a pure cache hit. Returns
-/// immediately on hosts that cannot self-update (dev, non-Linux), where the
-/// console gets no update information at all.
-pub async fn refresh_release_forever(shutdown: tokio_util::sync::CancellationToken) {
+/// Every console page polls `/api/status` every few seconds, and the
+/// dashboard flags an available release off that endpoint - so all of its
+/// reads are pure cache hits and only this task talks to GitHub, once per
+/// interval (default hourly, floor 10 minutes per
+/// `MIN_UPDATE_CHECK_INTERVAL_SECS`, enforced for the setting in
+/// `DaygleConfig::validate` and again here for safety). Immediately returns
+/// on hosts that cannot self-update (dev, non-Linux): no probes happen there
+/// at all. The loop re-reads the setting every cycle, so checks can be
+/// re-timed or disabled from the console without a restart.
+pub async fn refresh_release_forever(
+    config: std::sync::Arc<arc_swap::ArcSwap<daygle_dns_core::config::DaygleConfig>>,
+    shutdown: tokio_util::sync::CancellationToken,
+) {
     // The install-evidence checks are filesystem-only and static for the
     // process lifetime; decide once whether probing GitHub is worthwhile.
     if !can_update(config_dir_hint()) {
@@ -712,12 +705,27 @@ pub async fn refresh_release_forever(shutdown: tokio_util::sync::CancellationTok
             _ = shutdown.cancelled() => return,
             _ = tokio::time::sleep(wait) => {}
         }
-        // curl with up-to-5 s timeouts: keep it off the async workers, and
-        // ignore the outcome (a failure leaves the last-known cache value).
-        let _ = tokio::task::spawn_blocking(fetch_latest_release_version).await;
-        // Slightly under the cache TTL so the cache is fresh again before
-        // any status request can notice it went stale.
-        wait = std::time::Duration::from_secs(RELEASE_CACHE_SECS.saturating_sub(15));
+        let (enabled, interval) = {
+            let cfg = config.load();
+            (
+                cfg.updates.enabled,
+                cfg.updates
+                    .check_interval_secs
+                    .max(daygle_dns_core::config::MIN_UPDATE_CHECK_INTERVAL_SECS),
+            )
+        };
+        if enabled {
+            // curl with up-to-5 s timeouts: keep it off the async workers,
+            // and ignore the outcome (a failure leaves the last-known value).
+            let _ = tokio::task::spawn_blocking(refresh_latest_release_cache).await;
+            // Refresh just ahead of the interval so a status read at the
+            // boundary still sees a fresh value.
+            wait = std::time::Duration::from_secs(interval.saturating_sub(15));
+        } else {
+            // Disabled: poll the setting periodically so checks can be
+            // re-enabled from the console without a restart.
+            wait = std::time::Duration::from_secs(30);
+        }
     }
 }
 

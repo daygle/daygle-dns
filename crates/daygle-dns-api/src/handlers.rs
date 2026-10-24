@@ -194,11 +194,14 @@ pub async fn status(State(state): State<AppState>) -> Response {
         Err(e) => return map_err(e),
     };
     let config = state.config.load_full();
-    // Update availability for the dashboard's banner. The release cache is
-    // kept warm in the background (refresh_release_forever), so this is a
-    // cache hit in steady state; the blocking variant keeps the - rare -
-    // cold refresh and the filesystem evidence checks off the async workers.
-    let release = run_blocking(crate::update::release_comparison).await;
+    // Update availability for the dashboard's banner: a pure cache read
+    // (only the background warmer touches GitHub, at the configured
+    // interval), skipped entirely while update checks are disabled.
+    let release = if state.config.load().updates.enabled {
+        run_blocking(crate::update::release_comparison).await
+    } else {
+        None
+    };
     Json(serde_json::json!({
         "version": VERSION,
         "uptime_secs": state.started_at.elapsed().as_secs(),
@@ -1133,15 +1136,22 @@ pub async fn update_info(State(state): State<AppState>) -> Response {
     let config_dir = config_dir(&state);
     // Spawns processes (`sh`, `curl` with multi-second timeouts) and reads
     // files: keep it off the async workers.
+    // Whether automated release checks are on: the probe below is skipped
+    // when they are not, so the Update page then shows no release claim but
+    // keeps Update Now and the manual command.
+    let release_checks_on = state.config.load().updates.enabled;
     let (has_systemd, can_update, gates, release, update_state) = run_blocking(move || {
         let dir = config_dir.as_deref();
         (
             std::path::Path::new("/etc/systemd/system/daygle-dns.service").is_file(),
             crate::update::can_update(dir),
             crate::update::gates(dir),
-            // Latest-release comparison (network, cached): only resolved on
-            // hosts that can self-update, so dev/non-Linux consoles get nulls.
-            crate::update::release_comparison(),
+            // Latest-release comparison (cache only, warmed in the
+            // background): only resolved on hosts that can self-update with
+            // checks enabled, so dev/non-Linux consoles get nulls.
+            release_checks_on
+                .then(crate::update::release_comparison)
+                .flatten(),
             crate::update::read_state(),
         )
     })
@@ -3943,6 +3953,8 @@ pub struct SettingsUpdate {
     pub dns64: Option<daygle_dns_core::config::Dns64Settings>,
     /// Replaces the whole `[ecs]` section.
     pub ecs: Option<daygle_dns_core::config::EcsSettings>,
+    /// Replaces the whole `[updates]` section.
+    pub updates: Option<daygle_dns_core::config::UpdateCheckSettings>,
 }
 
 /// Partial update for how the web console is served (HTTP and/or HTTPS).
@@ -4446,6 +4458,9 @@ pub async fn update_settings(
             return error_response(StatusCode::BAD_REQUEST, format!("syslog: {msg}"));
         }
         config.syslog = syslog;
+    }
+    if let Some(updates) = &update.updates {
+        config.updates = updates.clone();
     }
     if let Some(w) = &update.web {
         if let Some(v) = w.http_enabled {

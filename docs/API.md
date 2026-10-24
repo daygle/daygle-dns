@@ -177,10 +177,13 @@ GET /api/status
 
 `update_available` (whether the running binary is older than the latest
 published release) and `latest_release` are compared against GitHub; both
-are `null` on hosts that cannot self-update (dev installs, non-Linux), so
-the dashboard hides the update banner there. The release lookup is cached
-for 120 s and refreshed in the background, so status polls never wait on
-the network.
+are `null` on hosts that cannot self-update (dev installs, non-Linux) or
+while update checks are disabled under `[updates]` (Settings -> General:
+"Update Checks"), so the dashboard hides the update banner there. The
+release lookup is a pure cached read - only a background task probes
+GitHub, at the configured `[updates].check_interval_secs` cadence (default
+hourly, minimum 10 minutes to respect GitHub's unauthenticated rate
+budget) - so status polls never wait on the network.
 
 ### Metrics
 

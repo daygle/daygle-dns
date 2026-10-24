@@ -42,6 +42,8 @@ pub struct DaygleConfig {
     pub display: DisplaySettings,
     /// How the web console and API are reached: HTTP and/or HTTPS.
     pub web: WebSettings,
+    /// Periodic (or disabled) checks for a newer Daygle DNS release.
+    pub updates: UpdateCheckSettings,
     /// Sending logs to a syslog server.
     pub syslog: SyslogSettings,
     /// DNS64 (RFC 6147): AAAA answers made from A records for IPv6-only
@@ -417,6 +419,42 @@ impl Default for WebSettings {
 /// The managed certificate created for HTTPS when none is chosen.
 pub const WEB_SELF_SIGNED_CERT: &str = "web-console";
 
+/// How often (and whether at all) this server checks GitHub for a newer
+/// Daygle DNS release. The check runs in the background away from DNS
+/// traffic; GitHub's unauthenticated API allows only 60 requests per hour
+/// per client IP, shared with everything else using that address, so the
+/// interval has a floor (see [`MIN_UPDATE_CHECK_INTERVAL_SECS`]) and can be
+/// switched off entirely. Edited in Settings -> General as "Update Checks".
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct UpdateCheckSettings {
+    /// Whether automatic checks (and the dashboard's update banner) run.
+    /// Off: nothing probes GitHub; "Update Now" and the manual update
+    /// command keep working.
+    pub enabled: bool,
+    /// Seconds between background checks.
+    pub check_interval_secs: u64,
+}
+
+impl Default for UpdateCheckSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            // Hourly: one API request per hour, far inside the shared
+            // unauthenticated budget, and a fresh release is still noticed
+            // within an hour of publication.
+            check_interval_secs: 3600,
+        }
+    }
+}
+
+/// Floor for `updates.check_interval_secs`, enforced by validate() and by
+/// the background warmer: 10 minutes = at most 6 API requests per hour for
+/// this server, leaving room for other GitHub users behind the same
+/// address. (Every update.sh / install.sh run uses additional one-off calls
+/// on top of these.)
+pub const MIN_UPDATE_CHECK_INTERVAL_SECS: u64 = 600;
+
 impl WebSettings {
     /// Check the settings a console user can change. `api_port` is the
     /// config file's port, which an `http_port` of 0 stands for.
@@ -624,6 +662,8 @@ pub struct RuntimeSettings {
     pub web: Option<WebSettings>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub syslog: Option<SyslogSettings>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updates: Option<UpdateCheckSettings>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dns64: Option<Dns64Settings>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1320,6 +1360,7 @@ impl RuntimeSettings {
             && self.display.is_none()
             && self.web.is_none()
             && self.syslog.is_none()
+            && self.updates.is_none()
             && self.dns64.is_none()
             && self.ecs.is_none()
             && self.networks.is_none()
@@ -1488,6 +1529,9 @@ impl RuntimeSettings {
         }
         if let Some(w) = &self.web {
             config.web = w.clone();
+        }
+        if let Some(u) = &self.updates {
+            config.updates = u.clone();
         }
         if let Some(a) = &self.ai {
             if let Some(v) = a.enabled {
@@ -1688,6 +1732,7 @@ impl RuntimeSettings {
             ai: Some(AiUpdate::capture_ai(&config.ai)),
             display: Some(config.display.clone()),
             web: Some(config.web.clone()),
+            updates: Some(config.updates.clone()),
             syslog: Some(config.syslog.clone()),
             dns64: Some(config.dns64.clone()),
             ecs: Some(config.ecs.clone()),
@@ -2535,6 +2580,13 @@ impl DaygleConfig {
         self.ecs
             .compile()
             .map_err(|e| DaygleError::Config(format!("ecs: {e}")))?;
+        if self.updates.enabled && self.updates.check_interval_secs < MIN_UPDATE_CHECK_INTERVAL_SECS
+        {
+            return Err(DaygleError::Config(format!(
+                "updates.check_interval_secs must be >= {} seconds: GitHub's unauthenticated API allows 60 requests per hour per address, which everything else on this network shares",
+                MIN_UPDATE_CHECK_INTERVAL_SECS
+            )));
+        }
         Ok(())
     }
 }
@@ -3815,6 +3867,29 @@ mod tests {
         assert!(cfg.policy.allowlist.is_empty());
         assert_eq!(cfg.dot.port, 853);
         assert!(cfg.recursive.dnssec_validate);
+    }
+
+    #[test]
+    fn update_check_settings_parse_and_floor() {
+        // Defaults: hourly checks on.
+        let cfg = DaygleConfig::parse("").unwrap();
+        assert!(cfg.updates.enabled);
+        assert_eq!(cfg.updates.check_interval_secs, 3600);
+        // Explicitly parsed section; unknown keys rejected.
+        let cfg = DaygleConfig::parse("[updates]\nenabled = false\ncheck_interval_secs = 86400\n")
+            .unwrap();
+        assert!(!cfg.updates.enabled);
+        assert_eq!(cfg.updates.check_interval_secs, 86400);
+        assert!(DaygleConfig::parse("[updates]\nnope = 1\n").is_err());
+        // The interval floor applies only while checks are enabled.
+        let mut cfg = DaygleConfig::parse("").unwrap();
+        cfg.updates.check_interval_secs = 60;
+        assert!(cfg.validate().is_err());
+        cfg.updates.enabled = false;
+        assert!(cfg.validate().is_ok());
+        cfg.updates.enabled = true;
+        cfg.updates.check_interval_secs = 600;
+        assert!(cfg.validate().is_ok());
     }
 
     #[test]
