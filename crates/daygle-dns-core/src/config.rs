@@ -3334,7 +3334,7 @@ pub struct DotSettings {
     pub certificate: String,
     /// TLS handshake timeout in seconds: how long a client may take to
     /// complete the TLS handshake before the connection is dropped
-    /// (1..=600, default 10).
+    /// (1..=600, default 20).
     pub handshake_timeout_secs: u64,
     /// Client networks allowed to use this listener (addresses or network
     /// names). Empty means everyone; clients outside the list get REFUSED
@@ -3353,7 +3353,7 @@ impl Default for DotSettings {
             self_signed: true,
             server_name: "daygle.local".to_string(),
             certificate: String::new(),
-            handshake_timeout_secs: 10,
+            handshake_timeout_secs: 20,
             allowed_networks: vec![],
         }
     }
@@ -4576,8 +4576,9 @@ handshake_timeout_secs = 60
         assert_eq!(cfg.dot.handshake_timeout_secs, 30);
         assert_eq!(cfg.doh.handshake_timeout_secs, 60);
 
-        // Sensible default: matches the previously hard-coded 10 s.
-        assert_eq!(DaygleConfig::default().dot.handshake_timeout_secs, 10);
+        // DoT default is 20 s: real clients on mobile or high-latency links
+        // can take longer than 10 s to finish the handshake.
+        assert_eq!(DaygleConfig::default().dot.handshake_timeout_secs, 20);
         assert_eq!(DaygleConfig::default().doh.handshake_timeout_secs, 10);
 
         // Out-of-range values are rejected for enabled listeners (same

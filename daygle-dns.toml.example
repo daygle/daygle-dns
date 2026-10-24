@@ -262,8 +262,8 @@ port = 853
 # "private_networks". Empty (the default) serves everyone.
 # allowed_networks = ["192.168.0.0/16", "LAN"]
 # How long a client may take to complete the TLS handshake before its
-# connection is dropped (seconds, 1..=600; default 10).
-# handshake_timeout_secs = 10
+# connection is dropped (seconds, 1..=600; default 20).
+# handshake_timeout_secs = 20
 # Instead of file paths / self-signed generation below, a listener can use a
 # certificate stored in the database and managed from the console's
 # Certificates page (set certificate = "<name>"; it overrides cert_path/
