@@ -182,9 +182,27 @@
     notice = null;
     error = null;
     dialogError = null;
+    // The dialog owns a record's staged (disabled) state, so remember what it
+    // was to tell a real toggle from an untouched checkbox.
     edit = record
-      ? { ...record, name: relativeName(record.name), createPtr: false, isNew: false }
-      : { name: '', rtype: 'A', content: '', ttl: defaultTtl, priority: 0, createPtr: false, isNew: true };
+      ? {
+          ...record,
+          name: relativeName(record.name),
+          createPtr: false,
+          isNew: false,
+          disabledBefore: Boolean(record.disabled),
+        }
+      : {
+          name: '',
+          rtype: 'A',
+          content: '',
+          ttl: defaultTtl,
+          priority: 0,
+          createPtr: false,
+          isNew: true,
+          disabled: false,
+          disabledBefore: false,
+        };
   }
 
   function closeEdit() {
@@ -208,6 +226,13 @@
       const savedRecord = edit.isNew
         ? await api.upsertRecord(selected.id, body)
         : await api.replaceRecord(selected.id, edit.id, body);
+      // Saving keeps a record's staged state, so only a checkbox that moved
+      // needs the separate endpoint (the serial is bumped with it).
+      let stagedNotice = '';
+      if (Boolean(edit.disabled) !== edit.disabledBefore) {
+        await api.setRecordDisabled(selected.id, savedRecord.id, Boolean(edit.disabled));
+        stagedNotice = edit.disabled ? ' It is disabled, so it is not served.' : ' It is served again.';
+      }
       let ptrNotice = '';
       if (createPtr) {
         try {
@@ -236,7 +261,7 @@
           ptrNotice = ` The forward record was saved, but PTR creation failed: ${formatApiError(e)}`;
         }
       }
-      notice = `${body.rtype} record ${edit.isNew ? 'added' : 'saved'} and applied live.${ptrNotice}`;
+      notice = `${body.rtype} record ${edit.isNew ? 'added' : 'saved'} and applied live.${stagedNotice}${ptrNotice}`;
       edit = null;
       await loadRecords(selected.id);
     } catch (e) {
@@ -309,22 +334,6 @@
       dialogError = formatApiError(e);
     } finally {
       saving = false;
-    }
-  }
-
-  // A disabled record stays in the zone but is not served.
-  async function toggleDisabled(record) {
-    if (!selected) return;
-    notice = null;
-    error = null;
-    try {
-      await api.setRecordDisabled(selected.id, record.id, !record.disabled);
-      notice = record.disabled
-        ? `${record.rtype} record for "${relativeName(record.name)}" enabled.`
-        : `${record.rtype} record for "${relativeName(record.name)}" disabled: kept in the zone but not served.`;
-      await loadRecords(selected.id);
-    } catch (e) {
-      error = formatApiError(e);
     }
   }
 
@@ -462,11 +471,6 @@
                       {#if record.rtype === 'A' || record.rtype === 'AAAA'}
                         <button class="secondary" onclick={() => openHealth(record)} title="Check this address and fail over when it is down">Health</button>
                       {/if}
-                      <button
-                        class="secondary"
-                        onclick={() => toggleDisabled(record)}
-                        title={record.disabled ? 'Serve this record again' : 'Stop serving this record but keep it'}
-                      >{record.disabled ? 'Enable' : 'Disable'}</button>
                       <button class="danger" onclick={() => removeRecord(record)} aria-label="Delete record">✕</button>
                     </div>
                   {:else}
@@ -509,7 +513,7 @@
         <label class="full">Value <input placeholder={EXAMPLES[edit.rtype]} bind:value={edit.content} /></label>
         {#if (edit.rtype === 'A' || edit.rtype === 'AAAA') && ptrTarget}
           {#if ptrTarget.zone && ptrTarget.zone.zone_type !== 'secondary'}
-            <label class="checkbox ptr-option">
+            <label class="checkbox option">
               <input type="checkbox" bind:checked={edit.createPtr} />
               <span>Also create matching PTR record in <code>{ptrTarget.zone.name}</code></span>
             </label>
@@ -535,6 +539,10 @@
             <label>Failover Priority <span class="hint">0 = primary</span><input type="number" min="0" bind:value={edit.priority} /></label>
           {/if}
         </div>
+        <label class="checkbox option">
+          <input type="checkbox" bind:checked={edit.disabled} />
+          <span>Disabled (Keep for Later)</span>
+        </label>
         <div class="row actions">
           <button type="submit" disabled={saving || !edit.content.trim()}>{saving ? 'Saving...' : edit.isNew ? 'Add Record' : 'Save Record'}</button>
           <button type="button" class="secondary" onclick={closeEdit} disabled={saving}>Cancel</button>
@@ -590,9 +598,9 @@
 
 <style>
   .value-help { margin-top: 8px; }
-  .ptr-option { flex-direction: row; align-items: center; gap: 8px; margin-top: 10px; }
-  .ptr-option input { width: auto; }
-  .ptr-option span { color: var(--text); }
+  .option { flex-direction: row; align-items: center; gap: 8px; margin-top: 10px; }
+  .option input { width: auto; }
+  .option span { color: var(--text); }
   .picker { margin-bottom: 14px; gap: 10px; align-items: center; }
   .picker-label { font-size: 0.85rem; color: var(--muted); margin: 0; }
   .picker-box { position: relative; flex: 0 1 340px; min-width: 240px; }

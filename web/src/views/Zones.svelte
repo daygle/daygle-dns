@@ -272,10 +272,15 @@
     if (!savingZone) showAdd = false;
   }
 
+  // The zone's settings dialog. A secondary zone's SOA comes from its master,
+  // so for those only the serving state can be changed here.
   function openSoa(zone) {
     clearMessages();
     soaEdit = {
       zone,
+      secondary: zone.zone_type === 'secondary',
+      disabled: zone.enabled === false,
+      disabledBefore: zone.enabled === false,
       primary_ns: zone.primary_ns || '',
       admin_mailbox: mailboxForDisplay(zone.admin_mailbox || ''),
       serial: zone.serial,
@@ -294,22 +299,42 @@
   async function saveSoa() {
     if (!soaEdit) return;
     const form = soaEdit;
+    const disabled = Boolean(form.disabled);
+    const statusChanged = disabled !== form.disabledBefore;
     savingSoa = true;
     dialogError = null;
     try {
-      const body = {
-        primary_ns: form.primary_ns.trim(),
-        admin_mailbox: form.admin_mailbox.trim(),
-        refresh: Number(form.refresh) || form.refresh,
-        retry: Number(form.retry) || form.retry,
-        expire: Number(form.expire) || form.expire,
-        minimum: Number(form.minimum) || form.minimum,
-        bump_serial: form.bumpSerial,
-      };
-      if (!form.bumpSerial) body.serial = Number(form.serial) || form.serial;
-      await api.updateZoneSoa(form.zone.id, body);
+      if (!form.secondary) {
+        const body = {
+          primary_ns: form.primary_ns.trim(),
+          admin_mailbox: form.admin_mailbox.trim(),
+          refresh: Number(form.refresh) || form.refresh,
+          retry: Number(form.retry) || form.retry,
+          expire: Number(form.expire) || form.expire,
+          minimum: Number(form.minimum) || form.minimum,
+          bump_serial: form.bumpSerial,
+        };
+        if (!form.bumpSerial) body.serial = Number(form.serial) || form.serial;
+        await api.updateZoneSoa(form.zone.id, body);
+      }
+      // Serving state is its own endpoint, so it is only called when the
+      // checkbox actually moved.
+      if (statusChanged) {
+        await api.setZoneEnabled(form.zone.id, !disabled);
+      }
       soaEdit = null;
-      notice = `SOA for ${form.zone.name} saved and applied live.`;
+      if (form.secondary) {
+        notice = disabled
+          ? `${form.zone.name} disabled and is no longer being served.`
+          : `${form.zone.name} enabled and is now being served.`;
+      } else {
+        const status = statusChanged
+          ? disabled
+            ? ' The zone is disabled and no longer served.'
+            : ' The zone is served again.'
+          : '';
+        notice = `Settings for ${form.zone.name} saved and applied live.${status}`;
+      }
       await loadZones();
     } catch (e) {
       dialogError = formatApiError(e);
@@ -420,17 +445,6 @@
     try {
       await api.deleteZone(zone.id);
       notice = `Zone ${zone.name} deleted.`;
-      await loadZones();
-    } catch (e) {
-      error = formatApiError(e);
-    }
-  }
-
-  async function toggleZoneEnabled(zone) {
-    clearMessages();
-    try {
-      await api.setZoneEnabled(zone.id, !zone.enabled);
-      notice = `${zone.name} ${zone.enabled ? 'disabled and is no longer being served' : 'enabled and is now being served'}.`;
       await loadZones();
     } catch (e) {
       error = formatApiError(e);
@@ -552,11 +566,8 @@
             <td><span class:pill={true} class:ok={zone.enabled} title={zone.enabled ? 'Serving this zone' : 'Not served until enabled'}>{zone.enabled ? 'Enabled' : 'Disabled'}</span></td>
             <td class="num">
               <div class="row" style="gap: 6px; justify-content: flex-end">
-                {#if zone.zone_type !== 'secondary'}
-                  <button class="secondary" onclick={() => openSoa(zone)} title="Edit the zone's settings: primary nameserver, contact and timers (its SOA record)">Edit</button>
-                {/if}
+                <button class="secondary" onclick={() => openSoa(zone)} title="Edit the zone's settings: serving state, and its SOA (nameserver, contact, timers)">Edit</button>
                 <button class="secondary" onclick={() => onOpenRecords(zone.id)}>Records</button>
-                <button class="secondary" onclick={() => toggleZoneEnabled(zone)} title={zone.enabled ? 'Stop serving this zone but keep its records' : 'Serve this zone again'}>{zone.enabled ? 'Disable' : 'Enable'}</button>
                 {#if zone.zone_type !== 'secondary'}
                   <button class="secondary" onclick={() => toggleSign(zone)} title={zone.dnssec ? 'Stop DNSSEC signing' : 'Sign the zone with DNSSEC'}>{zone.dnssec ? 'Unsign' : 'Sign'}</button>
                   {#if zone.dnssec}
@@ -759,30 +770,49 @@
   <div class="modal-backdrop" role="presentation" onclick={(e) => e.target === e.currentTarget && closeSoa()}>
     <div class="modal card" role="dialog" aria-modal="true" aria-labelledby="edit-soa-title">
       <div class="spread modal-title">
-        <h3 id="edit-soa-title" style="margin: 0">Edit SOA - {soaEdit.zone.name}</h3>
+        <h3 id="edit-soa-title" style="margin: 0">Edit Zone - {soaEdit.zone.name}</h3>
         <button class="secondary" style="padding: 2px 10px" onclick={closeSoa} aria-label="Close">✕</button>
       </div>
       {#if dialogError}<p class="dialog-error">{dialogError}</p>{/if}
 
-      <div class="section-title">SOA Parameters</div>
-      <div class="grid2">
-        <label>Primary Nameserver <input placeholder={dnsServerDomain || 'ns1.example.com.'} bind:value={soaEdit.primary_ns} /></label>
-        <label>Administrator Email <input placeholder="hostmaster@example.com" bind:value={soaEdit.admin_mailbox} /></label>
-        <label>Serial <input type="number" min="1" bind:value={soaEdit.serial} disabled={soaEdit.bumpSerial} /></label>
-        <label class="checkbox"><input type="checkbox" bind:checked={soaEdit.bumpSerial} /><span>Increment Serial on Save</span></label>
-        <label>Refresh (Seconds) <span class="hint">{hint(soaEdit.refresh)}</span><input type="number" min="1" bind:value={soaEdit.refresh} /></label>
-        <label>Retry (Seconds) <span class="hint">{hint(soaEdit.retry)}</span><input type="number" min="1" bind:value={soaEdit.retry} /></label>
-        <label>Expire (Seconds) <span class="hint">{hint(soaEdit.expire)}</span><input type="number" min="1" bind:value={soaEdit.expire} /></label>
-        <label>Minimum TTL (Seconds) <span class="hint">{hint(soaEdit.minimum)}</span><input type="number" min="1" bind:value={soaEdit.minimum} /></label>
-      </div>
-      {#if soaEdit.bumpSerial}
-        <p class="muted help">The serial is incremented automatically so downstream secondaries and transfers pick up the change.</p>
+      <label class="checkbox plain">
+        <input type="checkbox" bind:checked={soaEdit.disabled} />
+        <span>Disabled (Keep for Later)</span>
+      </label>
+      <p class="muted help">
+        A disabled zone keeps its records but is not answered until it is
+        enabled again.
+      </p>
+
+      {#if soaEdit.secondary}
+        <p class="muted help">
+          This is a secondary zone: its SOA record comes from the master, so
+          only its serving state can be changed here.
+        </p>
       {:else}
-        <p class="muted help">Serial is set exactly to the value above. Prefer automatic increments unless you know the zone's history.</p>
+        <div class="section-title">SOA Parameters</div>
+        <div class="grid2">
+          <label>Primary Nameserver <input placeholder={dnsServerDomain || 'ns1.example.com.'} bind:value={soaEdit.primary_ns} /></label>
+          <label>Administrator Email <input placeholder="hostmaster@example.com" bind:value={soaEdit.admin_mailbox} /></label>
+          <label>Serial <input type="number" min="1" bind:value={soaEdit.serial} disabled={soaEdit.bumpSerial} /></label>
+          <label class="checkbox"><input type="checkbox" bind:checked={soaEdit.bumpSerial} /><span>Increment Serial on Save</span></label>
+          <label>Refresh (Seconds) <span class="hint">{hint(soaEdit.refresh)}</span><input type="number" min="1" bind:value={soaEdit.refresh} /></label>
+          <label>Retry (Seconds) <span class="hint">{hint(soaEdit.retry)}</span><input type="number" min="1" bind:value={soaEdit.retry} /></label>
+          <label>Expire (Seconds) <span class="hint">{hint(soaEdit.expire)}</span><input type="number" min="1" bind:value={soaEdit.expire} /></label>
+          <label>Minimum TTL (Seconds) <span class="hint">{hint(soaEdit.minimum)}</span><input type="number" min="1" bind:value={soaEdit.minimum} /></label>
+        </div>
+        {#if soaEdit.bumpSerial}
+          <p class="muted help">The serial is incremented automatically so downstream secondaries and transfers pick up the change.</p>
+        {:else}
+          <p class="muted help">Serial is set exactly to the value above. Prefer automatic increments unless you know the zone's history.</p>
+        {/if}
       {/if}
 
       <div class="row actions">
-        <button onclick={saveSoa} disabled={savingSoa}>{savingSoa ? 'Saving...' : 'Save SOA'}</button>
+        <button
+          onclick={saveSoa}
+          disabled={savingSoa || (soaEdit.secondary && soaEdit.disabled === soaEdit.disabledBefore)}
+        >{savingSoa ? 'Saving...' : 'Save Zone'}</button>
         <button class="secondary" onclick={closeSoa} disabled={savingSoa}>Cancel</button>
       </div>
     </div>
@@ -815,6 +845,8 @@
     color: var(--muted);
   }
   .checkbox { flex-direction: row; align-items: center; gap: 8px; padding-top: 22px; }
+  /* A checkbox that stands on its own rather than inside the grid. */
+  .checkbox.plain { padding-top: 4px; margin-bottom: 4px; }
   .checkbox input { width: auto; }
   .checkbox span { color: var(--text); }
   .actions { margin-top: 22px; padding-top: 14px; border-top: 1px solid var(--border); }
