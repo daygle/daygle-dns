@@ -34,6 +34,34 @@ jobs:
       - name: Verify GUI version is in sync with the workspace
         run: node web/scripts/sync-version.mjs --check
 
+  # The release binary embeds the committed web/dist (the installer never
+  # rebuilds the GUI), so a commit that changes web/src without committing
+  # the rebuilt bundle would ship a console missing the new features. Rebuild
+  # the bundle here and fail when it differs from what is committed.
+  gui-bundle:
+    name: GUI bundle is current
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Rebuild the console bundle
+        working-directory: web
+        run: npm ci && npm run build
+
+      - name: Fail when the committed bundle is stale
+        run: |
+          if [ -n "$(git status --porcelain -- web/dist)" ]; then
+            git status --short -- web/dist
+            echo "::error::web/dist is stale: a fresh build of web/src differs from the committed bundle. Run 'npm run build' in web/ and commit the result."
+            exit 1
+          fi
+
   # Every warning is an error so lints cannot silently accumulate.
   clippy:
     name: Clippy
