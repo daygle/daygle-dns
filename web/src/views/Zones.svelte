@@ -537,21 +537,19 @@
   <div class="table-wrap">
     <table>
       <thead>
-        <tr><th>Name</th><th>Type</th><th>Details</th><th>Last Modified</th><th>DNSSEC</th><th class="num">Actions</th></tr>
+        <tr><th>Name</th><th>Type</th><th>Details</th><th>DNSSEC</th><th>Last Modified</th><th>Status</th><th class="num">Actions</th></tr>
       </thead>
       <tbody>
         {#each zones as zone (zone.id)}
           <tr class:disabled={!zone.enabled}>
-            <td>
-              <code>{zone.name}</code>
-              {#if !zone.enabled}<span class="pill">Disabled</span>{/if}
-            </td>
+            <td><code>{zone.name}</code></td>
             <td><span class="pill">{zone.zone_type === 'secondary' ? 'Secondary' : 'Primary'}</span></td>
             <td class="muted">
               Serial {zone.serial}{#if zone.zone_type === 'secondary' && zone.masters?.length}{` · from ${zone.masters.join(', ')}`}{/if}{#if zone.catalog}{` · catalog ${zone.catalog}`}{/if}
             </td>
-            <td class="muted" title={zone.last_modified_at || zone.created_at}>{formatTime(zone.last_modified_at || zone.created_at)}</td>
             <td><span class:pill={true} class:ok={zone.dnssec}>{zone.dnssec ? (zone.nsec3 ? 'Signed · NSEC3' : 'Signed · NSEC') : 'Unsigned'}</span></td>
+            <td class="muted nowrap" title={zone.last_modified_at || zone.created_at}>{formatTime(zone.last_modified_at || zone.created_at)}</td>
+            <td><span class:pill={true} class:ok={zone.enabled} title={zone.enabled ? 'Serving this zone' : 'Not served until enabled'}>{zone.enabled ? 'Enabled' : 'Disabled'}</span></td>
             <td class="num">
               <div class="row" style="gap: 6px; justify-content: flex-end">
                 <button class="secondary" onclick={() => onOpenRecords(zone.id)}>Records</button>
@@ -574,13 +572,11 @@
         {#each stubs as stub (stub.name)}
           <tr class:disabled={!stub.enabled}>
             <td><code>{stub.name}</code></td>
-            <td>
-              <span class="pill">Stub</span>
-              {#if !stub.enabled}<span class="pill">Disabled</span>{/if}
-            </td>
+            <td><span class="pill">Stub</span></td>
             <td class="muted">NS {stub.nss.join(', ') || '-'}</td>
             <td class="muted">-</td>
             <td class="muted">-</td>
+            <td><span class:pill={true} class:ok={stub.enabled}>{stub.enabled ? 'Enabled' : 'Disabled'}</span></td>
             <td class="num">
               <div class="row" style="gap: 6px; justify-content: flex-end">
                 <button class="secondary" onclick={() => openEditStub(stub)}>Edit</button>
@@ -604,7 +600,6 @@
                 Transferring and Verifying the Root Zone...
               {/if}
             </td>
-            <td class="muted">-</td>
             <td>
               {#if rootStatus?.serving}
                 <span class="pill ok" title="ZONEMD digest and DNSSEC signatures verified">Verified</span>
@@ -612,6 +607,8 @@
                 <span class="muted">-</span>
               {/if}
             </td>
+            <td class="muted">-</td>
+            <td><span class="pill ok" title="Configured and in use">Enabled</span></td>
             <td class="num">
               <div class="row" style="gap: 6px; justify-content: flex-end">
                 <button class="secondary" onclick={refreshRoot}>Refresh</button>
@@ -628,6 +625,7 @@
             <td class="muted">→ {fwd.upstreams.join(', ')}</td>
             <td class="muted">-</td>
             <td class="muted">-</td>
+            <td><span class="pill ok" title="Configured and in use">Enabled</span></td>
             <td class="num">
               <div class="row" style="gap: 6px; justify-content: flex-end">
                 <button class="secondary" onclick={() => openEditForwarder(fwd)}>Edit</button>
@@ -792,6 +790,7 @@
 <style>
   .notice { margin-bottom: 14px; }
   .notice.ok { border-color: var(--ok); }
+  .nowrap { white-space: nowrap; }
   .notice.error { border-color: var(--danger); color: var(--danger); }
   .dialog-error { color: var(--danger); margin: 0 0 10px; }
   /* The friendly duration beside a seconds field, e.g. "1 Hour". */
