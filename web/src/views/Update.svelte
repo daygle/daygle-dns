@@ -384,7 +384,7 @@
       {/if}
 
       {#if run?.started_at}
-        <p class="muted small" style="margin-top: 10px" title="Process {run.pid}{run.exit_code != null ? `, exit code ${run.exit_code}` : ''}">
+        <p class="muted small" style="margin-top: 10px" title="Process {run.pid}{run.phase === 'done' || run.phase === 'error' ? `, exit code ${run.exit_code}` : ''}">
           Last update started {formatDateTime(run.started_at)}.
         </p>
       {/if}

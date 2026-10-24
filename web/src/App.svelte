@@ -20,44 +20,44 @@
   import { sidebar, setSidebar, isNarrow, toggleSidebar } from './nav.svelte.js';
 import { loadDisplayPreferences } from './datetime.svelte.js';
 
-let view = $state('status');
-// Settings tab to open on the next visit (set by cross-page links).
-let settingsTab = $state('general');
+  let view = $state('status');
+  // Settings tab to open on the next visit (set by cross-page links).
+  let settingsTab = $state('general');
 
-// A page left open across a server update keeps running the console bundle
-// it loaded, so new features never appear until a reload. The public health
-// endpoint reports the entry bundle the *server* embeds (`console_build`);
-// when it diverges from the bundle this page is running, offer a reload.
-let consoleOutdated = $state(false);
+  // A page left open across a server update keeps running the console bundle
+  // it loaded, so new features never appear until a reload. The public health
+  // endpoint reports the entry bundle the *server* embeds (`console_build`);
+  // when it diverges from the bundle this page is running, offer a reload.
+  let consoleOutdated = $state(false);
 
-function runningBundle() {
-  // This page runs the bundle named in the shell's module script.
-  const el = document.querySelector('script[type="module"][src*="/assets/index-"]');
-  const match = /assets\/(index-[^/?#]+)\.js/.exec(el?.getAttribute('src') || '');
-  return match ? match[1] : '';
-}
-
-async function checkConsoleBuild() {
-  try {
-    const health = await api.health();
-    const served = health?.console_build || '';
-    consoleOutdated = !!served && served !== runningBundle();
-  } catch (_) {
-    // The server may be restarting mid-update: keep the current banner state.
+  function runningBundle() {
+    // This page runs the bundle named in the shell's module script.
+    const el = document.querySelector('script[type="module"][src*="/assets/index-"]');
+    const match = /assets\/(index-[^/?#]+)\.js/.exec(el?.getAttribute('src') || '');
+    return match ? match[1] : '';
   }
-}
 
-// Check shortly after mount (so an already-outdated page finds out quickly)
-// and then on a minute interval, all without reactive dependencies so the
-// effect cannot loop back into itself.
-$effect(() => {
-  const first = setTimeout(checkConsoleBuild, 2000);
-  const interval = setInterval(checkConsoleBuild, 60_000);
-  return () => {
-    clearTimeout(first);
-    clearInterval(interval);
-  };
-});
+  async function checkConsoleBuild() {
+    try {
+      const health = await api.health();
+      const served = health?.console_build || '';
+      consoleOutdated = !!served && served !== runningBundle();
+    } catch (_) {
+      // The server may be restarting mid-update: keep the current banner state.
+    }
+  }
+
+  // Check shortly after mount (so an already-outdated page finds out quickly)
+  // and then on a minute interval, all without reactive dependencies so the
+  // effect cannot loop back into itself.
+  $effect(() => {
+    const first = setTimeout(checkConsoleBuild, 2000);
+    const interval = setInterval(checkConsoleBuild, 60_000);
+    return () => {
+      clearTimeout(first);
+      clearInterval(interval);
+    };
+  });
 
   function openSettings(tab) {
     settingsTab = tab;
