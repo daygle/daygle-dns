@@ -229,6 +229,10 @@ pub async fn health() -> Response {
     Json(serde_json::json!({
         "status": "ok",
         "version": VERSION,
+        // Entry bundle embedded in this build's console, compared by the
+        // running console against its own bundle to offer a reload when the
+        // server was updated while a page stayed open.
+        "console_build": daygle_dns_gui::entry_bundle_name(),
     }))
     .into_response()
 }

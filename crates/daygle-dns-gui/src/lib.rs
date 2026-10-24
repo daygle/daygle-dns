@@ -8,6 +8,7 @@
 //! the embedded bundle after changing `web/src`.
 
 use std::borrow::Cow;
+use std::sync::OnceLock;
 
 use rust_embed::RustEmbed;
 
@@ -57,6 +58,36 @@ pub fn cache_control(served_path: &str) -> &'static str {
     } else {
         "no-cache"
     }
+}
+
+/// The Vite entry bundle referenced by the embedded `index.html`
+/// (e.g. `index-abc123`), without directory or extension - or `None` when it
+/// cannot be parsed.
+///
+/// The console polls `/api/health`, which exposes this as `console_build`,
+/// and compares it with the bundle file it is actually running, so a page
+/// left open across a server update can tell that the server now embeds a
+/// newer build and ask for a reload. The bundle name is content-hashed by
+/// Vite, so it changes whenever the console build changes - even when the
+/// workspace version does not (releases build from `main` with the version
+/// pinned at 1.0.0, so a version comparison would never fire).
+pub fn entry_bundle_name() -> Option<&'static str> {
+    static ENTRY: OnceLock<Option<String>> = OnceLock::new();
+    ENTRY
+        .get_or_init(|| {
+            let html = GuiAssets::get("index.html")?.data;
+            let html = std::str::from_utf8(&html).ok()?;
+            // The shell has exactly one module script, emitted by Vite as
+            // `<script type="module" crossorigin src="/assets/index-<hash>.js">`.
+            let script = html.find("<script type=\"module\"")?;
+            let src = script + html[script..].find("src=\"")? + 5;
+            let end = src + html[src..].find('"')?;
+            let url = &html[src..end];
+            let file = url.rsplit('/').next()?;
+            let file = file.strip_suffix(".js")?;
+            Some(file.to_string())
+        })
+        .as_deref()
 }
 
 /// Look up an asset by request path (e.g. `index.html`, `assets/index.js`).
@@ -152,5 +183,13 @@ mod tests {
         );
         // Un-hashed files at the dist root cannot be proven stable.
         assert_eq!(cache_control("favicon.ico"), "no-cache");
+    }
+
+    #[test]
+    fn entry_bundle_name_matches_the_embedded_shell() {
+        // Committed dist shells reference a Vite-hashed entry bundle.
+        let name = entry_bundle_name().expect("the shell's module script is parseable");
+        assert!(name.starts_with("index-"), "unexpected entry name: {name}");
+        assert!(!name.contains('/'), "entry name must be a bare file stem");
     }
 }

@@ -134,9 +134,20 @@ and `Referrer-Policy: same-origin`.
 GET /api/health
 ```
 
+```json
+{
+  "status": "ok",
+  "version": "1.0.0",
+  "console_build": "index-abc123"
+}
+```
+
 Public liveness endpoint, exempt from authentication (the in-place updater
 uses it to verify a restarted service is serving HTTP without carrying
-credentials); it exposes no configuration or zone data.
+credentials); it exposes no configuration or zone data. `console_build` is
+the entry bundle embedded in this build's console (`null` when unparseable):
+the console compares it with the bundle it is running and offers a reload
+when the server was updated while a page stayed open.
 
 ### Status
 

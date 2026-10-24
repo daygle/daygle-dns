@@ -109,6 +109,10 @@ export function formatUptime(totalSecs) {
 }
 
 export const api = {
+  // Public liveness endpoint (no auth): the app shell also uses its
+  // `console_build` field to detect that the server was updated while a page
+  // stayed open.
+  health: () => request('GET', '/health', undefined, { noLoginRedirect: true }),
   // ---- auth ----
   // `code`: the authenticator app's code (or a recovery code) when the
   // account uses two-factor login. Without one, such an account fails with

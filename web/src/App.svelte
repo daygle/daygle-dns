@@ -18,11 +18,46 @@
   import Account from './views/Account.svelte';
   import { icons } from './icons.svelte.js';
   import { sidebar, setSidebar, isNarrow, toggleSidebar } from './nav.svelte.js';
-  import { loadDisplayPreferences } from './datetime.svelte.js';
+import { loadDisplayPreferences } from './datetime.svelte.js';
 
-  let view = $state('status');
-  // Settings tab to open on the next visit (set by cross-page links).
-  let settingsTab = $state('general');
+let view = $state('status');
+// Settings tab to open on the next visit (set by cross-page links).
+let settingsTab = $state('general');
+
+// A page left open across a server update keeps running the console bundle
+// it loaded, so new features never appear until a reload. The public health
+// endpoint reports the entry bundle the *server* embeds (`console_build`);
+// when it diverges from the bundle this page is running, offer a reload.
+let consoleOutdated = $state(false);
+
+function runningBundle() {
+  // This page runs the bundle named in the shell's module script.
+  const el = document.querySelector('script[type="module"][src*="/assets/index-"]');
+  const match = /assets\/(index-[^/?#]+)\.js/.exec(el?.getAttribute('src') || '');
+  return match ? match[1] : '';
+}
+
+async function checkConsoleBuild() {
+  try {
+    const health = await api.health();
+    const served = health?.console_build || '';
+    consoleOutdated = !!served && served !== runningBundle();
+  } catch (_) {
+    // The server may be restarting mid-update: keep the current banner state.
+  }
+}
+
+// Check shortly after mount (so an already-outdated page finds out quickly)
+// and then on a minute interval, all without reactive dependencies so the
+// effect cannot loop back into itself.
+$effect(() => {
+  const first = setTimeout(checkConsoleBuild, 2000);
+  const interval = setInterval(checkConsoleBuild, 60_000);
+  return () => {
+    clearTimeout(first);
+    clearInterval(interval);
+  };
+});
 
   function openSettings(tab) {
     settingsTab = tab;
@@ -142,6 +177,14 @@
     <Login onLogin={handleLogin} />
   {/if}
 {:else}
+  {#if consoleOutdated}
+    <div class="update-banner" role="status">
+      <span>
+        Daygle DNS has been updated with new features. Reload the console to load them.
+      </span>
+      <button onclick={() => location.reload()}>Reload Console</button>
+    </div>
+  {/if}
   <div class="shell">
     <button
       type="button"
@@ -241,6 +284,30 @@
 {/if}
 
 <style>
+  .update-banner {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 14px;
+    padding: 9px 16px;
+    background: var(--accent);
+    color: #fff;
+    font-size: 0.88rem;
+    text-align: center;
+  }
+  .update-banner button {
+    flex: 0 0 auto;
+    padding: 4px 12px;
+    font-size: 0.82rem;
+    background: rgba(255, 255, 255, 0.16);
+    border-color: rgba(255, 255, 255, 0.55);
+    color: #fff;
+    white-space: nowrap;
+  }
+  .update-banner button:hover {
+    background: rgba(255, 255, 255, 0.28);
+  }
+
   .shell { display: flex; min-height: 100vh; }
 
   aside {
