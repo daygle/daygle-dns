@@ -28,6 +28,16 @@ const SWEEP_AT_ENTRIES: usize = 10_000;
 /// the global lock was held.
 const SIZE_SWEEP_MIN_GAP: Duration = Duration::from_secs(1);
 
+/// Hard caps on either bucket map. Sweeping keeps the maps bounded in the
+/// common case, but an attacker flooding unique keys *within* the window
+/// keeps every bucket alive (its window keeps refreshing), so a sustained
+/// flood of unique domains or spoofed source IPs would otherwise grow the
+/// maps without bound. Past a cap a new key is admitted but not tracked
+/// (fail-open for admission, bounded memory); keys already tracked keep
+/// their limits.
+const CLIENT_BUCKETS_CAP: usize = 50_000;
+const DOMAIN_BUCKETS_CAP: usize = 50_000;
+
 /// A thread-safe fixed-window rate limiter.
 ///
 /// Cheap on the hot path: one mutex-guarded hash lookup per key. The mutex is
@@ -112,7 +122,14 @@ impl RateLimiter {
                 .unwrap_or(client),
             v4 => v4,
         };
-        let allowed = check_bucket(inner.clients.entry(key), window, limit);
+        let at_client_cap = inner.clients.len() >= CLIENT_BUCKETS_CAP;
+        let allowed = match inner.clients.get_mut(&key) {
+            Some(bucket) => advance_bucket(bucket, window, limit),
+            // Map at its cap: new clients are admitted untracked so memory
+            // stays bounded under a spoofed-source flood.
+            None if at_client_cap => true,
+            None => check_bucket(inner.clients.entry(key), window, limit),
+        };
         maybe_sweep(&mut inner);
         allowed
     }
@@ -127,8 +144,13 @@ impl RateLimiter {
         let (window, limit) = (inner.domain_window, inner.domain_limit);
         // Fast path without allocating an owned key for the (common) case of
         // an already-tracked domain; `entry` would allocate on every query.
+        let at_domain_cap = inner.domains.len() >= DOMAIN_BUCKETS_CAP;
         let allowed = match inner.domains.get_mut(domain) {
             Some(bucket) => advance_bucket(bucket, window, limit),
+            // At the cap, newly seen domains are admitted untracked so a
+            // flood of unique names cannot grow memory without bound; a
+            // domain already tracked keeps its limit.
+            None if at_domain_cap => true,
             None => {
                 // A fresh bucket always admits its first query (config
                 // validation rejects a limit of 0).
@@ -351,5 +373,23 @@ mod tests {
         std::thread::sleep(Duration::from_millis(1100));
         limiter.check_domain("example.com");
         assert_eq!(limiter.client_buckets(), 0);
+    }
+
+    #[test]
+    fn bucket_maps_cannot_grow_past_the_hard_cap() {
+        let limiter = RateLimiter::new(&settings(true));
+
+        // A flood of unique domains (and spoofed clients) admitted within
+        // one window stops inserting new buckets once the cap is reached,
+        // instead of growing the maps without bound.
+        for i in 0..(DOMAIN_BUCKETS_CAP + 100) {
+            limiter.check_domain(&format!("d{i}.flood.test"));
+        }
+        assert_eq!(limiter.domain_buckets(), DOMAIN_BUCKETS_CAP);
+
+        // Queries keep being admitted even while the map is at cap.
+        assert!(limiter.check_domain("late.flood.test"));
+        assert_eq!(limiter.domain_buckets(), DOMAIN_BUCKETS_CAP);
+        assert!(limiter.check_domain("d0.flood.test"));
     }
 }
