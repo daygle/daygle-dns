@@ -946,6 +946,89 @@ async fn settings_update_applies_and_persists() {
 }
 
 #[tokio::test]
+async fn client_policies_last_modified_is_stamped_by_the_server() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg_path = dir.path().join("daygle-dns.toml");
+    std::fs::write(
+        &cfg_path,
+        DaygleConfig::default().to_toml().expect("serialize"),
+    )
+    .unwrap();
+
+    let server = spawn_with_users(&dir, Some(cfg_path)).await;
+    let client = reqwest::Client::new();
+    let (token, _) = login(server.api_addr, "admin", "secret").await;
+
+    /// The `modified_at` of the first policy in the stored list.
+    async fn stamp(
+        client: &reqwest::Client,
+        token: &str,
+        addr: std::net::SocketAddr,
+    ) -> serde_json::Value {
+        client
+            .get(api_url(addr, "/api/config"))
+            .bearer_auth(token)
+            .send()
+            .await
+            .unwrap()
+            .json::<serde_json::Value>()
+            .await
+            .unwrap()["recursive"]["client_policies"][0]["modified_at"]
+            .clone()
+    }
+
+    async fn put_policies(
+        client: &reqwest::Client,
+        token: &str,
+        addr: std::net::SocketAddr,
+        policies: serde_json::Value,
+    ) -> reqwest::Response {
+        client
+            .put(api_url(addr, "/api/config"))
+            .bearer_auth(token)
+            .json(&json!({ "recursive": { "client_policies": policies } }))
+            .send()
+            .await
+            .unwrap()
+    }
+
+    let policy = json!({
+        "name": "kids",
+        "enabled": true,
+        "clients": ["192.168.4.0/24"],
+        "action": "forward",
+        "upstreams": ["1.1.1.3"],
+    });
+
+    // Creating the policy stamps it.
+    let resp = put_policies(&client, &token, server.api_addr, json!([policy.clone()])).await;
+    assert_eq!(resp.status(), 200, "body: {}", resp.text().await.unwrap());
+    let first = stamp(&client, &token, server.api_addr).await;
+    assert!(first.is_string(), "missing stamp after create: {first:?}");
+
+    // Saving the same policy again (a no-op edit) keeps the stamp, and a
+    // modified_at sent in the request is ignored - the server owns it.
+    let mut unchanged = policy.clone();
+    unchanged["modified_at"] = json!("1999-01-01T00:00:00Z");
+    let resp = put_policies(&client, &token, server.api_addr, json!([unchanged])).await;
+    assert_eq!(resp.status(), 200, "body: {}", resp.text().await.unwrap());
+    let second = stamp(&client, &token, server.api_addr).await;
+    assert_eq!(second, first, "an unchanged policy must keep its stamp");
+    assert_ne!(second, json!("1999-01-01T00:00:00Z"), "client value won");
+
+    // Editing the policy re-stamps it.
+    let mut changed = policy.clone();
+    changed["upstreams"] = json!(["9.9.9.9"]);
+    let resp = put_policies(&client, &token, server.api_addr, json!([changed])).await;
+    assert_eq!(resp.status(), 200, "body: {}", resp.text().await.unwrap());
+    let third = stamp(&client, &token, server.api_addr).await;
+    assert!(third.is_string());
+    assert_ne!(third, first, "an edited policy must get a fresh stamp");
+
+    shutdown(server).await;
+}
+
+#[tokio::test]
 async fn zone_form_creates_primary_import_and_secondary_zones() {
     let dir = tempfile::tempdir().unwrap();
     let mut cfg = base_config(&dir.path().join("daygle-dns.db"));

@@ -12,6 +12,7 @@ pub mod proxy_protocol;
 pub mod query_db_log;
 pub mod reload;
 pub mod syslog;
+pub mod tls_diag;
 pub mod web;
 
 use std::path::PathBuf;
@@ -529,6 +530,12 @@ pub async fn bind_with(
         let syslog = syslog.clone();
         Arc::new(move |entry| syslog.log_entry(entry))
     });
+    // Encrypted-DNS session diagnostics: certificate lifecycle reports and
+    // coalesced handshake/connection failure warnings for DoT/DoH/DoQ.
+    // Registered before any listener binds, so the hickory bridge in the
+    // server binary's tracing setup forwards into this Server Log.
+    let session = Arc::new(tls_diag::SessionLog::new(logs.clone()));
+    tls_diag::set_current(session.clone());
     let shared = Arc::new(Shared {
         catalog: catalog.clone(),
         policy: Arc::new(ArcSwap::from_pointee(policy)),
@@ -540,6 +547,7 @@ pub async fn bind_with(
         rate_limiter: rate_limiter.clone(),
         metrics: metrics.clone(),
         logs: logs.clone(),
+        session: session.clone(),
         stats: stats.clone(),
         notify_hooks: notify_hooks.clone(),
         tsig_keys: tsig_keys.clone(),
@@ -553,6 +561,7 @@ pub async fn bind_with(
     let mut initial_addrs = ListenerAddrs::default();
     let initial_doq = bind_listeners(
         &config,
+        &session,
         &store,
         &dispatcher,
         &mut server,
@@ -788,6 +797,9 @@ async fn run_dns_supervisor(
                 match cmd {
                     Some(ReloadCommand::Rebuild { ack }) => {
                         let requested = shared.config.load_full();
+                        let encrypted = requested.dot.enabled
+                            || requested.doh.enabled
+                            || requested.doq.enabled;
                         stop_listeners(&mut listeners).await;
 
                         let outcome = match start_listeners(&shared, &addrs).await {
@@ -795,6 +807,15 @@ async fn run_dns_supervisor(
                                 listeners = Some(gen);
                                 last_good = requested;
                                 info!("DNS listeners rebound");
+                                // State change worth seeing in the console's
+                                // Server Log, not just tracing: encrypted
+                                // listeners now serve the new TLS material.
+                                if encrypted {
+                                    shared.logs.info(
+                                        "tls",
+                                        "TLS configuration reloaded (listeners rebound)",
+                                    );
+                                }
                                 Ok(())
                             }
                             Err(e) => {
@@ -866,6 +887,7 @@ async fn start_listeners_with(
     let mut snapshot = ListenerAddrs::default();
     let doq_task = bind_listeners(
         config,
+        &shared.session,
         shared.catalog.store(),
         &dispatcher,
         &mut server,
@@ -1001,6 +1023,16 @@ fn write_if_changed(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
     std::fs::rename(&tmp, path).map_err(DaygleError::Io)
 }
 
+/// The certificate's display name in diagnostics: the console-managed name
+/// when set, otherwise the file path.
+fn cert_name<'a>(certificate: &'a str, cert_path: &'a str) -> &'a str {
+    if certificate.is_empty() {
+        cert_path
+    } else {
+        certificate
+    }
+}
+
 /// `[section].listen` and a port as socket addresses (one or several, IPv4
 /// or IPv6), each with whether it is bound IPv6-only (see
 /// [`net::v6_only`]).
@@ -1018,6 +1050,7 @@ fn listen_addrs(
 
 async fn bind_listeners(
     config: &DaygleConfig,
+    session: &Arc<tls_diag::SessionLog>,
     store: &daygle_dns_authoritative::ZoneStore,
     dispatcher: &DnsDispatcher,
     server: &mut Server<DnsDispatcher>,
@@ -1027,6 +1060,9 @@ async fn bind_listeners(
     // to the zone database so the file-based TLS loaders can read them.
     let mut config = config.clone();
     materialize_stored_certs(&mut config, store)?;
+    // The renewal window in force (ACME settings; 30 days by default), for
+    // the certificate lifecycle reports on each encrypted listener below.
+    let renew_days = daygle_dns_api::acme::renewal_window_days(store);
     let ipv6_only = config.server.ipv6_only;
     let listen = listen_addrs(
         "server",
@@ -1107,6 +1143,14 @@ async fn bind_listeners(
 
     if config.dot.enabled {
         let tls_config = daygle_dns_dot::build_tls_config(&config.dot)?;
+        tls_diag::report_certificate(
+            tls_diag::TLS,
+            "DoT",
+            cert_name(&config.dot.certificate, &config.dot.cert_path),
+            &config.dot.cert_path,
+            renew_days,
+            session,
+        );
         for (addr, v6_only) in listen_addrs("dot", &config.dot.listen, config.dot.port, ipv6_only)?
         {
             let listener = net::bind_tcp(addr, v6_only)?;
@@ -1124,6 +1168,14 @@ async fn bind_listeners(
 
     if config.doh.enabled {
         let tls_config = daygle_dns_dot::build_doh_tls_config(&config.doh)?;
+        tls_diag::report_certificate(
+            tls_diag::HTTPS,
+            "DoH",
+            cert_name(&config.doh.certificate, &config.doh.cert_path),
+            &config.doh.cert_path,
+            renew_days,
+            session,
+        );
         for (addr, v6_only) in listen_addrs("doh", &config.doh.listen, config.doh.port, ipv6_only)?
         {
             let listener = net::bind_tcp(addr, v6_only)?;
@@ -1143,6 +1195,14 @@ async fn bind_listeners(
 
     if config.doq.enabled {
         let tls_config = daygle_dns_dot::build_doq_tls_config(&config.doq)?;
+        tls_diag::report_certificate(
+            tls_diag::QUIC,
+            "DoQ",
+            cert_name(&config.doq.certificate, &config.doq.cert_path),
+            &config.doq.cert_path,
+            renew_days,
+            session,
+        );
         let mut tasks = Vec::new();
         for (addr, v6_only) in listen_addrs("doq", &config.doq.listen, config.doq.port, ipv6_only)?
         {
@@ -1159,6 +1219,7 @@ async fn bind_listeners(
             tasks.push(tokio::spawn(crate::doq::serve_doq(
                 endpoint,
                 dispatcher.clone(),
+                session.clone(),
                 token,
             )));
             info!(

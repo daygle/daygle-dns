@@ -104,6 +104,19 @@ pub fn settings(state: &AppState) -> AcmeSettings {
         .unwrap_or_default()
 }
 
+/// The renewal window (days before expiry) currently in force: the stored
+/// ACME settings' `renew_days`, or the default when nothing is stored. The
+/// encrypted-DNS listeners use it to warn when a loaded certificate is
+/// already inside the window (see `daygle_dns::tls_diag`).
+pub fn renewal_window_days(store: &daygle_dns_authoritative::ZoneStore) -> u32 {
+    let stored: AcmeSettings = store
+        .get_named_setting(SETTINGS_KEY)
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    stored.renew_days()
+}
+
 pub fn save_settings(state: &AppState, settings: &AcmeSettings) -> Result<(), String> {
     settings.check()?;
     state

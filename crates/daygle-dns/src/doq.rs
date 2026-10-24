@@ -27,9 +27,10 @@ use quinn::crypto::rustls::QuicServerConfig;
 use quinn::{Endpoint, ServerConfig, VarInt};
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, warn};
+use tracing::{debug, error};
 
 use crate::dispatcher::DnsDispatcher;
+use crate::tls_diag::{SessionLog, QUIC};
 
 /// Largest message the 2-octet length prefix can describe (RFC 1035 §4.2.2).
 const MAX_MESSAGE_LEN: usize = u16::MAX as usize;
@@ -84,8 +85,14 @@ pub fn build_doq_endpoint(
 }
 
 /// Serve DoQ on `endpoint` until `shutdown` is cancelled, dispatching queries
-/// to `handler`.
-pub async fn serve_doq(endpoint: Endpoint, handler: DnsDispatcher, shutdown: CancellationToken) {
+/// to `handler`. Handshake and connection failures are reported through
+/// `session` (coalesced, tagged `quic`).
+pub async fn serve_doq(
+    endpoint: Endpoint,
+    handler: DnsDispatcher,
+    session: Arc<SessionLog>,
+    shutdown: CancellationToken,
+) {
     let mut connections = tokio::task::JoinSet::new();
     loop {
         tokio::select! {
@@ -102,10 +109,9 @@ pub async fn serve_doq(endpoint: Endpoint, handler: DnsDispatcher, shutdown: Can
             incoming = endpoint.accept() => {
                 let Some(connecting) = incoming else { break };
                 let handler = handler.clone();
+                let session = session.clone();
                 connections.spawn(async move {
-                    if let Err(e) = handle_connection(connecting, handler).await {
-                        debug!("DoQ connection error: {e}");
-                    }
+                    handle_connection(connecting, handler, &session).await;
                 });
             }
         }
@@ -114,33 +120,61 @@ pub async fn serve_doq(endpoint: Endpoint, handler: DnsDispatcher, shutdown: Can
 
 /// Handle one inbound QUIC connection: complete the handshake, then serve one
 /// task per DNS query stream.
+///
+/// Failures that indicate a problem (a rejected handshake, a transport error,
+/// an abnormal peer close) go to the coalescing session log at `warn`; normal
+/// ends (our own shutdown, a client's `DOQ_NO_ERROR` close, an idle timeout)
+/// stay at `debug`.
 async fn handle_connection(
     connecting: quinn::Incoming,
     handler: DnsDispatcher,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    session: &Arc<SessionLog>,
+) {
     let src = connecting.remote_address();
-    let connection = connecting.await?;
+    let ip = src.ip();
+    let connection = match connecting.await {
+        Ok(connection) => connection,
+        Err(e) => {
+            session.record(QUIC, Some(ip), &format!("handshake failed: {e}"));
+            return;
+        }
+    };
     loop {
         match connection.accept_bi().await {
             Ok((send_stream, recv_stream)) => {
                 let handler = handler.clone();
+                let session = Arc::clone(session);
                 tokio::spawn(async move {
-                    if let Err(e) = handle_stream(send_stream, recv_stream, src, handler).await {
+                    if let Err(e) =
+                        handle_stream(send_stream, recv_stream, src, handler, &session).await
+                    {
                         debug!(%src, "DoQ stream error: {e}");
                     }
                 });
             }
-            Err(quinn::ConnectionError::ApplicationClosed(_)) => {
-                debug!(%src, "DoQ connection closed by client");
+            Err(e) if benign_close(&e) => {
+                debug!(%src, "DoQ connection closed: {e}");
                 break;
             }
             Err(e) => {
-                debug!(%src, "DoQ connection ended: {e}");
+                session.record(QUIC, Some(ip), &format!("connection failed: {e}"));
                 break;
             }
         }
     }
-    Ok(())
+}
+
+/// Whether a connection end needs no warning: our own shutdown, the client
+/// closing normally (RFC 9250 §4.3: `DOQ_NO_ERROR`), or the idle timeout of
+/// a client that went quiet.
+fn benign_close(e: &quinn::ConnectionError) -> bool {
+    match e {
+        quinn::ConnectionError::ApplicationClosed(close) => {
+            close.error_code == VarInt::from_u32(DOQ_NO_ERROR)
+        }
+        quinn::ConnectionError::TimedOut | quinn::ConnectionError::LocallyClosed => true,
+        _ => false,
+    }
 }
 
 /// Serve one DNS query/response transaction on a single QUIC stream
@@ -151,6 +185,7 @@ async fn handle_stream(
     mut recv_stream: quinn::RecvStream,
     src: SocketAddr,
     handler: DnsDispatcher,
+    session: &SessionLog,
 ) -> Result<(), NetError> {
     // Read the framed request. A client that closes the stream without
     // sending a query has nothing to answer.
@@ -178,7 +213,9 @@ async fn handle_stream(
     let request = match Request::from_bytes(body, src, Protocol::Quic) {
         Ok(request) => request,
         Err(e) => {
-            warn!(%e, %src, "malformed DoQ request");
+            // Coalesced: a client looping malformed requests must not flood
+            // the warn log.
+            session.record(QUIC, Some(src.ip()), &format!("malformed request: {e}"));
             responder.formerr(id_hint).await;
             return Ok(());
         }

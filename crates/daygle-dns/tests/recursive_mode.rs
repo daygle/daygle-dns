@@ -401,6 +401,7 @@ fn policy(
         clients: vec![format!("{client}/32")],
         action,
         upstreams,
+        modified_at: None,
     }
 }
 

@@ -19,8 +19,11 @@ use daygle_dns::bind_with;
 use daygle_dns_authoritative::ZoneStore;
 use daygle_dns_core::config::{AiSettings, AiUpdate, DaygleConfig, RuntimeSettings};
 use daygle_dns_core::DEFAULT_CONFIG_PATH;
-use tracing::info;
-use tracing_subscriber::EnvFilter;
+use tracing::{info, Level};
+use tracing_subscriber::layer::Layer as _;
+use tracing_subscriber::layer::SubscriberExt as _;
+use tracing_subscriber::util::SubscriberInitExt as _;
+use tracing_subscriber::{filter::Targets, EnvFilter};
 
 /// Daygle DNS - a modern, combined DNS server.
 #[derive(Parser, Debug)]
@@ -286,9 +289,16 @@ fn main() {
         .log_level
         .clone()
         .unwrap_or_else(|| config.logging.level.clone());
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(&filter)),
+    // fmt keeps the configured level; the hickory bridge additionally sees
+    // Hickory's own `debug` DoT/DoH failure events so it can re-emit them
+    // into the console's Server Log - tagged with the query-log protocol
+    // values and coalesced per client (see `daygle_dns::tls_diag`).
+    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(&filter));
+    tracing_subscriber::registry()
+        .with(tracing_subscriber::fmt::layer().with_filter(env_filter))
+        .with(
+            daygle_dns::tls_diag::hickory_bridge()
+                .with_filter(Targets::new().with_target("hickory_server", Level::DEBUG)),
         )
         .init();
 

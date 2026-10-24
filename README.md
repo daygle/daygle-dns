@@ -53,6 +53,14 @@ Daygle DNS combines, in a single process:
   nameservers (no root→TLD walk) - both matched by longest suffix.
 - **DNS over TLS (DoT)**, **DNS over HTTPS (DoH, RFC 8484)**, and
   **DNS over QUIC (DoQ, RFC 9250)** using **rustls**.
+- **Encrypted-DNS diagnostics**: every DoT/DoH/DoQ listener start or reload
+  reports its certificate's subject and expiry, warning when it is already
+  expired or inside the ACME renewal window, and failed handshakes, dropped
+  connections and rejected DoH requests (wrong endpoint path or content
+  type) reach the console's Server Log and syslog as coalesced warnings
+  with the client address and reason - tagged `tls`/`https`/`quic` like the
+  query log, and counted per client so a loop of failures cannot flood the
+  log.
 - **DNS cookies** (RFC 7873, with RFC 9018 server cookies): clients that
   send a cookie get a server cookie back, and ones that prove their address
   with it are spared the per-client rate limit, so spoofed floods cannot

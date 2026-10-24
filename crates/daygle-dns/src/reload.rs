@@ -44,6 +44,10 @@ pub struct Shared {
     pub rate_limiter: Arc<RateLimiter>,
     pub metrics: Arc<Metrics>,
     pub logs: Arc<LogStore>,
+    /// Coalescing session-failure logger for DoT/DoH/DoQ: certificate
+    /// lifecycle reports and handshake/connection failures (tagged `tls`,
+    /// `https`, `quic` like the query log).
+    pub session: Arc<crate::tls_diag::SessionLog>,
     /// Dashboard time-series + top-N tables.
     pub stats: Arc<daygle_dns_core::stats::QueryStats>,
     /// NOTIFY hooks (RFC 1996): outbound sender + inbound handler, built once
@@ -376,6 +380,9 @@ mod tests {
             rate_limiter: Arc::new(RateLimiter::default()),
             metrics: Arc::new(Metrics::default()),
             logs: Arc::new(LogStore::new(16)),
+            session: Arc::new(crate::tls_diag::SessionLog::new(Arc::new(LogStore::new(
+                16,
+            )))),
             stats: Arc::new(daygle_dns_core::stats::QueryStats::new()),
             notify_hooks: Default::default(),
             tsig_keys: Arc::new(Default::default()),

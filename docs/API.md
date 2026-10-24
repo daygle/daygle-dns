@@ -260,6 +260,14 @@ Returns the most recent `limit` (≤ 10 000) log entries, oldest first:
 ]
 ```
 
+Encrypted-DNS entries tag `component` with the query log's protocol values
+(`tls`, `https`, `quic`): certificate lifecycle reports on every listener
+start or reload (subject, expiry, renewal window), a `TLS configuration
+reloaded` line after a rebuild, and coalesced `session failure` warnings for
+failed handshakes, dropped connections and rejected DoH requests - at most
+one warning per client per protocol per minute, with the client address and
+the reason.
+
 ### Query logs
 
 ```
@@ -485,7 +493,9 @@ first enabled policy covering the client wins; `recursion_access` still
 decides who may use recursion at all, and conditional forwarders and stub
 zones still answer for their own names. Each policy keeps its own cached
 answers. The list is replaced as a whole; invalid upstreams are rejected with
-`400`.
+`400`. Each policy also carries `modified_at` (RFC 3339): the server stamps it
+when a policy is created or edited and keeps it for unchanged policies, the
+console shows it as *Last Modified*, and a value sent in an update is ignored.
 
 Recursive settings and stub zones apply to live traffic immediately: the
 resolver is rebuilt whenever `recursive.*` or `authoritative.stub_zones`

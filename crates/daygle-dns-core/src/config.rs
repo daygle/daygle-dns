@@ -744,6 +744,7 @@ impl RecursiveUpdate {
                     clients: trim_list(&p.clients),
                     action: p.action,
                     upstreams: trim_list(&p.upstreams),
+                    modified_at: p.modified_at.clone(),
                 })
                 .collect();
         }
@@ -2871,6 +2872,11 @@ pub struct ClientPolicyConfig {
     /// Upstreams for [`ClientPolicyAction::Forward`] (same forms as
     /// `recursive.upstreams`).
     pub upstreams: Vec<String>,
+    /// When the policy last changed (RFC 3339). Stamped by the server when
+    /// the list is saved - never taken from a request - and shown as "Last
+    /// Modified" in the console.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub modified_at: Option<String>,
 }
 
 impl Default for ClientPolicyConfig {
@@ -2881,6 +2887,7 @@ impl Default for ClientPolicyConfig {
             clients: vec![],
             action: ClientPolicyAction::Forward,
             upstreams: vec![],
+            modified_at: None,
         }
     }
 }

@@ -1,6 +1,7 @@
 <script>
   import { api, formatApiError } from '../api.js';
   import NetworkPicker from '../NetworkPicker.svelte';
+  import { formatDateTime } from '../datetime.svelte.js';
 
   // Client resolution policies (recursive.client_policies). Saved on their
   // own, like the Zones page's forwarders, so editing them never touches the
@@ -164,7 +165,7 @@
     <div class="table-wrap">
       <table>
         <thead>
-          <tr><th>Name</th><th>Clients</th><th>Resolution</th><th class="num">Actions</th></tr>
+          <tr><th>Name</th><th>Clients</th><th>Resolution</th><th>Last Modified</th><th class="num">Actions</th></tr>
         </thead>
         <tbody>
           {#each policies as p, i (p.name)}
@@ -175,6 +176,7 @@
               </td>
               <td class="muted">{p.clients.join(', ')}</td>
               <td class="muted">{describe(p)}</td>
+              <td class="muted" style="white-space: nowrap">{p.modified_at ? formatDateTime(p.modified_at) : '—'}</td>
               <td class="num">
                 <div class="row" style="gap: 6px; justify-content: flex-end">
                   <button class="secondary" onclick={() => move(i, -1)} disabled={i === 0} aria-label="Move up">↑</button>

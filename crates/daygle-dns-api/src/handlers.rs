@@ -4135,6 +4135,31 @@ pub struct ApiUpdate {
     pub cors_origins: Option<Vec<String>>,
 }
 
+/// Stamp each client policy with the time it last changed, for the
+/// console's Last Modified column. A policy with the same name whose
+/// enabled/clients/action/upstreams are unchanged keeps its previous
+/// stamp; a new, renamed or edited one gets the current time. The stamp
+/// always comes from the server clock, never from the request.
+fn stamp_client_policies(
+    old: &[daygle_dns_core::config::ClientPolicyConfig],
+    new: &mut [daygle_dns_core::config::ClientPolicyConfig],
+) {
+    let now = chrono::Utc::now().to_rfc3339();
+    for policy in new {
+        let previous = old.iter().find(|o| o.name == policy.name);
+        let unchanged = previous.is_some_and(|o| {
+            o.enabled == policy.enabled
+                && o.clients == policy.clients
+                && o.action == policy.action
+                && o.upstreams == policy.upstreams
+        });
+        policy.modified_at = match previous {
+            Some(p) if unchanged => p.modified_at.clone(),
+            _ => Some(now.clone()),
+        };
+    }
+}
+
 /// `PUT /api/config` - apply a partial settings update.
 ///
 /// The merged configuration is validated first (invalid input is rejected
@@ -4239,6 +4264,15 @@ pub async fn update_settings(
             ..Default::default()
         }
         .apply_resolution(&mut config.recursive);
+        if r.client_policies.is_some() {
+            // The console's Last Modified column: stamp each policy with
+            // when it last changed. Unchanged policies keep their stamp,
+            // and anything sent in the request is ignored.
+            stamp_client_policies(
+                &old_config.recursive.client_policies,
+                &mut config.recursive.client_policies,
+            );
+        }
         if let Some(v) = r.failure_cache_ttl {
             config.recursive.failure_cache_ttl = v;
         }

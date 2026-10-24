@@ -636,6 +636,7 @@ dependencies = [
  "hickory-server",
  "ipnet",
  "quinn",
+ "rcgen",
  "reqwest",
  "rustls",
  "rustls-pki-types",

@@ -61,3 +61,4 @@ daygle-dns-authoritative = { path = "../daygle-dns-authoritative" }
 daygle-dns-policy = { path = "../daygle-dns-policy" }
 reqwest.workspace = true
 serde_json.workspace = true
+rcgen.workspace = true
