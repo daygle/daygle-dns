@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "vite",
     "prebuild": "node scripts/sync-version.mjs",
-    "build": "vite build",
+    "build": "vite build && node scripts/normalize-dist.mjs",
     "preview": "vite preview",
     "sync-version": "node scripts/sync-version.mjs --check"
   },

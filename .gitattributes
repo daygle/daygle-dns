@@ -1,0 +1,6 @@
+# The console bundle in web/dist is generated output: CI rebuilds it and fails
+# when the bytes differ from what is committed. Marking it binary stops Git
+# converting line endings on checkout/commit (core.autocrlf is commonly on for
+# Windows checkouts), so a bundle built here is byte-identical to one built on
+# the Linux CI runner.
+web/dist/** -text -diff
