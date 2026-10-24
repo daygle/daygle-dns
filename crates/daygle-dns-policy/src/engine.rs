@@ -49,6 +49,10 @@ pub struct PolicyEngine {
     /// `blocklist` (config + files) so the source refresher can swap just the
     /// remote set without touching user-configured entries.
     remote_blocklist: Option<std::sync::Arc<Blocklist>>,
+    /// Domains pulled from remote blocklist sources scoped to the DoT
+    /// listener. Applied only to clients whose query arrived on the DoT
+    /// listener (`evaluate_dot`), so the plain-DNS LAN path is untouched.
+    dot_blocklist: Option<std::sync::Arc<Blocklist>>,
     rules: std::sync::Arc<Vec<PerClientRule>>,
     plugins: std::sync::Arc<PluginRegistry>,
     /// When set, AAAA queries are answered with an empty NODATA response
@@ -115,6 +119,24 @@ impl PolicyEngine {
         self.filter_aaaa_bypass = bypass.map(std::sync::Arc::new);
     }
 
+    /// Replace the DoT-scoped remote blocklist. Kept separate from the
+    /// server-wide sets so the source refresher can swap it independently.
+    pub fn set_dot_blocklist(&mut self, blocklist: Blocklist) {
+        self.dot_blocklist = Some(std::sync::Arc::new(blocklist));
+    }
+
+    /// The current DoT-scoped remote blocklist, for comparison on refresh
+    /// and for carrying over a policy-engine rebuild.
+    pub fn dot_blocklist_snapshot(&self) -> Option<std::sync::Arc<Blocklist>> {
+        self.dot_blocklist.clone()
+    }
+
+    /// The number of domains currently blocked by DoT-scoped sources (0 when
+    /// none are configured or fetched yet).
+    pub fn dot_blocklist_len(&self) -> usize {
+        self.dot_blocklist.as_ref().map(|l| l.len()).unwrap_or(0)
+    }
+
     /// Whether the AAAA filter would suppress a query for `query_name` of the
     /// given `record_type` (used by the dispatcher and tests).
     fn aaaa_filtered(&self, query_name: &str, record_type: &str) -> bool {
@@ -146,6 +168,29 @@ impl PolicyEngine {
         if !self.enabled {
             return Decision::allow();
         }
+        self.evaluate_with(client, query_name, record_type, false).await
+    }
+
+    /// Evaluate policy for a query arriving on the DoT listener: the normal
+    /// evaluation plus the DoT-scoped remote blocklist. All the shared
+    /// rules (ACLs, allowlist, static/remote blocklists, per-client rules,
+    /// AAAA filter, plugins) apply exactly as for plain DNS, so a DoT
+    /// client never bypasses operator policy - it only faces the extra
+    /// listener-scoped set on top.
+    pub async fn evaluate_dot(&self, client: IpAddr, query_name: &str, record_type: &str) -> Decision {
+        if !self.enabled {
+            return Decision::allow();
+        }
+        self.evaluate_with(client, query_name, record_type, true).await
+    }
+
+    async fn evaluate_with(
+        &self,
+        client: IpAddr,
+        query_name: &str,
+        record_type: &str,
+        dot_listener: bool,
+    ) -> Decision {
 
         // 1. ACLs.
         if let Some(acl) = &self.acl {
@@ -177,6 +222,20 @@ impl PolicyEngine {
                     format!("'{query_name}' matched remote blocklist source"),
                     Action::Block,
                 );
+            }
+        }
+
+        // 3b. DoT-scoped sources: apply only on the DoT listener.
+        if dot_listener {
+            if let Some(list) = &self.dot_blocklist {
+                if list.contains(query_name) {
+                    return Decision::new(
+                        format!(
+                            "'{query_name}' matched remote blocklist source (DoT)"
+                        ),
+                        Action::Block,
+                    );
+                }
             }
         }
 
@@ -259,6 +318,53 @@ mod tests {
         let e = engine();
         let d = e.evaluate(ip("8.8.8.8"), "example.org", "A").await;
         assert_eq!(d.action, Action::Allow);
+    }
+
+    #[tokio::test]
+    async fn dot_scoped_blocklist_applies_only_to_dot_clients() {
+        let mut e = PolicyEngine::new(true);
+        e.set_dot_blocklist(Blocklist::from_lines(["public-ads.test"]));
+
+        // A query on the DoT listener is blocked...
+        assert_eq!(
+            e.evaluate_dot(ip("203.0.113.7"), "public-ads.test", "A")
+                .await
+                .action,
+            Action::Block
+        );
+        // ...an identical query from plain DNS is not.
+        assert_eq!(
+            e.evaluate(ip("192.168.1.10"), "public-ads.test", "A")
+                .await
+                .action,
+            Action::Allow
+        );
+    }
+
+    #[tokio::test]
+    async fn dot_scoped_blocklist_never_overrides_shared_policy() {
+        let mut e = PolicyEngine::new(true);
+        e.set_allowlist(Blocklist::from_lines(["*.trusted.test"]));
+        e.set_dot_blocklist(Blocklist::from_lines([
+            "trusted.test",
+            "blocked.test",
+        ]));
+
+        // The operator allowlist still wins on the DoT listener...
+        assert_eq!(
+            e.evaluate_dot(ip("203.0.113.7"), "safe.trusted.test", "A")
+                .await
+                .action,
+            Action::Allow
+        );
+        // ...and a name in both the global and DoT sets blocks either way.
+        e.set_blocklist(Blocklist::from_lines(["blocked.test"]));
+        assert_eq!(
+            e.evaluate_dot(ip("203.0.113.7"), "blocked.test", "A")
+                .await
+                .action,
+            Action::Block
+        );
     }
 
     #[tokio::test]

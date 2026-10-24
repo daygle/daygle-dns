@@ -727,9 +727,19 @@ impl RequestHandler for DnsDispatcher {
         }
 
         // 1. Policy. The engine is swapped atomically on reload; clone out the
-        // current one so a single query sees one consistent snapshot.
+        // current one so a single query sees one consistent snapshot. A query
+        // on the DoT listener additionally faces the DoT-scoped remote
+        // blocklist sources (scope `dot`), giving that endpoint its own
+        // stricter policy without touching the LAN's plain-DNS experience.
         let policy = self.policy.load_full();
-        let decision = policy.evaluate(client, &qname, &rtype).await;
+        let decision = if matches!(
+            info.protocol,
+            hickory_server::net::xfer::Protocol::Tls
+        ) {
+            policy.evaluate_dot(client, &qname, &rtype).await
+        } else {
+            policy.evaluate(client, &qname, &rtype).await
+        };
         match &decision.action {
             Action::Allow => {}
             Action::Refused => {

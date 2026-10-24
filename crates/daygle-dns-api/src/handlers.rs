@@ -4782,6 +4782,10 @@ pub async fn update_settings(
                 if let Some(remote) = state.policy.load_full().remote_blocklist_snapshot() {
                     engine.set_remote_blocklist(remote.as_ref().clone());
                 }
+                // The DoT-scoped listener set is refresher-owned too.
+                if let Some(dot) = state.policy.load_full().dot_blocklist_snapshot() {
+                    engine.set_dot_blocklist(dot.as_ref().clone());
+                }
                 state.policy.store(Arc::new(engine));
             }
             Err(e) => tracing::warn!("policy rebuild after settings update failed: {e}"),

@@ -105,7 +105,17 @@ pub fn apply_config(shared: &Shared, new: Arc<DaygleConfig>) -> bool {
     // Policy engine.
     if old_r.policy != new_r.policy {
         match daygle_dns_policy::build_engine(&new_r.policy) {
-            Ok(engine) => {
+            Ok(mut engine) => {
+                // Rebuilding the engine must not discard domain sets the
+                // source refresher owns (remote sources, and the DoT-scoped
+                // listener set); the running engine holds the latest copies.
+                let previous = shared.policy.load_full();
+                if let Some(remote) = previous.remote_blocklist_snapshot() {
+                    engine.set_remote_blocklist(remote.as_ref().clone());
+                }
+                if let Some(dot) = previous.dot_blocklist_snapshot() {
+                    engine.set_dot_blocklist(dot.as_ref().clone());
+                }
                 shared.policy.store(Arc::new(engine));
                 info!("policy engine reloaded");
             }
@@ -330,8 +340,33 @@ pub fn spawn_blocklist_refresh(
                         let domains = list.len();
                         let mut engine = shared.policy.load_full().as_ref().clone();
                         engine.set_remote_blocklist(list);
+                        // Rebuilds in between (a policy or network change)
+                        // may have dropped the DoT-scoped set; carry the
+                        // latest one into the same refreshed snapshot.
+                        if let Some(dot) = refresh_manager.dot_blocklist() {
+                            engine.set_dot_blocklist(dot.as_ref().clone());
+                        }
                         shared.policy.store(std::sync::Arc::new(engine));
                         info!(domains, "remote blocklist refreshed");
+                    }
+                    // The DoT-scoped set lives its own lifecycle (its
+                    // sources refresh independently), so swap it on every
+                    // cycle whenever it differs from what the engine holds.
+                    if let Some(dot) = refresh_manager.dot_blocklist() {
+                        let dot_changed = shared
+                            .policy
+                            .load()
+                            .dot_blocklist_snapshot()
+                            .is_none_or(|c| c.as_ref() != dot.as_ref());
+                        if dot_changed {
+                            let mut engine = shared.policy.load_full().as_ref().clone();
+                            engine.set_dot_blocklist(dot.as_ref().clone());
+                            shared.policy.store(std::sync::Arc::new(engine));
+                            info!(
+                                domains = dot.len(),
+                                "DoT-scoped blocklist refreshed"
+                            );
+                        }
                     }
                 }
                 Err(e) => warn!("blocklist refresh failed: {e}"),

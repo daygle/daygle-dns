@@ -1134,9 +1134,11 @@ remove flow calls. An optional `"renames": {"old name": "new name"}` keeps
 the client groups that select a renamed source pointing at it; groups drop
 any source that is no longer in the list.
 
-A source's `scope` is `everyone` (the default: it blocks for every client)
-or `groups` (it blocks only for the client groups that list it in their
-`blocklists`; see Blocking groups below). Each source is validated, the list is persisted to the
+A source's `scope` is `everyone` (the default: it blocks for every client),
+`dot` (it blocks only on the DoT listener - public/remote users over DNS
+over TLS - so it can carry stricter filtering without changing what LAN
+clients see), or `groups` (it blocks only for the client groups that list
+it in their `blocklists`; see Blocking groups below). Each source is validated, the list is persisted to the
 **SQLite database** (the config file is no longer rewritten), and the
 running server swaps its sources and refetches
 them in the background immediately; the change survives a restart.

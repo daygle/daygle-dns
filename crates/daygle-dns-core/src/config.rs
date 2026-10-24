@@ -3565,8 +3565,9 @@ pub struct BlocklistSourceConfig {
     pub refresh_secs: u64,
     /// Whether this source is fetched at all.
     pub enabled: bool,
-    /// Who the source blocks for: `everyone` (the default), or only the
-    /// client groups that select it (`groups`).
+    /// Who the source blocks for: `everyone` (the default), only the queries
+    /// arriving on the DoT listener (`dot`), or only the client groups that
+    /// select it (`groups`).
     pub scope: BlocklistScope,
 }
 
@@ -3592,6 +3593,10 @@ pub enum BlocklistScope {
     Everyone,
     /// Only clients in a client group that selects this source.
     Groups,
+    /// Only queries arriving on the DoT listener (public/remote users doing
+    /// DNS over TLS). Plain-DNS LAN clients are never blocked by these
+    /// sources, giving the encrypted endpoint its own stricter policy.
+    Dot,
 }
 
 /// The wire format of a remote blocklist source.
@@ -4564,12 +4569,44 @@ format = "adblock"
             cfg.policy.blocklist_sources[0].format,
             BlocklistFormat::Hosts
         );
-        assert_eq!(cfg.policy.blocklist_sources[0].refresh_secs, 43200);
-        assert_eq!(
-            cfg.policy.blocklist_sources[1].format,
+        assert_eq!(cfg.policy.blocklist_sources[0].refresh_secs, 43200);        assert_eq!(cfg.policy.blocklist_sources[1].format,
             BlocklistFormat::Adblock
         );
         assert_eq!(cfg.policy.blocklist_sources[1].refresh_secs, 86400);
+    }
+
+    #[test]
+    fn parses_blocklist_source_scopes() {
+        let text = r#"
+[policy]
+
+[[policy.blocklist_sources]]
+name = "global"
+url = "https://example.com/a"
+
+[[policy.blocklist_sources]]
+name = "dot only"
+url = "https://example.com/b"
+scope = "dot"
+
+[[policy.blocklist_sources]]
+name = "group only"
+url = "https://example.com/c"
+scope = "groups"
+"#;
+        let cfg = DaygleConfig::parse(text).unwrap();
+        assert_eq!(
+            cfg.policy.blocklist_sources[0].scope,
+            BlocklistScope::Everyone
+        );
+        assert_eq!(
+            cfg.policy.blocklist_sources[1].scope,
+            BlocklistScope::Dot
+        );
+        assert_eq!(
+            cfg.policy.blocklist_sources[2].scope,
+            BlocklistScope::Groups
+        );
     }
 
     #[test]

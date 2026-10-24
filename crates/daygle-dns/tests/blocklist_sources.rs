@@ -417,23 +417,91 @@ async fn blocklist_source_validation_detects_format_mismatches() {
         "domains content failed auto-detect: {json}"
     );
     assert_eq!(json["format"], "domains");
-    assert!(!json["sample"].as_array().unwrap().is_empty());
-
-    // Non-HTTP URLs and unknown formats are bad requests, not verdicts.
+    assert!(!json["sample"].as_array().unwrap().is_empty());    // Non-HTTP URLs and unknown formats are bad requests, not verdicts.
     let resp = client
         .get(&base)
         .query(&[("url", "ftp://example.com/list"), ("format", "auto")])
         .send()
-        .await
-        .unwrap();
+        .await.unwrap();
     assert_eq!(resp.status(), reqwest::StatusCode::BAD_REQUEST);
     let resp = client
         .get(&base)
         .query(&[("url", url_of(hosts.addr)), ("format", "nope".to_string())])
         .send()
-        .await
-        .unwrap();
+        .await.unwrap();
     assert_eq!(resp.status(), reqwest::StatusCode::BAD_REQUEST);
 
     shutdown(server).await;
 }
+
+/// A source scoped `dot` blocks only on the DoT listener: a public/remote
+/// user over DNS-over-TLS gets NXDOMAIN for its domains, while the very same
+/// query over plain UDP (the LAN path) is untouched.
+#[tokio::test]
+async fn dot_scoped_source_blocks_only_on_dot() {
+    let dir = tempfile::tempdir().unwrap();
+    // The stub upstream serves zone `ads.test` (with a host record); the
+    // dot-scoped list blocks the zone apex itself, so a differential is
+    // possible: the same name behaves differently on the two transports.
+    let source = BlocklistServer::spawn(
+        "# public-user list\n0.0.0.0 ads.test\n",
+    )
+    .await;
+
+    let mut config = base_config(&dir.path().join("daygle-dns.db"));
+    config.policy.enabled = true;
+    config.policy.blocklist_sources = vec![BlocklistSourceConfig {
+        name: "dot-list".to_string(),
+        url: format!("http://{}/blocklist", source.addr),
+        format: BlocklistFormat::Hosts,
+        refresh_secs: 1,
+        enabled: true,
+        scope: daygle_dns_core::config::BlocklistScope::Dot,
+    }];
+    config.recursive.enabled = true;
+    config.recursive.use_system_config = false;
+    let stub = spawn_upstream(&dir.path().join("upstream.db"), "ads.test", "198.51.100.77").await;
+    config.recursive.upstreams = vec![stub.to_string()];
+    config.recursive.dnssec_validate = false;
+
+    // Enable the DoT listener like tests/dot.rs does (self-signed cert).
+    let cert = dir.path().join("server.crt");
+    let key = dir.path().join("server.key");
+    config.dot.enabled = true;
+    config.dot.self_signed = true;
+    config.dot.cert_path = cert.to_string_lossy().to_string();
+    config.dot.key_path = key.to_string_lossy().to_string();
+    config.dot.server_name = "daygle.test".to_string();
+
+    let server = spawn(config).await;
+    let udp = server.udp_addr.unwrap();
+    let dot = server.dot_addr.unwrap();
+
+    // Wait for the initial fetch; the DoT client must see NXDOMAIN once the
+    // list lands (the source refresh loop fetches on its first tick).
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    let mut blocked = false;
+    while std::time::Instant::now() < deadline {
+        let msg = dot_query(dot, "daygle.test", &cert, "ads.test.", RecordType::A).await;
+        if msg.response_code == ResponseCode::NXDomain {
+            blocked = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+    assert!(blocked, "domain from the DoT-scoped source was not blocked on DoT");
+
+    // The same name over plain UDP is untouched: no NXDOMAIN, and recursion
+    // through the stub yields NODATA for the zone apex (NOERROR).
+    let msg = udp_query(udp, "ads.test.", RecordType::A).await;
+    assert_ne!(msg.response_code, ResponseCode::NXDomain);
+    assert_eq!(msg.response_code, ResponseCode::NoError);
+
+    // An unlisted name on the DoT listener resolves via the upstream.
+    let msg = dot_query(dot, "daygle.test", &cert, "host.ads.test.", RecordType::A).await;
+    assert_eq!(msg.response_code, ResponseCode::NoError);
+    assert_eq!(first_answer(&msg).as_deref(), Some("198.51.100.77"));
+
+    shutdown(server).await;
+}
+

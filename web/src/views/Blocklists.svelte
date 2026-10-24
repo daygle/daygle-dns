@@ -342,7 +342,7 @@
               {/if}
             </td>
             <td><span class="pill">{FORMAT_NAMES[s.format] || s.format}</span></td>
-            <td>{s.scope === 'groups' ? 'Client Groups' : 'Everyone'}</td>
+            <td>{s.scope === 'groups' ? 'Client Groups' : s.scope === 'dot' ? 'DoT Only' : 'Everyone'}</td>
             <td class="muted">{interval(s.refresh_secs)}</td>
             <td class="num">{fmt(s.domains)}</td>
             <td class="muted" style="white-space: nowrap" title={ago(s.last_fetch)}>
@@ -418,6 +418,7 @@
           <span>Applies To</span>
           <select bind:value={draft.scope}>
             <option value="everyone">Everyone</option>
+            <option value="dot">DoT Listeners Only</option>
             <option value="groups">Selected Client Groups Only</option>
           </select>
         </label>
@@ -428,6 +429,9 @@
         works out the format, a chosen format must match the content.
         Validate checks it without saving. A list for selected client groups
         only blocks for the groups that tick it on the Client Groups tab.
+        A DoT-only list blocks only on the encrypted DoT endpoint, so it
+        can carry stricter public-user filtering without changing what
+        LAN clients see.
       </p>
 
       {#if draft.result}

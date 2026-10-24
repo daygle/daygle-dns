@@ -102,6 +102,10 @@ pub struct BlocklistSourceManager {
     /// The compiled form of each group-scoped source and the domain set it
     /// was built from, so an unchanged source is not recompiled every cycle.
     compiled: Mutex<HashMap<String, CompiledSource>>,
+    /// The merged domain list of the sources scoped to the DoT listener,
+    /// published by every refresh cycle (`None` when none contribute).
+    /// Read by the refresh loop to swap into the policy engine's DoT set.
+    dot_list: RwLock<Option<Arc<Blocklist>>>,
 }
 
 impl BlocklistSourceManager {
@@ -142,12 +146,19 @@ impl BlocklistSourceManager {
             changed_flag: std::sync::atomic::AtomicBool::new(false),
             group_lists,
             compiled: Mutex::default(),
+            dot_list: RwLock::new(None),
         })
     }
 
     /// The group-scoped sources this manager publishes.
     pub fn group_lists(&self) -> Arc<GroupBlocklists> {
         Arc::clone(&self.group_lists)
+    }
+
+    /// The merged domain set of the sources scoped to the DoT listener
+    /// (`None` when no `dot`-scoped source contributes domains).
+    pub fn dot_blocklist(&self) -> Option<Arc<Blocklist>> {
+        self.dot_list.read().unwrap().clone()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -337,8 +348,10 @@ impl BlocklistSourceManager {
         // Merge the per-source caches so the effective set follows the
         // current source list, not the last fetch cycle. A source removed or
         // disabled on the latest edit stops contributing here immediately.
-        // Group-scoped sources are compiled one by one instead.
+        // Group-scoped sources are compiled one by one instead, and
+        // DoT-scoped sources are merged into their own listener-scoped set.
         let mut group_sets: Vec<(String, Arc<BTreeSet<String>>)> = Vec::new();
+        let mut dot_merged: BTreeSet<String> = BTreeSet::new();
         {
             let status = self.status.lock().unwrap();
             for (i, source) in sources.iter().enumerate() {
@@ -355,12 +368,20 @@ impl BlocklistSourceManager {
                                 source.name.to_ascii_lowercase(),
                                 st.cached_domains.clone(),
                             )),
+                            BlocklistScope::Dot => {
+                                dot_merged.extend(st.cached_domains.iter().cloned())
+                            }
                         }
                     }
                 }
             }
         }
         self.publish_group_lists(group_sets);
+
+        // Publish the DoT-scoped merge the same way: an emptied or disabled
+        // source stops blocking on the listener immediately.
+        *self.dot_list.write().unwrap() = (!dot_merged.is_empty())
+            .then(|| Arc::new(Blocklist::from_set(dot_merged)));
 
         // Always hand back the current effective set (possibly empty): a
         // source removed, disabled, or emptied on its last fetch must stop

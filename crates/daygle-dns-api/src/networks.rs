@@ -199,6 +199,10 @@ fn apply_resolved_changes(state: &AppState, old: &DaygleConfig, new: &DaygleConf
                 if let Some(remote) = state.policy.load_full().remote_blocklist_snapshot() {
                     engine.set_remote_blocklist(remote.as_ref().clone());
                 }
+                // Same for the DoT-scoped listener set.
+                if let Some(dot) = state.policy.load_full().dot_blocklist_snapshot() {
+                    engine.set_dot_blocklist(dot.as_ref().clone());
+                }
                 state.policy.store(Arc::new(engine));
             }
             Err(e) => state.logs.warn(

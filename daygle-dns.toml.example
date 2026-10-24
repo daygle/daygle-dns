@@ -366,7 +366,8 @@ filter_aaaa_except = []
 # format: "domains" (one per line) | "wildcard" (one per line, each also
 #         covering its subdomains, e.g. oisd domainswild2) | "hosts" (hosts
 #         file, e.g. StevenBlack) | "adblock" (AdGuard/uBlock syntax) | "rpz".
-# scope: "everyone" (default) blocks for every client; "groups" blocks only
+# scope: "everyone" (default) blocks for every client; "dot" blocks only
+#        on the DoT listener (your public/remote users); "groups" blocks only
 #        for the client groups (Filtering -> Client Groups) that select it.
 #
 # [[policy.blocklist_sources]]
