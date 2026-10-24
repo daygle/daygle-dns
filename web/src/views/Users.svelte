@@ -302,53 +302,55 @@
 
 {#if add}
   <div class="modal-backdrop" role="presentation" onclick={(e) => e.target === e.currentTarget && closeAdd()}>
-    <form class="card modal" role="dialog" aria-modal="true" aria-labelledby="add-user-title" onsubmit={createUser}>
-      <div class="spread modal-title">
-        <h3 id="add-user-title" style="margin: 0">Add User</h3>
-        <button type="button" class="secondary" style="padding: 2px 10px" onclick={closeAdd} aria-label="Close">✕</button>
-      </div>
-      {#if addError}<p class="dialog-error">{addError}</p>{/if}
+    <div class="modal card" role="dialog" aria-modal="true" aria-labelledby="add-user-title">
+      <form onsubmit={createUser}>
+        <div class="spread modal-title">
+          <h3 id="add-user-title" style="margin: 0">Add User</h3>
+          <button type="button" class="secondary" style="padding: 2px 10px" onclick={closeAdd} aria-label="Close">✕</button>
+        </div>
+        {#if addError}<p class="dialog-error">{addError}</p>{/if}
 
-      <div class="section-title">Sign-In</div>
-      <div class="grid2">
-        <label>
-          <span>Username</span>
-          <input type="text" bind:value={add.username} placeholder="jane" autocomplete="off" spellcheck="false" />
+        <div class="section-title">Sign-In</div>
+        <div class="grid2">
+          <label>
+            <span>Username</span>
+            <input type="text" bind:value={add.username} placeholder="jane" autocomplete="off" spellcheck="false" />
+          </label>
+          <label>
+            <span>Password</span>
+            <input type="password" bind:value={add.password} placeholder="At least {MIN_PASSWORD} characters" autocomplete="new-password" />
+          </label>
+        </div>
+        <label class="full">
+          <span>Role</span>
+          <select bind:value={add.role}>
+            <option value="admin">Administrator - can change everything</option>
+            <option value="viewer">Read-Only - can view but not change</option>
+          </select>
         </label>
-        <label>
-          <span>Password</span>
-          <input type="password" bind:value={add.password} placeholder="At least {MIN_PASSWORD} characters" autocomplete="new-password" />
-        </label>
-      </div>
-      <label class="full">
-        <span>Role</span>
-        <select bind:value={add.role}>
-          <option value="admin">Administrator - can change everything</option>
-          <option value="viewer">Read-Only - can view but not change</option>
-        </select>
-      </label>
 
-      <div class="section-title">Profile (Optional)</div>
-      <div class="grid2">
-        <label>
-          <span>First Name</span>
-          <input type="text" bind:value={add.first_name} placeholder="Jane" autocomplete="off" />
+        <div class="section-title">Profile (Optional)</div>
+        <div class="grid2">
+          <label>
+            <span>First Name</span>
+            <input type="text" bind:value={add.first_name} placeholder="Jane" autocomplete="off" />
+          </label>
+          <label>
+            <span>Last Name</span>
+            <input type="text" bind:value={add.last_name} placeholder="Doe" autocomplete="off" />
+          </label>
+        </div>
+        <label class="full">
+          <span>Email</span>
+          <input type="email" bind:value={add.email} placeholder="jane@example.com" autocomplete="off" />
         </label>
-        <label>
-          <span>Last Name</span>
-          <input type="text" bind:value={add.last_name} placeholder="Doe" autocomplete="off" />
-        </label>
-      </div>
-      <label class="full">
-        <span>Email</span>
-        <input type="email" bind:value={add.email} placeholder="jane@example.com" autocomplete="off" />
-      </label>
 
-      <div class="row actions">
-        <button type="submit" disabled={busy || !add.username.trim() || !add.password}>{busy ? 'Creating...' : 'Create Account'}</button>
-        <button type="button" class="secondary" onclick={closeAdd} disabled={busy}>Cancel</button>
-      </div>
-    </form>
+        <div class="row actions">
+          <button type="submit" disabled={busy || !add.username.trim() || !add.password}>{busy ? 'Creating...' : 'Create Account'}</button>
+          <button type="button" class="secondary" onclick={closeAdd} disabled={busy}>Cancel</button>
+        </div>
+      </form>
+    </div>
   </div>
 {/if}
 

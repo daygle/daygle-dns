@@ -34,7 +34,6 @@
     installing: 'Installing new binary...',
     applying: 'Applying the new release...',
     restarting: 'Restarting the service...',
-    checking: 'Verifying update...',
     rolling_back: 'Rolling back to previous version...',
     done: 'Complete',
     error: 'Failed',

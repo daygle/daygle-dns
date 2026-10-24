@@ -377,7 +377,7 @@
       />
       <span class="picker-chevron" class:open={pickerOpen} aria-hidden="true">▾</span>
       {#if pickerOpen}
-        <div id="zone-list" class="picker-list" role="listbox" onmousedown={(e) => e.preventDefault()}>
+        <div id="zone-list" class="picker-list" role="listbox" tabindex="-1" onmousedown={(e) => e.preventDefault()}>
           {#if zoneMatches.length === 0}
             <div class="picker-empty">No zones match “{query.trim()}”</div>
           {:else}
@@ -495,104 +495,96 @@
 
 {#if edit}
   <div class="modal-backdrop" role="presentation" onclick={(e) => e.target === e.currentTarget && closeEdit()}>
-    <form
-      class="modal card"
-      role="dialog"
-      aria-modal="true"
-      aria-labelledby="record-title"
-      onsubmit={(e) => { e.preventDefault(); saveEdit(); }}
-    >
-      <div class="spread modal-title">
-        <h3 id="record-title" style="margin: 0">{edit.isNew ? `Add Record - ${selected.name}` : `Edit Record - ${selected.name}`}</h3>
-        <button type="button" class="secondary" style="padding: 2px 10px" onclick={closeEdit} aria-label="Close">✕</button>
-      </div>
-      {#if dialogError}<p class="dialog-error">{dialogError}</p>{/if}
-      <div class="grid2">
-        <label>Name <input placeholder="www, or @ for {selected.name}" bind:value={edit.name} /></label>
-        <label>Type<select bind:value={edit.rtype}>{#each TYPES as t (t)}<option value={t}>{t}</option>{/each}</select></label>
-      </div>
-      <label class="full">Value <input placeholder={EXAMPLES[edit.rtype]} bind:value={edit.content} /></label>
-      {#if (edit.rtype === 'A' || edit.rtype === 'AAAA') && ptrTarget}
-        {#if ptrTarget.zone && ptrTarget.zone.zone_type !== 'secondary'}
-          <label class="checkbox ptr-option">
-            <input type="checkbox" bind:checked={edit.createPtr} />
-            <span>Also create matching PTR record in <code>{ptrTarget.zone.name}</code></span>
-          </label>
-        {:else if ptrTarget.zone}
-          <p class="muted help">The matching reverse zone <code>{ptrTarget.zone.name}</code> is secondary and read-only; add PTR records on its master.</p>
-        {:else}
-          <p class="muted help">No editable matching reverse zone is hosted, so Daygle cannot create a PTR record. Create the reverse zone first on the Zones page.</p>
+    <div class="modal card" role="dialog" aria-modal="true" aria-labelledby="record-title">
+      <form onsubmit={(e) => { e.preventDefault(); saveEdit(); }}>
+        <div class="spread modal-title">
+          <h3 id="record-title" style="margin: 0">{edit.isNew ? `Add Record - ${selected.name}` : `Edit Record - ${selected.name}`}</h3>
+          <button type="button" class="secondary" style="padding: 2px 10px" onclick={closeEdit} aria-label="Close">✕</button>
+        </div>
+        {#if dialogError}<p class="dialog-error">{dialogError}</p>{/if}
+        <div class="grid2">
+          <label>Name <input placeholder="www, or @ for {selected.name}" bind:value={edit.name} /></label>
+          <label>Type<select bind:value={edit.rtype}>{#each TYPES as t (t)}<option value={t}>{t}</option>{/each}</select></label>
+        </div>
+        <label class="full">Value <input placeholder={EXAMPLES[edit.rtype]} bind:value={edit.content} /></label>
+        {#if (edit.rtype === 'A' || edit.rtype === 'AAAA') && ptrTarget}
+          {#if ptrTarget.zone && ptrTarget.zone.zone_type !== 'secondary'}
+            <label class="checkbox ptr-option">
+              <input type="checkbox" bind:checked={edit.createPtr} />
+              <span>Also create matching PTR record in <code>{ptrTarget.zone.name}</code></span>
+            </label>
+          {:else if ptrTarget.zone}
+            <p class="muted help">The matching reverse zone <code>{ptrTarget.zone.name}</code> is secondary and read-only; add PTR records on its master.</p>
+          {:else}
+            <p class="muted help">No editable matching reverse zone is hosted, so Daygle cannot create a PTR record. Create the reverse zone first on the Zones page.</p>
+          {/if}
         {/if}
-      {/if}
-      <p class="muted help value-help">
-        Format: <code>{EXAMPLES[edit.rtype]}</code>{#if edit.rtype === 'MX' || edit.rtype === 'SRV'} (the priority is the first number){/if}.
-        {#if edit.rtype === 'ALIAS'}
-          Like a CNAME, but allowed at the zone's own name (<code>@</code>) and
-          next to its other records: A and AAAA questions are answered with the
-          target's current addresses. The name cannot also have A, AAAA or
-          CNAME records, and a DNSSEC-signed zone cannot have ALIAS records.
-        {/if}
-        End a host name with a dot when it is a full name.
-      </p>
-      <div class="grid2" style="margin-top: 10px">
-        <label>TTL (Seconds) <span class="hint">{duration(Number(edit.ttl) || 0)}</span><input type="number" min="0" bind:value={edit.ttl} /></label>
-        {#if edit.rtype === 'A' || edit.rtype === 'AAAA'}
-          <label>Failover Priority <span class="hint">0 = primary</span><input type="number" min="0" bind:value={edit.priority} /></label>
-        {/if}
-      </div>
-      <div class="row actions">
-        <button type="submit" disabled={saving || !edit.content.trim()}>{saving ? 'Saving...' : edit.isNew ? 'Add Record' : 'Save Record'}</button>
-        <button type="button" class="secondary" onclick={closeEdit} disabled={saving}>Cancel</button>
-      </div>
-    </form>
+        <p class="muted help value-help">
+          Format: <code>{EXAMPLES[edit.rtype]}</code>{#if edit.rtype === 'MX' || edit.rtype === 'SRV'} (the priority is the first number){/if}.
+          {#if edit.rtype === 'ALIAS'}
+            Like a CNAME, but allowed at the zone's own name (<code>@</code>) and
+            next to its other records: A and AAAA questions are answered with the
+            target's current addresses. The name cannot also have A, AAAA or
+            CNAME records, and a DNSSEC-signed zone cannot have ALIAS records.
+          {/if}
+          End a host name with a dot when it is a full name.
+        </p>
+        <div class="grid2" style="margin-top: 10px">
+          <label>TTL (Seconds) <span class="hint">{duration(Number(edit.ttl) || 0)}</span><input type="number" min="0" bind:value={edit.ttl} /></label>
+          {#if edit.rtype === 'A' || edit.rtype === 'AAAA'}
+            <label>Failover Priority <span class="hint">0 = primary</span><input type="number" min="0" bind:value={edit.priority} /></label>
+          {/if}
+        </div>
+        <div class="row actions">
+          <button type="submit" disabled={saving || !edit.content.trim()}>{saving ? 'Saving...' : edit.isNew ? 'Add Record' : 'Save Record'}</button>
+          <button type="button" class="secondary" onclick={closeEdit} disabled={saving}>Cancel</button>
+        </div>
+      </form>
+    </div>
   </div>
 {/if}
 
 {#if healthEdit}
   <div class="modal-backdrop" role="presentation" onclick={(e) => e.target === e.currentTarget && !saving && (healthEdit = null)}>
-    <form
-      class="modal card"
-      role="dialog"
-      aria-modal="true"
-      aria-labelledby="health-title"
-      onsubmit={(e) => { e.preventDefault(); saveHealth(); }}
-    >
-      <div class="spread modal-title">
-        <h3 id="health-title" style="margin: 0">Health Check - {relativeName(healthEdit.record.name)} {healthEdit.record.rtype} {healthEdit.record.content}</h3>
-        <button type="button" class="secondary" style="padding: 2px 10px" onclick={() => (healthEdit = null)} aria-label="Close">✕</button>
-      </div>
-      {#if dialogError}<p class="dialog-error">{dialogError}</p>{/if}
-      <div class="grid2">
-        <label>Check
-          <select bind:value={healthEdit.kind}>
-            <option value="tcp">TCP Connection</option>
-            <option value="http">HTTP Request</option>
-            <option value="https">HTTPS Request</option>
-          </select>
-        </label>
-        <label>Port <input type="number" min="1" max="65535" bind:value={healthEdit.port} /></label>
-        {#if healthEdit.kind !== 'tcp'}
-          <label>Path <input placeholder="/health" bind:value={healthEdit.path} /></label>
-          <label>Host Name <input placeholder={relativeName(healthEdit.record.name) === '@' ? selected.name : healthEdit.record.name} bind:value={healthEdit.host} /></label>
-        {/if}
-        <label>Every (Seconds) <input type="number" min="5" max="86400" bind:value={healthEdit.interval_secs} /></label>
-      </div>
-      <p class="muted help">
-        The address is checked on this schedule; after 2 failures in a row it is
-        left out of answers, and it returns after 2 passes. At a name with
-        several addresses, only the healthy ones with the lowest Failover
-        Priority are served (set a higher priority on a record to make it a
-        backup). If every address is down, all are served. HTTP(S) checks pass
-        on any status below 400 and do not verify certificates.
-      </p>
-      <div class="row actions">
-        <button type="submit" disabled={saving}>{saving ? 'Saving...' : 'Save Check'}</button>
-        {#if healthEdit.exists}
-          <button type="button" class="danger" onclick={removeHealth} disabled={saving}>Remove Check</button>
-        {/if}
-        <button type="button" class="secondary" onclick={() => (healthEdit = null)} disabled={saving}>Cancel</button>
-      </div>
-    </form>
+    <div class="modal card" role="dialog" aria-modal="true" aria-labelledby="health-title">
+      <form onsubmit={(e) => { e.preventDefault(); saveHealth(); }}>
+        <div class="spread modal-title">
+          <h3 id="health-title" style="margin: 0">Health Check - {relativeName(healthEdit.record.name)} {healthEdit.record.rtype} {healthEdit.record.content}</h3>
+          <button type="button" class="secondary" style="padding: 2px 10px" onclick={() => (healthEdit = null)} aria-label="Close">✕</button>
+        </div>
+        {#if dialogError}<p class="dialog-error">{dialogError}</p>{/if}
+        <div class="grid2">
+          <label>Check
+            <select bind:value={healthEdit.kind}>
+              <option value="tcp">TCP Connection</option>
+              <option value="http">HTTP Request</option>
+              <option value="https">HTTPS Request</option>
+            </select>
+          </label>
+          <label>Port <input type="number" min="1" max="65535" bind:value={healthEdit.port} /></label>
+          {#if healthEdit.kind !== 'tcp'}
+            <label>Path <input placeholder="/health" bind:value={healthEdit.path} /></label>
+            <label>Host Name <input placeholder={relativeName(healthEdit.record.name) === '@' ? selected.name : healthEdit.record.name} bind:value={healthEdit.host} /></label>
+          {/if}
+          <label>Every (Seconds) <input type="number" min="5" max="86400" bind:value={healthEdit.interval_secs} /></label>
+        </div>
+        <p class="muted help">
+          The address is checked on this schedule; after 2 failures in a row it is
+          left out of answers, and it returns after 2 passes. At a name with
+          several addresses, only the healthy ones with the lowest Failover
+          Priority are served (set a higher priority on a record to make it a
+          backup). If every address is down, all are served. HTTP(S) checks pass
+          on any status below 400 and do not verify certificates.
+        </p>
+        <div class="row actions">
+          <button type="submit" disabled={saving}>{saving ? 'Saving...' : 'Save Check'}</button>
+          {#if healthEdit.exists}
+            <button type="button" class="danger" onclick={removeHealth} disabled={saving}>Remove Check</button>
+          {/if}
+          <button type="button" class="secondary" onclick={() => (healthEdit = null)} disabled={saving}>Cancel</button>
+        </div>
+      </form>
+    </div>
   </div>
 {/if}
 

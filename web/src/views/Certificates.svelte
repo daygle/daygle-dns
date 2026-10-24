@@ -418,170 +418,174 @@
 
 {#if form}
   <div class="modal-backdrop" role="presentation" onclick={(e) => e.target === e.currentTarget && closeForm()}>
-    <form class="card modal" role="dialog" aria-modal="true" aria-labelledby="cert-title" onsubmit={saveCert}>
-      <div class="spread modal-title">
-        <h3 id="cert-title" style="margin: 0">{form.replacing ? `Replace Certificate - ${form.replacing}` : 'Add Certificate'}</h3>
-        <button type="button" class="secondary" style="padding: 2px 10px" onclick={closeForm} aria-label="Close">✕</button>
-      </div>
-      {#if formError}<p class="dialog-error">{formError}</p>{/if}
-
-      {#if !form.replacing}
-        <div class="choices" role="radiogroup" aria-label="Certificate source">
-          <label class="choice" class:on={form.mode === 'self'}>
-            <input type="radio" bind:group={form.mode} value="self" />
-            <span>
-              <strong>Generate Self-Signed</strong>
-              <small>Quick and free. Clients will only accept it if they are told to trust it, so it suits testing and private networks.</small>
-            </span>
-          </label>
-          <label class="choice" class:on={form.mode === 'acme'}>
-            <input type="radio" bind:group={form.mode} value="acme" />
-            <span>
-              <strong>Let's Encrypt</strong>
-              <small>Free and trusted everywhere, issued and renewed automatically. The names must be reachable from the internet.</small>
-            </span>
-          </label>
-          <label class="choice" class:on={form.mode === 'upload'}>
-            <input type="radio" bind:group={form.mode} value="upload" />
-            <span>
-              <strong>Upload Certificate</strong>
-              <small>From any certificate authority. Trusted by clients automatically; you replace it before it expires.</small>
-            </span>
-          </label>
+    <div class="modal card" role="dialog" aria-modal="true" aria-labelledby="cert-title">
+      <form onsubmit={saveCert}>
+        <div class="spread modal-title">
+          <h3 id="cert-title" style="margin: 0">{form.replacing ? `Replace Certificate - ${form.replacing}` : 'Add Certificate'}</h3>
+          <button type="button" class="secondary" style="padding: 2px 10px" onclick={closeForm} aria-label="Close">✕</button>
         </div>
-        <label class="full">
-          <span>Name</span>
-          <input type="text" bind:value={form.name} placeholder="lan-dns" autocomplete="off" spellcheck="false" />
-        </label>
-        <p class="muted help">How the certificate is listed and picked in Settings.</p>
-      {:else}
-        <p class="muted help" style="margin-top: 0">
-          Upload the renewed certificate and its key. Listeners using
-          '{form.replacing}' switch to it straight away.
-        </p>
-      {/if}
+        {#if formError}<p class="dialog-error">{formError}</p>{/if}
 
-      {#if form.mode === 'acme'}
-        <label class="full">
-          <span>Domain Names (one per line)</span>
-          <textarea rows="3" bind:value={form.domains} placeholder={'dns.example.com\n*.example.com'} spellcheck="false"></textarea>
-        </label>
-        <div class="choices two" role="radiogroup" aria-label="How to prove the names are yours">
-          <label class="choice" class:on={form.challenge === 'http'}>
-            <input type="radio" bind:group={form.challenge} value="http" />
-            <span>
-              <strong>Web Console (HTTP)</strong>
-              <small>{caName()} connects to each name on port 80, which must reach this console's HTTP listener (directly, or forwarded by your router).</small>
-            </span>
-          </label>
-          <label class="choice" class:on={form.challenge === 'dns'}>
-            <input type="radio" bind:group={form.challenge} value="dns" />
-            <span>
-              <strong>DNS Zone Hosted Here</strong>
-              <small>A temporary TXT record in the name's zone on this server, which must be the zone's public DNS server. Needed for wildcards (*.example.com).</small>
-            </span>
-          </label>
-        </div>
-        {#if !acme?.settings?.agree_terms}
+        {#if !form.replacing}
+          <div class="choices" role="radiogroup" aria-label="Certificate source">
+            <label class="choice" class:on={form.mode === 'self'}>
+              <input type="radio" bind:group={form.mode} value="self" />
+              <span>
+                <strong>Generate Self-Signed</strong>
+                <small>Quick and free. Clients will only accept it if they are told to trust it, so it suits testing and private networks.</small>
+              </span>
+            </label>
+            <label class="choice" class:on={form.mode === 'acme'}>
+              <input type="radio" bind:group={form.mode} value="acme" />
+              <span>
+                <strong>Let's Encrypt</strong>
+                <small>Free and trusted everywhere, issued and renewed automatically. The names must be reachable from the internet.</small>
+              </span>
+            </label>
+            <label class="choice" class:on={form.mode === 'upload'}>
+              <input type="radio" bind:group={form.mode} value="upload" />
+              <span>
+                <strong>Upload Certificate</strong>
+                <small>From any certificate authority. Trusted by clients automatically; you replace it before it expires.</small>
+              </span>
+            </label>
+          </div>
           <label class="full">
-            <span>Email for Expiry Notices (Optional)</span>
-            <input type="email" bind:value={form.email} placeholder="you@example.com" autocomplete="email" />
+            <span>Name</span>
+            <input type="text" bind:value={form.name} placeholder="lan-dns" autocomplete="off" spellcheck="false" />
           </label>
-          <label class="check full">
-            <input type="checkbox" bind:checked={form.agree} />
-            <span>I accept the terms of service of {caName()}{#if caName().startsWith('Let')}{' '}(<a href="https://letsencrypt.org/repository/" target="_blank" rel="noopener">Subscriber Agreement</a>){/if}.</span>
-          </label>
+          <p class="muted help">How the certificate is listed and picked in Settings.</p>
+        {:else}
+          <p class="muted help" style="margin-top: 0">
+            Upload the renewed certificate and its key. Listeners using
+            '{form.replacing}' switch to it straight away.
+          </p>
         {/if}
-        <p class="muted help">
-          The certificate is renewed {acme?.settings?.renew_days || 30} days before it expires, and listeners
-          using it switch to the renewal straight away.
-        </p>
-      {:else if form.mode === 'self'}
-        <label class="full">
-          <span>Server Name</span>
-          <input type="text" bind:value={form.serverName} placeholder="dns.example.com" autocomplete="off" spellcheck="false" />
-        </label>
-        <p class="muted help">The name clients use to reach this server; the certificate is issued for it (and for localhost).</p>
-      {:else}
-        <div class="grid2">
-          <label>
-            <span>Certificate (PEM)</span>
-            <input type="file" accept=".pem,.crt,.cer" onchange={(e) => pickFile(e.currentTarget, 'cert')} />
-            <textarea rows="5" bind:value={form.certPem} placeholder="-----BEGIN CERTIFICATE-----&#10;... or paste here" spellcheck="false"></textarea>
-          </label>
-          <label>
-            <span>Private Key (PEM)</span>
-            <input type="file" accept=".pem,.key" onchange={(e) => pickFile(e.currentTarget, 'key')} />
-            <textarea rows="5" bind:value={form.keyPem} placeholder="-----BEGIN PRIVATE KEY-----&#10;... or paste here" spellcheck="false"></textarea>
-          </label>
-        </div>
-        <p class="muted help">
-          Use the full chain (your certificate first, then the intermediates;
-          Let's Encrypt calls it <code>fullchain.pem</code>) and the matching
-          private key. The pair is checked before it is saved.
-        </p>
-      {/if}
 
-      <div class="row actions">
-        <button type="submit" disabled={busy || !form.name.trim()}>
-          {busy ? 'Saving...' : form.replacing ? 'Replace Certificate' : form.mode === 'self' ? 'Create Certificate' : form.mode === 'acme' ? 'Request Certificate' : 'Upload Certificate'}
-        </button>
-        <button type="button" class="secondary" onclick={closeForm} disabled={busy}>Cancel</button>
-      </div>
-    </form>
+        {#if form.mode === 'acme'}
+          <label class="full">
+            <span>Domain Names (one per line)</span>
+            <textarea rows="3" bind:value={form.domains} placeholder={'dns.example.com\n*.example.com'} spellcheck="false"></textarea>
+          </label>
+          <div class="choices two" role="radiogroup" aria-label="How to prove the names are yours">
+            <label class="choice" class:on={form.challenge === 'http'}>
+              <input type="radio" bind:group={form.challenge} value="http" />
+              <span>
+                <strong>Web Console (HTTP)</strong>
+                <small>{caName()} connects to each name on port 80, which must reach this console's HTTP listener (directly, or forwarded by your router).</small>
+              </span>
+            </label>
+            <label class="choice" class:on={form.challenge === 'dns'}>
+              <input type="radio" bind:group={form.challenge} value="dns" />
+              <span>
+                <strong>DNS Zone Hosted Here</strong>
+                <small>A temporary TXT record in the name's zone on this server, which must be the zone's public DNS server. Needed for wildcards (*.example.com).</small>
+              </span>
+            </label>
+          </div>
+          {#if !acme?.settings?.agree_terms}
+            <label class="full">
+              <span>Email for Expiry Notices (Optional)</span>
+              <input type="email" bind:value={form.email} placeholder="you@example.com" autocomplete="email" />
+            </label>
+            <label class="check full">
+              <input type="checkbox" bind:checked={form.agree} />
+              <span>I accept the terms of service of {caName()}{#if caName().startsWith('Let')}{' '}(<a href="https://letsencrypt.org/repository/" target="_blank" rel="noopener">Subscriber Agreement</a>){/if}.</span>
+            </label>
+          {/if}
+          <p class="muted help">
+            The certificate is renewed {acme?.settings?.renew_days || 30} days before it expires, and listeners
+            using it switch to the renewal straight away.
+          </p>
+        {:else if form.mode === 'self'}
+          <label class="full">
+            <span>Server Name</span>
+            <input type="text" bind:value={form.serverName} placeholder="dns.example.com" autocomplete="off" spellcheck="false" />
+          </label>
+          <p class="muted help">The name clients use to reach this server; the certificate is issued for it (and for localhost).</p>
+        {:else}
+          <div class="grid2">
+            <label>
+              <span>Certificate (PEM)</span>
+              <input type="file" accept=".pem,.crt,.cer" onchange={(e) => pickFile(e.currentTarget, 'cert')} />
+              <textarea rows="5" bind:value={form.certPem} placeholder="-----BEGIN CERTIFICATE-----&#10;... or paste here" spellcheck="false"></textarea>
+            </label>
+            <label>
+              <span>Private Key (PEM)</span>
+              <input type="file" accept=".pem,.key" onchange={(e) => pickFile(e.currentTarget, 'key')} />
+              <textarea rows="5" bind:value={form.keyPem} placeholder="-----BEGIN PRIVATE KEY-----&#10;... or paste here" spellcheck="false"></textarea>
+            </label>
+          </div>
+          <p class="muted help">
+            Use the full chain (your certificate first, then the intermediates;
+            Let's Encrypt calls it <code>fullchain.pem</code>) and the matching
+            private key. The pair is checked before it is saved.
+          </p>
+        {/if}
+
+        <div class="row actions">
+          <button type="submit" disabled={busy || !form.name.trim()}>
+            {busy ? 'Saving...' : form.replacing ? 'Replace Certificate' : form.mode === 'self' ? 'Create Certificate' : form.mode === 'acme' ? 'Request Certificate' : 'Upload Certificate'}
+          </button>
+          <button type="button" class="secondary" onclick={closeForm} disabled={busy}>Cancel</button>
+        </div>
+      </form>
+    </div>
   </div>
 {/if}
 
 {#if acmeForm}
   <div class="modal-backdrop" role="presentation" onclick={(e) => e.target === e.currentTarget && !busy && (acmeForm = null)}>
-    <form class="card modal" role="dialog" aria-modal="true" aria-labelledby="acme-title" onsubmit={saveAcme}>
-      <div class="spread modal-title">
-        <h3 id="acme-title" style="margin: 0">Let's Encrypt Settings</h3>
-        <button type="button" class="secondary" style="padding: 2px 10px" onclick={() => (acmeForm = null)} aria-label="Close">✕</button>
-      </div>
-      {#if acmeError}<p class="dialog-error">{acmeError}</p>{/if}
-      <label>
-        <span>Certificate Authority</span>
-        <select bind:value={acmeForm.ca}>
-          <option value="letsencrypt">Let's Encrypt</option>
-          <option value="staging">Let's Encrypt Staging (for testing, not trusted)</option>
-          <option value="custom">Another ACME CA</option>
-        </select>
-      </label>
-      {#if acmeForm.ca === 'custom'}
-        <label class="full">
-          <span>Directory URL</span>
-          <input type="url" bind:value={acmeForm.directory} placeholder="https://ca.internal/acme/acme/directory" spellcheck="false" />
-        </label>
-        <label class="full">
-          <span>CA Root Certificate (PEM, if not publicly trusted)</span>
-          <textarea rows="4" bind:value={acmeForm.ca_certificate} placeholder="-----BEGIN CERTIFICATE-----" spellcheck="false"></textarea>
-        </label>
-      {/if}
-      <div class="grid2">
+    <div class="modal card" role="dialog" aria-modal="true" aria-labelledby="acme-title">
+      <form onsubmit={saveAcme}>
+        <div class="spread modal-title">
+          <h3 id="acme-title" style="margin: 0">Let's Encrypt Settings</h3>
+          <button type="button" class="secondary" style="padding: 2px 10px" onclick={() => (acmeForm = null)} aria-label="Close">✕</button>
+        </div>
+        {#if acmeError}<p class="dialog-error">{acmeError}</p>{/if}
         <label>
-          <span>Email for Expiry Notices (Optional)</span>
-          <input type="email" bind:value={acmeForm.email} placeholder="you@example.com" autocomplete="email" />
+          <span>Certificate Authority</span>
+          <select bind:value={acmeForm.ca}>
+            <option value="letsencrypt">Let's Encrypt</option>
+            <option value="staging">Let's Encrypt Staging (for testing, not trusted)</option>
+            <option value="custom">Another ACME CA</option>
+          </select>
         </label>
-        <label>
-          <span>Renew Days Before Expiry</span>
-          <input type="number" min="1" max="60" bind:value={acmeForm.renew_days} />
+        {#if acmeForm.ca === 'custom'}
+          <label class="full">
+            <span>Directory URL</span>
+            <input type="url" bind:value={acmeForm.directory} placeholder="https://ca.internal/acme/acme/directory" spellcheck="false" />
+          </label>
+          <label class="full">
+            <span>CA Root Certificate (PEM, if not publicly trusted)</span>
+            <textarea rows="4" bind:value={acmeForm.ca_certificate} placeholder="-----BEGIN CERTIFICATE-----" spellcheck="false"></textarea>
+          </label>
+        {/if}
+        <div class="grid2">
+          <label>
+            <span>Email for Expiry Notices (Optional)</span>
+            <input type="email" bind:value={acmeForm.email} placeholder="you@example.com" autocomplete="email" />
+          </label>
+          <label>
+            <span>Renew Days Before Expiry</span>
+            <input type="number" min="1" max="60" bind:value={acmeForm.renew_days} />
+          </label>
+        </div>
+        <label class="check full">
+          <input type="checkbox" bind:checked={acmeForm.agree_terms} />
+          <span>I accept the CA's terms of service{#if acmeForm.ca !== 'custom'}{' '}(<a href="https://letsencrypt.org/repository/" target="_blank" rel="noopener">Let's Encrypt Subscriber Agreement</a>){/if}.</span>
         </label>
-      </div>
-      <label class="check full">
-        <input type="checkbox" bind:checked={acmeForm.agree_terms} />
-        <span>I accept the CA's terms of service{#if acmeForm.ca !== 'custom'}{' '}(<a href="https://letsencrypt.org/repository/" target="_blank" rel="noopener">Let's Encrypt Subscriber Agreement</a>){/if}.</span>
-      </label>
-      <p class="muted help">
-        Certificates are checked twice a day and renewed automatically. A
-        private CA such as step-ca works too: give its ACME directory and,
-        if browsers do not trust it, its root certificate.
-      </p>
-      <div class="row actions">
-        <button type="submit" disabled={busy}>{busy ? 'Saving...' : 'Save Settings'}</button>
-        <button type="button" class="secondary" onclick={() => (acmeForm = null)} disabled={busy}>Cancel</button>
-      </div>
-    </form>
+        <p class="muted help">
+          Certificates are checked twice a day and renewed automatically. A
+          private CA such as step-ca works too: give its ACME directory and,
+          if browsers do not trust it, its root certificate.
+        </p>
+        <div class="row actions">
+          <button type="submit" disabled={busy}>{busy ? 'Saving...' : 'Save Settings'}</button>
+          <button type="button" class="secondary" onclick={() => (acmeForm = null)} disabled={busy}>Cancel</button>
+        </div>
+      </form>
+    </div>
   </div>
 {/if}
 

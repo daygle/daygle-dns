@@ -272,62 +272,58 @@
 
 {#if edit}
   <div class="modal-backdrop" role="presentation" onclick={(e) => e.target === e.currentTarget && closeEdit()}>
-    <form
-      class="modal card"
-      role="dialog"
-      aria-modal="true"
-      aria-labelledby="entry-title"
-      onsubmit={(e) => { e.preventDefault(); saveEntry(); }}
-    >
-      <div class="spread modal-title">
-        <h3 id="entry-title" style="margin: 0">{edit.isNew ? 'Add Entry' : `Edit Entry - ${edit.domain}`}</h3>
-        <button type="button" class="secondary" style="padding: 2px 10px" onclick={closeEdit} aria-label="Close">✕</button>
-      </div>
-      {#if dialogError}<p class="dialog-error">{dialogError}</p>{/if}
-      <div class="grid2">
-        <label>Domain <input placeholder="intranet.example.com" bind:value={edit.domain} /></label>
-        <label>TTL (Seconds) <span class="hint">{duration(Number(edit.ttl) || 0)}</span><input type="number" min="0" bind:value={edit.ttl} /></label>
-      </div>
-
-      <div class="section-title">Clients</div>
-      <NetworkPicker {networks} bind:value={edit.networks} />
-      <p class="muted help">
-        {#if edit.networks.length === 0}
-          No networks chosen: this entry answers <strong>every client</strong> (a public fallback).
-        {:else}
-          Only clients in the chosen networks get this answer.
-        {/if}
-      </p>
-
-      <div class="section-title">Answers</div>
-      {#each edit.records as rec, i (i)}
-        <div class="row" style="gap: 6px; margin-top: 6px; flex-wrap: nowrap">
-          <select bind:value={rec.rtype} style="width: 110px" aria-label="Answer type">
-            {#each RECORD_TYPES as t (t)}
-              <option value={t}>{t}</option>
-            {/each}
-          </select>
-          <input placeholder={PLACEHOLDERS[rec.rtype]} bind:value={rec.content} style="flex: 1" aria-label="Answer value" />
-          <button type="button" class="danger" onclick={() => removeRecordAt(i)} aria-label="Remove answer" disabled={edit.records.length === 1}>✕</button>
+    <div class="modal card" role="dialog" aria-modal="true" aria-labelledby="entry-title">
+      <form onsubmit={(e) => { e.preventDefault(); saveEntry(); }}>
+        <div class="spread modal-title">
+          <h3 id="entry-title" style="margin: 0">{edit.isNew ? 'Add Entry' : `Edit Entry - ${edit.domain}`}</h3>
+          <button type="button" class="secondary" style="padding: 2px 10px" onclick={closeEdit} aria-label="Close">✕</button>
         </div>
-      {/each}
-      <div><button type="button" class="secondary" onclick={addRecord} style="margin-top: 8px">Add Answer</button></div>
-      <p class="muted help">One answer per type; a CNAME answers every type.</p>
+        {#if dialogError}<p class="dialog-error">{dialogError}</p>{/if}
+        <div class="grid2">
+          <label>Domain <input placeholder="intranet.example.com" bind:value={edit.domain} /></label>
+          <label>TTL (Seconds) <span class="hint">{duration(Number(edit.ttl) || 0)}</span><input type="number" min="0" bind:value={edit.ttl} /></label>
+        </div>
 
-      <label class="checkbox">
-        <input type="checkbox" bind:checked={edit.disabled} />
-        <span>Disabled (Keep for Later)</span>
-      </label>
-      <div class="row actions">
-        <button
-          type="submit"
-          disabled={saving || !edit.domain.trim() || edit.records.filter((r) => r.rtype && r.content.trim()).length === 0}
-        >
-          {saving ? 'Saving...' : edit.isNew ? 'Add Entry' : 'Save Entry'}
-        </button>
-        <button type="button" class="secondary" onclick={closeEdit} disabled={saving}>Cancel</button>
-      </div>
-    </form>
+        <div class="section-title">Clients</div>
+        <NetworkPicker {networks} bind:value={edit.networks} />
+        <p class="muted help">
+          {#if edit.networks.length === 0}
+            No networks chosen: this entry answers <strong>every client</strong> (a public fallback).
+          {:else}
+            Only clients in the chosen networks get this answer.
+          {/if}
+        </p>
+
+        <div class="section-title">Answers</div>
+        {#each edit.records as rec, i (i)}
+          <div class="row" style="gap: 6px; margin-top: 6px; flex-wrap: nowrap">
+            <select bind:value={rec.rtype} style="width: 110px" aria-label="Answer type">
+              {#each RECORD_TYPES as t (t)}
+                <option value={t}>{t}</option>
+              {/each}
+            </select>
+            <input placeholder={PLACEHOLDERS[rec.rtype]} bind:value={rec.content} style="flex: 1" aria-label="Answer value" />
+            <button type="button" class="danger" onclick={() => removeRecordAt(i)} aria-label="Remove answer" disabled={edit.records.length === 1}>✕</button>
+          </div>
+        {/each}
+        <div><button type="button" class="secondary" onclick={addRecord} style="margin-top: 8px">Add Answer</button></div>
+        <p class="muted help">One answer per type; a CNAME answers every type.</p>
+
+        <label class="checkbox">
+          <input type="checkbox" bind:checked={edit.disabled} />
+          <span>Disabled (Keep for Later)</span>
+        </label>
+        <div class="row actions">
+          <button
+            type="submit"
+            disabled={saving || !edit.domain.trim() || edit.records.filter((r) => r.rtype && r.content.trim()).length === 0}
+          >
+            {saving ? 'Saving...' : edit.isNew ? 'Add Entry' : 'Save Entry'}
+          </button>
+          <button type="button" class="secondary" onclick={closeEdit} disabled={saving}>Cancel</button>
+        </div>
+      </form>
+    </div>
   </div>
 {/if}
 

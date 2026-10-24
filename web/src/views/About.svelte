@@ -94,7 +94,7 @@
 </div>
 
 <style>
-  h2, h3 { margin-top: 0; }
+  h3 { margin-top: 0; }
   .feature-grid, .details-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 14px; }
   /* Six features: 3 x 2 on wide screens, 2 x 3 below that - never a lone card. */
   .feature-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); margin-bottom: 14px; }
