@@ -509,6 +509,37 @@ fn check_disk_space() -> Option<PreflightCheck> {
 
 /// Check network connectivity to GitHub releases.
 fn check_github_connectivity() -> Option<PreflightCheck> {
+    // First gate: a background release check that reached GitHub recently
+    // proves connectivity without costing this probe a request off GitHub's
+    // unauthenticated budget (60/hour per address, shared). The warmer
+    // refreshes at the configured interval (floor 10 minutes), so a cache
+    // fetched within that window is trustworthy evidence.
+    if let Some(at) = latest_release_fetched_at() {
+        let cache_has_value = LATEST_RELEASE.lock().ok().and_then(|g| g.clone()).is_some();
+        if cache_has_value
+            && at.elapsed()
+                < std::time::Duration::from_secs(
+                    daygle_dns_core::config::MIN_UPDATE_CHECK_INTERVAL_SECS,
+                )
+        {
+            return Some(PreflightCheck {
+                name: "network".to_string(),
+                ok: true,
+                message: "GitHub releases were accessible at the last background check".to_string(),
+                fix: None,
+                fix_commands: None,
+            });
+        }
+    }
+    // Second gate: repeated live probes are throttled to one per minute; a
+    // rerun inside the window reuses the previous result verbatim. Without
+    // this, clicking "Run preflight" several times in a row (or a busy
+    // polling loop) would burn the same shared budget a click at a time.
+    if let Some((at, result)) = LAST_CONNECTIVITY_PROBE.lock().ok().and_then(|g| g.clone()) {
+        if at.elapsed() < CONNECTIVITY_PROBE_MIN_INTERVAL {
+            return Some(result);
+        }
+    }
     let output = std::process::Command::new("curl")
         .args([
             "-fsSL",
@@ -525,7 +556,7 @@ fn check_github_connectivity() -> Option<PreflightCheck> {
         .output()
         .ok()?;
 
-    if output.status.success() {
+    let result = if output.status.success() {
         Some(PreflightCheck {
             name: "network".to_string(),
             ok: true,
@@ -542,6 +573,81 @@ fn check_github_connectivity() -> Option<PreflightCheck> {
             fix: Some("Check network connectivity and firewall rules. The update requires access to github.com.".to_string()),
             fix_commands: None,
         })
+    };
+    if let Ok(mut guard) = LAST_CONNECTIVITY_PROBE.lock() {
+        *guard = Some((std::time::Instant::now(), result.clone().unwrap()));
+    }
+    result
+}
+
+/// When the background warmer last fetched the release cache successfully
+/// (for the preflight connectivity gate) and the previous live connectivity
+/// probe and its result (for the throttle). `std::sync::Mutex::new` is
+/// `const` stable here, matching `LATEST_RELEASE` below.
+static LATEST_RELEASE_FETCHED_AT: std::sync::Mutex<Option<std::time::Instant>> =
+    std::sync::Mutex::new(None);
+static LAST_CONNECTIVITY_PROBE: std::sync::Mutex<Option<(std::time::Instant, PreflightCheck)>> =
+    std::sync::Mutex::new(None);
+
+/// Minimum spacing between live connectivity probes: repeated preflight
+/// runs inside this window reuse the previous result instead of re-hitting
+/// GitHub.
+const CONNECTIVITY_PROBE_MIN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// When the cached latest release was last fetched from GitHub, if ever.
+fn latest_release_fetched_at() -> Option<std::time::Instant> {
+    LATEST_RELEASE_FETCHED_AT.lock().ok().and_then(|g| *g)
+}
+
+#[cfg(test)]
+mod connectivity_tests {
+    use super::*;
+
+    /// Two preflight calls inside the throttle window produce two identical
+    /// network checks without a second GitHub request: one result written
+    /// by the (test-local stubbed) probe, replayed verbatim on the second.
+    #[test]
+    fn repeated_probes_inside_the_window_reuse_the_previous_result() {
+        let sample = PreflightCheck {
+            name: "network".to_string(),
+            ok: false,
+            message: "stub failure".to_string(),
+            fix: None,
+            fix_commands: None,
+        };
+        *LAST_CONNECTIVITY_PROBE.lock().unwrap() =
+            Some((std::time::Instant::now(), sample.clone()));
+
+        let first = check_github_connectivity().unwrap();
+        assert_eq!(first.message, "stub failure");
+        assert!(!first.ok);
+
+        // The replay must not have replaced the stored probe (a new live
+        // probe would), and a second call is still the stored result.
+        let second = check_github_connectivity().unwrap();
+        assert_eq!(second.message, first.message);
+        assert_eq!(second.ok, first.ok);
+    }
+
+    /// A recently-refreshed release cache short-circuits before any live
+    /// probe or throttle replay: the result names the background check.
+    #[test]
+    fn fresh_release_cache_replaces_a_live_probe() {
+        *LAST_CONNECTIVITY_PROBE.lock().unwrap() = None;
+        *LATEST_RELEASE.lock().unwrap() = Some("1.0.0".to_string());
+        *LATEST_RELEASE_FETCHED_AT.lock().unwrap() = Some(std::time::Instant::now());
+
+        let check = check_github_connectivity().unwrap();
+        assert!(check.ok);
+        assert_eq!(
+            check.message,
+            "GitHub releases were accessible at the last background check"
+        );
+
+        // Clean up so tests running after this one are not affected.
+        *LAST_CONNECTIVITY_PROBE.lock().unwrap() = None;
+        *LATEST_RELEASE.lock().unwrap() = None;
+        *LATEST_RELEASE_FETCHED_AT.lock().unwrap() = None;
     }
 }
 
@@ -567,6 +673,9 @@ fn refresh_latest_release_cache() {
     if let Some(version) = fetch_latest_release_uncached() {
         if let Ok(mut guard) = LATEST_RELEASE.lock() {
             *guard = Some(version);
+        }
+        if let Ok(mut guard) = LATEST_RELEASE_FETCHED_AT.lock() {
+            *guard = Some(std::time::Instant::now());
         }
     }
 }

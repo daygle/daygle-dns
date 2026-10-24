@@ -1251,7 +1251,14 @@ POST   /api/policy/blocking/test
 Blocking groups extend the policy engine with per-group client and domain
 criteria, including regular expressions (`allow_regex` / `block_regex`;
 invalid patterns are rejected with `400` instead of being silently dropped
-at engine-build time). `blocklists` names remote blocklist sources whose
+at engine-build time). A group's `clients` list normally holds CIDRs or
+single addresses (or network names); the special case-insensitive entries
+`DOT`, `DOH` and `DOQ` instead match a query by the encrypted listener it
+arrived on (plain port-53 queries never match those entries), which is how
+a group targets public/remote users - their addresses cannot be expressed
+as networks. Any combination of networks and listener entries is allowed;
+a group matches when either side matches. `blocklists` names remote
+blocklist sources whose
 `scope` is `groups`: their domains are blocked for the group's clients, and
 the group's `allow` list still overrides them (`400` for a name that is not
 a configured source).
@@ -1266,6 +1273,9 @@ field existed read `null` until their next edit.
 `POST /api/policy/blocking/{id}/move` with `{"direction": "up"}` or
 `{"direction": "down"}` swaps the group with its neighbour and returns the
 reordered list. Groups are evaluated in this order.
+`POST /api/policy/blocking/test` accepts an optional `"listener"` of
+`"doT"` / `"doH"` / `"doq"` (case-insensitive, omitted or `null` for plain
+DNS) so a group's listener entries can be tested.
 
 `POST /api/policy/blocking/test` evaluates a `{client, domain}` pair against
 the live blocking groups and reports whether (and why) it is blocked, so an

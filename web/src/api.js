@@ -253,8 +253,8 @@ export const api = {
   saveBlockingGroup: (body) => request('POST', '/policy/blocking', body),
   deleteBlockingGroup: (id) => request('DELETE', `/policy/blocking/${id}`),
   moveBlockingGroup: (id, direction) => request('POST', `/policy/blocking/${id}/move`, { direction }),
-  testBlocking: (client, domain) =>
-    request('POST', '/policy/blocking/test', { client, domain }),
+  testBlocking: (client, domain, listener) =>
+    request('POST', '/policy/blocking/test', { client, domain, listener }),
   networks: () => request('GET', '/networks'),
   saveNetwork: (body) => request('POST', '/networks', body),
   deleteNetwork: (name) => request('DELETE', `/networks/${encodeURIComponent(name)}`),

@@ -18,6 +18,7 @@
   // Tester.
   let testClient = $state('');
   let testDomain = $state('');
+  let testListener = $state('');
   let testResult = $state(null);
 
   const RESPONSES = [
@@ -161,7 +162,11 @@
     testResult = null;
     error = null;
     try {
-      testResult = await api.testBlocking(testClient.trim(), testDomain.trim());
+      testResult = await api.testBlocking(
+        testClient.trim(),
+        testDomain.trim(),
+        testListener || undefined,
+      );
     } catch (e) {
       error = formatApiError(e);
     }
@@ -256,6 +261,12 @@
   <form class="row" style="flex-wrap: wrap; gap: 8px" onsubmit={(e) => { e.preventDefault(); runTest(); }}>
     <input style="flex: 1; min-width: 160px" bind:value={testClient} placeholder="Client IP, e.g. 192.168.1.50" />
     <input style="flex: 1; min-width: 160px" bind:value={testDomain} placeholder="Domain, e.g. ads.example.com" />
+    <select bind:value={testListener} title="Listener the query arrives on">
+      <option value="">Plain DNS</option>
+      <option value="dot">DoT</option>
+      <option value="doh">DoH</option>
+      <option value="doq">DoQ</option>
+    </select>
     <button type="submit" disabled={!testClient.trim() || !testDomain.trim()}>Test</button>
   </form>
   {#if testResult}
@@ -295,8 +306,13 @@
       <label class="checkbox"><input type="checkbox" bind:checked={edit.enabled} /><span>Enabled</span></label>
 
       <div class="section-title">Clients</div>
-      <NetworkPicker {networks} bind:value={edit.clients} />
-      <p class="muted help">Tick named networks and/or type addresses. Leave empty for every client.</p>
+      <NetworkPicker {networks} listeners bind:value={edit.clients} />
+      <p class="muted help">
+        Tick named networks and/or type addresses. DoT, DoH and DoQ match any
+        client connecting over that encrypted listener, wherever it is - use
+        them (alone or combined) to give public/remote users their own rules.
+        Leave empty for every client.
+      </p>
 
       <div class="section-title">Blocklists</div>
       {#if groupLists.length}

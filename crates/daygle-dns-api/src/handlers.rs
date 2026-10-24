@@ -2360,12 +2360,12 @@ pub async fn upsert_blocking_group(
     if let Some(entry) = input
         .clients
         .iter()
-        .find(|c| !config.is_network_entry(c.trim()))
+        .find(|c| !config.is_network_entry(c.trim()) && !daygle_dns_policy::is_listener_keyword(c))
     {
         return error_response(
             StatusCode::BAD_REQUEST,
             format!(
-                "'{}' is not a network, an address or a network name",
+                "'{}' is not a network, an address, a network name, or a listener name (DoT, DoH, DoQ)",
                 entry.trim()
             ),
         );
@@ -2459,6 +2459,11 @@ pub struct BlockingTestInput {
     client: String,
     /// Domain to test.
     domain: String,
+    /// Encrypted listener to evaluate as (`dot`, `doh` or `doq`, matching
+    /// the special client-list entries); omitted for plain DNS. Optional so
+    /// existing console calls keep working.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    listener: Option<String>,
 }
 
 /// `POST /api/policy/blocking/test` - evaluate a `{client, domain}` pair
@@ -2477,16 +2482,29 @@ pub async fn test_blocking(
         .trim()
         .trim_end_matches('.')
         .to_ascii_lowercase();
-    let (blocked, action, reason, group) =
-        match state.advanced_blocking.load().evaluate(client, &domain) {
-            Some(d) => (true, d.action.as_str().to_string(), d.reason, d.group),
-            None => (
-                false,
-                "allow".to_string(),
-                "no group blocked this query".to_string(),
-                None,
-            ),
-        };
+    let listener = input
+        .listener
+        .as_deref()
+        .map(|l| l.trim().to_ascii_lowercase())
+        .filter(|l| daygle_dns_policy::advanced::LISTENER_KEYWORDS.contains(&l.as_str()))
+        .map(|l| match l.as_str() {
+            "dot" => "dot",
+            "doh" => "doh",
+            _ => "doq",
+        });
+    let (blocked, action, reason, group) = match state
+        .advanced_blocking
+        .load()
+        .evaluate(client, &domain, listener)
+    {
+        Some(d) => (true, d.action.as_str().to_string(), d.reason, d.group),
+        None => (
+            false,
+            "allow".to_string(),
+            "no group blocked this query".to_string(),
+            None,
+        ),
+    };
     Json(serde_json::json!({
         "client": client.to_string(),
         "domain": domain,

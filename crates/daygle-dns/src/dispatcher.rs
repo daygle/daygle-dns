@@ -828,7 +828,17 @@ impl RequestHandler for DnsDispatcher {
         // can still let a name through) and before split-horizon/authoritative
         // resolution. `evaluate` only ever returns a blocking action.
         if !policy.is_allowlisted(&qname) {
-            if let Some(decision) = self.advanced_blocking.load().evaluate(client, &qname) {
+            let encrypted_listener = match info.protocol {
+                hickory_server::net::xfer::Protocol::Tls => Some("dot"),
+                hickory_server::net::xfer::Protocol::Https => Some("doh"),
+                hickory_server::net::xfer::Protocol::Quic => Some("doq"),
+                _ => None,
+            };
+            if let Some(decision) =
+                self.advanced_blocking
+                    .load()
+                    .evaluate(client, &qname, encrypted_listener)
+            {
                 debug!(query = %qname, reason = %decision.reason, "blocked by advanced blocking");
                 self.metrics.inc(&self.metrics.blocked);
                 let rcode = match decision.action {
