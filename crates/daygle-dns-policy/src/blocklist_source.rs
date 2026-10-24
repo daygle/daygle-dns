@@ -380,8 +380,8 @@ impl BlocklistSourceManager {
 
         // Publish the DoT-scoped merge the same way: an emptied or disabled
         // source stops blocking on the listener immediately.
-        *self.dot_list.write().unwrap() = (!dot_merged.is_empty())
-            .then(|| Arc::new(Blocklist::from_set(dot_merged)));
+        *self.dot_list.write().unwrap() =
+            (!dot_merged.is_empty()).then(|| Arc::new(Blocklist::from_set(dot_merged)));
 
         // Always hand back the current effective set (possibly empty): a
         // source removed, disabled, or emptied on its last fetch must stop

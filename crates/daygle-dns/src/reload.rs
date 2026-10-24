@@ -362,10 +362,7 @@ pub fn spawn_blocklist_refresh(
                             let mut engine = shared.policy.load_full().as_ref().clone();
                             engine.set_dot_blocklist(dot.as_ref().clone());
                             shared.policy.store(std::sync::Arc::new(engine));
-                            info!(
-                                domains = dot.len(),
-                                "DoT-scoped blocklist refreshed"
-                            );
+                            info!(domains = dot.len(), "DoT-scoped blocklist refreshed");
                         }
                     }
                 }

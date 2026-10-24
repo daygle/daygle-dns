@@ -168,7 +168,8 @@ impl PolicyEngine {
         if !self.enabled {
             return Decision::allow();
         }
-        self.evaluate_with(client, query_name, record_type, false).await
+        self.evaluate_with(client, query_name, record_type, false)
+            .await
     }
 
     /// Evaluate policy for a query arriving on the DoT listener: the normal
@@ -177,11 +178,17 @@ impl PolicyEngine {
     /// AAAA filter, plugins) apply exactly as for plain DNS, so a DoT
     /// client never bypasses operator policy - it only faces the extra
     /// listener-scoped set on top.
-    pub async fn evaluate_dot(&self, client: IpAddr, query_name: &str, record_type: &str) -> Decision {
+    pub async fn evaluate_dot(
+        &self,
+        client: IpAddr,
+        query_name: &str,
+        record_type: &str,
+    ) -> Decision {
         if !self.enabled {
             return Decision::allow();
         }
-        self.evaluate_with(client, query_name, record_type, true).await
+        self.evaluate_with(client, query_name, record_type, true)
+            .await
     }
 
     async fn evaluate_with(
@@ -191,7 +198,6 @@ impl PolicyEngine {
         record_type: &str,
         dot_listener: bool,
     ) -> Decision {
-
         // 1. ACLs.
         if let Some(acl) = &self.acl {
             if !acl.is_allowed(client) {
@@ -230,9 +236,7 @@ impl PolicyEngine {
             if let Some(list) = &self.dot_blocklist {
                 if list.contains(query_name) {
                     return Decision::new(
-                        format!(
-                            "'{query_name}' matched remote blocklist source (DoT)"
-                        ),
+                        format!("'{query_name}' matched remote blocklist source (DoT)"),
                         Action::Block,
                     );
                 }
@@ -345,10 +349,7 @@ mod tests {
     async fn dot_scoped_blocklist_never_overrides_shared_policy() {
         let mut e = PolicyEngine::new(true);
         e.set_allowlist(Blocklist::from_lines(["*.trusted.test"]));
-        e.set_dot_blocklist(Blocklist::from_lines([
-            "trusted.test",
-            "blocked.test",
-        ]));
+        e.set_dot_blocklist(Blocklist::from_lines(["trusted.test", "blocked.test"]));
 
         // The operator allowlist still wins on the DoT listener...
         assert_eq!(

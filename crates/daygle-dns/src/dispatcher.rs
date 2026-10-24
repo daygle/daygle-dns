@@ -732,10 +732,7 @@ impl RequestHandler for DnsDispatcher {
         // blocklist sources (scope `dot`), giving that endpoint its own
         // stricter policy without touching the LAN's plain-DNS experience.
         let policy = self.policy.load_full();
-        let decision = if matches!(
-            info.protocol,
-            hickory_server::net::xfer::Protocol::Tls
-        ) {
+        let decision = if matches!(info.protocol, hickory_server::net::xfer::Protocol::Tls) {
             policy.evaluate_dot(client, &qname, &rtype).await
         } else {
             policy.evaluate(client, &qname, &rtype).await

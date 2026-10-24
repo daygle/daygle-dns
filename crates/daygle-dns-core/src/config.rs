@@ -4569,7 +4569,9 @@ format = "adblock"
             cfg.policy.blocklist_sources[0].format,
             BlocklistFormat::Hosts
         );
-        assert_eq!(cfg.policy.blocklist_sources[0].refresh_secs, 43200);        assert_eq!(cfg.policy.blocklist_sources[1].format,
+        assert_eq!(cfg.policy.blocklist_sources[0].refresh_secs, 43200);
+        assert_eq!(
+            cfg.policy.blocklist_sources[1].format,
             BlocklistFormat::Adblock
         );
         assert_eq!(cfg.policy.blocklist_sources[1].refresh_secs, 86400);
@@ -4599,10 +4601,7 @@ scope = "groups"
             cfg.policy.blocklist_sources[0].scope,
             BlocklistScope::Everyone
         );
-        assert_eq!(
-            cfg.policy.blocklist_sources[1].scope,
-            BlocklistScope::Dot
-        );
+        assert_eq!(cfg.policy.blocklist_sources[1].scope, BlocklistScope::Dot);
         assert_eq!(
             cfg.policy.blocklist_sources[2].scope,
             BlocklistScope::Groups

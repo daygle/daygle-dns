@@ -417,18 +417,20 @@ async fn blocklist_source_validation_detects_format_mismatches() {
         "domains content failed auto-detect: {json}"
     );
     assert_eq!(json["format"], "domains");
-    assert!(!json["sample"].as_array().unwrap().is_empty());    // Non-HTTP URLs and unknown formats are bad requests, not verdicts.
+    assert!(!json["sample"].as_array().unwrap().is_empty()); // Non-HTTP URLs and unknown formats are bad requests, not verdicts.
     let resp = client
         .get(&base)
         .query(&[("url", "ftp://example.com/list"), ("format", "auto")])
         .send()
-        .await.unwrap();
+        .await
+        .unwrap();
     assert_eq!(resp.status(), reqwest::StatusCode::BAD_REQUEST);
     let resp = client
         .get(&base)
         .query(&[("url", url_of(hosts.addr)), ("format", "nope".to_string())])
         .send()
-        .await.unwrap();
+        .await
+        .unwrap();
     assert_eq!(resp.status(), reqwest::StatusCode::BAD_REQUEST);
 
     shutdown(server).await;
@@ -443,10 +445,7 @@ async fn dot_scoped_source_blocks_only_on_dot() {
     // The stub upstream serves zone `ads.test` (with a host record); the
     // dot-scoped list blocks the zone apex itself, so a differential is
     // possible: the same name behaves differently on the two transports.
-    let source = BlocklistServer::spawn(
-        "# public-user list\n0.0.0.0 ads.test\n",
-    )
-    .await;
+    let source = BlocklistServer::spawn("# public-user list\n0.0.0.0 ads.test\n").await;
 
     let mut config = base_config(&dir.path().join("daygle-dns.db"));
     config.policy.enabled = true;
@@ -489,7 +488,10 @@ async fn dot_scoped_source_blocks_only_on_dot() {
         }
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     }
-    assert!(blocked, "domain from the DoT-scoped source was not blocked on DoT");
+    assert!(
+        blocked,
+        "domain from the DoT-scoped source was not blocked on DoT"
+    );
 
     // The same name over plain UDP is untouched: no NXDOMAIN, and recursion
     // through the stub yields NODATA for the zone apex (NOERROR).
@@ -504,4 +506,3 @@ async fn dot_scoped_source_blocks_only_on_dot() {
 
     shutdown(server).await;
 }
-
