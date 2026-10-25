@@ -96,6 +96,12 @@ fail() { # message
     && publish "$PRIV/state.json" state.json
 }
 
+# Most recent meaningful line of an arbitrary log file (see the installer
+# branch, which streams the installer's last line as state).
+last_log_error_from_file() {
+  tail -n 8 "$1" 2>/dev/null | tr '\r' '\n' | grep -v '^[[:space:]]*$' | tail -n 1 | cut -c1-200
+}
+
 # The API endpoint the health check probes, read from the [api] section of
 # the config file next to the models dir (defaults: 127.0.0.1:5380). A
 # hard-coded port/host would fail the check - and roll back every update - on
@@ -194,6 +200,89 @@ if [ -z "$ACTUAL" ] || [ "$ACTUAL" != "$SHA256" ]; then
   log "rejecting update: sha256 mismatch (expected $SHA256)"
   rm -f "$REQ.processing"
   fail "the staged binary failed checksum verification - refusing to install it. Re-run the update from the console."
+  exit 1
+fi
+
+# ---- installer-run update ---------------------------------------------
+# The staged file is the canonical installer script (install.sh), fetched by
+# the unprivileged updater from the repository's main branch - the same
+# one-line install an operator would run by hand, run here as root through
+# this dedicated oneshot. Configuration-affecting rewrites ([api] listen,
+# console accounts) are disabled for this run via DAYGLE_DNS_GUI_UPDATE=1;
+# the deployment's own config file is never touched.
+#
+# $BIN is the already sha-verified root-private copy, so the script is run
+# from there, never from the service-writable staged file. Real deployment
+# paths are handed in via the environment the installer already accepts
+# (PREFIX/CONFIG_DIR/DATA_DIR/SERVICE_USER/PRIV_LIB_DIR), derived from the
+# paths the installer baked into this helper - so a customised install is
+# updated in place, not reset to the defaults.
+if [ "$KIND" = "install" ]; then
+  state applying "Running the full installer (this can take several minutes)..."
+  log "running the canonical installer for v${VERSION}"
+
+  cp -f "$BIN" "$PRIV/install.sh"
+  chmod 0700 "$PRIV/install.sh"
+
+  # Deployment layout from the baked-in helper paths (mirroring how
+  # install.sh configures the placeholder substitutions).
+  PREFIX="$(dirname "$(dirname "$EXE")")"
+  CONFIG_DIR="$(dirname "$MODELS_DIR")"
+  DATA_DIR="$(dirname "$UPDATES_DIR")"
+  PRIV_LIB_DIR="$(dirname -- "$0")"
+  export PREFIX CONFIG_DIR DATA_DIR SERVICE_USER PRIV_LIB_DIR
+  # The installer's LAN-GUI section rebinds [api] listen to 0.0.0.0 and may
+  # write console accounts - explicitly not wanted here ("update the app,
+  # keep the operator's settings").
+  export DAYGLE_DNS_GUI_UPDATE=1
+  unset DAYGLE_DNS_ADMIN_USER DAYGLE_DNS_ADMIN_PASSWORD DAYGLE_DNS_LAN_GUI DAYGLE_DNS_NO_DEPS || true
+
+  # Run in the background so progress can be streamed: the installer's last
+  # log line becomes the state message the console shows while it clones,
+  # builds and installs (several minutes on a small host).
+  : > "$PRIV/installer-exit"
+  (
+    sh "$PRIV/install.sh" >>"$LOG" 2>&1
+    printf '%s' "$?" > "$PRIV/installer-exit"
+  ) &
+  WORKER="$!"
+
+  LAST="installer: hand-off accepted"
+  state applying "$LAST"
+  while kill -0 "$WORKER" 2>/dev/null; do
+    sleep 3
+    STEP="$(tail -n 20 "$LOG" 2>/dev/null | tr '\r' '\n' | grep -v '^[[:space:]]*$' | tail -n 1 | cut -c1-160)"
+    NEW="installer: ${STEP:-working...}"
+    if [ "$NEW" != "$LAST" ]; then
+      LAST="$NEW"
+      state applying "$LAST"
+    fi
+  done
+
+  RC="$(cat "$PRIV/installer-exit" 2>/dev/null || true)"
+  case "$RC" in ''|*[!0-9]*) RC=1 ;; esac
+
+  if [ "$RC" -eq 0 ]; then
+    # The installer restarts the service itself; require that it is back
+    # and healthy, as with every other apply kind.
+    state restarting "Installer finished - checking the restarted service..."
+    if health_check; then
+      rm -f "$REQ.processing" "$MANIFEST" "$STAGED_BIN"
+      log "installer completed v${VERSION} and health check passed"
+      state done "Full update installed by the canonical installer and verified successfully (v${VERSION})."
+      exit 0
+    fi
+    rm -f "$REQ.processing" "$MANIFEST" "$STAGED_BIN"
+    fail "the installer completed but the service health check failed. The installer rebuilt and installed v${VERSION}; check the service with 'systemctl status daygle-dns' (details in apply.log)."
+    exit 1
+  fi
+
+  # Best effort: if the installer stopped/failed mid-apply, make sure the
+  # previously installed binary is still the one systemd runs.
+  systemctl start daygle-dns 2>>"$LOG" || true
+  STOP="$(last_log_error_from_file "$LOG")"
+  rm -f "$REQ.processing" "$MANIFEST" "$STAGED_BIN"
+  fail "the full installer failed (exit ${RC})${STOP:+ — last installer message: $STOP}. Nothing was replaced if it failed before the install step; details in apply.log."
   exit 1
 fi
 

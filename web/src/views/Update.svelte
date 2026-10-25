@@ -26,14 +26,12 @@
   let preflightLoading = $state(false);
   let preflightError = $state('');
 
-  const RUNNING = ['preparing', 'downloading', 'cloning', 'building', 'installing', 'applying', 'restarting', 'rolling_back'];
+  const RUNNING = ['preparing', 'downloading', 'installing', 'applying', 'restarting', 'rolling_back'];
   const PHASE_LABEL = {
-    preparing: 'Preparing...',
-    downloading: 'Downloading the prebuilt release...',
-    cloning: 'Fetching source (no prebuilt release matched, building from source)...',
-    building: 'Building release binary (a few minutes)...',
-    installing: 'Installing new binary...',
-    applying: 'Applying the new release...',
+    preparing: 'Preparing the update...',
+    downloading: 'Fetching the installer...',
+    installing: 'Handing off to the update service...',
+    applying: 'Running the installer (several minutes; the build happens here)...',
     restarting: 'Restarting the service...',
     rolling_back: 'Rolling back to previous version...',
     done: 'Complete',
@@ -183,7 +181,7 @@
     }
     
     const ok = confirm(
-      'Update Daygle DNS to the latest release?\n\nThe server will download the latest prebuilt release, verify its checksum, swap it in place and restart. DNS resolution is briefly interrupted and this console may take a moment to reconnect.'
+      'Update Daygle DNS to the latest release?\n\nThe server will run the same one-line installer you can run by hand: it fetches the latest release, builds it from source, installs it and re-provisions the systemd services. Your configuration (including the listen address), zones, certificates and database are kept. The build can take several minutes on a small host; DNS resolution is briefly interrupted and this console may take a moment to reconnect.'
     );
     if (!ok) return;
     updating = true; // guard against double-clicks while the request is out
@@ -273,8 +271,9 @@
 <PageHeader
   icon={icons.update}
   title="Update"
-  tagline="Update Daygle DNS in place. The latest release is downloaded, its checksum verified and installed, and your configuration, zones, certificates and database are kept. Start it here on hosts set up by the installer, or run the one-line command on any host."
+  tagline="Update Daygle DNS in place. Update Now runs the same one-line installer you would run by hand: the latest release is built from source and installed, the systemd services re-provisioned, and your configuration, zones, certificates and database are kept."
 />
+
 
 {#if error}
   <div class="card" style="border-color: var(--danger); color: var(--danger); margin-bottom: 14px">{error}</div>
@@ -341,11 +340,12 @@
         <div class="bootstrap">
           <p style="margin: 0">
             <strong>One-time bootstrap needed:</strong> the installed updater
-            (from version {info.version}) predates the release-download update
-            path, so an update started here cannot complete on this host. Run
-            the installer command in the Manual Update Command card below once
-            - it swaps in the new binary and provisions the update helper -
-            and one-click updates work from then on.
+            (from version {info.version}) predates the in-place updater, so an
+            update started here cannot complete on this host. Run the installer
+            command in the Manual Update Command card below once - it installs
+            the latest build and provisions the update helper - and one-click
+            updates (which then run the same installer for you) work from then
+            on.
           </p>
         </div>
       {:else if info.updater_outdated && info.latest_release}
@@ -475,8 +475,8 @@
       <p class="muted small" style="margin: 10px 0 0; max-width: 80ch">
         In-place updates need a Linux host managed by the installer (systemd
         unit, <code>/usr/local/bin/daygle-dns</code>, or a config under
-        <code>/etc</code>) and a downloader (curl or wget) for the prebuilt
-        release. Otherwise use the host command below. Missing requirements:
+        <code>/etc</code>) and a way to fetch the installer (curl or wget,
+        or git). Otherwise use the host command below. Missing requirements:
       </p>
       <ul class="gates small" style="margin: 8px 0 0">
         {#each info.gates || [] as gate}

@@ -1,16 +1,20 @@
-//! Web-console self-update: fetches the newest release binary and swaps the
-//! running binary in place, restarting the systemd unit afterwards.
+//! Web-console self-update.
 //!
-//! Two paths, in order of preference (both handled by the embedded `sh`
-//! helper):
+//! Two request kinds can be staged (both by the embedded `sh` helper, both
+//! applied by the root oneshot `update-apply.sh`):
 //!
-//! 1. **Prebuilt release** (default): download the release asset for this
-//!    architecture from GitHub Releases, verify its sha256 checksum, swap it
-//!    in place. Needs only a downloader (curl or wget) - no Rust toolchain,
-//!    no compilation, seconds instead of minutes. Assets are published by
-//!    the release CI workflow (`.github/workflows/release.yml`).
-//! 2. **Source build** (fallback): only when no release asset can be
-//!    fetched, clone and build as `install.sh` does - needs git + cargo.
+//! 1. **Full installer run** (default): stage the canonical installer - the
+//!    same one-line `curl -fsSL .../install.sh | sh` an operator would run
+//!    by hand - and let the root apply service execute it. The installer
+//!    resolves the latest release, builds daygle-dns from source with that
+//!    version stamped, installs the binary, re-provisions the systemd units
+//!    and seeds AI settings, while leaving the deployment's own config file
+//!    ([api] listener, console accounts, zones, certificates, database)
+//!    untouched (`DAYGLE_DNS_GUI_UPDATE=1`). Everything the manual command
+//!    does, one click from the console.
+//! 2. **Models-only** (`--models`): download the `daygle-dns-models.tar.gz`
+//!    bundle from the latest release and hand it to the same apply service
+//!    (AI model files only; the binary is never touched).
 //!
 //! Progress is written to `<temp>/daygle-dns-update/state.json` and full
 //! output to `update.log`. The helper is spawned with its own process group
@@ -209,10 +213,12 @@ fn file_tail(path: &Path, max: usize) -> String {
     }
 }
 
-/// Whether `sh` and a downloader (curl or wget) exist on `PATH`.
+/// Whether `sh` and something able to fetch the installer (a downloader -
+/// curl or wget - or a git client to clone it) exist on `PATH`.
 ///
-/// The prebuilt-release path needs only these; git and cargo are required
-/// solely by the source-build fallback, so they are deliberately not gates.
+/// The installer run needs only a fetcher for the script itself; toolchains
+/// (Rust, a C compiler) are installed by the installer itself when missing,
+/// so they are deliberately not gates.
 fn tools_present() -> bool {
     let have = |tool: &str| {
         std::process::Command::new("sh")
@@ -224,7 +230,7 @@ fn tools_present() -> bool {
             .map(|s| s.success())
             .unwrap_or(false)
     };
-    have("sh") && (have("curl") || have("wget"))
+    have("sh") && (have("curl") || have("wget") || have("git"))
 }
 
 /// Whether the updater helper process `pid` is still alive.
@@ -300,7 +306,7 @@ pub fn gates(config_dir: Option<&Path>) -> Vec<&'static str> {
         missing.push("host OS is not Linux");
     }
     if !tools_present() {
-        missing.push("sh or a downloader (curl/wget) not found on this account's PATH");
+        missing.push("sh or a fetch tool (curl/wget/git) not found on this account's PATH");
     }
     if !has_install_evidence(config_dir) {
         missing.push(
@@ -909,8 +915,8 @@ pub struct ReleaseComparison {
     pub latest: String,
     /// Whether the running binary is older than the latest release.
     pub outdated: bool,
-    /// Whether the embedded updater is too old to self-update reliably
-    /// (it predates the release-download fix): the console then shows a
+    /// Whether the installed updater is too old to self-update reliably
+    /// (it predates the in-place updater): the console then shows a
     /// one-time installer bootstrap hint instead of a run button.
     pub bootstrap_required: bool,
 }
@@ -1374,6 +1380,52 @@ mod tests {
                 "release.yml models bundle must package {name}"
             );
         }
+    }
+
+    /// The installer-run update depends on a three-way handshake: update.sh
+    /// stages a kind="install" request (its default MODE), update-apply.sh
+    /// routes that kind to the installer-execution branch and sets the flag
+    /// install.sh uses to skip config-affecting rewrites, and install.sh
+    /// honours that flag. A drift on any side would either stage a request
+    /// the apply step cannot route ("staged but never applied") or silently
+    /// rewrite the operator's [api] listener on every GUI update.
+    #[test]
+    fn installer_request_handshake_matches_all_three_scripts() {
+        let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let update = std::fs::read_to_string(manifest_dir.join("src/update.sh"))
+            .expect("update.sh readable");
+        let apply = std::fs::read_to_string(manifest_dir.join("src/update-apply.sh"))
+            .expect("update-apply.sh readable");
+        let installer =
+            std::fs::read_to_string(std::path::Path::new(&manifest_dir).join("../../install.sh"))
+                .expect("install.sh readable");
+
+        // update.sh: the default MODE is the installer kind, staged through
+        // the same stage_and_trigger the models branch uses.
+        assert!(
+            update.contains("MODE=\"install\""),
+            "update.sh default MODE must be the installer kind"
+        );
+        assert!(
+            update.contains("stage_and_trigger \"$STAGE_SRC\" \"$TARGET_VERSION\" \"$MODE\""),
+            "update.sh must stage through stage_and_trigger with the request kind"
+        );
+        // update-apply.sh: the kind routes to the installer branch, and the
+        // branch sets the guard flag so the run does not rewrite config.
+        assert!(
+            apply.contains("[ \"$KIND\" = \"install\" ]"),
+            "update-apply.sh must route kind=install to the installer branch"
+        );
+        assert!(
+            apply.contains("DAYGLE_DNS_GUI_UPDATE"),
+            "update-apply.sh must set DAYGLE_DNS_GUI_UPDATE for installer runs"
+        );
+        // install.sh: the guard flag exists and skips the listener/accounts
+        // section.
+        assert!(
+            installer.contains("DAYGLE_DNS_GUI_UPDATE"),
+            "install.sh must honour DAYGLE_DNS_GUI_UPDATE for console-driven runs"
+        );
     }
 
     #[test]

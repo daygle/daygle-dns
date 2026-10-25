@@ -1170,7 +1170,7 @@ pub async fn update_info(State(state): State<AppState>) -> Response {
         "updater_bootstrap_required": release.as_ref().map(|r| r.bootstrap_required),
         "update_command": format!("curl -fsSL {install_script} | sh"),
         "preserves": ["configuration", "zones", "certificates", "database"],
-        "note": "Run the update command on the host to update all components in place. The installer rebuilds the server binary, preserves configuration, zones, certificates and the database, and provisions the systemd update service.",
+        "note": "Update Now runs this same installer on the host: the latest release is built from source and installed in place, preserving configuration, zones, certificates and the database, and re-provisions the systemd update service. The command shown here is the manual equivalent.",
         "state": update_state,
         "checks_enabled": release_checks_on,
         "check_interval_secs": state.config.load().updates.check_interval_secs,

@@ -11,6 +11,13 @@
 # manager; DNS test tools (dig) are installed as a convenience. Set
 # DAYGLE_DNS_NO_DEPS=1 to skip the automatic installs and get manual
 # instructions instead.
+#
+# DAYGLE_DNS_GUI_UPDATE=1 marks an update run driven by the installed
+# console (its updater stages this script and the root apply service
+# executes it): everything still runs, but configuration-affecting rewrites
+# - the [api] listen rebind, generated console accounts and firewall rule
+# changes - are skipped, because the deployment's own config is
+# authoritative on a host that is merely being updated.
 
 set -eu
 
@@ -203,6 +210,9 @@ Description=Daygle DNS update apply step (root oneshot)
 
 [Service]
 Type=oneshot
+# A GUI-driven update rebuilds from source inside this oneshot and can
+# legitimately run for several minutes on a small host; never time it out.
+TimeoutStartSec=0
 ExecStart=$APPLY_HELPER
 EOF
     run_as_root tee /etc/systemd/system/daygle-dns-update.path > /dev/null <<EOF
@@ -539,7 +549,13 @@ fi
 # console is never exposed. The installer always rebinds it to 0.0.0.0 so
 # the first-run setup page (or a supplied admin account) is reachable from
 # the LAN; opt out with DAYGLE_DNS_LAN_GUI=0.
-if [ "${DAYGLE_DNS_LAN_GUI:-}" = "0" ]; then
+#
+# A GUI-driven update run (DAYGLE_DNS_GUI_UPDATE=1) skips this whole
+# section: the operator's listen address, console accounts and firewall
+# rules were explicit choices and an in-place update must not change them.
+if [ "${DAYGLE_DNS_GUI_UPDATE:-}" = "1" ]; then
+    log "Update run: configuration, [api] listener, accounts and firewall rules left untouched."
+elif [ "${DAYGLE_DNS_LAN_GUI:-}" = "0" ]; then
     LAN_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
     log "Web GUI left on the loopback interface (DAYGLE_DNS_LAN_GUI=0)."
 else

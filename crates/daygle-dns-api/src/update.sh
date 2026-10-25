@@ -1,23 +1,35 @@
 #!/usr/bin/env sh
 # Daygle DNS in-place update, driven by the web console.
 #
-# Usage: sh daygle-dns-update.sh <current-binary> <state-dir>
+# Usage: sh daygle-dns-update.sh [--models] <current-binary> <state-dir>
 #
-# Preferred path: download the prebuilt release binary for this architecture
-# from GitHub Releases and verify its sha256 checksum. Fallback path (only
-# when no release asset can be fetched): build from source, the way install.sh
-# does. Progress is written to <state-dir>/state.json so the console can
-# follow along; all command output accumulates in <state-dir>/update.log.
+# Default path: stage the canonical installer (the same one-line
+# `curl -fsSL .../install.sh | sh` an operator would run by hand) and hand it
+# to the root apply service, which runs it. The installer resolves the latest
+# release, builds daygle-dns from source with that release version stamped,
+# installs the binary, re-provisions the systemd units and seeds AI settings
+# - while keeping the deployment's own configuration file ([api] listener,
+# console accounts, zones, certificates, database) untouched.
+#
+# `--models` mode: download the daygle-dns-models.tar.gz bundle from the
+# latest release and hand it to the same apply service - no architecture
+# matching and no installer, since models are platform-independent data.
+#
+# Progress is written to <state-dir>/state.json so the console can follow
+# along; all command output accumulates in <state-dir>/update.log (the apply
+# step publishes its own installer log as apply.log).
 #
 # Privilege model: this helper runs as the (unprivileged) service account and
 # NEVER runs sudo or any setuid helper - that design poisoned every update on
 # hardened hosts (the service's CapabilityBoundingSet broke sudo's core audit
-# write and sudo aborted before doing anything). Instead this script downloads,
-# verifies and stages the new binary into <updates>/staging, then drops a
+# write and sudo aborted before doing anything). Instead this script
+# downloads, verifies and stages what needs applying into
+# <updates>/staging, then drops a
 # `request` marker into <updates>. A root-owned systemd path unit
 # (daygle-dns-update.path) watches that directory and starts
-# daygle-dns-update.service - a short root oneshot that swaps the binary,
-# restarts the service, health-checks and rolls back on failure. This script
+# daygle-dns-update.service - a short root oneshot that applies the request
+# (installer run / binary swap / model install), restarts the service,
+# health-checks and rolls back on failure. This script
 # only reaches the hand-off; it exits as soon as the apply step takes over so
 # the service restart cannot kill it mid-record.
 #
@@ -27,10 +39,10 @@
 
 set -eu
 
-# Modes: default updates the binary; `--models` updates the AI model bundle
-# (daygle-dns-models.tar.gz) instead - no architecture matching and no
-# source-build fallback, since models are platform-independent data.
-MODE="release"
+# Modes: default runs the full installer; `--models` updates the AI model
+# bundle (daygle-dns-models.tar.gz) instead - no architecture matching,
+# since models are platform-independent data.
+MODE="install"
 if [ "$1" = "--models" ]; then
   MODE="models"
   shift
@@ -91,9 +103,9 @@ UPDATES_DIR="$(sed -n 's/^PathChanged=//p' /etc/systemd/system/daygle-dns-update
 [ -n "$UPDATES_DIR" ] || UPDATES_DIR=/var/lib/daygle-dns/updates
 STAGING="$UPDATES_DIR/staging"
 
-# Big transient artifacts (a fallback source build's tree and registry cache)
-# should not land on /tmp: many distros mount it as tmpfs, so a multi-GB
-# release build can exhaust memory on small hosts. /var/tmp is the
+# Big transient artifacts (a fresh source checkout for the installer) should
+# not land on /tmp: many distros mount it as tmpfs, so a multi-GB checkout
+# plus release build can exhaust memory on small hosts. /var/tmp is the
 # conventional spot.
 if [ -z "${TMPDIR:-}" ] && [ -d /var/tmp ]; then
   export TMPDIR=/var/tmp
@@ -108,43 +120,12 @@ state preparing "Preparing update..."
 # The hand-off requires the installer-provisioned update service; fail early
 # (before any download) so the operator gets the repair without waiting.
 if [ ! -f /etc/systemd/system/daygle-dns-update.path ] || [ ! -d "$STAGING" ] || [ ! -w "$STAGING" ]; then
-  fail "the systemd update service is not provisioned on this host (daygle-dns-update.path or the updates staging dir is missing). Re-run the installer from main so it can provision the update service, then retry."
+  fail "the systemd update service is not provisioned on this host (daygle-dns-update.path or the updates staging dir is missing). Re-run the installer so it can provision the update service, then retry."
   exit 1
 fi
 
-# ---- locate a toolchain (used only by the source-build fallback) --------
-
-find_cargo() {
-  if command -v rustup >/dev/null 2>&1; then
-    rustup which cargo 2>/dev/null && return 0
-  fi
-  if command -v cargo >/dev/null 2>&1; then
-    command -v cargo && return 0
-  fi
-  for cand in "$HOME/.cargo/bin/cargo" \
-              /root/.cargo/bin/cargo \
-              /home/*/.cargo/bin/cargo \
-              "${CARGO_HOME:-/.cargo}/bin/cargo" \
-              /usr/bin/cargo \
-              /usr/local/bin/cargo \
-              /snap/bin/cargo; do
-    if [ -x "$cand" ]; then
-      printf '%s\n' "$cand"
-      return 0
-    fi
-  done
-  # Last resort: ask the filesystem. A bare PATH on a service account does
-  # not mean the toolchain is missing - rustup under another user's home (or
-  # under /opt) is the common case, and the binary is usually world-executable.
-  if command -v find >/dev/null 2>&1; then
-    find /root /home /opt /usr -maxdepth 4 -type f -name cargo -perm -u+x 2>/dev/null | head -n 1
-  fi
-}
-CARGO_BIN="$(find_cargo || true)"
-
-# ---- download the prebuilt release --------------------------------------
-
-# A downloader (curl or wget) enables the fast prebuilt-release path.
+# A downloader (curl or wget) fetches the installer script and the models
+# bundle; a git client clones the repository the installer lives in.
 DOWNLOADER=""
 if command -v curl >/dev/null 2>&1; then
   DOWNLOADER="curl"
@@ -160,30 +141,26 @@ fetch() { # url dest
   esac
 }
 
-# Match the release asset to this machine's architecture. CI publishes
-# daygle-dns-linux-{x86_64,x86_64-musl,aarch64}; the musl asset is the
-# universal fallback because it is statically linked and runs on any Linux.
-# (The models bundle is arch-independent and skips this entirely.)
-ARCH="$(uname -m)"
-if [ "$MODE" = "models" ]; then
-  ASSET="models"
-else
-  case "$ARCH" in
-    x86_64) ASSET="linux-x86_64" ;;
-    aarch64|arm64) ASSET="linux-aarch64" ;;
-    *) ASSET="linux-x86_64-musl" ;;
-  esac
+# At least one fetch mechanism is required: a downloader fetches the installer
+# script (and the models bundle); git clones the repository the installer
+# lives in.
+if [ -z "$DOWNLOADER" ] && ! command -v git >/dev/null 2>&1; then
+  fail "no downloader (curl or wget) and no git is installed; at least one is needed to fetch the installer."
+  exit 1
 fi
 
-DOWNLOAD_OK=0
-REL_TAG=""
+STAGE_SRC=""
+TARGET_VERSION=""
+
+# ---- models-only branch --------------------------------------------------
 if [ "$MODE" = "models" ]; then
   if [ -z "$DOWNLOADER" ]; then
     fail "no downloader (curl or wget) is installed; it is needed to fetch the AI models bundle."
     exit 1
   fi
   # Resolve the latest release tag with the same API-first logic as the
-  # binary path.
+  # installer path.
+  REL_TAG=""
   if fetch "$LATEST_API_URL" "$SRC/release.json" 2>>"$LOG"; then
     REL_TAG="$(grep -o '"tag_name"[[:space:]]*:[[:space:]]*"[^"]*"' "$SRC/release.json" 2>/dev/null | head -n 1 | sed 's/.*"tag_name"[[:space:]]*:[[:space:]]*"//; s/"$//')"
   fi
@@ -199,53 +176,13 @@ if [ "$MODE" = "models" ]; then
   BUNDLE_SUM="$SRC/models.sha256"
   if fetch "$BASE_URL/$REL_TAG/daygle-dns-models.tar.gz" "$BUNDLE_TMP" 2>>"$LOG" \
      && fetch "$BASE_URL/$REL_TAG/daygle-dns-models.tar.gz.sha256" "$BUNDLE_SUM" 2>>"$LOG"; then
-    DOWNLOAD_OK=1
+    :
   else
     rm -f "$BUNDLE_TMP" "$BUNDLE_SUM"
     fail "release ${REL_TAG} has no AI models bundle (daygle-dns-models.tar.gz) or it failed to download - see update.log."
     exit 1
   fi
-elif [ -n "$DOWNLOADER" ]; then
-  state downloading "Downloading the prebuilt release (${ASSET} build)..."
-  # Resolve the latest release tag: the GitHub API is authoritative (and
-  # cheap); the /releases/latest HTML redirect is the fallback if the API is
-  # unreachable or rate-limited. Naming the tag lets errors say exactly
-  # which release failed.
-  if fetch "$LATEST_API_URL" "$SRC/release.json" 2>>"$LOG"; then
-    REL_TAG="$(grep -o '"tag_name"[[:space:]]*:[[:space:]]*"[^"]*"' "$SRC/release.json" 2>/dev/null | head -n 1 | sed 's/.*"tag_name"[[:space:]]*:[[:space:]]*"//; s/"$//')"
-  fi
-  if [ -z "$REL_TAG" ] && fetch "$LATEST_URL" "$SRC/release.html" 2>>"$LOG"; then
-    REL_TAG="$(sed -n 's/.*releases\/tag\/\([^"/?]*\).*/\1/p' "$SRC/release.html" | head -n 1)"
-  fi
-  # Try the architecture-matched asset first, then the other Linux builds.
-  try_assets="$ASSET"
-  case "$ASSET" in
-    linux-x86_64) try_assets="$try_assets linux-x86_64-musl" ;;
-    *) try_assets="$try_assets linux-x86_64" ;;
-  esac
-  case "$ASSET" in
-    linux-aarch64) ;;
-    *) try_assets="$try_assets linux-aarch64" ;;
-  esac
-  for asset in $try_assets; do
-    BIN_TMP="$SRC/bin-$asset"
-    SUM_TMP="$SRC/sum-$asset"
-    if fetch "$BASE_URL/$REL_TAG/daygle-dns-$asset" "$BIN_TMP" 2>>"$LOG" \
-       && fetch "$BASE_URL/$REL_TAG/daygle-dns-$asset.sha256" "$SUM_TMP" 2>>"$LOG"; then
-      mv -f "$BIN_TMP" "$SRC/daygle-dns"
-      mv -f "$SUM_TMP" "$SRC/daygle-dns.sha256"
-      DOWNLOAD_OK=1
-      break
-    fi
-    # A failed fetch can leave an empty/partial file behind (wget -O does);
-    # remove it so it is never mistaken for a real download.
-    rm -f "$BIN_TMP" "$SUM_TMP"
-  done
-fi
 
-NEW_BIN=""
-TARGET_VERSION=""
-if [ "$MODE" = "models" ]; then
   # Verify the bundle checksum BEFORE staging; a mismatch is fatal.
   state downloading "Verifying the models bundle checksum..."
   EXPECTED="$(cut -d' ' -f1 "$BUNDLE_SUM" 2>/dev/null | tr -d '[:space:]')"
@@ -254,81 +191,61 @@ if [ "$MODE" = "models" ]; then
     fail "checksum verification failed for the AI models bundle${REL_TAG:+ ($REL_TAG)} - refusing to install it."
     exit 1
   fi
-  NEW_BIN="$BUNDLE_TMP"
+  STAGE_SRC="$BUNDLE_TMP"
   TARGET_VERSION="$(printf '%s' "$REL_TAG" | sed 's/^v//')"
-elif [ "$DOWNLOAD_OK" -eq 1 ]; then
-  # Verify the checksum BEFORE the file is used; a mismatch is fatal.
-  state downloading "Verifying the download checksum..."
-  EXPECTED="$(cut -d' ' -f1 "$SRC/daygle-dns.sha256" 2>/dev/null | tr -d '[:space:]')"
-  ACTUAL="$( (sha256sum "$SRC/daygle-dns" 2>/dev/null || shasum -a 256 "$SRC/daygle-dns" 2>/dev/null) | cut -d' ' -f1 | tr -d '[:space:]')"
-  if [ -z "$EXPECTED" ] || [ "$EXPECTED" != "$ACTUAL" ]; then
-    fail "checksum verification failed for the downloaded release${REL_TAG:+ ($REL_TAG)} - refusing to install it. If this persists, report the release as broken."
-    exit 1
-  fi
-  chmod 0755 "$SRC/daygle-dns"
-  NEW_BIN="$SRC/daygle-dns"
-  TARGET_VERSION="$(printf '%s' "$REL_TAG" | sed 's/^v//')"
+
+# ---- default: stage the canonical installer -------------------------------
 else
-  # No release asset could be fetched: fall back to building from source,
-  # which additionally requires git and a working toolchain. Say exactly why
-  # the download path failed so the operator knows which fix applies.
-  if [ -z "$DOWNLOADER" ]; then
-    DL_WHY="no downloader (curl or wget) is installed"
-  elif [ -z "$REL_TAG" ]; then
-    DL_WHY="no published release exists (publish one by pushing a version tag)"
-  else
-    DL_WHY="release ${REL_TAG} has no usable binary assets for this platform"
-  fi
-  if ! command -v git >/dev/null 2>&1; then
-    fail "no release binary could be downloaded and git is not installed (needed for the source-build fallback); install git and retry."
-    exit 1
-  fi
-  if [ -z "$CARGO_BIN" ]; then
-    fail "no release binary could be downloaded ($DL_WHY) and cargo was not found; install the Rust toolchain (curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal) and retry."
-    exit 1
-  fi
-
-  state cloning "No prebuilt release matched ($DL_WHY) - building from source (this can take several minutes)..."
-  # Clone into a fresh subdirectory: $SRC already holds the release lookup
-  # files, and git refuses to clone into a non-empty directory.
-  BUILD_DIR="$SRC/source"
-  if ! git clone --depth 1 "$REPO_URL" "$BUILD_DIR" >>"$LOG" 2>&1; then
-    fail "git clone failed - check network access to $REPO_URL (see update.log)."
-    exit 1
-  fi
-
-  cd "$BUILD_DIR"
-
-  state building "Building the release binary (this can take a few minutes)..."
-  # cargo writes its registry to $CARGO_HOME (default $HOME/.cargo). systemd
-  # accounts may have no usable home directory; fall back to a writable dir
-  # so the build can proceed and cache across runs.
-  if [ -z "${CARGO_HOME:-}" ]; then
-    if [ -n "${HOME:-}" ] && [ -d "$HOME" ] && [ -w "$HOME" ]; then
-      :
+  # Fetch the installer from the repository's main branch - the exact script
+  # (and URL semantics) the manual one-line command pipes into sh. Without a
+  # downloader, a shallow git clone provides the same file.
+  state downloading "Fetching the canonical installer (install.sh)..."
+  INSTALLER="$SRC/install.sh"
+  GOT=0
+  if [ -n "$DOWNLOADER" ]; then
+    if fetch "https://raw.githubusercontent.com/${REPO_OWNER}/${REPO_NAME}/main/install.sh" "$INSTALLER" 2>>"$LOG" \
+       && [ -s "$INSTALLER" ]; then
+      GOT=1
     else
-      CARGO_HOME="/var/tmp/daygle-dns-cargo-home"
-      if ! mkdir -p "$CARGO_HOME" 2>/dev/null || [ ! -w "$CARGO_HOME" ]; then
-        CARGO_HOME="$DIR/cargo-home"
-        mkdir -p "$CARGO_HOME"
-      fi
-      export CARGO_HOME
+      rm -f "$INSTALLER"
     fi
   fi
-  if ! PATH="$(dirname "$CARGO_BIN"):$PATH" cargo build --release -p daygle-dns >>"$LOG" 2>&1; then
-    fail "build failed - see update.log for details."
+  if [ "$GOT" -eq 0 ] && command -v git >/dev/null 2>&1; then
+    if git clone --depth 1 "$REPO_URL" "$SRC/repo" >>"$LOG" 2>&1 \
+       && cp -f "$SRC/repo/install.sh" "$INSTALLER"; then
+      GOT=1
+    else
+      rm -f "$INSTALLER"
+    fi
+  fi
+  if [ "$GOT" -eq 0 ]; then
+    fail "the canonical installer could not be fetched - check network access to $REPO_URL (see update.log)."
     exit 1
   fi
 
-  NEW_BIN="$BUILD_DIR/target/release/daygle-dns"
-  TARGET_VERSION="$("$NEW_BIN" --version 2>/dev/null | head -n 1 || true)"
+  # Resolve the latest release tag: the GitHub API is authoritative (and
+  # cheap); the /releases/latest HTML redirect is the fallback if the API is
+  # unreachable or rate-limited. The installer stamps the built binary with
+  # this version and refuses to build without one, so resolve it here too -
+  # naming the tag lets errors say exactly which release this run targets.
+  state downloading "Resolving the latest release..."
+  REL_TAG=""
+  if fetch "$LATEST_API_URL" "$SRC/release.json" 2>>"$LOG"; then
+    REL_TAG="$(grep -o '"tag_name"[[:space:]]*:[[:space:]]*"[^"]*"' "$SRC/release.json" 2>/dev/null | head -n 1 | sed 's/.*"tag_name"[[:space:]]*:[[:space:]]*"//; s/"$//')"
+  fi
+  if [ -z "$REL_TAG" ] && fetch "$LATEST_URL" "$SRC/release.html" 2>>"$LOG"; then
+    REL_TAG="$(sed -n 's/.*releases\/tag\/\([^"/?#]*\).*/\1/p' "$SRC/release.html" | head -n 1)"
+  fi
+  if [ -z "$REL_TAG" ]; then
+    fail "could not resolve the latest release (GitHub unreachable or rate-limited); the installer would refuse to build a stale version - see update.log."
+    exit 1
+  fi
+  TARGET_VERSION="$(printf '%s' "$REL_TAG" | sed 's/^v//')"
+  STAGE_SRC="$INSTALLER"
 fi
 
 # The manifest's version is free text but must be dotted numerics for the
-# apply step to accept it; derive it from the tag or the binary.
-if [ -z "$TARGET_VERSION" ]; then
-  TARGET_VERSION="$("$NEW_BIN" --version 2>/dev/null | head -n 1 || true)"
-fi
+# apply step to accept it.
 TARGET_VERSION="$(printf '%s' "$TARGET_VERSION" | sed 's/^v//' | grep -o '[0-9][0-9.]*' | head -n 1 || true)"
 [ -n "$TARGET_VERSION" ] || TARGET_VERSION="0.0.0"
 
@@ -350,10 +267,10 @@ stage_and_trigger() { # staged-file target-version kind
   : > "$UPDATES_DIR/request" || return 1
 }
 
-state installing "Update ready - handing off to the systemd update service (${MODE} v${TARGET_VERSION})..."
-if ! stage_and_trigger "$NEW_BIN" "$TARGET_VERSION" "$MODE"; then
+state installing "Update ready - handing off to the systemd update service (v${TARGET_VERSION})..."
+if ! stage_and_trigger "$STAGE_SRC" "$TARGET_VERSION" "$MODE"; then
   WHY="$(last_log_error)"
-  fail "the update binary could not be staged into $STAGING${WHY:+: $WHY}. Re-run the installer to repair the update service, then retry."
+  fail "the update could not be staged into $STAGING${WHY:+: $WHY}. Re-run the installer to repair the update service, then retry."
   exit 1
 fi
 
