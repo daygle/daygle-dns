@@ -4,11 +4,11 @@
 //! each socket. This front rejects excess sockets before forwarding admitted
 //! connections to a private listener served by Hickory.
 
-use std::net::SocketAddr;
+use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::{TcpListener, TcpSocket, TcpStream};
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 
@@ -109,12 +109,22 @@ async fn bridge(
         }
         _ => peer,
     };
-    let mut backend = TcpStream::connect(backend_addr).await?;
-    let backend_local = backend.local_addr()?;
+    // Bind the backend socket first and register its local address before
+    // connecting: once connected, Hickory may accept the peer immediately and
+    // must already find the real client behind it.
+    let socket = TcpSocket::new_v4()?;
+    socket.bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))?;
+    let backend_local = socket.local_addr()?;
     proxy_protocol::register_client(backend_local, client);
-    let result = tokio::io::copy_bidirectional(&mut frontend, &mut backend).await;
+    let connected = socket.connect(backend_addr).await;
+    let result = match connected {
+        Ok(mut backend) => tokio::io::copy_bidirectional(&mut frontend, &mut backend)
+            .await
+            .map(|_| ()),
+        Err(error) => Err(error),
+    };
     proxy_protocol::unregister_client(backend_local);
-    result.map(|_| ())
+    result
 }
 
 #[cfg(test)]
