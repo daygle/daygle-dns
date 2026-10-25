@@ -231,6 +231,10 @@ if [ "$KIND" = "install" ]; then
   DATA_DIR="$(dirname "$UPDATES_DIR")"
   PRIV_LIB_DIR="$(dirname -- "$0")"
   export PREFIX CONFIG_DIR DATA_DIR SERVICE_USER PRIV_LIB_DIR
+  # systemd starts this oneshot without HOME; rustup/cargo (and the
+  # installer's `set -u`) need it, so give the installer root's home.
+  HOME="${HOME:-/root}"
+  export HOME
   # The installer's LAN-GUI section rebinds [api] listen to 0.0.0.0 and may
   # write console accounts - explicitly not wanted here ("update the app,
   # keep the operator's settings").

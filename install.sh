@@ -21,6 +21,22 @@
 
 set -eu
 
+# A GUI-driven update runs this script from a systemd oneshot, whose
+# environment has no HOME (and a PATH without ~/.cargo/bin). Fall back to the
+# invoking user's passwd home so rustup/cargo resolve the same toolchain a
+# hand-run install would, instead of tripping `set -u` or reinstalling Rust.
+if [ -z "${HOME:-}" ]; then
+    HOME="$(getent passwd "$(id -u)" 2>/dev/null | cut -d: -f6 || true)"
+    [ -n "$HOME" ] || HOME="/root"
+    export HOME
+fi
+if [ -d "$HOME/.cargo/bin" ]; then
+    case ":$PATH:" in
+        *":$HOME/.cargo/bin:"*) ;;
+        *) PATH="$HOME/.cargo/bin:$PATH"; export PATH ;;
+    esac
+fi
+
 PREFIX="${PREFIX:-/usr/local}"
 CONFIG_DIR="${CONFIG_DIR:-/etc/daygle-dns}"
 DATA_DIR="${DATA_DIR:-/var/lib/daygle-dns}"
