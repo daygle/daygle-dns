@@ -187,7 +187,6 @@
 {/if}
 
 <style>
-  .help { max-width: 90ch; }
   .pill { margin-left: 6px; }
   td .row .pill { margin-left: 0; }
   textarea { width: 100%; }
