@@ -59,10 +59,20 @@ static PASSWORD_WORK: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new
 /// Run a PBKDF2 job on the blocking pool (never on an async worker thread,
 /// where it would stall every task scheduled there, DNS included).
 async fn password_work<T: Send + 'static>(job: impl FnOnce() -> T + Send + 'static) -> T {
-    let _permit = PASSWORD_WORK
+    let _permit = password_permit().await;
+    run_password_job(job).await
+}
+
+/// A slot for one PBKDF2 computation (see [`PASSWORD_WORK`]).
+async fn password_permit() -> tokio::sync::SemaphorePermit<'static> {
+    PASSWORD_WORK
         .acquire()
         .await
-        .expect("password semaphore is never closed");
+        .expect("password semaphore is never closed")
+}
+
+/// Run a PBKDF2 job on the blocking pool; the caller holds a permit.
+async fn run_password_job<T: Send + 'static>(job: impl FnOnce() -> T + Send + 'static) -> T {
     tokio::task::spawn_blocking(job)
         .await
         .expect("password hashing task panicked")
@@ -2879,7 +2889,8 @@ pub async fn auth_login(
     axum::Json(input): axum::Json<LoginInput>,
 ) -> Response {
     let client_ip = connect_info.map(|axum::Extension(info)| info.0.ip().to_canonical());
-    if let Some(retry) = client_ip.and_then(|ip| state.login_throttle.retry_after(ip)) {
+    let throttled = |state: &AppState| {
+        let retry = client_ip.and_then(|ip| state.login_throttle.retry_after(ip))?;
         let mut resp = error_response(
             StatusCode::TOO_MANY_REQUESTS,
             "too many failed login attempts; try again later",
@@ -2887,6 +2898,9 @@ pub async fn auth_login(
         if let Ok(value) = header::HeaderValue::from_str(&retry.to_string()) {
             resp.headers_mut().insert(header::RETRY_AFTER, value);
         }
+        Some(resp)
+    };
+    if let Some(resp) = throttled(&state) {
         return resp;
     }
     if input.username.len() > 256 || input.password.len() > MAX_PASSWORD_LEN {
@@ -2905,13 +2919,28 @@ pub async fn auth_login(
     // does not exist (or is disabled, which is not disclosed) so timing
     // cannot enumerate accounts.
     let dummy_hash = "pbkdf2-sha256$210000$AAAAAAAAAAAAAAAAAAAAAA==$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
-    let ok = match user.as_ref() {
-        Some(u) if u.enabled => verify_password(&input.password, &u.password_hash).await,
-        _ => {
-            let _ = verify_password(&input.password, dummy_hash).await;
+    let stored_hash = match user.as_ref() {
+        Some(u) if u.enabled => Some(u.password_hash.clone()),
+        _ => None,
+    };
+    // Check the throttle again once this attempt has its PBKDF2 slot. Many
+    // concurrent attempts all pass the check above before any of them has
+    // failed; they queue for the slots, so re-checking here bounds a burst
+    // to the permits in flight instead of letting every queued guess run.
+    // The slot is held until this attempt's outcome is recorded below.
+    let _permit = password_permit().await;
+    if let Some(resp) = throttled(&state) {
+        return resp;
+    }
+    let password = input.password.clone();
+    let ok = run_password_job(move || match stored_hash {
+        Some(hash) => daygle_dns_core::auth::verify_password(&password, &hash),
+        None => {
+            let _ = daygle_dns_core::auth::verify_password(&password, dummy_hash);
             false
         }
-    };
+    })
+    .await;
 
     if !ok {
         if let Some(ip) = client_ip {

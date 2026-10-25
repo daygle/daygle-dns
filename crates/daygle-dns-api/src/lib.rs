@@ -647,12 +647,24 @@ fn cors_layer(config: Arc<ArcSwap<DaygleConfig>>) -> tower_http::cors::CorsLayer
         ])
 }
 
+/// Content Security Policy for the console: everything from this origin
+/// only. Session tokens live in the browser's local storage, so any script
+/// injected into the page could read them; this keeps injected markup from
+/// loading or running script from anywhere else. Inline styles stay allowed
+/// (the Svelte bundle sets `style` attributes).
+const CONTENT_SECURITY_POLICY: &str = "default-src 'self'; script-src 'self'; \
+    style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; \
+    object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'";
+
 /// Baseline hardening headers for the console and API: forbid framing
-/// (clickjacking) and MIME sniffing, and keep URLs out of cross-site
-/// referrers.
+/// (clickjacking) and MIME sniffing, keep URLs out of cross-site referrers,
+/// and restrict where the console may load code from.
 async fn security_headers(mut response: Response) -> Response {
     use axum::http::{header, HeaderValue};
     let headers = response.headers_mut();
+    headers
+        .entry(header::CONTENT_SECURITY_POLICY)
+        .or_insert(HeaderValue::from_static(CONTENT_SECURITY_POLICY));
     headers
         .entry(header::X_FRAME_OPTIONS)
         .or_insert(HeaderValue::from_static("DENY"));

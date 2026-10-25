@@ -295,7 +295,9 @@ pub fn sign_response(
         .map_err(|e| format!("tsig record encoding failed: {e}"))?;
     out.extend_from_slice(&tsig_bytes);
     // Patch the additional record count (header bytes 10-11) by one.
-    let additionals = u16::from_be_bytes([out[10], out[11]]) + 1;
+    let additionals = u16::from_be_bytes([out[10], out[11]])
+        .checked_add(1)
+        .ok_or_else(|| "tsig response has no room for another additional record".to_string())?;
     out[10..12].copy_from_slice(&additionals.to_be_bytes());
     Ok(out)
 }

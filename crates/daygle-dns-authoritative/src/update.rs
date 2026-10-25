@@ -549,10 +549,9 @@ fn update_client_allowed(networks: &[String], client: IpAddr) -> bool {
     if networks.is_empty() {
         return true;
     }
+    // A bare address (accepted by the config check) is a single host.
     networks.iter().any(|net| {
-        net.parse::<ipnet::IpNet>()
-            .map(|ip| ip.contains(&client))
-            .unwrap_or(false)
+        daygle_dns_core::config::parse_network(net).is_some_and(|ip| ip.contains(&client))
     })
 }
 
@@ -587,6 +586,18 @@ fn fallback_response() -> ResponseInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn update_acl_accepts_bare_addresses_and_networks() {
+        let client: IpAddr = "2001:db8::5".parse().unwrap();
+        assert!(update_client_allowed(&["2001:db8::5".to_string()], client));
+        assert!(update_client_allowed(
+            &["2001:db8::/64".to_string()],
+            client
+        ));
+        assert!(!update_client_allowed(&["2001:db8::6".to_string()], client));
+        assert!(update_client_allowed(&[], client));
+    }
 
     #[test]
     fn lower_names_and_zone_membership() {

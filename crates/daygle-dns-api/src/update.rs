@@ -23,13 +23,17 @@
 //! Privilege is deliberately narrow and does **not** use sudo or any setuid
 //! helper (a hardened service's `CapabilityBoundingSet` can break sudo's core
 //! audit write, which aborted every update). Instead, the helper - running as
-//! the unprivileged service account - downloads, verifies and stages the new
-//! binary under `<data>/updates/staging`, then drops a `request` marker into
+//! the unprivileged service account - downloads, verifies and stages the
+//! request under `<data>/updates/staging`, then drops a `request` marker into
 //! `<data>/updates`. A root-owned systemd path unit
 //! (`daygle-dns-update.path`) watches that directory and starts
 //! `daygle-dns-update.service`, a short root oneshot (embedded as
-//! `update-apply.sh`) that swaps the binary, restarts the unit, health-checks
-//! and rolls back on failure. `install.sh` provisions both units. Self-update
+//! `update-apply.sh`) that applies it, restarts the unit, health-checks and
+//! rolls back on failure. The staged files are only a request: the root step
+//! re-fetches the installer itself and checks a models bundle against the
+//! checksum published with its release, so a compromised service account
+//! cannot get its own content run or installed as root. `install.sh`
+//! provisions both units. Self-update
 //! is opt-in by environment: only Linux hosts that look like a real install
 //! (systemd unit, `/usr/local/bin` binary, or a config under `/etc/`).
 //! Dev/test builds and the Windows/macOS console expose guidance-only mode.
@@ -1466,8 +1470,15 @@ fn spawn(script: PathBuf, exe: &Path, dir: &Path, mode: Option<&str>) -> std::io
     // `process_group(0)` makes the child a session/group leader. Combined with
     // a null controlling terminal this detaches it from the server process.
     cmd.process_group(0);
-    let child = cmd.spawn()?;
-    Ok(child.id())
+    let mut child = cmd.spawn()?;
+    let pid = child.id();
+    // Reap the helper when it exits (it hands off to the root step and quits
+    // before the restart). Unwaited, every run - failed ones included, which
+    // do not restart the server - left a zombie until the server exited.
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
+    Ok(pid)
 }
 
 #[cfg(not(unix))]

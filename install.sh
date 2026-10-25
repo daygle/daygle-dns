@@ -501,6 +501,10 @@ RestartSec=3
 CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 AmbientCapabilities=CAP_NET_BIND_SERVICE
 NoNewPrivileges=true
+# Files the server creates (the database with its private keys, TOTP
+# secrets and password hashes, backups, TLS material) are not readable by
+# other local accounts.
+UMask=0027
 
 [Install]
 WantedBy=multi-user.target
@@ -525,6 +529,10 @@ EOF
         fi
     fi
     chown -R "$SERVICE_USER":"$SERVICE_USER" "$CONFIG_DIR" "$DATA_DIR"
+    # The config can hold the API token and TSIG secrets, and the data dir
+    # the database with every private key: keep other local accounts out of
+    # both (existing installs included, whose files were created 0644).
+    chmod 0750 "$CONFIG_DIR" "$DATA_DIR"
     systemctl daemon-reload
     if [ "$INSTALL_MODE" = "upgrade" ]; then
         WAS_ACTIVE=0

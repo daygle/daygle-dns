@@ -35,6 +35,9 @@ use crate::tls_diag::{SessionLog, QUIC};
 /// Largest message the 2-octet length prefix can describe (RFC 1035 §4.2.2).
 const MAX_MESSAGE_LEN: usize = u16::MAX as usize;
 
+/// How long a client has to send its query once it opened a stream.
+const REQUEST_READ_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// DoQ reserved error codes (RFC 9250 §4.3).
 const DOQ_NO_ERROR: u32 = 0x0;
 const DOQ_PROTOCOL_ERROR: u32 = 0x2;
@@ -232,15 +235,20 @@ async fn handle_stream(
 ) -> Result<(), NetError> {
     // Read the framed request. A client that closes the stream without
     // sending a query has nothing to answer.
-    let mut len_buf = [0u8; 2];
-    if recv_stream.read_exact(&mut len_buf).await.is_err() {
+    // Bounded in time: a client keeping its connection alive could
+    // otherwise hold stream slots (shared by every connection) open forever
+    // without ever sending a query.
+    let read = async {
+        let mut len_buf = [0u8; 2];
+        recv_stream.read_exact(&mut len_buf).await.ok()?;
+        let mut body = vec![0u8; u16::from_be_bytes(len_buf) as usize];
+        recv_stream.read_exact(&mut body).await.ok()?;
+        Some(body)
+    };
+    let Ok(Some(body)) = tokio::time::timeout(REQUEST_READ_TIMEOUT, read).await else {
+        let _ = recv_stream.stop(VarInt::from_u32(DOQ_NO_ERROR));
         return Ok(());
-    }
-    let len = u16::from_be_bytes(len_buf) as usize;
-    let mut body = vec![0u8; len];
-    if recv_stream.read_exact(&mut body).await.is_err() {
-        return Ok(());
-    }
+    };
 
     let responder = DoqResponseHandle::new(send_stream, recv_stream);
 
