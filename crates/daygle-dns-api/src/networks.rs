@@ -13,7 +13,6 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use daygle_dns_core::config::{DaygleConfig, NamedNetwork, RuntimeSettings};
-use daygle_dns_recursive::RecursiveResolver;
 use serde::Deserialize;
 
 use crate::handlers::{error_response, map_err, rebuild_advanced_blocking, validate_config_update};
@@ -126,7 +125,7 @@ pub async fn save_network(
             return map_err(e);
         }
     }
-    if let Err(e) = apply(&state, &old, config) {
+    if let Err(e) = apply(&state, &old, config).await {
         return map_err(e);
     }
     Json(network).into_response()
@@ -160,7 +159,7 @@ pub async fn delete_network(State(state): State<AppState>, Path(name): Path<Stri
     }
     let mut config = (*old).clone();
     config.networks.remove(index);
-    if let Err(e) = apply(&state, &old, config) {
+    if let Err(e) = apply(&state, &old, config).await {
         return map_err(e);
     }
     StatusCode::NO_CONTENT.into_response()
@@ -170,7 +169,7 @@ pub async fn delete_network(State(state): State<AppState>, Path(name): Path<Stri
 /// apply it to everything that names networks: split horizon, the policy
 /// engine, the recursive resolver, the zone-transfer and update gates, the
 /// Advanced Blocking groups and the PROXY-protocol listeners.
-pub(crate) fn apply(
+pub(crate) async fn apply(
     state: &AppState,
     old: &DaygleConfig,
     config: DaygleConfig,
@@ -182,14 +181,14 @@ pub(crate) fn apply(
     let networks = config.all_networks();
     state.config.store(Arc::new(config));
     state.catalog.set_networks(networks)?;
-    apply_resolved_changes(state, old, &state.config.load_full());
+    apply_resolved_changes(state, old, &state.config.load_full()).await;
     Ok(())
 }
 
 /// Rebuild what a network change alters. Every component is built from the
 /// config with its names resolved to addresses, so this compares those
 /// copies: only a setting whose addresses really changed is rebuilt.
-fn apply_resolved_changes(state: &AppState, old: &DaygleConfig, new: &DaygleConfig) {
+async fn apply_resolved_changes(state: &AppState, old: &DaygleConfig, new: &DaygleConfig) {
     let old_r = old.with_networks_resolved();
     let new_r = new.with_networks_resolved();
     if old_r.policy != new_r.policy {
@@ -217,12 +216,7 @@ fn apply_resolved_changes(state: &AppState, old: &DaygleConfig, new: &DaygleConf
         || old_r.authoritative.stub_zones != new_r.authoritative.stub_zones
     {
         if new_r.recursive.enabled {
-            match RecursiveResolver::build(
-                &new_r.recursive,
-                state.metrics.clone(),
-                &new_r.authoritative.stub_zones,
-                Some(state.local_root.clone()),
-            ) {
+            match crate::handlers::build_resolver(state, &new_r).await {
                 Ok(resolver) => state.resolver.store(Some(Arc::new(resolver))),
                 Err(e) => state.logs.warn(
                     "api",

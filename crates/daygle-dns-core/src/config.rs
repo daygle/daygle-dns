@@ -857,18 +857,26 @@ pub struct NamedNetwork {
 
 /// The networks every server has, which can be named but not changed.
 pub fn builtin_networks() -> Vec<NamedNetwork> {
-    vec![
-        NamedNetwork {
-            name: "Private".to_string(),
-            cidrs: PRIVATE_NETWORKS.iter().map(|n| n.to_string()).collect(),
-            description: "Private, shared, link-local and loopback addresses".to_string(),
-        },
-        NamedNetwork {
-            name: "This Server".to_string(),
-            cidrs: vec!["127.0.0.0/8".to_string(), "::1/128".to_string()],
-            description: "Loopback: queries from this machine".to_string(),
-        },
-    ]
+    builtin_network_list().to_vec()
+}
+
+/// The built-in networks, built once.
+fn builtin_network_list() -> &'static [NamedNetwork] {
+    static LIST: std::sync::OnceLock<Vec<NamedNetwork>> = std::sync::OnceLock::new();
+    LIST.get_or_init(|| {
+        vec![
+            NamedNetwork {
+                name: "Private".to_string(),
+                cidrs: PRIVATE_NETWORKS.iter().map(|n| n.to_string()).collect(),
+                description: "Private, shared, link-local and loopback addresses".to_string(),
+            },
+            NamedNetwork {
+                name: "This Server".to_string(),
+                cidrs: vec!["127.0.0.0/8".to_string(), "::1/128".to_string()],
+                description: "Loopback: queries from this machine".to_string(),
+            },
+        ]
+    })
 }
 
 impl DaygleConfig {
@@ -881,9 +889,15 @@ impl DaygleConfig {
 
     /// The network called `name` (any case), built-in or configured.
     pub fn find_network(&self, name: &str) -> Option<NamedNetwork> {
+        self.named_network(name).cloned()
+    }
+
+    /// Like [`Self::find_network`], without copying: for per-query lookups.
+    pub fn named_network(&self, name: &str) -> Option<&NamedNetwork> {
         let name = name.trim();
-        self.all_networks()
-            .into_iter()
+        builtin_network_list()
+            .iter()
+            .chain(&self.networks)
             .find(|n| n.name.eq_ignore_ascii_case(name))
     }
 
@@ -2694,8 +2708,8 @@ pub struct ServerSettings {
     /// IPv4 clients too.
     pub ipv6_only: bool,
     /// DNS cookies (RFC 7873): answer clients that send a cookie with a
-    /// server cookie, and let clients whose server cookie checks out skip
-    /// the per-client rate limit. On by default.
+    /// server cookie, and give clients whose server cookie checks out ten
+    /// times the per-client rate limit. On by default.
     pub dns_cookies: bool,
     /// PROXY protocol (v1/v2): networks of trusted load balancers. A TCP,
     /// DoT or DoH connection from one of them must start with a PROXY
@@ -3236,8 +3250,10 @@ pub struct AuthoritativeSettings {
     /// Accept RFC 2136 dynamic updates (UPDATE messages) for primary zones.
     /// Updates are written through to SQLite and applied live.
     pub allow_dynamic_updates: bool,
-    /// Client networks allowed to send dynamic updates. When empty, any
-    /// client may update (subject to `allow_dynamic_updates`).
+    /// Client networks allowed to send dynamic updates. When empty, only
+    /// zones bound to a TSIG key (`tsig_update_zones`) accept updates, and
+    /// only signed ones; an unauthenticated update from anywhere is never
+    /// accepted.
     pub update_networks: Vec<String>,
     /// Secondary zones replicated from remote masters via AXFR/IXFR.
     pub secondary_zones: Vec<SecondaryZoneConfig>,

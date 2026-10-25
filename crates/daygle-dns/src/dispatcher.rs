@@ -683,9 +683,10 @@ impl RequestHandler for DnsDispatcher {
 
         // DNS cookies (RFC 7873): every response to a client that sent one
         // carries a fresh server cookie, and a request whose server cookie
-        // checks out provably comes from its source address, so it is not
-        // held to the per-client rate limit (which exists for spoofed
-        // floods).
+        // checks out provably comes from its source address. Such a client
+        // cannot be a spoofed flood, so it gets a larger per-client
+        // allowance - not an exemption, or any real client could flood the
+        // server by echoing its cookie back.
         let (cookie_ok, cookie_reply) =
             match self
                 .cookies
@@ -700,7 +701,12 @@ impl RequestHandler for DnsDispatcher {
             };
         let mut response_handle =
             crate::cookies::CookieResponder::new(response_handle, cookie_reply);
-        if !cookie_ok && !self.rate_limiter.check_client(client) {
+        let admitted = if cookie_ok {
+            self.rate_limiter.check_verified_client(client)
+        } else {
+            self.rate_limiter.check_client(client)
+        };
+        if !admitted {
             debug!(%client, "query rate-limited by client");
             self.metrics.inc(&self.metrics.rate_limited);
             self.observe(
@@ -1451,7 +1457,7 @@ impl DnsDispatcher {
                 // A Settings -> Networks name. An unresolvable entry
                 // matches nobody - the config validator rejects those,
                 // and failing open here could expose the listener.
-                None => config.find_network(entry).is_some_and(|n| {
+                None => config.named_network(entry).is_some_and(|n| {
                     n.cidrs
                         .iter()
                         .filter_map(|c| daygle_dns_core::config::parse_network(c))

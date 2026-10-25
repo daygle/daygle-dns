@@ -12,7 +12,7 @@ use std::sync::{Arc, OnceLock, RwLock};
 use std::time::Duration;
 
 use tokio::io::AsyncReadExt;
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::{TcpListener, TcpSocket, TcpStream};
 use tokio_util::sync::CancellationToken;
 use tracing::debug;
 
@@ -198,12 +198,22 @@ async fn splice(
     } else {
         peer
     };
-    let mut inner = TcpStream::connect(backend).await?;
-    let local = inner.local_addr()?;
+    // Bind the backend socket and register its local address before
+    // connecting (as `connection_admission::bridge` does): once connected,
+    // the listener may accept and look up the peer immediately.
+    let socket = match backend {
+        SocketAddr::V4(_) => TcpSocket::new_v4()?,
+        SocketAddr::V6(_) => TcpSocket::new_v6()?,
+    };
+    socket.bind(SocketAddr::new(backend.ip(), 0))?;
+    let local = socket.local_addr()?;
     register_client(local, client);
-    let result = tokio::select! {
-        _ = shutdown.cancelled() => Ok(()),
-        copied = tokio::io::copy_bidirectional(&mut stream, &mut inner) => copied.map(|_| ()),
+    let result = match socket.connect(backend).await {
+        Ok(mut inner) => tokio::select! {
+            _ = shutdown.cancelled() => Ok(()),
+            copied = tokio::io::copy_bidirectional(&mut stream, &mut inner) => copied.map(|_| ()),
+        },
+        Err(e) => Err(e),
     };
     unregister_client(local);
     result

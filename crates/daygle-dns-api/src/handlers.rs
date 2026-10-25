@@ -84,12 +84,6 @@ async fn hash_password(password: &str) -> String {
     password_work(move || daygle_dns_core::auth::hash_password(&password)).await
 }
 
-/// [`daygle_dns_core::auth::verify_password`] off the async runtime.
-async fn verify_password(password: &str, hash: &str) -> bool {
-    let (password, hash) = (password.to_string(), hash.to_string());
-    password_work(move || daygle_dns_core::auth::verify_password(&password, &hash)).await
-}
-
 /// Shorten attacker-controlled text before it is written to the in-memory
 /// log ring (an unauthenticated login may carry megabytes in `username`).
 fn log_safe(value: &str) -> String {
@@ -2888,18 +2882,8 @@ pub async fn auth_login(
     connect_info: Option<axum::Extension<axum::extract::ConnectInfo<std::net::SocketAddr>>>,
     axum::Json(input): axum::Json<LoginInput>,
 ) -> Response {
-    let client_ip = connect_info.map(|axum::Extension(info)| info.0.ip().to_canonical());
-    let throttled = |state: &AppState| {
-        let retry = client_ip.and_then(|ip| state.login_throttle.retry_after(ip))?;
-        let mut resp = error_response(
-            StatusCode::TOO_MANY_REQUESTS,
-            "too many failed login attempts; try again later",
-        );
-        if let Ok(value) = header::HeaderValue::from_str(&retry.to_string()) {
-            resp.headers_mut().insert(header::RETRY_AFTER, value);
-        }
-        Some(resp)
-    };
+    let client_ip = client_ip_of(connect_info);
+    let throttled = |state: &AppState| throttled_response(state, client_ip);
     if let Some(resp) = throttled(&state) {
         return resp;
     }
@@ -3139,6 +3123,7 @@ pub struct ChangePasswordInput {
 /// Available to `viewer` accounts too (it is their own credential).
 pub async fn auth_change_password(
     State(state): State<AppState>,
+    connect_info: Option<axum::Extension<axum::extract::ConnectInfo<std::net::SocketAddr>>>,
     headers: axum::http::HeaderMap,
     axum::Json(input): axum::Json<ChangePasswordInput>,
 ) -> Response {
@@ -3158,15 +3143,17 @@ pub async fn auth_change_password(
     if !user.enabled {
         return error_response(StatusCode::FORBIDDEN, "account is disabled");
     }
-    if input.current_password.len() > MAX_PASSWORD_LEN
-        || !verify_password(&input.current_password, &user.password_hash).await
+    if let Err(r) = confirm_password(
+        &state,
+        client_ip_of(connect_info),
+        &user,
+        &input.current_password,
+        "a password change",
+        "current password is incorrect",
+    )
+    .await
     {
-        state.logs.push(
-            daygle_dns_core::LogLevel::Warn,
-            "api",
-            format!("failed password change for user '{}'", session.username),
-        );
-        return error_response(StatusCode::UNAUTHORIZED, "current password is incorrect");
+        return r;
     }
     if input.new_password.chars().count() < 8 || input.new_password.len() > MAX_PASSWORD_LEN {
         return error_response(
@@ -3312,26 +3299,90 @@ fn session_user(
     }
 }
 
-/// Re-check the account's password before a two-factor change.
+/// Build a recursive resolver from `resolved` (a config with its network
+/// names resolved) on the blocking pool: a stub zone naming its servers by
+/// host name is resolved with a blocking system lookup.
+pub(crate) async fn build_resolver(
+    state: &AppState,
+    resolved: &daygle_dns_core::config::DaygleConfig,
+) -> daygle_dns_core::error::Result<daygle_dns_recursive::RecursiveResolver> {
+    let settings = resolved.recursive.clone();
+    let stub_zones = resolved.authoritative.stub_zones.clone();
+    let metrics = state.metrics.clone();
+    let local_root = state.local_root.clone();
+    tokio::task::spawn_blocking(move || {
+        daygle_dns_recursive::RecursiveResolver::build(
+            &settings,
+            metrics,
+            &stub_zones,
+            Some(local_root),
+        )
+    })
+    .await
+    .map_err(|e| {
+        daygle_dns_core::error::DaygleError::Internal(format!("resolver build task failed: {e}"))
+    })?
+}
+
+/// `429` with `Retry-After` when `client_ip` is locked out by the failed
+/// login throttle, else `None`.
+fn throttled_response(state: &AppState, client_ip: Option<IpAddr>) -> Option<Response> {
+    let retry = client_ip.and_then(|ip| state.login_throttle.retry_after(ip))?;
+    let mut resp = error_response(
+        StatusCode::TOO_MANY_REQUESTS,
+        "too many failed login attempts; try again later",
+    );
+    if let Ok(value) = header::HeaderValue::from_str(&retry.to_string()) {
+        resp.headers_mut().insert(header::RETRY_AFTER, value);
+    }
+    Some(resp)
+}
+
+/// The client address of a request (canonical, so IPv4-mapped IPv6 counts
+/// as the IPv4 address it carries).
+fn client_ip_of(
+    connect_info: Option<axum::Extension<axum::extract::ConnectInfo<std::net::SocketAddr>>>,
+) -> Option<IpAddr> {
+    connect_info.map(|axum::Extension(info)| info.0.ip().to_canonical())
+}
+
+/// Re-check a signed-in account's password (before a password or
+/// two-factor change). A wrong password counts as a failed login for
+/// `client_ip`, so a stolen session cannot be used to guess the password
+/// at full speed; like a login, the throttle is re-checked once the
+/// attempt holds its PBKDF2 slot. `what` names the change for the log.
 #[allow(clippy::result_large_err)]
 async fn confirm_password(
     state: &AppState,
+    client_ip: Option<IpAddr>,
     user: &daygle_dns_authoritative::store::ConsoleUser,
     password: &str,
+    what: &str,
+    wrong: &str,
 ) -> Result<(), Response> {
-    if password.len() > MAX_PASSWORD_LEN || !verify_password(password, &user.password_hash).await {
+    if let Some(resp) = throttled_response(state, client_ip) {
+        return Err(resp);
+    }
+    let ok = if password.len() > MAX_PASSWORD_LEN {
+        false
+    } else {
+        let _permit = password_permit().await;
+        if let Some(resp) = throttled_response(state, client_ip) {
+            return Err(resp);
+        }
+        let (password, hash) = (password.to_string(), user.password_hash.clone());
+        run_password_job(move || daygle_dns_core::auth::verify_password(&password, &hash)).await
+    };
+    if !ok {
+        if let Some(ip) = client_ip {
+            state.login_throttle.record_failure(ip);
+        }
         state.logs.push(
             daygle_dns_core::LogLevel::Warn,
             "api",
-            format!(
-                "wrong password for a two-factor change by user '{}'",
-                user.username
-            ),
+            format!("wrong password for {what} by user '{}'", user.username),
         );
-        return Err(error_response(
-            StatusCode::UNAUTHORIZED,
-            "password is incorrect",
-        ));
+        return Err(error_response(StatusCode::UNAUTHORIZED, wrong));
     }
     Ok(())
 }
@@ -3376,6 +3427,7 @@ pub async fn two_factor_status(
 /// Nothing changes until `/enable` confirms a code.
 pub async fn two_factor_setup(
     State(state): State<AppState>,
+    connect_info: Option<axum::Extension<axum::extract::ConnectInfo<std::net::SocketAddr>>>,
     headers: axum::http::HeaderMap,
     axum::Json(input): axum::Json<PasswordInput>,
 ) -> Response {
@@ -3383,7 +3435,16 @@ pub async fn two_factor_setup(
         Ok(u) => u,
         Err(r) => return r,
     };
-    if let Err(r) = confirm_password(&state, &user, &input.password).await {
+    if let Err(r) = confirm_password(
+        &state,
+        client_ip_of(connect_info),
+        &user,
+        &input.password,
+        "a two-factor change",
+        "password is incorrect",
+    )
+    .await
+    {
         return r;
     }
     let secret = daygle_dns_core::totp::generate_secret();
@@ -3444,6 +3505,7 @@ pub async fn two_factor_enable(
 /// recovery codes (the old ones stop working).
 pub async fn two_factor_new_recovery_codes(
     State(state): State<AppState>,
+    connect_info: Option<axum::Extension<axum::extract::ConnectInfo<std::net::SocketAddr>>>,
     headers: axum::http::HeaderMap,
     axum::Json(input): axum::Json<PasswordInput>,
 ) -> Response {
@@ -3451,7 +3513,16 @@ pub async fn two_factor_new_recovery_codes(
         Ok(u) => u,
         Err(r) => return r,
     };
-    if let Err(r) = confirm_password(&state, &user, &input.password).await {
+    if let Err(r) = confirm_password(
+        &state,
+        client_ip_of(connect_info),
+        &user,
+        &input.password,
+        "a two-factor change",
+        "password is incorrect",
+    )
+    .await
+    {
         return r;
     }
     if !user.two_factor {
@@ -3476,6 +3547,7 @@ pub async fn two_factor_new_recovery_codes(
 /// login off for the signed-in account.
 pub async fn two_factor_disable(
     State(state): State<AppState>,
+    connect_info: Option<axum::Extension<axum::extract::ConnectInfo<std::net::SocketAddr>>>,
     headers: axum::http::HeaderMap,
     axum::Json(input): axum::Json<PasswordInput>,
 ) -> Response {
@@ -3483,7 +3555,16 @@ pub async fn two_factor_disable(
         Ok(u) => u,
         Err(r) => return r,
     };
-    if let Err(r) = confirm_password(&state, &user, &input.password).await {
+    if let Err(r) = confirm_password(
+        &state,
+        client_ip_of(connect_info),
+        &user,
+        &input.password,
+        "a two-factor change",
+        "password is incorrect",
+    )
+    .await
+    {
         return r;
     }
     match state.catalog.store().disable_two_factor(&user.username) {
@@ -4842,22 +4923,15 @@ pub async fn update_settings(
     let recursive_changed = old_config.recursive != config.recursive
         || old_config.authoritative.stub_zones != config.authoritative.stub_zones;
     let new_resolver = if recursive_changed && config.recursive.enabled {
-        Some(
-            match daygle_dns_recursive::RecursiveResolver::build(
-                &resolved.recursive,
-                state.metrics.clone(),
-                &resolved.authoritative.stub_zones,
-                Some(state.local_root.clone()),
-            ) {
-                Ok(resolver) => resolver,
-                Err(e) => {
-                    return error_response(
-                        StatusCode::BAD_REQUEST,
-                        format!("recursive resolver rebuild failed: {e}"),
-                    );
-                }
-            },
-        )
+        Some(match build_resolver(&state, &resolved).await {
+            Ok(resolver) => resolver,
+            Err(e) => {
+                return error_response(
+                    StatusCode::BAD_REQUEST,
+                    format!("recursive resolver rebuild failed: {e}"),
+                );
+            }
+        })
     } else {
         None
     };

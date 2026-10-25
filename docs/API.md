@@ -639,8 +639,9 @@ RFC 2136 dynamic updates are also a DNS-protocol feature (over UDP/TCP/DoT,
 not HTTP): `UPDATE` messages for hosted primary zones are applied atomically
 with write-through to SQLite and served immediately after a catalog reload.
 They are gated by `authoritative.allow_dynamic_updates` (default off) and the
-`authoritative.update_networks` client allow-list, and are always refused for
-secondary zones. Prerequisites (value-dependent / value-independent /
+`authoritative.update_networks` client allow-list (when it is empty, only
+zones bound to a TSIG key in `authoritative.tsig_update_zones` take updates,
+signed ones only), and are always refused for secondary zones. Prerequisites (value-dependent / value-independent /
 not-exists forms) are fully checked; failed updates return their RFC 2136
 RCODE (YXDOMAIN, YXRRSet, NXDOMAIN, NXRRSet, NOTAUTH, ...).
 

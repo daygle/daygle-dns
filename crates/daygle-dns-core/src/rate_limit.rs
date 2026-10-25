@@ -36,6 +36,10 @@ const SIZE_SWEEP_MIN_GAP: Duration = Duration::from_secs(1);
 /// (fail-open for admission, bounded memory); keys already tracked keep
 /// their limits.
 const CLIENT_BUCKETS_CAP: usize = 50_000;
+
+/// How many times the per-client limit a client with a valid DNS cookie
+/// may send (see [`RateLimiter::check_verified_client`]).
+pub const VERIFIED_CLIENT_ALLOWANCE: u32 = 10;
 const DOMAIN_BUCKETS_CAP: usize = 50_000;
 
 /// A thread-safe fixed-window rate limiter.
@@ -107,6 +111,19 @@ impl RateLimiter {
     /// Admit one query from `client`. Returns `true` when the query may be
     /// processed, `false` when the client exceeded its window limit.
     pub fn check_client(&self, client: IpAddr) -> bool {
+        self.check_client_scaled(client, 1)
+    }
+
+    /// Admit one query from a client that proved its address (a valid DNS
+    /// cookie): it cannot be a spoofed source, so it gets
+    /// [`VERIFIED_CLIENT_ALLOWANCE`] times the per-client limit - but still
+    /// a limit, so a real client cannot flood the server just by echoing a
+    /// cookie back. The window is shared with its unverified queries.
+    pub fn check_verified_client(&self, client: IpAddr) -> bool {
+        self.check_client_scaled(client, VERIFIED_CLIENT_ALLOWANCE)
+    }
+
+    fn check_client_scaled(&self, client: IpAddr, factor: u32) -> bool {
         let mut inner = self.inner.lock();
         if !inner.enabled {
             return true;
@@ -114,7 +131,10 @@ impl RateLimiter {
         if inner.exempt_loopback && client.is_loopback() {
             return true;
         }
-        let (window, limit) = (inner.client_window, inner.client_limit);
+        let (window, limit) = (
+            inner.client_window,
+            inner.client_limit.saturating_mul(factor),
+        );
         // IPv6 clients share a bucket per prefix (see client_ipv6_prefix).
         let key = match client {
             IpAddr::V6(v6) => ipnet::Ipv6Net::new(v6, inner.ipv6_prefix.min(128))
@@ -258,6 +278,19 @@ mod tests {
             exempt_loopback: true,
             client_ipv6_prefix: 56,
         }
+    }
+
+    #[test]
+    fn verified_clients_get_a_larger_but_finite_allowance() {
+        let limiter = RateLimiter::new(&settings(true));
+        let client: IpAddr = "192.0.2.7".parse().unwrap();
+        let allowance = 3 * VERIFIED_CLIENT_ALLOWANCE;
+        for _ in 0..allowance {
+            assert!(limiter.check_verified_client(client));
+        }
+        assert!(!limiter.check_verified_client(client));
+        // The window is shared: unverified queries are over their limit too.
+        assert!(!limiter.check_client(client));
     }
 
     #[test]

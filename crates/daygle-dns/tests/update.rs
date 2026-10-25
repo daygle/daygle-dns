@@ -17,6 +17,8 @@ use hickory_proto::rr::{DNSClass, Name, RData, Record, RecordType};
 fn config_with_updates(db: &std::path::Path) -> DaygleConfig {
     let mut cfg = base_config(db);
     cfg.authoritative.allow_dynamic_updates = true;
+    // Unsigned updates need a client allow-list.
+    cfg.authoritative.update_networks = vec!["127.0.0.1".to_string()];
     cfg
 }
 
@@ -302,6 +304,31 @@ async fn update_acl_accepts_named_networks() {
     assert!(resp.status().is_success(), "{}", resp.text().await.unwrap());
     let resp = udp_send(udp, &msg).await;
     assert_eq!(resp.response_code, ResponseCode::NoError);
+
+    shutdown(server).await;
+}
+
+/// Updates on, but neither a client allow-list nor a TSIG key for the
+/// zone: an unauthenticated update from anywhere is refused.
+#[tokio::test]
+async fn open_unsigned_update_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("daygle-dns.db");
+    let mut config = config_with_updates(&db);
+    config.authoritative.update_networks.clear();
+    let server = spawn(config).await;
+    setup_zone(&server, "open.test").await;
+    let udp = server.udp_addr.expect("UDP is enabled");
+
+    let msg = update_message(
+        "open.test.",
+        vec![],
+        vec![add_a_record("x.open.test.", [192, 0, 2, 6], 60)],
+    );
+    let resp = udp_send(udp, &msg).await;
+    assert_eq!(resp.response_code, ResponseCode::Refused);
+    let query = udp_query(udp, "x.open.test.", RecordType::A).await;
+    assert_eq!(query.response_code, ResponseCode::NXDomain);
 
     shutdown(server).await;
 }

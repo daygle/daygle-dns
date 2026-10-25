@@ -9,17 +9,18 @@ comparisons, symlink-safe writes, parameterized SQL throughout). The
 findings below are what remained.
 
 Each entry gives the problem, its impact, the fix, and the risks or
-trade-offs. **Fixed** entries are changed in this commit. **Reported**
-entries are left as they are, with the reason.
+trade-offs. Every finding is **Fixed**, except one that turned out not to
+be a defect (marked **Verified, no change**).
 
 Verification:
 
 - `cargo fmt --all -- --check` is clean.
 - `cargo clippy --workspace --all-targets --no-default-features -- -D warnings`
   is clean.
-- `cargo test --workspace --no-default-features` passes, with one
-  pre-existing, environment-dependent exception (L7).
-- New regression tests cover the ACL fix.
+- `cargo test --workspace --no-default-features` passes, including when
+  run as root (see L7).
+- New regression tests cover the ACL fix, the cookie allowance, refused
+  open updates and the redirect host check.
 - The apply script was exercised in a sandbox with stubbed
   `curl`/`systemctl`.
 - The console was driven in Chromium under the new CSP with no violations.
@@ -235,29 +236,44 @@ unchanged.
 
 *Risks.* None for standard clients. `dig` sets AD by default.
 
-### M5. Valid DNS cookies exempt a client from the rate limit entirely - *Reported (design)*
+### M5. Valid DNS cookies exempted a client from the rate limit entirely - **Fixed**
 
-*Where:* `crates/daygle-dns/src/dispatcher.rs`
+*Where:*
 
-*Problem.* This is documented behavior: cookies prove the source address,
-so the per-client limit is skipped. But the limit also protects against
-abusive *non-spoofing* clients. Any client can fetch a cookie and then
-query without limit.
+- `crates/daygle-dns-core/src/rate_limit.rs`
+- `crates/daygle-dns/src/dispatcher.rs`
 
-*Recommendation.* Keep applying the limit to cookie-validated clients,
-with a higher allowance such as 10×, rather than exempting them.
+*Problem.* Cookies prove the source address, so the per-client limit was
+skipped for a valid one. But the limit also protects against abusive
+*non-spoofing* clients: any client could fetch a cookie and then query
+without limit.
 
-*Not changed because* this would change documented behavior that
-operators may rely on.
+*Fix.* A client with a valid cookie now gets ten times the per-client
+limit (`VERIFIED_CLIENT_ALLOWANCE`), not an exemption. Its window is shared
+with its uncookied queries. The README, the example config and the config
+docs say so, and the cookie integration test checks the allowance ends.
 
-### M6. Dynamic updates without an ACL or TSIG are open to everyone - *Reported (design)*
+*Risks.* This changes documented behavior. A legitimate client sending
+over ten times the configured limit with cookies is now limited. Operators
+who need more can raise `client_max_queries`.
+
+### M6. Dynamic updates without an ACL or TSIG were open to everyone - **Fixed**
+
+*Where:* `crates/daygle-dns-authoritative/src/update.rs`
 
 *Problem.* The defaults are safe (`allow_dynamic_updates = false`). But
-enabling updates with an empty `update_networks` and no TSIG accepts
-spoofable UDP updates from anyone.
+enabling updates with an empty `update_networks` and no TSIG key for the
+zone accepted spoofable UDP updates from anyone.
 
-*Recommendation.* Have the config check warn about, or refuse, that
-combination.
+*Fix.* That combination now fails closed. With an empty `update_networks`,
+only zones bound to a TSIG key in `tsig_update_zones` accept updates, and
+only signed ones. The decision is per zone, because TSIG binding is per
+zone. The config docs, example config, API docs and the Settings help text
+are updated, and a test covers the refusal.
+
+*Risks.* This changes behavior. A deployment that relied on open,
+unauthenticated updates must now list its updaters in `update_networks`
+(the built-in "This Server" network covers localhost) or bind a TSIG key.
 
 ---
 
@@ -294,64 +310,84 @@ response never has.
 *Fix.* The reservation is capped by what the file can actually hold. No
 record is shorter than 11 octets.
 
-### L4. PROXY-protocol TCP front registers the client mapping after connecting - *Reported*
+### L4. PROXY-protocol TCP front registered the client mapping after connecting - **Fixed**
 
 *Where:* `crates/daygle-dns/src/proxy_protocol.rs` (`splice`)
 
 *Problem.* `connection_admission::bridge` binds first and registers before
-connecting. `splice` connects first and registers afterwards. Queries are
-unaffected, because data only flows after registration. But an
+connecting. `splice` connected first and registered afterwards. Queries
+were unaffected, because data only flows after registration. But an
 accept-time lookup, such as the TLS session diagnostics, could briefly
 attribute the connection to `127.0.0.1`.
 
-*Recommendation.* Mirror the bind, register, connect order used in
-`bridge`.
+*Fix.* `splice` now binds the backend socket, registers its address, then
+connects, like `bridge`.
 
-### L5. Credential re-confirmation is not throttled - *Reported*
+### L5. Credential re-confirmation was not throttled - **Fixed**
 
-*Problem.* `POST /auth/password` and the two-factor endpoints verify the
-current password without the per-IP failure counter. They do need a valid
-session, and the PBKDF2 semaphore bounds the rate.
+*Where:* `crates/daygle-dns-api/src/handlers.rs` (`confirm_password`)
 
-*Recommendation.* Feed failures into the login throttle as well.
+*Problem.* `POST /auth/password` and the two-factor endpoints verified
+the current password without the per-IP failure counter. A stolen session
+could be used to guess the account's password, bounded only by the PBKDF2
+semaphore.
 
-### L6. Blocking work on async threads in rare admin paths - *Reported*
+*Fix.* All four endpoints go through one `confirm_password`. It checks the
+login throttle, re-checks it once the attempt holds its PBKDF2 slot (as
+login does), and records a wrong password as a failed login for the client
+address. The old one-off `verify_password` helper is gone.
 
-*Problem.* `RecursiveResolver::build`, called from settings handlers,
-resolves stub-zone host names with blocking `getaddrinfo`. Many handlers
-also make short synchronous SQLite calls on the async runtime.
+*Risks.* Wrong passwords on these endpoints now count toward the same
+10-per-5-minutes lockout as sign-in failures from that address.
 
-*Impact.* These are rare and admin-only, so the impact is small.
+### L6. Blocking work on async threads in admin paths - **Fixed**
 
-*Recommendation.* Use `spawn_blocking` for resolver rebuilds.
+*Where:*
 
-### L7. Test isolation: suite leaves `/etc/daygle-dns` behind when run as root - *Reported*
+- `crates/daygle-dns-api/src/handlers.rs` (`build_resolver`)
+- `crates/daygle-dns-api/src/networks.rs`
 
-*Problem.* A test that uses the default DoT certificate paths creates
-`/etc/daygle-dns/certs`. Once that directory exists, `config_dir_hint()`
-treats the host as installed and the background release warmer starts
-fetching. A later run of
-`console::update_endpoints_report_state_and_gate_start` then sees
-`latest_checked_secs_ago` set and fails. It passes on a clean `/etc`.
+*Problem.* `RecursiveResolver::build`, called from the settings and
+network handlers, resolves stub-zone host names with blocking
+`getaddrinfo` on an async worker thread.
 
-In-process tests in `update::connectivity_tests` and `manual_check_tests`
-also share global statics and can race when run in parallel.
+*Fix.* Both handlers now build the resolver through one `build_resolver`
+helper on the blocking pool. In `networks.rs`, `apply` and
+`apply_resolved_changes` became `async`.
 
-*Recommendation.*
+*Not changed:* the many short synchronous SQLite calls in handlers.
+Moving them is a broad refactor for no measured benefit.
 
-- Point those tests at temporary certificate paths.
-- Make the release-cache tests serialize on a shared lock.
+### L7. Test isolation: suite left `/etc/daygle-dns` behind when run as root - **Fixed**
 
-### L8. Minor items noted, left as they are
+*Problem.* `console::settings_update_applies_and_persists` enabled DoQ
+with the default certificate paths, so the server wrote a self-signed
+certificate to `/etc/daygle-dns/certs`. Once that directory exists,
+`config_dir_hint()` treats the host as installed and the background
+release warmer starts fetching, so a later
+`console::update_endpoints_report_state_and_gate_start` saw
+`latest_checked_secs_ago` set and failed. The release-cache tests in
+`update.rs` also shared global statics and raced when run in parallel.
 
-- **Host-header redirect.** `redirect_to_https` builds its target from the
-  client's own `Host` header. It only redirects the requester, so it is
-  not exploitable without a caching proxy.
-- **Last-admin guard race.** `last_admin_guard` and the user mutations are
-  not one transaction. The store's `delete_console_user` re-checks under
-  its own lock, so deletion is safe. Two concurrent demotions are a
-  theoretical admin-only race.
-- **Named-network lookups per query.** `listener_gate` resolves named
-  networks per query, allocating the network list. This only applies to
-  encrypted listeners with named-network ACLs. The cost was not
-  measurable here.
+*Fix.*
+
+- The test now sends temp-dir certificate paths with its DoQ settings, and
+  the suite no longer writes to `/etc`.
+- The six release-cache tests serialize on one lock, and the throttle
+  replay test clears the cache it depends on.
+
+### L8. Minor items
+
+- **Host-header redirect - Fixed.** `redirect_to_https` built its target
+  from the client's `Host` header. It now redirects only when that is a
+  plain host name or IP address, so a crafted header cannot inject a path,
+  user info or a port. Covered by a unit test.
+- **Last-admin guard race - Verified, no change.** Re-checked: the store's
+  `set_console_user_role`, `set_console_user_enabled` and
+  `delete_console_user` each count enabled admins and write under the same
+  connection lock, so concurrent demotions cannot remove the last admin.
+  The handler's check only gives an earlier, friendlier error.
+- **Named-network lookups per query - Fixed.** `listener_gate` called
+  `find_network`, which copied the whole network list on every DoT, DoH
+  or DoQ query that had a named-network ACL. The built-in networks are now
+  built once, and the gate uses a new borrowing `named_network` lookup.

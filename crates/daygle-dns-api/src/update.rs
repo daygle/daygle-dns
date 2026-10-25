@@ -599,6 +599,16 @@ static LATEST_RELEASE_FETCHED_AT: std::sync::Mutex<Option<std::time::Instant>> =
 static LAST_CONNECTIVITY_PROBE: std::sync::Mutex<Option<(std::time::Instant, PreflightCheck)>> =
     std::sync::Mutex::new(None);
 
+/// Serializes the tests that set and read the release-cache statics above:
+/// the test harness runs tests in parallel, and one test's fresh cache
+/// changed what another observed.
+#[cfg(test)]
+fn release_cache_test_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 /// Minimum spacing between live connectivity probes: repeated preflight
 /// runs inside this window reuse the previous result instead of re-hitting
 /// GitHub.
@@ -618,6 +628,9 @@ mod connectivity_tests {
     /// by the (test-local stubbed) probe, replayed verbatim on the second.
     #[test]
     fn repeated_probes_inside_the_window_reuse_the_previous_result() {
+        let _serial = release_cache_test_lock();
+        // A fresh release cache would answer before the throttle replay.
+        *LATEST_RELEASE_FETCHED_AT.lock().unwrap() = None;
         let sample = PreflightCheck {
             name: "network".to_string(),
             ok: false,
@@ -643,6 +656,7 @@ mod connectivity_tests {
     /// probe or throttle replay: the result names the background check.
     #[test]
     fn fresh_release_cache_replaces_a_live_probe() {
+        let _serial = release_cache_test_lock();
         *LAST_CONNECTIVITY_PROBE.lock().unwrap() = None;
         *LATEST_RELEASE.lock().unwrap() = Some("1.0.0".to_string());
         *LATEST_RELEASE_FETCHED_AT.lock().unwrap() = Some(std::time::Instant::now());
@@ -683,6 +697,7 @@ mod manual_check_tests {
     /// never calls the fetch stub.
     #[test]
     fn a_check_inside_the_window_is_throttled() {
+        let _serial = release_cache_test_lock();
         cleanup();
         *LAST_MANUAL_CHECK.lock().unwrap() = Some(std::time::Instant::now());
         *LATEST_RELEASE.lock().unwrap() = Some("1.2.3".to_string());
@@ -699,6 +714,7 @@ mod manual_check_tests {
     /// Outside the window the fetch runs, and its result fills the cache.
     #[test]
     fn a_stale_window_runs_the_fetch_and_records_the_attempt() {
+        let _serial = release_cache_test_lock();
         cleanup();
         *LAST_MANUAL_CHECK.lock().unwrap() =
             Some(std::time::Instant::now() - MANUAL_CHECK_MIN_INTERVAL);
@@ -720,6 +736,7 @@ mod manual_check_tests {
     /// unreachable GitHub stay bounded.
     #[test]
     fn a_failed_attempt_is_throttled_too() {
+        let _serial = release_cache_test_lock();
         cleanup();
         *LAST_MANUAL_CHECK.lock().unwrap() =
             Some(std::time::Instant::now() - MANUAL_CHECK_MIN_INTERVAL);
@@ -736,6 +753,7 @@ mod manual_check_tests {
     /// successful fetch it is unknown, after one it counts up.
     #[test]
     fn cache_age_tracks_the_last_successful_fetch() {
+        let _serial = release_cache_test_lock();
         cleanup();
         assert!(latest_release_age_secs().is_none());
         *LATEST_RELEASE_FETCHED_AT.lock().unwrap() =

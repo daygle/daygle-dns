@@ -76,6 +76,7 @@ async fn allowed_networks_refuse_dns_update_before_authoritative_update_handling
     config.dot.server_name = "daygle.test".to_string();
     config.dot.allowed_networks = vec!["10.9.9.0/24".to_string()];
     config.authoritative.allow_dynamic_updates = true;
+    config.authoritative.update_networks = vec!["127.0.0.1".to_string()];
 
     let server = spawn(config).await;
     let zone = server

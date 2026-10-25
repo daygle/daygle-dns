@@ -115,7 +115,24 @@ pub async fn handle_update_with_notify<R: ResponseHandler>(
     // -- TSIG gate (RFC 8945) ---------------------------------------------
     // When the zone requires a signed update, verify the request signature
     // before any zone state is read or modified.
-    if let Some(required) = catalog.tsig_update_key(&zone_name) {
+    let required_key = catalog.tsig_update_key(&zone_name);
+    // Neither a client allow-list nor a TSIG key: nothing would stop a
+    // spoofed UDP update from anyone, so such a zone takes no updates.
+    if settings.update_networks.is_empty() && required_key.is_none() {
+        debug!(
+            zone = %zone_name,
+            client = %client,
+            "dynamic update refused: no update_networks and no TSIG key for this zone"
+        );
+        return respond(
+            update,
+            response_edns,
+            response_handle,
+            ResponseCode::Refused,
+        )
+        .await;
+    }
+    if let Some(required) = required_key {
         match crate::tsig::verify_request(
             &crate::tsig::TsigKeyRing::from_configs(&settings.tsig_keys).unwrap_or_default(),
             update.as_slice(),
