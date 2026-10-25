@@ -330,6 +330,7 @@
         serve_stale_secs: Number(recursive.serve_stale_secs),
         max_cache_ttl: Number(recursive.max_cache_ttl),
         failure_cache_ttl: Number(recursive.failure_cache_ttl),
+        max_concurrent_lookups: Number(recursive.max_concurrent_lookups),
       },
       dot: {
         enabled: !!dot.enabled,
@@ -340,6 +341,7 @@
         key_path: dot.key_path || '',
         certificate: dot.certificate || '',
         handshake_timeout_secs: Number(dot.handshake_timeout_secs),
+        max_connections: Number(dot.max_connections),
         allowed_networks: [...dotNetworks],
       },
       doh: {
@@ -352,6 +354,7 @@
         certificate: doh.certificate || '',
         endpoint: doh.endpoint,
         handshake_timeout_secs: Number(doh.handshake_timeout_secs),
+        max_connections: Number(doh.max_connections),
         allowed_networks: [...dohNetworks],
       },
       doq: {
@@ -362,6 +365,8 @@
         cert_path: doq.cert_path || '',
         key_path: doq.key_path || '',
         certificate: doq.certificate || '',
+        max_connections: Number(doq.max_connections),
+        max_concurrent_streams: Number(doq.max_concurrent_streams),
         allowed_networks: [...doqNetworks],
       },
       display: { ...display_ },
@@ -806,6 +811,7 @@
       <label><span>Maximum Cache TTL (Seconds)</span><span class="hint">{hint(recursive.max_cache_ttl)}</span><input type="number" min="0" bind:value={recursive.max_cache_ttl} /></label>
       <label><span>Failure Cache TTL (Seconds)</span><span class="hint">{hint(recursive.failure_cache_ttl)}</span><input type="number" min="0" bind:value={recursive.failure_cache_ttl} /></label>
       <label><span>Cache Size (Entries)</span><input type="number" min="0" bind:value={recursive.cache_size} /></label>
+      <label><span>Maximum Concurrent Lookups</span><input type="number" min="1" max="65536" bind:value={recursive.max_concurrent_lookups} /></label>
     </div>
     <p class="muted help">
       Minimum and negative TTLs bound how long records stay in cache. Maximum TTL
@@ -935,6 +941,7 @@
       <label class="check"><input type="checkbox" bind:checked={dot.enabled} /> <span>Enabled</span></label>
       <label><span>Port</span><input type="number" bind:value={dot.port} /></label>
       <label><span>Handshake Timeout (Seconds)</span><input type="number" min="1" bind:value={dot.handshake_timeout_secs} /></label>
+      <label><span>Maximum Connections</span><input type="number" min="1" max="65536" bind:value={dot.max_connections} /></label>
       <label>
         <span>Certificate</span>
         <select bind:value={dotCertMode} onchange={(e) => applyCertMode(dot, e.currentTarget.value)}>
@@ -969,6 +976,7 @@
       <label class="check"><input type="checkbox" bind:checked={doh.enabled} /> <span>Enabled</span></label>
       <label><span>Port</span><input type="number" bind:value={doh.port} /></label>
       <label><span>Handshake Timeout (Seconds)</span><input type="number" min="1" bind:value={doh.handshake_timeout_secs} /></label>
+      <label><span>Maximum Connections</span><input type="number" min="1" max="65536" bind:value={doh.max_connections} /></label>
       <label>
         <span>Certificate</span>
         <select bind:value={dohCertMode} onchange={(e) => applyCertMode(doh, e.currentTarget.value)}>
@@ -998,6 +1006,8 @@
     <div class="form-grid">
       <label class="check"><input type="checkbox" bind:checked={doq.enabled} /> <span>Enabled</span></label>
       <label><span>Port</span><input type="number" bind:value={doq.port} /></label>
+      <label><span>Maximum Connections</span><input type="number" min="1" max="65536" bind:value={doq.max_connections} /></label>
+      <label><span>Concurrent DNS Streams per Connection</span><input type="number" min="1" max="65536" bind:value={doq.max_concurrent_streams} /></label>
       <label>
         <span>Certificate</span>
         <select bind:value={doqCertMode} onchange={(e) => applyCertMode(doq, e.currentTarget.value)}>

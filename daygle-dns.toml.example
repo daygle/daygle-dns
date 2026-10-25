@@ -48,6 +48,8 @@ enabled = true
 #                  list is empty and use_system_config is set).
 # Unset: forwarding when upstreams are listed, otherwise recursive.
 mode = "recursive"
+# Maximum outstanding recursive lookups (timed-out work keeps its slot).
+# max_concurrent_lookups = 256
 # Who may use recursion: "private_networks" (loopback, RFC 1918, CGNAT,
 # link-local, IPv6 ULA), "allow" (everyone), "custom" (recursion_networks)
 # or "deny". Your own zones are answered for everyone regardless.
@@ -266,6 +268,8 @@ port = 853
 # How long a client may take to complete the TLS handshake (also the DoT
 # connection's read-inactivity timeout; seconds, 1..=600; default 20).
 # handshake_timeout_secs = 20
+# Bound active DoT sessions, including TLS handshakes; excess connections close.
+# max_connections = 1024
 # Instead of file paths / self-signed generation below, a listener can use a
 # certificate stored in the database and managed from the console's
 # Certificates page (set certificate = "<name>"; it overrides cert_path/
@@ -370,9 +374,10 @@ filter_aaaa_except = []
 # format: "domains" (one per line) | "wildcard" (one per line, each also
 #         covering its subdomains, e.g. oisd domainswild2) | "hosts" (hosts
 #         file, e.g. StevenBlack) | "adblock" (AdGuard/uBlock syntax) | "rpz".
-# scope: "everyone" (default) blocks for every client; "dot" blocks only
-#        on the DoT listener (your public/remote users); "groups" blocks only
+# scope: "everyone" (default) blocks for every client; "groups" blocks only
 #        for the client groups (Filtering -> Client Groups) that select it.
+# Existing sources with scope = "dot" remain supported; use client groups
+# matching DOT, DOH or DOQ for listener-specific filtering.
 #
 # [[policy.blocklist_sources]]
 # name = "StevenBlack hosts"

@@ -551,7 +551,7 @@
   <div class="table-wrap">
     <table>
       <thead>
-        <tr><th>Name</th><th>Type</th><th>Details</th><th>DNSSEC</th><th>Last Modified</th><th>Status</th><th class="num">Actions</th></tr>
+        <tr><th>Name</th><th>Type</th><th>Details</th><th>DNSSEC</th><th>Status</th><th>Last Modified</th><th class="num">Actions</th></tr>
       </thead>
       <tbody>
         {#each zones as zone (zone.id)}
@@ -562,8 +562,8 @@
               Serial {zone.serial}{#if zone.zone_type === 'secondary' && zone.masters?.length}{` · from ${zone.masters.join(', ')}`}{/if}{#if zone.catalog}{` · catalog ${zone.catalog}`}{/if}
             </td>
             <td><span class:pill={true} class:ok={zone.dnssec}>{zone.dnssec ? (zone.nsec3 ? 'Signed · NSEC3' : 'Signed · NSEC') : 'Unsigned'}</span></td>
-            <td class="muted nowrap" title={zone.last_modified_at || zone.created_at}>{formatTime(zone.last_modified_at || zone.created_at)}</td>
             <td><span class:pill={true} class:ok={zone.enabled} title={zone.enabled ? 'Serving this zone' : 'Not served until enabled'}>{zone.enabled ? 'Enabled' : 'Disabled'}</span></td>
+            <td class="muted nowrap" title={zone.last_modified_at || zone.created_at}>{formatTime(zone.last_modified_at || zone.created_at)}</td>
             <td class="num">
               <div class="row" style="gap: 6px; justify-content: flex-end">
                 <button class="secondary" onclick={() => openSoa(zone)} title="Edit the zone's settings: serving state, and its SOA (nameserver, contact, timers)">Edit</button>

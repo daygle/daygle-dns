@@ -736,6 +736,8 @@ pub struct RecursiveUpdate {
     /// [`ClientPolicyConfig`]).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub client_policies: Option<Vec<ClientPolicyConfig>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_concurrent_lookups: Option<usize>,
 }
 
 impl RecursiveUpdate {
@@ -1221,6 +1223,12 @@ pub struct ListenerUpdate {
     /// governs its own handshake).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub handshake_timeout_secs: Option<u64>,
+    /// Maximum active connections for this listener (DoT/DoQ).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_connections: Option<usize>,
+    /// DoQ maximum concurrent DNS streams per listener.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_concurrent_streams: Option<usize>,
     /// Client networks allowed to use this listener (addresses or network
     /// names); empty or absent means everyone.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1249,6 +1257,9 @@ pub struct DohUpdate {
     /// TLS handshake timeout in seconds.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub handshake_timeout_secs: Option<u64>,
+    /// DoH-only maximum active TLS connections.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_connections: Option<usize>,
     /// Client networks allowed to use this listener (addresses or network
     /// names); empty or absent means everyone.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1399,6 +1410,9 @@ impl RuntimeSettings {
             if let Some(v) = r.failure_cache_ttl {
                 config.recursive.failure_cache_ttl = v;
             }
+            if let Some(v) = r.max_concurrent_lookups {
+                config.recursive.max_concurrent_lookups = v;
+            }
             if let Some(v) = &r.conditional_zones {
                 config.recursive.conditional_zones =
                     RecursiveUpdate::normalize_conditional_zones(v);
@@ -1429,6 +1443,9 @@ impl RuntimeSettings {
             }
             if let Some(v) = d.handshake_timeout_secs {
                 config.dot.handshake_timeout_secs = v;
+            }
+            if let Some(v) = d.max_connections {
+                config.dot.max_connections = v;
             }
             if let Some(v) = &d.allowed_networks {
                 config.dot.allowed_networks = trim_list(v);
@@ -1462,6 +1479,9 @@ impl RuntimeSettings {
             if let Some(v) = d.handshake_timeout_secs {
                 config.doh.handshake_timeout_secs = v;
             }
+            if let Some(v) = d.max_connections {
+                config.doh.max_connections = v;
+            }
             if let Some(v) = &d.allowed_networks {
                 config.doh.allowed_networks = trim_list(v);
             }
@@ -1490,6 +1510,12 @@ impl RuntimeSettings {
             }
             if let Some(v) = d.idle_timeout_secs {
                 config.doq.idle_timeout_secs = v;
+            }
+            if let Some(v) = d.max_connections {
+                config.doq.max_connections = v;
+            }
+            if let Some(v) = d.max_concurrent_streams {
+                config.doq.max_concurrent_streams = v;
             }
             if let Some(v) = &d.allowed_networks {
                 config.doq.allowed_networks = trim_list(v);
@@ -1652,6 +1678,7 @@ impl RuntimeSettings {
                 negative_cache_ttl: Some(config.recursive.negative_cache_ttl),
                 use_system_config: Some(config.recursive.use_system_config),
                 failure_cache_ttl: Some(config.recursive.failure_cache_ttl),
+                max_concurrent_lookups: Some(config.recursive.max_concurrent_lookups),
                 conditional_zones: Some(config.recursive.conditional_zones.clone()),
                 // Store the effective mode so a later upstreams change cannot
                 // silently flip an install between recursive and forwarding.
@@ -1677,6 +1704,7 @@ impl RuntimeSettings {
                     .then(|| config.dot.certificate.clone()),
                 idle_timeout_secs: None,
                 handshake_timeout_secs: Some(config.dot.handshake_timeout_secs),
+                max_connections: Some(config.dot.max_connections),
                 allowed_networks: Some(config.dot.allowed_networks.clone()),
             }),
             doh: Some(DohUpdate {
@@ -1690,6 +1718,7 @@ impl RuntimeSettings {
                 certificate: (!config.doh.certificate.is_empty())
                     .then(|| config.doh.certificate.clone()),
                 handshake_timeout_secs: Some(config.doh.handshake_timeout_secs),
+                max_connections: Some(config.doh.max_connections),
                 allowed_networks: Some(config.doh.allowed_networks.clone()),
             }),
             doq: Some(ListenerUpdate {
@@ -1703,6 +1732,8 @@ impl RuntimeSettings {
                     .then(|| config.doq.certificate.clone()),
                 idle_timeout_secs: Some(config.doq.idle_timeout_secs),
                 handshake_timeout_secs: None,
+                max_connections: Some(config.doq.max_connections),
+                max_concurrent_streams: Some(config.doq.max_concurrent_streams),
                 allowed_networks: Some(config.doq.allowed_networks.clone()),
             }),
             policy: Some(PolicyUpdate {
@@ -2001,6 +2032,25 @@ impl DaygleConfig {
                 return Err(DaygleError::Config(format!("{name} must not be 0")));
             }
         }
+        if !(1..=65_536).contains(&self.server.proxy_protocol_max_connections) {
+            return Err(DaygleError::Config(
+                "server.proxy_protocol_max_connections must be in 1..=65536".to_string(),
+            ));
+        }
+        for (name, value, enabled) in [
+            ("dot.max_connections", self.dot.max_connections, self.dot.enabled),
+            ("doh.max_connections", self.doh.max_connections, self.doh.enabled),
+            ("doq.max_connections", self.doq.max_connections, self.doq.enabled),
+        ] {
+            if enabled && !(1..=65_536).contains(&value) {
+                return Err(DaygleError::Config(format!("{name} must be in 1..=65536")));
+            }
+        }
+        if self.doq.enabled && !(1..=65_536).contains(&self.doq.max_concurrent_streams) {
+            return Err(DaygleError::Config(
+                "doq.max_concurrent_streams must be in 1..=65536".to_string(),
+            ));
+        }
         if self.doq.enabled && self.doq.idle_timeout_secs < 30 {
             return Err(DaygleError::Config(
                 "doq.idle_timeout_secs must be >= 30 (RFC 9250 recommends 600)".to_string(),
@@ -2048,6 +2098,11 @@ impl DaygleConfig {
         if rec.cache_size == 0 {
             return Err(DaygleError::Config(
                 "recursive.cache_size must be >= 1".to_string(),
+            ));
+        }
+        if !(1..=65_536).contains(&rec.max_concurrent_lookups) {
+            return Err(DaygleError::Config(
+                "recursive.max_concurrent_lookups must be in 1..=65536".to_string(),
             ));
         }
         if rec.prefetch_enabled {
@@ -2623,6 +2678,8 @@ pub struct ServerSettings {
     /// header, and the client it names is treated as the real client.
     /// Empty (the default) turns it off.
     pub proxy_protocol: Vec<String>,
+    /// Maximum active connections admitted by each PROXY-protocol TCP front.
+    pub proxy_protocol_max_connections: usize,
     /// UDP/TCP port (default 53).
     pub port: u16,
     /// Serve plaintext UDP.
@@ -2660,6 +2717,7 @@ impl Default for ServerSettings {
             ipv6_only: false,
             dns_cookies: true,
             proxy_protocol: vec![],
+            proxy_protocol_max_connections: 1024,
             port: 53,
             udp_enabled: true,
             tcp_enabled: true,
@@ -2740,6 +2798,8 @@ pub struct RecursiveSettings {
     /// upstreams fail, so popular domains keep resolving during upstream
     /// outages. 0 disables serve-stale.
     pub serve_stale_secs: u64,
+    /// Maximum concurrent client recursive lookups. Timed-out work retains its slot until complete.
+    pub max_concurrent_lookups: usize,
     /// Which clients may use recursion (both modes). Authoritative zones are
     /// answered for every client regardless.
     pub recursion_access: RecursionAccess,
@@ -3081,6 +3141,7 @@ impl Default for RecursiveSettings {
             prefetch_min_queries: 5,
             prefetch_window_secs: 600,
             serve_stale_secs: 86400,
+            max_concurrent_lookups: 256,
             recursion_access: RecursionAccess::PrivateNetworks,
             recursion_networks: vec![],
             root_hints: vec![],
@@ -3332,6 +3393,8 @@ pub struct DotSettings {
     /// When set it takes precedence over `self_signed` and the file paths.
     #[serde(default)]
     pub certificate: String,
+    /// Maximum active TCP connections (including TLS handshakes).
+    pub max_connections: usize,
     /// TLS handshake timeout in seconds: how long a client may take to
     /// complete the TLS handshake before the connection is dropped
     /// (1..=600, default 20).
@@ -3353,6 +3416,7 @@ impl Default for DotSettings {
             self_signed: true,
             server_name: "daygle.local".to_string(),
             certificate: String::new(),
+            max_connections: 1024,
             handshake_timeout_secs: 20,
             allowed_networks: vec![],
         }
@@ -3388,6 +3452,8 @@ pub struct DohSettings {
     /// complete the TLS handshake before the connection is dropped
     /// (1..=600, default 10).
     pub handshake_timeout_secs: u64,
+    /// Maximum active TCP connections including TLS handshakes.
+    pub max_connections: usize,
     /// Client networks allowed to use this listener (addresses or network
     /// names). Empty means everyone; clients outside the list get REFUSED
     /// and, on this listener only, are treated as allowed for recursion.
@@ -3407,6 +3473,7 @@ impl Default for DohSettings {
             endpoint: "/dns-query".to_string(),
             certificate: String::new(),
             handshake_timeout_secs: 10,
+            max_connections: 1024,
             allowed_networks: vec![],
         }
     }
@@ -3523,6 +3590,10 @@ pub struct DoqSettings {
     pub server_name: String,
     /// QUIC idle timeout in seconds. RFC 9250 recommends 600 or larger.
     pub idle_timeout_secs: u64,
+    /// Maximum active QUIC connections, including handshakes.
+    pub max_connections: usize,
+    /// Maximum concurrent DNS query streams per DoQ listener.
+    pub max_concurrent_streams: usize,
     /// Name of a console-managed certificate (stored in the database) to use.
     #[serde(default)]
     pub certificate: String,
@@ -3543,6 +3614,8 @@ impl Default for DoqSettings {
             self_signed: true,
             server_name: "daygle.local".to_string(),
             idle_timeout_secs: 600,
+            max_connections: 1024,
+            max_concurrent_streams: 256,
             certificate: String::new(),
             allowed_networks: vec![],
         }
@@ -3617,9 +3690,9 @@ pub struct BlocklistSourceConfig {
     pub refresh_secs: u64,
     /// Whether this source is fetched at all.
     pub enabled: bool,
-    /// Who the source blocks for: `everyone` (the default), only the queries
-    /// arriving on the DoT listener (`dot`), or only the client groups that
-    /// select it (`groups`).
+    /// Who the source blocks for: `everyone` (the default), or only the
+    /// client groups that select it (`groups`). `dot` remains accepted for
+    /// compatibility with previously saved sources.
     pub scope: BlocklistScope,
 }
 
@@ -3645,9 +3718,8 @@ pub enum BlocklistScope {
     Everyone,
     /// Only clients in a client group that selects this source.
     Groups,
-    /// Only queries arriving on the DoT listener (public/remote users doing
-    /// DNS over TLS). Plain-DNS LAN clients are never blocked by these
-    /// sources, giving the encrypted endpoint its own stricter policy.
+    /// Legacy compatibility: only queries arriving on the DoT listener.
+    #[serde(rename = "dot")]
     Dot,
 }
 
@@ -3867,6 +3939,38 @@ mod tests {
         assert!(cfg.policy.allowlist.is_empty());
         assert_eq!(cfg.dot.port, 853);
         assert!(cfg.recursive.dnssec_validate);
+    }
+
+    #[test]
+    fn resource_limits_validate_and_survive_runtime_settings_overlay() {
+        let mut config = DaygleConfig::default();
+        config.recursive.max_concurrent_lookups = 17;
+        config.dot.max_connections = 18;
+        config.doh.max_connections = 19;
+        config.doq.max_connections = 20;
+        config.doq.max_concurrent_streams = 21;
+
+        let overlay = RuntimeSettings::capture(&config);
+        let mut restored = DaygleConfig::default();
+        overlay.apply_to(&mut restored);
+        assert_eq!(restored.recursive.max_concurrent_lookups, 17);
+        assert_eq!(restored.dot.max_connections, 18);
+        assert_eq!(restored.doh.max_connections, 19);
+        assert_eq!(restored.doq.max_connections, 20);
+        assert_eq!(restored.doq.max_concurrent_streams, 21);
+        restored.validate().unwrap();
+
+        let mut invalid = DaygleConfig::default();
+        invalid.recursive.max_concurrent_lookups = 0;
+        assert!(invalid.validate().is_err());
+        invalid.recursive.max_concurrent_lookups = 1;
+        invalid.dot.enabled = true;
+        invalid.dot.max_connections = 0;
+        assert!(invalid.validate().is_err());
+        invalid.dot.max_connections = 1;
+        invalid.doq.enabled = true;
+        invalid.doq.max_concurrent_streams = 0;
+        assert!(invalid.validate().is_err());
     }
 
     #[test]
@@ -4654,7 +4758,7 @@ format = "adblock"
     }
 
     #[test]
-    fn parses_blocklist_source_scopes() {
+    fn parses_blocklist_source_scopes_including_legacy_dot_scope() {
         let text = r#"
 [policy]
 
@@ -4678,6 +4782,8 @@ scope = "groups"
             BlocklistScope::Everyone
         );
         assert_eq!(cfg.policy.blocklist_sources[1].scope, BlocklistScope::Dot);
+        let legacy_json = serde_json::to_value(&cfg.policy.blocklist_sources[1]).unwrap();
+        assert_eq!(legacy_json["scope"], "dot");
         assert_eq!(
             cfg.policy.blocklist_sources[2].scope,
             BlocklistScope::Groups

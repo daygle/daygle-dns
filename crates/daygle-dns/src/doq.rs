@@ -49,6 +49,8 @@ pub fn build_doq_endpoint(
     socket: tokio::net::UdpSocket,
     tls_config: Arc<rustls::ServerConfig>,
     idle_timeout: Duration,
+    max_concurrent_streams: usize,
+    max_incoming: usize,
 ) -> Result<quinn::Endpoint, DaygleError> {
     let mut server_config = ServerConfig::with_crypto(Arc::new(
         QuicServerConfig::try_from(tls_config)
@@ -60,12 +62,18 @@ pub fn build_doq_endpoint(
     // configured connection idle timeout.
     let mut transport = quinn::TransportConfig::default();
     transport.max_concurrent_uni_streams(VarInt::from_u32(0));
+    transport.max_concurrent_bidi_streams(VarInt::from_u32(
+        u32::try_from(max_concurrent_streams).map_err(|_| {
+            DaygleError::Config("doq.max_concurrent_streams is too large".to_string())
+        })?,
+    ));
     transport.datagram_receive_buffer_size(None);
     transport.datagram_send_buffer_size(0);
     transport.max_idle_timeout(Some(idle_timeout.try_into().map_err(|_| {
         DaygleError::Config("doq idle_timeout_secs is too large".to_string())
     })?));
     server_config.transport = Arc::new(transport);
+    server_config.max_incoming(max_incoming);
 
     let mut endpoint_config = quinn::EndpointConfig::default();
     endpoint_config
@@ -92,7 +100,13 @@ pub async fn serve_doq(
     handler: DnsDispatcher,
     session: Arc<SessionLog>,
     shutdown: CancellationToken,
+    max_connections: usize,
+    max_concurrent_streams: usize,
 ) {
+    let permits = Arc::new(tokio::sync::Semaphore::new(max_connections));
+    let global_stream_limit = max_connections.saturating_mul(max_concurrent_streams);
+    let streams = Arc::new(tokio::sync::Semaphore::new(global_stream_limit));
+    let per_connection = max_concurrent_streams;
     let mut connections = tokio::task::JoinSet::new();
     loop {
         tokio::select! {
@@ -107,11 +121,18 @@ pub async fn serve_doq(
             // whole lifetime.
             Some(_) = connections.join_next(), if !connections.is_empty() => {}
             incoming = endpoint.accept() => {
-                let Some(connecting) = incoming else { break };
+                let Some(incoming) = incoming else { break };
+                let Ok(permit) = permits.clone().try_acquire_owned() else {
+                    incoming.refuse();
+                    continue;
+                };
                 let handler = handler.clone();
                 let session = session.clone();
+                let streams = streams.clone();
+                let per_connection = per_connection;
                 connections.spawn(async move {
-                    handle_connection(connecting, handler, &session).await;
+                    let _permit = permit;
+                    handle_connection(incoming, handler, &session, streams, per_connection).await;
                 });
             }
         }
@@ -129,6 +150,8 @@ async fn handle_connection(
     connecting: quinn::Incoming,
     handler: DnsDispatcher,
     session: &Arc<SessionLog>,
+    stream_permits: Arc<tokio::sync::Semaphore>,
+    max_concurrent_streams: usize,
 ) {
     let src = connecting.remote_address();
     let ip = src.ip();
@@ -139,12 +162,33 @@ async fn handle_connection(
             return;
         }
     };
+    let per_connection = Arc::new(tokio::sync::Semaphore::new(max_concurrent_streams));
     loop {
         match connection.accept_bi().await {
             Ok((send_stream, recv_stream)) => {
+                let connection_permit = match per_connection.clone().try_acquire_owned() {
+                    Ok(permit) => permit,
+                    Err(_) => {
+                        let mut send_stream = send_stream;
+                        let _ = send_stream.reset(VarInt::from_u32(DOQ_PROTOCOL_ERROR));
+                        let _ = recv_stream.stop(VarInt::from_u32(DOQ_PROTOCOL_ERROR));
+                        continue;
+                    }
+                };
+                let permit = match stream_permits.clone().try_acquire_owned() {
+                    Ok(permit) => permit,
+                    Err(_) => {
+                        let mut send_stream = send_stream;
+                        let _ = send_stream.reset(VarInt::from_u32(DOQ_PROTOCOL_ERROR));
+                        let _ = recv_stream.stop(VarInt::from_u32(DOQ_PROTOCOL_ERROR));
+                        continue;
+                    }
+                };
                 let handler = handler.clone();
                 let session = Arc::clone(session);
                 tokio::spawn(async move {
+                    let _permit = permit;
+                    let _connection_permit = connection_permit;
                     if let Err(e) =
                         handle_stream(send_stream, recv_stream, src, handler, &session).await
                     {

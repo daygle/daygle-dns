@@ -40,6 +40,7 @@ pub struct Shared {
     /// unless `logging.query_db_enabled`.
     pub query_db_logger: Option<Arc<crate::query_db_log::QueryDbLogger>>,
     pub resolver: Arc<ArcSwapOption<RecursiveResolver>>,
+    pub recursive_admission: Arc<crate::dispatcher::RecursiveAdmission>,
     pub config: Arc<ArcSwap<DaygleConfig>>,
     pub rate_limiter: Arc<RateLimiter>,
     pub metrics: Arc<Metrics>,
@@ -101,6 +102,9 @@ pub fn apply_config(shared: &Shared, new: Arc<DaygleConfig>) -> bool {
     // Publish the new configuration first so the API token, `/api/config` and
     // the listener supervisor all observe the requested state immediately.
     shared.config.store(Arc::clone(&new));
+    shared
+        .recursive_admission
+        .set_limit(new.recursive.max_concurrent_lookups);
 
     // Policy engine.
     if old_r.policy != new_r.policy {
@@ -408,6 +412,9 @@ mod tests {
             query_logger: None,
             query_db_logger: None,
             resolver: Arc::new(ArcSwapOption::empty()),
+            recursive_admission: Arc::new(crate::dispatcher::RecursiveAdmission::new(
+                cfg.recursive.max_concurrent_lookups,
+            )),
             config: Arc::new(ArcSwap::from(Arc::new(cfg))),
             rate_limiter: Arc::new(RateLimiter::default()),
             metrics: Arc::new(Metrics::default()),

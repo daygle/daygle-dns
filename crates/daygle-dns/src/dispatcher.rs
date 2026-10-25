@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::net::IpAddr;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -20,6 +21,60 @@ use hickory_server::net::runtime::Time;
 use hickory_server::server::{Request, RequestHandler, ResponseHandler, ResponseInfo};
 use hickory_server::zone_handler::MessageResponseBuilder;
 use tracing::{debug, warn};
+
+/// Admission limit for recursive network work.
+///
+/// Work holds a permit until its resolver future ends, independently of how
+/// long the client waits for it.
+pub struct RecursiveAdmission {
+    limit: AtomicUsize,
+    active: AtomicUsize,
+}
+
+/// RAII slot held by one in-flight resolver operation.
+pub struct RecursivePermit(Arc<RecursiveAdmission>);
+
+impl RecursiveAdmission {
+    pub fn new(limit: usize) -> Self {
+        Self {
+            limit: AtomicUsize::new(limit),
+            active: AtomicUsize::new(0),
+        }
+    }
+
+    pub fn set_limit(&self, limit: usize) {
+        self.limit.store(limit, Ordering::Release);
+    }
+
+    fn try_acquire(self: &Arc<Self>) -> Option<RecursivePermit> {
+        loop {
+            let limit = self.limit.load(Ordering::Acquire);
+            let active = self.active.load(Ordering::Acquire);
+            if active >= limit {
+                return None;
+            }
+            if self
+                .active
+                .compare_exchange_weak(active, active + 1, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                // If a concurrent reload lowered the limit after our first
+                // check, roll back instead of admitting above the new cap.
+                if self.active.load(Ordering::Acquire) <= self.limit.load(Ordering::Acquire) {
+                    return Some(RecursivePermit(Arc::clone(self)));
+                }
+                self.active.fetch_sub(1, Ordering::AcqRel);
+                return None;
+            }
+        }
+    }
+}
+
+impl Drop for RecursivePermit {
+    fn drop(&mut self) {
+        self.0.active.fetch_sub(1, Ordering::AcqRel);
+    }
+}
 
 /// The single [`RequestHandler`] used by every listener (UDP, TCP, DoT).
 ///
@@ -62,6 +117,8 @@ pub struct DnsDispatcher {
     /// Client Timeout (`server.client_timeout_ms`): how long the recursive
     /// path may take before the client receives SERVFAIL. Default 2000 ms.
     client_timeout: Duration,
+    /// Global cap for recursive lookups, including work outliving client timeouts.
+    recursive_admission: Arc<RecursiveAdmission>,
     /// DNS cookies (RFC 7873, `server.dns_cookies`).
     cookies: Arc<crate::cookies::Cookies>,
     /// Remote logging of queries (`[syslog] queries`).
@@ -127,6 +184,7 @@ impl DnsDispatcher {
             query_db_logger: None,
             record_use_cache: Arc::new(Mutex::new(HashMap::new())),
             client_timeout: Duration::from_millis(2000),
+            recursive_admission: Arc::new(RecursiveAdmission::new(256)),
             cookies: Arc::new(crate::cookies::Cookies::new(true)),
             syslog: None,
             config: None,
@@ -201,6 +259,16 @@ impl DnsDispatcher {
     pub fn with_client_timeout(mut self, client_timeout: Duration) -> Self {
         self.client_timeout = client_timeout;
         self
+    }
+
+    /// Use the shared recursive admission gate for this server.
+    pub fn with_recursive_admission(mut self, admission: Arc<RecursiveAdmission>) -> Self {
+        self.recursive_admission = admission;
+        self
+    }
+
+    fn try_recursive_permit(&self) -> Option<RecursivePermit> {
+        self.recursive_admission.try_acquire()
     }
 
     /// Send query lines to syslog (when its settings ask for them).
@@ -571,7 +639,8 @@ impl RequestHandler for DnsDispatcher {
         // IPv4-mapped IPv6 sources (an IPv4 client on a dual-stack `::`
         // listener) are canonicalized to plain IPv4 so IPv4 ACLs, rate
         // limits, split-horizon networks and transfer allow-lists match them.
-        // Behind a PROXY protocol front, the client it names.
+        // Behind a PROXY protocol or bounded listener front, the original
+        // remote address is restored through the bridge peer mapping.
         let client = crate::proxy_protocol::real_client(request.src())
             .ip()
             .to_canonical();
@@ -1028,6 +1097,31 @@ impl RequestHandler for DnsDispatcher {
             .await;
         }
 
+        let permit = match self.try_recursive_permit() {
+            Some(permit) => permit,
+            None => {
+                self.metrics.inc(&self.metrics.errors);
+                self.observe(
+                    client,
+                    &qname,
+                    &rtype,
+                    protocol,
+                    Outcome::Error,
+                    Some(&rcode_label(ResponseCode::ServFail)),
+                    started,
+                );
+                return send_error(
+                    &mut response_handle,
+                    request,
+                    ResponseCode::ServFail,
+                    Some(Ede::new(
+                        ede::OTHER,
+                        "recursive lookup capacity exhausted",
+                    )),
+                )
+                .await;
+            }
+        };
         self.metrics.inc(&self.metrics.recursive);
         // The lookup runs as its own task, so one that outlasts the client
         // timeout still finishes and fills the cache for the client's retry.
@@ -1035,12 +1129,16 @@ impl RequestHandler for DnsDispatcher {
             let resolver = Arc::clone(&resolver);
             let name = qname.clone();
             let rtype = info.query.query_type();
-            tokio::spawn(daygle_dns_recursive::with_client_subnet(
-                self.client_subnet(client),
-                daygle_dns_recursive::track_stale(async move {
-                    resolver.lookup_for_client(client, &name, rtype).await
-                }),
-            ))
+            let subnet = self.client_subnet(client);
+            tokio::spawn(async move {
+                let _permit = permit;
+                daygle_dns_recursive::with_client_subnet(
+                    subnet,
+                    daygle_dns_recursive::track_stale(async move {
+                        resolver.lookup_for_client(client, &name, rtype).await
+                    }),
+                ).await
+            })
         };
         let lookup = match tokio::time::timeout(self.client_timeout, lookup_task).await {
             Ok(Ok((result, stale))) => result.map(|lookup| (lookup, stale)),
@@ -1359,14 +1457,21 @@ impl DnsDispatcher {
                 _ => None,
             })
             .unwrap_or(600);
-        let lookup = tokio::time::timeout(
-            self.client_timeout,
-            daygle_dns_recursive::with_client_subnet(
-                self.client_subnet(client),
-                resolver.lookup_for_client(client, qname, RecordType::A),
-            ),
-        )
-        .await
+        let lookup_task = {
+            let permit = self.try_recursive_permit()?;
+            let subnet = self.client_subnet(client);
+            let qname = qname.to_string();
+            tokio::spawn(async move {
+                let _permit = permit;
+                daygle_dns_recursive::with_client_subnet(
+                    subnet,
+                    resolver.lookup_for_client(client, &qname, RecordType::A),
+                ).await
+            })
+        };
+        let lookup = tokio::time::timeout(self.client_timeout, lookup_task)
+            .await
+            .ok()?
         .ok()?
         .ok()?;
         let mut records = Vec::new();
@@ -1441,27 +1546,44 @@ impl DnsDispatcher {
                 )),
             );
         };
-        let lookup = tokio::time::timeout(
-            self.client_timeout,
-            daygle_dns_recursive::with_client_subnet(
-                self.client_subnet(client),
-                resolver.lookup(target.trim_end_matches('.'), rtype),
-            ),
-        )
-        .await;
+        let lookup_task = {
+            let Some(permit) = self.try_recursive_permit() else {
+                return (
+                    ResponseCode::ServFail,
+                    Vec::new(),
+                    Some(Ede::new(
+                        ede::OTHER,
+                        "recursive lookup capacity exhausted",
+                    )),
+                );
+            };
+            let subnet = self.client_subnet(client);
+            let target = target.trim_end_matches('.').to_string();
+            tokio::spawn(async move {
+                let _permit = permit;
+                daygle_dns_recursive::track_stale(
+                    daygle_dns_recursive::with_client_subnet(
+                        subnet,
+                        resolver.lookup(&target, rtype),
+                    ),
+                ).await
+            })
+        };
+        let lookup = tokio::time::timeout(self.client_timeout, lookup_task).await;
         match lookup {
-            Ok(Ok(found)) => (
+            Ok(Ok(Ok((found, _stale)))) => (
                 ResponseCode::NoError,
                 collect(found.answers().to_vec()),
                 None,
             ),
             // The target has no such records (or does not exist): the alias
             // name exists here, so that is NODATA, not NXDOMAIN.
-            Ok(Err(DaygleError::Resolution {
+            Ok(Ok((Err(DaygleError::Resolution {
                 response_code: Some(0 | 3),
                 ..
-            })) => (ResponseCode::NoError, Vec::new(), None),
-            Ok(Err(e)) => (ResponseCode::ServFail, Vec::new(), Some(failure_ede(&e))),
+            }), _stale))) => (ResponseCode::NoError, Vec::new(), None),
+            Ok(Ok((Err(e), _stale))) => (ResponseCode::ServFail, Vec::new(), Some(failure_ede(&e))),
+            Ok(Err(e)) => (ResponseCode::ServFail, Vec::new(), Some(Ede::new(ede::OTHER, e.to_string()))),
             Err(_) => (
                 ResponseCode::ServFail,
                 Vec::new(),
@@ -1710,5 +1832,20 @@ mod tests {
         let e = Ede::new(ede::BLOCKED, long);
         assert!(e.text.len() <= 200);
         assert!(e.text.chars().all(|c| c == 'é'));
+    }
+
+    #[test]
+    fn recursive_admission_holds_capacity_until_permit_drop_and_respects_reload() {
+        let admission = Arc::new(RecursiveAdmission::new(1));
+        let permit = admission.try_acquire().expect("initial slot");
+        assert!(admission.try_acquire().is_none());
+        admission.set_limit(2);
+        let second = admission.try_acquire().expect("raised limit admits");
+        assert!(admission.try_acquire().is_none());
+        drop(permit);
+        assert!(admission.try_acquire().is_some());
+        admission.set_limit(1);
+        assert!(admission.try_acquire().is_none());
+        drop(second);
     }
 }

@@ -443,13 +443,16 @@
 
       <div class="table-wrap">
         <table>
-          <thead><tr><th>Name</th><th>Type</th><th>Value</th><th class="num">TTL</th><th>Last Used</th><th>Last Modified</th><th class="num">Actions</th></tr></thead>
+          <thead><tr><th>Name</th><th>Type</th><th>Value</th><th class="num">TTL</th><th>Status</th><th>Last Used</th><th>Last Modified</th><th class="num">Actions</th></tr></thead>
           <tbody>
             {#each shown as record (record.id)}
               <tr class:disabled={record.disabled}>
+                <td><code title={record.name}>{relativeName(record.name)}</code></td>
+                <td>{record.rtype}</td>
+                <td class="value"><code>{record.content}</code></td>
+                <td class="num" title={duration(record.ttl)}>{record.ttl}</td>
                 <td>
-                  <code title={record.name}>{relativeName(record.name)}</code>
-                  {#if record.disabled}<span class="pill">Disabled</span>{/if}
+                  <span class="pill" class:ok={!record.disabled} title={record.disabled ? 'Not served until enabled' : 'Record is active'}>{record.disabled ? 'Disabled' : 'Enabled'}</span>
                   {#if health[record.id]}
                     <span
                       class="pill"
@@ -459,9 +462,6 @@
                     >{health[record.id].healthy ? 'Healthy' : 'Down'}{record.priority ? ` · Backup ${record.priority}` : ''}</span>
                   {/if}
                 </td>
-                <td>{record.rtype}</td>
-                <td class="value"><code>{record.content}</code></td>
-                <td class="num" title={duration(record.ttl)}>{record.ttl}</td>
                 <td class="muted" title={record.last_used_at || ''}>{record.last_used_at ? formatDateTime(record.last_used_at) : 'Never'}</td>
                 <td class="muted" title={record.last_modified_at || ''}>{record.last_modified_at ? formatDateTime(record.last_modified_at) : '-'}</td>
                 <td class="num">

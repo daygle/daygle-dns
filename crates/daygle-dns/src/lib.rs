@@ -7,6 +7,7 @@
 pub mod cookies;
 pub mod dispatcher;
 mod doq;
+mod connection_admission;
 mod net;
 pub mod proxy_protocol;
 pub mod query_db_log;
@@ -543,6 +544,9 @@ pub async fn bind_with(
         query_logger: query_logger.clone(),
         query_db_logger: query_db_logger.clone(),
         resolver: Arc::new(arc_swap::ArcSwapOption::from(resolver.clone())),
+        recursive_admission: Arc::new(dispatcher::RecursiveAdmission::new(
+            config.recursive.max_concurrent_lookups,
+        )),
         config: config_swap,
         rate_limiter: rate_limiter.clone(),
         metrics: metrics.clone(),
@@ -876,6 +880,7 @@ fn build_dispatcher(shared: &Shared, config: &DaygleConfig) -> DnsDispatcher {
         shared.stats.clone(),
     )
     .with_client_timeout(Duration::from_millis(config.server.client_timeout_ms))
+    .with_recursive_admission(shared.recursive_admission.clone())
     .with_cookies(config.server.dns_cookies)
     .with_config(shared.config.clone())
     .with_syslog(shared.syslog.clone())
@@ -1095,12 +1100,22 @@ async fn bind_listeners(
         )
     });
     let token = server.shutdown_token().clone();
-    let serve = |public: tokio::net::TcpListener| -> Result<tokio::net::TcpListener> {
+    let serve = |public: tokio::net::TcpListener,
+                 connection_limit: Option<usize>|
+     -> Result<tokio::net::TcpListener> {
         let Some(trusted) = &proxy_trusted else {
             return Ok(public);
         };
         let hidden = net::bind_tcp(([127, 0, 0, 1], 0).into(), false)?;
-        proxy_protocol::spawn_front(public, hidden.local_addr()?, trusted.clone(), token.clone());
+        let max_connections = connection_limit
+            .unwrap_or(config.server.proxy_protocol_max_connections);
+        let _front = proxy_protocol::spawn_front(
+            public,
+            hidden.local_addr()?,
+            trusted.clone(),
+            max_connections,
+            token.clone(),
+        );
         Ok(hidden)
     };
 
@@ -1142,7 +1157,7 @@ async fn bind_listeners(
             let bound = listener.local_addr()?;
             addrs.tcp.get_or_insert(bound);
             server.register_listener(
-                serve(listener)?,
+                serve(listener, None)?,
                 Duration::from_millis(config.server.tcp_timeout_ms),
                 config.server.response_buffer_size,
             );
@@ -1163,15 +1178,23 @@ async fn bind_listeners(
         for (addr, v6_only) in listen_addrs("dot", &config.dot.listen, config.dot.port, ipv6_only)?
         {
             let listener = net::bind_tcp(addr, v6_only)?;
-            let bound = listener.local_addr()?;
+            let admission = crate::connection_admission::ConnectionAdmission::new(
+                listener,
+                config.dot.max_connections,
+                server.shutdown_token().clone(),
+                proxy_trusted.clone(),
+            )?;
+            let bound = admission.public_addr;
+            let _admission_task = admission.task;
+            let listener = admission.backend;
             addrs.dot.get_or_insert(bound);
             daygle_dns_dot::register_dot(
                 server,
-                serve(listener)?,
+                listener,
                 tls_config.clone(),
                 Duration::from_secs(config.dot.handshake_timeout_secs),
             )?;
-            info!(addr = %bound, "DNS over TLS listening");
+            info!(addr = %bound, max_connections = config.dot.max_connections, "DNS over TLS listening");
         }
     }
 
@@ -1187,12 +1210,19 @@ async fn bind_listeners(
         );
         for (addr, v6_only) in listen_addrs("doh", &config.doh.listen, config.doh.port, ipv6_only)?
         {
-            let listener = net::bind_tcp(addr, v6_only)?;
-            let bound = listener.local_addr()?;
+            let public = net::bind_tcp(addr, v6_only)?;
+            let admission = crate::connection_admission::ConnectionAdmission::new(
+                public,
+                config.doh.max_connections,
+                server.shutdown_token().clone(),
+                proxy_trusted.clone(),
+            )?;
+            let bound = admission.public_addr;
+            let _admission_task = admission.task;
             addrs.doh.get_or_insert(bound);
             daygle_dns_dot::register_doh(
                 server,
-                serve(listener)?,
+                admission.backend,
                 tls_config.clone(),
                 Duration::from_secs(config.doh.handshake_timeout_secs),
                 None,
@@ -1220,6 +1250,8 @@ async fn bind_listeners(
                 socket,
                 tls_config.clone(),
                 Duration::from_secs(config.doq.idle_timeout_secs),
+                config.doq.max_concurrent_streams,
+                config.doq.max_connections,
             )
             .map_err(|e| DaygleError::Config(format!("cannot build DoQ listener: {e}")))?;
             let bound = endpoint.local_addr().map_err(DaygleError::Io)?;
@@ -1230,6 +1262,8 @@ async fn bind_listeners(
                 dispatcher.clone(),
                 session.clone(),
                 token,
+                config.doq.max_connections,
+                config.doq.max_concurrent_streams,
             )));
             info!(
                 addr = %bound,

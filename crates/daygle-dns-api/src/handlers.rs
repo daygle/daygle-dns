@@ -4089,6 +4089,7 @@ pub struct RecursiveUpdate {
     pub serve_stale_secs: Option<u64>,
     pub max_cache_ttl: Option<u32>,
     pub failure_cache_ttl: Option<u32>,
+    pub max_concurrent_lookups: Option<usize>,
     /// Replaces the whole conditional-forwarder list.
     pub conditional_zones: Option<Vec<daygle_dns_core::config::ConditionalZoneConfig>>,
     pub mode: Option<daygle_dns_core::config::ResolutionMode>,
@@ -4149,6 +4150,8 @@ pub struct ListenerUpdate {
     pub key_path: Option<String>,
     pub certificate: Option<String>,
     pub handshake_timeout_secs: Option<u64>,
+    pub max_connections: Option<usize>,
+    pub max_concurrent_streams: Option<usize>,
     /// Client networks allowed to use this listener (addresses or network
     /// names); empty or absent means everyone.
     pub allowed_networks: Option<Vec<String>>,
@@ -4166,6 +4169,7 @@ pub struct DohUpdate {
     pub endpoint: Option<String>,
     pub certificate: Option<String>,
     pub handshake_timeout_secs: Option<u64>,
+    pub max_connections: Option<usize>,
     /// Client networks allowed to use this listener (addresses or network
     /// names); empty or absent means everyone.
     pub allowed_networks: Option<Vec<String>>,
@@ -4319,6 +4323,9 @@ pub async fn update_settings(
         if let Some(v) = r.failure_cache_ttl {
             config.recursive.failure_cache_ttl = v;
         }
+        if let Some(v) = r.max_concurrent_lookups {
+            config.recursive.max_concurrent_lookups = v;
+        }
     }
     if let Some(d) = &update.dot {
         if let Some(v) = d.enabled {
@@ -4351,6 +4358,10 @@ pub async fn update_settings(
         }
         if let Some(v) = d.handshake_timeout_secs {
             config.dot.handshake_timeout_secs = v;
+            listeners_affected = true;
+        }
+        if let Some(v) = d.max_connections {
+            config.dot.max_connections = v;
             listeners_affected = true;
         }
         if let Some(v) = &d.allowed_networks {
@@ -4394,6 +4405,10 @@ pub async fn update_settings(
             config.doh.handshake_timeout_secs = v;
             listeners_affected = true;
         }
+        if let Some(v) = d.max_connections {
+            config.doh.max_connections = v;
+            listeners_affected = true;
+        }
         if let Some(v) = &d.allowed_networks {
             config.doh.allowed_networks = normalize_policy_networks(v);
         }
@@ -4425,6 +4440,14 @@ pub async fn update_settings(
         }
         if let Some(v) = &d.certificate {
             config.doq.certificate = v.clone();
+            listeners_affected = true;
+        }
+        if let Some(v) = d.max_connections {
+            config.doq.max_connections = v;
+            listeners_affected = true;
+        }
+        if let Some(v) = d.max_concurrent_streams {
+            config.doq.max_concurrent_streams = v;
             listeners_affected = true;
         }
         if let Some(v) = &d.allowed_networks {

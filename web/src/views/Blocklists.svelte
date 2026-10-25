@@ -90,7 +90,10 @@
       format: source.format,
       refreshHours: Math.max(1, Math.round(source.refresh_secs / 3600)),
       enabled: source.enabled,
-      scope: source.scope || 'everyone',
+      // DoT-only scope is retained for existing sources but is no longer
+      // offered for new edits. Require an explicit replacement to avoid
+      // silently broadening or narrowing a legacy source when it is saved.
+      scope: source.scope === 'dot' ? '' : source.scope || 'everyone',
       result: null,
     };
   }
@@ -174,6 +177,10 @@
     }
     if (!url) {
       draft.result = { ok: false, msg: 'Enter the blocklist URL.' };
+      return;
+    }
+    if (!draft.scope) {
+      draft.result = { ok: false, msg: 'Choose Everyone or Selected Client Groups for this source.' };
       return;
     }
     saving = true;
@@ -342,7 +349,7 @@
               {/if}
             </td>
             <td><span class="pill">{FORMAT_NAMES[s.format] || s.format}</span></td>
-            <td>{s.scope === 'groups' ? 'Client Groups' : s.scope === 'dot' ? 'DoT Only' : 'Everyone'}</td>
+            <td>{s.scope === 'groups' ? 'Client Groups' : s.scope === 'dot' ? 'DoT Only (legacy)' : 'Everyone'}</td>
             <td class="muted">{interval(s.refresh_secs)}</td>
             <td class="num">{fmt(s.domains)}</td>
             <td class="muted" style="white-space: nowrap" title={ago(s.last_fetch)}>
@@ -417,8 +424,10 @@
         <label>
           <span>Applies To</span>
           <select bind:value={draft.scope}>
+            {#if !draft.scope}
+              <option value="" disabled>Choose a replacement scope for this legacy source</option>
+            {/if}
             <option value="everyone">Everyone</option>
-            <option value="dot">DoT Listeners Only</option>
             <option value="groups">Selected Client Groups Only</option>
           </select>
         </label>
@@ -429,9 +438,10 @@
         works out the format, a chosen format must match the content.
         Validate checks it without saving. A list for selected client groups
         only blocks for the groups that tick it on the Client Groups tab.
-        A DoT-only list blocks only on the encrypted DoT endpoint, so it
-        can carry stricter public-user filtering without changing what
-        LAN clients see.
+        Existing DoT-only sources are kept for compatibility; when editing
+        one, choose a replacement scope explicitly. For listener-specific
+        filtering, create a client group matching DOT, DOH, or DOQ and select
+        the source there.
       </p>
 
       {#if draft.result}
