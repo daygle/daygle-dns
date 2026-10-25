@@ -3409,7 +3409,9 @@ pub struct DotSettings {
     /// Maximum active TCP connections (including TLS handshakes).
     pub max_connections: usize,
     /// TLS handshake timeout in seconds: how long a client may take to
-    /// complete the TLS handshake before the connection is dropped
+    /// complete the TLS handshake before the connection is dropped. Hickory
+    /// also applies it as the read-inactivity timeout of an established DoT
+    /// session, so an idle keep-alive connection is closed once it expires
     /// (1..=600, default 20).
     pub handshake_timeout_secs: u64,
     /// Client networks allowed to use this listener (addresses or network

@@ -14,6 +14,13 @@
 //!   Entries carry the same protocol values the query log records (`tls`,
 //!   `https`, `quic`) as their console Server Log component, so the two logs
 //!   correlate, and they feed syslog when it is enabled.
+//!   A client address behind a listener's admission bridge is translated to
+//!   the real peer with [`crate::proxy_protocol::real_client`], like the
+//!   query log does. One event is deliberately not a failure: hickory ends an
+//!   established DoT session whose client stays idle past the configured
+//!   handshake timeout (the same duration doubles as the session's read
+//!   timeout), which is normal keep-alive expiry and is logged at `debug`
+//!   only.
 //! - **Hickory bridge** ([`hickory_bridge`]): Hickory logs DoT handshake
 //!   failures at `debug` and DoH request rejections at `warn`, but never
 //!   into the console's Server Log. This layer re-emits the actionable
@@ -69,6 +76,11 @@ struct Window {
 /// summary line. A client looping failed handshakes therefore produces at
 /// most one line per protocol per interval.
 ///
+/// A read-inactivity timeout on an established session (`nothing ready in
+/// …`, which hickory reports when its DoT read timeout expires) is normal
+/// keep-alive expiry, not a failure: it goes to `debug` and is never
+/// counted as one.
+///
 /// Every emission goes to `tracing` and to the console's Server Log
 /// ([`LogStore`], which also feeds syslog), tagged with the protocol values
 /// the query log uses.
@@ -100,7 +112,12 @@ impl SessionLog {
 
     /// Record one session failure. `client` is `None` when the transport
     /// could not attribute one (Hickory's handshake timeouts log no peer).
+    /// An idle read-timeout is logged at `debug` only - it is not a failure.
     pub fn record(&self, protocol: &'static str, client: Option<IpAddr>, reason: &str) {
+        if idle_expiry(reason) {
+            tracing::debug!(protocol, client = ?client, reason, "idle {protocol} session closed");
+            return;
+        }
         let now = Instant::now();
         let (message, failures) = {
             let mut map = self.inner.lock().unwrap_or_else(|e| e.into_inner());
@@ -147,6 +164,21 @@ impl SessionLog {
         tracing::warn!(protocol, client = ?client, reason, failures, "{message}");
         self.logs.warn(protocol, message);
     }
+
+    /// Record one session event for the accepted peer `peer` of a TCP-based
+    /// listener, resolving the admission bridge's loopback address back to
+    /// the client that actually connected.
+    pub fn record_peer(&self, protocol: &'static str, peer: Option<SocketAddr>, reason: &str) {
+        let client = peer.map(|addr| crate::proxy_protocol::real_client(addr).ip());
+        self.record(protocol, client, reason);
+    }
+}
+
+/// Hickory's read-inactivity timeout on an established TLS session reports
+/// `"nothing ready in <duration>"`: the client simply had nothing to send
+/// before the session read timeout expired, so nothing failed.
+fn idle_expiry(reason: &str) -> bool {
+    reason.starts_with("nothing ready in ")
 }
 
 fn who(client: Option<IpAddr>) -> String {
@@ -435,21 +467,21 @@ impl tracing::field::Visit for Rendered {
     }
 }
 
-/// Parse `"127.0.0.1:54321"` / `"[::1]:54321"` (possibly debug-quoted) to the
-/// IP.
-fn parse_ip(text: &str) -> Option<IpAddr> {
+/// Parse `"127.0.0.1:54321"` / `"[::1]:54321"` (possibly debug-quoted) to a
+/// socket address; a bare IP is kept with port 0 (it cannot be translated
+/// through the admission bridge, but still names the client).
+fn parse_peer(text: &str) -> Option<SocketAddr> {
     let text = text.trim().trim_matches('"');
     text.parse::<SocketAddr>()
         .ok()
-        .map(|addr| addr.ip())
-        .or_else(|| text.parse().ok())
+        .or_else(|| text.parse::<IpAddr>().ok().map(|ip| SocketAddr::new(ip, 0)))
 }
 
-fn extract(shape: &Shape, rendered: &Rendered) -> (Option<IpAddr>, String) {
+fn extract(shape: &Shape, rendered: &Rendered) -> (Option<SocketAddr>, String) {
     let message = rendered.message.clone().unwrap_or_default();
     match shape {
         Shape::Fields => {
-            let client = rendered.fields.get("src_addr").and_then(|s| parse_ip(s));
+            let client = rendered.fields.get("src_addr").and_then(|s| parse_peer(s));
             let reason = rendered
                 .fields
                 .get("error")
@@ -460,8 +492,8 @@ fn extract(shape: &Shape, rendered: &Rendered) -> (Option<IpAddr>, String) {
         Shape::Prefixed(prefix) => {
             let rest = message.strip_prefix(prefix).unwrap_or(&message);
             match rest.split_once(": ") {
-                Some((addr, reason)) => match parse_ip(addr) {
-                    Some(ip) => (Some(ip), reason.to_string()),
+                Some((addr, reason)) => match parse_peer(addr) {
+                    Some(peer) => (Some(peer), reason.to_string()),
                     None => (None, message.clone()),
                 },
                 None => (None, message.clone()),
@@ -472,7 +504,7 @@ fn extract(shape: &Shape, rendered: &Rendered) -> (Option<IpAddr>, String) {
                 .strip_prefix("https handshake src: ")
                 .unwrap_or(&message);
             match rest.split_once(" error: ") {
-                Some((addr, reason)) => (parse_ip(addr), reason.to_string()),
+                Some((addr, reason)) => (parse_peer(addr), reason.to_string()),
                 None => (None, message.clone()),
             }
         }
@@ -525,8 +557,8 @@ where
         // client address and the actionable reason.
         let mut full = Rendered::default();
         event.record(&mut full);
-        let (client, reason) = extract(&shape, &full);
-        session.record(protocol, client, &reason);
+        let (peer, reason) = extract(&shape, &full);
+        session.record_peer(protocol, peer, &reason);
     }
 }
 
@@ -584,6 +616,38 @@ mod tests {
         assert_eq!(entries.len(), 1);
         // The Server Log sentence-cases every message on push.
         assert!(entries[0].contains("Unknown client"), "{:?}", entries[0]);
+    }
+
+    #[test]
+    fn idle_session_expiry_is_not_a_failure() {
+        let logs = store();
+        let session = SessionLog::with_interval(logs.clone(), Duration::from_secs(60));
+        // Hickory reports its established-session read timeout this way after
+        // the TLS handshake succeeded; the client was merely idle.
+        session.record(
+            TLS,
+            Some(IpAddr::from(Ipv4Addr::LOCALHOST)),
+            "nothing ready in 10s",
+        );
+        assert!(warns(&logs, TLS).is_empty(), "{:?}", warns(&logs, TLS));
+        assert!(session.inner.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn attributes_failures_to_the_client_behind_the_admission_bridge() {
+        let logs = store();
+        let session = SessionLog::with_interval(logs.clone(), Duration::from_secs(60));
+        // The admitted connection reaches hickory from a loopback backend;
+        // the bridge maps that local address back to the real peer.
+        let backend: SocketAddr = "127.0.0.1:41234".parse().unwrap();
+        let client: SocketAddr = "198.51.100.20:5555".parse().unwrap();
+        crate::proxy_protocol::register_client(backend, client);
+        session.record_peer(TLS, Some(backend), "connection reset");
+        crate::proxy_protocol::unregister_client(backend);
+        let entries = warns(&logs, TLS);
+        assert_eq!(entries.len(), 1, "{entries:?}");
+        assert!(entries[0].contains("198.51.100.20"), "{entries:?}");
+        assert!(!entries[0].contains("127.0.0.1"), "{entries:?}");
     }
 
     #[test]
@@ -655,7 +719,7 @@ mod tests {
         .unwrap();
         let (client, reason) = extract(&shape, &rendered);
         assert_eq!(protocol, HTTPS);
-        assert_eq!(client, Some(IpAddr::from(Ipv4Addr::new(127, 0, 0, 1))));
+        assert_eq!(client, Some("127.0.0.1:51000".parse().unwrap()));
         assert!(reason.starts_with("bad path: /x"), "{reason}");
 
         // DoT handshake failure: structured fields, IPv6 address.
@@ -666,7 +730,7 @@ mod tests {
         let (protocol, shape) = classify("tls handshake error").unwrap();
         let (client, reason) = extract(&shape, &rendered);
         assert_eq!(protocol, TLS);
-        assert_eq!(client, Some("2001:db8::7".parse().unwrap()));
+        assert_eq!(client, Some("[2001:db8::7]:853".parse().unwrap()));
         assert_eq!(reason, "connection reset");
 
         // DoH handshake failure: address embedded before " error: ".
@@ -679,7 +743,7 @@ mod tests {
             classify("https handshake src: 127.0.0.1:443 error: invalid certificate").unwrap();
         let (client, reason) = extract(&shape, &rendered);
         assert_eq!(protocol, HTTPS);
-        assert_eq!(client, Some(IpAddr::from(Ipv4Addr::new(127, 0, 0, 1))));
+        assert_eq!(client, Some("127.0.0.1:443".parse().unwrap()));
         assert_eq!(reason, "invalid certificate");
 
         // Handshake timeout: no address, but the reason still says why.

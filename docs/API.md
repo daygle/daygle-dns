@@ -289,7 +289,11 @@ start or reload (subject, expiry, renewal window), a `TLS configuration
 reloaded` line after a rebuild, and coalesced `session failure` warnings for
 failed handshakes, dropped connections and rejected DoH requests - at most
 one warning per client per protocol per minute, with the client address and
-the reason.
+the reason. Addresses name the real client (the listener's admission bridge
+is resolved away), and a DoT session closed for read inactivity past its
+handshake timeout - hickory also applies that value as the session's read
+timeout - is normal keep-alive expiry, logged at `debug` rather than as a
+failure.
 
 ### Query logs
 
