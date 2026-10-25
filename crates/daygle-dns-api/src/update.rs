@@ -979,19 +979,27 @@ pub async fn refresh_release_forever(
             _ = shutdown.cancelled() => return,
             _ = tokio::time::sleep(wait) => {}
         }
-        let (enabled, interval) = {
+        let (enabled, interval, auto_models) = {
             let cfg = config.load();
             (
                 cfg.updates.enabled,
                 cfg.updates
                     .check_interval_secs
                     .max(daygle_dns_core::config::MIN_UPDATE_CHECK_INTERVAL_SECS),
+                cfg.updates.auto_refresh_models,
             )
         };
         if enabled {
             // curl with up-to-5 s timeouts: keep it off the async workers,
             // and ignore the outcome (a failure leaves the last-known value).
             let _ = tokio::task::spawn_blocking(refresh_latest_release_cache).await;
+            // Opt-in: install a changed AI models bundle automatically, at
+            // the same cadence and through the same verified, rollback-
+            // protected apply path as the console button (see
+            // `auto_models_tick`).
+            if auto_models {
+                let _ = tokio::task::spawn_blocking(auto_models_tick).await;
+            }
             // Refresh just ahead of the interval so a status read at the
             // boundary still sees a fresh value.
             wait = std::time::Duration::from_secs(interval.saturating_sub(15));
@@ -1088,6 +1096,125 @@ pub fn model_status(config_dir: Option<&Path>) -> (Option<std::path::PathBuf>, V
         })
         .collect();
     (dir, files)
+}
+
+// ---- AI models auto-refresh (opt-in) ------------------------------------
+
+/// Release asset that drives the models-bundle auto-refresh check: the
+/// bundle's internal `manifest.json` (file name -> sha256) is published
+/// beside the bundle by the same release workflow. Release assets are
+/// served from the plain `github.com` download redirect, not the
+/// rate-limited API, so the check costs one small download per cycle.
+const MODELS_MANIFEST_URL: &str = "https://github.com/daygle/daygle-dns/releases/download";
+
+#[derive(Deserialize)]
+struct ModelsManifestFile {
+    #[serde(default)]
+    files: Vec<ModelsManifestEntry>,
+}
+
+#[derive(Deserialize)]
+struct ModelsManifestEntry {
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    sha256: String,
+}
+
+/// Download and parse the AI models manifest of release `tag` (the cached,
+/// `v`-normalized version string). Tries the `v`-prefixed tag first (how
+/// the release workflow names them) and the bare number as a fallback.
+/// `None` on any network failure, unknown release (no such asset) or
+/// manifest without whitelisted entries: the caller then simply does
+/// nothing this cycle; the next one re-checks.
+fn fetch_models_manifest(tag: &str) -> Option<Vec<(String, String)>> {
+    let get = |url: &str| -> Option<String> {
+        let out = std::process::Command::new("curl")
+            .args(["-fsSL", "--max-time", "15", "--connect-timeout", "5", url])
+            .output()
+            .ok()
+            .filter(|o| o.status.success())?;
+        String::from_utf8_lossy(&out.stdout).into_owned().into()
+    };
+    let mut candidates = vec![format!("v{tag}")];
+    if !tag.starts_with('v') {
+        candidates.push(tag.to_string());
+    }
+    let mut body = None;
+    for candidate in candidates {
+        if let Some(text) = get(&format!("{MODELS_MANIFEST_URL}/{candidate}/manifest.json")) {
+            body = Some(text);
+            break;
+        }
+    }
+    parse_models_manifest(&body?)
+}
+
+/// Parse a models manifest JSON into the entries worth comparing: whitelisted
+/// file names with well-formed 64-hex checksums (lowercased). Everything else
+/// is dropped - the root-side apply re-validates every file it installs
+/// anyway. `None` when nothing recognizable remains (a release without this
+/// asset yields garbage or a 404 body).
+fn parse_models_manifest(body: &str) -> Option<Vec<(String, String)>> {
+    let parsed: ModelsManifestFile = serde_json::from_str(body).ok()?;
+    let files: Vec<(String, String)> = parsed
+        .files
+        .into_iter()
+        .filter(|e| {
+            MODEL_FILES.contains(&e.name.as_str())
+                && e.sha256.len() == 64
+                && e.sha256.chars().all(|c| c.is_ascii_hexdigit())
+        })
+        .map(|e| (e.name, e.sha256.to_ascii_lowercase()))
+        .collect();
+    (!files.is_empty()).then_some(files)
+}
+
+/// Whether the installed AI model files differ from a release's manifest:
+/// any manifest entry absent on disk or present with a different checksum
+/// is exactly what a models-run installs. Files on disk that the manifest
+/// does not mention are ignored, so the check cannot loop on unknown
+/// leftovers.
+fn models_bundle_differs(installed: &[ModelFileInfo], manifest: &[(String, String)]) -> bool {
+    manifest.iter().any(|(name, want)| {
+        !installed
+            .iter()
+            .any(|f| &f.file == name && f.sha256.as_ref() == Some(want))
+    })
+}
+
+/// One warmer-cycle models auto-refresh check. Runs only when
+/// `[updates].auto_refresh_models` is on (plus the usual self-update host
+/// gate around the whole warmer); triggered when no run is active, a models
+/// directory exists and the installed files differ from the latest
+/// release's models manifest. It then starts exactly the run the console's
+/// "Update AI Models" button starts: checksum-verified bundle, root-side
+/// apply, rollback + health check on failure. Anything unknown (no tag yet,
+/// unreachable GitHub, unsupported manifest) skips this cycle; the next one
+/// re-checks. A failed apply stays visible in the AI page's run state and
+/// the content difference keeps triggering retries, spaced by the check
+/// interval.
+fn auto_models_tick() {
+    if update_in_progress() {
+        return;
+    }
+    let config_dir = config_dir_hint();
+    if models_dir(config_dir).is_none() {
+        return;
+    }
+    let Some(latest) = latest_release_cached() else {
+        return;
+    };
+    let Some(manifest) = fetch_models_manifest(&latest) else {
+        return;
+    };
+    let (_, installed) = model_status(config_dir);
+    if !models_bundle_differs(&installed, &manifest) {
+        return;
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        let _ = start_models(&exe, config_dir);
+    }
 }
 
 /// Numeric semver-ish comparison: true when `a` < `b`. Tolerates prefixes
@@ -1459,6 +1586,87 @@ mod tests {
         assert_eq!(st.message, "ok");
         assert_eq!(st.pid, 0);
         assert!(st.is_terminal());
+    }
+
+    #[test]
+    fn parse_models_manifest_keeps_only_whitelisted_checksums() {
+        let body = r#"{
+            "files": [
+                {"name": "daygle-starter.bin", "sha256": "1111111111111111111111111111111111111111111111111111111111111111"},
+                {"name": "minilm-centroids.json", "sha256": "2222222222222222222222222222222222222222222222222222222222222222"},
+                {"name": "not-a-model.txt", "sha256": "ab"},
+                {"name": "all-MiniLM-L6-v2-int8.onnx", "sha256": "not-hex"},
+                {"name": "minilm-tokenizer.json"}
+            ]
+        }"#;
+        let files = parse_models_manifest(body).expect("recognizable manifest");
+        assert_eq!(files.len(), 2);
+        assert!(files.contains(&("daygle-starter.bin".to_string(), "1".repeat(64)),));
+        assert!(files.contains(&("minilm-centroids.json".to_string(), "2".repeat(64)),));
+        assert!(files
+            .iter()
+            .all(|(_, sha)| sha.chars().all(|c| c.is_ascii_hexdigit())));
+    }
+
+    #[test]
+    fn parse_models_manifest_rejects_garbage_and_empty() {
+        assert!(parse_models_manifest("404: Not Found").is_none());
+        assert!(parse_models_manifest("{}").is_none());
+        assert!(parse_models_manifest(r#"{"files": []}"#).is_none());
+        assert!(parse_models_manifest(r#"{"files": [{"name": "x"}]}"#).is_none());
+    }
+
+    #[test]
+    fn models_bundle_differs_matches_installed_file_states() {
+        let manifest = vec![
+            ("a.bin".to_string(), "1111".to_string()),
+            ("b.json".to_string(), "2222".to_string()),
+        ];
+        // All matching (same names, same checksums): no update needed.
+        let same = vec![
+            file_info("a.bin", true, Some("1111")),
+            file_info("b.json", true, Some("2222")),
+        ];
+        assert!(!models_bundle_differs(&same, &manifest));
+        // One checksum differs.
+        let changed = vec![
+            file_info("a.bin", true, Some("1111")),
+            file_info("b.json", true, Some("9999")),
+        ];
+        assert!(models_bundle_differs(&changed, &manifest));
+        // One manifest file is missing on disk.
+        let missing = vec![file_info("a.bin", true, Some("1111"))];
+        assert!(models_bundle_differs(&missing, &manifest));
+        // Extra/unknown files on disk alone never trigger a run.
+        let extra = vec![
+            file_info("a.bin", true, Some("1111")),
+            file_info("b.json", true, Some("2222")),
+            file_info("leftover.bin", true, Some("dead")),
+        ];
+        assert!(!models_bundle_differs(&extra, &manifest));
+    }
+
+    #[test]
+    fn auto_models_tick_early_returns_do_not_start_runs() {
+        // On this Windows host update_in_progress may be idle, but
+        // models_dir/config_dir are missing, so the tick must never reach
+        // start_models. The failure mode to guard against is a run attempt
+        // whose state file gets primed, so assert no workspace state was
+        // written by this call.
+        if workspace_dir().join("state.json").exists() {
+            let _ = std::fs::remove_file(workspace_dir().join("state.json"));
+        }
+        auto_models_tick();
+        assert!(!workspace_dir().join("state.json").exists());
+    }
+
+    fn file_info(name: &str, present: bool, sha: Option<&str>) -> ModelFileInfo {
+        ModelFileInfo {
+            file: name.to_string(),
+            present,
+            size: None,
+            sha256: sha.map(|s| s.to_string()),
+        }
     }
 
     #[test]

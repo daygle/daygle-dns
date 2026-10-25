@@ -21,6 +21,10 @@
   let modelsError = $state(null);
   let modelRun = $state(null); // active/finished model update run
   let modelBusy = $state(false);
+  // Opt-in auto install of changed model bundles at the update-check cadence
+  // (`[updates].auto_refresh_models` in Settings). Only for admins.
+  let autoModels = $state(false);
+  let autoBusy = $state(false);
   let pollTimer = null;
   const RUNNING = ['preparing', 'downloading', 'installing', 'applying', 'restarting', 'rolling_back'];
 
@@ -43,6 +47,39 @@
     } catch (e) {
       models = null;
       modelsError = formatApiError(e);
+    }
+    if (isAdmin) {
+      api
+        .config()
+        .then((c) => (autoModels = !!c.updates?.auto_refresh_models))
+        .catch(() => {});
+    }
+  }
+
+  async function toggleAutoModels(e) {
+    const want = e.target.checked;
+    autoBusy = true;
+    error = null;
+    try {
+      // Send the whole [updates] section: the API replaces it as a unit, so
+      // omit the other fields would reset them to defaults.
+      const current = (await api.config()).updates || {};
+      await api.updateSettings({
+        updates: {
+          enabled: current.enabled ?? true,
+          check_interval_secs: current.check_interval_secs ?? 3600,
+          auto_refresh_models: want,
+        },
+      });
+      autoModels = want;
+      notice = want
+        ? 'New AI model bundles will be installed automatically at the Update Checks cadence.'
+        : 'AI model bundles will no longer be installed automatically.';
+    } catch (err) {
+      error = formatApiError(err);
+      e.target.checked = !want; // undo the checkbox on failure
+    } finally {
+      autoBusy = false;
     }
   }
 
@@ -332,6 +369,20 @@
       files and restarts the service (a brief DNS pause) with automatic
       rollback on failure.
     </p>
+    {#if isAdmin && models?.models_dir && !modelRun}
+      <label class="check auto-row">
+        <input
+          type="checkbox"
+          checked={autoModels}
+          disabled={autoBusy}
+          onchange={(e) => toggleAutoModels(e)}
+        />
+        <span>
+          Keep AI Models up to Date
+          <span class="muted small"> (installs new model bundles automatically with every Update Check; each install restarts the service)</span>
+        </span>
+      </label>
+    {/if}
     {#if modelsError}
       <p style="color: var(--danger)">{modelsError}</p>
     {:else if models}
@@ -387,4 +438,5 @@
   .warn { border-color: #f5b041; }
   .exempt-row { display: flex; gap: 8px; flex-wrap: wrap; }
   .small { font-size: 0.85rem; }
+  .auto-row { margin-bottom: 10px; }
 </style>

@@ -434,6 +434,16 @@ pub struct UpdateCheckSettings {
     pub enabled: bool,
     /// Seconds between background checks.
     pub check_interval_secs: u64,
+    /// When a release ships a *different* AI models bundle than the one
+    /// installed, download and install it automatically at the check
+    /// cadence (the same verified checksum + rollback-protected apply path
+    /// the console's "Update AI Models" button uses; each install restarts
+    /// the service, a brief DNS pause). Default off: automatic model
+    /// writes and restarts are an explicit operator choice, compared here
+    /// by content hashes - a release that ships unchanged models causes
+    /// no run.
+    #[serde(default)]
+    pub auto_refresh_models: bool,
 }
 
 impl Default for UpdateCheckSettings {
@@ -444,6 +454,7 @@ impl Default for UpdateCheckSettings {
             // unauthenticated budget, and a fresh release is still noticed
             // within an hour of publication.
             check_interval_secs: 3600,
+            auto_refresh_models: false,
         }
     }
 }

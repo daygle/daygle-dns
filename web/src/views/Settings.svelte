@@ -110,7 +110,7 @@
   let ecs = $state({ enabled: false, subnet: '', ipv4_prefix: 24, ipv6_prefix: 56 });
   let syslog_ = $state({ enabled: false, server: '', facility: 'daemon', level: 'info', queries: false });
   // Update checks (Settings -> General). Background only; never on DNS traffic.
-  let updates_ = $state({ enabled: true, check_interval_secs: 3600 });
+  let updates_ = $state({ enabled: true, check_interval_secs: 3600, auto_refresh_models: false });
   const zoneChoices = timeZoneOptions();
   // Users who chose their own settings don't see the defaults change.
   const ownPrefsSet = $derived(
@@ -215,7 +215,7 @@
         http_port: config.web?.http_port || config.api?.port || 5380,
       };
       syslog_ = { enabled: false, server: '', facility: 'daemon', level: 'info', queries: false, ...config.syslog };
-      updates_ = { enabled: true, check_interval_secs: 3600, ...config.updates };
+      updates_ = { enabled: true, check_interval_secs: 3600, auto_refresh_models: false, ...config.updates };
       dns64 = { enabled: !!config.dns64?.enabled, prefix: config.dns64?.prefix || '64:ff9b::/96' };
       dns64Clients = [...(config.dns64?.clients || [])];
       ecs = { enabled: false, subnet: '', ipv4_prefix: 24, ipv6_prefix: 56, ...config.ecs };
@@ -399,6 +399,7 @@
       updates: {
         enabled: !!updates_.enabled,
         check_interval_secs: Number(updates_.check_interval_secs) || 3600,
+        auto_refresh_models: !!updates_.auto_refresh_models,
       },
       authoritative: {
         default_record_ttl: Number(authoritative.default_record_ttl),
