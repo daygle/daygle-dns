@@ -269,7 +269,8 @@ port = 853
 # How long a client may take to complete the TLS handshake (also the DoT
 # connection's read-inactivity timeout; seconds, 1..=600; default 20).
 # handshake_timeout_secs = 20
-# Bound active DoT sessions, including TLS handshakes; excess connections close.
+# Bound active DoT sessions, including TLS handshakes; excess connections
+# close. One client (IPv4 address or IPv6 /64) may hold an eighth of them.
 # max_connections = 1024
 # Instead of file paths / self-signed generation below, a listener can use a
 # certificate stored in the database and managed from the console's

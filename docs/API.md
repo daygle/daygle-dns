@@ -289,11 +289,13 @@ start or reload (subject, expiry, renewal window), a `TLS configuration
 reloaded` line after a rebuild, and coalesced `session failure` warnings for
 failed handshakes, dropped connections and rejected DoH requests - at most
 one warning per client per protocol per minute, with the client address and
-the reason. Addresses name the real client (the listener's admission bridge
-is resolved away), and a DoT session closed for read inactivity past its
-handshake timeout - hickory also applies that value as the session's read
-timeout - is normal keep-alive expiry, logged at `debug` rather than as a
-failure.
+the reason. Addresses name the real client (behind a PROXY-protocol load
+balancer too); a DoT session closed for read inactivity past its handshake
+timeout (also the session's read timeout) is normal keep-alive expiry and is
+not logged as a failure. DoT also warns at start when a listener open to
+every client has a certificate public clients such as Android Private DNS
+refuse (self-signed, or without its intermediates), and notes when clients
+outside `recursion_access` would be refused recursion on it.
 
 ### Query logs
 

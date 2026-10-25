@@ -462,11 +462,27 @@ fn resolved_updates_dir() -> Option<PathBuf> {
     })
 }
 
-/// Check available disk space in the temp directory.
+/// Where an update's source checkout and release build happen: `/var/tmp`
+/// (the update scripts put them there, as /tmp is often a small tmpfs), or
+/// the temp dir on hosts without it.
+fn build_dir() -> PathBuf {
+    let var_tmp = Path::new("/var/tmp");
+    if var_tmp.is_dir() {
+        var_tmp.to_path_buf()
+    } else {
+        std::env::temp_dir()
+    }
+}
+
+/// Space an update needs where it builds: a release build of the workspace
+/// from a fresh checkout (sources, models, dependencies and target dir).
+const BUILD_SPACE_MB: u64 = 3072;
+
+/// Check available disk space where the update builds.
 fn check_disk_space() -> Option<PreflightCheck> {
     #[cfg(unix)]
     {
-        let temp_dir = std::env::temp_dir();
+        let temp_dir = build_dir();
         let output = std::process::Command::new("df")
             .arg("--output=avail")
             .arg(&temp_dir)
@@ -485,8 +501,7 @@ fn check_disk_space() -> Option<PreflightCheck> {
             .and_then(|line| line.trim().parse().ok())
             .unwrap_or(0);
 
-        // Need at least 100MB for download, 1GB for source build
-        let min_required_mb = 100;
+        let min_required_mb = BUILD_SPACE_MB;
         let avail_mb = avail_kb / 1024;
 
         if avail_mb >= min_required_mb {
@@ -507,7 +522,10 @@ fn check_disk_space() -> Option<PreflightCheck> {
                     temp_dir.display(),
                     min_required_mb
                 ),
-                fix: Some("Free up disk space in the temp directory before updating.".to_string()),
+                fix: Some(format!(
+                    "The update builds the release from source in {}: free up space there before updating.",
+                    temp_dir.display()
+                )),
                 fix_commands: None,
             })
         }
@@ -1242,7 +1260,10 @@ fn auto_models_tick() {
 /// Numeric semver-ish comparison: true when `a` < `b`. Tolerates prefixes
 /// and extra segments (`"1.0.2-rc1"`), comparing only leading numeric parts.
 fn version_lt(a: &str, b: &str) -> bool {
+    // Build metadata (`+...`) never orders versions (SemVer 2.0 §10); left
+    // in, `1.0.3+abc` read as 1.0 and looked older than 1.0.3.
     let nums = |s: &str| -> Vec<u64> {
+        let s = s.split('+').next().unwrap_or(s);
         s.trim_start_matches('v')
             .split(['.', '-'])
             .map_while(|p| p.parse::<u64>().ok())
@@ -1312,7 +1333,7 @@ pub fn start_models(exe: &Path, config_dir: Option<&Path>) -> Result<u32, StartE
     )
 }
 
-/// Common launcher for both run kinds (release binary / models bundle):
+/// Common launcher for both run kinds (installer run / models bundle):
 /// writes the embedded helper and spawns it detached; returns the pid.
 fn launch_run(
     mode: Option<&str>,
@@ -1323,6 +1344,14 @@ fn launch_run(
     if !can_update(config_dir) {
         return Err(StartError::NotUpdateable);
     }
+    // The "already running?" check and the primed state that answers it
+    // must be one step: two concurrent starts (a double click, the console
+    // and the AI page) both passed the check and launched two helpers that
+    // staged over each other.
+    static LAUNCH: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _launching = LAUNCH
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     if update_in_progress() {
         return Err(StartError::AlreadyRunning);
     }
@@ -1891,6 +1920,8 @@ mod tests {
         assert!(version_lt("v0.9", "1.0")); // v-prefix tolerated
         assert!(!version_lt("1.0.2-rc1", "1.0.2")); // prerelease suffix ignored
         assert!(version_lt("2", "10")); // numeric, not lexicographic
+        assert!(!version_lt("1.0.3+abc", "1.0.3")); // build metadata ignored
+        assert!(version_lt("1.0.2+abc", "1.0.3"));
     }
 
     #[test]

@@ -3433,13 +3433,14 @@ pub struct DotSettings {
     /// When set it takes precedence over `self_signed` and the file paths.
     #[serde(default)]
     pub certificate: String,
-    /// Maximum active TCP connections (including TLS handshakes).
+    /// Maximum active TCP connections (including TLS handshakes). One client
+    /// (an IPv4 address or IPv6 /64) may hold an eighth of them, at least 4.
     pub max_connections: usize,
     /// TLS handshake timeout in seconds: how long a client may take to
-    /// complete the TLS handshake before the connection is dropped. Hickory
-    /// also applies it as the read-inactivity timeout of an established DoT
-    /// session, so an idle keep-alive connection is closed once it expires
-    /// (1..=600, default 20).
+    /// complete the TLS handshake before the connection is dropped. It is
+    /// also the read-inactivity timeout of an established DoT session, so an
+    /// idle keep-alive connection is closed once it expires (1..=600,
+    /// default 20).
     pub handshake_timeout_secs: u64,
     /// Client networks allowed to use this listener (addresses or network
     /// names). Empty means everyone; clients outside the list get REFUSED

@@ -157,18 +157,44 @@ case "$API_HOST" in
 esac
 HEALTH_URL="http://$API_HOST:$API_PORT/api/health"
 
-# Wait up to 15s for the unit to be active and the API to answer.
+# Wait up to 90 s for the service to come up. The console answering
+# /api/health proves it. The console may not be where the config file says
+# (moved to another port or HTTPS-only in Settings, which the database holds),
+# so the unit staying active under one process for 20 s proves it too: a
+# start that fails exits and is restarted under a new process.
 health_check() {
   i=0
-  while [ $i -lt 15 ]; do
+  pid=""
+  steady=0
+  while [ $i -lt 90 ]; do
     sleep 1
-    if systemctl is-active --quiet daygle-dns 2>/dev/null \
-       && curl -fsS --max-time 2 "$HEALTH_URL" >/dev/null 2>&1; then
+    i=$((i + 1))
+    if ! systemctl is-active --quiet daygle-dns 2>/dev/null; then
+      pid=""
+      steady=0
+      continue
+    fi
+    if curl -fsS --max-time 2 "$HEALTH_URL" >/dev/null 2>&1; then
       return 0
     fi
-    i=$((i + 1))
+    now="$(systemctl show daygle-dns -p MainPID --value 2>/dev/null || true)"
+    if [ -n "$now" ] && [ "$now" != 0 ] && [ "$now" = "$pid" ]; then
+      steady=$((steady + 1))
+      if [ $steady -ge 20 ]; then
+        log "service up (pid $now) without the console answering at $HEALTH_URL"
+        return 0
+      fi
+    else
+      pid="$now"
+      steady=0
+    fi
   done
   return 1
+}
+
+# Checksum of a file (empty when unreadable).
+file_sha() {
+  (sha256sum "$1" 2>/dev/null || shasum -a 256 "$1" 2>/dev/null) | cut -d' ' -f1 | tr -d '[:space:]'
 }
 
 # Nothing pending: the marker's own rename/removal events can re-trigger this
@@ -284,13 +310,51 @@ if [ "$KIND" = "install" ]; then
   export DAYGLE_DNS_GUI_UPDATE=1
   unset DAYGLE_DNS_ADMIN_USER DAYGLE_DNS_ADMIN_PASSWORD DAYGLE_DNS_LAN_GUI DAYGLE_DNS_NO_DEPS || true
 
+  # The checkout and release build take gigabytes: keep them off /tmp,
+  # which many distributions mount as a small tmpfs (RAM).
+  if [ -z "${TMPDIR:-}" ] && [ -d /var/tmp ]; then
+    BUILD_TMP=/var/tmp
+  else
+    BUILD_TMP="${TMPDIR:-/tmp}"
+  fi
+
+  # Keep the binary the service runs now, to put back if the new one does
+  # not come up. Prefer the running image: a previous update can have
+  # replaced the file while this server kept running from the old inode.
+  ROLLBACK="$PRIV/rollback.bin"
+  BACKUP_SRC="$EXE"
+  MAINPID="$(systemctl show daygle-dns -p MainPID --value 2>/dev/null || true)"
+  case "$MAINPID" in
+    ''|0) ;;
+    *) if [ -r "/proc/$MAINPID/exe" ]; then BACKUP_SRC="/proc/$MAINPID/exe"; fi ;;
+  esac
+  if ! cp -f "$BACKUP_SRC" "$ROLLBACK" 2>>"$LOG"; then
+    ROLLBACK=""
+    log "could not keep a copy of the current binary; a failed update cannot be rolled back"
+  fi
+
+  # Put the kept binary back and restart; false when there is nothing to
+  # roll back (no copy, or the installer never replaced the binary).
+  rollback_binary() {
+    [ -n "$ROLLBACK" ] && [ -s "$ROLLBACK" ] || return 1
+    [ "$(file_sha "$ROLLBACK")" != "$(file_sha "$EXE")" ] || return 1
+    state rolling_back "The update did not come up - restoring the previous version..."
+    log "rolling back $EXE to the previous binary"
+    install -m 0755 "$ROLLBACK" "$EXE.rollback" 2>>"$LOG" && mv -f "$EXE.rollback" "$EXE" || return 1
+    systemctl restart daygle-dns 2>>"$LOG" || true
+    return 0
+  }
+
   # Run in the background so progress can be streamed: the installer's last
   # log line becomes the state message the console shows while it clones,
   # builds and installs (several minutes on a small host).
   : > "$PRIV/installer-exit"
+  # (`|| rc=$?`: under `set -e` a failing installer would otherwise end the
+  # subshell before its exit code is recorded, and every failure read as 1.)
   (
-    sh "$PRIV/install.sh" >>"$LOG" 2>&1
-    printf '%s' "$?" > "$PRIV/installer-exit"
+    rc=0
+    TMPDIR="$BUILD_TMP" sh "$PRIV/install.sh" >>"$LOG" 2>&1 || rc=$?
+    printf '%s' "$rc" > "$PRIV/installer-exit"
   ) &
   WORKER="$!"
 
@@ -320,16 +384,30 @@ if [ "$KIND" = "install" ]; then
       exit 0
     fi
     rm -f "$REQ.processing" "$MANIFEST" "$STAGED_BIN"
-    fail "the installer completed but the service health check failed. The installer rebuilt and installed v${VERSION}; check the service with 'systemctl status daygle-dns' (details in apply.log)."
+    log "health check failed after installing v${VERSION}"
+    if rollback_binary; then
+      if health_check; then
+        fail "v${VERSION} was installed but did not come up, so the previous version was restored and is running again. Details in apply.log."
+      else
+        fail "v${VERSION} did not come up, and neither did the restored previous version. Check 'systemctl status daygle-dns' (details in apply.log)."
+      fi
+    else
+      fail "the installer completed but the service health check failed, and no previous binary could be restored. Check 'systemctl status daygle-dns' (details in apply.log)."
+    fi
     exit 1
   fi
 
-  # Best effort: if the installer stopped/failed mid-apply, make sure the
-  # previously installed binary is still the one systemd runs.
-  systemctl start daygle-dns 2>>"$LOG" || true
+  # The installer failed. If it got as far as replacing the binary, put the
+  # previous one back; either way make sure the service is running.
   STOP="$(last_log_error_from_file "$LOG")"
   rm -f "$REQ.processing" "$MANIFEST" "$STAGED_BIN"
-  fail "the full installer failed (exit ${RC})${STOP:+ — last installer message: $STOP}. Nothing was replaced if it failed before the install step; details in apply.log."
+  if rollback_binary; then
+    WHAT="the previous version was restored"
+  else
+    systemctl start daygle-dns 2>>"$LOG" || true
+    WHAT="nothing was replaced"
+  fi
+  fail "the full installer failed (exit ${RC})${STOP:+ — last installer message: $STOP}; ${WHAT}. Details in apply.log."
   exit 1
 fi
 

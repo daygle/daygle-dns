@@ -364,13 +364,9 @@ if need_git; then
         'Then re-run this installer.' >&2
     exit 1
 fi
-git clone --depth 1 https://github.com/daygle/daygle-dns.git "$SRC_DIR"
-cd "$SRC_DIR"
-
-# Cargo embeds the workspace package version into the binary. The main branch
-# manifest can lag the published release tag, so resolve the latest stable
-# release and set the version before building instead of shipping the stale
-# manifest version (historically v1.0.0).
+# Build the latest stable release, not the tip of main: "update to the
+# latest release" must install exactly that release's code, and the version
+# the binary reports must name the code it runs.
 RELEASE_TAG="$(download_url "https://api.github.com/repos/daygle/daygle-dns/releases/latest" 2>/dev/null \
     | sed -n 's/^[[:space:]]*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
     | head -n 1 || true)"
@@ -384,6 +380,11 @@ if ! printf '%s\n' "$RELEASE_VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([+-][0
     log "ERROR: Could not resolve a valid latest GitHub release version; refusing to build with a stale version."
     exit 1
 fi
+git clone --depth 1 --branch "$RELEASE_TAG" https://github.com/daygle/daygle-dns.git "$SRC_DIR"
+cd "$SRC_DIR"
+
+# Cargo embeds the workspace package version into the binary, and a tag's
+# manifest can lag its tag (historically v1.0.0): set it from the tag.
 if ! awk -v version="$RELEASE_VERSION" '
     /^\[workspace\.package\][[:space:]]*$/ { in_workspace_package = 1; print; next }
     /^\[/ { if (in_workspace_package) in_workspace_package = 0 }

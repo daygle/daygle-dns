@@ -16,18 +16,17 @@
 //!   correlate, and they feed syslog when it is enabled.
 //!   A client address behind a listener's admission bridge is translated to
 //!   the real peer with [`crate::proxy_protocol::real_client`], like the
-//!   query log does. One event is deliberately not a failure: hickory ends an
-//!   established DoT session whose client stays idle past the configured
-//!   handshake timeout (the same duration doubles as the session's read
-//!   timeout), which is normal keep-alive expiry and is logged at `debug`
-//!   only.
-//! - **Hickory bridge** ([`hickory_bridge`]): Hickory logs DoT handshake
-//!   failures at `debug` and DoH request rejections at `warn`, but never
-//!   into the console's Server Log. This layer re-emits the actionable
+//!   query log does. The DoT and DoQ listeners (`dot`, `doq`) record their
+//!   failures here directly, with the client address.
+//! - **Hickory bridge** ([`hickory_bridge`]): Hickory's DoH listener logs
+//!   handshake failures at `debug` and request rejections at `warn`, but
+//!   never into the console's Server Log. This layer re-emits the actionable
 //!   events through the [`SessionLog`] - tagged, coalesced and visible in
 //!   the console.
+//! - **Public DoT readiness** ([`report_dot_readiness`]): what would stop
+//!   DoT serving public clients such as Android Private DNS.
 //!
-//! Documented limitation: Hickory's handshake-timeout warnings carry no
+//! Documented limitation: Hickory's DoH handshake-timeout warnings carry no
 //! client address (its TLS acceptor logs the timeout without the peer), so
 //! those entries are logged with an unknown client; everything else is
 //! attributed.
@@ -76,11 +75,6 @@ struct Window {
 /// summary line. A client looping failed handshakes therefore produces at
 /// most one line per protocol per interval.
 ///
-/// A read-inactivity timeout on an established session (`nothing ready in
-/// …`, which hickory reports when its DoT read timeout expires) is normal
-/// keep-alive expiry, not a failure: it goes to `debug` and is never
-/// counted as one.
-///
 /// Every emission goes to `tracing` and to the console's Server Log
 /// ([`LogStore`], which also feeds syslog), tagged with the protocol values
 /// the query log uses.
@@ -111,13 +105,9 @@ impl SessionLog {
     }
 
     /// Record one session failure. `client` is `None` when the transport
-    /// could not attribute one (Hickory's handshake timeouts log no peer).
-    /// An idle read-timeout is logged at `debug` only - it is not a failure.
+    /// could not attribute one (Hickory's DoH handshake timeouts log no
+    /// peer).
     pub fn record(&self, protocol: &'static str, client: Option<IpAddr>, reason: &str) {
-        if idle_expiry(reason) {
-            tracing::debug!(protocol, client = ?client, reason, "idle {protocol} session closed");
-            return;
-        }
         let now = Instant::now();
         let (message, failures) = {
             let mut map = self.inner.lock().unwrap_or_else(|e| e.into_inner());
@@ -174,11 +164,72 @@ impl SessionLog {
     }
 }
 
-/// Hickory's read-inactivity timeout on an established TLS session reports
-/// `"nothing ready in <duration>"`: the client simply had nothing to send
-/// before the session read timeout expired, so nothing failed.
-fn idle_expiry(reason: &str) -> bool {
-    reason.starts_with("nothing ready in ")
+/// Whether a DoT certificate can serve public clients such as Android's
+/// Private DNS, which accept only a CA-issued certificate presented with its
+/// intermediates (they do not fetch missing ones).
+#[derive(Debug, PartialEq, Eq)]
+pub enum PublicCertProblem {
+    SelfSigned,
+    MissingChain,
+}
+
+/// The [`PublicCertProblem`] with the PEM chain `pem`, if any.
+pub fn public_cert_problem(pem: &str) -> Option<PublicCertProblem> {
+    let info = daygle_dns_dot::describe_certificate(pem).ok()?;
+    if info.self_signed {
+        return Some(PublicCertProblem::SelfSigned);
+    }
+    let certificates = pem.matches("-----BEGIN CERTIFICATE-----").count();
+    (certificates < 2).then_some(PublicCertProblem::MissingChain)
+}
+
+/// Explain at listener start what would stop DoT from serving as a public
+/// resolver (Android Private DNS and the like): recursion that public
+/// clients are refused, and a certificate they will not accept.
+pub fn report_dot_readiness(config: &daygle_dns_core::config::DaygleConfig, session: &SessionLog) {
+    use daygle_dns_core::config::RecursionAccess;
+    let allowed = config.with_networks_resolved().dot.allowed_networks;
+    let public = allowed.iter().any(|entry| {
+        daygle_dns_core::config::parse_network(entry).is_some_and(|net| net.prefix_len() == 0)
+    });
+    let recursion_restricted =
+        config.recursive.enabled && config.recursive.recursion_access != RecursionAccess::Allow;
+    if allowed.is_empty() && recursion_restricted {
+        session.logs().info(
+            TLS,
+            "DoT answers every client, but recursion only for clients recursion_access \
+             allows: others get REFUSED for names this server does not host (Android Private \
+             DNS then reports the server as unreachable). To offer DoT as a public resolver, \
+             list its clients in dot.allowed_networks (0.0.0.0/0 and ::/0 for everyone)."
+                .to_string(),
+        );
+    }
+    // Public resolver: every client listed, or none listed while recursion
+    // is open to all.
+    let open_recursion =
+        config.recursive.enabled && config.recursive.recursion_access == RecursionAccess::Allow;
+    if !(public || (allowed.is_empty() && open_recursion)) {
+        return;
+    }
+    let Ok(pem) = std::fs::read_to_string(&config.dot.cert_path) else {
+        return;
+    };
+    let problem = match public_cert_problem(&pem) {
+        Some(PublicCertProblem::SelfSigned) => {
+            "is self-signed: Android Private DNS and other strict clients refuse it. Issue a \
+             certificate for the resolver's host name on the Certificates page (ACME) and use it \
+             for DoT"
+        }
+        Some(PublicCertProblem::MissingChain) => {
+            "holds no intermediate certificates: clients such as Android Private DNS do not \
+             fetch them and fail to verify it. Use the full chain (leaf first, then \
+             intermediates)"
+        }
+        None => return,
+    };
+    let message = format!("DoT serves public clients, but its certificate {problem}");
+    tracing::warn!("{message}");
+    session.logs().warn(TLS, message);
 }
 
 fn who(client: Option<IpAddr>) -> String {
@@ -340,8 +391,6 @@ pub fn report_certificate(
 /// Which hickory event a line is, and how to pull the client out of it.
 #[derive(Debug)]
 enum Shape {
-    /// Structured `src_addr` + `error` fields on the event.
-    Fields,
     /// `"<prefix><addr>: <reason>"` inside the rendered message.
     Prefixed(&'static str),
     /// `"https handshake src: <addr> error: <reason>"`.
@@ -415,11 +464,6 @@ impl tracing::field::Visit for Peek {
 /// per-request logs.
 fn classify(rendered: &str) -> Option<(&'static str, Shape)> {
     Some(match rendered {
-        "tls handshake error" | "error in TLS request stream" => (TLS, Shape::Fields),
-        "tls timeout expired during handshake" => (
-            TLS,
-            Shape::NoAddress("handshake timeout (client address unavailable)"),
-        ),
         "https timeout expired during handshake" => (
             HTTPS,
             Shape::NoAddress("handshake timeout (client address unavailable)"),
@@ -480,15 +524,6 @@ fn parse_peer(text: &str) -> Option<SocketAddr> {
 fn extract(shape: &Shape, rendered: &Rendered) -> (Option<SocketAddr>, String) {
     let message = rendered.message.clone().unwrap_or_default();
     match shape {
-        Shape::Fields => {
-            let client = rendered.fields.get("src_addr").and_then(|s| parse_peer(s));
-            let reason = rendered
-                .fields
-                .get("error")
-                .cloned()
-                .unwrap_or_else(|| message.clone());
-            (client, reason)
-        }
         Shape::Prefixed(prefix) => {
             let rest = message.strip_prefix(prefix).unwrap_or(&message);
             match rest.split_once(": ") {
@@ -512,7 +547,7 @@ fn extract(shape: &Shape, rendered: &Rendered) -> (Option<SocketAddr>, String) {
     }
 }
 
-/// The [`tracing`] layer that surfaces Hickory's DoT/DoH failures in the
+/// The [`tracing`] layer that surfaces Hickory's DoH failures in the
 /// console's Server Log. Install it with its own target filter so Hickory's
 /// `debug` events reach it while the console-facing fmt layer keeps the
 /// configured level:
@@ -619,18 +654,37 @@ mod tests {
     }
 
     #[test]
-    fn idle_session_expiry_is_not_a_failure() {
-        let logs = store();
-        let session = SessionLog::with_interval(logs.clone(), Duration::from_secs(60));
-        // Hickory reports its established-session read timeout this way after
-        // the TLS handshake succeeded; the client was merely idle.
-        session.record(
-            TLS,
-            Some(IpAddr::from(Ipv4Addr::LOCALHOST)),
-            "nothing ready in 10s",
+    fn spots_certificates_public_clients_reject() {
+        use rcgen::{CertificateParams, DistinguishedName, DnType, Issuer, KeyPair};
+
+        let (self_signed, _) = daygle_dns_dot::generate_self_signed_pem("dns.example").unwrap();
+        assert_eq!(
+            public_cert_problem(&self_signed),
+            Some(PublicCertProblem::SelfSigned)
         );
-        assert!(warns(&logs, TLS).is_empty(), "{:?}", warns(&logs, TLS));
-        assert!(session.inner.lock().unwrap().is_empty());
+
+        let ca_key = KeyPair::generate().unwrap();
+        let mut ca_params = CertificateParams::new(Vec::<String>::new()).unwrap();
+        let mut ca_name = DistinguishedName::new();
+        ca_name.push(DnType::CommonName, "Test CA");
+        ca_params.distinguished_name = ca_name;
+        ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        let ca_cert = ca_params.self_signed(&ca_key).unwrap();
+        let issuer = Issuer::new(ca_params, ca_key);
+
+        let leaf_key = KeyPair::generate().unwrap();
+        let mut leaf_params = CertificateParams::new(vec!["dns.example".to_string()]).unwrap();
+        let mut leaf_name = DistinguishedName::new();
+        leaf_name.push(DnType::CommonName, "dns.example");
+        leaf_params.distinguished_name = leaf_name;
+        let leaf = leaf_params.signed_by(&leaf_key, &issuer).unwrap();
+
+        assert_eq!(
+            public_cert_problem(&leaf.pem()),
+            Some(PublicCertProblem::MissingChain)
+        );
+        let chain = format!("{}{}", leaf.pem(), ca_cert.pem());
+        assert_eq!(public_cert_problem(&chain), None);
     }
 
     #[test]
@@ -682,9 +736,9 @@ mod tests {
 
     #[test]
     fn classifies_hickory_event_messages() {
-        assert!(classify("tls handshake error").is_some());
-        assert!(classify("error in TLS request stream").is_some());
-        assert!(classify("tls timeout expired during handshake").is_some());
+        // The DoT listener reports its own failures; Hickory's are no
+        // longer classified.
+        assert!(classify("tls handshake error").is_none());
         assert!(classify("https timeout expired during handshake").is_some());
         assert!(classify("https handshake src: 127.0.0.1:443 error: bad").is_some());
         assert!(classify("handshake error from 127.0.0.1:443: bad").is_some());
@@ -722,17 +776,6 @@ mod tests {
         assert_eq!(client, Some("127.0.0.1:51000".parse().unwrap()));
         assert!(reason.starts_with("bad path: /x"), "{reason}");
 
-        // DoT handshake failure: structured fields, IPv6 address.
-        let mut rendered = Rendered::default();
-        rendered.store("message", "tls handshake error".to_string());
-        rendered.store("src_addr", "[2001:db8::7]:853".to_string());
-        rendered.store("error", "connection reset".to_string());
-        let (protocol, shape) = classify("tls handshake error").unwrap();
-        let (client, reason) = extract(&shape, &rendered);
-        assert_eq!(protocol, TLS);
-        assert_eq!(client, Some("[2001:db8::7]:853".parse().unwrap()));
-        assert_eq!(reason, "connection reset");
-
         // DoH handshake failure: address embedded before " error: ".
         let mut rendered = Rendered::default();
         rendered.store(
@@ -747,9 +790,9 @@ mod tests {
         assert_eq!(reason, "invalid certificate");
 
         // Handshake timeout: no address, but the reason still says why.
-        let (protocol, shape) = classify("tls timeout expired during handshake").unwrap();
+        let (protocol, shape) = classify("https timeout expired during handshake").unwrap();
         let (client, reason) = extract(&shape, &Rendered::default());
-        assert_eq!(protocol, TLS);
+        assert_eq!(protocol, HTTPS);
         assert!(client.is_none());
         assert!(reason.contains("timeout"), "{reason}");
     }

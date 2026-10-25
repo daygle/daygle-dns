@@ -45,15 +45,19 @@ DNS over HTTPS, DNS over QUIC, and an HTTP API/GUI.
   label-aligned suffix match.
 - **`daygle-dns-dot`** produces rustls TLS configurations for the encrypted
   DNS protocols - the `dot` ALPN for DoT (RFC 7858), `h2` for DoH (RFC 8484)
-  and a TLS 1.3 + `doq`-ALPN setup for DoQ (RFC 9250, served by Hickory's
-  QUIC listener) - and generates self-signed certificates when configured.
+  and a TLS 1.3 + `doq`-ALPN setup for DoQ (RFC 9250) - and generates
+  self-signed certificates when configured.
 - **`daygle-dns-api`** serves the REST API and the embedded GUI, including
   console login (PBKDF2 password verification + in-memory session tokens,
   `admin`/`viewer` roles enforced in the auth middleware) and the dashboard
   statistics endpoint backed by `daygle-dns-core`'s bounded `QueryStats`.
 - **`daygle-dns-gui`** embeds the compiled Svelte bundle via `rust-embed`.
-- **`daygle-dns`** (binary) binds UDP/TCP/DoT/DoH/DoQ listeners onto one
-  Hickory `Server` driven by `DnsDispatcher`.
+- **`daygle-dns`** (binary) binds the UDP/TCP/DoH listeners onto one
+  Hickory `Server` driven by `DnsDispatcher`, and serves DoT and DoQ with its
+  own listeners (`dot.rs`, `doq.rs`) that feed the same dispatcher: DoT
+  answers the queries of one connection concurrently and out of order
+  (RFC 7766), pads answers to padded queries (RFC 8467) and caps connections
+  per client.
 
 ## Query flow
 

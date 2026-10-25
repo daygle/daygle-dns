@@ -391,3 +391,272 @@ release warmer starts fetching, so a later
   `find_network`, which copied the whole network list on every DoT, DoH
   or DoQ query that had a named-network ACL. The built-in networks are now
   built once, and the gate uses a new borrowing `named_network` lookup.
+
+---
+
+# Follow-up audit: DNS over TLS and the update pipeline
+
+Scope:
+
+- **DNS over TLS end to end:** listener, admission, TLS configuration,
+  certificates and diagnostics. This includes the case of public users
+  pointing Android's "Private DNS" (or any RFC 7858 stub) at the server.
+- **The in-place update pipeline:**
+  - the console's Update and AI pages;
+  - the API handlers;
+  - `update.rs`, `update.sh` (service account) and `update-apply.sh`
+    (root);
+  - `install.sh`.
+
+Verification:
+
+- fmt and clippy (`-D warnings`) are clean, and the full test suite passes.
+- 7 new DoT integration tests:
+  - pipelining;
+  - padding;
+  - the per-client cap, through a PROXY header;
+  - idle close;
+  - readiness warnings;
+  - silent connections;
+  - a client that never reads.
+- The pipelining test was run against Hickory's listener too, and fails
+  there.
+- `update-apply.sh` was exercised in a sandbox with stubbed
+  `curl`/`systemctl`/`sleep`:
+  - a healthy update;
+  - a failed health check with rollback;
+  - an installer that fails after swapping the binary, now reporting its
+    real exit code;
+  - a service that is up while its console is not where the config file
+    says.
+
+## DNS over TLS
+
+### T1. Queries on one DoT connection were answered strictly one at a time - **Fixed** (High)
+
+*Where:* the DoT listener, which was Hickory's `register_tls_listener_with_tls_config`.
+
+*Problem.* Hickory's TLS listener awaits each query's full handling before
+it reads the next one from the connection ("we don't spawn here"). Android
+Private DNS, and most DoT stubs, pipeline every query of a device over one
+connection. So one slow recursive lookup, such as an unresponsive
+authoritative server waiting out `client_timeout_ms`, delayed every query
+behind it, cached ones included. RFC 7766 §6.2.1.1 asks for concurrent,
+out-of-order processing.
+
+*Impact.* Browsing over DoT stalled for seconds whenever one name was slow.
+That is exactly what users of a public "Private DNS" resolver notice.
+
+*Fix.* A native DoT listener (`crates/daygle-dns/src/dot.rs`), built like
+the existing DoQ one:
+
+- up to 32 queries per connection are answered concurrently and written as
+  each completes, matched by message ID;
+- past 32 the connection is not read (TCP back-pressure);
+- a single writer per connection coalesces queued answers into shared TLS
+  records;
+- each write is bounded by the session timeout, and the session ends when
+  the writer stops. A client that pipelines queries but never reads its
+  answers can otherwise hold its connection, and its slot, forever. A test
+  reproduces this: it fails with unbounded writes and passes now;
+- `TCP_NODELAY` is set.
+
+The integration test sends a slow and a fast query back to back on one
+connection. With Hickory's listener the fast answer came second, after the
+slow query timed out. Now it comes first, at once.
+
+*Risks.* Hickory no longer handles DoT, and the dispatcher, ACLs, rate
+limits and logs are unchanged. One connection can now cost up to 32
+concurrent lookups instead of 1. Those are still bounded by the global
+recursive admission limit and the per-client rate limit.
+
+### T2. One address could take every DoT connection slot - **Fixed** (Medium)
+
+*Problem.* Admission only bounded the total (`dot.max_connections`,
+default 1024). A single public client could open 1024 connections, or
+just keep 1024 handshakes pending for up to `handshake_timeout_secs` each,
+and lock every other user out of a public resolver.
+
+*Fix.* At most an eighth of `max_connections` (minimum 4) per public client.
+A client is an IPv4 address or an IPv6 /64, and IPv4-mapped addresses
+count as IPv4. Private and loopback addresses are exempt: a load balancer
+that does not send PROXY headers shows every client from its own address,
+and LAN clients are distinct anyway. Behind a trusted PROXY-protocol
+balancer, the cap applies to the real client. A refusal is logged,
+coalesced per client.
+
+*Risks.* More than 128 simultaneous DoT sessions from one public address
+(at the default) is now refused. A large carrier NAT pool in front of a
+busy resolver could reach that; raise `max_connections` for such
+deployments.
+
+### T3. Answers were never padded (RFC 8467) - **Fixed** (Medium, privacy)
+
+*Problem.* The size of an encrypted answer reveals which name was asked
+for. Android, among others, pads its queries and expects padded answers.
+
+*Fix.* When the query carries an EDNS Padding option, the answer is padded
+to a multiple of 468 octets, as RFC 8467 §4.1 recommends. Unpadded
+queries, TSIG-signed answers and answers that would exceed 64 KiB are left
+alone.
+
+### T4. Nothing warned about setups public Private DNS clients cannot use - **Fixed** (Medium)
+
+*Problem.* Three common setups break Android Private DNS with only a
+"couldn't connect" on the phone, and nothing on the server said why:
+
+1. **Self-signed certificate.** The default `self_signed = true` produces
+   one, and Android refuses it.
+2. **No intermediates.** A certificate file holding only the leaf fails,
+   because Android does not fetch intermediates.
+3. **Recursion refused.** With `dot.allowed_networks` empty, recursion
+   follows `recursion_access`, which defaults to `private_networks`. Public
+   clients then get REFUSED, which fails Android's validation query.
+
+*Fix.* `report_dot_readiness` runs at every listener start. It:
+
+- warns about a self-signed certificate or a missing chain whenever DoT
+  serves public clients (`0.0.0.0/0` or `::/0` listed, or recursion open to
+  all);
+- notes when clients outside `recursion_access` would be refused,
+  explaining how to open DoT alone to them.
+
+### T5. A failed listener rebind leaked running DoT/DoQ listeners - **Fixed** (Medium, reliability)
+
+*Problem.* When a reload bound DoT, and DoQ or the DoT admission front,
+and then failed on a later listener (a DoH port in use, say), those
+already-started tasks kept running with their ports. The supervisor's
+"restore the previous listeners" step then failed with "address in use",
+leaving that protocol down.
+
+*Fix.* On a bind failure, `bind_listeners` cancels the generation and
+waits for its native listeners to close before returning the error.
+
+### T6. Smaller DoT and TLS issues - **Fixed** (Low)
+
+- **Admission bridge.** DoT went through a loopback bridge: an extra socket
+  pair and a userspace copy per connection. DoT now admits connections
+  itself and handles PROXY headers directly. DoH keeps the bridge.
+- **Session resumption.** rustls keeps 256 resumable sessions by default.
+  Mobile clients reconnect on every network change, so they mostly paid
+  full handshakes. DoT, DoH and DoQ now keep 8 192.
+- **DoQ TLS versions.** DoQ's TLS config was documented as TLS 1.3-only but
+  offered 1.2 as well (QUIC negotiated 1.3 regardless). It is now really
+  restricted.
+- **Diagnostics.** Handshake timeouts were logged without a client address
+  (Hickory's limitation). DoT now records every failure with the address,
+  including a bad PROXY header and the per-client refusal. A
+  connect-and-close with no TLS bytes (health checks, scans) is no longer
+  logged as a failure. The diagnostics bridge's Hickory DoT patterns, and
+  the "idle expiry" special case they needed, are removed as dead code.
+- **Dead code.** `daygle_dns_dot::register_dot` is removed.
+
+### T7. Certificate renewal restarts every DNS listener - *Reported*
+
+When a certificate a listener uses is renewed (ACME, every ~60 days) or
+replaced, the console requests a full listener rebuild. Every DNS
+listener stops and rebinds, plain UDP/TCP included, so all DoT sessions
+drop and every client reconnects.
+
+*Recommendation.* Serve the TLS config through a swappable resolver
+(`ArcSwap<ServerConfig>`, or a rustls `ResolvesServerCert`) and swap it in
+place on renewal.
+
+*Not changed:* the interruption is brief and rare, and the change touches
+the reload supervisor, which this audit kept stable.
+
+## Update pipeline
+
+### U1. "Update to the latest release" built the tip of `main` - **Fixed** (High)
+
+*Where:* `install.sh`
+
+*Problem.* The installer cloned `main` but stamped the binary with the
+latest release's version. An update therefore installed whatever was on
+`main` (unreleased, possibly broken), labelled as the release. Afterwards
+the console reported "up to date" while running different code.
+
+*Fix.* The installer resolves the latest release first and clones that tag
+(`git clone --branch <tag>`). It still stamps the version, because a tag's
+manifest can lag the tag.
+
+*Risks.* Fixes on `main` now reach hosts only when a release is tagged.
+That includes the hardened `update-apply.sh` from this PR, which the
+installer copies from the source it builds. **Tag a release after merging
+this PR.**
+
+### U2. A failed installer update had no rollback - **Fixed** (High)
+
+*Problem.* The installer replaces the binary and then restarts the
+service. If the new version did not come up, or the installer failed after
+the swap, the broken binary stayed in place. The old binary-swap path had
+a rollback, but the installer path, the only one in use, never did.
+
+*Fix.* Before the installer runs, the root step keeps a copy of the running
+binary, preferring `/proc/<pid>/exe`. If the health check fails, or the
+installer fails after replacing the binary, the root step:
+
+1. puts the copy back;
+2. restarts the service;
+3. checks its health again;
+4. reports exactly what happened.
+
+*Risks.* Only the binary is rolled back. A new version that already
+migrated the database leaves the migration in place; Daygle's migrations
+are additive.
+
+### U3. The health check could fail healthy updates - **Fixed** (Medium)
+
+*Problem.* The check gave the service 15 s and probed only the plain-HTTP
+console address from the config file. A console moved to another port, or
+to HTTPS only in Settings (those settings live in the database), always
+failed it, as did a slow start. With U2's rollback, that would have
+reverted a good update.
+
+*Fix.* The window is now 90 s, and the check passes on either of:
+
+- the console answering;
+- the unit staying active under one process for 20 s (a failing start
+  exits and is restarted under a new process).
+
+### U4. GUI updates built in `/tmp` - **Fixed** (Medium)
+
+*Problem.* The root step ran the installer with the default temp
+directory. The installer's checkout and release build (gigabytes) landed
+on `/tmp`, which many distributions mount as RAM-backed tmpfs. The disk
+preflight checked the service's temp dir and passed at 100 MB.
+
+*Fix.*
+
+- The installer runs with `TMPDIR=/var/tmp` (as `update.sh` already did).
+- The preflight checks `/var/tmp` and asks for 3 GB. For reference, a debug
+  build of the workspace takes 3.3 GB.
+
+### U5. Smaller pipeline issues - **Fixed** (Low)
+
+- **Installer exit code.** It was always reported as 1. Under `set -e` the
+  subshell exited before recording the real code. Now it records the
+  installer's own code (verified: 3).
+- **Concurrent starts.** Two concurrent update or model-update starts (a
+  double click, or the Update and AI pages) could both pass the "already
+  running" check and launch two helpers. Starting is now serialized.
+- **Version ordering.** `version_lt` read build metadata (`1.0.3+abc`) as
+  `1.0` and reported such a build as outdated. Build metadata is now
+  ignored, as SemVer specifies.
+- **Phase lists.** The Update and AI pages' running-phase lists missed
+  `cloning`/`building`, which the server counts as running.
+- **Polling.** The Update page polled forever on `401`/`403` instead of
+  stopping.
+
+### U6. Remaining limitations - *Reported*
+
+- **Workspace in `/tmp`.** The update workspace is `/tmp/daygle-dns-update`.
+  Another local account can create that directory first and so block
+  updates. It cannot hijack them: the directory's owner is checked, and
+  root only renames files into it.
+- **`hidepid`.** On hosts mounting `/proc` with `hidepid`, the service
+  cannot see the root step's process. A running update then reads as
+  "stopped", and the console would allow a second start.
+- **`TMPDIR` mismatch.** If the service ran with its own `TMPDIR`, it and
+  the root step would disagree on the workspace path. The installed unit
+  sets none.

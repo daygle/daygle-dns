@@ -2,8 +2,8 @@
 //!
 //! Encrypted DNS listeners built on `rustls` and Hickory's [`Server`]:
 //!
-//! - **DNS over TLS (RFC 7858)** - the `dot` ALPN protocol on a plain TCP
-//!   listener ([`register_dot`]).
+//! - **DNS over TLS (RFC 7858)** - the `dot` ALPN protocol ([`build_tls_config`];
+//!   the listener itself lives in the `daygle-dns` crate).
 //! - **DNS over HTTPS (RFC 8484)** - the `h2` ALPN protocol on a TLS listener
 //!   serving POST requests at a configurable path, e.g. `/dns-query`
 //!   ([`register_doh`]).
@@ -60,18 +60,6 @@ pub fn build_doh_tls_config(settings: &DohSettings) -> Result<Arc<ServerConfig>>
     load_tls_config(&settings.cert_path, &settings.key_path, DOH_ALPN).map(Arc::new)
 }
 
-/// Register a DoT listener on a Hickory server.
-pub fn register_dot<T: RequestHandler>(
-    server: &mut Server<T>,
-    listener: TcpListener,
-    tls_config: Arc<ServerConfig>,
-    handshake_timeout: Duration,
-) -> Result<()> {
-    server
-        .register_tls_listener_with_tls_config(listener, handshake_timeout, tls_config)
-        .map_err(|e| DaygleError::Tls(format!("cannot register DoT listener: {e}")))
-}
-
 /// Register a DoH listener on a Hickory server.
 ///
 /// Serves POST requests carrying `application/dns-message` bodies at
@@ -109,7 +97,12 @@ pub fn build_doq_tls_config(settings: &DoqSettings) -> Result<Arc<ServerConfig>>
         settings.self_signed,
         &settings.server_name,
     )?;
-    let config = load_tls_config_versions(&settings.cert_path, &settings.key_path, DOQ_ALPN)?;
+    let config = load_tls_config_versions(
+        &settings.cert_path,
+        &settings.key_path,
+        DOQ_ALPN,
+        &[&rustls::version::TLS13],
+    )?;
     Ok(Arc::new(config))
 }
 

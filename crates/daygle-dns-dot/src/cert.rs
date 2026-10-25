@@ -238,22 +238,30 @@ fn write_if_parent_exists(path: &str, bytes: &[u8], private: bool) -> Result<()>
     fs::write(path, bytes).map_err(DaygleError::Io)
 }
 
+/// TLS sessions an encrypted listener remembers for resumption. rustls keeps
+/// 256 by default; a resolver with many (mobile) clients reconnecting after
+/// every network change would evict them before they come back, and pay a
+/// full handshake each time. An entry is a few hundred bytes.
+pub const SESSION_CACHE_SIZE: usize = 8192;
+
 /// Load a PEM certificate chain + private key into a rustls server config
-/// advertising the given ALPN protocol (e.g. `dot` for DoT, `h2` for DoH).
+/// advertising the given ALPN protocol (e.g. `dot` for DoT, `h2` for DoH),
+/// with TLS 1.2 and 1.3.
 pub fn load_tls_config(
     cert_path: &str,
     key_path: &str,
     alpn: &[u8],
 ) -> Result<rustls::ServerConfig> {
-    load_tls_config_versions(cert_path, key_path, alpn)
+    load_tls_config_versions(cert_path, key_path, alpn, rustls::DEFAULT_VERSIONS)
 }
 
-/// Like [`load_tls_config`], but restricted to the given protocol versions
-/// (needed for DoQ, where QUIC requires TLS 1.3 only).
+/// Like [`load_tls_config`], restricted to `versions` (DoQ: QUIC requires
+/// TLS 1.3 only).
 pub fn load_tls_config_versions(
     cert_path: &str,
     key_path: &str,
     alpn: &[u8],
+    versions: &[&'static rustls::SupportedProtocolVersion],
 ) -> Result<rustls::ServerConfig> {
     let certs = read_certs(cert_path)?;
     let key = read_key(key_path)?;
@@ -265,13 +273,14 @@ pub fn load_tls_config_versions(
         DaygleError::Tls("no rustls crypto provider available; enable `ring` or `aws_lc_rs`".into())
     })?;
     let mut config = rustls::ServerConfig::builder_with_provider(provider)
-        .with_safe_default_protocol_versions()
+        .with_protocol_versions(versions)
         .map_err(|e| DaygleError::Tls(format!("TLS protocol setup failed: {e}")))?
         .with_no_client_auth()
         .with_single_cert(certs, key)
         .map_err(|e| DaygleError::Tls(format!("invalid TLS material: {e}")))?;
 
     config.alpn_protocols = vec![alpn.to_vec()];
+    config.session_storage = rustls::server::ServerSessionMemoryCache::new(SESSION_CACHE_SIZE);
     Ok(config)
 }
 
@@ -327,6 +336,13 @@ mod tests {
 
         let config = load_tls_config(&cert, &key, crate::DOT_ALPN).unwrap();
         assert_eq!(config.alpn_protocols, vec![crate::DOT_ALPN.to_vec()]);
+        assert!(config.session_storage.can_cache());
+
+        // DoQ: TLS 1.3 only.
+        let quic =
+            load_tls_config_versions(&cert, &key, crate::DOQ_ALPN, &[&rustls::version::TLS13])
+                .unwrap();
+        assert_eq!(quic.alpn_protocols, vec![crate::DOQ_ALPN.to_vec()]);
     }
 
     #[cfg(unix)]
