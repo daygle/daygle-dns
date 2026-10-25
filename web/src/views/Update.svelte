@@ -223,6 +223,36 @@
     return `${Math.round(secs / 3600)} h`;
   }
 
+  // Details shown as a tooltip on the header status pill: what is installed,
+  // what is out there, and how fresh the release check is.
+  function releaseTooltip() {
+    if (!info) return '';
+    const latest = info.latest_release ? `v${info.latest_release}` : 'unknown';
+    let when;
+    if (info.latest_checked_secs_ago == null) {
+      when = 'no release check has run since the server started';
+    } else {
+      when = `last release check ran ${formatAgeSecs(info.latest_checked_secs_ago)} ago`;
+    }
+    if (info.checks_enabled && info.check_interval_secs) {
+      when += ` (automatic checks run every ${formatAgeSecs(info.check_interval_secs)})`;
+    } else {
+      when += ' (automatic release checks are off)';
+    }
+    return `Installed v${info.version} · latest release ${latest} · ${when}`;
+  }
+
+  // Tooltip for the update-run pills: when the run started and, once it has
+  // ended, how it ended.
+  function runTooltip() {
+    if (!run?.started_at) return undefined;
+    let text = `Update started ${formatDateTime(run.started_at)}`;
+    if (run.phase === 'done' || run.phase === 'error') {
+      text += ` · finished with exit code ${run.exit_code}`;
+    }
+    return text;
+  }
+
   // Operator-triggered release fetch ("Check Now"): resolves the worst
   // case of the automatic cadence (a fresh release staying invisible for a
   // whole check interval). The server throttles live fetches to one per
@@ -281,19 +311,82 @@
 
 {#if info}
 
+  {#snippet installFooter(divided)}
+    <div class="version-row" class:divided>
+      <div class="version-stat">
+        <span class="v-label">Installed Version</span>
+        <code>v{info.version}</code>
+      </div>
+      <div class="version-stat">
+        <span class="v-label">Latest Release</span>
+        {#if info.latest_release}<code>v{info.latest_release}</code>{:else}Unknown{/if}
+      </div>
+    </div>
+    {#if checkNote}
+      <p class="muted small" style="margin: 8px 0 0">{checkNote}</p>
+    {/if}
+    {#if info.checks_enabled && info.check_interval_secs}
+      <p class="muted small" style="margin: 10px 0 0; max-width: 80ch">
+        Automatic checks run every {formatAgeSecs(info.check_interval_secs)}
+        {#if info.latest_checked_secs_ago == null}
+          — none has run since the server started.
+        {:else}
+          — the last one ran {formatAgeSecs(info.latest_checked_secs_ago)} ago.
+        {/if}
+      </p>
+    {:else}
+      <p class="muted small" style="margin: 10px 0 0; max-width: 80ch">
+        Automatic release checks are off (Settings &rarr; General). Any latest
+        release shown above came from a manual check.
+      </p>
+    {/if}
+    {#if !info.can_update}
+      <p class="muted small" style="margin: 10px 0 0; max-width: 80ch">
+        In-place updates need a Linux host managed by the installer (systemd
+        unit, <code>/usr/local/bin/daygle-dns</code>, or a config under
+        <code>/etc</code>) and a way to fetch the installer (curl or wget,
+        or git). Otherwise use the host command below. Missing requirements:
+      </p>
+      <ul class="gates small" style="margin: 8px 0 0">
+        {#each info.gates || [] as gate}
+          <li>{gate}</li>
+        {/each}
+      </ul>
+    {/if}
+  {/snippet}
+
   <!-- self-update available -->
   {#if info.can_update}
     <div class="card" style="margin-bottom: 14px">
       <div class="spread">
-        <h3 style="margin: 0">Update</h3>
-        {#if updating || runRunning()}
-          <span class="pill"><span class="spin" aria-hidden="true"></span> Updating...</span>
-        {:else if run?.phase === 'done' && isRollback(run)}
-          <span class="pill err">Failed</span>
-        {:else if run?.phase === 'done'}
-          <span class="pill ok">Complete</span>
-        {:else if run?.phase === 'error'}
-          <span class="pill err">Failed</span>
+        <div class="title-row">
+          <h3 style="margin: 0">Update</h3>
+          {#if updating || runRunning()}
+            <span class="pill" title={runTooltip()}
+              ><span class="spin" aria-hidden="true"></span> Updating...</span
+            >
+          {:else if run?.phase === 'done' && isRollback(run)}
+            <span class="pill err" title={runTooltip()}>Failed</span>
+          {:else if run?.phase === 'done'}
+            <span class="pill ok" title={runTooltip()}>Complete</span>
+          {:else if run?.phase === 'error'}
+            <span class="pill err" title={runTooltip()}>Failed</span>
+          {:else if info.updater_outdated === false}
+            <span class="pill ok" title={releaseTooltip()}>Up to date</span>
+          {:else if info.updater_outdated}
+            <span class="pill new" title={releaseTooltip()}>Update available</span>
+          {/if}
+        </div>
+        {#if isAdmin}
+          <button
+            class="secondary"
+            style="font-size: 0.8rem; padding: 5px 12px; white-space: nowrap"
+            onclick={checkNow}
+            disabled={checking}
+            title="Fetch the latest published release from GitHub now (at most one live check per minute)"
+          >
+            {checking ? 'Checking...' : 'Check Now'}
+          </button>
         {/if}
       </div>
 
@@ -429,62 +522,16 @@
           Last update started {formatDateTime(run.started_at)}.
         </p>
       {/if}
+
+      {@render installFooter(true)}
+    </div>
+  {:else}
+    <!-- self-update unavailable -->
+    <div class="card" style="margin-bottom: 14px">
+      <h3 style="margin: 0">Current Installation</h3>
+      {@render installFooter(false)}
     </div>
   {/if}
-
-  <div class="card" style="margin-bottom: 14px">
-    <div class="spread">
-      <h3 style="margin: 0">Current Installation</h3>
-      {#if isAdmin && info.can_update}
-        <button
-          class="secondary"
-          style="font-size: 0.8rem; padding: 5px 12px; white-space: nowrap"
-          onclick={checkNow}
-          disabled={checking}
-          title="Fetch the latest published release from GitHub now (at most one live check per minute)"
-        >
-          {checking ? 'Checking...' : 'Check Now'}
-        </button>
-      {/if}
-    </div>
-    <table>
-      <tbody>
-        <tr><td class="muted">Installed Version</td><td><code>v{info.version}</code></td></tr>
-        <tr><td class="muted">Latest Release</td><td>{#if info.latest_release}<code>v{info.latest_release}</code>{:else}Unknown{/if}</td></tr>
-      </tbody>
-    </table>
-    {#if checkNote}
-      <p class="muted small" style="margin: 8px 0 0">{checkNote}</p>
-    {/if}
-    {#if info.checks_enabled && info.check_interval_secs}
-      <p class="muted small" style="margin: 10px 0 0; max-width: 80ch">
-        Automatic checks run every {formatAgeSecs(info.check_interval_secs)}
-        {#if info.latest_checked_secs_ago == null}
-          — none has run since the server started.
-        {:else}
-          — the last one ran {formatAgeSecs(info.latest_checked_secs_ago)} ago.
-        {/if}
-      </p>
-    {:else}
-      <p class="muted small" style="margin: 10px 0 0; max-width: 80ch">
-        Automatic release checks are off (Settings &rarr; General). Any latest
-        release shown above came from a manual check.
-      </p>
-    {/if}
-    {#if !info.can_update}
-      <p class="muted small" style="margin: 10px 0 0; max-width: 80ch">
-        In-place updates need a Linux host managed by the installer (systemd
-        unit, <code>/usr/local/bin/daygle-dns</code>, or a config under
-        <code>/etc</code>) and a way to fetch the installer (curl or wget,
-        or git). Otherwise use the host command below. Missing requirements:
-      </p>
-      <ul class="gates small" style="margin: 8px 0 0">
-        {#each info.gates || [] as gate}
-          <li>{gate}</li>
-        {/each}
-      </ul>
-    {/if}
-  </div>
 
   <div class="card" style="margin-bottom: 14px">
     <h3 style="margin: 0 0 10px">Manual Update Command</h3>
@@ -505,15 +552,6 @@
       The one-line installer is available directly from the project repository:
       <a href={info.install_script} target="_blank" rel="noreferrer">{info.install_script}</a>
     </p>
-  </div>
-
-  <div class="card" style="margin-bottom: 14px">
-    <h3 style="margin: 0 0 10px">Preserved During Update</h3>
-    <div class="preserve-list">
-      {#each info.preserves as item}
-        <span class="preserve">{item}</span>
-      {/each}
-    </div>
   </div>
 {:else if busy}
   <div class="card">
@@ -552,21 +590,26 @@
     margin: 10px 0;
     font-size: 0.88rem;
   }
-  .preserve-list {
+  .spread { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
+  .title-row { display: flex; align-items: center; gap: 10px; min-width: 0; }
+  .version-row {
     display: flex;
     flex-wrap: wrap;
+    gap: 8px 28px;
+    margin-top: 14px;
+  }
+  .version-row.divided {
+    border-top: 1px solid var(--border);
+    padding-top: 12px;
+  }
+  .version-stat {
+    display: flex;
+    align-items: baseline;
     gap: 8px;
-    margin-top: 6px;
+    font-size: 0.9rem;
   }
-  .preserve {
-    background: var(--panel-2);
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    padding: 4px 10px;
-    font-size: 0.85rem;
-  }
-  td:first-child { width: 52%; }
-  .spread { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
+  .v-label { color: var(--muted); }
+  .pill.new { color: var(--warn, #b58900); border-color: var(--warn, #b58900); }
   .spin {
     display: inline-block;
     width: 10px;
