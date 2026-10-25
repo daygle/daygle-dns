@@ -16,7 +16,7 @@ listen = "0.0.0.0"
 # ipv6_only = false
 # DNS cookies (RFC 7873): clients that send a cookie get a server cookie
 # back, and ones whose server cookie checks out (so cannot be spoofing their
-# address) skip the per-client rate limit.
+# address) get ten times the per-client rate limit.
 # dns_cookies = true
 #
 # PROXY protocol (HAProxy v1/v2) for load balancers in front of the TCP, DoT
@@ -191,8 +191,9 @@ axfr_networks = []
 # Accept RFC 2136 dynamic updates (UPDATE messages) for primary zones.
 # Changes are written through to SQLite and go live immediately. Off by
 # default: anyone who can reach the server could otherwise add records.
-# update_networks limits which clients may update (empty = anyone),
-# e.g. ["10.0.0.0/8", "192.168.0.0/16"].
+# update_networks limits which clients may update, e.g.
+# ["10.0.0.0/8", "192.168.0.0/16"]. When it is empty, only zones bound to a
+# TSIG key (tsig_update_zones) take updates, and only signed ones.
 allow_dynamic_updates = false
 # Entries may name a [[networks]] network as well as an address.
 update_networks = []
@@ -268,7 +269,8 @@ port = 853
 # How long a client may take to complete the TLS handshake (also the DoT
 # connection's read-inactivity timeout; seconds, 1..=600; default 20).
 # handshake_timeout_secs = 20
-# Bound active DoT sessions, including TLS handshakes; excess connections close.
+# Bound active DoT sessions, including TLS handshakes; excess connections
+# close. One client (IPv4 address or IPv6 /64) may hold an eighth of them.
 # max_connections = 1024
 # Instead of file paths / self-signed generation below, a listener can use a
 # certificate stored in the database and managed from the console's

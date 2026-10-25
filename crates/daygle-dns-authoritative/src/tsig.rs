@@ -295,7 +295,9 @@ pub fn sign_response(
         .map_err(|e| format!("tsig record encoding failed: {e}"))?;
     out.extend_from_slice(&tsig_bytes);
     // Patch the additional record count (header bytes 10-11) by one.
-    let additionals = u16::from_be_bytes([out[10], out[11]]) + 1;
+    let additionals = u16::from_be_bytes([out[10], out[11]])
+        .checked_add(1)
+        .ok_or_else(|| "tsig response has no room for another additional record".to_string())?;
     out[10..12].copy_from_slice(&additionals.to_be_bytes());
     Ok(out)
 }
@@ -303,6 +305,15 @@ pub fn sign_response(
 /// Sign a client request (used by the secondary-side transfer client).
 /// Returns the wire bytes of `message` with its TSIG record appended.
 pub fn sign_request(message: &Message, key: &TsigKey) -> Result<Vec<u8>, String> {
+    sign_request_with_mac(message, key).map(|(wire, _)| wire)
+}
+
+/// [`sign_request`], also returning the request MAC, which the replies
+/// chain from.
+pub fn sign_request_with_mac(
+    message: &Message,
+    key: &TsigKey,
+) -> Result<(Vec<u8>, Vec<u8>), String> {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -325,11 +336,144 @@ pub fn sign_request(message: &Message, key: &TsigKey) -> Result<Vec<u8>, String>
     let mut signed = message.clone();
     signed.set_signature(Box::new(make_tsig_record(
         key.name.clone(),
-        pre_tsig.set_mac(mac),
+        pre_tsig.set_mac(mac.clone()),
     )));
-    signed
+    let wire = signed
         .to_bytes()
-        .map_err(|e| format!("tsig request encoding failed: {e}"))
+        .map_err(|e| format!("tsig request encoding failed: {e}"))?;
+    Ok((wire, mac))
+}
+
+/// The TSIG record for the second or a later message of a multi-message
+/// response (a zone transfer), RFC 8945 §5.3.1: the MAC covers the previous
+/// message's MAC, this message as sent without its TSIG (`body`), and only
+/// the TSIG timers.
+pub fn sign_subsequent(
+    key: &TsigKey,
+    previous_mac: &[u8],
+    body: &[u8],
+    original_id: u16,
+) -> Result<Box<Record<TSIG>>, String> {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let tbs = subsequent_tbs(previous_mac, body, now, key.fudge);
+    let mac = key
+        .algorithm
+        .mac_data(&key.secret, &tbs)
+        .map_err(|e| format!("tsig response mac failed: {e}"))?;
+    let tsig = TSIG::new(
+        key.algorithm.clone(),
+        now,
+        key.fudge,
+        mac,
+        original_id,
+        None,
+        Vec::new(),
+    );
+    Ok(Box::new(make_tsig_record(key.name.clone(), tsig)))
+}
+
+/// The to-be-signed bytes of a later message: previous MAC (length
+/// prefixed), the message data, then time signed (48 bits) and fudge.
+fn subsequent_tbs(previous_mac: &[u8], data: &[u8], time: u64, fudge: u16) -> Vec<u8> {
+    let mut tbs = Vec::with_capacity(previous_mac.len() + data.len() + 10);
+    tbs.extend_from_slice(&(previous_mac.len() as u16).to_be_bytes());
+    tbs.extend_from_slice(previous_mac);
+    tbs.extend_from_slice(data);
+    tbs.extend_from_slice(&time.to_be_bytes()[2..]);
+    tbs.extend_from_slice(&fudge.to_be_bytes());
+    tbs
+}
+
+/// Checks each message of a signed multi-message response (a zone transfer)
+/// in order, chaining every MAC from the one before (RFC 8945 §5.3.1). Later
+/// messages may come unsigned, as long as no more than 99 in a row do and
+/// the last one is signed; their bytes are covered by the next signature.
+pub struct ResponseVerifier {
+    key: TsigKey,
+    previous_mac: Vec<u8>,
+    first: bool,
+    unsigned: Vec<u8>,
+    unsigned_count: usize,
+}
+
+impl ResponseVerifier {
+    /// Verify replies to a request signed with `key` whose MAC was
+    /// `request_mac`.
+    pub fn new(key: TsigKey, request_mac: Vec<u8>) -> Self {
+        Self {
+            key,
+            previous_mac: request_mac,
+            first: true,
+            unsigned: Vec::new(),
+            unsigned_count: 0,
+        }
+    }
+
+    /// Check the next response message, as received.
+    pub fn verify(&mut self, raw: &[u8]) -> Result<(), String> {
+        let signed = Message::from_vec(raw)
+            .map_err(|e| format!("cannot decode response: {e}"))?
+            .signature()
+            .is_some();
+        if !signed {
+            if self.first {
+                return Err("the response is not TSIG-signed".to_string());
+            }
+            self.unsigned_count += 1;
+            if self.unsigned_count >= 100 {
+                return Err("more than 99 unsigned messages in a row".to_string());
+            }
+            self.unsigned.extend_from_slice(raw);
+            return Ok(());
+        }
+        let (body, record) = signed_bitmessage_to_buf(raw, None, self.first)
+            .map_err(|e| format!("malformed TSIG: {e}"))?;
+        let tsig = &record.data;
+        if record.name != self.key.name {
+            return Err(format!(
+                "response signed with another key ({})",
+                record.name
+            ));
+        }
+        if let Some(error) = &tsig.error {
+            return Err(format!("the server reported TSIG error {error:?}"));
+        }
+        let mut tbs = Vec::with_capacity(self.previous_mac.len() + body.len() + 2);
+        tbs.extend_from_slice(&(self.previous_mac.len() as u16).to_be_bytes());
+        tbs.extend_from_slice(&self.previous_mac);
+        tbs.extend_from_slice(&self.unsigned);
+        tbs.extend_from_slice(&body);
+        self.key
+            .algorithm
+            .verify_mac(&self.key.secret, &tbs, &tsig.mac)
+            .map_err(|_| "TSIG signature does not verify".to_string())?;
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        if now.abs_diff(tsig.time) > u64::from(tsig.fudge) {
+            return Err(format!(
+                "TSIG time {} is outside the accepted window (now {now})",
+                tsig.time
+            ));
+        }
+        self.previous_mac = tsig.mac.clone();
+        self.first = false;
+        self.unsigned.clear();
+        self.unsigned_count = 0;
+        Ok(())
+    }
+
+    /// Check that the response ended on a signed message.
+    pub fn finish(&self) -> Result<(), String> {
+        if self.first || self.unsigned_count > 0 {
+            return Err("the response does not end with a TSIG-signed message".to_string());
+        }
+        Ok(())
+    }
 }
 
 /// Verify a TSIG-signed response from a master, chaining the request MAC.
@@ -405,6 +549,104 @@ mod tests {
             RecordType::AXFR,
         ));
         msg
+    }
+
+    /// A three-message signed response, as a primary sends a large
+    /// transfer: hickory signs the first message, `sign_subsequent` the
+    /// rest. Both hickory's verifier and `ResponseVerifier` accept it, and
+    /// the verifier rejects a tampered message.
+    #[test]
+    fn multi_message_responses_chain_their_macs() {
+        use hickory_proto::op::MessageType;
+        let key = test_key();
+        let (_, request_mac) = sign_request_with_mac(&test_query(), &key).unwrap();
+
+        let message = |n: u8| {
+            let mut m = Message::new(1234, MessageType::Response, OpCode::Query);
+            m.add_answer(hickory_proto::rr::Record::from_rdata(
+                Name::from_ascii("example.com.").unwrap(),
+                60,
+                hickory_proto::rr::RData::A(hickory_proto::rr::rdata::A::new(192, 0, 2, n)),
+            ));
+            m.to_bytes().unwrap()
+        };
+        let append = |body: &[u8], tsig: &Record<TSIG>| {
+            let mut out = body.to_vec();
+            out.extend_from_slice(&tsig.to_bytes().unwrap());
+            let count = u16::from_be_bytes([out[10], out[11]]) + 1;
+            out[10..12].copy_from_slice(&count.to_be_bytes());
+            out
+        };
+
+        let first_body = message(1);
+        let first_tsig = TSigResponseContext::new(
+            1234,
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+            key.tsigner(),
+            request_mac.clone(),
+            None,
+        )
+        .sign(&first_body)
+        .unwrap();
+        let first = append(&first_body, &first_tsig);
+        let second_body = message(2);
+        let second_tsig = sign_subsequent(&key, &first_tsig.data.mac, &second_body, 1234).unwrap();
+        let second = append(&second_body, &second_tsig);
+        let third = message(3);
+        let fourth_body = message(4);
+        // The fourth message's MAC also covers the unsigned third.
+        let mut covered = third.clone();
+        covered.extend_from_slice(&fourth_body);
+        let fourth_tsig = {
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+            let tbs = subsequent_tbs(&second_tsig.data.mac, &covered, now, key.fudge);
+            let mac = key.algorithm.mac_data(&key.secret, &tbs).unwrap();
+            make_tsig_record(
+                key.name.clone(),
+                TSIG::new(
+                    key.algorithm.clone(),
+                    now,
+                    key.fudge,
+                    mac,
+                    1234,
+                    None,
+                    Vec::new(),
+                ),
+            )
+        };
+        let fourth = append(&fourth_body, &fourth_tsig);
+
+        // Hickory agrees with the subsequent-message format.
+        key.tsigner()
+            .verify_message_byte(&second, Some(&first_tsig.data.mac), false)
+            .expect("hickory verifies a later message");
+
+        let mut verifier = ResponseVerifier::new(key.clone(), request_mac.clone());
+        verifier.verify(&first).unwrap();
+        verifier.verify(&second).unwrap();
+        verifier.verify(&third).unwrap();
+        assert!(verifier.finish().is_err(), "ends on an unsigned message");
+        verifier.verify(&fourth).unwrap();
+        verifier.finish().unwrap();
+
+        // Flip a byte of the answer's address.
+        let mut tampered = second.clone();
+        tampered[second_body.len() - 1] ^= 1;
+        let mut verifier = ResponseVerifier::new(key.clone(), request_mac.clone());
+        verifier.verify(&first).unwrap();
+        assert!(verifier.verify(&tampered).is_err());
+
+        let mut verifier = ResponseVerifier::new(key, request_mac);
+        assert!(
+            verifier.verify(&first_body).is_err(),
+            "an unsigned first message"
+        );
     }
 
     #[test]

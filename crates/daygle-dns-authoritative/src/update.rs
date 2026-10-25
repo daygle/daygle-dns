@@ -115,7 +115,24 @@ pub async fn handle_update_with_notify<R: ResponseHandler>(
     // -- TSIG gate (RFC 8945) ---------------------------------------------
     // When the zone requires a signed update, verify the request signature
     // before any zone state is read or modified.
-    if let Some(required) = catalog.tsig_update_key(&zone_name) {
+    let required_key = catalog.tsig_update_key(&zone_name);
+    // Neither a client allow-list nor a TSIG key: nothing would stop a
+    // spoofed UDP update from anyone, so such a zone takes no updates.
+    if settings.update_networks.is_empty() && required_key.is_none() {
+        debug!(
+            zone = %zone_name,
+            client = %client,
+            "dynamic update refused: no update_networks and no TSIG key for this zone"
+        );
+        return respond(
+            update,
+            response_edns,
+            response_handle,
+            ResponseCode::Refused,
+        )
+        .await;
+    }
+    if let Some(required) = required_key {
         match crate::tsig::verify_request(
             &crate::tsig::TsigKeyRing::from_configs(&settings.tsig_keys).unwrap_or_default(),
             update.as_slice(),
@@ -156,6 +173,11 @@ pub async fn handle_update_with_notify<R: ResponseHandler>(
             }
         }
     }
+
+    // From here on the zone is read, checked and changed: one update at a
+    // time, or two updates could both pass prerequisites only one of them
+    // should (each adding the name the other required to be absent).
+    let _serialized = catalog.update_lock.lock().await;
 
     // -- Zone must exist and be a primary zone ----------------------------
     let zone = match store.find_zone_by_name(&zone_name) {
@@ -270,6 +292,18 @@ pub async fn handle_update_with_notify<R: ResponseHandler>(
             response_edns,
             response_handle,
             ResponseCode::Refused,
+        )
+        .await;
+    }
+
+    // Nothing to change (only an ignored SOA, or an empty update): the
+    // zone, and so its serial, stays as it is.
+    if plan.adds.is_empty() && plan.deletes.is_empty() && plan.soa.is_none() {
+        return respond(
+            update,
+            response_edns,
+            response_handle,
+            ResponseCode::NoError,
         )
         .await;
     }
@@ -395,6 +429,13 @@ fn build_update(
             }
             if rtype == RecordType::SOA && name == zone.name {
                 let soa = match &record.data {
+                    // RFC 2136 §3.4.2.2: an SOA whose serial is not newer
+                    // than the zone's is ignored. Applying it would move the
+                    // serial back, and secondaries would stop picking up
+                    // changes until it passed the old value again.
+                    RData::SOA(soa) if !crate::secondary::serial_newer(soa.serial, zone.serial) => {
+                        return Ok(());
+                    }
                     RData::SOA(soa) => SoaUpdate {
                         primary_ns: soa.mname.to_string(),
                         admin_mailbox: soa.rname.to_string(),
@@ -549,10 +590,9 @@ fn update_client_allowed(networks: &[String], client: IpAddr) -> bool {
     if networks.is_empty() {
         return true;
     }
+    // A bare address (accepted by the config check) is a single host.
     networks.iter().any(|net| {
-        net.parse::<ipnet::IpNet>()
-            .map(|ip| ip.contains(&client))
-            .unwrap_or(false)
+        daygle_dns_core::config::parse_network(net).is_some_and(|ip| ip.contains(&client))
     })
 }
 
@@ -587,6 +627,18 @@ fn fallback_response() -> ResponseInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn update_acl_accepts_bare_addresses_and_networks() {
+        let client: IpAddr = "2001:db8::5".parse().unwrap();
+        assert!(update_client_allowed(&["2001:db8::5".to_string()], client));
+        assert!(update_client_allowed(
+            &["2001:db8::/64".to_string()],
+            client
+        ));
+        assert!(!update_client_allowed(&["2001:db8::6".to_string()], client));
+        assert!(update_client_allowed(&[], client));
+    }
 
     #[test]
     fn lower_names_and_zone_membership() {

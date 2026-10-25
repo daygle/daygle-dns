@@ -282,6 +282,7 @@ async fn successful_update_sends_notify_to_targets() {
 
     let mut config = base_config(&dir.path().join("daygle-dns.db"));
     config.authoritative.allow_dynamic_updates = true;
+    config.authoritative.update_networks = vec!["127.0.0.1".to_string()];
     config.authoritative.notify_enabled = true;
     config.authoritative.notify_targets = vec![capture_addr.to_string()];
     let server = spawn(config).await;

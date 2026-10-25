@@ -71,6 +71,9 @@ pub struct SigningKeyRecord {
     pub state: String,
     /// RFC 3339 creation timestamp.
     pub created_at: String,
+    /// RFC 3339 time the key was retired (stopped signing), if it has been.
+    #[serde(default)]
+    pub retired_at: Option<String>,
 }
 
 /// A TSIG shared secret key (RFC 8945) stored in SQLite for API visibility.

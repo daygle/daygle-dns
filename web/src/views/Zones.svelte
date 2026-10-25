@@ -15,6 +15,8 @@
   // they can be seen.
   let error = $state(null);
   let notice = $state(null);
+  // The signed zone whose DS records are shown (to publish at the parent).
+  let dsZone = $state(null);
   let dialogError = $state(null);
   let showAdd = $state(false);
   let savingZone = $state(false);
@@ -472,6 +474,7 @@
         notice = `${zone.name} is now signed. Publish its DS record at the parent zone to complete the chain of trust.`;
       }
       await loadZones();
+      dsZone = zone.dnssec ? null : zones.find((z) => z.id === zone.id && z.ds?.length) || null;
     } catch (e) {
       error = formatApiError(e);
     }
@@ -570,6 +573,9 @@
                 <button class="secondary" onclick={() => onOpenRecords(zone.id)}>Records</button>
                 {#if zone.zone_type !== 'secondary'}
                   <button class="secondary" onclick={() => toggleSign(zone)} title={zone.dnssec ? 'Stop DNSSEC signing' : 'Sign the zone with DNSSEC'}>{zone.dnssec ? 'Unsign' : 'Sign'}</button>
+                  {#if zone.dnssec && zone.ds?.length}
+                    <button class="secondary" onclick={() => (dsZone = zone)} title="The DS record to publish at the parent zone (your registrar)">DS</button>
+                  {/if}
                   {#if zone.dnssec}
                     <button class="secondary" onclick={() => toggleNsec3(zone)} title={zone.nsec3 ? 'Prove missing names with NSEC' : 'Prove missing names with NSEC3, which keeps the zone from being listed by walking it'}>{zone.nsec3 ? 'Use NSEC' : 'Use NSEC3'}</button>
                   {/if}
@@ -650,6 +656,20 @@
       </tbody>
     </table>
   </div>
+  {#if dsZone}
+    <div class="card" style="margin-top: 12px">
+      <div class="spread">
+        <h3 style="margin: 0">DS for {dsZone.name}</h3>
+        <button class="secondary" onclick={() => (dsZone = null)}>Close</button>
+      </div>
+      <p class="muted">
+        Publish this at the parent zone (usually through your registrar) to
+        complete the chain of trust. During a key rollover there are two:
+        publish both, and remove the old one once its key is retired.
+      </p>
+      <pre style="white-space: pre-wrap; word-break: break-all">{dsZone.ds.join('\n')}</pre>
+    </div>
+  {/if}
   {#if rowCount === 0}
     <p class="muted">
       No zones yet. Add a primary zone to serve your own records, or a

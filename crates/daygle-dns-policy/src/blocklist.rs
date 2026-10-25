@@ -12,6 +12,10 @@ use daygle_dns_core::config::normalize_domains;
 /// suffix (`a.example.com`, `a.b.example.com`) but not the bare suffix itself
 /// (`example.com`); block that with a separate exact entry if needed.
 ///
+/// Entries prefixed with `@@` (`@@cdn.example.com`, `@@*.example.com`) are
+/// exceptions, as in adblock-style lists: a name they match is not in the
+/// list even when another entry matches it.
+///
 /// Membership is hashed, not ordered: `contains` runs on every query for the
 /// allowlist, blocklist, remote blocklist and AAAA-bypass sets, which can
 /// hold hundreds of thousands of entries.
@@ -19,6 +23,27 @@ use daygle_dns_core::config::normalize_domains;
 pub struct Blocklist {
     exact: HashSet<String>,
     suffixes: HashSet<String>,
+    except_exact: HashSet<String>,
+    except_suffixes: HashSet<String>,
+}
+
+/// The prefix that marks an exception entry.
+pub const EXCEPTION_PREFIX: &str = "@@";
+
+/// Whether any parent of `domain` (`b.example.com`, `example.com`, `com` for
+/// `a.b.example.com`) is in `suffixes`.
+fn parent_in(suffixes: &HashSet<String>, domain: &str) -> bool {
+    if suffixes.is_empty() {
+        return false;
+    }
+    let mut rest = domain;
+    while let Some((_, parent)) = rest.split_once('.') {
+        rest = parent;
+        if suffixes.contains(rest) {
+            return true;
+        }
+    }
+    false
 }
 
 impl Blocklist {
@@ -30,11 +55,19 @@ impl Blocklist {
     pub fn from_set(entries: BTreeSet<String>) -> Self {
         let mut list = Blocklist::new();
         for entry in entries {
-            if let Some(suffix) = entry.strip_prefix("*.") {
-                list.suffixes.insert(suffix.to_string());
+            let (exception, entry) = match entry.strip_prefix(EXCEPTION_PREFIX) {
+                Some(rest) => (true, rest.to_string()),
+                None => (false, entry),
+            };
+            let (exact, suffixes) = if exception {
+                (&mut list.except_exact, &mut list.except_suffixes)
             } else {
-                list.exact.insert(entry);
-            }
+                (&mut list.exact, &mut list.suffixes)
+            };
+            match entry.strip_prefix("*.") {
+                Some(suffix) => suffixes.insert(suffix.to_string()),
+                None => exact.insert(entry),
+            };
         }
         list
     }
@@ -48,31 +81,43 @@ impl Blocklist {
         self.exact.is_empty() && self.suffixes.is_empty()
     }
 
+    /// Block entries (exceptions are not counted).
     pub fn len(&self) -> usize {
         self.exact.len() + self.suffixes.len()
     }
 
     /// Whether `domain` (already normalized, no trailing dot) is blocked.
     pub fn contains(&self, domain: &str) -> bool {
-        if self.exact.contains(domain) {
-            return true;
-        }
-        // Walk the domain's parents: for `a.b.example.com` test
-        // `b.example.com`, `example.com`, `com`.
-        let mut rest = domain;
-        while let Some((_, parent)) = rest.split_once('.') {
-            rest = parent;
-            if self.suffixes.contains(rest) {
-                return true;
-            }
-        }
-        false
+        let listed = self.exact.contains(domain) || parent_in(&self.suffixes, domain);
+        listed && !(self.except_exact.contains(domain) || parent_in(&self.except_suffixes, domain))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn exceptions_override_blocks() {
+        let list = Blocklist::from_set(
+            [
+                "example.com",
+                "*.example.com",
+                "@@cdn.example.com",
+                "@@*.static.example.com",
+            ]
+            .into_iter()
+            .map(String::from)
+            .collect(),
+        );
+        assert!(list.contains("example.com"));
+        assert!(list.contains("ads.example.com"));
+        assert!(!list.contains("cdn.example.com"));
+        assert!(list.contains("a.cdn.example.com"));
+        assert!(!list.contains("img.static.example.com"));
+        assert!(list.contains("static.example.com"));
+        assert_eq!(list.len(), 2);
+    }
 
     #[test]
     fn exact_match() {

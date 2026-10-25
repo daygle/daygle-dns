@@ -6,18 +6,23 @@
 //! The [`DnssecMaintenance`] task prevents that in two ways:
 //!
 //! 1. **RRSIG renewal** - when the current signatures are older than half
-//!    their validity window, the catalog is reloaded, which re-signs every
-//!    zone with fresh inceptions. Signatures therefore always have at least
-//!    half their validity remaining.
+//!    their validity window, every signed zone's serial is bumped and the
+//!    catalog reloaded, which re-signs every zone with fresh inceptions.
+//!    Signatures therefore always have at least half their validity
+//!    remaining. The new serial is what makes secondaries transfer the
+//!    fresh signatures: without it they would keep serving the old ones
+//!    until they expired.
 //!
 //! 2. **Key rollover** - when the active key reaches `dnssec_rollover_days`
 //!    of age, a new key is generated. Both keys then sign the zone
-//!    (double-signing) and both DNSKEYs are published for
-//!    `dnssec_rollover_overlap_days`, after which the old key is retired: it
-//!    stops signing but its DNSKEY stays published for a further
-//!    `dnssec_rollover_retire_days` so validators with cached RRSIGs can
-//!    still verify (RFC 6781 pre-publish rollover), and finally the key is
-//!    deleted and its DNSKEY disappears.
+//!    (double-signing) and both DNSKEYs are published until the new key has
+//!    been out for `dnssec_rollover_overlap_days`, after which the old key
+//!    is retired: it stops signing but its DNSKEY stays published for a
+//!    further `dnssec_rollover_retire_days` so validators with cached RRSIGs
+//!    can still verify (RFC 6781 pre-publish rollover), and finally the key
+//!    is deleted and its DNSKEY disappears. Each period is counted from the
+//!    event that starts it, so a server that was down for a while never
+//!    shortens one.
 //!
 //! Note for public zones: automated rollover cannot update the parent's DS
 //! record. When the parent DS points at the old key, submit the new DS (or
@@ -71,9 +76,6 @@ pub struct DnssecMaintenance {
     store: ZoneStore,
     catalog: Arc<AuthorityCatalog>,
     config: MaintenanceConfig,
-    /// Only primary zones roll keys; replicas get their signed data (and
-    /// their key states) from the master.
-    secondary_ids: std::collections::HashSet<String>,
 }
 
 impl DnssecMaintenance {
@@ -82,15 +84,10 @@ impl DnssecMaintenance {
         catalog: Arc<AuthorityCatalog>,
         settings: &AuthoritativeSettings,
     ) -> Self {
-        let secondary_ids = store
-            .list_secondary()
-            .map(|list| list.into_iter().map(|s| s.zone_id).collect())
-            .unwrap_or_default();
         Self {
             store,
             catalog,
             config: MaintenanceConfig::from_settings(settings),
-            secondary_ids,
         }
     }
 
@@ -106,12 +103,12 @@ impl DnssecMaintenance {
             // 1. RRSIG renewal: reload re-signs everything with fresh
             //    inceptions, keeping signatures well within their validity.
             if last_resign.elapsed() >= self.config.resign_after {
-                match self.catalog.reload() {
-                    Ok(()) => {
+                match self.renew_signatures() {
+                    Ok(zones) => {
                         last_resign = Instant::now();
-                        info!("re-signed DNSSEC zones (RRSIG renewal)");
+                        info!(zones, "re-signed DNSSEC zones (RRSIG renewal)");
                     }
-                    Err(e) => warn!(error = %e, "RRSIG renewal reload failed"),
+                    Err(e) => warn!(error = %e, "RRSIG renewal failed"),
                 }
             }
 
@@ -124,6 +121,42 @@ impl DnssecMaintenance {
         }
     }
 
+    /// Bump the serial of every signed primary zone and reload, which
+    /// re-signs them all. Returns the number of signed zones.
+    pub fn renew_signatures(&self) -> Result<usize> {
+        let mut signed = 0;
+        for zone in self.primary_zones()? {
+            if self
+                .store
+                .list_signing_keys(&zone.id)?
+                .iter()
+                .any(SigningKeyRecord::is_active)
+            {
+                self.store.bump_serial(&zone.id)?;
+                signed += 1;
+            }
+        }
+        self.catalog.reload()?;
+        Ok(signed)
+    }
+
+    /// The zones this server signs itself: secondaries get their signed
+    /// data (and key states) from their master.
+    fn primary_zones(&self) -> Result<Vec<crate::model::Zone>> {
+        let secondary: std::collections::HashSet<String> = self
+            .store
+            .list_secondary()?
+            .into_iter()
+            .map(|s| s.zone_id)
+            .collect();
+        Ok(self
+            .store
+            .list_zones()?
+            .into_iter()
+            .filter(|z| !secondary.contains(&z.id))
+            .collect())
+    }
+
     /// Advance every zone's rollover state machine by one step. Returns the
     /// number of key events (new keys generated, keys retired, keys deleted).
     /// When anything changed the catalog is reloaded so the new state is
@@ -132,10 +165,7 @@ impl DnssecMaintenance {
         let mut events = 0usize;
         let mut changed = false;
 
-        for zone in self.store.list_zones()? {
-            if self.secondary_ids.contains(&zone.id) {
-                continue;
-            }
+        for zone in self.primary_zones()? {
             let keys = self.store.list_signing_keys(&zone.id)?;
             if keys.is_empty() {
                 continue; // unsigned zone
@@ -168,17 +198,18 @@ impl DnssecMaintenance {
             }
 
             // -- Retire the superseded key -------------------------------
-            // An active key older than rollover + overlap retires once a
-            // newer active key exists, so the zone is never left unsigned.
-            let retire_after = self.config.rollover_after + self.config.overlap;
+            // An older active key retires once its successor has been
+            // published and signing for the overlap period, so the zone is
+            // never left unsigned and validators have seen the new DNSKEY.
             let newest_active = active
                 .iter()
                 .map(|k| key_created_at(k))
                 .max()
                 .unwrap_or(DateTime::<Utc>::MIN_UTC);
+            let successor_age = age_since(newest_active);
             for key in &active {
-                if key_age(key) >= retire_after
-                    && key_created_at(key) < newest_active
+                if key_created_at(key) < newest_active
+                    && successor_age >= self.config.overlap
                     && self.store.set_key_state(&key.id, "retired")?
                 {
                     changed = true;
@@ -192,9 +223,15 @@ impl DnssecMaintenance {
             }
 
             // -- Delete fully aged-out keys ------------------------------
-            let delete_after = retire_after + self.config.retire;
+            // Counted from retirement: the old key's last signatures may sit
+            // in caches until then.
             for key in &retired {
-                if key_age(key) >= delete_after && self.store.delete_key(&key.id)? {
+                let retired_at = key
+                    .retired_at
+                    .as_deref()
+                    .and_then(|t| DateTime::parse_from_rfc3339(t).ok())
+                    .map_or_else(Utc::now, |t| t.with_timezone(&Utc));
+                if age_since(retired_at) >= self.config.retire && self.store.delete_key(&key.id)? {
                     changed = true;
                     events += 1;
                     info!(zone = %zone.name, "DNSSEC rollover: removed old key");
@@ -219,13 +256,12 @@ fn key_created_at(key: &SigningKeyRecord) -> DateTime<Utc> {
 
 /// Age of a key since its creation timestamp.
 fn key_age(key: &SigningKeyRecord) -> Duration {
-    let created = key_created_at(key);
-    let now = Utc::now();
-    if now <= created {
-        Duration::ZERO
-    } else {
-        Duration::from_secs((now - created).num_seconds().max(0) as u64)
-    }
+    age_since(key_created_at(key))
+}
+
+/// Time elapsed since `then` (zero for a time in the future).
+fn age_since(then: DateTime<Utc>) -> Duration {
+    Duration::from_secs((Utc::now() - then).num_seconds().max(0) as u64)
 }
 
 #[cfg(test)]
@@ -292,11 +328,32 @@ mod tests {
         states
     }
 
+    /// Age the zone's newest key (the rollover successor) by `hours`.
+    fn age_newest_key(m: &DnssecMaintenance, zone_id: &str, hours: i64) {
+        let newest = m.store.list_signing_keys(zone_id).unwrap().pop().unwrap();
+        m.store
+            .set_key_created_at(&newest.id, Utc::now() - chrono::Duration::hours(hours))
+            .unwrap();
+    }
+
+    /// Age the zone's retired key's retirement by `hours`.
+    fn age_retirement(m: &DnssecMaintenance, zone_id: &str, hours: i64) {
+        let retired = m
+            .store
+            .list_signing_keys(zone_id)
+            .unwrap()
+            .into_iter()
+            .find(|k| k.is_retired())
+            .unwrap();
+        m.store
+            .set_key_retired_at(&retired.id, Utc::now() - chrono::Duration::hours(hours))
+            .unwrap();
+    }
+
     #[test]
     fn rollover_advances_through_all_stages() {
         let m = maintenance(1);
-        // The key is 48 h old: past the 24 h rollover threshold, and exactly
-        // at the 48 h retire threshold.
+        // The key is 48 h old: past the 24 h rollover threshold.
         let zone = zone_with_key(&m, "roll.test", chrono::Duration::hours(48));
 
         // Pass 1: the old key is past rollover age -> a new key is
@@ -304,27 +361,44 @@ mod tests {
         assert_eq!(m.process_rollover().unwrap(), 1);
         assert_eq!(key_states(&m, &zone.id), vec!["active", "active"]);
 
-        // Pass 2: the old key (48 h >= 48 h rollover+overlap) retires; it is
-        // not yet old enough to be deleted (needs 72 h).
+        // The successor is brand new: the overlap has not run yet, however
+        // old the old key is.
+        assert_eq!(m.process_rollover().unwrap(), 0);
+
+        // After the 24 h overlap the old key retires; its grace period has
+        // only just started, so it is not deleted yet.
+        age_newest_key(&m, &zone.id, 25);
         assert_eq!(m.process_rollover().unwrap(), 1);
         assert_eq!(key_states(&m, &zone.id), vec!["active", "retired"]);
+        assert_eq!(m.process_rollover().unwrap(), 0);
 
-        // Age the retired key past the delete threshold and remove it.
-        let old_key = m
-            .store
-            .list_signing_keys(&zone.id)
-            .unwrap()
-            .into_iter()
-            .find(|k| k.is_retired())
-            .unwrap();
-        m.store
-            .set_key_created_at(&old_key.id, Utc::now() - chrono::Duration::hours(96))
-            .unwrap();
+        // 24 h after retirement it is removed.
+        age_retirement(&m, &zone.id, 25);
         assert_eq!(m.process_rollover().unwrap(), 1);
         assert_eq!(key_states(&m, &zone.id), vec!["active"]);
 
         // Steady state: one active, young key - nothing happens.
+        age_newest_key(&m, &zone.id, 0);
         assert_eq!(m.process_rollover().unwrap(), 0);
+    }
+
+    #[test]
+    fn renewal_bumps_signed_zones_only() {
+        let m = maintenance(1);
+        let signed = zone_with_key(&m, "signed.test", chrono::Duration::hours(1));
+        let plain = m
+            .store
+            .create_zone(&ZoneInput {
+                name: "plain.test".to_string(),
+                ..Default::default()
+            })
+            .unwrap();
+        let before = |id: &str| m.store.get_zone(id).unwrap().unwrap().serial;
+        let (signed_serial, plain_serial) = (before(&signed.id), before(&plain.id));
+
+        assert_eq!(m.renew_signatures().unwrap(), 1);
+        assert_eq!(before(&signed.id), signed_serial + 1);
+        assert_eq!(before(&plain.id), plain_serial);
     }
 
     #[test]
@@ -349,19 +423,22 @@ mod tests {
     }
 
     #[test]
-    fn ancient_key_is_replaced_and_removed() {
+    fn ancient_key_still_gets_the_full_overlap_and_grace() {
         let m = maintenance(1);
-        // A single key left far past every threshold (e.g. after an
-        // abandoned rollover or a very long gap): rollover starts, and on
-        // the next pass the old key retires and is deleted in one go.
+        // A single key left far past every threshold (e.g. after a long
+        // outage): rollover starts, but the old key keeps signing until the
+        // new one has been out for the overlap, and stays published for the
+        // grace period after retiring.
         let zone = zone_with_key(&m, "ancient.test", chrono::Duration::hours(100));
 
         assert_eq!(m.process_rollover().unwrap(), 1);
         assert_eq!(key_states(&m, &zone.id), vec!["active", "active"]);
-        // Pass 2 retires the old key; pass 3 deletes it (state changes are
-        // observed one pass apart, never cascaded within a single pass).
+        assert_eq!(m.process_rollover().unwrap(), 0);
+        age_newest_key(&m, &zone.id, 25);
         assert_eq!(m.process_rollover().unwrap(), 1);
         assert_eq!(key_states(&m, &zone.id), vec!["active", "retired"]);
+        assert_eq!(m.process_rollover().unwrap(), 0);
+        age_retirement(&m, &zone.id, 25);
         assert_eq!(m.process_rollover().unwrap(), 1);
         assert_eq!(key_states(&m, &zone.id), vec!["active"]);
     }
@@ -409,6 +486,7 @@ mod tests {
             key_der: vec![],
             state: "active".to_string(),
             created_at: "not-a-date".to_string(),
+            retired_at: None,
         };
         // Treated as "created now": age ~0, so no threshold can fire.
         assert!(key_age(&key) < Duration::from_secs(60));

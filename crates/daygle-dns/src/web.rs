@@ -317,7 +317,10 @@ async fn redirect_to_https(
         .and_then(|h| h.to_str().ok())
         .map(host_without_port)
         .unwrap_or_default();
-    if host.is_empty() {
+    // The target is built from the client's own Host header: only a plain
+    // host name or address goes into it, so a crafted header cannot turn
+    // the redirect into one to another path or scheme.
+    if !is_plain_host(host) {
         return next.run(req).await;
     }
     let port = if s.https_port == 443 {
@@ -333,6 +336,19 @@ async fn redirect_to_https(
     Redirect::permanent(&format!("https://{host}{port}{path}")).into_response()
 }
 
+/// Whether `host` is a bare host name, IPv4 address or bracketed IPv6
+/// address (nothing that could carry a path, user info or another port).
+fn is_plain_host(host: &str) -> bool {
+    if let Some(inner) = host.strip_prefix('[').and_then(|h| h.strip_suffix(']')) {
+        return inner.parse::<std::net::Ipv6Addr>().is_ok();
+    }
+    !host.is_empty()
+        && host.len() <= 253
+        && host
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-')
+}
+
 /// `example.com:5380` -> `example.com`, `[::1]:5380` -> `[::1]`.
 fn host_without_port(host: &str) -> &str {
     if host.starts_with('[') {
@@ -343,7 +359,18 @@ fn host_without_port(host: &str) -> &str {
 
 #[cfg(test)]
 mod tests {
-    use super::host_without_port;
+    use super::{host_without_port, is_plain_host};
+
+    #[test]
+    fn only_plain_hosts_are_redirected_to() {
+        assert!(is_plain_host("dns.example.com"));
+        assert!(is_plain_host("192.168.1.2"));
+        assert!(is_plain_host("[::1]"));
+        assert!(!is_plain_host(""));
+        assert!(!is_plain_host("evil.example/path"));
+        assert!(!is_plain_host("user@evil.example"));
+        assert!(!is_plain_host("[not-an-address]"));
+    }
 
     #[test]
     fn strips_the_port_from_a_host_header() {

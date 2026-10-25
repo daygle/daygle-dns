@@ -5,7 +5,9 @@
 //! A refresh compares the master's SOA serial against the local serial and
 //! performs a transfer when the master is newer (or the local zone is empty).
 //! Transferred records replace the stored zone data and the catalog is
-//! reloaded so new answers are served immediately.
+//! reloaded so new answers are served immediately. The transfer is also kept
+//! exactly as received, DNSSEC signatures and all, and the zone is served
+//! from it: a signed zone stays signed on this secondary.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -28,6 +30,9 @@ pub struct SecondaryRefresher {
     zones: std::sync::Arc<std::sync::RwLock<Vec<SecondaryZoneConfig>>>,
     changed: std::sync::Arc<tokio::sync::Notify>,
     client: XfrClient,
+    /// One refresh at a time: a NOTIFY-triggered refresh racing the
+    /// periodic one could otherwise store an older transfer last.
+    refreshing: tokio::sync::Mutex<()>,
 }
 
 impl SecondaryRefresher {
@@ -60,6 +65,7 @@ impl SecondaryRefresher {
             zones: std::sync::Arc::new(std::sync::RwLock::new(zones)),
             changed: std::sync::Arc::new(tokio::sync::Notify::new()),
             client,
+            refreshing: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -151,13 +157,31 @@ impl SecondaryRefresher {
 
     /// Synchronize a single secondary zone. Returns `true` when data changed.
     pub async fn refresh_zone(&self, config: &SecondaryZoneConfig) -> Result<bool> {
+        let _refreshing = self.refreshing.lock().await;
         let zone = self.ensure_zone(config)?;
         let zone_name: Name = fqdn(&config.name)?;
+        let tsig = match config.tsig_key.trim() {
+            "" => None,
+            name => Some(
+                self.catalog
+                    .tsig_key_ring()
+                    .get_by_config_name(name)
+                    .cloned()
+                    .ok_or_else(|| {
+                        DaygleError::Config(format!(
+                            "secondary zone '{}' names TSIG key '{name}', which is not configured",
+                            config.name
+                        ))
+                    })?,
+            ),
+        };
 
         let mut last_error: Option<DaygleError> = None;
         for master in &config.masters {
             let addr = daygle_dns_core::config::parse_master_addr(master)
                 .map_err(|e| DaygleError::Config(format!("bad master '{master}': {e}")))?;
+            // The serial check is a hint and goes unsigned (masters do not
+            // all sign ordinary answers); the transfer itself is signed.
             match self.client.query_soa(addr, &zone_name).await {
                 Ok(Some(soa)) => {
                     let master_serial = match &soa.data {
@@ -168,15 +192,23 @@ impl SecondaryRefresher {
                     // A zone that has never completed a transfer (freshly
                     // created, or after a restart before the first sync) is
                     // always pulled, even when the default serial matches.
-                    let never_transferred = !self.store_has_transferred(&zone.id)?;
-                    let needs = never_transferred
-                        || serial_newer(master_serial, current_serial)
-                        || zone_has_no_data(&self.store, &zone.id)?;
-                    if !needs {
+                    // A copy kept before transfers were stored verbatim is
+                    // pulled once more, so it is served as the master signed it.
+                    let full = !self.store_has_transferred(&zone.id)?
+                        || zone_has_no_data(&self.store, &zone.id)?
+                        || self.store.transfer_data(&zone.id)?.is_none();
+                    if !full && !serial_newer(master_serial, current_serial) {
                         return Ok(false);
                     }
                     return self
-                        .transfer_from(addr, &zone_name, master_serial, current_serial, &zone.id)
+                        .transfer_from(
+                            addr,
+                            &zone_name,
+                            master_serial,
+                            (!full).then_some(current_serial),
+                            tsig.as_ref(),
+                            &zone.id,
+                        )
                         .await;
                 }
                 Ok(None) => {
@@ -197,18 +229,41 @@ impl SecondaryRefresher {
         }))
     }
 
+    /// Pull the zone: incrementally from `current_serial` when given (IXFR,
+    /// which may report no change), else in full (AXFR).
     async fn transfer_from(
         &self,
         master: std::net::SocketAddr,
         zone_name: &Name,
         master_serial: u32,
-        current_serial: u32,
+        current_serial: Option<u32>,
+        tsig: Option<&crate::tsig::TsigKey>,
         zone_id: &str,
     ) -> Result<bool> {
-        let records = self
-            .client
-            .ixfr_or_axfr(master, zone_name, Some(current_serial))
-            .await?;
+        let records = match current_serial {
+            Some(serial) => {
+                match self
+                    .client
+                    .ixfr_or_axfr(master, zone_name, serial, tsig)
+                    .await?
+                {
+                    Some(records) => records,
+                    None => return Ok(false),
+                }
+            }
+            None => self.client.axfr_signed(master, zone_name, tsig).await?,
+        };
+        // A transfer opens and closes with the SOA. Anything else (an empty
+        // answer, a cut-off stream) must not replace the zone.
+        let complete = records.len() >= 2
+            && records.first().map(Record::record_type) == Some(RecordType::SOA)
+            && records.last().map(Record::record_type) == Some(RecordType::SOA);
+        if !complete {
+            return Err(DaygleError::Proto(format!(
+                "incomplete transfer of {zone_name} from {master}"
+            )));
+        }
+        let wire = crate::catalog::encode_transfer(&records[..records.len() - 1])?;
 
         // Apply the transfer: extract SOA metadata, store the rest.
         let (soa, inputs) = records_to_inputs(zone_name, &records);
@@ -236,6 +291,7 @@ impl SecondaryRefresher {
         }
 
         self.store.replace_records(zone_id, &inputs)?;
+        self.store.set_transfer_data(zone_id, &wire)?;
         self.store.touch_secondary(zone_id)?;
         self.catalog.reload()?;
         info!(zone = %zone_name, records = inputs.len(), "secondary zone transferred from {master}");
@@ -278,7 +334,7 @@ fn stored_secondaries(store: &ZoneStore) -> Result<Vec<SecondaryZoneConfig>> {
 
 /// True when `master` is a newer serial than `local` under RFC 1982 serial
 /// arithmetic (wraps at 2^31).
-fn serial_newer(master: u32, local: u32) -> bool {
+pub(crate) fn serial_newer(master: u32, local: u32) -> bool {
     master != local && (master.wrapping_sub(local) as i32) > 0
 }
 
@@ -321,9 +377,10 @@ impl SecondaryRefresher {
     }
 }
 
-/// Convert transfer records into store inputs, extracting the SOA separately.
-/// DNSSEC records (RRSIG, NSEC, DNSKEY, ...) and OPT are dropped - the local
-/// catalog re-signs zones that have signing keys.
+/// Convert transfer records into store inputs (the zone's record list in
+/// the console), extracting the SOA separately. DNSSEC records (RRSIG,
+/// NSEC, DNSKEY, ...) and OPT are left out; they are served from the
+/// stored transfer.
 /// SOA fields extracted from a transferred zone: `(mname, rname, serial,
 /// refresh, retry, expire, minimum)`.
 type SoaFields = (String, String, u32, u32, u32, u32, u32);

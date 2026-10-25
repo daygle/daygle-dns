@@ -26,7 +26,8 @@
   let autoModels = $state(false);
   let autoBusy = $state(false);
   let pollTimer = null;
-  const RUNNING = ['preparing', 'downloading', 'installing', 'applying', 'restarting', 'rolling_back'];
+  // Must match UpdateState::is_running on the server.
+  const RUNNING = ['preparing', 'downloading', 'cloning', 'building', 'installing', 'applying', 'restarting', 'rolling_back'];
 
   function fmtSize(bytes) {
     if (bytes == null) return '-';

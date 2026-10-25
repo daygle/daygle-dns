@@ -45,15 +45,19 @@ DNS over HTTPS, DNS over QUIC, and an HTTP API/GUI.
   label-aligned suffix match.
 - **`daygle-dns-dot`** produces rustls TLS configurations for the encrypted
   DNS protocols - the `dot` ALPN for DoT (RFC 7858), `h2` for DoH (RFC 8484)
-  and a TLS 1.3 + `doq`-ALPN setup for DoQ (RFC 9250, served by Hickory's
-  QUIC listener) - and generates self-signed certificates when configured.
+  and a TLS 1.3 + `doq`-ALPN setup for DoQ (RFC 9250) - and generates
+  self-signed certificates when configured.
 - **`daygle-dns-api`** serves the REST API and the embedded GUI, including
   console login (PBKDF2 password verification + in-memory session tokens,
   `admin`/`viewer` roles enforced in the auth middleware) and the dashboard
   statistics endpoint backed by `daygle-dns-core`'s bounded `QueryStats`.
 - **`daygle-dns-gui`** embeds the compiled Svelte bundle via `rust-embed`.
-- **`daygle-dns`** (binary) binds UDP/TCP/DoT/DoH/DoQ listeners onto one
-  Hickory `Server` driven by `DnsDispatcher`.
+- **`daygle-dns`** (binary) binds the UDP/TCP/DoH listeners onto one
+  Hickory `Server` driven by `DnsDispatcher`, and serves DoT and DoQ with its
+  own listeners (`dot.rs`, `doq.rs`) that feed the same dispatcher: DoT
+  answers the queries of one connection concurrently and out of order
+  (RFC 7766), pads answers to padded queries (RFC 8467) and caps connections
+  per client.
 
 ## Query flow
 
@@ -127,7 +131,8 @@ listener:
   Hickory catalog marks them `ZoneType::Secondary`.
 - NOTIFY (RFC 1996) closes the loop in both directions. Outbound: the
   `NotifySender` sends a NOTIFY (OpCode 4, QTYPE SOA, UDP) to each configured
-  `notify_targets` after a successful dynamic update on a primary zone.
+  `notify_targets` whenever a primary zone is served with a new serial (the
+  catalog reports these on every reload, whatever made the change).
   Inbound: the dispatcher intercepts OpCode::Notify on the regular DNS
   listeners (no extra socket) and `NotifyInbound` answers NOTIFYs for
   configured secondary zones with the current SOA, then triggers an
@@ -173,21 +178,27 @@ same path for per-source status.
 - **Signing** (authoritative path) is per-zone: `POST /api/zones/:id/sign`
   generates an ECDSA P-256 key (stored as PKCS#8 in SQLite) and signs the zone
   with NSEC non-existence proofs on the next catalog reload. Signatures are
-  valid for `dnssec_sig_validity_days` (default 14) from their inception.
+  valid for `dnssec_sig_validity_days` (default 14) from their inception,
+  which is backdated one hour to absorb validator clock skew. A signed zone
+  is served with its stored serial, and transferred (AXFR/IXFR) exactly as
+  served: RRSIGs, NSEC/NSEC3 and DNSKEYs included. Secondaries keep a
+  transfer as received and serve it unaltered, so a signed master stays
+  signed on every secondary.
 - **Maintenance** (`daygle-dns-authoritative`'s `DnssecMaintenance`, spawned when
   `dnssec_enabled`) keeps signed zones valid forever. Every
   `dnssec_maintenance_secs` it checks two things: when signatures are older
-  than half their validity window it reloads the catalog, which re-signs
-  every zone with fresh inceptions (so signatures always have at least half
-  their validity left); and it advances the automatic key rollover state
+  than half their validity window it bumps every signed zone's serial and
+  reloads the catalog, which re-signs every zone with fresh inceptions (so
+  signatures always have at least half their validity left, on secondaries
+  too); and it advances the automatic key rollover state
   machine (see below). Key state changes are stored in SQLite (`dnssec_keys`:
   `active`/`retired`, with creation timestamps) so rollover survives restarts.
 - **Automatic key rollover**: when the active key reaches
   `dnssec_rollover_days` (default 90), a new key is generated and both keys
-  sign every RRset (double-signing) with both DNSKEYs published. After
-  `dnssec_rollover_overlap_days` (default 30) the old key is retired: it
-  stops signing but its DNSKEY stays published for a further
-  `dnssec_rollover_retire_days` (default 14) so validators holding cached
+  sign every RRset (double-signing) with both DNSKEYs published. Once the new
+  key has been out for `dnssec_rollover_overlap_days` (default 30) the old
+  key is retired: it stops signing but its DNSKEY stays published for a
+  further `dnssec_rollover_retire_days` (default 14) from its retirement so validators holding cached
   RRSIGs can still build a chain (RFC 6781 pre-publish rollover), then the
   key is deleted and its DNSKEY disappears. A rollover never removes the
   only active key, does not stack a third key while one is in flight, and

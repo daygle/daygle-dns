@@ -17,13 +17,18 @@
 # __DAYGLE_DNS_UPDATES_DIR__/__DAYGLE_DNS_MODELS_DIR__/__DAYGLE_DNS_USER__):
 #   <updates>/request               - empty trigger marker (created atomically
 #                                     by the updater after staging completes)
-#   <updates>/staging/apply.json   - {"kind":"release|models","version":"x.y.z","sha256":"<64hex>"}
-#   <updates>/staging/apply.bin    - the staged, checksum-verified binary (or
-#                                     models bundle tar.gz for kind=models)
+#   <updates>/staging/apply.json   - {"kind":"install|models","version":"x.y.z","sha256":"<64hex>"}
+#   <updates>/staging/apply.bin    - the staged installer script (kind=install)
+#                                     or models bundle tar.gz (kind=models)
 #
 # Only the fixed staging paths are ever touched (the manifest cannot select a
-# path), and the staged binary is validated against the manifest's sha256, so
-# a hostile request cannot cause an arbitrary file to be installed.
+# path). The manifest's sha256 is written by the same unprivileged account
+# that writes apply.bin, so it only proves the copy is intact - never that
+# the content is genuine. Root therefore trusts nothing it did not fetch
+# itself: kind=install runs an installer root downloads from the canonical
+# repository, and kind=models installs a bundle only when its checksum
+# matches the one published with that release (fetched by root). Any other
+# kind - including the retired binary-swap "release" kind - is refused.
 
 set -eu
 
@@ -39,6 +44,24 @@ DIR="${DAYGLE_DNS_UPDATE_DIR:-/tmp/daygle-dns-update}"
 # (mirrors update.rs MODEL_FILES). Nothing in a manifest or a bundle ever
 # selects another path.
 MODEL_WHITELIST="daygle-starter.bin all-MiniLM-L6-v2-int8.onnx minilm-tokenizer.json minilm-centroids.json"
+
+# Canonical sources, fixed here (the same ones install.sh itself uses): root
+# never takes a URL, or content it runs, from the service-writable dirs.
+REPO_SLUG="daygle/daygle-dns"
+INSTALLER_URL="https://raw.githubusercontent.com/$REPO_SLUG/main/install.sh"
+REPO_URL="https://github.com/$REPO_SLUG.git"
+RELEASE_BASE_URL="https://github.com/$REPO_SLUG/releases/download"
+
+# Download over HTTPS only (redirects included) as root.
+root_fetch() { # url dest
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsSL --proto '=https' --proto-redir '=https' --retry 3 --connect-timeout 15 -o "$2" "$1"
+  elif command -v wget >/dev/null 2>&1; then
+    wget -q --tries=3 -O "$2" "$1"
+  else
+    return 1
+  fi
+}
 
 # This step runs as root, but $DIR (and everything under $UPDATES_DIR) is
 # writable by the unprivileged service account. Root therefore never opens
@@ -134,18 +157,44 @@ case "$API_HOST" in
 esac
 HEALTH_URL="http://$API_HOST:$API_PORT/api/health"
 
-# Wait up to 15s for the unit to be active and the API to answer.
+# Wait up to 90 s for the service to come up. The console answering
+# /api/health proves it. The console may not be where the config file says
+# (moved to another port or HTTPS-only in Settings, which the database holds),
+# so the unit staying active under one process for 20 s proves it too: a
+# start that fails exits and is restarted under a new process.
 health_check() {
   i=0
-  while [ $i -lt 15 ]; do
+  pid=""
+  steady=0
+  while [ $i -lt 90 ]; do
     sleep 1
-    if systemctl is-active --quiet daygle-dns 2>/dev/null \
-       && curl -fsS --max-time 2 "$HEALTH_URL" >/dev/null 2>&1; then
+    i=$((i + 1))
+    if ! systemctl is-active --quiet daygle-dns 2>/dev/null; then
+      pid=""
+      steady=0
+      continue
+    fi
+    if curl -fsS --max-time 2 "$HEALTH_URL" >/dev/null 2>&1; then
       return 0
     fi
-    i=$((i + 1))
+    now="$(systemctl show daygle-dns -p MainPID --value 2>/dev/null || true)"
+    if [ -n "$now" ] && [ "$now" != 0 ] && [ "$now" = "$pid" ]; then
+      steady=$((steady + 1))
+      if [ $steady -ge 20 ]; then
+        log "service up (pid $now) without the console answering at $HEALTH_URL"
+        return 0
+      fi
+    else
+      pid="$now"
+      steady=0
+    fi
   done
   return 1
+}
+
+# Checksum of a file (empty when unreadable).
+file_sha() {
+  (sha256sum "$1" 2>/dev/null || shasum -a 256 "$1" 2>/dev/null) | cut -d' ' -f1 | tr -d '[:space:]'
 }
 
 # Nothing pending: the marker's own rename/removal events can re-trigger this
@@ -174,17 +223,24 @@ fi
 VERSION="$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$MANIFEST" | head -n 1)"
 SHA256="$(sed -n 's/.*"sha256"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$MANIFEST" | head -n 1)"
 KIND="$(sed -n 's/.*"kind"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$MANIFEST" | head -n 1)"
-KIND="${KIND:-release}"
 BAD=""
+case "$KIND" in
+  install|models) ;;
+  *) BAD="unsupported update kind '$KIND' in the update manifest" ;;
+esac
 
 # Strict validation of the manifest: version is dotted numerics only; sha256
 # is exactly 64 hex chars. Nothing in the manifest ever selects a path.
-case "$VERSION" in
-  ''|*[!0-9.]*|*..*|.*|*.) BAD="invalid version '$VERSION' in the update manifest" ;;
-esac
-case "$SHA256" in
-  ''|*[!0-9a-fA-F]*) BAD="invalid sha256 in the update manifest" ;;
-esac
+if [ -z "$BAD" ]; then
+  case "$VERSION" in
+    ''|*[!0-9.]*|*..*|.*|*.) BAD="invalid version '$VERSION' in the update manifest" ;;
+  esac
+fi
+if [ -z "$BAD" ]; then
+  case "$SHA256" in
+    ''|*[!0-9a-fA-F]*) BAD="invalid sha256 in the update manifest" ;;
+  esac
+fi
 if [ -z "$BAD" ] && [ "${#SHA256}" -ne 64 ]; then
   BAD="invalid sha256 length in the update manifest"
 fi
@@ -204,15 +260,17 @@ if [ -z "$ACTUAL" ] || [ "$ACTUAL" != "$SHA256" ]; then
 fi
 
 # ---- installer-run update ---------------------------------------------
-# The staged file is the canonical installer script (install.sh), fetched by
-# the unprivileged updater from the repository's main branch - the same
-# one-line install an operator would run by hand, run here as root through
-# this dedicated oneshot. Configuration-affecting rewrites ([api] listen,
-# console accounts) are disabled for this run via DAYGLE_DNS_GUI_UPDATE=1;
-# the deployment's own config file is never touched.
+# The canonical installer script (install.sh) from the repository's main
+# branch - the same one-line install an operator would run by hand - run
+# here as root through this dedicated oneshot. Configuration-affecting
+# rewrites ([api] listen, console accounts) are disabled for this run via
+# DAYGLE_DNS_GUI_UPDATE=1; the deployment's own config file is never touched.
 #
-# $BIN is the already sha-verified root-private copy, so the script is run
-# from there, never from the service-writable staged file. Real deployment
+# The service account staged its own copy, but root never runs that: a
+# compromised service account could stage any script with a matching
+# manifest checksum and so run code as root. Root downloads the installer
+# itself from the canonical URL (or, without a downloader, takes it from a
+# fresh clone of the canonical repository) into its private dir. Real deployment
 # paths are handed in via the environment the installer already accepts
 # (PREFIX/CONFIG_DIR/DATA_DIR/SERVICE_USER/PRIV_LIB_DIR), derived from the
 # paths the installer baked into this helper - so a customised install is
@@ -221,7 +279,18 @@ if [ "$KIND" = "install" ]; then
   state applying "Running the full installer (this can take several minutes)..."
   log "running the canonical installer for v${VERSION}"
 
-  cp -f "$BIN" "$PRIV/install.sh"
+  if root_fetch "$INSTALLER_URL" "$PRIV/install.sh" 2>>"$LOG" && [ -s "$PRIV/install.sh" ]; then
+    :
+  elif command -v git >/dev/null 2>&1 \
+       && git clone --depth 1 "$REPO_URL" "$PRIV/repo" >>"$LOG" 2>&1 \
+       && cp -f "$PRIV/repo/install.sh" "$PRIV/install.sh"; then
+    :
+  else
+    log "cannot fetch the canonical installer from $INSTALLER_URL"
+    rm -f "$REQ.processing"
+    fail "the update service could not download the canonical installer ($INSTALLER_URL). Check this host's network access to GitHub and retry."
+    exit 1
+  fi
   chmod 0700 "$PRIV/install.sh"
 
   # Deployment layout from the baked-in helper paths (mirroring how
@@ -241,13 +310,51 @@ if [ "$KIND" = "install" ]; then
   export DAYGLE_DNS_GUI_UPDATE=1
   unset DAYGLE_DNS_ADMIN_USER DAYGLE_DNS_ADMIN_PASSWORD DAYGLE_DNS_LAN_GUI DAYGLE_DNS_NO_DEPS || true
 
+  # The checkout and release build take gigabytes: keep them off /tmp,
+  # which many distributions mount as a small tmpfs (RAM).
+  if [ -z "${TMPDIR:-}" ] && [ -d /var/tmp ]; then
+    BUILD_TMP=/var/tmp
+  else
+    BUILD_TMP="${TMPDIR:-/tmp}"
+  fi
+
+  # Keep the binary the service runs now, to put back if the new one does
+  # not come up. Prefer the running image: a previous update can have
+  # replaced the file while this server kept running from the old inode.
+  ROLLBACK="$PRIV/rollback.bin"
+  BACKUP_SRC="$EXE"
+  MAINPID="$(systemctl show daygle-dns -p MainPID --value 2>/dev/null || true)"
+  case "$MAINPID" in
+    ''|0) ;;
+    *) if [ -r "/proc/$MAINPID/exe" ]; then BACKUP_SRC="/proc/$MAINPID/exe"; fi ;;
+  esac
+  if ! cp -f "$BACKUP_SRC" "$ROLLBACK" 2>>"$LOG"; then
+    ROLLBACK=""
+    log "could not keep a copy of the current binary; a failed update cannot be rolled back"
+  fi
+
+  # Put the kept binary back and restart; false when there is nothing to
+  # roll back (no copy, or the installer never replaced the binary).
+  rollback_binary() {
+    [ -n "$ROLLBACK" ] && [ -s "$ROLLBACK" ] || return 1
+    [ "$(file_sha "$ROLLBACK")" != "$(file_sha "$EXE")" ] || return 1
+    state rolling_back "The update did not come up - restoring the previous version..."
+    log "rolling back $EXE to the previous binary"
+    install -m 0755 "$ROLLBACK" "$EXE.rollback" 2>>"$LOG" && mv -f "$EXE.rollback" "$EXE" || return 1
+    systemctl restart daygle-dns 2>>"$LOG" || true
+    return 0
+  }
+
   # Run in the background so progress can be streamed: the installer's last
   # log line becomes the state message the console shows while it clones,
   # builds and installs (several minutes on a small host).
   : > "$PRIV/installer-exit"
+  # (`|| rc=$?`: under `set -e` a failing installer would otherwise end the
+  # subshell before its exit code is recorded, and every failure read as 1.)
   (
-    sh "$PRIV/install.sh" >>"$LOG" 2>&1
-    printf '%s' "$?" > "$PRIV/installer-exit"
+    rc=0
+    TMPDIR="$BUILD_TMP" sh "$PRIV/install.sh" >>"$LOG" 2>&1 || rc=$?
+    printf '%s' "$rc" > "$PRIV/installer-exit"
   ) &
   WORKER="$!"
 
@@ -277,16 +384,30 @@ if [ "$KIND" = "install" ]; then
       exit 0
     fi
     rm -f "$REQ.processing" "$MANIFEST" "$STAGED_BIN"
-    fail "the installer completed but the service health check failed. The installer rebuilt and installed v${VERSION}; check the service with 'systemctl status daygle-dns' (details in apply.log)."
+    log "health check failed after installing v${VERSION}"
+    if rollback_binary; then
+      if health_check; then
+        fail "v${VERSION} was installed but did not come up, so the previous version was restored and is running again. Details in apply.log."
+      else
+        fail "v${VERSION} did not come up, and neither did the restored previous version. Check 'systemctl status daygle-dns' (details in apply.log)."
+      fi
+    else
+      fail "the installer completed but the service health check failed, and no previous binary could be restored. Check 'systemctl status daygle-dns' (details in apply.log)."
+    fi
     exit 1
   fi
 
-  # Best effort: if the installer stopped/failed mid-apply, make sure the
-  # previously installed binary is still the one systemd runs.
-  systemctl start daygle-dns 2>>"$LOG" || true
+  # The installer failed. If it got as far as replacing the binary, put the
+  # previous one back; either way make sure the service is running.
   STOP="$(last_log_error_from_file "$LOG")"
   rm -f "$REQ.processing" "$MANIFEST" "$STAGED_BIN"
-  fail "the full installer failed (exit ${RC})${STOP:+ — last installer message: $STOP}. Nothing was replaced if it failed before the install step; details in apply.log."
+  if rollback_binary; then
+    WHAT="the previous version was restored"
+  else
+    systemctl start daygle-dns 2>>"$LOG" || true
+    WHAT="nothing was replaced"
+  fi
+  fail "the full installer failed (exit ${RC})${STOP:+ — last installer message: $STOP}; ${WHAT}. Details in apply.log."
   exit 1
 fi
 
@@ -298,6 +419,21 @@ fi
 if [ "$KIND" = "models" ]; then
   state applying "Applying AI model files (v${VERSION})..."
   log "applying models bundle v${VERSION} into $MODELS_DIR"
+
+  # The manifest checksum only proves the staged copy is intact; the bundle
+  # is genuine only if it matches the checksum published with the release,
+  # fetched here by root (before root extracts anything from it).
+  PUBLISHED="$PRIV/models.sha256"
+  WANT_BUNDLE=""
+  if root_fetch "$RELEASE_BASE_URL/v${VERSION}/daygle-dns-models.tar.gz.sha256" "$PUBLISHED" 2>>"$LOG"; then
+    WANT_BUNDLE="$(cut -d' ' -f1 "$PUBLISHED" 2>/dev/null | tr -d '[:space:]' | tr 'A-F' 'a-f')"
+  fi
+  if [ -z "$WANT_BUNDLE" ] || [ "$WANT_BUNDLE" != "$(printf '%s' "$ACTUAL" | tr 'A-F' 'a-f')" ]; then
+    log "rejecting models bundle: it does not match the checksum published for v${VERSION}"
+    rm -f "$REQ.processing"
+    fail "the staged AI models bundle does not match the checksum published with release v${VERSION} (or it could not be fetched) - refusing to install it."
+    exit 1
+  fi
 
   WORK="$PRIV/models"
   mkdir -p "$WORK"
@@ -403,69 +539,6 @@ if [ "$KIND" = "models" ]; then
   exit 1
 fi
 
-state applying "Applying release v${VERSION}..."
-log "applying v${VERSION} from $BIN"
-
-# Back up the current binary for rollback (best effort). Prefer the image of
-# the RUNNING process: a previous update can have swapped the on-disk file
-# while this server keeps running from the old inode, leaving the path
-# reported as "... (deleted)" - copying /proc/<MainPID>/exe captures the true
-# running version in that case. Then swap via a temp name + rename: writing
-# over a running executable fails with "Text file busy" (ETXTBSY), while
-# rename(2) swaps the directory entry atomically.
-MAINPID="$(systemctl show daygle-dns -p MainPID --value 2>/dev/null || true)"
-BACKUP_SRC="$EXE"
-case "$MAINPID" in
-  ''|0) ;;
-  *) if [ -r "/proc/$MAINPID/exe" ]; then BACKUP_SRC="/proc/$MAINPID/exe"; fi ;;
-esac
-cp -f "$BACKUP_SRC" "$EXE.bak" 2>/dev/null || true
-rm -f "$EXE.new"
-if ! install -m 0755 "$BIN" "$EXE.new"; then
-  rm -f "$EXE.new" "$REQ.processing"
-  fail "installing the new binary to $EXE failed (install step). Please check the disk and retry."
-  exit 1
-fi
-if ! mv -f "$EXE.new" "$EXE"; then
-  rm -f "$EXE.new" "$REQ.processing"
-  fail "installing the new binary to $EXE failed (swap step). Please check the disk and retry."
-  exit 1
-fi
-
-state restarting "Restarting the service..."
-if ! systemctl restart daygle-dns; then
-  log "systemctl restart daygle-dns failed after install"
-  rm -f "$REQ.processing"
-  if [ -f "$EXE.bak" ]; then
-    mv -f "$EXE.bak" "$EXE"
-    systemctl restart daygle-dns 2>>"$LOG" || true
-    fail "the new binary was installed but the service restart failed; the previous version was restored."
-  else
-    fail "the new binary was installed but the service restart failed and no backup was available for rollback."
-  fi
-  exit 1
-fi
-
-# Health check: the service must come back and the API answer. Phase stays
-# "restarting" (a running phase) so the console keeps polling.
-HEALTHY=0
-if health_check; then HEALTHY=1; fi
-
-rm -f "$REQ.processing" "$MANIFEST" "$STAGED_BIN"
-
-if [ "$HEALTHY" -eq 1 ]; then
-  log "applied v${VERSION} and health check passed"
-  state done "Update installed and verified successfully (v${VERSION})."
-  exit 0
-fi
-
-log "health check failed after update - rolling back"
-if [ -f "$EXE.bak" ]; then
-  state rolling_back "Update failed - rolling back to the previous version..."
-  mv -f "$EXE.bak" "$EXE"
-  systemctl restart daygle-dns 2>>"$LOG" || true
-  fail "Update failed - successfully rolled back to the previous version. Release v${VERSION} did not pass its health check."
-  exit 1
-fi
-fail "Update installed but the health check failed and no backup was available for rollback. Manual intervention required."
+# Unreachable: the kind was validated above (install or models only).
+fail "unsupported update kind '$KIND'."
 exit 1

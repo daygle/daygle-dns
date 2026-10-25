@@ -857,18 +857,26 @@ pub struct NamedNetwork {
 
 /// The networks every server has, which can be named but not changed.
 pub fn builtin_networks() -> Vec<NamedNetwork> {
-    vec![
-        NamedNetwork {
-            name: "Private".to_string(),
-            cidrs: PRIVATE_NETWORKS.iter().map(|n| n.to_string()).collect(),
-            description: "Private, shared, link-local and loopback addresses".to_string(),
-        },
-        NamedNetwork {
-            name: "This Server".to_string(),
-            cidrs: vec!["127.0.0.0/8".to_string(), "::1/128".to_string()],
-            description: "Loopback: queries from this machine".to_string(),
-        },
-    ]
+    builtin_network_list().to_vec()
+}
+
+/// The built-in networks, built once.
+fn builtin_network_list() -> &'static [NamedNetwork] {
+    static LIST: std::sync::OnceLock<Vec<NamedNetwork>> = std::sync::OnceLock::new();
+    LIST.get_or_init(|| {
+        vec![
+            NamedNetwork {
+                name: "Private".to_string(),
+                cidrs: PRIVATE_NETWORKS.iter().map(|n| n.to_string()).collect(),
+                description: "Private, shared, link-local and loopback addresses".to_string(),
+            },
+            NamedNetwork {
+                name: "This Server".to_string(),
+                cidrs: vec!["127.0.0.0/8".to_string(), "::1/128".to_string()],
+                description: "Loopback: queries from this machine".to_string(),
+            },
+        ]
+    })
 }
 
 impl DaygleConfig {
@@ -881,9 +889,15 @@ impl DaygleConfig {
 
     /// The network called `name` (any case), built-in or configured.
     pub fn find_network(&self, name: &str) -> Option<NamedNetwork> {
+        self.named_network(name).cloned()
+    }
+
+    /// Like [`Self::find_network`], without copying: for per-query lookups.
+    pub fn named_network(&self, name: &str) -> Option<&NamedNetwork> {
         let name = name.trim();
-        self.all_networks()
-            .into_iter()
+        builtin_network_list()
+            .iter()
+            .chain(&self.networks)
             .find(|n| n.name.eq_ignore_ascii_case(name))
     }
 
@@ -1545,6 +1559,15 @@ impl RuntimeSettings {
             if let Some(v) = &p.filter_aaaa_except {
                 config.policy.filter_aaaa_except = v.clone();
             }
+            // Captured on every save but never applied: a console-made
+            // client deny/allow list reverted to the config file's at the
+            // next start or file reload.
+            if let Some(v) = &p.denied_networks {
+                config.policy.denied_networks = trim_list(v);
+            }
+            if let Some(v) = &p.allowed_networks {
+                config.policy.allowed_networks = trim_list(v);
+            }
             if let Some(v) = &p.blocklist_sources {
                 config.policy.blocklist_sources = v.clone();
             }
@@ -1653,17 +1676,17 @@ impl RuntimeSettings {
                 config.authoritative.default_admin_mailbox = v.clone();
             }
             if let Some(v) = &a.default_primary_ns {
+                // SOA MNAME is conventionally fully qualified; store the
+                // trailing dot even when the user omitted it. Blank clears it
+                // (new zones then use this server's name), as the console
+                // save does; it used to keep the file's value instead, so a
+                // cleared name came back at the next start.
                 let v = v.trim();
-                if !v.is_empty() {
-                    // SOA MNAME is conventionally fully qualified; store the
-                    // trailing dot even when the user omitted it. Blank input
-                    // keeps the current value.
-                    config.authoritative.default_primary_ns = if v.ends_with('.') {
-                        v.to_string()
-                    } else {
-                        format!("{v}.")
-                    };
-                }
+                config.authoritative.default_primary_ns = if v.is_empty() || v.ends_with('.') {
+                    v.to_string()
+                } else {
+                    format!("{v}.")
+                };
             }
         }
         // Placeholders stored by earlier versions count as unset.
@@ -2694,8 +2717,8 @@ pub struct ServerSettings {
     /// IPv4 clients too.
     pub ipv6_only: bool,
     /// DNS cookies (RFC 7873): answer clients that send a cookie with a
-    /// server cookie, and let clients whose server cookie checks out skip
-    /// the per-client rate limit. On by default.
+    /// server cookie, and give clients whose server cookie checks out ten
+    /// times the per-client rate limit. On by default.
     pub dns_cookies: bool,
     /// PROXY protocol (v1/v2): networks of trusted load balancers. A TCP,
     /// DoT or DoH connection from one of them must start with a PROXY
@@ -3236,8 +3259,10 @@ pub struct AuthoritativeSettings {
     /// Accept RFC 2136 dynamic updates (UPDATE messages) for primary zones.
     /// Updates are written through to SQLite and applied live.
     pub allow_dynamic_updates: bool,
-    /// Client networks allowed to send dynamic updates. When empty, any
-    /// client may update (subject to `allow_dynamic_updates`).
+    /// Client networks allowed to send dynamic updates. When empty, only
+    /// zones bound to a TSIG key (`tsig_update_zones`) accept updates, and
+    /// only signed ones; an unauthenticated update from anywhere is never
+    /// accepted.
     pub update_networks: Vec<String>,
     /// Secondary zones replicated from remote masters via AXFR/IXFR.
     pub secondary_zones: Vec<SecondaryZoneConfig>,
@@ -3417,13 +3442,14 @@ pub struct DotSettings {
     /// When set it takes precedence over `self_signed` and the file paths.
     #[serde(default)]
     pub certificate: String,
-    /// Maximum active TCP connections (including TLS handshakes).
+    /// Maximum active TCP connections (including TLS handshakes). One client
+    /// (an IPv4 address or IPv6 /64) may hold an eighth of them, at least 4.
     pub max_connections: usize,
     /// TLS handshake timeout in seconds: how long a client may take to
-    /// complete the TLS handshake before the connection is dropped. Hickory
-    /// also applies it as the read-inactivity timeout of an established DoT
-    /// session, so an idle keep-alive connection is closed once it expires
-    /// (1..=600, default 20).
+    /// complete the TLS handshake before the connection is dropped. It is
+    /// also the read-inactivity timeout of an established DoT session, so an
+    /// idle keep-alive connection is closed once it expires (1..=600,
+    /// default 20).
     pub handshake_timeout_secs: u64,
     /// Client networks allowed to use this listener (addresses or network
     /// names). Empty means everyone; clients outside the list get REFUSED
@@ -3957,6 +3983,218 @@ pub fn normalize_domains(entries: impl IntoIterator<Item = String>) -> BTreeSet<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every setting the console saves into the database overlay must come
+    /// back from it on the next start (and on a config-file reload, which
+    /// re-applies the overlay): change each owned field, store the overlay
+    /// the way the database does (JSON), apply it to a fresh config and
+    /// compare. A field captured but not applied (or the reverse) silently
+    /// reverts a console change at restart.
+    #[test]
+    fn every_console_setting_survives_the_database_overlay() {
+        let mut c = DaygleConfig::default();
+        let s = |v: &str| v.to_string();
+
+        let r = &mut c.recursive;
+        r.enabled = !r.enabled;
+        r.cache_size += 1;
+        r.upstreams = vec![s("192.0.2.53")];
+        r.dnssec_validate = !r.dnssec_validate;
+        r.prefetch_enabled = !r.prefetch_enabled;
+        r.prefetch_ttl_fraction_pct += 1;
+        r.prefetch_min_queries += 1;
+        r.serve_stale_secs += 1;
+        r.max_cache_ttl += 1;
+        r.min_cache_ttl += 1;
+        r.negative_cache_ttl += 1;
+        r.use_system_config = !r.use_system_config;
+        r.failure_cache_ttl += 1;
+        r.max_concurrent_lookups += 1;
+        r.conditional_zones = vec![ConditionalZoneConfig {
+            name: s("corp.example"),
+            upstreams: vec![s("192.0.2.1")],
+        }];
+        r.mode = Some(ResolutionMode::Forwarding);
+        r.recursion_access = RecursionAccess::Custom;
+        r.recursion_networks = vec![s("192.0.2.0/24")];
+        r.root_hints = vec![s("192.0.2.2")];
+        r.case_randomization = !r.case_randomization;
+        r.rebinding_protection = !r.rebinding_protection;
+        r.local_root.enabled = !r.local_root.enabled;
+        r.local_root.sources = vec![s("https://www.internic.net/domain/root.zone")];
+        r.opportunistic_encryption = !r.opportunistic_encryption;
+        r.outbound_ip_versions = IpVersions::Ipv4;
+        r.client_policies = vec![ClientPolicyConfig {
+            name: s("kids"),
+            enabled: true,
+            clients: vec![s("192.0.2.64/26")],
+            action: ClientPolicyAction::Refuse,
+            upstreams: vec![],
+            modified_at: Some(s("2026-01-01T00:00:00Z")),
+        }];
+
+        for (enabled, port, self_signed, name, cert, key, certificate, networks) in [
+            (
+                &mut c.dot.enabled,
+                &mut c.dot.port,
+                &mut c.dot.self_signed,
+                &mut c.dot.server_name,
+                &mut c.dot.cert_path,
+                &mut c.dot.key_path,
+                &mut c.dot.certificate,
+                &mut c.dot.allowed_networks,
+            ),
+            (
+                &mut c.doh.enabled,
+                &mut c.doh.port,
+                &mut c.doh.self_signed,
+                &mut c.doh.server_name,
+                &mut c.doh.cert_path,
+                &mut c.doh.key_path,
+                &mut c.doh.certificate,
+                &mut c.doh.allowed_networks,
+            ),
+            (
+                &mut c.doq.enabled,
+                &mut c.doq.port,
+                &mut c.doq.self_signed,
+                &mut c.doq.server_name,
+                &mut c.doq.cert_path,
+                &mut c.doq.key_path,
+                &mut c.doq.certificate,
+                &mut c.doq.allowed_networks,
+            ),
+        ] {
+            *enabled = !*enabled;
+            *port += 1;
+            *self_signed = !*self_signed;
+            *name = s("dns.example");
+            *cert = s("/srv/cert.pem");
+            *key = s("/srv/key.pem");
+            *certificate = s("managed");
+            *networks = vec![s("0.0.0.0/0")];
+        }
+        c.dot.handshake_timeout_secs += 1;
+        c.dot.max_connections += 1;
+        c.doh.handshake_timeout_secs += 1;
+        c.doh.max_connections += 1;
+        c.doh.endpoint = s("/q");
+        c.doq.idle_timeout_secs += 1;
+        c.doq.max_connections += 1;
+        c.doq.max_concurrent_streams += 1;
+
+        let p = &mut c.policy;
+        p.allowlist = vec![s("ok.example")];
+        p.blocklist = vec![s("ads.example")];
+        p.denied_networks = vec![s("198.51.100.0/24")];
+        p.allowed_networks = vec![s("192.0.2.0/24")];
+        p.filter_aaaa = !p.filter_aaaa;
+        p.filter_aaaa_except = vec![s("v6.example")];
+        p.blocklist_sources = vec![BlocklistSourceConfig {
+            name: s("list"),
+            url: s("https://lists.example/hosts"),
+            format: BlocklistFormat::Hosts,
+            refresh_secs: 7200,
+            enabled: true,
+            scope: BlocklistScope::Groups,
+        }];
+
+        let a = &mut c.authoritative;
+        a.default_record_ttl += 1;
+        a.default_admin_mailbox = s("hostmaster.example.com.");
+        a.default_primary_ns = s("ns1.example.com.");
+        a.axfr_enabled = !a.axfr_enabled;
+        a.axfr_networks = vec![s("192.0.2.10")];
+        a.allow_dynamic_updates = !a.allow_dynamic_updates;
+        a.update_networks = vec![s("192.0.2.11")];
+        a.notify_enabled = !a.notify_enabled;
+        a.notify_targets = vec![s("192.0.2.12")];
+        a.notify_listen_enabled = !a.notify_listen_enabled;
+        a.stub_zones = vec![StubZoneConfig {
+            name: s("stub.example"),
+            nss: vec![s("192.0.2.13")],
+            refresh_secs: 600,
+            enabled: true,
+        }];
+        a.catalog_zone = s("catalog.example");
+        a.catalog_consumers = vec![CatalogConsumerConfig {
+            name: s("their-catalog.example"),
+            masters: vec![s("192.0.2.14")],
+            refresh_secs: 900,
+            enabled: true,
+        }];
+
+        let ai = &mut c.ai;
+        ai.enabled = !ai.enabled;
+        ai.mode = AiMode::Enforce;
+        ai.database = s("/srv/ai.db");
+        ai.model_path = s("/srv/model.bin");
+        ai.workers += 1;
+        ai.scan_interval_secs += 1;
+        ai.expire_check_secs += 1;
+        ai.max_domains_per_scan += 1;
+        ai.auto_block_categories = vec![s("malware")];
+        ai.block_threshold = 0.42;
+        ai.confidence_floor = 0.21;
+        ai.category_ttl_secs += 1;
+        ai.threat_ttl_secs += 1;
+
+        c.display = DisplaySettings {
+            time_zone: s("UTC"),
+            date_format: s("ymd"),
+            time_format: s("24h"),
+        };
+        c.web.http_port = 8080;
+        c.web.https_enabled = true;
+        c.web.https_port = 8443;
+        c.web.https_certificate = s("managed");
+        c.web.redirect_http = true;
+        c.updates.enabled = !c.updates.enabled;
+        c.updates.check_interval_secs += 1;
+        c.updates.auto_refresh_models = !c.updates.auto_refresh_models;
+        c.syslog.enabled = true;
+        c.syslog.server = s("192.0.2.15:514");
+        c.syslog.queries = true;
+        c.dns64.enabled = true;
+        c.dns64.prefix = s("64:ff9b::/96");
+        c.dns64.clients = vec![s("2001:db8::/64")];
+        c.ecs.enabled = true;
+        c.ecs.subnet = s("198.51.100.0/24");
+        c.networks = vec![NamedNetwork {
+            name: s("LAN"),
+            cidrs: vec![s("192.168.1.0/24")],
+            description: s("home"),
+        }];
+
+        let stored = serde_json::to_string(&RuntimeSettings::capture(&c)).unwrap();
+        let overlay: RuntimeSettings = serde_json::from_str(&stored).unwrap();
+        let mut restored = DaygleConfig::default();
+        overlay.apply_to(&mut restored);
+
+        assert_eq!(restored.recursive, c.recursive, "recursive");
+        assert_eq!(restored.dot, c.dot, "dot");
+        assert_eq!(restored.doh, c.doh, "doh");
+        assert_eq!(restored.doq, c.doq, "doq");
+        assert_eq!(restored.policy, c.policy, "policy");
+        assert_eq!(restored.authoritative, c.authoritative, "authoritative");
+        assert_eq!(restored.ai, c.ai, "ai");
+        assert_eq!(restored.display, c.display, "display");
+        assert_eq!(restored.web, c.web, "web");
+        assert_eq!(restored.updates, c.updates, "updates");
+        assert_eq!(restored.syslog, c.syslog, "syslog");
+        assert_eq!(restored.dns64, c.dns64, "dns64");
+        assert_eq!(restored.ecs, c.ecs, "ecs");
+        assert_eq!(restored.networks, c.networks, "networks");
+
+        // Clearing a value in the console must stay cleared after a restart,
+        // even when the config file sets it.
+        let mut cleared = c.clone();
+        cleared.authoritative.default_primary_ns = String::new();
+        let overlay = RuntimeSettings::capture(&cleared);
+        let mut from_file = c.clone();
+        overlay.apply_to(&mut from_file);
+        assert_eq!(from_file.authoritative.default_primary_ns, "");
+    }
 
     #[test]
     fn parses_minimal_config() {

@@ -364,13 +364,9 @@ if need_git; then
         'Then re-run this installer.' >&2
     exit 1
 fi
-git clone --depth 1 https://github.com/daygle/daygle-dns.git "$SRC_DIR"
-cd "$SRC_DIR"
-
-# Cargo embeds the workspace package version into the binary. The main branch
-# manifest can lag the published release tag, so resolve the latest stable
-# release and set the version before building instead of shipping the stale
-# manifest version (historically v1.0.0).
+# Build the latest stable release, not the tip of main: "update to the
+# latest release" must install exactly that release's code, and the version
+# the binary reports must name the code it runs.
 RELEASE_TAG="$(download_url "https://api.github.com/repos/daygle/daygle-dns/releases/latest" 2>/dev/null \
     | sed -n 's/^[[:space:]]*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
     | head -n 1 || true)"
@@ -384,6 +380,11 @@ if ! printf '%s\n' "$RELEASE_VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([+-][0
     log "ERROR: Could not resolve a valid latest GitHub release version; refusing to build with a stale version."
     exit 1
 fi
+git clone --depth 1 --branch "$RELEASE_TAG" https://github.com/daygle/daygle-dns.git "$SRC_DIR"
+cd "$SRC_DIR"
+
+# Cargo embeds the workspace package version into the binary, and a tag's
+# manifest can lag its tag (historically v1.0.0): set it from the tag.
 if ! awk -v version="$RELEASE_VERSION" '
     /^\[workspace\.package\][[:space:]]*$/ { in_workspace_package = 1; print; next }
     /^\[/ { if (in_workspace_package) in_workspace_package = 0 }
@@ -501,6 +502,10 @@ RestartSec=3
 CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 AmbientCapabilities=CAP_NET_BIND_SERVICE
 NoNewPrivileges=true
+# Files the server creates (the database with its private keys, TOTP
+# secrets and password hashes, backups, TLS material) are not readable by
+# other local accounts.
+UMask=0027
 
 [Install]
 WantedBy=multi-user.target
@@ -525,6 +530,10 @@ EOF
         fi
     fi
     chown -R "$SERVICE_USER":"$SERVICE_USER" "$CONFIG_DIR" "$DATA_DIR"
+    # The config can hold the API token and TSIG secrets, and the data dir
+    # the database with every private key: keep other local accounts out of
+    # both (existing installs included, whose files were created 0644).
+    chmod 0750 "$CONFIG_DIR" "$DATA_DIR"
     systemctl daemon-reload
     if [ "$INSTALL_MODE" = "upgrade" ]; then
         WAS_ACTIVE=0

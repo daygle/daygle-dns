@@ -289,11 +289,13 @@ start or reload (subject, expiry, renewal window), a `TLS configuration
 reloaded` line after a rebuild, and coalesced `session failure` warnings for
 failed handshakes, dropped connections and rejected DoH requests - at most
 one warning per client per protocol per minute, with the client address and
-the reason. Addresses name the real client (the listener's admission bridge
-is resolved away), and a DoT session closed for read inactivity past its
-handshake timeout - hickory also applies that value as the session's read
-timeout - is normal keep-alive expiry, logged at `debug` rather than as a
-failure.
+the reason. Addresses name the real client (behind a PROXY-protocol load
+balancer too); a DoT session closed for read inactivity past its handshake
+timeout (also the session's read timeout) is normal keep-alive expiry and is
+not logged as a failure. DoT also warns at start when a listener open to
+every client has a certificate public clients such as Android Private DNS
+refuse (self-signed, or without its intermediates), and notes when clients
+outside `recursion_access` would be refused recursion on it.
 
 ### Query logs
 
@@ -352,7 +354,8 @@ conditional_zones/recursion_access/recursion_networks/root_hints/
 case_randomization/rebinding_protection/local_root/opportunistic_encryption/
 outbound_ip_versions/client_policies), `dot`,
 `doh`, `doq` (enabled/port/self_signed/server_name/cert_path/key_path/
-certificate/handshake_timeout_secs [+ `doh.endpoint`, `doq.idle_timeout_secs`]
+certificate/max_connections [+ `dot`/`doh` handshake_timeout_secs, `doh.endpoint`,
+`doq.idle_timeout_secs`/`doq.max_concurrent_streams`]
 /allowed_networks), `api`
 (gui_enabled/cors_origins), `display` (the console's date/time defaults:
 `time_zone` = `system`, `UTC` or an IANA zone; `date_format` = `system`/`dmy`/
@@ -639,14 +642,16 @@ RFC 2136 dynamic updates are also a DNS-protocol feature (over UDP/TCP/DoT,
 not HTTP): `UPDATE` messages for hosted primary zones are applied atomically
 with write-through to SQLite and served immediately after a catalog reload.
 They are gated by `authoritative.allow_dynamic_updates` (default off) and the
-`authoritative.update_networks` client allow-list, and are always refused for
-secondary zones. Prerequisites (value-dependent / value-independent /
+`authoritative.update_networks` client allow-list (when it is empty, only
+zones bound to a TSIG key in `authoritative.tsig_update_zones` take updates,
+signed ones only), and are always refused for secondary zones. Prerequisites (value-dependent / value-independent /
 not-exists forms) are fully checked; failed updates return their RFC 2136
 RCODE (YXDOMAIN, YXRRSet, NXDOMAIN, NXRRSet, NOTAUTH, ...).
 
 NOTIFY (RFC 1996) is likewise a DNS-protocol feature. When
-`authoritative.notify_enabled` is set, a successful dynamic update sends a
-NOTIFY (OpCode 4, QTYPE SOA, UDP) to every address in
+`authoritative.notify_enabled` is set, every change to a primary zone's
+serial (a console edit or import, a dynamic update, a DNSSEC signature
+renewal) sends a NOTIFY (OpCode 4, QTYPE SOA, UDP) to every address in
 `authoritative.notify_targets`; secondaries that receive it immediately query
 our SOA and pull an IXFR/AXFR when the serial advanced. When
 `authoritative.notify_listen_enabled` is set, the server also accepts
@@ -1010,10 +1015,13 @@ NSEC3 uses the RFC 9276 parameters: SHA-1, no extra iterations, no salt and
 no opt-out (NSEC3PARAM is published at the apex). Calling `sign` on a signed
 zone with `nsec3` switches between the two without changing keys; without a
 body it keeps the zone's current choice. `GET /api/zones` reports `dnssec`
-and `nsec3` for each zone.
+and `nsec3` for each zone, and `ds`: the DS records (SHA-256) the parent
+zone must publish, one per active key (two during a key rollover). `sign`
+fails while `authoritative.dnssec_enabled` is off.
 
 Once signed, a zone is maintained automatically: RRSIGs are renewed before
-they expire and keys are rolled over on schedule (double-signing during the
+they expire (with a serial bump, so secondaries pick up the new signatures)
+and keys are rolled over on schedule (double-signing during the
 overlap, the old key retired and eventually removed) - see the `dnssec_*`
 settings under `authoritative` in `daygle-dns.toml`. Manual `unsign` removes all
 keys (including any mid-rollover ones) and stops the maintenance for that

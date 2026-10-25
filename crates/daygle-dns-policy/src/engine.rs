@@ -125,6 +125,25 @@ impl PolicyEngine {
         self.dot_blocklist = Some(std::sync::Arc::new(blocklist));
     }
 
+    /// Share `other`'s source-owned sets (the remote and DoT-scoped
+    /// blocklists) instead of copying them: a rebuild from configuration
+    /// keeps what the source refresher fetched, at the cost of two `Arc`
+    /// clones rather than a copy of every domain.
+    pub fn adopt_source_lists(&mut self, other: &PolicyEngine) {
+        self.remote_blocklist = other.remote_blocklist.clone();
+        self.dot_blocklist = other.dot_blocklist.clone();
+    }
+
+    /// Replace both source-owned sets (`None` clears one).
+    pub fn set_source_lists(
+        &mut self,
+        remote: Option<std::sync::Arc<Blocklist>>,
+        dot: Option<std::sync::Arc<Blocklist>>,
+    ) {
+        self.remote_blocklist = remote;
+        self.dot_blocklist = dot;
+    }
+
     /// The current DoT-scoped remote blocklist, for comparison on refresh
     /// and for carrying over a policy-engine rebuild.
     pub fn dot_blocklist_snapshot(&self) -> Option<std::sync::Arc<Blocklist>> {
@@ -274,6 +293,47 @@ impl PolicyEngine {
 
         Decision::allow()
     }
+}
+
+/// Publish `engine`, a rebuild from configuration, keeping the source-owned
+/// sets of whatever engine is live at that moment. Read-modify-write through
+/// `rcu`: a source refresh landing in between is kept, not overwritten.
+pub fn publish_rebuilt(policy: &arc_swap::ArcSwap<PolicyEngine>, engine: PolicyEngine) {
+    policy.rcu(|current| {
+        let mut next = engine.clone();
+        next.adopt_source_lists(current);
+        next
+    });
+}
+
+/// Publish new source-owned sets (`remote` for everyone, `dot` for the DoT
+/// listener; `None` clears one) into the live engine, keeping everything
+/// else. Read-modify-write through `rcu`, so a concurrent rebuild from
+/// configuration is not lost. Returns whether anything changed.
+pub fn publish_source_lists(
+    policy: &arc_swap::ArcSwap<PolicyEngine>,
+    remote: Option<std::sync::Arc<Blocklist>>,
+    dot: Option<std::sync::Arc<Blocklist>>,
+) -> bool {
+    let same = |current: &Option<std::sync::Arc<Blocklist>>,
+                new: &Option<std::sync::Arc<Blocklist>>| {
+        let empty = |l: &Option<std::sync::Arc<Blocklist>>| l.as_ref().is_none_or(|l| l.is_empty());
+        match (current, new) {
+            (Some(a), Some(b)) => std::sync::Arc::ptr_eq(a, b) || a == b,
+            _ => empty(current) && empty(new),
+        }
+    };
+    let live = policy.load();
+    if same(&live.remote_blocklist, &remote) && same(&live.dot_blocklist, &dot) {
+        return false;
+    }
+    drop(live);
+    policy.rcu(|current| {
+        let mut next = current.as_ref().clone();
+        next.set_source_lists(remote.clone(), dot.clone());
+        next
+    });
+    true
 }
 
 #[cfg(test)]

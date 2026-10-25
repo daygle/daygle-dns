@@ -686,6 +686,7 @@ name = "daygle-dns-authoritative"
 version = "1.0.0"
 dependencies = [
  "arc-swap",
+ "async-trait",
  "base64 0.23.1",
  "chrono",
  "daygle-dns-core",
@@ -782,6 +783,7 @@ dependencies = [
 name = "daygle-dns-policy"
 version = "1.0.0"
 dependencies = [
+ "arc-swap",
  "async-trait",
  "daygle-dns-core",
  "ipnet",

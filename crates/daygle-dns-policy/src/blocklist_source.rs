@@ -77,6 +77,14 @@ pub struct SourceStatus {
     pub last_error: Option<String>,
 }
 
+/// Whether the status row `st` still describes `source`. The source list can
+/// be replaced while a fetch is in flight: a row is only updated with (or
+/// read for) a source of the same name, URL and format, so an edited URL
+/// never gets the old URL's domains cached under it.
+fn describes(st: &SourceStatus, source: &BlocklistSourceConfig) -> bool {
+    st.name == source.name && st.url == source.url && st.format == source.format
+}
+
 /// A group-scoped source's domain set and the list compiled from it.
 type CompiledSource = (Arc<BTreeSet<String>>, Arc<Blocklist>);
 
@@ -298,7 +306,7 @@ impl BlocklistSourceManager {
             let last_fetch = {
                 let status = self.status.lock().unwrap();
                 match status.get(i) {
-                    Some(st) if st.name == source.name => st.last_fetch,
+                    Some(st) if describes(st, source) => st.last_fetch,
                     _ => continue,
                 }
             };
@@ -323,7 +331,7 @@ impl BlocklistSourceManager {
                         // status row that still describes this source.
                         let mut status = self.status.lock().unwrap();
                         if let Some(st) = status.get_mut(i) {
-                            if st.name == source.name {
+                            if describes(st, source) {
                                 st.last_fetch = Some(now);
                                 st.last_fetch_at = Some(SystemTime::now());
                                 st.domains = domain_count(&domains, source.format);
@@ -337,7 +345,7 @@ impl BlocklistSourceManager {
                     tracing::warn!(source = %source.name, error = %e, "blocklist source fetch failed");
                     let mut status = self.status.lock().unwrap();
                     if let Some(st) = status.get_mut(i) {
-                        if st.name == source.name {
+                        if describes(st, source) {
                             st.last_error = Some(e.to_string());
                         }
                     }
@@ -359,7 +367,7 @@ impl BlocklistSourceManager {
                     continue;
                 }
                 if let Some(st) = status.get(i) {
-                    if st.name == source.name {
+                    if describes(st, source) {
                         match source.scope {
                             BlocklistScope::Everyone => {
                                 merged.extend(st.cached_domains.iter().cloned())
@@ -577,11 +585,19 @@ pub fn detect_blocklist_format_at(url: &str, text: &str) -> Option<BlocklistForm
     }
 }
 
-/// How many domains a parsed list names: a wildcard list holds two entries
-/// (`x` and `*.x`) per listed name.
+/// How many domains a parsed list blocks: a wildcard list holds two entries
+/// (`x` and `*.x`) per listed name, as do adblock `||x^` rules, and adblock
+/// exceptions block nothing.
 pub fn domain_count(domains: &BTreeSet<String>, format: BlocklistFormat) -> usize {
     match format {
         BlocklistFormat::Wildcard => domains.iter().filter(|d| !d.starts_with("*.")).count(),
+        BlocklistFormat::Adblock => domains
+            .iter()
+            .filter(|d| {
+                !d.starts_with(crate::blocklist::EXCEPTION_PREFIX)
+                    && !(d.starts_with("*.") && domains.contains(&d[2..]))
+            })
+            .count(),
         _ => domains.len(),
     }
 }
@@ -632,32 +648,85 @@ pub fn parse_blocklist(text: &str, format: BlocklistFormat) -> BTreeSet<String> 
         }
         BlocklistFormat::Adblock => {
             for line in text.lines() {
-                let line = line.trim();
-                if line.is_empty() || line.starts_with('!') || line.starts_with('[') {
-                    continue;
-                }
-                // Ignore exception rules (`@@`) and cosmetics (`##`, `#?#`).
-                if line.starts_with("@@") || line.contains("##") || line.contains("#?#") {
-                    continue;
-                }
-                // Drop the `$options` suffix and cosmetic/shortcut markers.
-                let domain = line
-                    .trim_start_matches("||")
-                    .split('$')
-                    .next()
-                    .unwrap_or("")
-                    .trim_end_matches('^')
-                    .trim_end_matches('|');
-                // Only keep entries that look like a domain (contain a dot)
-                // and carry no other adblock syntax.
-                if domain.contains('.') && !domain.contains('*') && !domain.contains('/') {
-                    out.extend(normalize_domains([domain.to_string()]));
+                if let Some(entries) = parse_adblock_rule(line) {
+                    out.extend(entries);
                 }
             }
         }
         BlocklistFormat::Rpz => out = parse_rpz(text),
     }
     out
+}
+
+/// Modifiers that change what a DNS adblock rule means in ways a blocklist
+/// cannot express (per client, per record type, rewrites, disabling another
+/// rule): a rule carrying one is skipped rather than turned into a blanket
+/// block. Other modifiers (`important`, browser-only ones such as
+/// `third-party`) leave the rule a plain block.
+const UNSUPPORTED_ADBLOCK_MODIFIERS: [&str; 6] = [
+    "badfilter",
+    "client",
+    "ctag",
+    "denyallow",
+    "dnsrewrite",
+    "dnstype",
+];
+
+/// One adblock-syntax line as blocklist entries (AdGuard DNS filtering
+/// syntax):
+///
+/// - `||example.com^` blocks the name and every subdomain;
+/// - `|example.com^` and a bare `example.com` block the name only;
+/// - `@@` makes the rule an exception ([`crate::blocklist::EXCEPTION_PREFIX`])
+///   that unblocks what other rules block.
+///
+/// `None` for comments, cosmetic rules, patterns with wildcards, paths or
+/// regular expressions, and rules with modifiers that cannot be honoured.
+fn parse_adblock_rule(line: &str) -> Option<Vec<String>> {
+    let line = line.trim();
+    if line.is_empty() || line.starts_with('!') || line.starts_with('[') || line.starts_with('#') {
+        return None;
+    }
+    // Cosmetic and HTML filters are for browsers.
+    if line.contains("##") || line.contains("#?#") || line.contains("#@#") || line.contains("#$#") {
+        return None;
+    }
+    let (exception, rule) = match line.strip_prefix("@@") {
+        Some(rest) => (true, rest),
+        None => (false, line),
+    };
+    let (pattern, modifiers) = match rule.split_once('$') {
+        Some((pattern, modifiers)) => (pattern, modifiers),
+        None => (rule, ""),
+    };
+    let unsupported = modifiers.split(',').any(|m| {
+        let name = m.trim().trim_start_matches('~');
+        let name = name.split('=').next().unwrap_or(name);
+        UNSUPPORTED_ADBLOCK_MODIFIERS.contains(&name.to_ascii_lowercase().as_str())
+    });
+    if unsupported {
+        return None;
+    }
+    let (subdomains, name) = if let Some(rest) = pattern.strip_prefix("||") {
+        (true, rest)
+    } else {
+        (false, pattern.strip_prefix('|').unwrap_or(pattern))
+    };
+    let name = name.trim_end_matches('|').trim_end_matches('^');
+    if !name.contains('.') || name.contains(['*', '/', '|', '^', '$', ':']) {
+        return None;
+    }
+    let domain = normalize_domains([name.to_string()]).into_iter().next()?;
+    let prefix = if exception {
+        crate::blocklist::EXCEPTION_PREFIX
+    } else {
+        ""
+    };
+    let mut entries = vec![format!("{prefix}{domain}")];
+    if subdomains {
+        entries.push(format!("{prefix}*.{domain}"));
+    }
+    Some(entries)
 }
 
 /// The records of a zone file as `(owner, fields)`, with comments removed,
@@ -841,6 +910,40 @@ example.com##.banner
         assert!(set.contains("tracker.example.net"));
         assert!(!set.contains("allow.example.com"));
         assert!(!set.contains("example.com"));
+        assert_eq!(domain_count(&set, BlocklistFormat::Adblock), 2);
+    }
+
+    #[test]
+    fn adblock_rules_follow_dns_filtering_syntax() {
+        let text = "\
+||ads.example.com^
+|exact.example.com^
+plain.example.com
+@@||cdn.ads.example.com^
+||rewritten.example.com^$dnsrewrite=1.2.3.4
+||only-a.example.com^$dnstype=A
+||important.example.com^$important
+||*.wild.example.com^
+/regex\\.example/
+";
+        let list = crate::Blocklist::from_set(parse_blocklist(text, BlocklistFormat::Adblock));
+        // `||` covers the name and its subdomains.
+        assert!(list.contains("ads.example.com"));
+        assert!(list.contains("x.ads.example.com"));
+        // Exceptions unblock their name (and, with `||`, its subdomains).
+        assert!(!list.contains("cdn.ads.example.com"));
+        assert!(!list.contains("img.cdn.ads.example.com"));
+        // `|name^` and a bare name are that name only.
+        assert!(list.contains("exact.example.com"));
+        assert!(!list.contains("x.exact.example.com"));
+        assert!(list.contains("plain.example.com"));
+        assert!(!list.contains("x.plain.example.com"));
+        // Modifiers a blocklist cannot honour skip the rule.
+        assert!(!list.contains("rewritten.example.com"));
+        assert!(!list.contains("only-a.example.com"));
+        assert!(list.contains("important.example.com"));
+        // Wildcard patterns and regular expressions are not domains.
+        assert!(!list.contains("a.wild.example.com"));
     }
 
     #[test]

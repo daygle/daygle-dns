@@ -870,7 +870,10 @@ async fn settings_update_applies_and_persists() {
         .unwrap()
         .into();
 
-    // Update recursion + DoQ settings through the console.
+    // Update recursion + DoQ settings through the console. DoQ makes a
+    // self-signed certificate: keep it in the temp dir, not the default
+    // /etc/daygle-dns/certs (a leftover /etc/daygle-dns makes later tests
+    // take this host for an install).
     let resp = client
         .put(api_url(server.api_addr, "/api/config"))
         .bearer_auth(&token)
@@ -879,7 +882,11 @@ async fn settings_update_applies_and_persists() {
                 "dnssec_validate": true,
                 "serve_stale_secs": 1800,
             },
-            "doq": { "enabled": true },
+            "doq": {
+                "enabled": true,
+                "cert_path": dir.path().join("doq.crt"),
+                "key_path": dir.path().join("doq.key"),
+            },
         }))
         .send()
         .await

@@ -1,4 +1,5 @@
-//! Bounded TLS-over-TCP connection admission (DoT and DoH).
+//! Bounded TLS-over-TCP connection admission (DoH; DoT admits its own
+//! connections, see `dot`).
 //!
 //! Hickory's TLS listeners accept a Tokio TCP listener and start a task for
 //! each socket. This front rejects excess sockets before forwarding admitted
@@ -59,7 +60,7 @@ impl ConnectionAdmission {
                         let permit = match permits.clone().try_acquire_owned() {
                             Ok(permit) => permit,
                             Err(_) => {
-                                tracing::debug!(%peer, "DoT connection rejected: capacity exhausted");
+                                tracing::debug!(%peer, "DoH connection rejected: capacity exhausted");
                                 drop(frontend);
                                 continue;
                             }
@@ -71,7 +72,7 @@ impl ConnectionAdmission {
                                 bridge(frontend, backend_addr, trusted.as_deref().map(Vec::as_slice))
                                     .await
                             {
-                                tracing::debug!(%peer, %error, "DoT connection ended");
+                                tracing::debug!(%peer, %error, "DoH connection ended");
                             }
                         });
                     }

@@ -113,7 +113,7 @@ pub struct DnsDispatcher {
     query_db_logger: Option<Arc<crate::query_db_log::QueryDbLogger>>,
     /// Coalesces recent authoritative record-use updates so queries do not
     /// serialize SQLite writes at request volume.
-    record_use_cache: Arc<Mutex<HashMap<(String, String), i64>>>,
+    record_use_cache: Arc<Mutex<RecordUseCache>>,
     /// Client Timeout (`server.client_timeout_ms`): how long the recursive
     /// path may take before the client receives SERVFAIL. Default 2000 ms.
     client_timeout: Duration,
@@ -182,7 +182,7 @@ impl DnsDispatcher {
             stats: None,
             query_logger: None,
             query_db_logger: None,
-            record_use_cache: Arc::new(Mutex::new(HashMap::new())),
+            record_use_cache: Arc::default(),
             client_timeout: Duration::from_millis(2000),
             recursive_admission: Arc::new(RecursiveAdmission::new(256)),
             cookies: Arc::new(crate::cookies::Cookies::new(true)),
@@ -407,28 +407,48 @@ impl DnsDispatcher {
         }
     }
 
+    /// Whether `key` is used for the first time this clock minute (and so
+    /// needs a "last used" database write). Past [`RECORD_USE_CACHE_CAP`]
+    /// keys seen within the last two minutes - a flood of unique names under
+    /// a wildcard - further writes are skipped: each would cost a blocking
+    /// task and a database write, and the cache itself would grow without
+    /// bound for as long as the flood lasts.
+    fn first_use_this_minute(&self, key: (String, String)) -> bool {
+        let current_minute = chrono::Utc::now().timestamp().div_euclid(60);
+        let Ok(mut cache) = self.record_use_cache.lock() else {
+            return false;
+        };
+        if cache
+            .last_use
+            .get(&key)
+            .is_some_and(|last_minute| *last_minute >= current_minute)
+        {
+            return false;
+        }
+        // Sweep at most once a minute: sweeping on every call once the map
+        // was large rescanned it in full per query while the lock was held.
+        if cache.last_use.len() >= RECORD_USE_CACHE_SWEEP_AT && cache.swept_minute != current_minute
+        {
+            cache
+                .last_use
+                .retain(|_, minute| *minute >= current_minute - 1);
+            cache.swept_minute = current_minute;
+        }
+        if cache.last_use.len() >= RECORD_USE_CACHE_CAP {
+            return false;
+        }
+        cache.last_use.insert(key, current_minute);
+        true
+    }
+
     /// Mark eligible stored records at an authoritative owner as used,
     /// coalescing database writes for each name/type within each clock minute.
     fn mark_authoritative_records_used(&self, qname: &str, qtype: &str) {
         if tokio::runtime::Handle::try_current().is_err() {
             return;
         }
-        let key = (qname.to_ascii_lowercase(), qtype.to_ascii_uppercase());
-        let current_minute = chrono::Utc::now().timestamp().div_euclid(60);
-        {
-            let Ok(mut recent) = self.record_use_cache.lock() else {
-                return;
-            };
-            if recent
-                .get(&key)
-                .is_some_and(|last_minute| *last_minute >= current_minute)
-            {
-                return;
-            }
-            recent.insert(key, current_minute);
-            if recent.len() > 4096 {
-                recent.retain(|_, minute| *minute >= current_minute - 1);
-            }
+        if !self.first_use_this_minute((qname.to_ascii_lowercase(), qtype.to_ascii_uppercase())) {
+            return;
         }
         let store = self.catalog.store_handle();
         let name = qname.to_string();
@@ -444,22 +464,8 @@ impl DnsDispatcher {
         if tokio::runtime::Handle::try_current().is_err() {
             return;
         }
-        let key = ("@split-horizon".to_string(), entry_id.to_string());
-        let current_minute = chrono::Utc::now().timestamp().div_euclid(60);
-        {
-            let Ok(mut recent) = self.record_use_cache.lock() else {
-                return;
-            };
-            if recent
-                .get(&key)
-                .is_some_and(|last_minute| *last_minute >= current_minute)
-            {
-                return;
-            }
-            recent.insert(key, current_minute);
-            if recent.len() > 4096 {
-                recent.retain(|_, minute| *minute >= current_minute - 1);
-            }
+        if !self.first_use_this_minute(("@split-horizon".to_string(), entry_id.to_string())) {
+            return;
         }
         let store = self.catalog.store_handle();
         let id = entry_id.to_string();
@@ -538,41 +544,37 @@ impl DnsDispatcher {
                 answers.extend(records);
                 answers.push(soa);
 
-                let mut response = MessageResponseBuilder::from_message_request(request).build(
-                    metadata,
-                    answers.iter(),
-                    std::iter::empty(),
-                    std::iter::empty(),
-                    std::iter::empty(),
-                );
-                // TSIG-signed transfer: sign the response with the request
-                // MAC chained (RFC 8945 §5.4.2), following the same pattern
-                // as hickory's own catalog zone-transfer path.
-                if let Some((_, context)) = tsig {
-                    let mut tbs_buf = Vec::with_capacity(1024);
-                    let mut encoder =
-                        hickory_proto::serialize::binary::BinEncoder::new(&mut tbs_buf);
-                    let tbs_response = MessageResponseBuilder::from_message_request(request).build(
+                // A DNS message holds at most 64 KiB, so a larger zone goes
+                // out as several messages (RFC 5936 §2.2). Each TSIG-signed
+                // message chains from the MAC of the one before.
+                let (tsig_key, mut first_context) = match tsig {
+                    Some((key, context)) => (Some(key), Some(context)),
+                    None => (None, None),
+                };
+                let mut previous_mac: Option<Vec<u8>> = None;
+                let mut info = None;
+                for chunk in transfer_chunks(&answers) {
+                    let mut response = MessageResponseBuilder::from_message_request(request).build(
                         metadata,
-                        answers.iter(),
+                        chunk.iter(),
                         std::iter::empty(),
                         std::iter::empty(),
                         std::iter::empty(),
                     );
-                    if let Err(e) = tbs_response.destructive_emit(&mut encoder) {
-                        warn!(query = %qname, error = %e, "failed to encode signed transfer");
-                        return send_error(
-                            &mut response_handle,
-                            request,
-                            ResponseCode::ServFail,
-                            None,
-                        )
-                        .await;
-                    }
-                    match context.sign(&tbs_buf) {
-                        Ok(signature) => response.set_signature(signature),
-                        Err(e) => {
-                            warn!(query = %qname, error = %e, "failed to sign zone transfer");
+                    if let Some(key) = &tsig_key {
+                        let mut tbs_buf = Vec::with_capacity(16 * 1024);
+                        let mut encoder =
+                            hickory_proto::serialize::binary::BinEncoder::new(&mut tbs_buf);
+                        let tbs_response = MessageResponseBuilder::from_message_request(request)
+                            .build(
+                                metadata,
+                                chunk.iter(),
+                                std::iter::empty(),
+                                std::iter::empty(),
+                                std::iter::empty(),
+                            );
+                        if let Err(e) = tbs_response.destructive_emit(&mut encoder) {
+                            warn!(query = %qname, error = %e, "failed to encode signed transfer");
                             return send_error(
                                 &mut response_handle,
                                 request,
@@ -581,15 +583,45 @@ impl DnsDispatcher {
                             )
                             .await;
                         }
+                        let signature = match (&previous_mac, first_context.take()) {
+                            (None, Some(context)) => {
+                                context.sign(&tbs_buf).map_err(|e| e.to_string())
+                            }
+                            _ => daygle_dns_authoritative::tsig::sign_subsequent(
+                                key,
+                                previous_mac.as_deref().unwrap_or_default(),
+                                &tbs_buf,
+                                request.metadata.id,
+                            ),
+                        };
+                        match signature {
+                            Ok(signature) => {
+                                previous_mac = Some(signature.data.mac.clone());
+                                response.set_signature(signature);
+                            }
+                            Err(e) => {
+                                warn!(query = %qname, error = %e, "failed to sign zone transfer");
+                                return send_error(
+                                    &mut response_handle,
+                                    request,
+                                    ResponseCode::ServFail,
+                                    None,
+                                )
+                                .await;
+                            }
+                        }
+                    }
+                    match response_handle.send_response(response).await {
+                        Ok(sent) => {
+                            info.get_or_insert(sent);
+                        }
+                        Err(e) => {
+                            warn!("failed to send zone transfer: {e}");
+                            return fallback_response();
+                        }
                     }
                 }
-                match response_handle.send_response(response).await {
-                    Ok(info) => info,
-                    Err(e) => {
-                        warn!("failed to send zone transfer: {e}");
-                        fallback_response()
-                    }
-                }
+                info.unwrap_or_else(fallback_response)
             }
             Ok(None) => {
                 debug!(query = %qname, "zone transfer for unknown zone");
@@ -604,6 +636,31 @@ impl DnsDispatcher {
     }
 }
 
+/// Split a zone transfer's answers into groups that each fit one DNS
+/// message: sizes are counted uncompressed, so the real messages come out
+/// smaller still, well under the 64 KiB limit.
+fn transfer_chunks(answers: &[Record]) -> Vec<&[Record]> {
+    const BUDGET: usize = 16 * 1024;
+    let mut chunks = Vec::new();
+    let mut start = 0;
+    let mut size = 0;
+    for (i, record) in answers.iter().enumerate() {
+        let len = hickory_proto::serialize::binary::BinEncodable::to_bytes(record)
+            .map(|b| b.len())
+            .unwrap_or(BUDGET);
+        if size > 0 && size + len > BUDGET {
+            chunks.push(&answers[start..i]);
+            start = i;
+            size = 0;
+        }
+        size += len;
+    }
+    if start < answers.len() {
+        chunks.push(&answers[start..]);
+    }
+    chunks
+}
+
 /// True when the query type is a zone transfer (AXFR or IXFR).
 fn rtype_is_transfer(rtype: &str) -> bool {
     rtype.eq_ignore_ascii_case("AXFR") || rtype.eq_ignore_ascii_case("IXFR")
@@ -614,10 +671,11 @@ fn transfer_client_allowed(networks: &[String], client: IpAddr) -> bool {
     if networks.is_empty() {
         return true;
     }
+    // `parse_network` also takes a bare address (a single host), which the
+    // config check accepts; a plain `IpNet` parse rejected it and refused
+    // that secondary.
     networks.iter().any(|net| {
-        net.parse::<ipnet::IpNet>()
-            .map(|ipnet| ipnet.contains(&client))
-            .unwrap_or(false)
+        daygle_dns_core::config::parse_network(net).is_some_and(|ipnet| ipnet.contains(&client))
     })
 }
 
@@ -676,9 +734,10 @@ impl RequestHandler for DnsDispatcher {
 
         // DNS cookies (RFC 7873): every response to a client that sent one
         // carries a fresh server cookie, and a request whose server cookie
-        // checks out provably comes from its source address, so it is not
-        // held to the per-client rate limit (which exists for spoofed
-        // floods).
+        // checks out provably comes from its source address. Such a client
+        // cannot be a spoofed flood, so it gets a larger per-client
+        // allowance - not an exemption, or any real client could flood the
+        // server by echoing its cookie back.
         let (cookie_ok, cookie_reply) =
             match self
                 .cookies
@@ -693,7 +752,12 @@ impl RequestHandler for DnsDispatcher {
             };
         let mut response_handle =
             crate::cookies::CookieResponder::new(response_handle, cookie_reply);
-        if !cookie_ok && !self.rate_limiter.check_client(client) {
+        let admitted = if cookie_ok {
+            self.rate_limiter.check_verified_client(client)
+        } else {
+            self.rate_limiter.check_client(client)
+        };
+        if !admitted {
             debug!(%client, "query rate-limited by client");
             self.metrics.inc(&self.metrics.rate_limited);
             self.observe(
@@ -734,7 +798,9 @@ impl RequestHandler for DnsDispatcher {
                 client,
                 edns,
                 response_handle,
-                self.notify.sender.as_deref(),
+                // Secondaries are notified of every zone change from the
+                // catalog's change feed (see `daygle_dns::run`).
+                None,
             )
             .await;
         }
@@ -1200,7 +1266,11 @@ impl RequestHandler for DnsDispatcher {
                 metadata.message_type = MessageType::Response;
                 metadata.response_code = lookup.message().response_code;
                 metadata.recursion_available = true;
-                metadata.authentic_data = validated;
+                // RFC 6840 §5.8: AD only for a client that asked for it (AD
+                // or DO set); others may not understand the bit.
+                metadata.authentic_data = validated
+                    && (request.metadata.authentic_data
+                        || request.edns.as_ref().is_some_and(|e| e.flags().dnssec_ok));
 
                 // Log with the upstream response code and the full handling
                 // time (the lookup is the bulk of a recursive query's latency).
@@ -1355,6 +1425,20 @@ fn failure_ede(error: &DaygleError) -> Ede {
 /// value, which avoids IP fragmentation).
 const RESPONSE_UDP_PAYLOAD: u16 = 1232;
 
+/// Size at which the record-use cache drops entries older than a minute.
+const RECORD_USE_CACHE_SWEEP_AT: usize = 4096;
+/// Hard bound on the record-use cache (see
+/// [`DnsDispatcher::first_use_this_minute`]).
+const RECORD_USE_CACHE_CAP: usize = 16_384;
+
+/// When each (name, type) - or split-horizon entry - was last recorded as
+/// used, by clock minute, and when the map was last swept.
+#[derive(Default)]
+struct RecordUseCache {
+    last_use: HashMap<(String, String), i64>,
+    swept_minute: i64,
+}
+
 /// The OPT record for a response: only when the client sent one (RFC 6891),
 /// echoing its DO bit, and carrying `ede` when given.
 fn response_edns(request: &Request, ede: Option<&Ede>) -> Option<hickory_proto::op::Edns> {
@@ -1426,7 +1510,7 @@ impl DnsDispatcher {
                 // A Settings -> Networks name. An unresolvable entry
                 // matches nobody - the config validator rejects those,
                 // and failing open here could expose the listener.
-                None => config.find_network(entry).is_some_and(|n| {
+                None => config.named_network(entry).is_some_and(|n| {
                     n.cidrs
                         .iter()
                         .filter_map(|c| daygle_dns_core::config::parse_network(c))
@@ -1812,6 +1896,26 @@ fn fallback_response() -> ResponseInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn transfer_acl_accepts_bare_addresses_and_networks() {
+        let client: IpAddr = "192.0.2.10".parse().unwrap();
+        // A bare address passes the config check, so it must match too.
+        assert!(transfer_client_allowed(&["192.0.2.10".to_string()], client));
+        assert!(transfer_client_allowed(
+            &["192.0.2.0/24".to_string()],
+            client
+        ));
+        assert!(!transfer_client_allowed(
+            &["192.0.2.11".to_string()],
+            client
+        ));
+        assert!(!transfer_client_allowed(
+            &["not-a-network".to_string()],
+            client
+        ));
+        assert!(transfer_client_allowed(&[], client));
+    }
 
     #[test]
     fn failures_map_to_extended_errors() {

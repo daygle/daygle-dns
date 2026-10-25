@@ -1,7 +1,7 @@
 //! Integration test: DNS cookies (RFC 7873). Clients that send a cookie get
 //! a server cookie back (on authoritative answers too), a malformed cookie
-//! gets FORMERR, and a client whose server cookie checks out is not held to
-//! the per-client rate limit.
+//! gets FORMERR, and a client whose server cookie checks out gets a larger,
+//! but still finite, per-client rate limit.
 
 mod common;
 
@@ -82,7 +82,8 @@ async fn cookies_are_answered_and_trusted() {
     assert_eq!(cookie.len(), 24);
     assert_eq!(&cookie[..8], &client_cookie[..]);
 
-    // With the server cookie, the rate limit (3 a minute) does not apply.
+    // With the server cookie, the client gets ten times the limit of 3 a
+    // minute (the window is shared with its other queries).
     for _ in 0..6 {
         let msg = query(udp, "www.cookie.test.", Some(cookie.clone())).await;
         assert_eq!(msg.metadata.response_code, ResponseCode::NoError);
@@ -104,6 +105,21 @@ async fn cookies_are_answered_and_trusted() {
     forged[23] ^= 0xff;
     let msg = query(udp, "www.cookie.test.", Some(forged)).await;
     assert_eq!(msg.metadata.response_code, ResponseCode::ServFail);
+
+    // The larger allowance (30 a minute here) still ends: keep querying with
+    // the cookie and it is refused before another 30 get through.
+    let mut admitted = 0;
+    let refused = loop {
+        let msg = query(udp, "www.cookie.test.", Some(cookie.clone())).await;
+        if msg.metadata.response_code == ResponseCode::ServFail {
+            break true;
+        }
+        admitted += 1;
+        if admitted > 30 {
+            break false;
+        }
+    };
+    assert!(refused, "a valid cookie must not lift the limit entirely");
 
     // A cookie of an impossible length: FORMERR.
     let msg = query(udp, "www.cookie.test.", Some(vec![1; 9])).await;

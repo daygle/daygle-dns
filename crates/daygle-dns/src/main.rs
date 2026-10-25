@@ -290,7 +290,7 @@ fn main() {
         .clone()
         .unwrap_or_else(|| config.logging.level.clone());
     // fmt keeps the configured level; the hickory bridge additionally sees
-    // Hickory's own `debug` DoT/DoH failure events so it can re-emit them
+    // Hickory's own `debug` DoH failure events so it can re-emit them
     // into the console's Server Log - tagged with the query-log protocol
     // values and coalesced per client (see `daygle_dns::tls_diag`).
     let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(&filter));

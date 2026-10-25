@@ -59,10 +59,20 @@ static PASSWORD_WORK: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new
 /// Run a PBKDF2 job on the blocking pool (never on an async worker thread,
 /// where it would stall every task scheduled there, DNS included).
 async fn password_work<T: Send + 'static>(job: impl FnOnce() -> T + Send + 'static) -> T {
-    let _permit = PASSWORD_WORK
+    let _permit = password_permit().await;
+    run_password_job(job).await
+}
+
+/// A slot for one PBKDF2 computation (see [`PASSWORD_WORK`]).
+async fn password_permit() -> tokio::sync::SemaphorePermit<'static> {
+    PASSWORD_WORK
         .acquire()
         .await
-        .expect("password semaphore is never closed");
+        .expect("password semaphore is never closed")
+}
+
+/// Run a PBKDF2 job on the blocking pool; the caller holds a permit.
+async fn run_password_job<T: Send + 'static>(job: impl FnOnce() -> T + Send + 'static) -> T {
     tokio::task::spawn_blocking(job)
         .await
         .expect("password hashing task panicked")
@@ -72,12 +82,6 @@ async fn password_work<T: Send + 'static>(job: impl FnOnce() -> T + Send + 'stat
 async fn hash_password(password: &str) -> String {
     let password = password.to_string();
     password_work(move || daygle_dns_core::auth::hash_password(&password)).await
-}
-
-/// [`daygle_dns_core::auth::verify_password`] off the async runtime.
-async fn verify_password(password: &str, hash: &str) -> bool {
-    let (password, hash) = (password.to_string(), hash.to_string());
-    password_work(move || daygle_dns_core::auth::verify_password(&password, &hash)).await
 }
 
 /// Shorten attacker-controlled text before it is written to the in-memory
@@ -384,6 +388,7 @@ pub async fn replace_blocklist_sources(
     State(state): State<AppState>,
     Json(input): Json<BlocklistSourcesInput>,
 ) -> Response {
+    let _config_write = state.config_write.lock().await;
     let Some(manager) = &state.blocklist_sources else {
         return error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -438,11 +443,10 @@ pub async fn replace_blocklist_sources(
 
     let any_enabled = input.sources.iter().any(|s| s.enabled);
     if input.sources.is_empty() || !any_enabled {
-        // Nothing left to fetch: drop the remote blocklist immediately so
-        // previously blocked domains start resolving again.
-        let mut engine = state.policy.load_full().as_ref().clone();
-        engine.set_remote_blocklist(daygle_dns_policy::Blocklist::new());
-        state.policy.store(Arc::new(engine));
+        // Nothing left to fetch: drop the remote blocklists (everyone's and
+        // the DoT listener's) immediately so previously blocked domains
+        // start resolving again.
+        daygle_dns_policy::publish_source_lists(&state.policy, None, None);
     }
     // For one or more enabled sources, `set_sources` above already woke the
     // background refresher, which rebuilds the remote blocklist from the
@@ -668,9 +672,13 @@ pub async fn refresh_blocklist_sources(State(state): State<AppState>) -> Respons
     }
     match manager.refresh_all().await {
         Ok(list) => {
-            let mut engine = state.policy.load_full().as_ref().clone();
-            engine.set_remote_blocklist(list);
-            state.policy.store(Arc::new(engine));
+            // The DoT-scoped set too: it used to wait for the next scheduled
+            // cycle, which may be hours away.
+            daygle_dns_policy::publish_source_lists(
+                &state.policy,
+                Some(Arc::new(list)),
+                manager.dot_blocklist(),
+            );
             let total = state.policy.load_full().remote_blocklist_len();
             Json(serde_json::json!({
                 "refreshed": true,
@@ -1365,6 +1373,9 @@ struct ZoneView {
     dnssec: bool,
     /// Whether a signed zone uses NSEC3 rather than NSEC.
     nsec3: bool,
+    /// The DS records the parent zone must publish for a signed zone (one
+    /// per active key, so two during a key rollover).
+    ds: Vec<String>,
     zone_type: &'static str,
     /// The consumed catalog zone that added this zone, if any.
     catalog: Option<String>,
@@ -1399,11 +1410,17 @@ pub async fn list_zones(State(state): State<AppState>) -> Response {
                 .unwrap_or(false);
             let nsec3 = dnssec && state.catalog.store().zone_nsec3(&zone.id).unwrap_or(false);
             let catalog = catalog_members.get(&zone.id).cloned();
+            let ds = if dnssec {
+                state.catalog.ds_records(&zone.id).unwrap_or_default()
+            } else {
+                Vec::new()
+            };
             if let Some(item) = secondary.get(&zone.id) {
                 ZoneView {
                     zone,
                     dnssec,
                     nsec3,
+                    ds,
                     zone_type: "secondary",
                     catalog,
                     masters: item.masters.clone(),
@@ -1414,6 +1431,7 @@ pub async fn list_zones(State(state): State<AppState>) -> Response {
                     zone,
                     dnssec,
                     nsec3,
+                    ds,
                     zone_type: "primary",
                     catalog,
                     masters: Vec::new(),
@@ -1601,6 +1619,7 @@ pub async fn create_zone(
     State(state): State<AppState>,
     Json(input): Json<CreateZoneInput>,
 ) -> Response {
+    let _config_write = state.config_write.lock().await;
     let zone_type = input.zone_type.trim().to_ascii_lowercase();
     if zone_type != "primary" && zone_type != "secondary" {
         return error_response(
@@ -1781,6 +1800,7 @@ pub async fn set_zone_enabled(
 }
 
 pub async fn delete_zone(State(state): State<AppState>, Path(id): Path<String>) -> Response {
+    let _config_write = state.config_write.lock().await;
     let existing = match state.catalog.store().get_zone(&id) {
         Ok(Some(zone)) => zone,
         Ok(None) => return error_response(StatusCode::NOT_FOUND, "zone not found"),
@@ -2513,8 +2533,10 @@ pub async fn test_blocking(
     State(state): State<AppState>,
     Json(input): Json<BlockingTestInput>,
 ) -> Response {
-    let client: IpAddr = match input.client.trim().parse() {
-        Ok(ip) => ip,
+    // Queries reach the policy with IPv4-mapped sources unmapped; test the
+    // same address the resolver would see.
+    let client: IpAddr = match input.client.trim().parse::<IpAddr>() {
+        Ok(ip) => ip.to_canonical(),
         Err(_) => return error_response(StatusCode::BAD_REQUEST, "client must be an IP address"),
     };
     let domain = input
@@ -2532,16 +2554,26 @@ pub async fn test_blocking(
             "doh" => "doh",
             _ => "doq",
         });
-    let (blocked, action, reason, group) = match state
-        .advanced_blocking
-        .load()
-        .evaluate(client, &domain, listener)
-    {
+    // The resolver skips client-group blocking for allowlisted names.
+    let allowlisted = state.policy.load().is_allowlisted(&domain);
+    let verdict = if allowlisted {
+        None
+    } else {
+        state
+            .advanced_blocking
+            .load()
+            .evaluate(client, &domain, listener)
+    };
+    let (blocked, action, reason, group) = match verdict {
         Some(d) => (true, d.action.as_str().to_string(), d.reason, d.group),
         None => (
             false,
             "allow".to_string(),
-            "no group blocked this query".to_string(),
+            if allowlisted {
+                "domain is on the allowlist".to_string()
+            } else {
+                "no group blocked this query".to_string()
+            },
             None,
         ),
     };
@@ -2878,15 +2910,9 @@ pub async fn auth_login(
     connect_info: Option<axum::Extension<axum::extract::ConnectInfo<std::net::SocketAddr>>>,
     axum::Json(input): axum::Json<LoginInput>,
 ) -> Response {
-    let client_ip = connect_info.map(|axum::Extension(info)| info.0.ip().to_canonical());
-    if let Some(retry) = client_ip.and_then(|ip| state.login_throttle.retry_after(ip)) {
-        let mut resp = error_response(
-            StatusCode::TOO_MANY_REQUESTS,
-            "too many failed login attempts; try again later",
-        );
-        if let Ok(value) = header::HeaderValue::from_str(&retry.to_string()) {
-            resp.headers_mut().insert(header::RETRY_AFTER, value);
-        }
+    let client_ip = client_ip_of(connect_info);
+    let throttled = |state: &AppState| throttled_response(state, client_ip);
+    if let Some(resp) = throttled(&state) {
         return resp;
     }
     if input.username.len() > 256 || input.password.len() > MAX_PASSWORD_LEN {
@@ -2905,13 +2931,28 @@ pub async fn auth_login(
     // does not exist (or is disabled, which is not disclosed) so timing
     // cannot enumerate accounts.
     let dummy_hash = "pbkdf2-sha256$210000$AAAAAAAAAAAAAAAAAAAAAA==$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
-    let ok = match user.as_ref() {
-        Some(u) if u.enabled => verify_password(&input.password, &u.password_hash).await,
-        _ => {
-            let _ = verify_password(&input.password, dummy_hash).await;
+    let stored_hash = match user.as_ref() {
+        Some(u) if u.enabled => Some(u.password_hash.clone()),
+        _ => None,
+    };
+    // Check the throttle again once this attempt has its PBKDF2 slot. Many
+    // concurrent attempts all pass the check above before any of them has
+    // failed; they queue for the slots, so re-checking here bounds a burst
+    // to the permits in flight instead of letting every queued guess run.
+    // The slot is held until this attempt's outcome is recorded below.
+    let _permit = password_permit().await;
+    if let Some(resp) = throttled(&state) {
+        return resp;
+    }
+    let password = input.password.clone();
+    let ok = run_password_job(move || match stored_hash {
+        Some(hash) => daygle_dns_core::auth::verify_password(&password, &hash),
+        None => {
+            let _ = daygle_dns_core::auth::verify_password(&password, dummy_hash);
             false
         }
-    };
+    })
+    .await;
 
     if !ok {
         if let Some(ip) = client_ip {
@@ -3110,6 +3151,7 @@ pub struct ChangePasswordInput {
 /// Available to `viewer` accounts too (it is their own credential).
 pub async fn auth_change_password(
     State(state): State<AppState>,
+    connect_info: Option<axum::Extension<axum::extract::ConnectInfo<std::net::SocketAddr>>>,
     headers: axum::http::HeaderMap,
     axum::Json(input): axum::Json<ChangePasswordInput>,
 ) -> Response {
@@ -3129,15 +3171,17 @@ pub async fn auth_change_password(
     if !user.enabled {
         return error_response(StatusCode::FORBIDDEN, "account is disabled");
     }
-    if input.current_password.len() > MAX_PASSWORD_LEN
-        || !verify_password(&input.current_password, &user.password_hash).await
+    if let Err(r) = confirm_password(
+        &state,
+        client_ip_of(connect_info),
+        &user,
+        &input.current_password,
+        "a password change",
+        "current password is incorrect",
+    )
+    .await
     {
-        state.logs.push(
-            daygle_dns_core::LogLevel::Warn,
-            "api",
-            format!("failed password change for user '{}'", session.username),
-        );
-        return error_response(StatusCode::UNAUTHORIZED, "current password is incorrect");
+        return r;
     }
     if input.new_password.chars().count() < 8 || input.new_password.len() > MAX_PASSWORD_LEN {
         return error_response(
@@ -3283,26 +3327,90 @@ fn session_user(
     }
 }
 
-/// Re-check the account's password before a two-factor change.
+/// Build a recursive resolver from `resolved` (a config with its network
+/// names resolved) on the blocking pool: a stub zone naming its servers by
+/// host name is resolved with a blocking system lookup.
+pub(crate) async fn build_resolver(
+    state: &AppState,
+    resolved: &daygle_dns_core::config::DaygleConfig,
+) -> daygle_dns_core::error::Result<daygle_dns_recursive::RecursiveResolver> {
+    let settings = resolved.recursive.clone();
+    let stub_zones = resolved.authoritative.stub_zones.clone();
+    let metrics = state.metrics.clone();
+    let local_root = state.local_root.clone();
+    tokio::task::spawn_blocking(move || {
+        daygle_dns_recursive::RecursiveResolver::build(
+            &settings,
+            metrics,
+            &stub_zones,
+            Some(local_root),
+        )
+    })
+    .await
+    .map_err(|e| {
+        daygle_dns_core::error::DaygleError::Internal(format!("resolver build task failed: {e}"))
+    })?
+}
+
+/// `429` with `Retry-After` when `client_ip` is locked out by the failed
+/// login throttle, else `None`.
+fn throttled_response(state: &AppState, client_ip: Option<IpAddr>) -> Option<Response> {
+    let retry = client_ip.and_then(|ip| state.login_throttle.retry_after(ip))?;
+    let mut resp = error_response(
+        StatusCode::TOO_MANY_REQUESTS,
+        "too many failed login attempts; try again later",
+    );
+    if let Ok(value) = header::HeaderValue::from_str(&retry.to_string()) {
+        resp.headers_mut().insert(header::RETRY_AFTER, value);
+    }
+    Some(resp)
+}
+
+/// The client address of a request (canonical, so IPv4-mapped IPv6 counts
+/// as the IPv4 address it carries).
+fn client_ip_of(
+    connect_info: Option<axum::Extension<axum::extract::ConnectInfo<std::net::SocketAddr>>>,
+) -> Option<IpAddr> {
+    connect_info.map(|axum::Extension(info)| info.0.ip().to_canonical())
+}
+
+/// Re-check a signed-in account's password (before a password or
+/// two-factor change). A wrong password counts as a failed login for
+/// `client_ip`, so a stolen session cannot be used to guess the password
+/// at full speed; like a login, the throttle is re-checked once the
+/// attempt holds its PBKDF2 slot. `what` names the change for the log.
 #[allow(clippy::result_large_err)]
 async fn confirm_password(
     state: &AppState,
+    client_ip: Option<IpAddr>,
     user: &daygle_dns_authoritative::store::ConsoleUser,
     password: &str,
+    what: &str,
+    wrong: &str,
 ) -> Result<(), Response> {
-    if password.len() > MAX_PASSWORD_LEN || !verify_password(password, &user.password_hash).await {
+    if let Some(resp) = throttled_response(state, client_ip) {
+        return Err(resp);
+    }
+    let ok = if password.len() > MAX_PASSWORD_LEN {
+        false
+    } else {
+        let _permit = password_permit().await;
+        if let Some(resp) = throttled_response(state, client_ip) {
+            return Err(resp);
+        }
+        let (password, hash) = (password.to_string(), user.password_hash.clone());
+        run_password_job(move || daygle_dns_core::auth::verify_password(&password, &hash)).await
+    };
+    if !ok {
+        if let Some(ip) = client_ip {
+            state.login_throttle.record_failure(ip);
+        }
         state.logs.push(
             daygle_dns_core::LogLevel::Warn,
             "api",
-            format!(
-                "wrong password for a two-factor change by user '{}'",
-                user.username
-            ),
+            format!("wrong password for {what} by user '{}'", user.username),
         );
-        return Err(error_response(
-            StatusCode::UNAUTHORIZED,
-            "password is incorrect",
-        ));
+        return Err(error_response(StatusCode::UNAUTHORIZED, wrong));
     }
     Ok(())
 }
@@ -3347,6 +3455,7 @@ pub async fn two_factor_status(
 /// Nothing changes until `/enable` confirms a code.
 pub async fn two_factor_setup(
     State(state): State<AppState>,
+    connect_info: Option<axum::Extension<axum::extract::ConnectInfo<std::net::SocketAddr>>>,
     headers: axum::http::HeaderMap,
     axum::Json(input): axum::Json<PasswordInput>,
 ) -> Response {
@@ -3354,7 +3463,16 @@ pub async fn two_factor_setup(
         Ok(u) => u,
         Err(r) => return r,
     };
-    if let Err(r) = confirm_password(&state, &user, &input.password).await {
+    if let Err(r) = confirm_password(
+        &state,
+        client_ip_of(connect_info),
+        &user,
+        &input.password,
+        "a two-factor change",
+        "password is incorrect",
+    )
+    .await
+    {
         return r;
     }
     let secret = daygle_dns_core::totp::generate_secret();
@@ -3415,6 +3533,7 @@ pub async fn two_factor_enable(
 /// recovery codes (the old ones stop working).
 pub async fn two_factor_new_recovery_codes(
     State(state): State<AppState>,
+    connect_info: Option<axum::Extension<axum::extract::ConnectInfo<std::net::SocketAddr>>>,
     headers: axum::http::HeaderMap,
     axum::Json(input): axum::Json<PasswordInput>,
 ) -> Response {
@@ -3422,7 +3541,16 @@ pub async fn two_factor_new_recovery_codes(
         Ok(u) => u,
         Err(r) => return r,
     };
-    if let Err(r) = confirm_password(&state, &user, &input.password).await {
+    if let Err(r) = confirm_password(
+        &state,
+        client_ip_of(connect_info),
+        &user,
+        &input.password,
+        "a two-factor change",
+        "password is incorrect",
+    )
+    .await
+    {
         return r;
     }
     if !user.two_factor {
@@ -3447,6 +3575,7 @@ pub async fn two_factor_new_recovery_codes(
 /// login off for the signed-in account.
 pub async fn two_factor_disable(
     State(state): State<AppState>,
+    connect_info: Option<axum::Extension<axum::extract::ConnectInfo<std::net::SocketAddr>>>,
     headers: axum::http::HeaderMap,
     axum::Json(input): axum::Json<PasswordInput>,
 ) -> Response {
@@ -3454,7 +3583,16 @@ pub async fn two_factor_disable(
         Ok(u) => u,
         Err(r) => return r,
     };
-    if let Err(r) = confirm_password(&state, &user, &input.password).await {
+    if let Err(r) = confirm_password(
+        &state,
+        client_ip_of(connect_info),
+        &user,
+        &input.password,
+        "a two-factor change",
+        "password is incorrect",
+    )
+    .await
+    {
         return r;
     }
     match state.catalog.store().disable_two_factor(&user.username) {
@@ -4192,6 +4330,8 @@ pub struct ListenerUpdate {
     pub handshake_timeout_secs: Option<u64>,
     pub max_connections: Option<usize>,
     pub max_concurrent_streams: Option<usize>,
+    /// QUIC idle timeout (DoQ only).
+    pub idle_timeout_secs: Option<u64>,
     /// Client networks allowed to use this listener (addresses or network
     /// names); empty or absent means everyone.
     pub allowed_networks: Option<Vec<String>>,
@@ -4256,6 +4396,7 @@ pub async fn update_settings(
     State(state): State<AppState>,
     axum::Json(update): axum::Json<SettingsUpdate>,
 ) -> Response {
+    let _config_write = state.config_write.lock().await;
     let old_config = (*state.config.load_full()).clone();
     let mut config = old_config.clone();
     let mut listeners_affected = false;
@@ -4488,6 +4629,10 @@ pub async fn update_settings(
         }
         if let Some(v) = d.max_concurrent_streams {
             config.doq.max_concurrent_streams = v;
+            listeners_affected = true;
+        }
+        if let Some(v) = d.idle_timeout_secs {
+            config.doq.idle_timeout_secs = v;
             listeners_affected = true;
         }
         if let Some(v) = &d.allowed_networks {
@@ -4813,22 +4958,15 @@ pub async fn update_settings(
     let recursive_changed = old_config.recursive != config.recursive
         || old_config.authoritative.stub_zones != config.authoritative.stub_zones;
     let new_resolver = if recursive_changed && config.recursive.enabled {
-        Some(
-            match daygle_dns_recursive::RecursiveResolver::build(
-                &resolved.recursive,
-                state.metrics.clone(),
-                &resolved.authoritative.stub_zones,
-                Some(state.local_root.clone()),
-            ) {
-                Ok(resolver) => resolver,
-                Err(e) => {
-                    return error_response(
-                        StatusCode::BAD_REQUEST,
-                        format!("recursive resolver rebuild failed: {e}"),
-                    );
-                }
-            },
-        )
+        Some(match build_resolver(&state, &resolved).await {
+            Ok(resolver) => resolver,
+            Err(e) => {
+                return error_response(
+                    StatusCode::BAD_REQUEST,
+                    format!("recursive resolver rebuild failed: {e}"),
+                );
+            }
+        })
     } else {
         None
     };
@@ -4853,6 +4991,12 @@ pub async fn update_settings(
             || old_config.doh != config.doh
             || old_config.doq != config.doq);
     state.config.store(Arc::new(config.clone()));
+    // Server-side knobs read from their own state rather than the config
+    // (the recursive lookup limit): a console change otherwise waited for a
+    // restart or a config-file reload.
+    if let Some(apply) = &state.apply_runtime {
+        apply(&config);
+    }
     if listeners_affected {
         if let Some(rebuild) = &state.request_dns_rebuild {
             rebuild();
@@ -4897,19 +5041,10 @@ pub async fn update_settings(
     // regardless of whether the config-file watcher is enabled.
     if policy_changed {
         match daygle_dns_policy::build_engine(&resolved.policy) {
-            Ok(mut engine) => {
-                // Rebuilding static policy must not discard domains already
-                // fetched from remote sources; the source refresher owns that
-                // portion and will replace it only when a refresh completes.
-                if let Some(remote) = state.policy.load_full().remote_blocklist_snapshot() {
-                    engine.set_remote_blocklist(remote.as_ref().clone());
-                }
-                // The DoT-scoped listener set is refresher-owned too.
-                if let Some(dot) = state.policy.load_full().dot_blocklist_snapshot() {
-                    engine.set_dot_blocklist(dot.as_ref().clone());
-                }
-                state.policy.store(Arc::new(engine));
-            }
+            // Rebuilding static policy must not discard domains already
+            // fetched from remote sources (and the DoT-scoped set): the
+            // source refresher owns those, and the live engine's are kept.
+            Ok(engine) => daygle_dns_policy::publish_rebuilt(&state.policy, engine),
             Err(e) => tracing::warn!("policy rebuild after settings update failed: {e}"),
         }
     }

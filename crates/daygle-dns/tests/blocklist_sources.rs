@@ -504,5 +504,37 @@ async fn dot_scoped_source_blocks_only_on_dot() {
     assert_eq!(msg.response_code, ResponseCode::NoError);
     assert_eq!(first_answer(&msg).as_deref(), Some("198.51.100.77"));
 
+    // Replacing the DoT-scoped source with another (everyone-scoped) one
+    // stops the DoT block. The refresher used to leave the last DoT-scoped
+    // set in the engine, blocking until a restart.
+    let other = BlocklistServer::spawn("0.0.0.0 other.test\n").await;
+    let resp = reqwest::Client::new()
+        .put(format!(
+            "http://{}/api/policy/blocklist/sources",
+            server.api_addr
+        ))
+        .json(&serde_json::json!({ "sources": [{
+            "name": "other",
+            "url": format!("http://{}/list", other.addr),
+            "format": "hosts",
+            "refresh_secs": 3600,
+            "enabled": true,
+        }] }))
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_success(), "PUT failed: {}", resp.status());
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let mut unblocked = false;
+    while std::time::Instant::now() < deadline {
+        let msg = dot_query(dot, "daygle.test", &cert, "ads.test.", RecordType::A).await;
+        if msg.response_code != ResponseCode::NXDomain {
+            unblocked = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+    assert!(unblocked, "the removed DoT-scoped source kept blocking");
+
     shutdown(server).await;
 }

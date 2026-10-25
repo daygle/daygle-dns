@@ -346,6 +346,9 @@ fn new_token() -> String {
         .collect()
 }
 
+/// Callback that applies a saved configuration to server-side state.
+pub type ApplyRuntime = Arc<dyn Fn(&DaygleConfig) + Send + Sync>;
+
 /// Shared state for the API and the DNS dispatcher.
 ///
 /// `config` and `resolver` are atomic-swap containers so the live-reload
@@ -384,6 +387,14 @@ pub struct AppState {
     /// Hook that rebinds DNS listeners after a settings change; `None` when
     /// the caller does not support live listener rebinding.
     pub request_dns_rebuild: Option<Arc<dyn Fn() + Send + Sync>>,
+    /// Held while a handler reads, changes and publishes the configuration
+    /// (shared with the config-file reload), so two saves landing together
+    /// cannot silently overwrite each other's change.
+    pub config_write: Arc<tokio::sync::Mutex<()>>,
+    /// Applies a saved configuration to the server-side parts the API cannot
+    /// reach itself (the recursive lookup admission limit); `None` in
+    /// API-only setups.
+    pub apply_runtime: Option<ApplyRuntime>,
     /// Reconfigure the web console's HTTP/HTTPS listeners (Settings ->
     /// General). `None` when the API runs without a server (tests).
     pub web_apply: Option<WebApplyFn>,
@@ -647,12 +658,24 @@ fn cors_layer(config: Arc<ArcSwap<DaygleConfig>>) -> tower_http::cors::CorsLayer
         ])
 }
 
+/// Content Security Policy for the console: everything from this origin
+/// only. Session tokens live in the browser's local storage, so any script
+/// injected into the page could read them; this keeps injected markup from
+/// loading or running script from anywhere else. Inline styles stay allowed
+/// (the Svelte bundle sets `style` attributes).
+const CONTENT_SECURITY_POLICY: &str = "default-src 'self'; script-src 'self'; \
+    style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; \
+    object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'";
+
 /// Baseline hardening headers for the console and API: forbid framing
-/// (clickjacking) and MIME sniffing, and keep URLs out of cross-site
-/// referrers.
+/// (clickjacking) and MIME sniffing, keep URLs out of cross-site referrers,
+/// and restrict where the console may load code from.
 async fn security_headers(mut response: Response) -> Response {
     use axum::http::{header, HeaderValue};
     let headers = response.headers_mut();
+    headers
+        .entry(header::CONTENT_SECURITY_POLICY)
+        .or_insert(HeaderValue::from_static(CONTENT_SECURITY_POLICY));
     headers
         .entry(header::X_FRAME_OPTIONS)
         .or_insert(HeaderValue::from_static("DENY"));

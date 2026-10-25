@@ -319,7 +319,9 @@ impl RootZone {
         let count = u32::from_be_bytes(bytes[at + 8..at + 12].try_into().expect("4 bytes"));
         let mut decoder = BinDecoder::new(bytes);
         decoder.read_slice(header).map_err(|e| e.to_string())?;
-        let mut records = Vec::with_capacity(count as usize);
+        // The count comes from the file: a damaged one must not make us
+        // reserve gigabytes up front (no record is shorter than 11 octets).
+        let mut records = Vec::with_capacity((count as usize).min(bytes.len() / 11));
         for _ in 0..count {
             records.push(Record::read(&mut decoder).map_err(|e| e.to_string())?);
         }

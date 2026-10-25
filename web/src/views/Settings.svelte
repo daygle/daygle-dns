@@ -880,8 +880,9 @@
     </div>
     <p class="muted help">
       Clients on these networks may add, change, or delete records in primary
-      zones with UPDATE messages. An empty list allows every client when
-      dynamic updates are enabled. Applies immediately, no restart needed.
+      zones with UPDATE messages. With an empty list, only zones bound to a
+      TSIG key accept updates, and only signed ones. Applies immediately, no
+      restart needed.
     </p>
   </div>
 

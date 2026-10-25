@@ -30,7 +30,7 @@ pub use blocklist_source::{
     detect_blocklist_format, detect_blocklist_format_at, domain_count, parse_blocklist,
     BlocklistSourceManager, GroupBlocklists, SourceStatus,
 };
-pub use engine::{Decision, PolicyEngine};
+pub use engine::{publish_rebuilt, publish_source_lists, Decision, PolicyEngine};
 pub use plugin::{PluginRegistry, PolicyContext, PolicyPlugin};
 pub use rule::PerClientRule;
 

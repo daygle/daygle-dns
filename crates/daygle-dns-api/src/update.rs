@@ -23,13 +23,17 @@
 //! Privilege is deliberately narrow and does **not** use sudo or any setuid
 //! helper (a hardened service's `CapabilityBoundingSet` can break sudo's core
 //! audit write, which aborted every update). Instead, the helper - running as
-//! the unprivileged service account - downloads, verifies and stages the new
-//! binary under `<data>/updates/staging`, then drops a `request` marker into
+//! the unprivileged service account - downloads, verifies and stages the
+//! request under `<data>/updates/staging`, then drops a `request` marker into
 //! `<data>/updates`. A root-owned systemd path unit
 //! (`daygle-dns-update.path`) watches that directory and starts
 //! `daygle-dns-update.service`, a short root oneshot (embedded as
-//! `update-apply.sh`) that swaps the binary, restarts the unit, health-checks
-//! and rolls back on failure. `install.sh` provisions both units. Self-update
+//! `update-apply.sh`) that applies it, restarts the unit, health-checks and
+//! rolls back on failure. The staged files are only a request: the root step
+//! re-fetches the installer itself and checks a models bundle against the
+//! checksum published with its release, so a compromised service account
+//! cannot get its own content run or installed as root. `install.sh`
+//! provisions both units. Self-update
 //! is opt-in by environment: only Linux hosts that look like a real install
 //! (systemd unit, `/usr/local/bin` binary, or a config under `/etc/`).
 //! Dev/test builds and the Windows/macOS console expose guidance-only mode.
@@ -458,11 +462,27 @@ fn resolved_updates_dir() -> Option<PathBuf> {
     })
 }
 
-/// Check available disk space in the temp directory.
+/// Where an update's source checkout and release build happen: `/var/tmp`
+/// (the update scripts put them there, as /tmp is often a small tmpfs), or
+/// the temp dir on hosts without it.
+fn build_dir() -> PathBuf {
+    let var_tmp = Path::new("/var/tmp");
+    if var_tmp.is_dir() {
+        var_tmp.to_path_buf()
+    } else {
+        std::env::temp_dir()
+    }
+}
+
+/// Space an update needs where it builds: a release build of the workspace
+/// from a fresh checkout (sources, models, dependencies and target dir).
+const BUILD_SPACE_MB: u64 = 3072;
+
+/// Check available disk space where the update builds.
 fn check_disk_space() -> Option<PreflightCheck> {
     #[cfg(unix)]
     {
-        let temp_dir = std::env::temp_dir();
+        let temp_dir = build_dir();
         let output = std::process::Command::new("df")
             .arg("--output=avail")
             .arg(&temp_dir)
@@ -481,8 +501,7 @@ fn check_disk_space() -> Option<PreflightCheck> {
             .and_then(|line| line.trim().parse().ok())
             .unwrap_or(0);
 
-        // Need at least 100MB for download, 1GB for source build
-        let min_required_mb = 100;
+        let min_required_mb = BUILD_SPACE_MB;
         let avail_mb = avail_kb / 1024;
 
         if avail_mb >= min_required_mb {
@@ -503,7 +522,10 @@ fn check_disk_space() -> Option<PreflightCheck> {
                     temp_dir.display(),
                     min_required_mb
                 ),
-                fix: Some("Free up disk space in the temp directory before updating.".to_string()),
+                fix: Some(format!(
+                    "The update builds the release from source in {}: free up space there before updating.",
+                    temp_dir.display()
+                )),
                 fix_commands: None,
             })
         }
@@ -595,6 +617,16 @@ static LATEST_RELEASE_FETCHED_AT: std::sync::Mutex<Option<std::time::Instant>> =
 static LAST_CONNECTIVITY_PROBE: std::sync::Mutex<Option<(std::time::Instant, PreflightCheck)>> =
     std::sync::Mutex::new(None);
 
+/// Serializes the tests that set and read the release-cache statics above:
+/// the test harness runs tests in parallel, and one test's fresh cache
+/// changed what another observed.
+#[cfg(test)]
+fn release_cache_test_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 /// Minimum spacing between live connectivity probes: repeated preflight
 /// runs inside this window reuse the previous result instead of re-hitting
 /// GitHub.
@@ -614,6 +646,9 @@ mod connectivity_tests {
     /// by the (test-local stubbed) probe, replayed verbatim on the second.
     #[test]
     fn repeated_probes_inside_the_window_reuse_the_previous_result() {
+        let _serial = release_cache_test_lock();
+        // A fresh release cache would answer before the throttle replay.
+        *LATEST_RELEASE_FETCHED_AT.lock().unwrap() = None;
         let sample = PreflightCheck {
             name: "network".to_string(),
             ok: false,
@@ -639,6 +674,7 @@ mod connectivity_tests {
     /// probe or throttle replay: the result names the background check.
     #[test]
     fn fresh_release_cache_replaces_a_live_probe() {
+        let _serial = release_cache_test_lock();
         *LAST_CONNECTIVITY_PROBE.lock().unwrap() = None;
         *LATEST_RELEASE.lock().unwrap() = Some("1.0.0".to_string());
         *LATEST_RELEASE_FETCHED_AT.lock().unwrap() = Some(std::time::Instant::now());
@@ -679,6 +715,7 @@ mod manual_check_tests {
     /// never calls the fetch stub.
     #[test]
     fn a_check_inside_the_window_is_throttled() {
+        let _serial = release_cache_test_lock();
         cleanup();
         *LAST_MANUAL_CHECK.lock().unwrap() = Some(std::time::Instant::now());
         *LATEST_RELEASE.lock().unwrap() = Some("1.2.3".to_string());
@@ -695,6 +732,7 @@ mod manual_check_tests {
     /// Outside the window the fetch runs, and its result fills the cache.
     #[test]
     fn a_stale_window_runs_the_fetch_and_records_the_attempt() {
+        let _serial = release_cache_test_lock();
         cleanup();
         *LAST_MANUAL_CHECK.lock().unwrap() =
             Some(std::time::Instant::now() - MANUAL_CHECK_MIN_INTERVAL);
@@ -716,6 +754,7 @@ mod manual_check_tests {
     /// unreachable GitHub stay bounded.
     #[test]
     fn a_failed_attempt_is_throttled_too() {
+        let _serial = release_cache_test_lock();
         cleanup();
         *LAST_MANUAL_CHECK.lock().unwrap() =
             Some(std::time::Instant::now() - MANUAL_CHECK_MIN_INTERVAL);
@@ -732,6 +771,7 @@ mod manual_check_tests {
     /// successful fetch it is unknown, after one it counts up.
     #[test]
     fn cache_age_tracks_the_last_successful_fetch() {
+        let _serial = release_cache_test_lock();
         cleanup();
         assert!(latest_release_age_secs().is_none());
         *LATEST_RELEASE_FETCHED_AT.lock().unwrap() =
@@ -1220,7 +1260,10 @@ fn auto_models_tick() {
 /// Numeric semver-ish comparison: true when `a` < `b`. Tolerates prefixes
 /// and extra segments (`"1.0.2-rc1"`), comparing only leading numeric parts.
 fn version_lt(a: &str, b: &str) -> bool {
+    // Build metadata (`+...`) never orders versions (SemVer 2.0 §10); left
+    // in, `1.0.3+abc` read as 1.0 and looked older than 1.0.3.
     let nums = |s: &str| -> Vec<u64> {
+        let s = s.split('+').next().unwrap_or(s);
         s.trim_start_matches('v')
             .split(['.', '-'])
             .map_while(|p| p.parse::<u64>().ok())
@@ -1290,7 +1333,7 @@ pub fn start_models(exe: &Path, config_dir: Option<&Path>) -> Result<u32, StartE
     )
 }
 
-/// Common launcher for both run kinds (release binary / models bundle):
+/// Common launcher for both run kinds (installer run / models bundle):
 /// writes the embedded helper and spawns it detached; returns the pid.
 fn launch_run(
     mode: Option<&str>,
@@ -1301,6 +1344,14 @@ fn launch_run(
     if !can_update(config_dir) {
         return Err(StartError::NotUpdateable);
     }
+    // The "already running?" check and the primed state that answers it
+    // must be one step: two concurrent starts (a double click, the console
+    // and the AI page) both passed the check and launched two helpers that
+    // staged over each other.
+    static LAUNCH: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _launching = LAUNCH
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     if update_in_progress() {
         return Err(StartError::AlreadyRunning);
     }
@@ -1466,8 +1517,15 @@ fn spawn(script: PathBuf, exe: &Path, dir: &Path, mode: Option<&str>) -> std::io
     // `process_group(0)` makes the child a session/group leader. Combined with
     // a null controlling terminal this detaches it from the server process.
     cmd.process_group(0);
-    let child = cmd.spawn()?;
-    Ok(child.id())
+    let mut child = cmd.spawn()?;
+    let pid = child.id();
+    // Reap the helper when it exits (it hands off to the root step and quits
+    // before the restart). Unwaited, every run - failed ones included, which
+    // do not restart the server - left a zombie until the server exited.
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
+    Ok(pid)
 }
 
 #[cfg(not(unix))]
@@ -1862,6 +1920,8 @@ mod tests {
         assert!(version_lt("v0.9", "1.0")); // v-prefix tolerated
         assert!(!version_lt("1.0.2-rc1", "1.0.2")); // prerelease suffix ignored
         assert!(version_lt("2", "10")); // numeric, not lexicographic
+        assert!(!version_lt("1.0.3+abc", "1.0.3")); // build metadata ignored
+        assert!(version_lt("1.0.2+abc", "1.0.3"));
     }
 
     #[test]

@@ -26,10 +26,13 @@
   let preflightLoading = $state(false);
   let preflightError = $state('');
 
-  const RUNNING = ['preparing', 'downloading', 'installing', 'applying', 'restarting', 'rolling_back'];
+  // Must match UpdateState::is_running on the server.
+  const RUNNING = ['preparing', 'downloading', 'cloning', 'building', 'installing', 'applying', 'restarting', 'rolling_back'];
   const PHASE_LABEL = {
     preparing: 'Preparing the update...',
     downloading: 'Fetching the installer...',
+    cloning: 'Fetching the source...',
+    building: 'Building the release...',
     installing: 'Handing off to the update service...',
     applying: 'Running the installer (several minutes; the build happens here)...',
     restarting: 'Restarting the service...',
@@ -99,7 +102,13 @@
           }
         }
       })
-      .catch(() => {
+      .catch((e) => {
+        // Signed out or not allowed: polling again cannot succeed.
+        if (e?.status === 401 || e?.status === 403) {
+          updating = false;
+          startError = formatApiError(e);
+          return;
+        }
         // The updater restarted the server: the API is briefly unreachable.
         serverDown = true;
         pollTimer = setTimeout(poll, 1000);
