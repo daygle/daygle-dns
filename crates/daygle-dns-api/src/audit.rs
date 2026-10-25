@@ -82,7 +82,11 @@ fn skipped(method: &Method, path: &str) -> bool {
     (!changes && !notable_read)
         || matches!(
             path,
-            "/auth/login" | "/auth/setup" | "/policy/blocking/test" | "/update/dismiss"
+            "/auth/login"
+                | "/auth/setup"
+                | "/policy/blocking/test"
+                | "/update/dismiss"
+                | "/update/check"
         )
 }
 

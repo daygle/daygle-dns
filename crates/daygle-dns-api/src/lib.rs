@@ -587,6 +587,7 @@ pub fn router(state: AppState) -> Router {
         .route("/update", get(handlers::update_info))
         .route("/update/status", get(handlers::update_status))
         .route("/update/start", post(handlers::update_start))
+        .route("/update/check", post(handlers::update_check))
         .route("/update/dismiss", post(handlers::update_dismiss))
         .route("/update/preflight", get(handlers::update_preflight))
         .route("/audit", get(handlers::audit_log))

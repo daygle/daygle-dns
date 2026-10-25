@@ -247,6 +247,10 @@ export const api = {
   updateInfo: () => request('GET', '/update'),
   updateStatus: () => request('GET', '/update/status'),
   updateStart: () => request('POST', '/update/start'),
+  // One release fetch against GitHub now (throttled server-side to one per
+  // minute): a request inside the window returns the cached value with a
+  // retry hint instead.
+  updateCheck: () => request('POST', '/update/check', {}),
   updateDismiss: () => request('POST', '/update/dismiss'),
   updatePreflight: () => request('GET', '/update/preflight'),
   blockingGroups: () => request('GET', '/policy/blocking'),

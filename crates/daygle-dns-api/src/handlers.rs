@@ -1136,26 +1136,27 @@ pub async fn update_info(State(state): State<AppState>) -> Response {
     let config_dir = config_dir(&state);
     // Spawns processes (`sh`, `curl` with multi-second timeouts) and reads
     // files: keep it off the async workers.
-    // Whether automated release checks are on: the probe below is skipped
-    // when they are not, so the Update page then shows no release claim but
-    // keeps Update Now and the manual command.
+    // Whether automatic checks are on. They warm the release cache at the
+    // configured cadence; the release data below is always a pure cache
+    // read, so it is surfaced even with checks off — a manual `Check Now`
+    // then populates it (and the Update page explains the state).
     let release_checks_on = state.config.load().updates.enabled;
-    let (has_systemd, can_update, gates, release, update_state) = run_blocking(move || {
-        let dir = config_dir.as_deref();
-        (
-            std::path::Path::new("/etc/systemd/system/daygle-dns.service").is_file(),
-            crate::update::can_update(dir),
-            crate::update::gates(dir),
-            // Latest-release comparison (cache only, warmed in the
-            // background): only resolved on hosts that can self-update with
-            // checks enabled, so dev/non-Linux consoles get nulls.
-            release_checks_on
-                .then(crate::update::release_comparison)
-                .flatten(),
-            crate::update::read_state(),
-        )
-    })
-    .await;
+    let (has_systemd, can_update, gates, release, update_state, checked_ago) =
+        run_blocking(move || {
+            let dir = config_dir.as_deref();
+            (
+                std::path::Path::new("/etc/systemd/system/daygle-dns.service").is_file(),
+                crate::update::can_update(dir),
+                crate::update::gates(dir),
+                // Latest-release comparison (cache only, never touches GitHub):
+                // only resolved on hosts that can self-update, so dev/non-Linux
+                // consoles get nulls.
+                crate::update::release_comparison(),
+                crate::update::read_state(),
+                crate::update::latest_release_age_secs(),
+            )
+        })
+        .await;
 
     Json(serde_json::json!({
         "version": VERSION,
@@ -1171,6 +1172,45 @@ pub async fn update_info(State(state): State<AppState>) -> Response {
         "preserves": ["configuration", "zones", "certificates", "database"],
         "note": "Run the update command on the host to update all components in place. The installer rebuilds the server binary, preserves configuration, zones, certificates and the database, and provisions the systemd update service.",
         "state": update_state,
+        "checks_enabled": release_checks_on,
+        "check_interval_secs": state.config.load().updates.check_interval_secs,
+        "latest_checked_secs_ago": checked_ago,
+    }))
+    .into_response()
+}
+
+/// `POST /api/update/check` - run one release check now (admin).
+///
+/// The Update page's "Check Now": fetches the latest published release
+/// from GitHub on demand instead of waiting up to the full
+/// `[updates].check_interval_secs` cycle for the background warmer, so a
+/// freshly published release is visible immediately. Throttled server-side
+/// (see [`crate::update::manual_release_check`]): every click is a request
+/// off GitHub's unauthenticated budget, so a request inside the minute
+/// window is answered from the cache with a retry hint. Automatic checks
+/// being disabled does not block this — it is the explicit replacement
+/// for them.
+pub async fn update_check(State(state): State<AppState>) -> Response {
+    let config_dir = config_dir(&state);
+    let can = run_blocking(move || crate::update::can_update(config_dir.as_deref())).await;
+    if !can {
+        return error_response(
+            StatusCode::CONFLICT,
+            "this host cannot self-update, so there is nothing to check",
+        );
+    }
+    let (check, comparison) = run_blocking(|| {
+        let check = crate::update::manual_release_check();
+        (check, crate::update::release_comparison())
+    })
+    .await;
+    Json(serde_json::json!({
+        "latest_release": check.latest,
+        "updater_outdated": comparison.as_ref().map(|r| r.outdated),
+        "updater_bootstrap_required": comparison.as_ref().map(|r| r.bootstrap_required),
+        "checked_now": check.checked_now,
+        "fetched": check.fetched_now,
+        "retry_after_secs": check.retry_after_secs,
     }))
     .into_response()
 }

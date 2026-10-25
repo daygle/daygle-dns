@@ -651,6 +651,90 @@ mod connectivity_tests {
     }
 }
 
+#[cfg(test)]
+mod manual_check_tests {
+    use super::*;
+
+    fn stub_fetch(as_recorded: bool) -> bool {
+        if as_recorded {
+            *LATEST_RELEASE.lock().unwrap() = Some("9.9.9".to_string());
+            *LATEST_RELEASE_FETCHED_AT.lock().unwrap() = Some(std::time::Instant::now());
+        }
+        as_recorded
+    }
+
+    fn cleanup() {
+        *LAST_MANUAL_CHECK.lock().unwrap() = None;
+        *LATEST_RELEASE.lock().unwrap() = None;
+        *LATEST_RELEASE_FETCHED_AT.lock().unwrap() = None;
+    }
+
+    /// A request inside the throttle window is answered from the cache and
+    /// never calls the fetch stub.
+    #[test]
+    fn a_check_inside_the_window_is_throttled() {
+        cleanup();
+        *LAST_MANUAL_CHECK.lock().unwrap() = Some(std::time::Instant::now());
+        *LATEST_RELEASE.lock().unwrap() = Some("1.2.3".to_string());
+
+        let check = manual_release_check_with(|| panic!("fetch must not run inside the window"));
+
+        assert!(!check.checked_now);
+        assert!(!check.fetched_now);
+        assert_eq!(check.latest.as_deref(), Some("1.2.3"));
+        assert!(check.retry_after_secs.unwrap() < 60);
+        cleanup();
+    }
+
+    /// Outside the window the fetch runs, and its result fills the cache.
+    #[test]
+    fn a_stale_window_runs_the_fetch_and_records_the_attempt() {
+        cleanup();
+        *LAST_MANUAL_CHECK.lock().unwrap() =
+            Some(std::time::Instant::now() - MANUAL_CHECK_MIN_INTERVAL);
+
+        let check = manual_release_check_with(|| stub_fetch(true));
+
+        assert!(check.checked_now);
+        assert!(check.fetched_now);
+        assert_eq!(check.latest.as_deref(), Some("9.9.9"));
+        assert!(check.retry_after_secs.is_none());
+        // The attempt is recorded, so a second immediate request throttles.
+        let second =
+            manual_release_check_with(|| panic!("immediately repeated attempt must throttle"));
+        assert!(!second.checked_now);
+        cleanup();
+    }
+
+    /// A failed attempt also counts as an attempt: retry storms against an
+    /// unreachable GitHub stay bounded.
+    #[test]
+    fn a_failed_attempt_is_throttled_too() {
+        cleanup();
+        *LAST_MANUAL_CHECK.lock().unwrap() =
+            Some(std::time::Instant::now() - MANUAL_CHECK_MIN_INTERVAL);
+
+        let check = manual_release_check_with(|| stub_fetch(false));
+
+        assert!(check.checked_now);
+        assert!(!check.fetched_now);
+        assert!(check.latest.is_none());
+        cleanup();
+    }
+
+    /// The cache age comes off the success timestamp only: before any
+    /// successful fetch it is unknown, after one it counts up.
+    #[test]
+    fn cache_age_tracks_the_last_successful_fetch() {
+        cleanup();
+        assert!(latest_release_age_secs().is_none());
+        *LATEST_RELEASE_FETCHED_AT.lock().unwrap() =
+            Some(std::time::Instant::now() - std::time::Duration::from_secs(42));
+        assert_eq!(latest_release_age_secs().unwrap(), 42);
+        cleanup();
+    }
+}
+
 /// The latest published release version read off the server, cached across
 /// the console's status polls. Only the background warmer writes it (at the
 /// configured `[updates].check_interval_secs` cadence), so the console's
@@ -669,15 +753,90 @@ pub fn latest_release_cached() -> Option<String> {
 /// timeouts); called only by the background warmer. On an unreachable or
 /// rate-limited GitHub the previous value stays, so the console keeps
 /// showing the last known release instead of "unknown".
-fn refresh_latest_release_cache() {
-    if let Some(version) = fetch_latest_release_uncached() {
-        if let Ok(mut guard) = LATEST_RELEASE.lock() {
-            *guard = Some(version);
-        }
-        if let Ok(mut guard) = LATEST_RELEASE_FETCHED_AT.lock() {
-            *guard = Some(std::time::Instant::now());
+fn refresh_latest_release_cache() -> bool {
+    let Some(version) = fetch_latest_release_uncached() else {
+        return false;
+    };
+    if let Ok(mut guard) = LATEST_RELEASE.lock() {
+        *guard = Some(version);
+    }
+    if let Ok(mut guard) = LATEST_RELEASE_FETCHED_AT.lock() {
+        *guard = Some(std::time::Instant::now());
+    }
+    true
+}
+
+/// Minimum spacing between operator-triggered release checks ("Check Now"
+/// on the Update page). Each attempt is one request off the same shared
+/// unauthenticated GitHub budget the periodic warmer uses, so a
+/// double-click, an impatient retry or several operators at once cannot
+/// burn it; a request inside this window is answered from the cache with a
+/// retry hint. The periodic warmer's own spacing is governed separately
+/// (`MIN_UPDATE_CHECK_INTERVAL_SECS` plus config validation).
+const MANUAL_CHECK_MIN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// When the operator last triggered a release check (an attempt — a failed
+/// fetch also counts, so retry storms against an unreachable GitHub stay
+/// bounded too).
+static LAST_MANUAL_CHECK: std::sync::Mutex<Option<std::time::Instant>> =
+    std::sync::Mutex::new(None);
+
+/// The result of a manual release check for `POST /api/update/check`.
+#[derive(Debug, Clone)]
+pub struct ManualReleaseCheck {
+    /// `true` when a live check ran now; `false` when the request arrived
+    /// inside the throttle window and was answered from the cache.
+    pub checked_now: bool,
+    /// Whether this attempt obtained a value from GitHub (`false` when the
+    /// host was unreachable or rate-limited; the cache then still holds the
+    /// last-known value).
+    pub fetched_now: bool,
+    /// Latest known release after the attempt (`None` = never fetched
+    /// successfully).
+    pub latest: Option<String>,
+    /// Seconds until the throttle window lifts; set only when throttled.
+    pub retry_after_secs: Option<u64>,
+}
+
+/// Run one release check on behalf of the operator (Update page "Check
+/// Now"). Throttled to one attempt per [`MANUAL_CHECK_MIN_INTERVAL`]: a
+/// request inside the window replays the cache and reports
+/// `retry_after_secs` instead of re-hitting GitHub. The caller must have
+/// verified the host can self-update first (`can_update`), matching
+/// [`release_comparison`] — checks make no sense where updates are
+/// impossible anyway.
+pub fn manual_release_check() -> ManualReleaseCheck {
+    manual_release_check_with(refresh_latest_release_cache)
+}
+
+fn manual_release_check_with(fetch: fn() -> bool) -> ManualReleaseCheck {
+    if let Some(at) = LAST_MANUAL_CHECK.lock().ok().and_then(|guard| *guard) {
+        let elapsed = at.elapsed();
+        if elapsed < MANUAL_CHECK_MIN_INTERVAL {
+            return ManualReleaseCheck {
+                checked_now: false,
+                fetched_now: false,
+                latest: latest_release_cached(),
+                retry_after_secs: Some((MANUAL_CHECK_MIN_INTERVAL - elapsed).as_secs()),
+            };
         }
     }
+    let fetched_now = fetch();
+    if let Ok(mut guard) = LAST_MANUAL_CHECK.lock() {
+        *guard = Some(std::time::Instant::now());
+    }
+    ManualReleaseCheck {
+        checked_now: true,
+        fetched_now,
+        latest: latest_release_cached(),
+        retry_after_secs: None,
+    }
+}
+
+/// Seconds since the release cache was last fetched from GitHub, if ever.
+/// Only successful fetches are timestamped (`None` until the first one).
+pub fn latest_release_age_secs() -> Option<u64> {
+    latest_release_fetched_at().map(|at| at.elapsed().as_secs())
 }
 
 fn fetch_latest_release_uncached() -> Option<String> {

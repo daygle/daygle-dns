@@ -78,6 +78,7 @@
     clearTimeout(pollTimer);
     clearTimeout(reloadTimer);
     clearTimeout(autoDismissTimer);
+    clearTimeout(checkNoteTimer);
   });
 
   function poll() {
@@ -212,6 +213,46 @@
       await load();
     } catch (e) {
       startError = formatApiError(e);
+    }
+  }
+
+  // Formats whole seconds as a short human duration for the last-check line:
+  // "45 s", "12 min", "3 h".
+  function formatAgeSecs(secs) {
+    if (secs == null) return null;
+    if (secs < 90) return `${Math.round(secs)} s`;
+    if (secs < 90 * 60) return `${Math.round(secs / 60)} min`;
+    return `${Math.round(secs / 3600)} h`;
+  }
+
+  // Operator-triggered release fetch ("Check Now"): resolves the worst
+  // case of the automatic cadence (a fresh release staying invisible for a
+  // whole check interval). The server throttles live fetches to one per
+  // minute; a request inside that window comes back with the cached value
+  // `retry_after_secs` seconds after the last live one.
+  let checking = $state(false);
+  let checkNote = $state('');
+  let checkNoteTimer = null;
+
+  async function checkNow() {
+    checking = true;
+    checkNote = '';
+    try {
+      const res = await api.updateCheck();
+      await load();
+      checkNote = res.checked_now
+        ? res.fetched
+          ? 'Release check ran against GitHub just now.'
+          : 'Release check just ran, but GitHub could not be reached (or was rate-limited); the value shown may be stale.'
+        : `The last live check was under a minute ago; the next one can run in ${formatAgeSecs(res.retry_after_secs)} — showing that earlier result.`;
+    } catch (e) {
+      error = formatApiError(e);
+    } finally {
+      checking = false;
+      clearTimeout(checkNoteTimer);
+      checkNoteTimer = setTimeout(() => {
+        checkNote = '';
+      }, 8000);
     }
   }
 
@@ -392,13 +433,44 @@
   {/if}
 
   <div class="card" style="margin-bottom: 14px">
-    <h3 style="margin: 0 0 10px">Current Installation</h3>
+    <div class="spread">
+      <h3 style="margin: 0">Current Installation</h3>
+      {#if isAdmin && info.can_update}
+        <button
+          class="secondary"
+          style="font-size: 0.8rem; padding: 5px 12px; white-space: nowrap"
+          onclick={checkNow}
+          disabled={checking}
+          title="Fetch the latest published release from GitHub now (at most one live check per minute)"
+        >
+          {checking ? 'Checking...' : 'Check Now'}
+        </button>
+      {/if}
+    </div>
     <table>
       <tbody>
         <tr><td class="muted">Installed Version</td><td><code>v{info.version}</code></td></tr>
         <tr><td class="muted">Latest Release</td><td>{#if info.latest_release}<code>v{info.latest_release}</code>{:else}Unknown{/if}</td></tr>
       </tbody>
     </table>
+    {#if checkNote}
+      <p class="muted small" style="margin: 8px 0 0">{checkNote}</p>
+    {/if}
+    {#if info.checks_enabled && info.check_interval_secs}
+      <p class="muted small" style="margin: 10px 0 0; max-width: 80ch">
+        Automatic checks run every {formatAgeSecs(info.check_interval_secs)}
+        {#if info.latest_checked_secs_ago == null}
+          — none has run since the server started.
+        {:else}
+          — the last one ran {formatAgeSecs(info.latest_checked_secs_ago)} ago.
+        {/if}
+      </p>
+    {:else}
+      <p class="muted small" style="margin: 10px 0 0; max-width: 80ch">
+        Automatic release checks are off (Settings &rarr; General). Any latest
+        release shown above came from a manual check.
+      </p>
+    {/if}
     {#if !info.can_update}
       <p class="muted small" style="margin: 10px 0 0; max-width: 80ch">
         In-place updates need a Linux host managed by the installer (systemd

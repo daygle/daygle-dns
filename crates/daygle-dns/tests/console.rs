@@ -1703,6 +1703,27 @@ async fn update_endpoints_report_state_and_gate_start() {
         assert!(body["error"].as_str().unwrap_or("").contains("update"));
     }
 
+    // The manual release check needs the same host evidence; elsewhere it
+    // would be a wasted GitHub request, so it is also 409.
+    if !info["can_update"].as_bool().unwrap_or(false) {
+        let resp = reqwest::Client::new()
+            .post(format!("{base}/api/update/check"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 409);
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert!(body["error"].as_str().unwrap_or("").contains("self-update"));
+    }
+
+    // Cadence metadata for the Update page's check schedule display. The
+    // cache age is null until the first successful fetch (which never
+    // happens on a non-updatable host: the background warmer and the manual
+    // check both decline there).
+    assert!(info["checks_enabled"].is_boolean());
+    assert!(info["check_interval_secs"].is_u64());
+    assert!(info["latest_checked_secs_ago"].is_null());
+
     shutdown(server).await;
 }
 
