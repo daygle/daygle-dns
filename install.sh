@@ -37,6 +37,16 @@ log() { printf '\033[1;32m[daygle-dns-install]\033[0m %s\n' "$1"; }
 
 have_cmd() { command -v "$1" >/dev/null 2>&1; }
 
+download_url() {
+    if have_cmd curl; then
+        curl -fsSL --retry 3 --connect-timeout 15 "$1"
+    elif have_cmd wget; then
+        wget -qO- "$1"
+    else
+        return 1
+    fi
+}
+
 need_cargo() { ! have_cmd cargo; }
 need_git() { ! have_cmd git; }
 need_downloader() { ! { have_cmd curl || have_cmd wget; }; }
@@ -331,8 +341,46 @@ fi
 git clone --depth 1 https://github.com/daygle/daygle-dns.git "$SRC_DIR"
 cd "$SRC_DIR"
 
-log "Building release binary (this may take a few minutes)..."
+# Cargo embeds the workspace package version into the binary. The main branch
+# manifest can lag the published release tag, so resolve the latest stable
+# release and set the version before building instead of shipping the stale
+# manifest version (historically v1.0.0).
+RELEASE_TAG="$(download_url "https://api.github.com/repos/daygle/daygle-dns/releases/latest" 2>/dev/null \
+    | sed -n 's/^[[:space:]]*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
+    | head -n 1 || true)"
+if [ -z "$RELEASE_TAG" ]; then
+    RELEASE_TAG="$(download_url "https://github.com/daygle/daygle-dns/releases/latest" 2>/dev/null \
+        | sed -n 's#.*releases/tag/\([^"/?#]*\).*#\1#p' \
+        | head -n 1 || true)"
+fi
+RELEASE_VERSION="${RELEASE_TAG#v}"
+if ! printf '%s\n' "$RELEASE_VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([+-][0-9A-Za-z.-]+)?$'; then
+    log "ERROR: Could not resolve a valid latest GitHub release version; refusing to build with a stale version."
+    exit 1
+fi
+if ! awk -v version="$RELEASE_VERSION" '
+    /^\[workspace\.package\][[:space:]]*$/ { in_workspace_package = 1; print; next }
+    /^\[/ { if (in_workspace_package) in_workspace_package = 0 }
+    in_workspace_package && /^[[:space:]]*version[[:space:]]*=/ {
+        print "version = \"" version "\""
+        updated = 1
+        next
+    }
+    { print }
+    END { if (!updated) exit 1 }
+' Cargo.toml > Cargo.toml.tmp; then
+    rm -f Cargo.toml.tmp
+    log "ERROR: Could not set the Cargo workspace version from release $RELEASE_TAG."
+    exit 1
+fi
+mv Cargo.toml.tmp Cargo.toml
+log "Building Daygle DNS release $RELEASE_TAG (this may take a few minutes)..."
 cargo build --release -p daygle-dns
+BUILT_VERSION="$(target/release/daygle-dns --version 2>/dev/null | awk '{print $2}')"
+if [ "$BUILT_VERSION" != "$RELEASE_VERSION" ]; then
+    log "ERROR: Built binary reports version '$BUILT_VERSION', expected '$RELEASE_VERSION'."
+    exit 1
+fi
 
 log "Installing binary to $PREFIX/bin/daygle-dns..."
 install -d "$PREFIX/bin"
