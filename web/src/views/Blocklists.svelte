@@ -348,7 +348,16 @@
                 <div class="fetch-error">{s.last_error}</div>
               {/if}
             </td>
-            <td><span class="pill">{FORMAT_NAMES[s.format] || s.format}</span></td>
+            <td>
+              {#if s.format === 'wildcard'}
+                <div class="pill-row">
+                  <span class="pill">Domains</span>
+                  <span class="pill">Subdomains</span>
+                </div>
+              {:else}
+                <span class="pill">{FORMAT_NAMES[s.format] || s.format}</span>
+              {/if}
+            </td>
             <td>{s.scope === 'groups' ? 'Client Groups' : s.scope === 'dot' ? 'DoT Only (legacy)' : 'Everyone'}</td>
             <td class="muted">{interval(s.refresh_secs)}</td>
             <td class="num">{fmt(s.domains)}</td>
@@ -471,6 +480,7 @@
 
 <style>
   .url { font-size: 0.78rem; max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .pill-row { display: flex; flex-wrap: wrap; gap: 6px; }
   .fetch-error { font-size: 0.78rem; color: var(--danger); max-width: 320px; }
   .modal-backdrop { position: fixed; inset: 0; background: rgb(0 0 0 / 0.65); display: grid; place-items: center; padding: 20px; z-index: 10; }
   .modal { width: min(680px, 100%); max-height: calc(100vh - 40px); overflow: auto; }
