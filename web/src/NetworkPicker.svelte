@@ -25,8 +25,9 @@
 
   // Ticked names follow `value`; the typed text is kept as typed.
   const named = $derived(value.map(nameOf).filter(Boolean));
+  // Ticked listener keywords, as the strings the server stores ("DOT").
   const listenersOn = $derived(
-    LISTENERS.filter((l) => value.some((v) => isListener(v) && v.trim().toUpperCase() === l.key)),
+    LISTENERS.map((l) => l.key).filter((key) => value.some((v) => String(v).trim().toUpperCase() === key)),
   );
   let extra = $state(value.filter((v) => !nameOf(v) && !isListener(v)).join(', '));
 
@@ -47,9 +48,7 @@
   }
 
   function toggleListener(key) {
-    const next = listenersOn.some((l) => l.key === key)
-      ? listenersOn.filter((l) => l.key !== key)
-      : [...listenersOn, LISTENERS.find((l) => l.key === key)];
+    const next = listenersOn.includes(key) ? listenersOn.filter((k) => k !== key) : [...listenersOn, key];
     value = [...next, ...named, ...others(extra)];
   }
 
@@ -72,7 +71,7 @@
     {#each LISTENERS as l (l.key)}
       <label
         class="chip"
-        class:on={listenersOn.some((x) => x.key === l.key)}
+        class:on={listenersOn.includes(l.key)}
         title="Queries arriving over DNS over {l.key === 'DOT'
               ? 'TLS'
               : l.key === 'DOH'
@@ -81,7 +80,7 @@
       >
         <input
           type="checkbox"
-          checked={listenersOn.some((x) => x.key === l.key)}
+          checked={listenersOn.includes(l.key)}
           onchange={() => toggleListener(l.key)}
         />
         {l.label}
