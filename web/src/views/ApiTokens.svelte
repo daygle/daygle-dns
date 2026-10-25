@@ -2,6 +2,7 @@
   import { onMount } from 'svelte';
   import { api, formatApiError } from '../api.js';
   import { formatDate } from '../datetime.svelte.js';
+  import { copyText } from '../clipboard.js';
 
   // Personal API tokens for the signed-in account (Account page): scripts
   // send one as `Authorization: Bearer <token>`. A token is shown once, when
@@ -64,6 +65,14 @@
     }
   }
 
+  async function copyToken() {
+    try {
+      await copyText(created.token);
+    } catch (err) {
+      error = formatApiError(err);
+    }
+  }
+
   const when = (secs) => (secs ? formatDate(new Date(secs * 1000)) : null);
 </script>
 
@@ -83,7 +92,7 @@
       <strong>Copy the token for '{created.name}' now: it is not shown again.</strong>
       <div class="secret-row">
         <code class="secret">{created.token}</code>
-        <button type="button" class="secondary" onclick={() => navigator.clipboard?.writeText(created.token)}>Copy</button>
+        <button type="button" class="secondary" onclick={copyToken}>Copy</button>
       </div>
     </div>
   {/if}

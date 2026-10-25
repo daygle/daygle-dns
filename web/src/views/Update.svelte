@@ -4,6 +4,7 @@
   import { icons } from '../icons.svelte.js';
   import { onDestroy } from 'svelte';
   import { formatDateTime } from '../datetime.svelte.js';
+  import { copyText } from '../clipboard.js';
 
   let info = $state(null);
   let error = $state(null);
@@ -217,7 +218,7 @@
   async function copyCommand() {
     if (!info) return;
     try {
-      await navigator.clipboard.writeText(info.update_command);
+      await copyText(info.update_command);
       copied = true;
       setTimeout(() => {
         copied = false;

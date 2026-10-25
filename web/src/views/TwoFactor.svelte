@@ -2,6 +2,7 @@
   import { onMount } from 'svelte';
   import qrcode from 'qrcode-generator';
   import { api, formatApiError } from '../api.js';
+  import { copyText } from '../clipboard.js';
 
   // Two-factor login for the signed-in account (Account page): turn it on
   // (scan a QR code, confirm a code, keep the recovery codes), make new
@@ -82,6 +83,14 @@
     });
   }
 
+  async function copyCodes() {
+    try {
+      await copyText(codes.join('\n'));
+    } catch (e) {
+      error = formatApiError(e);
+    }
+  }
+
   function downloadCodes() {
     const text = `Daygle DNS recovery codes\nEach code signs you in once, instead of an authenticator app code.\n\n${codes.join('\n')}\n`;
     const url = URL.createObjectURL(new Blob([text], { type: 'text/plain' }));
@@ -148,7 +157,7 @@
     </div>
     <div class="modal-actions">
       <button type="button" onclick={downloadCodes}>Download Codes</button>
-      <button type="button" class="secondary" onclick={() => navigator.clipboard?.writeText(codes.join('\n'))}>Copy</button>
+      <button type="button" class="secondary" onclick={copyCodes}>Copy</button>
       <button type="button" class="secondary" onclick={() => { codes = []; load(); }}>Done</button>
     </div>
   {:else if step === 'on'}
