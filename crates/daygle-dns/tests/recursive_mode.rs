@@ -294,6 +294,78 @@ async fn recursion_access_refuses_clients_outside_allowed_networks() {
     shutdown(server).await;
 }
 
+// A console save that changes Recursion Access applies to live traffic
+// immediately, without a restart: the replacement resolver is built during
+// the save and swapped in after the config is published, so the published
+// settings and the serving resolver always move together.
+#[tokio::test]
+async fn save_applies_recursion_access_without_restart() {
+    let upstream = spawn_upstream_answering("fwd.test.", Ipv4Addr::new(198, 51, 100, 55)).await;
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = base_config(&dir.path().join("daygle-dns.db"));
+    config.recursive.enabled = true;
+    config.recursive.mode = Some(ResolutionMode::Forwarding);
+    config.recursive.use_system_config = false;
+    config.recursive.upstreams = vec![upstream.to_string()];
+    config.recursive.dnssec_validate = false;
+    config.recursive.timeout_secs = 2;
+    // Deny from the start: recursion is served to nobody.
+    config.recursive.recursion_access = RecursionAccess::Deny;
+    // Real ports: validation rejects port 0, and that pre-existing error
+    // would otherwise mask the result this test expects from the save.
+    config.server.port = free_port();
+    config.api.port = free_port();
+    let server = spawn(config).await;
+    let udp = server.udp_addr.unwrap();
+    let api = format!("http://{}/api/config", server.api_addr);
+    let client = reqwest::Client::new();
+
+    // Deny: only authoritative zones are answered, recursion is REFUSED.
+    let msg = udp_query(udp, "host.fwd.test.", RecordType::A).await;
+    assert_eq!(msg.response_code, ResponseCode::Refused);
+
+    // The console save that opens recursion up ("Recursion Access:
+    // Allow").
+    let ok = client
+        .put(&api)
+        .json(&serde_json::json!({ "recursive": { "recursion_access": "allow" } }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(ok.status(), 200);
+
+    // The next query already recurses to the upstream - no restart.
+    let msg = udp_query(udp, "host.fwd.test.", RecordType::A).await;
+    assert_eq!(msg.response_code, ResponseCode::NoError);
+    assert_eq!(first_answer(&msg).as_deref(), Some("198.51.100.55"));
+
+    // And a save that closes it applies immediately too: the upstream is
+    // unreachable in test terms anyway, but the client is refused before any
+    // upstream traffic.
+    let ok = client
+        .put(&api)
+        .json(&serde_json::json!({ "recursive": { "recursion_access": "deny" } }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(ok.status(), 200);
+    let msg = udp_query(udp, "fresh.fwd.test.", RecordType::A).await;
+    assert_eq!(msg.response_code, ResponseCode::Refused);
+
+    shutdown(server).await;
+}
+
+/// A port that is currently free for both TCP and UDP on 127.0.0.1.
+fn free_port() -> u16 {
+    loop {
+        let tcp = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = tcp.local_addr().unwrap().port();
+        if std::net::UdpSocket::bind(("127.0.0.1", port)).is_ok() {
+            return port;
+        }
+    }
+}
+
 #[tokio::test]
 async fn forwarding_mode_passes_nodata_through_as_noerror() {
     // The upstream knows v4only.test (A only): AAAA is NODATA, not NXDOMAIN.

@@ -4802,6 +4802,37 @@ pub async fn update_settings(
         }
     }
 
+    // Build the replacement recursive resolver before anything is persisted
+    // or published: a failed build rejects the save with 400 and nothing
+    // changes, so the published config and the live resolver can never
+    // diverge (a rebuild that failed after publishing used to silently keep
+    // the previous resolver, and a later no-op save would never retry it
+    // without a restart). Runtime components take the network names
+    // resolved to addresses.
+    let resolved = config.with_networks_resolved();
+    let recursive_changed = old_config.recursive != config.recursive
+        || old_config.authoritative.stub_zones != config.authoritative.stub_zones;
+    let new_resolver = if recursive_changed && config.recursive.enabled {
+        Some(
+            match daygle_dns_recursive::RecursiveResolver::build(
+                &resolved.recursive,
+                state.metrics.clone(),
+                &resolved.authoritative.stub_zones,
+                Some(state.local_root.clone()),
+            ) {
+                Ok(resolver) => resolver,
+                Err(e) => {
+                    return error_response(
+                        StatusCode::BAD_REQUEST,
+                        format!("recursive resolver rebuild failed: {e}"),
+                    );
+                }
+            },
+        )
+    } else {
+        None
+    };
+
     // Persist the DB-owned runtime settings to the database, then publish
     // live. (The config file is no longer rewritten: it holds bootstrap
     // values only, and the DB overlay wins over it on every boot.)
@@ -4830,31 +4861,13 @@ pub async fn update_settings(
     state
         .local_root
         .set_settings(config.recursive.local_root_in_effect());
-    // Rebuild the recursive resolver when its settings or the stub zones
-    // changed, so upstreams, cache settings, conditional forwarders and stub
-    // zones apply to live traffic immediately (mirrors the config-file
-    // reload path). A failed build keeps the previous resolver serving.
-    // Runtime components take the network names resolved to addresses.
-    let resolved = config.with_networks_resolved();
-    if old_config.recursive != config.recursive
-        || old_config.authoritative.stub_zones != config.authoritative.stub_zones
-    {
-        if config.recursive.enabled {
-            match daygle_dns_recursive::RecursiveResolver::build(
-                &resolved.recursive,
-                state.metrics.clone(),
-                &resolved.authoritative.stub_zones,
-                Some(state.local_root.clone()),
-            ) {
-                Ok(resolver) => state.resolver.store(Some(Arc::new(resolver))),
-                Err(e) => state.logs.warn(
-                    "api",
-                    format!("recursive resolver rebuild failed, keeping the previous one: {e}"),
-                ),
-            }
-        } else {
-            state.resolver.store(None);
-        }
+    // Swap in the resolver built before the save (or drop it when recursion
+    // was disabled) so upstreams, cache settings, conditional forwarders,
+    // stub zones and recursion access apply to live traffic immediately and
+    // together with the published config. No rebuild here: anything that
+    // needed building happened before the persist step (see above).
+    if recursive_changed {
+        state.resolver.store(new_resolver.map(Arc::new));
     }
     // Hot-swap the per-request authoritative gates (AXFR + dynamic-update
     // policy) so the change applies to in-flight DNS traffic immediately,
