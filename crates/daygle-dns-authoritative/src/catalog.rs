@@ -1,8 +1,11 @@
 //! Assembles SQLite-backed zones into a Hickory [`Catalog`] for serving, with
 //! optional DNSSEC signing.
 
-use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::future::Future;
+use std::net::SocketAddr;
+use std::pin::Pin;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use hickory_proto::dnssec::crypto::EcdsaSigningKey;
@@ -10,7 +13,9 @@ use hickory_proto::dnssec::rdata::dnskey::DNSKEY;
 use hickory_proto::dnssec::rdata::DNSSECRData;
 use hickory_proto::dnssec::{Algorithm, DnssecSigner, SigningKey};
 use hickory_proto::rr::{LowerName, Name, RData, Record, RecordSet, RecordType, RrKey};
+use hickory_proto::serialize::binary::{BinDecodable, BinDecoder, BinEncodable, BinEncoder};
 use hickory_server::dnssec::NxProofKind;
+use hickory_server::net::runtime::{RuntimeProvider, Time, TokioRuntimeProvider, TokioTime};
 use hickory_server::store::in_memory::InMemoryZoneHandler;
 use hickory_server::zone_handler::{AxfrPolicy, Catalog, ZoneHandler, ZoneType};
 use tracing::{info, warn};
@@ -55,6 +60,105 @@ pub struct AuthorityCatalog {
     catalog_zone_changed: Arc<tokio::sync::Notify>,
     /// Ids of health-checked records currently failing their check.
     unhealthy: arc_swap::ArcSwap<std::collections::HashSet<String>>,
+    /// Held while a catalog is built and published, so a slow rebuild that
+    /// read the database first cannot replace a newer one.
+    reload_lock: Mutex<()>,
+    /// The served data of zones whose transfers must carry it verbatim
+    /// (signed zones, and secondaries kept as their master sent them), by
+    /// lowercase zone name.
+    transfer_sets: arc_swap::ArcSwap<HashMap<String, Arc<ServedRecords>>>,
+    /// The SOA serial each primary zone was last served with.
+    serials: Mutex<HashMap<String, u32>>,
+    /// Primary zones whose serial changed since [`Self::take_changed_zones`]
+    /// was last called.
+    changed_zones: Mutex<BTreeSet<String>>,
+    /// Woken when `changed_zones` gains a zone, so its secondaries can be
+    /// sent a NOTIFY.
+    zones_changed: Arc<tokio::sync::Notify>,
+    /// Dynamic updates run one at a time (RFC 2136 §3.7): prerequisites are
+    /// checked against the zone as it will be when the update applies.
+    pub(crate) update_lock: tokio::sync::Mutex<()>,
+}
+
+/// A zone's served records, with their signatures.
+pub type ServedRecords = BTreeMap<RrKey, Arc<RecordSet>>;
+
+/// How far signature inceptions are backdated. Hickory stamps each RRSIG
+/// with the signing time; a validator whose clock runs behind ours would
+/// reject a signature made moments ago as not yet valid, after every
+/// re-sign, until its clock caught up. An hour (as BIND uses) absorbs
+/// ordinary clock skew.
+const INCEPTION_BACKDATE_SECS: u64 = 3600;
+
+/// Hickory's Tokio runtime, with a clock that reads [`INCEPTION_BACKDATE_SECS`]
+/// early. Zone handlers use the clock only to stamp signature inceptions.
+#[derive(Clone, Default)]
+pub struct SigningRuntime(TokioRuntimeProvider);
+
+/// The backdated signing clock of [`SigningRuntime`].
+pub struct SigningClock;
+
+#[async_trait::async_trait]
+impl Time for SigningClock {
+    async fn delay_for(duration: Duration) {
+        TokioTime::delay_for(duration).await
+    }
+
+    async fn timeout<F: 'static + Future + Send>(
+        duration: Duration,
+        future: F,
+    ) -> std::io::Result<F::Output> {
+        TokioTime::timeout(duration, future).await
+    }
+
+    fn current_time() -> u64 {
+        TokioTime::current_time().saturating_sub(INCEPTION_BACKDATE_SECS)
+    }
+}
+
+impl RuntimeProvider for SigningRuntime {
+    type Handle = <TokioRuntimeProvider as RuntimeProvider>::Handle;
+    type Timer = SigningClock;
+    type Udp = <TokioRuntimeProvider as RuntimeProvider>::Udp;
+    type Tcp = <TokioRuntimeProvider as RuntimeProvider>::Tcp;
+
+    fn create_handle(&self) -> Self::Handle {
+        self.0.create_handle()
+    }
+
+    fn connect_tcp(
+        &self,
+        server_addr: SocketAddr,
+        bind_addr: Option<SocketAddr>,
+        timeout: Option<Duration>,
+    ) -> Pin<Box<dyn Send + Future<Output = std::io::Result<Self::Tcp>>>> {
+        self.0.connect_tcp(server_addr, bind_addr, timeout)
+    }
+
+    fn bind_udp(
+        &self,
+        local_addr: SocketAddr,
+        server_addr: SocketAddr,
+    ) -> Pin<Box<dyn Send + Future<Output = std::io::Result<Self::Udp>>>> {
+        self.0.bind_udp(local_addr, server_addr)
+    }
+}
+
+/// The zone handler every hosted zone is served by.
+type ZoneData = InMemoryZoneHandler<SigningRuntime>;
+
+/// A freshly built catalog and what changed in it.
+struct Built {
+    catalog: Catalog,
+    catalog_zone_changed: bool,
+    /// Served SOA serial of each primary zone, by lowercase name.
+    serials: HashMap<String, u32>,
+    transfer_sets: HashMap<String, Arc<ServedRecords>>,
+}
+
+/// The key zones are filed under: lowercase, no trailing dot.
+fn zone_key(name: &str) -> String {
+    name.trim().trim_end_matches('.').to_ascii_lowercase()
 }
 
 /// An ALIAS record: A and AAAA queries for its name are answered with its
@@ -91,20 +195,41 @@ fn build_aliases(store: &ZoneStore) -> Result<std::collections::HashMap<String, 
 impl AuthorityCatalog {
     /// Build a catalog from the store without any DNSSEC signing.
     pub fn new(store: ZoneStore, settings: AuthoritativeSettings) -> Result<Self> {
-        let (catalog, _) = build_catalog(&store, &settings, false, &Default::default())?;
+        let built = build_catalog(&store, &settings, false, &Default::default())?;
         let networks = daygle_dns_core::config::builtin_networks();
         let split_horizon = Arc::new(build_split_horizon(&store, &networks)?);
         let aliases = build_aliases(&store)?;
         Ok(Self {
             store,
             settings: arc_swap::ArcSwap::from_pointee(settings),
-            catalog: arc_swap::ArcSwap::from_pointee(catalog),
+            catalog: arc_swap::ArcSwap::from_pointee(built.catalog),
             split_horizon: arc_swap::ArcSwap::from(split_horizon),
             networks: arc_swap::ArcSwap::from_pointee(networks),
             aliases: arc_swap::ArcSwap::from_pointee(aliases),
             catalog_zone_changed: Arc::new(tokio::sync::Notify::new()),
             unhealthy: Default::default(),
+            reload_lock: Mutex::new(()),
+            transfer_sets: arc_swap::ArcSwap::from_pointee(built.transfer_sets),
+            serials: Mutex::new(built.serials),
+            changed_zones: Mutex::new(BTreeSet::new()),
+            zones_changed: Arc::new(tokio::sync::Notify::new()),
+            update_lock: tokio::sync::Mutex::new(()),
         })
+    }
+
+    /// Woken when a primary zone is served with a new serial (any change:
+    /// console edit, import, dynamic update, re-sign), so its secondaries
+    /// can be sent a NOTIFY. Collect the zones with
+    /// [`Self::take_changed_zones`].
+    pub fn zones_changed(&self) -> Arc<tokio::sync::Notify> {
+        self.zones_changed.clone()
+    }
+
+    /// The primary zones whose serial changed since the last call.
+    pub fn take_changed_zones(&self) -> Vec<String> {
+        std::mem::take(&mut *self.changed_zones.lock().unwrap_or_else(|e| e.into_inner()))
+            .into_iter()
+            .collect()
     }
 
     /// The health-checked records now failing their check.
@@ -234,22 +359,73 @@ impl AuthorityCatalog {
     /// Rebuild the catalog and split-horizon index from the database,
     /// applying DNSSEC signing when keys are present and signing is enabled.
     pub fn reload(&self) -> Result<()> {
+        let _reload = self.reload_lock.lock().unwrap_or_else(|e| e.into_inner());
         let settings = self.settings.load_full();
-        let (catalog, catalog_zone_changed) = build_catalog(
+        let built = build_catalog(
             &self.store,
             &settings,
             settings.dnssec_enabled,
             &self.unhealthy.load(),
         )?;
-        self.catalog.store(Arc::new(catalog));
-        if catalog_zone_changed {
+        self.catalog.store(Arc::new(built.catalog));
+        self.transfer_sets.store(Arc::new(built.transfer_sets));
+        if built.catalog_zone_changed {
             self.catalog_zone_changed.notify_waiters();
         }
         let split_horizon = Arc::new(build_split_horizon(&self.store, &self.networks.load())?);
         self.split_horizon.store(split_horizon);
         self.aliases.store(Arc::new(build_aliases(&self.store)?));
+
+        let mut serials = self.serials.lock().unwrap_or_else(|e| e.into_inner());
+        let changed: Vec<String> = built
+            .serials
+            .iter()
+            .filter(|(name, serial)| serials.get(*name) != Some(*serial))
+            .map(|(name, _)| name.clone())
+            .collect();
+        *serials = built.serials;
+        drop(serials);
+        if !changed.is_empty() {
+            self.changed_zones
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .extend(changed);
+            self.zones_changed.notify_one();
+        }
         info!("authoritative catalog reloaded");
         Ok(())
+    }
+
+    /// The DS records (SHA-256 digest) a parent zone should publish for the
+    /// signed zone `zone_id`, one per active key, in presentation form.
+    /// Empty when the zone is not served signed.
+    pub fn ds_records(&self, zone_id: &str) -> Result<Vec<String>> {
+        if !self.settings.load().dnssec_enabled {
+            return Ok(Vec::new());
+        }
+        let Some(zone) = self.store.get_zone(zone_id)? else {
+            return Ok(Vec::new());
+        };
+        let origin = fqdn_name(&zone.name)?;
+        let mut out = Vec::new();
+        for key in self.store.list_signing_keys(zone_id)? {
+            if !key.is_active() {
+                continue;
+            }
+            let record = build_dnskey_record(&origin, key.algorithm, &key.key_der, 0)?;
+            let RData::DNSSEC(DNSSECRData::DNSKEY(dnskey)) = &record.data else {
+                continue;
+            };
+            let tag = dnskey
+                .calculate_key_tag()
+                .map_err(|e| DaygleError::Internal(format!("DNSKEY key tag: {e}")))?;
+            let digest = dnskey
+                .to_digest(&origin, hickory_proto::dnssec::DigestType::SHA256)
+                .map_err(|e| DaygleError::Internal(format!("DNSKEY digest: {e}")))?;
+            let hex: String = digest.as_ref().iter().map(|b| format!("{b:02X}")).collect();
+            out.push(format!("{origin} IN DS {tag} {} 2 {hex}", key.algorithm));
+        }
+        Ok(out)
     }
 
     /// The ALIAS record at `name` (lowercase, with or without the trailing
@@ -324,6 +500,14 @@ impl AuthorityCatalog {
                 "the zone has ALIAS records, whose answers are made when asked and cannot be signed: replace them with A/AAAA or CNAME records first".to_string(),
             ));
         }
+        // With signing turned off the key would be stored but never used:
+        // the zone would read as signed while it is served unsigned, and a
+        // DS published for it would make it bogus.
+        if !self.settings.load().dnssec_enabled {
+            return Err(DaygleError::Config(
+                "DNSSEC signing is turned off (authoritative.dnssec_enabled = false)".to_string(),
+            ));
+        }
         if let Some(nsec3) = nsec3 {
             self.store.set_zone_nsec3(zone_id, nsec3)?;
         }
@@ -348,6 +532,23 @@ impl AuthorityCatalog {
     ///
     /// Returns `None` when no zone with exactly `zone_name` exists.
     pub fn transfer_records(&self, zone_name: &str) -> Result<Option<(Record, Vec<Record>)>> {
+        // Signed zones (and secondaries kept as their master sent them) are
+        // transferred exactly as served, signatures, NSEC chain and DNSKEYs
+        // included: a secondary given the bare records would serve the zone
+        // unsigned, which validators reject once the parent has a DS.
+        if let Some(served) = self.transfer_sets.load().get(&zone_key(zone_name)) {
+            let mut soa = None;
+            let mut others = Vec::with_capacity(served.len() * 2);
+            for set in served.values() {
+                if set.record_type() == RecordType::SOA {
+                    soa = set.records_without_rrsigs().next().cloned();
+                    others.extend(set.rrsigs().iter().cloned());
+                } else {
+                    others.extend(set.records_with_rrsigs().cloned());
+                }
+            }
+            return Ok(soa.map(|soa| (soa, others)));
+        }
         let map = match self.store.find_zone_by_name(zone_name)? {
             Some(zone) if zone.enabled => {
                 let records = self.store.list_records(&zone.id)?;
@@ -404,14 +605,12 @@ fn build_split_horizon(
 }
 
 /// Build a fresh Hickory `Catalog` from the store.
-///
-/// Also returns whether the published catalog zone's member list changed.
 fn build_catalog(
     store: &ZoneStore,
     settings: &AuthoritativeSettings,
     sign_zones: bool,
     unhealthy: &std::collections::HashSet<String>,
-) -> Result<(Catalog, bool)> {
+) -> Result<Built> {
     let mut catalog = Catalog::new();
     let checked: std::collections::HashSet<String> = store
         .list_health_checks()?
@@ -426,96 +625,96 @@ fn build_catalog(
         .collect();
 
     let sig_validity = sig_duration(settings);
+    let mut serials = HashMap::new();
+    let mut transfer_sets = HashMap::new();
 
     for (zone, records, keys) in data {
         if !zone.enabled {
             continue;
         }
         let origin = fqdn_name(&zone.name)?;
-        let zone_type = if secondary_ids.contains(&zone.id) {
-            ZoneType::Secondary
-        } else {
-            ZoneType::Primary
-        };
-        let active: Vec<&SigningKeyRecord> = keys.iter().filter(|k| k.is_active()).collect();
-        let retired: Vec<&SigningKeyRecord> = keys.iter().filter(|k| k.is_retired()).collect();
-        let records = failover(records, &checked, unhealthy);
-        let mut map = zone_rrsets(&zone, &records)?;
+        let lower = LowerName::from(origin.clone());
 
-        // Retired keys no longer sign, but their DNSKEY stays published for
-        // the retirement grace period so validators holding cached RRSIGs
-        // made by the old key can still build a chain of trust (RFC 6781).
-        if sign_zones {
-            for key in &retired {
-                match build_dnskey_record(
-                    &origin,
-                    key.algorithm,
-                    &key.key_der,
-                    zone.minimum.max(300),
-                ) {
-                    Ok(record) => {
-                        insert_record_set(&mut map, record)?;
+        if secondary_ids.contains(&zone.id) {
+            let handler = match store.transfer_data(&zone.id)? {
+                // As the master sent it: its signatures stay valid only if
+                // every record is served byte for byte as signed.
+                Some(wire) => match secondary_zone(&origin, &wire) {
+                    Ok(handler) => Some(handler),
+                    Err(e) => {
+                        warn!(zone = %zone.name, error = %e, "stored transfer is unreadable; serving the record table");
+                        None
                     }
-                    Err(e) => warn!(
-                        zone = %zone.name,
-                        error = %e,
-                        "cannot publish retired DNSKEY"
-                    ),
-                }
-            }
+                },
+                None => None,
+            };
+            let mut handler = match handler {
+                Some(handler) => handler,
+                None => ZoneData::new(
+                    origin.clone(),
+                    zone_rrsets(&zone, &records)?,
+                    ZoneType::Secondary,
+                    AxfrPolicy::Deny,
+                    None,
+                )
+                .map_err(DaygleError::InvalidRecord)?,
+            };
+            transfer_sets.insert(
+                zone_key(&zone.name),
+                Arc::new(handler.records_get_mut().clone()),
+            );
+            catalog.upsert(lower, vec![Arc::new(handler) as Arc<dyn ZoneHandler>]);
+            continue;
         }
 
-        let nx_proof_kind = if !(sign_zones && !active.is_empty()) {
-            None
-        } else if store.zone_nsec3(&zone.id).unwrap_or(false) {
-            // RFC 9276: SHA-1, no extra iterations, no salt, no opt-out.
-            Some(NxProofKind::Nsec3 {
-                algorithm: Default::default(),
-                salt: Arc::new([]),
-                iterations: 0,
-                opt_out: false,
-            })
+        let records = failover(records, &checked, unhealthy);
+
+        // Every active key signs every RRset (and the DNSKEY RRset), which
+        // is what makes pre-publish/double-sign rollover work: validators
+        // can pick either key while both are published.
+        let signers: Vec<DnssecSigner> = if sign_zones {
+            keys.iter()
+                .filter(|k| k.is_active())
+                .filter_map(|key| {
+                    build_signer(origin.clone(), key.algorithm, &key.key_der, sig_validity)
+                        .map_err(|e| warn!("cannot reconstruct signing key for {}: {e}", zone.name))
+                        .ok()
+                })
+                .collect()
         } else {
-            Some(NxProofKind::Nsec)
+            Vec::new()
         };
 
-        let mut handler: InMemoryZoneHandler = InMemoryZoneHandler::new(
-            origin.clone(),
-            map,
-            zone_type,
-            AxfrPolicy::Deny,
-            nx_proof_kind,
-        )
-        .map_err(DaygleError::InvalidRecord)?;
-
-        // Apply DNSSEC signing: every active key signs every RRset (and the
-        // DNSKEY RRset), which is what makes pre-publish/double-sign rollover
-        // work - validators can pick either key while both are published.
-        if sign_zones {
-            let mut added = 0usize;
-            for key in &active {
-                match build_signer(origin.clone(), key.algorithm, &key.key_der, sig_validity) {
-                    Ok(signer) => match handler.add_zone_signing_key_mut(signer) {
-                        Ok(()) => added += 1,
-                        Err(e) => warn!("failed to add signing key for {}: {e}", zone.name),
-                    },
-                    Err(e) => warn!("cannot reconstruct signing key for {}: {e}", zone.name),
+        let handler = if signers.is_empty() {
+            None
+        } else {
+            let retired: Vec<&SigningKeyRecord> = keys.iter().filter(|k| k.is_retired()).collect();
+            match signed_zone(store, &zone, &records, &origin, signers, &retired) {
+                Ok(mut handler) => {
+                    transfer_sets.insert(
+                        zone_key(&zone.name),
+                        Arc::new(handler.records_get_mut().clone()),
+                    );
+                    Some(handler)
+                }
+                Err(e) => {
+                    warn!(zone = %zone.name, error = %e, "failed to sign zone; serving it unsigned");
+                    None
                 }
             }
-            if added > 0 {
-                match handler.secure_zone_mut() {
-                    Ok(()) => info!(
-                        zone = %zone.name,
-                        keys = added,
-                        retired = retired.len(),
-                        "zone signed with DNSSEC"
-                    ),
-                    Err(e) => warn!("failed to sign zone {}: {e}", zone.name),
-                }
-            }
-        }
-
-        let lower = LowerName::from(origin);
+        };
+        let handler = match handler {
+            Some(handler) => handler,
+            None => ZoneData::new(
+                origin.clone(),
+                zone_rrsets(&zone, &records)?,
+                ZoneType::Primary,
+                AxfrPolicy::Deny,
+                None,
+            )
+            .map_err(DaygleError::InvalidRecord)?,
+        };
+        serials.insert(zone_key(&zone.name), zone.serial);
         catalog.upsert(lower, vec![Arc::new(handler) as Arc<dyn ZoneHandler>]);
     }
 
@@ -534,7 +733,7 @@ fn build_catalog(
             let (map, changed) = catalog_zone_rrsets(store, catalog_zone)?;
             catalog_changed = changed;
             let origin = fqdn_name(catalog_zone)?;
-            let handler: InMemoryZoneHandler = InMemoryZoneHandler::new(
+            let handler = ZoneData::new(
                 origin.clone(),
                 map,
                 ZoneType::Primary,
@@ -549,7 +748,175 @@ fn build_catalog(
         }
     }
 
-    Ok((catalog, catalog_changed))
+    Ok(Built {
+        catalog,
+        catalog_zone_changed: catalog_changed,
+        serials,
+        transfer_sets,
+    })
+}
+
+/// Build and sign a primary zone with `signers`.
+fn signed_zone(
+    store: &ZoneStore,
+    zone: &crate::model::Zone,
+    records: &[DbRecord],
+    origin: &Name,
+    signers: Vec<DnssecSigner>,
+    retired: &[&SigningKeyRecord],
+) -> Result<ZoneData> {
+    // Hickory bumps the SOA serial when it signs. Start one below the
+    // stored serial so the zone is served (and transferred) with the serial
+    // the console shows, and unsigning it later does not move it backwards.
+    let mut unbumped = zone.clone();
+    unbumped.serial = zone.serial.wrapping_sub(1);
+    let mut map = zone_rrsets(&unbumped, records)?;
+
+    // Retired keys no longer sign, but their DNSKEY stays published for the
+    // retirement grace period so validators holding cached RRSIGs made by
+    // the old key can still build a chain of trust (RFC 6781).
+    for key in retired {
+        match build_dnskey_record(origin, key.algorithm, &key.key_der, zone.minimum.max(300)) {
+            Ok(record) => insert_record_set(&mut map, record)?,
+            Err(e) => warn!(zone = %zone.name, error = %e, "cannot publish retired DNSKEY"),
+        }
+    }
+
+    let nx_proof_kind = if store.zone_nsec3(&zone.id).unwrap_or(false) {
+        // RFC 9276: SHA-1, no extra iterations, no salt, no opt-out.
+        NxProofKind::Nsec3 {
+            algorithm: Default::default(),
+            salt: Arc::new([]),
+            iterations: 0,
+            opt_out: false,
+        }
+    } else {
+        NxProofKind::Nsec
+    };
+    let mut handler = ZoneData::new(
+        origin.clone(),
+        map,
+        ZoneType::Primary,
+        AxfrPolicy::Deny,
+        Some(nx_proof_kind),
+    )
+    .map_err(DaygleError::InvalidRecord)?;
+    let keys = signers.len();
+    for signer in signers {
+        handler
+            .add_zone_signing_key_mut(signer)
+            .map_err(|e| DaygleError::Internal(format!("add signing key: {e}")))?;
+    }
+    handler
+        .secure_zone_mut()
+        .map_err(|e| DaygleError::Internal(format!("sign zone: {e}")))?;
+    info!(zone = %zone.name, keys, retired = retired.len(), "zone signed with DNSSEC");
+    Ok(handler)
+}
+
+/// Serve a secondary zone from the records its master transferred
+/// (`wire`, see [`encode_transfer`]), signatures and denial proofs
+/// included, without re-signing anything.
+fn secondary_zone(origin: &Name, wire: &[u8]) -> Result<ZoneData> {
+    let mut map: BTreeMap<RrKey, RecordSet> = BTreeMap::new();
+    let mut rrsigs = Vec::new();
+    let mut nsec = false;
+    let mut nsec3: Option<NxProofKind> = None;
+    let mut opt_out = false;
+    for record in decode_transfer(wire)? {
+        match &record.data {
+            RData::DNSSEC(DNSSECRData::RRSIG(_)) => {
+                rrsigs.push(record);
+                continue;
+            }
+            RData::DNSSEC(DNSSECRData::NSEC(_)) => nsec = true,
+            RData::DNSSEC(DNSSECRData::NSEC3(n)) => opt_out |= n.opt_out(),
+            RData::DNSSEC(DNSSECRData::NSEC3PARAM(p)) if record.name == *origin => {
+                nsec3 = Some(NxProofKind::Nsec3 {
+                    algorithm: p.hash_algorithm(),
+                    salt: Arc::from(p.salt()),
+                    iterations: p.iterations(),
+                    opt_out: false,
+                });
+            }
+            _ => {}
+        }
+        insert_record_set(&mut map, record)?;
+    }
+    let nx_proof_kind = match nsec3 {
+        Some(NxProofKind::Nsec3 {
+            algorithm,
+            salt,
+            iterations,
+            ..
+        }) => Some(NxProofKind::Nsec3 {
+            algorithm,
+            salt,
+            iterations,
+            opt_out,
+        }),
+        _ if nsec => Some(NxProofKind::Nsec),
+        other => other,
+    };
+    let mut handler = ZoneData::new(
+        origin.clone(),
+        map,
+        ZoneType::Secondary,
+        AxfrPolicy::Deny,
+        nx_proof_kind,
+    )
+    .map_err(DaygleError::InvalidRecord)?;
+    // The handler takes records only; signatures are attached to their
+    // RRsets afterwards.
+    let served = handler.records_get_mut();
+    for rrsig in rrsigs {
+        let RData::DNSSEC(DNSSECRData::RRSIG(sig)) = &rrsig.data else {
+            continue;
+        };
+        let key = RrKey::new(
+            LowerName::from(rrsig.name.clone()),
+            sig.input().type_covered,
+        );
+        if let Some(set) = served.get_mut(&key) {
+            Arc::make_mut(set).insert_rrsig(rrsig);
+        }
+    }
+    Ok(handler)
+}
+
+/// Encode a transfer's records for storage: each in wire format, after
+/// its length (4 bytes). The closing SOA of the transfer must already be
+/// removed.
+pub(crate) fn encode_transfer(records: &[Record]) -> Result<Vec<u8>> {
+    let mut out = Vec::new();
+    for record in records {
+        let mut buf = Vec::new();
+        let mut encoder = BinEncoder::new(&mut buf);
+        record
+            .emit(&mut encoder)
+            .map_err(|e| DaygleError::Internal(format!("encode transferred record: {e}")))?;
+        out.extend_from_slice(&(buf.len() as u32).to_be_bytes());
+        out.extend_from_slice(&buf);
+    }
+    Ok(out)
+}
+
+/// Decode records stored by [`encode_transfer`].
+fn decode_transfer(mut wire: &[u8]) -> Result<Vec<Record>> {
+    let corrupt = || DaygleError::Internal("stored transfer is truncated".to_string());
+    let mut records = Vec::new();
+    while !wire.is_empty() {
+        let (len, rest) = wire.split_first_chunk::<4>().ok_or_else(corrupt)?;
+        let len = u32::from_be_bytes(*len) as usize;
+        let (record, rest) = rest.split_at_checked(len).ok_or_else(corrupt)?;
+        let mut decoder = BinDecoder::new(record);
+        records.push(
+            Record::read(&mut decoder)
+                .map_err(|e| DaygleError::Internal(format!("decode stored transfer: {e}")))?,
+        );
+        wire = rest;
+    }
+    Ok(records)
 }
 
 /// Health-checked failover: in each A or AAAA RRset holding a
@@ -812,6 +1179,7 @@ pub(crate) fn build_dnskey_record(
 mod tests {
     use super::*;
     use crate::model::{RecordInput, ZoneInput};
+    use chrono::Utc;
 
     #[test]
     fn failover_serves_the_healthy_records_of_the_best_priority() {
@@ -886,6 +1254,91 @@ mod tests {
             )
             .unwrap();
         AuthorityCatalog::new(store, settings).unwrap()
+    }
+
+    /// Every change to a primary zone's serial, however it was made, is
+    /// reported once, so the zone's secondaries are sent a NOTIFY.
+    #[test]
+    fn serial_changes_are_reported_for_notify() {
+        let catalog = catalog();
+        catalog.reload().unwrap();
+        assert!(
+            catalog.take_changed_zones().is_empty(),
+            "nothing changed yet"
+        );
+
+        let zone = catalog
+            .store()
+            .find_zone_by_name("example.com")
+            .unwrap()
+            .unwrap();
+        catalog
+            .store()
+            .upsert_record(
+                &zone.id,
+                &RecordInput {
+                    name: "mail".to_string(),
+                    rtype: "A".to_string(),
+                    content: "192.0.2.25".to_string(),
+                    ttl: 300,
+                    priority: 0,
+                    disabled: false,
+                },
+            )
+            .unwrap();
+        catalog.reload().unwrap();
+        assert_eq!(
+            catalog.take_changed_zones(),
+            vec!["example.com".to_string()]
+        );
+        catalog.reload().unwrap();
+        assert!(catalog.take_changed_zones().is_empty());
+    }
+
+    /// Signing keeps the stored serial (hickory's own bump is undone), and
+    /// signatures start an hour back so validators with a slow clock accept
+    /// them at once.
+    #[tokio::test]
+    async fn signed_zones_keep_their_serial_and_backdate_inception() {
+        let store = ZoneStore::open(":memory:").unwrap();
+        let zone = store
+            .create_zone(&ZoneInput {
+                name: "signed.example".to_string(),
+                ..Default::default()
+            })
+            .unwrap();
+        let catalog = AuthorityCatalog::new(
+            store,
+            AuthoritativeSettings {
+                dnssec_enabled: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        catalog.sign_zone(&zone.id).unwrap();
+        assert!(
+            catalog.take_changed_zones().is_empty(),
+            "signing changes no serial"
+        );
+
+        let (soa, records) = catalog.transfer_records("signed.example").unwrap().unwrap();
+        let RData::SOA(soa) = &soa.data else {
+            panic!("not an SOA")
+        };
+        assert_eq!(soa.serial, zone.serial);
+        let now = Utc::now().timestamp() as u32;
+        let inceptions: Vec<u32> = records
+            .iter()
+            .filter_map(|r| match &r.data {
+                RData::DNSSEC(DNSSECRData::RRSIG(sig)) => Some(sig.input().sig_inception.get()),
+                _ => None,
+            })
+            .collect();
+        assert!(!inceptions.is_empty());
+        for inception in inceptions {
+            let behind = now - inception;
+            assert!((3590..=3700).contains(&behind), "inception {behind}s back");
+        }
     }
 
     #[test]

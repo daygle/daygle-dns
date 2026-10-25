@@ -1373,6 +1373,9 @@ struct ZoneView {
     dnssec: bool,
     /// Whether a signed zone uses NSEC3 rather than NSEC.
     nsec3: bool,
+    /// The DS records the parent zone must publish for a signed zone (one
+    /// per active key, so two during a key rollover).
+    ds: Vec<String>,
     zone_type: &'static str,
     /// The consumed catalog zone that added this zone, if any.
     catalog: Option<String>,
@@ -1407,11 +1410,17 @@ pub async fn list_zones(State(state): State<AppState>) -> Response {
                 .unwrap_or(false);
             let nsec3 = dnssec && state.catalog.store().zone_nsec3(&zone.id).unwrap_or(false);
             let catalog = catalog_members.get(&zone.id).cloned();
+            let ds = if dnssec {
+                state.catalog.ds_records(&zone.id).unwrap_or_default()
+            } else {
+                Vec::new()
+            };
             if let Some(item) = secondary.get(&zone.id) {
                 ZoneView {
                     zone,
                     dnssec,
                     nsec3,
+                    ds,
                     zone_type: "secondary",
                     catalog,
                     masters: item.masters.clone(),
@@ -1422,6 +1431,7 @@ pub async fn list_zones(State(state): State<AppState>) -> Response {
                     zone,
                     dnssec,
                     nsec3,
+                    ds,
                     zone_type: "primary",
                     catalog,
                     masters: Vec::new(),

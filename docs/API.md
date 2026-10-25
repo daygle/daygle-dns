@@ -649,8 +649,9 @@ not-exists forms) are fully checked; failed updates return their RFC 2136
 RCODE (YXDOMAIN, YXRRSet, NXDOMAIN, NXRRSet, NOTAUTH, ...).
 
 NOTIFY (RFC 1996) is likewise a DNS-protocol feature. When
-`authoritative.notify_enabled` is set, a successful dynamic update sends a
-NOTIFY (OpCode 4, QTYPE SOA, UDP) to every address in
+`authoritative.notify_enabled` is set, every change to a primary zone's
+serial (a console edit or import, a dynamic update, a DNSSEC signature
+renewal) sends a NOTIFY (OpCode 4, QTYPE SOA, UDP) to every address in
 `authoritative.notify_targets`; secondaries that receive it immediately query
 our SOA and pull an IXFR/AXFR when the serial advanced. When
 `authoritative.notify_listen_enabled` is set, the server also accepts
@@ -1014,10 +1015,13 @@ NSEC3 uses the RFC 9276 parameters: SHA-1, no extra iterations, no salt and
 no opt-out (NSEC3PARAM is published at the apex). Calling `sign` on a signed
 zone with `nsec3` switches between the two without changing keys; without a
 body it keeps the zone's current choice. `GET /api/zones` reports `dnssec`
-and `nsec3` for each zone.
+and `nsec3` for each zone, and `ds`: the DS records (SHA-256) the parent
+zone must publish, one per active key (two during a key rollover). `sign`
+fails while `authoritative.dnssec_enabled` is off.
 
 Once signed, a zone is maintained automatically: RRSIGs are renewed before
-they expire and keys are rolled over on schedule (double-signing during the
+they expire (with a serial bump, so secondaries pick up the new signatures)
+and keys are rolled over on schedule (double-signing during the
 overlap, the old key retired and eventually removed) - see the `dnssec_*`
 settings under `authoritative` in `daygle-dns.toml`. Manual `unsign` removes all
 keys (including any mid-rollover ones) and stops the maintenance for that

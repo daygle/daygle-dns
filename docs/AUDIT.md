@@ -857,3 +857,279 @@ The `server` and `api` sections (listen addresses, CORS origins) apply live
 but stay owned by the config file. That way a bad console change cannot
 lock the operator out across a restart. This was already documented and is
 unchanged.
+
+# Follow-up audit: authoritative zones and DNSSEC
+
+Scope:
+
+- **Serving:** how hosted zones are built into the serving catalog, and
+  health-checked failover.
+- **Zone transfers:** AXFR/IXFR served to secondaries, and the transfer
+  client and refresher used by secondary zones.
+- **Dynamic updates and NOTIFY:** RFC 2136 updates, and NOTIFY in both
+  directions.
+- **DNSSEC:** signing, NSEC/NSEC3, signature renewal, key rollover, and
+  what the console shows.
+
+Verification:
+
+- fmt and clippy (`-D warnings`) are clean, and the full suite passes (500
+  tests).
+- New tests:
+  - **End to end:** a signed zone too big for one DNS message, behind
+    TSIG, replicated to a secondary. The secondary must serve the master's
+    own signatures, byte for byte, and its NSEC denial proofs.
+  - **Scripted master:** a fake master answering IXFR with a lone SOA and
+    AXFR with the opening SOA in a message of its own.
+  - **TSIG chaining:** multi-message signing and verification, checked
+    against hickory's own verifier.
+  - **Unit tests:** the served serial, inception backdating, the NOTIFY
+    change feed, rollover timing, and renewal serial bumps.
+
+## Zone transfers and secondaries
+
+### Z1. Signed zones were transferred unsigned, with the wrong serial - **Fixed** (High)
+
+*Problem.* AXFR/IXFR was built from the database, not from the signed
+zone. A secondary of a signed Daygle zone therefore received no RRSIG,
+NSEC or DNSKEY records and served the zone unsigned.
+
+There was also a serial mismatch. Hickory bumps the SOA serial by one when
+it signs, so a signed zone answered SOA queries with serial N+1 while its
+transfers carried N. Two consequences:
+
+- A secondary saw a newer serial on every check and re-transferred the zone
+  every refresh interval.
+- Unsigning a zone moved the served serial *backwards*, after which
+  secondaries ignored changes until the serial passed the old value again.
+
+*Impact.* Once the parent publishes a DS, a validating resolver that asks a
+secondary for the zone gets unsigned answers and treats the zone as bogus.
+
+*Fix.*
+
+- A signed zone is built one serial below the stored value, so after
+  hickory's bump it is served with exactly the serial the console shows.
+- Its transfers are taken from the served, signed data: SOA, RRSIGs,
+  NSEC/NSEC3 and DNSKEY records included.
+
+### Z2. Secondaries threw away their master's signatures - **Fixed** (High)
+
+*Problem.* The refresher dropped every DNSSEC record from a transfer and
+stored the rest as text records, then served those.
+
+*Impact.* A zone signed by any master was served unsigned by a Daygle
+secondary, which made it bogus for validators. Re-parsing every record
+from text also risked changing record data in ways that would break the
+master's signatures.
+
+*Fix.* Each transfer is also stored exactly as received (wire format), and
+a secondary zone is served from that copy:
+
+- signatures are attached to the record sets they cover;
+- the NSEC chain, or the NSEC3 chain with its NSEC3PARAM settings, is used
+  for denial proofs;
+- nothing is re-signed or re-encoded from text.
+
+The record table is still filled, for the console. A secondary zone kept
+from before this change is transferred again once, at its next check.
+
+### Z3. Renewed signatures never reached secondaries - **Fixed** (High)
+
+*Problem.* Signature renewal re-signed zones without changing their
+serial. Secondaries only transfer when the serial changes, so they kept
+the old signatures until those expired (14 days by default). With Z1
+fixed, this would have made every secondary copy of a signed zone go bogus.
+
+*Fix.*
+
+- Renewal bumps the serial of every signed primary zone, at half the
+  signature validity.
+- The new NOTIFY feed (Z9) tells secondaries at once.
+
+### Z4. Zones over 64 KiB could not be transferred - **Fixed** (High)
+
+*Problem.* A whole transfer was sent as one DNS message. A zone larger than
+the 64 KiB message limit was cut off and marked truncated, and secondaries
+reject that. The limit is roughly 1,500 plain records, and far fewer once
+the zone is signed.
+
+*Fix.*
+
+- Transfers are split into messages of at most about 16 KiB (RFC 5936).
+- With TSIG, every message is signed, each MAC chained from the one before
+  (RFC 8945 §5.3.1). A test checks this format against hickory's own
+  verifier.
+
+### Z5. A secondary could stay empty, or be emptied - **Fixed** (High)
+
+*Problem.*
+
+- To fill a new or empty secondary zone, the refresher asked for an IXFR
+  from its current serial. A new zone's default serial (1) often matches
+  the master's, and the master then answers "no change" with a lone SOA.
+  That reply was applied as the full zone: the zone was marked
+  transferred, every record was deleted, and it stayed empty from then on.
+- A lone *newer* SOA, which means "use AXFR" (RFC 1995), was also read as
+  "no change".
+- Any transfer that came back without records would have replaced the
+  zone with nothing.
+
+*Fix.*
+
+- A zone that has never been transferred, or has no data, is fetched with
+  AXFR.
+- A lone newer SOA leads to an AXFR, and a lone current SOA changes
+  nothing.
+- A transfer that does not open and close with the SOA is rejected.
+
+### Z6. Secondary zones ignored their TSIG key - **Fixed** (Medium)
+
+*Problem.* `secondary_zones[].tsig_key` was documented as signing transfer
+requests, but nothing used it.
+
+*Impact.* Transfers from a master that requires TSIG were always refused.
+
+*Fix.*
+
+- Transfer requests are signed with the named key.
+- Every reply message must verify, chained from the request. Up to 99
+  unsigned messages in a row are allowed between signed ones, and the last
+  message must be signed (RFC 8945).
+- An unknown key name is an error.
+- The SOA serial check stays unsigned. It is only a hint, and many masters
+  (Daygle included) do not sign ordinary answers.
+
+### Z7. Smaller transfer issues - **Fixed** (Low)
+
+- **Lone opening SOA.** The transfer client stopped at a first message
+  holding only the SOA, which some servers send on its own. An AXFR now
+  ends only on a closing SOA.
+- **Overlapping refreshes.** A refresh started by a NOTIFY could run at the
+  same time as the periodic one, and the older transfer could be stored
+  last. Refreshes now run one at a time.
+
+## DNSSEC
+
+### D1. Signature inception was "now" - **Fixed** (Medium)
+
+*Problem.* Every reload re-signs the zone (any record edit triggers one),
+stamping each RRSIG with the current second as its inception. A validator
+whose clock runs even a few seconds behind sees those signatures as not
+yet valid.
+
+*Impact.* After every edit, validators with a slow clock treated the zone
+as bogus until their clock caught up.
+
+*Fix.*
+
+- Zones are signed with a clock that reads one hour early, as BIND does.
+  It is a small runtime wrapper that hickory's zone handler uses only to
+  stamp inceptions.
+- Expiry moves one hour earlier with it. That is immaterial against a
+  14-day validity, renewed at half.
+
+### D2. Key rollover could skip its overlap and grace periods - **Fixed** (Medium)
+
+*Problem.* Both rollover stages were measured from the *old key's
+creation*:
+
+- The old key retired once it was older than rollover + overlap, whenever
+  its successor had appeared.
+- The old key was deleted once it was older than rollover + overlap +
+  retire.
+
+After an outage, or with rollover turned on for an old zone, the successor
+appeared, the old key retired at the next check (an hour later, not
+30 days), and it was deleted at the check after that.
+
+*Impact.* Validators holding the old DNSKEY set had no time to learn the
+new key. There was also no window to update the DS at the parent.
+
+*Fix.*
+
+- The old key retires when its successor has been out for the overlap
+  period.
+- A retired key is deleted when the grace period has passed since its
+  retirement. Keys now record a `retired_at` time. Keys already retired
+  when upgrading start their grace period then.
+
+### D3. The DS record was never shown - **Fixed** (Medium)
+
+*Problem.* After signing, the console said "Publish its DS record at the
+parent zone", but neither the console nor the API showed it.
+
+*Fix.*
+
+- `GET /api/zones` reports `ds`: the DS records, with SHA-256 digests, for
+  the active keys. During a rollover there are two.
+- The Zones page has a DS button that shows them, and opens them right
+  after a zone is signed.
+
+### D4. "Sign" did nothing when signing was turned off - **Fixed** (Low)
+
+*Problem.* With `authoritative.dnssec_enabled = false`, signing a zone
+stored a key and reported success, but the zone was served unsigned.
+
+*Impact.* The console listed the zone as signed. A DS published for it
+made it bogus.
+
+*Fix.* Signing now fails with a clear error while DNSSEC signing is off.
+
+## Updates, NOTIFY and the catalog
+
+### N1. Console changes did not notify secondaries - **Fixed** (Medium)
+
+*Problem.* NOTIFY was sent only after a dynamic update. Changes made any
+other way reached secondaries only at their refresh interval (an hour by
+default). That covered console edits, imports, signing and renewal.
+
+*Fix.*
+
+- Each catalog reload reports the primary zones whose served serial
+  changed, whatever changed it, and a background task notifies their
+  secondaries.
+- Dynamic updates use the same path, so a zone is notified once.
+
+### N2. Concurrent dynamic updates could both pass their prerequisites - **Fixed** (Medium)
+
+*Problem.* Each update read the zone, checked its prerequisites and then
+applied its changes, with nothing stopping another update in between. Two
+clients that each required a name to be absent before adding it could
+both succeed. RFC 2136 §3.7 requires updates to be serialized.
+
+*Fix.* Updates now run one at a time, from the zone read to the reload.
+
+### N3. Concurrent reloads could publish a stale catalog - **Fixed** (Medium)
+
+*Problem.* Many things reload the catalog: console edits, updates,
+transfers, health changes and DNSSEC maintenance. A slow rebuild that read
+the database first could finish last and replace a newer catalog, leaving
+a change unserved until the next reload.
+
+*Fix.* Building and publishing a catalog happen under one lock.
+
+### N4. Smaller issues - **Fixed** (Low)
+
+- **Backwards SOA in updates.** A dynamic update whose SOA serial was not
+  newer than the zone's was applied, moving the serial back. It is now
+  ignored, as RFC 2136 §3.4.2.2 requires.
+- **Empty updates.** An update with nothing left to apply no longer bumps
+  the serial.
+- **Reload cost.** The catalog build filtered every record once per zone
+  (zones × records). It now groups records in one pass.
+- **Signing maintenance.** It read the list of secondary zones only at
+  startup, so a zone made secondary later could still have its keys
+  rolled. The list is now read on every pass.
+
+## Reported, not changed
+
+- **Every change re-signs every zone.** A reload rebuilds and re-signs all
+  zones. That is fine for typical sizes. With many large signed zones,
+  rebuilding only the changed zone would be worth doing.
+- **CDS/CDNSKEY.** These are not published (RFC 7344/8078). The DS update
+  at the parent during a rollover is still manual.
+- **Inbound NOTIFY behind a PROXY front.** The NOTIFY master check uses
+  the socket's source address, not a PROXY-restored client.
+- **ALIAS to a local target.** Answering it reads the database on each
+  query.

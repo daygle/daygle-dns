@@ -407,6 +407,25 @@ pub async fn bind_with(
             }
         });
     }
+    // Primary zones: NOTIFY their secondaries whenever a zone is served
+    // with a new serial, whatever changed it (console, import, dynamic
+    // update, DNSSEC re-sign).
+    if let Some(sender) = notify_sender.clone() {
+        let changed = catalog.zones_changed();
+        let catalog = catalog.clone();
+        let shutdown = shutdown.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = shutdown.cancelled() => return,
+                    _ = changed.notified() => {}
+                }
+                for zone in catalog.take_changed_zones() {
+                    sender.notify_zone(&zone).await;
+                }
+            }
+        });
+    }
     let notify_hooks = daygle_dns_authoritative::notify::NotifyHooks {
         sender: notify_sender,
         inbound: notify_inbound,

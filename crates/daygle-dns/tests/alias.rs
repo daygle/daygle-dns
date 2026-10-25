@@ -77,6 +77,7 @@ async fn alias_records_answer_with_their_target() {
     cfg.recursive.use_system_config = false;
     cfg.recursive.upstreams = vec![upstream.to_string()];
     cfg.recursive.dnssec_validate = false;
+    cfg.authoritative.dnssec_enabled = true;
     let server = spawn(cfg).await;
     let store = server.catalog.store();
     let zone = store

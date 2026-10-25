@@ -174,6 +174,11 @@ pub async fn handle_update_with_notify<R: ResponseHandler>(
         }
     }
 
+    // From here on the zone is read, checked and changed: one update at a
+    // time, or two updates could both pass prerequisites only one of them
+    // should (each adding the name the other required to be absent).
+    let _serialized = catalog.update_lock.lock().await;
+
     // -- Zone must exist and be a primary zone ----------------------------
     let zone = match store.find_zone_by_name(&zone_name) {
         Ok(Some(zone)) if zone.enabled => zone,
@@ -287,6 +292,18 @@ pub async fn handle_update_with_notify<R: ResponseHandler>(
             response_edns,
             response_handle,
             ResponseCode::Refused,
+        )
+        .await;
+    }
+
+    // Nothing to change (only an ignored SOA, or an empty update): the
+    // zone, and so its serial, stays as it is.
+    if plan.adds.is_empty() && plan.deletes.is_empty() && plan.soa.is_none() {
+        return respond(
+            update,
+            response_edns,
+            response_handle,
+            ResponseCode::NoError,
         )
         .await;
     }
@@ -412,6 +429,13 @@ fn build_update(
             }
             if rtype == RecordType::SOA && name == zone.name {
                 let soa = match &record.data {
+                    // RFC 2136 §3.4.2.2: an SOA whose serial is not newer
+                    // than the zone's is ignored. Applying it would move the
+                    // serial back, and secondaries would stop picking up
+                    // changes until it passed the old value again.
+                    RData::SOA(soa) if !crate::secondary::serial_newer(soa.serial, zone.serial) => {
+                        return Ok(());
+                    }
                     RData::SOA(soa) => SoaUpdate {
                         primary_ns: soa.mname.to_string(),
                         admin_mailbox: soa.rname.to_string(),

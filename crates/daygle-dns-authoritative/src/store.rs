@@ -61,7 +61,8 @@ CREATE TABLE IF NOT EXISTS dnssec_keys (
     algorithm  INTEGER NOT NULL,
     key_der    BLOB NOT NULL,
     state      TEXT NOT NULL DEFAULT 'active',
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    retired_at TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_dnssec_keys_zone ON dnssec_keys(zone_id);
@@ -96,6 +97,13 @@ CREATE TABLE IF NOT EXISTS catalog_state (
 CREATE TABLE IF NOT EXISTS zone_dnssec (
     zone_id  TEXT PRIMARY KEY REFERENCES zones(id) ON DELETE CASCADE,
     nsec3    INTEGER NOT NULL DEFAULT 0
+);
+
+-- A secondary zone's records exactly as its master last transferred them
+-- (wire format), signatures included, so the zone is served unaltered.
+CREATE TABLE IF NOT EXISTS zone_transfers (
+    zone_id  TEXT PRIMARY KEY REFERENCES zones(id) ON DELETE CASCADE,
+    records  BLOB NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS secondary_zones (
@@ -312,6 +320,7 @@ impl ZoneStore {
         migrate_split_horizon_records(&conn)?;
         migrate_split_horizon_timestamps(&conn)?;
         migrate_dnssec_keys(&conn)?;
+        migrate_dnssec_key_retirement(&conn)?;
         migrate_console_user_profile(&conn)?;
         migrate_blocking_group_lists(&conn)?;
         migrate_blocking_group_timestamps(&conn)?;
@@ -1087,6 +1096,30 @@ impl ZoneStore {
         Ok(())
     }
 
+    /// The records a secondary zone's master last transferred, as stored
+    /// by [`Self::set_transfer_data`].
+    pub fn transfer_data(&self, zone_id: &str) -> Result<Option<Vec<u8>>> {
+        let conn = self.lock_conn()?;
+        Ok(conn
+            .query_row(
+                "SELECT records FROM zone_transfers WHERE zone_id = ?1",
+                [zone_id],
+                |row| row.get(0),
+            )
+            .optional()?)
+    }
+
+    /// Keep a secondary zone's transferred records (wire format).
+    pub fn set_transfer_data(&self, zone_id: &str, records: &[u8]) -> Result<()> {
+        let conn = self.lock_conn()?;
+        conn.execute(
+            "INSERT INTO zone_transfers (zone_id, records) VALUES (?1, ?2)
+             ON CONFLICT(zone_id) DO UPDATE SET records = excluded.records",
+            params![zone_id, records],
+        )?;
+        Ok(())
+    }
+
     /// Bulk import: replace all records of a zone (keeping the zone row).
     pub fn replace_records(&self, zone_id: &str, records: &[RecordInput]) -> Result<()> {
         let zone = self
@@ -1608,7 +1641,7 @@ impl ZoneStore {
     pub fn list_signing_keys(&self, zone_id: &str) -> Result<Vec<SigningKeyRecord>> {
         let conn = self.lock_conn()?;
         let mut stmt = conn.prepare(
-            "SELECT id, zone_id, algorithm, key_der, state, created_at
+            "SELECT id, zone_id, algorithm, key_der, state, created_at, retired_at
              FROM dnssec_keys WHERE zone_id = ?1 ORDER BY created_at",
         )?;
         let rows = stmt.query_map([zone_id], row_to_key)?;
@@ -1650,12 +1683,28 @@ impl ZoneStore {
         Ok(id)
     }
 
-    /// Move a key between states (`active` <-> `retired`).
+    /// Move a key between states (`active` <-> `retired`), recording when
+    /// it was retired.
     pub fn set_key_state(&self, key_id: &str, state: &str) -> Result<bool> {
         let conn = self.lock_conn()?;
+        let retired_at = (state == "retired").then(|| Utc::now().to_rfc3339());
         let changed = conn.execute(
-            "UPDATE dnssec_keys SET state = ?2 WHERE id = ?1",
-            params![key_id, state],
+            "UPDATE dnssec_keys SET state = ?2, retired_at = ?3 WHERE id = ?1",
+            params![key_id, state, retired_at],
+        )?;
+        Ok(changed > 0)
+    }
+
+    /// Rewrite a retired key's retirement time (tests and imports).
+    pub fn set_key_retired_at(
+        &self,
+        key_id: &str,
+        retired_at: chrono::DateTime<Utc>,
+    ) -> Result<bool> {
+        let conn = self.lock_conn()?;
+        let changed = conn.execute(
+            "UPDATE dnssec_keys SET retired_at = ?2 WHERE id = ?1",
+            params![key_id, retired_at.to_rfc3339()],
         )?;
         Ok(changed > 0)
     }
@@ -1702,14 +1751,19 @@ impl ZoneStore {
     /// catalog builder.
     pub fn load_catalog_data(&self) -> Result<CatalogData> {
         let zones = self.list_zones()?;
-        let records = self.list_all_records()?;
+        // Grouped in one pass: filtering every record once per zone cost
+        // zones x records on every reload.
+        let mut by_zone: std::collections::HashMap<String, Vec<Record>> =
+            std::collections::HashMap::new();
+        for record in self.list_all_records()? {
+            by_zone
+                .entry(record.zone_id.clone())
+                .or_default()
+                .push(record);
+        }
         let mut out = Vec::with_capacity(zones.len());
         for zone in zones {
-            let recs = records
-                .iter()
-                .filter(|r| r.zone_id == zone.id)
-                .cloned()
-                .collect::<Vec<_>>();
+            let recs = by_zone.remove(&zone.id).unwrap_or_default();
             let keys = self.list_signing_keys(&zone.id)?;
             out.push((zone, recs, keys));
         }
@@ -1757,6 +1811,7 @@ fn row_to_key(row: &rusqlite::Row<'_>) -> rusqlite::Result<SigningKeyRecord> {
         key_der: row.get(3)?,
         state: row.get(4)?,
         created_at: row.get(5)?,
+        retired_at: row.get(6)?,
     })
 }
 
@@ -3507,7 +3562,26 @@ fn migrate_record_metadata(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-/// Add zone enablement and modification metadata to older databases.
+/// Record when signing keys are retired (older databases lack the column).
+/// Keys already retired start their grace period now.
+fn migrate_dnssec_key_retirement(conn: &Connection) -> Result<()> {
+    let has: bool = conn.query_row(
+        "SELECT EXISTS(
+            SELECT 1 FROM pragma_table_info('dnssec_keys') WHERE name = 'retired_at'
+         )",
+        [],
+        |r| r.get(0),
+    )?;
+    if !has {
+        conn.execute("ALTER TABLE dnssec_keys ADD COLUMN retired_at TEXT", [])?;
+    }
+    conn.execute(
+        "UPDATE dnssec_keys SET retired_at = ?1 WHERE state = 'retired' AND retired_at IS NULL",
+        [Utc::now().to_rfc3339()],
+    )?;
+    Ok(())
+}
+
 /// Add zone enablement and modification metadata to older databases.
 fn migrate_zone_metadata(conn: &Connection) -> Result<()> {
     for (column, definition) in [

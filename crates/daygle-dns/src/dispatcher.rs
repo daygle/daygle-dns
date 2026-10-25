@@ -544,41 +544,37 @@ impl DnsDispatcher {
                 answers.extend(records);
                 answers.push(soa);
 
-                let mut response = MessageResponseBuilder::from_message_request(request).build(
-                    metadata,
-                    answers.iter(),
-                    std::iter::empty(),
-                    std::iter::empty(),
-                    std::iter::empty(),
-                );
-                // TSIG-signed transfer: sign the response with the request
-                // MAC chained (RFC 8945 §5.4.2), following the same pattern
-                // as hickory's own catalog zone-transfer path.
-                if let Some((_, context)) = tsig {
-                    let mut tbs_buf = Vec::with_capacity(1024);
-                    let mut encoder =
-                        hickory_proto::serialize::binary::BinEncoder::new(&mut tbs_buf);
-                    let tbs_response = MessageResponseBuilder::from_message_request(request).build(
+                // A DNS message holds at most 64 KiB, so a larger zone goes
+                // out as several messages (RFC 5936 §2.2). Each TSIG-signed
+                // message chains from the MAC of the one before.
+                let (tsig_key, mut first_context) = match tsig {
+                    Some((key, context)) => (Some(key), Some(context)),
+                    None => (None, None),
+                };
+                let mut previous_mac: Option<Vec<u8>> = None;
+                let mut info = None;
+                for chunk in transfer_chunks(&answers) {
+                    let mut response = MessageResponseBuilder::from_message_request(request).build(
                         metadata,
-                        answers.iter(),
+                        chunk.iter(),
                         std::iter::empty(),
                         std::iter::empty(),
                         std::iter::empty(),
                     );
-                    if let Err(e) = tbs_response.destructive_emit(&mut encoder) {
-                        warn!(query = %qname, error = %e, "failed to encode signed transfer");
-                        return send_error(
-                            &mut response_handle,
-                            request,
-                            ResponseCode::ServFail,
-                            None,
-                        )
-                        .await;
-                    }
-                    match context.sign(&tbs_buf) {
-                        Ok(signature) => response.set_signature(signature),
-                        Err(e) => {
-                            warn!(query = %qname, error = %e, "failed to sign zone transfer");
+                    if let Some(key) = &tsig_key {
+                        let mut tbs_buf = Vec::with_capacity(16 * 1024);
+                        let mut encoder =
+                            hickory_proto::serialize::binary::BinEncoder::new(&mut tbs_buf);
+                        let tbs_response = MessageResponseBuilder::from_message_request(request)
+                            .build(
+                                metadata,
+                                chunk.iter(),
+                                std::iter::empty(),
+                                std::iter::empty(),
+                                std::iter::empty(),
+                            );
+                        if let Err(e) = tbs_response.destructive_emit(&mut encoder) {
+                            warn!(query = %qname, error = %e, "failed to encode signed transfer");
                             return send_error(
                                 &mut response_handle,
                                 request,
@@ -587,15 +583,45 @@ impl DnsDispatcher {
                             )
                             .await;
                         }
+                        let signature = match (&previous_mac, first_context.take()) {
+                            (None, Some(context)) => {
+                                context.sign(&tbs_buf).map_err(|e| e.to_string())
+                            }
+                            _ => daygle_dns_authoritative::tsig::sign_subsequent(
+                                key,
+                                previous_mac.as_deref().unwrap_or_default(),
+                                &tbs_buf,
+                                request.metadata.id,
+                            ),
+                        };
+                        match signature {
+                            Ok(signature) => {
+                                previous_mac = Some(signature.data.mac.clone());
+                                response.set_signature(signature);
+                            }
+                            Err(e) => {
+                                warn!(query = %qname, error = %e, "failed to sign zone transfer");
+                                return send_error(
+                                    &mut response_handle,
+                                    request,
+                                    ResponseCode::ServFail,
+                                    None,
+                                )
+                                .await;
+                            }
+                        }
+                    }
+                    match response_handle.send_response(response).await {
+                        Ok(sent) => {
+                            info.get_or_insert(sent);
+                        }
+                        Err(e) => {
+                            warn!("failed to send zone transfer: {e}");
+                            return fallback_response();
+                        }
                     }
                 }
-                match response_handle.send_response(response).await {
-                    Ok(info) => info,
-                    Err(e) => {
-                        warn!("failed to send zone transfer: {e}");
-                        fallback_response()
-                    }
-                }
+                info.unwrap_or_else(fallback_response)
             }
             Ok(None) => {
                 debug!(query = %qname, "zone transfer for unknown zone");
@@ -608,6 +634,31 @@ impl DnsDispatcher {
             }
         }
     }
+}
+
+/// Split a zone transfer's answers into groups that each fit one DNS
+/// message: sizes are counted uncompressed, so the real messages come out
+/// smaller still, well under the 64 KiB limit.
+fn transfer_chunks(answers: &[Record]) -> Vec<&[Record]> {
+    const BUDGET: usize = 16 * 1024;
+    let mut chunks = Vec::new();
+    let mut start = 0;
+    let mut size = 0;
+    for (i, record) in answers.iter().enumerate() {
+        let len = hickory_proto::serialize::binary::BinEncodable::to_bytes(record)
+            .map(|b| b.len())
+            .unwrap_or(BUDGET);
+        if size > 0 && size + len > BUDGET {
+            chunks.push(&answers[start..i]);
+            start = i;
+            size = 0;
+        }
+        size += len;
+    }
+    if start < answers.len() {
+        chunks.push(&answers[start..]);
+    }
+    chunks
 }
 
 /// True when the query type is a zone transfer (AXFR or IXFR).
@@ -747,7 +798,9 @@ impl RequestHandler for DnsDispatcher {
                 client,
                 edns,
                 response_handle,
-                self.notify.sender.as_deref(),
+                // Secondaries are notified of every zone change from the
+                // catalog's change feed (see `daygle_dns::run`).
+                None,
             )
             .await;
         }

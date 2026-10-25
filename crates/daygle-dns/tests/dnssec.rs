@@ -172,6 +172,22 @@ async fn rollover_transitions_are_served() {
     assert_eq!(dnskey_count(&reply), 2, "pre-publish: both keys served");
     assert!(rrsig_count(&reply) >= 1);
 
+    // The old key keeps signing until its successor has been out for the
+    // overlap (1 day here).
+    pass_rollover(&server);
+    assert!(store
+        .list_signing_keys(&zone_id)
+        .unwrap()
+        .iter()
+        .all(|k| k.is_active()));
+    let successor = store.list_signing_keys(&zone_id).unwrap().pop().unwrap();
+    store
+        .set_key_created_at(
+            &successor.id,
+            chrono::Utc::now() - chrono::Duration::hours(25),
+        )
+        .unwrap();
+
     // Pass 2: old key retired -> still two DNSKEYs (grace publication),
     // signed by the surviving key.
     pass_rollover(&server);
@@ -179,8 +195,8 @@ async fn rollover_transitions_are_served() {
     assert_eq!(dnskey_count(&reply), 2, "retired key stays published");
     assert!(rrsig_count(&reply) >= 1);
 
-    // Age the retired key past the delete threshold and advance once more:
-    // only the new key remains, and the zone keeps serving signed answers.
+    // Age the retirement past the grace period and advance once more: only
+    // the new key remains, and the zone keeps serving signed answers.
     let old_key = store
         .list_signing_keys(&zone_id)
         .unwrap()
@@ -188,7 +204,7 @@ async fn rollover_transitions_are_served() {
         .find(|k| k.is_retired())
         .unwrap();
     store
-        .set_key_created_at(
+        .set_key_retired_at(
             &old_key.id,
             chrono::Utc::now() - chrono::Duration::hours(96),
         )
