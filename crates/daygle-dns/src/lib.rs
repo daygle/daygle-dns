@@ -4,10 +4,10 @@
 //! [`DnsDispatcher`] and a [`bind`] helper that wires every subsystem into a
 //! runnable server. The `daygle-dns` binary is a thin CLI wrapper around this.
 
+mod connection_admission;
 pub mod cookies;
 pub mod dispatcher;
 mod doq;
-mod connection_admission;
 mod net;
 pub mod proxy_protocol;
 pub mod query_db_log;
@@ -1107,8 +1107,8 @@ async fn bind_listeners(
             return Ok(public);
         };
         let hidden = net::bind_tcp(([127, 0, 0, 1], 0).into(), false)?;
-        let max_connections = connection_limit
-            .unwrap_or(config.server.proxy_protocol_max_connections);
+        let max_connections =
+            connection_limit.unwrap_or(config.server.proxy_protocol_max_connections);
         let _front = proxy_protocol::spawn_front(
             public,
             hidden.local_addr()?,

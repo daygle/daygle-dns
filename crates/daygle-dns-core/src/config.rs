@@ -1705,6 +1705,7 @@ impl RuntimeSettings {
                 idle_timeout_secs: None,
                 handshake_timeout_secs: Some(config.dot.handshake_timeout_secs),
                 max_connections: Some(config.dot.max_connections),
+                max_concurrent_streams: None,
                 allowed_networks: Some(config.dot.allowed_networks.clone()),
             }),
             doh: Some(DohUpdate {
@@ -2038,9 +2039,21 @@ impl DaygleConfig {
             ));
         }
         for (name, value, enabled) in [
-            ("dot.max_connections", self.dot.max_connections, self.dot.enabled),
-            ("doh.max_connections", self.doh.max_connections, self.doh.enabled),
-            ("doq.max_connections", self.doq.max_connections, self.doq.enabled),
+            (
+                "dot.max_connections",
+                self.dot.max_connections,
+                self.dot.enabled,
+            ),
+            (
+                "doh.max_connections",
+                self.doh.max_connections,
+                self.doh.enabled,
+            ),
+            (
+                "doq.max_connections",
+                self.doq.max_connections,
+                self.doq.enabled,
+            ),
         ] {
             if enabled && !(1..=65_536).contains(&value) {
                 return Err(DaygleError::Config(format!("{name} must be in 1..=65536")));

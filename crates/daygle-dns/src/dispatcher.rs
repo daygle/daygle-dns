@@ -1114,10 +1114,7 @@ impl RequestHandler for DnsDispatcher {
                     &mut response_handle,
                     request,
                     ResponseCode::ServFail,
-                    Some(Ede::new(
-                        ede::OTHER,
-                        "recursive lookup capacity exhausted",
-                    )),
+                    Some(Ede::new(ede::OTHER, "recursive lookup capacity exhausted")),
                 )
                 .await;
             }
@@ -1137,7 +1134,8 @@ impl RequestHandler for DnsDispatcher {
                     daygle_dns_recursive::track_stale(async move {
                         resolver.lookup_for_client(client, &name, rtype).await
                     }),
-                ).await
+                )
+                .await
             })
         };
         let lookup = match tokio::time::timeout(self.client_timeout, lookup_task).await {
@@ -1178,7 +1176,7 @@ impl RequestHandler for DnsDispatcher {
                 {
                     if let Some(dns64) = self.dns64_for(client, request) {
                         if let Some(records) = self
-                            .synthesize_aaaa(&dns64, &resolver, client, &qname, &authorities)
+                            .synthesize_aaaa(&dns64, resolver.clone(), client, &qname, &authorities)
                             .await
                         {
                             answers = records;
@@ -1265,7 +1263,7 @@ impl RequestHandler for DnsDispatcher {
                 if code == ResponseCode::NoError && info.query.query_type() == RecordType::AAAA {
                     if let Some(dns64) = self.dns64_for(client, request) {
                         if let Some(records) = self
-                            .synthesize_aaaa(&dns64, &resolver, client, &qname, &[])
+                            .synthesize_aaaa(&dns64, resolver.clone(), client, &qname, &[])
                             .await
                         {
                             self.observe(
@@ -1445,7 +1443,7 @@ impl DnsDispatcher {
     async fn synthesize_aaaa(
         &self,
         dns64: &daygle_dns_core::config::Dns64,
-        resolver: &RecursiveResolver,
+        resolver: Arc<RecursiveResolver>,
         client: IpAddr,
         qname: &str,
         aaaa_authorities: &[Record],
@@ -1466,14 +1464,15 @@ impl DnsDispatcher {
                 daygle_dns_recursive::with_client_subnet(
                     subnet,
                     resolver.lookup_for_client(client, &qname, RecordType::A),
-                ).await
+                )
+                .await
             })
         };
         let lookup = tokio::time::timeout(self.client_timeout, lookup_task)
             .await
             .ok()?
-        .ok()?
-        .ok()?;
+            .ok()?
+            .ok()?;
         let mut records = Vec::new();
         let mut mapped = 0usize;
         for record in lookup.answers() {
@@ -1551,39 +1550,42 @@ impl DnsDispatcher {
                 return (
                     ResponseCode::ServFail,
                     Vec::new(),
-                    Some(Ede::new(
-                        ede::OTHER,
-                        "recursive lookup capacity exhausted",
-                    )),
+                    Some(Ede::new(ede::OTHER, "recursive lookup capacity exhausted")),
                 );
             };
             let subnet = self.client_subnet(client);
             let target = target.trim_end_matches('.').to_string();
             tokio::spawn(async move {
                 let _permit = permit;
-                daygle_dns_recursive::track_stale(
-                    daygle_dns_recursive::with_client_subnet(
-                        subnet,
-                        resolver.lookup(&target, rtype),
-                    ),
-                ).await
+                daygle_dns_recursive::track_stale(daygle_dns_recursive::with_client_subnet(
+                    subnet,
+                    resolver.lookup(&target, rtype),
+                ))
+                .await
             })
         };
         let lookup = tokio::time::timeout(self.client_timeout, lookup_task).await;
         match lookup {
-            Ok(Ok(Ok((found, _stale)))) => (
+            Ok(Ok((Ok(found), _stale))) => (
                 ResponseCode::NoError,
                 collect(found.answers().to_vec()),
                 None,
             ),
             // The target has no such records (or does not exist): the alias
             // name exists here, so that is NODATA, not NXDOMAIN.
-            Ok(Ok((Err(DaygleError::Resolution {
-                response_code: Some(0 | 3),
-                ..
-            }), _stale))) => (ResponseCode::NoError, Vec::new(), None),
+            Ok(Ok((
+                Err(DaygleError::Resolution {
+                    response_code: Some(0 | 3),
+                    ..
+                }),
+                _stale,
+            ))) => (ResponseCode::NoError, Vec::new(), None),
             Ok(Ok((Err(e), _stale))) => (ResponseCode::ServFail, Vec::new(), Some(failure_ede(&e))),
-            Ok(Err(e)) => (ResponseCode::ServFail, Vec::new(), Some(Ede::new(ede::OTHER, e.to_string()))),
+            Ok(Err(e)) => (
+                ResponseCode::ServFail,
+                Vec::new(),
+                Some(Ede::new(ede::OTHER, e.to_string())),
+            ),
             Err(_) => (
                 ResponseCode::ServFail,
                 Vec::new(),

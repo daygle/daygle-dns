@@ -28,12 +28,18 @@ fn table() -> &'static RwLock<HashMap<SocketAddr, SocketAddr>> {
 /// Register the peer on a loopback backend connection against its public
 /// client's address. Used when a transparent listener bridge is necessary.
 pub fn register_client(local: SocketAddr, client: SocketAddr) {
-    table().write().expect("proxy table lock poisoned").insert(local, client);
+    table()
+        .write()
+        .expect("proxy table lock poisoned")
+        .insert(local, client);
 }
 
 /// Remove a bridge's peer mapping when the bridged connection finishes.
 pub fn unregister_client(local: SocketAddr) {
-    table().write().expect("proxy table lock poisoned").remove(&local);
+    table()
+        .write()
+        .expect("proxy table lock poisoned")
+        .remove(&local);
 }
 
 /// The real client behind `src` when it is a connection from a front; else src.
@@ -54,7 +60,9 @@ pub fn real_client(src: SocketAddr) -> SocketAddr {
 fn parse_v1(line: &str) -> std::io::Result<Option<SocketAddr>> {
     let bad = || std::io::Error::other(format!("bad PROXY v1 header '{line}'"));
     let mut parts = line.split(' ');
-    if parts.next() != Some("PROXY") { return Err(bad()); }
+    if parts.next() != Some("PROXY") {
+        return Err(bad());
+    }
     match parts.next() {
         Some("UNKNOWN") => Ok(None),
         Some("TCP4" | "TCP6") => {
@@ -69,41 +77,64 @@ fn parse_v1(line: &str) -> std::io::Result<Option<SocketAddr>> {
 
 fn parse_v2(command: u8, family: u8, body: &[u8]) -> std::io::Result<Option<SocketAddr>> {
     let short = || std::io::Error::other("short PROXY v2 address block");
-    if command == 0 { return Ok(None); }
-    if command != 1 { return Err(std::io::Error::other("unknown PROXY v2 command")); }
+    if command == 0 {
+        return Ok(None);
+    }
+    if command != 1 {
+        return Err(std::io::Error::other("unknown PROXY v2 command"));
+    }
     match family >> 4 {
         1 => {
             let b = body.get(..12).ok_or_else(short)?;
             let ip = Ipv4Addr::new(b[0], b[1], b[2], b[3]);
-            Ok(Some(SocketAddr::new(ip.into(), u16::from_be_bytes([b[8], b[9]]))))
+            Ok(Some(SocketAddr::new(
+                ip.into(),
+                u16::from_be_bytes([b[8], b[9]]),
+            )))
         }
         2 => {
             let b = body.get(..36).ok_or_else(short)?;
             let ip = Ipv6Addr::from(<[u8; 16]>::try_from(&b[..16]).expect("16 bytes"));
-            Ok(Some(SocketAddr::new(ip.into(), u16::from_be_bytes([b[32], b[33]]))))
+            Ok(Some(SocketAddr::new(
+                ip.into(),
+                u16::from_be_bytes([b[32], b[33]]),
+            )))
         }
         _ => Ok(None),
     }
 }
 
-pub async fn read_header<S: tokio::io::AsyncRead + Unpin>(stream: &mut S) -> std::io::Result<Option<SocketAddr>> {
+pub async fn read_header<S: tokio::io::AsyncRead + Unpin>(
+    stream: &mut S,
+) -> std::io::Result<Option<SocketAddr>> {
     let mut start = [0u8; 12];
     stream.read_exact(&mut start[..5]).await?;
     if &start[..5] == b"PROXY" {
         let mut line = start[..5].to_vec();
         loop {
             line.push(stream.read_u8().await?);
-            if line.ends_with(b"\r\n") { break; }
-            if line.len() >= V1_MAX { return Err(std::io::Error::other("PROXY v1 header too long")); }
+            if line.ends_with(b"\r\n") {
+                break;
+            }
+            if line.len() >= V1_MAX {
+                return Err(std::io::Error::other("PROXY v1 header too long"));
+            }
         }
-        let text = std::str::from_utf8(&line[..line.len() - 2]).map_err(|_| std::io::Error::other("PROXY v1 header is not text"))?;
+        let text = std::str::from_utf8(&line[..line.len() - 2])
+            .map_err(|_| std::io::Error::other("PROXY v1 header is not text"))?;
         return parse_v1(text);
     }
     stream.read_exact(&mut start[5..]).await?;
-    if start != V2_SIGNATURE { return Err(std::io::Error::other("no PROXY header from a trusted proxy")); }
+    if start != V2_SIGNATURE {
+        return Err(std::io::Error::other(
+            "no PROXY header from a trusted proxy",
+        ));
+    }
     let mut head = [0u8; 4];
     stream.read_exact(&mut head).await?;
-    if head[0] >> 4 != 2 { return Err(std::io::Error::other("unsupported PROXY version")); }
+    if head[0] >> 4 != 2 {
+        return Err(std::io::Error::other("unsupported PROXY version"));
+    }
     let len = usize::from(u16::from_be_bytes([head[2], head[3]]));
     let mut body = vec![0u8; len];
     stream.read_exact(&mut body).await?;
@@ -130,9 +161,15 @@ pub fn spawn_front(
             };
             let (stream, peer) = match accepted {
                 Ok(s) => s,
-                Err(e) => { debug!("PROXY front accept failed: {e}"); continue; }
+                Err(e) => {
+                    debug!("PROXY front accept failed: {e}");
+                    continue;
+                }
             };
-            let Ok(permit) = permits.clone().try_acquire_owned() else { drop(stream); continue; };
+            let Ok(permit) = permits.clone().try_acquire_owned() else {
+                drop(stream);
+                continue;
+            };
             let trusted = trusted.clone();
             let shutdown = shutdown.clone();
             tasks.spawn(async move {
@@ -145,12 +182,22 @@ pub fn spawn_front(
     })
 }
 
-async fn splice(mut stream: TcpStream, peer: SocketAddr, backend: SocketAddr, trusted: &[ipnet::IpNet], shutdown: CancellationToken) -> std::io::Result<()> {
+async fn splice(
+    mut stream: TcpStream,
+    peer: SocketAddr,
+    backend: SocketAddr,
+    trusted: &[ipnet::IpNet],
+    shutdown: CancellationToken,
+) -> std::io::Result<()> {
     let peer_ip = peer.ip().to_canonical();
     let client = if trusted.iter().any(|n| n.contains(&peer_ip)) {
-        tokio::time::timeout(HEADER_TIMEOUT, read_header(&mut stream)).await
-            .map_err(|_| std::io::Error::other("no PROXY header in time"))??.unwrap_or(peer)
-    } else { peer };
+        tokio::time::timeout(HEADER_TIMEOUT, read_header(&mut stream))
+            .await
+            .map_err(|_| std::io::Error::other("no PROXY header in time"))??
+            .unwrap_or(peer)
+    } else {
+        peer
+    };
     let mut inner = TcpStream::connect(backend).await?;
     let local = inner.local_addr()?;
     register_client(local, client);

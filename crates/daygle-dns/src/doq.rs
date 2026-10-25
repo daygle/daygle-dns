@@ -129,7 +129,6 @@ pub async fn serve_doq(
                 let handler = handler.clone();
                 let session = session.clone();
                 let streams = streams.clone();
-                let per_connection = per_connection;
                 connections.spawn(async move {
                     let _permit = permit;
                     handle_connection(incoming, handler, &session, streams, per_connection).await;
@@ -165,7 +164,7 @@ async fn handle_connection(
     let per_connection = Arc::new(tokio::sync::Semaphore::new(max_concurrent_streams));
     loop {
         match connection.accept_bi().await {
-            Ok((send_stream, recv_stream)) => {
+            Ok((send_stream, mut recv_stream)) => {
                 let connection_permit = match per_connection.clone().try_acquire_owned() {
                     Ok(permit) => permit,
                     Err(_) => {

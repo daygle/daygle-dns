@@ -67,7 +67,10 @@ impl ConnectionAdmission {
                         let trusted = proxy_trusted.clone();
                         sessions.spawn(async move {
                             let _permit = permit;
-                            if let Err(error) = bridge(frontend, backend_addr, trusted.as_deref()).await {
+                            if let Err(error) =
+                                bridge(frontend, backend_addr, trusted.as_deref().map(Vec::as_slice))
+                                    .await
+                            {
                                 tracing::debug!(%peer, %error, "DoT connection ended");
                             }
                         });
@@ -91,11 +94,18 @@ async fn bridge(
 ) -> std::io::Result<()> {
     let peer = frontend.peer_addr()?;
     let client = match trusted {
-        Some(networks) if networks.iter().any(|net| net.contains(&peer.ip().to_canonical())) => {
-            tokio::time::timeout(Duration::from_secs(5), proxy_protocol::read_header(&mut frontend))
-                .await
-                .map_err(|_| std::io::Error::other("no PROXY header in time"))??
-                .unwrap_or(peer)
+        Some(networks)
+            if networks
+                .iter()
+                .any(|net| net.contains(&peer.ip().to_canonical())) =>
+        {
+            tokio::time::timeout(
+                Duration::from_secs(5),
+                proxy_protocol::read_header(&mut frontend),
+            )
+            .await
+            .map_err(|_| std::io::Error::other("no PROXY header in time"))??
+            .unwrap_or(peer)
         }
         _ => peer,
     };
@@ -118,15 +128,16 @@ mod tests {
         let shutdown = CancellationToken::new();
         let admission = ConnectionAdmission::new(public, 1, shutdown.clone(), None).unwrap();
 
-        let mut first = TcpStream::connect(admission.public_addr).await.unwrap();
-        let (mut backend_stream, backend_peer) = tokio::time::timeout(
-            Duration::from_secs(1),
-            admission.backend.accept(),
-        )
-        .await
-        .unwrap()
-        .unwrap();
-        assert_eq!(proxy_protocol::real_client(backend_peer), first.local_addr().unwrap());
+        let first = TcpStream::connect(admission.public_addr).await.unwrap();
+        let (backend_stream, backend_peer) =
+            tokio::time::timeout(Duration::from_secs(1), admission.backend.accept())
+                .await
+                .unwrap()
+                .unwrap();
+        assert_eq!(
+            proxy_protocol::real_client(backend_peer),
+            first.local_addr().unwrap()
+        );
 
         let mut excess = TcpStream::connect(admission.public_addr).await.unwrap();
         let mut byte = [0u8; 1];
@@ -139,13 +150,11 @@ mod tests {
         drop(first);
         drop(backend_stream);
         let admitted_again = TcpStream::connect(admission.public_addr).await.unwrap();
-        let (mut backend_again, _) = tokio::time::timeout(
-            Duration::from_secs(1),
-            admission.backend.accept(),
-        )
-        .await
-        .unwrap()
-        .unwrap();
+        let (backend_again, _) =
+            tokio::time::timeout(Duration::from_secs(1), admission.backend.accept())
+                .await
+                .unwrap()
+                .unwrap();
         drop(admitted_again);
         drop(backend_again);
         shutdown.cancel();
