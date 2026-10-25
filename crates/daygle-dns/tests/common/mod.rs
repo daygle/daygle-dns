@@ -108,13 +108,12 @@ pub async fn tcp_query(addr: SocketAddr, name: &str, rtype: RecordType) -> Messa
     Message::from_vec(&resp).expect("decode response")
 }
 
-/// Send a query over DNS-over-TLS (self-signed cert trusted via `cert_path`).
-pub async fn dot_query(
+/// Send a DNS message over DNS-over-TLS (self-signed cert trusted via `cert_path`).
+pub async fn dot_send(
     addr: SocketAddr,
     server_name: &str,
     cert_path: &Path,
-    name: &str,
-    rtype: RecordType,
+    message: &Message,
 ) -> Message {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -146,11 +145,11 @@ pub async fn dot_query(
         .await
         .expect("tls handshake");
 
-    let bytes = query_message(name, rtype).to_vec().expect("encode query");
+    let bytes = message.to_vec().expect("encode DNS message");
     let mut framed = Vec::with_capacity(bytes.len() + 2);
     framed.extend_from_slice(&(bytes.len() as u16).to_be_bytes());
     framed.extend_from_slice(&bytes);
-    stream.write_all(&framed).await.expect("write query");
+    stream.write_all(&framed).await.expect("write DNS message");
 
     let mut len_buf = [0u8; 2];
     stream.read_exact(&mut len_buf).await.expect("read length");
@@ -158,6 +157,17 @@ pub async fn dot_query(
     let mut resp = vec![0u8; len];
     stream.read_exact(&mut resp).await.expect("read body");
     Message::from_vec(&resp).expect("decode response")
+}
+
+/// Send a query over DNS-over-TLS (self-signed cert trusted via `cert_path`).
+pub async fn dot_query(
+    addr: SocketAddr,
+    server_name: &str,
+    cert_path: &Path,
+    name: &str,
+    rtype: RecordType,
+) -> Message {
+    dot_send(addr, server_name, cert_path, &query_message(name, rtype)).await
 }
 
 /// The presentation text of the first answer record, if any.

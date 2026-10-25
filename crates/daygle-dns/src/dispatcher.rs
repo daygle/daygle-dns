@@ -575,6 +575,35 @@ impl RequestHandler for DnsDispatcher {
         let client = crate::proxy_protocol::real_client(request.src())
             .ip()
             .to_canonical();
+        let protocol = protocol_label(request.protocol());
+
+        // Enforce encrypted-listener ACLs before opcode-specific handlers.
+        // In particular, UPDATE and NOTIFY take early paths below and must
+        // not bypass dot/doh/doq.allowed_networks.
+        let listener_allowed = self.listener_gate(client, request.protocol());
+        if matches!(listener_allowed, Some(false)) {
+            debug!(%client, protocol, "client not allowed on this listener");
+            self.metrics.inc(&self.metrics.blocked);
+            self.observe(
+                client,
+                "(listener-denied)",
+                "",
+                protocol,
+                Outcome::Blocked,
+                Some("REFUSED"),
+                started,
+            );
+            return send_error(
+                &mut response_handle,
+                request,
+                ResponseCode::Refused,
+                Some(Ede::new(
+                    ede::PROHIBITED,
+                    "client is not allowed on this listener",
+                )),
+            )
+            .await;
+        }
 
         // DNS cookies (RFC 7873): every response to a client that sent one
         // carries a fresh server cookie, and a request whose server cookie
@@ -598,10 +627,6 @@ impl RequestHandler for DnsDispatcher {
         if !cookie_ok && !self.rate_limiter.check_client(client) {
             debug!(%client, "query rate-limited by client");
             self.metrics.inc(&self.metrics.rate_limited);
-            let protocol = request
-                .request_info()
-                .map(|i| protocol_label(i.protocol))
-                .unwrap_or("");
             self.observe(
                 client,
                 "(rate-limited)",
@@ -669,8 +694,6 @@ impl RequestHandler for DnsDispatcher {
             .trim_end_matches('.')
             .to_ascii_lowercase();
         let rtype = info.query.query_type().to_string();
-        let protocol = protocol_label(info.protocol);
-
         // 0b. Rate limiting (per domain). Tracked independently of the client
         // counter: a client may legitimately ask about many domains, and a hot
         // domain must not be hammered by one client's retries.
@@ -695,36 +718,9 @@ impl RequestHandler for DnsDispatcher {
             .await;
         }
 
-        // 0c. Listener access control (`dot`/`doh`/`doq.allowed_networks`):
-        // an encrypted listener may list the client networks it serves.
-        // A client outside the list is refused before any other processing,
-        // and being inside the list also counts as recursion permission on
-        // this listener (see the recursion gate below). Plain UDP/TCP and
-        // empty lists have no gate.
-        let listener_allowed = self.listener_gate(client, info.protocol);
-        if matches!(listener_allowed, Some(false)) {
-            debug!(query = %qname, %client, "client not allowed on this listener");
-            self.metrics.inc(&self.metrics.blocked);
-            self.observe(
-                client,
-                &qname,
-                &rtype,
-                protocol,
-                Outcome::Blocked,
-                Some("REFUSED"),
-                started,
-            );
-            return send_error(
-                &mut response_handle,
-                request,
-                ResponseCode::Refused,
-                Some(Ede::new(
-                    ede::PROHIBITED,
-                    "client is not allowed on this listener",
-                )),
-            )
-            .await;
-        }
+        // Listener ACL was checked before opcode-specific handlers above.
+        // The result is reused by the recursion gate so membership in the
+        // encrypted listener's allow-list grants recursion on that listener.
 
         // 1. Policy. The engine is swapped atomically on reload; clone out the
         // current one so a single query sees one consistent snapshot. A query

@@ -259,10 +259,12 @@ port = 853
 # Client networks allowed on this listener: addresses, CIDRs or names of
 # Settings -> Networks. Clients outside the list get REFUSED on it, and
 # clients inside may use recursion here even when recursion_access is
-# "private_networks". Empty (the default) serves everyone.
+# "private_networks". Empty accepts everyone at this listener, but recursion
+# still follows recursion_access. For public recursion only on DoT, use
+# ["0.0.0.0/0", "::/0"] here and keep plaintext recursion restricted.
 # allowed_networks = ["192.168.0.0/16", "LAN"]
-# How long a client may take to complete the TLS handshake before its
-# connection is dropped (seconds, 1..=600; default 20).
+# How long a client may take to complete the TLS handshake (also the DoT
+# connection's read-inactivity timeout; seconds, 1..=600; default 20).
 # handshake_timeout_secs = 20
 # Instead of file paths / self-signed generation below, a listener can use a
 # certificate stored in the database and managed from the console's
@@ -271,7 +273,9 @@ port = 853
 # certificate = "lan-dns"
 cert_path = "/etc/daygle-dns/certs/server.crt"
 key_path = "/etc/daygle-dns/certs/server.key"
-# Generate a self-signed certificate when none is present.
+# Generate a self-signed certificate when none is present. Public clients
+# need a CA-trusted certificate whose SAN matches the resolver hostname;
+# set self_signed = false and configure cert_path/key_path (or `certificate`).
 self_signed = true
 server_name = "dns.example.com"
 

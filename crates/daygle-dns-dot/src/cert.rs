@@ -60,8 +60,8 @@ pub fn generate_self_signed_pem(server_name: &str) -> Result<(String, String)> {
 pub fn generate_self_signed(cert_path: &str, key_path: &str, server_name: &str) -> Result<()> {
     let (cert_pem, key_pem) = generate_self_signed_pem(server_name)?;
 
-    write_if_parent_exists(cert_path, cert_pem.as_bytes())?;
-    write_if_parent_exists(key_path, key_pem.as_bytes())?;
+    write_if_parent_exists(cert_path, cert_pem.as_bytes(), false)?;
+    write_if_parent_exists(key_path, key_pem.as_bytes(), true)?;
     info!("generated self-signed certificate for '{server_name}' at '{cert_path}'");
     Ok(())
 }
@@ -213,12 +213,28 @@ pub fn crypto_provider() -> Option<Arc<rustls::crypto::CryptoProvider>> {
     }
 }
 
-fn write_if_parent_exists(path: &str, bytes: &[u8]) -> Result<()> {
+fn write_if_parent_exists(path: &str, bytes: &[u8], private: bool) -> Result<()> {
     if let Some(parent) = Path::new(path).parent() {
         if !parent.as_os_str().is_empty() {
             fs::create_dir_all(parent).map_err(DaygleError::Io)?;
         }
     }
+    #[cfg(unix)]
+    if private {
+        use std::io::Write as _;
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create(true).truncate(true).mode(0o600);
+        let mut file = options.open(path).map_err(DaygleError::Io)?;
+        // Existing files retain their old mode when opened, so tighten it
+        // before writing any new private-key bytes.
+        file.set_permissions(fs::Permissions::from_mode(0o600))
+            .map_err(DaygleError::Io)?;
+        file.write_all(bytes).map_err(DaygleError::Io)?;
+        return Ok(());
+    }
+    #[cfg(not(unix))]
+    let _ = private;
     fs::write(path, bytes).map_err(DaygleError::Io)
 }
 
@@ -311,6 +327,24 @@ mod tests {
 
         let config = load_tls_config(&cert, &key, crate::DOT_ALPN).unwrap();
         assert_eq!(config.alpn_protocols, vec![crate::DOT_ALPN.to_vec()]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn generated_private_key_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempdir().unwrap();
+        let cert = dir.path().join("server.crt");
+        let key = dir.path().join("server.key");
+        fs::write(&key, b"old key with permissive mode").unwrap();
+        fs::set_permissions(&key, fs::Permissions::from_mode(0o644)).unwrap();
+        generate_self_signed(cert.to_str().unwrap(), key.to_str().unwrap(), "daygle.test").unwrap();
+
+        assert_eq!(
+            fs::metadata(key).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
     }
 
     #[test]
