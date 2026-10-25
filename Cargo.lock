@@ -782,6 +782,7 @@ dependencies = [
 name = "daygle-dns-policy"
 version = "1.0.0"
 dependencies = [
+ "arc-swap",
  "async-trait",
  "daygle-dns-core",
  "ipnet",

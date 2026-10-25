@@ -388,6 +388,7 @@ pub async fn replace_blocklist_sources(
     State(state): State<AppState>,
     Json(input): Json<BlocklistSourcesInput>,
 ) -> Response {
+    let _config_write = state.config_write.lock().await;
     let Some(manager) = &state.blocklist_sources else {
         return error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -442,11 +443,10 @@ pub async fn replace_blocklist_sources(
 
     let any_enabled = input.sources.iter().any(|s| s.enabled);
     if input.sources.is_empty() || !any_enabled {
-        // Nothing left to fetch: drop the remote blocklist immediately so
-        // previously blocked domains start resolving again.
-        let mut engine = state.policy.load_full().as_ref().clone();
-        engine.set_remote_blocklist(daygle_dns_policy::Blocklist::new());
-        state.policy.store(Arc::new(engine));
+        // Nothing left to fetch: drop the remote blocklists (everyone's and
+        // the DoT listener's) immediately so previously blocked domains
+        // start resolving again.
+        daygle_dns_policy::publish_source_lists(&state.policy, None, None);
     }
     // For one or more enabled sources, `set_sources` above already woke the
     // background refresher, which rebuilds the remote blocklist from the
@@ -672,9 +672,13 @@ pub async fn refresh_blocklist_sources(State(state): State<AppState>) -> Respons
     }
     match manager.refresh_all().await {
         Ok(list) => {
-            let mut engine = state.policy.load_full().as_ref().clone();
-            engine.set_remote_blocklist(list);
-            state.policy.store(Arc::new(engine));
+            // The DoT-scoped set too: it used to wait for the next scheduled
+            // cycle, which may be hours away.
+            daygle_dns_policy::publish_source_lists(
+                &state.policy,
+                Some(Arc::new(list)),
+                manager.dot_blocklist(),
+            );
             let total = state.policy.load_full().remote_blocklist_len();
             Json(serde_json::json!({
                 "refreshed": true,
@@ -1605,6 +1609,7 @@ pub async fn create_zone(
     State(state): State<AppState>,
     Json(input): Json<CreateZoneInput>,
 ) -> Response {
+    let _config_write = state.config_write.lock().await;
     let zone_type = input.zone_type.trim().to_ascii_lowercase();
     if zone_type != "primary" && zone_type != "secondary" {
         return error_response(
@@ -1785,6 +1790,7 @@ pub async fn set_zone_enabled(
 }
 
 pub async fn delete_zone(State(state): State<AppState>, Path(id): Path<String>) -> Response {
+    let _config_write = state.config_write.lock().await;
     let existing = match state.catalog.store().get_zone(&id) {
         Ok(Some(zone)) => zone,
         Ok(None) => return error_response(StatusCode::NOT_FOUND, "zone not found"),
@@ -2517,8 +2523,10 @@ pub async fn test_blocking(
     State(state): State<AppState>,
     Json(input): Json<BlockingTestInput>,
 ) -> Response {
-    let client: IpAddr = match input.client.trim().parse() {
-        Ok(ip) => ip,
+    // Queries reach the policy with IPv4-mapped sources unmapped; test the
+    // same address the resolver would see.
+    let client: IpAddr = match input.client.trim().parse::<IpAddr>() {
+        Ok(ip) => ip.to_canonical(),
         Err(_) => return error_response(StatusCode::BAD_REQUEST, "client must be an IP address"),
     };
     let domain = input
@@ -2536,16 +2544,26 @@ pub async fn test_blocking(
             "doh" => "doh",
             _ => "doq",
         });
-    let (blocked, action, reason, group) = match state
-        .advanced_blocking
-        .load()
-        .evaluate(client, &domain, listener)
-    {
+    // The resolver skips client-group blocking for allowlisted names.
+    let allowlisted = state.policy.load().is_allowlisted(&domain);
+    let verdict = if allowlisted {
+        None
+    } else {
+        state
+            .advanced_blocking
+            .load()
+            .evaluate(client, &domain, listener)
+    };
+    let (blocked, action, reason, group) = match verdict {
         Some(d) => (true, d.action.as_str().to_string(), d.reason, d.group),
         None => (
             false,
             "allow".to_string(),
-            "no group blocked this query".to_string(),
+            if allowlisted {
+                "domain is on the allowlist".to_string()
+            } else {
+                "no group blocked this query".to_string()
+            },
             None,
         ),
     };
@@ -4302,6 +4320,8 @@ pub struct ListenerUpdate {
     pub handshake_timeout_secs: Option<u64>,
     pub max_connections: Option<usize>,
     pub max_concurrent_streams: Option<usize>,
+    /// QUIC idle timeout (DoQ only).
+    pub idle_timeout_secs: Option<u64>,
     /// Client networks allowed to use this listener (addresses or network
     /// names); empty or absent means everyone.
     pub allowed_networks: Option<Vec<String>>,
@@ -4366,6 +4386,7 @@ pub async fn update_settings(
     State(state): State<AppState>,
     axum::Json(update): axum::Json<SettingsUpdate>,
 ) -> Response {
+    let _config_write = state.config_write.lock().await;
     let old_config = (*state.config.load_full()).clone();
     let mut config = old_config.clone();
     let mut listeners_affected = false;
@@ -4598,6 +4619,10 @@ pub async fn update_settings(
         }
         if let Some(v) = d.max_concurrent_streams {
             config.doq.max_concurrent_streams = v;
+            listeners_affected = true;
+        }
+        if let Some(v) = d.idle_timeout_secs {
+            config.doq.idle_timeout_secs = v;
             listeners_affected = true;
         }
         if let Some(v) = &d.allowed_networks {
@@ -4956,6 +4981,12 @@ pub async fn update_settings(
             || old_config.doh != config.doh
             || old_config.doq != config.doq);
     state.config.store(Arc::new(config.clone()));
+    // Server-side knobs read from their own state rather than the config
+    // (the recursive lookup limit): a console change otherwise waited for a
+    // restart or a config-file reload.
+    if let Some(apply) = &state.apply_runtime {
+        apply(&config);
+    }
     if listeners_affected {
         if let Some(rebuild) = &state.request_dns_rebuild {
             rebuild();
@@ -5000,19 +5031,10 @@ pub async fn update_settings(
     // regardless of whether the config-file watcher is enabled.
     if policy_changed {
         match daygle_dns_policy::build_engine(&resolved.policy) {
-            Ok(mut engine) => {
-                // Rebuilding static policy must not discard domains already
-                // fetched from remote sources; the source refresher owns that
-                // portion and will replace it only when a refresh completes.
-                if let Some(remote) = state.policy.load_full().remote_blocklist_snapshot() {
-                    engine.set_remote_blocklist(remote.as_ref().clone());
-                }
-                // The DoT-scoped listener set is refresher-owned too.
-                if let Some(dot) = state.policy.load_full().dot_blocklist_snapshot() {
-                    engine.set_dot_blocklist(dot.as_ref().clone());
-                }
-                state.policy.store(Arc::new(engine));
-            }
+            // Rebuilding static policy must not discard domains already
+            // fetched from remote sources (and the DoT-scoped set): the
+            // source refresher owns those, and the live engine's are kept.
+            Ok(engine) => daygle_dns_policy::publish_rebuilt(&state.policy, engine),
             Err(e) => tracing::warn!("policy rebuild after settings update failed: {e}"),
         }
     }

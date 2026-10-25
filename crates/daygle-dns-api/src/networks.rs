@@ -72,6 +72,7 @@ pub async fn save_network(
     State(state): State<AppState>,
     Json(input): Json<NetworkInput>,
 ) -> Response {
+    let _config_write = state.config_write.lock().await;
     let old = state.config.load_full();
     let network = NamedNetwork {
         name: input.name.trim().to_string(),
@@ -134,6 +135,7 @@ pub async fn save_network(
 /// `DELETE /api/networks/{name}`: remove a network nothing uses (`409`
 /// with `used_by` otherwise).
 pub async fn delete_network(State(state): State<AppState>, Path(name): Path<String>) -> Response {
+    let _config_write = state.config_write.lock().await;
     let old = state.config.load_full();
     let Some(index) = old
         .networks
@@ -193,17 +195,9 @@ async fn apply_resolved_changes(state: &AppState, old: &DaygleConfig, new: &Dayg
     let new_r = new.with_networks_resolved();
     if old_r.policy != new_r.policy {
         match daygle_dns_policy::build_engine(&new_r.policy) {
-            Ok(mut engine) => {
-                // Keep the remote blocklist; the source refresher owns it.
-                if let Some(remote) = state.policy.load_full().remote_blocklist_snapshot() {
-                    engine.set_remote_blocklist(remote.as_ref().clone());
-                }
-                // Same for the DoT-scoped listener set.
-                if let Some(dot) = state.policy.load_full().dot_blocklist_snapshot() {
-                    engine.set_dot_blocklist(dot.as_ref().clone());
-                }
-                state.policy.store(Arc::new(engine));
-            }
+            // Keep the remote and DoT-scoped blocklists; the source
+            // refresher owns them.
+            Ok(engine) => daygle_dns_policy::publish_rebuilt(&state.policy, engine),
             Err(e) => state.logs.warn(
                 "api",
                 format!(

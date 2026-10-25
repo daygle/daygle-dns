@@ -8,6 +8,7 @@ description = "Plugin-style policy engine: blocklists, ACLs and per-client rules
 
 [dependencies]
 daygle-dns-core = { path = "../daygle-dns-core" }
+arc-swap.workspace = true
 ipnet.workspace = true
 regex.workspace = true
 async-trait.workspace = true

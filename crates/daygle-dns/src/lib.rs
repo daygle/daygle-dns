@@ -104,6 +104,9 @@ impl BoundServer {
                 "live reload is unavailable: no config file path".to_string(),
             ));
         };
+        // Serialized with console saves, which also read-modify-write it.
+        let config_write = self.shared.config_write.clone();
+        let _config_write = config_write.lock().await;
         let mut new = DaygleConfig::load(&path)?;
         // The DB overlay owns the console-managed runtime settings: re-apply
         // it so a file edit cannot silently revert GUI-made changes.
@@ -558,6 +561,7 @@ pub async fn bind_with(
         tsig_keys: tsig_keys.clone(),
         local_root: local_root.clone(),
         syslog: Some(syslog),
+        config_write: Arc::default(),
     });
 
     // DNS listeners (bound immediately so the server serves right away).
@@ -656,6 +660,15 @@ pub async fn bind_with(
         sessions: Arc::new(daygle_dns_api::SessionStore::with_store(store.clone())),
         login_throttle: Arc::new(daygle_dns_api::LoginThrottle::default()),
         request_dns_rebuild: Some(request_dns_rebuild),
+        config_write: shared.config_write.clone(),
+        apply_runtime: Some({
+            let shared = shared.clone();
+            Arc::new(move |config: &DaygleConfig| {
+                shared
+                    .recursive_admission
+                    .set_limit(config.recursive.max_concurrent_lookups);
+            })
+        }),
         web_apply: Some(web_apply),
         stats: stats.clone(),
         ai: ai_engine.clone(),

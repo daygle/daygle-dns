@@ -660,3 +660,200 @@ preflight checked the service's temp dir and passed at 100 MB.
 - **`TMPDIR` mismatch.** If the service ran with its own `TMPDIR`, it and
   the root step would disagree on the workspace path. The installed unit
   sets none.
+
+# Follow-up audit: blocklists, client groups, networks and settings persistence
+
+Scope:
+
+- **Blocklists:** source parsing (hosts, plain domains, Adblock), the
+  blocklist matcher, scheduled and manual refresh, and DoT-scoped sources.
+- **Client groups:** advanced blocking, how groups are rebuilt, and the
+  console's "Test blocking" tool.
+- **Named networks:** create, edit and delete, and what each one rebuilds.
+- **Settings:** every save on the Settings tabs, followed through
+  `PUT /api/config` → live config → config file and database overlay →
+  restart and config-file reload.
+
+Verification:
+
+- fmt and clippy (`-D warnings`) are clean, and the full test suite passes.
+- New tests:
+  - `every_console_setting_survives_the_database_overlay`. It changes every
+    setting the console owns (recursive, DoT, DoH, DoQ, policy,
+    authoritative, AI, display, web, updates, syslog, DNS64, ECS and
+    networks). Then it checks that each value survives the database
+    overlay's save → JSON → startup round trip. It failed before the
+    fixes below.
+  - `adblock_rules_follow_dns_filtering_syntax` and
+    `exceptions_override_blocks`.
+  - The DoT-scoped source integration test now also removes the source.
+    It checks that DoT queries stop being blocked, which failed before
+    fix B2.
+
+## Blocklists
+
+### B1. Adblock lists were read with the wrong meaning - **Fixed** (High)
+
+*Problem.* Adblock DNS filters (AdGuard, OISD, HaGeZi "adblock" formats)
+were read as plain domain lists:
+
+- `||example.com^` blocks `example.com` and every subdomain. It was stored
+  as an exact name, so `ads.example.com` passed. Most entries in these
+  lists depend on the subdomain match.
+- `@@||example.com^` is an exception that unblocks a name. It was turned
+  into a block instead, so the names a list author had deliberately
+  unblocked were blocked.
+- Rules with modifiers the resolver cannot honour, such as
+  `$client=`, `$dnsrewrite=` or `$badfilter`, were applied as
+  unconditional blocks.
+
+*Impact.* Adblock-format lists blocked far less than they should, and also
+blocked names they were written to allow.
+
+*Fix.*
+
+- `||x^` now matches `x` and its subdomains, and `|x^` matches exactly.
+- `@@` rules go into a separate exception set, and an exception always wins
+  over a block from the same lists.
+- Rules with `badfilter`, `client`, `ctag`, `denyallow`, `dnsrewrite` or
+  `dnstype` are skipped. Other modifiers, such as `$important`, do not
+  change a DNS answer and are ignored.
+- The domain count shown for a source counts block rules only, so a
+  `||x^` rule counts once.
+
+*Risk.* Adblock sources will now block more names (the subdomains they
+always meant to cover). The allowlist still takes precedence over them.
+
+### B2. Removing a DoT-scoped source never stopped it blocking - **Fixed** (High)
+
+*Problem.* A source scoped to DoT compiles into its own list. When the
+source was removed, disabled or rescoped, the refresh published only the
+everyone list, and the old DoT list stayed live until restart. "Refresh
+now" did not rebuild the DoT list at all.
+
+*Impact.* DoT clients (including public Private DNS users) went on being
+blocked by a list the operator had removed.
+
+*Fix.* Both lists are published together on every refresh, manual or
+scheduled, and both are cleared when every source is disabled.
+
+### B3. Lost updates between a refresh and a settings save - **Fixed** (Medium, race)
+
+*Problem.* A settings save rebuilt the policy engine from the old engine's
+source lists and then stored it. A blocklist refresh finishing in between
+was overwritten, and the new list was lost until the next refresh (up to a
+day later). The reverse order lost the settings change instead.
+
+*Fix.* Both paths now publish through a read-copy-update
+(`publish_rebuilt` / `publish_source_lists`). A rebuild always adopts
+whatever source lists are live at the moment it is stored, so neither
+change can erase the other.
+
+### B4. Every policy rebuild deep-copied the remote lists - **Fixed** (Low, performance)
+
+*Problem.* Each settings or network save cloned the full downloaded list
+(hundreds of thousands of names for common lists) into the new engine.
+
+*Fix.* The lists are shared (`Arc`) between engines. A rebuild now costs
+the same whatever the list size. A refresh that produced an identical list
+does not republish it.
+
+### B5. A source's status could be recorded against the wrong URL - **Fixed** (Low)
+
+*Problem.* Refresh status rows were matched to sources by name only. If a
+source's URL or format was edited while a fetch was in flight, the old
+fetch's result (domain count, last-updated time) was shown for the new URL,
+and the new URL was not fetched until the next interval.
+
+*Fix.* Status rows are matched on name, URL and format, so an edited source
+is treated as new and fetched at once.
+
+## Client groups and networks
+
+### N1. Allowed and denied networks reverted at restart - **Fixed** (High)
+
+*Problem.* The database overlay stored `policy.allowed_networks` and
+`policy.denied_networks` on every save but never applied them back at
+startup or on a config-file reload.
+
+*Impact.* Restricting service to a set of networks from the console worked
+until the next restart. The setting then silently reverted to the file's
+value (usually "everyone").
+
+*Fix.* The overlay applies both lists. The new round-trip test covers every
+other console-owned setting too, and found no further gaps.
+
+### N2. "Test blocking" did not match what the resolver does - **Fixed** (Medium)
+
+*Problem.*
+
+- An IPv4-mapped client address (`::ffff:192.0.2.10`) was tested as IPv6.
+  The resolver unmaps it first, so a group defined by IPv4 network reported
+  "not blocked" while the resolver blocked it.
+- The resolver skips client-group blocking for allowlisted names. The tool
+  ignored the allowlist and reported such names as blocked.
+
+*Fix.* The tool canonicalizes the address and applies the allowlist the way
+the resolver does. It reports "domain is on the allowlist" in that case.
+
+### N3. Concurrent saves could undo each other - **Fixed** (Medium, race)
+
+*Problem.* Settings, blocklist sources, networks and zones are saved by
+reading the live config, changing it and storing it. Two saves at the same
+time (two tabs, or a save during a config-file reload) could each start
+from the same config, so the second silently undid the first.
+
+*Fix.* One config-write lock is held by every handler that changes the
+config and by both config-file reload paths. Reads are unaffected.
+
+### N4. Things reported but not changed
+
+- **Config-file `[[networks]]` edits.** A file reload rebuilds client
+  groups from the file's networks. When the console has never saved a
+  network, the file is the source of truth and this is correct. Once the
+  console has saved networks, the database copy wins, as designed.
+- **DNS64 and ECS.** Prefixes are parsed per query. The cost is a few
+  string parses, too small to measure against a lookup, so this is left
+  as is.
+
+## Settings save and reload
+
+Every Settings tab was traced from its save button to the running server.
+After the fixes above, each value is:
+
+1. validated (an invalid save is rejected with nothing changed);
+2. applied to the live config, so requests see it at once;
+3. written to the config file and the database overlay;
+4. restored at restart and after a config-file reload.
+
+### S1. Recursive concurrency limit needed a restart - **Fixed** (Medium)
+
+*Problem.* "Max concurrent lookups" was saved but the admission limit was
+only set at startup, so the new value had no effect until restart.
+
+*Fix.* A save applies the new limit to the running admission control.
+
+### S2. A cleared default primary NS came back - **Fixed** (Low)
+
+*Problem.* Clearing "Default primary NS" saved an empty value, but the
+overlay treated empty as "not set" and restored the file's value at
+restart.
+
+*Fix.* An empty value now stays empty.
+
+### S3. DoQ idle timeout could not be set through the API - **Fixed** (Low)
+
+*Problem.* `docs/API.md` listed `doq.idle_timeout_secs` as settable, but
+the API rejected the field. The docs also listed `handshake_timeout_secs`
+for DoQ, which has no such setting.
+
+*Fix.* The API accepts `doq.idle_timeout_secs` (validated at 30 seconds or
+more, and the listeners are rebuilt). The docs now say which fields apply
+to which listener.
+
+### S4. Server and API sections revert at restart - *By design*
+
+The `server` and `api` sections (listen addresses, CORS origins) apply live
+but stay owned by the config file. That way a bad console change cannot
+lock the operator out across a restart. This was already documented and is
+unchanged.

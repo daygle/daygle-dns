@@ -62,6 +62,10 @@ pub struct Shared {
     pub local_root: Arc<daygle_dns_authoritative::LocalRoot>,
     /// Remote logging (syslog); `None` in tests.
     pub syslog: Option<Arc<crate::syslog::SyslogSender>>,
+    /// Held while the configuration is read, changed and published (console
+    /// saves and config-file reloads), so two changes landing together
+    /// cannot overwrite each other.
+    pub config_write: Arc<tokio::sync::Mutex<()>>,
 }
 
 /// The currently bound DNS listener addresses.
@@ -109,18 +113,11 @@ pub fn apply_config(shared: &Shared, new: Arc<DaygleConfig>) -> bool {
     // Policy engine.
     if old_r.policy != new_r.policy {
         match daygle_dns_policy::build_engine(&new_r.policy) {
-            Ok(mut engine) => {
+            Ok(engine) => {
                 // Rebuilding the engine must not discard domain sets the
                 // source refresher owns (remote sources, and the DoT-scoped
-                // listener set); the running engine holds the latest copies.
-                let previous = shared.policy.load_full();
-                if let Some(remote) = previous.remote_blocklist_snapshot() {
-                    engine.set_remote_blocklist(remote.as_ref().clone());
-                }
-                if let Some(dot) = previous.dot_blocklist_snapshot() {
-                    engine.set_dot_blocklist(dot.as_ref().clone());
-                }
-                shared.policy.store(Arc::new(engine));
+                // listener set): the live engine's are kept.
+                daygle_dns_policy::publish_rebuilt(&shared.policy, engine);
                 info!("policy engine reloaded");
             }
             Err(e) => warn!("policy reload failed, keeping previous engine: {e}"),
@@ -236,6 +233,9 @@ pub fn spawn_watcher(
             }
             last_mtime = mtime;
 
+            // Serialized with console saves: the overlay read below and the
+            // publish must not interleave with one.
+            let _config_write = shared.config_write.lock().await;
             let new = match DaygleConfig::load(path.as_ref()) {
                 Ok(mut cfg) => {
                     // The database overlay owns the console-managed runtime
@@ -330,44 +330,19 @@ pub fn spawn_blocklist_refresh(
             let expected = refresh_manager.sources();
             match refresh_manager.refresh_due().await {
                 Ok(list) => {
-                    // Apply only when the fetched set differs from what the
-                    // engine already has, so failed/empty fetches don't wipe
-                    // previously loaded domains.
-                    // Compared in place (hash-set equality): materializing
-                    // sorted copies of both sets every cycle was costly for
-                    // lists with hundreds of thousands of entries.
-                    let unchanged = match shared.policy.load().remote_blocklist_snapshot() {
-                        Some(current) => *current == list,
-                        None => list.is_empty(),
-                    };
-                    if !unchanged {
-                        let domains = list.len();
-                        let mut engine = shared.policy.load_full().as_ref().clone();
-                        engine.set_remote_blocklist(list);
-                        // Rebuilds in between (a policy or network change)
-                        // may have dropped the DoT-scoped set; carry the
-                        // latest one into the same refreshed snapshot.
-                        if let Some(dot) = refresh_manager.dot_blocklist() {
-                            engine.set_dot_blocklist(dot.as_ref().clone());
-                        }
-                        shared.policy.store(std::sync::Arc::new(engine));
-                        info!(domains, "remote blocklist refreshed");
-                    }
-                    // The DoT-scoped set lives its own lifecycle (its
-                    // sources refresh independently), so swap it on every
-                    // cycle whenever it differs from what the engine holds.
-                    if let Some(dot) = refresh_manager.dot_blocklist() {
-                        let dot_changed = shared
-                            .policy
-                            .load()
-                            .dot_blocklist_snapshot()
-                            .is_none_or(|c| c.as_ref() != dot.as_ref());
-                        if dot_changed {
-                            let mut engine = shared.policy.load_full().as_ref().clone();
-                            engine.set_dot_blocklist(dot.as_ref().clone());
-                            shared.policy.store(std::sync::Arc::new(engine));
-                            info!(domains = dot.len(), "DoT-scoped blocklist refreshed");
-                        }
+                    // Publish both source-owned sets together, and only when
+                    // they differ from the live ones. A DoT-scoped set that
+                    // is gone (its last source removed or disabled) clears
+                    // the engine's: before, it kept blocking until restart.
+                    let domains = list.len();
+                    let dot = refresh_manager.dot_blocklist();
+                    let dot_domains = dot.as_ref().map_or(0, |d| d.len());
+                    if daygle_dns_policy::publish_source_lists(
+                        &shared.policy,
+                        Some(Arc::new(list)),
+                        dot,
+                    ) {
+                        info!(domains, dot_domains, "remote blocklists refreshed");
                     }
                 }
                 Err(e) => warn!("blocklist refresh failed: {e}"),
@@ -430,6 +405,7 @@ mod tests {
                 None,
             )),
             syslog: None,
+            config_write: Arc::default(),
         }
     }
 
