@@ -62,6 +62,15 @@ jobs:
             exit 1
           fi
 
+      # Only on failure: publish the bundle CI built so it can be downloaded
+      # and committed. The Linux build differs from the Windows one.
+      - name: Upload the CI-built bundle
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-dist-ci-build
+          path: web/dist
+
   # Every warning is an error so lints cannot silently accumulate.
   clippy:
     name: Clippy
