@@ -898,7 +898,8 @@ impl RequestHandler for DnsDispatcher {
         let policy = self.policy.load_full();
         let listener = match info.protocol {
             hickory_server::net::xfer::Protocol::Tls => Some("dot"),
-            hickory_server::net::xfer::Protocol::Https => Some("doh"),
+            hickory_server::net::xfer::Protocol::Https
+            | hickory_server::net::xfer::Protocol::H3 => Some("doh"),
             hickory_server::net::xfer::Protocol::Quic => Some("doq"),
             _ => None,
         };
@@ -996,7 +997,8 @@ impl RequestHandler for DnsDispatcher {
         if !policy.is_allowlisted(&qname) {
             let encrypted_listener = match info.protocol {
                 hickory_server::net::xfer::Protocol::Tls => Some("dot"),
-                hickory_server::net::xfer::Protocol::Https => Some("doh"),
+                hickory_server::net::xfer::Protocol::Https
+                | hickory_server::net::xfer::Protocol::H3 => Some("doh"),
                 hickory_server::net::xfer::Protocol::Quic => Some("doq"),
                 _ => None,
             };
@@ -1727,7 +1729,7 @@ impl DnsDispatcher {
         let networks = match protocol {
             P::Tls => &config.dot.allowed_networks,
             P::Quic => &config.doq.allowed_networks,
-            P::Https => &config.doh.allowed_networks,
+            P::Https | P::H3 => &config.doh.allowed_networks,
             _ => return None,
         };
         if networks.is_empty() {
@@ -2118,6 +2120,7 @@ fn protocol_label(protocol: hickory_server::net::xfer::Protocol) -> &'static str
         P::Tcp => "tcp",
         P::Tls => "tls",
         P::Https => "https",
+        P::H3 => "h3",
         P::Quic => "quic",
         _ => "other",
     }

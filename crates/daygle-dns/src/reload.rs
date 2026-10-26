@@ -80,6 +80,8 @@ pub struct ListenerAddrs {
     pub dot: Option<std::net::SocketAddr>,
     pub doh: Option<std::net::SocketAddr>,
     pub doq: Option<std::net::SocketAddr>,
+    /// DoH over HTTP/3 (UDP).
+    pub doh3: Option<std::net::SocketAddr>,
 }
 
 /// Commands sent to the DNS listener supervisor.

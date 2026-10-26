@@ -365,7 +365,10 @@ outbound_ip_versions/client_policies), `dot`,
 `doh`, `doq` (enabled/port/self_signed/server_name/cert_path/key_path/
 certificate/max_connections [+ `dot`/`doh` handshake_timeout_secs, `doh.endpoint`,
 `doq.idle_timeout_secs`/`doq.max_concurrent_streams`]
-/allowed_networks), `api`
+/allowed_networks; `doh.http3`, default off, also serves DoH over HTTP/3 (QUIC)
+on UDP at the same addresses and port number, with the same certificate,
+endpoint and allowed networks - for clients configured for HTTP/3 DoH, as
+nothing advertises it to browsers; it cannot share a UDP port with DoQ), `api`
 (gui_enabled/cors_origins), `display` (the console's date/time defaults:
 `time_zone` = `system`, `UTC` or an IANA zone; `date_format` = `system`/`dmy`/
 `mdy`/`ymd`/`d_mon_y`; `time_format` = `system`/`24h`/`12h`), `syslog`, `dns64` and `ecs` (see below), `policy`

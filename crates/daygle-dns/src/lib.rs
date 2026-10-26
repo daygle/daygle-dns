@@ -53,6 +53,8 @@ pub struct BoundServer {
     pub doh_addr: Option<std::net::SocketAddr>,
     /// The initially bound DNS-over-QUIC address, if DoQ is enabled.
     pub doq_addr: Option<std::net::SocketAddr>,
+    /// The initially bound DoH over HTTP/3 (UDP) address, if enabled.
+    pub doh3_addr: Option<std::net::SocketAddr>,
     /// The REST API + GUI address as bound at startup: the HTTP listener,
     /// or HTTPS when HTTP is off (see [`BoundServer::web_addrs`]).
     pub api_addr: std::net::SocketAddr,
@@ -786,6 +788,7 @@ pub async fn bind_with(
         dot_addr: initial_addrs.dot,
         doh_addr: initial_addrs.doh,
         doq_addr: initial_addrs.doq,
+        doh3_addr: initial_addrs.doh3,
         api_addr,
         metrics,
         logs,
@@ -1316,6 +1319,13 @@ async fn bind_listeners_inner(
 
     if config.doh.enabled {
         let tls_config = daygle_dns_dot::build_doh_tls_config(&config.doh)?;
+        // The same service over HTTP/3 (QUIC): UDP on each address, on the
+        // port the TCP listener got.
+        let h3_tls_config = if config.doh.http3 {
+            Some(daygle_dns_dot::build_doh3_tls_config(&config.doh)?)
+        } else {
+            None
+        };
         tls_diag::report_certificate(
             tls_diag::HTTPS,
             "DoH",
@@ -1345,6 +1355,19 @@ async fn bind_listeners_inner(
                 &config.doh.endpoint,
             )?;
             info!(addr = %bound, endpoint = %config.doh.endpoint, "DNS over HTTPS listening");
+            if let Some(h3_tls_config) = &h3_tls_config {
+                let socket =
+                    net::bind_udp(std::net::SocketAddr::new(addr.ip(), bound.port()), v6_only)?;
+                let bound = socket.local_addr()?;
+                addrs.doh3.get_or_insert(bound);
+                daygle_dns_dot::register_doh3(
+                    server,
+                    socket,
+                    h3_tls_config.clone(),
+                    Duration::from_secs(config.doh.handshake_timeout_secs.max(30)),
+                )?;
+                info!(addr = %bound, "DNS over HTTPS (HTTP/3) listening");
+            }
         }
     }
 

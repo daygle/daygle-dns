@@ -399,6 +399,7 @@
         handshake_timeout_secs: Number(doh.handshake_timeout_secs),
         max_connections: Number(doh.max_connections),
         allowed_networks: [...dohNetworks],
+        http3: !!doh.http3,
       },
       doq: {
         enabled: !!doq.enabled,
@@ -1004,12 +1005,20 @@
         <label><span>Key Path</span><input bind:value={doh.key_path} placeholder="/etc/daygle-dns/certs/server.key" /></label>
       {/if}
       <label><span>Endpoint Path</span><input bind:value={doh.endpoint} placeholder="/dns-query" /></label>
+      <label class="check"><input type="checkbox" bind:checked={doh.http3} disabled={!doh.enabled} /> <span>Also Serve over HTTP/3 (QUIC)</span></label>
     </div>
     <div class="stacked" style="margin-top: 12px">
       <span>Client Networks (empty means everyone)</span>
       <NetworkPicker {networks} bind:value={dohNetworks} />
     </div>
     <p class="muted help">Clients use <code>https://{doh.server_name || 'this-server'}{Number(doh.port) === 443 ? '' : `:${doh.port}`}{doh.endpoint || '/dns-query'}</code>. The standard port is 443. Clients outside these networks get REFUSED on this listener; clients inside it may use recursion here even when Recursion Access is set to Private Networks Only.</p>
+    <p class="muted help">
+      HTTP/3 serves the same address over QUIC, on UDP port {doh.port || 443}
+      (open it in your firewall as well as TCP), with the same certificate,
+      path and client networks. It needs a client set up for HTTP/3 DoH (for
+      example AdGuard's or dnsproxy's <code>h3://</code> addresses); browsers
+      keep using HTTP/2. It cannot share its UDP port with DNS over QUIC.
+    </p>
   </div>
   <div class="card" style="margin-bottom: 14px">
     <h3 style="margin: 0 0 10px">DNS over QUIC</h3>

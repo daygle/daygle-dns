@@ -55,8 +55,9 @@ Daygle DNS combines, in a single process:
 - **Conditional forwarding** so specific zones resolve via dedicated
   upstreams, plus **stub zones** that send queries straight to a zone's own
   nameservers (no root→TLD walk) - both matched by longest suffix.
-- **DNS over TLS (DoT)**, **DNS over HTTPS (DoH, RFC 8484)**, and
-  **DNS over QUIC (DoQ, RFC 9250)** using **rustls**.
+- **DNS over TLS (DoT)**, **DNS over HTTPS (DoH, RFC 8484)** over HTTP/2
+  and optionally **HTTP/3**, and **DNS over QUIC (DoQ, RFC 9250)** using
+  **rustls**.
 - **Encrypted-DNS diagnostics**: every DoT/DoH/DoQ listener start or reload
   reports its certificate's subject and expiry, warning when it is already
   expired or inside the ACME renewal window, and failed handshakes, dropped

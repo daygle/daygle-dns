@@ -113,9 +113,10 @@
     ['tcp', 'TCP'],
     ['tls', 'DNS over TLS'],
     ['https', 'DNS over HTTPS'],
+    ['h3', 'DNS over HTTPS (HTTP/3)'],
     ['quic', 'DNS over QUIC'],
   ];
-  const PROTOCOL_SHORT = { udp: 'UDP', tcp: 'TCP', tls: 'DoT', https: 'DoH', quic: 'DoQ' };
+  const PROTOCOL_SHORT = { udp: 'UDP', tcp: 'TCP', tls: 'DoT', https: 'DoH', h3: 'DoH3', quic: 'DoQ' };
   const OUTCOMES = [
     ['authoritative', 'Authoritative'],
     ['recursive', 'Recursive'],

@@ -28,6 +28,7 @@ hickory-server = { version = "0.26", features = [
     "tls-ring",
     "https-ring",
     "quic-ring",
+    "h3-ring",
     "metrics",
     "testing",
 ] }

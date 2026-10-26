@@ -1659,6 +1659,9 @@ pub struct DohUpdate {
     /// names); empty or absent means everyone.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub allowed_networks: Option<Vec<String>>,
+    /// Also serve DoH over HTTP/3.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub http3: Option<bool>,
 }
 
 /// Partial updates for the policy engine (allow/block lists and Filter AAAA).
@@ -1888,6 +1891,9 @@ impl RuntimeSettings {
             }
             if let Some(v) = &d.allowed_networks {
                 config.doh.allowed_networks = trim_list(v);
+            }
+            if let Some(v) = d.http3 {
+                config.doh.http3 = v;
             }
         }
         if let Some(d) = &self.doq {
@@ -2152,6 +2158,7 @@ impl RuntimeSettings {
                 handshake_timeout_secs: Some(config.doh.handshake_timeout_secs),
                 max_connections: Some(config.doh.max_connections),
                 allowed_networks: Some(config.doh.allowed_networks.clone()),
+                http3: Some(config.doh.http3),
             }),
             doq: Some(ListenerUpdate {
                 enabled: Some(config.doq.enabled),
@@ -2495,6 +2502,14 @@ impl DaygleConfig {
             if enabled && !(1..=65_536).contains(&value) {
                 return Err(DaygleError::Config(format!("{name} must be in 1..=65536")));
             }
+        }
+        // DoH over HTTP/3 and DoQ both listen on UDP.
+        if self.doh.enabled && self.doh.http3 && self.doq.enabled && self.doh.port == self.doq.port
+        {
+            return Err(DaygleError::Config(format!(
+                "DoH over HTTP/3 and DoQ cannot share UDP port {}",
+                self.doh.port
+            )));
         }
         if self.doq.enabled && !(1..=65_536).contains(&self.doq.max_concurrent_streams) {
             return Err(DaygleError::Config(
@@ -3928,6 +3943,10 @@ pub struct DohSettings {
     /// names). Empty means everyone; clients outside the list get REFUSED
     /// and, on this listener only, are treated as allowed for recursion.
     pub allowed_networks: Vec<String>,
+    /// Also serve DoH over HTTP/3 (QUIC, UDP) on the same addresses and
+    /// port, with the same certificate, endpoint and allowed networks.
+    #[serde(default)]
+    pub http3: bool,
 }
 
 impl Default for DohSettings {
@@ -3945,6 +3964,7 @@ impl Default for DohSettings {
             handshake_timeout_secs: 10,
             max_connections: 1024,
             allowed_networks: vec![],
+            http3: false,
         }
     }
 }
@@ -4610,6 +4630,7 @@ mod tests {
             description: s("home"),
         }];
 
+        c.doh.http3 = true;
         let stored = serde_json::to_string(&RuntimeSettings::capture(&c)).unwrap();
         let overlay: RuntimeSettings = serde_json::from_str(&stored).unwrap();
         let mut restored = DaygleConfig::default();

@@ -4514,6 +4514,8 @@ pub struct DohUpdate {
     /// Client networks allowed to use this listener (addresses or network
     /// names); empty or absent means everyone.
     pub allowed_networks: Option<Vec<String>>,
+    /// Also serve DoH over HTTP/3 (UDP).
+    pub http3: Option<bool>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -4753,6 +4755,10 @@ pub async fn update_settings(
         }
         if let Some(v) = &d.allowed_networks {
             config.doh.allowed_networks = normalize_policy_networks(v);
+        }
+        if let Some(v) = d.http3 {
+            config.doh.http3 = v;
+            listeners_affected = true;
         }
     }
     if let Some(d) = &update.doq {
