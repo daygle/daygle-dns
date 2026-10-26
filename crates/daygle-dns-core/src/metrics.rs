@@ -26,6 +26,14 @@ pub struct Metrics {
     pub rate_limited: AtomicU64,
     /// Queries that resulted in an error.
     pub errors: AtomicU64,
+    /// UDP responses dropped by response rate limiting.
+    pub rrl_dropped: AtomicU64,
+    /// UDP responses sent truncated by response rate limiting (slip).
+    pub rrl_slipped: AtomicU64,
+    /// Responses RRL would have limited in log-only mode.
+    pub rrl_would_limit: AtomicU64,
+    /// Queries a response policy zone acted on.
+    pub rpz_hits: AtomicU64,
     /// DNSSEC-validated answers (recursive path).
     pub dnssec_validated: AtomicU64,
     /// Total bytes of DNS requests received.
@@ -255,6 +263,10 @@ impl Metrics {
             split_horizon: self.get(&self.split_horizon),
             rate_limited: self.get(&self.rate_limited),
             errors: self.get(&self.errors),
+            rrl_dropped: self.get(&self.rrl_dropped),
+            rrl_slipped: self.get(&self.rrl_slipped),
+            rrl_would_limit: self.get(&self.rrl_would_limit),
+            rpz_hits: self.get(&self.rpz_hits),
             dnssec_validated: self.get(&self.dnssec_validated),
             bytes_in: self.get(&self.bytes_in),
             bytes_out: self.get(&self.bytes_out),
@@ -310,6 +322,31 @@ impl Metrics {
                 get(counter)
             );
         }
+
+        family(
+            &mut out,
+            "rrl_responses_total",
+            "counter",
+            "UDP responses held back by response rate limiting.",
+        );
+        for (action, counter) in [
+            ("dropped", &self.rrl_dropped),
+            ("slipped", &self.rrl_slipped),
+            ("would_limit", &self.rrl_would_limit),
+        ] {
+            let _ = writeln!(
+                out,
+                "daygle_dns_rrl_responses_total{{action=\"{action}\"}} {}",
+                get(counter)
+            );
+        }
+        family(
+            &mut out,
+            "rpz_hits_total",
+            "counter",
+            "Queries a response policy zone acted on.",
+        );
+        let _ = writeln!(out, "daygle_dns_rpz_hits_total {}", get(&self.rpz_hits));
 
         family(
             &mut out,
@@ -488,6 +525,10 @@ pub struct MetricSnapshot {
     pub split_horizon: u64,
     pub rate_limited: u64,
     pub errors: u64,
+    pub rrl_dropped: u64,
+    pub rrl_slipped: u64,
+    pub rrl_would_limit: u64,
+    pub rpz_hits: u64,
     pub dnssec_validated: u64,
     pub bytes_in: u64,
     pub bytes_out: u64,

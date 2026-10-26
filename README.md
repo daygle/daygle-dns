@@ -118,6 +118,14 @@ metrics.
   and wildcard domain lists, response policy zones) fetched over HTTP(S) and
   refreshed on a schedule. A source blocks for everyone or only for the
   filtering groups that select it.
+- **Response policy zones (RPZ)**: DNS firewall feeds loaded by zone
+  transfer (AXFR, with TSIG) or URL, or rules typed in the console, with
+  every RPZ action (NXDOMAIN, NODATA, passthru, drop, TCP-only, local data
+  and walled gardens), QNAME, client-IP and answer-IP triggers, per-zone
+  policy overrides, a log-only mode and a tester.
+- **Response rate limiting (RRL)**: identical UDP answers to one network
+  are capped per second, with slip (truncated answers that send real
+  clients to TCP), against reflection and amplification attacks.
 - **Rate limiting** per client (source IP) and per domain (query name) with
   configurable fixed windows, loopback exemption, and live reload - queries
   over the limit get SERVFAIL and are counted in the `rate_limited` metric.
@@ -339,7 +347,10 @@ real server on ephemeral ports and exercise:
 - **zone transfers** (AXFR/IXFR) and secondary-zone replication,
 - **RFC 2136 dynamic updates** and **NOTIFY** propagation,
 - **query logging** into SQLite and the console's query-log filters,
-- **rate limiting** per client and per domain,
+- **rate limiting** per client and per domain, and **response rate
+  limiting** (RRL) with slip,
+- **response policy zones**: every action and trigger type, and zones
+  loaded by zone transfer,
 - **live config reload** of policy, upstreams and listeners, both via the
   reload API and the file watcher,
 - **console login, roles and settings**: login flow, read-only `viewer`

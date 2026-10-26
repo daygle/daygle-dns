@@ -193,6 +193,10 @@ pub(crate) async fn apply(
 async fn apply_resolved_changes(state: &AppState, old: &DaygleConfig, new: &DaygleConfig) {
     let old_r = old.with_networks_resolved();
     let new_r = new.with_networks_resolved();
+    // Server-side state built from the config (RRL exemptions name networks).
+    if let Some(apply) = &state.apply_runtime {
+        apply(new);
+    }
     if old_r.policy != new_r.policy {
         match daygle_dns_policy::build_engine(&new_r.policy) {
             // Keep the remote and DoT-scoped blocklists; the source

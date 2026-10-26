@@ -30,6 +30,7 @@ pub mod model;
 pub mod notify;
 pub mod parse;
 pub mod root_zone;
+pub mod rpz;
 pub mod secondary;
 pub mod split_horizon;
 pub mod store;

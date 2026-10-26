@@ -258,6 +258,9 @@ export const api = {
   deleteBlockingGroup: (id) => request('DELETE', `/policy/blocking/${id}`),
   moveBlockingGroup: (id, direction) => request('POST', `/policy/blocking/${id}/move`, { direction }),
   testAlert: (alerts) => request('POST', '/alerts/test', { alerts }),
+  rpzStatus: () => request('GET', '/rpz'),
+  rpzRefresh: () => request('POST', '/rpz'),
+  rpzTest: (client, domain) => request('POST', '/rpz/test', { client, domain }),
   testBlocking: (client, domain, listener) =>
     request('POST', '/policy/blocking/test', { client, domain, listener }),
   networks: () => request('GET', '/networks'),

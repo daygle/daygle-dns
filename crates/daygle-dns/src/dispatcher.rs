@@ -125,6 +125,10 @@ pub struct DnsDispatcher {
     recursive_admission: Arc<RecursiveAdmission>,
     /// DNS cookies (RFC 7873, `server.dns_cookies`).
     cookies: Arc<crate::cookies::Cookies>,
+    /// Response rate limiting (`[rrl]`).
+    rrl: Arc<daygle_dns_core::rrl::ResponseRateLimiter>,
+    /// Response policy zones, published by their manager.
+    rpz: Arc<ArcSwap<daygle_dns_authoritative::rpz::RpzSet>>,
     /// Remote logging of queries (`[syslog] queries`).
     syslog: Option<Arc<crate::syslog::SyslogSender>>,
     /// The live config, for settings read per query (`[dns64]`).
@@ -190,6 +194,8 @@ impl DnsDispatcher {
             client_timeout: Duration::from_millis(2000),
             recursive_admission: Arc::new(RecursiveAdmission::new(256)),
             cookies: Arc::new(crate::cookies::Cookies::new(true)),
+            rrl: Arc::default(),
+            rpz: Arc::default(),
             syslog: None,
             config: None,
         }
@@ -287,6 +293,18 @@ impl DnsDispatcher {
         config: Arc<ArcSwap<daygle_dns_core::config::DaygleConfig>>,
     ) -> Self {
         self.config = Some(config);
+        self
+    }
+
+    /// Share a response rate limiter (`[rrl]`).
+    pub fn with_rrl(mut self, rrl: Arc<daygle_dns_core::rrl::ResponseRateLimiter>) -> Self {
+        self.rrl = rrl;
+        self
+    }
+
+    /// Share the response policy zones (`[[rpz]]`).
+    pub fn with_rpz(mut self, rpz: Arc<ArcSwap<daygle_dns_authoritative::rpz::RpzSet>>) -> Self {
+        self.rpz = rpz;
         self
     }
 
@@ -754,6 +772,17 @@ impl RequestHandler for DnsDispatcher {
                 }
                 crate::cookies::CookieCheck::Present { valid, reply } => (valid, Some(reply)),
             };
+        // Response rate limiting (RRL) counts every UDP response that goes
+        // out from here on; the cookie layer sits outside it, so a truncated
+        // (slipped) reply still carries a cookie the client can retry with.
+        let response_handle = crate::rrl::RrlResponder::new(
+            response_handle,
+            request,
+            client,
+            cookie_ok,
+            &self.rrl,
+            &self.metrics,
+        );
         let mut response_handle =
             crate::cookies::CookieResponder::new(response_handle, cookie_reply);
         let admitted = if cookie_ok {
@@ -1015,6 +1044,33 @@ impl RequestHandler for DnsDispatcher {
                         send_error(&mut response_handle, request, ResponseCode::NXDomain, why).await
                     }
                 };
+            }
+        }
+
+        // 1c. Response policy zones (RPZ): client-IP and QNAME triggers, in
+        // zone order. They apply to what the blocklists and filtering groups
+        // let through; an allowlisted name is exempt, and a PASSTHRU rule
+        // exempts the query from the rest of RPZ (its answer included).
+        let rpz = self.rpz.load_full();
+        let mut rpz_done = rpz.is_empty() || policy.is_allowlisted(&qname);
+        if !rpz_done {
+            if let Some(hit) = rpz.check_query(client, &qname) {
+                if rpz_lets_through(&hit.action, info.protocol) {
+                    rpz_done = true;
+                } else {
+                    return self
+                        .serve_rpz(
+                            hit,
+                            request,
+                            &mut response_handle,
+                            client,
+                            &qname,
+                            &rtype,
+                            protocol,
+                            started,
+                        )
+                        .await;
+                }
             }
         }
 
@@ -1361,6 +1417,43 @@ impl RequestHandler for DnsDispatcher {
                                 .await
                             }
                         };
+                    }
+                }
+                // Response policy zones: a name in the CNAME chain matching a
+                // QNAME trigger, or an address in the answer matching an IP
+                // trigger.
+                if !rpz_done && rpz.checks_answers() {
+                    let mut names = Vec::new();
+                    let mut ips = Vec::new();
+                    for record in lookup.answers() {
+                        match &record.data {
+                            RData::CNAME(target) => names.push(
+                                target
+                                    .0
+                                    .to_ascii()
+                                    .trim_end_matches('.')
+                                    .to_ascii_lowercase(),
+                            ),
+                            RData::A(a) => ips.push(IpAddr::V4(a.0)),
+                            RData::AAAA(a) => ips.push(IpAddr::V6(a.0)),
+                            _ => {}
+                        }
+                    }
+                    if let Some(hit) = rpz.check_answer(&names, &ips) {
+                        if !rpz_lets_through(&hit.action, info.protocol) {
+                            return self
+                                .serve_rpz(
+                                    hit,
+                                    request,
+                                    &mut response_handle,
+                                    client,
+                                    &qname,
+                                    &rtype,
+                                    protocol,
+                                    started,
+                                )
+                                .await;
+                        }
                     }
                 }
                 let mut answers = lookup.answers().to_vec();
@@ -1750,6 +1843,112 @@ impl DnsDispatcher {
         None
     }
 
+    /// Carry out a response policy zone's action.
+    #[allow(clippy::too_many_arguments)]
+    async fn serve_rpz<R: ResponseHandler>(
+        &self,
+        hit: daygle_dns_authoritative::rpz::RpzHit,
+        request: &Request,
+        response_handle: &mut R,
+        client: IpAddr,
+        qname: &str,
+        rtype: &str,
+        protocol: &str,
+        started: Instant,
+    ) -> ResponseInfo {
+        use daygle_dns_authoritative::rpz::RpzAction;
+        debug!(query = %qname, zone = %hit.zone, trigger = %hit.trigger, action = hit.action.label(), "response policy zone");
+        self.metrics.inc(&self.metrics.rpz_hits);
+        self.metrics.inc(&self.metrics.blocked);
+        let why = || {
+            Some(Ede::new(
+                ede::BLOCKED,
+                format!("response policy zone {}: {}", hit.zone, hit.trigger),
+            ))
+        };
+        let observe = |rcode: &str| {
+            self.observe(
+                client,
+                qname,
+                rtype,
+                protocol,
+                Outcome::Blocked,
+                Some(rcode),
+                started,
+            )
+        };
+        match &hit.action {
+            // PASSTHRU never gets here (the callers carry on instead).
+            RpzAction::NxDomain | RpzAction::Passthru => {
+                observe("NXDOMAIN");
+                send_error(response_handle, request, ResponseCode::NXDomain, why()).await
+            }
+            RpzAction::NoData => {
+                observe("NOERROR");
+                send_empty(response_handle, request, why()).await
+            }
+            RpzAction::Drop => {
+                observe("DROPPED");
+                fallback_response()
+            }
+            RpzAction::TcpOnly => {
+                observe("TRUNCATED");
+                send_truncated(response_handle, request).await
+            }
+            RpzAction::Local(records) => {
+                let Some(query) = request.queries.queries().first() else {
+                    return send_error(response_handle, request, ResponseCode::FormErr, None).await;
+                };
+                let owner = Name::from(query.name().clone());
+                let qtype = query.query_type();
+                let matching: Vec<Record> = records
+                    .iter()
+                    .filter(|r| r.rtype == qtype || qtype == RecordType::ANY)
+                    .map(|r| Record::from_rdata(owner.clone(), r.ttl, r.rdata.clone()))
+                    .collect();
+                if !matching.is_empty() {
+                    observe("NOERROR");
+                    return send_records(response_handle, request, &matching, why()).await;
+                }
+                let cname = records.iter().find_map(|r| match &r.rdata {
+                    RData::CNAME(target) => Some((r.ttl, target.0.clone())),
+                    _ => None,
+                });
+                let Some((ttl, target)) = cname else {
+                    observe("NOERROR");
+                    return send_empty(response_handle, request, why()).await;
+                };
+                // `*.garden.example.` stands for the query name under the
+                // garden.
+                let target = match target.to_ascii().strip_prefix("*.") {
+                    Some(rest) => Name::from_ascii(format!("{qname}.{rest}")).unwrap_or(target),
+                    None => target,
+                };
+                let mut answers = vec![Record::from_rdata(
+                    owner,
+                    ttl,
+                    RData::CNAME(hickory_proto::rr::rdata::CNAME(target.clone())),
+                )];
+                if qtype != RecordType::CNAME {
+                    let alias = daygle_dns_authoritative::catalog::Alias {
+                        target: target.to_ascii(),
+                        ttl,
+                    };
+                    let (rcode, records, _) = self.resolve_alias(alias, client, qtype).await;
+                    if rcode == ResponseCode::NoError {
+                        answers.extend(
+                            records
+                                .into_iter()
+                                .map(|(ttl, rdata)| Record::from_rdata(target.clone(), ttl, rdata)),
+                        );
+                    }
+                }
+                observe("NOERROR");
+                send_records(response_handle, request, &answers, why()).await
+            }
+        }
+    }
+
     /// The Safe Search address to answer `qname` with for `client`, if any:
     /// the global switches apply to everyone, and the first filtering group
     /// a client belongs to can turn them on for its clients.
@@ -1965,6 +2164,44 @@ async fn send_empty<R: ResponseHandler>(
         Ok(info) => info,
         Err(e) => {
             warn!("failed to send empty answer: {e}");
+            fallback_response()
+        }
+    }
+}
+
+/// Whether an RPZ action lets the query carry on as usual: PASSTHRU, and
+/// TCP-only over anything but UDP.
+fn rpz_lets_through(
+    action: &daygle_dns_authoritative::rpz::RpzAction,
+    protocol: hickory_server::net::xfer::Protocol,
+) -> bool {
+    use daygle_dns_authoritative::rpz::RpzAction;
+    match action {
+        RpzAction::Passthru => true,
+        RpzAction::TcpOnly => protocol != hickory_server::net::xfer::Protocol::Udp,
+        _ => false,
+    }
+}
+
+/// Send an empty, truncated (TC) answer: the client retries over TCP.
+async fn send_truncated<R: ResponseHandler>(handle: &mut R, request: &Request) -> ResponseInfo {
+    let mut metadata = request.metadata;
+    metadata.message_type = MessageType::Response;
+    metadata.response_code = ResponseCode::NoError;
+    metadata.recursion_available = true;
+    metadata.truncation = true;
+    let edns = response_edns(request, None);
+    let mut builder = MessageResponseBuilder::from_message_request(request);
+    if let Some(edns) = &edns {
+        builder.edns(edns);
+    }
+    match handle
+        .send_response(builder.build_no_records(metadata))
+        .await
+    {
+        Ok(info) => info,
+        Err(e) => {
+            warn!("failed to send truncated answer: {e}");
             fallback_response()
         }
     }

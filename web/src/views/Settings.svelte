@@ -28,6 +28,7 @@
     ['zones', 'Zones'],
     ['ai', 'AI Scanner'],
     ['logging', 'Logging'],
+    ['rate-limiting', 'Rate Limiting'],
     ['alerts', 'Alerts'],
     ['backup', 'Backup'],
   ];
@@ -39,6 +40,7 @@
     zones: 'Defaults for new zones and records, and how other DNS servers may copy, update and be notified about your zones.',
     logging: 'Sending the server log, and optionally every query, to a syslog server. The logs themselves are on the Logs page.',
     ai: 'The background scanner that classifies the domains in your DNS traffic and can block unsafe ones.',
+    'rate-limiting': 'Response rate limiting (RRL): stop this server being used to flood someone else with DNS answers sent to a forged address.',
     alerts: 'Email and webhook alerts when something needs attention: failing blocklists or zone transfers, expiring certificates, DNSSEC, updates and AI blocks.',
     backup: 'Download a backup of everything this server keeps, or restore one.',
   };
@@ -121,6 +123,18 @@
     ['ai_blocks', 'The AI starts blocking new domains (Enforce mode)'],
   ];
   let alerts_ = $state({ ...ALERT_DEFAULTS });
+  const RRL_DEFAULTS = {
+    enabled: false, responses_per_second: 10, nxdomains_per_second: 10, errors_per_second: 10,
+    window_secs: 15, slip: 2, ipv4_prefix: 24, ipv6_prefix: 56, log_only: false,
+  };
+  let rrl_ = $state({ ...RRL_DEFAULTS });
+  let rrlExempt = $state([]);
+  // RRL counters since start (from /api/metrics), shown on its tab.
+  let rrlCounts = $state(null);
+  $effect(() => {
+    if (tab !== 'rate-limiting') return;
+    api.metrics().then((m) => { rrlCounts = m; }).catch(() => {});
+  });
   // Recipients as typed (one per line or comma-separated).
   let alertTo = $state('');
   let alertTest = $state(null);
@@ -248,6 +262,8 @@
       };
       syslog_ = { enabled: false, server: '', facility: 'daemon', level: 'info', queries: false, ...config.syslog };
       alerts_ = { ...ALERT_DEFAULTS, ...config.alerts };
+      rrl_ = { ...RRL_DEFAULTS, ...config.rrl };
+      rrlExempt = [...(config.rrl?.exempt || [])];
       alertTo = (config.alerts?.email_to || []).join('\n');
       dns64 = { enabled: !!config.dns64?.enabled, prefix: config.dns64?.prefix || '64:ff9b::/96' };
       dns64Clients = [...(config.dns64?.clients || [])];
@@ -417,6 +433,18 @@
         ipv6_prefix: Number(ecs.ipv6_prefix),
       },
       alerts: alertsBody(),
+      rrl: {
+        enabled: !!rrl_.enabled,
+        responses_per_second: Number(rrl_.responses_per_second),
+        nxdomains_per_second: Number(rrl_.nxdomains_per_second),
+        errors_per_second: Number(rrl_.errors_per_second),
+        window_secs: Number(rrl_.window_secs),
+        slip: Number(rrl_.slip),
+        ipv4_prefix: Number(rrl_.ipv4_prefix),
+        ipv6_prefix: Number(rrl_.ipv6_prefix),
+        exempt: [...rrlExempt],
+        log_only: !!rrl_.log_only,
+      },
       syslog: {
         enabled: !!syslog_.enabled,
         server: (syslog_.server || '').trim(),
@@ -1128,6 +1156,67 @@
       syslog, over UDP by default (port 514), or TCP with
       <code>tcp://host:port</code>. Changes apply as soon as they are saved.
       Every query can be a lot of traffic on a busy server.
+    </p>
+  </div>
+  {:else if tab === 'rate-limiting'}
+  <div class="card" style="margin-bottom: 14px">
+    <h3 style="margin: 0 0 10px">Response Rate Limiting (RRL)</h3>
+    <label class="check"><input type="checkbox" bind:checked={rrl_.enabled} /> <span>Limit Identical Responses</span></label>
+    <p class="muted help">
+      An attacker can send queries with a victim's address as the sender, so
+      this server's answers (often far larger than the queries) flood the
+      victim. RRL limits how many identical answers each network gets per
+      second over UDP. Over the limit, answers are dropped, except that some
+      are sent truncated: a real client then asks again over TCP and gets its
+      answer, while a forged one cannot. TCP, and clients with a valid DNS
+      cookie, are never limited. Most useful when this server answers the
+      internet (authoritative zones, public DNS); on a private network it can
+      stay off.
+    </p>
+  </div>
+  <div class="card" style="margin-bottom: 14px">
+    <h3 style="margin: 0 0 10px">Limits</h3>
+    <div class="form-grid">
+      <label><span>Identical Answers per Second</span><input type="number" min="0" max="10000" bind:value={rrl_.responses_per_second} disabled={!rrl_.enabled} /></label>
+      <label><span>NXDOMAIN Answers per Second</span><input type="number" min="0" max="10000" bind:value={rrl_.nxdomains_per_second} disabled={!rrl_.enabled} /></label>
+      <label><span>Error Answers per Second</span><input type="number" min="0" max="10000" bind:value={rrl_.errors_per_second} disabled={!rrl_.enabled} /></label>
+      <label><span>Window (Seconds)</span><input type="number" min="1" max="3600" bind:value={rrl_.window_secs} disabled={!rrl_.enabled} /></label>
+      <label>
+        <span>Slip</span>
+        <select bind:value={rrl_.slip} disabled={!rrl_.enabled}>
+          <option value={0}>Drop All Limited Answers</option>
+          <option value={1}>Truncate All Limited Answers</option>
+          {#each [2, 3, 4, 5, 6, 7, 8, 9, 10] as n (n)}<option value={n}>Truncate 1 in {n}</option>{/each}
+        </select>
+      </label>
+      <label><span>IPv4 Network Size (Prefix)</span><input type="number" min="8" max="32" bind:value={rrl_.ipv4_prefix} disabled={!rrl_.enabled} /></label>
+      <label><span>IPv6 Network Size (Prefix)</span><input type="number" min="16" max="128" bind:value={rrl_.ipv6_prefix} disabled={!rrl_.enabled} /></label>
+    </div>
+    <label class="check" style="margin-top: 10px"><input type="checkbox" bind:checked={rrl_.log_only} disabled={!rrl_.enabled} /> <span>Log Only (Count, Do Not Limit)</span></label>
+    <p class="muted help">
+      Answers count as identical when they are for the same name and type;
+      NXDOMAIN answers count per parent domain (so a flood of random names
+      under one domain shares a limit), and errors count per network. 0 means
+      no limit for that kind. The window is how long a network that went over
+      the limit stays limited after it slows down. Clients are grouped into
+      networks of the given size (/24 and /56 by default, as in BIND). Log
+      Only counts what would be limited without limiting anything, to check
+      the rates first.
+    </p>
+    {#if rrlCounts}
+      <p class="muted help">
+        Since the server started: <strong>{Number(rrlCounts.rrl_dropped || 0).toLocaleString()}</strong> dropped,
+        <strong>{Number(rrlCounts.rrl_slipped || 0).toLocaleString()}</strong> sent truncated,
+        <strong>{Number(rrlCounts.rrl_would_limit || 0).toLocaleString()}</strong> would have been limited (Log Only).
+      </p>
+    {/if}
+  </div>
+  <div class="card" style="margin-bottom: 14px">
+    <h3 style="margin: 0 0 10px">Never Limited</h3>
+    <NetworkPicker {networks} bind:value={rrlExempt} />
+    <p class="muted help">
+      Networks whose answers are never limited, such as your own networks
+      and monitoring systems.
     </p>
   </div>
   {:else if tab === 'alerts'}
