@@ -43,6 +43,10 @@ pub struct Shared {
     pub recursive_admission: Arc<crate::dispatcher::RecursiveAdmission>,
     pub config: Arc<ArcSwap<DaygleConfig>>,
     pub rate_limiter: Arc<RateLimiter>,
+    /// Recent block-page answers (the page reads them).
+    pub block_log: Arc<daygle_dns_core::block_log::BlockLog>,
+    /// The block page's web server; `None` in tests.
+    pub block_page: Option<Arc<crate::block_page::BlockPageServer>>,
     /// Response policy zones; `None` in tests.
     pub rpz: Option<Arc<daygle_dns_authoritative::rpz::RpzManager>>,
     /// Response rate limiting (`[rrl]`), shared by every listener.
@@ -198,6 +202,11 @@ pub fn apply_config(shared: &Shared, new: Arc<DaygleConfig>) -> bool {
     // Rate limiting. The shared limiter holds its own settings snapshot and
     // keeps its buckets, so a reload applies new limits (or disables the
     // limiter) without dropping in-flight window state.
+    if old.block_page != new.block_page {
+        if let Some(page) = &shared.block_page {
+            page.apply(&new.block_page);
+        }
+    }
     if old.rpz != new.rpz {
         if let Some(rpz) = &shared.rpz {
             rpz.set_zones(&new.rpz);
@@ -419,6 +428,8 @@ mod tests {
             rate_limiter: Arc::new(RateLimiter::default()),
             rrl: Arc::default(),
             rpz: None,
+            block_log: Arc::default(),
+            block_page: None,
             metrics: Arc::new(Metrics::default()),
             logs: Arc::new(LogStore::new(16)),
             session: Arc::new(crate::tls_diag::SessionLog::new(Arc::new(LogStore::new(

@@ -4,6 +4,7 @@
 //! [`DnsDispatcher`] and a [`bind`] helper that wires every subsystem into a
 //! runnable server. The `daygle-dns` binary is a thin CLI wrapper around this.
 
+mod block_page;
 mod connection_admission;
 pub mod cookies;
 pub mod dispatcher;
@@ -460,6 +461,13 @@ pub async fn bind_with(
     rpz_manager.set_zones(&config.rpz);
     tokio::spawn(rpz_manager.clone().run_forever(shutdown.clone()));
 
+    // The block page: blocked names can point here, and its web server says
+    // what was blocked and why.
+    let block_log = Arc::new(daygle_dns_core::block_log::BlockLog::default());
+    let block_page =
+        block_page::BlockPageServer::new(block_log.clone(), logs.clone(), shutdown.clone());
+    block_page.apply(&config.block_page);
+
     // Recursive.
     let resolver = if config.recursive.enabled {
         Some(Arc::new(RecursiveResolver::build(
@@ -598,6 +606,8 @@ pub async fn bind_with(
         config: config_swap,
         rate_limiter: rate_limiter.clone(),
         rpz: Some(rpz_manager.clone()),
+        block_log: block_log.clone(),
+        block_page: Some(block_page.clone()),
         rrl: Arc::new(daygle_dns_core::rrl::ResponseRateLimiter::new(
             &config.rrl,
             config
@@ -723,6 +733,9 @@ pub async fn bind_with(
                 reload::apply_rrl(&shared, config);
                 if let Some(rpz) = &shared.rpz {
                     rpz.set_zones(&config.rpz);
+                }
+                if let Some(page) = &shared.block_page {
+                    page.apply(&config.block_page);
                 }
             })
         }),
@@ -965,6 +978,7 @@ fn build_dispatcher(shared: &Shared, config: &DaygleConfig) -> DnsDispatcher {
     .with_query_logger(shared.query_logger.clone())
     .with_query_db_logger(shared.query_db_logger.clone())
     .with_rrl(shared.rrl.clone())
+    .with_block_log(shared.block_log.clone())
     .with_rpz(shared.rpz.as_ref().map(|rpz| rpz.set()).unwrap_or_default())
 }
 

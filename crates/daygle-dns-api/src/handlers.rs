@@ -4319,6 +4319,8 @@ pub struct SettingsUpdate {
     pub rrl: Option<daygle_dns_core::config::RrlSettings>,
     /// Replaces the response policy zones (`[[rpz]]`), in order.
     pub rpz: Option<Vec<daygle_dns_core::config::RpzZoneConfig>>,
+    /// Replaces the whole `[block_page]` section.
+    pub block_page: Option<daygle_dns_core::config::BlockPageSettings>,
     /// Replaces the whole `[alerts]` section; an `smtp_password` of
     /// `[redacted]` keeps the stored one.
     pub alerts: Option<daygle_dns_core::config::AlertSettings>,
@@ -4897,6 +4899,18 @@ pub async fn update_settings(
         }
         config.rpz = zones;
     }
+    if let Some(page) = &update.block_page {
+        let page = daygle_dns_core::config::BlockPageSettings {
+            ipv4: page.ipv4.trim().to_string(),
+            ipv6: page.ipv6.trim().to_string(),
+            listen: page.listen.trim().to_string(),
+            ..page.clone()
+        };
+        if let Err(msg) = page.check() {
+            return error_response(StatusCode::BAD_REQUEST, format!("block page: {msg}"));
+        }
+        config.block_page = page;
+    }
     if let Some(rrl) = &update.rrl {
         let rrl = daygle_dns_core::config::RrlSettings {
             exempt: rrl
@@ -5209,6 +5223,10 @@ pub async fn update_settings(
                 return error_response(StatusCode::BAD_REQUEST, msg);
             }
         }
+    }
+
+    if let Err(msg) = config.check_block_page_port() {
+        return error_response(StatusCode::BAD_REQUEST, format!("block page: {msg}"));
     }
 
     // Build the replacement recursive resolver before anything is persisted

@@ -61,6 +61,68 @@ pub struct DaygleConfig {
     pub rrl: RrlSettings,
     /// Response policy zones (`[[rpz]]`), checked in order.
     pub rpz: Vec<RpzZoneConfig>,
+    /// A web page that tells people a site was blocked.
+    pub block_page: BlockPageSettings,
+}
+
+/// The block page: blocked names (that would get NXDOMAIN) are answered
+/// with this server's address instead, and a small web server here shows
+/// a page saying what was blocked and why. Edited in Filtering -> Response
+/// Filters and stored in the database.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct BlockPageSettings {
+    pub enabled: bool,
+    /// The address blocked names resolve to (A queries): this server's
+    /// address as clients reach it. Empty: A queries get NXDOMAIN as usual.
+    pub ipv4: String,
+    /// The same for AAAA queries; empty: no IPv6 answer (NODATA).
+    pub ipv6: String,
+    /// Where the page's web server listens (addresses, comma-separated).
+    #[serde(deserialize_with = "listen_list")]
+    pub listen: String,
+    /// The page's HTTP port (80, so plain `http://` links reach it).
+    pub port: u16,
+    /// Extra text shown on the page (e.g. who to ask for access).
+    pub message: String,
+}
+
+impl Default for BlockPageSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            ipv4: String::new(),
+            ipv6: String::new(),
+            listen: "0.0.0.0".to_string(),
+            port: 80,
+            message: String::new(),
+        }
+    }
+}
+
+impl BlockPageSettings {
+    /// Problems that stop the settings being used.
+    pub fn check(&self) -> std::result::Result<(), String> {
+        if !self.ipv4.trim().is_empty() && self.ipv4.trim().parse::<std::net::Ipv4Addr>().is_err() {
+            return Err(format!("'{}' is not an IPv4 address", self.ipv4.trim()));
+        }
+        if !self.ipv6.trim().is_empty() && self.ipv6.trim().parse::<std::net::Ipv6Addr>().is_err() {
+            return Err(format!("'{}' is not an IPv6 address", self.ipv6.trim()));
+        }
+        if self.enabled {
+            if self.ipv4.trim().is_empty() && self.ipv6.trim().is_empty() {
+                return Err("enter the address blocked names should point to".to_string());
+            }
+            if self.port == 0 {
+                return Err("the port cannot be 0".to_string());
+            }
+            listen_socket_addrs(&self.listen, self.port)?;
+        }
+        if self.message.len() > 2000 {
+            return Err("the message is too long (2000 characters at most)".to_string());
+        }
+        Ok(())
+    }
 }
 
 /// Where a response policy zone's rules come from.
@@ -1055,6 +1117,8 @@ pub struct RuntimeSettings {
     pub rrl: Option<RrlSettings>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rpz: Option<Vec<RpzZoneConfig>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub block_page: Option<BlockPageSettings>,
 }
 
 /// Partial updates for the recursive resolver (matches the API's shape).
@@ -1290,6 +1354,34 @@ impl DaygleConfig {
             }
         }
         Ok(out)
+    }
+
+    /// The block page needs its own TCP port: not one the web console, the
+    /// API or a DoH/DoT listener holds.
+    pub fn check_block_page_port(&self) -> std::result::Result<(), String> {
+        if !self.block_page.enabled {
+            return Ok(());
+        }
+        for (name, port, used) in [
+            (
+                "the web console (HTTP)",
+                self.web.http_port,
+                self.web.http_enabled,
+            ),
+            (
+                "the web console (HTTPS)",
+                self.web.https_port,
+                self.web.https_enabled,
+            ),
+            ("the API", self.api.port, self.api.enabled),
+            ("DNS over HTTPS", self.doh.port, self.doh.enabled),
+            ("DNS over TLS", self.dot.port, self.dot.enabled),
+        ] {
+            if used && port == self.block_page.port {
+                return Err(format!("port {port} is already used by {name}"));
+            }
+        }
+        Ok(())
     }
 
     /// Whether `entry` is an address, a CIDR network or the name of a
@@ -1782,6 +1874,7 @@ impl RuntimeSettings {
             && self.alerts.is_none()
             && self.rrl.is_none()
             && self.rpz.is_none()
+            && self.block_page.is_none()
     }
 
     /// Apply the overlay to `config` in place. `None` fields are untouched.
@@ -1989,6 +2082,9 @@ impl RuntimeSettings {
         }
         if let Some(r) = &self.rpz {
             config.rpz = r.clone();
+        }
+        if let Some(b) = &self.block_page {
+            config.block_page = b.clone();
         }
         if let Some(w) = &self.web {
             config.web = w.clone();
@@ -2213,6 +2309,7 @@ impl RuntimeSettings {
             alerts: Some(config.alerts.clone()),
             rrl: Some(config.rrl.clone()),
             rpz: Some(config.rpz.clone()),
+            block_page: Some(config.block_page.clone()),
         }
     }
 }
@@ -3109,6 +3206,11 @@ impl DaygleConfig {
             .map_err(|e| DaygleError::Config(format!("rrl: {e}")))?;
         check_rpz_zones(&self.rpz, &self.authoritative.tsig_keys)
             .map_err(|e| DaygleError::Config(format!("rpz: {e}")))?;
+        self.block_page
+            .check()
+            .map_err(|e| DaygleError::Config(format!("block_page: {e}")))?;
+        self.check_block_page_port()
+            .map_err(|e| DaygleError::Config(format!("block_page: {e}")))?;
         self.dns64
             .compile(&self.all_networks())
             .map_err(|e| DaygleError::Config(format!("dns64: {e}")))?;
@@ -4631,6 +4733,9 @@ mod tests {
         }];
 
         c.doh.http3 = true;
+        c.block_page.enabled = true;
+        c.block_page.ipv4 = s("192.168.1.2");
+        c.block_page.message = s("Ask Sam");
         let stored = serde_json::to_string(&RuntimeSettings::capture(&c)).unwrap();
         let overlay: RuntimeSettings = serde_json::from_str(&stored).unwrap();
         let mut restored = DaygleConfig::default();
@@ -4653,6 +4758,7 @@ mod tests {
         assert_eq!(restored.alerts, c.alerts, "alerts");
         assert_eq!(restored.rrl, c.rrl, "rrl");
         assert_eq!(restored.rpz, c.rpz, "rpz");
+        assert_eq!(restored.block_page, c.block_page, "block_page");
 
         // Clearing a value in the console must stay cleared after a restart,
         // even when the config file sets it.
@@ -4980,6 +5086,27 @@ fd0000000000000000000000000000aa 02 40 00 80     eth0
         ] {
             assert!(bad.compile().is_err(), "{bad:?}");
         }
+    }
+
+    #[test]
+    fn block_page_needs_an_address_and_its_own_port() {
+        let mut c = DaygleConfig::default();
+        c.block_page.enabled = true;
+        assert!(c.block_page.check().is_err(), "no address");
+        c.block_page.ipv4 = "192.168.1.2".to_string();
+        assert!(c.block_page.check().is_ok());
+        c.block_page.ipv6 = "not-an-address".to_string();
+        assert!(c.block_page.check().is_err());
+        c.block_page.ipv6 = String::new();
+        c.web.http_enabled = true;
+        c.web.http_port = 80;
+        c.block_page.port = 80;
+        assert!(c
+            .check_block_page_port()
+            .unwrap_err()
+            .contains("web console"));
+        c.block_page.port = 8081;
+        assert!(c.check_block_page_port().is_ok());
     }
 
     #[test]

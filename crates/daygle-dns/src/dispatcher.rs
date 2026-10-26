@@ -129,6 +129,8 @@ pub struct DnsDispatcher {
     rrl: Arc<daygle_dns_core::rrl::ResponseRateLimiter>,
     /// Response policy zones, published by their manager.
     rpz: Arc<ArcSwap<daygle_dns_authoritative::rpz::RpzSet>>,
+    /// Recent block-page answers, for the page to say why.
+    block_log: Arc<daygle_dns_core::block_log::BlockLog>,
     /// Remote logging of queries (`[syslog] queries`).
     syslog: Option<Arc<crate::syslog::SyslogSender>>,
     /// The live config, for settings read per query (`[dns64]`).
@@ -196,6 +198,7 @@ impl DnsDispatcher {
             cookies: Arc::new(crate::cookies::Cookies::new(true)),
             rrl: Arc::default(),
             rpz: Arc::default(),
+            block_log: Arc::default(),
             syslog: None,
             config: None,
         }
@@ -299,6 +302,12 @@ impl DnsDispatcher {
     /// Share a response rate limiter (`[rrl]`).
     pub fn with_rrl(mut self, rrl: Arc<daygle_dns_core::rrl::ResponseRateLimiter>) -> Self {
         self.rrl = rrl;
+        self
+    }
+
+    /// Share the block page's log of recent blocks (`[block_page]`).
+    pub fn with_block_log(mut self, log: Arc<daygle_dns_core::block_log::BlockLog>) -> Self {
+        self.block_log = log;
         self
     }
 
@@ -929,6 +938,27 @@ impl RequestHandler for DnsDispatcher {
             Action::Block => {
                 debug!(query = %qname, reason = %decision.reason, "blocked by policy");
                 self.metrics.inc(&self.metrics.blocked);
+                if let Some(answer) = self.block_page_answer(info.query.query_type()) {
+                    self.observe(
+                        client,
+                        &qname,
+                        &rtype,
+                        protocol,
+                        Outcome::Blocked,
+                        Some("NOERROR"),
+                        started,
+                    );
+                    return self
+                        .serve_block_page(
+                            &mut response_handle,
+                            request,
+                            client,
+                            &qname,
+                            &decision.reason,
+                            answer,
+                        )
+                        .await;
+                }
                 self.observe(
                     client,
                     &qname,
@@ -1009,6 +1039,29 @@ impl RequestHandler for DnsDispatcher {
             {
                 debug!(query = %qname, reason = %decision.reason, "blocked by advanced blocking");
                 self.metrics.inc(&self.metrics.blocked);
+                if decision.action == Action::Block {
+                    if let Some(answer) = self.block_page_answer(info.query.query_type()) {
+                        self.observe(
+                            client,
+                            &qname,
+                            &rtype,
+                            protocol,
+                            Outcome::Blocked,
+                            Some("NOERROR"),
+                            started,
+                        );
+                        return self
+                            .serve_block_page(
+                                &mut response_handle,
+                                request,
+                                client,
+                                &qname,
+                                &decision.reason,
+                                answer,
+                            )
+                            .await;
+                    }
+                }
                 let rcode = match decision.action {
                     Action::Refused => "REFUSED",
                     Action::Redirect(_) | Action::NoData => "NOERROR",
@@ -1369,6 +1422,33 @@ impl RequestHandler for DnsDispatcher {
                     {
                         debug!(query = %qname, %target, reason = %decision.reason, "blocked by CNAME inspection");
                         self.metrics.inc(&self.metrics.blocked);
+                        if decision.action == Action::Block {
+                            if let Some(answer) = self.block_page_answer(info.query.query_type()) {
+                                self.observe(
+                                    client,
+                                    &qname,
+                                    &rtype,
+                                    protocol,
+                                    Outcome::Blocked,
+                                    Some("NOERROR"),
+                                    started,
+                                );
+                                let reason = format!(
+                                    "CNAME target {target} is blocked: {}",
+                                    decision.reason
+                                );
+                                return self
+                                    .serve_block_page(
+                                        &mut response_handle,
+                                        request,
+                                        client,
+                                        &qname,
+                                        &reason,
+                                        answer,
+                                    )
+                                    .await;
+                            }
+                        }
                         let why = Some(Ede::new(
                             ede::BLOCKED,
                             format!("CNAME target {target} is blocked: {}", decision.reason),
@@ -1843,6 +1923,50 @@ impl DnsDispatcher {
             }
         }
         None
+    }
+
+    /// With the block page on, how a blocked query of `qtype` is answered
+    /// instead of NXDOMAIN: `Some(Some(ip))` with the page's address,
+    /// `Some(None)` empty (NODATA); `None` leaves it to NXDOMAIN.
+    fn block_page_answer(&self, qtype: RecordType) -> Option<Option<IpAddr>> {
+        let config = self.config.as_ref()?.load();
+        let page = &config.block_page;
+        if !page.enabled {
+            return None;
+        }
+        let v4 = page.ipv4.trim().parse::<std::net::Ipv4Addr>().ok();
+        let v6 = page.ipv6.trim().parse::<std::net::Ipv6Addr>().ok();
+        match qtype {
+            RecordType::A => v4.map(|ip| Some(IpAddr::V4(ip))),
+            RecordType::AAAA if v4.is_some() || v6.is_some() => Some(v6.map(IpAddr::V6)),
+            // No other endpoints for browsers to try.
+            RecordType::HTTPS | RecordType::SVCB if v4.is_some() || v6.is_some() => Some(None),
+            _ => None,
+        }
+    }
+
+    /// Answer a blocked query with the block page's address (or empty),
+    /// remembering why for the page.
+    #[allow(clippy::too_many_arguments)]
+    async fn serve_block_page<R: ResponseHandler>(
+        &self,
+        response_handle: &mut R,
+        request: &Request,
+        client: IpAddr,
+        qname: &str,
+        reason: &str,
+        answer: Option<IpAddr>,
+    ) -> ResponseInfo {
+        let why = Some(Ede::new(ede::BLOCKED, reason.to_string()));
+        let Some(ip) = answer else {
+            return send_empty(response_handle, request, why).await;
+        };
+        self.block_log.record(client, qname, reason);
+        let Some(query) = request.queries.queries().first() else {
+            return send_error(response_handle, request, ResponseCode::FormErr, None).await;
+        };
+        let name = Name::from(query.name().clone());
+        send_redirect(response_handle, request, &name, query.query_type(), ip, why).await
     }
 
     /// Carry out a response policy zone's action.

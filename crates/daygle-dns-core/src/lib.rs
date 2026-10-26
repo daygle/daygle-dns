@@ -8,6 +8,7 @@
 
 pub mod alerts;
 pub mod auth;
+pub mod block_log;
 pub mod blocking;
 pub mod config;
 pub mod error;

@@ -277,3 +277,68 @@ async fn groups_block_services() {
 
     shutdown(server).await;
 }
+
+/// With the block page on, a blocked name points at the page, and the page
+/// says what was blocked and why; turned off, it is NXDOMAIN again.
+#[tokio::test]
+async fn block_page_explains_blocks() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = base_config(&dir.path().join("daygle-dns.db"));
+    config.policy.blocklist = vec!["ads.test".to_string()];
+    let server = spawn(config).await;
+    let udp = server.udp_addr.unwrap();
+    let base = format!("http://{}/api", server.api_addr);
+    let client = reqwest::Client::new();
+    let free_port = {
+        let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        probe.local_addr().unwrap().port()
+    };
+
+    let reply = udp_query(udp, "ads.test.", RecordType::A).await;
+    assert_eq!(reply.response_code, ResponseCode::NXDomain);
+
+    let page = serde_json::json!({
+        "enabled": true, "ipv4": "127.0.0.1", "listen": "127.0.0.1",
+        "port": free_port, "message": "Ask <Sam>",
+    });
+    let resp = client
+        .put(format!("{base}/config"))
+        .json(&serde_json::json!({ "block_page": page }))
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_success(), "{}", resp.text().await.unwrap());
+
+    let reply = udp_query(udp, "ads.test.", RecordType::A).await;
+    assert_eq!(reply.response_code, ResponseCode::NoError);
+    assert_eq!(first_answer(&reply).as_deref(), Some("127.0.0.1"));
+    // No IPv6 address set: AAAA is empty, not NXDOMAIN.
+    let reply = udp_query(udp, "ads.test.", RecordType::AAAA).await;
+    assert_eq!(reply.response_code, ResponseCode::NoError);
+    assert!(reply.answers.is_empty());
+
+    let resp = client
+        .get(format!("http://127.0.0.1:{free_port}/some/path"))
+        .header("Host", "ads.test")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::FORBIDDEN);
+    let html = resp.text().await.unwrap();
+    assert!(html.contains("<strong>ads.test</strong>"), "{html}");
+    assert!(html.contains("Reason:"), "{html}");
+    assert!(html.contains("Ask &lt;Sam&gt;"), "{html}");
+
+    // Off again.
+    let resp = client
+        .put(format!("{base}/config"))
+        .json(&serde_json::json!({ "block_page": { "enabled": false } }))
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_success());
+    let reply = udp_query(udp, "ads.test.", RecordType::A).await;
+    assert_eq!(reply.response_code, ResponseCode::NXDomain);
+
+    shutdown(server).await;
+}

@@ -1425,6 +1425,28 @@ zone for changes now (`202`). `POST /api/rpz/test` with `{"client",
 [{"zone", "trigger", "action", "log_only"}]}`; the first match that is not
 `log_only` is the one that acts.
 
+### Block page
+
+The `block_page` settings group (Filtering → Response Filters, replaced as
+a whole by `PUT /api/config` with `{"block_page": {...}}`) answers blocked
+names with this server's address, where a small web server shows a page
+saying what was blocked and why:
+
+| Field | Default | Meaning |
+|---|---|---|
+| `enabled` | `false` | Requires `ipv4` or `ipv6`. |
+| `ipv4`, `ipv6` | `""` | The address blocked A (AAAA) queries are answered with: this server, as clients reach it. Without `ipv6`, blocked AAAA queries are answered empty; without `ipv4`, A queries keep NXDOMAIN. |
+| `listen`, `port` | `0.0.0.0`, `80` | Where the page is served (plain HTTP). The port may not be one the web console, the API or a DoH/DoT listener uses (`400`). |
+| `message` | `""` | Extra text on the page (escaped; 2000 characters at most). |
+
+It applies to blocks that would be NXDOMAIN: blocklists, the allow and
+block lists, the AI scanner, CNAME inspection, and filtering groups whose
+`response` is NXDOMAIN. `HTTPS`/`SVCB` queries for blocked names are
+answered empty. The page answers every path with `403` and HTML naming the
+`Host` and, when the visitor's lookup was within the last 10 minutes, the
+block reason. HTTPS sites cannot show it (the browser reports a certificate
+or connection error instead).
+
 ### Response rate limiting (RRL)
 
 The `rrl` settings group (Settings → Rate Limiting, replaced as a whole by
