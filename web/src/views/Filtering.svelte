@@ -4,6 +4,7 @@
   import Blocklists from './Blocklists.svelte';
   import DomainLists from './DomainLists.svelte';
   import ResponseFilters from './ResponseFilters.svelte';
+  import RpzZones from './RpzZones.svelte';
 
   // The Filtering page groups everything that decides what gets blocked or
   // rewritten as tabs (same pattern as Settings, Logs and AI).
@@ -24,7 +25,13 @@
       id: 'response-filters',
       label: 'Response Filters',
       tagline:
-        'Rules that change DNS answers instead of blocking them.',
+        'Rules that look at or change DNS answers: block trackers hidden behind CNAME records, force Safe Search, show a block page, and answer IPv6 lookups with IPv4 only.',
+    },
+    {
+      id: 'rpz',
+      label: 'Response Policy Zones',
+      tagline:
+        'DNS firewall rules in the standard RPZ format: subscribe to threat-intelligence feeds by zone transfer or URL, or write your own, with every RPZ action (NXDOMAIN, NODATA, drop, TCP-only, passthru and local data).',
     },
   ];
 
@@ -44,6 +51,8 @@
   <Blocklists />
 {:else if tab === 'domain-lists'}
   <DomainLists />
+{:else if tab === 'rpz'}
+  <RpzZones />
 {:else}
   <ResponseFilters />
 {/if}

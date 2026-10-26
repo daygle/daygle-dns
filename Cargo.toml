@@ -9,6 +9,7 @@ members = [
     "crates/daygle-dns-api",
     "crates/daygle-dns-gui",
     "crates/daygle-dns-ml",
+    "crates/daygle-dns-dhcp",
     "crates/daygle-dns",
 ]
 
@@ -28,6 +29,7 @@ hickory-server = { version = "0.26", features = [
     "tls-ring",
     "https-ring",
     "quic-ring",
+    "h3-ring",
     "metrics",
     "testing",
 ] }
@@ -55,6 +57,8 @@ axum = "0.8"
 tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "0.7", features = ["fs", "cors", "trace"] }
 socket2 = "0.6"
+dhcproto = "0.15"
+nix = { version = "0.31", features = ["net", "socket", "uio"] }
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -71,17 +75,19 @@ getrandom = "0.4"
 siphasher = "1"
 uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
+chrono-tz = "0.10"
 thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 clap = { version = "4", features = ["derive"] }
 arc-swap = "1"
-parking_lot = "0.12"
+parking_lot = "0.13"
 rust-embed = "8"
 rand = "0.10"
 regex = "1"
 tempfile = "3"
 url = "2"
+lettre = { version = "0.11", default-features = false, features = ["smtp-transport", "builder", "hostname", "tokio1-rustls", "rustls-tls"] }
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "http2", "json", "socks", "query", "form"] }
 # AI subsystem: pure-Rust fastText inference (supervised text classification)
 fasttext = "0.8"

@@ -340,9 +340,20 @@ impl BlocklistSourceManager {
                             }
                         }
                     }
+                    daygle_dns_core::alerts::resolve(&format!("blocklist:{}", source.name));
                 }
                 Err(e) => {
                     tracing::warn!(source = %source.name, error = %e, "blocklist source fetch failed");
+                    daygle_dns_core::alerts::raise(
+                        daygle_dns_core::alerts::AlertKind::BlocklistFailure,
+                        format!("blocklist:{}", source.name),
+                        format!("Blocklist '{}' cannot be downloaded", source.name),
+                        format!(
+                            "Downloading the blocklist '{}' from {} failed: {e}. The last \
+                             downloaded copy (if any) stays in use.",
+                            source.name, source.url
+                        ),
+                    );
                     let mut status = self.status.lock().unwrap();
                     if let Some(st) = status.get_mut(i) {
                         if describes(st, source) {

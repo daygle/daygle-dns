@@ -28,7 +28,7 @@
       id: 'filtering-groups',
       label: 'Filtering Groups',
       tagline:
-        "Give a set of devices their own filtering: extra allow and block rules and blocklists on top of everything else, and whether the AI may auto-block them - for example, block social media on the kids' devices.",
+        "Give a set of devices their own filtering: extra allow and block rules, blocked services (TikTok, games...) and blocklists on top of everything else, Safe Search, whether the AI may auto-block them, and when the rules apply - for example, block social media on the kids' devices at bedtime.",
     },
     {
       id: 'resolution-policies',

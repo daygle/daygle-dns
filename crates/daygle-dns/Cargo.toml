@@ -15,6 +15,7 @@ path = "src/main.rs"
 daygle-dns-core = { path = "../daygle-dns-core" }
 daygle-dns-policy = { path = "../daygle-dns-policy" }
 daygle-dns-authoritative = { path = "../daygle-dns-authoritative" }
+daygle-dns-dhcp = { path = "../daygle-dns-dhcp" }
 daygle-dns-recursive = { path = "../daygle-dns-recursive" }
 daygle-dns-dot = { path = "../daygle-dns-dot" }
 daygle-dns-api = { path = "../daygle-dns-api", default-features = false }

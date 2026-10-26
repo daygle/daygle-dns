@@ -8,6 +8,9 @@
   let networks = $state([]);
   // Blocklists (Filtering -> Blocklists) set to apply to selected groups only.
   let groupLists = $state([]);
+  // Services a group can block with one tick, and their categories in order.
+  let services = $state([]);
+  const serviceCategories = $derived([...new Set(services.map((s) => s.category))]);
   let error = $state(null);
   let notice = $state(null);
   let saving = $state(false);
@@ -21,6 +24,11 @@
   let testListener = $state('');
   let testResult = $state(null);
 
+  const DAYS = [
+    ['mon', 'Mon'], ['tue', 'Tue'], ['wed', 'Wed'], ['thu', 'Thu'],
+    ['fri', 'Fri'], ['sat', 'Sat'], ['sun', 'Sun'],
+  ];
+
   const RESPONSES = [
     { value: 'nx_domain', label: 'NXDOMAIN (Does Not Exist)' },
     { value: 'refused', label: 'REFUSED' },
@@ -30,6 +38,7 @@
 
   async function load() {
     api.networks().then((data) => { networks = data.networks || []; }).catch(() => {});
+    api.blockableServices().then((data) => { services = data.services || []; }).catch(() => {});
     try {
       groups = await api.blockingGroups();
     } catch (e) {
@@ -76,6 +85,10 @@
           responseKind: group.response?.kind || 'nx_domain',
           redirectAddr: group.response?.address || '0.0.0.0',
           ai_blocking: group.ai_blocking !== false,
+          safe_search: !!group.safe_search,
+          youtube_restricted: !!group.youtube_restricted,
+          schedule: (group.schedule || []).map((w) => ({ ...w, days: [...(w.days || [])] })),
+          blocked_services: [...(group.blocked_services || [])],
         }
       : {
           id: null,
@@ -91,7 +104,42 @@
           responseKind: 'nx_domain',
           redirectAddr: '0.0.0.0',
           ai_blocking: true,
+          safe_search: false,
+          youtube_restricted: false,
+          schedule: [],
+          blocked_services: [],
         };
+  }
+
+  function toggleService(id) {
+    edit.blocked_services = edit.blocked_services.includes(id)
+      ? edit.blocked_services.filter((s) => s !== id)
+      : [...edit.blocked_services, id];
+  }
+
+  function serviceNames(ids) {
+    return ids.map((id) => services.find((s) => s.id === id)?.name || id).join(', ');
+  }
+
+  function addWindow() {
+    edit.schedule = [
+      ...edit.schedule,
+      { days: ['mon', 'tue', 'wed', 'thu', 'fri'], start: '08:00', end: '15:00' },
+    ];
+  }
+
+  function toggleDay(w, day) {
+    w.days = w.days.includes(day)
+      ? w.days.filter((d) => d !== day)
+      : DAYS.map(([d]) => d).filter((d) => d === day || w.days.includes(d));
+  }
+
+  // "Mon-Fri 08:00-15:00" for the list's tooltip.
+  function describeWindow(w) {
+    const days = w.days?.length
+      ? DAYS.filter(([d]) => w.days.includes(d)).map(([, l]) => l).join(', ')
+      : 'Every day';
+    return `${days} ${w.start}-${w.end}`;
   }
 
   function closeEdit() {
@@ -122,6 +170,10 @@
       blocklists: edit.blocklists,
       response,
       ai_blocking: edit.ai_blocking,
+      safe_search: edit.safe_search,
+      youtube_restricted: edit.youtube_restricted,
+      schedule: edit.schedule,
+      blocked_services: edit.blocked_services,
     };
     saving = true;
     error = null;
@@ -221,6 +273,9 @@
                 <strong>{g.name}</strong>
                 {#if !g.enabled}<span class="pill">Disabled</span>{/if}
                 {#if g.ai_blocking === false}<span class="pill" title="The AI never auto-blocks these clients' queries">AI Off</span>{/if}
+                {#if g.safe_search}<span class="pill" title="Google, Bing and DuckDuckGo always use Safe Search for these clients">Safe Search</span>{/if}
+                {#if g.youtube_restricted}<span class="pill" title="YouTube always uses Restricted Mode for these clients">YouTube Restricted</span>{/if}
+                {#if g.schedule?.length}<span class="pill" title={'Applies only: ' + g.schedule.map(describeWindow).join('; ')}>Scheduled</span>{/if}
               </td>
               <td class="muted">{g.clients.length ? g.clients.join(', ') : 'All Clients'}</td>
               <td class="muted">
@@ -228,6 +283,9 @@
                 {count(g.block.length + g.block_regex.length, 'Block Rule')}
                 {#if g.blocklists?.length}
                   <div title={g.blocklists.join(', ')}>{count(g.blocklists.length, 'Blocklist')}</div>
+                {/if}
+                {#if g.blocked_services?.length}
+                  <div title={serviceNames(g.blocked_services)}>{count(g.blocked_services.length, 'Blocked Service')}</div>
                 {/if}
               </td>
               <td class="muted">{responseLabel(g.response)}</td>
@@ -254,8 +312,9 @@
     (later groups are skipped); on its block list or one of its blocklists,
     it is blocked with that group's response. Otherwise the next group is
     checked. A group with no client networks covers every client. AI
-    auto-blocking follows the first group covering the client: a group can
-    turn it off for its clients.
+    auto-blocking, Safe Search and YouTube Restricted Mode follow the first
+    group covering the client: a group can turn AI auto-blocking off, or Safe
+    Search on, for its clients.
   </p>
 </div>
 
@@ -288,6 +347,16 @@
         <span class="muted ai-note">
           AI auto-blocking: {testResult.ai_blocking ? 'On' : 'Off'}
           {testResult.ai_group ? `(group "${testResult.ai_group}")` : '(client is in no group)'}
+        </span>
+      {/if}
+      {#if testResult.scheduled_off?.length}
+        <span class="muted ai-note">
+          Outside their schedule now, so skipped: {testResult.scheduled_off.join(', ')}
+        </span>
+      {/if}
+      {#if testResult.safe_search_target}
+        <span class="muted ai-note">
+          Safe Search: answered with <code>{testResult.safe_search_target}</code>
         </span>
       {/if}
     </div>
@@ -326,6 +395,56 @@
         Leave empty for every client.
       </p>
 
+      <div class="section-title">Schedule</div>
+      {#each edit.schedule as w, i (i)}
+        <div class="window">
+          <div class="days">
+            {#each DAYS as [day, label] (day)}
+              <label class="day" class:on={w.days.includes(day)}>
+                <input type="checkbox" checked={w.days.includes(day)} onchange={() => toggleDay(w, day)} />{label}
+              </label>
+            {/each}
+          </div>
+          <label class="time">From <input type="time" bind:value={w.start} required /></label>
+          <label class="time">Until <input type="time" bind:value={w.end} required /></label>
+          <button class="secondary" onclick={() => (edit.schedule = edit.schedule.filter((_, j) => j !== i))} aria-label="Remove time window">✕</button>
+        </div>
+      {/each}
+      <button class="secondary" style="margin-top: 4px" onclick={addWindow}>Add Time Window</button>
+      <p class="muted help">
+        {#if edit.schedule.length}
+          The group applies only inside these windows; at other times it is
+          skipped as if it did not exist, so the next group covering the
+          client (or nothing) applies.
+        {:else}
+          The group applies all the time. Add a time window to apply it only
+          at certain times, such as school hours or bedtime.
+        {/if}
+        A window ending earlier than it starts runs past midnight (21:00
+        until 07:00 on Friday covers Friday night into Saturday morning).
+        Times use the server's time zone under Settings → General → Date &amp;
+        Time Defaults.
+      </p>
+
+      <div class="section-title">Blocked Services</div>
+      {#each serviceCategories as category (category)}
+        <div class="service-category">{category}</div>
+        <div class="services">
+          {#each services.filter((s) => s.category === category) as s (s.id)}
+            <label class="service" class:on={edit.blocked_services.includes(s.id)} title={s.domains.join(', ')}>
+              <input type="checkbox" checked={edit.blocked_services.includes(s.id)} onchange={() => toggleService(s.id)} />{s.name}
+            </label>
+          {/each}
+        </div>
+      {/each}
+      <p class="muted help">
+        Blocks every domain the service uses, and their subdomains (hover a
+        service to see them). Combine with a schedule to block, for example,
+        games and social media at bedtime only. The Allow list below still
+        wins. Apps change their domains from time to time, so a blocked
+        service may occasionally work partly until the list is updated.
+      </p>
+
       <div class="section-title">Blocklists</div>
       {#if groupLists.length}
         <div class="lists">
@@ -357,6 +476,15 @@
         first group (from the top) that covers it; clients in no group are
         covered. To use the AI for some groups only, add a group covering every
         client with this off and move it to the bottom.
+      </p>
+
+      <div class="section-title">Safe Search</div>
+      <label class="checkbox"><input type="checkbox" bind:checked={edit.safe_search} /><span>Force Safe Search on Google, Bing and DuckDuckGo</span></label>
+      <label class="checkbox"><input type="checkbox" bind:checked={edit.youtube_restricted} /><span>Force YouTube Restricted Mode</span></label>
+      <p class="muted help">
+        Hides explicit results whatever the device or account settings say.
+        A client follows the first group that covers it. To turn these on for
+        every client, use Filtering → Response Filters instead.
       </p>
 
       <div class="section-title">Domains</div>
@@ -411,6 +539,19 @@
   .result { margin-top: 12px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
   .pill.group { border-color: var(--accent); color: var(--accent); }
   .ai-note { flex-basis: 100%; }
+  .window { display: flex; align-items: flex-end; gap: 10px; flex-wrap: wrap; margin-bottom: 8px; }
+  .days { display: flex; gap: 4px; flex-wrap: wrap; }
+  .day { flex-direction: row; align-items: center; gap: 0; padding: 5px 8px; border: 1px solid var(--border); border-radius: 6px; cursor: pointer; color: var(--muted); }
+  .day.on { border-color: var(--accent); color: var(--accent); }
+  .day input { position: absolute; opacity: 0; width: 1px; height: 1px; }
+  .day:focus-within { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .time { width: 120px; }
+  .service-category { font-size: 0.78rem; color: var(--muted); margin: 8px 0 4px; }
+  .services { display: flex; flex-wrap: wrap; gap: 6px; }
+  .service { flex-direction: row; align-items: center; gap: 0; padding: 5px 10px; border: 1px solid var(--border); border-radius: 999px; cursor: pointer; color: var(--text); font-size: 0.82rem; }
+  .service.on { border-color: var(--danger); color: var(--danger); }
+  .service input { position: absolute; opacity: 0; width: 1px; height: 1px; }
+  .service:focus-within { outline: 2px solid var(--accent); outline-offset: 1px; }
   @media (max-width: 640px) {
     .grid2 { grid-template-columns: 1fr; }
   }

@@ -22,6 +22,13 @@ use hickory_server::server::{Request, RequestHandler, ResponseHandler, ResponseI
 use hickory_server::zone_handler::MessageResponseBuilder;
 use tracing::{debug, warn};
 
+/// TTL of the DDR (RFC 9462) SVCB answers.
+const DDR_TTL: u32 = 300;
+
+/// TTL of the CNAME in a Safe Search answer (the safe address's own
+/// records keep theirs, capped by it).
+const SAFE_SEARCH_TTL: u32 = 300;
+
 /// Admission limit for recursive network work.
 ///
 /// Work holds a permit until its resolver future ends, independently of how
@@ -121,6 +128,12 @@ pub struct DnsDispatcher {
     recursive_admission: Arc<RecursiveAdmission>,
     /// DNS cookies (RFC 7873, `server.dns_cookies`).
     cookies: Arc<crate::cookies::Cookies>,
+    /// Response rate limiting (`[rrl]`).
+    rrl: Arc<daygle_dns_core::rrl::ResponseRateLimiter>,
+    /// Response policy zones, published by their manager.
+    rpz: Arc<ArcSwap<daygle_dns_authoritative::rpz::RpzSet>>,
+    /// Recent block-page answers, for the page to say why.
+    block_log: Arc<daygle_dns_core::block_log::BlockLog>,
     /// Remote logging of queries (`[syslog] queries`).
     syslog: Option<Arc<crate::syslog::SyslogSender>>,
     /// The live config, for settings read per query (`[dns64]`).
@@ -186,6 +199,9 @@ impl DnsDispatcher {
             client_timeout: Duration::from_millis(2000),
             recursive_admission: Arc::new(RecursiveAdmission::new(256)),
             cookies: Arc::new(crate::cookies::Cookies::new(true)),
+            rrl: Arc::default(),
+            rpz: Arc::default(),
+            block_log: Arc::default(),
             syslog: None,
             config: None,
         }
@@ -283,6 +299,24 @@ impl DnsDispatcher {
         config: Arc<ArcSwap<daygle_dns_core::config::DaygleConfig>>,
     ) -> Self {
         self.config = Some(config);
+        self
+    }
+
+    /// Share a response rate limiter (`[rrl]`).
+    pub fn with_rrl(mut self, rrl: Arc<daygle_dns_core::rrl::ResponseRateLimiter>) -> Self {
+        self.rrl = rrl;
+        self
+    }
+
+    /// Share the block page's log of recent blocks (`[block_page]`).
+    pub fn with_block_log(mut self, log: Arc<daygle_dns_core::block_log::BlockLog>) -> Self {
+        self.block_log = log;
+        self
+    }
+
+    /// Share the response policy zones (`[[rpz]]`).
+    pub fn with_rpz(mut self, rpz: Arc<ArcSwap<daygle_dns_authoritative::rpz::RpzSet>>) -> Self {
+        self.rpz = rpz;
         self
     }
 
@@ -750,6 +784,17 @@ impl RequestHandler for DnsDispatcher {
                 }
                 crate::cookies::CookieCheck::Present { valid, reply } => (valid, Some(reply)),
             };
+        // Response rate limiting (RRL) counts every UDP response that goes
+        // out from here on; the cookie layer sits outside it, so a truncated
+        // (slipped) reply still carries a cookie the client can retry with.
+        let response_handle = crate::rrl::RrlResponder::new(
+            response_handle,
+            request,
+            client,
+            cookie_ok,
+            &self.rrl,
+            &self.metrics,
+        );
         let mut response_handle =
             crate::cookies::CookieResponder::new(response_handle, cookie_reply);
         let admitted = if cookie_ok {
@@ -853,6 +898,38 @@ impl RequestHandler for DnsDispatcher {
             .await;
         }
 
+        // 0c. Discovery of Designated Resolvers (DDR, RFC 9462): a device
+        // asks `_dns.resolver.arpa` (or `_dns.<this server's name>`) for
+        // SVCB records describing the encrypted DNS it can switch to.
+        // `resolver.arpa` is local to every resolver: never forwarded.
+        let special_use = qname == "resolver.arpa" || qname.ends_with(".resolver.arpa");
+        let ddr_name = qname == "_dns.resolver.arpa" || (!special_use && self.is_ddr_name(&qname));
+        if special_use || ddr_name {
+            let known = ddr_name || qname == "resolver.arpa";
+            self.observe(
+                client,
+                &qname,
+                &rtype,
+                protocol,
+                Outcome::Authoritative,
+                Some(if known { "NOERROR" } else { "NXDOMAIN" }),
+                started,
+            );
+            if !known {
+                return send_error(&mut response_handle, request, ResponseCode::NXDomain, None)
+                    .await;
+            }
+            let records = if ddr_name && info.query.query_type() == RecordType::SVCB {
+                self.ddr_records(client, &Name::from(info.query.name().clone()))
+            } else {
+                Vec::new()
+            };
+            if records.is_empty() {
+                return send_empty(&mut response_handle, request, None).await;
+            }
+            return send_records(&mut response_handle, request, &records, None).await;
+        }
+
         // Listener ACL was checked before opcode-specific handlers above.
         // The result is reused by the recursion gate so membership in the
         // encrypted listener's allow-list grants recursion on that listener.
@@ -865,7 +942,8 @@ impl RequestHandler for DnsDispatcher {
         let policy = self.policy.load_full();
         let listener = match info.protocol {
             hickory_server::net::xfer::Protocol::Tls => Some("dot"),
-            hickory_server::net::xfer::Protocol::Https => Some("doh"),
+            hickory_server::net::xfer::Protocol::Https
+            | hickory_server::net::xfer::Protocol::H3 => Some("doh"),
             hickory_server::net::xfer::Protocol::Quic => Some("doq"),
             _ => None,
         };
@@ -895,6 +973,27 @@ impl RequestHandler for DnsDispatcher {
             Action::Block => {
                 debug!(query = %qname, reason = %decision.reason, "blocked by policy");
                 self.metrics.inc(&self.metrics.blocked);
+                if let Some(answer) = self.block_page_answer(info.query.query_type()) {
+                    self.observe(
+                        client,
+                        &qname,
+                        &rtype,
+                        protocol,
+                        Outcome::Blocked,
+                        Some("NOERROR"),
+                        started,
+                    );
+                    return self
+                        .serve_block_page(
+                            &mut response_handle,
+                            request,
+                            client,
+                            &qname,
+                            &decision.reason,
+                            answer,
+                        )
+                        .await;
+                }
                 self.observe(
                     client,
                     &qname,
@@ -963,7 +1062,8 @@ impl RequestHandler for DnsDispatcher {
         if !policy.is_allowlisted(&qname) {
             let encrypted_listener = match info.protocol {
                 hickory_server::net::xfer::Protocol::Tls => Some("dot"),
-                hickory_server::net::xfer::Protocol::Https => Some("doh"),
+                hickory_server::net::xfer::Protocol::Https
+                | hickory_server::net::xfer::Protocol::H3 => Some("doh"),
                 hickory_server::net::xfer::Protocol::Quic => Some("doq"),
                 _ => None,
             };
@@ -974,6 +1074,29 @@ impl RequestHandler for DnsDispatcher {
             {
                 debug!(query = %qname, reason = %decision.reason, "blocked by advanced blocking");
                 self.metrics.inc(&self.metrics.blocked);
+                if decision.action == Action::Block {
+                    if let Some(answer) = self.block_page_answer(info.query.query_type()) {
+                        self.observe(
+                            client,
+                            &qname,
+                            &rtype,
+                            protocol,
+                            Outcome::Blocked,
+                            Some("NOERROR"),
+                            started,
+                        );
+                        return self
+                            .serve_block_page(
+                                &mut response_handle,
+                                request,
+                                client,
+                                &qname,
+                                &decision.reason,
+                                answer,
+                            )
+                            .await;
+                    }
+                }
                 let rcode = match decision.action {
                     Action::Refused => "REFUSED",
                     Action::Redirect(_) | Action::NoData => "NOERROR",
@@ -1011,6 +1134,100 @@ impl RequestHandler for DnsDispatcher {
                         send_error(&mut response_handle, request, ResponseCode::NXDomain, why).await
                     }
                 };
+            }
+        }
+
+        // 1c. Response policy zones (RPZ): client-IP and QNAME triggers, in
+        // zone order. They apply to what the blocklists and filtering groups
+        // let through; an allowlisted name is exempt, and a PASSTHRU rule
+        // exempts the query from the rest of RPZ (its answer included).
+        let rpz = self.rpz.load_full();
+        let mut rpz_done = rpz.is_empty() || policy.is_allowlisted(&qname);
+        if !rpz_done {
+            if let Some(hit) = rpz.check_query(client, &qname) {
+                if rpz_lets_through(&hit.action, info.protocol) {
+                    rpz_done = true;
+                } else {
+                    return self
+                        .serve_rpz(
+                            hit,
+                            request,
+                            &mut response_handle,
+                            client,
+                            &qname,
+                            &rtype,
+                            protocol,
+                            started,
+                        )
+                        .await;
+                }
+            }
+        }
+
+        // 1d. Safe Search and YouTube Restricted Mode: a search engine's name
+        // is answered with a CNAME to its "safe" address plus that address's
+        // records. Only for clients that may use recursion (everyone else is
+        // refused below anyway) and names not hosted here; HTTPS/SVCB are
+        // answered empty so browsers cannot learn other endpoints from them,
+        // and every other type resolves as usual.
+        if let Some(target) = self.safe_search_target(&policy, client, listener, &qname) {
+            let may_recurse = self.resolver.load().as_ref().is_some_and(|r| {
+                r.allows_client_with_listener(client, matches!(listener_allowed, Some(true)))
+            });
+            let qtype = info.query.query_type();
+            if may_recurse && !self.catalog.contains(info.query.name()) {
+                if matches!(qtype, RecordType::HTTPS | RecordType::SVCB) {
+                    self.metrics.inc(&self.metrics.recursive);
+                    self.observe(
+                        client,
+                        &qname,
+                        &rtype,
+                        protocol,
+                        Outcome::Recursive,
+                        Some("NOERROR"),
+                        started,
+                    );
+                    return send_empty(&mut response_handle, request, None).await;
+                }
+                if matches!(qtype, RecordType::A | RecordType::AAAA | RecordType::CNAME) {
+                    debug!(query = %qname, %target, "safe search rewrite");
+                    let ttl = SAFE_SEARCH_TTL;
+                    let owner = Name::from(info.query.name().clone());
+                    let target_name = Name::from_ascii(format!("{target}.")).expect("valid name");
+                    let mut answers = vec![Record::from_rdata(
+                        owner,
+                        ttl,
+                        RData::CNAME(hickory_proto::rr::rdata::CNAME(target_name.clone())),
+                    )];
+                    let mut rcode = ResponseCode::NoError;
+                    let mut ede = None;
+                    if qtype != RecordType::CNAME {
+                        let alias = daygle_dns_authoritative::catalog::Alias {
+                            target: format!("{target}."),
+                            ttl,
+                        };
+                        let (code, records, why) = self.resolve_alias(alias, client, qtype).await;
+                        rcode = code;
+                        ede = why;
+                        answers.extend(records.into_iter().map(|(ttl, rdata)| {
+                            Record::from_rdata(target_name.clone(), ttl, rdata)
+                        }));
+                    }
+                    self.metrics.inc(&self.metrics.recursive);
+                    self.observe(
+                        client,
+                        &qname,
+                        &rtype,
+                        protocol,
+                        Outcome::Recursive,
+                        Some(&rcode_label(rcode)),
+                        started,
+                    );
+                    if rcode != ResponseCode::NoError {
+                        return send_error(&mut response_handle, request, rcode, ede).await;
+                    }
+                    return send_records(&mut response_handle, request, &answers, None).await;
+                }
             }
         }
 
@@ -1229,6 +1446,151 @@ impl RequestHandler for DnsDispatcher {
         };
         match lookup {
             Ok((lookup, stale)) => {
+                // CNAME inspection: a name that is allowed, but answers
+                // through a CNAME to a blocked one, is blocked too (trackers
+                // put on a first-party subdomain, `metrics.shop.example ->
+                // tracker.example`). An allowlisted query name is trusted.
+                if policy.cname_inspection() && !policy.is_allowlisted(&qname) {
+                    if let Some((target, decision)) = self
+                        .blocked_cname_target(&policy, client, listener, lookup.answers())
+                        .await
+                    {
+                        debug!(query = %qname, %target, reason = %decision.reason, "blocked by CNAME inspection");
+                        self.metrics.inc(&self.metrics.blocked);
+                        if decision.action == Action::Block {
+                            if let Some(answer) = self.block_page_answer(info.query.query_type()) {
+                                self.observe(
+                                    client,
+                                    &qname,
+                                    &rtype,
+                                    protocol,
+                                    Outcome::Blocked,
+                                    Some("NOERROR"),
+                                    started,
+                                );
+                                let reason = format!(
+                                    "CNAME target {target} is blocked: {}",
+                                    decision.reason
+                                );
+                                return self
+                                    .serve_block_page(
+                                        &mut response_handle,
+                                        request,
+                                        client,
+                                        &qname,
+                                        &reason,
+                                        answer,
+                                    )
+                                    .await;
+                            }
+                        }
+                        let why = Some(Ede::new(
+                            ede::BLOCKED,
+                            format!("CNAME target {target} is blocked: {}", decision.reason),
+                        ));
+                        let rcode = match decision.action {
+                            Action::Refused => "REFUSED",
+                            Action::Redirect(_) | Action::NoData => "NOERROR",
+                            _ => "NXDOMAIN",
+                        };
+                        self.observe(
+                            client,
+                            &qname,
+                            &rtype,
+                            protocol,
+                            Outcome::Blocked,
+                            Some(rcode),
+                            started,
+                        );
+                        return match decision.action {
+                            Action::Refused => {
+                                send_error(
+                                    &mut response_handle,
+                                    request,
+                                    ResponseCode::Refused,
+                                    why,
+                                )
+                                .await
+                            }
+                            Action::Redirect(ip) => {
+                                send_redirect(
+                                    &mut response_handle,
+                                    request,
+                                    info.query.name(),
+                                    info.query.query_type(),
+                                    ip,
+                                    why,
+                                )
+                                .await
+                            }
+                            Action::NoData => send_empty(&mut response_handle, request, why).await,
+                            _ => {
+                                send_error(
+                                    &mut response_handle,
+                                    request,
+                                    ResponseCode::NXDomain,
+                                    why,
+                                )
+                                .await
+                            }
+                        };
+                    }
+                }
+                // Response policy zones: a name in the CNAME chain matching a
+                // QNAME trigger, or an address in the answer matching an IP
+                // trigger.
+                if !rpz_done && rpz.checks_answers() {
+                    let mut names = Vec::new();
+                    let mut ips = Vec::new();
+                    for record in lookup.answers() {
+                        match &record.data {
+                            RData::CNAME(target) => names.push(
+                                target
+                                    .0
+                                    .to_ascii()
+                                    .trim_end_matches('.')
+                                    .to_ascii_lowercase(),
+                            ),
+                            RData::A(a) => ips.push(IpAddr::V4(a.0)),
+                            RData::AAAA(a) => ips.push(IpAddr::V6(a.0)),
+                            _ => {}
+                        }
+                    }
+                    // NSDNAME/NSIP triggers need the domain's name servers:
+                    // looked up (from the cache, mostly) only when a zone
+                    // has such triggers, within the client timeout.
+                    let ns = if rpz.checks_name_servers() {
+                        tokio::time::timeout(
+                            self.client_timeout,
+                            self.name_servers_of(
+                                Arc::clone(&resolver),
+                                client,
+                                &qname,
+                                rpz.checks_name_server_ips(),
+                            ),
+                        )
+                        .await
+                        .ok()
+                    } else {
+                        None
+                    };
+                    if let Some(hit) = rpz.check_answer(&names, &ips, ns.as_ref()) {
+                        if !rpz_lets_through(&hit.action, info.protocol) {
+                            return self
+                                .serve_rpz(
+                                    hit,
+                                    request,
+                                    &mut response_handle,
+                                    client,
+                                    &qname,
+                                    &rtype,
+                                    protocol,
+                                    started,
+                                )
+                                .await;
+                        }
+                    }
+                }
                 let mut answers = lookup.answers().to_vec();
                 let mut authorities = lookup.authorities().to_vec();
                 let mut additionals = lookup.additionals().to_vec();
@@ -1500,7 +1862,7 @@ impl DnsDispatcher {
         let networks = match protocol {
             P::Tls => &config.dot.allowed_networks,
             P::Quic => &config.doq.allowed_networks,
-            P::Https => &config.doh.allowed_networks,
+            P::Https | P::H3 => &config.doh.allowed_networks,
             _ => return None,
         };
         if networks.is_empty() {
@@ -1578,6 +1940,458 @@ impl DnsDispatcher {
             }
         }
         (mapped > 0).then_some(records)
+    }
+
+    /// The first CNAME target in `answers` that the blocklists, the
+    /// client's per-client rules or its filtering groups block, with the
+    /// blocking decision. Allowlisted targets are skipped.
+    async fn blocked_cname_target(
+        &self,
+        policy: &PolicyEngine,
+        client: IpAddr,
+        listener: Option<&'static str>,
+        answers: &[Record],
+    ) -> Option<(String, daygle_dns_policy::Decision)> {
+        let groups = self.advanced_blocking.load();
+        for record in answers {
+            let RData::CNAME(target) = &record.data else {
+                continue;
+            };
+            let name = target
+                .0
+                .to_ascii()
+                .trim_end_matches('.')
+                .to_ascii_lowercase();
+            if policy.is_allowlisted(&name) {
+                continue;
+            }
+            // Evaluated as an A query: a NODATA from the AAAA filter is not
+            // a block of the target.
+            let decision = policy.evaluate_on(client, &name, "A", listener).await;
+            if !matches!(decision.action, Action::Allow) {
+                return Some((name, decision));
+            }
+            if let Some(decision) = groups.evaluate(client, &name, listener) {
+                return Some((name, decision));
+            }
+        }
+        None
+    }
+
+    /// Whether `qname` is `_dns.<name>` for a name this server's encrypted
+    /// listeners go by, and not hosted in a zone here (RFC 9462 §5).
+    fn is_ddr_name(&self, qname: &str) -> bool {
+        let Some(name) = qname.strip_prefix("_dns.") else {
+            return false;
+        };
+        let Some(config) = self.config.as_ref().map(|c| c.load()) else {
+            return false;
+        };
+        if !config.ddr.enabled || name.ends_with(".resolver.arpa") || name == "resolver.arpa" {
+            return false;
+        }
+        let hosted = Name::from_ascii(format!("{qname}."))
+            .map(|n| self.catalog.contains(&n.into()))
+            .unwrap_or(false);
+        !hosted
+            && self
+                .ddr_targets(&config)
+                .iter()
+                .any(|(_, target)| target.eq_ignore_ascii_case(name))
+    }
+
+    /// The enabled encrypted listeners and the name each is reached by:
+    /// `ddr.name`, else the name its certificate was made for.
+    fn ddr_targets(
+        &self,
+        config: &daygle_dns_core::config::DaygleConfig,
+    ) -> Vec<(&'static str, String)> {
+        let name_of = |certificate: &str, server_name: &str| -> String {
+            let fixed = config.ddr.name.trim().trim_end_matches('.');
+            if !fixed.is_empty() {
+                return fixed.to_ascii_lowercase();
+            }
+            let stored = (!certificate.trim().is_empty())
+                .then(|| {
+                    self.catalog
+                        .store()
+                        .get_tls_certificate(certificate.trim())
+                        .ok()
+                        .flatten()
+                })
+                .flatten()
+                .map(|c| c.server_name);
+            stored
+                .unwrap_or_else(|| server_name.to_string())
+                .trim()
+                .trim_end_matches('.')
+                .to_ascii_lowercase()
+        };
+        let mut out = Vec::new();
+        if config.doh.enabled {
+            out.push((
+                "doh",
+                name_of(&config.doh.certificate, &config.doh.server_name),
+            ));
+        }
+        if config.dot.enabled {
+            out.push((
+                "dot",
+                name_of(&config.dot.certificate, &config.dot.server_name),
+            ));
+        }
+        if config.doq.enabled {
+            out.push((
+                "doq",
+                name_of(&config.doq.certificate, &config.doq.server_name),
+            ));
+        }
+        out
+    }
+
+    /// The SVCB records (RFC 9461/9462) describing the encrypted listeners
+    /// `client` may use, owned by `owner`.
+    fn ddr_records(&self, client: IpAddr, owner: &Name) -> Vec<Record> {
+        use hickory_proto::rr::rdata::svcb::{
+            Alpn, IpHint, SvcParamKey, SvcParamValue, Unknown, SVCB,
+        };
+        use hickory_server::net::xfer::Protocol as P;
+        let Some(config) = self.config.as_ref().map(|c| c.load_full()) else {
+            return Vec::new();
+        };
+        if !config.ddr.enabled {
+            return Vec::new();
+        }
+        let mut records = Vec::new();
+        for (priority, (kind, target)) in (1u16..).zip(self.ddr_targets(&config)) {
+            let (protocol, listen, port, mut alpn) = match kind {
+                "doh" => (
+                    P::Https,
+                    &config.doh.listen,
+                    config.doh.port,
+                    vec!["h2".to_string()],
+                ),
+                "dot" => (
+                    P::Tls,
+                    &config.dot.listen,
+                    config.dot.port,
+                    vec!["dot".to_string()],
+                ),
+                _ => (
+                    P::Quic,
+                    &config.doq.listen,
+                    config.doq.port,
+                    vec!["doq".to_string()],
+                ),
+            };
+            // Only listeners this client is allowed on.
+            if matches!(self.listener_gate(client, protocol), Some(false)) {
+                continue;
+            }
+            let Ok(target_name) = Name::from_ascii(format!("{target}.")) else {
+                continue;
+            };
+            if kind == "doh" && config.doh.http3 {
+                alpn.push("h3".to_string());
+            }
+            let mut params = vec![
+                (SvcParamKey::Alpn, SvcParamValue::Alpn(Alpn(alpn))),
+                (SvcParamKey::Port, SvcParamValue::Port(port)),
+            ];
+            // Address hints, when the listener is bound to specific addresses.
+            let addrs: Vec<IpAddr> = daygle_dns_core::config::listen_socket_addrs(listen, port)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|a| a.ip())
+                .filter(|ip| !ip.is_unspecified())
+                .collect();
+            let v4: Vec<hickory_proto::rr::rdata::A> = addrs
+                .iter()
+                .filter_map(|ip| match ip {
+                    IpAddr::V4(v4) => Some((*v4).into()),
+                    _ => None,
+                })
+                .collect();
+            let v6: Vec<hickory_proto::rr::rdata::AAAA> = addrs
+                .iter()
+                .filter_map(|ip| match ip {
+                    IpAddr::V6(v6) => Some((*v6).into()),
+                    _ => None,
+                })
+                .collect();
+            if !v4.is_empty() {
+                params.push((SvcParamKey::Ipv4Hint, SvcParamValue::Ipv4Hint(IpHint(v4))));
+            }
+            if !v6.is_empty() {
+                params.push((SvcParamKey::Ipv6Hint, SvcParamValue::Ipv6Hint(IpHint(v6))));
+            }
+            if kind == "doh" {
+                // dohpath (RFC 9461 §5): the URI template.
+                let path = format!("{}{{?dns}}", config.doh.endpoint.trim());
+                params.push((
+                    SvcParamKey::Unknown(7),
+                    SvcParamValue::Unknown(Unknown(path.into_bytes())),
+                ));
+            }
+            records.push(Record::from_rdata(
+                owner.clone(),
+                DDR_TTL,
+                RData::SVCB(SVCB::new(priority, target_name, params)),
+            ));
+        }
+        records
+    }
+
+    /// One recursive lookup's answers, or `None` when it failed or there
+    /// was no capacity for it.
+    async fn resolver_answers(
+        &self,
+        resolver: Arc<RecursiveResolver>,
+        client: IpAddr,
+        name: &str,
+        rtype: RecordType,
+    ) -> Option<Vec<Record>> {
+        let lookup_task = {
+            let permit = self.try_recursive_permit()?;
+            let subnet = self.client_subnet(client);
+            let name = name.to_string();
+            tokio::spawn(async move {
+                let _permit = permit;
+                daygle_dns_recursive::with_client_subnet(
+                    subnet,
+                    resolver.lookup_for_client(client, &name, rtype),
+                )
+                .await
+            })
+        };
+        let lookup = lookup_task.await.ok()?.ok()?;
+        Some(lookup.answers().to_vec())
+    }
+
+    /// The name servers of the zone `qname` is in: the closest enclosing
+    /// name with NS records (stopping above the top-level domain), and with
+    /// `with_ips` the addresses of the first few of them.
+    async fn name_servers_of(
+        &self,
+        resolver: Arc<RecursiveResolver>,
+        client: IpAddr,
+        qname: &str,
+        with_ips: bool,
+    ) -> daygle_dns_authoritative::rpz::NameServers {
+        let mut found = daygle_dns_authoritative::rpz::NameServers::default();
+        let mut candidate = qname;
+        loop {
+            let answers = self
+                .resolver_answers(Arc::clone(&resolver), client, candidate, RecordType::NS)
+                .await
+                .unwrap_or_default();
+            found.names = answers
+                .iter()
+                .filter_map(|r| match &r.data {
+                    RData::NS(ns) => {
+                        Some(ns.0.to_ascii().trim_end_matches('.').to_ascii_lowercase())
+                    }
+                    _ => None,
+                })
+                .collect();
+            if !found.names.is_empty() {
+                break;
+            }
+            match candidate.split_once('.') {
+                Some((_, parent)) if parent.contains('.') => candidate = parent,
+                _ => break,
+            }
+        }
+        if with_ips {
+            for name in found.names.clone().iter().take(4) {
+                for rtype in [RecordType::A, RecordType::AAAA] {
+                    for record in self
+                        .resolver_answers(Arc::clone(&resolver), client, name, rtype)
+                        .await
+                        .unwrap_or_default()
+                    {
+                        match &record.data {
+                            RData::A(a) => found.ips.push(IpAddr::V4(a.0)),
+                            RData::AAAA(a) => found.ips.push(IpAddr::V6(a.0)),
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+        found
+    }
+
+    /// With the block page on, how a blocked query of `qtype` is answered
+    /// instead of NXDOMAIN: `Some(Some(ip))` with the page's address,
+    /// `Some(None)` empty (NODATA); `None` leaves it to NXDOMAIN.
+    fn block_page_answer(&self, qtype: RecordType) -> Option<Option<IpAddr>> {
+        let config = self.config.as_ref()?.load();
+        let page = &config.block_page;
+        if !page.enabled {
+            return None;
+        }
+        let v4 = page.ipv4.trim().parse::<std::net::Ipv4Addr>().ok();
+        let v6 = page.ipv6.trim().parse::<std::net::Ipv6Addr>().ok();
+        match qtype {
+            RecordType::A => v4.map(|ip| Some(IpAddr::V4(ip))),
+            RecordType::AAAA if v4.is_some() || v6.is_some() => Some(v6.map(IpAddr::V6)),
+            // No other endpoints for browsers to try.
+            RecordType::HTTPS | RecordType::SVCB if v4.is_some() || v6.is_some() => Some(None),
+            _ => None,
+        }
+    }
+
+    /// Answer a blocked query with the block page's address (or empty),
+    /// remembering why for the page.
+    #[allow(clippy::too_many_arguments)]
+    async fn serve_block_page<R: ResponseHandler>(
+        &self,
+        response_handle: &mut R,
+        request: &Request,
+        client: IpAddr,
+        qname: &str,
+        reason: &str,
+        answer: Option<IpAddr>,
+    ) -> ResponseInfo {
+        let why = Some(Ede::new(ede::BLOCKED, reason.to_string()));
+        let Some(ip) = answer else {
+            return send_empty(response_handle, request, why).await;
+        };
+        self.block_log.record(client, qname, reason);
+        let Some(query) = request.queries.queries().first() else {
+            return send_error(response_handle, request, ResponseCode::FormErr, None).await;
+        };
+        let name = Name::from(query.name().clone());
+        send_redirect(response_handle, request, &name, query.query_type(), ip, why).await
+    }
+
+    /// Carry out a response policy zone's action.
+    #[allow(clippy::too_many_arguments)]
+    async fn serve_rpz<R: ResponseHandler>(
+        &self,
+        hit: daygle_dns_authoritative::rpz::RpzHit,
+        request: &Request,
+        response_handle: &mut R,
+        client: IpAddr,
+        qname: &str,
+        rtype: &str,
+        protocol: &str,
+        started: Instant,
+    ) -> ResponseInfo {
+        use daygle_dns_authoritative::rpz::RpzAction;
+        debug!(query = %qname, zone = %hit.zone, trigger = %hit.trigger, action = hit.action.label(), "response policy zone");
+        self.metrics.inc(&self.metrics.rpz_hits);
+        self.metrics.inc(&self.metrics.blocked);
+        let why = || {
+            Some(Ede::new(
+                ede::BLOCKED,
+                format!("response policy zone {}: {}", hit.zone, hit.trigger),
+            ))
+        };
+        let observe = |rcode: &str| {
+            self.observe(
+                client,
+                qname,
+                rtype,
+                protocol,
+                Outcome::Blocked,
+                Some(rcode),
+                started,
+            )
+        };
+        match &hit.action {
+            // PASSTHRU never gets here (the callers carry on instead).
+            RpzAction::NxDomain | RpzAction::Passthru => {
+                observe("NXDOMAIN");
+                send_error(response_handle, request, ResponseCode::NXDomain, why()).await
+            }
+            RpzAction::NoData => {
+                observe("NOERROR");
+                send_empty(response_handle, request, why()).await
+            }
+            RpzAction::Drop => {
+                observe("DROPPED");
+                fallback_response()
+            }
+            RpzAction::TcpOnly => {
+                observe("TRUNCATED");
+                send_truncated(response_handle, request).await
+            }
+            RpzAction::Local(records) => {
+                let Some(query) = request.queries.queries().first() else {
+                    return send_error(response_handle, request, ResponseCode::FormErr, None).await;
+                };
+                let owner = Name::from(query.name().clone());
+                let qtype = query.query_type();
+                let matching: Vec<Record> = records
+                    .iter()
+                    .filter(|r| r.rtype == qtype || qtype == RecordType::ANY)
+                    .map(|r| Record::from_rdata(owner.clone(), r.ttl, r.rdata.clone()))
+                    .collect();
+                if !matching.is_empty() {
+                    observe("NOERROR");
+                    return send_records(response_handle, request, &matching, why()).await;
+                }
+                let cname = records.iter().find_map(|r| match &r.rdata {
+                    RData::CNAME(target) => Some((r.ttl, target.0.clone())),
+                    _ => None,
+                });
+                let Some((ttl, target)) = cname else {
+                    observe("NOERROR");
+                    return send_empty(response_handle, request, why()).await;
+                };
+                // `*.garden.example.` stands for the query name under the
+                // garden.
+                let target = match target.to_ascii().strip_prefix("*.") {
+                    Some(rest) => Name::from_ascii(format!("{qname}.{rest}")).unwrap_or(target),
+                    None => target,
+                };
+                let mut answers = vec![Record::from_rdata(
+                    owner,
+                    ttl,
+                    RData::CNAME(hickory_proto::rr::rdata::CNAME(target.clone())),
+                )];
+                if qtype != RecordType::CNAME {
+                    let alias = daygle_dns_authoritative::catalog::Alias {
+                        target: target.to_ascii(),
+                        ttl,
+                    };
+                    let (rcode, records, _) = self.resolve_alias(alias, client, qtype).await;
+                    if rcode == ResponseCode::NoError {
+                        answers.extend(
+                            records
+                                .into_iter()
+                                .map(|(ttl, rdata)| Record::from_rdata(target.clone(), ttl, rdata)),
+                        );
+                    }
+                }
+                observe("NOERROR");
+                send_records(response_handle, request, &answers, why()).await
+            }
+        }
+    }
+
+    /// The Safe Search address to answer `qname` with for `client`, if any:
+    /// the global switches apply to everyone, and the first filtering group
+    /// a client belongs to can turn them on for its clients.
+    fn safe_search_target(
+        &self,
+        policy: &PolicyEngine,
+        client: IpAddr,
+        listener: Option<&str>,
+        qname: &str,
+    ) -> Option<&'static str> {
+        use daygle_dns_policy::safe_search::safe_target;
+        // Most names are no search engine at all: skip the group lookup.
+        safe_target(qname, true, true)?;
+        let (mut search, mut youtube) = (policy.safe_search(), policy.youtube_restricted());
+        if !(search && youtube) {
+            let (s, y, _) = self.advanced_blocking.load().safe_search(client, listener);
+            search |= s;
+            youtube |= y;
+        }
+        safe_target(qname, search, youtube)
     }
 
     /// Look up an ALIAS target's `rtype` records: from the zones here when
@@ -1727,6 +2541,7 @@ fn protocol_label(protocol: hickory_server::net::xfer::Protocol) -> &'static str
         P::Tcp => "tcp",
         P::Tls => "tls",
         P::Https => "https",
+        P::H3 => "h3",
         P::Quic => "quic",
         _ => "other",
     }
@@ -1773,6 +2588,44 @@ async fn send_empty<R: ResponseHandler>(
         Ok(info) => info,
         Err(e) => {
             warn!("failed to send empty answer: {e}");
+            fallback_response()
+        }
+    }
+}
+
+/// Whether an RPZ action lets the query carry on as usual: PASSTHRU, and
+/// TCP-only over anything but UDP.
+fn rpz_lets_through(
+    action: &daygle_dns_authoritative::rpz::RpzAction,
+    protocol: hickory_server::net::xfer::Protocol,
+) -> bool {
+    use daygle_dns_authoritative::rpz::RpzAction;
+    match action {
+        RpzAction::Passthru => true,
+        RpzAction::TcpOnly => protocol != hickory_server::net::xfer::Protocol::Udp,
+        _ => false,
+    }
+}
+
+/// Send an empty, truncated (TC) answer: the client retries over TCP.
+async fn send_truncated<R: ResponseHandler>(handle: &mut R, request: &Request) -> ResponseInfo {
+    let mut metadata = request.metadata;
+    metadata.message_type = MessageType::Response;
+    metadata.response_code = ResponseCode::NoError;
+    metadata.recursion_available = true;
+    metadata.truncation = true;
+    let edns = response_edns(request, None);
+    let mut builder = MessageResponseBuilder::from_message_request(request);
+    if let Some(edns) = &edns {
+        builder.edns(edns);
+    }
+    match handle
+        .send_response(builder.build_no_records(metadata))
+        .await
+    {
+        Ok(info) => info,
+        Err(e) => {
+            warn!("failed to send truncated answer: {e}");
             fallback_response()
         }
     }

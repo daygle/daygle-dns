@@ -2,6 +2,7 @@
   import { onDestroy, onMount } from 'svelte';
   import { api, getToken, formatApiError, getStoredUser } from '../api.js';
   import PageHeader from '../PageHeader.svelte';
+  import Reports from './Reports.svelte';
   import { icons } from '../icons.svelte.js';
   import { formatDateTime, displayZoneName, zonedInputToIso } from '../datetime.svelte.js';
 
@@ -15,6 +16,12 @@
       label: 'Query Log',
       tagline:
         'Every query the server answered, newest first. Filter by client, domain, type or result, export the matches as CSV, or follow new queries live. Click a client or domain to filter by it.',
+    },
+    {
+      id: 'reports',
+      label: 'Reports',
+      tagline:
+        'What the query log adds up to: queries and blocks over a period, the most active devices, and the most asked and most blocked domains, overall or for one device.',
     },
     {
       id: 'server',
@@ -39,7 +46,7 @@
     else {
       stopLive();
       if (id === 'audit') loadAudit();
-      else refresh();
+      else if (id === 'server') refresh();
     }
   }
 
@@ -113,9 +120,10 @@
     ['tcp', 'TCP'],
     ['tls', 'DNS over TLS'],
     ['https', 'DNS over HTTPS'],
+    ['h3', 'DNS over HTTPS (HTTP/3)'],
     ['quic', 'DNS over QUIC'],
   ];
-  const PROTOCOL_SHORT = { udp: 'UDP', tcp: 'TCP', tls: 'DoT', https: 'DoH', quic: 'DoQ' };
+  const PROTOCOL_SHORT = { udp: 'UDP', tcp: 'TCP', tls: 'DoT', https: 'DoH', h3: 'DoH3', quic: 'DoQ' };
   const OUTCOMES = [
     ['authoritative', 'Authoritative'],
     ['recursive', 'Recursive'],
@@ -298,7 +306,9 @@
   {/each}
 </div>
 
-{#if tab === 'audit'}
+{#if tab === 'reports'}
+  <Reports onShowQueries={(client) => { tab = 'queries'; filterBy('client', client); }} />
+{:else if tab === 'audit'}
   {#if auditError}
     <div class="card" style="border-color: var(--danger); color: var(--danger); margin-bottom: 14px">{auditError}</div>
   {/if}

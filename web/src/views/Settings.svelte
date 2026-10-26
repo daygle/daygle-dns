@@ -28,6 +28,8 @@
     ['zones', 'Zones'],
     ['ai', 'AI Scanner'],
     ['logging', 'Logging'],
+    ['rate-limiting', 'Rate Limiting'],
+    ['alerts', 'Alerts'],
     ['backup', 'Backup'],
   ];
   const TAGLINES = {
@@ -38,6 +40,8 @@
     zones: 'Defaults for new zones and records, and how other DNS servers may copy, update and be notified about your zones.',
     logging: 'Sending the server log, and optionally every query, to a syslog server. The logs themselves are on the Logs page.',
     ai: 'The background scanner that classifies the domains in your DNS traffic and can block unsafe ones.',
+    'rate-limiting': 'Response rate limiting (RRL): stop this server being used to flood someone else with DNS answers sent to a forged address.',
+    alerts: 'Email and webhook alerts when something needs attention: failing blocklists or zone transfers, expiring certificates, DNSSEC, updates and AI blocks.',
     backup: 'Download a backup of everything this server keeps, or restore one.',
   };
 
@@ -104,6 +108,90 @@
   let dns64Clients = $state([]);
   let ecs = $state({ enabled: false, subnet: '', ipv4_prefix: 24, ipv6_prefix: 56 });
   let syslog_ = $state({ enabled: false, server: '', facility: 'daemon', level: 'info', queries: false });
+  const ALERT_DEFAULTS = {
+    enabled: false, webhook_url: '', smtp_server: '', smtp_port: 587, smtp_security: 'starttls',
+    smtp_username: '', smtp_password: '', email_from: '', email_to: [],
+    blocklist_failures: true, zone_transfer_failures: true, certificate_expiry: true,
+    dnssec: true, update_available: true, ai_blocks: false,
+  };
+  const ALERT_EVENTS = [
+    ['blocklist_failures', 'A blocklist cannot be downloaded'],
+    ['zone_transfer_failures', 'A secondary zone cannot be refreshed from its primary'],
+    ['certificate_expiry', 'A certificate expires within 14 days, or cannot be renewed'],
+    ['dnssec', 'DNSSEC: a key rollover needs a new DS record, or signing fails'],
+    ['update_available', 'A new Daygle DNS release is available'],
+    ['ai_blocks', 'The AI starts blocking new domains (Enforce mode)'],
+  ];
+  let alerts_ = $state({ ...ALERT_DEFAULTS });
+  const RRL_DEFAULTS = {
+    enabled: false, responses_per_second: 10, nxdomains_per_second: 10, errors_per_second: 10,
+    window_secs: 15, slip: 2, ipv4_prefix: 24, ipv6_prefix: 56, log_only: false,
+  };
+  let rrl_ = $state({ ...RRL_DEFAULTS });
+  let ddr_ = $state({ enabled: true, name: '' });
+  const REPORT_DEFAULTS = { enabled: false, frequency: 'weekly', weekday: 'mon', hour: 8, top: 10 };
+  let reports_ = $state({ ...REPORT_DEFAULTS });
+  let reportSending = $state(false);
+  let reportResult = $state(null);
+
+  function reportsBody() {
+    return {
+      enabled: !!reports_.enabled,
+      frequency: reports_.frequency,
+      weekday: reports_.weekday,
+      hour: Number(reports_.hour),
+      top: Number(reports_.top),
+    };
+  }
+
+  async function sendReportNow() {
+    reportSending = true;
+    reportResult = null;
+    try {
+      await api.sendReport(reportsBody());
+      reportResult = { ok: true, msg: 'Report sent. Check that it arrived.' };
+    } catch (e) {
+      reportResult = { ok: false, msg: formatApiError(e) };
+    } finally {
+      reportSending = false;
+    }
+  }
+  let rrlExempt = $state([]);
+  // RRL counters since start (from /api/metrics), shown on its tab.
+  let rrlCounts = $state(null);
+  $effect(() => {
+    if (tab !== 'rate-limiting') return;
+    api.metrics().then((m) => { rrlCounts = m; }).catch(() => {});
+  });
+  // Recipients as typed (one per line or comma-separated).
+  let alertTo = $state('');
+  let alertTest = $state(null);
+  let alertTesting = $state(false);
+
+  function alertsBody() {
+    return {
+      ...alerts_,
+      smtp_port: Number(alerts_.smtp_port),
+      webhook_url: (alerts_.webhook_url || '').trim(),
+      smtp_server: (alerts_.smtp_server || '').trim(),
+      smtp_username: (alerts_.smtp_username || '').trim(),
+      email_from: (alerts_.email_from || '').trim(),
+      email_to: alertTo.split(/[\n,]/).map((s) => s.trim()).filter(Boolean),
+    };
+  }
+
+  async function testAlert() {
+    alertTesting = true;
+    alertTest = null;
+    try {
+      await api.testAlert(alertsBody());
+      alertTest = { ok: true, msg: 'Test alert sent. Check that it arrived.' };
+    } catch (e) {
+      alertTest = { ok: false, msg: formatApiError(e) };
+    } finally {
+      alertTesting = false;
+    }
+  }
   const zoneChoices = timeZoneOptions();
   // Users who chose their own settings don't see the defaults change.
   const ownPrefsSet = $derived(
@@ -201,6 +289,12 @@
         http_port: config.web?.http_port || config.api?.port || 5380,
       };
       syslog_ = { enabled: false, server: '', facility: 'daemon', level: 'info', queries: false, ...config.syslog };
+      alerts_ = { ...ALERT_DEFAULTS, ...config.alerts };
+      rrl_ = { ...RRL_DEFAULTS, ...config.rrl };
+      ddr_ = { enabled: true, name: '', ...config.ddr };
+      reports_ = { ...REPORT_DEFAULTS, ...config.reports };
+      rrlExempt = [...(config.rrl?.exempt || [])];
+      alertTo = (config.alerts?.email_to || []).join('\n');
       dns64 = { enabled: !!config.dns64?.enabled, prefix: config.dns64?.prefix || '64:ff9b::/96' };
       dns64Clients = [...(config.dns64?.clients || [])];
       ecs = { enabled: false, subnet: '', ipv4_prefix: 24, ipv6_prefix: 56, ...config.ecs };
@@ -335,6 +429,7 @@
         handshake_timeout_secs: Number(doh.handshake_timeout_secs),
         max_connections: Number(doh.max_connections),
         allowed_networks: [...dohNetworks],
+        http3: !!doh.http3,
       },
       doq: {
         enabled: !!doq.enabled,
@@ -367,6 +462,21 @@
         subnet: (ecs.subnet || '').trim(),
         ipv4_prefix: Number(ecs.ipv4_prefix),
         ipv6_prefix: Number(ecs.ipv6_prefix),
+      },
+      alerts: alertsBody(),
+      ddr: { enabled: !!ddr_.enabled, name: (ddr_.name || '').trim() },
+      reports: reportsBody(),
+      rrl: {
+        enabled: !!rrl_.enabled,
+        responses_per_second: Number(rrl_.responses_per_second),
+        nxdomains_per_second: Number(rrl_.nxdomains_per_second),
+        errors_per_second: Number(rrl_.errors_per_second),
+        window_secs: Number(rrl_.window_secs),
+        slip: Number(rrl_.slip),
+        ipv4_prefix: Number(rrl_.ipv4_prefix),
+        ipv6_prefix: Number(rrl_.ipv6_prefix),
+        exempt: [...rrlExempt],
+        log_only: !!rrl_.log_only,
       },
       syslog: {
         enabled: !!syslog_.enabled,
@@ -600,6 +710,8 @@
       {#if ownPrefsSet}Your own preferences are set, so you won't see a change
         here until you reset them.{/if}
       "Device Time Zone" and "Browser Default" follow each viewer's computer.
+      Filtering group schedules also use this time zone ("Device Time Zone"
+      there means the server's own).
     </p>
   </div>
   {:else if tab === 'recursive'}
@@ -867,6 +979,24 @@
   </div>
   {:else if tab === 'listeners'}
   <div class="card" style="margin-bottom: 14px">
+    <h3 style="margin: 0 0 10px">Automatic Discovery (DDR)</h3>
+    <div class="form-grid">
+      <label class="check"><input type="checkbox" bind:checked={ddr_.enabled} /> <span>Advertise Encrypted DNS to Devices</span></label>
+      <label><span>Server Name (Optional)</span><input bind:value={ddr_.name} placeholder="dns.example.com" disabled={!ddr_.enabled} spellcheck="false" /></label>
+    </div>
+    <p class="muted help">
+      Devices that support Discovery of Designated Resolvers (RFC 9462) -
+      Windows 11, iOS and macOS, Android - ask this server whether it also
+      offers encrypted DNS, and switch to the DNS over HTTPS, TLS or QUIC
+      listeners below by themselves; each device is only told about the
+      listeners it is allowed on. Most devices only switch when the
+      listener's certificate is one they trust and it covers the address
+      they use for this server, so a self-signed certificate is usually
+      ignored. The server name is the name devices connect to; leave it empty
+      to use each listener's own certificate name.
+    </p>
+  </div>
+  <div class="card" style="margin-bottom: 14px">
     <h3 style="margin: 0 0 10px">DNS over TLS</h3>
     <div class="form-grid">
       <label class="check"><input type="checkbox" bind:checked={dot.enabled} /> <span>Enabled</span></label>
@@ -925,12 +1055,21 @@
         <label><span>Key Path</span><input bind:value={doh.key_path} placeholder="/etc/daygle-dns/certs/server.key" /></label>
       {/if}
       <label><span>Endpoint Path</span><input bind:value={doh.endpoint} placeholder="/dns-query" /></label>
+      <label class="check"><input type="checkbox" bind:checked={doh.http3} disabled={!doh.enabled} /> <span>Also Serve over HTTP/3 (QUIC)</span></label>
     </div>
     <div class="stacked" style="margin-top: 12px">
       <span>Client Networks (empty means everyone)</span>
       <NetworkPicker {networks} bind:value={dohNetworks} />
     </div>
     <p class="muted help">Clients use <code>https://{doh.server_name || 'this-server'}{Number(doh.port) === 443 ? '' : `:${doh.port}`}{doh.endpoint || '/dns-query'}</code>. The standard port is 443. Clients outside these networks get REFUSED on this listener; clients inside it may use recursion here even when Recursion Access is set to Private Networks Only.</p>
+    <p class="muted help">
+      HTTP/3 serves the same address over QUIC, on UDP port {doh.port || 443}
+      (open it in your firewall as well as TCP), with the same certificate,
+      path and client networks. Clients set up for HTTP/3 DoH (for example
+      AdGuard's or dnsproxy's <code>h3://</code> addresses) and devices using
+      Automatic Discovery above can use it; browsers keep using HTTP/2. It
+      cannot share its UDP port with DNS over QUIC.
+    </p>
   </div>
   <div class="card" style="margin-bottom: 14px">
     <h3 style="margin: 0 0 10px">DNS over QUIC</h3>
@@ -1079,6 +1218,177 @@
       Every query can be a lot of traffic on a busy server.
     </p>
   </div>
+  {:else if tab === 'rate-limiting'}
+  <div class="card" style="margin-bottom: 14px">
+    <h3 style="margin: 0 0 10px">Response Rate Limiting (RRL)</h3>
+    <label class="check"><input type="checkbox" bind:checked={rrl_.enabled} /> <span>Limit Identical Responses</span></label>
+    <p class="muted help">
+      An attacker can send queries with a victim's address as the sender, so
+      this server's answers (often far larger than the queries) flood the
+      victim. RRL limits how many identical answers each network gets per
+      second over UDP. Over the limit, answers are dropped, except that some
+      are sent truncated: a real client then asks again over TCP and gets its
+      answer, while a forged one cannot. TCP, and clients with a valid DNS
+      cookie, are never limited. Most useful when this server answers the
+      internet (authoritative zones, public DNS); on a private network it can
+      stay off.
+    </p>
+  </div>
+  <div class="card" style="margin-bottom: 14px">
+    <h3 style="margin: 0 0 10px">Limits</h3>
+    <div class="form-grid">
+      <label><span>Identical Answers per Second</span><input type="number" min="0" max="10000" bind:value={rrl_.responses_per_second} disabled={!rrl_.enabled} /></label>
+      <label><span>NXDOMAIN Answers per Second</span><input type="number" min="0" max="10000" bind:value={rrl_.nxdomains_per_second} disabled={!rrl_.enabled} /></label>
+      <label><span>Error Answers per Second</span><input type="number" min="0" max="10000" bind:value={rrl_.errors_per_second} disabled={!rrl_.enabled} /></label>
+      <label><span>Window (Seconds)</span><input type="number" min="1" max="3600" bind:value={rrl_.window_secs} disabled={!rrl_.enabled} /></label>
+      <label>
+        <span>Slip</span>
+        <select bind:value={rrl_.slip} disabled={!rrl_.enabled}>
+          <option value={0}>Drop All Limited Answers</option>
+          <option value={1}>Truncate All Limited Answers</option>
+          {#each [2, 3, 4, 5, 6, 7, 8, 9, 10] as n (n)}<option value={n}>Truncate 1 in {n}</option>{/each}
+        </select>
+      </label>
+      <label><span>IPv4 Network Size (Prefix)</span><input type="number" min="8" max="32" bind:value={rrl_.ipv4_prefix} disabled={!rrl_.enabled} /></label>
+      <label><span>IPv6 Network Size (Prefix)</span><input type="number" min="16" max="128" bind:value={rrl_.ipv6_prefix} disabled={!rrl_.enabled} /></label>
+    </div>
+    <label class="check" style="margin-top: 10px"><input type="checkbox" bind:checked={rrl_.log_only} disabled={!rrl_.enabled} /> <span>Log Only (Count, Do Not Limit)</span></label>
+    <p class="muted help">
+      Answers count as identical when they are for the same name and type;
+      NXDOMAIN answers count per parent domain (so a flood of random names
+      under one domain shares a limit), and errors count per network. 0 means
+      no limit for that kind. The window is how long a network that went over
+      the limit stays limited after it slows down. Clients are grouped into
+      networks of the given size (/24 and /56 by default, as in BIND). Log
+      Only counts what would be limited without limiting anything, to check
+      the rates first.
+    </p>
+    {#if rrlCounts}
+      <p class="muted help">
+        Since the server started: <strong>{Number(rrlCounts.rrl_dropped || 0).toLocaleString()}</strong> dropped,
+        <strong>{Number(rrlCounts.rrl_slipped || 0).toLocaleString()}</strong> sent truncated,
+        <strong>{Number(rrlCounts.rrl_would_limit || 0).toLocaleString()}</strong> would have been limited (Log Only).
+      </p>
+    {/if}
+  </div>
+  <div class="card" style="margin-bottom: 14px">
+    <h3 style="margin: 0 0 10px">Never Limited</h3>
+    <NetworkPicker {networks} bind:value={rrlExempt} />
+    <p class="muted help">
+      Networks whose answers are never limited, such as your own networks
+      and monitoring systems.
+    </p>
+  </div>
+  {:else if tab === 'alerts'}
+  <div class="card" style="margin-bottom: 14px">
+    <h3 style="margin: 0 0 10px">Alerts</h3>
+    <label class="check"><input type="checkbox" bind:checked={alerts_.enabled} /> <span>Send Alerts</span></label>
+    <p class="muted help">
+      Alerts go to a webhook, by email, or both. A problem that persists is
+      reported again after 6 hours at most (a day for certificates), not on
+      every check, and an update is reported once per release.
+    </p>
+  </div>
+  <div class="card" style="margin-bottom: 14px">
+    <h3 style="margin: 0 0 10px">Webhook</h3>
+    <div class="form-grid">
+      <label>
+        <span>Webhook URL</span>
+        <input placeholder="https://hooks.slack.com/services/..." bind:value={alerts_.webhook_url} spellcheck="false" />
+      </label>
+    </div>
+    <p class="muted help">
+      Each alert is sent as a JSON <code>POST</code> with <code>kind</code>,
+      <code>title</code>, <code>message</code>, <code>host</code> and
+      <code>time</code>, plus <code>text</code> and <code>content</code> so
+      Slack, Mattermost, Discord and Teams workflow webhooks show it as is.
+      Leave empty for no webhook.
+    </p>
+  </div>
+  <div class="card" style="margin-bottom: 14px">
+    <h3 style="margin: 0 0 10px">Email</h3>
+    <div class="form-grid">
+      <label><span>SMTP Server</span><input placeholder="smtp.example.com" bind:value={alerts_.smtp_server} spellcheck="false" /></label>
+      <label><span>Port</span><input type="number" min="1" max="65535" bind:value={alerts_.smtp_port} /></label>
+      <label>
+        <span>Security</span>
+        <select bind:value={alerts_.smtp_security}>
+          <option value="starttls">STARTTLS (Usually Port 587)</option>
+          <option value="tls">TLS (Usually Port 465)</option>
+          <option value="none">None (Unencrypted)</option>
+        </select>
+      </label>
+      <label><span>Username</span><input autocomplete="off" bind:value={alerts_.smtp_username} spellcheck="false" /></label>
+      <label><span>Password</span><input type="password" autocomplete="new-password" bind:value={alerts_.smtp_password} /></label>
+      <label><span>From</span><input placeholder="dns@example.com" bind:value={alerts_.email_from} spellcheck="false" /></label>
+      <label><span>To</span><textarea rows="2" placeholder={'admin@example.com\nnoc@example.com'} bind:value={alertTo} spellcheck="false"></textarea></label>
+    </div>
+    <p class="muted help">
+      Leave the server empty for no email. Username and password are only
+      needed if the server asks for them; the saved password is never shown
+      again (leave it as is to keep it). Recipients go one per line.
+    </p>
+  </div>
+  <div class="card" style="margin-bottom: 14px">
+    <h3 style="margin: 0 0 10px">Events</h3>
+    <div class="events">
+      {#each ALERT_EVENTS as [key, label] (key)}
+        <label class="check"><input type="checkbox" bind:checked={alerts_[key]} /> <span>{label}</span></label>
+      {/each}
+    </div>
+    <div class="row" style="margin-top: 14px; gap: 10px; flex-wrap: wrap; align-items: center">
+      <button class="secondary" onclick={testAlert} disabled={alertTesting}>{alertTesting ? 'Sending...' : 'Send Test Alert'}</button>
+      {#if alertTest}<span style="color: {alertTest.ok ? 'var(--ok)' : 'var(--danger)'}">{alertTest.msg}</span>{/if}
+    </div>
+    <p class="muted help">
+      Send Test Alert uses the settings on this page, saved or not, so you
+      can check them before saving.
+    </p>
+  </div>
+  <div class="card" style="margin-bottom: 14px">
+    <h3 style="margin: 0 0 10px">Scheduled Report</h3>
+    <div class="form-grid">
+      <label class="check"><input type="checkbox" bind:checked={reports_.enabled} /> <span>Send a Report</span></label>
+      <label>
+        <span>How Often</span>
+        <select bind:value={reports_.frequency}>
+          <option value="daily">Daily (Last 24 Hours)</option>
+          <option value="weekly">Weekly (Last 7 Days)</option>
+        </select>
+      </label>
+      {#if reports_.frequency === 'weekly'}
+        <label>
+          <span>On</span>
+          <select bind:value={reports_.weekday}>
+            {#each [['mon', 'Monday'], ['tue', 'Tuesday'], ['wed', 'Wednesday'], ['thu', 'Thursday'], ['fri', 'Friday'], ['sat', 'Saturday'], ['sun', 'Sunday']] as [value, label] (value)}
+              <option value={value}>{label}</option>
+            {/each}
+          </select>
+        </label>
+      {/if}
+      <label>
+        <span>At</span>
+        <select bind:value={reports_.hour}>
+          {#each Array.from({ length: 24 }, (_, h) => h) as h (h)}
+            <option value={h}>{String(h).padStart(2, '0')}:00</option>
+          {/each}
+        </select>
+      </label>
+      <label><span>Entries per List</span><input type="number" min="1" max="50" bind:value={reports_.top} /></label>
+    </div>
+    <div class="row" style="margin-top: 14px; gap: 10px; flex-wrap: wrap; align-items: center">
+      <button class="secondary" onclick={sendReportNow} disabled={reportSending}>{reportSending ? 'Sending...' : 'Send Report Now'}</button>
+      {#if reportResult}<span style="color: {reportResult.ok ? 'var(--ok)' : 'var(--danger)'}">{reportResult.msg}</span>{/if}
+    </div>
+    <p class="muted help">
+      A summary of the query log - queries, blocks, the most asked and most
+      blocked domains and the most active devices - sent to the webhook and
+      email above (alerts do not need to be switched on). Times use the time
+      zone under General → Date &amp; Time Defaults. Send Report Now sends
+      one with the destinations as saved. The same figures, for any period
+      and per device, are under Logs → Reports.
+    </p>
+  </div>
   {:else if tab === 'backup'}
   <BackupRestore />
   {/if}
@@ -1090,6 +1400,7 @@
 
 <style>
   .actions { display: flex; gap: 10px; margin-bottom: 16px; }
+  .events { display: flex; flex-direction: column; gap: 8px; }
   .stacked {
     display: flex;
     flex-direction: column;

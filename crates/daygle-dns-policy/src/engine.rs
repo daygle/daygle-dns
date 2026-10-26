@@ -62,6 +62,12 @@ pub struct PolicyEngine {
     /// Names (and `*.suffix` wildcards) exempt from the AAAA filter, e.g.
     /// hosts that must remain reachable over IPv6.
     filter_aaaa_bypass: Option<std::sync::Arc<Blocklist>>,
+    /// `policy.youtube_restricted`.
+    youtube_restricted: bool,
+    /// `policy.safe_search`.
+    safe_search: bool,
+    /// `policy.cname_inspection`.
+    cname_inspection: bool,
 }
 
 impl PolicyEngine {
@@ -114,6 +120,36 @@ impl PolicyEngine {
 
     /// Enable or disable the AAAA filter. When enabled, AAAA queries return an
     /// empty NODATA answer unless the name matches `bypass`.
+    /// Set `policy.cname_inspection`.
+    pub fn set_cname_inspection(&mut self, enabled: bool) {
+        self.cname_inspection = enabled;
+    }
+
+    /// Whether `policy.cname_inspection` is on.
+    pub fn cname_inspection(&self) -> bool {
+        self.cname_inspection
+    }
+
+    /// Set `policy.safe_search`.
+    pub fn set_safe_search(&mut self, enabled: bool) {
+        self.safe_search = enabled;
+    }
+
+    /// Whether `policy.safe_search` is on.
+    pub fn safe_search(&self) -> bool {
+        self.safe_search
+    }
+
+    /// Set `policy.youtube_restricted`.
+    pub fn set_youtube_restricted(&mut self, enabled: bool) {
+        self.youtube_restricted = enabled;
+    }
+
+    /// Whether `policy.youtube_restricted` is on.
+    pub fn youtube_restricted(&self) -> bool {
+        self.youtube_restricted
+    }
+
     pub fn set_filter_aaaa(&mut self, enabled: bool, bypass: Option<Blocklist>) {
         self.filter_aaaa = enabled;
         self.filter_aaaa_bypass = bypass.map(std::sync::Arc::new);

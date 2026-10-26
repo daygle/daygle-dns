@@ -70,9 +70,11 @@
 //! new values without locking or restarting.
 
 pub mod acme;
+pub mod alerts;
 mod audit;
 mod handlers;
 mod networks;
+pub mod reports;
 mod update;
 
 // The release-cache warmer is spawned by the binary next to the ACME
@@ -406,6 +408,10 @@ pub struct AppState {
     pub ai: Option<Arc<daygle_dns_ml::AiEngine>>,
     /// Certificates from an ACME CA: HTTP-01 answers and issues running.
     pub acme: Arc<acme::Acme>,
+    /// Response policy zones; `None` when the API runs without a server.
+    pub rpz: Option<Arc<daygle_dns_authoritative::rpz::RpzManager>>,
+    /// The DHCP server; `None` when the API runs without a server.
+    pub dhcp: Option<Arc<daygle_dns_dhcp::DhcpService>>,
 }
 
 /// Build the API router (REST endpoints plus the embedded GUI).
@@ -574,6 +580,20 @@ pub fn router(state: AppState) -> Router {
             get(handlers::validate_blocklist_source),
         )
         .route("/policy/blocking/test", post(handlers::test_blocking))
+        .route("/alerts/test", post(handlers::test_alert))
+        .route("/reports", get(handlers::report))
+        .route("/reports/send", post(handlers::send_report))
+        .route("/policy/services", get(handlers::blockable_services))
+        .route(
+            "/rpz",
+            get(handlers::rpz_status).post(handlers::rpz_refresh),
+        )
+        .route("/rpz/test", post(handlers::rpz_test))
+        .route("/dhcp", get(handlers::dhcp_status))
+        .route(
+            "/dhcp/leases/{address}",
+            delete(handlers::delete_dhcp_lease),
+        )
         .route(
             "/policy/blocking",
             get(handlers::list_blocking_groups).post(handlers::upsert_blocking_group),

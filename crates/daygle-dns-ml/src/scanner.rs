@@ -50,6 +50,9 @@ pub struct Scanner {
     /// Held while a block snapshot is computed and published, so a scan
     /// cycle cannot publish one computed before an override landed.
     publishing: std::sync::Mutex<()>,
+    /// Set after the first snapshot is published: the blocks already in
+    /// force at startup are not news.
+    primed: std::sync::atomic::AtomicBool,
 }
 
 impl Scanner {
@@ -69,6 +72,7 @@ impl Scanner {
             rescan_notify: Arc::new(Notify::new()),
             last_expiry: AtomicI64::new(0),
             publishing: std::sync::Mutex::new(()),
+            primed: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
@@ -275,6 +279,39 @@ impl Scanner {
         } else {
             BlockSnapshot::new()
         };
+        let previous = self.snapshot.load();
+        let mut added: Vec<(&String, &ActiveBlock)> = snapshot
+            .iter()
+            .filter(|(domain, _)| !previous.contains_key(*domain))
+            .collect();
+        if self.primed.swap(true, std::sync::atomic::Ordering::Relaxed) && !added.is_empty() {
+            added.sort_by_key(|(domain, _)| *domain);
+            let list: Vec<String> = added
+                .iter()
+                .take(10)
+                .map(|(domain, block)| format!("{domain} ({})", block.category))
+                .collect();
+            let more = added.len().saturating_sub(list.len());
+            daygle_dns_core::alerts::raise(
+                daygle_dns_core::alerts::AlertKind::AiBlocks,
+                format!("ai-blocks:{now}"),
+                format!(
+                    "The AI blocked {} new domain{}",
+                    added.len(),
+                    if added.len() == 1 { "" } else { "s" }
+                ),
+                format!(
+                    "The AI scanner started blocking: {}{}. Review them under AI -> Verdicts, \
+                     and exempt any that should stay reachable.",
+                    list.join(", "),
+                    if more > 0 {
+                        format!(" and {more} more")
+                    } else {
+                        String::new()
+                    }
+                ),
+            );
+        }
         self.snapshot.store(Arc::new(snapshot));
     }
 

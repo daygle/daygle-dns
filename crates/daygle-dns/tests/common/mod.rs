@@ -182,6 +182,16 @@ pub async fn shutdown(server: BoundServer) {
 
 /// Spawn a minimal authoritative-only upstream server serving `zone_name`.
 pub async fn spawn_upstream(db: &Path, zone_name: &str, ip: &str) -> SocketAddr {
+    spawn_upstream_with(db, zone_name, &[("host", "A", ip)]).await
+}
+
+/// An upstream authoritative for `zone_name`, holding `records` as
+/// `(name, type, content)`.
+pub async fn spawn_upstream_with(
+    db: &Path,
+    zone_name: &str,
+    records: &[(&str, &str, &str)],
+) -> SocketAddr {
     let store = ZoneStore::open(&db.to_string_lossy()).unwrap();
     let catalog = Arc::new(AuthorityCatalog::new(store, AuthoritativeSettings::default()).unwrap());
     let zone = catalog
@@ -191,20 +201,22 @@ pub async fn spawn_upstream(db: &Path, zone_name: &str, ip: &str) -> SocketAddr 
             ..Default::default()
         })
         .unwrap();
-    catalog
-        .store()
-        .upsert_record(
-            &zone.id,
-            &RecordInput {
-                name: "host".to_string(),
-                rtype: "A".to_string(),
-                content: ip.to_string(),
-                ttl: 300,
-                priority: 0,
-                disabled: false,
-            },
-        )
-        .unwrap();
+    for (name, rtype, content) in records {
+        catalog
+            .store()
+            .upsert_record(
+                &zone.id,
+                &RecordInput {
+                    name: name.to_string(),
+                    rtype: rtype.to_string(),
+                    content: content.to_string(),
+                    ttl: 300,
+                    priority: 0,
+                    disabled: false,
+                },
+            )
+            .unwrap();
+    }
     catalog.reload().unwrap();
 
     let dispatcher = DnsDispatcher::from_components(
