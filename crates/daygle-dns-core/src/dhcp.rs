@@ -429,6 +429,21 @@ impl DhcpSettings {
 mod tests {
     use super::*;
 
+    #[test]
+    fn dhcp_is_off_by_default() {
+        let config = crate::config::DaygleConfig::parse("").unwrap();
+        assert!(!config.dhcp.enabled);
+        assert!(config.dhcp.scopes.is_empty() && config.dhcp.scopes_v6.is_empty());
+        // Adding scopes alone does not turn it on.
+        let config = crate::config::DaygleConfig::parse(
+            "[[dhcp.scopes]]\nname = \"LAN\"\nsubnet = \"192.168.1.0/24\"\n\
+             range_start = \"192.168.1.100\"\nrange_end = \"192.168.1.199\"\n\
+             [[dhcp.scopes_v6]]\nname = \"LAN6\"\nprefix = \"fd00:1::/64\"\n",
+        )
+        .unwrap();
+        assert!(!config.dhcp.enabled);
+    }
+
     fn scope() -> DhcpScope {
         DhcpScope {
             name: "LAN".to_string(),

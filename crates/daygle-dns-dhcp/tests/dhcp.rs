@@ -69,6 +69,41 @@ async fn eventually(mut check: impl FnMut() -> bool) {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn nothing_listens_until_turned_on() {
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _catalog) = service(&dir);
+    let shutdown = CancellationToken::new();
+    service.start(shutdown.clone());
+    service.apply(&DhcpSettings::default());
+    let status = service.status();
+    assert_eq!((status.v4.as_str(), status.v6.as_str()), ("Off", "Off"));
+
+    // Scopes alone do not start it: the server must be turned on.
+    let port = free_port("127.0.0.1:0");
+    service.apply(&DhcpSettings {
+        port_v4: port,
+        scopes: vec![DhcpScope {
+            name: "lo".to_string(),
+            subnet: "127.0.0.0/24".to_string(),
+            range_start: "127.0.0.100".to_string(),
+            range_end: "127.0.0.200".to_string(),
+            ..DhcpScope::default()
+        }],
+        scopes_v6: vec![Dhcp6Scope {
+            name: "lo6".to_string(),
+            prefix: "fd00:99::/64".to_string(),
+            ..Dhcp6Scope::default()
+        }],
+        ..DhcpSettings::default()
+    });
+    let status = service.status();
+    assert_eq!((status.v4.as_str(), status.v6.as_str()), ("Off", "Off"));
+    // The port is free: nothing bound it.
+    assert!(std::net::UdpSocket::bind(("127.0.0.1", port)).is_ok());
+    shutdown.cancel();
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn dhcpv4_through_a_relay_registers_the_name() {
     let dir = tempfile::tempdir().unwrap();
     let (service, catalog) = service(&dir);
