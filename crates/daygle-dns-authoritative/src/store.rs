@@ -260,6 +260,19 @@ CREATE TABLE IF NOT EXISTS query_logs (
 CREATE INDEX IF NOT EXISTS idx_query_logs_ts ON query_logs (ts DESC);
 CREATE INDEX IF NOT EXISTS idx_query_logs_qname ON query_logs (qname);
 CREATE INDEX IF NOT EXISTS idx_query_logs_client ON query_logs (client);
+
+CREATE TABLE IF NOT EXISTS dhcp_leases (
+    address     TEXT PRIMARY KEY,
+    scope       TEXT NOT NULL,
+    client_id   TEXT NOT NULL,
+    hw_address  TEXT NOT NULL DEFAULT '',
+    hostname    TEXT NOT NULL DEFAULT '',
+    state       TEXT NOT NULL,
+    expires     INTEGER NOT NULL,
+    dns_name    TEXT NOT NULL DEFAULT '',
+    dns_records TEXT NOT NULL DEFAULT '[]',
+    updated_at  TEXT NOT NULL
+);
 "#;
 
 /// SQLite-backed storage for zones and records.
@@ -3025,6 +3038,82 @@ fn qname_like_pattern(raw: &str) -> String {
         format!("{}%", stripped)
     } else {
         format!("%{}%", escaped)
+    }
+}
+
+impl ZoneStore {
+    /// Every DHCP lease (and offer), by address.
+    pub fn list_dhcp_leases(&self) -> Result<Vec<daygle_dns_core::dhcp::DhcpLease>> {
+        let conn = self.lock_conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT address, scope, client_id, hw_address, hostname, state, expires,
+                    dns_name, dns_records, updated_at
+             FROM dhcp_leases ORDER BY address",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            let address: String = r.get(0)?;
+            Ok((
+                address,
+                daygle_dns_core::dhcp::DhcpLease {
+                    address: std::net::IpAddr::from([0, 0, 0, 0]),
+                    scope: r.get(1)?,
+                    client_id: r.get(2)?,
+                    hw_address: r.get(3)?,
+                    hostname: r.get(4)?,
+                    state: r.get(5)?,
+                    expires: r.get(6)?,
+                    dns_name: r.get(7)?,
+                    dns_records: decode_list(r, 8)?,
+                    updated_at: r.get(9)?,
+                },
+            ))
+        })?;
+        let mut leases = Vec::new();
+        for row in rows {
+            let (address, mut lease) = row?;
+            // A row whose address does not parse is skipped, not fatal.
+            if let Ok(ip) = address.parse() {
+                lease.address = ip;
+                leases.push(lease);
+            }
+        }
+        Ok(leases)
+    }
+
+    /// Create or replace the lease on `lease.address`.
+    pub fn put_dhcp_lease(&self, lease: &daygle_dns_core::dhcp::DhcpLease) -> Result<()> {
+        let records = encode_json(&lease.dns_records, "dns_records")?;
+        let conn = self.lock_conn()?;
+        conn.execute(
+            "INSERT INTO dhcp_leases (address, scope, client_id, hw_address, hostname, state,
+                 expires, dns_name, dns_records, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+             ON CONFLICT(address) DO UPDATE SET scope = ?2, client_id = ?3, hw_address = ?4,
+                 hostname = ?5, state = ?6, expires = ?7, dns_name = ?8, dns_records = ?9,
+                 updated_at = ?10",
+            params![
+                lease.address.to_string(),
+                lease.scope,
+                lease.client_id,
+                lease.hw_address,
+                lease.hostname,
+                lease.state,
+                lease.expires,
+                lease.dns_name,
+                records,
+                lease.updated_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Forget the lease on `address`; whether there was one.
+    pub fn delete_dhcp_lease(&self, address: &std::net::IpAddr) -> Result<bool> {
+        let conn = self.lock_conn()?;
+        Ok(conn.execute(
+            "DELETE FROM dhcp_leases WHERE address = ?1",
+            [address.to_string()],
+        )? > 0)
     }
 }
 

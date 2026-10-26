@@ -242,6 +242,41 @@ pub async fn rpz_status(State(state): State<AppState>) -> Response {
     Json(serde_json::json!({ "zones": zones })).into_response()
 }
 
+/// `GET /api/dhcp` - the DHCP server's status, the network interfaces it
+/// can serve and the leases.
+pub async fn dhcp_status(State(state): State<AppState>) -> Response {
+    let Some(dhcp) = &state.dhcp else {
+        return error_response(StatusCode::NOT_FOUND, "DHCP is not available");
+    };
+    // By address, IPv4 first (the table is ordered).
+    let leases = dhcp.leases();
+    Json(serde_json::json!({
+        "status": dhcp.status(),
+        "interfaces": daygle_dns_dhcp::net::interfaces(),
+        "leases": leases,
+    }))
+    .into_response()
+}
+
+/// `DELETE /api/dhcp/leases/{address}` - forget a lease and remove its
+/// DNS names.
+pub async fn delete_dhcp_lease(
+    State(state): State<AppState>,
+    Path(address): Path<String>,
+) -> Response {
+    let Some(dhcp) = &state.dhcp else {
+        return error_response(StatusCode::NOT_FOUND, "DHCP is not available");
+    };
+    let Ok(ip) = address.trim().parse::<std::net::IpAddr>() else {
+        return error_response(StatusCode::BAD_REQUEST, "not an IP address");
+    };
+    match dhcp.delete_lease(&ip) {
+        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(false) => error_response(StatusCode::NOT_FOUND, "no lease for that address"),
+        Err(e) => error_response(StatusCode::INTERNAL_SERVER_ERROR, e),
+    }
+}
+
 /// `POST /api/rpz` - check every fetched or transferred zone for changes
 /// now.
 pub async fn rpz_refresh(State(state): State<AppState>) -> Response {
@@ -4380,6 +4415,8 @@ pub struct SettingsUpdate {
     pub rpz: Option<Vec<daygle_dns_core::config::RpzZoneConfig>>,
     /// Replaces the whole `[block_page]` section.
     pub block_page: Option<daygle_dns_core::config::BlockPageSettings>,
+    /// Replaces the whole `[dhcp]` section.
+    pub dhcp: Option<daygle_dns_core::dhcp::DhcpSettings>,
     /// Replaces the whole `[ddr]` section (encrypted DNS discovery).
     pub ddr: Option<daygle_dns_core::config::DdrSettings>,
     /// Replaces the whole `[reports]` section (scheduled reports).
@@ -4961,6 +4998,20 @@ pub async fn update_settings(
             }
         }
         config.rpz = zones;
+    }
+    if let Some(dhcp) = &update.dhcp {
+        let dhcp = daygle_dns_core::dhcp::DhcpSettings {
+            dns_zone: dhcp
+                .dns_zone
+                .trim()
+                .trim_end_matches('.')
+                .to_ascii_lowercase(),
+            ..dhcp.clone()
+        };
+        if let Err(msg) = dhcp.check() {
+            return error_response(StatusCode::BAD_REQUEST, format!("dhcp: {msg}"));
+        }
+        config.dhcp = dhcp;
     }
     if let Some(reports) = &update.reports {
         let reports = daygle_dns_core::config::ReportSettings {

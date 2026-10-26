@@ -1562,6 +1562,56 @@ One report goes out per period, also across restarts. `POST
 {...}}` from the body: `{"sent": true}`, `400` for invalid settings, or
 `502` naming what failed (including no destination).
 
+### DHCP
+
+```
+GET    /api/dhcp
+DELETE /api/dhcp/leases/{address}
+```
+
+`GET /api/dhcp` returns `{"status": {"supported", "v4", "v6",
+"server_duid"}, "interfaces": [{"name", "index", "addresses"}], "leases":
+[...]}`. `v4` and `v6` say `Off`, `Listening on UDP port 67` (`547`), or
+why the listener could not start; `supported` is false off Linux. Each
+lease is `{"address", "scope", "client_id", "hw_address", "hostname",
+"state", "expires", "dns_name", "dns_records", "updated_at"}`: `state` is
+`offered`, `bound`, `released` or `declined` (the address is in use by
+another device and is skipped for an hour), `expires` is UNIX seconds,
+`hw_address` is the MAC address (IPv4) or the DUID (IPv6), and
+`dns_records` the ids of the zone records registered for it. `DELETE`
+forgets a lease and removes its records (`204`, `404` when there is none).
+
+The `dhcp` settings group (DHCP → Settings and the scope tabs, replaced as
+a whole by `PUT /api/config` with `{"dhcp": {...}}`, `400` naming the
+problem):
+
+| Field | Default | Meaning |
+|---|---|---|
+| `enabled` | `false` | Run the server (UDP 67 and 547; needs root or `CAP_NET_BIND_SERVICE`). |
+| `dns_zone` | `""` | Hosted zone that bound leases with a host name are registered in (A/AAAA, plus a PTR in the most specific hosted reverse zone). A name with records of its own is left alone. |
+| `scopes` | `[]` | IPv4 scopes, below. |
+| `scopes_v6` | `[]` | IPv6 scopes, below. |
+
+An IPv4 scope is `{"name", "enabled", "interface", "subnet", "range_start",
+"range_end", "router", "dns_servers", "domain_name", "ntp_servers",
+"lease_secs", "reservations", "options"}`. It serves `interface`, or when
+that is empty the interface with an address in `subnet`, and requests
+from a DHCP relay whose address (`giaddr`) is in `subnet`. Empty
+`dns_servers` hands out this server's address on that network.
+`lease_secs` defaults to 86400. `reservations` are `{"client": MAC,
+"address", "hostname", "description"}`; `options` are extra DHCP options,
+`{"code": 1-254, "value"}` with the value as text or as hex starting
+`0x`. Subnets may not overlap.
+
+An IPv6 scope is `{"name", "enabled", "interface", "prefix",
+"range_start", "range_end", "dns_servers", "domain_search",
+"preferred_secs", "valid_secs", "reservations"}`, with reservations keyed
+by DUID (hex). With no range it is stateless: it answers
+Information-request with the DNS servers and search list only. Routers
+keep sending the router advertisements; their managed (M) and other (O)
+flags decide whether devices ask. Rapid Commit is supported; relayed
+DHCPv6 and prefix delegation are not.
+
 ### Backup and restore
 
 ```

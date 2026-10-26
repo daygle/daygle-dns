@@ -44,6 +44,10 @@ Daygle DNS combines, in a single process:
 - **Reports**: queries, blocks, the busiest devices and the most asked and
   most blocked domains for any period (overall or per device) under
   Logs → Reports, and a daily or weekly summary by email or webhook.
+- **DHCP (IPv4 and IPv6)**: hand out addresses, gateway and DNS settings
+  with reservations and custom options, and DHCPv6 addresses or DNS
+  settings only (stateless); devices are registered by name (A/AAAA and
+  PTR) in a zone you host. Linux only.
 - **Blocked services**: block TikTok, YouTube, Roblox, Discord, ChatGPT and
   30-odd other apps for a filtering group with one tick each.
 - **Per-client rules** on the console's Clients page: **filtering groups**

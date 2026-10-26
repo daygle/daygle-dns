@@ -410,6 +410,8 @@ pub struct AppState {
     pub acme: Arc<acme::Acme>,
     /// Response policy zones; `None` when the API runs without a server.
     pub rpz: Option<Arc<daygle_dns_authoritative::rpz::RpzManager>>,
+    /// The DHCP server; `None` when the API runs without a server.
+    pub dhcp: Option<Arc<daygle_dns_dhcp::DhcpService>>,
 }
 
 /// Build the API router (REST endpoints plus the embedded GUI).
@@ -587,6 +589,11 @@ pub fn router(state: AppState) -> Router {
             get(handlers::rpz_status).post(handlers::rpz_refresh),
         )
         .route("/rpz/test", post(handlers::rpz_test))
+        .route("/dhcp", get(handlers::dhcp_status))
+        .route(
+            "/dhcp/leases/{address}",
+            delete(handlers::delete_dhcp_lease),
+        )
         .route(
             "/policy/blocking",
             get(handlers::list_blocking_groups).post(handlers::upsert_blocking_group),

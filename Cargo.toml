@@ -9,6 +9,7 @@ members = [
     "crates/daygle-dns-api",
     "crates/daygle-dns-gui",
     "crates/daygle-dns-ml",
+    "crates/daygle-dns-dhcp",
     "crates/daygle-dns",
 ]
 
@@ -56,6 +57,8 @@ axum = "0.8"
 tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "0.7", features = ["fs", "cors", "trace"] }
 socket2 = "0.6"
+dhcproto = "0.15"
+nix = { version = "0.31", features = ["net", "socket", "uio"] }
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

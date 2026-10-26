@@ -1,0 +1,28 @@
+[package]
+name = "daygle-dns-dhcp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "DHCPv4 and DHCPv6 server with DNS registration of leases"
+
+[dependencies]
+daygle-dns-core = { path = "../daygle-dns-core" }
+daygle-dns-authoritative = { path = "../daygle-dns-authoritative" }
+dhcproto.workspace = true
+hickory-proto.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+chrono.workspace = true
+ipnet.workspace = true
+serde.workspace = true
+socket2.workspace = true
+parking_lot.workspace = true
+uuid.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+nix.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

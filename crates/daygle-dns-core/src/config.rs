@@ -67,6 +67,8 @@ pub struct DaygleConfig {
     pub ddr: DdrSettings,
     /// A scheduled summary sent to the alert destinations.
     pub reports: ReportSettings,
+    /// The DHCP service (DHCPv4 and DHCPv6).
+    pub dhcp: crate::dhcp::DhcpSettings,
 }
 
 /// A scheduled report: a summary of the query log (queries, blocks, top
@@ -1226,6 +1228,8 @@ pub struct RuntimeSettings {
     pub ddr: Option<DdrSettings>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reports: Option<ReportSettings>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dhcp: Option<crate::dhcp::DhcpSettings>,
 }
 
 /// Partial updates for the recursive resolver (matches the API's shape).
@@ -1984,6 +1988,7 @@ impl RuntimeSettings {
             && self.block_page.is_none()
             && self.ddr.is_none()
             && self.reports.is_none()
+            && self.dhcp.is_none()
     }
 
     /// Apply the overlay to `config` in place. `None` fields are untouched.
@@ -2200,6 +2205,9 @@ impl RuntimeSettings {
         }
         if let Some(r) = &self.reports {
             config.reports = r.clone();
+        }
+        if let Some(d) = &self.dhcp {
+            config.dhcp = d.clone();
         }
         if let Some(w) = &self.web {
             config.web = w.clone();
@@ -2427,6 +2435,7 @@ impl RuntimeSettings {
             block_page: Some(config.block_page.clone()),
             ddr: Some(config.ddr.clone()),
             reports: Some(config.reports.clone()),
+            dhcp: Some(config.dhcp.clone()),
         }
     }
 }
@@ -3334,6 +3343,9 @@ impl DaygleConfig {
         self.reports
             .check()
             .map_err(|e| DaygleError::Config(format!("reports: {e}")))?;
+        self.dhcp
+            .check()
+            .map_err(|e| DaygleError::Config(format!("dhcp: {e}")))?;
         self.dns64
             .compile(&self.all_networks())
             .map_err(|e| DaygleError::Config(format!("dns64: {e}")))?;
@@ -4864,6 +4876,15 @@ mod tests {
         c.reports.enabled = true;
         c.reports.frequency = s("daily");
         c.reports.hour = 7;
+        c.dhcp.enabled = true;
+        c.dhcp.dns_zone = s("home.arpa");
+        c.dhcp.scopes.push(crate::dhcp::DhcpScope {
+            name: s("LAN"),
+            subnet: s("192.168.1.0/24"),
+            range_start: s("192.168.1.100"),
+            range_end: s("192.168.1.199"),
+            ..Default::default()
+        });
         let stored = serde_json::to_string(&RuntimeSettings::capture(&c)).unwrap();
         let overlay: RuntimeSettings = serde_json::from_str(&stored).unwrap();
         let mut restored = DaygleConfig::default();
@@ -4889,6 +4910,7 @@ mod tests {
         assert_eq!(restored.block_page, c.block_page, "block_page");
         assert_eq!(restored.ddr, c.ddr, "ddr");
         assert_eq!(restored.reports, c.reports, "reports");
+        assert_eq!(restored.dhcp, c.dhcp, "dhcp");
 
         // Clearing a value in the console must stay cleared after a restart,
         // even when the config file sets it.
