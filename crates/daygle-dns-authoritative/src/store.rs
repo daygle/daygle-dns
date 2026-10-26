@@ -260,6 +260,19 @@ CREATE TABLE IF NOT EXISTS query_logs (
 CREATE INDEX IF NOT EXISTS idx_query_logs_ts ON query_logs (ts DESC);
 CREATE INDEX IF NOT EXISTS idx_query_logs_qname ON query_logs (qname);
 CREATE INDEX IF NOT EXISTS idx_query_logs_client ON query_logs (client);
+
+CREATE TABLE IF NOT EXISTS dhcp_leases (
+    address     TEXT PRIMARY KEY,
+    scope       TEXT NOT NULL,
+    client_id   TEXT NOT NULL,
+    hw_address  TEXT NOT NULL DEFAULT '',
+    hostname    TEXT NOT NULL DEFAULT '',
+    state       TEXT NOT NULL,
+    expires     INTEGER NOT NULL,
+    dns_name    TEXT NOT NULL DEFAULT '',
+    dns_records TEXT NOT NULL DEFAULT '[]',
+    updated_at  TEXT NOT NULL
+);
 "#;
 
 /// SQLite-backed storage for zones and records.
@@ -3029,6 +3042,181 @@ fn qname_like_pattern(raw: &str) -> String {
 }
 
 impl ZoneStore {
+    /// Every DHCP lease (and offer), by address.
+    pub fn list_dhcp_leases(&self) -> Result<Vec<daygle_dns_core::dhcp::DhcpLease>> {
+        let conn = self.lock_conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT address, scope, client_id, hw_address, hostname, state, expires,
+                    dns_name, dns_records, updated_at
+             FROM dhcp_leases ORDER BY address",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            let address: String = r.get(0)?;
+            Ok((
+                address,
+                daygle_dns_core::dhcp::DhcpLease {
+                    address: std::net::IpAddr::from([0, 0, 0, 0]),
+                    scope: r.get(1)?,
+                    client_id: r.get(2)?,
+                    hw_address: r.get(3)?,
+                    hostname: r.get(4)?,
+                    state: r.get(5)?,
+                    expires: r.get(6)?,
+                    dns_name: r.get(7)?,
+                    dns_records: decode_list(r, 8)?,
+                    updated_at: r.get(9)?,
+                },
+            ))
+        })?;
+        let mut leases = Vec::new();
+        for row in rows {
+            let (address, mut lease) = row?;
+            // A row whose address does not parse is skipped, not fatal.
+            if let Ok(ip) = address.parse() {
+                lease.address = ip;
+                leases.push(lease);
+            }
+        }
+        Ok(leases)
+    }
+
+    /// Create or replace the lease on `lease.address`.
+    pub fn put_dhcp_lease(&self, lease: &daygle_dns_core::dhcp::DhcpLease) -> Result<()> {
+        let records = encode_json(&lease.dns_records, "dns_records")?;
+        let conn = self.lock_conn()?;
+        conn.execute(
+            "INSERT INTO dhcp_leases (address, scope, client_id, hw_address, hostname, state,
+                 expires, dns_name, dns_records, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+             ON CONFLICT(address) DO UPDATE SET scope = ?2, client_id = ?3, hw_address = ?4,
+                 hostname = ?5, state = ?6, expires = ?7, dns_name = ?8, dns_records = ?9,
+                 updated_at = ?10",
+            params![
+                lease.address.to_string(),
+                lease.scope,
+                lease.client_id,
+                lease.hw_address,
+                lease.hostname,
+                lease.state,
+                lease.expires,
+                lease.dns_name,
+                records,
+                lease.updated_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Forget the lease on `address`; whether there was one.
+    pub fn delete_dhcp_lease(&self, address: &std::net::IpAddr) -> Result<bool> {
+        let conn = self.lock_conn()?;
+        Ok(conn.execute(
+            "DELETE FROM dhcp_leases WHERE address = ?1",
+            [address.to_string()],
+        )? > 0)
+    }
+}
+
+/// Query counts for one client in a report.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ClientActivity {
+    pub client: String,
+    pub queries: u64,
+    pub blocked: u64,
+    /// RFC 3339.
+    pub last_seen: String,
+}
+
+/// A name and how many times it was asked.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct NameCount {
+    pub name: String,
+    pub count: u64,
+}
+
+/// A summary of the query log since a moment (for one client, or all).
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct QueryLogReport {
+    /// RFC 3339: the start of the period.
+    pub since: String,
+    pub queries: u64,
+    pub blocked: u64,
+    /// Distinct clients.
+    pub clients_seen: u64,
+    /// The most active clients.
+    pub clients: Vec<ClientActivity>,
+    pub top_domains: Vec<NameCount>,
+    pub top_blocked: Vec<NameCount>,
+}
+
+impl ZoneStore {
+    /// Summarize the query log from `since` (RFC 3339) on: totals, the
+    /// `top` most active clients and the `top` most asked and most blocked
+    /// names, for every client or only `client`.
+    pub fn query_log_report(
+        &self,
+        since: &str,
+        client: Option<&str>,
+        top: usize,
+    ) -> Result<QueryLogReport> {
+        let conn = self.lock_conn()?;
+        let filter = if client.is_some() {
+            "ts >= ?1 AND client = ?2"
+        } else {
+            "ts >= ?1 AND ?2 IS NULL"
+        };
+        let top = top as i64;
+        let (queries, blocked, clients_seen): (i64, i64, i64) = conn.query_row(
+            &format!(
+                "SELECT COUNT(*), COALESCE(SUM(outcome = 'blocked'), 0), COUNT(DISTINCT client)
+                 FROM query_logs WHERE {filter}"
+            ),
+            params![since, client],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )?;
+        let mut stmt = conn.prepare(&format!(
+            "SELECT client, COUNT(*), COALESCE(SUM(outcome = 'blocked'), 0), MAX(ts)
+             FROM query_logs WHERE {filter}
+             GROUP BY client ORDER BY COUNT(*) DESC, client LIMIT ?3"
+        ))?;
+        let clients = stmt
+            .query_map(params![since, client, top], |r| {
+                Ok(ClientActivity {
+                    client: r.get(0)?,
+                    queries: r.get::<_, i64>(1)? as u64,
+                    blocked: r.get::<_, i64>(2)? as u64,
+                    last_seen: r.get(3)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let names = |extra: &str| -> Result<Vec<NameCount>> {
+            let mut stmt = conn.prepare(&format!(
+                "SELECT qname, COUNT(*) FROM query_logs WHERE {filter}{extra}
+                 GROUP BY qname ORDER BY COUNT(*) DESC, qname LIMIT ?3"
+            ))?;
+            let rows = stmt
+                .query_map(params![since, client, top], |r| {
+                    Ok(NameCount {
+                        name: r.get(0)?,
+                        count: r.get::<_, i64>(1)? as u64,
+                    })
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            Ok(rows)
+        };
+        let top_domains = names("")?;
+        let top_blocked = names(" AND outcome = 'blocked'")?;
+        Ok(QueryLogReport {
+            since: since.to_string(),
+            queries: queries as u64,
+            blocked: blocked as u64,
+            clients_seen: clients_seen as u64,
+            clients,
+            top_domains,
+            top_blocked,
+        })
+    }
+
     /// Append one query-log entry.
     pub fn insert_query_log(&self, entry: &QueryLogRow) -> Result<()> {
         let conn = self.lock_conn()?;
@@ -3848,6 +4036,72 @@ mod tests {
 
     fn store() -> ZoneStore {
         ZoneStore::open(":memory:").unwrap()
+    }
+
+    #[test]
+    fn query_log_report_summarizes_a_period() {
+        let s = store();
+        let row = |ts: &str, client: &str, qname: &str, outcome: &str| QueryLogRow {
+            id: 0,
+            ts: ts.to_string(),
+            client: client.to_string(),
+            qname: qname.to_string(),
+            qtype: "A".to_string(),
+            protocol: "udp".to_string(),
+            outcome: outcome.to_string(),
+            rcode: None,
+            elapsed_ms: 1,
+        };
+        s.insert_query_logs(&[
+            row(
+                "2026-10-01T00:00:00+00:00",
+                "10.0.0.1",
+                "old.example",
+                "recursive",
+            ),
+            row(
+                "2026-10-20T00:00:00+00:00",
+                "10.0.0.1",
+                "a.example",
+                "recursive",
+            ),
+            row(
+                "2026-10-20T00:01:00+00:00",
+                "10.0.0.1",
+                "a.example",
+                "recursive",
+            ),
+            row(
+                "2026-10-20T00:02:00+00:00",
+                "10.0.0.1",
+                "ads.example",
+                "blocked",
+            ),
+            row(
+                "2026-10-20T00:03:00+00:00",
+                "10.0.0.2",
+                "ads.example",
+                "blocked",
+            ),
+        ])
+        .unwrap();
+        let report = s
+            .query_log_report("2026-10-15T00:00:00+00:00", None, 10)
+            .unwrap();
+        assert_eq!(
+            (report.queries, report.blocked, report.clients_seen),
+            (4, 2, 2)
+        );
+        assert_eq!(report.clients[0].client, "10.0.0.1");
+        assert_eq!(report.clients[0].queries, 3);
+        assert_eq!(report.clients[0].last_seen, "2026-10-20T00:02:00+00:00");
+        assert_eq!(report.top_domains[0].name, "a.example");
+        assert_eq!(report.top_blocked[0].name, "ads.example");
+        assert_eq!(report.top_blocked[0].count, 2);
+        let one = s
+            .query_log_report("2026-10-15T00:00:00+00:00", Some("10.0.0.2"), 10)
+            .unwrap();
+        assert_eq!((one.queries, one.blocked, one.clients_seen), (1, 1, 1));
     }
 
     #[test]

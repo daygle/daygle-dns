@@ -1556,7 +1556,25 @@ impl RequestHandler for DnsDispatcher {
                             _ => {}
                         }
                     }
-                    if let Some(hit) = rpz.check_answer(&names, &ips) {
+                    // NSDNAME/NSIP triggers need the domain's name servers:
+                    // looked up (from the cache, mostly) only when a zone
+                    // has such triggers, within the client timeout.
+                    let ns = if rpz.checks_name_servers() {
+                        tokio::time::timeout(
+                            self.client_timeout,
+                            self.name_servers_of(
+                                Arc::clone(&resolver),
+                                client,
+                                &qname,
+                                rpz.checks_name_server_ips(),
+                            ),
+                        )
+                        .await
+                        .ok()
+                    } else {
+                        None
+                    };
+                    if let Some(hit) = rpz.check_answer(&names, &ips, ns.as_ref()) {
                         if !rpz_lets_through(&hit.action, info.protocol) {
                             return self
                                 .serve_rpz(
@@ -2122,6 +2140,86 @@ impl DnsDispatcher {
             ));
         }
         records
+    }
+
+    /// One recursive lookup's answers, or `None` when it failed or there
+    /// was no capacity for it.
+    async fn resolver_answers(
+        &self,
+        resolver: Arc<RecursiveResolver>,
+        client: IpAddr,
+        name: &str,
+        rtype: RecordType,
+    ) -> Option<Vec<Record>> {
+        let lookup_task = {
+            let permit = self.try_recursive_permit()?;
+            let subnet = self.client_subnet(client);
+            let name = name.to_string();
+            tokio::spawn(async move {
+                let _permit = permit;
+                daygle_dns_recursive::with_client_subnet(
+                    subnet,
+                    resolver.lookup_for_client(client, &name, rtype),
+                )
+                .await
+            })
+        };
+        let lookup = lookup_task.await.ok()?.ok()?;
+        Some(lookup.answers().to_vec())
+    }
+
+    /// The name servers of the zone `qname` is in: the closest enclosing
+    /// name with NS records (stopping above the top-level domain), and with
+    /// `with_ips` the addresses of the first few of them.
+    async fn name_servers_of(
+        &self,
+        resolver: Arc<RecursiveResolver>,
+        client: IpAddr,
+        qname: &str,
+        with_ips: bool,
+    ) -> daygle_dns_authoritative::rpz::NameServers {
+        let mut found = daygle_dns_authoritative::rpz::NameServers::default();
+        let mut candidate = qname;
+        loop {
+            let answers = self
+                .resolver_answers(Arc::clone(&resolver), client, candidate, RecordType::NS)
+                .await
+                .unwrap_or_default();
+            found.names = answers
+                .iter()
+                .filter_map(|r| match &r.data {
+                    RData::NS(ns) => {
+                        Some(ns.0.to_ascii().trim_end_matches('.').to_ascii_lowercase())
+                    }
+                    _ => None,
+                })
+                .collect();
+            if !found.names.is_empty() {
+                break;
+            }
+            match candidate.split_once('.') {
+                Some((_, parent)) if parent.contains('.') => candidate = parent,
+                _ => break,
+            }
+        }
+        if with_ips {
+            for name in found.names.clone().iter().take(4) {
+                for rtype in [RecordType::A, RecordType::AAAA] {
+                    for record in self
+                        .resolver_answers(Arc::clone(&resolver), client, name, rtype)
+                        .await
+                        .unwrap_or_default()
+                    {
+                        match &record.data {
+                            RData::A(a) => found.ips.push(IpAddr::V4(a.0)),
+                            RData::AAAA(a) => found.ips.push(IpAddr::V6(a.0)),
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+        found
     }
 
     /// With the block page on, how a blocked query of `qtype` is answered

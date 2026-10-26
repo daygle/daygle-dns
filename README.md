@@ -41,6 +41,13 @@ Daygle DNS combines, in a single process:
   switch to them by themselves.
 - **Block page**: blocked sites can point at a page on this server that
   says what was blocked and why, instead of "site not found".
+- **Reports**: queries, blocks, the busiest devices and the most asked and
+  most blocked domains for any period (overall or per device) under
+  Logs → Reports, and a daily or weekly summary by email or webhook.
+- **DHCP (IPv4 and IPv6)**: hand out addresses, gateway and DNS settings
+  with reservations and custom options, and DHCPv6 addresses or DNS
+  settings only (stateless); devices are registered by name (A/AAAA and
+  PTR) in a zone you host. Linux only.
 - **Blocked services**: block TikTok, YouTube, Roblox, Discord, ChatGPT and
   30-odd other apps for a filtering group with one tick each.
 - **Per-client rules** on the console's Clients page: **filtering groups**
@@ -129,7 +136,7 @@ metrics.
 - **Response policy zones (RPZ)**: DNS firewall feeds loaded by zone
   transfer (AXFR, with TSIG) or URL, or rules typed in the console, with
   every RPZ action (NXDOMAIN, NODATA, passthru, drop, TCP-only, local data
-  and walled gardens), QNAME, client-IP and answer-IP triggers, per-zone
+  and walled gardens), QNAME, client-IP, answer-IP, NSDNAME and NSIP triggers, per-zone
   policy overrides, a log-only mode and a tester.
 - **Response rate limiting (RRL)**: identical UDP answers to one network
   are capped per second, with slip (truncated answers that send real

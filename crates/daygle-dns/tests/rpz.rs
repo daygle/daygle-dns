@@ -39,6 +39,8 @@ async fn server(dir: &tempfile::TempDir) -> daygle_dns::BoundServer {
             ("a.cdn", "A", "198.51.100.50"),
             ("ok.cdn", "A", "198.51.100.51"),
             ("feedblock", "A", "198.51.100.60"),
+            ("@", "NS", "ns.site.test."),
+            ("ns", "A", "198.51.100.53"),
         ],
     )
     .await;
@@ -258,4 +260,47 @@ async fn rpz_zones_load_by_zone_transfer() {
 
     shutdown(server).await;
     shutdown(feed).await;
+}
+
+/// NSDNAME and NSIP triggers act on answers whose domain is served by a
+/// matching name server.
+#[tokio::test]
+async fn rpz_name_server_triggers() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = server(&dir).await;
+    let udp = server.udp_addr.unwrap();
+    let base = format!("http://{}/api", server.api_addr);
+
+    assert_eq!(
+        data(&udp_query(udp, "host.site.test.", RecordType::A).await),
+        vec!["198.51.100.10"]
+    );
+    put_zones(
+        &base,
+        serde_json::json!([{ "name": "rpz.local", "rules": "ns.site.test.rpz-nsdname CNAME .\n" }]),
+    )
+    .await;
+    assert_eq!(
+        udp_query(udp, "host.site.test.", RecordType::A)
+            .await
+            .response_code,
+        ResponseCode::NXDomain
+    );
+    put_zones(
+        &base,
+        serde_json::json!([{ "name": "rpz.local", "rules": "32.53.100.51.198.rpz-nsip CNAME *.\n" }]),
+    )
+    .await;
+    let reply = udp_query(udp, "evil.site.test.", RecordType::A).await;
+    assert_eq!(reply.response_code, ResponseCode::NoError);
+    assert!(reply.answers.is_empty(), "{reply:?}");
+    let status: serde_json::Value = reqwest::get(format!("{base}/rpz"))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(status["zones"][0]["rules"]["nsip"], 1);
+
+    shutdown(server).await;
 }

@@ -8,6 +8,8 @@
 //! | `bad.example`, `*.bad.example` | the query name (QNAME), or a name in its CNAME chain |
 //! | `32.1.2.0.192.rpz-client-ip` | the client's address (`192.0.2.1/32`) |
 //! | `24.0.2.0.192.rpz-ip` | an address in the answer (`192.0.2.0/24`) |
+//! | `ns.bad.example.rpz-nsdname`, `*.bad.example.rpz-nsdname` | the name of a name server of the answer's domain (NSDNAME) |
+//! | `32.1.2.0.192.rpz-nsip` | an address of such a name server (NSIP) |
 //!
 //! | Records | Action |
 //! |---|---|
@@ -19,9 +21,11 @@
 //! | anything else (`A`, `CNAME garden.example.`, `TXT`...) | answered with these records (local data) |
 //!
 //! Zones are checked in order and the first that matches decides; within
-//! a zone, client-IP triggers come before QNAME triggers, an exact QNAME
-//! before a wildcard, and the longest wildcard or address prefix wins.
-//! NSDNAME and NSIP triggers are not supported (counted and skipped).
+//! a zone, triggers are checked in the standard order (client IP, QNAME,
+//! answer IP, NSDNAME, NSIP), an exact name before a wildcard, and the
+//! longest wildcard or address prefix wins. NSDNAME and NSIP need the
+//! answer's name servers, which the dispatcher looks up only when some zone
+//! has such triggers.
 //!
 //! [`RpzManager`] keeps the zones' rules: typed into the console, fetched
 //! over HTTP(S), or transferred (AXFR, optionally TSIG-signed) from a feed,
@@ -166,7 +170,10 @@ pub struct RuleCounts {
     pub wildcard: usize,
     pub client_ip: usize,
     pub response_ip: usize,
-    /// NSDNAME/NSIP triggers and unparsable owners, which are skipped.
+    /// NSDNAME triggers (exact and wildcard).
+    pub nsdname: usize,
+    pub nsip: usize,
+    /// Unparsable or unknown trigger owners, which are skipped.
     pub unsupported: usize,
 }
 
@@ -178,6 +185,10 @@ pub struct CompiledZone {
     wildcard: HashMap<String, RpzAction>,
     client_ip: IpTriggers,
     response_ip: IpTriggers,
+    /// NSDNAME triggers: exact, and `*.suffix` keyed by `suffix`.
+    ns_exact: HashMap<String, RpzAction>,
+    ns_wildcard: HashMap<String, RpzAction>,
+    ns_ip: IpTriggers,
     unsupported: usize,
     /// The zone's SOA serial, when it had one.
     pub serial: Option<u32>,
@@ -191,6 +202,8 @@ impl CompiledZone {
             wildcard: self.wildcard.len(),
             client_ip: self.client_ip.len(),
             response_ip: self.response_ip.len(),
+            nsdname: self.ns_exact.len() + self.ns_wildcard.len(),
+            nsip: self.ns_ip.len(),
             unsupported: self.unsupported,
         }
     }
@@ -198,20 +211,17 @@ impl CompiledZone {
     /// The rule for the name `qname` (lowercase, no trailing dot): exact,
     /// else the closest wildcard.
     fn qname(&self, qname: &str) -> Option<(String, &RpzAction)> {
-        if let Some(action) = self.exact.get(qname) {
-            return Some((qname.to_string(), action));
-        }
-        if self.wildcard.is_empty() {
-            return None;
-        }
-        let mut rest = qname;
-        while let Some((_, parent)) = rest.split_once('.') {
-            if let Some(action) = self.wildcard.get(parent) {
-                return Some((format!("*.{parent}"), action));
-            }
-            rest = parent;
-        }
-        None
+        match_name(&self.exact, &self.wildcard, qname)
+    }
+
+    /// The NSDNAME rule for a name server called `name`.
+    fn nsdname(&self, name: &str) -> Option<(String, &RpzAction)> {
+        match_name(&self.ns_exact, &self.ns_wildcard, name)
+    }
+
+    /// Whether the zone has NSDNAME or NSIP triggers.
+    fn has_ns_triggers(&self) -> bool {
+        !self.ns_exact.is_empty() || !self.ns_wildcard.is_empty() || self.ns_ip.len() > 0
     }
 
     /// Compile a zone from its records. `owner` is the record's owner name
@@ -252,12 +262,26 @@ impl CompiledZone {
                     Some(net) => compiled.response_ip.insert(net, action),
                     None => compiled.unsupported += 1,
                 }
+            } else if let Some(ip) = trigger.strip_suffix(".rpz-nsip") {
+                match parse_ip_trigger(ip) {
+                    Some(net) => compiled.ns_ip.insert(net, action),
+                    None => compiled.unsupported += 1,
+                }
+            } else if let Some(name) = trigger.strip_suffix(".rpz-nsdname") {
+                match name.strip_prefix("*.") {
+                    Some(suffix) => {
+                        compiled.ns_wildcard.insert(suffix.to_string(), action);
+                    }
+                    None => {
+                        compiled.ns_exact.insert(name.to_string(), action);
+                    }
+                }
             } else if trigger
                 .rsplit('.')
                 .next()
                 .is_some_and(|tld| tld.starts_with("rpz-"))
             {
-                // NSDNAME, NSIP, and anything newer.
+                // Anything newer than this.
                 compiled.unsupported += 1;
             } else if let Some(suffix) = trigger.strip_prefix("*.") {
                 compiled.wildcard.insert(suffix.to_string(), action);
@@ -308,6 +332,38 @@ impl CompiledZone {
             }),
         )
     }
+}
+
+/// The rule for `name` among `exact` names and `*.suffix` wildcards
+/// (keyed by suffix): exact first, else the closest wildcard.
+fn match_name<'a>(
+    exact: &'a HashMap<String, RpzAction>,
+    wildcard: &'a HashMap<String, RpzAction>,
+    name: &str,
+) -> Option<(String, &'a RpzAction)> {
+    if let Some(action) = exact.get(name) {
+        return Some((name.to_string(), action));
+    }
+    if wildcard.is_empty() {
+        return None;
+    }
+    let mut rest = name;
+    while let Some((_, parent)) = rest.split_once('.') {
+        if let Some(action) = wildcard.get(parent) {
+            return Some((format!("*.{parent}"), action));
+        }
+        rest = parent;
+    }
+    None
+}
+
+/// The name servers of an answer's domain, for NSDNAME and NSIP triggers.
+#[derive(Debug, Clone, Default)]
+pub struct NameServers {
+    /// Their names (lowercase, no trailing dot).
+    pub names: Vec<String>,
+    /// Their addresses (looked up only when some zone has NSIP triggers).
+    pub ips: Vec<IpAddr>,
 }
 
 /// The action the records at a trigger give.
@@ -446,9 +502,15 @@ impl RpzSet {
     }
 
     /// The first zone that acts on an answer: a name in its CNAME chain
-    /// (`names`) matching a QNAME trigger, or an address in it (`ips`)
-    /// matching an IP trigger.
-    pub fn check_answer(&self, names: &[String], ips: &[IpAddr]) -> Option<RpzHit> {
+    /// (`names`) matching a QNAME trigger, an address in it (`ips`)
+    /// matching an IP trigger, or one of its domain's name servers (`ns`)
+    /// matching an NSDNAME or NSIP trigger.
+    pub fn check_answer(
+        &self,
+        names: &[String],
+        ips: &[IpAddr],
+        ns: Option<&NameServers>,
+    ) -> Option<RpzHit> {
         for zone in &self.zones {
             let found = names
                 .iter()
@@ -464,6 +526,21 @@ impl RpzSet {
                             .find(*ip)
                             .map(|(len, action)| (format!("answer IP {ip}/{len}"), action))
                     })
+                })
+                .or_else(|| {
+                    ns?.names.iter().find_map(|name| {
+                        zone.data
+                            .nsdname(name)
+                            .map(|(trigger, action)| (format!("NSDNAME {trigger}"), action))
+                    })
+                })
+                .or_else(|| {
+                    ns?.ips.iter().find_map(|ip| {
+                        zone.data
+                            .ns_ip
+                            .find(*ip)
+                            .map(|(len, action)| (format!("name server IP {ip}/{len}"), action))
+                    })
                 });
             if let Some(hit) = found.and_then(|(trigger, action)| self.hit(zone, trigger, action)) {
                 return Some(hit);
@@ -472,12 +549,27 @@ impl RpzSet {
         None
     }
 
-    /// Whether any zone has answer (CNAME-target or IP) triggers worth
-    /// checking an answer against.
+    /// Whether any zone has answer (CNAME-target, IP or name server)
+    /// triggers worth checking an answer against.
     pub fn checks_answers(&self) -> bool {
         self.zones.iter().any(|z| {
-            !z.data.exact.is_empty() || !z.data.wildcard.is_empty() || z.data.response_ip.len() > 0
+            !z.data.exact.is_empty()
+                || !z.data.wildcard.is_empty()
+                || z.data.response_ip.len() > 0
+                || z.data.has_ns_triggers()
         })
+    }
+
+    /// Whether any zone has NSDNAME or NSIP triggers (the answer's name
+    /// servers must then be looked up).
+    pub fn checks_name_servers(&self) -> bool {
+        self.zones.iter().any(|z| z.data.has_ns_triggers())
+    }
+
+    /// Whether any zone has NSIP triggers (the name servers' addresses
+    /// must then be looked up too).
+    pub fn checks_name_server_ips(&self) -> bool {
+        self.zones.iter().any(|z| z.data.ns_ip.len() > 0)
     }
 
     /// Count a match; `None` when the zone only counts.
@@ -928,6 +1020,9 @@ local.example           TXT \"blocked by policy\"
 24.0.113.0.203.rpz-ip   CNAME .
 48.zz.8b.db8.2001.rpz-ip CNAME *.
 ns.evil.rpz-nsdname     CNAME .
+*.badhost.example.rpz-nsdname CNAME *.
+32.53.2.0.192.rpz-nsip  CNAME rpz-drop.
+1.2.3.rpz-future        CNAME .
 ";
 
     fn zone() -> CompiledZone {
@@ -967,6 +1062,8 @@ ns.evil.rpz-nsdname     CNAME .
                 wildcard: 1,
                 client_ip: 1,
                 response_ip: 2,
+                nsdname: 2,
+                nsip: 1,
                 unsupported: 1,
             }
         );
@@ -997,14 +1094,42 @@ ns.evil.rpz-nsdname     CNAME .
     #[test]
     fn answers_are_checked_by_address_and_cname_target() {
         let s = set(RpzPolicy::Given);
-        let hit = s.check_answer(&[], &[ip("203.0.113.9")]).unwrap();
+        let hit = s.check_answer(&[], &[ip("203.0.113.9")], None).unwrap();
         assert_eq!(hit.action, RpzAction::NxDomain);
         assert!(hit.trigger.contains("203.0.113.9/24"), "{}", hit.trigger);
-        let hit = s.check_answer(&[], &[ip("2001:db8:8b::1")]).unwrap();
+        let hit = s.check_answer(&[], &[ip("2001:db8:8b::1")], None).unwrap();
         assert_eq!(hit.action, RpzAction::NoData);
-        assert!(s.check_answer(&[], &[ip("198.51.100.1")]).is_none());
-        let hit = s.check_answer(&["t.ads.example".to_string()], &[]).unwrap();
+        assert!(s.check_answer(&[], &[ip("198.51.100.1")], None).is_none());
+        let hit = s
+            .check_answer(&["t.ads.example".to_string()], &[], None)
+            .unwrap();
         assert_eq!(hit.action, RpzAction::NxDomain);
+    }
+
+    #[test]
+    fn answers_are_checked_by_name_server() {
+        let s = set(RpzPolicy::Given);
+        let ns = |names: &[&str], ips: &[&str]| NameServers {
+            names: names.iter().map(|n| n.to_string()).collect(),
+            ips: ips.iter().map(|i| ip(i)).collect(),
+        };
+        let hit = s
+            .check_answer(&[], &[], Some(&ns(&["ns.evil"], &[])))
+            .unwrap();
+        assert_eq!(hit.action, RpzAction::NxDomain);
+        assert_eq!(hit.trigger, "NSDNAME ns.evil");
+        let hit = s
+            .check_answer(&[], &[], Some(&ns(&["ns1.badhost.example"], &[])))
+            .unwrap();
+        assert_eq!(hit.action, RpzAction::NoData);
+        let hit = s
+            .check_answer(&[], &[], Some(&ns(&["ns1.fine.example"], &["192.0.2.53"])))
+            .unwrap();
+        assert_eq!(hit.action, RpzAction::Drop);
+        assert!(s
+            .check_answer(&[], &[], Some(&ns(&["ns1.fine.example"], &["192.0.2.54"])))
+            .is_none());
+        assert!(s.checks_name_servers() && s.checks_name_server_ips());
     }
 
     #[test]

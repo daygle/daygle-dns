@@ -17,6 +17,7 @@
   import Donate from './views/Donate.svelte';
   import Update from './views/Update.svelte';
   import Account from './views/Account.svelte';
+  import Dhcp from './views/Dhcp.svelte';
   import { icons } from './icons.svelte.js';
   import { sidebar, setSidebar, isNarrow, toggleSidebar } from './nav.svelte.js';
 import { loadDisplayPreferences } from './datetime.svelte.js';
@@ -180,6 +181,7 @@ import { loadDisplayPreferences } from './datetime.svelte.js';
     { id: 'zones', label: 'Zones', icon: icons.zones, viewer: true, section: 'dns' },
     { id: 'filtering', label: 'Filtering', icon: icons.filtering, viewer: true, section: 'dns' },
     { id: 'clients', label: 'Clients', icon: icons.clients, viewer: true, section: 'dns' },
+    { id: 'dhcp', label: 'DHCP', icon: icons.dhcp, section: 'dns' },
     { id: 'ai', label: 'AI', icon: icons.ai, viewer: true, section: 'dns' },
     { id: 'cache', label: 'Cache', icon: icons.cache, section: 'dns' },
     { id: 'settings', label: 'Settings', icon: icons.settings, viewer: true, section: 'server' },
@@ -296,6 +298,8 @@ import { loadDisplayPreferences } from './datetime.svelte.js';
         {#key clientsTab}
           <Clients initialTab={clientsTab} />
         {/key}
+      {:else if view === 'dhcp'}
+        <Dhcp />
       {:else if view === 'cache'}
         <Cache onOpenSettings={isViewer ? null : openSettings} />
       {:else if view === 'users'}

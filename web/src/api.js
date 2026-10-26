@@ -259,7 +259,12 @@ export const api = {
   moveBlockingGroup: (id, direction) => request('POST', `/policy/blocking/${id}/move`, { direction }),
   testAlert: (alerts) => request('POST', '/alerts/test', { alerts }),
   rpzStatus: () => request('GET', '/rpz'),
+  dhcp: () => request('GET', '/dhcp'),
+  deleteDhcpLease: (address) => request('DELETE', `/dhcp/leases/${encodeURIComponent(address)}`),
   blockableServices: () => request('GET', '/policy/services'),
+  report: (hours, client) =>
+    request('GET', `/reports?hours=${hours}${client ? `&client=${encodeURIComponent(client)}` : ''}`),
+  sendReport: (reports) => request('POST', '/reports/send', { reports }),
   rpzRefresh: () => request('POST', '/rpz'),
   rpzTest: (client, domain) => request('POST', '/rpz/test', { client, domain }),
   testBlocking: (client, domain, listener) =>

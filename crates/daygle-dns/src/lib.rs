@@ -467,6 +467,10 @@ pub async fn bind_with(
     let block_page =
         block_page::BlockPageServer::new(block_log.clone(), logs.clone(), shutdown.clone());
     block_page.apply(&config.block_page);
+    // DHCP (DNS -> DHCP): leases come from the zone database.
+    let dhcp = daygle_dns_dhcp::DhcpService::new(catalog.clone(), logs.clone());
+    dhcp.start(shutdown.clone());
+    dhcp.apply(&config.dhcp);
 
     // Recursive.
     let resolver = if config.recursive.enabled {
@@ -608,6 +612,7 @@ pub async fn bind_with(
         rpz: Some(rpz_manager.clone()),
         block_log: block_log.clone(),
         block_page: Some(block_page.clone()),
+        dhcp: Some(dhcp.clone()),
         rrl: Arc::new(daygle_dns_core::rrl::ResponseRateLimiter::new(
             &config.rrl,
             config
@@ -734,6 +739,9 @@ pub async fn bind_with(
                 if let Some(rpz) = &shared.rpz {
                     rpz.set_zones(&config.rpz);
                 }
+                if let Some(dhcp) = &shared.dhcp {
+                    dhcp.apply(&config.dhcp);
+                }
                 if let Some(page) = &shared.block_page {
                     page.apply(&config.block_page);
                 }
@@ -744,7 +752,13 @@ pub async fn bind_with(
         ai: ai_engine.clone(),
         acme: Arc::new(daygle_dns_api::acme::Acme::default()),
         rpz: Some(rpz_manager.clone()),
+        dhcp: Some(dhcp.clone()),
     };
+    // Scheduled reports (Settings -> Alerts).
+    tokio::spawn(daygle_dns_api::reports::run_reports(
+        app_state.clone(),
+        shutdown.clone(),
+    ));
     // Issue and renew ACME (Let's Encrypt) certificates in the background.
     tokio::spawn(daygle_dns_api::acme::run_renewals(
         app_state.clone(),

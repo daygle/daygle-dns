@@ -1395,8 +1395,12 @@ Triggers (owner names, relative to the zone): a domain or `*.domain`
 (`32.7.1.168.192.rpz-client-ip` is `192.168.1.7/32`; IPv6 words are reversed
 too, `zz` standing for `::`); and `prefix.reversed-address.rpz-ip` for an
 address in the answer. A domain trigger also matches a name in the answer's
-CNAME chain. NSDNAME and NSIP triggers are not supported (they are counted as
-`unsupported` and skipped).
+CNAME chain. `name.rpz-nsdname` (or `*.name.rpz-nsdname`) matches a name
+server of the answer's domain by name, and `prefix.reversed-address.rpz-nsip`
+by address: the name servers are those of the closest enclosing name with NS
+records (below the top-level domain), looked up through the resolver (and
+their addresses, for NSIP) only when some zone has such triggers. Triggers
+of an unknown kind are counted as `unsupported` and skipped.
 
 Actions: `CNAME .` is NXDOMAIN, `CNAME *.` NODATA, `CNAME rpz-passthru.`
 exempts the query from the rest of RPZ (as does a CNAME to the trigger
@@ -1408,9 +1412,10 @@ garden returns its address; a target `*.garden.example.` becomes the query
 name under the garden), else NODATA.
 
 Zones are checked in order and the first that matches decides. Within a
-zone, client-IP triggers come before domain triggers, an exact domain
-before a wildcard, and the longest wildcard or address prefix wins. Answer
-triggers (CNAME targets and addresses) are checked on recursive answers.
+zone, triggers are checked in the standard order (client IP, domain, answer
+IP, NSDNAME, NSIP), an exact domain before a wildcard, and the longest
+wildcard or address prefix wins. Answer triggers (CNAME targets, answer
+addresses, name servers) are checked on recursive answers.
 RPZ applies to what the blocklists and filtering groups let through, and an
 allowlisted name is exempt. A zone that cannot be loaded keeps its last
 loaded rules; failures raise a `blocklist_failure` (URL) or
@@ -1418,7 +1423,7 @@ loaded rules; failures raise a `blocklist_failure` (URL) or
 
 `GET /api/rpz` returns `{"zones": [...]}`, each with `name`, `enabled`,
 `source`, `policy`, `loaded`, `rules` (`qname`, `wildcard`, `client_ip`,
-`response_ip`, `unsupported` counts), `serial`, `last_loaded`, `last_checked`
+`response_ip`, `nsdname`, `nsip`, `unsupported` counts), `serial`, `last_loaded`, `last_checked`
 (RFC 3339), `last_error` and `hits` (matches since start, those of a
 `disabled` zone included). `POST /api/rpz` checks every URL and transfer
 zone for changes now (`202`). `POST /api/rpz/test` with `{"client",
@@ -1522,6 +1527,90 @@ away. `POST /api/alerts/test` sends a test alert (`kind` `test`) with the
 saved settings, or with `{"alerts": {...}}` from the body (unsaved form
 values), whether or not alerts are enabled. It answers `{"sent": true}`, `400`
 for invalid settings, or `502` naming each destination that failed.
+
+### Reports
+
+```
+GET    /api/reports?hours=24[&client=192.168.1.7][&top=20]
+POST   /api/reports/send
+```
+
+`GET /api/reports` summarizes the query log (the database one; see
+`logging.query_db_enabled`, also returned as `query_log_enabled`) over the
+last `hours` (default 24, at most 90 days), for every client or only
+`client`: `{"hours", "query_log_enabled", "report": {"since", "queries",
+"blocked", "clients_seen", "clients": [{"client", "queries", "blocked",
+"last_seen"}], "top_domains": [{"name", "count"}], "top_blocked": [...]}}`,
+the lists cut to `top` entries (default 20, at most 100), busiest first.
+
+The `reports` settings group (Settings → Alerts, replaced as a whole by
+`PUT /api/config` with `{"reports": {...}}`) sends that summary as plain
+text on a schedule, to the alert destinations (`alerts.webhook_url` and/or
+email; alerts themselves need not be enabled), as an alert of `kind`
+`report`:
+
+| Field | Default | Meaning |
+|---|---|---|
+| `enabled` | `false` | Requires an alert destination (`400` otherwise). |
+| `frequency` | `weekly` | `daily` (covers the last 24 hours) or `weekly` (the last 7 days). |
+| `weekday` | `mon` | `weekly`: the day it goes out. |
+| `hour` | `8` | The hour it goes out (0-23), in `display.time_zone`. |
+| `top` | `10` | Entries per list (1-50). |
+
+One report goes out per period, also across restarts. `POST
+/api/reports/send` sends one now, with the saved settings or `{"reports":
+{...}}` from the body: `{"sent": true}`, `400` for invalid settings, or
+`502` naming what failed (including no destination).
+
+### DHCP
+
+```
+GET    /api/dhcp
+DELETE /api/dhcp/leases/{address}
+```
+
+`GET /api/dhcp` returns `{"status": {"supported", "v4", "v6",
+"server_duid"}, "interfaces": [{"name", "index", "addresses"}], "leases":
+[...]}`. `v4` and `v6` say `Off`, `Listening on UDP port 67` (`547`), or
+why the listener could not start; `supported` is false off Linux. Each
+lease is `{"address", "scope", "client_id", "hw_address", "hostname",
+"state", "expires", "dns_name", "dns_records", "updated_at"}`: `state` is
+`offered`, `bound`, `released` or `declined` (the address is in use by
+another device and is skipped for an hour), `expires` is UNIX seconds,
+`hw_address` is the MAC address (IPv4) or the DUID (IPv6), and
+`dns_records` the ids of the zone records registered for it. `DELETE`
+forgets a lease and removes its records (`204`, `404` when there is none).
+
+The `dhcp` settings group (DHCP → Settings and the scope tabs, replaced as
+a whole by `PUT /api/config` with `{"dhcp": {...}}`, `400` naming the
+problem):
+
+| Field | Default | Meaning |
+|---|---|---|
+| `enabled` | `false` | Run the server (UDP 67 and 547; needs root or `CAP_NET_BIND_SERVICE`). |
+| `dns_zone` | `""` | Hosted zone that bound leases with a host name are registered in (A/AAAA, plus a PTR in the most specific hosted reverse zone). A name with records of its own is left alone. |
+| `scopes` | `[]` | IPv4 scopes, below. |
+| `scopes_v6` | `[]` | IPv6 scopes, below. |
+
+An IPv4 scope is `{"name", "enabled", "interface", "subnet", "range_start",
+"range_end", "router", "dns_servers", "domain_name", "ntp_servers",
+"lease_secs", "reservations", "options"}`. It serves `interface`, or when
+that is empty the interface with an address in `subnet`, and requests
+from a DHCP relay whose address (`giaddr`) is in `subnet`. Empty
+`dns_servers` hands out this server's address on that network.
+`lease_secs` defaults to 86400. `reservations` are `{"client": MAC,
+"address", "hostname", "description"}`; `options` are extra DHCP options,
+`{"code": 1-254, "value"}` with the value as text or as hex starting
+`0x`. Subnets may not overlap.
+
+An IPv6 scope is `{"name", "enabled", "interface", "prefix",
+"range_start", "range_end", "dns_servers", "domain_search",
+"preferred_secs", "valid_secs", "reservations"}`, with reservations keyed
+by DUID (hex). With no range it is stateless: it answers
+Information-request with the DNS servers and search list only. Routers
+keep sending the router advertisements; their managed (M) and other (O)
+flags decide whether devices ask. Rapid Commit is supported; relayed
+DHCPv6 and prefix delegation are not.
 
 ### Backup and restore
 

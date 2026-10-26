@@ -62,7 +62,7 @@
   function ruleCount(s) {
     if (!s?.rules) return 0;
     const r = s.rules;
-    return r.qname + r.wildcard + r.client_ip + r.response_ip;
+    return r.qname + r.wildcard + r.client_ip + r.response_ip + (r.nsdname || 0) + (r.nsip || 0);
   }
 
   async function saveAll(next, message) {
@@ -225,7 +225,7 @@
                 </td>
                 <td class="muted">{sourceLabel(z)}</td>
                 <td class="muted">{policyLabel(z.policy || 'given')}</td>
-                <td class="num" title={s?.rules ? `${s.rules.qname} names, ${s.rules.wildcard} wildcards, ${s.rules.client_ip} client IPs, ${s.rules.response_ip} answer IPs${s.rules.unsupported ? `, ${s.rules.unsupported} unsupported (skipped)` : ''}` : ''}>
+                <td class="num" title={s?.rules ? `${s.rules.qname} names, ${s.rules.wildcard} wildcards, ${s.rules.client_ip} client IPs, ${s.rules.response_ip} answer IPs, ${s.rules.nsdname || 0} name server names, ${s.rules.nsip || 0} name server IPs${s.rules.unsupported ? `, ${s.rules.unsupported} unsupported (skipped)` : ''}` : ''}>
                   {s?.loaded ? ruleCount(s).toLocaleString() : '-'}
                 </td>
                 <td class="muted nowrap">
@@ -264,7 +264,8 @@
     <h3 style="margin: 0 0 10px">Test a Query</h3>
     <p class="muted help" style="margin: 0 0 10px">
       Check which zones match a domain asked by a given client (client-IP and
-      domain rules; rules on answer addresses need the real answer).
+      domain rules; rules on answer addresses and name servers need the real
+      answer).
     </p>
     <form class="row" style="flex-wrap: wrap; gap: 8px" onsubmit={(e) => { e.preventDefault(); runTest(); }}>
       <input style="flex: 1; min-width: 160px" bind:value={testClient} placeholder="Client IP, e.g. 192.168.1.50" />
@@ -321,8 +322,11 @@
           is a walled garden). Triggers: a domain or <code>*.domain</code>; a
           client address as <code>prefix.reversed-address.rpz-client-ip</code>
           (<code>32.7.1.168.192</code> is 192.168.1.7); an answer address as
-          <code>prefix.reversed-address.rpz-ip</code>. IPv6 words are reversed
-          too, with <code>zz</code> for <code>::</code>.
+          <code>prefix.reversed-address.rpz-ip</code>; a name server of the
+          answer's domain as <code>ns.example.rpz-nsdname</code> (or
+          <code>*.example.rpz-nsdname</code>) or by address as
+          <code>prefix.reversed-address.rpz-nsip</code>. IPv6 words are
+          reversed too, with <code>zz</code> for <code>::</code>.
         </p>
       {:else if edit.source === 'url'}
         <div class="section-title">Source</div>

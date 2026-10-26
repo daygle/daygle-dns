@@ -11,6 +11,7 @@ pub mod auth;
 pub mod block_log;
 pub mod blocking;
 pub mod config;
+pub mod dhcp;
 pub mod error;
 pub mod local_root;
 pub mod logs;

@@ -47,6 +47,8 @@ pub struct Shared {
     pub block_log: Arc<daygle_dns_core::block_log::BlockLog>,
     /// The block page's web server; `None` in tests.
     pub block_page: Option<Arc<crate::block_page::BlockPageServer>>,
+    /// The DHCP server; `None` in tests.
+    pub dhcp: Option<Arc<daygle_dns_dhcp::DhcpService>>,
     /// Response policy zones; `None` in tests.
     pub rpz: Option<Arc<daygle_dns_authoritative::rpz::RpzManager>>,
     /// Response rate limiting (`[rrl]`), shared by every listener.
@@ -205,6 +207,12 @@ pub fn apply_config(shared: &Shared, new: Arc<DaygleConfig>) -> bool {
     if old.block_page != new.block_page {
         if let Some(page) = &shared.block_page {
             page.apply(&new.block_page);
+        }
+    }
+    if old.dhcp != new.dhcp {
+        if let Some(dhcp) = &shared.dhcp {
+            dhcp.apply(&new.dhcp);
+            info!("DHCP settings reloaded");
         }
     }
     if old.rpz != new.rpz {
@@ -430,6 +438,7 @@ mod tests {
             rpz: None,
             block_log: Arc::default(),
             block_page: None,
+            dhcp: None,
             metrics: Arc::new(Metrics::default()),
             logs: Arc::new(LogStore::new(16)),
             session: Arc::new(crate::tls_diag::SessionLog::new(Arc::new(LogStore::new(
