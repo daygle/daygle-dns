@@ -384,7 +384,6 @@
 {/if}
 
 <style>
-  .help { max-width: 90ch; }
   textarea { width: 100%; }
   .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
   label { display: flex; flex-direction: column; gap: 4px; font-size: 0.85rem; color: var(--muted); }

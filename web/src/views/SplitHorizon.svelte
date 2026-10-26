@@ -346,7 +346,6 @@
     font-size: 0.85rem;
     color: var(--muted);
   }
-  .help { max-width: 90ch; }
   .answers { display: flex; flex-direction: column; gap: 4px; }
   .checkbox { flex-direction: row; align-items: center; gap: 8px; margin-top: 12px; }
   .checkbox input { width: auto; }
