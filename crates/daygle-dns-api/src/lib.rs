@@ -24,6 +24,8 @@
 //! | `DELETE` | `/api/zones/:id/records/:rid`     | delete a record |
 //! | `POST`   | `/api/auth/password`              | signed-in user rotates their own password |
 //! | `PUT`    | `/api/auth/preferences`           | signed-in user sets their own date/time display |
+//! | `GET`    | `/api/auth/columns`               | signed-in user's hidden table columns |
+//! | `PUT`    | `/api/auth/columns`               | signed-in user hides columns of a table |
 //! | `GET`    | `/api/users`                      | list console accounts (hashes redacted) |
 //! | `POST`   | `/api/users`                      | create a console account |
 //! | `PATCH`  | `/api/users/:username`            | reset password / change role / enable-disable |
@@ -462,6 +464,10 @@ pub fn router(state: AppState) -> Router {
         .route("/auth/logout", post(handlers::auth_logout))
         .route("/auth/me", get(handlers::auth_me))
         .route("/auth/preferences", put(handlers::auth_set_preferences))
+        .route(
+            "/auth/columns",
+            get(handlers::auth_columns).put(handlers::auth_set_columns),
+        )
         .route("/auth/password", post(handlers::auth_change_password))
         .route(
             "/auth/tokens",
@@ -810,11 +816,14 @@ async fn require_auth(
                 );
             // The self-service password change and two-factor settings are
             // mutations on the caller's own credentials (the handlers
-            // re-verify the password), and display preferences only change
-            // the caller's own view, so read-only accounts may use them.
+            // re-verify the password), and display preferences and hidden
+            // columns only change the caller's own view, so read-only
+            // accounts may use them.
             let own_path = path.strip_prefix("/api").unwrap_or(path);
-            let is_own_account_change = matches!(own_path, "/auth/password" | "/auth/preferences")
-                || own_path.starts_with("/auth/two-factor")
+            let is_own_account_change = matches!(
+                own_path,
+                "/auth/password" | "/auth/preferences" | "/auth/columns"
+            ) || own_path.starts_with("/auth/two-factor")
                 || own_path.starts_with("/auth/tokens");
             if mutating
                 && session.role == daygle_dns_core::config::Role::Viewer

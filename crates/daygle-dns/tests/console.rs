@@ -2147,3 +2147,60 @@ async fn new_zones_default_to_this_server_and_the_first_admin() {
 
     shutdown(server).await;
 }
+
+/// Hidden table columns are kept per account, and read-only accounts may
+/// keep their own.
+#[tokio::test]
+async fn hidden_columns_are_kept_per_account() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = spawn_with_roles(&dir).await;
+    let client = reqwest::Client::new();
+    let (viewer, _) = login(server.api_addr, "auditor", "watch").await;
+    let (admin, _) = login(server.api_addr, "admin", "secret").await;
+    let put = |token: &str, body: serde_json::Value| {
+        client
+            .put(api_url(server.api_addr, "/api/auth/columns"))
+            .bearer_auth(token)
+            .json(&body)
+            .send()
+    };
+    let get = |token: &str| {
+        client
+            .get(api_url(server.api_addr, "/api/auth/columns"))
+            .bearer_auth(token)
+            .send()
+    };
+
+    let resp = put(
+        &viewer,
+        json!({ "table": "query-log", "hidden": ["took", "protocol", "took"] }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = get(&viewer).await.unwrap().json().await.unwrap();
+    assert_eq!(body["columns"]["query-log"], json!(["protocol", "took"]));
+    // Each account has its own.
+    let body: serde_json::Value = get(&admin).await.unwrap().json().await.unwrap();
+    assert_eq!(body["columns"], json!({}));
+
+    // Showing every column again forgets the table.
+    put(&viewer, json!({ "table": "query-log", "hidden": [] }))
+        .await
+        .unwrap();
+    let body: serde_json::Value = get(&viewer).await.unwrap().json().await.unwrap();
+    assert_eq!(body["columns"], json!({}));
+
+    // Bad names are refused, and signing in is required.
+    let resp = put(&admin, json!({ "table": "Query Log", "hidden": [] }))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+    let resp = client
+        .get(api_url(server.api_addr, "/api/auth/columns"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 401);
+    shutdown(server).await;
+}

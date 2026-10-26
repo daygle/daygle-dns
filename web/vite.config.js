@@ -7,6 +7,10 @@ export default defineConfig({
   build: {
     outDir: 'dist',
     emptyOutDir: true,
+    // The console is one bundle embedded in the server binary and loaded
+    // once, usually over the local network: splitting it would only add
+    // requests, so a bundle past Vite's 500 kB default is expected.
+    chunkSizeWarningLimit: 1024,
   },
   server: {
     proxy: {

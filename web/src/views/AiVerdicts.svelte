@@ -2,6 +2,19 @@
   import { api, formatApiError, getStoredUser } from '../api.js';
   import { formatDate, formatDateTime } from '../datetime.svelte.js';
   import { backendLabel, percent, STATUS_LABELS, titleCase } from '../aiLabels.js';
+  import ColumnPicker from '../ColumnPicker.svelte';
+  import { isHidden } from '../columns.svelte.js';
+
+  const COLUMNS = [
+    { key: 'domain', label: 'Domain', locked: true },
+    { key: 'category', label: 'Category' },
+    { key: 'status', label: 'Status' },
+    { key: 'confidence', label: 'Confidence' },
+    { key: 'seen', label: 'Seen' },
+    { key: 'evidence', label: 'Evidence' },
+    { key: 're-check', label: 'Re-Check' },
+  ];
+  const show = (key) => !isHidden('ai-verdicts', key);
 
   const PER_PAGE = 50;
   const STATUS_FILTERS = [
@@ -143,6 +156,7 @@
           {/each}
         </select>
         <button class="secondary" onclick={load}>Reload</button>
+        <ColumnPicker table="ai-verdicts" columns={COLUMNS} />
       </div>
     </div>
     <div class="table-wrap">
@@ -150,12 +164,12 @@
       <thead>
         <tr>
           <th>Domain</th>
-          <th>Category</th>
-          <th>Status</th>
-          <th class="num">Confidence</th>
-          <th class="num" title="In how many scans the domain showed up in your DNS traffic">Seen</th>
-          <th>Evidence</th>
-          <th title="When the verdict expires: it is checked again if the domain is still being queried, and dropped otherwise">Re-Check</th>
+          {#if show('category')}<th>Category</th>{/if}
+          {#if show('status')}<th>Status</th>{/if}
+          {#if show('confidence')}<th class="num">Confidence</th>{/if}
+          {#if show('seen')}<th class="num" title="In how many scans the domain showed up in your DNS traffic">Seen</th>{/if}
+          {#if show('evidence')}<th>Evidence</th>{/if}
+          {#if show('re-check')}<th title="When the verdict expires: it is checked again if the domain is still being queried, and dropped otherwise">Re-Check</th>{/if}
           {#if isAdmin}<th class="num">Actions</th>{/if}
         </tr>
       </thead>
@@ -165,11 +179,14 @@
             <td>
               <code>{r.domain}</code>{#if r.overridden}<span class="pill ok tag" title="Never auto-blocked by the AI">Exempt</span>{/if}
             </td>
+            {#if show('category')}
             <td>
               {#if r.category}
                 {titleCase(r.category)} {#if r.severity === 'threat'}<span class="pill err">Threat</span>{:else if r.severity === 'disputed'}<span class="pill" title="The verifier disagreed: this verdict never auto-blocks">Disputed</span>{/if}
               {:else}<span class="muted">-</span>{/if}
             </td>
+            {/if}
+            {#if show('status')}
             <td>
               <span
                 class="pill"
@@ -177,12 +194,15 @@
                 title={r.status === 'pending' ? 'Classified on the next scan' : `${stamp(r.classified_at, formatDateTime)} by ${backendLabel(r.backend)}`}
               >{STATUS_LABELS[r.status] || titleCase(r.status)}</span>
             </td>
-            <td class="num">
-              {r.status === 'pending' || !r.category ? '-' : percent(r.confidence)}
-            </td>
-            <td class="num">{fmt(r.observations)}</td>
-            <td class="muted evidence" title={r.evidence}>{r.evidence || '-'}</td>
-            <td class="muted nowrap">{stamp(r.expires_at, formatDate)}</td>
+            {/if}
+            {#if show('confidence')}
+              <td class="num">
+                {r.status === 'pending' || !r.category ? '-' : percent(r.confidence)}
+              </td>
+            {/if}
+            {#if show('seen')}<td class="num">{fmt(r.observations)}</td>{/if}
+            {#if show('evidence')}<td class="muted evidence" title={r.evidence}>{r.evidence || '-'}</td>{/if}
+            {#if show('re-check')}<td class="muted nowrap">{stamp(r.expires_at, formatDate)}</td>{/if}
             {#if isAdmin}
               <td class="num">
                 {#if r.overridden}

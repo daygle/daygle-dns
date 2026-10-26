@@ -1,6 +1,19 @@
 <script>
   import { api, formatApiError } from '../api.js';
   import { formatDateTime } from '../datetime.svelte.js';
+  import ColumnPicker from '../ColumnPicker.svelte';
+  import { isHidden } from '../columns.svelte.js';
+
+  const COLUMNS = [
+    { key: 'source', label: 'Source', locked: true },
+    { key: 'format', label: 'Format' },
+    { key: 'applies-to', label: 'Applies To' },
+    { key: 'refresh', label: 'Refreshes Every' },
+    { key: 'domains', label: 'Domains' },
+    { key: 'last-updated', label: 'Last Updated' },
+    { key: 'status', label: 'Status' },
+  ];
+  const show = (key) => !isHidden('blocklists', key);
 
   let sources = $state([]);
   let total = $state(0);
@@ -321,6 +334,7 @@
         <button class="secondary" onclick={refreshNow} disabled={refreshing}>
           {refreshing ? 'Refreshing...' : 'Refresh All'}
         </button>
+        <ColumnPicker table="blocklists" columns={COLUMNS} />
         <button onclick={openAdd}>Add Blocklist</button>
       </div>
     </div>
@@ -329,12 +343,12 @@
       <thead>
         <tr>
           <th>Source</th>
-          <th>Format</th>
-          <th>Applies To</th>
-          <th>Refreshes Every</th>
-          <th class="num">Domains</th>
-          <th>Last Updated</th>
-          <th>Status</th>
+          {#if show('format')}<th>Format</th>{/if}
+          {#if show('applies-to')}<th>Applies To</th>{/if}
+          {#if show('refresh')}<th>Refreshes Every</th>{/if}
+          {#if show('domains')}<th class="num">Domains</th>{/if}
+          {#if show('last-updated')}<th>Last Updated</th>{/if}
+          {#if show('status')}<th>Status</th>{/if}
           <th class="num">Actions</th>
         </tr>
       </thead>
@@ -348,6 +362,7 @@
                 <div class="fetch-error">{s.last_error}</div>
               {/if}
             </td>
+            {#if show('format')}
             <td>
               {#if s.format === 'wildcard'}
                 <div class="pill-row">
@@ -358,12 +373,16 @@
                 <span class="pill">{FORMAT_NAMES[s.format] || s.format}</span>
               {/if}
             </td>
-            <td>{s.scope === 'groups' ? 'Filtering Groups' : s.scope === 'dot' ? 'DoT Only (legacy)' : 'Everyone'}</td>
-            <td class="muted">{interval(s.refresh_secs)}</td>
-            <td class="num">{fmt(s.domains)}</td>
-            <td class="muted" style="white-space: nowrap" title={ago(s.last_fetch)}>
-              {s.last_fetch_at ? formatDateTime(s.last_fetch_at) : 'Never'}
-            </td>
+            {/if}
+            {#if show('applies-to')}<td>{s.scope === 'groups' ? 'Filtering Groups' : s.scope === 'dot' ? 'DoT Only (legacy)' : 'Everyone'}</td>{/if}
+            {#if show('refresh')}<td class="muted">{interval(s.refresh_secs)}</td>{/if}
+            {#if show('domains')}<td class="num">{fmt(s.domains)}</td>{/if}
+            {#if show('last-updated')}
+              <td class="muted" style="white-space: nowrap" title={ago(s.last_fetch)}>
+                {s.last_fetch_at ? formatDateTime(s.last_fetch_at) : 'Never'}
+              </td>
+            {/if}
+            {#if show('status')}
             <td>
               {#if s.last_error}
                 <span class="pill err">Fetch Failed</span>
@@ -373,6 +392,7 @@
                 <span class="pill ok">OK</span>
               {/if}
             </td>
+            {/if}
             <td class="num">
               <div class="row" style="gap: 6px; justify-content: flex-end">
                 <button class="secondary" onclick={() => openEdit(s)}>Edit</button>

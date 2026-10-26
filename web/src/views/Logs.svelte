@@ -6,7 +6,37 @@
   import { icons } from '../icons.svelte.js';
   import { formatDateTime, displayZoneName, zonedInputToIso } from '../datetime.svelte.js';
   import ClientLabel from '../ClientLabel.svelte';
-  import { addressFor } from '../devices.svelte.js';
+  import { addressFor, deviceName, loadDeviceNames } from '../devices.svelte.js';
+  import ColumnPicker from '../ColumnPicker.svelte';
+  import { isHidden } from '../columns.svelte.js';
+
+  // The query log's columns (Columns menu); Domain is always shown.
+  const QUERY_COLUMNS = [
+    { key: 'time', label: 'Time' },
+    { key: 'device', label: 'Device' },
+    { key: 'ip', label: 'IP Address' },
+    { key: 'domain', label: 'Domain', locked: true },
+    { key: 'type', label: 'Type' },
+    { key: 'protocol', label: 'Protocol' },
+    { key: 'result', label: 'Result' },
+    { key: 'rcode', label: 'Response Code' },
+    { key: 'took', label: 'Took' },
+  ];
+  const showQ = (key) => !isHidden('query-log', key);
+
+  const AUDIT_COLUMNS = [
+    { key: 'time', label: 'Time' },
+    { key: 'user', label: 'User' },
+    { key: 'action', label: 'Action', locked: true },
+    { key: 'result', label: 'Result' },
+    { key: 'from', label: 'From' },
+  ];
+  const showA = (key) => !isHidden('audit-log', key);
+
+  // Device names for the Device column.
+  $effect(() => {
+    loadDeviceNames();
+  });
 
   // The searchable per-query history, the in-memory server log, and (for
   // admins) the audit log of changes. Query Log opens first: it is what the
@@ -322,32 +352,43 @@
         <input type="search" placeholder="User" bind:value={auditUser} style="width: 140px" />
         <input type="search" placeholder="Search Actions" bind:value={auditSearch} style="min-width: 200px" />
         <button type="submit" class="secondary">Search</button>
+        <ColumnPicker table="audit-log" columns={AUDIT_COLUMNS} />
       </div>
     </form>
     <div class="table-wrap" style="max-height: 70vh; overflow-y: auto">
       <table>
         <thead>
-          <tr><th title={`Shown in ${displayZoneName()}`}>Time</th><th>User</th><th>Action</th><th>Result</th><th>From</th></tr>
+          <tr>
+            {#if showA('time')}<th title={`Shown in ${displayZoneName()}`}>Time</th>{/if}
+            {#if showA('user')}<th>User</th>{/if}
+            <th>Action</th>
+            {#if showA('result')}<th>Result</th>{/if}
+            {#if showA('from')}<th>From</th>{/if}
+          </tr>
         </thead>
         <tbody>
           {#each audit as entry (entry.id)}
             <tr>
-              <td style="white-space: nowrap">{formatDateTime(new Date(entry.ts * 1000))}</td>
-              <td>
-                {entry.username || '-'}
-                <div class="muted small">{VIA[entry.via] || entry.via}</div>
-              </td>
+              {#if showA('time')}<td style="white-space: nowrap">{formatDateTime(new Date(entry.ts * 1000))}</td>{/if}
+              {#if showA('user')}
+                <td>
+                  {entry.username || '-'}
+                  <div class="muted small">{VIA[entry.via] || entry.via}</div>
+                </td>
+              {/if}
               <td>
                 {entry.action}
                 <div class="muted small"><code>{entry.method} {entry.path}</code></div>
               </td>
-              <td>
-                <span class="pill" class:ok={entry.status < 400} class:err={entry.status >= 400}>
-                  {entry.status < 400 ? 'Done' : entry.status === 401 ? 'Refused' : entry.status === 403 ? 'Not Allowed' : 'Failed'}
-                </span>
-                <div class="muted small">HTTP {entry.status}</div>
-              </td>
-              <td><ClientLabel address={entry.client} /></td>
+              {#if showA('result')}
+                <td>
+                  <span class="pill" class:ok={entry.status < 400} class:err={entry.status >= 400}>
+                    {entry.status < 400 ? 'Done' : entry.status === 401 ? 'Refused' : entry.status === 403 ? 'Not Allowed' : 'Failed'}
+                  </span>
+                  <div class="muted small">HTTP {entry.status}</div>
+                </td>
+              {/if}
+              {#if showA('from')}<td><ClientLabel address={entry.client} /></td>{/if}
             </tr>
           {/each}
         </tbody>
@@ -471,42 +512,55 @@
   <div class="card">
     <div class="spread" style="margin-bottom: 10px; gap: 10px; flex-wrap: wrap">
       <h3 style="margin: 0">{filtersActive ? 'Matching Queries' : 'Queries'} ({fmt(qTotal)})</h3>
-      <label class="per-page">Per Page
-        <select bind:value={perPage} onchange={apply}>
-          <option value={25}>25</option>
-          <option value={50}>50</option>
-          <option value={100}>100</option>
-          <option value={200}>200</option>
-        </select>
-      </label>
+      <div class="row" style="gap: 10px">
+        <ColumnPicker table="query-log" columns={QUERY_COLUMNS} />
+        <label class="per-page">Per Page
+          <select bind:value={perPage} onchange={apply}>
+            <option value={25}>25</option>
+            <option value={50}>50</option>
+            <option value={100}>100</option>
+            <option value={200}>200</option>
+          </select>
+        </label>
+      </div>
     </div>
     <div class="table-wrap">
     <table>
       <thead>
         <tr>
-          <th title={`Shown in ${displayZoneName()}`}>Time</th>
-          <th>Client</th>
+          {#if showQ('time')}<th title={`Shown in ${displayZoneName()}`}>Time</th>{/if}
+          {#if showQ('device')}<th>Device</th>{/if}
+          {#if showQ('ip')}<th>IP Address</th>{/if}
           <th>Domain</th>
-          <th>Type</th>
-          <th>Protocol</th>
-          <th>Result</th>
-          <th>Response Code</th>
-          <th class="num">Took</th>
+          {#if showQ('type')}<th>Type</th>{/if}
+          {#if showQ('protocol')}<th>Protocol</th>{/if}
+          {#if showQ('result')}<th>Result</th>{/if}
+          {#if showQ('rcode')}<th>Response Code</th>{/if}
+          {#if showQ('took')}<th class="num">Took</th>{/if}
         </tr>
       </thead>
       <tbody>
         {#each qEntries as entry (entry.id)}
           <tr>
-            <td style="white-space: nowrap">{formatDateTime(entry.ts)}</td>
-            <td><button type="button" class="link" onclick={() => filterBy('client', entry.client)} title="Show only this client"><ClientLabel address={entry.client} /></button></td>
+            {#if showQ('time')}<td style="white-space: nowrap">{formatDateTime(entry.ts)}</td>{/if}
+            {#if showQ('device')}
+              <td>
+                {#if deviceName(entry.client)}
+                  <button type="button" class="link" onclick={() => filterBy('client', entry.client)} title="Show only this device">{deviceName(entry.client)}</button>
+                {:else}<span class="muted">-</span>{/if}
+              </td>
+            {/if}
+            {#if showQ('ip')}<td><button type="button" class="link" onclick={() => filterBy('client', entry.client)} title="Show only this client"><code>{entry.client}</code></button></td>{/if}
             <td><button type="button" class="link" onclick={() => filterBy('qname', entry.qname)} title="Show only this domain"><code>{entry.qname}</code></button></td>
-            <td>{entry.qtype}</td>
-            <td title={PROTOCOLS.find(([v]) => v === entry.protocol)?.[1] || ''}>{PROTOCOL_SHORT[entry.protocol] || entry.protocol.toUpperCase()}</td>
-            <td><span class:pill={true} class:ok={outcomeClass(entry.outcome) === 'ok'} class:err={outcomeClass(entry.outcome) === 'err'} class:warn={outcomeClass(entry.outcome) === 'warn'}>
-              {outcomeLabel(entry.outcome)}
-            </span></td>
-            <td>{entry.rcode || '-'}</td>
-            <td class="num">{entry.elapsed_ms} ms</td>
+            {#if showQ('type')}<td>{entry.qtype}</td>{/if}
+            {#if showQ('protocol')}<td title={PROTOCOLS.find(([v]) => v === entry.protocol)?.[1] || ''}>{PROTOCOL_SHORT[entry.protocol] || entry.protocol.toUpperCase()}</td>{/if}
+            {#if showQ('result')}
+              <td><span class:pill={true} class:ok={outcomeClass(entry.outcome) === 'ok'} class:err={outcomeClass(entry.outcome) === 'err'} class:warn={outcomeClass(entry.outcome) === 'warn'}>
+                {outcomeLabel(entry.outcome)}
+              </span></td>
+            {/if}
+            {#if showQ('rcode')}<td>{entry.rcode || '-'}</td>{/if}
+            {#if showQ('took')}<td class="num">{entry.elapsed_ms} ms</td>{/if}
           </tr>
         {/each}
       </tbody>

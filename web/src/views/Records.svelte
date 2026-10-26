@@ -3,6 +3,19 @@
   import { formatDateTime } from '../datetime.svelte.js';
   import { duration } from '../aiLabels.js';
   import { defaultReverseZone, reverseRecordName } from '../reverseZone.js';
+  import ColumnPicker from '../ColumnPicker.svelte';
+  import { isHidden } from '../columns.svelte.js';
+
+  const COLUMNS = [
+    { key: 'name', label: 'Name', locked: true },
+    { key: 'type', label: 'Type' },
+    { key: 'value', label: 'Value' },
+    { key: 'ttl', label: 'TTL' },
+    { key: 'status', label: 'Status' },
+    { key: 'last-used', label: 'Last Used' },
+    { key: 'last-modified', label: 'Last Modified' },
+  ];
+  const show = (key) => !isHidden('records', key);
 
   // The zone to preselect, passed when coming from the Zones page.
   let { zoneId = null, onSelectZone = () => {} } = $props();
@@ -455,19 +468,32 @@
             {#each typesPresent as t (t)}<option value={t}>{t}</option>{/each}
           </select>
           {#if shown.length !== records.length}<span class="muted">Showing {shown.length} of {records.length}</span>{/if}
+          <span style="margin-left: auto"><ColumnPicker table="records" columns={COLUMNS} /></span>
         </div>
       {/if}
 
       <div class="table-wrap">
         <table>
-          <thead><tr><th>Name</th><th>Type</th><th>Value</th><th class="num">TTL</th><th>Status</th><th>Last Used</th><th>Last Modified</th><th class="num">Actions</th></tr></thead>
+          <thead>
+            <tr>
+              <th>Name</th>
+              {#if show('type')}<th>Type</th>{/if}
+              {#if show('value')}<th>Value</th>{/if}
+              {#if show('ttl')}<th class="num">TTL</th>{/if}
+              {#if show('status')}<th>Status</th>{/if}
+              {#if show('last-used')}<th>Last Used</th>{/if}
+              {#if show('last-modified')}<th>Last Modified</th>{/if}
+              <th class="num">Actions</th>
+            </tr>
+          </thead>
           <tbody>
             {#each shown as record (record.id)}
               <tr class:disabled={record.disabled}>
                 <td><code title={record.name}>{relativeName(record.name)}</code></td>
-                <td>{record.rtype}</td>
-                <td class="value"><code>{record.content}</code></td>
-                <td class="num" title={duration(record.ttl)}>{record.ttl}</td>
+                {#if show('type')}<td>{record.rtype}</td>{/if}
+                {#if show('value')}<td class="value"><code>{record.content}</code></td>{/if}
+                {#if show('ttl')}<td class="num" title={duration(record.ttl)}>{record.ttl}</td>{/if}
+                {#if show('status')}
                 <td>
                   <span class="pill" class:ok={!record.disabled} title={record.disabled ? 'Not served until enabled' : 'Record is active'}>{record.disabled ? 'Disabled' : 'Enabled'}</span>
                   {#if health[record.id]}
@@ -479,8 +505,9 @@
                     >{health[record.id].healthy ? 'Healthy' : 'Down'}{record.priority ? ` · Backup ${record.priority}` : ''}</span>
                   {/if}
                 </td>
-                <td class="muted" title={record.last_used_at || ''}>{record.last_used_at ? formatDateTime(record.last_used_at) : 'Never'}</td>
-                <td class="muted" title={record.last_modified_at || ''}>{record.last_modified_at ? formatDateTime(record.last_modified_at) : '-'}</td>
+                {/if}
+                {#if show('last-used')}<td class="muted" title={record.last_used_at || ''}>{record.last_used_at ? formatDateTime(record.last_used_at) : 'Never'}</td>{/if}
+                {#if show('last-modified')}<td class="muted" title={record.last_modified_at || ''}>{record.last_modified_at ? formatDateTime(record.last_modified_at) : '-'}</td>{/if}
                 <td class="num">
                   {#if selected.zone_type !== 'secondary'}
                     <div class="row" style="gap: 6px; justify-content: flex-end; flex-wrap: nowrap">

@@ -3,6 +3,18 @@
   import { icons } from '../icons.svelte.js';
   import { api, formatApiError, getStoredUser } from '../api.js';
   import { formatDateTime } from '../datetime.svelte.js';
+  import ColumnPicker from '../ColumnPicker.svelte';
+  import { isHidden } from '../columns.svelte.js';
+
+  const LEASE_COLUMNS = [
+    { key: 'address', label: 'Address', locked: true },
+    { key: 'name', label: 'Name' },
+    { key: 'device', label: 'Device' },
+    { key: 'scope', label: 'Scope' },
+    { key: 'state', label: 'State' },
+    { key: 'expires', label: 'Expires' },
+  ];
+  const showL = (key) => !isHidden('dhcp-leases', key);
 
   // Viewers are read-only (the server refuses their changes).
   const isAdmin = getStoredUser()?.role !== 'viewer';
@@ -314,7 +326,10 @@
     <div class="card">
       <div class="spread" style="margin-bottom: 10px; gap: 10px; flex-wrap: wrap">
         <h3 style="margin: 0">Leases ({leases.length})</h3>
-        <button class="secondary" onclick={loadStatus}>Reload</button>
+        <div class="row" style="gap: 8px">
+          <button class="secondary" onclick={loadStatus}>Reload</button>
+          <ColumnPicker table="dhcp-leases" columns={LEASE_COLUMNS} />
+        </div>
       </div>
       {#if leases.length === 0}
         <p class="muted">No leases yet.</p>
@@ -322,23 +337,35 @@
         <div class="table-wrap">
           <table>
             <thead>
-              <tr><th>Address</th><th>Name</th><th>Device</th><th>Scope</th><th>State</th><th>Expires</th>{#if isAdmin}<th class="num">Actions</th>{/if}</tr>
+              <tr>
+                <th>Address</th>
+                {#if showL('name')}<th>Name</th>{/if}
+                {#if showL('device')}<th>Device</th>{/if}
+                {#if showL('scope')}<th>Scope</th>{/if}
+                {#if showL('state')}<th>State</th>{/if}
+                {#if showL('expires')}<th>Expires</th>{/if}
+                {#if isAdmin}<th class="num">Actions</th>{/if}
+              </tr>
             </thead>
             <tbody>
               {#each leases as l (l.address)}
                 <tr class:disabled={l.state !== 'bound'}>
                   <td><code>{l.address}</code></td>
-                  <td>
-                    {l.hostname || '-'}
-                    {#if l.dns_name}<div class="muted small"><code>{l.dns_name}</code></div>{/if}
-                  </td>
-                  <td><code class="small" title={isV6(l) ? 'DUID' : 'MAC address'}>{l.hw_address || '-'}</code></td>
-                  <td class="muted">{l.scope}</td>
-                  <td>
-                    <span class="pill" class:ok={l.state === 'bound'}>{STATES[l.state] || l.state}</span>
-                    {#if reserved(l)}<span class="pill">Reserved</span>{/if}
-                  </td>
-                  <td class="muted nowrap">{expires(l)}</td>
+                  {#if showL('name')}
+                    <td>
+                      {l.hostname || '-'}
+                      {#if l.dns_name}<div class="muted small"><code>{l.dns_name}</code></div>{/if}
+                    </td>
+                  {/if}
+                  {#if showL('device')}<td><code class="small" title={isV6(l) ? 'DUID' : 'MAC address'}>{l.hw_address || '-'}</code></td>{/if}
+                  {#if showL('scope')}<td class="muted">{l.scope}</td>{/if}
+                  {#if showL('state')}
+                    <td>
+                      <span class="pill" class:ok={l.state === 'bound'}>{STATES[l.state] || l.state}</span>
+                      {#if reserved(l)}<span class="pill">Reserved</span>{/if}
+                    </td>
+                  {/if}
+                  {#if showL('expires')}<td class="muted nowrap">{expires(l)}</td>{/if}
                   {#if isAdmin}
                     <td class="num">
                       <div class="row" style="gap: 6px; justify-content: flex-end">
