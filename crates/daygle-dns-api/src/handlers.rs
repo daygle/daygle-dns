@@ -172,6 +172,11 @@ fn normalize_alerts(
 /// Stands for a stored secret in what the browser sees and sends back.
 const REDACTED: &str = "[redacted]";
 
+/// `GET /api/policy/services` - the services a filtering group can block.
+pub async fn blockable_services() -> Response {
+    Json(serde_json::json!({ "services": daygle_dns_policy::services::SERVICES })).into_response()
+}
+
 /// `GET /api/rpz` - each response policy zone's state.
 pub async fn rpz_status(State(state): State<AppState>) -> Response {
     let zones = state.rpz.as_ref().map(|m| m.status()).unwrap_or_default();
@@ -2545,6 +2550,20 @@ pub async fn upsert_blocking_group(
     if let Err(msg) = daygle_dns_core::schedule::validate(&input.schedule) {
         return error_response(StatusCode::BAD_REQUEST, format!("schedule: {msg}"));
     }
+    // Blocked services are stored by their canonical id, once each.
+    let mut services: Vec<String> = Vec::new();
+    for id in &input.blocked_services {
+        let Some(service) = daygle_dns_policy::services::find(id) else {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                format!("'{}' is not a known service", id.trim()),
+            );
+        };
+        if !services.iter().any(|s| s == service.id) {
+            services.push(service.id.to_string());
+        }
+    }
+    input.blocked_services = services;
     // Client networks are addresses or names of configured networks.
     let config = state.config.load_full();
     if let Some(entry) = input

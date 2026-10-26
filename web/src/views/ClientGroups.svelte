@@ -8,6 +8,9 @@
   let networks = $state([]);
   // Blocklists (Filtering -> Blocklists) set to apply to selected groups only.
   let groupLists = $state([]);
+  // Services a group can block with one tick, and their categories in order.
+  let services = $state([]);
+  const serviceCategories = $derived([...new Set(services.map((s) => s.category))]);
   let error = $state(null);
   let notice = $state(null);
   let saving = $state(false);
@@ -35,6 +38,7 @@
 
   async function load() {
     api.networks().then((data) => { networks = data.networks || []; }).catch(() => {});
+    api.blockableServices().then((data) => { services = data.services || []; }).catch(() => {});
     try {
       groups = await api.blockingGroups();
     } catch (e) {
@@ -84,6 +88,7 @@
           safe_search: !!group.safe_search,
           youtube_restricted: !!group.youtube_restricted,
           schedule: (group.schedule || []).map((w) => ({ ...w, days: [...(w.days || [])] })),
+          blocked_services: [...(group.blocked_services || [])],
         }
       : {
           id: null,
@@ -102,7 +107,18 @@
           safe_search: false,
           youtube_restricted: false,
           schedule: [],
+          blocked_services: [],
         };
+  }
+
+  function toggleService(id) {
+    edit.blocked_services = edit.blocked_services.includes(id)
+      ? edit.blocked_services.filter((s) => s !== id)
+      : [...edit.blocked_services, id];
+  }
+
+  function serviceNames(ids) {
+    return ids.map((id) => services.find((s) => s.id === id)?.name || id).join(', ');
   }
 
   function addWindow() {
@@ -157,6 +173,7 @@
       safe_search: edit.safe_search,
       youtube_restricted: edit.youtube_restricted,
       schedule: edit.schedule,
+      blocked_services: edit.blocked_services,
     };
     saving = true;
     error = null;
@@ -266,6 +283,9 @@
                 {count(g.block.length + g.block_regex.length, 'Block Rule')}
                 {#if g.blocklists?.length}
                   <div title={g.blocklists.join(', ')}>{count(g.blocklists.length, 'Blocklist')}</div>
+                {/if}
+                {#if g.blocked_services?.length}
+                  <div title={serviceNames(g.blocked_services)}>{count(g.blocked_services.length, 'Blocked Service')}</div>
                 {/if}
               </td>
               <td class="muted">{responseLabel(g.response)}</td>
@@ -406,6 +426,25 @@
         Time Defaults.
       </p>
 
+      <div class="section-title">Blocked Services</div>
+      {#each serviceCategories as category (category)}
+        <div class="service-category">{category}</div>
+        <div class="services">
+          {#each services.filter((s) => s.category === category) as s (s.id)}
+            <label class="service" class:on={edit.blocked_services.includes(s.id)} title={s.domains.join(', ')}>
+              <input type="checkbox" checked={edit.blocked_services.includes(s.id)} onchange={() => toggleService(s.id)} />{s.name}
+            </label>
+          {/each}
+        </div>
+      {/each}
+      <p class="muted help">
+        Blocks every domain the service uses, and their subdomains (hover a
+        service to see them). Combine with a schedule to block, for example,
+        games and social media at bedtime only. The Allow list below still
+        wins. Apps change their domains from time to time, so a blocked
+        service may occasionally work partly until the list is updated.
+      </p>
+
       <div class="section-title">Blocklists</div>
       {#if groupLists.length}
         <div class="lists">
@@ -507,6 +546,12 @@
   .day input { position: absolute; opacity: 0; width: 1px; height: 1px; }
   .day:focus-within { outline: 2px solid var(--accent); outline-offset: 1px; }
   .time { width: 120px; }
+  .service-category { font-size: 0.78rem; color: var(--muted); margin: 8px 0 4px; }
+  .services { display: flex; flex-wrap: wrap; gap: 6px; }
+  .service { flex-direction: row; align-items: center; gap: 0; padding: 5px 10px; border: 1px solid var(--border); border-radius: 999px; cursor: pointer; color: var(--text); font-size: 0.82rem; }
+  .service.on { border-color: var(--danger); color: var(--danger); }
+  .service input { position: absolute; opacity: 0; width: 1px; height: 1px; }
+  .service:focus-within { outline: 2px solid var(--accent); outline-offset: 1px; }
   @media (max-width: 640px) {
     .grid2 { grid-template-columns: 1fr; }
   }

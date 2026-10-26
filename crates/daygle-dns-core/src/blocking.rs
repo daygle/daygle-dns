@@ -72,6 +72,9 @@ pub struct BlockingGroup {
     /// group is skipped as if it did not exist.
     #[serde(default)]
     pub schedule: Vec<ScheduleWindow>,
+    /// Services (by id, e.g. `tiktok`) whose domains the group blocks.
+    #[serde(default)]
+    pub blocked_services: Vec<String>,
     /// Ordering position (lower groups are evaluated first).
     pub position: i64,
     /// When the group was last created or edited through the console or API,
@@ -118,6 +121,8 @@ pub struct BlockingGroupInput {
     pub youtube_restricted: bool,
     #[serde(default)]
     pub schedule: Vec<ScheduleWindow>,
+    #[serde(default)]
+    pub blocked_services: Vec<String>,
 }
 
 impl BlockingGroup {
@@ -138,6 +143,7 @@ impl BlockingGroup {
             safe_search: self.safe_search,
             youtube_restricted: self.youtube_restricted,
             schedule: self.schedule.clone(),
+            blocked_services: self.blocked_services.clone(),
         }
     }
 }

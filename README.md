@@ -36,6 +36,8 @@ Daygle DNS combines, in a single process:
   in Clients -> Networks and pick it wherever a setting takes client
   networks; changing it changes them all, renaming it keeps them pointing at
   it, and a network in use cannot be deleted.
+- **Blocked services**: block TikTok, YouTube, Roblox, Discord, ChatGPT and
+  30-odd other apps for a filtering group with one tick each.
 - **Per-client rules** on the console's Clients page: **filtering groups**
   (extra allow/block rules, blocklists and AI auto-blocking for a set of
   clients) and **resolution policies** (forward some clients to their own

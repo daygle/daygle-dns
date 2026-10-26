@@ -225,3 +225,55 @@ async fn group_schedules_are_validated_and_applied() {
 
     shutdown(server).await;
 }
+
+/// A group blocks a whole service (its domains and their subdomains) with
+/// one tick; an unknown service is refused.
+#[tokio::test]
+async fn groups_block_services() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = search_server(&dir).await;
+    let udp = server.udp_addr.unwrap();
+    let base = format!("http://{}/api", server.api_addr);
+    let client = reqwest::Client::new();
+
+    let services: serde_json::Value = client
+        .get(format!("{base}/policy/services"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(services["services"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|s| s["id"] == "roblox"));
+
+    let resp = client
+        .post(format!("{base}/policy/blocking"))
+        .json(&serde_json::json!({ "name": "kids", "blocked_services": ["nope"] }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::BAD_REQUEST);
+    let resp = client
+        .post(format!("{base}/policy/blocking"))
+        .json(&serde_json::json!({ "name": "kids", "blocked_services": ["Roblox"] }))
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_success(), "{}", resp.text().await.unwrap());
+    let group: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(group["blocked_services"], serde_json::json!(["roblox"]));
+
+    for name in ["roblox.com.", "setup.rbxcdn.com."] {
+        let reply = udp_query(udp, name, RecordType::A).await;
+        assert_eq!(reply.response_code, ResponseCode::NXDomain, "{name}");
+    }
+    // Other names are untouched.
+    let reply = udp_query(udp, "www.google.com.", RecordType::A).await;
+    assert_eq!(first_answer(&reply).as_deref(), Some("192.0.2.80"));
+
+    shutdown(server).await;
+}

@@ -1311,6 +1311,11 @@ and YouTube Restricted Mode on for the group's clients, by the same
 first-group rule; the global `policy.safe_search` and
 `policy.youtube_restricted` switches apply to every client whatever the
 groups say.
+`blocked_services` lists services (by id, e.g. `["tiktok", "roblox"]`) the
+group blocks: every domain the service uses, and its subdomains (`400` for
+an unknown id; ids are stored in their canonical form). `GET
+/api/policy/services` returns the catalog: `{"services": [{"id", "name",
+"category", "domains"}]}`. The group's `allow` list still wins.
 `schedule` limits when the group applies: a list of
 `{"days": ["mon", "fri"], "start": "21:00", "end": "07:00"}` windows
 (`days` from `mon`..`sun`, full names accepted, empty for every day; times

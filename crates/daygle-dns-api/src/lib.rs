@@ -578,6 +578,7 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/policy/blocking/test", post(handlers::test_blocking))
         .route("/alerts/test", post(handlers::test_alert))
+        .route("/policy/services", get(handlers::blockable_services))
         .route(
             "/rpz",
             get(handlers::rpz_status).post(handlers::rpz_refresh),
