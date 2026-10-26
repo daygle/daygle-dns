@@ -300,7 +300,7 @@
 {:else if !configured}
   <div class="card">
     <h3 style="margin: 0 0 10px">No Blocklists Yet</h3>
-    <p class="muted" style="max-width: 70ch">
+    <p class="muted">
       Add a published blocklist (ads, trackers, malware...) by its URL. Leave
       the format on <strong>Auto-Detect</strong> and the server works it out
       from the list itself before saving.

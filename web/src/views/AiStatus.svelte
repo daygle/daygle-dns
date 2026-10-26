@@ -259,13 +259,13 @@
   <div class="card">
     {#if enabledInSettings}
       <h3 style="margin: 0 0 10px">AI Scanner Starts After a Restart</h3>
-      <p class="muted" style="max-width: 70ch; margin: 0">
+      <p class="muted" style="margin: 0">
         The scanner is turned on in Settings → AI Scanner but was off when the
         service started. Restart the service to start it.
       </p>
     {:else}
       <h3 style="margin: 0 0 10px">AI Scanner Is Off</h3>
-      <p class="muted" style="max-width: 70ch; margin: 0">
+      <p class="muted" style="margin: 0">
         No domains are being classified. Turn the scanner on in Settings → AI
         Scanner; it starts after the next restart.
       </p>

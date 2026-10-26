@@ -337,7 +337,7 @@
       <p class="muted small" style="margin: 8px 0 0">{checkNote}</p>
     {/if}
     {#if info.checks_enabled && info.check_interval_secs}
-      <p class="muted small" style="margin: 10px 0 0; max-width: 80ch">
+      <p class="muted small" style="margin: 10px 0 0">
         Automatic checks run every {formatAgeSecs(info.check_interval_secs)}
         {#if info.latest_checked_secs_ago == null}
           - none has run since the server started.
@@ -346,13 +346,13 @@
         {/if}
       </p>
     {:else}
-      <p class="muted small" style="margin: 10px 0 0; max-width: 80ch">
+      <p class="muted small" style="margin: 10px 0 0">
         Automatic release checks are off (Settings &rarr; General). Any latest
         release shown above came from a manual check.
       </p>
     {/if}
     {#if !info.can_update}
-      <p class="muted small" style="margin: 10px 0 0; max-width: 80ch">
+      <p class="muted small" style="margin: 10px 0 0">
         In-place updates need a Linux host managed by the installer (systemd
         unit, <code>/usr/local/bin/daygle-dns</code>, or a config under
         <code>/etc</code>) and a way to fetch the installer (curl or wget,

@@ -126,7 +126,7 @@
 {:else if disabled}
   <div class="card">
     <h3 style="margin: 0 0 10px">AI Scanner Is Off</h3>
-    <p class="muted" style="max-width: 70ch; margin: 0">
+    <p class="muted" style="margin: 0">
       There are no verdicts. Turn the scanner on in Settings → AI Scanner; it
       starts after the next restart.
     </p>
