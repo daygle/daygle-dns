@@ -57,6 +57,8 @@ struct CompiledGroup {
     blocklists: Vec<(String, String)>,
     /// Response returned when this group blocks a query.
     action: Action,
+    /// Whether the AI scanner may auto-block this group's clients.
+    ai_blocking: bool,
 }
 
 impl CompiledGroup {
@@ -120,6 +122,7 @@ impl AdvancedBlocking {
                     .map(|n| (n.to_ascii_lowercase(), n.clone()))
                     .collect(),
                 action: response_to_action(&g.response),
+                ai_blocking: g.ai_blocking,
                 name: g.name.clone(),
             });
         }
@@ -142,6 +145,17 @@ impl AdvancedBlocking {
     /// Number of compiled (enabled) groups.
     pub fn len(&self) -> usize {
         self.groups.len()
+    }
+
+    /// Whether the AI scanner may auto-block a query from `client` on
+    /// `listener`: the first enabled group the client belongs to decides,
+    /// and clients in no group are covered. Returns the deciding group's
+    /// name with the answer (`None` when no group matched).
+    pub fn ai_blocking(&self, client: IpAddr, listener: Option<&str>) -> (bool, Option<&str>) {
+        self.groups
+            .iter()
+            .find(|g| g.matches_client(client, listener))
+            .map_or((true, None), |g| (g.ai_blocking, Some(g.name.as_str())))
     }
 
     /// Evaluate `qname` (already normalized: lowercase, no trailing dot) for
@@ -281,6 +295,7 @@ mod tests {
             block_regex: vec![],
             blocklists: vec![],
             response: BlockResponse::NxDomain,
+            ai_blocking: true,
             position: 0,
             last_modified_at: None,
         }
@@ -288,6 +303,41 @@ mod tests {
 
     fn ip(s: &str) -> IpAddr {
         s.parse().unwrap()
+    }
+
+    /// The first enabled group a client belongs to decides whether the AI
+    /// may block its queries; listener groups match by listener, and
+    /// clients in no group stay covered.
+    #[test]
+    fn first_matching_group_decides_ai_blocking() {
+        let mut kids = group("kids");
+        kids.clients = vec!["192.168.50.0/24".to_string()];
+        let mut public = group("public dot");
+        public.clients = vec!["DoT".to_string()];
+        public.ai_blocking = false;
+        let mut everyone = group("everyone");
+        everyone.ai_blocking = false;
+        let ab = AdvancedBlocking::build(&[kids, public], Arc::default());
+        assert_eq!(
+            ab.ai_blocking(ip("192.168.50.7"), None),
+            (true, Some("kids"))
+        );
+        assert_eq!(
+            ab.ai_blocking(ip("203.0.113.9"), Some("dot")),
+            (false, Some("public dot"))
+        );
+        assert_eq!(ab.ai_blocking(ip("203.0.113.9"), None), (true, None));
+
+        // A catch-all group with AI off, last: only the groups before it
+        // keep AI blocking.
+        let mut kids = group("kids");
+        kids.clients = vec!["192.168.50.0/24".to_string()];
+        let ab = AdvancedBlocking::build(&[kids, everyone], Arc::default());
+        assert!(ab.ai_blocking(ip("192.168.50.7"), None).0);
+        assert_eq!(
+            ab.ai_blocking(ip("10.0.0.2"), None),
+            (false, Some("everyone"))
+        );
     }
 
     #[test]

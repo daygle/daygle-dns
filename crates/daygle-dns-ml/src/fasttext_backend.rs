@@ -43,12 +43,12 @@ impl FastTextBackend {
         let threat_categories = labels
             .into_iter()
             .filter_map(|l| {
-                let cat = l.strip_prefix("__label__")?;
-                if DEFAULT_THREAT_CATEGORIES.contains(&cat) {
-                    Some(cat.to_string())
-                } else {
-                    None
-                }
+                // Lowercase, as `classify` compares lowercased labels: a
+                // model labelled `__label__Malware` emitted `info` verdicts.
+                let cat = l.strip_prefix("__label__")?.to_ascii_lowercase();
+                DEFAULT_THREAT_CATEGORIES
+                    .contains(&cat.as_str())
+                    .then_some(cat)
             })
             .collect();
         Ok(Self {

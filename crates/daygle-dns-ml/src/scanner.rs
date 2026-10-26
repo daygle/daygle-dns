@@ -21,8 +21,8 @@ use daygle_dns_core::LogStore;
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
-use crate::backend::{ClassificationInput, DomainClassifier};
-use crate::store::AiStore;
+use crate::backend::{ClassificationInput, DomainClassifier, Severity, Verdict};
+use crate::store::{AiStore, NewVerdict};
 
 /// A domain currently auto-blocked in `enforce` mode.
 #[derive(Debug, Clone)]
@@ -47,6 +47,9 @@ pub struct Scanner {
     pub rescan_notify: Arc<Notify>,
     /// When expired verdicts were last re-queued (UNIX seconds; 0 = never).
     last_expiry: AtomicI64,
+    /// Held while a block snapshot is computed and published, so a scan
+    /// cycle cannot publish one computed before an override landed.
+    publishing: std::sync::Mutex<()>,
 }
 
 impl Scanner {
@@ -65,6 +68,7 @@ impl Scanner {
             logs,
             rescan_notify: Arc::new(Notify::new()),
             last_expiry: AtomicI64::new(0),
+            publishing: std::sync::Mutex::new(()),
         })
     }
 
@@ -103,67 +107,73 @@ impl Scanner {
         //    (new ones become pending; known ones count another sighting).
         // Recording a sighting is cheap, so the harvest cap is generous;
         // `max_domains_per_scan` bounds the expensive part, classification.
-        let names = source.distinct_recent_query_names(since_epoch, HARVEST_LIMIT)?;
-        for name in names {
-            let name = name.trim_end_matches('.').to_ascii_lowercase();
-            if looks_like_domain(&name) {
-                self.store.observe(&name)?;
-            }
-        }
+        // Names inside the zones this server hosts are its own: never
+        // candidates for blocking.
+        let hosted: Vec<String> = source
+            .list_zones()?
+            .into_iter()
+            .map(|z| z.name.trim_end_matches('.').to_ascii_lowercase())
+            .collect();
+        let names: Vec<String> = source
+            .distinct_recent_query_names(since_epoch, HARVEST_LIMIT)?
+            .into_iter()
+            .map(|name| name.trim_end_matches('.').to_ascii_lowercase())
+            .filter(|name| is_candidate(name, &hosted))
+            .collect();
+        self.store.observe_all(&names)?;
 
         // 3. Classify everything pending, `workers` at a time.
         let pending = self.store.pending_domains(cfg.max_domains_per_scan)?;
         let verdicts = self.classify_all(&pending, cfg.workers);
         let mut classified = 0usize;
         let mut skipped = 0usize;
-        for (name, verdict) in pending.iter().zip(verdicts) {
-            match verdict {
-                None => {
-                    self.store.save_verdict(
-                        name,
-                        "",
-                        "",
-                        "skipped",
-                        0.0,
-                        self.classifier.name(),
-                        "no signal",
-                        cfg.category_ttl_secs as i64,
-                    )?;
-                    skipped += 1;
-                }
-                Some(v) if v.confidence < cfg.confidence_floor => {
-                    self.store.save_verdict(
-                        name,
-                        &v.category,
-                        severity_name(v.severity),
-                        "skipped",
-                        v.confidence,
-                        self.classifier.name(),
-                        &v.evidence,
-                        cfg.category_ttl_secs as i64,
-                    )?;
-                    skipped += 1;
-                }
-                Some(v) => {
-                    let ttl = if v.severity == crate::backend::Severity::Threat {
-                        cfg.threat_ttl_secs
-                    } else {
-                        cfg.category_ttl_secs
-                    } as i64;
-                    self.store.save_verdict(
-                        name,
-                        &v.category,
-                        severity_name(v.severity),
-                        "classified",
-                        v.confidence,
-                        self.classifier.name(),
-                        &v.evidence,
-                        ttl,
-                    )?;
+        let backend = self.classifier.name().to_string();
+        let rows: Vec<NewVerdict> = pending
+            .iter()
+            .zip(verdicts)
+            .map(|(name, verdict)| {
+                let (verdict, status, ttl) = match verdict {
+                    None => (None, "skipped", cfg.category_ttl_secs),
+                    Some(v) if v.confidence < cfg.confidence_floor => {
+                        (Some(v), "skipped", cfg.category_ttl_secs)
+                    }
+                    Some(v) => {
+                        // Threats, disputed ones included, are re-checked
+                        // on the shorter threat schedule.
+                        let ttl = if v.severity == Severity::Info {
+                            cfg.category_ttl_secs
+                        } else {
+                            cfg.threat_ttl_secs
+                        };
+                        (Some(v), "classified", ttl)
+                    }
+                };
+                if status == "classified" {
                     classified += 1;
+                } else {
+                    skipped += 1;
                 }
-            }
-        }
+                NewVerdict {
+                    domain: name.clone(),
+                    category: verdict
+                        .as_ref()
+                        .map(|v| v.category.clone())
+                        .unwrap_or_default(),
+                    severity: verdict
+                        .as_ref()
+                        .map(|v| severity_name(v.severity).to_string())
+                        .unwrap_or_default(),
+                    status: status.to_string(),
+                    confidence: verdict.as_ref().map_or(0.0, |v| v.confidence),
+                    backend: backend.clone(),
+                    evidence: verdict
+                        .map(|v| v.evidence)
+                        .unwrap_or_else(|| "no signal".to_string()),
+                    expires_after_secs: ttl as i64,
+                }
+            })
+            .collect();
+        self.store.save_verdicts(&rows)?;
         if !pending.is_empty() {
             self.log_info(format!(
                 "AI scanned {} domain(s): {classified} classified, {skipped} skipped",
@@ -176,40 +186,40 @@ impl Scanner {
         Ok(classified)
     }
 
-    /// Classify `domains` on up to `workers` threads, keeping their order.
-    fn classify_all(
-        &self,
-        domains: &[String],
-        workers: u32,
-    ) -> Vec<Option<crate::backend::Verdict>> {
-        let workers = (workers.clamp(1, 32) as usize).min(domains.len().max(1));
-        if workers == 1 {
-            return domains
-                .iter()
+    /// Classify `domains` on up to `workers` threads, keeping their order:
+    /// result `i` is always domain `i`'s.
+    fn classify_all(&self, domains: &[String], workers: u32) -> Vec<Option<Verdict>> {
+        let classify_part = |part: &[String]| -> Vec<Option<Verdict>> {
+            part.iter()
                 .map(|d| {
                     self.classifier
                         .classify(&ClassificationInput::domain_only(d.clone()))
                 })
-                .collect();
+                .collect()
+        };
+        let workers = (workers.clamp(1, 32) as usize).min(domains.len().max(1));
+        if workers == 1 {
+            return classify_part(domains);
         }
         let chunk = domains.len().div_ceil(workers);
         std::thread::scope(|scope| {
             let handles: Vec<_> = domains
                 .chunks(chunk)
-                .map(|part| {
-                    scope.spawn(move || {
-                        part.iter()
-                            .map(|d| {
-                                self.classifier
-                                    .classify(&ClassificationInput::domain_only(d.clone()))
-                            })
-                            .collect::<Vec<_>>()
-                    })
-                })
+                .map(|part| (part.len(), scope.spawn(move || classify_part(part))))
                 .collect();
             handles
                 .into_iter()
-                .flat_map(|h| h.join().unwrap_or_default())
+                .flat_map(|(len, h)| {
+                    // A worker that panicked yields "no verdict" for each of
+                    // its domains. Dropping its results instead shifted every
+                    // later verdict onto the wrong domain.
+                    h.join().unwrap_or_else(|_| {
+                        self.log_warn(format!(
+                            "AI classifier panicked; {len} domain(s) left without a verdict"
+                        ));
+                        vec![None; len]
+                    })
+                })
                 .collect()
         })
     }
@@ -251,6 +261,7 @@ impl Scanner {
     /// by the scanner after each cycle and by operators after an override
     /// or settings change; enforce mode => populated, train mode => empty.
     pub fn refresh_snapshot(&self, cfg: &AiSettings, now: i64) {
+        let _publishing = self.publishing.lock().unwrap_or_else(|e| e.into_inner());
         let snapshot = if cfg.mode == AiMode::Enforce {
             match self.eligible_blocks(cfg, now) {
                 Ok(eligible) => eligible,
@@ -284,6 +295,16 @@ impl Scanner {
                 return;
             }
             let started = Utc::now().timestamp();
+            // Turned off in the console: the plugin stops blocking at once;
+            // the scanner idles until it is turned back on.
+            if !self.settings.load().enabled {
+                tokio::select! {
+                    _ = tokio::time::sleep(std::time::Duration::from_secs(60)) => {}
+                    _ = self.rescan_notify.notified() => {}
+                    _ = shutdown.cancelled() => return,
+                }
+                continue;
+            }
             let result = tokio::task::spawn_blocking({
                 let scanner = self.clone();
                 let source = source.clone();
@@ -333,9 +354,44 @@ fn exempt(domain: &str, overrides: &HashSet<String>) -> bool {
 /// Lowercase `info`/`threat`, shared by store writes.
 fn severity_name(s: crate::backend::Severity) -> &'static str {
     match s {
-        crate::backend::Severity::Info => "info",
-        crate::backend::Severity::Threat => "threat",
+        Severity::Info => "info",
+        Severity::Threat => "threat",
+        Severity::Disputed => "disputed",
     }
+}
+
+/// Special-use and local-only suffixes (RFC 6761/6762/8375, `.internal`,
+/// and common LAN suffixes): names under them are not on the internet, so
+/// there is nothing to classify and nothing that should be auto-blocked.
+const LOCAL_SUFFIXES: &[&str] = &[
+    "arpa",
+    "local",
+    "localhost",
+    "internal",
+    "test",
+    "invalid",
+    "lan",
+    "home",
+    "corp",
+    "localdomain",
+];
+
+/// Whether a query-log name should be classified: a valid domain of at
+/// least two labels, not under a special-use or local suffix, and not in
+/// a zone this server hosts. Single-label names (`wpad`, `printer`) and
+/// reverse lookups were classified before, and a verdict on a hosted name
+/// could auto-block the operator's own records.
+fn is_candidate(name: &str, hosted: &[String]) -> bool {
+    let in_zone = |zone: &str| {
+        name == zone
+            || (name.len() > zone.len()
+                && name.ends_with(zone)
+                && name.as_bytes()[name.len() - zone.len() - 1] == b'.')
+    };
+    looks_like_domain(name)
+        && name.contains('.')
+        && !LOCAL_SUFFIXES.iter().any(|s| in_zone(s))
+        && !hosted.iter().any(|z| in_zone(z))
 }
 
 /// Basic sanity: a candidate is a DNS-ish name with valid labels (letters,

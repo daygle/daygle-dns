@@ -456,7 +456,6 @@
   .nowrap { white-space: nowrap; }
   .pill.you { border-color: var(--accent); color: var(--accent); }
   .pill.admin { border-color: var(--accent); }
-  .help { max-width: 90ch; }
   .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
   label { display: flex; flex-direction: column; gap: 4px; font-size: 0.85rem; }
   label span { color: var(--muted); }

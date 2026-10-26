@@ -131,7 +131,11 @@ impl AiEngine {
                             settings.verifier_model_path
                         ),
                     );
-                    Box::new(verify::VerifyingBackend::new(classifier, verifier))
+                    Box::new(verify::VerifyingBackend::new(
+                        classifier,
+                        verifier,
+                        settings.verifier_threshold,
+                    ))
                 }
                 Err(e) => {
                     logs.push(
@@ -169,6 +173,12 @@ impl AiEngine {
     /// The plugin to install into the policy engine.
     pub fn block_plugin(&self) -> Arc<plugin::AiBlockPlugin> {
         self.plugin.clone()
+    }
+
+    /// Let the live client groups decide which clients AI blocking covers
+    /// (their `ai_blocking` switch).
+    pub fn set_client_groups(&self, groups: Arc<ArcSwap<daygle_dns_policy::AdvancedBlocking>>) {
+        self.plugin.set_client_groups(groups);
     }
 
     /// Kick the scanner for one immediate cycle (used by the rescan API).

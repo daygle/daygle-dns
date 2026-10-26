@@ -4,7 +4,7 @@
   import { formatDateTime } from '../datetime.svelte.js';
 
   let groups = $state([]);
-  // Named networks (Settings -> Networks) for the client picker.
+  // Named networks (Clients -> Networks) for the client picker.
   let networks = $state([]);
   // Blocklists (Filtering -> Blocklists) set to apply to selected groups only.
   let groupLists = $state([]);
@@ -75,6 +75,7 @@
           blocklists: [...(group.blocklists || [])],
           responseKind: group.response?.kind || 'nx_domain',
           redirectAddr: group.response?.address || '0.0.0.0',
+          ai_blocking: group.ai_blocking !== false,
         }
       : {
           id: null,
@@ -89,6 +90,7 @@
           blocklists: [],
           responseKind: 'nx_domain',
           redirectAddr: '0.0.0.0',
+          ai_blocking: true,
         };
   }
 
@@ -119,6 +121,7 @@
       block_regex: parseList(edit.block_regex),
       blocklists: edit.blocklists,
       response,
+      ai_blocking: edit.ai_blocking,
     };
     saving = true;
     error = null;
@@ -136,7 +139,7 @@
   }
 
   async function removeGroup(group) {
-    if (!confirm(`Delete client group "${group.name}"?`)) return;
+    if (!confirm(`Delete filtering group "${group.name}"?`)) return;
     notice = null;
     error = null;
     try {
@@ -196,13 +199,13 @@
 
 <div class="card" style="margin-bottom: 14px">
   <div class="spread" style="margin-bottom: 10px">
-    <h3 style="margin: 0">Client Groups ({groups.length})</h3>
+    <h3 style="margin: 0">Filtering Groups ({groups.length})</h3>
     <button onclick={() => startEdit(null)}>Add Group</button>
   </div>
 
   {#if groups.length === 0}
     <p class="muted">
-      No client groups yet. Add one to give a set of devices (by IP or network)
+      No filtering groups yet. Add one to give a set of devices (by IP or network)
       their own allow and block rules.
     </p>
   {:else}
@@ -217,6 +220,7 @@
               <td>
                 <strong>{g.name}</strong>
                 {#if !g.enabled}<span class="pill">Disabled</span>{/if}
+                {#if g.ai_blocking === false}<span class="pill" title="The AI never auto-blocks these clients' queries">AI Off</span>{/if}
               </td>
               <td class="muted">{g.clients.length ? g.clients.join(', ') : 'All Clients'}</td>
               <td class="muted">
@@ -249,14 +253,16 @@
     lists the domain decides: on its allow list, the domain is never blocked
     (later groups are skipped); on its block list or one of its blocklists,
     it is blocked with that group's response. Otherwise the next group is
-    checked. A group with no client networks covers every client.
+    checked. A group with no client networks covers every client. AI
+    auto-blocking follows the first group covering the client: a group can
+    turn it off for its clients.
   </p>
 </div>
 
 <div class="card">
   <h3 style="margin: 0 0 10px">Test a Query</h3>
   <p class="muted help" style="margin: 0 0 10px">
-    Check what the client groups would do with a domain asked by a given client.
+    Check what the filtering groups would do with a domain asked by a given client.
   </p>
   <form class="row" style="flex-wrap: wrap; gap: 8px" onsubmit={(e) => { e.preventDefault(); runTest(); }}>
     <input style="flex: 1; min-width: 160px" bind:value={testClient} placeholder="Client IP, e.g. 192.168.1.50" />
@@ -278,6 +284,12 @@
         <span class="pill group">By {testResult.group}</span>
       {/if}
       <span class="muted">{testResult.reason}</span>
+      {#if testResult.ai_blocking !== undefined}
+        <span class="muted ai-note">
+          AI auto-blocking: {testResult.ai_blocking ? 'On' : 'Off'}
+          {testResult.ai_group ? `(group "${testResult.ai_group}")` : '(client is in no group)'}
+        </span>
+      {/if}
     </div>
   {/if}
 </div>
@@ -286,7 +298,7 @@
   <div class="modal-backdrop" role="presentation" onclick={(e) => e.target === e.currentTarget && closeEdit()}>
     <div class="modal card" role="dialog" aria-modal="true" aria-labelledby="group-title">
       <div class="spread modal-title">
-        <h3 id="group-title" style="margin: 0">{edit.id ? `Edit Client Group - ${edit.originalName}` : 'Add Client Group'}</h3>
+        <h3 id="group-title" style="margin: 0">{edit.id ? `Edit Filtering Group - ${edit.originalName}` : 'Add Filtering Group'}</h3>
         <button class="secondary" style="padding: 2px 10px" onclick={closeEdit} aria-label="Close">✕</button>
       </div>
       {#if error}
@@ -332,11 +344,20 @@
         </p>
       {:else}
         <p class="muted help">
-          No blocklists are set to apply to selected client groups. On the
-          Blocklists tab, add or edit a list and set <strong>Applies To</strong>
-          to <strong>Selected Client Groups Only</strong>, then tick it here.
+          No blocklists are set to apply to selected filtering groups. Under
+          Filtering → Blocklists, add or edit a list and set <strong>Applies To</strong>
+          to <strong>Selected Filtering Groups Only</strong>, then tick it here.
         </p>
       {/if}
+
+      <div class="section-title">AI Auto-Blocking</div>
+      <label class="checkbox"><input type="checkbox" bind:checked={edit.ai_blocking} /><span>Let the AI auto-block these clients' queries</span></label>
+      <p class="muted help">
+        Applies when the AI scanner is in Enforce mode. A client follows the
+        first group (from the top) that covers it; clients in no group are
+        covered. To use the AI for some groups only, add a group covering every
+        client with this off and move it to the bottom.
+      </p>
 
       <div class="section-title">Domains</div>
       <div class="grid2">
@@ -363,7 +384,6 @@
 {/if}
 
 <style>
-  .help { max-width: 90ch; }
   textarea { width: 100%; }
   .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
   label { display: flex; flex-direction: column; gap: 4px; font-size: 0.85rem; color: var(--muted); }
@@ -390,6 +410,7 @@
   .dialog-error { color: var(--danger); margin: 0 0 10px; }
   .result { margin-top: 12px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
   .pill.group { border-color: var(--accent); color: var(--accent); }
+  .ai-note { flex-basis: 100%; }
   @media (max-width: 640px) {
     .grid2 { grid-template-columns: 1fr; }
   }

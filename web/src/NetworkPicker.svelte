@@ -1,5 +1,5 @@
 <script>
-  // Pick client networks: tick named networks (Settings -> Networks) and/or
+  // Pick client networks: tick named networks (Clients -> Networks) and/or
   // type other addresses. `value` is the list as the server stores it:
   // network names followed by CIDRs or single addresses.
   let {
@@ -9,7 +9,7 @@
     placeholder = '10.8.0.0/16',
     // Optional listener keywords (DOT/DOH/DOQ) shown as chips that group by
     // "which listener the query arrived on" rather than by address. Only
-    // used where the server accepts them (client groups).
+    // used where the server accepts them (filtering groups).
     listeners = false,
   } = $props();
 

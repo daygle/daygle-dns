@@ -407,7 +407,7 @@ if [ "$KIND" = "install" ]; then
     systemctl start daygle-dns 2>>"$LOG" || true
     WHAT="nothing was replaced"
   fi
-  fail "the full installer failed (exit ${RC})${STOP:+ — last installer message: $STOP}; ${WHAT}. Details in apply.log."
+  fail "the full installer failed (exit ${RC})${STOP:+ - last installer message: $STOP}; ${WHAT}. Details in apply.log."
   exit 1
 fi
 

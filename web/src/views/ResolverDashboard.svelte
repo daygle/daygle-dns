@@ -33,7 +33,7 @@
           ['Forwarded (Upstreams)', stats.routes.forwarding],
           ['Conditional Forwarders', stats.routes.conditional],
           ['Stub Zones', stats.routes.stub],
-          ['Client Policies', stats.routes.client_policy],
+          ['Resolution Policies', stats.routes.client_policy],
           ['Local Root NXDOMAIN', stats.routes.local_root],
         ].filter(([, n]) => n > 0)
       : [],
@@ -91,7 +91,7 @@
         {#if data.local_root.enabled}
           <span class="pill" class:ok={data.local_root.serving}>{data.local_root.serving ? `Local Root Serial ${data.local_root.serial}` : 'Local Root Not in Use'}</span>
         {/if}
-        {#if data.client_policies}<span class="pill">{data.client_policies} Client {data.client_policies === 1 ? 'Policy' : 'Policies'}</span>{/if}
+        {#if data.client_policies}<span class="pill">{data.client_policies} Resolution {data.client_policies === 1 ? 'Policy' : 'Policies'}</span>{/if}
       </div>
     </div>
 

@@ -22,6 +22,9 @@ pub enum Severity {
     /// Threat category (malware, phishing): eligible to auto-block in
     /// enforce mode when confidence and corroboration are sufficient.
     Threat,
+    /// A threat verdict an independent verifier disagreed with: kept and
+    /// shown, never auto-blocked, and re-checked on the threat schedule.
+    Disputed,
 }
 
 /// One classification verdict produced by a backend.

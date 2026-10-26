@@ -7,7 +7,7 @@
   // own, like the Zones page's forwarders, so editing them never touches the
   // unsaved Settings form around this card.
   let policies = $state([]);
-  // Named networks (Settings -> Networks) for the client picker.
+  // Named networks (Clients -> Networks) for the client picker.
   let networks = $state([]);
   // `error` shows in red, `notice` (success) in green; failures while the
   // dialog is open show inside it.
@@ -113,7 +113,7 @@
 
   async function remove(index) {
     const name = policies[index].name;
-    if (!confirm(`Delete client policy ${name}?`)) return;
+    if (!confirm(`Delete resolution policy ${name}?`)) return;
     clearMessages();
     try {
       await store((list) => list.filter((p) => p.name !== name));
@@ -152,7 +152,7 @@
 
 <div class="card" style="margin-bottom: 14px">
   <div class="spread" style="margin-bottom: 10px">
-    <h3 style="margin: 0">Client Resolution Policies ({policies.length})</h3>
+    <h3 style="margin: 0">Resolution Policies ({policies.length})</h3>
     <button onclick={openAdd}>Add Policy</button>
   </div>
   {#if notice}
@@ -176,7 +176,7 @@
               </td>
               <td class="muted">{p.clients.join(', ')}</td>
               <td class="muted">{describe(p)}</td>
-              <td class="muted" style="white-space: nowrap">{p.modified_at ? formatDateTime(p.modified_at) : '—'}</td>
+              <td class="muted" style="white-space: nowrap">{p.modified_at ? formatDateTime(p.modified_at) : '-'}</td>
               <td class="num">
                 <div class="row" style="gap: 6px; justify-content: flex-end">
                   <button class="secondary" onclick={() => move(i, -1)} disabled={i === 0} aria-label="Move up">↑</button>
@@ -191,13 +191,15 @@
       </table>
     </div>
   {:else}
-    <p class="muted">No client policies. Every client is resolved the default way.</p>
+    <p class="muted">No resolution policies. Every client is resolved the default way.</p>
   {/if}
   <p class="muted help">
     Resolve some clients differently: send a network's queries to its own
     upstreams (a filtering DNS service for the kids' devices, say), resolve
-    them from the root servers whatever the mode above, or refuse them
-    recursion. The first enabled matching policy wins. Recursion Access still
+    them from the root servers whatever the resolver's mode (Settings →
+    Resolver), or refuse them
+    recursion. The first enabled matching policy wins. Recursion Access
+    (Clients → Access) still
     decides who may use recursion at all, and conditional forwarders and stub
     zones still answer for their own names.
   </p>
@@ -207,7 +209,7 @@
   <div class="modal-backdrop" role="presentation" onclick={(e) => e.target === e.currentTarget && close()}>
     <div class="modal card" role="dialog" aria-modal="true" aria-labelledby="policy-title">
       <div class="spread modal-title">
-        <h3 id="policy-title" style="margin: 0">{form.index === null ? 'Add Client Policy' : `Edit Client Policy - ${policies[form.index].name}`}</h3>
+        <h3 id="policy-title" style="margin: 0">{form.index === null ? 'Add Resolution Policy' : `Edit Resolution Policy - ${policies[form.index].name}`}</h3>
         <button class="secondary" style="padding: 2px 10px" onclick={close} aria-label="Close">✕</button>
       </div>
       {#if dialogError}<p class="notice error">{dialogError}</p>{/if}

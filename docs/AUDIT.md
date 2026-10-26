@@ -1133,3 +1133,256 @@ a change unserved until the next reload.
   the socket's source address, not a PROXY-restored client.
 - **ALIAS to a local target.** Answering it reads the database on each
   query.
+
+# Follow-up fix: console settings reverted to the config file at startup
+
+Reported from the field: with Recursion Access set to "Everyone", public
+clients (for example Android Private DNS over DoT) were refused recursion
+after every update, while the console still showed "Everyone". Saving
+"Private Networks" and then "Everyone" again worked around it.
+
+*Problem.* At startup, `bind_with` resolved the network names in the config
+*before* applying the settings saved in the console (the database
+overlay). The overlay was applied afterwards to the config the console
+reads, but these were built from the earlier copy, which held the config
+file's values:
+
+- the recursive resolver;
+- the filtering policy engine;
+- the client groups;
+- the authoritative catalog's settings.
+
+*Impact (High).* After every restart, which every update causes, each of
+those ran on the file's values until the relevant setting was saved again
+in the console. Affected settings include:
+
+- recursion access, upstreams and resolution mode;
+- conditional forwarders and client policies;
+- the allowlist and blocklist, and the allowed and denied networks;
+- the zone-transfer and dynamic-update settings.
+
+The console showed the saved values throughout, so nothing looked wrong.
+
+*Fix.* The overlay is applied (or seeded on first boot) as soon as the
+database opens, before anything is built from the config.
+
+*Test.* `console_settings_apply_after_a_restart` saves Recursion Access
+"Everyone" and a blocklist entry, restarts on the same database and config
+file, and checks that the resolver admits a public client and the entry is
+blocked. It fails without the fix.
+
+# Follow-up audit: the AI scanner
+
+Scope:
+
+- **Pipeline:** the background scanner, from query-log harvest through
+  classification to the block snapshot.
+- **Storage and enforcement:** the verdict store and the policy plugin.
+- **Classifiers:** the heuristic, fastText and MiniLM/ONNX verifier
+  backends.
+- **Live settings:** how the console's changes reach the running engine.
+
+Verification:
+
+- fmt and clippy (`-D warnings`) are clean, and the full suite passes (507
+  tests).
+- New tests:
+  - a rebuild keeps the policy plugins;
+  - a disputed threat never blocks;
+  - a weak verifier answer does not count;
+  - an unqueried domain is dropped at expiry;
+  - local and hosted names are not classified;
+  - a panicking classifier worker does not shift verdicts.
+- The MiniLM/ONNX feature cannot be built in this environment (its
+  runtime download is blocked). The only change in code gated behind it is
+  one argument passed to the verifier wrapper; CI builds it.
+
+### AI1. Any filtering or network save switched AI blocking off - **Fixed** (High)
+
+*Problem.* The AI auto-blocker is a policy-engine plugin, installed once at
+startup. A policy rebuild kept the downloaded blocklists but dropped the
+plugins. Rebuilds happen on every Filtering save, every network save and
+every config reload.
+
+*Impact.* After any of those, enforce mode silently stopped blocking until
+the next restart, while the console still showed it enforcing.
+
+*Fix.* A rebuild keeps the live engine's plugins, as it already kept its
+source lists.
+
+### AI2. The verifier could not veto a threat - **Fixed** (High)
+
+*Problem.* When the MiniLM verifier disagreed with a threat verdict, the
+verdict was relabelled from `threat` to `info`. Its category and confidence
+were unchanged, and the block snapshot goes by category and confidence, so
+a disputed phishing verdict at 0.99 still auto-blocked.
+
+*Fix.*
+
+- Such verdicts are now `disputed`, which the snapshot excludes.
+- Disputed verdicts are re-checked on the threat schedule.
+- The console marks them "Disputed".
+- Verdicts stored by earlier versions are relabelled when the database is
+  opened.
+
+### AI3. The verifier's threshold was never applied - **Fixed** (Medium)
+
+*Problem.* Neither `ai.verifier_threshold` nor the verifier's built-in
+0.35 cosine threshold was used. The verifier answered with its nearest
+category however weak the match. That noise:
+
+- corroborated threats (raising their confidence); or
+- disputed them (see AI2).
+
+*Fix.* Verifier answers below `ai.verifier_threshold` count as no answer.
+The verdict is then kept as the primary classifier made it, marked
+"unverified".
+
+### AI4. One failing classifier thread put verdicts on the wrong domains - **Fixed** (High)
+
+*Problem.* With several workers, a worker that panicked returned no
+results at all. The remaining verdicts were then paired with domains in
+order, so every verdict after the gap landed on a different domain.
+
+*Impact.* In enforce mode this could block domains whose own verdict was
+harmless.
+
+*Fix.* A failed worker yields "no verdict" for each of its domains, so the
+results stay aligned. The failure is logged.
+
+### AI5. Local and hosted names were classified, and could be blocked - **Fixed** (Medium)
+
+*Problem.* Every query-log name was a candidate, including:
+
+- single-label names such as `wpad` and printers;
+- reverse lookups;
+- `.local`, `.home.arpa` and other local-only names;
+- names in zones this server hosts.
+
+In enforce mode, a verdict on a hosted name blocked the operator's own
+records, because policy runs before authoritative answers.
+
+*Fix.* Only names with at least two labels are classified, outside the
+special-use and local-only suffixes and outside hosted zones.
+
+### AI6. Every domain ever queried was kept and re-classified forever - **Fixed** (Medium)
+
+*Problem.* Rows were never removed. Each expired verdict went back in the
+queue, even for a domain queried once months ago. The store grew without
+bound and the classifier's work grew with it.
+
+*Fix.*
+
+- Rows now record when the domain was last seen.
+- At expiry, a verdict is re-checked only if its domain has been queried
+  since. Otherwise the row is dropped, and the domain starts over as new
+  if it is queried again.
+- Rows that existed before the upgrade get one more check.
+
+### AI7. The harvest committed one row at a time - **Fixed** (Low, performance)
+
+*Problem.* Each cycle recorded every queried domain with its own SELECT
+and UPDATE or INSERT, each committed separately. Each cycle's verdicts
+were also saved one commit per domain.
+
+*Fix.* Both are single transactions. Measured on 20,000 names: 1.79 s
+before, 75 ms after.
+
+### AI8. Smaller issues - **Fixed** (Low)
+
+- **Turning AI off.** The plugin stopped blocking, but the scanner kept
+  harvesting and classifying until restart. It now idles while disabled.
+- **Snapshot race.** A scan cycle could publish a block snapshot computed
+  just before an operator override, undoing the override until the next
+  cycle. Snapshot publication is now serialized.
+- **Capitalised fastText labels.** A model labelled `__label__Malware`
+  produced `info` verdicts, because threat labels were matched before
+  lowercasing. They are now lowercased first.
+
+## Reported, not changed
+
+- **Subdomain coverage.** A verdict on a domain also blocks its subdomains,
+  as designed. For shared-hosting parents (`*.github.io`-style names), a
+  single verdict would block every tenant. A public-suffix check would
+  catch this, but no suffix list ships today.
+- **Startup-only changes.** Enabling AI on a server that started with it
+  off, or changing the model or database path, still takes effect only
+  after a restart. The console already says so.
+
+# Follow-up audit: the AI console pages
+
+Scope: the AI page, with its Scanner and Verdicts tabs, and the API
+responses they use.
+
+Verification:
+
+- The pages were driven in Chromium against a running server in enforce
+  mode, with real DNS traffic and a scan.
+- Checked: both tabs, exempting a domain by pasting a URL, invalid input,
+  and the scanner turned off at runtime.
+- No console or page errors.
+
+### G1. Controls hidden or refused depending on how roles were checked - **Fixed** (Medium)
+
+*Problem.* The AI pages decided who is an administrator with
+`role === 'admin'`, unlike the rest of the console, which treats every
+non-viewer as one. Two problems followed:
+
+- The model update controls disappeared for sessions without a stored role.
+- The Scan Now, Exempt and Unexempt actions were shown to everyone and
+  never checked the role at all, so a read-only account would have had
+  them refused by the server.
+
+*Fix.* Both pages follow the console's rule: viewers get a read-only page
+without action buttons, and everyone else gets the full page.
+
+### G2. A scanner turned off in Settings still looked active - **Fixed** (Medium)
+
+*Problem.* Turning the AI off in Settings stops it at once, but the page
+kept showing the mode as Enforce and the "Auto-Blocked Now" count.
+
+*Fix.*
+
+- A banner says the scanner is off.
+- The mode reads "Off" and the counts read "Would Auto-Block".
+- Scan Now is disabled.
+
+### G3. Misleading "scanner is off" message - **Fixed** (Low)
+
+*Problem.* When the scanner is turned on in Settings but the service has
+not been restarted since, the page still said to turn it on.
+
+*Fix.* The page now says it only needs a restart.
+
+### G4. Exempting a domain - **Fixed** (Low)
+
+*Problem.* A pasted URL (`https://www.example.com/page`), `*.example.com`
+or `example.com:443` was rejected with "domain is required".
+
+*Fix.*
+
+- The form takes the domain out of what was pasted.
+- Anything that is not a domain gets a clear message, and the API's own
+  message for invalid domains says the same.
+
+### G5. Verdict list - **Fixed** (Low)
+
+- **Empty last page.** Paging past the end, which now happens as stale
+  verdicts are dropped, showed "No verdicts yet". The list now moves to
+  the last page instead.
+- **Confidence.** "No signal" rows showed 0% confidence; they now show
+  "-".
+- **Seen column.** A new column shows how many scans found the domain in
+  DNS traffic.
+- **Re-Check column.** Its header explains what happens at expiry.
+- **Disputed verdicts.** These are labelled "Disputed".
+
+### G6. Smaller display issues - **Fixed** (Low)
+
+- **Percentages.** They showed as "30.0%" and "99.0%" because the values
+  arrive as 32-bit floats; they now read "30%" and "99%".
+- **Spacing.** The Exempt tag touched the domain name.
+- **Heuristic warning.** The "nothing can be auto-blocked" warning missed
+  the heuristic rules running with the verifier.
+- **Page text.** The header now says exempt domains are never blocked
+  *by the AI*; blocklists still apply to them.

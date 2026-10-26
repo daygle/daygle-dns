@@ -146,7 +146,7 @@
   {/if}
   <p class="muted help">
     Name your networks once (LAN, VPN, IoT...) and pick them wherever a setting
-    asks for client networks: split horizon, client groups, client policies,
+    asks for client networks: split horizon, filtering groups, resolution policies,
     recursion access and more. Changing a network's addresses changes every
     setting that uses it straight away; renaming it keeps them pointing at it.
     A network in use cannot be deleted. The built-in networks cannot be

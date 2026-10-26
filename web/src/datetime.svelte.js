@@ -2,7 +2,7 @@
 //
 // Three layers decide how a date is shown, most specific first:
 //   1. the signed-in user's own preferences (stored on their account),
-//   2. the server-wide defaults (Settings → Interface, admins only),
+//   2. the server-wide defaults (Settings → General, admins only),
 //   3. this browser's locale and time zone (`system`).
 // Every layer has the same three fields: `time_zone` (`system`, `UTC` or an
 // IANA zone such as `Europe/London`), `date_format` (`system`, `dmy`, `mdy`,

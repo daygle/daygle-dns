@@ -598,7 +598,6 @@
   label { display: flex; flex-direction: column; gap: 4px; font-size: 0.85rem; }
   label span { color: var(--muted); }
   .full { margin-top: 12px; }
-  .help { max-width: 90ch; }
   .nowrap { white-space: nowrap; }
   .nowrap div { margin-bottom: 4px; }
   .pill.used { border-color: var(--accent); margin-right: 4px; }

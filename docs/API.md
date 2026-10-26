@@ -178,7 +178,7 @@ GET /api/status
 `update_available` (whether the running binary is older than the latest
 published release) and `latest_release` are compared against GitHub; both
 are `null` on hosts that cannot self-update (dev installs, non-Linux) or
-while update checks are disabled under `[updates]` (Settings -> General:
+while update checks are disabled under `[updates]` (the Update page's
 "Update Checks"), so the dashboard hides the update banner there. The
 release lookup is a pure cached read - only a background task probes
 GitHub, at the configured `[updates].check_interval_secs` cadence (default
@@ -786,7 +786,7 @@ POST   /api/networks
 DELETE /api/networks/{name}
 ```
 
-Named networks (Settings -> Networks) give a set of addresses a name, such
+Named networks (Clients -> Networks in the console) give a set of addresses a name, such
 as `LAN` = `192.168.20.0/24`, so settings that take client networks can name
 it instead of repeating the addresses. They are part of the configuration
 (`[[networks]]` in the config file, saved with the console's settings).
@@ -1230,16 +1230,21 @@ would be blocked in train mode) and the current block-snapshot size.
 A domain qualifies for auto-blocking when its current verdict is in one of
 `ai.auto_block_categories` (any category, not only threats) with a
 confidence at or above `ai.block_threshold`, and neither it nor a parent
-domain is exempt. The built-in heuristic rules score at most 0.35, so they
-never auto-block on their own.
+domain is exempt. A threat verdict the MiniLM verifier disagreed with
+(severity `disputed`, decided at `ai.verifier_threshold`) never qualifies.
+The built-in heuristic rules score at most 0.35, so they never auto-block on
+their own. Only internet names are classified: single-label names, reverse
+lookups, local-only suffixes (`.local`, `.home.arpa`, `.internal`, `.lan`,
+...) and names in zones this server hosts are skipped.
 
 `GET /api/ai/verdicts` pages through the verdict store, most recently
 classified first (pending rows last), optionally filtered by `status`
 (`pending`/`classified`/`skipped`) and a domain substring `q`: domain,
 category, severity, status, confidence, backend, evidence, observation count
 (scan cycles the domain appeared in), `overridden` (the domain is exempt) and
-`classified_at`/`expires_at` in RFC 3339 (the verdict is re-checked at
-expiry). `per_page` is capped at 500.
+`classified_at`/`expires_at` in RFC 3339 (at expiry the verdict is
+re-checked if the domain has been queried since; otherwise it is dropped,
+and the domain starts over if it is queried again). `per_page` is capped at 500.
 
 `POST /api/ai/override` with `action: "allow"` exempts a domain and its
 subdomains from AI blocking; `clear` removes the exemption (`404` when there
@@ -1261,8 +1266,9 @@ POST   /api/policy/blocking/{id}/move
 POST   /api/policy/blocking/test
 ```
 
-Blocking groups extend the policy engine with per-group client and domain
-criteria, including regular expressions (`allow_regex` / `block_regex`;
+Blocking groups (the console's **Clients → Filtering Groups**; the
+`recursive.client_policies` list is its **Clients → Resolution Policies**)
+extend the policy engine with per-group client and domain criteria, including regular expressions (`allow_regex` / `block_regex`;
 invalid patterns are rejected with `400` instead of being silently dropped
 at engine-build time). A group's `clients` list normally holds CIDRs or
 single addresses (or network names); the special case-insensitive entries
@@ -1275,6 +1281,11 @@ blocklist sources whose
 `scope` is `groups`: their domains are blocked for the group's clients, and
 the group's `allow` list still overrides them (`400` for a name that is not
 a configured source).
+`ai_blocking` (default `true`) lets the AI scanner auto-block the group's
+clients in enforce mode. A client follows the first enabled group that
+covers it, and clients in no group are covered; to use the AI for some
+groups only, put a group covering every client with `ai_blocking: false`
+last.
 `POST /api/policy/blocking` creates a group or updates the one with the same
 name; with an `id` it updates that group, so it can be renamed (`400` if
 another group has the new name, `404` if the id is unknown). The
@@ -1292,7 +1303,10 @@ DNS) so a group's listener entries can be tested.
 
 `POST /api/policy/blocking/test` evaluates a `{client, domain}` pair against
 the live blocking groups and reports whether (and why) it is blocked, so an
-operator can verify rules before relying on them.
+operator can verify rules before relying on them. It also reports
+`ai_blocking` (whether the AI may auto-block that client's queries) and
+`ai_group` (the group that decided; `null` when the client is in no
+group).
 
 ### Backup and restore
 

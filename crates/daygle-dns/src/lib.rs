@@ -210,21 +210,17 @@ pub async fn bind_with(
 
     // Authoritative.
     let store = daygle_dns_authoritative::ZoneStore::open(&config.authoritative.database)?;
-    // Runtime components take the network names resolved to addresses; the
-    // stored config keeps the names.
-    let resolved = config.with_networks_resolved();
-    let catalog = Arc::new(AuthorityCatalog::new(
-        store.clone(),
-        resolved.authoritative.clone(),
-    )?);
-    catalog.reload()?;
-    import_zone_files(&catalog, &config, &logs)?;
 
     // DB-backed runtime settings: the TOML file supplies bootstrap values
     // (listeners, addresses, ports, paths); everything the console edits
     // lives in the database and wins over the file on every boot. On first
     // boot (nothing stored yet) the file's values are seeded into the DB so
     // file-based installs transition seamlessly.
+    //
+    // This must come before anything is built from the config: the
+    // resolver, policy engine, client groups and catalog below would
+    // otherwise start with the file's values while the console showed the
+    // saved ones, until the next save rebuilt them.
     let mut config = Arc::unwrap_or_clone(config);
     let overlay = store.get_runtime_settings::<daygle_dns_core::config::RuntimeSettings>()?;
     // Stored settings from before networks were shared hold none yet.
@@ -250,10 +246,19 @@ pub async fn bind_with(
     if adopt_split_horizon_networks && config.networks.is_empty() {
         adopt_legacy_networks(&store, &mut config, &logs)?;
     }
-    catalog.set_networks(config.all_networks())?;
-    // Note: no `validate()` here - `bind` accepts pre-validated configs, and
-    // test setups legitimately use ephemeral port 0.
     let config = Arc::new(config);
+
+    // Runtime components take the network names resolved to addresses; the
+    // stored config keeps the names.
+    let resolved = config.with_networks_resolved();
+    let catalog = Arc::new(AuthorityCatalog::new(
+        store.clone(),
+        resolved.authoritative.clone(),
+    )?);
+    catalog.reload()?;
+    import_zone_files(&catalog, &config, &logs)?;
+
+    catalog.set_networks(config.all_networks())?;
     // Shared, atomically-swappable runtime config.
     let config_swap = Arc::new(ArcSwap::from(config.clone()));
 
@@ -513,6 +518,9 @@ pub async fn bind_with(
             group_blocklists.clone(),
         ),
     ));
+    if let Some(ai) = &ai_engine {
+        ai.set_client_groups(advanced_blocking.clone());
+    }
 
     // Persistent query logging (daily JSON-lines files), when enabled.
     let query_logger = if config.logging.query_log_enabled {

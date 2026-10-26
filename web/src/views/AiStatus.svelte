@@ -2,18 +2,24 @@
   import { api, formatApiError, getStoredUser } from '../api.js';
   import { onDestroy } from 'svelte';
   import { formatDateTime } from '../datetime.svelte.js';
-  import { backendLabel, duration, percent, titleCase } from '../aiLabels.js';
+  import { backendLabel, cleanDomain, duration, percent, titleCase } from '../aiLabels.js';
 
   // `onOpenSettings(tab)` opens Settings on a tab; null for viewers.
   let { onOpenSettings = null } = $props();
 
   let status = $state(null);
+  // When the scanner is not running: whether Settings has it turned on
+  // (it then only needs a restart), or null when unknown.
+  let enabledInSettings = $state(null);
   let overrides = $state([]);
+  // Enabled filtering groups whose clients the AI never auto-blocks.
+  let aiOffGroups = $state([]);
   let loading = $state(true);
   let error = $state(null);
   let notice = $state(null);
 
-  const isAdmin = getStoredUser()?.role === 'admin';
+  // Viewers are read-only; with sign-in off there is no stored user at all.
+  const isAdmin = getStoredUser()?.role !== 'viewer';
 
   // Installed AI model files (fastText starter, MiniLM verifier, tokenizer,
   // centroids) + the shared updater run state.
@@ -133,30 +139,54 @@
     try {
       status = await api.aiStatus();
       overrides = (await api.aiOverrides())?.overrides || [];
+      api
+        .blockingGroups()
+        .then((groups) => {
+          aiOffGroups = (groups || [])
+            .filter((g) => g.enabled && g.ai_blocking === false)
+            .map((g) => g.name);
+        })
+        .catch(() => {});
     } catch (e) {
       status = null;
       // 404 means the scanner is off: an empty state, not a failure.
       error = e.status === 404 ? null : formatApiError(e);
+      if (e.status === 404) {
+        enabledInSettings = await api
+          .config()
+          .then((c) => !!c.ai?.enabled)
+          .catch(() => null);
+      }
     } finally {
       loading = false;
     }
   }
 
+  let scanBusy = $state(false);
   async function rescan() {
     notice = null;
     error = null;
+    scanBusy = true;
     try {
       await api.aiRescan();
-      notice = 'Scan started.';
-      setTimeout(load, 1500);
+      notice = 'Scan started. The counts below update when it finishes.';
+      setTimeout(load, 3000);
     } catch (e) {
       error = formatApiError(e);
+    } finally {
+      // Debounce repeated clicks; the scan itself runs in the background.
+      setTimeout(() => (scanBusy = false), 3000);
     }
   }
 
   async function exempt() {
-    const domain = exemptDomain.trim().replace(/\.+$/, '');
-    if (!domain) return;
+    if (!exemptDomain.trim()) return;
+    const domain = cleanDomain(exemptDomain);
+    if (!domain) {
+      notice = null;
+      error = `"${exemptDomain.trim()}" is not a domain name. Enter one such as news.example.com.`;
+      return;
+    }
     exemptBusy = true;
     notice = null;
     error = null;
@@ -202,8 +232,11 @@
   const enforcing = $derived(status?.mode === 'enforce');
   const blockable = $derived(Object.entries(status?.blockable_counts || {}));
   const blockableTotal = $derived(blockable.reduce((sum, [, n]) => sum + n, 0));
-  // The heuristic rules score at most 35%, below any allowed threshold.
-  const heuristicOnly = $derived(status?.backend === 'heuristic');
+  // The heuristic rules score at most 35%, below any allowed threshold (a
+  // verifier behind them corroborates, it does not lift them that far).
+  const heuristicOnly = $derived(!!status?.backend?.startsWith('heuristic'));
+  // Turned off in Settings while running: nothing is classified or blocked.
+  const switchedOff = $derived(status?.enabled === false);
 
   $effect(() => {
     load();
@@ -224,17 +257,31 @@
   </div>
 {:else if !status}
   <div class="card">
-    <h3 style="margin: 0 0 10px">AI Scanner Is Off</h3>
-    <p class="muted" style="max-width: 70ch; margin: 0">
-      No domains are being classified. Turn the scanner on in Settings → AI
-      Scanner; it starts after the next restart.
-    </p>
+    {#if enabledInSettings}
+      <h3 style="margin: 0 0 10px">AI Scanner Starts After a Restart</h3>
+      <p class="muted" style="margin: 0">
+        The scanner is turned on in Settings → AI Scanner but was off when the
+        service started. Restart the service to start it.
+      </p>
+    {:else}
+      <h3 style="margin: 0 0 10px">AI Scanner Is Off</h3>
+      <p class="muted" style="margin: 0">
+        No domains are being classified. Turn the scanner on in Settings → AI
+        Scanner; it starts after the next restart.
+      </p>
+    {/if}
     {#if onOpenSettings}
       <button class="secondary" style="margin-top: 12px" onclick={() => onOpenSettings('ai')}>Open AI Settings</button>
     {/if}
   </div>
 {:else}
-  {#if enforcing && heuristicOnly}
+  {#if switchedOff}
+    <div class="card warn" style="margin-bottom: 14px">
+      <strong>The AI scanner is turned off.</strong>
+      It is not classifying domains or blocking any. The verdicts below are
+      from before; turn it back on in Settings → AI Scanner.
+    </div>
+  {:else if enforcing && heuristicOnly}
     <div class="card warn" style="margin-bottom: 14px">
       <strong>Nothing can be auto-blocked yet.</strong>
       Enforce mode is on, but the scanner is using its built-in heuristic
@@ -244,9 +291,9 @@
   {/if}
 
   <div class="grid">
-    <div class="card stat" title={enforcing ? 'Domains the AI is blocking right now' : 'Domains the AI would block in Enforce mode'}>
-      <div class="muted">{enforcing ? 'Auto-Blocked Now' : 'Would Auto-Block'}</div>
-      <div class="big">{fmt(enforcing ? status.snapshot_len : blockableTotal)}</div>
+    <div class="card stat" title={enforcing && !switchedOff ? 'Domains the AI is blocking right now' : 'Domains the AI would block in Enforce mode'}>
+      <div class="muted">{enforcing && !switchedOff ? 'Auto-Blocked Now' : 'Would Auto-Block'}</div>
+      <div class="big">{fmt(enforcing && !switchedOff ? status.snapshot_len : blockableTotal)}</div>
     </div>
     <div class="card stat">
       <div class="muted">Waiting to Classify</div>
@@ -267,7 +314,9 @@
       <div class="spread" style="margin-bottom: 10px; gap: 8px; flex-wrap: wrap">
         <h3 style="margin: 0">Scanner</h3>
         <div class="row" style="gap: 8px">
-          <button onclick={rescan}>Scan Now</button>
+          {#if isAdmin}
+            <button onclick={rescan} disabled={scanBusy || switchedOff} title={switchedOff ? 'Turn the scanner on first' : 'Run a scan cycle now instead of waiting for the next one'}>Scan Now</button>
+          {/if}
           {#if onOpenSettings}
             <button class="secondary" onclick={() => onOpenSettings('ai')}>Settings</button>
           {/if}
@@ -278,9 +327,13 @@
           <tr>
             <td class="muted">Mode</td>
             <td>
-              <span class="pill" class:ok={enforcing}>
-                {enforcing ? 'Enforce (Auto-Block)' : 'Train (Record Only)'}
-              </span>
+              {#if switchedOff}
+                <span class="pill">Off</span>
+              {:else}
+                <span class="pill" class:ok={enforcing}>
+                  {enforcing ? 'Enforce (Auto-Block)' : 'Train (Record Only)'}
+                </span>
+              {/if}
             </td>
           </tr>
           <tr><td class="muted">Classifier</td><td>{backendLabel(status.backend)}</td></tr>
@@ -297,6 +350,18 @@
             </td>
           </tr>
           <tr>
+            <td class="muted">Applies To</td>
+            <td>
+              {#if aiOffGroups.length}
+                Turned off for filtering groups
+                {#each aiOffGroups as g (g)}<span class="pill" style="margin-left: 4px">{g}</span>{/each}
+              {:else}
+                All Clients
+              {/if}
+              <div class="muted small">Change this per group under Clients → Filtering Groups.</div>
+            </td>
+          </tr>
+          <tr>
             <td class="muted">Verdicts Re-Checked After</td>
             <td>{duration(status.threat_ttl_secs)} (Threats) · {duration(status.category_ttl_secs)} (Other)</td>
           </tr>
@@ -305,10 +370,11 @@
     </div>
 
     <div class="card">
-      <h3 style="margin: 0 0 4px">{enforcing ? 'Auto-Blocked Domains' : 'Would Auto-Block'}</h3>
+      <h3 style="margin: 0 0 4px">{enforcing && !switchedOff ? 'Auto-Blocked Domains' : 'Would Auto-Block'}</h3>
       <p class="muted small" style="margin: 0 0 10px">
         Domains with a current verdict in an auto-block category at or above
-        the block threshold, minus exempt domains{enforcing ? '' : ': what Enforce mode would block'}.
+        the block threshold, minus exempt domains and verdicts the verifier
+        disputed{enforcing && !switchedOff ? '' : ': what Enforce mode would block'}.
       </p>
       {#if blockable.length}
         <table>
@@ -332,16 +398,18 @@
 
   <div class="card" style="margin-top: 14px">
     <h3 style="margin: 0 0 10px">Exempt Domains ({overrides.length})</h3>
-    <form class="exempt-row" onsubmit={(e) => { e.preventDefault(); exempt(); }}>
-      <input bind:value={exemptDomain} placeholder="Domain, e.g. news.example.com" style="flex: 2; min-width: 200px" />
-      <input bind:value={exemptReason} placeholder="Reason (Optional)" style="flex: 1; min-width: 160px" />
-      <button type="submit" disabled={exemptBusy || !exemptDomain.trim()}>Exempt</button>
-    </form>
+    {#if isAdmin}
+      <form class="exempt-row" onsubmit={(e) => { e.preventDefault(); exempt(); }}>
+        <input bind:value={exemptDomain} placeholder="Domain, e.g. news.example.com" aria-label="Domain to exempt" spellcheck="false" autocapitalize="off" style="flex: 2; min-width: 200px" />
+        <input bind:value={exemptReason} placeholder="Reason (Optional)" aria-label="Reason" maxlength="200" style="flex: 1; min-width: 160px" />
+        <button type="submit" disabled={exemptBusy || !exemptDomain.trim()}>Exempt</button>
+      </form>
+    {/if}
     {#if overrides.length}
       <div class="table-wrap" style="margin-top: 12px">
         <table>
           <thead>
-            <tr><th>Domain</th><th>Reason</th><th>Added</th><th class="num">Actions</th></tr>
+            <tr><th>Domain</th><th>Reason</th><th>Added</th>{#if isAdmin}<th class="num">Actions</th>{/if}</tr>
           </thead>
           <tbody>
             {#each overrides as o (o.domain)}
@@ -349,7 +417,9 @@
                 <td><code>{o.domain}</code></td>
                 <td class="muted">{o.reason || '-'}</td>
                 <td class="muted">{when(o.created_at)}</td>
-                <td class="num"><button class="danger" onclick={() => removeExemption(o.domain)} aria-label="Remove exemption for {o.domain}">✕</button></td>
+                {#if isAdmin}
+                  <td class="num"><button class="danger" onclick={() => removeExemption(o.domain)} aria-label="Remove exemption for {o.domain}" title="Let the AI block this domain again">✕</button></td>
+                {/if}
               </tr>
             {/each}
           </tbody>
@@ -358,7 +428,8 @@
     {/if}
     <p class="muted help">
       An exempt domain and its subdomains are never auto-blocked by the AI,
-      whatever their verdict. Verdicts are still recorded.
+      whatever their verdict. Verdicts are still recorded. You can paste a
+      URL; only its domain is used.
     </p>
   </div>
 
@@ -380,7 +451,7 @@
         />
         <span>
           Keep AI Models up to Date
-          <span class="muted small"> (installs new model bundles automatically with every Update Check; each install restarts the service)</span>
+          <span class="muted small"> (installs new model bundles automatically with every Update Check; each install restarts the service; also on the Update page)</span>
         </span>
       </label>
     {/if}

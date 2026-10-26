@@ -33,9 +33,13 @@ Daygle DNS combines, in a single process:
   HMAC-SHA512). Per-zone key binding, signed responses, and request-MAC
   chaining.
 - **Named networks**: name a set of addresses once (`LAN`, `VPN`, `IoT`...)
-  in Settings -> Networks and pick it wherever a setting takes client
+  in Clients -> Networks and pick it wherever a setting takes client
   networks; changing it changes them all, renaming it keeps them pointing at
   it, and a network in use cannot be deleted.
+- **Per-client rules** on the console's Clients page: **filtering groups**
+  (extra allow/block rules, blocklists and AI auto-blocking for a set of
+  clients) and **resolution policies** (forward some clients to their own
+  upstreams, resolve them from the root servers, or refuse them).
 - **Split horizon**: serve different answers for the same domain depending
   on the client's network (named networks like `LAN`/`VPN`/`IoT` or
   literal CIDRs), managed from the GUI - internal clients see internal
@@ -113,7 +117,7 @@ metrics.
   including **remote blocklist sources** (hosts files, AdGuard lists, plain
   and wildcard domain lists, response policy zones) fetched over HTTP(S) and
   refreshed on a schedule. A source blocks for everyone or only for the
-  client groups that select it.
+  filtering groups that select it.
 - **Rate limiting** per client (source IP) and per domain (query name) with
   configurable fixed windows, loopback exemption, and live reload - queries
   over the limit get SERVFAIL and are counted in the `rate_limited` metric.

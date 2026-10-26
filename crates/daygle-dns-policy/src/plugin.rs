@@ -20,6 +20,9 @@ pub struct PolicyContext {
     pub query_name: String,
     /// Record type being queried, e.g. `"A"`.
     pub record_type: String,
+    /// The encrypted listener the query arrived on (`dot`, `doh`, `doq`);
+    /// `None` for plain DNS.
+    pub listener: Option<&'static str>,
 }
 
 /// A user-supplied policy plugin.
@@ -113,6 +116,7 @@ mod tests {
             client: "1.2.3.4".parse().unwrap(),
             query_name: "www.google.com".to_string(),
             record_type: "A".to_string(),
+            listener: None,
         };
         let decision = registry.evaluate(&ctx).await.unwrap();
         assert_eq!(decision.action, Action::Allow);
@@ -127,6 +131,7 @@ mod tests {
             client: "1.2.3.4".parse().unwrap(),
             query_name: "www.google.com".to_string(),
             record_type: "A".to_string(),
+            listener: None,
         };
         assert_eq!(registry.evaluate(&ctx).await.unwrap().action, Action::Block);
 
@@ -134,6 +139,7 @@ mod tests {
             client: "1.2.3.4".parse().unwrap(),
             query_name: "example.com".to_string(),
             record_type: "A".to_string(),
+            listener: None,
         };
         assert!(registry.evaluate(&other).await.is_none());
     }

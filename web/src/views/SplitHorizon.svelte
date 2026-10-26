@@ -177,7 +177,7 @@
     </div>
     <p class="muted help" style="margin: 0 0 10px">
       Each entry answers the clients in the networks it names. Networks such
-      as LAN or VPN are set up once in Settings → Networks and shared with the
+      as LAN or VPN are set up once in Clients → Networks and shared with the
       other settings that take client networks.
     </p>
     {#if entries.length === 0}
@@ -346,7 +346,6 @@
     font-size: 0.85rem;
     color: var(--muted);
   }
-  .help { max-width: 90ch; }
   .answers { display: flex; flex-direction: column; gap: 4px; }
   .checkbox { flex-direction: row; align-items: center; gap: 8px; margin-top: 12px; }
   .checkbox input { width: auto; }

@@ -512,6 +512,7 @@ fn retarget_group_blocklists(
                     block_regex: group.block_regex.clone(),
                     blocklists: kept,
                     response: group.response.clone(),
+                    ai_blocking: group.ai_blocking,
                 },
             )?;
             changed = true;
@@ -1022,7 +1023,9 @@ pub async fn ai_override(
     if !domain_ok {
         return (
             StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": "domain is required"})),
+            Json(serde_json::json!({
+                "error": "enter a valid domain name, such as news.example.com"
+            })),
         )
             .into_response();
     }
@@ -1146,7 +1149,7 @@ pub async fn update_info(State(state): State<AppState>) -> Response {
     // files: keep it off the async workers.
     // Whether automatic checks are on. They warm the release cache at the
     // configured cadence; the release data below is always a pure cache
-    // read, so it is surfaced even with checks off — a manual `Check Now`
+    // read, so it is surfaced even with checks off - a manual `Check Now`
     // then populates it (and the Update page explains the state).
     let release_checks_on = state.config.load().updates.enabled;
     let (has_systemd, can_update, gates, release, update_state, checked_ago) =
@@ -1196,7 +1199,7 @@ pub async fn update_info(State(state): State<AppState>) -> Response {
 /// (see [`crate::update::manual_release_check`]): every click is a request
 /// off GitHub's unauthenticated budget, so a request inside the minute
 /// window is answered from the cache with a retry hint. Automatic checks
-/// being disabled does not block this — it is the explicit replacement
+/// being disabled does not block this - it is the explicit replacement
 /// for them.
 pub async fn update_check(State(state): State<AppState>) -> Response {
     let config_dir = config_dir(&state);
@@ -2556,14 +2559,16 @@ pub async fn test_blocking(
         });
     // The resolver skips client-group blocking for allowlisted names.
     let allowlisted = state.policy.load().is_allowlisted(&domain);
+    let groups = state.advanced_blocking.load();
     let verdict = if allowlisted {
         None
     } else {
-        state
-            .advanced_blocking
-            .load()
-            .evaluate(client, &domain, listener)
+        groups.evaluate(client, &domain, listener)
     };
+    // Whether the AI may auto-block this client's queries, and which group
+    // decided that (none: the client is in no group).
+    let (ai_blocking, ai_group) = groups.ai_blocking(client, listener);
+    let ai_group = ai_group.map(str::to_string);
     let (blocked, action, reason, group) = match verdict {
         Some(d) => (true, d.action.as_str().to_string(), d.reason, d.group),
         None => (
@@ -2584,6 +2589,8 @@ pub async fn test_blocking(
         "action": action,
         "reason": reason,
         "group": group,
+        "ai_blocking": ai_blocking,
+        "ai_group": ai_group,
     }))
     .into_response()
 }
