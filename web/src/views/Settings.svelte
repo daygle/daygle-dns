@@ -28,6 +28,7 @@
     ['zones', 'Zones'],
     ['ai', 'AI Scanner'],
     ['logging', 'Logging'],
+    ['alerts', 'Alerts'],
     ['backup', 'Backup'],
   ];
   const TAGLINES = {
@@ -38,6 +39,7 @@
     zones: 'Defaults for new zones and records, and how other DNS servers may copy, update and be notified about your zones.',
     logging: 'Sending the server log, and optionally every query, to a syslog server. The logs themselves are on the Logs page.',
     ai: 'The background scanner that classifies the domains in your DNS traffic and can block unsafe ones.',
+    alerts: 'Email and webhook alerts when something needs attention: failing blocklists or zone transfers, expiring certificates, DNSSEC, updates and AI blocks.',
     backup: 'Download a backup of everything this server keeps, or restore one.',
   };
 
@@ -104,6 +106,50 @@
   let dns64Clients = $state([]);
   let ecs = $state({ enabled: false, subnet: '', ipv4_prefix: 24, ipv6_prefix: 56 });
   let syslog_ = $state({ enabled: false, server: '', facility: 'daemon', level: 'info', queries: false });
+  const ALERT_DEFAULTS = {
+    enabled: false, webhook_url: '', smtp_server: '', smtp_port: 587, smtp_security: 'starttls',
+    smtp_username: '', smtp_password: '', email_from: '', email_to: [],
+    blocklist_failures: true, zone_transfer_failures: true, certificate_expiry: true,
+    dnssec: true, update_available: true, ai_blocks: false,
+  };
+  const ALERT_EVENTS = [
+    ['blocklist_failures', 'A blocklist cannot be downloaded'],
+    ['zone_transfer_failures', 'A secondary zone cannot be refreshed from its primary'],
+    ['certificate_expiry', 'A certificate expires within 14 days, or cannot be renewed'],
+    ['dnssec', 'DNSSEC: a key rollover needs a new DS record, or signing fails'],
+    ['update_available', 'A new Daygle DNS release is available'],
+    ['ai_blocks', 'The AI starts blocking new domains (Enforce mode)'],
+  ];
+  let alerts_ = $state({ ...ALERT_DEFAULTS });
+  // Recipients as typed (one per line or comma-separated).
+  let alertTo = $state('');
+  let alertTest = $state(null);
+  let alertTesting = $state(false);
+
+  function alertsBody() {
+    return {
+      ...alerts_,
+      smtp_port: Number(alerts_.smtp_port),
+      webhook_url: (alerts_.webhook_url || '').trim(),
+      smtp_server: (alerts_.smtp_server || '').trim(),
+      smtp_username: (alerts_.smtp_username || '').trim(),
+      email_from: (alerts_.email_from || '').trim(),
+      email_to: alertTo.split(/[\n,]/).map((s) => s.trim()).filter(Boolean),
+    };
+  }
+
+  async function testAlert() {
+    alertTesting = true;
+    alertTest = null;
+    try {
+      await api.testAlert(alertsBody());
+      alertTest = { ok: true, msg: 'Test alert sent. Check that it arrived.' };
+    } catch (e) {
+      alertTest = { ok: false, msg: formatApiError(e) };
+    } finally {
+      alertTesting = false;
+    }
+  }
   const zoneChoices = timeZoneOptions();
   // Users who chose their own settings don't see the defaults change.
   const ownPrefsSet = $derived(
@@ -201,6 +247,8 @@
         http_port: config.web?.http_port || config.api?.port || 5380,
       };
       syslog_ = { enabled: false, server: '', facility: 'daemon', level: 'info', queries: false, ...config.syslog };
+      alerts_ = { ...ALERT_DEFAULTS, ...config.alerts };
+      alertTo = (config.alerts?.email_to || []).join('\n');
       dns64 = { enabled: !!config.dns64?.enabled, prefix: config.dns64?.prefix || '64:ff9b::/96' };
       dns64Clients = [...(config.dns64?.clients || [])];
       ecs = { enabled: false, subnet: '', ipv4_prefix: 24, ipv6_prefix: 56, ...config.ecs };
@@ -368,6 +416,7 @@
         ipv4_prefix: Number(ecs.ipv4_prefix),
         ipv6_prefix: Number(ecs.ipv6_prefix),
       },
+      alerts: alertsBody(),
       syslog: {
         enabled: !!syslog_.enabled,
         server: (syslog_.server || '').trim(),
@@ -600,6 +649,8 @@
       {#if ownPrefsSet}Your own preferences are set, so you won't see a change
         here until you reset them.{/if}
       "Device Time Zone" and "Browser Default" follow each viewer's computer.
+      Filtering group schedules also use this time zone ("Device Time Zone"
+      there means the server's own).
     </p>
   </div>
   {:else if tab === 'recursive'}
@@ -1079,6 +1130,72 @@
       Every query can be a lot of traffic on a busy server.
     </p>
   </div>
+  {:else if tab === 'alerts'}
+  <div class="card" style="margin-bottom: 14px">
+    <h3 style="margin: 0 0 10px">Alerts</h3>
+    <label class="check"><input type="checkbox" bind:checked={alerts_.enabled} /> <span>Send Alerts</span></label>
+    <p class="muted help">
+      Alerts go to a webhook, by email, or both. A problem that persists is
+      reported again after 6 hours at most (a day for certificates), not on
+      every check, and an update is reported once per release.
+    </p>
+  </div>
+  <div class="card" style="margin-bottom: 14px">
+    <h3 style="margin: 0 0 10px">Webhook</h3>
+    <div class="form-grid">
+      <label>
+        <span>Webhook URL</span>
+        <input placeholder="https://hooks.slack.com/services/..." bind:value={alerts_.webhook_url} spellcheck="false" />
+      </label>
+    </div>
+    <p class="muted help">
+      Each alert is sent as a JSON <code>POST</code> with <code>kind</code>,
+      <code>title</code>, <code>message</code>, <code>host</code> and
+      <code>time</code>, plus <code>text</code> and <code>content</code> so
+      Slack, Mattermost, Discord and Teams workflow webhooks show it as is.
+      Leave empty for no webhook.
+    </p>
+  </div>
+  <div class="card" style="margin-bottom: 14px">
+    <h3 style="margin: 0 0 10px">Email</h3>
+    <div class="form-grid">
+      <label><span>SMTP Server</span><input placeholder="smtp.example.com" bind:value={alerts_.smtp_server} spellcheck="false" /></label>
+      <label><span>Port</span><input type="number" min="1" max="65535" bind:value={alerts_.smtp_port} /></label>
+      <label>
+        <span>Security</span>
+        <select bind:value={alerts_.smtp_security}>
+          <option value="starttls">STARTTLS (Usually Port 587)</option>
+          <option value="tls">TLS (Usually Port 465)</option>
+          <option value="none">None (Unencrypted)</option>
+        </select>
+      </label>
+      <label><span>Username</span><input autocomplete="off" bind:value={alerts_.smtp_username} spellcheck="false" /></label>
+      <label><span>Password</span><input type="password" autocomplete="new-password" bind:value={alerts_.smtp_password} /></label>
+      <label><span>From</span><input placeholder="dns@example.com" bind:value={alerts_.email_from} spellcheck="false" /></label>
+      <label><span>To</span><textarea rows="2" placeholder={'admin@example.com\nnoc@example.com'} bind:value={alertTo} spellcheck="false"></textarea></label>
+    </div>
+    <p class="muted help">
+      Leave the server empty for no email. Username and password are only
+      needed if the server asks for them; the saved password is never shown
+      again (leave it as is to keep it). Recipients go one per line.
+    </p>
+  </div>
+  <div class="card" style="margin-bottom: 14px">
+    <h3 style="margin: 0 0 10px">Events</h3>
+    <div class="events">
+      {#each ALERT_EVENTS as [key, label] (key)}
+        <label class="check"><input type="checkbox" bind:checked={alerts_[key]} /> <span>{label}</span></label>
+      {/each}
+    </div>
+    <div class="row" style="margin-top: 14px; gap: 10px; flex-wrap: wrap; align-items: center">
+      <button class="secondary" onclick={testAlert} disabled={alertTesting}>{alertTesting ? 'Sending...' : 'Send Test Alert'}</button>
+      {#if alertTest}<span style="color: {alertTest.ok ? 'var(--ok)' : 'var(--danger)'}">{alertTest.msg}</span>{/if}
+    </div>
+    <p class="muted help">
+      Send Test Alert uses the settings on this page, saved or not, so you
+      can check them before saving.
+    </p>
+  </div>
   {:else if tab === 'backup'}
   <BackupRestore />
   {/if}
@@ -1090,6 +1207,7 @@
 
 <style>
   .actions { display: flex; gap: 10px; margin-bottom: 16px; }
+  .events { display: flex; flex-direction: column; gap: 8px; }
   .stacked {
     display: flex;
     flex-direction: column;

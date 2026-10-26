@@ -22,6 +22,10 @@ use hickory_server::server::{Request, RequestHandler, ResponseHandler, ResponseI
 use hickory_server::zone_handler::MessageResponseBuilder;
 use tracing::{debug, warn};
 
+/// TTL of the CNAME in a Safe Search answer (the safe address's own
+/// records keep theirs, capped by it).
+const SAFE_SEARCH_TTL: u32 = 300;
+
 /// Admission limit for recursive network work.
 ///
 /// Work holds a permit until its resolver future ends, independently of how
@@ -1014,6 +1018,73 @@ impl RequestHandler for DnsDispatcher {
             }
         }
 
+        // 1d. Safe Search and YouTube Restricted Mode: a search engine's name
+        // is answered with a CNAME to its "safe" address plus that address's
+        // records. Only for clients that may use recursion (everyone else is
+        // refused below anyway) and names not hosted here; HTTPS/SVCB are
+        // answered empty so browsers cannot learn other endpoints from them,
+        // and every other type resolves as usual.
+        if let Some(target) = self.safe_search_target(&policy, client, listener, &qname) {
+            let may_recurse = self.resolver.load().as_ref().is_some_and(|r| {
+                r.allows_client_with_listener(client, matches!(listener_allowed, Some(true)))
+            });
+            let qtype = info.query.query_type();
+            if may_recurse && !self.catalog.contains(info.query.name()) {
+                if matches!(qtype, RecordType::HTTPS | RecordType::SVCB) {
+                    self.metrics.inc(&self.metrics.recursive);
+                    self.observe(
+                        client,
+                        &qname,
+                        &rtype,
+                        protocol,
+                        Outcome::Recursive,
+                        Some("NOERROR"),
+                        started,
+                    );
+                    return send_empty(&mut response_handle, request, None).await;
+                }
+                if matches!(qtype, RecordType::A | RecordType::AAAA | RecordType::CNAME) {
+                    debug!(query = %qname, %target, "safe search rewrite");
+                    let ttl = SAFE_SEARCH_TTL;
+                    let owner = Name::from(info.query.name().clone());
+                    let target_name = Name::from_ascii(format!("{target}.")).expect("valid name");
+                    let mut answers = vec![Record::from_rdata(
+                        owner,
+                        ttl,
+                        RData::CNAME(hickory_proto::rr::rdata::CNAME(target_name.clone())),
+                    )];
+                    let mut rcode = ResponseCode::NoError;
+                    let mut ede = None;
+                    if qtype != RecordType::CNAME {
+                        let alias = daygle_dns_authoritative::catalog::Alias {
+                            target: format!("{target}."),
+                            ttl,
+                        };
+                        let (code, records, why) = self.resolve_alias(alias, client, qtype).await;
+                        rcode = code;
+                        ede = why;
+                        answers.extend(records.into_iter().map(|(ttl, rdata)| {
+                            Record::from_rdata(target_name.clone(), ttl, rdata)
+                        }));
+                    }
+                    self.metrics.inc(&self.metrics.recursive);
+                    self.observe(
+                        client,
+                        &qname,
+                        &rtype,
+                        protocol,
+                        Outcome::Recursive,
+                        Some(&rcode_label(rcode)),
+                        started,
+                    );
+                    if rcode != ResponseCode::NoError {
+                        return send_error(&mut response_handle, request, rcode, ede).await;
+                    }
+                    return send_records(&mut response_handle, request, &answers, None).await;
+                }
+            }
+        }
+
         // 1c. Split horizon: per-client synthetic answers. This runs after
         // policy (blocklists/redirects win) and before the authoritative
         // catalog, so internal clients see internal answers even for hosted
@@ -1229,6 +1300,69 @@ impl RequestHandler for DnsDispatcher {
         };
         match lookup {
             Ok((lookup, stale)) => {
+                // CNAME inspection: a name that is allowed, but answers
+                // through a CNAME to a blocked one, is blocked too (trackers
+                // put on a first-party subdomain, `metrics.shop.example ->
+                // tracker.example`). An allowlisted query name is trusted.
+                if policy.cname_inspection() && !policy.is_allowlisted(&qname) {
+                    if let Some((target, decision)) = self
+                        .blocked_cname_target(&policy, client, listener, lookup.answers())
+                        .await
+                    {
+                        debug!(query = %qname, %target, reason = %decision.reason, "blocked by CNAME inspection");
+                        self.metrics.inc(&self.metrics.blocked);
+                        let why = Some(Ede::new(
+                            ede::BLOCKED,
+                            format!("CNAME target {target} is blocked: {}", decision.reason),
+                        ));
+                        let rcode = match decision.action {
+                            Action::Refused => "REFUSED",
+                            Action::Redirect(_) | Action::NoData => "NOERROR",
+                            _ => "NXDOMAIN",
+                        };
+                        self.observe(
+                            client,
+                            &qname,
+                            &rtype,
+                            protocol,
+                            Outcome::Blocked,
+                            Some(rcode),
+                            started,
+                        );
+                        return match decision.action {
+                            Action::Refused => {
+                                send_error(
+                                    &mut response_handle,
+                                    request,
+                                    ResponseCode::Refused,
+                                    why,
+                                )
+                                .await
+                            }
+                            Action::Redirect(ip) => {
+                                send_redirect(
+                                    &mut response_handle,
+                                    request,
+                                    info.query.name(),
+                                    info.query.query_type(),
+                                    ip,
+                                    why,
+                                )
+                                .await
+                            }
+                            Action::NoData => send_empty(&mut response_handle, request, why).await,
+                            _ => {
+                                send_error(
+                                    &mut response_handle,
+                                    request,
+                                    ResponseCode::NXDomain,
+                                    why,
+                                )
+                                .await
+                            }
+                        };
+                    }
+                }
                 let mut answers = lookup.answers().to_vec();
                 let mut authorities = lookup.authorities().to_vec();
                 let mut additionals = lookup.additionals().to_vec();
@@ -1578,6 +1712,64 @@ impl DnsDispatcher {
             }
         }
         (mapped > 0).then_some(records)
+    }
+
+    /// The first CNAME target in `answers` that the blocklists, the
+    /// client's per-client rules or its filtering groups block, with the
+    /// blocking decision. Allowlisted targets are skipped.
+    async fn blocked_cname_target(
+        &self,
+        policy: &PolicyEngine,
+        client: IpAddr,
+        listener: Option<&'static str>,
+        answers: &[Record],
+    ) -> Option<(String, daygle_dns_policy::Decision)> {
+        let groups = self.advanced_blocking.load();
+        for record in answers {
+            let RData::CNAME(target) = &record.data else {
+                continue;
+            };
+            let name = target
+                .0
+                .to_ascii()
+                .trim_end_matches('.')
+                .to_ascii_lowercase();
+            if policy.is_allowlisted(&name) {
+                continue;
+            }
+            // Evaluated as an A query: a NODATA from the AAAA filter is not
+            // a block of the target.
+            let decision = policy.evaluate_on(client, &name, "A", listener).await;
+            if !matches!(decision.action, Action::Allow) {
+                return Some((name, decision));
+            }
+            if let Some(decision) = groups.evaluate(client, &name, listener) {
+                return Some((name, decision));
+            }
+        }
+        None
+    }
+
+    /// The Safe Search address to answer `qname` with for `client`, if any:
+    /// the global switches apply to everyone, and the first filtering group
+    /// a client belongs to can turn them on for its clients.
+    fn safe_search_target(
+        &self,
+        policy: &PolicyEngine,
+        client: IpAddr,
+        listener: Option<&str>,
+        qname: &str,
+    ) -> Option<&'static str> {
+        use daygle_dns_policy::safe_search::safe_target;
+        // Most names are no search engine at all: skip the group lookup.
+        safe_target(qname, true, true)?;
+        let (mut search, mut youtube) = (policy.safe_search(), policy.youtube_restricted());
+        if !(search && youtube) {
+            let (s, y, _) = self.advanced_blocking.load().safe_search(client, listener);
+            search |= s;
+            youtube |= y;
+        }
+        safe_target(qname, search, youtube)
     }
 
     /// Look up an ALIAS target's `rtype` records: from the zones here when

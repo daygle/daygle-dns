@@ -116,6 +116,16 @@ fn redacted_config_json(
             key.insert("secret".to_string(), serde_json::json!("[redacted]"));
         }
     }
+    if let Some(alerts) = value.get_mut("alerts").and_then(|a| a.as_object_mut()) {
+        let set = alerts
+            .get("smtp_password")
+            .and_then(|p| p.as_str())
+            .is_some_and(|p| !p.is_empty());
+        alerts.insert(
+            "smtp_password".to_string(),
+            serde_json::json!(if set { REDACTED } else { "" }),
+        );
+    }
     if let Some(api) = value.get_mut("api").and_then(|a| a.as_object_mut()) {
         let token = api.get("api_token").and_then(|t| t.as_str()).unwrap_or("");
         let redacted = if token.is_empty() { "" } else { "[redacted]" };
@@ -129,6 +139,76 @@ fn redacted_config_json(
         }
     }
     Ok(value)
+}
+
+/// Alert settings as submitted, trimmed, with the redaction placeholder
+/// standing for the stored SMTP password.
+fn normalize_alerts(
+    input: &daygle_dns_core::config::AlertSettings,
+    stored: &daygle_dns_core::config::AlertSettings,
+) -> daygle_dns_core::config::AlertSettings {
+    let smtp_password = if input.smtp_password == REDACTED {
+        stored.smtp_password.clone()
+    } else {
+        input.smtp_password.clone()
+    };
+    daygle_dns_core::config::AlertSettings {
+        webhook_url: input.webhook_url.trim().to_string(),
+        smtp_server: input.smtp_server.trim().to_string(),
+        smtp_security: input.smtp_security.trim().to_ascii_lowercase(),
+        smtp_username: input.smtp_username.trim().to_string(),
+        smtp_password,
+        email_from: input.email_from.trim().to_string(),
+        email_to: input
+            .email_to
+            .iter()
+            .map(|a| a.trim().to_string())
+            .filter(|a| !a.is_empty())
+            .collect(),
+        ..input.clone()
+    }
+}
+
+/// Stands for a stored secret in what the browser sees and sends back.
+const REDACTED: &str = "[redacted]";
+
+/// Body of `POST /api/alerts/test`: the settings to try (as on the form,
+/// saved or not); omitted, the saved ones.
+#[derive(Deserialize, Default)]
+pub struct AlertTestInput {
+    #[serde(default)]
+    pub alerts: Option<daygle_dns_core::config::AlertSettings>,
+}
+
+/// `POST /api/alerts/test` - send a test alert to every configured
+/// destination and report what failed.
+pub async fn test_alert(
+    State(state): State<AppState>,
+    body: Option<Json<AlertTestInput>>,
+) -> Response {
+    let stored = state.config.load().alerts.clone();
+    let settings = match body.and_then(|Json(b)| b.alerts) {
+        Some(input) => normalize_alerts(&input, &stored),
+        None => stored,
+    };
+    // The test goes out whether or not alerts are switched on yet.
+    let settings = daygle_dns_core::config::AlertSettings {
+        enabled: true,
+        ..settings
+    };
+    if let Err(msg) = settings.check() {
+        return error_response(StatusCode::BAD_REQUEST, msg);
+    }
+    let alert = daygle_dns_core::alerts::Alert {
+        kind: daygle_dns_core::alerts::AlertKind::Test,
+        key: "test".to_string(),
+        title: "Test alert".to_string(),
+        message: "Alerts from this Daygle DNS server reach you here.".to_string(),
+    };
+    match crate::alerts::deliver(&settings, &alert).await {
+        Ok(()) => Json(serde_json::json!({ "sent": true })).into_response(),
+        Err(e) => error_response(StatusCode::BAD_GATEWAY, e),
+    }
 }
 
 fn config_response(config: &daygle_dns_core::config::DaygleConfig) -> Response {
@@ -500,21 +580,9 @@ fn retarget_group_blocklists(
             }
         }
         if kept != group.blocklists {
-            state.catalog.store().upsert_blocking_group(
-                &daygle_dns_core::blocking::BlockingGroupInput {
-                    id: Some(group.id.clone()),
-                    name: group.name.clone(),
-                    enabled: group.enabled,
-                    clients: group.clients.clone(),
-                    allow: group.allow.clone(),
-                    block: group.block.clone(),
-                    allow_regex: group.allow_regex.clone(),
-                    block_regex: group.block_regex.clone(),
-                    blocklists: kept,
-                    response: group.response.clone(),
-                    ai_blocking: group.ai_blocking,
-                },
-            )?;
+            let mut input = group.to_input();
+            input.blocklists = kept;
+            state.catalog.store().upsert_blocking_group(&input)?;
             changed = true;
         }
     }
@@ -2418,6 +2486,9 @@ pub async fn upsert_blocking_group(
     if let Err(msg) = validate_group_regexes(&input) {
         return error_response(StatusCode::BAD_REQUEST, msg);
     }
+    if let Err(msg) = daygle_dns_core::schedule::validate(&input.schedule) {
+        return error_response(StatusCode::BAD_REQUEST, format!("schedule: {msg}"));
+    }
     // Client networks are addresses or names of configured networks.
     let config = state.config.load_full();
     if let Some(entry) = input
@@ -2569,6 +2640,19 @@ pub async fn test_blocking(
     // decided that (none: the client is in no group).
     let (ai_blocking, ai_group) = groups.ai_blocking(client, listener);
     let ai_group = ai_group.map(str::to_string);
+    // Safe Search for this client: the global switches, or its group's.
+    let policy = state.policy.load();
+    let (group_safe, group_youtube, _) = groups.safe_search(client, listener);
+    let safe_search = policy.safe_search() || group_safe;
+    let youtube_restricted = policy.youtube_restricted() || group_youtube;
+    let safe_search_target =
+        daygle_dns_policy::safe_search::safe_target(&domain, safe_search, youtube_restricted);
+    // Groups covering the client that are outside their schedule now.
+    let scheduled_off: Vec<String> = groups
+        .scheduled_off(client, listener)
+        .into_iter()
+        .map(str::to_string)
+        .collect();
     let (blocked, action, reason, group) = match verdict {
         Some(d) => (true, d.action.as_str().to_string(), d.reason, d.group),
         None => (
@@ -2591,6 +2675,10 @@ pub async fn test_blocking(
         "group": group,
         "ai_blocking": ai_blocking,
         "ai_group": ai_group,
+        "safe_search": safe_search,
+        "youtube_restricted": youtube_restricted,
+        "safe_search_target": safe_search_target,
+        "scheduled_off": scheduled_off,
     }))
     .into_response()
 }
@@ -4152,6 +4240,9 @@ pub struct SettingsUpdate {
     pub web: Option<WebUpdate>,
     /// Replaces the whole `[syslog]` section.
     pub syslog: Option<daygle_dns_core::config::SyslogSettings>,
+    /// Replaces the whole `[alerts]` section; an `smtp_password` of
+    /// `[redacted]` keeps the stored one.
+    pub alerts: Option<daygle_dns_core::config::AlertSettings>,
     /// Replaces the whole `[dns64]` section.
     pub dns64: Option<daygle_dns_core::config::Dns64Settings>,
     /// Replaces the whole `[ecs]` section.
@@ -4222,6 +4313,9 @@ pub struct PolicyUpdate {
     pub blocklist: Option<Vec<String>>,
     pub filter_aaaa: Option<bool>,
     pub filter_aaaa_except: Option<Vec<String>>,
+    pub youtube_restricted: Option<bool>,
+    pub safe_search: Option<bool>,
+    pub cname_inspection: Option<bool>,
 }
 
 /// Partial update for the AI scanner (mirrors `AiSettings` fields; the
@@ -4680,6 +4774,13 @@ pub async fn update_settings(
         }
         config.ecs = ecs;
     }
+    if let Some(alerts) = &update.alerts {
+        let alerts = normalize_alerts(alerts, &config.alerts);
+        if let Err(msg) = alerts.check() {
+            return error_response(StatusCode::BAD_REQUEST, format!("alerts: {msg}"));
+        }
+        config.alerts = alerts;
+    }
     if let Some(syslog) = &update.syslog {
         let syslog = daygle_dns_core::config::SyslogSettings {
             server: syslog.server.trim().to_string(),
@@ -4847,6 +4948,18 @@ pub async fn update_settings(
             config.policy.filter_aaaa = v;
             policy_changed = true;
         }
+        if let Some(v) = p.cname_inspection {
+            config.policy.cname_inspection = v;
+            policy_changed = true;
+        }
+        if let Some(v) = p.safe_search {
+            config.policy.safe_search = v;
+            policy_changed = true;
+        }
+        if let Some(v) = p.youtube_restricted {
+            config.policy.youtube_restricted = v;
+            policy_changed = true;
+        }
         if let Some(v) = &p.filter_aaaa_except {
             config.policy.filter_aaaa_except = normalize_policy_domains(v);
             policy_changed = true;
@@ -4998,6 +5111,8 @@ pub async fn update_settings(
             || old_config.doh != config.doh
             || old_config.doq != config.doq);
     state.config.store(Arc::new(config.clone()));
+    // Filtering-group schedules are read in the display time zone.
+    daygle_dns_core::schedule::set_time_zone(&config.display.time_zone);
     // Server-side knobs read from their own state rather than the config
     // (the recursive lookup limit): a console change otherwise waited for a
     // restart or a config-file reload.

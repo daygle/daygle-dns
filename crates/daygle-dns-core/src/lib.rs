@@ -6,6 +6,7 @@
 //! Nothing in this crate performs I/O on its own; it is a set of pure data
 //! structures plus small runtime helpers that the server crates share.
 
+pub mod alerts;
 pub mod auth;
 pub mod blocking;
 pub mod config;
@@ -15,6 +16,7 @@ pub mod logs;
 pub mod metrics;
 pub mod query_log;
 pub mod rate_limit;
+pub mod schedule;
 pub mod stats;
 pub mod totp;
 

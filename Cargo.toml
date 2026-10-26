@@ -71,6 +71,7 @@ getrandom = "0.4"
 siphasher = "1"
 uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
+chrono-tz = "0.10"
 thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
@@ -82,6 +83,7 @@ rand = "0.10"
 regex = "1"
 tempfile = "3"
 url = "2"
+lettre = { version = "0.11", default-features = false, features = ["smtp-transport", "builder", "hostname", "tokio1-rustls", "rustls-tls"] }
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "http2", "json", "socks", "query", "form"] }
 # AI subsystem: pure-Rust fastText inference (supervised text classification)
 fasttext = "0.8"

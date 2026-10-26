@@ -108,7 +108,18 @@ impl DnssecMaintenance {
                         last_resign = Instant::now();
                         info!(zones, "re-signed DNSSEC zones (RRSIG renewal)");
                     }
-                    Err(e) => warn!(error = %e, "RRSIG renewal failed"),
+                    Err(e) => {
+                        warn!(error = %e, "RRSIG renewal failed");
+                        daygle_dns_core::alerts::raise(
+                            daygle_dns_core::alerts::AlertKind::Dnssec,
+                            "dnssec:resign",
+                            "DNSSEC signatures cannot be renewed",
+                            format!(
+                                "Re-signing the DNSSEC zones failed: {e}. Signatures that \
+                                 expire make the zones fail validation."
+                            ),
+                        );
+                    }
                 }
             }
 
@@ -116,7 +127,15 @@ impl DnssecMaintenance {
             match self.process_rollover() {
                 Ok(0) => {}
                 Ok(events) => info!(events, "DNSSEC key rollover progressed"),
-                Err(e) => warn!(error = %e, "DNSSEC key rollover failed"),
+                Err(e) => {
+                    warn!(error = %e, "DNSSEC key rollover failed");
+                    daygle_dns_core::alerts::raise(
+                        daygle_dns_core::alerts::AlertKind::Dnssec,
+                        "dnssec:rollover-failed",
+                        "DNSSEC key rollover failed",
+                        format!("The DNSSEC key rollover step failed: {e}."),
+                    );
+                }
             }
         }
     }
@@ -194,6 +213,18 @@ impl DnssecMaintenance {
                     zone = %zone.name,
                     "DNSSEC rollover: generated new signing key; the zone is now \
                      double-signed - update the parent DS during the overlap window"
+                );
+                daygle_dns_core::alerts::raise(
+                    daygle_dns_core::alerts::AlertKind::Dnssec,
+                    format!("dnssec:rollover:{}", zone.name),
+                    format!("Update the DS record for '{}'", zone.name),
+                    format!(
+                        "A DNSSEC key rollover started for '{}': a new signing key was \
+                         generated and the zone is now signed with both keys. Give the \
+                         parent zone (your registrar) the new DS record (the zone's DS button under Zones) \
+                         before the old key retires.",
+                        zone.name
+                    ),
                 );
             }
 

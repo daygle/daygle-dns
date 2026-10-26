@@ -1033,6 +1033,20 @@ pub async fn refresh_release_forever(
             // curl with up-to-5 s timeouts: keep it off the async workers,
             // and ignore the outcome (a failure leaves the last-known value).
             let _ = tokio::task::spawn_blocking(refresh_latest_release_cache).await;
+            if let Some(latest) = latest_release_cached() {
+                if version_lt(daygle_dns_core::VERSION, &latest) {
+                    daygle_dns_core::alerts::raise(
+                        daygle_dns_core::alerts::AlertKind::UpdateAvailable,
+                        format!("update:{latest}"),
+                        format!("Daygle DNS {latest} is available"),
+                        format!(
+                            "A newer release ({latest}) is available; this server runs {}. \
+                             Install it from the Update page.",
+                            daygle_dns_core::VERSION
+                        ),
+                    );
+                }
+            }
             // Opt-in: install a changed AI models bundle automatically, at
             // the same cadence and through the same verified, rollback-
             // protected apply path as the console button (see

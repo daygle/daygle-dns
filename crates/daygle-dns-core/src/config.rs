@@ -54,6 +54,134 @@ pub struct DaygleConfig {
     /// Named networks (`[[networks]]`), e.g. `LAN` = `192.168.1.0/24`, that
     /// network settings can name instead of repeating the addresses.
     pub networks: Vec<NamedNetwork>,
+    /// Alerts by email and/or webhook when something needs attention.
+    pub alerts: AlertSettings,
+}
+
+/// Alerts: tell the operator by email (SMTP) and/or a webhook when
+/// something needs attention. Edited in Settings -> Alerts and stored in
+/// the database.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct AlertSettings {
+    pub enabled: bool,
+    /// URL that receives each alert as a JSON `POST` (empty: no webhook).
+    pub webhook_url: String,
+    /// SMTP server host name (empty: no email).
+    pub smtp_server: String,
+    pub smtp_port: u16,
+    /// `starttls` (usually port 587), `tls` (usually 465) or `none`.
+    pub smtp_security: String,
+    /// SMTP sign-in; empty for a server that needs none.
+    pub smtp_username: String,
+    pub smtp_password: String,
+    /// Sender address.
+    pub email_from: String,
+    /// Recipient addresses.
+    pub email_to: Vec<String>,
+    /// A remote blocklist cannot be downloaded.
+    pub blocklist_failures: bool,
+    /// A secondary zone cannot be refreshed from its primary.
+    pub zone_transfer_failures: bool,
+    /// A console-managed certificate expires within 14 days, or its
+    /// automatic renewal failed.
+    pub certificate_expiry: bool,
+    /// DNSSEC: a key rollover started (the parent DS needs updating) or
+    /// signing failed.
+    pub dnssec: bool,
+    /// A newer Daygle DNS release is available.
+    pub update_available: bool,
+    /// The AI scanner (in Enforce mode) started blocking new domains.
+    pub ai_blocks: bool,
+}
+
+impl Default for AlertSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            webhook_url: String::new(),
+            smtp_server: String::new(),
+            smtp_port: 587,
+            smtp_security: "starttls".to_string(),
+            smtp_username: String::new(),
+            smtp_password: String::new(),
+            email_from: String::new(),
+            email_to: Vec::new(),
+            blocklist_failures: true,
+            zone_transfer_failures: true,
+            certificate_expiry: true,
+            dnssec: true,
+            update_available: true,
+            ai_blocks: false,
+        }
+    }
+}
+
+impl AlertSettings {
+    /// Whether email is configured.
+    pub fn email_configured(&self) -> bool {
+        !self.smtp_server.trim().is_empty() && !self.email_to.is_empty()
+    }
+
+    /// Whether the event `kind` is switched on.
+    pub fn wants(&self, kind: crate::alerts::AlertKind) -> bool {
+        use crate::alerts::AlertKind as K;
+        match kind {
+            K::BlocklistFailure => self.blocklist_failures,
+            K::ZoneTransferFailure => self.zone_transfer_failures,
+            K::CertificateExpiry => self.certificate_expiry,
+            K::Dnssec => self.dnssec,
+            K::UpdateAvailable => self.update_available,
+            K::AiBlocks => self.ai_blocks,
+            K::Test => true,
+        }
+    }
+
+    /// Problems that stop the settings being used.
+    pub fn check(&self) -> std::result::Result<(), String> {
+        let webhook = self.webhook_url.trim();
+        if !webhook.is_empty() {
+            let url = url::Url::parse(webhook)
+                .map_err(|_| format!("'{webhook}' is not a webhook URL"))?;
+            if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
+                return Err(format!("'{webhook}' is not an http(s) URL"));
+            }
+        }
+        if !matches!(self.smtp_security.as_str(), "starttls" | "tls" | "none") {
+            return Err(format!(
+                "unknown SMTP security '{}': use starttls, tls or none",
+                self.smtp_security
+            ));
+        }
+        let server = self.smtp_server.trim();
+        if server.contains(char::is_whitespace) || server.contains('/') {
+            return Err(format!("'{server}' is not an SMTP server name"));
+        }
+        if !server.is_empty() && self.smtp_port == 0 {
+            return Err("the SMTP port cannot be 0".to_string());
+        }
+        let is_address = |a: &str| {
+            let a = a.trim();
+            a.split_once('@').is_some_and(|(user, host)| {
+                !user.is_empty() && host.contains('.') && !a.contains(char::is_whitespace)
+            })
+        };
+        if !server.is_empty() {
+            if !is_address(&self.email_from) {
+                return Err(format!("'{}' is not an email address", self.email_from));
+            }
+            if self.email_to.is_empty() {
+                return Err("add at least one recipient".to_string());
+            }
+        }
+        if let Some(bad) = self.email_to.iter().find(|a| !is_address(a)) {
+            return Err(format!("'{bad}' is not an email address"));
+        }
+        if self.enabled && webhook.is_empty() && !self.email_configured() {
+            return Err("set a webhook URL or an SMTP server to send alerts to".to_string());
+        }
+        Ok(())
+    }
 }
 
 /// EDNS Client Subnet (RFC 7871): tell forwarding upstreams which network a
@@ -690,6 +818,8 @@ pub struct RuntimeSettings {
     pub ai: Option<AiUpdate>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display: Option<DisplaySettings>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alerts: Option<AlertSettings>,
 }
 
 /// Partial updates for the recursive resolver (matches the API's shape).
@@ -1308,6 +1438,12 @@ pub struct PolicyUpdate {
     pub filter_aaaa: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub filter_aaaa_except: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cname_inspection: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub safe_search: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub youtube_restricted: Option<bool>,
     /// The remote blocklist sources (Filtering -> Blocklists).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blocklist_sources: Option<Vec<BlocklistSourceConfig>>,
@@ -1400,6 +1536,7 @@ impl RuntimeSettings {
             && self.dns64.is_none()
             && self.ecs.is_none()
             && self.networks.is_none()
+            && self.alerts.is_none()
     }
 
     /// Apply the overlay to `config` in place. `None` fields are untouched.
@@ -1559,6 +1696,15 @@ impl RuntimeSettings {
             if let Some(v) = &p.filter_aaaa_except {
                 config.policy.filter_aaaa_except = v.clone();
             }
+            if let Some(v) = p.cname_inspection {
+                config.policy.cname_inspection = v;
+            }
+            if let Some(v) = p.safe_search {
+                config.policy.safe_search = v;
+            }
+            if let Some(v) = p.youtube_restricted {
+                config.policy.youtube_restricted = v;
+            }
             // Captured on every save but never applied: a console-made
             // client deny/allow list reverted to the config file's at the
             // next start or file reload.
@@ -1586,6 +1732,9 @@ impl RuntimeSettings {
         }
         if let Some(s) = &self.syslog {
             config.syslog = s.clone();
+        }
+        if let Some(a) = &self.alerts {
+            config.alerts = a.clone();
         }
         if let Some(w) = &self.web {
             config.web = w.clone();
@@ -1778,6 +1927,9 @@ impl RuntimeSettings {
                 blocklist: Some(config.policy.blocklist.clone()),
                 filter_aaaa: Some(config.policy.filter_aaaa),
                 filter_aaaa_except: Some(config.policy.filter_aaaa_except.clone()),
+                cname_inspection: Some(config.policy.cname_inspection),
+                safe_search: Some(config.policy.safe_search),
+                youtube_restricted: Some(config.policy.youtube_restricted),
                 blocklist_sources: Some(config.policy.blocklist_sources.clone()),
             }),
             authoritative: Some(AuthoritativeUpdate {
@@ -1803,6 +1955,7 @@ impl RuntimeSettings {
             dns64: Some(config.dns64.clone()),
             ecs: Some(config.ecs.clone()),
             networks: Some(config.networks.clone()),
+            alerts: Some(config.alerts.clone()),
         }
     }
 }
@@ -2676,6 +2829,9 @@ impl DaygleConfig {
         self.syslog
             .check()
             .map_err(|e| DaygleError::Config(format!("syslog: {e}")))?;
+        self.alerts
+            .check()
+            .map_err(|e| DaygleError::Config(format!("alerts: {e}")))?;
         self.dns64
             .compile(&self.all_networks())
             .map_err(|e| DaygleError::Config(format!("dns64: {e}")))?;
@@ -3705,6 +3861,13 @@ pub struct PolicySettings {
     /// Names (or `*.suffix` wildcards) exempt from `filter_aaaa`, i.e. hosts
     /// that must stay reachable over IPv6.
     pub filter_aaaa_except: Vec<String>,
+    /// Block a query whose answer leads, through a CNAME, to a blocked name
+    /// (trackers hidden behind a CNAME on an allowed domain).
+    pub cname_inspection: bool,
+    /// Force Safe Search on Google, Bing and DuckDuckGo for every client.
+    pub safe_search: bool,
+    /// Force YouTube Restricted Mode for every client.
+    pub youtube_restricted: bool,
 }
 
 impl Default for PolicySettings {
@@ -3720,6 +3883,9 @@ impl Default for PolicySettings {
             rules: vec![],
             filter_aaaa: false,
             filter_aaaa_except: vec![],
+            cname_inspection: true,
+            safe_search: false,
+            youtube_restricted: false,
         }
     }
 }
@@ -4090,6 +4256,9 @@ mod tests {
         p.allowed_networks = vec![s("192.0.2.0/24")];
         p.filter_aaaa = !p.filter_aaaa;
         p.filter_aaaa_except = vec![s("v6.example")];
+        p.cname_inspection = !p.cname_inspection;
+        p.safe_search = !p.safe_search;
+        p.youtube_restricted = !p.youtube_restricted;
         p.blocklist_sources = vec![BlocklistSourceConfig {
             name: s("list"),
             url: s("https://lists.example/hosts"),
@@ -4160,6 +4329,10 @@ mod tests {
         c.dns64.clients = vec![s("2001:db8::/64")];
         c.ecs.enabled = true;
         c.ecs.subnet = s("198.51.100.0/24");
+        c.alerts.enabled = true;
+        c.alerts.webhook_url = s("https://hooks.example/daygle");
+        c.alerts.smtp_password = s("secret");
+        c.alerts.ai_blocks = true;
         c.networks = vec![NamedNetwork {
             name: s("LAN"),
             cidrs: vec![s("192.168.1.0/24")],
@@ -4185,6 +4358,7 @@ mod tests {
         assert_eq!(restored.dns64, c.dns64, "dns64");
         assert_eq!(restored.ecs, c.ecs, "ecs");
         assert_eq!(restored.networks, c.networks, "networks");
+        assert_eq!(restored.alerts, c.alerts, "alerts");
 
         // Clearing a value in the console must stay cleared after a restart,
         // even when the config file sets it.

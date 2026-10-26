@@ -359,11 +359,18 @@ certificate/max_connections [+ `dot`/`doh` handshake_timeout_secs, `doh.endpoint
 /allowed_networks), `api`
 (gui_enabled/cors_origins), `display` (the console's date/time defaults:
 `time_zone` = `system`, `UTC` or an IANA zone; `date_format` = `system`/`dmy`/
-`mdy`/`ymd`/`d_mon_y`; `time_format` = `system`/`24h`/`12h`), `syslog`, `dns64` and `ecs` (see below), and `authoritative`
+`mdy`/`ymd`/`d_mon_y`; `time_format` = `system`/`24h`/`12h`), `syslog`, `dns64` and `ecs` (see below), `policy`
+(allowlist/blocklist/denied_networks/allowed_networks/filter_aaaa/
+filter_aaaa_except/blocklist_sources, and `cname_inspection`, default on:
+a recursive answer whose CNAME chain reaches a blocked name is blocked
+too, unless the queried name is allowlisted; `safe_search` and
+`youtube_restricted`, default off: answer Google, Bing and DuckDuckGo with
+their forced Safe Search addresses, and YouTube with Restricted Mode, for
+every client - see Safe Search below), and `authoritative`
 (default_record_ttl/default_primary_ns/default_admin_mailbox/axfr_enabled/axfr_networks/
 allow_dynamic_updates/update_networks/notify_enabled/notify_targets/
 notify_listen_enabled/stub_zones/catalog_zone/catalog_consumers). Runtime groups (`recursive`, `dot`, `doh`, `doq`,
-`policy`, `authoritative`, `ai`, `display`) are stored in the database and survive restarts and
+`policy`, `authoritative`, `ai`, `display`, `alerts`) are stored in the database and survive restarts and
 config-file edits; `server.*` and `api.*` stay config-file-owned so a broken
 listener can always be fixed by editing the file. A `server` or `api` group
 in a `PUT` is applied to the running server but not stored, so it reverts
@@ -1286,6 +1293,20 @@ clients in enforce mode. A client follows the first enabled group that
 covers it, and clients in no group are covered; to use the AI for some
 groups only, put a group covering every client with `ai_blocking: false`
 last.
+`safe_search` and `youtube_restricted` (default `false`) turn Safe Search
+and YouTube Restricted Mode on for the group's clients, by the same
+first-group rule; the global `policy.safe_search` and
+`policy.youtube_restricted` switches apply to every client whatever the
+groups say.
+`schedule` limits when the group applies: a list of
+`{"days": ["mon", "fri"], "start": "21:00", "end": "07:00"}` windows
+(`days` from `mon`..`sun`, full names accepted, empty for every day; times
+`HH:MM`, 24-hour). An `end` earlier than `start` runs past midnight into
+the next day, and equal times cover the whole day. Outside every window
+the group is skipped as if it did not exist (for blocking, AI blocking
+and Safe Search alike). Times are read in `display.time_zone` (`system`:
+the server's own zone). An empty list (the default) means always; a bad
+window is `400`.
 `POST /api/policy/blocking` creates a group or updates the one with the same
 name; with an `id` it updates that group, so it can be renamed (`400` if
 another group has the new name, `404` if the id is unknown). The
@@ -1306,7 +1327,55 @@ the live blocking groups and reports whether (and why) it is blocked, so an
 operator can verify rules before relying on them. It also reports
 `ai_blocking` (whether the AI may auto-block that client's queries) and
 `ai_group` (the group that decided; `null` when the client is in no
-group).
+group), whether `safe_search` and `youtube_restricted` apply to the client,
+and `safe_search_target`: the safe address the domain is answered with
+(`null` when it is not rewritten), and `scheduled_off`: the groups covering
+the client that are outside their schedule right now.
+
+#### Safe Search
+
+With Safe Search on for a client, `google.com` and Google's country sites
+(`google.de`, `google.co.uk`, `google.com.au`, with or without `www.`),
+`www.bing.com` and `duckduckgo.com` are answered with a CNAME to
+`forcesafesearch.google.com`, `strict.bing.com` or `safe.duckduckgo.com`
+plus that name's addresses; with YouTube Restricted Mode on,
+`www.youtube.com`, `m.youtube.com`, `youtubei.googleapis.com`,
+`youtube.googleapis.com` and `www.youtube-nocookie.com` point at
+`restrict.youtube.com`. `HTTPS`/`SVCB` queries for those names are answered
+empty and other types resolve as usual. It applies only to clients allowed
+to use recursion, and not to names hosted in a zone here.
+
+### Alerts
+
+```
+POST   /api/alerts/test
+```
+
+The `alerts` settings group (Settings -> Alerts, replaced as a whole by
+`PUT /api/config` with `{"alerts": {...}}`) sends an alert when something
+needs attention:
+
+| Field | Default | Meaning |
+|---|---|---|
+| `enabled` | `false` | Send alerts at all (needs a webhook or an SMTP server). |
+| `webhook_url` | `""` | Each alert is `POST`ed here as JSON: `source`, `host`, `kind`, `title`, `message`, `time`, plus `text`/`content` (the summary, for Slack, Mattermost, Discord and Teams webhooks). |
+| `smtp_server`, `smtp_port` | `""`, `587` | Email via this server (empty: no email). |
+| `smtp_security` | `starttls` | `starttls`, `tls` (implicit TLS, usually port 465) or `none`. |
+| `smtp_username`, `smtp_password` | `""` | Sign-in, when the server needs it. The password reads back as `[redacted]`; sending `[redacted]` keeps the stored one. |
+| `email_from`, `email_to` | `""`, `[]` | Sender and recipients (required with an SMTP server). |
+| `blocklist_failures` | `true` | A remote blocklist cannot be downloaded (`kind` `blocklist_failure`). |
+| `zone_transfer_failures` | `true` | A secondary zone cannot be refreshed (`zone_transfer_failure`). |
+| `certificate_expiry` | `true` | A console-managed certificate expires within 14 days, or an ACME request failed (`certificate_expiry`). |
+| `dnssec` | `true` | A key rollover started (the parent DS needs the new key), or re-signing failed (`dnssec`). |
+| `update_available` | `true` | A newer release is available (`update_available`), once per release. |
+| `ai_blocks` | `false` | The AI scanner in Enforce mode started blocking new domains (`ai_blocks`). |
+
+A failure that persists is reported again after 6 hours at the soonest (24
+hours for certificates); once it clears, the next failure is reported right
+away. `POST /api/alerts/test` sends a test alert (`kind` `test`) with the
+saved settings, or with `{"alerts": {...}}` from the body (unsaved form
+values), whether or not alerts are enabled. It answers `{"sent": true}`, `400`
+for invalid settings, or `502` naming each destination that failed.
 
 ### Backup and restore
 

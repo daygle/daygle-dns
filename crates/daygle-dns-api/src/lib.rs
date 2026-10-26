@@ -70,6 +70,7 @@
 //! new values without locking or restarting.
 
 pub mod acme;
+pub mod alerts;
 mod audit;
 mod handlers;
 mod networks;
@@ -574,6 +575,7 @@ pub fn router(state: AppState) -> Router {
             get(handlers::validate_blocklist_source),
         )
         .route("/policy/blocking/test", post(handlers::test_blocking))
+        .route("/alerts/test", post(handlers::test_alert))
         .route(
             "/policy/blocking",
             get(handlers::list_blocking_groups).post(handlers::upsert_blocking_group),
