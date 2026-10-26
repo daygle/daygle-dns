@@ -363,7 +363,10 @@ certificate/max_connections [+ `dot`/`doh` handshake_timeout_secs, `doh.endpoint
 (allowlist/blocklist/denied_networks/allowed_networks/filter_aaaa/
 filter_aaaa_except/blocklist_sources, and `cname_inspection`, default on:
 a recursive answer whose CNAME chain reaches a blocked name is blocked
-too, unless the queried name is allowlisted), and `authoritative`
+too, unless the queried name is allowlisted; `safe_search` and
+`youtube_restricted`, default off: answer Google, Bing and DuckDuckGo with
+their forced Safe Search addresses, and YouTube with Restricted Mode, for
+every client - see Safe Search below), and `authoritative`
 (default_record_ttl/default_primary_ns/default_admin_mailbox/axfr_enabled/axfr_networks/
 allow_dynamic_updates/update_networks/notify_enabled/notify_targets/
 notify_listen_enabled/stub_zones/catalog_zone/catalog_consumers). Runtime groups (`recursive`, `dot`, `doh`, `doq`,
@@ -1290,6 +1293,11 @@ clients in enforce mode. A client follows the first enabled group that
 covers it, and clients in no group are covered; to use the AI for some
 groups only, put a group covering every client with `ai_blocking: false`
 last.
+`safe_search` and `youtube_restricted` (default `false`) turn Safe Search
+and YouTube Restricted Mode on for the group's clients, by the same
+first-group rule; the global `policy.safe_search` and
+`policy.youtube_restricted` switches apply to every client whatever the
+groups say.
 `POST /api/policy/blocking` creates a group or updates the one with the same
 name; with an `id` it updates that group, so it can be renamed (`400` if
 another group has the new name, `404` if the id is unknown). The
@@ -1310,7 +1318,22 @@ the live blocking groups and reports whether (and why) it is blocked, so an
 operator can verify rules before relying on them. It also reports
 `ai_blocking` (whether the AI may auto-block that client's queries) and
 `ai_group` (the group that decided; `null` when the client is in no
-group).
+group), whether `safe_search` and `youtube_restricted` apply to the client,
+and `safe_search_target`: the safe address the domain is answered with
+(`null` when it is not rewritten).
+
+#### Safe Search
+
+With Safe Search on for a client, `google.com` and Google's country sites
+(`google.de`, `google.co.uk`, `google.com.au`, with or without `www.`),
+`www.bing.com` and `duckduckgo.com` are answered with a CNAME to
+`forcesafesearch.google.com`, `strict.bing.com` or `safe.duckduckgo.com`
+plus that name's addresses; with YouTube Restricted Mode on,
+`www.youtube.com`, `m.youtube.com`, `youtubei.googleapis.com`,
+`youtube.googleapis.com` and `www.youtube-nocookie.com` point at
+`restrict.youtube.com`. `HTTPS`/`SVCB` queries for those names are answered
+empty and other types resolve as usual. It applies only to clients allowed
+to use recursion, and not to names hosted in a zone here.
 
 ### Backup and restore
 

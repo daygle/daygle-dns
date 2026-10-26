@@ -1310,6 +1310,10 @@ pub struct PolicyUpdate {
     pub filter_aaaa_except: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cname_inspection: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub safe_search: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub youtube_restricted: Option<bool>,
     /// The remote blocklist sources (Filtering -> Blocklists).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blocklist_sources: Option<Vec<BlocklistSourceConfig>>,
@@ -1564,6 +1568,12 @@ impl RuntimeSettings {
             if let Some(v) = p.cname_inspection {
                 config.policy.cname_inspection = v;
             }
+            if let Some(v) = p.safe_search {
+                config.policy.safe_search = v;
+            }
+            if let Some(v) = p.youtube_restricted {
+                config.policy.youtube_restricted = v;
+            }
             // Captured on every save but never applied: a console-made
             // client deny/allow list reverted to the config file's at the
             // next start or file reload.
@@ -1784,6 +1794,8 @@ impl RuntimeSettings {
                 filter_aaaa: Some(config.policy.filter_aaaa),
                 filter_aaaa_except: Some(config.policy.filter_aaaa_except.clone()),
                 cname_inspection: Some(config.policy.cname_inspection),
+                safe_search: Some(config.policy.safe_search),
+                youtube_restricted: Some(config.policy.youtube_restricted),
                 blocklist_sources: Some(config.policy.blocklist_sources.clone()),
             }),
             authoritative: Some(AuthoritativeUpdate {
@@ -3714,6 +3726,10 @@ pub struct PolicySettings {
     /// Block a query whose answer leads, through a CNAME, to a blocked name
     /// (trackers hidden behind a CNAME on an allowed domain).
     pub cname_inspection: bool,
+    /// Force Safe Search on Google, Bing and DuckDuckGo for every client.
+    pub safe_search: bool,
+    /// Force YouTube Restricted Mode for every client.
+    pub youtube_restricted: bool,
 }
 
 impl Default for PolicySettings {
@@ -3730,6 +3746,8 @@ impl Default for PolicySettings {
             filter_aaaa: false,
             filter_aaaa_except: vec![],
             cname_inspection: true,
+            safe_search: false,
+            youtube_restricted: false,
         }
     }
 }
@@ -4101,6 +4119,8 @@ mod tests {
         p.filter_aaaa = !p.filter_aaaa;
         p.filter_aaaa_except = vec![s("v6.example")];
         p.cname_inspection = !p.cname_inspection;
+        p.safe_search = !p.safe_search;
+        p.youtube_restricted = !p.youtube_restricted;
         p.blocklist_sources = vec![BlocklistSourceConfig {
             name: s("list"),
             url: s("https://lists.example/hosts"),

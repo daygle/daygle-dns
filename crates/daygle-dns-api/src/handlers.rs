@@ -500,21 +500,9 @@ fn retarget_group_blocklists(
             }
         }
         if kept != group.blocklists {
-            state.catalog.store().upsert_blocking_group(
-                &daygle_dns_core::blocking::BlockingGroupInput {
-                    id: Some(group.id.clone()),
-                    name: group.name.clone(),
-                    enabled: group.enabled,
-                    clients: group.clients.clone(),
-                    allow: group.allow.clone(),
-                    block: group.block.clone(),
-                    allow_regex: group.allow_regex.clone(),
-                    block_regex: group.block_regex.clone(),
-                    blocklists: kept,
-                    response: group.response.clone(),
-                    ai_blocking: group.ai_blocking,
-                },
-            )?;
+            let mut input = group.to_input();
+            input.blocklists = kept;
+            state.catalog.store().upsert_blocking_group(&input)?;
             changed = true;
         }
     }
@@ -2569,6 +2557,13 @@ pub async fn test_blocking(
     // decided that (none: the client is in no group).
     let (ai_blocking, ai_group) = groups.ai_blocking(client, listener);
     let ai_group = ai_group.map(str::to_string);
+    // Safe Search for this client: the global switches, or its group's.
+    let policy = state.policy.load();
+    let (group_safe, group_youtube, _) = groups.safe_search(client, listener);
+    let safe_search = policy.safe_search() || group_safe;
+    let youtube_restricted = policy.youtube_restricted() || group_youtube;
+    let safe_search_target =
+        daygle_dns_policy::safe_search::safe_target(&domain, safe_search, youtube_restricted);
     let (blocked, action, reason, group) = match verdict {
         Some(d) => (true, d.action.as_str().to_string(), d.reason, d.group),
         None => (
@@ -2591,6 +2586,9 @@ pub async fn test_blocking(
         "group": group,
         "ai_blocking": ai_blocking,
         "ai_group": ai_group,
+        "safe_search": safe_search,
+        "youtube_restricted": youtube_restricted,
+        "safe_search_target": safe_search_target,
     }))
     .into_response()
 }
@@ -4222,6 +4220,8 @@ pub struct PolicyUpdate {
     pub blocklist: Option<Vec<String>>,
     pub filter_aaaa: Option<bool>,
     pub filter_aaaa_except: Option<Vec<String>>,
+    pub youtube_restricted: Option<bool>,
+    pub safe_search: Option<bool>,
     pub cname_inspection: Option<bool>,
 }
 
@@ -4850,6 +4850,14 @@ pub async fn update_settings(
         }
         if let Some(v) = p.cname_inspection {
             config.policy.cname_inspection = v;
+            policy_changed = true;
+        }
+        if let Some(v) = p.safe_search {
+            config.policy.safe_search = v;
+            policy_changed = true;
+        }
+        if let Some(v) = p.youtube_restricted {
+            config.policy.youtube_restricted = v;
             policy_changed = true;
         }
         if let Some(v) = &p.filter_aaaa_except {

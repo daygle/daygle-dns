@@ -58,6 +58,14 @@ pub struct BlockingGroup {
     /// clients in no group are covered.
     #[serde(default = "default_true")]
     pub ai_blocking: bool,
+    /// Force Safe Search on Google, Bing and DuckDuckGo for these clients.
+    /// Like `ai_blocking`, the first enabled group a client belongs to
+    /// decides (the global switch applies to everyone either way).
+    #[serde(default)]
+    pub safe_search: bool,
+    /// Force YouTube Restricted Mode for these clients (same rule).
+    #[serde(default)]
+    pub youtube_restricted: bool,
     /// Ordering position (lower groups are evaluated first).
     pub position: i64,
     /// When the group was last created or edited through the console or API,
@@ -98,4 +106,29 @@ pub struct BlockingGroupInput {
     pub response: BlockResponse,
     #[serde(default = "default_true")]
     pub ai_blocking: bool,
+    #[serde(default)]
+    pub safe_search: bool,
+    #[serde(default)]
+    pub youtube_restricted: bool,
+}
+
+impl BlockingGroup {
+    /// The input that saves this group back unchanged (by id).
+    pub fn to_input(&self) -> BlockingGroupInput {
+        BlockingGroupInput {
+            id: Some(self.id.clone()),
+            name: self.name.clone(),
+            enabled: self.enabled,
+            clients: self.clients.clone(),
+            allow: self.allow.clone(),
+            block: self.block.clone(),
+            allow_regex: self.allow_regex.clone(),
+            block_regex: self.block_regex.clone(),
+            blocklists: self.blocklists.clone(),
+            response: self.response.clone(),
+            ai_blocking: self.ai_blocking,
+            safe_search: self.safe_search,
+            youtube_restricted: self.youtube_restricted,
+        }
+    }
 }

@@ -59,6 +59,10 @@ struct CompiledGroup {
     action: Action,
     /// Whether the AI scanner may auto-block this group's clients.
     ai_blocking: bool,
+    /// Whether this group's clients get forced Safe Search.
+    safe_search: bool,
+    /// Whether this group's clients get YouTube Restricted Mode.
+    youtube_restricted: bool,
 }
 
 impl CompiledGroup {
@@ -123,6 +127,8 @@ impl AdvancedBlocking {
                     .collect(),
                 action: response_to_action(&g.response),
                 ai_blocking: g.ai_blocking,
+                safe_search: g.safe_search,
+                youtube_restricted: g.youtube_restricted,
                 name: g.name.clone(),
             });
         }
@@ -156,6 +162,22 @@ impl AdvancedBlocking {
             .iter()
             .find(|g| g.matches_client(client, listener))
             .map_or((true, None), |g| (g.ai_blocking, Some(g.name.as_str())))
+    }
+
+    /// The Safe Search and YouTube Restricted Mode switches of the first
+    /// enabled group `client` on `listener` belongs to (both off for clients
+    /// in no group), with that group's name.
+    pub fn safe_search(
+        &self,
+        client: IpAddr,
+        listener: Option<&str>,
+    ) -> (bool, bool, Option<&str>) {
+        self.groups
+            .iter()
+            .find(|g| g.matches_client(client, listener))
+            .map_or((false, false, None), |g| {
+                (g.safe_search, g.youtube_restricted, Some(g.name.as_str()))
+            })
     }
 
     /// Evaluate `qname` (already normalized: lowercase, no trailing dot) for
@@ -296,6 +318,8 @@ mod tests {
             blocklists: vec![],
             response: BlockResponse::NxDomain,
             ai_blocking: true,
+            safe_search: false,
+            youtube_restricted: false,
             position: 0,
             last_modified_at: None,
         }
@@ -337,6 +361,29 @@ mod tests {
         assert_eq!(
             ab.ai_blocking(ip("10.0.0.2"), None),
             (false, Some("everyone"))
+        );
+    }
+
+    #[test]
+    fn first_matching_group_decides_safe_search() {
+        let mut kids = group("kids");
+        kids.clients = vec!["192.168.50.0/24".to_string()];
+        kids.safe_search = true;
+        kids.youtube_restricted = true;
+        let mut everyone = group("everyone");
+        everyone.safe_search = true;
+        let ab = AdvancedBlocking::build(&[kids, everyone], Arc::default());
+        assert_eq!(
+            ab.safe_search(ip("192.168.50.7"), None),
+            (true, true, Some("kids"))
+        );
+        assert_eq!(
+            ab.safe_search(ip("10.0.0.2"), None),
+            (true, false, Some("everyone"))
+        );
+        assert_eq!(
+            AdvancedBlocking::default().safe_search(ip("10.0.0.2"), None),
+            (false, false, None)
         );
     }
 

@@ -24,7 +24,7 @@
       id: 'response-filters',
       label: 'Response Filters',
       tagline:
-        'Rules that look at or change DNS answers: block trackers hidden behind CNAME records, and answer IPv6 lookups with IPv4 only.',
+        'Rules that look at or change DNS answers: block trackers hidden behind CNAME records, force Safe Search, and answer IPv6 lookups with IPv4 only.',
     },
   ];
 

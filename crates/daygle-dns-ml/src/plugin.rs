@@ -205,6 +205,8 @@ mod tests {
             blocklists: vec![],
             response: Default::default(),
             ai_blocking: false,
+            safe_search: false,
+            youtube_restricted: false,
             position: 0,
             last_modified_at: None,
         };

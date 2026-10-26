@@ -76,6 +76,8 @@
           responseKind: group.response?.kind || 'nx_domain',
           redirectAddr: group.response?.address || '0.0.0.0',
           ai_blocking: group.ai_blocking !== false,
+          safe_search: !!group.safe_search,
+          youtube_restricted: !!group.youtube_restricted,
         }
       : {
           id: null,
@@ -91,6 +93,8 @@
           responseKind: 'nx_domain',
           redirectAddr: '0.0.0.0',
           ai_blocking: true,
+          safe_search: false,
+          youtube_restricted: false,
         };
   }
 
@@ -122,6 +126,8 @@
       blocklists: edit.blocklists,
       response,
       ai_blocking: edit.ai_blocking,
+      safe_search: edit.safe_search,
+      youtube_restricted: edit.youtube_restricted,
     };
     saving = true;
     error = null;
@@ -221,6 +227,8 @@
                 <strong>{g.name}</strong>
                 {#if !g.enabled}<span class="pill">Disabled</span>{/if}
                 {#if g.ai_blocking === false}<span class="pill" title="The AI never auto-blocks these clients' queries">AI Off</span>{/if}
+                {#if g.safe_search}<span class="pill" title="Google, Bing and DuckDuckGo always use Safe Search for these clients">Safe Search</span>{/if}
+                {#if g.youtube_restricted}<span class="pill" title="YouTube always uses Restricted Mode for these clients">YouTube Restricted</span>{/if}
               </td>
               <td class="muted">{g.clients.length ? g.clients.join(', ') : 'All Clients'}</td>
               <td class="muted">
@@ -254,8 +262,9 @@
     (later groups are skipped); on its block list or one of its blocklists,
     it is blocked with that group's response. Otherwise the next group is
     checked. A group with no client networks covers every client. AI
-    auto-blocking follows the first group covering the client: a group can
-    turn it off for its clients.
+    auto-blocking, Safe Search and YouTube Restricted Mode follow the first
+    group covering the client: a group can turn AI auto-blocking off, or Safe
+    Search on, for its clients.
   </p>
 </div>
 
@@ -288,6 +297,11 @@
         <span class="muted ai-note">
           AI auto-blocking: {testResult.ai_blocking ? 'On' : 'Off'}
           {testResult.ai_group ? `(group "${testResult.ai_group}")` : '(client is in no group)'}
+        </span>
+      {/if}
+      {#if testResult.safe_search_target}
+        <span class="muted ai-note">
+          Safe Search: answered with <code>{testResult.safe_search_target}</code>
         </span>
       {/if}
     </div>
@@ -357,6 +371,15 @@
         first group (from the top) that covers it; clients in no group are
         covered. To use the AI for some groups only, add a group covering every
         client with this off and move it to the bottom.
+      </p>
+
+      <div class="section-title">Safe Search</div>
+      <label class="checkbox"><input type="checkbox" bind:checked={edit.safe_search} /><span>Force Safe Search on Google, Bing and DuckDuckGo</span></label>
+      <label class="checkbox"><input type="checkbox" bind:checked={edit.youtube_restricted} /><span>Force YouTube Restricted Mode</span></label>
+      <p class="muted help">
+        Hides explicit results whatever the device or account settings say.
+        A client follows the first group that covers it. To turn these on for
+        every client, use Filtering → Response Filters instead.
       </p>
 
       <div class="section-title">Domains</div>

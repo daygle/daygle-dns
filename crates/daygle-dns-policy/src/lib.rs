@@ -22,6 +22,7 @@ mod blocklist_source;
 mod engine;
 mod plugin;
 mod rule;
+pub mod safe_search;
 
 pub use acl::Acl;
 pub use advanced::{is_listener_keyword, validate_regex, AdvancedBlocking, LISTENER_KEYWORDS};
@@ -132,6 +133,8 @@ pub fn build_engine(settings: &PolicySettings) -> Result<PolicyEngine> {
         let bypass = (!bypass.is_empty()).then(|| Blocklist::from_set(bypass));
         engine.set_filter_aaaa(true, bypass);
     }
+    engine.set_youtube_restricted(settings.youtube_restricted);
+    engine.set_safe_search(settings.safe_search);
     engine.set_cname_inspection(settings.cname_inspection);
 
     Ok(engine)
