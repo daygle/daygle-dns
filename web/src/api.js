@@ -204,11 +204,13 @@ export const api = {
   setZoneEnabled: (id, enabled) => request('PUT', `/zones/${id}/enabled`, { enabled }),
   updateZoneSoa: (id, body) => request('PUT', `/zones/${id}/soa`, body),
   records: (zoneId) => request('GET', `/zones/${zoneId}/records`),
-  upsertRecord: (zoneId, body) => request('PUT', `/zones/${zoneId}/records`, body),
-  replaceRecord: (zoneId, recordId, body) =>
-    request('PUT', `/zones/${zoneId}/records/${encodeURIComponent(recordId)}`, body),
-  deleteRecord: (zoneId, recordId) =>
-    request('DELETE', `/zones/${zoneId}/records/${recordId}`),
+  // `query` (optional) is e.g. "update_ptr=true&create_reverse_zone=true".
+  upsertRecord: (zoneId, body, query = '') =>
+    request('PUT', `/zones/${zoneId}/records${query ? `?${query}` : ''}`, body),
+  replaceRecord: (zoneId, recordId, body, query = '') =>
+    request('PUT', `/zones/${zoneId}/records/${encodeURIComponent(recordId)}${query ? `?${query}` : ''}`, body),
+  deleteRecord: (zoneId, recordId, query = '') =>
+    request('DELETE', `/zones/${zoneId}/records/${recordId}${query ? `?${query}` : ''}`),
   setRecordDisabled: (zoneId, recordId, disabled) =>
     request('PUT', `/zones/${zoneId}/records/${encodeURIComponent(recordId)}/disabled`, { disabled }),
   healthChecks: () => request('GET', '/health-checks'),
