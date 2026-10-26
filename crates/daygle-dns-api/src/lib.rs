@@ -76,6 +76,7 @@ pub mod devices;
 mod handlers;
 mod networks;
 pub mod reports;
+pub mod reverse;
 mod update;
 
 // The release-cache warmer is spawned by the binary next to the ACME

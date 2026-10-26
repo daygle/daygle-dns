@@ -758,6 +758,28 @@ Supported `rtype` values: `A`, `AAAA`, `CNAME`, `MX`, `TXT`, `NS`, `SOA`,
 For A and AAAA records with health checks it is the failover priority (see
 below).
 
+**Reverse (PTR) records.** `PUT /api/zones/{id}/records`,
+`PUT /api/zones/{id}/records/{rid}` (replace a record in place) and
+`DELETE /api/zones/{id}/records/{rid}` take two query options for A and AAAA
+records:
+
+- `update_ptr=true` keeps the record's PTR record in step, in the most
+  specific hosted zone covering its address. A save adds the PTR (pointing
+  at the record's full name, with its TTL); a change of address or name
+  moves it; a delete removes it. Only PTR records pointing at this record's
+  name are removed, and a PTR at the address for another name is left as it
+  is. A disabled record gets no PTR.
+- `create_reverse_zone=true` (with `update_ptr`) creates the reverse zone
+  when none covers the address: its /24 (`20.168.192.in-addr.arpa` for
+  192.168.20.5) or, for IPv6, its /64, with the default nameserver and
+  mailbox.
+
+With `update_ptr`, a save answers with the record plus `"reverse": {"added":
+[...], "removed": [...], "zone_created": "...", "problem": "..."}` (owner
+names; `zone_created` and `problem` only when they apply; `problem` says why
+no PTR was added, e.g. no reverse zone or another name's PTR), and a delete
+answers `200` with `{"reverse": {...}}` instead of `204`.
+
 **Health-checked failover.** An A or AAAA record can carry a health check:
 
 ```

@@ -2324,19 +2324,40 @@ fn reject_secondary_mutation(state: &AppState, zone_id: &str) -> Option<Response
     }
 }
 
+/// The saved record, with what happened to its PTR record when the
+/// `update_ptr` option was given.
+fn record_response(
+    state: &AppState,
+    before: Option<&daygle_dns_authoritative::model::Record>,
+    record: daygle_dns_authoritative::model::Record,
+    options: &crate::reverse::ReverseOptions,
+) -> Response {
+    let reverse = crate::reverse::sync(state, before, Some(&record), options);
+    let _ = state.catalog.reload();
+    if !options.update_ptr {
+        return Json(record).into_response();
+    }
+    let mut body = serde_json::to_value(&record).unwrap_or_default();
+    body["reverse"] = match reverse {
+        Ok(outcome) => serde_json::to_value(outcome).unwrap_or_default(),
+        // The record itself is saved; say what went wrong with its PTR.
+        Err(e) => serde_json::json!({ "added": [], "removed": [], "problem": e }),
+    };
+    Json(body).into_response()
+}
+
+/// `PUT /api/zones/{id}/records[?update_ptr=true[&create_reverse_zone=true]]`
 pub async fn upsert_record(
     State(state): State<AppState>,
     Path(id): Path<String>,
+    Query(options): Query<crate::reverse::ReverseOptions>,
     Json(input): Json<RecordInput>,
 ) -> Response {
     if let Some(response) = reject_secondary_mutation(&state, &id) {
         return response;
     }
     match state.catalog.store().upsert_record(&id, &input) {
-        Ok(record) => {
-            let _ = state.catalog.reload();
-            Json(record).into_response()
-        }
+        Ok(record) => record_response(&state, None, record, &options),
         Err(e) => map_err(e),
     }
 }
@@ -2347,16 +2368,15 @@ pub async fn upsert_record(
 pub async fn replace_record(
     State(state): State<AppState>,
     Path((zone_id, rid)): Path<(String, String)>,
+    Query(options): Query<crate::reverse::ReverseOptions>,
     Json(input): Json<RecordInput>,
 ) -> Response {
     if let Some(response) = reject_secondary_mutation(&state, &zone_id) {
         return response;
     }
+    let before = state.catalog.store().get_record(&rid).ok().flatten();
     match state.catalog.store().replace_record(&zone_id, &rid, &input) {
-        Ok(Some(record)) => {
-            let _ = state.catalog.reload();
-            Json(record).into_response()
-        }
+        Ok(Some(record)) => record_response(&state, before.as_ref(), record, &options),
         Ok(None) => error_response(StatusCode::NOT_FOUND, "record not found"),
         Err(e) => map_err(e),
     }
@@ -2367,14 +2387,27 @@ pub async fn delete_record(
     // The zone id (`zone_id`) scopes the route and enforces secondary read-only
     // semantics; `delete_record` bumps the serial in its own transaction.
     Path((zone_id, rid)): Path<(String, String)>,
+    Query(options): Query<crate::reverse::ReverseOptions>,
 ) -> Response {
     if let Some(response) = reject_secondary_mutation(&state, &zone_id) {
         return response;
     }
+    let before = state.catalog.store().get_record(&rid).ok().flatten();
     match state.catalog.store().delete_record(&rid) {
         Ok(true) => {
+            // With update_ptr, the record's PTR goes with it.
+            let reverse = crate::reverse::sync(&state, before.as_ref(), None, &options);
             let _ = state.catalog.reload();
-            StatusCode::NO_CONTENT.into_response()
+            if !options.update_ptr {
+                return StatusCode::NO_CONTENT.into_response();
+            }
+            match reverse {
+                Ok(outcome) => Json(serde_json::json!({ "reverse": outcome })).into_response(),
+                Err(e) => Json(
+                    serde_json::json!({ "reverse": { "added": [], "removed": [], "problem": e } }),
+                )
+                .into_response(),
+            }
         }
         Ok(false) => error_response(StatusCode::NOT_FOUND, "record not found"),
         Err(e) => map_err(e),

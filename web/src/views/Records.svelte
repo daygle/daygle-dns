@@ -2,7 +2,7 @@
   import { api, formatApiError } from '../api.js';
   import { formatDateTime } from '../datetime.svelte.js';
   import { duration } from '../aiLabels.js';
-  import { reverseRecordName } from '../reverseZone.js';
+  import { defaultReverseZone, reverseRecordName } from '../reverseZone.js';
 
   // The zone to preselect, passed when coming from the Zones page.
   let { zoneId = null, onSelectZone = () => {} } = $props();
@@ -188,7 +188,8 @@
       ? {
           ...record,
           name: relativeName(record.name),
-          createPtr: false,
+          updatePtr: true,
+          createZone: false,
           isNew: false,
           disabledBefore: Boolean(record.disabled),
         }
@@ -198,7 +199,8 @@
           content: '',
           ttl: defaultTtl,
           priority: 0,
-          createPtr: false,
+          updatePtr: true,
+          createZone: false,
           isNew: true,
           disabled: false,
           disabledBefore: false,
@@ -221,11 +223,16 @@
         ttl: Number(edit.ttl) || defaultTtl,
         priority: Number(edit.priority) || 0,
       };
-      const createPtr = Boolean(edit.createPtr && ptrTarget?.zone && ptrTarget.zone.zone_type !== 'secondary');
+      // The server keeps the PTR record in step (and can create the
+      // reverse zone) for A and AAAA records.
+      const ptrQuery =
+        ['A', 'AAAA'].includes(edit.rtype) && edit.updatePtr && ptrTarget
+          ? `update_ptr=true${!ptrTarget.zone && edit.createZone ? '&create_reverse_zone=true' : ''}`
+          : '';
       // Editing replaces the record in place; only new records are added.
       const savedRecord = edit.isNew
-        ? await api.upsertRecord(selected.id, body)
-        : await api.replaceRecord(selected.id, edit.id, body);
+        ? await api.upsertRecord(selected.id, body, ptrQuery)
+        : await api.replaceRecord(selected.id, edit.id, body, ptrQuery);
       // Saving keeps a record's staged state, so only a checkbox that moved
       // needs the separate endpoint (the serial is bumped with it).
       let stagedNotice = '';
@@ -233,34 +240,9 @@
         await api.setRecordDisabled(selected.id, savedRecord.id, Boolean(edit.disabled));
         stagedNotice = edit.disabled ? ' It is disabled, so it is not served.' : ' It is served again.';
       }
-      let ptrNotice = '';
-      if (createPtr) {
-        try {
-          const reverseRecords = await api.records(ptrTarget.zone.id);
-          const ownerName = ptrTarget.name.toLowerCase();
-          const existing = reverseRecords.filter(
-            (record) => record.rtype === 'PTR' && record.name.replace(/\.$/, '').toLowerCase() === ownerName,
-          );
-          const targetName = (value) => value.trim().replace(/\.$/, '').toLowerCase();
-          const expectedTarget = targetName(savedRecord.name);
-          if (existing.some((record) => targetName(record.content) === expectedTarget)) {
-            ptrNotice = ' The matching PTR record already exists.';
-          } else if (existing.length > 0) {
-            ptrNotice = ` A PTR record already exists for ${body.content} with a different target; it was not overwritten.`;
-          } else {
-            await api.upsertRecord(ptrTarget.zone.id, {
-              name: ptrTarget.owner,
-              rtype: 'PTR',
-              content: `${savedRecord.name}.`,
-              ttl: savedRecord.ttl,
-              priority: 0,
-            });
-            ptrNotice = ` A PTR record was added in ${ptrTarget.zone.name}.`;
-          }
-        } catch (e) {
-          ptrNotice = ` The forward record was saved, but PTR creation failed: ${formatApiError(e)}`;
-        }
-      }
+      const ptrNotice = reverseNotice(savedRecord?.reverse);
+      // A new reverse zone: refresh the list (the PTR option looks there).
+      if (savedRecord?.reverse?.zone_created) zones = await api.zones();
       notice = `${body.rtype} record ${edit.isNew ? 'added' : 'saved'} and applied live.${stagedNotice}${ptrNotice}`;
       edit = null;
       await loadRecords(selected.id);
@@ -271,14 +253,27 @@
     }
   }
 
+  // What the server did with the PTR record, as a sentence for the notice.
+  function reverseNotice(reverse) {
+    if (!reverse) return '';
+    const parts = [];
+    if (reverse.zone_created) parts.push(`The reverse zone ${reverse.zone_created} was created.`);
+    if (reverse.removed?.length) parts.push(`PTR record ${reverse.removed.join(', ')} removed.`);
+    if (reverse.added?.length) parts.push(`PTR record ${reverse.added.join(', ')} added.`);
+    if (reverse.problem) parts.push(`${reverse.problem.charAt(0).toUpperCase()}${reverse.problem.slice(1)}.`);
+    return parts.length ? ` ${parts.join(' ')}` : '';
+  }
+
   async function removeRecord(record) {
     if (!selected) return;
-    if (!confirm(`Delete the ${record.rtype} record for "${relativeName(record.name)}"?`)) return;
+    const address = ['A', 'AAAA'].includes(record.rtype);
+    const question = `Delete the ${record.rtype} record for "${relativeName(record.name)}"?`;
+    if (!confirm(address ? `${question} Its PTR record, if it points to this name, is removed too.` : question)) return;
     notice = null;
     error = null;
     try {
-      await api.deleteRecord(selected.id, record.id);
-      notice = `${record.rtype} record for "${relativeName(record.name)}" deleted.`;
+      const result = await api.deleteRecord(selected.id, record.id, address ? 'update_ptr=true' : '');
+      notice = `${record.rtype} record for "${relativeName(record.name)}" deleted.${reverseNotice(result?.reverse)}`;
       await loadRecords(selected.id);
     } catch (e) {
       error = formatApiError(e);
@@ -512,15 +507,27 @@
         </div>
         <label class="full">Value <input placeholder={EXAMPLES[edit.rtype]} bind:value={edit.content} /></label>
         {#if (edit.rtype === 'A' || edit.rtype === 'AAAA') && ptrTarget}
-          {#if ptrTarget.zone && ptrTarget.zone.zone_type !== 'secondary'}
-            <label class="checkbox option">
-              <input type="checkbox" bind:checked={edit.createPtr} />
-              <span>Also create matching PTR record in <code>{ptrTarget.zone.name}</code></span>
-            </label>
-          {:else if ptrTarget.zone}
+          {#if ptrTarget.zone && ptrTarget.zone.zone_type === 'secondary'}
             <p class="muted help">The matching reverse zone <code>{ptrTarget.zone.name}</code> is secondary and read-only; add PTR records on its master.</p>
           {:else}
-            <p class="muted help">No editable matching reverse zone is hosted, so Daygle cannot create a PTR record. Create the reverse zone first on the Zones page.</p>
+            <label class="checkbox option">
+              <input type="checkbox" bind:checked={edit.updatePtr} />
+              <span>
+                Update reverse (PTR) record{#if ptrTarget.zone} in <code>{ptrTarget.zone.name}</code>{/if}
+              </span>
+            </label>
+            {#if edit.updatePtr && !ptrTarget.zone}
+              <label class="checkbox option">
+                <input type="checkbox" bind:checked={edit.createZone} />
+                <span>Create reverse zone <code>{defaultReverseZone(ptrTarget.name)}</code> for the PTR record</span>
+              </label>
+            {/if}
+            <p class="muted help">
+              The PTR record follows this record: it moves when the address
+              or name changes and is removed with it. A PTR record for another
+              name at this address is left as it is.
+              {#if !ptrTarget.zone && !edit.createZone}No reverse zone covering this address is hosted yet.{/if}
+            </p>
           {/if}
         {/if}
         <p class="muted help value-help">

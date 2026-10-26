@@ -51,6 +51,12 @@ export function reverseRecordName(address) {
   return zone?.name || null;
 }
 
+// The reverse zone the server creates for a PTR owner name (from
+// reverseRecordName): its /24 for IPv4, its /64 for IPv6.
+export function defaultReverseZone(owner) {
+  return owner.split('.').slice(owner.endsWith('.in-addr.arpa') ? 1 : 16).join('.');
+}
+
 // Expand an IPv6 address into its 32 hex nibbles, or null when invalid.
 function ipv6Nibbles(addr) {
   if (!/^[0-9a-fA-F:]+$/.test(addr) || (addr.match(/::/g) || []).length > 1) return null;
