@@ -125,13 +125,18 @@ impl PolicyEngine {
         self.dot_blocklist = Some(std::sync::Arc::new(blocklist));
     }
 
-    /// Share `other`'s source-owned sets (the remote and DoT-scoped
-    /// blocklists) instead of copying them: a rebuild from configuration
-    /// keeps what the source refresher fetched, at the cost of two `Arc`
-    /// clones rather than a copy of every domain.
+    /// Share what `other` holds that is not built from the configuration:
+    /// the source-owned sets (the remote and DoT-scoped blocklists) and the
+    /// plugins. A rebuild from configuration keeps what the source
+    /// refresher fetched, at the cost of a few `Arc` clones rather than a
+    /// copy of every domain.
     pub fn adopt_source_lists(&mut self, other: &PolicyEngine) {
         self.remote_blocklist = other.remote_blocklist.clone();
         self.dot_blocklist = other.dot_blocklist.clone();
+        // Plugins (the AI auto-blocker) are installed once at startup, not
+        // built from the config: a rebuild that dropped them silently
+        // switched AI enforcement off until the next restart.
+        self.plugins = other.plugins.clone();
     }
 
     /// Replace both source-owned sets (`None` clears one).
@@ -354,6 +359,36 @@ mod tests {
 
     fn ip(s: &str) -> IpAddr {
         s.parse().unwrap()
+    }
+
+    /// Blocks one name, as the AI plugin would.
+    struct BlockOne;
+
+    #[async_trait::async_trait]
+    impl crate::PolicyPlugin for BlockOne {
+        fn name(&self) -> &str {
+            "block-one"
+        }
+
+        async fn evaluate(&self, context: &crate::PolicyContext) -> Option<Decision> {
+            (context.query_name == "plugin.example.com")
+                .then(|| Decision::new("blocked by plugin", Action::Block))
+        }
+    }
+
+    /// A rebuild from configuration (any filtering or network save) keeps
+    /// the plugins installed at startup.
+    #[tokio::test]
+    async fn rebuilds_keep_plugins() {
+        let mut live = engine();
+        live.add_plugin(std::sync::Arc::new(BlockOne));
+        let policy = arc_swap::ArcSwap::from_pointee(live);
+        publish_rebuilt(&policy, engine());
+        let d = policy
+            .load()
+            .evaluate(ip("1.1.1.1"), "plugin.example.com", "A")
+            .await;
+        assert_eq!(d.action, Action::Block);
     }
 
     #[tokio::test]

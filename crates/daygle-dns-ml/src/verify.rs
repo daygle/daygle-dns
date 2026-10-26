@@ -11,19 +11,19 @@
 //!
 //! | Verifier result                                  | Effect                              |
 //! |--------------------------------------------------|-------------------------------------|
-//! | same threat category, above its confidence floor | confidence raise + corroboration    |
-//! | same threat category, below floor                | annotation only (`unverified` tone) |
-//! | different category, confident                    | severity downgrade to `Info`        |
-//! | no verdict (below epsilon / no centroid match)   | annotation (`unverified`), keep base |
+//! | same threat category, at or above its threshold  | confidence raise + corroboration    |
+//! | different category, at or above its threshold    | severity `Disputed`: never blocks   |
+//! | below its threshold, or no verdict               | annotation (`unverified`), keep base |
 //!
-//! A downgrade never destroys information: the original category is kept in
-//! `evidence`, verdicts remain visible in the console, and the operator
-//! allowlist still outranks anything derived here.
+//! A dispute never destroys information: the category and confidence are
+//! kept, verdicts remain visible in the console, and the operator allowlist
+//! still outranks anything derived here.
 
 use crate::backend::{ClassificationInput, DomainClassifier, Severity, Verdict};
 
-/// Any primary + verifier pair. The verifier's own match threshold decides
-/// where "confident" begins (`MiniLmVerifier` defaults to 0.35 cosine).
+/// Any primary + verifier pair. `threshold` (`ai.verifier_threshold`,
+/// default 0.35 cosine for MiniLM) is where the verifier's answer starts to
+/// count: below it, it neither corroborates nor disputes.
 ///
 /// The classifier name recorded on verdicts is composed from the inner
 /// backends at construction time (e.g. `fasttext+minilm-onnx`), so the
@@ -32,6 +32,7 @@ use crate::backend::{ClassificationInput, DomainClassifier, Severity, Verdict};
 pub struct VerifyingBackend<B, V> {
     pub base: B,
     pub verifier: V,
+    threshold: f32,
     name: String,
 }
 
@@ -40,11 +41,12 @@ where
     B: DomainClassifier,
     V: DomainClassifier,
 {
-    pub fn new(base: B, verifier: V) -> Self {
+    pub fn new(base: B, verifier: V, threshold: f32) -> Self {
         let name = format!("{}+{}", base.name(), verifier.name());
         Self {
             base,
             verifier,
+            threshold,
             name,
         }
     }
@@ -61,13 +63,13 @@ fn corroborated(v: Verdict, base: Verdict) -> Verdict {
     }
 }
 
-fn downgraded(mut base: Verdict, verifier: Verdict) -> Verdict {
-    if base.severity == Severity::Threat {
-        base.severity = Severity::Info;
-    }
+fn disputed(mut base: Verdict, verifier: Verdict) -> Verdict {
+    // `Disputed`, not `Info`: the block snapshot goes by category and
+    // confidence, so a threat merely relabelled `Info` still auto-blocked.
+    base.severity = Severity::Disputed;
     base.evidence = format!(
-        "{}, {} disagrees (category '{}', {}): downgraded",
-        base.evidence, "verifier", verifier.category, verifier.evidence
+        "{}, verifier disagrees (category '{}', {}): disputed",
+        base.evidence, verifier.category, verifier.evidence
     );
     base
 }
@@ -99,14 +101,18 @@ where
         if base.severity != Severity::Threat {
             return Some(base);
         }
-        match self.verifier.classify(input) {
+        match self
+            .verifier
+            .classify(input)
+            .filter(|v| v.confidence >= self.threshold)
+        {
             Some(v) if v.category == base.category => Some(corroborated(v, base)),
             Some(v) => {
                 // A confident disagreement on the category destroys the
                 // threat's plausibility even if the verifier is itself just
                 // a heuristic: two cheap signals disagreeing is noise, and
                 // this stage feeds enforce mode.
-                Some(downgraded(base, v))
+                Some(disputed(base, v))
             }
             None => Some(annotated(base, self.verifier.name())),
         }
@@ -146,6 +152,7 @@ mod tests {
         let backend = VerifyingBackend::new(
             Fixed(Some(verdict("news", 0.8, Severity::Info))),
             Fixed(Some(verdict("shopping", 0.9, Severity::Info))),
+            0.35,
         );
         let v = backend.classify(&threat_input()).unwrap();
         // Base info verdict survives even though the verifier disagrees, and
@@ -160,6 +167,7 @@ mod tests {
         let backend = VerifyingBackend::new(
             Fixed(Some(verdict("phishing", 0.55, Severity::Threat))),
             Fixed(Some(verdict("phishing", 0.9, Severity::Threat))),
+            0.35,
         );
         let v = backend.classify(&threat_input()).unwrap();
         assert_eq!(v.category, "phishing");
@@ -173,11 +181,29 @@ mod tests {
         let backend = VerifyingBackend::new(
             Fixed(Some(verdict("phishing", 0.99, Severity::Threat))),
             Fixed(Some(verdict("news", 0.7, Severity::Info))),
+            0.35,
         );
         let v = backend.classify(&threat_input()).unwrap();
         assert_eq!(v.category, "phishing", "original category stays visible");
-        assert_eq!(v.severity, Severity::Info, "verifier veto downgrades");
+        assert_eq!(v.severity, Severity::Disputed, "verifier veto disputes");
         assert!(v.evidence.contains("disagrees"));
+    }
+
+    #[test]
+    fn verifier_answers_below_its_threshold_do_not_count() {
+        // Neither a weak disagreement nor a weak agreement changes the
+        // primary's verdict.
+        for weak in ["news", "phishing"] {
+            let backend = VerifyingBackend::new(
+                Fixed(Some(verdict("phishing", 0.99, Severity::Threat))),
+                Fixed(Some(verdict(weak, 0.2, Severity::Info))),
+                0.35,
+            );
+            let v = backend.classify(&threat_input()).unwrap();
+            assert_eq!(v.severity, Severity::Threat);
+            assert_eq!(v.confidence, 0.99);
+            assert!(v.evidence.contains("unverified"), "{}", v.evidence);
+        }
     }
 
     #[test]
@@ -185,6 +211,7 @@ mod tests {
         let backend = VerifyingBackend::new(
             Fixed(Some(verdict("malware", 0.99, Severity::Threat))),
             Fixed(None),
+            0.35,
         );
         let v = backend.classify(&threat_input()).unwrap();
         assert_eq!(v.severity, Severity::Threat);
@@ -196,6 +223,7 @@ mod tests {
         let backend = VerifyingBackend::new(
             Fixed(None),
             Fixed(Some(verdict("adult", 0.9, Severity::Info))),
+            0.35,
         );
         assert!(backend.classify(&threat_input()).is_none());
     }

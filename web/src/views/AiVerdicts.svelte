@@ -157,7 +157,7 @@
             </td>
             <td>
               {#if r.category}
-                {titleCase(r.category)} {#if r.severity === 'threat'}<span class="pill err">Threat</span>{/if}
+                {titleCase(r.category)} {#if r.severity === 'threat'}<span class="pill err">Threat</span>{:else if r.severity === 'disputed'}<span class="pill" title="The verifier disagreed: this verdict never auto-blocks">Disputed</span>{/if}
               {:else}<span class="muted">-</span>{/if}
             </td>
             <td>

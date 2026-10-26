@@ -7,7 +7,10 @@
 //! data. The layout:
 //!
 //! - `ai_verdicts` - one row per observed domain (UNIQUE), with category,
-//!   severity, confidence, TTL metadata and observation counters.
+//!   severity, confidence, TTL metadata and observation counters. A domain
+//!   not queried again since its verdict was made is dropped when the
+//!   verdict expires (and comes back as new if it is queried later), so the
+//!   table tracks the domains in use rather than every domain ever seen.
 //! - `ai_overrides` - operator vetoes: `allow` rows that the policy plugin
 //!   honours over its own block snapshot (manual operator blocks go through
 //!   the normal policy blocklist instead of this table).
@@ -28,7 +31,8 @@ pub struct VerdictRow {
     pub domain: String,
     /// Category label; empty when no verdict yet (`status` explains).
     pub category: String,
-    /// `info` or `threat` (empty when no verdict yet).
+    /// `info`, `threat`, or `disputed` (a threat the verifier disagreed
+    /// with, never auto-blocked); empty when no verdict yet.
     pub severity: String,
     /// `pending`, `classified`, `skipped` (below confidence floor / no
     /// signal), or `stale` (verdict expired and is awaiting re-scan).
@@ -45,6 +49,21 @@ pub struct VerdictRow {
     pub expires_at: i64,
     /// The domain itself has an operator `allow` override (it is exempt).
     pub overridden: bool,
+}
+
+/// One classification to store (see [`AiStore::save_verdicts`]).
+#[derive(Debug, Clone)]
+pub struct NewVerdict {
+    pub domain: String,
+    pub category: String,
+    pub severity: String,
+    /// `classified` or `skipped`.
+    pub status: String,
+    pub confidence: f32,
+    pub backend: String,
+    pub evidence: String,
+    /// Seconds until the verdict expires (0: never).
+    pub expires_after_secs: i64,
 }
 
 /// One operator override.
@@ -107,6 +126,30 @@ impl AiStore {
                 created_at INTEGER NOT NULL
             );",
         )?;
+        // When the domain was last seen in the query log. Rows from before
+        // the column get the upgrade time, so each is checked once more.
+        let has_last_seen: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('ai_verdicts') WHERE name = 'last_seen')",
+            [],
+            |r| r.get(0),
+        )?;
+        if !has_last_seen {
+            conn.execute(
+                "ALTER TABLE ai_verdicts ADD COLUMN last_seen INTEGER NOT NULL DEFAULT 0",
+                [],
+            )?;
+            conn.execute(
+                "UPDATE ai_verdicts SET last_seen = ?1",
+                params![now_epoch()],
+            )?;
+        }
+        // Threats the verifier disputed used to be stored as plain `info`
+        // verdicts, which the block snapshot did not tell apart.
+        conn.execute(
+            "UPDATE ai_verdicts SET severity = 'disputed'
+             WHERE severity = 'info' AND evidence LIKE '%disagrees%: downgraded'",
+            [],
+        )?;
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
         })
@@ -122,27 +165,36 @@ impl AiStore {
     /// and create a pending row on first sight. Returns whether a *new*
     /// candidate appeared (an upsert touching an existing row is `false`).
     pub fn observe(&self, domain: &str) -> Result<bool> {
-        let conn = self.lock()?;
-        let existed = conn
-            .query_row(
-                "SELECT 1 FROM ai_verdicts WHERE domain = ?1",
-                params![domain],
-                |_| Ok(()),
-            )
-            .optional()?
-            .is_some();
-        if existed {
-            conn.execute(
-                "UPDATE ai_verdicts SET observations = observations + 1 WHERE domain = ?1",
-                params![domain],
+        Ok(self.observe_all(&[domain.to_string()])? == 1)
+    }
+
+    /// [`Self::observe`] for many domains in one transaction (a cycle's
+    /// harvest can be tens of thousands of names; one commit each made the
+    /// harvest the slowest part of a cycle). Returns how many were new.
+    pub fn observe_all(&self, domains: &[String]) -> Result<usize> {
+        let mut conn = self.lock()?;
+        let now = now_epoch();
+        let tx = conn.transaction()?;
+        let mut new = 0;
+        {
+            let mut insert = tx.prepare(
+                "INSERT INTO ai_verdicts (domain, observations, last_seen) VALUES (?1, 1, ?2)
+                 ON CONFLICT(domain) DO NOTHING",
             )?;
-            return Ok(false);
+            let mut bump = tx.prepare(
+                "UPDATE ai_verdicts SET observations = observations + 1, last_seen = ?2
+                 WHERE domain = ?1",
+            )?;
+            for domain in domains {
+                if insert.execute(params![domain, now])? == 1 {
+                    new += 1;
+                } else {
+                    bump.execute(params![domain, now])?;
+                }
+            }
         }
-        conn.execute(
-            "INSERT INTO ai_verdicts (domain, observations) VALUES (?1, 1)",
-            params![domain],
-        )?;
-        Ok(true)
+        tx.commit()?;
+        Ok(new)
     }
 
     /// Domains waiting for classification (new, re-queued after expiry, or
@@ -174,58 +226,97 @@ impl AiStore {
         evidence: &str,
         expires_after_secs: i64,
     ) -> Result<()> {
+        self.save_verdicts(&[NewVerdict {
+            domain: domain.to_string(),
+            category: category.to_string(),
+            severity: severity.to_string(),
+            status: status.to_string(),
+            confidence,
+            backend: backend.to_string(),
+            evidence: evidence.to_string(),
+            expires_after_secs,
+        }])
+    }
+
+    /// [`Self::save_verdict`] for a whole cycle's results, in one
+    /// transaction.
+    pub fn save_verdicts(&self, verdicts: &[NewVerdict]) -> Result<()> {
         let now = now_epoch();
-        let expires_at = if expires_after_secs > 0 {
-            now + expires_after_secs
-        } else {
-            0
-        };
-        let conn = self.lock()?;
-        conn.execute(
-            "UPDATE ai_verdicts
-             SET category = ?2, severity = ?3, status = ?4, confidence = ?5,
-                 backend = ?6, evidence = ?7, classified_at = ?8, expires_at = ?9
-             WHERE domain = ?1 AND status = 'pending'",
-            params![
-                domain, category, severity, status, confidence, backend, evidence, now, expires_at
-            ],
-        )?;
+        let mut conn = self.lock()?;
+        let tx = conn.transaction()?;
+        {
+            let mut update = tx.prepare(
+                "UPDATE ai_verdicts
+                 SET category = ?2, severity = ?3, status = ?4, confidence = ?5,
+                     backend = ?6, evidence = ?7, classified_at = ?8, expires_at = ?9
+                 WHERE domain = ?1 AND status = 'pending'",
+            )?;
+            for v in verdicts {
+                let expires_at = if v.expires_after_secs > 0 {
+                    now + v.expires_after_secs
+                } else {
+                    0
+                };
+                update.execute(params![
+                    v.domain,
+                    v.category,
+                    v.severity,
+                    v.status,
+                    v.confidence,
+                    v.backend,
+                    v.evidence,
+                    now,
+                    expires_at
+                ])?;
+            }
+        }
+        tx.commit()?;
         Ok(())
     }
 
-    /// Verdicts older than `until_epoch` are re-queued to `pending` so the
-    /// next scan cycle re-classifies them (bounded by `limit` per call).
-    /// Categories are cleared - a changed site must never inherit the old
-    /// verdict; freshness is decided by a new classification, not a memory.
+    /// Verdicts expired by `until_epoch` (bounded by `limit` per call): those
+    /// of domains queried since they were classified are re-queued to
+    /// `pending` so the next scan cycle re-classifies them; the rest are
+    /// dropped (a domain queried again later starts over as new). Returns
+    /// the number re-queued. Categories are cleared - a changed site must
+    /// never inherit the old verdict; freshness is decided by a new
+    /// classification, not a memory.
     pub fn expire_old(&self, until_epoch: i64, limit: u32) -> Result<usize> {
-        let conn = self.lock()?;
-        let mut stmt = conn.prepare(
-            "SELECT domain FROM ai_verdicts
-             WHERE status IN ('classified', 'skipped')
-               AND expires_at > 0 AND expires_at <= ?1
-             LIMIT ?2",
-        )?;
-        let collected = stmt
-            .query_map(params![until_epoch, limit as i64], |r| {
-                r.get::<_, String>(0)
-            })?
-            .collect::<std::result::Result<Vec<String>, _>>()?;
-        drop(stmt);
-        let mut requeued = 0usize;
-        for domain in &collected {
-            let changed = conn.execute(
-                "UPDATE ai_verdicts SET status = 'pending', category = '', severity = '',
-                     confidence = 0, evidence = ''
-                 WHERE domain = ?1 AND status IN ('classified', 'skipped')",
-                params![domain],
+        let mut conn = self.lock()?;
+        let tx = conn.transaction()?;
+        let expired: Vec<(String, bool)> = {
+            let mut stmt = tx.prepare(
+                "SELECT domain, last_seen > classified_at FROM ai_verdicts
+                 WHERE status IN ('classified', 'skipped')
+                   AND expires_at > 0 AND expires_at <= ?1
+                 LIMIT ?2",
             )?;
-            requeued += changed;
+            let rows = stmt
+                .query_map(params![until_epoch, limit as i64], |r| {
+                    Ok((r.get::<_, String>(0)?, r.get::<_, bool>(1)?))
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            rows
+        };
+        let mut requeued = 0usize;
+        for (domain, seen_since) in &expired {
+            if *seen_since {
+                requeued += tx.execute(
+                    "UPDATE ai_verdicts SET status = 'pending', category = '', severity = '',
+                         confidence = 0, evidence = ''
+                     WHERE domain = ?1 AND status IN ('classified', 'skipped')",
+                    params![domain],
+                )?;
+            } else {
+                tx.execute("DELETE FROM ai_verdicts WHERE domain = ?1", params![domain])?;
+            }
         }
+        tx.commit()?;
         Ok(requeued)
     }
 
     /// Fresh (non-expired) classified verdicts at or above `threshold`, minus
-    /// exact operator `allow` vetoes. The block snapshot narrows these to the
+    /// exact operator `allow` vetoes and threats the verifier disputed. The block snapshot narrows these to the
     /// auto-block categories and to domains no parent override exempts.
     pub fn fresh_blocked(
         &self,
@@ -235,7 +326,7 @@ impl AiStore {
         let conn = self.lock()?;
         let mut stmt = conn.prepare(
             "SELECT domain, category, expires_at FROM ai_verdicts
-             WHERE status = 'classified'
+             WHERE status = 'classified' AND severity != 'disputed'
                AND confidence >= ?1 AND expires_at > ?2
                AND NOT EXISTS (
                    SELECT 1 FROM ai_overrides o

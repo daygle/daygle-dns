@@ -131,7 +131,11 @@ impl AiEngine {
                             settings.verifier_model_path
                         ),
                     );
-                    Box::new(verify::VerifyingBackend::new(classifier, verifier))
+                    Box::new(verify::VerifyingBackend::new(
+                        classifier,
+                        verifier,
+                        settings.verifier_threshold,
+                    ))
                 }
                 Err(e) => {
                     logs.push(

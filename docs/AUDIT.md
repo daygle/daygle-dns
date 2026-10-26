@@ -1170,3 +1170,141 @@ database opens, before anything is built from the config.
 "Everyone" and a blocklist entry, restarts on the same database and config
 file, and checks that the resolver admits a public client and the entry is
 blocked. It fails without the fix.
+
+# Follow-up audit: the AI scanner
+
+Scope:
+
+- **Pipeline:** the background scanner, from query-log harvest through
+  classification to the block snapshot.
+- **Storage and enforcement:** the verdict store and the policy plugin.
+- **Classifiers:** the heuristic, fastText and MiniLM/ONNX verifier
+  backends.
+- **Live settings:** how the console's changes reach the running engine.
+
+Verification:
+
+- fmt and clippy (`-D warnings`) are clean, and the full suite passes (507
+  tests).
+- New tests:
+  - a rebuild keeps the policy plugins;
+  - a disputed threat never blocks;
+  - a weak verifier answer does not count;
+  - an unqueried domain is dropped at expiry;
+  - local and hosted names are not classified;
+  - a panicking classifier worker does not shift verdicts.
+- The MiniLM/ONNX feature cannot be built in this environment (its
+  runtime download is blocked). The only change in code gated behind it is
+  one argument passed to the verifier wrapper; CI builds it.
+
+### AI1. Any filtering or network save switched AI blocking off - **Fixed** (High)
+
+*Problem.* The AI auto-blocker is a policy-engine plugin, installed once at
+startup. A policy rebuild kept the downloaded blocklists but dropped the
+plugins. Rebuilds happen on every Filtering save, every network save and
+every config reload.
+
+*Impact.* After any of those, enforce mode silently stopped blocking until
+the next restart, while the console still showed it enforcing.
+
+*Fix.* A rebuild keeps the live engine's plugins, as it already kept its
+source lists.
+
+### AI2. The verifier could not veto a threat - **Fixed** (High)
+
+*Problem.* When the MiniLM verifier disagreed with a threat verdict, the
+verdict was relabelled from `threat` to `info`. Its category and confidence
+were unchanged, and the block snapshot goes by category and confidence, so
+a disputed phishing verdict at 0.99 still auto-blocked.
+
+*Fix.*
+
+- Such verdicts are now `disputed`, which the snapshot excludes.
+- Disputed verdicts are re-checked on the threat schedule.
+- The console marks them "Disputed".
+- Verdicts stored by earlier versions are relabelled when the database is
+  opened.
+
+### AI3. The verifier's threshold was never applied - **Fixed** (Medium)
+
+*Problem.* Neither `ai.verifier_threshold` nor the verifier's built-in
+0.35 cosine threshold was used. The verifier answered with its nearest
+category however weak the match. That noise:
+
+- corroborated threats (raising their confidence); or
+- disputed them (see AI2).
+
+*Fix.* Verifier answers below `ai.verifier_threshold` count as no answer.
+The verdict is then kept as the primary classifier made it, marked
+"unverified".
+
+### AI4. One failing classifier thread put verdicts on the wrong domains - **Fixed** (High)
+
+*Problem.* With several workers, a worker that panicked returned no
+results at all. The remaining verdicts were then paired with domains in
+order, so every verdict after the gap landed on a different domain.
+
+*Impact.* In enforce mode this could block domains whose own verdict was
+harmless.
+
+*Fix.* A failed worker yields "no verdict" for each of its domains, so the
+results stay aligned. The failure is logged.
+
+### AI5. Local and hosted names were classified, and could be blocked - **Fixed** (Medium)
+
+*Problem.* Every query-log name was a candidate, including:
+
+- single-label names such as `wpad` and printers;
+- reverse lookups;
+- `.local`, `.home.arpa` and other local-only names;
+- names in zones this server hosts.
+
+In enforce mode, a verdict on a hosted name blocked the operator's own
+records, because policy runs before authoritative answers.
+
+*Fix.* Only names with at least two labels are classified, outside the
+special-use and local-only suffixes and outside hosted zones.
+
+### AI6. Every domain ever queried was kept and re-classified forever - **Fixed** (Medium)
+
+*Problem.* Rows were never removed. Each expired verdict went back in the
+queue, even for a domain queried once months ago. The store grew without
+bound and the classifier's work grew with it.
+
+*Fix.*
+
+- Rows now record when the domain was last seen.
+- At expiry, a verdict is re-checked only if its domain has been queried
+  since. Otherwise the row is dropped, and the domain starts over as new
+  if it is queried again.
+- Rows that existed before the upgrade get one more check.
+
+### AI7. The harvest committed one row at a time - **Fixed** (Low, performance)
+
+*Problem.* Each cycle recorded every queried domain with its own SELECT
+and UPDATE or INSERT, each committed separately. Each cycle's verdicts
+were also saved one commit per domain.
+
+*Fix.* Both are single transactions. Measured on 20,000 names: 1.79 s
+before, 75 ms after.
+
+### AI8. Smaller issues - **Fixed** (Low)
+
+- **Turning AI off.** The plugin stopped blocking, but the scanner kept
+  harvesting and classifying until restart. It now idles while disabled.
+- **Snapshot race.** A scan cycle could publish a block snapshot computed
+  just before an operator override, undoing the override until the next
+  cycle. Snapshot publication is now serialized.
+- **Capitalised fastText labels.** A model labelled `__label__Malware`
+  produced `info` verdicts, because threat labels were matched before
+  lowercasing. They are now lowercased first.
+
+## Reported, not changed
+
+- **Subdomain coverage.** A verdict on a domain also blocks its subdomains,
+  as designed. For shared-hosting parents (`*.github.io`-style names), a
+  single verdict would block every tenant. A public-suffix check would
+  catch this, but no suffix list ships today.
+- **Startup-only changes.** Enabling AI on a server that started with it
+  off, or changing the model or database path, still takes effect only
+  after a restart. The console already says so.

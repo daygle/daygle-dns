@@ -77,7 +77,10 @@ fn verdict_lifecycle_and_expiry() {
     let now = chrono::Utc::now().timestamp();
     assert_eq!(store.fresh_blocked(now, 0.99).unwrap().len(), 1);
 
-    // Expiry re-queues to pending and clears the category.
+    // Expiry re-queues a domain still being queried to pending and clears
+    // the category.
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    store.observe("bad.example.net").unwrap();
     let expired = store
         .expire_old(now + 7 * 86400 + 1, 1000)
         .expect("expiry update ran");
@@ -254,6 +257,8 @@ fn expired_verdicts_are_requeued_and_visible_again() {
             1,
         )
         .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    store.observe("x.example").unwrap();
     let now = chrono::Utc::now().timestamp();
     assert_eq!(store.expire_old(now + 5, 100).unwrap(), 1);
     // The row is pending again; a later save (new scan) overwrites the verdict.
@@ -333,7 +338,7 @@ fn expired_verdicts_are_reclassified_by_the_next_cycle() {
     let dir = TempDir::new().unwrap();
     let zones = zone_store(&dir);
     let ai = engine(&dir, settings(AiMode::Train));
-    // A verdict that has already expired, for a domain no longer queried.
+    // A verdict that has already expired, for a domain queried since.
     ai.store.observe("evil-virus-site.net").unwrap();
     ai.store
         .save_verdict(
@@ -348,6 +353,7 @@ fn expired_verdicts_are_reclassified_by_the_next_cycle() {
         )
         .unwrap();
     std::thread::sleep(std::time::Duration::from_millis(1100));
+    ai.store.observe("evil-virus-site.net").unwrap();
 
     // One cycle re-queues it and classifies it again - it must not be left
     // pending.
@@ -485,4 +491,143 @@ fn harvest_reads_only_the_requested_window() {
     let (rows, total) = ai.store.list_verdicts(None, None, 10, 0).unwrap();
     assert_eq!(total, 1, "{rows:?}");
     assert_eq!(rows[0].domain, "new.example");
+}
+
+/// A domain nobody has queried since its verdict was made is dropped when
+/// the verdict expires, instead of being re-classified forever; it starts
+/// over as new if it is queried again.
+#[test]
+fn expired_verdicts_of_unqueried_domains_are_dropped() {
+    let dir = TempDir::new().unwrap();
+    let store = tmp_store(&dir);
+    store.observe("gone.example.com").unwrap();
+    store
+        .save_verdict(
+            "gone.example.com",
+            "news",
+            "info",
+            "classified",
+            0.8,
+            "fasttext",
+            "ev",
+            1,
+        )
+        .unwrap();
+    let later = chrono::Utc::now().timestamp() + 5;
+    assert_eq!(store.expire_old(later, 100).unwrap(), 0);
+    let (_, total) = store.list_verdicts(None, None, 10, 0).unwrap();
+    assert_eq!(total, 0, "the stale row is gone");
+    assert!(store.observe("gone.example.com").unwrap(), "back as new");
+}
+
+/// A threat the verifier disputed keeps its category and confidence but is
+/// never block-eligible.
+#[test]
+fn disputed_threats_never_auto_block() {
+    let dir = TempDir::new().unwrap();
+    let store = tmp_store(&dir);
+    store.observe("disputed.example.com").unwrap();
+    store
+        .save_verdict(
+            "disputed.example.com",
+            "phishing",
+            "disputed",
+            "classified",
+            0.999,
+            "fasttext+minilm-onnx",
+            "verifier disagrees",
+            3600,
+        )
+        .unwrap();
+    let now = chrono::Utc::now().timestamp();
+    assert!(store.fresh_blocked(now, 0.99).unwrap().is_empty());
+}
+
+/// Only internet names outside the server's own zones are classified:
+/// single-label names, reverse lookups, local-only suffixes and hosted
+/// zones are left alone.
+#[test]
+fn local_and_hosted_names_are_not_classified() {
+    let dir = TempDir::new().unwrap();
+    let zones = zone_store(&dir);
+    zones
+        .create_zone(&daygle_dns_authoritative::model::ZoneInput {
+            name: "corp-virus.net".to_string(),
+            ..Default::default()
+        })
+        .unwrap();
+    let now = chrono::Utc::now().to_rfc3339();
+    for name in [
+        "wpad",
+        "1.0.168.192.in-addr.arpa",
+        "virus-printer.local",
+        "virus.home.arpa",
+        "www.corp-virus.net",
+        "evil-virus-site.net",
+    ] {
+        zones.insert_query_log(&log_row(&now, name)).unwrap();
+    }
+    let ai = AiEngine::new(
+        &settings(AiMode::Train),
+        &dir.path().join("zones.db").display().to_string(),
+        zones.clone(),
+        Arc::new(LogStore::new(128)),
+    )
+    .unwrap();
+    ai.scanner.run_cycle(0, zones.as_ref()).unwrap();
+    let (rows, _) = ai.store.list_verdicts(None, None, 100, 0).unwrap();
+    let domains: Vec<&str> = rows.iter().map(|r| r.domain.as_str()).collect();
+    assert_eq!(domains, vec!["evil-virus-site.net"]);
+}
+
+/// A classifier that panics on one domain: in a multi-worker cycle the
+/// verdicts of the other domains must stay with their own domains.
+#[test]
+fn a_panicking_worker_does_not_shift_verdicts() {
+    use daygle_dns_ml::backend::{ClassificationInput, DomainClassifier, Severity, Verdict};
+    struct PanicsOnOne;
+    impl DomainClassifier for PanicsOnOne {
+        fn name(&self) -> &str {
+            "test"
+        }
+        fn classify(&self, input: &ClassificationInput) -> Option<Verdict> {
+            if input.domain.starts_with("a-") {
+                panic!("classifier failure");
+            }
+            Some(Verdict {
+                category: input.domain.clone(),
+                confidence: 0.9,
+                severity: Severity::Info,
+                evidence: String::new(),
+            })
+        }
+    }
+
+    let dir = TempDir::new().unwrap();
+    let zones = zone_store(&dir);
+    let now = chrono::Utc::now().to_rfc3339();
+    let names = ["a-panics.com", "b-site.com", "c-site.com", "d-site.com"];
+    for name in names {
+        zones.insert_query_log(&log_row(&now, name)).unwrap();
+    }
+    let store = tmp_store(&dir);
+    let scanner = daygle_dns_ml::scanner::Scanner::new(
+        store.clone(),
+        Box::new(PanicsOnOne),
+        Arc::new(arc_swap::ArcSwap::from_pointee(AiSettings {
+            workers: 4,
+            ..settings(AiMode::Train)
+        })),
+        Arc::new(arc_swap::ArcSwap::from_pointee(Default::default())),
+        Arc::new(LogStore::new(128)),
+    );
+    scanner.run_cycle(0, zones.as_ref()).unwrap();
+    let (rows, _) = store.list_verdicts(None, None, 100, 0).unwrap();
+    for row in rows {
+        if row.domain == "a-panics.com" {
+            assert_eq!(row.status, "skipped");
+        } else {
+            assert_eq!(row.category, row.domain, "verdict stayed with its domain");
+        }
+    }
 }

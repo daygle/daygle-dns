@@ -1230,16 +1230,21 @@ would be blocked in train mode) and the current block-snapshot size.
 A domain qualifies for auto-blocking when its current verdict is in one of
 `ai.auto_block_categories` (any category, not only threats) with a
 confidence at or above `ai.block_threshold`, and neither it nor a parent
-domain is exempt. The built-in heuristic rules score at most 0.35, so they
-never auto-block on their own.
+domain is exempt. A threat verdict the MiniLM verifier disagreed with
+(severity `disputed`, decided at `ai.verifier_threshold`) never qualifies.
+The built-in heuristic rules score at most 0.35, so they never auto-block on
+their own. Only internet names are classified: single-label names, reverse
+lookups, local-only suffixes (`.local`, `.home.arpa`, `.internal`, `.lan`,
+...) and names in zones this server hosts are skipped.
 
 `GET /api/ai/verdicts` pages through the verdict store, most recently
 classified first (pending rows last), optionally filtered by `status`
 (`pending`/`classified`/`skipped`) and a domain substring `q`: domain,
 category, severity, status, confidence, backend, evidence, observation count
 (scan cycles the domain appeared in), `overridden` (the domain is exempt) and
-`classified_at`/`expires_at` in RFC 3339 (the verdict is re-checked at
-expiry). `per_page` is capped at 500.
+`classified_at`/`expires_at` in RFC 3339 (at expiry the verdict is
+re-checked if the domain has been queried since; otherwise it is dropped,
+and the domain starts over if it is queried again). `per_page` is capped at 500.
 
 `POST /api/ai/override` with `action: "allow"` exempts a domain and its
 subdomains from AI blocking; `clear` removes the exemption (`404` when there
