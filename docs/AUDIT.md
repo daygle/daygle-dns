@@ -1308,3 +1308,81 @@ before, 75 ms after.
 - **Startup-only changes.** Enabling AI on a server that started with it
   off, or changing the model or database path, still takes effect only
   after a restart. The console already says so.
+
+# Follow-up audit: the AI console pages
+
+Scope: the AI page, with its Scanner and Verdicts tabs, and the API
+responses they use.
+
+Verification:
+
+- The pages were driven in Chromium against a running server in enforce
+  mode, with real DNS traffic and a scan.
+- Checked: both tabs, exempting a domain by pasting a URL, invalid input,
+  and the scanner turned off at runtime.
+- No console or page errors.
+
+### G1. Controls hidden or refused depending on how roles were checked - **Fixed** (Medium)
+
+*Problem.* The AI pages decided who is an administrator with
+`role === 'admin'`, unlike the rest of the console, which treats every
+non-viewer as one. Two problems followed:
+
+- The model update controls disappeared for sessions without a stored role.
+- The Scan Now, Exempt and Unexempt actions were shown to everyone and
+  never checked the role at all, so a read-only account would have had
+  them refused by the server.
+
+*Fix.* Both pages follow the console's rule: viewers get a read-only page
+without action buttons, and everyone else gets the full page.
+
+### G2. A scanner turned off in Settings still looked active - **Fixed** (Medium)
+
+*Problem.* Turning the AI off in Settings stops it at once, but the page
+kept showing the mode as Enforce and the "Auto-Blocked Now" count.
+
+*Fix.*
+
+- A banner says the scanner is off.
+- The mode reads "Off" and the counts read "Would Auto-Block".
+- Scan Now is disabled.
+
+### G3. Misleading "scanner is off" message - **Fixed** (Low)
+
+*Problem.* When the scanner is turned on in Settings but the service has
+not been restarted since, the page still said to turn it on.
+
+*Fix.* The page now says it only needs a restart.
+
+### G4. Exempting a domain - **Fixed** (Low)
+
+*Problem.* A pasted URL (`https://www.example.com/page`), `*.example.com`
+or `example.com:443` was rejected with "domain is required".
+
+*Fix.*
+
+- The form takes the domain out of what was pasted.
+- Anything that is not a domain gets a clear message, and the API's own
+  message for invalid domains says the same.
+
+### G5. Verdict list - **Fixed** (Low)
+
+- **Empty last page.** Paging past the end, which now happens as stale
+  verdicts are dropped, showed "No verdicts yet". The list now moves to
+  the last page instead.
+- **Confidence.** "No signal" rows showed 0% confidence; they now show
+  "-".
+- **Seen column.** A new column shows how many scans found the domain in
+  DNS traffic.
+- **Re-Check column.** Its header explains what happens at expiry.
+- **Disputed verdicts.** These are labelled "Disputed".
+
+### G6. Smaller display issues - **Fixed** (Low)
+
+- **Percentages.** They showed as "30.0%" and "99.0%" because the values
+  arrive as 32-bit floats; they now read "30%" and "99%".
+- **Spacing.** The Exempt tag touched the domain name.
+- **Heuristic warning.** The "nothing can be auto-blocked" warning missed
+  the heuristic rules running with the verifier.
+- **Page text.** The header now says exempt domains are never blocked
+  *by the AI*; blocklists still apply to them.

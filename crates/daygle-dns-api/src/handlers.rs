@@ -1022,7 +1022,9 @@ pub async fn ai_override(
     if !domain_ok {
         return (
             StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": "domain is required"})),
+            Json(serde_json::json!({
+                "error": "enter a valid domain name, such as news.example.com"
+            })),
         )
             .into_response();
     }

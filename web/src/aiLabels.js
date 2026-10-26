@@ -21,9 +21,10 @@ export function titleCase(s) {
   return s ? s.charAt(0).toUpperCase() + s.slice(1) : s;
 }
 
-// 0.995 -> "99.5%", 0.3 -> "30%".
+// 0.995 -> "99.5%", 0.3 -> "30%". Rounded to one decimal first: values
+// arrive as 32-bit floats (0.3 is 0.30000001), which showed as "30.0%".
 export function percent(value) {
-  const pct = Number(value || 0) * 100;
+  const pct = Math.round(Number(value || 0) * 1000) / 10;
   return `${Number.isInteger(pct) ? pct : pct.toFixed(1)}%`;
 }
 
@@ -41,6 +42,20 @@ export function duration(secs) {
     }
   }
   return `${secs} Second${secs === 1 ? '' : 's'}`;
+}
+
+// What someone typed or pasted as a domain to exempt ("https://WWW.Example.com/x",
+// "*.example.com.", "example.com:443") as the bare name the server expects,
+// or null when it is not a valid domain name.
+export function cleanDomain(input) {
+  let d = (input || '').trim().toLowerCase();
+  d = d.replace(/^[a-z][a-z0-9+.-]*:\/\//, ''); // scheme
+  d = d.split(/[/?#]/)[0]; // path, query, fragment
+  d = d.replace(/:\d+$/, ''); // port
+  d = d.replace(/^\*\./, '').replace(/\.+$/, '');
+  const label = /^[a-z0-9_]([a-z0-9_-]{0,61}[a-z0-9_])?$/;
+  if (!d || d.length > 253 || !d.split('.').every((l) => label.test(l))) return null;
+  return d;
 }
 
 // Scanner row statuses as the console names them.

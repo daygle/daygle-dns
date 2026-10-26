@@ -1,5 +1,5 @@
 <script>
-  import { api, formatApiError } from '../api.js';
+  import { api, formatApiError, getStoredUser } from '../api.js';
   import { formatDate, formatDateTime } from '../datetime.svelte.js';
   import { backendLabel, percent, STATUS_LABELS, titleCase } from '../aiLabels.js';
 
@@ -21,6 +21,10 @@
   let notice = $state(null);
   let disabled = $state(false); // true when the scanner is off (404)
 
+  // Viewers are read-only (the server refuses their exemption changes);
+  // with sign-in off there is no stored user at all.
+  const isAdmin = getStoredUser()?.role !== 'viewer';
+
   function qs() {
     const params = new URLSearchParams();
     if (statusFilter) params.set('status', statusFilter);
@@ -38,8 +42,13 @@
       rows = data.entries || [];
       total = data.total || 0;
       disabled = false;
-      // The server clamps the page; adopt its answer so Prev/Next stay honest.
       page = data.page || page;
+      // Past the end (verdicts were dropped or exempted since the page was
+      // opened): show the last page instead of an empty one.
+      if (!rows.length && total > 0 && page > 1) {
+        page = pages();
+        return load();
+      }
     } catch (e) {
       rows = [];
       total = 0;
@@ -144,16 +153,17 @@
           <th>Category</th>
           <th>Status</th>
           <th class="num">Confidence</th>
+          <th class="num" title="In how many scans the domain showed up in your DNS traffic">Seen</th>
           <th>Evidence</th>
-          <th>Re-Check</th>
-          <th class="num">Actions</th>
+          <th title="When the verdict expires: it is checked again if the domain is still being queried, and dropped otherwise">Re-Check</th>
+          {#if isAdmin}<th class="num">Actions</th>{/if}
         </tr>
       </thead>
       <tbody>
         {#each rows as r (r.domain)}
           <tr>
             <td>
-              <code>{r.domain}</code>{#if r.overridden} <span class="pill ok" title="Never auto-blocked by the AI">Exempt</span>{/if}
+              <code>{r.domain}</code>{#if r.overridden}<span class="pill ok tag" title="Never auto-blocked by the AI">Exempt</span>{/if}
             </td>
             <td>
               {#if r.category}
@@ -168,17 +178,20 @@
               >{STATUS_LABELS[r.status] || titleCase(r.status)}</span>
             </td>
             <td class="num">
-              {r.status === 'pending' ? '-' : percent(r.confidence)}
+              {r.status === 'pending' || !r.category ? '-' : percent(r.confidence)}
             </td>
+            <td class="num">{fmt(r.observations)}</td>
             <td class="muted evidence" title={r.evidence}>{r.evidence || '-'}</td>
             <td class="muted nowrap">{stamp(r.expires_at, formatDate)}</td>
-            <td class="num">
-              {#if r.overridden}
-                <button class="secondary" onclick={() => setExempt(r.domain, false)} title="Let the AI block this domain again">Unexempt</button>
-              {:else}
-                <button class="secondary" onclick={() => setExempt(r.domain, true)} title="Never let the AI block this domain or its subdomains">Exempt</button>
-              {/if}
-            </td>
+            {#if isAdmin}
+              <td class="num">
+                {#if r.overridden}
+                  <button class="secondary" onclick={() => setExempt(r.domain, false)} title="Let the AI block this domain again">Unexempt</button>
+                {:else}
+                  <button class="secondary" onclick={() => setExempt(r.domain, true)} title="Never let the AI block this domain or its subdomains">Exempt</button>
+                {/if}
+              </td>
+            {/if}
           </tr>
         {/each}
       </tbody>
@@ -207,5 +220,6 @@
 
 <style>
   .nowrap { white-space: nowrap; }
+  .tag { margin-left: 6px; }
   .evidence { max-width: 200px; font-size: 0.78rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 </style>

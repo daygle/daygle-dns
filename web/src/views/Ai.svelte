@@ -14,7 +14,7 @@
       id: 'scanner',
       label: 'AI Safety Scanner',
       tagline:
-        'Classifies the domains in your DNS traffic in the background, never on the query path. Train mode only records verdicts; Enforce mode blocks domains in the auto-block categories once their verdict reaches the block threshold. Exempt domains are never blocked.',
+        'Classifies the domains in your DNS traffic in the background, never on the query path. Train mode only records verdicts; Enforce mode blocks domains in the auto-block categories once their verdict reaches the block threshold. Exempt domains are never blocked by the AI.',
     },
     {
       id: 'verdicts',
