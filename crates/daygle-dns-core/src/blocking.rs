@@ -53,6 +53,11 @@ pub struct BlockingGroup {
     pub blocklists: Vec<String>,
     /// Response returned for blocked queries.
     pub response: BlockResponse,
+    /// Whether the AI scanner may auto-block these clients' queries (in
+    /// enforce mode). The first enabled group a client belongs to decides;
+    /// clients in no group are covered.
+    #[serde(default = "default_true")]
+    pub ai_blocking: bool,
     /// Ordering position (lower groups are evaluated first).
     pub position: i64,
     /// When the group was last created or edited through the console or API,
@@ -91,4 +96,6 @@ pub struct BlockingGroupInput {
     pub blocklists: Vec<String>,
     #[serde(default)]
     pub response: BlockResponse,
+    #[serde(default = "default_true")]
+    pub ai_blocking: bool,
 }

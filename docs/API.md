@@ -1280,6 +1280,11 @@ blocklist sources whose
 `scope` is `groups`: their domains are blocked for the group's clients, and
 the group's `allow` list still overrides them (`400` for a name that is not
 a configured source).
+`ai_blocking` (default `true`) lets the AI scanner auto-block the group's
+clients in enforce mode. A client follows the first enabled group that
+covers it, and clients in no group are covered; to use the AI for some
+groups only, put a group covering every client with `ai_blocking: false`
+last.
 `POST /api/policy/blocking` creates a group or updates the one with the same
 name; with an `id` it updates that group, so it can be renamed (`400` if
 another group has the new name, `404` if the id is unknown). The
@@ -1297,7 +1302,10 @@ DNS) so a group's listener entries can be tested.
 
 `POST /api/policy/blocking/test` evaluates a `{client, domain}` pair against
 the live blocking groups and reports whether (and why) it is blocked, so an
-operator can verify rules before relying on them.
+operator can verify rules before relying on them. It also reports
+`ai_blocking` (whether the AI may auto-block that client's queries) and
+`ai_group` (the group that decided; `null` when the client is in no
+group).
 
 ### Backup and restore
 

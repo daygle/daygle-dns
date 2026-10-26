@@ -75,6 +75,7 @@
           blocklists: [...(group.blocklists || [])],
           responseKind: group.response?.kind || 'nx_domain',
           redirectAddr: group.response?.address || '0.0.0.0',
+          ai_blocking: group.ai_blocking !== false,
         }
       : {
           id: null,
@@ -89,6 +90,7 @@
           blocklists: [],
           responseKind: 'nx_domain',
           redirectAddr: '0.0.0.0',
+          ai_blocking: true,
         };
   }
 
@@ -119,6 +121,7 @@
       block_regex: parseList(edit.block_regex),
       blocklists: edit.blocklists,
       response,
+      ai_blocking: edit.ai_blocking,
     };
     saving = true;
     error = null;
@@ -217,6 +220,7 @@
               <td>
                 <strong>{g.name}</strong>
                 {#if !g.enabled}<span class="pill">Disabled</span>{/if}
+                {#if g.ai_blocking === false}<span class="pill" title="The AI never auto-blocks these clients' queries">AI Off</span>{/if}
               </td>
               <td class="muted">{g.clients.length ? g.clients.join(', ') : 'All Clients'}</td>
               <td class="muted">
@@ -249,7 +253,9 @@
     lists the domain decides: on its allow list, the domain is never blocked
     (later groups are skipped); on its block list or one of its blocklists,
     it is blocked with that group's response. Otherwise the next group is
-    checked. A group with no client networks covers every client.
+    checked. A group with no client networks covers every client. AI
+    auto-blocking follows the first group covering the client: a group can
+    turn it off for its clients.
   </p>
 </div>
 
@@ -278,6 +284,12 @@
         <span class="pill group">By {testResult.group}</span>
       {/if}
       <span class="muted">{testResult.reason}</span>
+      {#if testResult.ai_blocking !== undefined}
+        <span class="muted ai-note">
+          AI auto-blocking: {testResult.ai_blocking ? 'On' : 'Off'}
+          {testResult.ai_group ? `(group "${testResult.ai_group}")` : '(client is in no group)'}
+        </span>
+      {/if}
     </div>
   {/if}
 </div>
@@ -338,6 +350,15 @@
         </p>
       {/if}
 
+      <div class="section-title">AI Auto-Blocking</div>
+      <label class="checkbox"><input type="checkbox" bind:checked={edit.ai_blocking} /><span>Let the AI auto-block these clients' queries</span></label>
+      <p class="muted help">
+        Applies when the AI scanner is in Enforce mode. A client follows the
+        first group (from the top) that covers it; clients in no group are
+        covered. To use the AI for some groups only, add a group covering every
+        client with this off and move it to the bottom.
+      </p>
+
       <div class="section-title">Domains</div>
       <div class="grid2">
         <label>Allow <textarea rows="4" bind:value={edit.allow} placeholder={'school.example.com\n*.work.example'}></textarea></label>
@@ -390,6 +411,7 @@
   .dialog-error { color: var(--danger); margin: 0 0 10px; }
   .result { margin-top: 12px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
   .pill.group { border-color: var(--accent); color: var(--accent); }
+  .ai-note { flex-basis: 100%; }
   @media (max-width: 640px) {
     .grid2 { grid-template-columns: 1fr; }
   }

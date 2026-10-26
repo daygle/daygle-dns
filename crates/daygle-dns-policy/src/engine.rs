@@ -189,10 +189,7 @@ impl PolicyEngine {
     /// `query_name` must already be normalized (lowercase, no trailing dot).
     /// Returns a [`Decision`]; `Action::Allow` means "no policy objected".
     pub async fn evaluate(&self, client: IpAddr, query_name: &str, record_type: &str) -> Decision {
-        if !self.enabled {
-            return Decision::allow();
-        }
-        self.evaluate_with(client, query_name, record_type, false)
+        self.evaluate_on(client, query_name, record_type, None)
             .await
     }
 
@@ -208,10 +205,24 @@ impl PolicyEngine {
         query_name: &str,
         record_type: &str,
     ) -> Decision {
+        self.evaluate_on(client, query_name, record_type, Some("dot"))
+            .await
+    }
+
+    /// Evaluate policy for a query that arrived on `listener` (`dot`, `doh`,
+    /// `doq`; `None` for plain DNS). The DoT listener also faces the
+    /// DoT-scoped sources, and plugins are told the listener.
+    pub async fn evaluate_on(
+        &self,
+        client: IpAddr,
+        query_name: &str,
+        record_type: &str,
+        listener: Option<&'static str>,
+    ) -> Decision {
         if !self.enabled {
             return Decision::allow();
         }
-        self.evaluate_with(client, query_name, record_type, true)
+        self.evaluate_with(client, query_name, record_type, listener)
             .await
     }
 
@@ -220,8 +231,9 @@ impl PolicyEngine {
         client: IpAddr,
         query_name: &str,
         record_type: &str,
-        dot_listener: bool,
+        listener: Option<&'static str>,
     ) -> Decision {
+        let dot_listener = listener == Some("dot");
         // 1. ACLs.
         if let Some(acl) = &self.acl {
             if !acl.is_allowed(client) {
@@ -290,6 +302,7 @@ impl PolicyEngine {
                 client,
                 query_name: query_name.to_string(),
                 record_type: record_type.to_string(),
+                listener,
             };
             if let Some(decision) = self.plugins.evaluate(&ctx).await {
                 return decision;

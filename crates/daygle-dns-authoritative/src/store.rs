@@ -161,7 +161,8 @@ CREATE TABLE IF NOT EXISTS blocking_groups (
     blocklists  TEXT NOT NULL DEFAULT '[]',
     response    TEXT NOT NULL DEFAULT '{"kind":"nx_domain"}',
     position    INTEGER NOT NULL DEFAULT 0,
-    last_modified_at TEXT
+    last_modified_at TEXT,
+    ai_blocking INTEGER NOT NULL DEFAULT 1
 );
 
 CREATE TABLE IF NOT EXISTS console_users (
@@ -657,7 +658,7 @@ impl ZoneStore {
         let conn = self.lock_conn()?;
         let mut stmt = conn.prepare(
             "SELECT id, name, enabled, clients, allow, block, allow_regex, block_regex,
-                    response, position, blocklists, last_modified_at
+                    response, position, blocklists, last_modified_at, ai_blocking
              FROM blocking_groups ORDER BY position, name",
         )?;
         let rows = stmt.query_map([], row_to_blocking_group)?;
@@ -670,7 +671,7 @@ impl ZoneStore {
         let group = conn
             .query_row(
                 "SELECT id, name, enabled, clients, allow, block, allow_regex, block_regex,
-                        response, position, blocklists, last_modified_at
+                        response, position, blocklists, last_modified_at, ai_blocking
                  FROM blocking_groups WHERE id = ?1",
                 [id],
                 row_to_blocking_group,
@@ -714,7 +715,8 @@ impl ZoneStore {
             let updated = conn.execute(
                 "UPDATE blocking_groups SET name = ?2, enabled = ?3, clients = ?4,
                     allow = ?5, block = ?6, allow_regex = ?7, block_regex = ?8,
-                    response = ?9, blocklists = ?10, last_modified_at = ?11
+                    response = ?9, blocklists = ?10, last_modified_at = ?11,
+                    ai_blocking = ?12
                  WHERE id = ?1",
                 params![
                     id,
@@ -728,6 +730,7 @@ impl ZoneStore {
                     response,
                     blocklists,
                     now,
+                    input.ai_blocking as i64,
                 ],
             )?;
             drop(conn);
@@ -743,13 +746,13 @@ impl ZoneStore {
         conn.execute(
             "INSERT INTO blocking_groups
                 (id, name, enabled, clients, allow, block, allow_regex, block_regex,
-                 response, blocklists, position, last_modified_at)
+                 response, blocklists, position, last_modified_at, ai_blocking)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
-                 (SELECT COALESCE(MAX(position), -1) + 1 FROM blocking_groups), ?11)
+                 (SELECT COALESCE(MAX(position), -1) + 1 FROM blocking_groups), ?11, ?12)
              ON CONFLICT(name) DO UPDATE SET
                 enabled = ?3, clients = ?4, allow = ?5, block = ?6,
                 allow_regex = ?7, block_regex = ?8, response = ?9, blocklists = ?10,
-                last_modified_at = ?11",
+                last_modified_at = ?11, ai_blocking = ?12",
             params![
                 id,
                 name,
@@ -762,6 +765,7 @@ impl ZoneStore {
                 response,
                 blocklists,
                 now,
+                input.ai_blocking as i64,
             ],
         )?;
         drop(conn);
@@ -1842,6 +1846,7 @@ fn row_to_blocking_group(row: &rusqlite::Row<'_>) -> rusqlite::Result<BlockingGr
         response,
         position: row.get(9)?,
         last_modified_at: row.get(11)?,
+        ai_blocking: row.get::<_, i64>(12)? != 0,
     })
 }
 
@@ -3671,20 +3676,26 @@ fn migrate_blocking_group_lists(conn: &Connection) -> Result<()> {
 }
 
 /// Add the `last_modified_at` column to `blocking_groups` for databases
-/// created before it existed (existing rows stay `NULL` until first edited).
+/// created before it existed (existing rows stay `NULL` until first edited),
+/// and `ai_blocking` (on, as before it existed).
 fn migrate_blocking_group_timestamps(conn: &Connection) -> Result<()> {
-    let has: bool = conn.query_row(
-        "SELECT EXISTS(
-            SELECT 1 FROM pragma_table_info('blocking_groups') WHERE name = 'last_modified_at'
-         )",
-        [],
-        |r| r.get(0),
-    )?;
-    if !has {
-        conn.execute(
-            "ALTER TABLE blocking_groups ADD COLUMN last_modified_at TEXT",
-            [],
+    for (column, definition) in [
+        ("last_modified_at", "TEXT"),
+        ("ai_blocking", "INTEGER NOT NULL DEFAULT 1"),
+    ] {
+        let has: bool = conn.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM pragma_table_info('blocking_groups') WHERE name = ?1
+             )",
+            [column],
+            |r| r.get(0),
         )?;
+        if !has {
+            conn.execute(
+                &format!("ALTER TABLE blocking_groups ADD COLUMN {column} {definition}"),
+                [],
+            )?;
+        }
     }
     Ok(())
 }
@@ -3851,6 +3862,7 @@ mod tests {
                 allow_regex: vec![],
                 block_regex: vec![r"^ad".to_string()],
                 blocklists: vec![],
+                ai_blocking: true,
                 response: BlockResponse::Redirect("0.0.0.0".parse().unwrap()),
             })
             .unwrap();
@@ -3877,6 +3889,7 @@ mod tests {
                 allow_regex: vec![],
                 block_regex: vec![],
                 blocklists: vec![],
+                ai_blocking: true,
                 response: BlockResponse::NxDomain,
             })
             .unwrap();
@@ -3912,6 +3925,7 @@ mod tests {
             allow_regex: vec![],
             block_regex: vec![],
             blocklists: vec![],
+            ai_blocking: true,
             response: Default::default(),
         };
         let a = s.upsert_blocking_group(&input(None, "A")).unwrap();

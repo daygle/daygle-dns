@@ -518,6 +518,9 @@ pub async fn bind_with(
             group_blocklists.clone(),
         ),
     ));
+    if let Some(ai) = &ai_engine {
+        ai.set_client_groups(advanced_blocking.clone());
+    }
 
     // Persistent query logging (daily JSON-lines files), when enabled.
     let query_logger = if config.logging.query_log_enabled {

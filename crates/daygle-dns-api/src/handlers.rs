@@ -512,6 +512,7 @@ fn retarget_group_blocklists(
                     block_regex: group.block_regex.clone(),
                     blocklists: kept,
                     response: group.response.clone(),
+                    ai_blocking: group.ai_blocking,
                 },
             )?;
             changed = true;
@@ -2558,14 +2559,16 @@ pub async fn test_blocking(
         });
     // The resolver skips client-group blocking for allowlisted names.
     let allowlisted = state.policy.load().is_allowlisted(&domain);
+    let groups = state.advanced_blocking.load();
     let verdict = if allowlisted {
         None
     } else {
-        state
-            .advanced_blocking
-            .load()
-            .evaluate(client, &domain, listener)
+        groups.evaluate(client, &domain, listener)
     };
+    // Whether the AI may auto-block this client's queries, and which group
+    // decided that (none: the client is in no group).
+    let (ai_blocking, ai_group) = groups.ai_blocking(client, listener);
+    let ai_group = ai_group.map(str::to_string);
     let (blocked, action, reason, group) = match verdict {
         Some(d) => (true, d.action.as_str().to_string(), d.reason, d.group),
         None => (
@@ -2586,6 +2589,8 @@ pub async fn test_blocking(
         "action": action,
         "reason": reason,
         "group": group,
+        "ai_blocking": ai_blocking,
+        "ai_group": ai_group,
     }))
     .into_response()
 }

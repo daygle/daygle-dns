@@ -175,6 +175,12 @@ impl AiEngine {
         self.plugin.clone()
     }
 
+    /// Let the live client groups decide which clients AI blocking covers
+    /// (their `ai_blocking` switch).
+    pub fn set_client_groups(&self, groups: Arc<ArcSwap<daygle_dns_policy::AdvancedBlocking>>) {
+        self.plugin.set_client_groups(groups);
+    }
+
     /// Kick the scanner for one immediate cycle (used by the rescan API).
     pub fn trigger_rescan(&self) {
         self.scanner.rescan_notify.notify_one();
