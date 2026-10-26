@@ -63,6 +63,42 @@ pub struct DaygleConfig {
     pub rpz: Vec<RpzZoneConfig>,
     /// A web page that tells people a site was blocked.
     pub block_page: BlockPageSettings,
+    /// Discovery of Designated Resolvers (RFC 9462).
+    pub ddr: DdrSettings,
+}
+
+/// Discovery of Designated Resolvers (DDR, RFC 9462): answer the
+/// `_dns.resolver.arpa` SVCB query with this server's encrypted listeners
+/// (DoH, DoT, DoQ), so devices that support it (Windows 11, Apple, Android)
+/// switch from plain DNS to encrypted DNS by themselves. Edited in
+/// Settings -> Encrypted DNS and stored in the database.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct DdrSettings {
+    pub enabled: bool,
+    /// The name devices connect to (it must be in the listeners'
+    /// certificate). Empty: each listener's own server name.
+    pub name: String,
+}
+
+impl Default for DdrSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            name: String::new(),
+        }
+    }
+}
+
+impl DdrSettings {
+    /// Problems that stop the settings being used.
+    pub fn check(&self) -> std::result::Result<(), String> {
+        let name = self.name.trim();
+        if !name.is_empty() && (name.starts_with("*.") || validate_domain_pattern(name).is_err()) {
+            return Err(format!("'{name}' is not a host name"));
+        }
+        Ok(())
+    }
 }
 
 /// The block page: blocked names (that would get NXDOMAIN) are answered
@@ -1119,6 +1155,8 @@ pub struct RuntimeSettings {
     pub rpz: Option<Vec<RpzZoneConfig>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub block_page: Option<BlockPageSettings>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ddr: Option<DdrSettings>,
 }
 
 /// Partial updates for the recursive resolver (matches the API's shape).
@@ -1875,6 +1913,7 @@ impl RuntimeSettings {
             && self.rrl.is_none()
             && self.rpz.is_none()
             && self.block_page.is_none()
+            && self.ddr.is_none()
     }
 
     /// Apply the overlay to `config` in place. `None` fields are untouched.
@@ -2085,6 +2124,9 @@ impl RuntimeSettings {
         }
         if let Some(b) = &self.block_page {
             config.block_page = b.clone();
+        }
+        if let Some(d) = &self.ddr {
+            config.ddr = d.clone();
         }
         if let Some(w) = &self.web {
             config.web = w.clone();
@@ -2310,6 +2352,7 @@ impl RuntimeSettings {
             rrl: Some(config.rrl.clone()),
             rpz: Some(config.rpz.clone()),
             block_page: Some(config.block_page.clone()),
+            ddr: Some(config.ddr.clone()),
         }
     }
 }
@@ -3211,6 +3254,9 @@ impl DaygleConfig {
             .map_err(|e| DaygleError::Config(format!("block_page: {e}")))?;
         self.check_block_page_port()
             .map_err(|e| DaygleError::Config(format!("block_page: {e}")))?;
+        self.ddr
+            .check()
+            .map_err(|e| DaygleError::Config(format!("ddr: {e}")))?;
         self.dns64
             .compile(&self.all_networks())
             .map_err(|e| DaygleError::Config(format!("dns64: {e}")))?;
@@ -4736,6 +4782,8 @@ mod tests {
         c.block_page.enabled = true;
         c.block_page.ipv4 = s("192.168.1.2");
         c.block_page.message = s("Ask Sam");
+        c.ddr.enabled = false;
+        c.ddr.name = s("dns.example.com");
         let stored = serde_json::to_string(&RuntimeSettings::capture(&c)).unwrap();
         let overlay: RuntimeSettings = serde_json::from_str(&stored).unwrap();
         let mut restored = DaygleConfig::default();
@@ -4759,6 +4807,7 @@ mod tests {
         assert_eq!(restored.rrl, c.rrl, "rrl");
         assert_eq!(restored.rpz, c.rpz, "rpz");
         assert_eq!(restored.block_page, c.block_page, "block_page");
+        assert_eq!(restored.ddr, c.ddr, "ddr");
 
         // Clearing a value in the console must stay cleared after a restart,
         // even when the config file sets it.

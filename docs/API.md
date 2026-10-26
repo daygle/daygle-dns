@@ -367,8 +367,9 @@ certificate/max_connections [+ `dot`/`doh` handshake_timeout_secs, `doh.endpoint
 `doq.idle_timeout_secs`/`doq.max_concurrent_streams`]
 /allowed_networks; `doh.http3`, default off, also serves DoH over HTTP/3 (QUIC)
 on UDP at the same addresses and port number, with the same certificate,
-endpoint and allowed networks - for clients configured for HTTP/3 DoH, as
-nothing advertises it to browsers; it cannot share a UDP port with DoQ), `api`
+endpoint and allowed networks - for clients configured for HTTP/3 DoH and
+those that learn of it through DDR (below); browsers are not told through
+`Alt-Svc`; it cannot share a UDP port with DoQ), `api`
 (gui_enabled/cors_origins), `display` (the console's date/time defaults:
 `time_zone` = `system`, `UTC` or an IANA zone; `date_format` = `system`/`dmy`/
 `mdy`/`ymd`/`d_mon_y`; `time_format` = `system`/`24h`/`12h`), `syslog`, `dns64` and `ecs` (see below), `policy`
@@ -1424,6 +1425,28 @@ zone for changes now (`202`). `POST /api/rpz/test` with `{"client",
 "domain"}` lists the zones that match, in order: `{"allowlisted", "matches":
 [{"zone", "trigger", "action", "log_only"}]}`; the first match that is not
 `log_only` is the one that acts.
+
+### Encrypted DNS discovery (DDR)
+
+The `ddr` settings group (Settings → Encrypted DNS) answers Discovery of
+Designated Resolvers (RFC 9462): an `SVCB` query for `_dns.resolver.arpa`,
+or for `_dns.<name>` where `<name>` is a name the encrypted listeners go by
+(and not a zone hosted here), gets one SVCB record per enabled DoH, DoT and
+DoQ listener the client is allowed on (its `allowed_networks`): priority 1
+upwards, the target name, `alpn` (`h2`, plus `h3` with `doh.http3`; `dot`;
+`doq`), `port`, `ipv4hint`/`ipv6hint` when the listener is bound to
+specific addresses, and for DoH `dohpath` (`<endpoint>{?dns}`, RFC 9461).
+
+| Field | Default | Meaning |
+|---|---|---|
+| `enabled` | `true` | Off: the queries are answered empty. |
+| `name` | `""` | The target name devices connect to (it must be in the certificate); empty: each listener's certificate name (`server_name`, or the stored certificate's). |
+
+Other queries under `resolver.arpa` are never forwarded: `resolver.arpa` and
+`_dns.resolver.arpa` are answered empty for other types, and other names
+under it NXDOMAIN. Devices verify the designated resolver's certificate
+(it must be trusted and cover the address they use for this server), so a
+self-signed certificate is usually not taken up.
 
 ### Block page
 

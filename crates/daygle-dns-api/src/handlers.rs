@@ -4321,6 +4321,8 @@ pub struct SettingsUpdate {
     pub rpz: Option<Vec<daygle_dns_core::config::RpzZoneConfig>>,
     /// Replaces the whole `[block_page]` section.
     pub block_page: Option<daygle_dns_core::config::BlockPageSettings>,
+    /// Replaces the whole `[ddr]` section (encrypted DNS discovery).
+    pub ddr: Option<daygle_dns_core::config::DdrSettings>,
     /// Replaces the whole `[alerts]` section; an `smtp_password` of
     /// `[redacted]` keeps the stored one.
     pub alerts: Option<daygle_dns_core::config::AlertSettings>,
@@ -4898,6 +4900,16 @@ pub async fn update_settings(
             }
         }
         config.rpz = zones;
+    }
+    if let Some(ddr) = &update.ddr {
+        let ddr = daygle_dns_core::config::DdrSettings {
+            name: ddr.name.trim().trim_end_matches('.').to_ascii_lowercase(),
+            ..ddr.clone()
+        };
+        if let Err(msg) = ddr.check() {
+            return error_response(StatusCode::BAD_REQUEST, format!("ddr: {msg}"));
+        }
+        config.ddr = ddr;
     }
     if let Some(page) = &update.block_page {
         let page = daygle_dns_core::config::BlockPageSettings {

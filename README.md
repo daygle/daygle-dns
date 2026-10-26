@@ -36,6 +36,9 @@ Daygle DNS combines, in a single process:
   in Clients -> Networks and pick it wherever a setting takes client
   networks; changing it changes them all, renaming it keeps them pointing at
   it, and a network in use cannot be deleted.
+- **Encrypted DNS discovery (DDR, RFC 9462)**: devices that support it
+  (Windows 11, Apple, Android) learn of the DoH, DoT and DoQ listeners and
+  switch to them by themselves.
 - **Block page**: blocked sites can point at a page on this server that
   says what was blocked and why, instead of "site not found".
 - **Blocked services**: block TikTok, YouTube, Roblox, Discord, ChatGPT and

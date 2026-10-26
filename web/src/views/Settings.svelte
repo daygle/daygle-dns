@@ -128,6 +128,7 @@
     window_secs: 15, slip: 2, ipv4_prefix: 24, ipv6_prefix: 56, log_only: false,
   };
   let rrl_ = $state({ ...RRL_DEFAULTS });
+  let ddr_ = $state({ enabled: true, name: '' });
   let rrlExempt = $state([]);
   // RRL counters since start (from /api/metrics), shown on its tab.
   let rrlCounts = $state(null);
@@ -263,6 +264,7 @@
       syslog_ = { enabled: false, server: '', facility: 'daemon', level: 'info', queries: false, ...config.syslog };
       alerts_ = { ...ALERT_DEFAULTS, ...config.alerts };
       rrl_ = { ...RRL_DEFAULTS, ...config.rrl };
+      ddr_ = { enabled: true, name: '', ...config.ddr };
       rrlExempt = [...(config.rrl?.exempt || [])];
       alertTo = (config.alerts?.email_to || []).join('\n');
       dns64 = { enabled: !!config.dns64?.enabled, prefix: config.dns64?.prefix || '64:ff9b::/96' };
@@ -434,6 +436,7 @@
         ipv6_prefix: Number(ecs.ipv6_prefix),
       },
       alerts: alertsBody(),
+      ddr: { enabled: !!ddr_.enabled, name: (ddr_.name || '').trim() },
       rrl: {
         enabled: !!rrl_.enabled,
         responses_per_second: Number(rrl_.responses_per_second),
@@ -947,6 +950,24 @@
   </div>
   {:else if tab === 'listeners'}
   <div class="card" style="margin-bottom: 14px">
+    <h3 style="margin: 0 0 10px">Automatic Discovery (DDR)</h3>
+    <div class="form-grid">
+      <label class="check"><input type="checkbox" bind:checked={ddr_.enabled} /> <span>Advertise Encrypted DNS to Devices</span></label>
+      <label><span>Server Name (Optional)</span><input bind:value={ddr_.name} placeholder="dns.example.com" disabled={!ddr_.enabled} spellcheck="false" /></label>
+    </div>
+    <p class="muted help">
+      Devices that support Discovery of Designated Resolvers (RFC 9462) -
+      Windows 11, iOS and macOS, Android - ask this server whether it also
+      offers encrypted DNS, and switch to the DNS over HTTPS, TLS or QUIC
+      listeners below by themselves; each device is only told about the
+      listeners it is allowed on. Most devices only switch when the
+      listener's certificate is one they trust and it covers the address
+      they use for this server, so a self-signed certificate is usually
+      ignored. The server name is the name devices connect to; leave it empty
+      to use each listener's own certificate name.
+    </p>
+  </div>
+  <div class="card" style="margin-bottom: 14px">
     <h3 style="margin: 0 0 10px">DNS over TLS</h3>
     <div class="form-grid">
       <label class="check"><input type="checkbox" bind:checked={dot.enabled} /> <span>Enabled</span></label>
@@ -1015,9 +1036,10 @@
     <p class="muted help">
       HTTP/3 serves the same address over QUIC, on UDP port {doh.port || 443}
       (open it in your firewall as well as TCP), with the same certificate,
-      path and client networks. It needs a client set up for HTTP/3 DoH (for
-      example AdGuard's or dnsproxy's <code>h3://</code> addresses); browsers
-      keep using HTTP/2. It cannot share its UDP port with DNS over QUIC.
+      path and client networks. Clients set up for HTTP/3 DoH (for example
+      AdGuard's or dnsproxy's <code>h3://</code> addresses) and devices using
+      Automatic Discovery above can use it; browsers keep using HTTP/2. It
+      cannot share its UDP port with DNS over QUIC.
     </p>
   </div>
   <div class="card" style="margin-bottom: 14px">

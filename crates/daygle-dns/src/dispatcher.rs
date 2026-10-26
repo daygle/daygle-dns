@@ -22,6 +22,9 @@ use hickory_server::server::{Request, RequestHandler, ResponseHandler, ResponseI
 use hickory_server::zone_handler::MessageResponseBuilder;
 use tracing::{debug, warn};
 
+/// TTL of the DDR (RFC 9462) SVCB answers.
+const DDR_TTL: u32 = 300;
+
 /// TTL of the CNAME in a Safe Search answer (the safe address's own
 /// records keep theirs, capped by it).
 const SAFE_SEARCH_TTL: u32 = 300;
@@ -893,6 +896,38 @@ impl RequestHandler for DnsDispatcher {
                 Some(Ede::new(ede::OTHER, "rate limit exceeded")),
             )
             .await;
+        }
+
+        // 0c. Discovery of Designated Resolvers (DDR, RFC 9462): a device
+        // asks `_dns.resolver.arpa` (or `_dns.<this server's name>`) for
+        // SVCB records describing the encrypted DNS it can switch to.
+        // `resolver.arpa` is local to every resolver: never forwarded.
+        let special_use = qname == "resolver.arpa" || qname.ends_with(".resolver.arpa");
+        let ddr_name = qname == "_dns.resolver.arpa" || (!special_use && self.is_ddr_name(&qname));
+        if special_use || ddr_name {
+            let known = ddr_name || qname == "resolver.arpa";
+            self.observe(
+                client,
+                &qname,
+                &rtype,
+                protocol,
+                Outcome::Authoritative,
+                Some(if known { "NOERROR" } else { "NXDOMAIN" }),
+                started,
+            );
+            if !known {
+                return send_error(&mut response_handle, request, ResponseCode::NXDomain, None)
+                    .await;
+            }
+            let records = if ddr_name && info.query.query_type() == RecordType::SVCB {
+                self.ddr_records(client, &Name::from(info.query.name().clone()))
+            } else {
+                Vec::new()
+            };
+            if records.is_empty() {
+                return send_empty(&mut response_handle, request, None).await;
+            }
+            return send_records(&mut response_handle, request, &records, None).await;
         }
 
         // Listener ACL was checked before opcode-specific handlers above.
@@ -1923,6 +1958,170 @@ impl DnsDispatcher {
             }
         }
         None
+    }
+
+    /// Whether `qname` is `_dns.<name>` for a name this server's encrypted
+    /// listeners go by, and not hosted in a zone here (RFC 9462 §5).
+    fn is_ddr_name(&self, qname: &str) -> bool {
+        let Some(name) = qname.strip_prefix("_dns.") else {
+            return false;
+        };
+        let Some(config) = self.config.as_ref().map(|c| c.load()) else {
+            return false;
+        };
+        if !config.ddr.enabled || name.ends_with(".resolver.arpa") || name == "resolver.arpa" {
+            return false;
+        }
+        let hosted = Name::from_ascii(format!("{qname}."))
+            .map(|n| self.catalog.contains(&n.into()))
+            .unwrap_or(false);
+        !hosted
+            && self
+                .ddr_targets(&config)
+                .iter()
+                .any(|(_, target)| target.eq_ignore_ascii_case(name))
+    }
+
+    /// The enabled encrypted listeners and the name each is reached by:
+    /// `ddr.name`, else the name its certificate was made for.
+    fn ddr_targets(
+        &self,
+        config: &daygle_dns_core::config::DaygleConfig,
+    ) -> Vec<(&'static str, String)> {
+        let name_of = |certificate: &str, server_name: &str| -> String {
+            let fixed = config.ddr.name.trim().trim_end_matches('.');
+            if !fixed.is_empty() {
+                return fixed.to_ascii_lowercase();
+            }
+            let stored = (!certificate.trim().is_empty())
+                .then(|| {
+                    self.catalog
+                        .store()
+                        .get_tls_certificate(certificate.trim())
+                        .ok()
+                        .flatten()
+                })
+                .flatten()
+                .map(|c| c.server_name);
+            stored
+                .unwrap_or_else(|| server_name.to_string())
+                .trim()
+                .trim_end_matches('.')
+                .to_ascii_lowercase()
+        };
+        let mut out = Vec::new();
+        if config.doh.enabled {
+            out.push((
+                "doh",
+                name_of(&config.doh.certificate, &config.doh.server_name),
+            ));
+        }
+        if config.dot.enabled {
+            out.push((
+                "dot",
+                name_of(&config.dot.certificate, &config.dot.server_name),
+            ));
+        }
+        if config.doq.enabled {
+            out.push((
+                "doq",
+                name_of(&config.doq.certificate, &config.doq.server_name),
+            ));
+        }
+        out
+    }
+
+    /// The SVCB records (RFC 9461/9462) describing the encrypted listeners
+    /// `client` may use, owned by `owner`.
+    fn ddr_records(&self, client: IpAddr, owner: &Name) -> Vec<Record> {
+        use hickory_proto::rr::rdata::svcb::{
+            Alpn, IpHint, SvcParamKey, SvcParamValue, Unknown, SVCB,
+        };
+        use hickory_server::net::xfer::Protocol as P;
+        let Some(config) = self.config.as_ref().map(|c| c.load_full()) else {
+            return Vec::new();
+        };
+        if !config.ddr.enabled {
+            return Vec::new();
+        }
+        let mut records = Vec::new();
+        for (priority, (kind, target)) in (1u16..).zip(self.ddr_targets(&config)) {
+            let (protocol, listen, port, mut alpn) = match kind {
+                "doh" => (
+                    P::Https,
+                    &config.doh.listen,
+                    config.doh.port,
+                    vec!["h2".to_string()],
+                ),
+                "dot" => (
+                    P::Tls,
+                    &config.dot.listen,
+                    config.dot.port,
+                    vec!["dot".to_string()],
+                ),
+                _ => (
+                    P::Quic,
+                    &config.doq.listen,
+                    config.doq.port,
+                    vec!["doq".to_string()],
+                ),
+            };
+            // Only listeners this client is allowed on.
+            if matches!(self.listener_gate(client, protocol), Some(false)) {
+                continue;
+            }
+            let Ok(target_name) = Name::from_ascii(format!("{target}.")) else {
+                continue;
+            };
+            if kind == "doh" && config.doh.http3 {
+                alpn.push("h3".to_string());
+            }
+            let mut params = vec![
+                (SvcParamKey::Alpn, SvcParamValue::Alpn(Alpn(alpn))),
+                (SvcParamKey::Port, SvcParamValue::Port(port)),
+            ];
+            // Address hints, when the listener is bound to specific addresses.
+            let addrs: Vec<IpAddr> = daygle_dns_core::config::listen_socket_addrs(listen, port)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|a| a.ip())
+                .filter(|ip| !ip.is_unspecified())
+                .collect();
+            let v4: Vec<hickory_proto::rr::rdata::A> = addrs
+                .iter()
+                .filter_map(|ip| match ip {
+                    IpAddr::V4(v4) => Some((*v4).into()),
+                    _ => None,
+                })
+                .collect();
+            let v6: Vec<hickory_proto::rr::rdata::AAAA> = addrs
+                .iter()
+                .filter_map(|ip| match ip {
+                    IpAddr::V6(v6) => Some((*v6).into()),
+                    _ => None,
+                })
+                .collect();
+            if !v4.is_empty() {
+                params.push((SvcParamKey::Ipv4Hint, SvcParamValue::Ipv4Hint(IpHint(v4))));
+            }
+            if !v6.is_empty() {
+                params.push((SvcParamKey::Ipv6Hint, SvcParamValue::Ipv6Hint(IpHint(v6))));
+            }
+            if kind == "doh" {
+                // dohpath (RFC 9461 §5): the URI template.
+                let path = format!("{}{{?dns}}", config.doh.endpoint.trim());
+                params.push((
+                    SvcParamKey::Unknown(7),
+                    SvcParamValue::Unknown(Unknown(path.into_bytes())),
+                ));
+            }
+            records.push(Record::from_rdata(
+                owner.clone(),
+                DDR_TTL,
+                RData::SVCB(SVCB::new(priority, target_name, params)),
+            ));
+        }
+        records
     }
 
     /// With the block page on, how a blocked query of `qtype` is answered
