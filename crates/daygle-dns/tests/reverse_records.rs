@@ -127,6 +127,28 @@ async fn ptr_records_follow_their_address_records() {
     assert_eq!(body["reverse"]["removed"], json!([]), "{body}");
     assert!(ptr(udp, "6.20.168.192.in-addr.arpa.").await.is_some());
 
+    // Disabling the record takes its PTR away; enabling brings it back.
+    let toggle = |disabled: bool| {
+        client
+            .put(format!(
+                "{base}/zones/{zone_id}/records/{rid}/disabled?update_ptr=true"
+            ))
+            .json(&json!({ "disabled": disabled }))
+            .send()
+    };
+    let body: Value = toggle(true).await.unwrap().json().await.unwrap();
+    assert_eq!(
+        body["reverse"]["removed"][0], "6.20.168.192.in-addr.arpa",
+        "{body}"
+    );
+    assert_eq!(ptr(udp, "6.20.168.192.in-addr.arpa.").await, None);
+    let body: Value = toggle(false).await.unwrap().json().await.unwrap();
+    assert_eq!(
+        body["reverse"]["added"][0], "6.20.168.192.in-addr.arpa",
+        "{body}"
+    );
+    assert!(ptr(udp, "6.20.168.192.in-addr.arpa.").await.is_some());
+
     // Deleting the record removes its PTR; without the option it is a 204.
     let body: Value = client
         .delete(format!(

@@ -211,8 +211,8 @@ export const api = {
     request('PUT', `/zones/${zoneId}/records/${encodeURIComponent(recordId)}${query ? `?${query}` : ''}`, body),
   deleteRecord: (zoneId, recordId, query = '') =>
     request('DELETE', `/zones/${zoneId}/records/${recordId}${query ? `?${query}` : ''}`),
-  setRecordDisabled: (zoneId, recordId, disabled) =>
-    request('PUT', `/zones/${zoneId}/records/${encodeURIComponent(recordId)}/disabled`, { disabled }),
+  setRecordDisabled: (zoneId, recordId, disabled, query = '') =>
+    request('PUT', `/zones/${zoneId}/records/${encodeURIComponent(recordId)}/disabled${query ? `?${query}` : ''}`, { disabled }),
   healthChecks: () => request('GET', '/health-checks'),
   setHealthCheck: (zoneId, recordId, body) =>
     request('PUT', `/zones/${zoneId}/records/${encodeURIComponent(recordId)}/health`, body),

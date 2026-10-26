@@ -236,11 +236,18 @@
       // Saving keeps a record's staged state, so only a checkbox that moved
       // needs the separate endpoint (the serial is bumped with it).
       let stagedNotice = '';
+      let staged = null;
       if (Boolean(edit.disabled) !== edit.disabledBefore) {
-        await api.setRecordDisabled(selected.id, savedRecord.id, Boolean(edit.disabled));
+        // A disabled record's PTR goes too, and comes back with it.
+        staged = await api.setRecordDisabled(
+          selected.id,
+          savedRecord.id,
+          Boolean(edit.disabled),
+          ptrQuery ? 'update_ptr=true' : '',
+        );
         stagedNotice = edit.disabled ? ' It is disabled, so it is not served.' : ' It is served again.';
       }
-      const ptrNotice = reverseNotice(savedRecord?.reverse);
+      const ptrNotice = reverseNotice(combineReverse(savedRecord?.reverse, staged?.reverse));
       // A new reverse zone: refresh the list (the PTR option looks there).
       if (savedRecord?.reverse?.zone_created) zones = await api.zones();
       notice = `${body.rtype} record ${edit.isNew ? 'added' : 'saved'} and applied live.${stagedNotice}${ptrNotice}`;
@@ -251,6 +258,21 @@
     } finally {
       saving = false;
     }
+  }
+
+  // The PTR changes of a save and the disable/enable after it, together: a
+  // PTR added by the save and removed by disabling the new record is no
+  // change at all.
+  function combineReverse(first, second) {
+    if (!first || !second) return first || second;
+    const added = [...(first.added || []), ...(second.added || [])];
+    const removed = [...(first.removed || []), ...(second.removed || [])];
+    return {
+      added: added.filter((name) => !removed.includes(name)),
+      removed: removed.filter((name) => !added.includes(name)),
+      zone_created: first.zone_created || second.zone_created,
+      problem: second.problem || first.problem,
+    };
   }
 
   // What the server did with the PTR record, as a sentence for the notice.
