@@ -242,6 +242,81 @@ pub async fn rpz_status(State(state): State<AppState>) -> Response {
     Json(serde_json::json!({ "zones": zones })).into_response()
 }
 
+/// Query of `GET /api/devices`.
+#[derive(Deserialize)]
+pub struct DevicesQuery {
+    pub hours: Option<u64>,
+}
+
+/// `GET /api/devices` - the devices seen in the last `hours` (default a
+/// week), holding a DHCP lease or named by hand, with their names.
+pub async fn list_devices(
+    State(state): State<AppState>,
+    Query(q): Query<DevicesQuery>,
+) -> Response {
+    let hours = q.hours.unwrap_or(24 * 7).clamp(1, 24 * 90);
+    match crate::devices::devices(&state, std::time::Duration::from_secs(hours * 3600)).await {
+        Ok(devices) => Json(serde_json::json!({
+            "hours": hours,
+            "query_log_enabled": state.config.load().logging.query_db_enabled,
+            "devices": devices,
+        }))
+        .into_response(),
+        Err(e) => error_response(StatusCode::INTERNAL_SERVER_ERROR, e),
+    }
+}
+
+/// Body of `PUT /api/devices/name`.
+#[derive(Deserialize)]
+pub struct DeviceNameInput {
+    pub address: String,
+    #[serde(default)]
+    pub mac: String,
+    /// Empty: forget the name.
+    #[serde(default)]
+    pub name: String,
+}
+
+/// `PUT /api/devices/name` - name a device (by its MAC address when one is
+/// given, else by its IP address), or forget its name.
+pub async fn set_device_name(
+    State(state): State<AppState>,
+    Json(input): Json<DeviceNameInput>,
+) -> Response {
+    let address = input.address.trim();
+    if address.parse::<std::net::IpAddr>().is_err() {
+        return error_response(StatusCode::BAD_REQUEST, "not an IP address");
+    }
+    let mac = input.mac.trim();
+    if !mac.is_empty() && daygle_dns_core::dhcp::normalize_mac(mac).is_none() {
+        return error_response(StatusCode::BAD_REQUEST, "not a MAC address");
+    }
+    let name = input.name.trim();
+    if name.chars().count() > crate::devices::MAX_NAME || name.chars().any(char::is_control) {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            format!(
+                "a device name is at most {} characters, on one line",
+                crate::devices::MAX_NAME
+            ),
+        );
+    }
+    let store = state.catalog.store();
+    let key = crate::devices::name_key(address, mac);
+    // A name kept for the address gives way to one kept for the device.
+    let result = if key != address {
+        store
+            .set_device_name(address, "")
+            .and_then(|_| store.set_device_name(&key, name))
+    } else {
+        store.set_device_name(&key, name)
+    };
+    match result {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => error_response(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
+}
+
 /// `GET /api/dhcp` - the DHCP server's status, the network interfaces it
 /// can serve and the leases.
 pub async fn dhcp_status(State(state): State<AppState>) -> Response {

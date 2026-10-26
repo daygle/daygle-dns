@@ -5,6 +5,8 @@
   import Reports from './Reports.svelte';
   import { icons } from '../icons.svelte.js';
   import { formatDateTime, displayZoneName, zonedInputToIso } from '../datetime.svelte.js';
+  import ClientLabel from '../ClientLabel.svelte';
+  import { addressFor } from '../devices.svelte.js';
 
   // The searchable per-query history, the in-memory server log, and (for
   // admins) the audit log of changes. Query Log opens first: it is what the
@@ -162,7 +164,8 @@
   function buildQuery(overrides = {}) {
     const params = new URLSearchParams();
     const put = (key, value) => { if (String(value).trim() !== '') params.set(key, String(value).trim()); };
-    put('client', fClient);
+    // A device name (Clients -> Devices) stands for its address.
+    put('client', addressFor(fClient));
     put('qname', fQname);
     put('qtype', fQtype);
     put('protocol', fProtocol);
@@ -344,7 +347,7 @@
                 </span>
                 <div class="muted small">HTTP {entry.status}</div>
               </td>
-              <td><code>{entry.client || '-'}</code></td>
+              <td><ClientLabel address={entry.client} /></td>
             </tr>
           {/each}
         </tbody>
@@ -404,8 +407,8 @@
   <div class="card" style="margin-bottom: 14px">
     <form onsubmit={(e) => { e.preventDefault(); apply(); }}>
       <div class="filter-grid">
-        <label>Client IP
-          <input placeholder="192.168.1.20" bind:value={fClient} />
+        <label>Client
+          <input placeholder="192.168.1.20 or a device name" bind:value={fClient} />
         </label>
         <label>Domain
           <input placeholder="example.com or *.example.com" bind:value={fQname} />
@@ -495,7 +498,7 @@
         {#each qEntries as entry (entry.id)}
           <tr>
             <td style="white-space: nowrap">{formatDateTime(entry.ts)}</td>
-            <td><button type="button" class="link" onclick={() => filterBy('client', entry.client)} title="Show only this client"><code>{entry.client}</code></button></td>
+            <td><button type="button" class="link" onclick={() => filterBy('client', entry.client)} title="Show only this client"><ClientLabel address={entry.client} /></button></td>
             <td><button type="button" class="link" onclick={() => filterBy('qname', entry.qname)} title="Show only this domain"><code>{entry.qname}</code></button></td>
             <td>{entry.qtype}</td>
             <td title={PROTOCOLS.find(([v]) => v === entry.protocol)?.[1] || ''}>{PROTOCOL_SHORT[entry.protocol] || entry.protocol.toUpperCase()}</td>

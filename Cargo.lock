@@ -678,6 +678,7 @@ dependencies = [
  "daygle-dns-ml",
  "daygle-dns-policy",
  "daygle-dns-recursive",
+ "hickory-proto",
  "instant-acme",
  "lettre",
  "parking_lot",

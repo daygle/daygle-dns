@@ -753,6 +753,7 @@ pub async fn bind_with(
         acme: Arc::new(daygle_dns_api::acme::Acme::default()),
         rpz: Some(rpz_manager.clone()),
         dhcp: Some(dhcp.clone()),
+        devices: Arc::default(),
     };
     // Scheduled reports (Settings -> Alerts).
     tokio::spawn(daygle_dns_api::reports::run_reports(

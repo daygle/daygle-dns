@@ -1,6 +1,7 @@
 <script>
   import PageHeader from '../PageHeader.svelte';
   import { icons } from '../icons.svelte.js';
+  import Devices from './Devices.svelte';
   import Networks from './Networks.svelte';
   import ClientGroups from './ClientGroups.svelte';
   import ClientPolicies from './ClientPolicies.svelte';
@@ -9,9 +10,15 @@
   // Everything that treats some clients differently, in one place: the
   // named networks that say who they are, and the two kinds of per-client
   // rules that refer to them. `initialTab` lets another page open a tab.
-  let { initialTab = 'networks' } = $props();
+  let { initialTab = 'devices' } = $props();
 
   const TABS = [
+    {
+      id: 'devices',
+      label: 'Devices',
+      tagline:
+        'The devices using this server, and what they are called: name them here, or let names come from DHCP leases and reverse DNS, so the logs and reports say "Kids-iPad" instead of an address.',
+    },
     {
       id: 'networks',
       label: 'Networks',
@@ -38,7 +45,7 @@
     },
   ];
 
-  let tab = $state(TABS.some((t) => t.id === initialTab) ? initialTab : 'networks');
+  let tab = $state(TABS.some((t) => t.id === initialTab) ? initialTab : 'devices');
   const current = $derived(TABS.find((t) => t.id === tab));
 </script>
 
@@ -50,7 +57,9 @@
   {/each}
 </div>
 
-{#if tab === 'networks'}
+{#if tab === 'devices'}
+  <Devices />
+{:else if tab === 'networks'}
   <Networks />
 {:else if tab === 'access'}
   <Access />

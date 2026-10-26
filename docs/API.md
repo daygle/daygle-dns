@@ -1562,6 +1562,30 @@ One report goes out per period, also across restarts. `POST
 {...}}` from the body: `{"sent": true}`, `400` for invalid settings, or
 `502` naming what failed (including no destination).
 
+### Devices
+
+```
+GET    /api/devices?hours=168
+PUT    /api/devices/name
+```
+
+`GET /api/devices` lists the clients in the query log over the last
+`hours` (default a week, at most 90 days), the addresses holding a DHCP
+lease, and addresses named by hand, busiest first: `{"hours",
+"query_log_enabled", "devices": [{"address", "mac", "name", "source",
+"manual_name", "queries", "blocked", "last_seen"}]}`. `name` is what the
+console shows (empty when there is none) and `source` where it came from:
+`manual` (named by hand), `dhcp` (the lease's host name) or `reverse_dns`
+(a PTR record: a hosted reverse zone, else the resolver, remembered for an
+hour). `mac` comes from an IPv4 DHCP lease.
+
+`PUT /api/devices/name` with `{"address", "mac", "name"}` names a device:
+for its MAC address when `mac` is given (the name then follows the device
+to a new address), else for its IP address. An empty `name` clears it.
+Names are at most 63 characters (`400` otherwise, or for a bad address or
+MAC); `204` on success. The scheduled report shows devices as
+`name (address)`.
+
 ### DHCP
 
 ```

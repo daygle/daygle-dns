@@ -70,8 +70,8 @@ import { loadDisplayPreferences } from './datetime.svelte.js';
     settingsTab = tab;
     view = 'settings';
   }
-  // The Clients page's tab to open (Networks unless another page asks).
-  let clientsTab = $state('networks');
+  // The Clients page's tab to open (Devices unless another page asks).
+  let clientsTab = $state('devices');
   function openClients(tab) {
     clientsTab = tab;
     view = 'clients';
@@ -255,7 +255,7 @@ import { loadDisplayPreferences } from './datetime.svelte.js';
             onclick={() => {
               view = tab.id;
               settingsTab = 'general';
-              clientsTab = 'networks';
+              clientsTab = 'devices';
               if (isNarrow()) setSidebar(false);
             }}
           >

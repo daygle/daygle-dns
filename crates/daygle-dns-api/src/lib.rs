@@ -72,6 +72,7 @@
 pub mod acme;
 pub mod alerts;
 mod audit;
+pub mod devices;
 mod handlers;
 mod networks;
 pub mod reports;
@@ -412,6 +413,8 @@ pub struct AppState {
     pub rpz: Option<Arc<daygle_dns_authoritative::rpz::RpzManager>>,
     /// The DHCP server; `None` when the API runs without a server.
     pub dhcp: Option<Arc<daygle_dns_dhcp::DhcpService>>,
+    /// Device names (remembered reverse DNS answers).
+    pub devices: Arc<devices::DeviceNames>,
 }
 
 /// Build the API router (REST endpoints plus the embedded GUI).
@@ -589,6 +592,8 @@ pub fn router(state: AppState) -> Router {
             get(handlers::rpz_status).post(handlers::rpz_refresh),
         )
         .route("/rpz/test", post(handlers::rpz_test))
+        .route("/devices", get(handlers::list_devices))
+        .route("/devices/name", put(handlers::set_device_name))
         .route("/dhcp", get(handlers::dhcp_status))
         .route(
             "/dhcp/leases/{address}",

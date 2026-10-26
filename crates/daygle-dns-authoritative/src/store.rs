@@ -273,6 +273,14 @@ CREATE TABLE IF NOT EXISTS dhcp_leases (
     dns_records TEXT NOT NULL DEFAULT '[]',
     updated_at  TEXT NOT NULL
 );
+
+-- Names given to devices by hand, keyed by MAC address (aa:bb:cc:dd:ee:ff)
+-- or by IP address.
+CREATE TABLE IF NOT EXISTS device_names (
+    client     TEXT PRIMARY KEY,
+    name       TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
 "#;
 
 /// SQLite-backed storage for zones and records.
@@ -3114,6 +3122,54 @@ impl ZoneStore {
             "DELETE FROM dhcp_leases WHERE address = ?1",
             [address.to_string()],
         )? > 0)
+    }
+
+    /// The names given to devices by hand: (MAC or IP address, name).
+    pub fn list_device_names(&self) -> Result<Vec<(String, String)>> {
+        let conn = self.lock_conn()?;
+        let mut stmt = conn.prepare("SELECT client, name FROM device_names ORDER BY client")?;
+        let rows = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// Name the device `client` (a MAC or IP address); an empty name
+    /// forgets it.
+    pub fn set_device_name(&self, client: &str, name: &str) -> Result<()> {
+        let conn = self.lock_conn()?;
+        if name.is_empty() {
+            conn.execute("DELETE FROM device_names WHERE client = ?1", [client])?;
+        } else {
+            conn.execute(
+                "INSERT INTO device_names (client, name, updated_at) VALUES (?1, ?2, ?3)
+                 ON CONFLICT(client) DO UPDATE SET name = ?2, updated_at = ?3",
+                params![client, name, Utc::now().to_rfc3339()],
+            )?;
+        }
+        Ok(())
+    }
+
+    /// The clients in the query log from `since` (RFC 3339) on, busiest
+    /// first, at most `limit`.
+    pub fn recent_clients(&self, since: &str, limit: usize) -> Result<Vec<ClientActivity>> {
+        let conn = self.lock_conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT client, COUNT(*), COALESCE(SUM(outcome = 'blocked'), 0), MAX(ts)
+             FROM query_logs WHERE ts >= ?1
+             GROUP BY client ORDER BY COUNT(*) DESC, client LIMIT ?2",
+        )?;
+        let rows = stmt
+            .query_map(params![since, limit as i64], |r| {
+                Ok(ClientActivity {
+                    client: r.get(0)?,
+                    queries: r.get::<_, i64>(1)? as u64,
+                    blocked: r.get::<_, i64>(2)? as u64,
+                    last_seen: r.get(3)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
     }
 }
 

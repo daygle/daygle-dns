@@ -50,8 +50,13 @@ fn percent(part: u64, whole: u64) -> String {
     }
 }
 
-/// The report as plain text: a title and the body.
-pub fn render(report: &QueryLogReport, settings: &ReportSettings) -> (String, String) {
+/// The report as plain text: a title and the body. `labels` names clients
+/// (address -> device name).
+pub fn render(
+    report: &QueryLogReport,
+    settings: &ReportSettings,
+    labels: &std::collections::HashMap<String, String>,
+) -> (String, String) {
     let period = if settings.frequency == "daily" {
         "the last 24 hours"
     } else {
@@ -95,7 +100,10 @@ pub fn render(report: &QueryLogReport, settings: &ReportSettings) -> (String, St
         .iter()
         .map(|c| {
             (
-                c.client.clone(),
+                match labels.get(&c.client) {
+                    Some(name) => format!("{name} ({})", c.client),
+                    None => c.client.clone(),
+                },
                 format!(
                     "{} queries, {} blocked",
                     number(c.queries),
@@ -125,7 +133,8 @@ pub async fn send(state: &AppState, settings: &ReportSettings) -> Result<(), Str
         );
     }
     let report = summary(state, settings.period(), None, settings.top)?;
-    let (title, message) = render(&report, settings);
+    let names = crate::devices::labels(state, settings.period()).await;
+    let (title, message) = render(&report, settings, &names);
     let alert = Alert {
         kind: AlertKind::Report,
         key: "report".to_string(),
@@ -259,19 +268,28 @@ mod tests {
             queries: 12_345,
             blocked: 1_234,
             clients_seen: 3,
-            clients: vec![daygle_dns_authoritative::store::ClientActivity {
-                client: "192.168.1.7".to_string(),
-                queries: 10_000,
-                blocked: 1_000,
-                last_seen: String::new(),
-            }],
+            clients: vec![
+                daygle_dns_authoritative::store::ClientActivity {
+                    client: "192.168.1.7".to_string(),
+                    queries: 10_000,
+                    blocked: 1_000,
+                    last_seen: String::new(),
+                },
+                daygle_dns_authoritative::store::ClientActivity {
+                    client: "192.168.1.8".to_string(),
+                    queries: 10,
+                    blocked: 0,
+                    last_seen: String::new(),
+                },
+            ],
             top_domains: vec![daygle_dns_authoritative::store::NameCount {
                 name: "example.com".to_string(),
                 count: 500,
             }],
             top_blocked: vec![],
         };
-        let (title, text) = render(&report, &ReportSettings::default());
+        let names = [("192.168.1.8".to_string(), "Kids-iPad".to_string())].into();
+        let (title, text) = render(&report, &ReportSettings::default(), &names);
         assert_eq!(title, "Weekly DNS report");
         assert!(text.contains("Queries: 12,345"), "{text}");
         assert!(text.contains("Blocked: 1,234 (10.0%)"), "{text}");
@@ -281,5 +299,9 @@ mod tests {
             "{text}"
         );
         assert!(text.contains("(none)"), "{text}");
+        assert!(
+            text.contains("Kids-iPad (192.168.1.8)  10 queries"),
+            "{text}"
+        );
     }
 }

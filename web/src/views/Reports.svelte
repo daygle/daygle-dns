@@ -1,6 +1,7 @@
 <script>
   import { api, formatApiError } from '../api.js';
   import { formatDateTime } from '../datetime.svelte.js';
+  import ClientLabel from '../ClientLabel.svelte';
 
   // `onShowQueries(client)` opens the Query Log filtered to one device.
   let { onShowQueries = null } = $props();
@@ -104,7 +105,7 @@
           <tbody>
             {#each report.clients as c (c.client)}
               <tr class:selected={device === c.client}>
-                <td><code>{c.client}</code></td>
+                <td><ClientLabel address={c.client} /></td>
                 <td class="num">{fmt(c.queries)}</td>
                 <td class="num">{fmt(c.blocked)}</td>
                 <td class="num">{percent(c.blocked, c.queries)}</td>
@@ -129,7 +130,7 @@
   {#if device}
     <div class="card" style="margin-bottom: 14px">
       <div class="spread" style="margin-bottom: 10px">
-        <h3 style="margin: 0">Device <code>{device}</code></h3>
+        <h3 style="margin: 0">Device <ClientLabel address={device} /></h3>
         <button class="secondary" onclick={() => { device = null; deviceReport = null; }} aria-label="Close device details">✕</button>
       </div>
       {#if deviceReport}
