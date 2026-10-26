@@ -98,15 +98,16 @@ negative_cache_ttl = 3600
 # cache_size = 8192
 #
 # Cache prefetch: names asked at least `prefetch_min_queries` times inside the
-# sliding window are refreshed in the background once `prefetch_ttl_fraction_pct`
-# of their TTL has elapsed, so popular answers never wait on an upstream.
-prefetch_enabled = false
-prefetch_ttl_fraction_pct = 50
+# sliding window are refreshed in the background once less than
+# `prefetch_ttl_fraction_pct` of their TTL remains, so popular answers never
+# wait on an upstream.
+prefetch_enabled = true
+prefetch_ttl_fraction_pct = 10
 prefetch_min_queries = 5
-prefetch_window_secs = 300
+prefetch_window_secs = 600
 # Serve-stale: keep serving last-known-good answers for up to this long when
-# every upstream is unreachable (0 disables). 1800 = 30 minutes.
-serve_stale_secs = 0
+# every upstream is unreachable (0 disables). 86400 = 24 hours.
+serve_stale_secs = 86400
 
 # Conditional forwarding: queries for these zones are resolved by the zone's
 # own upstreams instead of the defaults above. Useful for split-horizon DNS,

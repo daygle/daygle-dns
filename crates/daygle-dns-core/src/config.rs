@@ -5473,6 +5473,28 @@ fd0000000000000000000000000000aa 02 40 00 80     eth0
     }
 
     #[test]
+    fn example_config_cache_settings_match_defaults() {
+        // The installer copies the example as the live config, so any cache
+        // value it pins overrides the built-in default on every new install.
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../daygle-dns.toml.example");
+        let text = std::fs::read_to_string(&path).expect("daygle-dns.toml.example is readable");
+        let example = DaygleConfig::parse(&text).unwrap().recursive;
+        let defaults = RecursiveSettings::default();
+        assert_eq!(example.cache_size, defaults.cache_size);
+        assert_eq!(example.min_cache_ttl, defaults.min_cache_ttl);
+        assert_eq!(example.negative_cache_ttl, defaults.negative_cache_ttl);
+        assert_eq!(example.prefetch_enabled, defaults.prefetch_enabled);
+        assert_eq!(
+            example.prefetch_ttl_fraction_pct,
+            defaults.prefetch_ttl_fraction_pct
+        );
+        assert_eq!(example.prefetch_min_queries, defaults.prefetch_min_queries);
+        assert_eq!(example.prefetch_window_secs, defaults.prefetch_window_secs);
+        assert_eq!(example.serve_stale_secs, defaults.serve_stale_secs);
+    }
+
+    #[test]
     fn parses_full_config() {
         let text = r#"
 [server]
