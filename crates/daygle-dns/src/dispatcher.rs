@@ -1229,6 +1229,69 @@ impl RequestHandler for DnsDispatcher {
         };
         match lookup {
             Ok((lookup, stale)) => {
+                // CNAME inspection: a name that is allowed, but answers
+                // through a CNAME to a blocked one, is blocked too (trackers
+                // put on a first-party subdomain, `metrics.shop.example ->
+                // tracker.example`). An allowlisted query name is trusted.
+                if policy.cname_inspection() && !policy.is_allowlisted(&qname) {
+                    if let Some((target, decision)) = self
+                        .blocked_cname_target(&policy, client, listener, lookup.answers())
+                        .await
+                    {
+                        debug!(query = %qname, %target, reason = %decision.reason, "blocked by CNAME inspection");
+                        self.metrics.inc(&self.metrics.blocked);
+                        let why = Some(Ede::new(
+                            ede::BLOCKED,
+                            format!("CNAME target {target} is blocked: {}", decision.reason),
+                        ));
+                        let rcode = match decision.action {
+                            Action::Refused => "REFUSED",
+                            Action::Redirect(_) | Action::NoData => "NOERROR",
+                            _ => "NXDOMAIN",
+                        };
+                        self.observe(
+                            client,
+                            &qname,
+                            &rtype,
+                            protocol,
+                            Outcome::Blocked,
+                            Some(rcode),
+                            started,
+                        );
+                        return match decision.action {
+                            Action::Refused => {
+                                send_error(
+                                    &mut response_handle,
+                                    request,
+                                    ResponseCode::Refused,
+                                    why,
+                                )
+                                .await
+                            }
+                            Action::Redirect(ip) => {
+                                send_redirect(
+                                    &mut response_handle,
+                                    request,
+                                    info.query.name(),
+                                    info.query.query_type(),
+                                    ip,
+                                    why,
+                                )
+                                .await
+                            }
+                            Action::NoData => send_empty(&mut response_handle, request, why).await,
+                            _ => {
+                                send_error(
+                                    &mut response_handle,
+                                    request,
+                                    ResponseCode::NXDomain,
+                                    why,
+                                )
+                                .await
+                            }
+                        };
+                    }
+                }
                 let mut answers = lookup.answers().to_vec();
                 let mut authorities = lookup.authorities().to_vec();
                 let mut additionals = lookup.additionals().to_vec();
@@ -1578,6 +1641,42 @@ impl DnsDispatcher {
             }
         }
         (mapped > 0).then_some(records)
+    }
+
+    /// The first CNAME target in `answers` that the blocklists, the
+    /// client's per-client rules or its filtering groups block, with the
+    /// blocking decision. Allowlisted targets are skipped.
+    async fn blocked_cname_target(
+        &self,
+        policy: &PolicyEngine,
+        client: IpAddr,
+        listener: Option<&'static str>,
+        answers: &[Record],
+    ) -> Option<(String, daygle_dns_policy::Decision)> {
+        let groups = self.advanced_blocking.load();
+        for record in answers {
+            let RData::CNAME(target) = &record.data else {
+                continue;
+            };
+            let name = target
+                .0
+                .to_ascii()
+                .trim_end_matches('.')
+                .to_ascii_lowercase();
+            if policy.is_allowlisted(&name) {
+                continue;
+            }
+            // Evaluated as an A query: a NODATA from the AAAA filter is not
+            // a block of the target.
+            let decision = policy.evaluate_on(client, &name, "A", listener).await;
+            if !matches!(decision.action, Action::Allow) {
+                return Some((name, decision));
+            }
+            if let Some(decision) = groups.evaluate(client, &name, listener) {
+                return Some((name, decision));
+            }
+        }
+        None
     }
 
     /// Look up an ALIAS target's `rtype` records: from the zones here when

@@ -359,7 +359,11 @@ certificate/max_connections [+ `dot`/`doh` handshake_timeout_secs, `doh.endpoint
 /allowed_networks), `api`
 (gui_enabled/cors_origins), `display` (the console's date/time defaults:
 `time_zone` = `system`, `UTC` or an IANA zone; `date_format` = `system`/`dmy`/
-`mdy`/`ymd`/`d_mon_y`; `time_format` = `system`/`24h`/`12h`), `syslog`, `dns64` and `ecs` (see below), and `authoritative`
+`mdy`/`ymd`/`d_mon_y`; `time_format` = `system`/`24h`/`12h`), `syslog`, `dns64` and `ecs` (see below), `policy`
+(allowlist/blocklist/denied_networks/allowed_networks/filter_aaaa/
+filter_aaaa_except/blocklist_sources, and `cname_inspection`, default on:
+a recursive answer whose CNAME chain reaches a blocked name is blocked
+too, unless the queried name is allowlisted), and `authoritative`
 (default_record_ttl/default_primary_ns/default_admin_mailbox/axfr_enabled/axfr_networks/
 allow_dynamic_updates/update_networks/notify_enabled/notify_targets/
 notify_listen_enabled/stub_zones/catalog_zone/catalog_consumers). Runtime groups (`recursive`, `dot`, `doh`, `doq`,

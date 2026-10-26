@@ -4222,6 +4222,7 @@ pub struct PolicyUpdate {
     pub blocklist: Option<Vec<String>>,
     pub filter_aaaa: Option<bool>,
     pub filter_aaaa_except: Option<Vec<String>>,
+    pub cname_inspection: Option<bool>,
 }
 
 /// Partial update for the AI scanner (mirrors `AiSettings` fields; the
@@ -4845,6 +4846,10 @@ pub async fn update_settings(
         }
         if let Some(v) = p.filter_aaaa {
             config.policy.filter_aaaa = v;
+            policy_changed = true;
+        }
+        if let Some(v) = p.cname_inspection {
+            config.policy.cname_inspection = v;
             policy_changed = true;
         }
         if let Some(v) = &p.filter_aaaa_except {

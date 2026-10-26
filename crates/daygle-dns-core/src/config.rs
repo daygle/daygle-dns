@@ -1308,6 +1308,8 @@ pub struct PolicyUpdate {
     pub filter_aaaa: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub filter_aaaa_except: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cname_inspection: Option<bool>,
     /// The remote blocklist sources (Filtering -> Blocklists).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blocklist_sources: Option<Vec<BlocklistSourceConfig>>,
@@ -1559,6 +1561,9 @@ impl RuntimeSettings {
             if let Some(v) = &p.filter_aaaa_except {
                 config.policy.filter_aaaa_except = v.clone();
             }
+            if let Some(v) = p.cname_inspection {
+                config.policy.cname_inspection = v;
+            }
             // Captured on every save but never applied: a console-made
             // client deny/allow list reverted to the config file's at the
             // next start or file reload.
@@ -1778,6 +1783,7 @@ impl RuntimeSettings {
                 blocklist: Some(config.policy.blocklist.clone()),
                 filter_aaaa: Some(config.policy.filter_aaaa),
                 filter_aaaa_except: Some(config.policy.filter_aaaa_except.clone()),
+                cname_inspection: Some(config.policy.cname_inspection),
                 blocklist_sources: Some(config.policy.blocklist_sources.clone()),
             }),
             authoritative: Some(AuthoritativeUpdate {
@@ -3705,6 +3711,9 @@ pub struct PolicySettings {
     /// Names (or `*.suffix` wildcards) exempt from `filter_aaaa`, i.e. hosts
     /// that must stay reachable over IPv6.
     pub filter_aaaa_except: Vec<String>,
+    /// Block a query whose answer leads, through a CNAME, to a blocked name
+    /// (trackers hidden behind a CNAME on an allowed domain).
+    pub cname_inspection: bool,
 }
 
 impl Default for PolicySettings {
@@ -3720,6 +3729,7 @@ impl Default for PolicySettings {
             rules: vec![],
             filter_aaaa: false,
             filter_aaaa_except: vec![],
+            cname_inspection: true,
         }
     }
 }
@@ -4090,6 +4100,7 @@ mod tests {
         p.allowed_networks = vec![s("192.0.2.0/24")];
         p.filter_aaaa = !p.filter_aaaa;
         p.filter_aaaa_except = vec![s("v6.example")];
+        p.cname_inspection = !p.cname_inspection;
         p.blocklist_sources = vec![BlocklistSourceConfig {
             name: s("list"),
             url: s("https://lists.example/hosts"),

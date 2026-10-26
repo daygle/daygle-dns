@@ -2,6 +2,8 @@
   import { api, formatApiError } from '../api.js';
 
   let loaded = $state(false);
+  let cnameInspection = $state(true);
+  let cnameBusy = $state(false);
   let filterAaaa = $state(false);
   let filterAaaaExcept = $state('');
   let busy = $state(false);
@@ -12,6 +14,7 @@
     error = null;
     try {
       const cfg = await api.config();
+      cnameInspection = cfg?.policy?.cname_inspection !== false;
       filterAaaa = !!cfg?.policy?.filter_aaaa;
       // Load the saved exceptions: Save sends the whole list, so starting
       // empty would erase them on the next save.
@@ -28,6 +31,20 @@
       .split(/[\n,]/)
       .map((s) => s.trim())
       .filter(Boolean);
+  }
+
+  async function saveCnameInspection() {
+    cnameBusy = true;
+    error = null;
+    notice = null;
+    try {
+      await api.updateSettings({ policy: { cname_inspection: cnameInspection } });
+      notice = `CNAME inspection ${cnameInspection ? 'on' : 'off'}.`;
+    } catch (e) {
+      error = formatApiError(e);
+    } finally {
+      cnameBusy = false;
+    }
   }
 
   async function saveFilterAaaa() {
@@ -62,6 +79,26 @@
 {/if}
 
 {#if loaded}
+  <div class="card" style="margin-bottom: 14px">
+    <div class="spread" style="margin-bottom: 10px">
+      <h3 style="margin: 0">CNAME Inspection</h3>
+      <label class="check">
+        <input type="checkbox" bind:checked={cnameInspection} /> <span>Enabled</span>
+      </label>
+    </div>
+    <p class="muted help" style="margin: 0 0 10px">
+      Also checks the names an answer leads to through CNAME records, and blocks
+      the query when one of them is blocked. Trackers often hide behind a
+      first-party name (<code>metrics.shop.example</code> pointing to
+      <code>tracker.example</code>) that a blocklist alone would let through.
+      Blocklists, Allow &amp; Block Lists and filtering groups all apply; a
+      name on the allow list is never blocked this way.
+    </p>
+    <div class="row">
+      <button onclick={saveCnameInspection} disabled={cnameBusy}>{cnameBusy ? 'Saving...' : 'Save'}</button>
+    </div>
+  </div>
+
   <div class="card">
     <div class="spread" style="margin-bottom: 10px">
       <h3 style="margin: 0">Filter AAAA (Force IPv4)</h3>

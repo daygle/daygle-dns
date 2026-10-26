@@ -62,6 +62,8 @@ pub struct PolicyEngine {
     /// Names (and `*.suffix` wildcards) exempt from the AAAA filter, e.g.
     /// hosts that must remain reachable over IPv6.
     filter_aaaa_bypass: Option<std::sync::Arc<Blocklist>>,
+    /// `policy.cname_inspection`.
+    cname_inspection: bool,
 }
 
 impl PolicyEngine {
@@ -114,6 +116,16 @@ impl PolicyEngine {
 
     /// Enable or disable the AAAA filter. When enabled, AAAA queries return an
     /// empty NODATA answer unless the name matches `bypass`.
+    /// Set `policy.cname_inspection`.
+    pub fn set_cname_inspection(&mut self, enabled: bool) {
+        self.cname_inspection = enabled;
+    }
+
+    /// Whether `policy.cname_inspection` is on.
+    pub fn cname_inspection(&self) -> bool {
+        self.cname_inspection
+    }
+
     pub fn set_filter_aaaa(&mut self, enabled: bool, bypass: Option<Blocklist>) {
         self.filter_aaaa = enabled;
         self.filter_aaaa_bypass = bypass.map(std::sync::Arc::new);

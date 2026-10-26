@@ -132,6 +132,7 @@ pub fn build_engine(settings: &PolicySettings) -> Result<PolicyEngine> {
         let bypass = (!bypass.is_empty()).then(|| Blocklist::from_set(bypass));
         engine.set_filter_aaaa(true, bypass);
     }
+    engine.set_cname_inspection(settings.cname_inspection);
 
     Ok(engine)
 }
