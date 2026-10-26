@@ -2,6 +2,7 @@
   import { api, formatApiError } from '../api.js';
   import NetworkPicker from '../NetworkPicker.svelte';
   import { formatDateTime } from '../datetime.svelte.js';
+  import { deviceName, loadDeviceNames } from '../devices.svelte.js';
 
   let groups = $state([]);
   // Named networks (Clients -> Networks) for the client picker.
@@ -238,6 +239,10 @@
   }
 
   $effect(() => {
+    loadDeviceNames();
+  });
+
+  $effect(() => {
     load();
   });
 </script>
@@ -277,7 +282,7 @@
                 {#if g.youtube_restricted}<span class="pill" title="YouTube always uses Restricted Mode for these clients">YouTube Restricted</span>{/if}
                 {#if g.schedule?.length}<span class="pill" title={'Applies only: ' + g.schedule.map(describeWindow).join('; ')}>Scheduled</span>{/if}
               </td>
-              <td class="muted">{g.clients.length ? g.clients.join(', ') : 'All Clients'}</td>
+              <td class="muted">{g.clients.length ? g.clients.map((c) => (deviceName(c) ? `${deviceName(c)} (${c})` : c)).join(', ') : 'All Clients'}</td>
               <td class="muted">
                 {count(g.allow.length + g.allow_regex.length, 'Allow Rule')} ·
                 {count(g.block.length + g.block_regex.length, 'Block Rule')}
@@ -387,9 +392,11 @@
       <label class="checkbox"><input type="checkbox" bind:checked={edit.enabled} /><span>Enabled</span></label>
 
       <div class="section-title">Clients</div>
-      <NetworkPicker {networks} listeners bind:value={edit.clients} />
+      <NetworkPicker {networks} listeners devices bind:value={edit.clients} />
       <p class="muted help">
-        Tick named networks and/or type addresses. DoT, DoH and DoQ match any
+        Tick named networks, pick named devices (Clients → Devices) and/or
+        type addresses. A device is matched by its address, so give it a
+        DHCP reservation to keep the address fixed. DoT, DoH and DoQ match any
         client connecting over that encrypted listener, wherever it is - use
         them (alone or combined) to give public/remote users their own rules.
         Leave empty for every client.

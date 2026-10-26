@@ -225,7 +225,7 @@
       </div>
       <label class="checkbox"><input type="checkbox" bind:checked={form.enabled} /><span>Enabled</span></label>
       <div class="section-title">Clients</div>
-      <NetworkPicker {networks} bind:value={form.clients} />
+      <NetworkPicker {networks} devices bind:value={form.clients} />
       <p class="muted help">Tick named networks and/or type addresses.</p>
       {#if form.action === 'forward'}
         <div class="section-title">Upstreams</div>
