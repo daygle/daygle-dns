@@ -3,8 +3,7 @@
 //! reply out of that interface, so this uses `IP_PKTINFO` and
 //! `IPV6_RECVPKTINFO`, which are only implemented for Linux here.
 
-use std::io;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddrV4, SocketAddrV6};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use serde::Serialize;
 
@@ -44,7 +43,8 @@ pub use linux::*;
 #[cfg(target_os = "linux")]
 mod linux {
     use super::*;
-    use std::io::{IoSlice, IoSliceMut};
+    use std::io::{self, IoSlice, IoSliceMut};
+    use std::net::{SocketAddrV4, SocketAddrV6};
     use std::os::fd::AsRawFd;
 
     use nix::libc;

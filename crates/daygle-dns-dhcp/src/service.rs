@@ -2,13 +2,16 @@
 //! a background worker that saves leases and keeps their DNS names in step.
 
 use std::collections::HashSet;
-use std::net::{IpAddr, Ipv4Addr, SocketAddrV4};
+use std::net::IpAddr;
+#[cfg(target_os = "linux")]
+use std::net::{Ipv4Addr, SocketAddrV4};
 use std::sync::Arc;
 use std::time::Duration;
 
 use daygle_dns_authoritative::catalog::AuthorityCatalog;
 use daygle_dns_core::dhcp::{DhcpLease, DhcpSettings};
 use daygle_dns_core::logs::LogStore;
+#[cfg(target_os = "linux")]
 use dhcproto::{Decodable, Encodable};
 use parking_lot::Mutex;
 use serde::Serialize;
@@ -16,7 +19,9 @@ use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
 use crate::leases::{self, Leases};
-use crate::{ddns, net, v4, v6};
+#[cfg(target_os = "linux")]
+use crate::v4;
+use crate::{ddns, net, v6};
 
 /// The named setting holding this server's DHCPv6 DUID (hex).
 const DUID_SETTING: &str = "dhcp_server_duid";
@@ -37,6 +42,8 @@ pub struct DhcpStatus {
 struct State {
     settings: DhcpSettings,
     leases: Leases,
+    /// Answers DHCPv6, which is only served on Linux.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     duid: Vec<u8>,
 }
 
@@ -275,13 +282,6 @@ impl DhcpService {
             self.reload_zones();
         }
     }
-
-    /// Note a handled request: wake the worker when leases changed.
-    fn handled(&self, state: &State) {
-        if state.leases.has_changes() {
-            self.dirty.notify_one();
-        }
-    }
 }
 
 fn decode_hex(text: &str) -> Option<Vec<u8>> {
@@ -297,6 +297,13 @@ fn decode_hex(text: &str) -> Option<Vec<u8>> {
 
 #[cfg(target_os = "linux")]
 impl DhcpService {
+    /// Note a handled request: wake the worker when leases changed.
+    fn handled(&self, state: &State) {
+        if state.leases.has_changes() {
+            self.dirty.notify_one();
+        }
+    }
+
     fn listen_v4(self: &Arc<Self>, port: Option<u16>, token: &CancellationToken) -> String {
         let Some(port) = port else {
             return "Off".to_string();

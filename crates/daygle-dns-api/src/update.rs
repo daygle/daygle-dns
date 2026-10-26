@@ -465,6 +465,7 @@ fn resolved_updates_dir() -> Option<PathBuf> {
 /// Where an update's source checkout and release build happen: `/var/tmp`
 /// (the update scripts put them there, as /tmp is often a small tmpfs), or
 /// the temp dir on hosts without it.
+#[cfg(unix)]
 fn build_dir() -> PathBuf {
     let var_tmp = Path::new("/var/tmp");
     if var_tmp.is_dir() {
@@ -476,6 +477,7 @@ fn build_dir() -> PathBuf {
 
 /// Space an update needs where it builds: a release build of the workspace
 /// from a fresh checkout (sources, models, dependencies and target dir).
+#[cfg(unix)]
 const BUILD_SPACE_MB: u64 = 3072;
 
 /// Check available disk space where the update builds.
