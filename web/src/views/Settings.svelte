@@ -1,9 +1,7 @@
 <script>
   import { api, formatApiError } from '../api.js';
   import PageHeader from '../PageHeader.svelte';
-  import ClientPolicies from './ClientPolicies.svelte';
   import BackupRestore from './BackupRestore.svelte';
-  import Networks from './Networks.svelte';
   import NetworkPicker from '../NetworkPicker.svelte';
   import { icons } from '../icons.svelte.js';
   import { display, setDisplayDefaults, timeZoneOptions, DATE_FORMAT_OPTIONS, TIME_FORMAT_OPTIONS, previewDateTime } from '../datetime.svelte.js';
@@ -18,11 +16,12 @@
   // stays navigable as more options are added.
   // `initialTab` lets another page open a tab directly (the Cache page's
   // "Settings" button).
-  let { initialTab = 'general' } = $props();
+  // `onOpenClients(tab)` opens the Clients page (networks and per-client
+  // rules live there).
+  let { initialTab = 'general', onOpenClients = null } = $props();
   let tab = $state(initialTab);
   const TABS = [
     ['general', 'General'],
-    ['networks', 'Networks'],
     ['recursive', 'Resolver'],
     ['cache', 'Cache'],
     ['listeners', 'Encrypted DNS'],
@@ -33,7 +32,6 @@
   ];
   const TAGLINES = {
     general: 'How the web console is reached (HTTP, HTTPS or both), and the DNS listeners this server was started with.',
-    networks: 'Named networks (LAN, VPN, IoT...) that the settings taking client networks can pick instead of repeating the addresses.',
     recursive: 'How the server answers names it does not host: resolving them itself from the root servers or forwarding to upstreams, and who may use it.',
     cache: 'How long answers are kept, how many, and how popular names are refreshed before they expire. Changes apply immediately.',
     listeners: 'Encrypted DNS: DNS over TLS, HTTPS and QUIC, and the certificate each one presents. Changes apply immediately.',
@@ -63,7 +61,7 @@
   // empty when unavailable, in which case the text field is the only UI.
   let aiBackendCategories = $state([]);
   let upstreamText = $state('');
-  // Named networks (Settings -> Networks) for the pickers below.
+  // Named networks (Clients -> Networks) for the pickers below.
   let networks = $state([]);
   let recursionNetworks = $state([]);
   let deniedNetworks = $state([]);
@@ -527,7 +525,7 @@
     {/each}
   </div>
 
-  {#if tab !== 'backup' && tab !== 'networks'}
+  {#if tab !== 'backup'}
   <div class="actions" class:dirty>
     <button onclick={save} disabled={busy || !dirty}>{busy ? 'Saving...' : 'Save Changes'}</button>
     <button class="secondary" onclick={reload} disabled={busy}>{dirty ? 'Discard Changes' : 'Reload'}</button>
@@ -802,7 +800,17 @@
       are near each other.
     </p>
   </div>
-  <ClientPolicies />
+  <div class="card" style="margin-bottom: 14px">
+    <h3 style="margin: 0 0 10px">Resolution Policies</h3>
+    <p class="muted help" style="margin: 0">
+      Forwarding some clients to particular upstreams, resolving them from the
+      root servers, or refusing them is set per client under
+      <strong>Clients → Resolution Policies</strong>.
+    </p>
+    {#if onOpenClients}
+      <button class="secondary" style="margin-top: 10px" onclick={() => onOpenClients('resolution-policies')}>Open Resolution Policies</button>
+    {/if}
+  </div>
   {:else if tab === 'cache'}
   <div class="card" style="margin-bottom: 14px">
     <h3 style="margin: 0 0 10px">Cache Lifetimes</h3>
@@ -1145,8 +1153,6 @@
       "Device Time Zone" and "Browser Default" follow each viewer's computer.
     </p>
   </div>
-  {:else if tab === 'networks'}
-    <Networks />
   {:else if tab === 'backup'}
   <BackupRestore />
   {/if}

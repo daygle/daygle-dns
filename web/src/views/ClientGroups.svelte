@@ -4,7 +4,7 @@
   import { formatDateTime } from '../datetime.svelte.js';
 
   let groups = $state([]);
-  // Named networks (Settings -> Networks) for the client picker.
+  // Named networks (Clients -> Networks) for the client picker.
   let networks = $state([]);
   // Blocklists (Filtering -> Blocklists) set to apply to selected groups only.
   let groupLists = $state([]);
@@ -139,7 +139,7 @@
   }
 
   async function removeGroup(group) {
-    if (!confirm(`Delete client group "${group.name}"?`)) return;
+    if (!confirm(`Delete filtering group "${group.name}"?`)) return;
     notice = null;
     error = null;
     try {
@@ -199,13 +199,13 @@
 
 <div class="card" style="margin-bottom: 14px">
   <div class="spread" style="margin-bottom: 10px">
-    <h3 style="margin: 0">Client Groups ({groups.length})</h3>
+    <h3 style="margin: 0">Filtering Groups ({groups.length})</h3>
     <button onclick={() => startEdit(null)}>Add Group</button>
   </div>
 
   {#if groups.length === 0}
     <p class="muted">
-      No client groups yet. Add one to give a set of devices (by IP or network)
+      No filtering groups yet. Add one to give a set of devices (by IP or network)
       their own allow and block rules.
     </p>
   {:else}
@@ -262,7 +262,7 @@
 <div class="card">
   <h3 style="margin: 0 0 10px">Test a Query</h3>
   <p class="muted help" style="margin: 0 0 10px">
-    Check what the client groups would do with a domain asked by a given client.
+    Check what the filtering groups would do with a domain asked by a given client.
   </p>
   <form class="row" style="flex-wrap: wrap; gap: 8px" onsubmit={(e) => { e.preventDefault(); runTest(); }}>
     <input style="flex: 1; min-width: 160px" bind:value={testClient} placeholder="Client IP, e.g. 192.168.1.50" />
@@ -298,7 +298,7 @@
   <div class="modal-backdrop" role="presentation" onclick={(e) => e.target === e.currentTarget && closeEdit()}>
     <div class="modal card" role="dialog" aria-modal="true" aria-labelledby="group-title">
       <div class="spread modal-title">
-        <h3 id="group-title" style="margin: 0">{edit.id ? `Edit Client Group - ${edit.originalName}` : 'Add Client Group'}</h3>
+        <h3 id="group-title" style="margin: 0">{edit.id ? `Edit Filtering Group - ${edit.originalName}` : 'Add Filtering Group'}</h3>
         <button class="secondary" style="padding: 2px 10px" onclick={closeEdit} aria-label="Close">✕</button>
       </div>
       {#if error}
@@ -344,9 +344,9 @@
         </p>
       {:else}
         <p class="muted help">
-          No blocklists are set to apply to selected client groups. On the
-          Blocklists tab, add or edit a list and set <strong>Applies To</strong>
-          to <strong>Selected Client Groups Only</strong>, then tick it here.
+          No blocklists are set to apply to selected filtering groups. Under
+          Filtering → Blocklists, add or edit a list and set <strong>Applies To</strong>
+          to <strong>Selected Filtering Groups Only</strong>, then tick it here.
         </p>
       {/if}
 

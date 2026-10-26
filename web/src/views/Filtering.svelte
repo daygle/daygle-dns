@@ -3,7 +3,6 @@
   import { icons } from '../icons.svelte.js';
   import Blocklists from './Blocklists.svelte';
   import DomainLists from './DomainLists.svelte';
-  import ClientGroups from './ClientGroups.svelte';
   import ResponseFilters from './ResponseFilters.svelte';
 
   // The Filtering page groups everything that decides what gets blocked or
@@ -20,12 +19,6 @@
       label: 'Domain Lists',
       tagline:
         'Your own lists of domains to always allow or always block, for every client. An allowed domain is never blocked by a blocklist or the AI.',
-    },
-    {
-      id: 'client-groups',
-      label: 'Client Groups',
-      tagline:
-        'Give a set of devices (by IP or network) their own allow and block rules, on top of everything else - for example, block social media on the kids\' devices.',
     },
     {
       id: 'response-filters',
@@ -51,8 +44,6 @@
   <Blocklists />
 {:else if tab === 'domain-lists'}
   <DomainLists />
-{:else if tab === 'client-groups'}
-  <ClientGroups />
 {:else}
   <ResponseFilters />
 {/if}

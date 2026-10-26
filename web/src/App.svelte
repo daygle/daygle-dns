@@ -7,6 +7,7 @@
   import ZonesPage from './views/ZonesPage.svelte';
   import Logs from './views/Logs.svelte';
   import Filtering from './views/Filtering.svelte';
+  import Clients from './views/Clients.svelte';
   import Settings from './views/Settings.svelte';
   import Ai from './views/Ai.svelte';
   import Cache from './views/Cache.svelte';
@@ -60,8 +61,19 @@ import { loadDisplayPreferences } from './datetime.svelte.js';
   });
 
   function openSettings(tab) {
+    // Networks moved from Settings to the Clients page.
+    if (tab === 'networks') {
+      openClients('networks');
+      return;
+    }
     settingsTab = tab;
     view = 'settings';
+  }
+  // The Clients page's tab to open (Networks unless another page asks).
+  let clientsTab = $state('networks');
+  function openClients(tab) {
+    clientsTab = tab;
+    view = 'clients';
   }
   // Zone preselected on the Zones page's Records tab (remembered across visits).
   let recordZoneId = $state(null);
@@ -158,6 +170,7 @@ import { loadDisplayPreferences } from './datetime.svelte.js';
     { id: 'status', label: 'Status', icon: icons.status },
     { id: 'zones', label: 'Zones', icon: icons.zones, viewer: true },
     { id: 'filtering', label: 'Filtering', icon: icons.filtering, viewer: true },
+    { id: 'clients', label: 'Clients', icon: icons.clients, viewer: true },
     { id: 'ai', label: 'AI', icon: icons.ai, viewer: true },
     { id: 'logs', label: 'Logs', icon: icons.logs },
     { id: 'cache', label: 'Cache', icon: icons.cache },
@@ -224,6 +237,7 @@ import { loadDisplayPreferences } from './datetime.svelte.js';
             onclick={() => {
               view = tab.id;
               settingsTab = 'general';
+              clientsTab = 'networks';
               if (isNarrow()) setSidebar(false);
             }}
           >
@@ -260,6 +274,10 @@ import { loadDisplayPreferences } from './datetime.svelte.js';
         <ZonesPage {recordZoneId} onSelectZone={setRecordZone} onOpenSettings={isViewer ? null : openSettings} />
       {:else if view === 'filtering'}
         <Filtering />
+      {:else if view === 'clients'}
+        {#key clientsTab}
+          <Clients initialTab={clientsTab} />
+        {/key}
       {:else if view === 'cache'}
         <Cache onOpenSettings={isViewer ? null : openSettings} />
       {:else if view === 'users'}
@@ -277,7 +295,7 @@ import { loadDisplayPreferences } from './datetime.svelte.js';
       {:else if view === 'logs'}
         <Logs />
       {:else}
-        <Settings initialTab={settingsTab} />
+        <Settings initialTab={settingsTab} onOpenClients={openClients} />
       {/if}
     </main>
   </div>

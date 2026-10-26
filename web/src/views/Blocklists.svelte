@@ -180,7 +180,7 @@
       return;
     }
     if (!draft.scope) {
-      draft.result = { ok: false, msg: 'Choose Everyone or Selected Client Groups for this source.' };
+      draft.result = { ok: false, msg: 'Choose Everyone or Selected Filtering Groups for this source.' };
       return;
     }
     saving = true;
@@ -253,7 +253,7 @@
   }
 
   async function removeSource(source) {
-    const groupsNote = source.scope === 'groups' ? ' It is also removed from the client groups that use it.' : '';
+    const groupsNote = source.scope === 'groups' ? ' It is also removed from the filtering groups that use it.' : '';
     if (!confirm(`Delete blocklist source "${source.name}"? Its domains stop being blocked.${groupsNote}`)) return;
     error = null;
     notice = null;
@@ -358,7 +358,7 @@
                 <span class="pill">{FORMAT_NAMES[s.format] || s.format}</span>
               {/if}
             </td>
-            <td>{s.scope === 'groups' ? 'Client Groups' : s.scope === 'dot' ? 'DoT Only (legacy)' : 'Everyone'}</td>
+            <td>{s.scope === 'groups' ? 'Filtering Groups' : s.scope === 'dot' ? 'DoT Only (legacy)' : 'Everyone'}</td>
             <td class="muted">{interval(s.refresh_secs)}</td>
             <td class="num">{fmt(s.domains)}</td>
             <td class="muted" style="white-space: nowrap" title={ago(s.last_fetch)}>
@@ -437,7 +437,7 @@
               <option value="" disabled>Choose a replacement scope for this legacy source</option>
             {/if}
             <option value="everyone">Everyone</option>
-            <option value="groups">Selected Client Groups Only</option>
+            <option value="groups">Selected Filtering Groups Only</option>
           </select>
         </label>
       </div>
@@ -445,11 +445,11 @@
       <p class="muted help">
         The list is downloaded and checked before it is saved: Auto-Detect
         works out the format, a chosen format must match the content.
-        Validate checks it without saving. A list for selected client groups
-        only blocks for the groups that tick it on the Client Groups tab.
+        Validate checks it without saving. A list for selected filtering groups
+        only blocks for the groups that tick it under Clients → Filtering Groups.
         Existing DoT-only sources are kept for compatibility; when editing
         one, choose a replacement scope explicitly. For listener-specific
-        filtering, create a client group matching DOT, DOH, or DOQ and select
+        filtering, create a filtering group matching DOT, DOH, or DOQ and select
         the source there.
       </p>
 

@@ -786,7 +786,7 @@ POST   /api/networks
 DELETE /api/networks/{name}
 ```
 
-Named networks (Settings -> Networks) give a set of addresses a name, such
+Named networks (Clients -> Networks in the console) give a set of addresses a name, such
 as `LAN` = `192.168.20.0/24`, so settings that take client networks can name
 it instead of repeating the addresses. They are part of the configuration
 (`[[networks]]` in the config file, saved with the console's settings).
@@ -1266,8 +1266,9 @@ POST   /api/policy/blocking/{id}/move
 POST   /api/policy/blocking/test
 ```
 
-Blocking groups extend the policy engine with per-group client and domain
-criteria, including regular expressions (`allow_regex` / `block_regex`;
+Blocking groups (the console's **Clients → Filtering Groups**; the
+`recursive.client_policies` list is its **Clients → Resolution Policies**)
+extend the policy engine with per-group client and domain criteria, including regular expressions (`allow_regex` / `block_regex`;
 invalid patterns are rejected with `400` instead of being silently dropped
 at engine-build time). A group's `clients` list normally holds CIDRs or
 single addresses (or network names); the special case-insensitive entries

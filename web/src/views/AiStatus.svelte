@@ -12,7 +12,7 @@
   // (it then only needs a restart), or null when unknown.
   let enabledInSettings = $state(null);
   let overrides = $state([]);
-  // Enabled client groups whose clients the AI never auto-blocks.
+  // Enabled filtering groups whose clients the AI never auto-blocks.
   let aiOffGroups = $state([]);
   let loading = $state(true);
   let error = $state(null);
@@ -353,12 +353,12 @@
             <td class="muted">Applies To</td>
             <td>
               {#if aiOffGroups.length}
-                Turned off for client groups
+                Turned off for filtering groups
                 {#each aiOffGroups as g (g)}<span class="pill" style="margin-left: 4px">{g}</span>{/each}
               {:else}
                 All Clients
               {/if}
-              <div class="muted small">Change this per group in Filtering → Client Groups.</div>
+              <div class="muted small">Change this per group under Clients → Filtering Groups.</div>
             </td>
           </tr>
           <tr>
