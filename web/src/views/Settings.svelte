@@ -129,6 +129,33 @@
   };
   let rrl_ = $state({ ...RRL_DEFAULTS });
   let ddr_ = $state({ enabled: true, name: '' });
+  const REPORT_DEFAULTS = { enabled: false, frequency: 'weekly', weekday: 'mon', hour: 8, top: 10 };
+  let reports_ = $state({ ...REPORT_DEFAULTS });
+  let reportSending = $state(false);
+  let reportResult = $state(null);
+
+  function reportsBody() {
+    return {
+      enabled: !!reports_.enabled,
+      frequency: reports_.frequency,
+      weekday: reports_.weekday,
+      hour: Number(reports_.hour),
+      top: Number(reports_.top),
+    };
+  }
+
+  async function sendReportNow() {
+    reportSending = true;
+    reportResult = null;
+    try {
+      await api.sendReport(reportsBody());
+      reportResult = { ok: true, msg: 'Report sent. Check that it arrived.' };
+    } catch (e) {
+      reportResult = { ok: false, msg: formatApiError(e) };
+    } finally {
+      reportSending = false;
+    }
+  }
   let rrlExempt = $state([]);
   // RRL counters since start (from /api/metrics), shown on its tab.
   let rrlCounts = $state(null);
@@ -265,6 +292,7 @@
       alerts_ = { ...ALERT_DEFAULTS, ...config.alerts };
       rrl_ = { ...RRL_DEFAULTS, ...config.rrl };
       ddr_ = { enabled: true, name: '', ...config.ddr };
+      reports_ = { ...REPORT_DEFAULTS, ...config.reports };
       rrlExempt = [...(config.rrl?.exempt || [])];
       alertTo = (config.alerts?.email_to || []).join('\n');
       dns64 = { enabled: !!config.dns64?.enabled, prefix: config.dns64?.prefix || '64:ff9b::/96' };
@@ -437,6 +465,7 @@
       },
       alerts: alertsBody(),
       ddr: { enabled: !!ddr_.enabled, name: (ddr_.name || '').trim() },
+      reports: reportsBody(),
       rrl: {
         enabled: !!rrl_.enabled,
         responses_per_second: Number(rrl_.responses_per_second),
@@ -1314,6 +1343,50 @@
     <p class="muted help">
       Send Test Alert uses the settings on this page, saved or not, so you
       can check them before saving.
+    </p>
+  </div>
+  <div class="card" style="margin-bottom: 14px">
+    <h3 style="margin: 0 0 10px">Scheduled Report</h3>
+    <div class="form-grid">
+      <label class="check"><input type="checkbox" bind:checked={reports_.enabled} /> <span>Send a Report</span></label>
+      <label>
+        <span>How Often</span>
+        <select bind:value={reports_.frequency}>
+          <option value="daily">Daily (Last 24 Hours)</option>
+          <option value="weekly">Weekly (Last 7 Days)</option>
+        </select>
+      </label>
+      {#if reports_.frequency === 'weekly'}
+        <label>
+          <span>On</span>
+          <select bind:value={reports_.weekday}>
+            {#each [['mon', 'Monday'], ['tue', 'Tuesday'], ['wed', 'Wednesday'], ['thu', 'Thursday'], ['fri', 'Friday'], ['sat', 'Saturday'], ['sun', 'Sunday']] as [value, label] (value)}
+              <option value={value}>{label}</option>
+            {/each}
+          </select>
+        </label>
+      {/if}
+      <label>
+        <span>At</span>
+        <select bind:value={reports_.hour}>
+          {#each Array.from({ length: 24 }, (_, h) => h) as h (h)}
+            <option value={h}>{String(h).padStart(2, '0')}:00</option>
+          {/each}
+        </select>
+      </label>
+      <label><span>Entries per List</span><input type="number" min="1" max="50" bind:value={reports_.top} /></label>
+    </div>
+    <div class="row" style="margin-top: 14px; gap: 10px; flex-wrap: wrap; align-items: center">
+      <button class="secondary" onclick={sendReportNow} disabled={reportSending}>{reportSending ? 'Sending...' : 'Send Report Now'}</button>
+      {#if reportResult}<span style="color: {reportResult.ok ? 'var(--ok)' : 'var(--danger)'}">{reportResult.msg}</span>{/if}
+    </div>
+    <p class="muted help">
+      A summary of the query log - queries, blocks, the most asked and most
+      blocked domains and the most active devices - sent to the webhook and
+      email above (alerts do not need to be switched on). Times use the time
+      zone under General → Date &amp; Time Defaults. Send Report Now sends
+      one with the destinations as saved. The same figures, for any period
+      and per device, are under Logs → Reports.
     </p>
   </div>
   {:else if tab === 'backup'}

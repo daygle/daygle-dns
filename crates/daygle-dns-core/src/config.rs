@@ -65,6 +65,73 @@ pub struct DaygleConfig {
     pub block_page: BlockPageSettings,
     /// Discovery of Designated Resolvers (RFC 9462).
     pub ddr: DdrSettings,
+    /// A scheduled summary sent to the alert destinations.
+    pub reports: ReportSettings,
+}
+
+/// A scheduled report: a summary of the query log (queries, blocks, top
+/// domains and devices) sent daily or weekly to the alert destinations
+/// (Settings -> Alerts). Stored in the database.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct ReportSettings {
+    pub enabled: bool,
+    /// `daily` (the last 24 hours) or `weekly` (the last 7 days).
+    pub frequency: String,
+    /// `weekly`: the day it goes out (`mon`..`sun`).
+    pub weekday: String,
+    /// The hour it goes out (0-23), in the display time zone.
+    pub hour: u8,
+    /// How many domains and devices each list shows.
+    pub top: usize,
+}
+
+impl Default for ReportSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            frequency: "weekly".to_string(),
+            weekday: "mon".to_string(),
+            hour: 8,
+            top: 10,
+        }
+    }
+}
+
+impl ReportSettings {
+    /// Problems that stop the settings being used.
+    pub fn check(&self) -> std::result::Result<(), String> {
+        if !matches!(self.frequency.as_str(), "daily" | "weekly") {
+            return Err(format!(
+                "unknown frequency '{}': use daily or weekly",
+                self.frequency
+            ));
+        }
+        if self.weekday_index().is_none() {
+            return Err(format!("'{}' is not a day of the week", self.weekday));
+        }
+        if self.hour > 23 {
+            return Err("the hour must be 0 to 23".to_string());
+        }
+        if !(1..=50).contains(&self.top) {
+            return Err("each list shows 1 to 50 entries".to_string());
+        }
+        Ok(())
+    }
+
+    /// The report day as 0 = Monday.
+    pub fn weekday_index(&self) -> Option<u32> {
+        crate::schedule::DAYS
+            .iter()
+            .position(|d| self.weekday.trim().eq_ignore_ascii_case(d))
+            .map(|i| i as u32)
+    }
+
+    /// How far back a report looks.
+    pub fn period(&self) -> std::time::Duration {
+        let days = if self.frequency == "daily" { 1 } else { 7 };
+        std::time::Duration::from_secs(days * 86_400)
+    }
 }
 
 /// Discovery of Designated Resolvers (DDR, RFC 9462): answer the
@@ -462,7 +529,7 @@ impl AlertSettings {
             K::Dnssec => self.dnssec,
             K::UpdateAvailable => self.update_available,
             K::AiBlocks => self.ai_blocks,
-            K::Test => true,
+            K::Test | K::Report => true,
         }
     }
 
@@ -1157,6 +1224,8 @@ pub struct RuntimeSettings {
     pub block_page: Option<BlockPageSettings>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ddr: Option<DdrSettings>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reports: Option<ReportSettings>,
 }
 
 /// Partial updates for the recursive resolver (matches the API's shape).
@@ -1914,6 +1983,7 @@ impl RuntimeSettings {
             && self.rpz.is_none()
             && self.block_page.is_none()
             && self.ddr.is_none()
+            && self.reports.is_none()
     }
 
     /// Apply the overlay to `config` in place. `None` fields are untouched.
@@ -2127,6 +2197,9 @@ impl RuntimeSettings {
         }
         if let Some(d) = &self.ddr {
             config.ddr = d.clone();
+        }
+        if let Some(r) = &self.reports {
+            config.reports = r.clone();
         }
         if let Some(w) = &self.web {
             config.web = w.clone();
@@ -2353,6 +2426,7 @@ impl RuntimeSettings {
             rpz: Some(config.rpz.clone()),
             block_page: Some(config.block_page.clone()),
             ddr: Some(config.ddr.clone()),
+            reports: Some(config.reports.clone()),
         }
     }
 }
@@ -3257,6 +3331,9 @@ impl DaygleConfig {
         self.ddr
             .check()
             .map_err(|e| DaygleError::Config(format!("ddr: {e}")))?;
+        self.reports
+            .check()
+            .map_err(|e| DaygleError::Config(format!("reports: {e}")))?;
         self.dns64
             .compile(&self.all_networks())
             .map_err(|e| DaygleError::Config(format!("dns64: {e}")))?;
@@ -4784,6 +4861,9 @@ mod tests {
         c.block_page.message = s("Ask Sam");
         c.ddr.enabled = false;
         c.ddr.name = s("dns.example.com");
+        c.reports.enabled = true;
+        c.reports.frequency = s("daily");
+        c.reports.hour = 7;
         let stored = serde_json::to_string(&RuntimeSettings::capture(&c)).unwrap();
         let overlay: RuntimeSettings = serde_json::from_str(&stored).unwrap();
         let mut restored = DaygleConfig::default();
@@ -4808,6 +4888,7 @@ mod tests {
         assert_eq!(restored.rpz, c.rpz, "rpz");
         assert_eq!(restored.block_page, c.block_page, "block_page");
         assert_eq!(restored.ddr, c.ddr, "ddr");
+        assert_eq!(restored.reports, c.reports, "reports");
 
         // Clearing a value in the console must stay cleared after a restart,
         // even when the config file sets it.

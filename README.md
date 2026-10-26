@@ -41,6 +41,9 @@ Daygle DNS combines, in a single process:
   switch to them by themselves.
 - **Block page**: blocked sites can point at a page on this server that
   says what was blocked and why, instead of "site not found".
+- **Reports**: queries, blocks, the busiest devices and the most asked and
+  most blocked domains for any period (overall or per device) under
+  Logs → Reports, and a daily or weekly summary by email or webhook.
 - **Blocked services**: block TikTok, YouTube, Roblox, Discord, ChatGPT and
   30-odd other apps for a filtering group with one tick each.
 - **Per-client rules** on the console's Clients page: **filtering groups**

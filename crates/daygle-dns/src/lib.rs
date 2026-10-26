@@ -745,6 +745,11 @@ pub async fn bind_with(
         acme: Arc::new(daygle_dns_api::acme::Acme::default()),
         rpz: Some(rpz_manager.clone()),
     };
+    // Scheduled reports (Settings -> Alerts).
+    tokio::spawn(daygle_dns_api::reports::run_reports(
+        app_state.clone(),
+        shutdown.clone(),
+    ));
     // Issue and renew ACME (Let's Encrypt) certificates in the background.
     tokio::spawn(daygle_dns_api::acme::run_renewals(
         app_state.clone(),

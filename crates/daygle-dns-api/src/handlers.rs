@@ -172,6 +172,65 @@ fn normalize_alerts(
 /// Stands for a stored secret in what the browser sees and sends back.
 const REDACTED: &str = "[redacted]";
 
+/// Query for `GET /api/reports`.
+#[derive(Deserialize)]
+pub struct ReportQuery {
+    /// How far back, in hours (default 24, at most 90 days).
+    pub hours: Option<u64>,
+    /// Only this client.
+    pub client: Option<String>,
+    /// How many entries each list shows (default 20, at most 100).
+    pub top: Option<usize>,
+}
+
+/// `GET /api/reports` - a summary of the query log: totals, the most
+/// active clients and the most asked and most blocked domains.
+pub async fn report(State(state): State<AppState>, Query(q): Query<ReportQuery>) -> Response {
+    let hours = q.hours.unwrap_or(24).clamp(1, 24 * 90);
+    let top = q.top.unwrap_or(20).clamp(1, 100);
+    let client = q.client.as_deref().map(str::trim).filter(|c| !c.is_empty());
+    let summary = crate::reports::summary(
+        &state,
+        std::time::Duration::from_secs(hours * 3600),
+        client,
+        top,
+    );
+    match summary {
+        Ok(report) => Json(serde_json::json!({
+            "hours": hours,
+            "query_log_enabled": state.config.load().logging.query_db_enabled,
+            "report": report,
+        }))
+        .into_response(),
+        Err(e) => error_response(StatusCode::INTERNAL_SERVER_ERROR, e),
+    }
+}
+
+/// Body of `POST /api/reports/send`: the settings to use (saved or not);
+/// omitted, the saved ones.
+#[derive(Deserialize, Default)]
+pub struct SendReportInput {
+    #[serde(default)]
+    pub reports: Option<daygle_dns_core::config::ReportSettings>,
+}
+
+/// `POST /api/reports/send` - send the scheduled report now.
+pub async fn send_report(
+    State(state): State<AppState>,
+    body: Option<Json<SendReportInput>>,
+) -> Response {
+    let settings = body
+        .and_then(|Json(b)| b.reports)
+        .unwrap_or_else(|| state.config.load().reports.clone());
+    if let Err(msg) = settings.check() {
+        return error_response(StatusCode::BAD_REQUEST, msg);
+    }
+    match crate::reports::send(&state, &settings).await {
+        Ok(()) => Json(serde_json::json!({ "sent": true })).into_response(),
+        Err(e) => error_response(StatusCode::BAD_GATEWAY, e),
+    }
+}
+
 /// `GET /api/policy/services` - the services a filtering group can block.
 pub async fn blockable_services() -> Response {
     Json(serde_json::json!({ "services": daygle_dns_policy::services::SERVICES })).into_response()
@@ -4323,6 +4382,8 @@ pub struct SettingsUpdate {
     pub block_page: Option<daygle_dns_core::config::BlockPageSettings>,
     /// Replaces the whole `[ddr]` section (encrypted DNS discovery).
     pub ddr: Option<daygle_dns_core::config::DdrSettings>,
+    /// Replaces the whole `[reports]` section (scheduled reports).
+    pub reports: Option<daygle_dns_core::config::ReportSettings>,
     /// Replaces the whole `[alerts]` section; an `smtp_password` of
     /// `[redacted]` keeps the stored one.
     pub alerts: Option<daygle_dns_core::config::AlertSettings>,
@@ -4901,6 +4962,17 @@ pub async fn update_settings(
         }
         config.rpz = zones;
     }
+    if let Some(reports) = &update.reports {
+        let reports = daygle_dns_core::config::ReportSettings {
+            frequency: reports.frequency.trim().to_ascii_lowercase(),
+            weekday: reports.weekday.trim().to_ascii_lowercase(),
+            ..reports.clone()
+        };
+        if let Err(msg) = reports.check() {
+            return error_response(StatusCode::BAD_REQUEST, format!("reports: {msg}"));
+        }
+        config.reports = reports;
+    }
     if let Some(ddr) = &update.ddr {
         let ddr = daygle_dns_core::config::DdrSettings {
             name: ddr.name.trim().trim_end_matches('.').to_ascii_lowercase(),
@@ -5237,6 +5309,16 @@ pub async fn update_settings(
         }
     }
 
+    // Scheduled reports go to the alert destinations: one must exist.
+    if config.reports.enabled
+        && config.alerts.webhook_url.trim().is_empty()
+        && !config.alerts.email_configured()
+    {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "reports: set up a webhook or email under Alerts first: reports are sent there",
+        );
+    }
     if let Err(msg) = config.check_block_page_port() {
         return error_response(StatusCode::BAD_REQUEST, format!("block page: {msg}"));
     }

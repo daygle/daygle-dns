@@ -74,6 +74,7 @@ pub mod alerts;
 mod audit;
 mod handlers;
 mod networks;
+pub mod reports;
 mod update;
 
 // The release-cache warmer is spawned by the binary next to the ACME
@@ -578,6 +579,8 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/policy/blocking/test", post(handlers::test_blocking))
         .route("/alerts/test", post(handlers::test_alert))
+        .route("/reports", get(handlers::report))
+        .route("/reports/send", post(handlers::send_report))
         .route("/policy/services", get(handlers::blockable_services))
         .route(
             "/rpz",

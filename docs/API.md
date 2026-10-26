@@ -1528,6 +1528,40 @@ saved settings, or with `{"alerts": {...}}` from the body (unsaved form
 values), whether or not alerts are enabled. It answers `{"sent": true}`, `400`
 for invalid settings, or `502` naming each destination that failed.
 
+### Reports
+
+```
+GET    /api/reports?hours=24[&client=192.168.1.7][&top=20]
+POST   /api/reports/send
+```
+
+`GET /api/reports` summarizes the query log (the database one; see
+`logging.query_db_enabled`, also returned as `query_log_enabled`) over the
+last `hours` (default 24, at most 90 days), for every client or only
+`client`: `{"hours", "query_log_enabled", "report": {"since", "queries",
+"blocked", "clients_seen", "clients": [{"client", "queries", "blocked",
+"last_seen"}], "top_domains": [{"name", "count"}], "top_blocked": [...]}}`,
+the lists cut to `top` entries (default 20, at most 100), busiest first.
+
+The `reports` settings group (Settings → Alerts, replaced as a whole by
+`PUT /api/config` with `{"reports": {...}}`) sends that summary as plain
+text on a schedule, to the alert destinations (`alerts.webhook_url` and/or
+email; alerts themselves need not be enabled), as an alert of `kind`
+`report`:
+
+| Field | Default | Meaning |
+|---|---|---|
+| `enabled` | `false` | Requires an alert destination (`400` otherwise). |
+| `frequency` | `weekly` | `daily` (covers the last 24 hours) or `weekly` (the last 7 days). |
+| `weekday` | `mon` | `weekly`: the day it goes out. |
+| `hour` | `8` | The hour it goes out (0-23), in `display.time_zone`. |
+| `top` | `10` | Entries per list (1-50). |
+
+One report goes out per period, also across restarts. `POST
+/api/reports/send` sends one now, with the saved settings or `{"reports":
+{...}}` from the body: `{"sent": true}`, `400` for invalid settings, or
+`502` naming what failed (including no destination).
+
 ### Backup and restore
 
 ```

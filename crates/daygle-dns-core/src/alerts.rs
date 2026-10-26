@@ -25,6 +25,8 @@ pub enum AlertKind {
     AiBlocks,
     /// Sent from the console to check the settings.
     Test,
+    /// A scheduled report (Settings -> Alerts), not an alert.
+    Report,
 }
 
 impl AlertKind {
@@ -36,7 +38,7 @@ impl AlertKind {
             Self::CertificateExpiry => 24 * HOUR,
             // Keyed by version: one alert per release.
             Self::UpdateAvailable => u64::MAX / 4,
-            Self::AiBlocks | Self::Test => 0,
+            Self::AiBlocks | Self::Test | Self::Report => 0,
         })
     }
 }

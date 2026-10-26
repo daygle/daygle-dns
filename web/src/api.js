@@ -260,6 +260,9 @@ export const api = {
   testAlert: (alerts) => request('POST', '/alerts/test', { alerts }),
   rpzStatus: () => request('GET', '/rpz'),
   blockableServices: () => request('GET', '/policy/services'),
+  report: (hours, client) =>
+    request('GET', `/reports?hours=${hours}${client ? `&client=${encodeURIComponent(client)}` : ''}`),
+  sendReport: (reports) => request('POST', '/reports/send', { reports }),
   rpzRefresh: () => request('POST', '/rpz'),
   rpzTest: (client, domain) => request('POST', '/rpz/test', { client, domain }),
   testBlocking: (client, domain, listener) =>

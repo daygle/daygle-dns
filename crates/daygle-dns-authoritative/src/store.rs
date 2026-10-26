@@ -3028,7 +3028,106 @@ fn qname_like_pattern(raw: &str) -> String {
     }
 }
 
+/// Query counts for one client in a report.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ClientActivity {
+    pub client: String,
+    pub queries: u64,
+    pub blocked: u64,
+    /// RFC 3339.
+    pub last_seen: String,
+}
+
+/// A name and how many times it was asked.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct NameCount {
+    pub name: String,
+    pub count: u64,
+}
+
+/// A summary of the query log since a moment (for one client, or all).
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct QueryLogReport {
+    /// RFC 3339: the start of the period.
+    pub since: String,
+    pub queries: u64,
+    pub blocked: u64,
+    /// Distinct clients.
+    pub clients_seen: u64,
+    /// The most active clients.
+    pub clients: Vec<ClientActivity>,
+    pub top_domains: Vec<NameCount>,
+    pub top_blocked: Vec<NameCount>,
+}
+
 impl ZoneStore {
+    /// Summarize the query log from `since` (RFC 3339) on: totals, the
+    /// `top` most active clients and the `top` most asked and most blocked
+    /// names, for every client or only `client`.
+    pub fn query_log_report(
+        &self,
+        since: &str,
+        client: Option<&str>,
+        top: usize,
+    ) -> Result<QueryLogReport> {
+        let conn = self.lock_conn()?;
+        let filter = if client.is_some() {
+            "ts >= ?1 AND client = ?2"
+        } else {
+            "ts >= ?1 AND ?2 IS NULL"
+        };
+        let top = top as i64;
+        let (queries, blocked, clients_seen): (i64, i64, i64) = conn.query_row(
+            &format!(
+                "SELECT COUNT(*), COALESCE(SUM(outcome = 'blocked'), 0), COUNT(DISTINCT client)
+                 FROM query_logs WHERE {filter}"
+            ),
+            params![since, client],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )?;
+        let mut stmt = conn.prepare(&format!(
+            "SELECT client, COUNT(*), COALESCE(SUM(outcome = 'blocked'), 0), MAX(ts)
+             FROM query_logs WHERE {filter}
+             GROUP BY client ORDER BY COUNT(*) DESC, client LIMIT ?3"
+        ))?;
+        let clients = stmt
+            .query_map(params![since, client, top], |r| {
+                Ok(ClientActivity {
+                    client: r.get(0)?,
+                    queries: r.get::<_, i64>(1)? as u64,
+                    blocked: r.get::<_, i64>(2)? as u64,
+                    last_seen: r.get(3)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let names = |extra: &str| -> Result<Vec<NameCount>> {
+            let mut stmt = conn.prepare(&format!(
+                "SELECT qname, COUNT(*) FROM query_logs WHERE {filter}{extra}
+                 GROUP BY qname ORDER BY COUNT(*) DESC, qname LIMIT ?3"
+            ))?;
+            let rows = stmt
+                .query_map(params![since, client, top], |r| {
+                    Ok(NameCount {
+                        name: r.get(0)?,
+                        count: r.get::<_, i64>(1)? as u64,
+                    })
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            Ok(rows)
+        };
+        let top_domains = names("")?;
+        let top_blocked = names(" AND outcome = 'blocked'")?;
+        Ok(QueryLogReport {
+            since: since.to_string(),
+            queries: queries as u64,
+            blocked: blocked as u64,
+            clients_seen: clients_seen as u64,
+            clients,
+            top_domains,
+            top_blocked,
+        })
+    }
+
     /// Append one query-log entry.
     pub fn insert_query_log(&self, entry: &QueryLogRow) -> Result<()> {
         let conn = self.lock_conn()?;
@@ -3848,6 +3947,72 @@ mod tests {
 
     fn store() -> ZoneStore {
         ZoneStore::open(":memory:").unwrap()
+    }
+
+    #[test]
+    fn query_log_report_summarizes_a_period() {
+        let s = store();
+        let row = |ts: &str, client: &str, qname: &str, outcome: &str| QueryLogRow {
+            id: 0,
+            ts: ts.to_string(),
+            client: client.to_string(),
+            qname: qname.to_string(),
+            qtype: "A".to_string(),
+            protocol: "udp".to_string(),
+            outcome: outcome.to_string(),
+            rcode: None,
+            elapsed_ms: 1,
+        };
+        s.insert_query_logs(&[
+            row(
+                "2026-10-01T00:00:00+00:00",
+                "10.0.0.1",
+                "old.example",
+                "recursive",
+            ),
+            row(
+                "2026-10-20T00:00:00+00:00",
+                "10.0.0.1",
+                "a.example",
+                "recursive",
+            ),
+            row(
+                "2026-10-20T00:01:00+00:00",
+                "10.0.0.1",
+                "a.example",
+                "recursive",
+            ),
+            row(
+                "2026-10-20T00:02:00+00:00",
+                "10.0.0.1",
+                "ads.example",
+                "blocked",
+            ),
+            row(
+                "2026-10-20T00:03:00+00:00",
+                "10.0.0.2",
+                "ads.example",
+                "blocked",
+            ),
+        ])
+        .unwrap();
+        let report = s
+            .query_log_report("2026-10-15T00:00:00+00:00", None, 10)
+            .unwrap();
+        assert_eq!(
+            (report.queries, report.blocked, report.clients_seen),
+            (4, 2, 2)
+        );
+        assert_eq!(report.clients[0].client, "10.0.0.1");
+        assert_eq!(report.clients[0].queries, 3);
+        assert_eq!(report.clients[0].last_seen, "2026-10-20T00:02:00+00:00");
+        assert_eq!(report.top_domains[0].name, "a.example");
+        assert_eq!(report.top_blocked[0].name, "ads.example");
+        assert_eq!(report.top_blocked[0].count, 2);
+        let one = s
+            .query_log_report("2026-10-15T00:00:00+00:00", Some("10.0.0.2"), 10)
+            .unwrap();
+        assert_eq!((one.queries, one.blocked, one.clients_seen), (1, 1, 1));
     }
 
     #[test]
