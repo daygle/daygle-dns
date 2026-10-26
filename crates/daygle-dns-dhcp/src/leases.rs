@@ -23,6 +23,8 @@ pub struct Leases {
     by_address: BTreeMap<IpAddr, DhcpLease>,
     /// Addresses changed since the last [`Leases::take_changes`].
     changed: BTreeSet<IpAddr>,
+    /// Addresses newly bound to a client (not renewals), for the log.
+    granted: Vec<IpAddr>,
 }
 
 impl Leases {
@@ -30,6 +32,7 @@ impl Leases {
         Self {
             by_address: leases.into_iter().map(|l| (l.address, l)).collect(),
             changed: BTreeSet::new(),
+            granted: Vec::new(),
         }
     }
 
@@ -62,6 +65,13 @@ impl Leases {
 
     /// Insert or replace a lease.
     pub fn put(&mut self, lease: DhcpLease) {
+        let renewal = self
+            .by_address
+            .get(&lease.address)
+            .is_some_and(|old| old.state == BOUND && old.client_id == lease.client_id);
+        if lease.state == BOUND && !renewal {
+            self.granted.push(lease.address);
+        }
         self.changed.insert(lease.address);
         self.by_address.insert(lease.address, lease);
     }
@@ -97,6 +107,11 @@ impl Leases {
     /// Whether anything changed since the last [`Leases::take_changes`].
     pub fn has_changes(&self) -> bool {
         !self.changed.is_empty()
+    }
+
+    /// The addresses newly bound since the last call.
+    pub fn take_granted(&mut self) -> Vec<IpAddr> {
+        std::mem::take(&mut self.granted)
     }
 
     /// Drop a pending change already written out.
@@ -215,6 +230,11 @@ mod tests {
             leases.of_client("lan", "a", 50).map(|l| l.address),
             Some(ip("10.0.0.5"))
         );
+        leases.take_changes();
+        assert_eq!(leases.take_granted(), vec![ip("10.0.0.5")]);
+        // Binding it again for the same client is a renewal.
+        leases.put(lease(ip("10.0.0.5"), "lan", "a", "", "", BOUND, 100));
+        assert!(leases.take_granted().is_empty());
         leases.take_changes();
         leases.expire(150);
         assert_eq!(leases.get(&ip("10.0.0.5")).unwrap().state, RELEASED);

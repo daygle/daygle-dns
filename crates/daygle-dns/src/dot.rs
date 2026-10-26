@@ -272,10 +272,19 @@ impl Connection {
         let tls =
             match tokio::time::timeout(self.options.timeout, self.acceptor.accept(stream)).await {
                 Ok(Ok(tls)) => tls,
-                // Connected and closed without a word: a load balancer's or
-                // monitor's TCP check, or a port scan - not a failed client. (A
-                // client rejecting the certificate sends an alert, logged below.)
-                Ok(Err(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                // Connected and closed (or reset) without a word: a load
+                // balancer's or monitor's TCP check, or a port scan - not a
+                // failed client. (A client rejecting the certificate sends an
+                // alert, logged below.)
+                Ok(Err(e))
+                    if matches!(
+                        e.kind(),
+                        std::io::ErrorKind::UnexpectedEof
+                            | std::io::ErrorKind::ConnectionReset
+                            | std::io::ErrorKind::ConnectionAborted
+                            | std::io::ErrorKind::BrokenPipe
+                    ) =>
+                {
                     debug!(%client, "DoT connection closed before the TLS handshake");
                     return;
                 }

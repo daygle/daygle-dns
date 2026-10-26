@@ -199,6 +199,20 @@ impl DhcpService {
         let now = chrono::Utc::now().timestamp();
         let mut state = self.state.lock();
         state.leases.expire(now);
+        for address in state.leases.take_granted() {
+            if let Some(lease) = state.leases.get(&address) {
+                let who = match (lease.hw_address.as_str(), lease.hostname.as_str()) {
+                    ("", "") => String::new(),
+                    (hw, "") => format!(" to {hw}"),
+                    ("", name) => format!(" to {name}"),
+                    (hw, name) => format!(" to {name} ({hw})"),
+                };
+                self.logs.info(
+                    LOG,
+                    format!("{address} leased{who} in scope {}", lease.scope),
+                );
+            }
+        }
         let changes: HashSet<IpAddr> = state.leases.take_changes().into_iter().collect();
         let zone = state.settings.dns_zone.trim().to_string();
         let mut ours: HashSet<String> = state

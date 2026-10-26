@@ -860,7 +860,9 @@ impl RequestHandler for DnsDispatcher {
         let info = match request.request_info() {
             Ok(info) => info,
             Err(e) => {
-                warn!("malformed request from {}: {e}", request.src());
+                // Garbage on the port (scanners, probes) is counted, not
+                // logged one line per packet.
+                debug!("malformed request from {}: {e}", request.src());
                 self.metrics.inc(&self.metrics.errors);
                 return send_error(&mut response_handle, request, ResponseCode::FormErr, None)
                     .await;
@@ -1672,7 +1674,9 @@ impl RequestHandler for DnsDispatcher {
                 match response_handle.send_response(response).await {
                     Ok(info) => info,
                     Err(e) => {
-                        self.log_error("dispatcher", format!("send failure: {e}"));
+                        // Usually a TCP or DoT client that left before a
+                        // slow lookup finished: not a server fault.
+                        debug!(query = %qname, error = %e, "answer not sent");
                         fallback_response()
                     }
                 }
@@ -2514,7 +2518,7 @@ async fn send_error<R: ResponseHandler>(
     match handle.send_response(response).await {
         Ok(info) => info,
         Err(e) => {
-            warn!("failed to send error response: {e}");
+            debug!("failed to send error response: {e}");
             fallback_response()
         }
     }
@@ -2587,7 +2591,7 @@ async fn send_empty<R: ResponseHandler>(
     match handle.send_response(response).await {
         Ok(info) => info,
         Err(e) => {
-            warn!("failed to send empty answer: {e}");
+            debug!("failed to send empty answer: {e}");
             fallback_response()
         }
     }
@@ -2625,7 +2629,7 @@ async fn send_truncated<R: ResponseHandler>(handle: &mut R, request: &Request) -
     {
         Ok(info) => info,
         Err(e) => {
-            warn!("failed to send truncated answer: {e}");
+            debug!("failed to send truncated answer: {e}");
             fallback_response()
         }
     }
@@ -2663,7 +2667,7 @@ async fn send_records<R: ResponseHandler>(
     match handle.send_response(response).await {
         Ok(info) => info,
         Err(e) => {
-            warn!("failed to send answer: {e}");
+            debug!("failed to send answer: {e}");
             fallback_response()
         }
     }
@@ -2695,7 +2699,7 @@ async fn send_recursive_answer<R: ResponseHandler>(
     match handle.send_response(response).await {
         Ok(info) => info,
         Err(e) => {
-            warn!("failed to send answer: {e}");
+            debug!("failed to send answer: {e}");
             fallback_response()
         }
     }
