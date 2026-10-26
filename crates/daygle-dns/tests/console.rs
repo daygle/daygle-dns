@@ -24,8 +24,8 @@ async fn spawn_with_users(dir: &tempfile::TempDir, config_path: Option<PathBuf>)
     let mut cfg = base_config(&dir.path().join("daygle-dns.db"));
     // Real (validated) ports: settings updates re-validate the merged
     // config, which must mirror a production-loaded file.
-    cfg.server.port = free_tcp_port();
-    cfg.api.port = free_tcp_port();
+    cfg.server.port = free_port();
+    cfg.api.port = free_port();
     cfg.api.users = vec![daygle_dns_core::config::ApiUser {
         username: "admin".to_string(),
         password_hash: hash_password("secret"),
@@ -39,8 +39,8 @@ async fn spawn_with_users(dir: &tempfile::TempDir, config_path: Option<PathBuf>)
 /// count, so this is safe.
 async fn spawn_with_roles(dir: &tempfile::TempDir) -> BoundServer {
     let mut cfg = base_config(&dir.path().join("daygle-dns.db"));
-    cfg.server.port = free_tcp_port();
-    cfg.api.port = free_tcp_port();
+    cfg.server.port = free_port();
+    cfg.api.port = free_port();
     let low = |pw: &str| daygle_dns_core::auth::hash_password_with(pw, 100);
     cfg.api.users = vec![
         daygle_dns_core::config::ApiUser {
@@ -104,14 +104,6 @@ fn api_url(addr: std::net::SocketAddr, path: &str) -> String {
 
 /// Probe a free TCP port (bind + drop). Used so the settings test's config
 /// passes full validation, mirroring a production-loaded config.
-fn free_tcp_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
-}
-
 #[tokio::test]
 async fn console_users_live_in_the_database() {
     let dir = tempfile::tempdir().unwrap();
@@ -358,8 +350,8 @@ async fn first_run_setup_creates_admin_and_locks_the_console() {
     )
     .unwrap();
     let mut cfg = base_config(&dir.path().join("daygle-dns.db"));
-    cfg.server.port = free_tcp_port();
-    cfg.api.port = free_tcp_port();
+    cfg.server.port = free_port();
+    cfg.api.port = free_port();
     // Simulate a fresh install: auth back on (base_config opts out for the
     // other tests), no users, no token.
     cfg.api.auth_required = true;
@@ -450,9 +442,9 @@ async fn first_run_setup_creates_admin_and_locks_the_console() {
     // Keep the test's ephemeral ports/database; the persisted file only
     // supplies the (now DB-backed) account plus auth settings.
     cfg.server.listen = "127.0.0.1".to_string();
-    cfg.server.port = free_tcp_port();
+    cfg.server.port = free_port();
     cfg.api.listen = "127.0.0.1".to_string();
-    cfg.api.port = free_tcp_port();
+    cfg.api.port = free_port();
     cfg.dot.enabled = false;
     cfg.doh.enabled = false;
     cfg.doq.enabled = false;
@@ -485,8 +477,8 @@ async fn first_run_setup_creates_admin_and_locks_the_console() {
 async fn auth_can_be_disabled_explicitly() {
     let dir = tempfile::tempdir().unwrap();
     let mut cfg = base_config(&dir.path().join("daygle-dns.db"));
-    cfg.server.port = free_tcp_port();
-    cfg.api.port = free_tcp_port();
+    cfg.server.port = free_port();
+    cfg.api.port = free_port();
     cfg.api.auth_required = false;
     let server = spawn(cfg).await;
 
@@ -753,8 +745,8 @@ async fn repeated_failed_logins_are_throttled_per_client() {
 async fn tsig_secrets_are_redacted_from_the_config_endpoint() {
     let dir = tempfile::tempdir().unwrap();
     let mut cfg = base_config(&dir.path().join("daygle-dns.db"));
-    cfg.server.port = free_tcp_port();
-    cfg.api.port = free_tcp_port();
+    cfg.server.port = free_port();
+    cfg.api.port = free_port();
     cfg.api.users = vec![daygle_dns_core::config::ApiUser {
         username: "auditor".to_string(),
         password_hash: daygle_dns_core::auth::hash_password_with("watch", 100),
@@ -1039,8 +1031,8 @@ async fn client_policies_last_modified_is_stamped_by_the_server() {
 async fn zone_form_creates_primary_import_and_secondary_zones() {
     let dir = tempfile::tempdir().unwrap();
     let mut cfg = base_config(&dir.path().join("daygle-dns.db"));
-    cfg.server.port = free_tcp_port();
-    cfg.api.port = free_tcp_port();
+    cfg.server.port = free_port();
+    cfg.api.port = free_port();
     let server = spawn(cfg).await;
     let client = reqwest::Client::new();
     let base = api_url(server.api_addr, "");
@@ -1163,8 +1155,8 @@ async fn zone_form_creates_primary_import_and_secondary_zones() {
 async fn editing_a_record_replaces_it_in_place() {
     let dir = tempfile::tempdir().unwrap();
     let mut cfg = base_config(&dir.path().join("daygle-dns.db"));
-    cfg.server.port = free_tcp_port();
-    cfg.api.port = free_tcp_port();
+    cfg.server.port = free_port();
+    cfg.api.port = free_port();
     let server = spawn(cfg).await;
     let client = reqwest::Client::new();
     let base = api_url(server.api_addr, "");
@@ -1373,8 +1365,8 @@ async fn stats_endpoint_tracks_served_queries() {
     let dir = tempfile::tempdir().unwrap();
     let zone_db = dir.path().join("daygle-dns.db");
     let mut cfg = base_config(&zone_db);
-    cfg.server.port = free_tcp_port();
-    cfg.api.port = free_tcp_port();
+    cfg.server.port = free_port();
+    cfg.api.port = free_port();
 
     // One authoritative zone + record, in the database the server opens.
     let store = daygle_dns_authoritative::ZoneStore::open(&zone_db.to_string_lossy()).unwrap();
@@ -2038,8 +2030,8 @@ async fn new_zones_default_to_this_server_and_the_first_admin() {
 
     let dir = tempfile::tempdir().unwrap();
     let mut cfg = base_config(&dir.path().join("daygle-dns.db"));
-    cfg.server.port = free_tcp_port();
-    cfg.api.port = free_tcp_port();
+    cfg.server.port = free_port();
+    cfg.api.port = free_port();
     cfg.api.auth_required = true;
     let server = bind_with_config(cfg, None).await;
     let client = reqwest::Client::new();

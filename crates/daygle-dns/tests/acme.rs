@@ -11,20 +11,12 @@
 
 mod common;
 
-use std::net::{Ipv4Addr, TcpListener};
+use std::net::Ipv4Addr;
 use std::time::Duration;
 
 use common::*;
 use daygle_dns_authoritative::model::{RecordInput, ZoneInput};
 use serde_json::{json, Value};
-
-fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
-}
 
 struct Pebble(std::process::Child);
 

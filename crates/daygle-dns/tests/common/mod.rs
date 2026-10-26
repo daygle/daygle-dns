@@ -20,6 +20,36 @@ use hickory_proto::rr::{Name, RecordType};
 use hickory_server::server::Server;
 use rustls_pki_types::pem::PemObject;
 
+/// A loopback port that is free for both TCP and UDP, for tests that need
+/// a fixed port number (one that settings validation accepts, or that a
+/// restart reuses).
+///
+/// Ports come from below the kernel's ephemeral range (32768 and up on
+/// Linux), which port-0 binds never hand out: binding port 0 and releasing
+/// it instead lets any socket in a parallel test take the same number
+/// before the server binds it. A counter keeps the ports of one test
+/// process apart, and the process id spreads concurrent processes.
+pub fn free_port() -> u16 {
+    use std::sync::atomic::{AtomicU16, Ordering};
+    const FIRST: u16 = 20_000;
+    const COUNT: u16 = 12_000;
+    static NEXT: AtomicU16 = AtomicU16::new(0);
+    let start = (std::process::id() % u32::from(COUNT)) as u16;
+    for _ in 0..COUNT {
+        let offset = NEXT.fetch_add(1, Ordering::Relaxed) % COUNT;
+        let port = FIRST + (start + offset) % COUNT;
+        let tcp = std::net::TcpListener::bind(("127.0.0.1", port));
+        let udp = std::net::UdpSocket::bind(("127.0.0.1", port));
+        if tcp.is_ok() && udp.is_ok() {
+            return port;
+        }
+    }
+    panic!(
+        "no free loopback port between {FIRST} and {}",
+        FIRST + COUNT
+    );
+}
+
 /// A configuration with ephemeral ports and no recursion, bound to loopback.
 pub fn base_config(db: &Path) -> DaygleConfig {
     let mut cfg = DaygleConfig::default();
