@@ -671,6 +671,8 @@ pub async fn bind_with(
             })
         })
     };
+    // Alerts (Settings -> Alerts): deliver what the rest of the server raises.
+    daygle_dns_api::alerts::install(shared.config.clone(), logs.clone());
     let app_state = AppState {
         catalog: catalog.clone(),
         resolver: shared.resolver.clone(),

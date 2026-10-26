@@ -120,11 +120,24 @@ impl SecondaryRefresher {
             if !zone.enabled {
                 continue;
             }
+            let key = format!("secondary:{}", zone.name);
             match self.refresh_zone(&zone).await {
-                Ok(true) => changed += 1,
-                Ok(false) => {}
+                Ok(changed_now) => {
+                    changed += usize::from(changed_now);
+                    daygle_dns_core::alerts::resolve(&key);
+                }
                 Err(e) => {
                     warn!(zone = %zone.name, error = %e, "secondary zone refresh failed");
+                    daygle_dns_core::alerts::raise(
+                        daygle_dns_core::alerts::AlertKind::ZoneTransferFailure,
+                        key,
+                        format!("Secondary zone '{}' cannot be refreshed", zone.name),
+                        format!(
+                            "Refreshing the secondary zone '{}' from its primary failed: {e}. \
+                             The zone keeps answering with its last copy until it expires.",
+                            zone.name
+                        ),
+                    );
                 }
             }
         }

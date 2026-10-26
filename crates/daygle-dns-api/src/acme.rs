@@ -201,6 +201,7 @@ pub async fn issue(state: &AppState, name: &str) -> Result<(), String> {
     let store = state.catalog.store();
     match &result {
         Ok(()) => {
+            daygle_dns_core::alerts::resolve(&format!("acme:{name}"));
             let _ = store.set_acme_certificate_status(name, "valid", "", now());
             state.logs.info(
                 "acme",
@@ -213,6 +214,12 @@ pub async fn issue(state: &AppState, name: &str) -> Result<(), String> {
                 daygle_dns_core::LogLevel::Error,
                 "acme",
                 format!("certificate '{name}' could not be issued: {e}"),
+            );
+            daygle_dns_core::alerts::raise(
+                daygle_dns_core::alerts::AlertKind::CertificateExpiry,
+                format!("acme:{name}"),
+                format!("Certificate '{name}' could not be issued"),
+                format!("Requesting the certificate '{name}' from the ACME CA failed: {e}"),
             );
         }
     }
@@ -522,6 +529,43 @@ pub async fn renew_due(state: &AppState) {
     }
 }
 
+/// How close to its expiry a certificate raises an alert.
+const EXPIRY_ALERT_DAYS: i64 = 14;
+
+/// Raise an alert for every console-managed certificate that expires within
+/// [`EXPIRY_ALERT_DAYS`] (or already has).
+fn alert_expiring_certificates(state: &AppState) {
+    let Ok(certs) = state.catalog.store().list_tls_certificates() else {
+        return;
+    };
+    for cert in certs {
+        let Ok(info) = daygle_dns_dot::describe_certificate(&cert.cert_pem) else {
+            continue;
+        };
+        let days = (info.not_after - now()).div_euclid(86_400);
+        if days >= EXPIRY_ALERT_DAYS {
+            continue;
+        }
+        let when = if days < 0 {
+            "has expired".to_string()
+        } else if days == 0 {
+            "expires today".to_string()
+        } else {
+            format!("expires in {days} day{}", if days == 1 { "" } else { "s" })
+        };
+        daygle_dns_core::alerts::raise(
+            daygle_dns_core::alerts::AlertKind::CertificateExpiry,
+            format!("cert-expiry:{}", cert.name),
+            format!("Certificate '{}' {when}", cert.name),
+            format!(
+                "The certificate '{}' ({}) {when}. Renew or replace it under \
+                 Certificates; clients refuse an expired certificate.",
+                cert.name, cert.server_name
+            ),
+        );
+    }
+}
+
 /// Renew certificates in the background: shortly after start, then twice a
 /// day.
 pub async fn run_renewals(state: AppState, shutdown: CancellationToken) {
@@ -532,6 +576,7 @@ pub async fn run_renewals(state: AppState, shutdown: CancellationToken) {
             _ = tokio::time::sleep(wait) => {}
         }
         renew_due(&state).await;
+        alert_expiring_certificates(&state);
         wait = CHECK_EVERY;
     }
 }

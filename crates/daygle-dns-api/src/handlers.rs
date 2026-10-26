@@ -116,6 +116,16 @@ fn redacted_config_json(
             key.insert("secret".to_string(), serde_json::json!("[redacted]"));
         }
     }
+    if let Some(alerts) = value.get_mut("alerts").and_then(|a| a.as_object_mut()) {
+        let set = alerts
+            .get("smtp_password")
+            .and_then(|p| p.as_str())
+            .is_some_and(|p| !p.is_empty());
+        alerts.insert(
+            "smtp_password".to_string(),
+            serde_json::json!(if set { REDACTED } else { "" }),
+        );
+    }
     if let Some(api) = value.get_mut("api").and_then(|a| a.as_object_mut()) {
         let token = api.get("api_token").and_then(|t| t.as_str()).unwrap_or("");
         let redacted = if token.is_empty() { "" } else { "[redacted]" };
@@ -129,6 +139,76 @@ fn redacted_config_json(
         }
     }
     Ok(value)
+}
+
+/// Alert settings as submitted, trimmed, with the redaction placeholder
+/// standing for the stored SMTP password.
+fn normalize_alerts(
+    input: &daygle_dns_core::config::AlertSettings,
+    stored: &daygle_dns_core::config::AlertSettings,
+) -> daygle_dns_core::config::AlertSettings {
+    let smtp_password = if input.smtp_password == REDACTED {
+        stored.smtp_password.clone()
+    } else {
+        input.smtp_password.clone()
+    };
+    daygle_dns_core::config::AlertSettings {
+        webhook_url: input.webhook_url.trim().to_string(),
+        smtp_server: input.smtp_server.trim().to_string(),
+        smtp_security: input.smtp_security.trim().to_ascii_lowercase(),
+        smtp_username: input.smtp_username.trim().to_string(),
+        smtp_password,
+        email_from: input.email_from.trim().to_string(),
+        email_to: input
+            .email_to
+            .iter()
+            .map(|a| a.trim().to_string())
+            .filter(|a| !a.is_empty())
+            .collect(),
+        ..input.clone()
+    }
+}
+
+/// Stands for a stored secret in what the browser sees and sends back.
+const REDACTED: &str = "[redacted]";
+
+/// Body of `POST /api/alerts/test`: the settings to try (as on the form,
+/// saved or not); omitted, the saved ones.
+#[derive(Deserialize, Default)]
+pub struct AlertTestInput {
+    #[serde(default)]
+    pub alerts: Option<daygle_dns_core::config::AlertSettings>,
+}
+
+/// `POST /api/alerts/test` - send a test alert to every configured
+/// destination and report what failed.
+pub async fn test_alert(
+    State(state): State<AppState>,
+    body: Option<Json<AlertTestInput>>,
+) -> Response {
+    let stored = state.config.load().alerts.clone();
+    let settings = match body.and_then(|Json(b)| b.alerts) {
+        Some(input) => normalize_alerts(&input, &stored),
+        None => stored,
+    };
+    // The test goes out whether or not alerts are switched on yet.
+    let settings = daygle_dns_core::config::AlertSettings {
+        enabled: true,
+        ..settings
+    };
+    if let Err(msg) = settings.check() {
+        return error_response(StatusCode::BAD_REQUEST, msg);
+    }
+    let alert = daygle_dns_core::alerts::Alert {
+        kind: daygle_dns_core::alerts::AlertKind::Test,
+        key: "test".to_string(),
+        title: "Test alert".to_string(),
+        message: "Alerts from this Daygle DNS server reach you here.".to_string(),
+    };
+    match crate::alerts::deliver(&settings, &alert).await {
+        Ok(()) => Json(serde_json::json!({ "sent": true })).into_response(),
+        Err(e) => error_response(StatusCode::BAD_GATEWAY, e),
+    }
 }
 
 fn config_response(config: &daygle_dns_core::config::DaygleConfig) -> Response {
@@ -4160,6 +4240,9 @@ pub struct SettingsUpdate {
     pub web: Option<WebUpdate>,
     /// Replaces the whole `[syslog]` section.
     pub syslog: Option<daygle_dns_core::config::SyslogSettings>,
+    /// Replaces the whole `[alerts]` section; an `smtp_password` of
+    /// `[redacted]` keeps the stored one.
+    pub alerts: Option<daygle_dns_core::config::AlertSettings>,
     /// Replaces the whole `[dns64]` section.
     pub dns64: Option<daygle_dns_core::config::Dns64Settings>,
     /// Replaces the whole `[ecs]` section.
@@ -4690,6 +4773,13 @@ pub async fn update_settings(
             return error_response(StatusCode::BAD_REQUEST, format!("ecs: {msg}"));
         }
         config.ecs = ecs;
+    }
+    if let Some(alerts) = &update.alerts {
+        let alerts = normalize_alerts(alerts, &config.alerts);
+        if let Err(msg) = alerts.check() {
+            return error_response(StatusCode::BAD_REQUEST, format!("alerts: {msg}"));
+        }
+        config.alerts = alerts;
     }
     if let Some(syslog) = &update.syslog {
         let syslog = daygle_dns_core::config::SyslogSettings {

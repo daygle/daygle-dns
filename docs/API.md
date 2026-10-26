@@ -370,7 +370,7 @@ every client - see Safe Search below), and `authoritative`
 (default_record_ttl/default_primary_ns/default_admin_mailbox/axfr_enabled/axfr_networks/
 allow_dynamic_updates/update_networks/notify_enabled/notify_targets/
 notify_listen_enabled/stub_zones/catalog_zone/catalog_consumers). Runtime groups (`recursive`, `dot`, `doh`, `doq`,
-`policy`, `authoritative`, `ai`, `display`) are stored in the database and survive restarts and
+`policy`, `authoritative`, `ai`, `display`, `alerts`) are stored in the database and survive restarts and
 config-file edits; `server.*` and `api.*` stay config-file-owned so a broken
 listener can always be fixed by editing the file. A `server` or `api` group
 in a `PUT` is applied to the running server but not stored, so it reverts
@@ -1344,6 +1344,38 @@ plus that name's addresses; with YouTube Restricted Mode on,
 `restrict.youtube.com`. `HTTPS`/`SVCB` queries for those names are answered
 empty and other types resolve as usual. It applies only to clients allowed
 to use recursion, and not to names hosted in a zone here.
+
+### Alerts
+
+```
+POST   /api/alerts/test
+```
+
+The `alerts` settings group (Settings -> Alerts, replaced as a whole by
+`PUT /api/config` with `{"alerts": {...}}`) sends an alert when something
+needs attention:
+
+| Field | Default | Meaning |
+|---|---|---|
+| `enabled` | `false` | Send alerts at all (needs a webhook or an SMTP server). |
+| `webhook_url` | `""` | Each alert is `POST`ed here as JSON: `source`, `host`, `kind`, `title`, `message`, `time`, plus `text`/`content` (the summary, for Slack, Mattermost, Discord and Teams webhooks). |
+| `smtp_server`, `smtp_port` | `""`, `587` | Email via this server (empty: no email). |
+| `smtp_security` | `starttls` | `starttls`, `tls` (implicit TLS, usually port 465) or `none`. |
+| `smtp_username`, `smtp_password` | `""` | Sign-in, when the server needs it. The password reads back as `[redacted]`; sending `[redacted]` keeps the stored one. |
+| `email_from`, `email_to` | `""`, `[]` | Sender and recipients (required with an SMTP server). |
+| `blocklist_failures` | `true` | A remote blocklist cannot be downloaded (`kind` `blocklist_failure`). |
+| `zone_transfer_failures` | `true` | A secondary zone cannot be refreshed (`zone_transfer_failure`). |
+| `certificate_expiry` | `true` | A console-managed certificate expires within 14 days, or an ACME request failed (`certificate_expiry`). |
+| `dnssec` | `true` | A key rollover started (the parent DS needs the new key), or re-signing failed (`dnssec`). |
+| `update_available` | `true` | A newer release is available (`update_available`), once per release. |
+| `ai_blocks` | `false` | The AI scanner in Enforce mode started blocking new domains (`ai_blocks`). |
+
+A failure that persists is reported again after 6 hours at the soonest (24
+hours for certificates); once it clears, the next failure is reported right
+away. `POST /api/alerts/test` sends a test alert (`kind` `test`) with the
+saved settings, or with `{"alerts": {...}}` from the body (unsaved form
+values), whether or not alerts are enabled. It answers `{"sent": true}`, `400`
+for invalid settings, or `502` naming each destination that failed.
 
 ### Backup and restore
 

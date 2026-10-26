@@ -30,6 +30,9 @@ instant-acme.workspace = true
 rustls.workspace = true
 rustls-pki-types.workspace = true
 tracing.workspace = true
+lettre.workspace = true
+reqwest.workspace = true
+url.workspace = true
 
 [features]
 default = ["verifier-onnx"]
