@@ -450,7 +450,9 @@
         Existing DoT-only sources are kept for compatibility; when editing
         one, choose a replacement scope explicitly. For listener-specific
         filtering, create a filtering group matching DOT, DOH, or DOQ and select
-        the source there.
+        the source there. An RPZ list here simply blocks every name it lists;
+        to use its own actions (redirects, NODATA, passthru, client and answer
+        address rules), add it under Response Policy Zones instead.
       </p>
 
       {#if draft.result}

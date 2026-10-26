@@ -66,6 +66,8 @@ struct CompiledGroup {
     youtube_restricted: bool,
     /// When the group applies; empty means always.
     schedule: Vec<CompiledWindow>,
+    /// Blocked services: (display name, their domains and subdomains).
+    services: Vec<(&'static str, Blocklist)>,
 }
 
 impl CompiledGroup {
@@ -158,6 +160,24 @@ impl AdvancedBlocking {
                             warn!(group = %g.name, error = %e, "skipping invalid schedule window");
                             None
                         }
+                    })
+                    .collect(),
+                services: g
+                    .blocked_services
+                    .iter()
+                    .filter_map(|id| {
+                        let found = crate::services::find(id);
+                        if found.is_none() {
+                            warn!(group = %g.name, service = %id, "skipping unknown blocked service");
+                        }
+                        found
+                    })
+                    .map(|s| {
+                        let domains = s
+                            .domains
+                            .iter()
+                            .flat_map(|d| [d.to_string(), format!("*.{d}")]);
+                        (s.name, Blocklist::from_set(normalize_domains(domains)))
                     })
                     .collect(),
                 safe_search: g.safe_search,
@@ -264,8 +284,18 @@ impl AdvancedBlocking {
             if group.allows(qname) {
                 return None;
             }
+            let service = group
+                .services
+                .iter()
+                .find(|(_, domains)| domains.contains(qname))
+                .map(|(name, _)| *name);
             let reason = if group.blocks(qname) {
                 Some(format!("'{qname}' blocked by group '{}'", group.name))
+            } else if let Some(service) = service {
+                Some(format!(
+                    "'{qname}' blocked as part of {service} by group '{}'",
+                    group.name
+                ))
             } else if group.blocklists.is_empty() {
                 None
             } else {
@@ -385,6 +415,7 @@ mod tests {
             safe_search: false,
             youtube_restricted: false,
             schedule: vec![],
+            blocked_services: vec![],
             position: 0,
             last_modified_at: None,
         }
@@ -483,6 +514,22 @@ mod tests {
             assert_eq!(ab.ai_blocking(ip("1.2.3.4"), None), (true, None));
             assert_eq!(ab.scheduled_off(ip("1.2.3.4"), None), vec!["kids"]);
         }
+    }
+
+    #[test]
+    fn blocked_services_block_their_domains_and_subdomains() {
+        let mut kids = group("kids");
+        kids.blocked_services = vec!["tiktok".to_string(), "unknown".to_string()];
+        kids.allow = vec!["ok.tiktok.com".to_string()];
+        let ab = AdvancedBlocking::build(&[kids], Arc::default());
+        let d = ab.evaluate(ip("1.2.3.4"), "tiktok.com", None).unwrap();
+        assert!(d.reason.contains("TikTok"), "{}", d.reason);
+        assert!(ab
+            .evaluate(ip("1.2.3.4"), "v16.tiktokcdn.com", None)
+            .is_some());
+        // The group's allow list still wins.
+        assert!(ab.evaluate(ip("1.2.3.4"), "ok.tiktok.com", None).is_none());
+        assert!(ab.evaluate(ip("1.2.3.4"), "example.com", None).is_none());
     }
 
     #[test]

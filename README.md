@@ -36,6 +36,13 @@ Daygle DNS combines, in a single process:
   in Clients -> Networks and pick it wherever a setting takes client
   networks; changing it changes them all, renaming it keeps them pointing at
   it, and a network in use cannot be deleted.
+- **Encrypted DNS discovery (DDR, RFC 9462)**: devices that support it
+  (Windows 11, Apple, Android) learn of the DoH, DoT and DoQ listeners and
+  switch to them by themselves.
+- **Block page**: blocked sites can point at a page on this server that
+  says what was blocked and why, instead of "site not found".
+- **Blocked services**: block TikTok, YouTube, Roblox, Discord, ChatGPT and
+  30-odd other apps for a filtering group with one tick each.
 - **Per-client rules** on the console's Clients page: **filtering groups**
   (extra allow/block rules, blocklists and AI auto-blocking for a set of
   clients) and **resolution policies** (forward some clients to their own
@@ -55,8 +62,9 @@ Daygle DNS combines, in a single process:
 - **Conditional forwarding** so specific zones resolve via dedicated
   upstreams, plus **stub zones** that send queries straight to a zone's own
   nameservers (no root→TLD walk) - both matched by longest suffix.
-- **DNS over TLS (DoT)**, **DNS over HTTPS (DoH, RFC 8484)**, and
-  **DNS over QUIC (DoQ, RFC 9250)** using **rustls**.
+- **DNS over TLS (DoT)**, **DNS over HTTPS (DoH, RFC 8484)** over HTTP/2
+  and optionally **HTTP/3**, and **DNS over QUIC (DoQ, RFC 9250)** using
+  **rustls**.
 - **Encrypted-DNS diagnostics**: every DoT/DoH/DoQ listener start or reload
   reports its certificate's subject and expiry, warning when it is already
   expired or inside the ACME renewal window, and failed handshakes, dropped
@@ -118,6 +126,14 @@ metrics.
   and wildcard domain lists, response policy zones) fetched over HTTP(S) and
   refreshed on a schedule. A source blocks for everyone or only for the
   filtering groups that select it.
+- **Response policy zones (RPZ)**: DNS firewall feeds loaded by zone
+  transfer (AXFR, with TSIG) or URL, or rules typed in the console, with
+  every RPZ action (NXDOMAIN, NODATA, passthru, drop, TCP-only, local data
+  and walled gardens), QNAME, client-IP and answer-IP triggers, per-zone
+  policy overrides, a log-only mode and a tester.
+- **Response rate limiting (RRL)**: identical UDP answers to one network
+  are capped per second, with slip (truncated answers that send real
+  clients to TCP), against reflection and amplification attacks.
 - **Rate limiting** per client (source IP) and per domain (query name) with
   configurable fixed windows, loopback exemption, and live reload - queries
   over the limit get SERVFAIL and are counted in the `rate_limited` metric.
@@ -339,7 +355,10 @@ real server on ephemeral ports and exercise:
 - **zone transfers** (AXFR/IXFR) and secondary-zone replication,
 - **RFC 2136 dynamic updates** and **NOTIFY** propagation,
 - **query logging** into SQLite and the console's query-log filters,
-- **rate limiting** per client and per domain,
+- **rate limiting** per client and per domain, and **response rate
+  limiting** (RRL) with slip,
+- **response policy zones**: every action and trigger type, and zones
+  loaded by zone transfer,
 - **live config reload** of policy, upstreams and listeners, both via the
   reload API and the file watcher,
 - **console login, roles and settings**: login flow, read-only `viewer`

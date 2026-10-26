@@ -56,6 +56,335 @@ pub struct DaygleConfig {
     pub networks: Vec<NamedNetwork>,
     /// Alerts by email and/or webhook when something needs attention.
     pub alerts: AlertSettings,
+    /// Response rate limiting (RRL): caps identical responses to one network,
+    /// against reflection and amplification attacks over UDP.
+    pub rrl: RrlSettings,
+    /// Response policy zones (`[[rpz]]`), checked in order.
+    pub rpz: Vec<RpzZoneConfig>,
+    /// A web page that tells people a site was blocked.
+    pub block_page: BlockPageSettings,
+    /// Discovery of Designated Resolvers (RFC 9462).
+    pub ddr: DdrSettings,
+}
+
+/// Discovery of Designated Resolvers (DDR, RFC 9462): answer the
+/// `_dns.resolver.arpa` SVCB query with this server's encrypted listeners
+/// (DoH, DoT, DoQ), so devices that support it (Windows 11, Apple, Android)
+/// switch from plain DNS to encrypted DNS by themselves. Edited in
+/// Settings -> Encrypted DNS and stored in the database.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct DdrSettings {
+    pub enabled: bool,
+    /// The name devices connect to (it must be in the listeners'
+    /// certificate). Empty: each listener's own server name.
+    pub name: String,
+}
+
+impl Default for DdrSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            name: String::new(),
+        }
+    }
+}
+
+impl DdrSettings {
+    /// Problems that stop the settings being used.
+    pub fn check(&self) -> std::result::Result<(), String> {
+        let name = self.name.trim();
+        if !name.is_empty() && (name.starts_with("*.") || validate_domain_pattern(name).is_err()) {
+            return Err(format!("'{name}' is not a host name"));
+        }
+        Ok(())
+    }
+}
+
+/// The block page: blocked names (that would get NXDOMAIN) are answered
+/// with this server's address instead, and a small web server here shows
+/// a page saying what was blocked and why. Edited in Filtering -> Response
+/// Filters and stored in the database.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct BlockPageSettings {
+    pub enabled: bool,
+    /// The address blocked names resolve to (A queries): this server's
+    /// address as clients reach it. Empty: A queries get NXDOMAIN as usual.
+    pub ipv4: String,
+    /// The same for AAAA queries; empty: no IPv6 answer (NODATA).
+    pub ipv6: String,
+    /// Where the page's web server listens (addresses, comma-separated).
+    #[serde(deserialize_with = "listen_list")]
+    pub listen: String,
+    /// The page's HTTP port (80, so plain `http://` links reach it).
+    pub port: u16,
+    /// Extra text shown on the page (e.g. who to ask for access).
+    pub message: String,
+}
+
+impl Default for BlockPageSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            ipv4: String::new(),
+            ipv6: String::new(),
+            listen: "0.0.0.0".to_string(),
+            port: 80,
+            message: String::new(),
+        }
+    }
+}
+
+impl BlockPageSettings {
+    /// Problems that stop the settings being used.
+    pub fn check(&self) -> std::result::Result<(), String> {
+        if !self.ipv4.trim().is_empty() && self.ipv4.trim().parse::<std::net::Ipv4Addr>().is_err() {
+            return Err(format!("'{}' is not an IPv4 address", self.ipv4.trim()));
+        }
+        if !self.ipv6.trim().is_empty() && self.ipv6.trim().parse::<std::net::Ipv6Addr>().is_err() {
+            return Err(format!("'{}' is not an IPv6 address", self.ipv6.trim()));
+        }
+        if self.enabled {
+            if self.ipv4.trim().is_empty() && self.ipv6.trim().is_empty() {
+                return Err("enter the address blocked names should point to".to_string());
+            }
+            if self.port == 0 {
+                return Err("the port cannot be 0".to_string());
+            }
+            listen_socket_addrs(&self.listen, self.port)?;
+        }
+        if self.message.len() > 2000 {
+            return Err("the message is too long (2000 characters at most)".to_string());
+        }
+        Ok(())
+    }
+}
+
+/// Where a response policy zone's rules come from.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum RpzSource {
+    /// Rules typed into the console (`rules`).
+    #[default]
+    Local,
+    /// A zone file fetched over HTTP(S) (`url`).
+    Url,
+    /// A zone transfer (AXFR) from the feed's servers (`primaries`), as most
+    /// commercial and community RPZ feeds are delivered.
+    Transfer,
+}
+
+/// Overrides the actions written in a response policy zone (BIND's
+/// `policy` option).
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RpzPolicy {
+    /// The action each rule gives.
+    #[default]
+    Given,
+    /// Match and count, but act on nothing (to try a zone out).
+    Disabled,
+    Nxdomain,
+    Nodata,
+    Passthru,
+    Drop,
+    TcpOnly,
+    /// Answer with a CNAME to `cname_target` (a walled garden).
+    Cname,
+}
+
+/// One response policy zone (RPZ).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct RpzZoneConfig {
+    /// The zone's name (e.g. `rpz.example.com`): what is transferred, and
+    /// the suffix stripped from the rules' owner names.
+    pub name: String,
+    pub enabled: bool,
+    pub source: RpzSource,
+    /// `transfer`: the servers to transfer from (`IP`, `IP:port`).
+    pub primaries: Vec<String>,
+    /// `transfer`: the TSIG key (from `authoritative.tsig_keys`) that signs
+    /// the transfer; empty for none.
+    pub tsig_key: String,
+    /// `url`: where the zone file is fetched from.
+    pub url: String,
+    /// `local`: the rules, in zone-file form (`bad.example CNAME .`).
+    pub rules: String,
+    /// `url` and `transfer`: how often to check for changes, in seconds.
+    pub refresh_secs: u64,
+    pub policy: RpzPolicy,
+    /// The walled-garden name for `policy = "cname"`.
+    pub cname_target: String,
+}
+
+impl Default for RpzZoneConfig {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            enabled: true,
+            source: RpzSource::Local,
+            primaries: Vec::new(),
+            tsig_key: String::new(),
+            url: String::new(),
+            rules: String::new(),
+            refresh_secs: 3600,
+            policy: RpzPolicy::Given,
+            cname_target: String::new(),
+        }
+    }
+}
+
+/// Longest `rules` text accepted for a local zone.
+pub const RPZ_MAX_LOCAL_RULES: usize = 2 * 1024 * 1024;
+
+impl RpzZoneConfig {
+    /// Problems that stop the zone being used (`tsig_keys`: the configured
+    /// key names).
+    pub fn check(&self, tsig_keys: &[TsigKeyConfig]) -> std::result::Result<(), String> {
+        let name = self.name.trim();
+        validate_domain_pattern(name)
+            .ok()
+            .filter(|_| !name.starts_with("*."))
+            .ok_or_else(|| format!("'{name}' is not a zone name"))?;
+        match self.source {
+            RpzSource::Local => {
+                if self.rules.len() > RPZ_MAX_LOCAL_RULES {
+                    return Err("the rules are too long (2 MB at most)".to_string());
+                }
+            }
+            RpzSource::Url => {
+                let url = url::Url::parse(self.url.trim())
+                    .map_err(|_| format!("'{}' is not a URL", self.url.trim()))?;
+                if !matches!(url.scheme(), "http" | "https") {
+                    return Err(format!("'{}' is not an http(s) URL", self.url.trim()));
+                }
+            }
+            RpzSource::Transfer => {
+                if self.primaries.is_empty() {
+                    return Err("add the servers to transfer the zone from".to_string());
+                }
+                for primary in &self.primaries {
+                    parse_master_addr(primary).map_err(|e| format!("'{primary}': {e}"))?;
+                }
+                let key = self.tsig_key.trim();
+                if !key.is_empty()
+                    && !tsig_keys.iter().any(|k| {
+                        k.name
+                            .trim_end_matches('.')
+                            .eq_ignore_ascii_case(key.trim_end_matches('.'))
+                    })
+                {
+                    return Err(format!("there is no TSIG key named '{key}'"));
+                }
+            }
+        }
+        if self.source != RpzSource::Local && self.refresh_secs < 60 {
+            return Err("check for changes every 60 seconds at most often".to_string());
+        }
+        if self.policy == RpzPolicy::Cname {
+            let target = self.cname_target.trim();
+            validate_domain_pattern(target)
+                .map_err(|_| format!("'{target}' is not a walled-garden name"))?;
+        }
+        Ok(())
+    }
+}
+
+/// Check a list of response policy zones: each one, and that no name is
+/// used twice.
+pub fn check_rpz_zones(
+    zones: &[RpzZoneConfig],
+    tsig_keys: &[TsigKeyConfig],
+) -> std::result::Result<(), String> {
+    let mut seen = std::collections::HashSet::new();
+    for zone in zones {
+        zone.check(tsig_keys)
+            .map_err(|e| format!("zone '{}': {e}", zone.name.trim()))?;
+        let key = zone.name.trim().trim_end_matches('.').to_ascii_lowercase();
+        if !seen.insert(key) {
+            return Err(format!("there are two zones named '{}'", zone.name.trim()));
+        }
+    }
+    Ok(())
+}
+
+/// Response rate limiting (RRL), as in BIND and Knot: each client network
+/// gets at most so many identical responses per second over UDP. Past the
+/// limit, responses are dropped, and every `slip`-th one is sent truncated
+/// (TC) instead so a real client retries over TCP, which cannot be spoofed.
+/// Edited in Settings -> Rate Limiting and stored in the database.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct RrlSettings {
+    pub enabled: bool,
+    /// Identical answers (same name and type) per second per network.
+    pub responses_per_second: u32,
+    /// NXDOMAIN answers per second per network and parent domain (a flood
+    /// of random names under one domain shares the limit).
+    pub nxdomains_per_second: u32,
+    /// Error answers (SERVFAIL, REFUSED, FORMERR...) per second per network.
+    pub errors_per_second: u32,
+    /// How many seconds of excess a network's account remembers: a flood
+    /// stays limited until it has been quiet (or within the rate) this long.
+    pub window_secs: u32,
+    /// Send every `slip`-th limited response truncated instead of dropping
+    /// it (0: drop them all; 1: truncate them all).
+    pub slip: u32,
+    /// Clients are grouped into networks of this size (BIND: /24 and /56).
+    pub ipv4_prefix: u8,
+    pub ipv6_prefix: u8,
+    /// Networks never limited (addresses, CIDRs or network names).
+    pub exempt: Vec<String>,
+    /// Count what would be limited without limiting anything (to size the
+    /// rates before enforcing them).
+    pub log_only: bool,
+}
+
+impl Default for RrlSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            responses_per_second: 10,
+            nxdomains_per_second: 10,
+            errors_per_second: 10,
+            window_secs: 15,
+            slip: 2,
+            ipv4_prefix: 24,
+            ipv6_prefix: 56,
+            exempt: vec!["127.0.0.0/8".to_string(), "::1/128".to_string()],
+            log_only: false,
+        }
+    }
+}
+
+impl RrlSettings {
+    /// Problems that stop the settings being used.
+    pub fn check(&self) -> std::result::Result<(), String> {
+        for (name, rate) in [
+            ("responses per second", self.responses_per_second),
+            ("NXDOMAIN per second", self.nxdomains_per_second),
+            ("errors per second", self.errors_per_second),
+        ] {
+            if rate > 10_000 {
+                return Err(format!("{name} must be at most 10000 (0: no limit)"));
+            }
+        }
+        if !(1..=3600).contains(&self.window_secs) {
+            return Err("the window must be 1 to 3600 seconds".to_string());
+        }
+        if self.slip > 10 {
+            return Err("slip must be 0 to 10".to_string());
+        }
+        if !(8..=32).contains(&self.ipv4_prefix) {
+            return Err("the IPv4 prefix must be 8 to 32".to_string());
+        }
+        if !(16..=128).contains(&self.ipv6_prefix) {
+            return Err("the IPv6 prefix must be 16 to 128".to_string());
+        }
+        Ok(())
+    }
 }
 
 /// Alerts: tell the operator by email (SMTP) and/or a webhook when
@@ -820,6 +1149,14 @@ pub struct RuntimeSettings {
     pub display: Option<DisplaySettings>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub alerts: Option<AlertSettings>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rrl: Option<RrlSettings>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rpz: Option<Vec<RpzZoneConfig>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub block_page: Option<BlockPageSettings>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ddr: Option<DdrSettings>,
 }
 
 /// Partial updates for the recursive resolver (matches the API's shape).
@@ -1057,6 +1394,34 @@ impl DaygleConfig {
         Ok(out)
     }
 
+    /// The block page needs its own TCP port: not one the web console, the
+    /// API or a DoH/DoT listener holds.
+    pub fn check_block_page_port(&self) -> std::result::Result<(), String> {
+        if !self.block_page.enabled {
+            return Ok(());
+        }
+        for (name, port, used) in [
+            (
+                "the web console (HTTP)",
+                self.web.http_port,
+                self.web.http_enabled,
+            ),
+            (
+                "the web console (HTTPS)",
+                self.web.https_port,
+                self.web.https_enabled,
+            ),
+            ("the API", self.api.port, self.api.enabled),
+            ("DNS over HTTPS", self.doh.port, self.doh.enabled),
+            ("DNS over TLS", self.dot.port, self.dot.enabled),
+        ] {
+            if used && port == self.block_page.port {
+                return Err(format!("port {port} is already used by {name}"));
+            }
+        }
+        Ok(())
+    }
+
     /// Whether `entry` is an address, a CIDR network or the name of a
     /// network (built-in or configured).
     pub fn is_network_entry(&self, entry: &str) -> bool {
@@ -1129,6 +1494,10 @@ impl DaygleConfig {
                 "DoQ allowed networks".to_string(),
                 &self.doq.allowed_networks,
             ),
+            (
+                "Response rate limiting exemptions".to_string(),
+                &self.rrl.exempt,
+            ),
         ];
         for p in &self.recursive.client_policies {
             lists.push((format!("Client policy '{}'", p.name), &p.clients));
@@ -1152,6 +1521,7 @@ impl DaygleConfig {
             &mut self.dot.allowed_networks,
             &mut self.doh.allowed_networks,
             &mut self.doq.allowed_networks,
+            &mut self.rrl.exempt,
         ];
         for p in &mut self.recursive.client_policies {
             lists.push(&mut p.clients);
@@ -1419,6 +1789,9 @@ pub struct DohUpdate {
     /// names); empty or absent means everyone.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub allowed_networks: Option<Vec<String>>,
+    /// Also serve DoH over HTTP/3.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub http3: Option<bool>,
 }
 
 /// Partial updates for the policy engine (allow/block lists and Filter AAAA).
@@ -1537,6 +1910,10 @@ impl RuntimeSettings {
             && self.ecs.is_none()
             && self.networks.is_none()
             && self.alerts.is_none()
+            && self.rrl.is_none()
+            && self.rpz.is_none()
+            && self.block_page.is_none()
+            && self.ddr.is_none()
     }
 
     /// Apply the overlay to `config` in place. `None` fields are untouched.
@@ -1647,6 +2024,9 @@ impl RuntimeSettings {
             if let Some(v) = &d.allowed_networks {
                 config.doh.allowed_networks = trim_list(v);
             }
+            if let Some(v) = d.http3 {
+                config.doh.http3 = v;
+            }
         }
         if let Some(d) = &self.doq {
             if let Some(v) = d.enabled {
@@ -1735,6 +2115,18 @@ impl RuntimeSettings {
         }
         if let Some(a) = &self.alerts {
             config.alerts = a.clone();
+        }
+        if let Some(r) = &self.rrl {
+            config.rrl = r.clone();
+        }
+        if let Some(r) = &self.rpz {
+            config.rpz = r.clone();
+        }
+        if let Some(b) = &self.block_page {
+            config.block_page = b.clone();
+        }
+        if let Some(d) = &self.ddr {
+            config.ddr = d.clone();
         }
         if let Some(w) = &self.web {
             config.web = w.clone();
@@ -1904,6 +2296,7 @@ impl RuntimeSettings {
                 handshake_timeout_secs: Some(config.doh.handshake_timeout_secs),
                 max_connections: Some(config.doh.max_connections),
                 allowed_networks: Some(config.doh.allowed_networks.clone()),
+                http3: Some(config.doh.http3),
             }),
             doq: Some(ListenerUpdate {
                 enabled: Some(config.doq.enabled),
@@ -1956,6 +2349,10 @@ impl RuntimeSettings {
             ecs: Some(config.ecs.clone()),
             networks: Some(config.networks.clone()),
             alerts: Some(config.alerts.clone()),
+            rrl: Some(config.rrl.clone()),
+            rpz: Some(config.rpz.clone()),
+            block_page: Some(config.block_page.clone()),
+            ddr: Some(config.ddr.clone()),
         }
     }
 }
@@ -2245,6 +2642,14 @@ impl DaygleConfig {
             if enabled && !(1..=65_536).contains(&value) {
                 return Err(DaygleError::Config(format!("{name} must be in 1..=65536")));
             }
+        }
+        // DoH over HTTP/3 and DoQ both listen on UDP.
+        if self.doh.enabled && self.doh.http3 && self.doq.enabled && self.doh.port == self.doq.port
+        {
+            return Err(DaygleError::Config(format!(
+                "DoH over HTTP/3 and DoQ cannot share UDP port {}",
+                self.doh.port
+            )));
         }
         if self.doq.enabled && !(1..=65_536).contains(&self.doq.max_concurrent_streams) {
             return Err(DaygleError::Config(
@@ -2674,6 +3079,13 @@ impl DaygleConfig {
             }
         }
         let catalog = self.authoritative.catalog_zone.trim();
+        for entry in &self.rrl.exempt {
+            if !self.is_network_entry(entry) {
+                return Err(DaygleError::Config(format!(
+                    "rrl.exempt: '{entry}' is not a network, an address or a network name"
+                )));
+            }
+        }
         for entry in &self.server.proxy_protocol {
             if !self.is_network_entry(entry) {
                 return Err(DaygleError::Config(format!(
@@ -2832,6 +3244,19 @@ impl DaygleConfig {
         self.alerts
             .check()
             .map_err(|e| DaygleError::Config(format!("alerts: {e}")))?;
+        self.rrl
+            .check()
+            .map_err(|e| DaygleError::Config(format!("rrl: {e}")))?;
+        check_rpz_zones(&self.rpz, &self.authoritative.tsig_keys)
+            .map_err(|e| DaygleError::Config(format!("rpz: {e}")))?;
+        self.block_page
+            .check()
+            .map_err(|e| DaygleError::Config(format!("block_page: {e}")))?;
+        self.check_block_page_port()
+            .map_err(|e| DaygleError::Config(format!("block_page: {e}")))?;
+        self.ddr
+            .check()
+            .map_err(|e| DaygleError::Config(format!("ddr: {e}")))?;
         self.dns64
             .compile(&self.all_networks())
             .map_err(|e| DaygleError::Config(format!("dns64: {e}")))?;
@@ -3666,6 +4091,10 @@ pub struct DohSettings {
     /// names). Empty means everyone; clients outside the list get REFUSED
     /// and, on this listener only, are treated as allowed for recursion.
     pub allowed_networks: Vec<String>,
+    /// Also serve DoH over HTTP/3 (QUIC, UDP) on the same addresses and
+    /// port, with the same certificate, endpoint and allowed networks.
+    #[serde(default)]
+    pub http3: bool,
 }
 
 impl Default for DohSettings {
@@ -3683,6 +4112,7 @@ impl Default for DohSettings {
             handshake_timeout_secs: 10,
             max_connections: 1024,
             allowed_networks: vec![],
+            http3: false,
         }
     }
 }
@@ -4333,12 +4763,27 @@ mod tests {
         c.alerts.webhook_url = s("https://hooks.example/daygle");
         c.alerts.smtp_password = s("secret");
         c.alerts.ai_blocks = true;
+        c.rrl.enabled = true;
+        c.rrl.slip = 0;
+        c.rrl.exempt = vec![s("LAN")];
+        c.rpz = vec![RpzZoneConfig {
+            name: s("rpz.local"),
+            rules: s("bad.example CNAME ."),
+            policy: RpzPolicy::Nodata,
+            ..Default::default()
+        }];
         c.networks = vec![NamedNetwork {
             name: s("LAN"),
             cidrs: vec![s("192.168.1.0/24")],
             description: s("home"),
         }];
 
+        c.doh.http3 = true;
+        c.block_page.enabled = true;
+        c.block_page.ipv4 = s("192.168.1.2");
+        c.block_page.message = s("Ask Sam");
+        c.ddr.enabled = false;
+        c.ddr.name = s("dns.example.com");
         let stored = serde_json::to_string(&RuntimeSettings::capture(&c)).unwrap();
         let overlay: RuntimeSettings = serde_json::from_str(&stored).unwrap();
         let mut restored = DaygleConfig::default();
@@ -4359,6 +4804,10 @@ mod tests {
         assert_eq!(restored.ecs, c.ecs, "ecs");
         assert_eq!(restored.networks, c.networks, "networks");
         assert_eq!(restored.alerts, c.alerts, "alerts");
+        assert_eq!(restored.rrl, c.rrl, "rrl");
+        assert_eq!(restored.rpz, c.rpz, "rpz");
+        assert_eq!(restored.block_page, c.block_page, "block_page");
+        assert_eq!(restored.ddr, c.ddr, "ddr");
 
         // Clearing a value in the console must stay cleared after a restart,
         // even when the config file sets it.
@@ -4686,6 +5135,27 @@ fd0000000000000000000000000000aa 02 40 00 80     eth0
         ] {
             assert!(bad.compile().is_err(), "{bad:?}");
         }
+    }
+
+    #[test]
+    fn block_page_needs_an_address_and_its_own_port() {
+        let mut c = DaygleConfig::default();
+        c.block_page.enabled = true;
+        assert!(c.block_page.check().is_err(), "no address");
+        c.block_page.ipv4 = "192.168.1.2".to_string();
+        assert!(c.block_page.check().is_ok());
+        c.block_page.ipv6 = "not-an-address".to_string();
+        assert!(c.block_page.check().is_err());
+        c.block_page.ipv6 = String::new();
+        c.web.http_enabled = true;
+        c.web.http_port = 80;
+        c.block_page.port = 80;
+        assert!(c
+            .check_block_page_port()
+            .unwrap_err()
+            .contains("web console"));
+        c.block_page.port = 8081;
+        assert!(c.check_block_page_port().is_ok());
     }
 
     #[test]

@@ -43,6 +43,14 @@ pub struct Shared {
     pub recursive_admission: Arc<crate::dispatcher::RecursiveAdmission>,
     pub config: Arc<ArcSwap<DaygleConfig>>,
     pub rate_limiter: Arc<RateLimiter>,
+    /// Recent block-page answers (the page reads them).
+    pub block_log: Arc<daygle_dns_core::block_log::BlockLog>,
+    /// The block page's web server; `None` in tests.
+    pub block_page: Option<Arc<crate::block_page::BlockPageServer>>,
+    /// Response policy zones; `None` in tests.
+    pub rpz: Option<Arc<daygle_dns_authoritative::rpz::RpzManager>>,
+    /// Response rate limiting (`[rrl]`), shared by every listener.
+    pub rrl: Arc<daygle_dns_core::rrl::ResponseRateLimiter>,
     pub metrics: Arc<Metrics>,
     pub logs: Arc<LogStore>,
     /// Coalescing session-failure logger for DoT/DoH/DoQ: certificate
@@ -76,6 +84,8 @@ pub struct ListenerAddrs {
     pub dot: Option<std::net::SocketAddr>,
     pub doh: Option<std::net::SocketAddr>,
     pub doq: Option<std::net::SocketAddr>,
+    /// DoH over HTTP/3 (UDP).
+    pub doh3: Option<std::net::SocketAddr>,
 }
 
 /// Commands sent to the DNS listener supervisor.
@@ -192,6 +202,20 @@ pub fn apply_config(shared: &Shared, new: Arc<DaygleConfig>) -> bool {
     // Rate limiting. The shared limiter holds its own settings snapshot and
     // keeps its buckets, so a reload applies new limits (or disables the
     // limiter) without dropping in-flight window state.
+    if old.block_page != new.block_page {
+        if let Some(page) = &shared.block_page {
+            page.apply(&new.block_page);
+        }
+    }
+    if old.rpz != new.rpz {
+        if let Some(rpz) = &shared.rpz {
+            rpz.set_zones(&new.rpz);
+            info!("response policy zones reloaded");
+        }
+    }
+    if old.rrl != new.rrl || old.networks != new.networks {
+        apply_rrl(shared, &new);
+    }
     if old.rate_limit != new.rate_limit {
         shared.rate_limiter.set_settings(&new.rate_limit);
         if new.rate_limit.enabled {
@@ -367,6 +391,15 @@ pub fn spawn_blocklist_refresh(
     Some(manager)
 }
 
+/// Apply `config.rrl` to the shared response rate limiter.
+pub fn apply_rrl(shared: &Shared, config: &DaygleConfig) {
+    // Exemptions name networks; an unknown name was rejected when saved.
+    let exempt = config
+        .resolve_networks(&config.rrl.exempt)
+        .unwrap_or_default();
+    shared.rrl.set_settings(&config.rrl, exempt);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -393,6 +426,10 @@ mod tests {
             )),
             config: Arc::new(ArcSwap::from(Arc::new(cfg))),
             rate_limiter: Arc::new(RateLimiter::default()),
+            rrl: Arc::default(),
+            rpz: None,
+            block_log: Arc::default(),
+            block_page: None,
             metrics: Arc::new(Metrics::default()),
             logs: Arc::new(LogStore::new(16)),
             session: Arc::new(crate::tls_diag::SessionLog::new(Arc::new(LogStore::new(

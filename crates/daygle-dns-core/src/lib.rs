@@ -8,6 +8,7 @@
 
 pub mod alerts;
 pub mod auth;
+pub mod block_log;
 pub mod blocking;
 pub mod config;
 pub mod error;
@@ -16,6 +17,7 @@ pub mod logs;
 pub mod metrics;
 pub mod query_log;
 pub mod rate_limit;
+pub mod rrl;
 pub mod schedule;
 pub mod stats;
 pub mod totp;

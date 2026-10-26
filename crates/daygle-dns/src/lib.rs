@@ -4,6 +4,7 @@
 //! [`DnsDispatcher`] and a [`bind`] helper that wires every subsystem into a
 //! runnable server. The `daygle-dns` binary is a thin CLI wrapper around this.
 
+mod block_page;
 mod connection_admission;
 pub mod cookies;
 pub mod dispatcher;
@@ -13,6 +14,7 @@ mod net;
 pub mod proxy_protocol;
 pub mod query_db_log;
 pub mod reload;
+pub mod rrl;
 pub mod syslog;
 pub mod tls_diag;
 pub mod web;
@@ -52,6 +54,8 @@ pub struct BoundServer {
     pub doh_addr: Option<std::net::SocketAddr>,
     /// The initially bound DNS-over-QUIC address, if DoQ is enabled.
     pub doq_addr: Option<std::net::SocketAddr>,
+    /// The initially bound DoH over HTTP/3 (UDP) address, if enabled.
+    pub doh3_addr: Option<std::net::SocketAddr>,
     /// The REST API + GUI address as bound at startup: the HTTP listener,
     /// or HTTPS when HTTP is off (see [`BoundServer::web_addrs`]).
     pub api_addr: std::net::SocketAddr,
@@ -445,6 +449,25 @@ pub async fn bind_with(
     ));
     tokio::spawn(local_root.clone().run_forever(shutdown.clone()));
 
+    // Response policy zones (RPZ): rules typed in the console, fetched over
+    // HTTP(S) or transferred from a feed, kept loaded in the background and
+    // published to the dispatcher.
+    let rpz_manager = daygle_dns_authoritative::rpz::RpzManager::new(
+        Arc::new(ArcSwap::from_pointee(
+            daygle_dns_authoritative::rpz::RpzSet::default(),
+        )),
+        catalog.clone(),
+    );
+    rpz_manager.set_zones(&config.rpz);
+    tokio::spawn(rpz_manager.clone().run_forever(shutdown.clone()));
+
+    // The block page: blocked names can point here, and its web server says
+    // what was blocked and why.
+    let block_log = Arc::new(daygle_dns_core::block_log::BlockLog::default());
+    let block_page =
+        block_page::BlockPageServer::new(block_log.clone(), logs.clone(), shutdown.clone());
+    block_page.apply(&config.block_page);
+
     // Recursive.
     let resolver = if config.recursive.enabled {
         Some(Arc::new(RecursiveResolver::build(
@@ -582,6 +605,15 @@ pub async fn bind_with(
         )),
         config: config_swap,
         rate_limiter: rate_limiter.clone(),
+        rpz: Some(rpz_manager.clone()),
+        block_log: block_log.clone(),
+        block_page: Some(block_page.clone()),
+        rrl: Arc::new(daygle_dns_core::rrl::ResponseRateLimiter::new(
+            &config.rrl,
+            config
+                .resolve_networks(&config.rrl.exempt)
+                .unwrap_or_default(),
+        )),
         metrics: metrics.clone(),
         logs: logs.clone(),
         session: session.clone(),
@@ -698,12 +730,20 @@ pub async fn bind_with(
                 shared
                     .recursive_admission
                     .set_limit(config.recursive.max_concurrent_lookups);
+                reload::apply_rrl(&shared, config);
+                if let Some(rpz) = &shared.rpz {
+                    rpz.set_zones(&config.rpz);
+                }
+                if let Some(page) = &shared.block_page {
+                    page.apply(&config.block_page);
+                }
             })
         }),
         web_apply: Some(web_apply),
         stats: stats.clone(),
         ai: ai_engine.clone(),
         acme: Arc::new(daygle_dns_api::acme::Acme::default()),
+        rpz: Some(rpz_manager.clone()),
     };
     // Issue and renew ACME (Let's Encrypt) certificates in the background.
     tokio::spawn(daygle_dns_api::acme::run_renewals(
@@ -761,6 +801,7 @@ pub async fn bind_with(
         dot_addr: initial_addrs.dot,
         doh_addr: initial_addrs.doh,
         doq_addr: initial_addrs.doq,
+        doh3_addr: initial_addrs.doh3,
         api_addr,
         metrics,
         logs,
@@ -936,6 +977,9 @@ fn build_dispatcher(shared: &Shared, config: &DaygleConfig) -> DnsDispatcher {
     .with_advanced_blocking(shared.advanced_blocking.clone())
     .with_query_logger(shared.query_logger.clone())
     .with_query_db_logger(shared.query_db_logger.clone())
+    .with_rrl(shared.rrl.clone())
+    .with_block_log(shared.block_log.clone())
+    .with_rpz(shared.rpz.as_ref().map(|rpz| rpz.set()).unwrap_or_default())
 }
 
 /// Bind listeners for a specific configuration snapshot (the current one, or
@@ -1289,6 +1333,13 @@ async fn bind_listeners_inner(
 
     if config.doh.enabled {
         let tls_config = daygle_dns_dot::build_doh_tls_config(&config.doh)?;
+        // The same service over HTTP/3 (QUIC): UDP on each address, on the
+        // port the TCP listener got.
+        let h3_tls_config = if config.doh.http3 {
+            Some(daygle_dns_dot::build_doh3_tls_config(&config.doh)?)
+        } else {
+            None
+        };
         tls_diag::report_certificate(
             tls_diag::HTTPS,
             "DoH",
@@ -1318,6 +1369,19 @@ async fn bind_listeners_inner(
                 &config.doh.endpoint,
             )?;
             info!(addr = %bound, endpoint = %config.doh.endpoint, "DNS over HTTPS listening");
+            if let Some(h3_tls_config) = &h3_tls_config {
+                let socket =
+                    net::bind_udp(std::net::SocketAddr::new(addr.ip(), bound.port()), v6_only)?;
+                let bound = socket.local_addr()?;
+                addrs.doh3.get_or_insert(bound);
+                daygle_dns_dot::register_doh3(
+                    server,
+                    socket,
+                    h3_tls_config.clone(),
+                    Duration::from_secs(config.doh.handshake_timeout_secs.max(30)),
+                )?;
+                info!(addr = %bound, "DNS over HTTPS (HTTP/3) listening");
+            }
         }
     }
 

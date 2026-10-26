@@ -38,6 +38,8 @@ pub const DOT_ALPN: &[u8] = b"dot";
 pub const DOH_ALPN: &[u8] = b"h2";
 /// The ALPN protocol identifier for DNS over QUIC (RFC 9250 §4.3).
 pub const DOQ_ALPN: &[u8] = b"doq";
+/// The ALPN protocol identifier for HTTP/3 (DoH over QUIC).
+pub const DOH3_ALPN: &[u8] = b"h3";
 
 /// Build the TLS configuration described by `settings`, generating a
 /// self-signed certificate when requested and none is present.
@@ -83,6 +85,38 @@ pub fn register_doh<T: RequestHandler>(
             endpoint.to_string(),
         )
         .map_err(|e| DaygleError::Tls(format!("cannot register DoH listener: {e}")))
+}
+
+/// Build the TLS configuration for DoH over HTTP/3: the DoH certificate,
+/// `h3` ALPN, TLS 1.3 only (QUIC requires it).
+pub fn build_doh3_tls_config(settings: &DohSettings) -> Result<Arc<ServerConfig>> {
+    ensure_certificate_paths(
+        &settings.cert_path,
+        &settings.key_path,
+        settings.self_signed,
+        &settings.server_name,
+    )?;
+    let config = load_tls_config_versions(
+        &settings.cert_path,
+        &settings.key_path,
+        DOH3_ALPN,
+        &[&rustls::version::TLS13],
+    )?;
+    Ok(Arc::new(config))
+}
+
+/// Register a DoH over HTTP/3 listener on a Hickory server, on a bound UDP
+/// socket. `timeout` closes a connection that sends no request for that
+/// long.
+pub fn register_doh3<T: RequestHandler>(
+    server: &mut Server<T>,
+    socket: tokio::net::UdpSocket,
+    tls_config: Arc<ServerConfig>,
+    timeout: Duration,
+) -> Result<()> {
+    server
+        .register_h3_listener_with_tls_config(socket, timeout, tls_config, None)
+        .map_err(|e| DaygleError::Tls(format!("cannot register the DoH over HTTP/3 listener: {e}")))
 }
 
 /// Build the DoQ TLS configuration (RFC 9250): `doq` ALPN, TLS 1.3 only.

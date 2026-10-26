@@ -208,6 +208,7 @@ mod tests {
             safe_search: false,
             youtube_restricted: false,
             schedule: vec![],
+            blocked_services: vec![],
             position: 0,
             last_modified_at: None,
         };

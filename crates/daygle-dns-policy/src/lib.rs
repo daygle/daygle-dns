@@ -23,6 +23,7 @@ mod engine;
 mod plugin;
 mod rule;
 pub mod safe_search;
+pub mod services;
 
 pub use acl::Acl;
 pub use advanced::{is_listener_keyword, validate_regex, AdvancedBlocking, LISTENER_KEYWORDS};

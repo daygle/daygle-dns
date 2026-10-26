@@ -3,6 +3,8 @@
 
 mod common;
 
+use std::sync::Arc;
+
 use common::*;
 use daygle_dns_authoritative::model::{RecordInput, ZoneInput};
 use hickory_proto::op::{Message, MessageType, OpCode, Query, ResponseCode};
@@ -148,6 +150,94 @@ async fn allowed_networks_refuse_clients_outside_the_list() {
     let bytes = resp.bytes().await.unwrap();
     let response = Message::from_vec(&bytes).expect("decode DoH response");
     assert_eq!(response.response_code, ResponseCode::Refused);
+
+    shutdown(server).await;
+}
+
+/// With `http3` on, the same DoH service answers over HTTP/3 (QUIC, UDP)
+/// on the same port number.
+#[tokio::test]
+async fn serves_queries_over_http3() {
+    use hickory_server::net::h3::H3ClientStream;
+    use hickory_server::net::xfer::{DnsRequestSender, FirstAnswer};
+
+    let dir = tempfile::tempdir().unwrap();
+    let cert = dir.path().join("server.crt");
+    let mut config = base_config(&dir.path().join("daygle-dns.db"));
+    config.doh.enabled = true;
+    config.doh.http3 = true;
+    config.doh.self_signed = true;
+    config.doh.cert_path = cert.to_string_lossy().to_string();
+    config.doh.key_path = dir.path().join("server.key").to_string_lossy().to_string();
+    config.doh.server_name = "daygle.test".to_string();
+    let server = spawn(config).await;
+    let zone = server
+        .catalog
+        .store()
+        .create_zone(&ZoneInput {
+            name: "h3.test".to_string(),
+            ..Default::default()
+        })
+        .unwrap();
+    server
+        .catalog
+        .store()
+        .upsert_record(
+            &zone.id,
+            &RecordInput {
+                name: "www".to_string(),
+                rtype: "A".to_string(),
+                content: "203.0.113.33".to_string(),
+                ttl: 300,
+                priority: 0,
+                disabled: false,
+            },
+        )
+        .unwrap();
+    server.catalog.reload().unwrap();
+    let h3 = server.doh3_addr.expect("HTTP/3 is enabled");
+    assert_eq!(h3.port(), server.doh_addr.unwrap().port());
+
+    let mut roots = rustls::RootCertStore::empty();
+    for c in rustls::pki_types::pem::PemObject::pem_file_iter(&cert).unwrap() {
+        roots.add(c.unwrap()).unwrap();
+    }
+    let tls = rustls::ClientConfig::builder_with_provider(Arc::new(
+        rustls::crypto::ring::default_provider(),
+    ))
+    .with_protocol_versions(&[&rustls::version::TLS13])
+    .unwrap()
+    .with_root_certificates(roots)
+    .with_no_client_auth();
+    let mut stream = H3ClientStream::builder()
+        .crypto_config(tls)
+        .build(h3, Arc::from("daygle.test"), Arc::from("/dns-query"))
+        .await
+        .expect("HTTP/3 connection");
+
+    let mut query = Message::new(0, MessageType::Query, OpCode::Query);
+    query.metadata.recursion_desired = true;
+    query.add_query(Query::query(
+        Name::from_utf8("www.h3.test.").unwrap(),
+        RecordType::A,
+    ));
+    let response = stream
+        .send_message(hickory_proto::op::DnsRequest::new(
+            query,
+            Default::default(),
+        ))
+        .first_answer()
+        .await
+        .expect("HTTP/3 answer");
+    assert_eq!(response.response_code, ResponseCode::NoError);
+    assert_eq!(
+        response
+            .answers
+            .first()
+            .map(|r| r.data.to_string())
+            .as_deref(),
+        Some("203.0.113.33")
+    );
 
     shutdown(server).await;
 }

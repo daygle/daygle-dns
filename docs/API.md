@@ -204,6 +204,10 @@ Returns a flat snapshot of the atomic counters:
   "split_horizon": 4,
   "rate_limited": 3,
   "errors": 0,
+  "rrl_dropped": 0,
+  "rrl_slipped": 0,
+  "rrl_would_limit": 0,
+  "rpz_hits": 7,
   "dnssec_validated": 500,
   "bytes_in": 45056,
   "bytes_out": 0
@@ -213,6 +217,11 @@ Returns a flat snapshot of the atomic counters:
 ```
 GET /api/metrics/prometheus
 ```
+
+`rrl_dropped` and `rrl_slipped` count UDP responses dropped or sent
+truncated by response rate limiting, `rrl_would_limit` those it would have
+limited in log-only mode, and `rpz_hits` the queries a response policy zone
+acted on.
 
 The same counters, plus the resolver's routes, outcomes, upstream
 connections and lookup-time histogram, and `uptime_seconds` and `zones`
@@ -356,7 +365,11 @@ outbound_ip_versions/client_policies), `dot`,
 `doh`, `doq` (enabled/port/self_signed/server_name/cert_path/key_path/
 certificate/max_connections [+ `dot`/`doh` handshake_timeout_secs, `doh.endpoint`,
 `doq.idle_timeout_secs`/`doq.max_concurrent_streams`]
-/allowed_networks), `api`
+/allowed_networks; `doh.http3`, default off, also serves DoH over HTTP/3 (QUIC)
+on UDP at the same addresses and port number, with the same certificate,
+endpoint and allowed networks - for clients configured for HTTP/3 DoH and
+those that learn of it through DDR (below); browsers are not told through
+`Alt-Svc`; it cannot share a UDP port with DoQ), `api`
 (gui_enabled/cors_origins), `display` (the console's date/time defaults:
 `time_zone` = `system`, `UTC` or an IANA zone; `date_format` = `system`/`dmy`/
 `mdy`/`ymd`/`d_mon_y`; `time_format` = `system`/`24h`/`12h`), `syslog`, `dns64` and `ecs` (see below), `policy`
@@ -370,7 +383,7 @@ every client - see Safe Search below), and `authoritative`
 (default_record_ttl/default_primary_ns/default_admin_mailbox/axfr_enabled/axfr_networks/
 allow_dynamic_updates/update_networks/notify_enabled/notify_targets/
 notify_listen_enabled/stub_zones/catalog_zone/catalog_consumers). Runtime groups (`recursive`, `dot`, `doh`, `doq`,
-`policy`, `authoritative`, `ai`, `display`, `alerts`) are stored in the database and survive restarts and
+`policy`, `authoritative`, `ai`, `display`, `alerts`, `rrl`, `rpz`) are stored in the database and survive restarts and
 config-file edits; `server.*` and `api.*` stay config-file-owned so a broken
 listener can always be fixed by editing the file. A `server` or `api` group
 in a `PUT` is applied to the running server but not stored, so it reverts
@@ -1212,7 +1225,8 @@ Response Policy Zone in zone-file form (as served over HTTP by most RPZ
 feeds): every QNAME trigger in it is blocked, wildcards (`*.example.com`)
 included, whatever its action (NXDOMAIN, NODATA, drop, a walled-garden CNAME
 or local data); `rpz-passthru.` entries are exceptions and are left out, and
-IP and NSDNAME triggers are ignored. `ok: false` with a `reason` means
+IP and NSDNAME triggers are ignored (to use an RPZ feed's own actions, add it
+under Response Policy Zones instead). `ok: false` with a `reason` means
 the URL fetched fine but the content does not parse as (or does not match)
 `format`; a `502` means the URL itself could not be fetched.
 
@@ -1298,6 +1312,11 @@ and YouTube Restricted Mode on for the group's clients, by the same
 first-group rule; the global `policy.safe_search` and
 `policy.youtube_restricted` switches apply to every client whatever the
 groups say.
+`blocked_services` lists services (by id, e.g. `["tiktok", "roblox"]`) the
+group blocks: every domain the service uses, and its subdomains (`400` for
+an unknown id; ids are stored in their canonical form). `GET
+/api/policy/services` returns the catalog: `{"services": [{"id", "name",
+"category", "domains"}]}`. The group's `allow` list still wins.
 `schedule` limits when the group applies: a list of
 `{"days": ["mon", "fri"], "start": "21:00", "end": "07:00"}` windows
 (`days` from `mon`..`sun`, full names accepted, empty for every day; times
@@ -1344,6 +1363,133 @@ plus that name's addresses; with YouTube Restricted Mode on,
 `restrict.youtube.com`. `HTTPS`/`SVCB` queries for those names are answered
 empty and other types resolve as usual. It applies only to clients allowed
 to use recursion, and not to names hosted in a zone here.
+
+### Response policy zones (RPZ)
+
+```
+GET    /api/rpz
+POST   /api/rpz
+POST   /api/rpz/test
+```
+
+Response policy zones (the console's **Filtering → Response Policy Zones**)
+are DNS firewall rules in the standard RPZ format. The list is the `rpz`
+settings group, replaced as a whole and in order by `PUT /api/config` with
+`{"rpz": [...]}`; each zone:
+
+| Field | Default | Meaning |
+|---|---|---|
+| `name` | | The zone's name, e.g. `rpz.example.com`: what is transferred, and the suffix stripped from owner names. |
+| `enabled` | `true` | |
+| `source` | `local` | `local` (the rules in `rules`), `url` (a zone file fetched from `url`) or `transfer` (AXFR from `primaries`, signed with the TSIG key `tsig_key` when set). |
+| `rules` | `""` | `local`: zone-file lines; a line that does not parse is a `400`. |
+| `url` | `""` | `url`: an http(s) URL. |
+| `primaries`, `tsig_key` | `[]`, `""` | `transfer`: the feed's servers (`IP` or `IP:port`), and a key from `authoritative.tsig_keys`. |
+| `refresh_secs` | `3600` | `url`/`transfer`: how often to check for changes (60 at least). A transfer is repeated only when the SOA serial changes. |
+| `policy` | `given` | `given` (each rule's own action), `disabled` (count matches, act on none), or an action for every match: `nxdomain`, `nodata`, `passthru`, `drop`, `tcp_only`, `cname` (redirect to `cname_target`). |
+| `cname_target` | `""` | The walled-garden name for `policy` `cname`. |
+
+Triggers (owner names, relative to the zone): a domain or `*.domain`
+(`*.example.com` covers names under `example.com`, not the name itself);
+`prefix.reversed-address.rpz-client-ip` for the client's address
+(`32.7.1.168.192.rpz-client-ip` is `192.168.1.7/32`; IPv6 words are reversed
+too, `zz` standing for `::`); and `prefix.reversed-address.rpz-ip` for an
+address in the answer. A domain trigger also matches a name in the answer's
+CNAME chain. NSDNAME and NSIP triggers are not supported (they are counted as
+`unsupported` and skipped).
+
+Actions: `CNAME .` is NXDOMAIN, `CNAME *.` NODATA, `CNAME rpz-passthru.`
+exempts the query from the rest of RPZ (as does a CNAME to the trigger
+itself), `CNAME rpz-drop.` sends no answer, and `CNAME rpz-tcp-only.`
+answers UDP queries truncated so the client retries over TCP (TCP queries
+go through). Any other records are local data, answered instead of the real
+answer: records of the queried type, else a CNAME (followed, so a walled
+garden returns its address; a target `*.garden.example.` becomes the query
+name under the garden), else NODATA.
+
+Zones are checked in order and the first that matches decides. Within a
+zone, client-IP triggers come before domain triggers, an exact domain
+before a wildcard, and the longest wildcard or address prefix wins. Answer
+triggers (CNAME targets and addresses) are checked on recursive answers.
+RPZ applies to what the blocklists and filtering groups let through, and an
+allowlisted name is exempt. A zone that cannot be loaded keeps its last
+loaded rules; failures raise a `blocklist_failure` (URL) or
+`zone_transfer_failure` (transfer) alert.
+
+`GET /api/rpz` returns `{"zones": [...]}`, each with `name`, `enabled`,
+`source`, `policy`, `loaded`, `rules` (`qname`, `wildcard`, `client_ip`,
+`response_ip`, `unsupported` counts), `serial`, `last_loaded`, `last_checked`
+(RFC 3339), `last_error` and `hits` (matches since start, those of a
+`disabled` zone included). `POST /api/rpz` checks every URL and transfer
+zone for changes now (`202`). `POST /api/rpz/test` with `{"client",
+"domain"}` lists the zones that match, in order: `{"allowlisted", "matches":
+[{"zone", "trigger", "action", "log_only"}]}`; the first match that is not
+`log_only` is the one that acts.
+
+### Encrypted DNS discovery (DDR)
+
+The `ddr` settings group (Settings → Encrypted DNS) answers Discovery of
+Designated Resolvers (RFC 9462): an `SVCB` query for `_dns.resolver.arpa`,
+or for `_dns.<name>` where `<name>` is a name the encrypted listeners go by
+(and not a zone hosted here), gets one SVCB record per enabled DoH, DoT and
+DoQ listener the client is allowed on (its `allowed_networks`): priority 1
+upwards, the target name, `alpn` (`h2`, plus `h3` with `doh.http3`; `dot`;
+`doq`), `port`, `ipv4hint`/`ipv6hint` when the listener is bound to
+specific addresses, and for DoH `dohpath` (`<endpoint>{?dns}`, RFC 9461).
+
+| Field | Default | Meaning |
+|---|---|---|
+| `enabled` | `true` | Off: the queries are answered empty. |
+| `name` | `""` | The target name devices connect to (it must be in the certificate); empty: each listener's certificate name (`server_name`, or the stored certificate's). |
+
+Other queries under `resolver.arpa` are never forwarded: `resolver.arpa` and
+`_dns.resolver.arpa` are answered empty for other types, and other names
+under it NXDOMAIN. Devices verify the designated resolver's certificate
+(it must be trusted and cover the address they use for this server), so a
+self-signed certificate is usually not taken up.
+
+### Block page
+
+The `block_page` settings group (Filtering → Response Filters, replaced as
+a whole by `PUT /api/config` with `{"block_page": {...}}`) answers blocked
+names with this server's address, where a small web server shows a page
+saying what was blocked and why:
+
+| Field | Default | Meaning |
+|---|---|---|
+| `enabled` | `false` | Requires `ipv4` or `ipv6`. |
+| `ipv4`, `ipv6` | `""` | The address blocked A (AAAA) queries are answered with: this server, as clients reach it. Without `ipv6`, blocked AAAA queries are answered empty; without `ipv4`, A queries keep NXDOMAIN. |
+| `listen`, `port` | `0.0.0.0`, `80` | Where the page is served (plain HTTP). The port may not be one the web console, the API or a DoH/DoT listener uses (`400`). |
+| `message` | `""` | Extra text on the page (escaped; 2000 characters at most). |
+
+It applies to blocks that would be NXDOMAIN: blocklists, the allow and
+block lists, the AI scanner, CNAME inspection, and filtering groups whose
+`response` is NXDOMAIN. `HTTPS`/`SVCB` queries for blocked names are
+answered empty. The page answers every path with `403` and HTML naming the
+`Host` and, when the visitor's lookup was within the last 10 minutes, the
+block reason. HTTPS sites cannot show it (the browser reports a certificate
+or connection error instead).
+
+### Response rate limiting (RRL)
+
+The `rrl` settings group (Settings → Rate Limiting, replaced as a whole by
+`PUT /api/config` with `{"rrl": {...}}`) limits identical UDP responses per
+client network, against reflection and amplification attacks:
+
+| Field | Default | Meaning |
+|---|---|---|
+| `enabled` | `false` | |
+| `responses_per_second` | `10` | Identical answers (same name and type) per second per network. |
+| `nxdomains_per_second` | `10` | NXDOMAIN answers per second per network and parent domain. |
+| `errors_per_second` | `10` | Error answers (SERVFAIL, REFUSED...) per second per network. `0` in any of the three: no limit. |
+| `window_secs` | `15` | How much excess (in seconds of the rate) a network's account remembers. |
+| `slip` | `2` | Every `slip`-th limited response is sent truncated (TC, no records) instead of dropped, so a real client retries over TCP; `0` drops all, `1` truncates all. |
+| `ipv4_prefix`, `ipv6_prefix` | `24`, `56` | The size of a client network. |
+| `exempt` | loopback | Networks never limited (addresses, CIDRs or network names). |
+| `log_only` | `false` | Count what would be limited (`rrl_would_limit`) without limiting. |
+
+TCP responses, and responses to a request with a valid DNS server cookie
+(whose source address is proven), are never limited.
 
 ### Alerts
 

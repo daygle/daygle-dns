@@ -172,6 +172,67 @@ fn normalize_alerts(
 /// Stands for a stored secret in what the browser sees and sends back.
 const REDACTED: &str = "[redacted]";
 
+/// `GET /api/policy/services` - the services a filtering group can block.
+pub async fn blockable_services() -> Response {
+    Json(serde_json::json!({ "services": daygle_dns_policy::services::SERVICES })).into_response()
+}
+
+/// `GET /api/rpz` - each response policy zone's state.
+pub async fn rpz_status(State(state): State<AppState>) -> Response {
+    let zones = state.rpz.as_ref().map(|m| m.status()).unwrap_or_default();
+    Json(serde_json::json!({ "zones": zones })).into_response()
+}
+
+/// `POST /api/rpz` - check every fetched or transferred zone for changes
+/// now.
+pub async fn rpz_refresh(State(state): State<AppState>) -> Response {
+    let Some(manager) = &state.rpz else {
+        return error_response(
+            StatusCode::NOT_FOUND,
+            "response policy zones are not available",
+        );
+    };
+    manager.refresh_now();
+    StatusCode::ACCEPTED.into_response()
+}
+
+/// Body of `POST /api/rpz/test`.
+#[derive(Deserialize)]
+pub struct RpzTestInput {
+    pub client: String,
+    pub domain: String,
+}
+
+/// `POST /api/rpz/test` - which zones match a query for `domain` from
+/// `client`, in order; the first that is not log-only acts.
+pub async fn rpz_test(State(state): State<AppState>, Json(input): Json<RpzTestInput>) -> Response {
+    let client: IpAddr = match input.client.trim().parse::<IpAddr>() {
+        Ok(ip) => ip.to_canonical(),
+        Err(_) => return error_response(StatusCode::BAD_REQUEST, "client must be an IP address"),
+    };
+    let domain = input
+        .domain
+        .trim()
+        .trim_end_matches('.')
+        .to_ascii_lowercase();
+    if domain.is_empty() {
+        return error_response(StatusCode::BAD_REQUEST, "enter a domain");
+    }
+    let allowlisted = state.policy.load().is_allowlisted(&domain);
+    let matches = state
+        .rpz
+        .as_ref()
+        .map(|m| m.set().load().explain(client, &domain))
+        .unwrap_or_default();
+    Json(serde_json::json!({
+        "client": client.to_string(),
+        "domain": domain,
+        "allowlisted": allowlisted,
+        "matches": matches,
+    }))
+    .into_response()
+}
+
 /// Body of `POST /api/alerts/test`: the settings to try (as on the form,
 /// saved or not); omitted, the saved ones.
 #[derive(Deserialize, Default)]
@@ -2489,6 +2550,20 @@ pub async fn upsert_blocking_group(
     if let Err(msg) = daygle_dns_core::schedule::validate(&input.schedule) {
         return error_response(StatusCode::BAD_REQUEST, format!("schedule: {msg}"));
     }
+    // Blocked services are stored by their canonical id, once each.
+    let mut services: Vec<String> = Vec::new();
+    for id in &input.blocked_services {
+        let Some(service) = daygle_dns_policy::services::find(id) else {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                format!("'{}' is not a known service", id.trim()),
+            );
+        };
+        if !services.iter().any(|s| s == service.id) {
+            services.push(service.id.to_string());
+        }
+    }
+    input.blocked_services = services;
     // Client networks are addresses or names of configured networks.
     let config = state.config.load_full();
     if let Some(entry) = input
@@ -4240,6 +4315,14 @@ pub struct SettingsUpdate {
     pub web: Option<WebUpdate>,
     /// Replaces the whole `[syslog]` section.
     pub syslog: Option<daygle_dns_core::config::SyslogSettings>,
+    /// Replaces the whole `[rrl]` section (response rate limiting).
+    pub rrl: Option<daygle_dns_core::config::RrlSettings>,
+    /// Replaces the response policy zones (`[[rpz]]`), in order.
+    pub rpz: Option<Vec<daygle_dns_core::config::RpzZoneConfig>>,
+    /// Replaces the whole `[block_page]` section.
+    pub block_page: Option<daygle_dns_core::config::BlockPageSettings>,
+    /// Replaces the whole `[ddr]` section (encrypted DNS discovery).
+    pub ddr: Option<daygle_dns_core::config::DdrSettings>,
     /// Replaces the whole `[alerts]` section; an `smtp_password` of
     /// `[redacted]` keeps the stored one.
     pub alerts: Option<daygle_dns_core::config::AlertSettings>,
@@ -4454,6 +4537,8 @@ pub struct DohUpdate {
     /// Client networks allowed to use this listener (addresses or network
     /// names); empty or absent means everyone.
     pub allowed_networks: Option<Vec<String>>,
+    /// Also serve DoH over HTTP/3 (UDP).
+    pub http3: Option<bool>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -4694,6 +4779,10 @@ pub async fn update_settings(
         if let Some(v) = &d.allowed_networks {
             config.doh.allowed_networks = normalize_policy_networks(v);
         }
+        if let Some(v) = d.http3 {
+            config.doh.http3 = v;
+            listeners_affected = true;
+        }
     }
     if let Some(d) = &update.doq {
         if let Some(v) = d.enabled {
@@ -4773,6 +4862,87 @@ pub async fn update_settings(
             return error_response(StatusCode::BAD_REQUEST, format!("ecs: {msg}"));
         }
         config.ecs = ecs;
+    }
+    if let Some(zones) = &update.rpz {
+        let zones: Vec<daygle_dns_core::config::RpzZoneConfig> = zones
+            .iter()
+            .map(|z| daygle_dns_core::config::RpzZoneConfig {
+                name: z.name.trim().trim_end_matches('.').to_ascii_lowercase(),
+                url: z.url.trim().to_string(),
+                tsig_key: z.tsig_key.trim().to_string(),
+                cname_target: z.cname_target.trim().trim_end_matches('.').to_string(),
+                primaries: z
+                    .primaries
+                    .iter()
+                    .map(|p| p.trim().to_string())
+                    .filter(|p| !p.is_empty())
+                    .collect(),
+                ..z.clone()
+            })
+            .collect();
+        if let Err(msg) =
+            daygle_dns_core::config::check_rpz_zones(&zones, &config.authoritative.tsig_keys)
+        {
+            return error_response(StatusCode::BAD_REQUEST, format!("rpz: {msg}"));
+        }
+        // Local rules must parse: a typo would otherwise drop the zone.
+        for zone in zones
+            .iter()
+            .filter(|z| z.source == daygle_dns_core::config::RpzSource::Local)
+        {
+            if let Err(msg) =
+                daygle_dns_authoritative::rpz::CompiledZone::from_text(&zone.name, &zone.rules)
+            {
+                return error_response(
+                    StatusCode::BAD_REQUEST,
+                    format!("rpz: zone '{}': {msg}", zone.name),
+                );
+            }
+        }
+        config.rpz = zones;
+    }
+    if let Some(ddr) = &update.ddr {
+        let ddr = daygle_dns_core::config::DdrSettings {
+            name: ddr.name.trim().trim_end_matches('.').to_ascii_lowercase(),
+            ..ddr.clone()
+        };
+        if let Err(msg) = ddr.check() {
+            return error_response(StatusCode::BAD_REQUEST, format!("ddr: {msg}"));
+        }
+        config.ddr = ddr;
+    }
+    if let Some(page) = &update.block_page {
+        let page = daygle_dns_core::config::BlockPageSettings {
+            ipv4: page.ipv4.trim().to_string(),
+            ipv6: page.ipv6.trim().to_string(),
+            listen: page.listen.trim().to_string(),
+            ..page.clone()
+        };
+        if let Err(msg) = page.check() {
+            return error_response(StatusCode::BAD_REQUEST, format!("block page: {msg}"));
+        }
+        config.block_page = page;
+    }
+    if let Some(rrl) = &update.rrl {
+        let rrl = daygle_dns_core::config::RrlSettings {
+            exempt: rrl
+                .exempt
+                .iter()
+                .map(|e| e.trim().to_string())
+                .filter(|e| !e.is_empty())
+                .collect(),
+            ..rrl.clone()
+        };
+        if let Err(msg) = rrl.check() {
+            return error_response(StatusCode::BAD_REQUEST, format!("rrl: {msg}"));
+        }
+        if let Some(bad) = rrl.exempt.iter().find(|e| !config.is_network_entry(e)) {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                format!("rrl: '{bad}' is not a network, an address or a network name"),
+            );
+        }
+        config.rrl = rrl;
     }
     if let Some(alerts) = &update.alerts {
         let alerts = normalize_alerts(alerts, &config.alerts);
@@ -5065,6 +5235,10 @@ pub async fn update_settings(
                 return error_response(StatusCode::BAD_REQUEST, msg);
             }
         }
+    }
+
+    if let Err(msg) = config.check_block_page_port() {
+        return error_response(StatusCode::BAD_REQUEST, format!("block page: {msg}"));
     }
 
     // Build the replacement recursive resolver before anything is persisted
