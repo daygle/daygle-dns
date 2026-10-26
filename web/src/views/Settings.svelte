@@ -27,17 +27,15 @@
     ['listeners', 'Encrypted DNS'],
     ['zones', 'Zones'],
     ['ai', 'AI Scanner'],
-    ['interface', 'Interface'],
     ['backup', 'Backup'],
   ];
   const TAGLINES = {
-    general: 'How the web console is reached (HTTP, HTTPS or both), and the DNS listeners this server was started with.',
+    general: 'How the web console is reached (HTTP, HTTPS or both), the DNS listeners this server was started with, and how dates and times are shown by default.',
     recursive: 'How the server answers names it does not host: resolving them itself from the root servers or forwarding to upstreams, and who may use it.',
     cache: 'How long answers are kept, how many, and how popular names are refreshed before they expire. Changes apply immediately.',
     listeners: 'Encrypted DNS: DNS over TLS, HTTPS and QUIC, and the certificate each one presents. Changes apply immediately.',
     zones: 'Defaults for new zones and records, and how other DNS servers may copy, update and be notified about your zones.',
     ai: 'The background scanner that classifies the domains in your DNS traffic and can block unsafe ones.',
-    interface: 'How the console shows dates and times by default.',
     backup: 'Download a backup of everything this server keeps, or restore one.',
   };
 
@@ -654,6 +652,34 @@
       manual update command still work.
     </p>
   </div>
+  <div class="card" style="margin-bottom: 14px">
+    <h3 style="margin: 0 0 10px">Date & Time Defaults</h3>
+    <div class="form-grid">
+      <label><span>Time Zone</span>
+        <select bind:value={display_.time_zone}>
+          {#each zoneChoices as [value, label]}<option value={value}>{label}</option>{/each}
+        </select>
+      </label>
+      <label><span>Date Format</span>
+        <select bind:value={display_.date_format}>
+          {#each DATE_FORMAT_OPTIONS as [value, label]}<option value={value}>{label}</option>{/each}
+        </select>
+      </label>
+      <label><span>Time Format</span>
+        <select bind:value={display_.time_format}>
+          {#each TIME_FORMAT_OPTIONS as [value, label]}<option value={value}>{label}</option>{/each}
+        </select>
+      </label>
+    </div>
+    <p class="muted help">
+      Example: <strong>{previewDateTime(display_)}</strong>. These are the
+      defaults for every user. Each user can choose their own under
+      the Preferences tab of their <strong>Account</strong> page.
+      {#if ownPrefsSet}Your own preferences are set, so you won't see a change
+        here until you reset them.{/if}
+      "Device Time Zone" and "Browser Default" follow each viewer's computer.
+    </p>
+  </div>
   {:else if tab === 'recursive'}
   <div class="card" style="margin-bottom: 14px">
     <h3 style="margin: 0 0 10px">Resolver</h3>
@@ -1122,35 +1148,6 @@
       Sites change, so verdicts expire and the domain is classified again;
       an expired verdict stops blocking until then. Threats (malware, phishing)
       are re-checked sooner than other categories.
-    </p>
-  </div>
-  {:else if tab === 'interface'}
-  <div class="card" style="margin-bottom: 14px">
-    <h3 style="margin: 0 0 10px">Date & Time Defaults</h3>
-    <div class="form-grid">
-      <label><span>Time Zone</span>
-        <select bind:value={display_.time_zone}>
-          {#each zoneChoices as [value, label]}<option value={value}>{label}</option>{/each}
-        </select>
-      </label>
-      <label><span>Date Format</span>
-        <select bind:value={display_.date_format}>
-          {#each DATE_FORMAT_OPTIONS as [value, label]}<option value={value}>{label}</option>{/each}
-        </select>
-      </label>
-      <label><span>Time Format</span>
-        <select bind:value={display_.time_format}>
-          {#each TIME_FORMAT_OPTIONS as [value, label]}<option value={value}>{label}</option>{/each}
-        </select>
-      </label>
-    </div>
-    <p class="muted help">
-      Example: <strong>{previewDateTime(display_)}</strong>. These are the
-      defaults for every user. Each user can choose their own under
-      the Preferences tab of their <strong>Account</strong> page.
-      {#if ownPrefsSet}Your own preferences are set, so you won't see a change
-        here until you reset them.{/if}
-      "Device Time Zone" and "Browser Default" follow each viewer's computer.
     </p>
   </div>
   {:else if tab === 'backup'}

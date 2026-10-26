@@ -12,13 +12,13 @@
   const TABS = [
     {
       id: 'scanner',
-      label: 'AI Safety Scanner',
+      label: 'Scanner',
       tagline:
         'Classifies the domains in your DNS traffic in the background, never on the query path. Train mode only records verdicts; Enforce mode blocks domains in the auto-block categories once their verdict reaches the block threshold. Exempt domains are never blocked by the AI.',
     },
     {
       id: 'verdicts',
-      label: 'AI Verdicts',
+      label: 'Verdicts',
       tagline:
         'Every domain the scanner has looked at, most recently classified first. Exempt a domain to keep the AI from ever blocking it or its subdomains.',
     },

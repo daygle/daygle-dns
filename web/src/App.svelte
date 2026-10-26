@@ -166,21 +166,34 @@ import { loadDisplayPreferences } from './datetime.svelte.js';
     recordZoneId = zoneId;
   }
 
+  // The sidebar, in sections: what the server is doing, the DNS it serves,
+  // and running the server itself; About and Donate sit at the foot.
+  const SECTIONS = [
+    { id: 'monitor', label: 'Monitor' },
+    { id: 'dns', label: 'DNS' },
+    { id: 'server', label: 'Server' },
+    { id: 'info', label: null },
+  ];
   const tabs = [
-    { id: 'status', label: 'Status', icon: icons.status },
-    { id: 'zones', label: 'Zones', icon: icons.zones, viewer: true },
-    { id: 'filtering', label: 'Filtering', icon: icons.filtering, viewer: true },
-    { id: 'clients', label: 'Clients', icon: icons.clients, viewer: true },
-    { id: 'ai', label: 'AI', icon: icons.ai, viewer: true },
-    { id: 'logs', label: 'Logs', icon: icons.logs },
-    { id: 'cache', label: 'Cache', icon: icons.cache },
-    { id: 'users', label: 'Users', icon: icons.users, viewer: true },
-    { id: 'certificates', label: 'Certificates', icon: icons.certificates },
-    { id: 'settings', label: 'Settings', icon: icons.settings, viewer: true },
-    { id: 'update', label: 'Update', icon: icons.update },
-    { id: 'about', label: 'About', icon: icons.about },
-    { id: 'donate', label: 'Donate', icon: icons.heart },
+    { id: 'status', label: 'Status', icon: icons.status, section: 'monitor' },
+    { id: 'logs', label: 'Logs', icon: icons.logs, section: 'monitor' },
+    { id: 'zones', label: 'Zones', icon: icons.zones, viewer: true, section: 'dns' },
+    { id: 'filtering', label: 'Filtering', icon: icons.filtering, viewer: true, section: 'dns' },
+    { id: 'clients', label: 'Clients', icon: icons.clients, viewer: true, section: 'dns' },
+    { id: 'ai', label: 'AI', icon: icons.ai, viewer: true, section: 'dns' },
+    { id: 'cache', label: 'Cache', icon: icons.cache, section: 'dns' },
+    { id: 'settings', label: 'Settings', icon: icons.settings, viewer: true, section: 'server' },
+    { id: 'certificates', label: 'Certificates', icon: icons.certificates, section: 'server' },
+    { id: 'users', label: 'Users', icon: icons.users, viewer: true, section: 'server' },
+    { id: 'update', label: 'Update', icon: icons.update, section: 'server' },
+    { id: 'about', label: 'About', icon: icons.about, section: 'info' },
+    { id: 'donate', label: 'Donate', icon: icons.heart, section: 'info' },
   ].filter((t) => !isViewer || !t.viewer);
+  const navSections = $derived(
+    SECTIONS.map((s) => ({ ...s, items: tabs.filter((t) => t.section === s.id) })).filter(
+      (s) => s.items.length,
+    ),
+  );
 </script>
 
 {#if !authed}
@@ -228,7 +241,10 @@ import { loadDisplayPreferences } from './datetime.svelte.js';
         </button>
       </div>
       <nav>
-        {#each tabs as tab (tab.id)}
+        {#each navSections as section (section.id)}
+        <div class="nav-section" class:info={section.id === 'info'}>
+          {#if section.label}<div class="nav-heading">{section.label}</div>{/if}
+        {#each section.items as tab (tab.id)}
           <button
             class="nav-btn"
             class:active={view === tab.id}
@@ -246,6 +262,8 @@ import { loadDisplayPreferences } from './datetime.svelte.js';
             </svg>
             <span>{tab.label}</span>
           </button>
+        {/each}
+        </div>
         {/each}
       </nav>
       {#if user}
@@ -374,7 +392,21 @@ import { loadDisplayPreferences } from './datetime.svelte.js';
   }
   .menu-btn svg { width: 20px; height: 20px; }
 
-  nav { display: flex; flex-direction: column; gap: 4px; }
+  nav { display: flex; flex-direction: column; gap: 4px; flex: 1; min-height: 0; overflow-y: auto; }
+  .nav-section { display: flex; flex-direction: column; gap: 2px; }
+  .nav-section + .nav-section { margin-top: 10px; }
+  .nav-heading {
+    padding: 0 12px 4px;
+    font-size: 0.68rem;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--muted);
+    opacity: 0.8;
+  }
+  /* About and Donate: smaller, at the foot of the list. */
+  .nav-section.info { margin-top: auto; padding-top: 10px; }
+  .nav-section.info .nav-btn { padding: 6px 12px; font-size: 0.85rem; }
   .nav-btn {
     background: none;
     color: var(--muted);
@@ -471,6 +503,8 @@ import { loadDisplayPreferences } from './datetime.svelte.js';
     padding: 9px 0;
   }
   aside.closed .nav-btn span { display: none; }
+  aside.closed .nav-heading { display: none; }
+  aside.closed .nav-section + .nav-section { margin-top: 6px; padding-top: 6px; border-top: 1px solid var(--border); }
 
   /* Narrow screens: the rail is pinned to the left edge and expanding it
      opens the full sidebar as an overlay drawer over the page. */

@@ -16,7 +16,7 @@
     },
     {
       id: 'domain-lists',
-      label: 'Domain Lists',
+      label: 'Allow & Block Lists',
       tagline:
         'Your own lists of domains to always allow or always block, for every client. An allowed domain is never blocked by a blocklist or the AI.',
     },
