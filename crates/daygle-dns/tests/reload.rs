@@ -341,3 +341,51 @@ async fn watches_config_file_and_applies_edits() {
 
     shutdown(server).await;
 }
+
+/// Settings saved in the console survive a restart (a service restart, or
+/// an in-place update) everywhere they are used, not just in the config the
+/// console shows: the resolver, the filtering policy and the rest are built
+/// from the saved settings at startup. They used to start from the config
+/// file's values, so "Recursion Access: Everyone" read back as Everyone but
+/// the resolver refused public clients until the setting was saved again.
+#[tokio::test]
+async fn console_settings_apply_after_a_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut file = base_config(&dir.path().join("daygle-dns.db"));
+    file.recursive.enabled = true;
+    file.recursive.mode = Some(daygle_dns_core::config::ResolutionMode::Forwarding);
+    file.recursive.upstreams = vec!["127.0.0.1:9".to_string()];
+
+    let public: std::net::IpAddr = "203.0.113.5".parse().unwrap();
+    let server = spawn(file.clone()).await;
+    assert!(
+        !server.resolver.as_ref().unwrap().allows_client(public),
+        "the default is private networks only"
+    );
+    let resp = reqwest::Client::new()
+        .put(format!("http://{}/api/config", server.api_addr))
+        .json(&serde_json::json!({
+            "recursive": { "recursion_access": "allow" },
+            "policy": { "blocklist": ["blocked.test"] },
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_success(), "{}", resp.text().await.unwrap());
+    shutdown(server).await;
+
+    // Restart with the same, untouched config file.
+    let server = spawn(file).await;
+    assert!(
+        server.resolver.as_ref().unwrap().allows_client(public),
+        "the saved recursion access applies from startup"
+    );
+    let udp = server.udp_addr.unwrap();
+    let reply = udp_query(udp, "blocked.test.", RecordType::A).await;
+    assert_eq!(
+        reply.response_code,
+        ResponseCode::NXDomain,
+        "the saved blocklist applies from startup"
+    );
+    shutdown(server).await;
+}

@@ -1133,3 +1133,40 @@ a change unserved until the next reload.
   the socket's source address, not a PROXY-restored client.
 - **ALIAS to a local target.** Answering it reads the database on each
   query.
+
+# Follow-up fix: console settings reverted to the config file at startup
+
+Reported from the field: with Recursion Access set to "Everyone", public
+clients (for example Android Private DNS over DoT) were refused recursion
+after every update, while the console still showed "Everyone". Saving
+"Private Networks" and then "Everyone" again worked around it.
+
+*Problem.* At startup, `bind_with` resolved the network names in the config
+*before* applying the settings saved in the console (the database
+overlay). The overlay was applied afterwards to the config the console
+reads, but these were built from the earlier copy, which held the config
+file's values:
+
+- the recursive resolver;
+- the filtering policy engine;
+- the client groups;
+- the authoritative catalog's settings.
+
+*Impact (High).* After every restart, which every update causes, each of
+those ran on the file's values until the relevant setting was saved again
+in the console. Affected settings include:
+
+- recursion access, upstreams and resolution mode;
+- conditional forwarders and client policies;
+- the allowlist and blocklist, and the allowed and denied networks;
+- the zone-transfer and dynamic-update settings.
+
+The console showed the saved values throughout, so nothing looked wrong.
+
+*Fix.* The overlay is applied (or seeded on first boot) as soon as the
+database opens, before anything is built from the config.
+
+*Test.* `console_settings_apply_after_a_restart` saves Recursion Access
+"Everyone" and a blocklist entry, restarts on the same database and config
+file, and checks that the resolver admits a public client and the entry is
+blocked. It fails without the fix.
