@@ -511,6 +511,8 @@ pub async fn bind_with(
     // Advanced Blocking groups (per-client allow/block policies) built from
     // the store; swapped atomically when the groups change via the API. The
     // blocklist sources scoped to groups are filled in by the refresher.
+    // Their schedules are read in the display time zone.
+    daygle_dns_core::schedule::set_time_zone(&config.display.time_zone);
     let group_blocklists = Arc::new(daygle_dns_policy::GroupBlocklists::default());
     let advanced_blocking = Arc::new(ArcSwap::from_pointee(
         daygle_dns_policy::AdvancedBlocking::build(

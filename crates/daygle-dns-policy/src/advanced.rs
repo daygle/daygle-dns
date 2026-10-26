@@ -23,6 +23,7 @@ use tracing::warn;
 
 use daygle_dns_core::blocking::{BlockResponse, BlockingGroup};
 use daygle_dns_core::config::normalize_domains;
+use daygle_dns_core::schedule::{self, CompiledWindow, WeekTime};
 
 use crate::{Action, Blocklist, Decision, GroupBlocklists};
 
@@ -63,6 +64,8 @@ struct CompiledGroup {
     safe_search: bool,
     /// Whether this group's clients get YouTube Restricted Mode.
     youtube_restricted: bool,
+    /// When the group applies; empty means always.
+    schedule: Vec<CompiledWindow>,
 }
 
 impl CompiledGroup {
@@ -80,6 +83,14 @@ impl CompiledGroup {
             || matches!(listener, Some(l) if self.listeners.contains(&l))
     }
 
+    /// Whether the group covers this query now: the client matches and the
+    /// group's schedule (if any) is active. `now` is read once per query,
+    /// and only when a group has a schedule.
+    fn applies(&self, client: IpAddr, listener: Option<&str>, now: &mut Clock) -> bool {
+        self.matches_client(client, listener)
+            && (self.schedule.is_empty() || schedule::active(&self.schedule, now.get()))
+    }
+
     fn allows(&self, qname: &str) -> bool {
         self.allow.contains(qname) || self.allow_regex.is_match(qname)
     }
@@ -89,11 +100,22 @@ impl CompiledGroup {
     }
 }
 
+/// The time of the week a query is evaluated at, read on first use.
+struct Clock(Option<WeekTime>);
+
+impl Clock {
+    fn get(&mut self) -> WeekTime {
+        *self.0.get_or_insert_with(schedule::now)
+    }
+}
+
 /// The compiled set of Advanced Blocking groups.
 #[derive(Default)]
 pub struct AdvancedBlocking {
     groups: Vec<CompiledGroup>,
     lists: Arc<GroupBlocklists>,
+    /// A fixed time to evaluate schedules at instead of the clock (tests).
+    fixed_time: Option<WeekTime>,
 }
 
 impl AdvancedBlocking {
@@ -127,6 +149,17 @@ impl AdvancedBlocking {
                     .collect(),
                 action: response_to_action(&g.response),
                 ai_blocking: g.ai_blocking,
+                schedule: g
+                    .schedule
+                    .iter()
+                    .filter_map(|w| match CompiledWindow::parse(w) {
+                        Ok(window) => Some(window),
+                        Err(e) => {
+                            warn!(group = %g.name, error = %e, "skipping invalid schedule window");
+                            None
+                        }
+                    })
+                    .collect(),
                 safe_search: g.safe_search,
                 youtube_restricted: g.youtube_restricted,
                 name: g.name.clone(),
@@ -135,7 +168,41 @@ impl AdvancedBlocking {
         Self {
             groups: compiled,
             lists,
+            fixed_time: None,
         }
+    }
+
+    /// Evaluate schedules at `time` instead of the current time.
+    pub fn at_time(mut self, time: WeekTime) -> Self {
+        self.fixed_time = Some(time);
+        self
+    }
+
+    fn clock(&self) -> Clock {
+        Clock(self.fixed_time)
+    }
+
+    /// The first enabled group covering `client` on `listener` right now.
+    fn first_group(&self, client: IpAddr, listener: Option<&str>) -> Option<&CompiledGroup> {
+        let mut now = self.clock();
+        self.groups
+            .iter()
+            .find(|g| g.applies(client, listener, &mut now))
+    }
+
+    /// The enabled groups that cover `client` on `listener` but are
+    /// outside their schedule right now.
+    pub fn scheduled_off(&self, client: IpAddr, listener: Option<&str>) -> Vec<&str> {
+        let mut now = self.clock();
+        self.groups
+            .iter()
+            .filter(|g| {
+                g.matches_client(client, listener)
+                    && !g.schedule.is_empty()
+                    && !schedule::active(&g.schedule, now.get())
+            })
+            .map(|g| g.name.as_str())
+            .collect()
     }
 
     /// The group-scoped sources the groups look their blocklists up in.
@@ -158,9 +225,7 @@ impl AdvancedBlocking {
     /// and clients in no group are covered. Returns the deciding group's
     /// name with the answer (`None` when no group matched).
     pub fn ai_blocking(&self, client: IpAddr, listener: Option<&str>) -> (bool, Option<&str>) {
-        self.groups
-            .iter()
-            .find(|g| g.matches_client(client, listener))
+        self.first_group(client, listener)
             .map_or((true, None), |g| (g.ai_blocking, Some(g.name.as_str())))
     }
 
@@ -172,9 +237,7 @@ impl AdvancedBlocking {
         client: IpAddr,
         listener: Option<&str>,
     ) -> (bool, bool, Option<&str>) {
-        self.groups
-            .iter()
-            .find(|g| g.matches_client(client, listener))
+        self.first_group(client, listener)
             .map_or((false, false, None), |g| {
                 (g.safe_search, g.youtube_restricted, Some(g.name.as_str()))
             })
@@ -191,8 +254,9 @@ impl AdvancedBlocking {
     ) -> Option<Decision> {
         // Loaded at most once per query, and only when a group needs it.
         let mut lists = None;
+        let mut now = self.clock();
         for group in &self.groups {
-            if !group.matches_client(client, listener) {
+            if !group.applies(client, listener, &mut now) {
                 continue;
             }
             // Whitelist wins: an allowed name is never blocked, and no later
@@ -320,6 +384,7 @@ mod tests {
             ai_blocking: true,
             safe_search: false,
             youtube_restricted: false,
+            schedule: vec![],
             position: 0,
             last_modified_at: None,
         }
@@ -385,6 +450,39 @@ mod tests {
             AdvancedBlocking::default().safe_search(ip("10.0.0.2"), None),
             (false, false, None)
         );
+    }
+
+    /// Outside its schedule a group is skipped entirely: it neither blocks
+    /// nor decides AI blocking or Safe Search.
+    #[test]
+    fn scheduled_group_applies_only_inside_its_windows() {
+        let mut kids = group("kids");
+        kids.block = vec!["games.test".to_string()];
+        kids.safe_search = true;
+        kids.ai_blocking = false;
+        kids.schedule = vec![daygle_dns_core::schedule::ScheduleWindow {
+            days: vec!["mon".to_string(), "tue".to_string()],
+            start: "21:00".to_string(),
+            end: "07:00".to_string(),
+        }];
+        let groups = [kids];
+        let at = |day, minute| {
+            AdvancedBlocking::build(&groups, Arc::default()).at_time(WeekTime { day, minute })
+        };
+        // Monday 22:00 and Tuesday 06:00: inside.
+        for ab in [at(0, 22 * 60), at(1, 6 * 60)] {
+            assert!(ab.evaluate(ip("1.2.3.4"), "games.test", None).is_some());
+            assert!(ab.safe_search(ip("1.2.3.4"), None).0);
+            assert!(!ab.ai_blocking(ip("1.2.3.4"), None).0);
+            assert!(ab.scheduled_off(ip("1.2.3.4"), None).is_empty());
+        }
+        // Monday noon and Thursday 06:00: outside.
+        for ab in [at(0, 12 * 60), at(3, 6 * 60)] {
+            assert!(ab.evaluate(ip("1.2.3.4"), "games.test", None).is_none());
+            assert_eq!(ab.safe_search(ip("1.2.3.4"), None), (false, false, None));
+            assert_eq!(ab.ai_blocking(ip("1.2.3.4"), None), (true, None));
+            assert_eq!(ab.scheduled_off(ip("1.2.3.4"), None), vec!["kids"]);
+        }
     }
 
     #[test]

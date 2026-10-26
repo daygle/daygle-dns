@@ -122,11 +122,11 @@
 
   <div class="card" style="margin-bottom: 14px">
     <h3 style="margin: 0 0 10px">Safe Search</h3>
-    <label class="check">
+    <label class="check" style="display: flex">
       <input type="checkbox" bind:checked={safeSearch} />
       <span>Force Safe Search on Google, Bing and DuckDuckGo</span>
     </label>
-    <label class="check" style="margin-top: 6px">
+    <label class="check" style="display: flex; margin-top: 6px">
       <input type="checkbox" bind:checked={youtubeRestricted} />
       <span>Force YouTube Restricted Mode</span>
     </label>

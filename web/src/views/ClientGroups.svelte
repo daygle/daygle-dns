@@ -21,6 +21,11 @@
   let testListener = $state('');
   let testResult = $state(null);
 
+  const DAYS = [
+    ['mon', 'Mon'], ['tue', 'Tue'], ['wed', 'Wed'], ['thu', 'Thu'],
+    ['fri', 'Fri'], ['sat', 'Sat'], ['sun', 'Sun'],
+  ];
+
   const RESPONSES = [
     { value: 'nx_domain', label: 'NXDOMAIN (Does Not Exist)' },
     { value: 'refused', label: 'REFUSED' },
@@ -78,6 +83,7 @@
           ai_blocking: group.ai_blocking !== false,
           safe_search: !!group.safe_search,
           youtube_restricted: !!group.youtube_restricted,
+          schedule: (group.schedule || []).map((w) => ({ ...w, days: [...(w.days || [])] })),
         }
       : {
           id: null,
@@ -95,7 +101,29 @@
           ai_blocking: true,
           safe_search: false,
           youtube_restricted: false,
+          schedule: [],
         };
+  }
+
+  function addWindow() {
+    edit.schedule = [
+      ...edit.schedule,
+      { days: ['mon', 'tue', 'wed', 'thu', 'fri'], start: '08:00', end: '15:00' },
+    ];
+  }
+
+  function toggleDay(w, day) {
+    w.days = w.days.includes(day)
+      ? w.days.filter((d) => d !== day)
+      : DAYS.map(([d]) => d).filter((d) => d === day || w.days.includes(d));
+  }
+
+  // "Mon-Fri 08:00-15:00" for the list's tooltip.
+  function describeWindow(w) {
+    const days = w.days?.length
+      ? DAYS.filter(([d]) => w.days.includes(d)).map(([, l]) => l).join(', ')
+      : 'Every day';
+    return `${days} ${w.start}-${w.end}`;
   }
 
   function closeEdit() {
@@ -128,6 +156,7 @@
       ai_blocking: edit.ai_blocking,
       safe_search: edit.safe_search,
       youtube_restricted: edit.youtube_restricted,
+      schedule: edit.schedule,
     };
     saving = true;
     error = null;
@@ -229,6 +258,7 @@
                 {#if g.ai_blocking === false}<span class="pill" title="The AI never auto-blocks these clients' queries">AI Off</span>{/if}
                 {#if g.safe_search}<span class="pill" title="Google, Bing and DuckDuckGo always use Safe Search for these clients">Safe Search</span>{/if}
                 {#if g.youtube_restricted}<span class="pill" title="YouTube always uses Restricted Mode for these clients">YouTube Restricted</span>{/if}
+                {#if g.schedule?.length}<span class="pill" title={'Applies only: ' + g.schedule.map(describeWindow).join('; ')}>Scheduled</span>{/if}
               </td>
               <td class="muted">{g.clients.length ? g.clients.join(', ') : 'All Clients'}</td>
               <td class="muted">
@@ -299,6 +329,11 @@
           {testResult.ai_group ? `(group "${testResult.ai_group}")` : '(client is in no group)'}
         </span>
       {/if}
+      {#if testResult.scheduled_off?.length}
+        <span class="muted ai-note">
+          Outside their schedule now, so skipped: {testResult.scheduled_off.join(', ')}
+        </span>
+      {/if}
       {#if testResult.safe_search_target}
         <span class="muted ai-note">
           Safe Search: answered with <code>{testResult.safe_search_target}</code>
@@ -338,6 +373,37 @@
         client connecting over that encrypted listener, wherever it is - use
         them (alone or combined) to give public/remote users their own rules.
         Leave empty for every client.
+      </p>
+
+      <div class="section-title">Schedule</div>
+      {#each edit.schedule as w, i (i)}
+        <div class="window">
+          <div class="days">
+            {#each DAYS as [day, label] (day)}
+              <label class="day" class:on={w.days.includes(day)}>
+                <input type="checkbox" checked={w.days.includes(day)} onchange={() => toggleDay(w, day)} />{label}
+              </label>
+            {/each}
+          </div>
+          <label class="time">From <input type="time" bind:value={w.start} required /></label>
+          <label class="time">Until <input type="time" bind:value={w.end} required /></label>
+          <button class="secondary" onclick={() => (edit.schedule = edit.schedule.filter((_, j) => j !== i))} aria-label="Remove time window">✕</button>
+        </div>
+      {/each}
+      <button class="secondary" style="margin-top: 4px" onclick={addWindow}>Add Time Window</button>
+      <p class="muted help">
+        {#if edit.schedule.length}
+          The group applies only inside these windows; at other times it is
+          skipped as if it did not exist, so the next group covering the
+          client (or nothing) applies.
+        {:else}
+          The group applies all the time. Add a time window to apply it only
+          at certain times, such as school hours or bedtime.
+        {/if}
+        A window ending earlier than it starts runs past midnight (21:00
+        until 07:00 on Friday covers Friday night into Saturday morning).
+        Times use the server's time zone under Settings → General → Date &amp;
+        Time Defaults.
       </p>
 
       <div class="section-title">Blocklists</div>
@@ -434,6 +500,13 @@
   .result { margin-top: 12px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
   .pill.group { border-color: var(--accent); color: var(--accent); }
   .ai-note { flex-basis: 100%; }
+  .window { display: flex; align-items: flex-end; gap: 10px; flex-wrap: wrap; margin-bottom: 8px; }
+  .days { display: flex; gap: 4px; flex-wrap: wrap; }
+  .day { flex-direction: row; align-items: center; gap: 0; padding: 5px 8px; border: 1px solid var(--border); border-radius: 6px; cursor: pointer; color: var(--muted); }
+  .day.on { border-color: var(--accent); color: var(--accent); }
+  .day input { position: absolute; opacity: 0; width: 1px; height: 1px; }
+  .day:focus-within { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .time { width: 120px; }
   @media (max-width: 640px) {
     .grid2 { grid-template-columns: 1fr; }
   }

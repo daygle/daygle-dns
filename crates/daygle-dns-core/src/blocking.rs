@@ -8,6 +8,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::schedule::ScheduleWindow;
+
 /// What to answer when a query is blocked by an Advanced Blocking group.
 ///
 /// Serialized adjacently-tagged so the API/DB round-trips as
@@ -66,6 +68,10 @@ pub struct BlockingGroup {
     /// Force YouTube Restricted Mode for these clients (same rule).
     #[serde(default)]
     pub youtube_restricted: bool,
+    /// When the group applies; empty means always. Outside its windows the
+    /// group is skipped as if it did not exist.
+    #[serde(default)]
+    pub schedule: Vec<ScheduleWindow>,
     /// Ordering position (lower groups are evaluated first).
     pub position: i64,
     /// When the group was last created or edited through the console or API,
@@ -110,6 +116,8 @@ pub struct BlockingGroupInput {
     pub safe_search: bool,
     #[serde(default)]
     pub youtube_restricted: bool,
+    #[serde(default)]
+    pub schedule: Vec<ScheduleWindow>,
 }
 
 impl BlockingGroup {
@@ -129,6 +137,7 @@ impl BlockingGroup {
             ai_blocking: self.ai_blocking,
             safe_search: self.safe_search,
             youtube_restricted: self.youtube_restricted,
+            schedule: self.schedule.clone(),
         }
     }
 }

@@ -600,6 +600,8 @@
       {#if ownPrefsSet}Your own preferences are set, so you won't see a change
         here until you reset them.{/if}
       "Device Time Zone" and "Browser Default" follow each viewer's computer.
+      Filtering group schedules also use this time zone ("Device Time Zone"
+      there means the server's own).
     </p>
   </div>
   {:else if tab === 'recursive'}

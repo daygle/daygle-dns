@@ -2406,6 +2406,9 @@ pub async fn upsert_blocking_group(
     if let Err(msg) = validate_group_regexes(&input) {
         return error_response(StatusCode::BAD_REQUEST, msg);
     }
+    if let Err(msg) = daygle_dns_core::schedule::validate(&input.schedule) {
+        return error_response(StatusCode::BAD_REQUEST, format!("schedule: {msg}"));
+    }
     // Client networks are addresses or names of configured networks.
     let config = state.config.load_full();
     if let Some(entry) = input
@@ -2564,6 +2567,12 @@ pub async fn test_blocking(
     let youtube_restricted = policy.youtube_restricted() || group_youtube;
     let safe_search_target =
         daygle_dns_policy::safe_search::safe_target(&domain, safe_search, youtube_restricted);
+    // Groups covering the client that are outside their schedule now.
+    let scheduled_off: Vec<String> = groups
+        .scheduled_off(client, listener)
+        .into_iter()
+        .map(str::to_string)
+        .collect();
     let (blocked, action, reason, group) = match verdict {
         Some(d) => (true, d.action.as_str().to_string(), d.reason, d.group),
         None => (
@@ -2589,6 +2598,7 @@ pub async fn test_blocking(
         "safe_search": safe_search,
         "youtube_restricted": youtube_restricted,
         "safe_search_target": safe_search_target,
+        "scheduled_off": scheduled_off,
     }))
     .into_response()
 }
@@ -5011,6 +5021,8 @@ pub async fn update_settings(
             || old_config.doh != config.doh
             || old_config.doq != config.doq);
     state.config.store(Arc::new(config.clone()));
+    // Filtering-group schedules are read in the display time zone.
+    daygle_dns_core::schedule::set_time_zone(&config.display.time_zone);
     // Server-side knobs read from their own state rather than the config
     // (the recursive lookup limit): a console change otherwise waited for a
     // restart or a config-file reload.

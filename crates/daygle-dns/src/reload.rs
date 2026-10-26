@@ -106,6 +106,7 @@ pub fn apply_config(shared: &Shared, new: Arc<DaygleConfig>) -> bool {
     // Publish the new configuration first so the API token, `/api/config` and
     // the listener supervisor all observe the requested state immediately.
     shared.config.store(Arc::clone(&new));
+    daygle_dns_core::schedule::set_time_zone(&new.display.time_zone);
     shared
         .recursive_admission
         .set_limit(new.recursive.max_concurrent_lookups);

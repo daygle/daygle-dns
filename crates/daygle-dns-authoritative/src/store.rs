@@ -164,7 +164,8 @@ CREATE TABLE IF NOT EXISTS blocking_groups (
     last_modified_at TEXT,
     ai_blocking INTEGER NOT NULL DEFAULT 1,
     safe_search INTEGER NOT NULL DEFAULT 0,
-    youtube_restricted INTEGER NOT NULL DEFAULT 0
+    youtube_restricted INTEGER NOT NULL DEFAULT 0,
+    schedule    TEXT NOT NULL DEFAULT '[]'
 );
 
 CREATE TABLE IF NOT EXISTS console_users (
@@ -661,7 +662,7 @@ impl ZoneStore {
         let mut stmt = conn.prepare(
             "SELECT id, name, enabled, clients, allow, block, allow_regex, block_regex,
                     response, position, blocklists, last_modified_at, ai_blocking,
-                    safe_search, youtube_restricted
+                    safe_search, youtube_restricted, schedule
              FROM blocking_groups ORDER BY position, name",
         )?;
         let rows = stmt.query_map([], row_to_blocking_group)?;
@@ -675,7 +676,7 @@ impl ZoneStore {
             .query_row(
                 "SELECT id, name, enabled, clients, allow, block, allow_regex, block_regex,
                         response, position, blocklists, last_modified_at, ai_blocking,
-                    safe_search, youtube_restricted
+                    safe_search, youtube_restricted, schedule
                  FROM blocking_groups WHERE id = ?1",
                 [id],
                 row_to_blocking_group,
@@ -700,6 +701,8 @@ impl ZoneStore {
         let allow_regex = encode_json(&input.allow_regex, "allow_regex")?;
         let block_regex = encode_json(&input.block_regex, "block_regex")?;
         let blocklists = encode_json(&input.blocklists, "blocklists")?;
+        let schedule = serde_json::to_string(&input.schedule)
+            .map_err(|e| DaygleError::Database(format!("encode schedule: {e}")))?;
         let response = serde_json::to_string(&input.response)
             .map_err(|e| DaygleError::Database(format!("encode response: {e}")))?;
         // Both branches below stamp the wall-clock time of this create/edit.
@@ -720,7 +723,8 @@ impl ZoneStore {
                 "UPDATE blocking_groups SET name = ?2, enabled = ?3, clients = ?4,
                     allow = ?5, block = ?6, allow_regex = ?7, block_regex = ?8,
                     response = ?9, blocklists = ?10, last_modified_at = ?11,
-                    ai_blocking = ?12, safe_search = ?13, youtube_restricted = ?14
+                    ai_blocking = ?12, safe_search = ?13, youtube_restricted = ?14,
+                    schedule = ?15
                  WHERE id = ?1",
                 params![
                     id,
@@ -737,6 +741,7 @@ impl ZoneStore {
                     input.ai_blocking as i64,
                     input.safe_search as i64,
                     input.youtube_restricted as i64,
+                    schedule,
                 ],
             )?;
             drop(conn);
@@ -753,15 +758,15 @@ impl ZoneStore {
             "INSERT INTO blocking_groups
                 (id, name, enabled, clients, allow, block, allow_regex, block_regex,
                  response, blocklists, position, last_modified_at, ai_blocking,
-                 safe_search, youtube_restricted)
+                 safe_search, youtube_restricted, schedule)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
                  (SELECT COALESCE(MAX(position), -1) + 1 FROM blocking_groups), ?11, ?12,
-                 ?13, ?14)
+                 ?13, ?14, ?15)
              ON CONFLICT(name) DO UPDATE SET
                 enabled = ?3, clients = ?4, allow = ?5, block = ?6,
                 allow_regex = ?7, block_regex = ?8, response = ?9, blocklists = ?10,
                 last_modified_at = ?11, ai_blocking = ?12, safe_search = ?13,
-                youtube_restricted = ?14",
+                youtube_restricted = ?14, schedule = ?15",
             params![
                 id,
                 name,
@@ -777,6 +782,7 @@ impl ZoneStore {
                 input.ai_blocking as i64,
                 input.safe_search as i64,
                 input.youtube_restricted as i64,
+                schedule,
             ],
         )?;
         drop(conn);
@@ -1860,6 +1866,7 @@ fn row_to_blocking_group(row: &rusqlite::Row<'_>) -> rusqlite::Result<BlockingGr
         ai_blocking: row.get::<_, i64>(12)? != 0,
         safe_search: row.get::<_, i64>(13)? != 0,
         youtube_restricted: row.get::<_, i64>(14)? != 0,
+        schedule: serde_json::from_str(&row.get::<_, String>(15)?).unwrap_or_default(),
     })
 }
 
@@ -3690,14 +3697,15 @@ fn migrate_blocking_group_lists(conn: &Connection) -> Result<()> {
 
 /// Add the `last_modified_at` column to `blocking_groups` for databases
 /// created before it existed (existing rows stay `NULL` until first edited),
-/// `ai_blocking` (on, as before it existed) and the Safe Search switches
-/// (off).
+/// `ai_blocking` (on, as before it existed), the Safe Search switches
+/// (off) and `schedule` (none: always active).
 fn migrate_blocking_group_timestamps(conn: &Connection) -> Result<()> {
     for (column, definition) in [
         ("last_modified_at", "TEXT"),
         ("ai_blocking", "INTEGER NOT NULL DEFAULT 1"),
         ("safe_search", "INTEGER NOT NULL DEFAULT 0"),
         ("youtube_restricted", "INTEGER NOT NULL DEFAULT 0"),
+        ("schedule", "TEXT NOT NULL DEFAULT '[]'"),
     ] {
         let has: bool = conn.query_row(
             "SELECT EXISTS(
@@ -3881,6 +3889,7 @@ mod tests {
                 ai_blocking: true,
                 safe_search: false,
                 youtube_restricted: false,
+                schedule: vec![],
                 response: BlockResponse::Redirect("0.0.0.0".parse().unwrap()),
             })
             .unwrap();
@@ -3910,6 +3919,7 @@ mod tests {
                 ai_blocking: true,
                 safe_search: false,
                 youtube_restricted: false,
+                schedule: vec![],
                 response: BlockResponse::NxDomain,
             })
             .unwrap();
@@ -3948,6 +3958,7 @@ mod tests {
             ai_blocking: true,
             safe_search: false,
             youtube_restricted: false,
+            schedule: vec![],
             response: Default::default(),
         };
         let a = s.upsert_blocking_group(&input(None, "A")).unwrap();

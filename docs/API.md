@@ -1298,6 +1298,15 @@ and YouTube Restricted Mode on for the group's clients, by the same
 first-group rule; the global `policy.safe_search` and
 `policy.youtube_restricted` switches apply to every client whatever the
 groups say.
+`schedule` limits when the group applies: a list of
+`{"days": ["mon", "fri"], "start": "21:00", "end": "07:00"}` windows
+(`days` from `mon`..`sun`, full names accepted, empty for every day; times
+`HH:MM`, 24-hour). An `end` earlier than `start` runs past midnight into
+the next day, and equal times cover the whole day. Outside every window
+the group is skipped as if it did not exist (for blocking, AI blocking
+and Safe Search alike). Times are read in `display.time_zone` (`system`:
+the server's own zone). An empty list (the default) means always; a bad
+window is `400`.
 `POST /api/policy/blocking` creates a group or updates the one with the same
 name; with an `id` it updates that group, so it can be renamed (`400` if
 another group has the new name, `404` if the id is unknown). The
@@ -1320,7 +1329,8 @@ operator can verify rules before relying on them. It also reports
 `ai_group` (the group that decided; `null` when the client is in no
 group), whether `safe_search` and `youtube_restricted` apply to the client,
 and `safe_search_target`: the safe address the domain is answered with
-(`null` when it is not rewritten).
+(`null` when it is not rewritten), and `scheduled_off`: the groups covering
+the client that are outside their schedule right now.
 
 #### Safe Search
 

@@ -167,3 +167,61 @@ async fn safe_search_rewrites_search_engines() {
 
     shutdown(server).await;
 }
+
+/// A group's schedule is validated, stored and returned; an always-matching
+/// window keeps the group in force.
+#[tokio::test]
+async fn group_schedules_are_validated_and_applied() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = search_server(&dir).await;
+    let udp = server.udp_addr.unwrap();
+    let base = format!("http://{}/api", server.api_addr);
+    let client = reqwest::Client::new();
+    let save = |schedule: serde_json::Value| {
+        client
+            .post(format!("{base}/policy/blocking"))
+            .json(&serde_json::json!({
+                "name": "bedtime",
+                "block": ["www.google.com"],
+                "schedule": schedule,
+            }))
+            .send()
+    };
+
+    let resp = save(serde_json::json!([{ "days": ["mon"], "start": "25:00", "end": "07:00" }]))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::BAD_REQUEST);
+    let resp = save(serde_json::json!([{ "days": ["someday"], "start": "21:00", "end": "07:00" }]))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    // Every day, all day: always in force.
+    let resp = save(serde_json::json!([{ "days": [], "start": "00:00", "end": "00:00" }]))
+        .await
+        .unwrap();
+    assert!(resp.status().is_success(), "{}", resp.text().await.unwrap());
+    let group: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(group["schedule"][0]["start"], "00:00");
+    let reply = udp_query(udp, "www.google.com.", RecordType::A).await;
+    assert_eq!(reply.response_code, ResponseCode::NXDomain);
+
+    // A window on every day but today: the group is skipped.
+    let today = chrono::Local::now()
+        .format("%a")
+        .to_string()
+        .to_ascii_lowercase();
+    let days: Vec<&str> = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+        .into_iter()
+        .filter(|d| !today.starts_with(d))
+        .collect();
+    let resp = save(serde_json::json!([{ "days": days, "start": "12:00", "end": "12:01" }]))
+        .await
+        .unwrap();
+    assert!(resp.status().is_success());
+    let reply = udp_query(udp, "www.google.com.", RecordType::A).await;
+    assert_eq!(first_answer(&reply).as_deref(), Some("192.0.2.80"));
+
+    shutdown(server).await;
+}
