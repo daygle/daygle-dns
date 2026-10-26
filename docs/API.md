@@ -178,7 +178,7 @@ GET /api/status
 `update_available` (whether the running binary is older than the latest
 published release) and `latest_release` are compared against GitHub; both
 are `null` on hosts that cannot self-update (dev installs, non-Linux) or
-while update checks are disabled under `[updates]` (Settings -> General:
+while update checks are disabled under `[updates]` (the Update page's
 "Update Checks"), so the dashboard hides the update banner there. The
 release lookup is a pure cached read - only a background task probes
 GitHub, at the configured `[updates].check_interval_secs` cadence (default

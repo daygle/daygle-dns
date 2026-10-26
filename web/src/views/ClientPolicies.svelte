@@ -176,7 +176,7 @@
               </td>
               <td class="muted">{p.clients.join(', ')}</td>
               <td class="muted">{describe(p)}</td>
-              <td class="muted" style="white-space: nowrap">{p.modified_at ? formatDateTime(p.modified_at) : '—'}</td>
+              <td class="muted" style="white-space: nowrap">{p.modified_at ? formatDateTime(p.modified_at) : '-'}</td>
               <td class="num">
                 <div class="row" style="gap: 6px; justify-content: flex-end">
                   <button class="secondary" onclick={() => move(i, -1)} disabled={i === 0} aria-label="Move up">↑</button>
@@ -198,7 +198,8 @@
     upstreams (a filtering DNS service for the kids' devices, say), resolve
     them from the root servers whatever the resolver's mode (Settings →
     Resolver), or refuse them
-    recursion. The first enabled matching policy wins. Recursion Access still
+    recursion. The first enabled matching policy wins. Recursion Access
+    (Clients → Access) still
     decides who may use recursion at all, and conditional forwarders and stub
     zones still answer for their own names.
   </p>

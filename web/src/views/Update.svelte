@@ -5,13 +5,15 @@
   import { onDestroy } from 'svelte';
   import { formatDateTime } from '../datetime.svelte.js';
   import { copyText } from '../clipboard.js';
+  import UpdateChecks from './UpdateChecks.svelte';
 
   let info = $state(null);
   let error = $state(null);
   let busy = $state(false);
   let copied = $state(false);
 
-  const isAdmin = getStoredUser()?.role === 'admin';
+  // Viewers are read-only; with sign-in off there is no stored user at all.
+  const isAdmin = getStoredUser()?.role !== 'viewer';
 
   // In-place update run state (mirrors the server's UpdateState).
   let run = $state(null);
@@ -281,7 +283,7 @@
         ? res.fetched
           ? 'Release check ran against GitHub just now.'
           : 'Release check just ran, but GitHub could not be reached (or was rate-limited); the value shown may be stale.'
-        : `The last live check was under a minute ago; the next one can run in ${formatAgeSecs(res.retry_after_secs)} — showing that earlier result.`;
+        : `The last live check was under a minute ago; the next one can run in ${formatAgeSecs(res.retry_after_secs)} - showing that earlier result.`;
     } catch (e) {
       error = formatApiError(e);
     } finally {
@@ -338,9 +340,9 @@
       <p class="muted small" style="margin: 10px 0 0; max-width: 80ch">
         Automatic checks run every {formatAgeSecs(info.check_interval_secs)}
         {#if info.latest_checked_secs_ago == null}
-          — none has run since the server started.
+          - none has run since the server started.
         {:else}
-          — the last one ran {formatAgeSecs(info.latest_checked_secs_ago)} ago.
+          - the last one ran {formatAgeSecs(info.latest_checked_secs_ago)} ago.
         {/if}
       </p>
     {:else}
@@ -566,6 +568,10 @@
   <div class="card">
     <p class="muted">Loading update details...</p>
   </div>
+{/if}
+
+{#if isAdmin}
+  <UpdateChecks />
 {/if}
 
 <style>

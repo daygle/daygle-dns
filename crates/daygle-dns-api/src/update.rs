@@ -821,7 +821,7 @@ fn refresh_latest_release_cache() -> bool {
 /// (`MIN_UPDATE_CHECK_INTERVAL_SECS` plus config validation).
 const MANUAL_CHECK_MIN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
 
-/// When the operator last triggered a release check (an attempt — a failed
+/// When the operator last triggered a release check (an attempt - a failed
 /// fetch also counts, so retry storms against an unreachable GitHub stay
 /// bounded too).
 static LAST_MANUAL_CHECK: std::sync::Mutex<Option<std::time::Instant>> =
@@ -849,7 +849,7 @@ pub struct ManualReleaseCheck {
 /// request inside the window replays the cache and reports
 /// `retry_after_secs` instead of re-hitting GitHub. The caller must have
 /// verified the host can self-update first (`can_update`), matching
-/// [`release_comparison`] — checks make no sense where updates are
+/// [`release_comparison`] - checks make no sense where updates are
 /// impossible anyway.
 pub fn manual_release_check() -> ManualReleaseCheck {
     manual_release_check_with(refresh_latest_release_cache)

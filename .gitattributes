@@ -8,7 +8,7 @@ web/dist/** -text -diff
 # The bundle check compares a Linux CI build against a build made with a
 # Windows checkout. Svelte compiles template-literal line endings straight
 # into the output JS, so a CRLF checkout (core.autocrlf=true) produces
-# different bytes — and different asset hashes — from the same sources.
+# different bytes - and different asset hashes - from the same sources.
 # Force LF for the web sources so both platforms compile identical output.
 web/index.html text eol=lf
 web/src/** text eol=lf

@@ -1149,7 +1149,7 @@ pub async fn update_info(State(state): State<AppState>) -> Response {
     // files: keep it off the async workers.
     // Whether automatic checks are on. They warm the release cache at the
     // configured cadence; the release data below is always a pure cache
-    // read, so it is surfaced even with checks off — a manual `Check Now`
+    // read, so it is surfaced even with checks off - a manual `Check Now`
     // then populates it (and the Update page explains the state).
     let release_checks_on = state.config.load().updates.enabled;
     let (has_systemd, can_update, gates, release, update_state, checked_ago) =
@@ -1199,7 +1199,7 @@ pub async fn update_info(State(state): State<AppState>) -> Response {
 /// (see [`crate::update::manual_release_check`]): every click is a request
 /// off GitHub's unauthenticated budget, so a request inside the minute
 /// window is answered from the cache with a retry hint. Automatic checks
-/// being disabled does not block this — it is the explicit replacement
+/// being disabled does not block this - it is the explicit replacement
 /// for them.
 pub async fn update_check(State(state): State<AppState>) -> Response {
     let config_dir = config_dir(&state);

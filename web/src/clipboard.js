@@ -4,7 +4,7 @@
 // (https, or localhost). The console is regularly served over plain
 // http://<lan-address>:5380, where navigator.clipboard is undefined, so
 // fall back to the deprecated but still-supported
-// document.execCommand('copy') through a hidden textarea — browsers allow
+// document.execCommand('copy') through a hidden textarea - browsers allow
 // that from inside a user gesture (an onclick handler) on any origin.
 
 export async function copyText(text) {

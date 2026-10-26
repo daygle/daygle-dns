@@ -27,6 +27,7 @@
     ['listeners', 'Encrypted DNS'],
     ['zones', 'Zones'],
     ['ai', 'AI Scanner'],
+    ['logging', 'Logging'],
     ['backup', 'Backup'],
   ];
   const TAGLINES = {
@@ -35,6 +36,7 @@
     cache: 'How long answers are kept, how many, and how popular names are refreshed before they expire. Changes apply immediately.',
     listeners: 'Encrypted DNS: DNS over TLS, HTTPS and QUIC, and the certificate each one presents. Changes apply immediately.',
     zones: 'Defaults for new zones and records, and how other DNS servers may copy, update and be notified about your zones.',
+    logging: 'Sending the server log, and optionally every query, to a syslog server. The logs themselves are on the Logs page.',
     ai: 'The background scanner that classifies the domains in your DNS traffic and can block unsafe ones.',
     backup: 'Download a backup of everything this server keeps, or restore one.',
   };
@@ -61,9 +63,6 @@
   let upstreamText = $state('');
   // Named networks (Clients -> Networks) for the pickers below.
   let networks = $state([]);
-  let recursionNetworks = $state([]);
-  let deniedNetworks = $state([]);
-  let allowedNetworks = $state([]);
   // Encrypted-listener client networks (Settings -> Listeners).
   let dotNetworks = $state([]);
   let dohNetworks = $state([]);
@@ -100,13 +99,11 @@
   // the stored settings means the config file's api.port; the form shows
   // the real number.
   let web_ = $state({ http_enabled: true, http_port: 5380, https_enabled: false, https_port: 5443, https_certificate: '', redirect_http: false });
-  // Remote logging (Settings -> General).
+  // DNS64 and ECS (Resolver tab), remote logging (Logging tab).
   let dns64 = $state({ enabled: false, prefix: '64:ff9b::/96' });
   let dns64Clients = $state([]);
   let ecs = $state({ enabled: false, subnet: '', ipv4_prefix: 24, ipv6_prefix: 56 });
   let syslog_ = $state({ enabled: false, server: '', facility: 'daemon', level: 'info', queries: false });
-  // Update checks (Settings -> General). Background only; never on DNS traffic.
-  let updates_ = $state({ enabled: true, check_interval_secs: 3600, auto_refresh_models: false });
   const zoneChoices = timeZoneOptions();
   // Users who chose their own settings don't see the defaults change.
   const ownPrefsSet = $derived(
@@ -176,9 +173,6 @@
         aiCategoriesText = '';
         aiBackendCategories = [];
         upstreamText = '';
-        recursionNetworks = [];
-        deniedNetworks = [];
-        allowedNetworks = [];
         dotNetworks = [];
         dohNetworks = [];
         doqNetworks = [];
@@ -191,11 +185,7 @@
       recursive = { ...config.recursive };
       // An unset mode means: forwarding when upstreams exist, else recursive.
       recursive.mode = config.recursive.mode || (config.recursive.upstreams?.length ? 'forwarding' : 'recursive');
-      recursive.recursion_access = config.recursive.recursion_access || 'private_networks';
       recursive.outbound_ip_versions = config.recursive.outbound_ip_versions || 'both';
-      recursionNetworks = [...(config.recursive.recursion_networks || [])];
-      deniedNetworks = [...(config.policy?.denied_networks || [])];
-      allowedNetworks = [...(config.policy?.allowed_networks || [])];
       authoritative = { ...config.authoritative };
       dot = { ...config.dot };
       doh = { ...config.doh };
@@ -211,7 +201,6 @@
         http_port: config.web?.http_port || config.api?.port || 5380,
       };
       syslog_ = { enabled: false, server: '', facility: 'daemon', level: 'info', queries: false, ...config.syslog };
-      updates_ = { enabled: true, check_interval_secs: 3600, auto_refresh_models: false, ...config.updates };
       dns64 = { enabled: !!config.dns64?.enabled, prefix: config.dns64?.prefix || '64:ff9b::/96' };
       dns64Clients = [...(config.dns64?.clients || [])];
       ecs = { enabled: false, subnet: '', ipv4_prefix: 24, ipv6_prefix: 56, ...config.ecs };
@@ -301,15 +290,9 @@
   // are shown but not sent.
   function buildBody() {
     return {
-      policy: {
-        denied_networks: [...deniedNetworks],
-        allowed_networks: [...allowedNetworks],
-      },
       recursive: {
         enabled: !!recursive.enabled,
         mode: recursive.mode,
-        recursion_access: recursive.recursion_access,
-        recursion_networks: [...recursionNetworks],
         case_randomization: !!recursive.case_randomization,
         rebinding_protection: !!recursive.rebinding_protection,
         opportunistic_encryption: !!recursive.opportunistic_encryption,
@@ -391,11 +374,6 @@
         facility: syslog_.facility || 'daemon',
         level: syslog_.level || 'info',
         queries: !!syslog_.queries,
-      },
-      updates: {
-        enabled: !!updates_.enabled,
-        check_interval_secs: Number(updates_.check_interval_secs) || 3600,
-        auto_refresh_models: !!updates_.auto_refresh_models,
       },
       authoritative: {
         default_record_ttl: Number(authoritative.default_record_ttl),
@@ -597,62 +575,6 @@
     </p>
   </div>
   <div class="card" style="margin-bottom: 14px">
-    <h3 style="margin: 0 0 10px">Remote Logging (Syslog)</h3>
-    <div class="form-grid">
-      <label class="check"><input type="checkbox" bind:checked={syslog_.enabled} /> <span>Send Logs to a Syslog Server</span></label>
-      <label>
-        <span>Syslog Server</span>
-        <input placeholder="logs.example.com or tcp://10.0.0.5:6514" bind:value={syslog_.server} disabled={!syslog_.enabled} spellcheck="false" />
-      </label>
-      <label>
-        <span>Facility</span>
-        <select bind:value={syslog_.facility} disabled={!syslog_.enabled}>
-          <option value="daemon">daemon</option>
-          <option value="user">user</option>
-          {#each [0, 1, 2, 3, 4, 5, 6, 7] as n (n)}<option value={`local${n}`}>local{n}</option>{/each}
-        </select>
-      </label>
-      <label>
-        <span>Server Log Messages</span>
-        <select bind:value={syslog_.level} disabled={!syslog_.enabled}>
-          <option value="info">Information and Above</option>
-          <option value="warn">Warnings and Errors</option>
-          <option value="error">Errors Only</option>
-        </select>
-      </label>
-      <label class="check"><input type="checkbox" bind:checked={syslog_.queries} disabled={!syslog_.enabled} /> <span>Also Send Every Query</span></label>
-    </div>
-    <p class="muted help">
-      Sends the server log (and, if chosen, a line per query) as RFC 5424
-      syslog, over UDP by default (port 514), or TCP with
-      <code>tcp://host:port</code>. Changes apply as soon as they are saved.
-      Every query can be a lot of traffic on a busy server.
-    </p>
-  </div>
-  <div class="card" style="margin-bottom: 14px">
-    <h3 style="margin: 0 0 10px">Update Checks</h3>
-    <div class="form-grid">
-      <label class="check"><input type="checkbox" bind:checked={updates_.enabled} /> <span>Check GitHub for Newer Releases</span></label>
-      <label>
-        <span>Check Interval</span>
-        <select bind:value={updates_.check_interval_secs} disabled={!updates_.enabled}>
-          <option value={900}>Every 15 Minutes</option>
-          <option value={3600}>Hourly</option>
-          <option value={21600}>Every 6 Hours</option>
-          <option value={86400}>Daily</option>
-        </select>
-      </label>
-    </div>
-    <p class="muted help">
-      Checks run in the background, away from DNS traffic, and flag a newer
-      release with a banner on the Status page. Intervals under 10 minutes
-      are refused: GitHub's unauthenticated API allows 60 requests per hour
-      per address, shared with everything else using this network. Turning
-      checks off removes the banner; "Update Now" on the Update page and the
-      manual update command still work.
-    </p>
-  </div>
-  <div class="card" style="margin-bottom: 14px">
     <h3 style="margin: 0 0 10px">Date & Time Defaults</h3>
     <div class="form-grid">
       <label><span>Time Zone</span>
@@ -751,41 +673,14 @@
         for: IPv6 (AAAA) records are still resolved and served.
       </p>
     {/if}
-    <h4>Recursion Access</h4>
-    <div class="form-grid">
-      <label>
-        <span>Who May Use Recursion</span>
-        <select bind:value={recursive.recursion_access}>
-          <option value="private_networks">Private Networks Only</option>
-          <option value="allow">Everyone</option>
-          <option value="custom">Custom Networks</option>
-          <option value="deny">Nobody</option>
-        </select>
-      </label>
-    </div>
-    <div class="stacked" style="margin-top: 12px">
-      <span>Always Refused Networks (denied)</span>
-      <NetworkPicker {networks} bind:value={deniedNetworks} />
-    </div>
-    <div class="stacked" style="margin-top: 12px">
-      <span>Exempt From the Denied List (allowed)</span>
-      <NetworkPicker {networks} bind:value={allowedNetworks} />
-    </div>
-    {#if recursive.recursion_access === 'custom'}
-      <div class="stacked" style="margin-top: 12px">
-        <span>Allowed Networks</span>
-        <NetworkPicker {networks} bind:value={recursionNetworks} />
-      </div>
-    {/if}
-    <p class="muted help">
-      Applies to everything this server resolves rather than answers from its own
-      zones; refused clients get REFUSED. Private Networks Only covers loopback,
-      10/8, 172.16/12, 192.168/16, 100.64/10 (CGNAT), link-local, IPv6 ULA and
-      the IPv6 networks this server is on (most LANs give devices addresses from
-      the ISP's prefix rather than ULA), so the server is not an open resolver
-      if it is reachable from the internet.
-      Your own zones are answered for everyone.
+    <h4>Who May Use This Server</h4>
+    <p class="muted help" style="margin: 0">
+      Recursion Access (who may have names resolved) and the always-refused
+      networks are under <strong>Clients → Access</strong>.
     </p>
+    {#if onOpenClients}
+      <button class="secondary" style="margin-top: 10px" onclick={() => onOpenClients('access')}>Open Access</button>
+    {/if}
   </div>
   <div class="card" style="margin-bottom: 14px">
     <h3 style="margin: 0 0 10px">DNS64 (RFC 6147)</h3>
@@ -1002,8 +897,8 @@
     <p class="muted help">
       Clients connect to port {dot.port || 853} (the standard port is 853).
       Clients outside these networks get REFUSED on this listener; clients
-      inside it may use recursion here even when Recursion Access is set to
-      Private Networks Only.
+      inside it may use recursion here even when Recursion Access (Clients →
+      Access) is set to Private Networks Only.
     </p>
   </div>
   <div class="card" style="margin-bottom: 14px">
@@ -1068,8 +963,8 @@
     <p class="muted help">
       Clients connect to UDP port {doq.port || 853} (the standard port is 853).
       Clients outside these networks get REFUSED on this listener; clients
-      inside it may use recursion here even when Recursion Access is set to
-      Private Networks Only.
+      inside it may use recursion here even when Recursion Access (Clients →
+      Access) is set to Private Networks Only.
       Manage certificates, and see when they expire, on the Certificates page.
     </p>
   </div>
@@ -1148,6 +1043,40 @@
       Sites change, so verdicts expire and the domain is classified again;
       an expired verdict stops blocking until then. Threats (malware, phishing)
       are re-checked sooner than other categories.
+    </p>
+  </div>
+  {:else if tab === 'logging'}
+  <div class="card" style="margin-bottom: 14px">
+    <h3 style="margin: 0 0 10px">Remote Logging (Syslog)</h3>
+    <div class="form-grid">
+      <label class="check"><input type="checkbox" bind:checked={syslog_.enabled} /> <span>Send Logs to a Syslog Server</span></label>
+      <label>
+        <span>Syslog Server</span>
+        <input placeholder="logs.example.com or tcp://10.0.0.5:6514" bind:value={syslog_.server} disabled={!syslog_.enabled} spellcheck="false" />
+      </label>
+      <label>
+        <span>Facility</span>
+        <select bind:value={syslog_.facility} disabled={!syslog_.enabled}>
+          <option value="daemon">daemon</option>
+          <option value="user">user</option>
+          {#each [0, 1, 2, 3, 4, 5, 6, 7] as n (n)}<option value={`local${n}`}>local{n}</option>{/each}
+        </select>
+      </label>
+      <label>
+        <span>Server Log Messages</span>
+        <select bind:value={syslog_.level} disabled={!syslog_.enabled}>
+          <option value="info">Information and Above</option>
+          <option value="warn">Warnings and Errors</option>
+          <option value="error">Errors Only</option>
+        </select>
+      </label>
+      <label class="check"><input type="checkbox" bind:checked={syslog_.queries} disabled={!syslog_.enabled} /> <span>Also Send Every Query</span></label>
+    </div>
+    <p class="muted help">
+      Sends the server log (and, if chosen, a line per query) as RFC 5424
+      syslog, over UDP by default (port 514), or TCP with
+      <code>tcp://host:port</code>. Changes apply as soon as they are saved.
+      Every query can be a lot of traffic on a busy server.
     </p>
   </div>
   {:else if tab === 'backup'}

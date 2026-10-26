@@ -4,6 +4,7 @@
   import Networks from './Networks.svelte';
   import ClientGroups from './ClientGroups.svelte';
   import ClientPolicies from './ClientPolicies.svelte';
+  import Access from './Access.svelte';
 
   // Everything that treats some clients differently, in one place: the
   // named networks that say who they are, and the two kinds of per-client
@@ -16,6 +17,12 @@
       label: 'Networks',
       tagline:
         'Name your networks (LAN, VPN, IoT...) once, then pick them by name wherever the server asks which clients something applies to: filtering groups, resolution policies, recursion access, encrypted DNS access, split horizon and more.',
+    },
+    {
+      id: 'access',
+      label: 'Access',
+      tagline:
+        'Who may use this server: which clients may have names resolved (recursion), and networks that are refused altogether.',
     },
     {
       id: 'filtering-groups',
@@ -45,6 +52,8 @@
 
 {#if tab === 'networks'}
   <Networks />
+{:else if tab === 'access'}
+  <Access />
 {:else if tab === 'filtering-groups'}
   <ClientGroups />
 {:else}

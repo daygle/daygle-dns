@@ -451,7 +451,7 @@
         />
         <span>
           Keep AI Models up to Date
-          <span class="muted small"> (installs new model bundles automatically with every Update Check; each install restarts the service)</span>
+          <span class="muted small"> (installs new model bundles automatically with every Update Check; each install restarts the service; also on the Update page)</span>
         </span>
       </label>
     {/if}
