@@ -779,6 +779,9 @@ With `update_ptr`, a save answers with the record plus `"reverse": {"added":
 names; `zone_created` and `problem` only when they apply; `problem` says why
 no PTR was added, e.g. no reverse zone or another name's PTR), and a delete
 answers `200` with `{"reverse": {...}}` instead of `204`.
+`PUT /api/zones/{id}/records/{rid}/disabled?update_ptr=true` removes the
+record's PTR when it is disabled and adds it back when it is enabled (its
+answer gains the same `reverse` field).
 
 **Health-checked failover.** An A or AAAA record can carry a health check:
 

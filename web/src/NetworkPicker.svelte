@@ -1,4 +1,6 @@
 <script>
+  import { deviceNames, loadDeviceNames } from './devices.svelte.js';
+
   // Pick client networks: tick named networks (Clients -> Networks) and/or
   // type other addresses. `value` is the list as the server stores it:
   // network names followed by CIDRs or single addresses.
@@ -11,7 +13,40 @@
     // "which listener the query arrived on" rather than by address. Only
     // used where the server accepts them (filtering groups).
     listeners = false,
+    // Offer named devices (Clients -> Devices): picking one adds its address,
+    // and typed addresses of named devices show their names.
+    devices = false,
   } = $props();
+
+  // Named devices, by name.
+  const namedDevices = $derived(
+    Object.entries(deviceNames.map)
+      .map(([address, name]) => ({ address, name }))
+      .sort((a, b) => a.name.localeCompare(b.name)),
+  );
+  // The typed addresses that belong to a named device.
+  const typedDevices = $derived(
+    others(extra)
+      .filter((entry) => deviceNames.map[entry])
+      .map((entry) => ({ address: entry, name: deviceNames.map[entry] })),
+  );
+
+  $effect(() => {
+    if (devices) loadDeviceNames();
+  });
+
+  function addDevice(e) {
+    const address = e.currentTarget.value;
+    e.currentTarget.value = '';
+    if (!address || others(extra).includes(address)) return;
+    extra = [...others(extra), address].join(', ');
+    value = [...listenersOn, ...named, ...others(extra)];
+  }
+
+  function removeDevice(address) {
+    extra = others(extra).filter((entry) => entry !== address).join(', ');
+    value = [...listenersOn, ...named, ...others(extra)];
+  }
 
   const LISTENERS = [
     { key: 'DOT', label: 'DoT' },
@@ -89,6 +124,28 @@
   {/if}
 </div>
 <label class="other">{label} <input {placeholder} value={extra} oninput={typed} /></label>
+{#if devices}
+  {#if typedDevices.length}
+    <div class="chips devices" role="group" aria-label="Devices">
+      {#each typedDevices as d (d.address)}
+        <span class="chip on" title={d.address}>
+          {d.name} <code>{d.address}</code>
+          <button type="button" class="remove" onclick={() => removeDevice(d.address)} aria-label="Remove {d.name}">✕</button>
+        </span>
+      {/each}
+    </div>
+  {/if}
+  {#if namedDevices.length}
+    <label class="other">Add a Device
+      <select onchange={addDevice}>
+        <option value="">Pick a named device...</option>
+        {#each namedDevices as d (d.address)}
+          <option value={d.address} disabled={others(extra).includes(d.address)}>{d.name} ({d.address})</option>
+        {/each}
+      </select>
+    </label>
+  {/if}
+{/if}
 
 <style>
   .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
@@ -107,4 +164,8 @@
   .chip.on { border-color: var(--accent); background: rgb(91 140 255 / 0.15); }
   .chip input { width: auto; margin: 0; }
   .other { display: flex; flex-direction: column; gap: 4px; font-size: 0.85rem; color: var(--muted); }
+  .devices { margin: 10px 0; }
+  .devices code { color: var(--muted); font-size: 0.8rem; }
+  .remove { padding: 0 4px; border: none; background: none; color: var(--muted); cursor: pointer; }
+  label.other + label.other { margin-top: 10px; }
 </style>

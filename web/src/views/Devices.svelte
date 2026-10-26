@@ -102,13 +102,15 @@
       <table>
         <thead>
           <tr>
-            <th>Name</th><th>Address</th><th>MAC Address</th><th class="num">Queries</th><th class="num">Blocked</th><th>Last Seen</th>
+            <th>Address</th><th>MAC Address</th><th>Name</th><th class="num">Queries</th><th class="num">Blocked</th><th>Last Seen</th>
             {#if isAdmin}<th class="num">Actions</th>{/if}
           </tr>
         </thead>
         <tbody>
           {#each shown as d (d.address)}
             <tr>
+              <td><code>{d.address}</code></td>
+              <td><code class="muted">{d.mac || '-'}</code></td>
               <td>
                 {#if editing?.address === d.address}
                   <form class="row" style="gap: 6px" onsubmit={(e) => { e.preventDefault(); saveName(editing.value); }}>
@@ -123,8 +125,6 @@
                   <span class="muted">-</span>
                 {/if}
               </td>
-              <td><code>{d.address}</code></td>
-              <td><code class="muted">{d.mac || '-'}</code></td>
               <td class="num">{fmt(d.queries)}</td>
               <td class="num">{fmt(d.blocked)}</td>
               <td class="muted nowrap">{d.last_seen ? formatDateTime(d.last_seen) : '-'}</td>

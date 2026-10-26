@@ -112,15 +112,46 @@ pub fn read_state() -> UpdateState {
 /// shared by [`read_state`] and its tests.
 fn read_state_with(alive: impl Fn(i64) -> bool) -> UpdateState {
     let path = workspace_dir().join("state.json");
-    let Ok(text) = std::fs::read_to_string(&path) else {
+    let Ok(bytes) = std::fs::read(&path) else {
         return UpdateState::default();
     };
-    let st: UpdateState = serde_json::from_str(&text).unwrap_or_default();
+    let st = parse_state(&bytes);
     let age = std::fs::metadata(&path)
         .and_then(|m| m.modified())
         .ok()
         .and_then(|t| t.elapsed().ok());
     normalize_stale(st, age, alive)
+}
+
+/// Parse a state snapshot written by the shell helpers, which build the JSON
+/// by hand. Their message is the installer's latest log line, which once
+/// carried terminal colour codes and characters cut in half: that made the
+/// file unreadable, a running update read as idle and the console stopped
+/// following it. Invalid UTF-8 is replaced, and colour codes and other
+/// control characters are dropped, before parsing.
+fn parse_state(bytes: &[u8]) -> UpdateState {
+    let text = String::from_utf8_lossy(bytes);
+    if let Ok(st) = serde_json::from_str(&text) {
+        return st;
+    }
+    let mut clean = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' {
+            // A CSI sequence: ESC [ parameters, then a final letter.
+            if chars.peek() == Some(&'[') {
+                chars.next();
+                for f in chars.by_ref() {
+                    if ('@'..='~').contains(&f) {
+                        break;
+                    }
+                }
+            }
+        } else if !c.is_control() {
+            clean.push(c);
+        }
+    }
+    serde_json::from_str(&clean).unwrap_or_default()
 }
 
 /// Map a stale "running" snapshot to a terminal `error` one.
@@ -1938,6 +1969,52 @@ mod tests {
         assert!(version_lt("2", "10")); // numeric, not lexicographic
         assert!(!version_lt("1.0.3+abc", "1.0.3")); // build metadata ignored
         assert!(version_lt("1.0.2+abc", "1.0.3"));
+    }
+
+    #[test]
+    fn states_with_colour_codes_and_broken_characters_still_parse() {
+        // What update-apply.sh wrote while install.sh's coloured log line
+        // was the latest output, cut in the middle of a "─".
+        let mut bytes = b"{\"phase\":\"applying\",\"pid\":7,\"started_at\":\"t\",\"message\":\"installer: \x1b[1;32m[daygle-dns-install]\x1b[0m Building \xe2\x94\",\"exit_code\":0}\n".to_vec();
+        let st = parse_state(&bytes);
+        assert_eq!(st.phase, "applying");
+        assert!(st.is_running());
+        assert!(
+            st.message
+                .starts_with("installer: [daygle-dns-install] Building"),
+            "{}",
+            st.message
+        );
+        // A clean file parses as before; garbage still reads as idle.
+        bytes =
+            br#"{"phase":"building","pid":3,"started_at":"","message":"m","exit_code":0}"#.to_vec();
+        assert_eq!(parse_state(&bytes).phase, "building");
+        assert_eq!(parse_state(b"not json").phase, "");
+    }
+
+    #[test]
+    fn helper_scripts_write_valid_json_for_coloured_log_lines() {
+        // Run each script's json_escape on a coloured install.sh log line
+        // with a box-drawing character, and parse what state() would write.
+        let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        for script in ["src/update.sh", "src/update-apply.sh"] {
+            let text = std::fs::read_to_string(manifest_dir.join(script)).unwrap();
+            let start = text.find("json_escape() {").expect("json_escape");
+            let end = start + text[start..].find("\n}\n").expect("end of json_escape") + 3;
+            let program = format!(
+                "{}\nprintf '{{\"phase\":\"applying\",\"pid\":1,\"started_at\":\"\",\"message\":\"%s\",\"exit_code\":0}}' \"$(json_escape \"$(printf '\\033[1;32m[x]\\033[0m \\342\\224\\200 building')\")\"",
+                &text[start..end]
+            );
+            let out = std::process::Command::new("sh")
+                .arg("-c")
+                .arg(&program)
+                .output()
+                .expect("sh runs");
+            let json = String::from_utf8(out.stdout).expect("ASCII output");
+            let st: UpdateState =
+                serde_json::from_str(&json).unwrap_or_else(|e| panic!("{script}: {e}: {json}"));
+            assert_eq!(st.message, "[x]  building", "{script}");
+        }
     }
 
     #[test]

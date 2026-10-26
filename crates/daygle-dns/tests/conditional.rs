@@ -178,14 +178,3 @@ async fn console_conditional_zone_applies_live() {
 
     shutdown(server).await;
 }
-
-/// A port that is currently free for both TCP and UDP on 127.0.0.1.
-fn free_port() -> u16 {
-    loop {
-        let tcp = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = tcp.local_addr().unwrap().port();
-        if std::net::UdpSocket::bind(("127.0.0.1", port)).is_ok() {
-            return port;
-        }
-    }
-}

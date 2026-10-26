@@ -62,7 +62,12 @@ BASE_URL="https://github.com/${REPO_OWNER}/${REPO_NAME}/releases/download"
 # control characters). Without handling newlines/tabs, a multi-line error
 # would produce invalid JSON that the Rust side reads as idle.
 json_escape() {
-  printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g; s/	/\\t/g' | awk '{
+  # Terminal colour codes (install.sh colours its log lines) and any other
+  # control or non-ASCII bytes are dropped first: unescaped, they made the
+  # JSON invalid (or cut a character in half), and the console then read
+  # the running update as idle.
+  printf '%s' "$1" | sed "s/$(printf '\033')\[[0-9;?]*[A-Za-z]//g" | tr -cd '\11\12\40-\176' \
+    | sed 's/\\/\\\\/g; s/"/\\"/g; s/	/\\t/g' | awk '{
     gsub(/\\n/, "\\\\n");
     gsub(/\\r/, "\\\\r");
     if (NR == 1) printf "%s", $0;

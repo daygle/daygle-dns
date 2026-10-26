@@ -2425,9 +2425,13 @@ pub struct RecordDisabledInput {
 /// `PUT /api/zones/{id}/records/{rid}/disabled` - stage or re-enable a
 /// single record without deleting it. The zone serial is bumped and the
 /// catalog reloaded, so the change is live immediately.
+///
+/// With `?update_ptr=true`, an A or AAAA record's PTR record goes when the
+/// record is disabled and comes back when it is enabled again.
 pub async fn set_record_disabled(
     State(state): State<AppState>,
     Path((zone_id, rid)): Path<(String, String)>,
+    Query(options): Query<crate::reverse::ReverseOptions>,
     axum::Json(input): axum::Json<RecordDisabledInput>,
 ) -> Response {
     if let Some(response) = reject_secondary_mutation(&state, &zone_id) {
@@ -2439,8 +2443,21 @@ pub async fn set_record_disabled(
         .set_record_disabled(&rid, input.disabled)
     {
         Ok(true) => {
+            let record = state.catalog.store().get_record(&rid).ok().flatten();
+            let reverse = match (&record, input.disabled) {
+                (Some(r), true) => crate::reverse::sync(&state, Some(r), None, &options),
+                (Some(r), false) => crate::reverse::sync(&state, None, Some(r), &options),
+                (None, _) => Ok(Default::default()),
+            };
             let _ = state.catalog.reload();
-            Json(serde_json::json!({ "id": rid, "disabled": input.disabled })).into_response()
+            let mut body = serde_json::json!({ "id": rid, "disabled": input.disabled });
+            if options.update_ptr {
+                body["reverse"] = match reverse {
+                    Ok(outcome) => serde_json::to_value(outcome).unwrap_or_default(),
+                    Err(e) => serde_json::json!({ "added": [], "removed": [], "problem": e }),
+                };
+            }
+            Json(body).into_response()
         }
         Ok(false) => error_response(StatusCode::NOT_FOUND, "record not found"),
         Err(e) => map_err(e),

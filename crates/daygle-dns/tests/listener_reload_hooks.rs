@@ -88,16 +88,6 @@ async fn udp_notify(addr: std::net::SocketAddr, zone: &str) -> Message {
     Message::from_vec(&buf[..n]).expect("decode")
 }
 
-/// Grab an ephemeral free TCP port by binding and dropping a socket.
-async fn free_tcp_port() -> u16 {
-    tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
-}
-
 #[tokio::test]
 async fn tsig_transfers_and_notify_survive_listener_reload() {
     let dir = tempfile::tempdir().unwrap();
@@ -106,10 +96,10 @@ async fn tsig_transfers_and_notify_survive_listener_reload() {
 
     let mut cfg = config_with_tsig_and_notify(&db);
     // The config file is validated, so ports must be concrete (not 0).
-    cfg.server.port = free_tcp_port().await;
-    cfg.dot.port = free_tcp_port().await;
-    cfg.doh.port = free_tcp_port().await;
-    cfg.api.port = free_tcp_port().await;
+    cfg.server.port = free_port();
+    cfg.dot.port = free_port();
+    cfg.doh.port = free_port();
+    cfg.api.port = free_port();
     std::fs::write(&cfg_path, toml::to_string(&cfg).expect("serialize config")).unwrap();
 
     let loaded = DaygleConfig::load(&cfg_path).unwrap();

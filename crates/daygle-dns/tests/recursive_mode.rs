@@ -355,17 +355,6 @@ async fn save_applies_recursion_access_without_restart() {
     shutdown(server).await;
 }
 
-/// A port that is currently free for both TCP and UDP on 127.0.0.1.
-fn free_port() -> u16 {
-    loop {
-        let tcp = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = tcp.local_addr().unwrap().port();
-        if std::net::UdpSocket::bind(("127.0.0.1", port)).is_ok() {
-            return port;
-        }
-    }
-}
-
 #[tokio::test]
 async fn forwarding_mode_passes_nodata_through_as_noerror() {
     // The upstream knows v4only.test (A only): AAAA is NODATA, not NXDOMAIN.

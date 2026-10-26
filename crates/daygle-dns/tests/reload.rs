@@ -17,23 +17,6 @@ use daygle_dns_core::config::DaygleConfig;
 use hickory_proto::op::ResponseCode;
 use hickory_proto::rr::RecordType;
 
-/// Grab an ephemeral port that is free for both UDP and TCP by binding and
-/// dropping a socket of each. The callers use these ports for TCP listeners
-/// too (DNS over TCP, DoT, DoH, the API), and a port free for UDP can still
-/// be taken for TCP, e.g. as the local port of another test's connection.
-async fn free_port() -> u16 {
-    loop {
-        let udp = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        let port = udp.local_addr().unwrap().port();
-        if tokio::net::TcpListener::bind(("127.0.0.1", port))
-            .await
-            .is_ok()
-        {
-            return port;
-        }
-    }
-}
-
 /// Send one raw DNS query over TCP (length-prefixed) and read the response.
 async fn tcp_transfer_query(
     addr: SocketAddr,
@@ -93,16 +76,16 @@ async fn reloads_policy_and_listeners_without_restart() {
     let db = dir.path().join("daygle-dns.db");
     let cfg_path = dir.path().join("daygle-dns.toml");
 
-    let port_a = free_port().await;
-    let port_b = free_port().await;
+    let port_a = free_port();
+    let port_b = free_port();
 
     let mut cfg = base_config(&db);
     cfg.server.port = port_a;
     cfg.server.reload_enabled = false;
     cfg.recursive.enabled = false;
-    cfg.dot.port = free_port().await;
-    cfg.doh.port = free_port().await;
-    cfg.api.port = free_port().await;
+    cfg.dot.port = free_port();
+    cfg.doh.port = free_port();
+    cfg.api.port = free_port();
     write_config(&cfg_path, &cfg);
 
     let loaded = DaygleConfig::load(&cfg_path).unwrap();
@@ -151,15 +134,15 @@ async fn reloads_recursive_upstreams() {
     let up_b = spawn_upstream(&dir.path().join("up-b.db"), "b.test", "198.51.100.2").await;
 
     let mut cfg = base_config(&db);
-    cfg.server.port = free_port().await;
+    cfg.server.port = free_port();
     cfg.server.reload_enabled = false;
     cfg.recursive.enabled = true;
     cfg.recursive.use_system_config = false;
     cfg.recursive.upstreams = vec![up_a.to_string()];
     cfg.recursive.dnssec_validate = false;
-    cfg.dot.port = free_port().await;
-    cfg.doh.port = free_port().await;
-    cfg.api.port = free_port().await;
+    cfg.dot.port = free_port();
+    cfg.doh.port = free_port();
+    cfg.api.port = free_port();
     write_config(&cfg_path, &cfg);
     // Upstreams are a DB-owned runtime setting: seed the DB with the values
     // the file would have supplied on first boot.
@@ -218,13 +201,13 @@ async fn console_owned_network_ignores_file_edits() {
     let cfg_path = dir.path().join("daygle-dns.toml");
 
     let mut cfg = base_config(&db);
-    cfg.server.port = free_port().await;
+    cfg.server.port = free_port();
     cfg.server.reload_enabled = true;
     cfg.server.reload_interval_ms = 50;
     cfg.recursive.enabled = false;
-    cfg.dot.port = free_port().await;
-    cfg.doh.port = free_port().await;
-    cfg.api.port = free_port().await;
+    cfg.dot.port = free_port();
+    cfg.doh.port = free_port();
+    cfg.api.port = free_port();
     cfg.authoritative.axfr_enabled = true;
     cfg.authoritative.axfr_networks = vec!["LAN".to_string()];
     cfg.networks = vec![daygle_dns_core::config::NamedNetwork {
@@ -291,13 +274,13 @@ async fn watches_config_file_and_applies_edits() {
     let cfg_path = dir.path().join("daygle-dns.toml");
 
     let mut cfg = base_config(&db);
-    cfg.server.port = free_port().await;
+    cfg.server.port = free_port();
     cfg.server.reload_enabled = true;
     cfg.server.reload_interval_ms = 50;
     cfg.recursive.enabled = false;
-    cfg.dot.port = free_port().await;
-    cfg.doh.port = free_port().await;
-    cfg.api.port = free_port().await;
+    cfg.dot.port = free_port();
+    cfg.doh.port = free_port();
+    cfg.api.port = free_port();
     write_config(&cfg_path, &cfg);
 
     let server = bind_with(
@@ -314,7 +297,7 @@ async fn watches_config_file_and_applies_edits() {
 
     // Edit the file: change the listener port (file-owned) and add a
     // blocklist entry (DB-owned, so the watcher must NOT apply it).
-    let port_b = free_port().await;
+    let port_b = free_port();
     cfg.server.port = port_b;
     cfg.policy.blocklist = vec!["watched.example".to_string()];
     write_config(&cfg_path, &cfg);
