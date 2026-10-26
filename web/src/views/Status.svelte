@@ -5,6 +5,7 @@
   import ResolverDashboard from './ResolverDashboard.svelte';
   import { icons } from '../icons.svelte.js';
   import { formatTime, formatTimeShort, formatDateTime } from '../datetime.svelte.js';
+  import ClientLabel from '../ClientLabel.svelte';
 
   // Navigate to the Update page (passed by the app shell).
   let { onOpenUpdate = null } = $props();
@@ -292,7 +293,7 @@
         <table>
           <tbody>
             {#each stats.top_clients as row, i (row.key)}
-              <tr><td class="muted">#{i + 1}</td><td><code>{row.key}</code></td><td class="num">{fmt(row.count)}</td></tr>
+              <tr><td class="muted">#{i + 1}</td><td><ClientLabel address={row.key} /></td><td class="num">{fmt(row.count)}</td></tr>
             {/each}
           </tbody>
         </table>

@@ -44,6 +44,9 @@ Daygle DNS combines, in a single process:
 - **Reports**: queries, blocks, the busiest devices and the most asked and
   most blocked domains for any period (overall or per device) under
   Logs → Reports, and a daily or weekly summary by email or webhook.
+- **Device names**: logs, reports and the dashboard show "Kids-iPad"
+  instead of 192.168.1.47. Name devices under Clients → Devices, or let
+  names come from DHCP leases and reverse DNS.
 - **DHCP (IPv4 and IPv6)**: hand out addresses, gateway and DNS settings
   with reservations and custom options, and DHCPv6 addresses or DNS
   settings only (stateless); devices are registered by name (A/AAAA and

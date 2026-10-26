@@ -293,7 +293,8 @@ fn main() {
     // Hickory's own `debug` DoH failure events so it can re-emit them
     // into the console's Server Log - tagged with the query-log protocol
     // values and coalesced per client (see `daygle_dns::tls_diag`).
-    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(&filter));
+    let env_filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new(daygle_dns::tracing_filter(&filter)));
     tracing_subscriber::registry()
         .with(tracing_subscriber::fmt::layer().with_filter(env_filter))
         .with(

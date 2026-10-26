@@ -11,6 +11,9 @@
 //!   reason. Repeats from the same client are coalesced - the first failure
 //!   per (protocol, client) per interval is logged, later ones are counted
 //!   and summarised - so a loop of failing handshakes cannot flood the log.
+//!   Across clients, at most [`LINES_PER_INTERVAL`] lines per protocol are
+//!   written per interval; the rest (an internet scan of a public DoT port
+//!   comes from many addresses) are counted and reported in one line.
 //!   Entries carry the same protocol values the query log records (`tls`,
 //!   `https`, `quic`) as their console Server Log component, so the two logs
 //!   correlate, and they feed syslog when it is enabled.
@@ -53,6 +56,8 @@ const DEFAULT_INTERVAL: Duration = Duration::from_secs(60);
 /// windows (and clears the map as a last resort) instead of growing it
 /// without limit; coalescing still holds at most one line per clear.
 const MAX_TRACKED: usize = 4096;
+/// Lines written per protocol per interval, across all clients.
+pub const LINES_PER_INTERVAL: u32 = 10;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct Key {
@@ -83,6 +88,17 @@ pub struct SessionLog {
     logs: Arc<LogStore>,
     interval: Duration,
     inner: Mutex<HashMap<Key, Window>>,
+    budgets: Mutex<HashMap<&'static str, Budget>>,
+}
+
+/// What one protocol has written in the current interval.
+#[derive(Debug)]
+struct Budget {
+    since: Instant,
+    lines: u32,
+    held_back: u64,
+    /// The clients held back (bounded: only counted).
+    clients: std::collections::HashSet<Option<IpAddr>>,
 }
 
 impl SessionLog {
@@ -96,6 +112,7 @@ impl SessionLog {
             logs,
             interval,
             inner: Mutex::new(HashMap::new()),
+            budgets: Mutex::new(HashMap::new()),
         }
     }
 
@@ -151,8 +168,61 @@ impl SessionLog {
                 }
             }
         };
+        let (allowed, held) = self.spend(protocol, client, now);
+        if let Some(held) = held {
+            tracing::warn!(protocol, "{held}");
+            self.logs.warn(protocol, held);
+        }
+        if !allowed {
+            return;
+        }
         tracing::warn!(protocol, client = ?client, reason, failures, "{message}");
         self.logs.warn(protocol, message);
+    }
+
+    /// Take one line from `protocol`'s budget: whether it may be written,
+    /// and the summary of what the last interval held back, if anything.
+    fn spend(
+        &self,
+        protocol: &'static str,
+        client: Option<IpAddr>,
+        now: Instant,
+    ) -> (bool, Option<String>) {
+        let mut budgets = self.budgets.lock().unwrap_or_else(|e| e.into_inner());
+        let budget = budgets.entry(protocol).or_insert_with(|| Budget {
+            since: now,
+            lines: 0,
+            held_back: 0,
+            clients: Default::default(),
+        });
+        let mut held = None;
+        if now.duration_since(budget.since) >= self.interval {
+            if budget.held_back > 0 {
+                held = Some(format!(
+                    "{} more {protocol} session failures from {} clients in the last {:?} \
+                     were not logged one by one",
+                    budget.held_back,
+                    budget.clients.len(),
+                    self.interval,
+                ));
+            }
+            *budget = Budget {
+                since: now,
+                lines: 0,
+                held_back: 0,
+                clients: Default::default(),
+            };
+        }
+        if budget.lines < LINES_PER_INTERVAL {
+            budget.lines += 1;
+            (true, held)
+        } else {
+            budget.held_back += 1;
+            if budget.clients.len() < MAX_TRACKED {
+                budget.clients.insert(client);
+            }
+            (false, held)
+        }
     }
 
     /// Record one session event for the accepted peer `peer` of a TCP-based
@@ -640,6 +710,30 @@ mod tests {
         assert_eq!(warns(&logs, QUIC).len(), 2);
         assert_eq!(warns(&logs, TLS).len(), 1);
         assert!(warns(&logs, TLS)[0].contains("tls reason"));
+    }
+
+    #[test]
+    fn many_clients_cannot_flood_the_log() {
+        let logs = store();
+        let session = SessionLog::with_interval(logs.clone(), Duration::from_millis(30));
+        for i in 0..50u8 {
+            let client = Some(IpAddr::from(Ipv4Addr::new(198, 51, 100, i)));
+            session.record(TLS, client, "TLS handshake timed out");
+        }
+        assert_eq!(warns(&logs, TLS).len(), LINES_PER_INTERVAL as usize);
+        // Another protocol has its own budget.
+        session.record(QUIC, Some(IpAddr::from(Ipv4Addr::new(192, 0, 2, 1))), "x");
+        assert_eq!(warns(&logs, QUIC).len(), 1);
+
+        std::thread::sleep(Duration::from_millis(60));
+        session.record(TLS, Some(IpAddr::from(Ipv4Addr::new(192, 0, 2, 7))), "y");
+        let all = warns(&logs, TLS);
+        assert_eq!(all.len(), LINES_PER_INTERVAL as usize + 2, "{all:?}");
+        assert!(
+            all[LINES_PER_INTERVAL as usize]
+                .contains("40 more tls session failures from 40 clients"),
+            "{all:?}"
+        );
     }
 
     #[test]

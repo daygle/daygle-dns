@@ -260,6 +260,8 @@ export const api = {
   testAlert: (alerts) => request('POST', '/alerts/test', { alerts }),
   rpzStatus: () => request('GET', '/rpz'),
   dhcp: () => request('GET', '/dhcp'),
+  devices: (hours) => request('GET', `/devices?hours=${hours}`),
+  setDeviceName: (address, mac, name) => request('PUT', '/devices/name', { address, mac, name }),
   deleteDhcpLease: (address) => request('DELETE', `/dhcp/leases/${encodeURIComponent(address)}`),
   blockableServices: () => request('GET', '/policy/services'),
   report: (hours, client) =>

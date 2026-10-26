@@ -11,6 +11,7 @@ daygle-dns-core = { path = "../daygle-dns-core" }
 daygle-dns-ml = { path = "../daygle-dns-ml", default-features = false }
 daygle-dns-authoritative = { path = "../daygle-dns-authoritative" }
 daygle-dns-dhcp = { path = "../daygle-dns-dhcp" }
+hickory-proto.workspace = true
 daygle-dns-dot = { path = "../daygle-dns-dot" }
 daygle-dns-policy = { path = "../daygle-dns-policy" }
 daygle-dns-recursive = { path = "../daygle-dns-recursive" }

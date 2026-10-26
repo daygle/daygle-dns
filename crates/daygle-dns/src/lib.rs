@@ -38,6 +38,29 @@ use reload::{
 };
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
+
+/// The `tracing` filter for `logging.level`. Hickory's server logs two
+/// `info` lines for every query it answers (the client address and the
+/// name asked), which would flood the system journal and record queries
+/// even with the query log off; they are kept to warnings unless the
+/// filter names `hickory_server` itself.
+pub fn tracing_filter(level: &str) -> String {
+    let level = level.trim();
+    if level.contains("hickory_server") {
+        return level.to_string();
+    }
+    let quiet = match level.to_ascii_lowercase().as_str() {
+        "error" => "error",
+        "off" => "off",
+        _ => "warn",
+    };
+    if level.is_empty() {
+        format!("info,hickory_server::server={quiet}")
+    } else {
+        format!("{level},hickory_server::server={quiet}")
+    }
+}
+
 use tracing::{info, warn};
 
 pub use dispatcher::DnsDispatcher as CombinedHandler;
@@ -753,6 +776,7 @@ pub async fn bind_with(
         acme: Arc::new(daygle_dns_api::acme::Acme::default()),
         rpz: Some(rpz_manager.clone()),
         dhcp: Some(dhcp.clone()),
+        devices: Arc::default(),
     };
     // Scheduled reports (Settings -> Alerts).
     tokio::spawn(daygle_dns_api::reports::run_reports(
@@ -1545,4 +1569,27 @@ fn local_root_cache_path(database: &str) -> Option<std::path::PathBuf> {
         return None;
     }
     Some(std::path::Path::new(database).with_file_name("local-root.zone"))
+}
+
+#[cfg(test)]
+mod filter_tests {
+    #[test]
+    fn hickory_per_query_lines_stay_quiet() {
+        use super::tracing_filter;
+        assert_eq!(tracing_filter("info"), "info,hickory_server::server=warn");
+        assert_eq!(tracing_filter("debug"), "debug,hickory_server::server=warn");
+        assert_eq!(
+            tracing_filter("error"),
+            "error,hickory_server::server=error"
+        );
+        assert_eq!(tracing_filter(""), "info,hickory_server::server=warn");
+        assert_eq!(
+            tracing_filter("info,hickory_server=info"),
+            "info,hickory_server=info"
+        );
+        // Every result parses.
+        for level in ["info", "warn", "info,daygle_dns=debug", "off"] {
+            tracing_subscriber::EnvFilter::try_new(tracing_filter(level)).unwrap();
+        }
+    }
 }
