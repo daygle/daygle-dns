@@ -1395,8 +1395,12 @@ Triggers (owner names, relative to the zone): a domain or `*.domain`
 (`32.7.1.168.192.rpz-client-ip` is `192.168.1.7/32`; IPv6 words are reversed
 too, `zz` standing for `::`); and `prefix.reversed-address.rpz-ip` for an
 address in the answer. A domain trigger also matches a name in the answer's
-CNAME chain. NSDNAME and NSIP triggers are not supported (they are counted as
-`unsupported` and skipped).
+CNAME chain. `name.rpz-nsdname` (or `*.name.rpz-nsdname`) matches a name
+server of the answer's domain by name, and `prefix.reversed-address.rpz-nsip`
+by address: the name servers are those of the closest enclosing name with NS
+records (below the top-level domain), looked up through the resolver (and
+their addresses, for NSIP) only when some zone has such triggers. Triggers
+of an unknown kind are counted as `unsupported` and skipped.
 
 Actions: `CNAME .` is NXDOMAIN, `CNAME *.` NODATA, `CNAME rpz-passthru.`
 exempts the query from the rest of RPZ (as does a CNAME to the trigger
@@ -1408,9 +1412,10 @@ garden returns its address; a target `*.garden.example.` becomes the query
 name under the garden), else NODATA.
 
 Zones are checked in order and the first that matches decides. Within a
-zone, client-IP triggers come before domain triggers, an exact domain
-before a wildcard, and the longest wildcard or address prefix wins. Answer
-triggers (CNAME targets and addresses) are checked on recursive answers.
+zone, triggers are checked in the standard order (client IP, domain, answer
+IP, NSDNAME, NSIP), an exact domain before a wildcard, and the longest
+wildcard or address prefix wins. Answer triggers (CNAME targets, answer
+addresses, name servers) are checked on recursive answers.
 RPZ applies to what the blocklists and filtering groups let through, and an
 allowlisted name is exempt. A zone that cannot be loaded keeps its last
 loaded rules; failures raise a `blocklist_failure` (URL) or
@@ -1418,7 +1423,7 @@ loaded rules; failures raise a `blocklist_failure` (URL) or
 
 `GET /api/rpz` returns `{"zones": [...]}`, each with `name`, `enabled`,
 `source`, `policy`, `loaded`, `rules` (`qname`, `wildcard`, `client_ip`,
-`response_ip`, `unsupported` counts), `serial`, `last_loaded`, `last_checked`
+`response_ip`, `nsdname`, `nsip`, `unsupported` counts), `serial`, `last_loaded`, `last_checked`
 (RFC 3339), `last_error` and `hits` (matches since start, those of a
 `disabled` zone included). `POST /api/rpz` checks every URL and transfer
 zone for changes now (`202`). `POST /api/rpz/test` with `{"client",

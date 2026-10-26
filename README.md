@@ -129,7 +129,7 @@ metrics.
 - **Response policy zones (RPZ)**: DNS firewall feeds loaded by zone
   transfer (AXFR, with TSIG) or URL, or rules typed in the console, with
   every RPZ action (NXDOMAIN, NODATA, passthru, drop, TCP-only, local data
-  and walled gardens), QNAME, client-IP and answer-IP triggers, per-zone
+  and walled gardens), QNAME, client-IP, answer-IP, NSDNAME and NSIP triggers, per-zone
   policy overrides, a log-only mode and a tester.
 - **Response rate limiting (RRL)**: identical UDP answers to one network
   are capped per second, with slip (truncated answers that send real
