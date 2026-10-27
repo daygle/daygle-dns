@@ -153,7 +153,9 @@ async fn db_query_log_records_filters_and_clears() {
     let csv = reqwest_text(&format!("{api}/querylogs?format=csv"))
         .await
         .unwrap();
-    assert!(csv.starts_with("timestamp,client,qname,qtype,protocol,outcome,rcode,elapsed_ms\n"));
+    assert!(csv.starts_with(
+        "timestamp,client,qname,qtype,protocol,outcome,rcode,elapsed_ms,block_source,block_group,block_matched,block_reason\n"
+    ));
     assert_eq!(csv.lines().count(), 4);
 
     // Clear empties the log.

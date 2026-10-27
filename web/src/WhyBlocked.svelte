@@ -24,6 +24,8 @@
     none: 'No Match',
     off: 'Not Active',
   };
+  // How the answer reads (the API's action names).
+  const ANSWERS = { block: 'NXDOMAIN', refused: 'REFUSED', nodata: 'No Data', redirect: 'Redirect' };
   const LISTENERS = [
     ['', 'Plain DNS'],
     ['dot', 'DNS over TLS'],
@@ -89,8 +91,8 @@
     </span>
     {#if result.verdict.blocked}
       <div class="muted small">
-        By {blockSourceLabel(result.verdict.source)}{#if result.verdict.group} in group <strong>{result.verdict.group}</strong>{/if}{#if result.verdict.matched} · matched <code>{result.verdict.matched}</code>{/if}
-        · answer: {result.verdict.action}
+        By {blockSourceLabel(result.verdict.source)}{#if result.verdict.group} in group <strong>{result.verdict.group}</strong>{/if}{#if result.verdict.matched}{' '}· matched <code>{result.verdict.matched}</code>{/if}
+        {' '}· answered {ANSWERS[result.verdict.action] || result.verdict.action}
       </div>
     {/if}
   </div>
