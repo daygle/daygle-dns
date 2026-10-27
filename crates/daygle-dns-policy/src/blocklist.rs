@@ -33,17 +33,41 @@ pub const EXCEPTION_PREFIX: &str = "@@";
 /// Whether any parent of `domain` (`b.example.com`, `example.com`, `com` for
 /// `a.b.example.com`) is in `suffixes`.
 fn parent_in(suffixes: &HashSet<String>, domain: &str) -> bool {
+    parent_match(suffixes, domain).is_some()
+}
+
+/// The nearest parent of `domain` in `suffixes`, if any.
+fn parent_match<'a>(suffixes: &HashSet<String>, domain: &'a str) -> Option<&'a str> {
     if suffixes.is_empty() {
-        return false;
+        return None;
     }
     let mut rest = domain;
     while let Some((_, parent)) = rest.split_once('.') {
         rest = parent;
         if suffixes.contains(rest) {
-            return true;
+            return Some(rest);
         }
     }
-    false
+    None
+}
+
+/// The entry of a source's raw entry set (as [`Blocklist::from_set`] takes
+/// it) that lists `domain`: the name itself, or the nearest `*.parent`
+/// wildcard. Exceptions are not considered; this says which entry a block
+/// came from, after the merged list has decided it is blocked.
+pub fn entry_for(entries: &BTreeSet<String>, domain: &str) -> Option<String> {
+    if entries.contains(domain) {
+        return Some(domain.to_string());
+    }
+    let mut rest = domain;
+    while let Some((_, parent)) = rest.split_once('.') {
+        rest = parent;
+        let wildcard = format!("*.{rest}");
+        if entries.contains(&wildcard) {
+            return Some(wildcard);
+        }
+    }
+    None
 }
 
 impl Blocklist {
@@ -91,6 +115,18 @@ impl Blocklist {
         let listed = self.exact.contains(domain) || parent_in(&self.suffixes, domain);
         listed && !(self.except_exact.contains(domain) || parent_in(&self.except_suffixes, domain))
     }
+
+    /// The entry that puts `domain` in the list (`ads.example.com` or
+    /// `*.example.com`), when it is in it.
+    pub fn matching_entry(&self, domain: &str) -> Option<String> {
+        if !self.contains(domain) {
+            return None;
+        }
+        if self.exact.contains(domain) {
+            return Some(domain.to_string());
+        }
+        parent_match(&self.suffixes, domain).map(|parent| format!("*.{parent}"))
+    }
 }
 
 #[cfg(test)]
@@ -117,6 +153,28 @@ mod tests {
         assert!(!list.contains("img.static.example.com"));
         assert!(list.contains("static.example.com"));
         assert_eq!(list.len(), 2);
+    }
+
+    #[test]
+    fn reports_the_matching_entry() {
+        let list =
+            Blocklist::from_lines(["ads.example.com", "*.tracker.test", "@@ok.tracker.test"]);
+        assert_eq!(
+            list.matching_entry("ads.example.com").as_deref(),
+            Some("ads.example.com")
+        );
+        assert_eq!(
+            list.matching_entry("a.b.tracker.test").as_deref(),
+            Some("*.tracker.test")
+        );
+        assert_eq!(list.matching_entry("ok.tracker.test"), None, "an exception");
+        assert_eq!(list.matching_entry("example.com"), None);
+        let entries: BTreeSet<String> = ["*.tracker.test".to_string()].into();
+        assert_eq!(
+            entry_for(&entries, "x.tracker.test").as_deref(),
+            Some("*.tracker.test")
+        );
+        assert_eq!(entry_for(&entries, "tracker.test"), None);
     }
 
     #[test]

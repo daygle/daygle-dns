@@ -41,6 +41,9 @@ pub struct QueryLogEntry {
     pub rcode: Option<String>,
     /// Server-side handling time in milliseconds.
     pub elapsed_ms: u64,
+    /// Why it was blocked, for blocked queries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub block: Option<crate::block_log::BlockReason>,
 }
 
 struct Inner {
@@ -245,6 +248,7 @@ mod tests {
             outcome: "recursive".to_string(),
             rcode: Some("NOERROR".to_string()),
             elapsed_ms: 3,
+            block: None,
         }
     }
 

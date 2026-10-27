@@ -53,6 +53,8 @@ pub struct QueryLine<'a> {
     pub outcome: &'a str,
     pub rcode: Option<&'a str>,
     pub elapsed_ms: u64,
+    /// Why it was blocked, for blocked queries.
+    pub block: Option<&'a daygle_dns_core::block_log::BlockReason>,
 }
 
 impl SyslogSender {
@@ -104,22 +106,39 @@ impl SyslogSender {
         if !(config.syslog.enabled && config.syslog.queries) {
             return;
         }
+        let mut text = format!(
+            "client={} qname={} qtype={} protocol={} outcome={} rcode={} ms={}",
+            q.client,
+            if q.qname.is_empty() { "." } else { q.qname },
+            q.qtype,
+            q.protocol,
+            q.outcome,
+            q.rcode.unwrap_or("-"),
+            q.elapsed_ms
+        );
+        if let Some(block) = q.block {
+            text.push_str(&format!(" source={}", block.source));
+            if let Some(group) = &block.group {
+                text.push_str(&format!(" group={}", quoted(group)));
+            }
+            if let Some(matched) = &block.matched {
+                text.push_str(&format!(" matched={}", quoted(matched)));
+            }
+            text.push_str(&format!(" reason={}", quoted(&block.reason)));
+        }
         self.queue(Line {
             ts: Utc::now(),
             severity: 6,
             msgid: "query",
-            text: format!(
-                "client={} qname={} qtype={} protocol={} outcome={} rcode={} ms={}",
-                q.client,
-                if q.qname.is_empty() { "." } else { q.qname },
-                q.qtype,
-                q.protocol,
-                q.outcome,
-                q.rcode.unwrap_or("-"),
-                q.elapsed_ms
-            ),
+            text,
         });
     }
+}
+
+/// `value` in double quotes, with `"` and `\` escaped, for a `key=value`
+/// field that may hold spaces.
+fn quoted(value: &str) -> String {
+    format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
 /// The RFC 5424 line for `line` (no trailing newline).

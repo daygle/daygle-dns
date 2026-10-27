@@ -13,6 +13,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use arc_swap::ArcSwap;
+use daygle_dns_core::block_log::BlockReason;
 use daygle_dns_core::config::{DaygleConfig, LogExportSettings};
 use daygle_dns_core::LogStore;
 use serde::Serialize;
@@ -46,6 +47,9 @@ pub struct QueryEvent {
     /// `NOERROR`, `NXDOMAIN`, ... when known.
     pub rcode: Option<String>,
     pub elapsed_ms: u64,
+    /// Why it was blocked, for blocked queries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub block: Option<BlockReason>,
 }
 
 /// Counters for the console.
@@ -108,6 +112,7 @@ impl LogExporter {
         outcome: &str,
         rcode: Option<&str>,
         elapsed_ms: u64,
+        block: Option<&BlockReason>,
     ) {
         if !self.enabled() {
             return;
@@ -122,6 +127,7 @@ impl LogExporter {
             outcome: outcome.to_string(),
             rcode: rcode.map(str::to_string),
             elapsed_ms,
+            block: block.cloned(),
         };
         if self.tx.try_send(event).is_err() {
             self.drop_events(1);
@@ -211,6 +217,7 @@ pub fn test_event() -> QueryEvent {
         outcome: "test".to_string(),
         rcode: Some("NOERROR".to_string()),
         elapsed_ms: 0,
+        block: None,
     }
 }
 

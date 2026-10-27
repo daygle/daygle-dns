@@ -9,6 +9,8 @@
   import { addressFor, deviceName, loadDeviceNames } from '../devices.svelte.js';
   import ColumnPicker from '../ColumnPicker.svelte';
   import { isHidden } from '../columns.svelte.js';
+  import WhyBlocked from '../WhyBlocked.svelte';
+  import { BLOCK_SOURCES, blockSourceLabel } from '../blockSources.js';
 
   // The query log's columns (Columns menu); Domain is always shown.
   const QUERY_COLUMNS = [
@@ -20,6 +22,7 @@
     { key: 'protocol', label: 'Protocol' },
     { key: 'result', label: 'Result' },
     { key: 'rcode', label: 'Response Code' },
+    { key: 'reason', label: 'Blocked By' },
     { key: 'took', label: 'Took' },
   ];
   const showQ = (key) => !isHidden('query-log', key);
@@ -202,6 +205,9 @@
   let fProtocol = $state('');
   let fOutcome = $state('');
   let fRcode = $state('');
+  let fBlockSource = $state('');
+  // The query log row "Why?" was opened for, or null.
+  let why = $state(null);
   let fFrom = $state('');
   let fTo = $state('');
   let perPage = $state(50);
@@ -217,7 +223,7 @@
   let liveTimer = null;
 
   const filtersActive = $derived(
-    !!(fClient.trim() || fQname.trim() || fQtype || fProtocol || fOutcome || fRcode || fFrom || fTo),
+    !!(fClient.trim() || fQname.trim() || fQtype || fProtocol || fOutcome || fRcode || fBlockSource || fFrom || fTo),
   );
 
   function buildQuery(overrides = {}) {
@@ -230,6 +236,7 @@
     put('protocol', fProtocol);
     put('outcome', fOutcome);
     put('rcode', fRcode);
+    put('block_source', fBlockSource);
     // The pickers show the display time zone; the API wants UTC.
     put('from', zonedInputToIso(fFrom));
     put('to', zonedInputToIso(fTo));
@@ -261,7 +268,7 @@
   }
 
   function resetFilters() {
-    fClient = fQname = fQtype = fProtocol = fOutcome = fRcode = fFrom = fTo = '';
+    fClient = fQname = fQtype = fProtocol = fOutcome = fRcode = fBlockSource = fFrom = fTo = '';
     apply();
   }
 
@@ -512,6 +519,12 @@
             {#each RCODES as r (r)}<option value={r}>{r}</option>{/each}
           </select>
         </label>
+        <label>Blocked By
+          <select bind:value={fBlockSource} onchange={apply}>
+            <option value="">Any</option>
+            {#each BLOCK_SOURCES.filter(([v]) => v !== 'allowlist' && v !== 'safe_search') as [value, label] (value)}<option value={value}>{label}</option>{/each}
+          </select>
+        </label>
         <label>From <span class="tz">{displayZoneName()}</span>
           <input type="datetime-local" bind:value={fFrom} />
         </label>
@@ -570,6 +583,7 @@
           {#if showQ('protocol')}<th>Protocol</th>{/if}
           {#if showQ('result')}<th>Result</th>{/if}
           {#if showQ('rcode')}<th>Response Code</th>{/if}
+          {#if showQ('reason')}<th>Blocked By</th>{/if}
           {#if showQ('took')}<th class="num">Took</th>{/if}
         </tr>
       </thead>
@@ -594,6 +608,16 @@
               </span></td>
             {/if}
             {#if showQ('rcode')}<td>{entry.rcode || '-'}</td>{/if}
+            {#if showQ('reason')}
+              <td class="reason">
+                {#if entry.outcome === 'blocked'}
+                  <span title={entry.block?.reason || 'Logged before reasons were kept'}>
+                    {entry.block ? blockSourceLabel(entry.block.source) : 'Unknown'}{#if entry.block?.matched}: <code>{entry.block.matched}</code>{/if}{#if entry.block?.group} <span class="muted">({entry.block.group})</span>{/if}
+                  </span>
+                  <button type="button" class="link why" onclick={() => (why = entry)} title="Every check this domain meets for this device, and which one decides">Why?</button>
+                {:else}<span class="muted">-</span>{/if}
+              </td>
+            {/if}
             {#if showQ('took')}<td class="num">{entry.elapsed_ms} ms</td>{/if}
           </tr>
         {/each}
@@ -622,8 +646,28 @@
   </div>
 {/if}
 
+{#if why}
+  <div class="modal-backdrop" role="presentation" onclick={(e) => e.target === e.currentTarget && (why = null)}>
+    <div class="modal card wide" role="dialog" aria-modal="true" aria-labelledby="why-title">
+      <div class="spread" style="margin-bottom: 10px">
+        <h3 id="why-title" style="margin: 0">Why Was {why.qname} Blocked?</h3>
+        <button class="secondary" style="padding: 2px 10px" onclick={() => (why = null)} aria-label="Close">✕</button>
+      </div>
+      {#if why.block}
+        <p style="margin-top: 0">At {formatDateTime(why.ts)}: {why.block.reason}.</p>
+      {/if}
+      <p class="muted help" style="margin-top: 0">How the server treats it now:</p>
+      <WhyBlocked domain={why.qname} client={why.client} qtype={why.qtype} auto={true} />
+    </div>
+  </div>
+{/if}
+
 <style>
   .small { font-size: 0.78rem; margin-top: 2px; }
+  .reason { max-width: 340px; }
+  .why { margin-left: 6px; font-size: 0.8rem; }
+  .modal-backdrop { position: fixed; inset: 0; background: rgb(0 0 0 / 0.65); display: grid; place-items: center; padding: 16px; z-index: 10; }
+  .modal.wide { width: min(980px, 100%); max-height: calc(100vh - 32px); overflow: auto; }
   .filter-grid {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));

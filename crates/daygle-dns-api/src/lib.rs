@@ -603,6 +603,7 @@ pub fn router(state: AppState) -> Router {
             get(handlers::validate_blocklist_source),
         )
         .route("/policy/blocking/test", post(handlers::test_blocking))
+        .route("/policy/explain", get(handlers::explain_blocking))
         .route("/alerts/test", post(handlers::test_alert))
         .route("/log-export", get(handlers::log_export_status))
         .route("/log-export/test", post(handlers::test_log_export))

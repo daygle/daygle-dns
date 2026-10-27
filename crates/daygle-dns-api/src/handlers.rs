@@ -1091,6 +1091,8 @@ pub struct QueryLogsQuery {
     protocol: Option<String>,
     outcome: Option<String>,
     rcode: Option<String>,
+    /// What blocked the query (`blocklist_source`, `group`, `rpz`, ...).
+    block_source: Option<String>,
     from: Option<String>,
     to: Option<String>,
     page: Option<u32>,
@@ -1158,6 +1160,7 @@ fn query_log_filter(
         protocol: query.protocol.clone(),
         outcome: query.outcome.clone(),
         rcode: query.rcode.clone(),
+        block_source: query.block_source.clone(),
         from: bound(&query.from, Bound::From)?,
         to: bound(&query.to, Bound::To)?,
         page: query.page,
@@ -1225,19 +1228,26 @@ pub async fn query_logs(
             Ok((rows, _)) => rows,
             Err(e) => return map_err(e),
         };
-        let mut csv =
-            String::from("timestamp,client,qname,qtype,protocol,outcome,rcode,elapsed_ms\n");
+        let mut csv = String::from(
+            "timestamp,client,qname,qtype,protocol,outcome,rcode,elapsed_ms,block_source,block_group,block_matched,block_reason\n",
+        );
         for r in &rows {
+            let block = r.block.as_ref();
+            let field = |value: Option<&str>| value.map(csv_escape).unwrap_or_default();
             csv.push_str(&format!(
-                "{},{},{},{},{},{},{},{}\n",
+                "{},{},{},{},{},{},{},{},{},{},{},{}\n",
                 csv_escape(&r.ts),
                 csv_escape(&r.client),
                 csv_escape(&r.qname),
                 csv_escape(&r.qtype),
                 csv_escape(&r.protocol),
                 csv_escape(&r.outcome),
-                r.rcode.as_deref().map(csv_escape).unwrap_or_default(),
+                field(r.rcode.as_deref()),
                 r.elapsed_ms,
+                field(block.map(|b| b.source.as_str())),
+                field(block.and_then(|b| b.group.as_deref())),
+                field(block.and_then(|b| b.matched.as_deref())),
+                field(block.map(|b| b.reason.as_str())),
             ));
         }
         let headers = [
@@ -3155,6 +3165,218 @@ pub async fn test_blocking(
         "youtube_restricted": youtube_restricted,
         "safe_search_target": safe_search_target,
         "scheduled_off": scheduled_off,
+    }))
+    .into_response()
+}
+
+/// Query of `GET /api/policy/explain`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExplainInput {
+    /// The domain to explain.
+    domain: String,
+    /// The device: an IP address, or a device name from Clients -> Devices.
+    client: String,
+    /// The query type (default `A`): Filter AAAA only touches `AAAA`.
+    #[serde(default)]
+    qtype: Option<String>,
+    /// The encrypted listener asked on (`dot`, `doh`, `doq`); omitted for
+    /// plain DNS.
+    #[serde(default)]
+    listener: Option<String>,
+}
+
+/// `GET /api/policy/explain` - why a domain is (or is not) blocked for a
+/// device: the verdict the server gives, every check in the order queries
+/// meet them and what each does with the domain, and the latest logged
+/// blocks of the domain with their reasons.
+pub async fn explain_blocking(
+    State(state): State<AppState>,
+    Query(input): Query<ExplainInput>,
+) -> Response {
+    use daygle_dns_policy::{source, Action, Check};
+    let domain = input
+        .domain
+        .trim()
+        .trim_end_matches('.')
+        .to_ascii_lowercase();
+    if domain.is_empty() || domain.contains(char::is_whitespace) {
+        return error_response(StatusCode::BAD_REQUEST, "domain must be a domain name");
+    }
+    let typed = input.client.trim();
+    let labels = crate::devices::labels(&state, std::time::Duration::from_secs(7 * 86_400)).await;
+    let client: IpAddr = match typed.parse::<IpAddr>() {
+        Ok(ip) => ip.to_canonical(),
+        Err(_) => match labels
+            .iter()
+            .find(|(_, name)| name.eq_ignore_ascii_case(typed))
+            .and_then(|(address, _)| address.parse::<IpAddr>().ok())
+        {
+            Some(ip) => ip,
+            None => {
+                return error_response(
+                    StatusCode::BAD_REQUEST,
+                    format!("'{typed}' is not an IP address or a known device name"),
+                )
+            }
+        },
+    };
+    let client_name = labels.get(&client.to_string()).cloned();
+    let qtype = input
+        .qtype
+        .as_deref()
+        .map(|t| t.trim().to_ascii_uppercase())
+        .filter(|t| !t.is_empty())
+        .unwrap_or_else(|| "A".to_string());
+    let listener: Option<&'static str> = match input
+        .listener
+        .as_deref()
+        .map(|l| l.trim().to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("dot") => Some("dot"),
+        Some("doh") => Some("doh"),
+        Some("doq") => Some("doq"),
+        _ => None,
+    };
+
+    let policy = state.policy.load_full();
+    let groups = state.advanced_blocking.load_full();
+    let rpz = state.rpz.as_ref().map(|r| r.set().load_full());
+
+    // Every check, in the order a query meets them.
+    let mut checks = policy.explain(client, &domain, &qtype, listener).await;
+    checks.extend(groups.explain(client, &domain, listener));
+    let rpz_hit = rpz.as_ref().and_then(|r| r.check_query(client, &domain));
+    if rpz.as_ref().is_some_and(|r| !r.is_empty()) {
+        checks.push(match &rpz_hit {
+            Some(hit) => {
+                let passthru = matches!(
+                    hit.action,
+                    daygle_dns_authoritative::rpz::RpzAction::Passthru
+                );
+                Check {
+                    source: source::RPZ,
+                    result: if passthru { "allow" } else { "block" },
+                    detail: format!(
+                        "Response policy zone '{}': {} ({})",
+                        hit.zone,
+                        hit.trigger,
+                        hit.action.label()
+                    ),
+                    matched: Some(hit.zone.clone()),
+                    group: None,
+                    action: (!passthru).then_some(hit.action.label()),
+                }
+            }
+            None => Check {
+                source: source::RPZ,
+                result: "none",
+                detail: "No response policy zone matches the name or the device".to_string(),
+                matched: None,
+                group: None,
+                action: None,
+            },
+        });
+    }
+    let (group_safe, group_youtube, _) = groups.safe_search(client, listener);
+    let safe_target = daygle_dns_policy::safe_search::safe_target(
+        &domain,
+        policy.safe_search() || group_safe,
+        policy.youtube_restricted() || group_youtube,
+    );
+    if let Some(target) = safe_target {
+        checks.push(Check {
+            source: source::SAFE_SEARCH,
+            result: "rewrite",
+            detail: format!(
+                "Answered with {target} (Safe Search or YouTube Restricted Mode), not blocked"
+            ),
+            matched: Some(target.to_string()),
+            group: None,
+            action: None,
+        });
+    }
+
+    // The verdict, decided as the server decides it.
+    let decision = policy.evaluate_on(client, &domain, &qtype, listener).await;
+    let allowlisted = policy.is_allowlisted(&domain);
+    let verdict = if decision.action != Action::Allow {
+        Some((
+            decision.source,
+            decision.group.clone(),
+            decision.matched.clone(),
+            decision.reason.clone(),
+            decision.action.as_str(),
+        ))
+    } else if allowlisted {
+        None
+    } else if let Some(d) = groups.evaluate(client, &domain, listener) {
+        Some((d.source, d.group, d.matched, d.reason, d.action.as_str()))
+    } else {
+        rpz_hit
+            .filter(|h| !matches!(h.action, daygle_dns_authoritative::rpz::RpzAction::Passthru))
+            .map(|h| {
+                (
+                    source::RPZ,
+                    None,
+                    Some(h.zone.clone()),
+                    format!("response policy zone {}: {}", h.zone, h.trigger),
+                    h.action.label(),
+                )
+            })
+    };
+    let verdict = match verdict {
+        Some((source, group, matched, reason, action)) => serde_json::json!({
+            "blocked": true,
+            "source": source,
+            "group": group,
+            "matched": matched,
+            "reason": reason,
+            "action": action,
+        }),
+        None => serde_json::json!({
+            "blocked": false,
+            "source": if allowlisted { Some(source::ALLOWLIST) } else { None },
+            "reason": if allowlisted {
+                decision.reason
+            } else if safe_target.is_some() {
+                "nothing blocks it; Safe Search answers it with its safe address".to_string()
+            } else {
+                "nothing blocks it".to_string()
+            },
+        }),
+    };
+
+    // The latest blocks of this domain in the query log, with their
+    // reasons: what happened, including checks made on the answer (CNAME
+    // inspection, response policy zone answer triggers).
+    let filter = daygle_dns_authoritative::QueryLogFilter {
+        qname: Some(domain.clone()),
+        outcome: Some("blocked".to_string()),
+        per_page: Some(200),
+        ..Default::default()
+    };
+    let recent: Vec<_> = state
+        .catalog
+        .store()
+        .search_query_logs(&filter)
+        .map(|(rows, _)| rows)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|r| r.qname == domain)
+        .take(10)
+        .collect();
+
+    Json(serde_json::json!({
+        "domain": domain,
+        "client": client.to_string(),
+        "client_name": client_name,
+        "qtype": qtype,
+        "listener": listener,
+        "verdict": verdict,
+        "checks": checks,
+        "recent": recent,
     }))
     .into_response()
 }

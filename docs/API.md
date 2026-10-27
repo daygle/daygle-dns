@@ -311,7 +311,7 @@ outside `recursion_access` would be refused recursion on it.
 ### Query logs
 
 ```
-GET    /api/querylogs?client=&qname=&qtype=&protocol=&outcome=&rcode=&from=&to=&page=1&per_page=50
+GET    /api/querylogs?client=&qname=&qtype=&protocol=&outcome=&rcode=&block_source=&from=&to=&page=1&per_page=50
 DELETE /api/querylogs
 ```
 
@@ -321,6 +321,24 @@ name/type, transport (`udp`, `tcp`, `tls`, `https`, `quic`), outcome
 (`authoritative`, `recursive`, `split_horizon`, `blocked`, `rate_limited`,
 `error`), response code and server-side handling time. The console's
 **Logs → Query Log** tab searches this history.
+
+A blocked query also keeps why it was blocked, as `block`:
+`{"source", "group", "matched", "reason"}` (`null` for queries that were
+not blocked, and for blocks logged before reasons were kept). `source`
+says what blocked it: `blocklist` (the server's own block list),
+`blocklist_source` (a blocklist source that applies to everyone or to the
+DoT listener; `matched` is its name), `group` (a filtering group's own
+block entries or patterns; `matched` is the entry), `service` (a blocked
+service; `matched` is its name), `group_blocklist` (a blocklist source
+selected by a group), `ai` (`matched` is the category), `rpz` (`matched` is
+the zone), `cname` (the answer led through a CNAME to a blocked name;
+`matched` is that name), `denied_network`, `listener` (the client may not
+use that encrypted listener), `aaaa_filter`, `client_rule` or `plugin`.
+`group` names the filtering group when a group blocked it, and `reason` is
+the whole explanation in words, as the Extended DNS Error carries it.
+`block_source` filters on it. The CSV export has `block_source`,
+`block_group`, `block_matched` and `block_reason` columns, and syslog query
+lines end in `source=... group="..." matched="..." reason="..."` for blocks.
 
 `GET` returns a page of entries (newest first) plus the total count under
 the same filter. `qname` accepts `*` wildcards (`*.example.com`, `www.*`)
@@ -1450,6 +1468,35 @@ reordered list. Groups are evaluated in this order.
 `POST /api/policy/blocking/test` accepts an optional `"listener"` of
 `"doT"` / `"doH"` / `"doq"` (case-insensitive, omitted or `null` for plain
 DNS) so a group's listener entries can be tested.
+
+```
+GET    /api/policy/explain?domain=&client=&qtype=A&listener=
+```
+
+`GET /api/policy/explain` says why `domain` is or is not blocked for
+`client` (an address, or a device name from Clients -> Devices; `400`
+otherwise), as an `A` query unless `qtype` says otherwise, over plain DNS
+unless `listener` is `dot`, `doh` or `doq`. It answers:
+
+- `verdict`: what the server does with the query now, decided as a real
+  query is: `{"blocked": true, "source", "group", "matched", "reason",
+  "action"}` (`source` as in the query log; `action` is `block` for
+  NXDOMAIN, `refused`, `redirect`, `nodata`, or the RPZ action), or
+  `{"blocked": false, "source", "reason"}` (`source` is `allowlist` when the
+  allow list lets it through).
+- `checks`: every check that is set up, in the order queries meet them, and
+  what each does with the domain, without stopping at the first that
+  decides: denied networks, the allow list, the block list, each blocklist
+  source that lists it, per-client rules, Filter AAAA, the AI scanner,
+  then each filtering group covering the device (including groups outside
+  their schedule, as `off`), response policy zones and Safe Search. Each is
+  `{"source", "result", "detail", "matched", "group", "action"}`, with
+  `result` one of `block`, `allow`, `rewrite`, `none` or `off`.
+- `recent`: the latest blocks of exactly this domain in the query log (any
+  device, up to 10), with their `block` reasons, which also covers checks
+  made on answers (CNAME inspection, RPZ answer triggers).
+
+It changes nothing, so read-only accounts may use it.
 
 `POST /api/policy/blocking/test` evaluates a `{client, domain}` pair against
 the live blocking groups and reports whether (and why) it is blocked, so an

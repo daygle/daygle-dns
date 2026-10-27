@@ -25,6 +25,7 @@ use daygle_dns_core::blocking::{BlockResponse, BlockingGroup};
 use daygle_dns_core::config::normalize_domains;
 use daygle_dns_core::schedule::{self, CompiledWindow, WeekTime};
 
+use crate::engine::{source, Check};
 use crate::{Action, Blocklist, Decision, GroupBlocklists};
 
 /// Client-list keywords that match by listener instead of by address.
@@ -97,9 +98,27 @@ impl CompiledGroup {
         self.allow.contains(qname) || self.allow_regex.is_match(qname)
     }
 
-    fn blocks(&self, qname: &str) -> bool {
-        self.block.contains(qname) || self.block_regex.is_match(qname)
+    /// The allow entry or pattern that lets `qname` through, if any.
+    fn allow_match(&self, qname: &str) -> Option<String> {
+        self.allow
+            .matching_entry(qname)
+            .or_else(|| first_pattern(&self.allow_regex, qname))
     }
+
+    /// The block entry or pattern that blocks `qname`, if any.
+    fn block_match(&self, qname: &str) -> Option<String> {
+        self.block
+            .matching_entry(qname)
+            .or_else(|| first_pattern(&self.block_regex, qname))
+    }
+}
+
+/// The first pattern of `set` that matches `qname`, written as `/pattern/`.
+fn first_pattern(set: &RegexSet, qname: &str) -> Option<String> {
+    set.matches(qname)
+        .iter()
+        .next()
+        .map(|i| format!("/{}/", set.patterns()[i]))
 }
 
 /// The time of the week a query is evaluated at, read on first use.
@@ -289,12 +308,23 @@ impl AdvancedBlocking {
                 .iter()
                 .find(|(_, domains)| domains.contains(qname))
                 .map(|(name, _)| *name);
-            let reason = if group.blocks(qname) {
-                Some(format!("'{qname}' blocked by group '{}'", group.name))
+            let found = if let Some(entry) = group.block_match(qname) {
+                Some((
+                    format!(
+                        "'{qname}' blocked by group '{}' (entry '{entry}')",
+                        group.name
+                    ),
+                    source::GROUP,
+                    entry,
+                ))
             } else if let Some(service) = service {
-                Some(format!(
-                    "'{qname}' blocked as part of {service} by group '{}'",
-                    group.name
+                Some((
+                    format!(
+                        "'{qname}' blocked as part of {service} by group '{}'",
+                        group.name
+                    ),
+                    source::SERVICE,
+                    service.to_string(),
                 ))
             } else if group.blocklists.is_empty() {
                 None
@@ -305,19 +335,120 @@ impl AdvancedBlocking {
                     .iter()
                     .find(|(key, _)| lists.get(key).is_some_and(|l| l.contains(qname)))
                     .map(|(_, name)| {
-                        format!(
-                            "'{qname}' blocked by blocklist '{name}' in group '{}'",
-                            group.name
+                        (
+                            format!(
+                                "'{qname}' blocked by blocklist '{name}' in group '{}'",
+                                group.name
+                            ),
+                            source::GROUP_BLOCKLIST,
+                            name.clone(),
                         )
                     })
             };
-            if let Some(reason) = reason {
+            if let Some((reason, kind, matched)) = found {
                 return Some(
-                    Decision::new(reason, group.action.clone()).with_group(group.name.clone()),
+                    Decision::new(reason, group.action.clone())
+                        .with_group(group.name.clone())
+                        .with_source(kind, Some(matched)),
                 );
             }
         }
         None
+    }
+
+    /// Every enabled group covering `client` on `listener`, in order, and
+    /// what each does with `qname`, without stopping at the first that
+    /// decides (a group that allows the name still stops later groups from
+    /// blocking it, as [`Self::evaluate`] does).
+    pub fn explain(
+        &self,
+        client: IpAddr,
+        qname: &str,
+        listener: Option<&'static str>,
+    ) -> Vec<Check> {
+        let lists = self.lists.snapshot();
+        let mut now = self.clock();
+        let mut checks = Vec::new();
+        for group in &self.groups {
+            if !group.matches_client(client, listener) {
+                continue;
+            }
+            let in_group = |result: &'static str, kind: &'static str, detail: String| Check {
+                group: Some(group.name.clone()),
+                action: (result == "block").then(|| group.action.as_str()),
+                ..Check::new(kind, result, detail)
+            };
+            if !group.applies(client, listener, &mut now) {
+                checks.push(in_group(
+                    "off",
+                    source::GROUP,
+                    format!(
+                        "Group '{}' covers this device but is outside its schedule now",
+                        group.name
+                    ),
+                ));
+                continue;
+            }
+            let before = checks.len();
+            if let Some(entry) = group.allow_match(qname) {
+                checks.push(Check {
+                    matched: Some(entry.clone()),
+                    ..in_group(
+                        "allow",
+                        source::GROUP,
+                        format!("Allowed by group '{}' (entry '{entry}')", group.name),
+                    )
+                });
+            }
+            if let Some(entry) = group.block_match(qname) {
+                checks.push(Check {
+                    matched: Some(entry.clone()),
+                    ..in_group(
+                        "block",
+                        source::GROUP,
+                        format!("Blocked by group '{}' (entry '{entry}')", group.name),
+                    )
+                });
+            }
+            for (service, domains) in &group.services {
+                if domains.contains(qname) {
+                    checks.push(Check {
+                        matched: Some(service.to_string()),
+                        ..in_group(
+                            "block",
+                            source::SERVICE,
+                            format!("Part of {service}, blocked by group '{}'", group.name),
+                        )
+                    });
+                }
+            }
+            for (key, name) in &group.blocklists {
+                if let Some(entry) = lists.get(key).and_then(|l| l.matching_entry(qname)) {
+                    checks.push(Check {
+                        matched: Some(name.clone()),
+                        ..in_group(
+                            "block",
+                            source::GROUP_BLOCKLIST,
+                            format!(
+                                "On the blocklist '{name}' (entry '{entry}'), selected by group '{}'",
+                                group.name
+                            ),
+                        )
+                    });
+                }
+            }
+            if checks.len() == before {
+                checks.push(in_group(
+                    "none",
+                    source::GROUP,
+                    format!(
+                        "Group '{}' covers this device; nothing in it matches",
+                        group.name
+                    ),
+                ));
+            }
+        }
+        checks
     }
 }
 

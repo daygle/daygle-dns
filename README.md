@@ -58,6 +58,11 @@ Daygle DNS combines, in a single process:
   with reservations and custom options, and DHCPv6 addresses or DNS
   settings only (stateless); devices are registered by name (A/AAAA and
   PTR) in a zone you host. Linux only.
+- **Why was it blocked?** Every blocked query in the Query Log says what
+  blocked it (which blocklist, list entry, filtering group, blocked service,
+  AI category or response policy zone), with a filter by it, and Filtering
+  → Why Blocked? walks a domain through every check for a device and shows
+  which one decides.
 - **Blocked services**: block TikTok, YouTube, Roblox, Discord, ChatGPT and
   30-odd other apps for a filtering group with one tick each.
 - **Per-client rules** on the console's Clients page: **filtering groups**

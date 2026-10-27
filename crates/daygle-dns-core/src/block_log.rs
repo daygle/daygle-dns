@@ -7,6 +7,24 @@ use std::net::IpAddr;
 use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
+use serde::{Deserialize, Serialize};
+
+/// Why a query was blocked, as the query logs keep it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BlockReason {
+    /// What blocked it: `blocklist`, `blocklist_source`, `group`,
+    /// `service`, `group_blocklist`, `ai`, `rpz`, `cname`, `denied_network`,
+    /// `listener`, `aaaa_filter`, `client_rule` or `plugin`.
+    pub source: String,
+    /// The filtering group, when a group blocked it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
+    /// The entry, list, service, AI category or zone that matched.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub matched: Option<String>,
+    /// The whole explanation, in words.
+    pub reason: String,
+}
 
 /// Most entries kept; older ones are forgotten first.
 const CAPACITY: usize = 4096;

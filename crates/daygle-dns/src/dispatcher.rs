@@ -10,9 +10,10 @@ use arc_swap::{ArcSwap, ArcSwapOption};
 use async_trait::async_trait;
 use daygle_dns_authoritative::model::SPLIT_HORIZON_RECORD_TYPES;
 use daygle_dns_authoritative::AuthorityCatalog;
+use daygle_dns_core::block_log::BlockReason;
 use daygle_dns_core::stats::Outcome;
 use daygle_dns_core::{DaygleError, LogStore, Metrics, RateLimiter};
-use daygle_dns_policy::{Action, AdvancedBlocking, PolicyEngine};
+use daygle_dns_policy::{source, Action, AdvancedBlocking, PolicyEngine};
 use daygle_dns_recursive::RecursiveResolver;
 use hickory_proto::dnssec::Proof;
 use hickory_proto::op::{MessageType, OpCode, ResponseCode};
@@ -373,6 +374,7 @@ impl DnsDispatcher {
     /// is disabled). `qtype` is the query type string (empty when the query was
     /// rejected before parsing), `rcode` the response code when known, and
     /// `started` the instant the request began (for the logged handling time).
+    #[allow(clippy::too_many_arguments)]
     fn log_query(
         &self,
         client: IpAddr,
@@ -381,6 +383,7 @@ impl DnsDispatcher {
         outcome: Outcome,
         rcode: Option<&str>,
         started: Instant,
+        block: Option<BlockReason>,
     ) {
         if let Some(logger) = &self.query_logger {
             logger.log(&daygle_dns_core::QueryLogEntry {
@@ -391,6 +394,7 @@ impl DnsDispatcher {
                 outcome: outcome_label(outcome).to_string(),
                 rcode: rcode.map(|r| r.to_string()),
                 elapsed_ms: started.elapsed().as_millis() as u64,
+                block,
             });
         }
     }
@@ -408,6 +412,7 @@ impl DnsDispatcher {
         outcome: Outcome,
         rcode: Option<&str>,
         started: Instant,
+        block: Option<BlockReason>,
     ) {
         if let Some(logger) = &self.query_db_logger {
             logger.log(crate::query_db_log::QueryDbEntry {
@@ -419,6 +424,7 @@ impl DnsDispatcher {
                 outcome: outcome_label(outcome).to_string(),
                 rcode: rcode.map(|r| r.to_string()),
                 elapsed_ms: started.elapsed().as_millis() as u64,
+                block,
             });
         }
     }
@@ -437,9 +443,25 @@ impl DnsDispatcher {
         rcode: Option<&str>,
         started: Instant,
     ) {
+        self.observe_with(
+            client, qname, qtype, protocol, outcome, rcode, started, None,
+        );
+    }
+
+    /// [`Self::observe`], with why the query was blocked when it was.
+    #[allow(clippy::too_many_arguments)]
+    fn observe_with(
+        &self,
+        client: IpAddr,
+        qname: &str,
+        qtype: &str,
+        protocol: &str,
+        outcome: Outcome,
+        rcode: Option<&str>,
+        started: Instant,
+        block: Option<BlockReason>,
+    ) {
         self.record_stats(client, qname, outcome);
-        self.log_query(client, qname, qtype, outcome, rcode, started);
-        self.db_log_query(client, qname, qtype, protocol, outcome, rcode, started);
         if let Some(syslog) = &self.syslog {
             syslog.query(crate::syslog::QueryLine {
                 client,
@@ -449,8 +471,20 @@ impl DnsDispatcher {
                 outcome: outcome_label(outcome),
                 rcode,
                 elapsed_ms: started.elapsed().as_millis() as u64,
+                block: block.as_ref(),
             });
         }
+        self.log_query(client, qname, qtype, outcome, rcode, started, block.clone());
+        self.db_log_query(
+            client,
+            qname,
+            qtype,
+            protocol,
+            outcome,
+            rcode,
+            started,
+            block.clone(),
+        );
         if let Some(export) = &self.log_export {
             export.query(
                 client,
@@ -460,8 +494,34 @@ impl DnsDispatcher {
                 outcome_label(outcome),
                 rcode,
                 started.elapsed().as_millis() as u64,
+                block.as_ref(),
             );
         }
+    }
+
+    /// [`Self::observe`] for a blocked query, keeping why it was blocked
+    /// in the query logs.
+    #[allow(clippy::too_many_arguments)]
+    fn observe_blocked(
+        &self,
+        client: IpAddr,
+        qname: &str,
+        qtype: &str,
+        protocol: &str,
+        rcode: Option<&str>,
+        started: Instant,
+        block: BlockReason,
+    ) {
+        self.observe_with(
+            client,
+            qname,
+            qtype,
+            protocol,
+            Outcome::Blocked,
+            rcode,
+            started,
+            Some(block),
+        );
     }
 
     /// Whether `key` is used for the first time this clock minute (and so
@@ -768,14 +828,19 @@ impl RequestHandler for DnsDispatcher {
         if matches!(listener_allowed, Some(false)) {
             debug!(%client, protocol, "client not allowed on this listener");
             self.metrics.inc(&self.metrics.blocked);
-            self.observe(
+            self.observe_blocked(
                 client,
                 "(listener-denied)",
                 "",
                 protocol,
-                Outcome::Blocked,
                 Some("REFUSED"),
                 started,
+                block_reason(
+                    source::LISTENER,
+                    None,
+                    None,
+                    "client is not allowed on this listener",
+                ),
             );
             return send_error(
                 &mut response_handle,
@@ -978,14 +1043,14 @@ impl RequestHandler for DnsDispatcher {
             Action::Refused => {
                 debug!(query = %qname, reason = %decision.reason, "refused by policy");
                 self.metrics.inc(&self.metrics.blocked);
-                self.observe(
+                self.observe_blocked(
                     client,
                     &qname,
                     &rtype,
                     protocol,
-                    Outcome::Blocked,
                     Some("REFUSED"),
                     started,
+                    block_reason_of(&decision),
                 );
                 return send_error(
                     &mut response_handle,
@@ -999,14 +1064,14 @@ impl RequestHandler for DnsDispatcher {
                 debug!(query = %qname, reason = %decision.reason, "blocked by policy");
                 self.metrics.inc(&self.metrics.blocked);
                 if let Some(answer) = self.block_page_answer(info.query.query_type()) {
-                    self.observe(
+                    self.observe_blocked(
                         client,
                         &qname,
                         &rtype,
                         protocol,
-                        Outcome::Blocked,
                         Some("NOERROR"),
                         started,
+                        block_reason_of(&decision),
                     );
                     return self
                         .serve_block_page(
@@ -1019,14 +1084,14 @@ impl RequestHandler for DnsDispatcher {
                         )
                         .await;
                 }
-                self.observe(
+                self.observe_blocked(
                     client,
                     &qname,
                     &rtype,
                     protocol,
-                    Outcome::Blocked,
                     Some("NXDOMAIN"),
                     started,
+                    block_reason_of(&decision),
                 );
                 return send_error(
                     &mut response_handle,
@@ -1039,14 +1104,14 @@ impl RequestHandler for DnsDispatcher {
             Action::Redirect(ip) => {
                 debug!(query = %qname, %ip, "redirected by policy");
                 self.metrics.inc(&self.metrics.blocked);
-                self.observe(
+                self.observe_blocked(
                     client,
                     &qname,
                     &rtype,
                     protocol,
-                    Outcome::Blocked,
                     Some("NOERROR"),
                     started,
+                    block_reason_of(&decision),
                 );
                 return send_redirect(
                     &mut response_handle,
@@ -1062,14 +1127,14 @@ impl RequestHandler for DnsDispatcher {
                 // Filter AAAA: NODATA (empty NOERROR) forces IPv4 fallback.
                 debug!(query = %qname, reason = %decision.reason, "AAAA filtered");
                 self.metrics.inc(&self.metrics.blocked);
-                self.observe(
+                self.observe_blocked(
                     client,
                     &qname,
                     &rtype,
                     protocol,
-                    Outcome::Blocked,
                     Some("NOERROR"),
                     started,
+                    block_reason_of(&decision),
                 );
                 return send_empty(
                     &mut response_handle,
@@ -1101,14 +1166,14 @@ impl RequestHandler for DnsDispatcher {
                 self.metrics.inc(&self.metrics.blocked);
                 if decision.action == Action::Block {
                     if let Some(answer) = self.block_page_answer(info.query.query_type()) {
-                        self.observe(
+                        self.observe_blocked(
                             client,
                             &qname,
                             &rtype,
                             protocol,
-                            Outcome::Blocked,
                             Some("NOERROR"),
                             started,
+                            block_reason_of(&decision),
                         );
                         return self
                             .serve_block_page(
@@ -1127,14 +1192,14 @@ impl RequestHandler for DnsDispatcher {
                     Action::Redirect(_) | Action::NoData => "NOERROR",
                     _ => "NXDOMAIN",
                 };
-                self.observe(
+                self.observe_blocked(
                     client,
                     &qname,
                     &rtype,
                     protocol,
-                    Outcome::Blocked,
                     Some(rcode),
                     started,
+                    block_reason_of(&decision),
                 );
                 // Per-client-group filtering (RFC 8914 "Filtered").
                 let why = Some(Ede::new(ede::FILTERED, decision.reason.clone()));
@@ -1536,14 +1601,14 @@ impl RequestHandler for DnsDispatcher {
                         self.metrics.inc(&self.metrics.blocked);
                         if decision.action == Action::Block {
                             if let Some(answer) = self.block_page_answer(info.query.query_type()) {
-                                self.observe(
+                                self.observe_blocked(
                                     client,
                                     &qname,
                                     &rtype,
                                     protocol,
-                                    Outcome::Blocked,
                                     Some("NOERROR"),
                                     started,
+                                    cname_block_reason(&target, &decision),
                                 );
                                 let reason = format!(
                                     "CNAME target {target} is blocked: {}",
@@ -1570,14 +1635,14 @@ impl RequestHandler for DnsDispatcher {
                             Action::Redirect(_) | Action::NoData => "NOERROR",
                             _ => "NXDOMAIN",
                         };
-                        self.observe(
+                        self.observe_blocked(
                             client,
                             &qname,
                             &rtype,
                             protocol,
-                            Outcome::Blocked,
                             Some(rcode),
                             started,
+                            cname_block_reason(&target, &decision),
                         );
                         return match decision.action {
                             Action::Refused => {
@@ -2369,14 +2434,19 @@ impl DnsDispatcher {
             ))
         };
         let observe = |rcode: &str| {
-            self.observe(
+            self.observe_blocked(
                 client,
                 qname,
                 rtype,
                 protocol,
-                Outcome::Blocked,
                 Some(rcode),
                 started,
+                block_reason(
+                    source::RPZ,
+                    None,
+                    Some(hit.zone.clone()),
+                    format!("response policy zone {}: {}", hit.zone, hit.trigger),
+                ),
             )
         };
         match &hit.action {
@@ -2578,6 +2648,46 @@ impl DnsDispatcher {
 }
 
 /// Send a response with only an error code.
+/// A block reason for the query logs.
+fn block_reason(
+    source: &str,
+    group: Option<String>,
+    matched: Option<String>,
+    reason: impl Into<String>,
+) -> BlockReason {
+    BlockReason {
+        source: source.to_string(),
+        group,
+        matched,
+        reason: reason.into(),
+    }
+}
+
+/// The block reason of a policy or filtering-group decision.
+fn block_reason_of(decision: &daygle_dns_policy::Decision) -> BlockReason {
+    block_reason(
+        if decision.source.is_empty() {
+            source::PLUGIN
+        } else {
+            decision.source
+        },
+        decision.group.clone(),
+        decision.matched.clone(),
+        decision.reason.clone(),
+    )
+}
+
+/// The block reason of a query whose answer led, through a CNAME, to the
+/// blocked name `target`.
+fn cname_block_reason(target: &str, decision: &daygle_dns_policy::Decision) -> BlockReason {
+    block_reason(
+        source::CNAME,
+        decision.group.clone(),
+        Some(target.to_string()),
+        format!("CNAME target {target} is blocked: {}", decision.reason),
+    )
+}
+
 async fn send_error<R: ResponseHandler>(
     handle: &mut R,
     request: &Request,

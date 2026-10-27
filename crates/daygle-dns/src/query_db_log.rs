@@ -32,6 +32,8 @@ pub struct QueryDbEntry {
     pub outcome: String,
     pub rcode: Option<String>,
     pub elapsed_ms: u64,
+    /// Why it was blocked, for blocked queries.
+    pub block: Option<daygle_dns_core::block_log::BlockReason>,
 }
 
 /// Async query-log writer. Cloneable handle for the dispatcher.
@@ -109,6 +111,7 @@ async fn run_writer(
                             outcome: entry.outcome,
                             rcode: entry.rcode,
                             elapsed_ms: entry.elapsed_ms as i64,
+                            block: entry.block,
                         });
                         if pending.len() >= BATCH_MAX_ROWS {
                             flush(&store, &mut pending).await;
@@ -185,6 +188,7 @@ mod tests {
             outcome: "authoritative".to_string(),
             rcode: Some("NOERROR".to_string()),
             elapsed_ms: 1,
+            block: None,
         }
     }
 

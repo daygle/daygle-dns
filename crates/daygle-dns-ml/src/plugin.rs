@@ -109,7 +109,8 @@ impl PolicyPlugin for AiBlockPlugin {
                 ),
                 Action::Block,
             )
-            .with_group("ai"),
+            .with_group("ai")
+            .with_source(daygle_dns_policy::source::AI, Some(block.category.clone())),
         )
     }
 }
