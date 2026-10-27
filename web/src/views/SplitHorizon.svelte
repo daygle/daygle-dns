@@ -1,4 +1,5 @@
 <script>
+  import IconButton from '../IconButton.svelte';
   import { api, formatApiError } from '../api.js';
   import { duration } from '../aiLabels.js';
   import { formatDateTime } from '../datetime.svelte.js';
@@ -236,22 +237,10 @@
                 </td>
                 <td class="num">
                   <div class="row" style="gap: 6px; justify-content: flex-end; flex-wrap: nowrap">
-                    <button
-                      class="secondary"
-                      title="Move up (checked earlier)"
-                      aria-label="Move up"
-                      onclick={() => moveEntry(entry, 'up')}
-                      disabled={!canMoveUp(entry)}
-                    >↑</button>
-                    <button
-                      class="secondary"
-                      title="Move down (checked later)"
-                      aria-label="Move down"
-                      onclick={() => moveEntry(entry, 'down')}
-                      disabled={!canMoveDown(entry)}
-                    >↓</button>
-                    <button class="secondary" onclick={() => startEdit(entry)}>Edit</button>
-                    <button class="danger" onclick={() => removeEntry(entry)} aria-label="Delete entry">✕</button>
+                    <IconButton icon="up" label="Move up (checked earlier)" onclick={() => moveEntry(entry, 'up')} disabled={!canMoveUp(entry)} />
+                    <IconButton icon="down" label="Move down (checked later)" onclick={() => moveEntry(entry, 'down')} disabled={!canMoveDown(entry)} />
+                    <IconButton icon="edit" label="Edit" onclick={() => startEdit(entry)} />
+                    <IconButton icon="delete" variant="danger" label="Delete entry" onclick={() => removeEntry(entry)} />
                   </div>
                 </td>
               </tr>

@@ -1,4 +1,5 @@
 <script>
+  import IconButton from '../IconButton.svelte';
   import { api, formatApiError } from '../api.js';
   import { formatDateTime } from '../datetime.svelte.js';
   import { duration } from '../aiLabels.js';
@@ -511,11 +512,11 @@
                 <td class="num">
                   {#if selected.zone_type !== 'secondary'}
                     <div class="row" style="gap: 6px; justify-content: flex-end; flex-wrap: nowrap">
-                      <button class="secondary" onclick={() => startEdit(record)}>Edit</button>
+                      <IconButton icon="edit" label="Edit" onclick={() => startEdit(record)} />
                       {#if record.rtype === 'A' || record.rtype === 'AAAA'}
-                        <button class="secondary" onclick={() => openHealth(record)} title="Check this address and fail over when it is down">Health</button>
+                        <IconButton icon="health" label="Health check: check this address and fail over when it is down" onclick={() => openHealth(record)} />
                       {/if}
-                      <button class="danger" onclick={() => removeRecord(record)} aria-label="Delete record">✕</button>
+                      <IconButton icon="delete" variant="danger" label="Delete record" onclick={() => removeRecord(record)} />
                     </div>
                   {:else}
                     <span class="muted">Read-Only</span>
