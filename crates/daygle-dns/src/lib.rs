@@ -589,15 +589,13 @@ pub async fn bind_with(
 
     // SQLite-backed query log for the console's Query Logs view (search,
     // filter, paginate, export). The sink batches writes off the query path.
-    let query_db_logger = if config.logging.query_db_enabled {
-        Some(Arc::new(crate::query_db_log::QueryDbLogger::spawn(
-            store.clone(),
-            config.logging.query_db_max_rows,
-            shutdown.clone(),
-        )))
-    } else {
-        None
-    };
+    // Always started: it reads `[logging]` live, so the console can turn it
+    // on or off and change its retention without a restart.
+    let query_db_logger = Some(Arc::new(crate::query_db_log::QueryDbLogger::spawn(
+        store.clone(),
+        config_swap.clone(),
+        shutdown.clone(),
+    )));
 
     // Rate limiting (per client + per domain).
     let rate_limiter = Arc::new(RateLimiter::new(&config.rate_limit));

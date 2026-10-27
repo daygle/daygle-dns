@@ -435,9 +435,13 @@ level = "info"
 ring_buffer = 2000
 # Record every served query into the SQLite database so the console's
 # Logs -> Query Logs tab can search, filter, paginate and export them.
-# Retention keeps at most this many rows (0 = unlimited).
+# Retention keeps at most this many rows (0 = unlimited) and, when
+# query_db_retention_days is set, nothing older than that many days (0 = no
+# age limit); whichever is reached first applies. All three can be changed
+# in Settings -> Logging and apply at once.
 query_db_enabled = true
 query_db_max_rows = 200000
+query_db_retention_days = 0
 
 # ── AI scanner: CPU-only background classification of observed domains ─────
 #

@@ -455,6 +455,7 @@ pub fn router(state: AppState) -> Router {
             "/querylogs",
             get(handlers::query_logs).delete(handlers::clear_query_logs),
         )
+        .route("/querylogs/stats", get(handlers::query_log_stats))
         .route("/ai/status", get(handlers::ai_status))
         .route("/ai/verdicts", get(handlers::ai_verdicts))
         .route("/ai/override", post(handlers::ai_override))

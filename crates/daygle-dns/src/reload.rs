@@ -36,8 +36,8 @@ pub struct Shared {
     pub advanced_blocking: Arc<ArcSwap<AdvancedBlocking>>,
     /// Persistent query logger; `None` unless `logging.query_log_enabled`.
     pub query_logger: Option<Arc<daygle_dns_core::QueryLogger>>,
-    /// SQLite query-log sink feeding the console's Query Logs view; `None`
-    /// unless `logging.query_db_enabled`.
+    /// SQLite query-log sink feeding the console's Query Logs view; it skips
+    /// entries while `logging.query_db_enabled` is off.
     pub query_db_logger: Option<Arc<crate::query_db_log::QueryDbLogger>>,
     pub resolver: Arc<ArcSwapOption<RecursiveResolver>>,
     pub recursive_admission: Arc<crate::dispatcher::RecursiveAdmission>,

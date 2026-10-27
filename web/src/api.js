@@ -271,6 +271,8 @@ export const api = {
   moveBlockingGroup: (id, direction) => request('POST', `/policy/blocking/${id}/move`, { direction }),
   testAlert: (alerts) => request('POST', '/alerts/test', { alerts }),
   logExportStatus: () => request('GET', '/log-export'),
+  // Query log size: { rows, oldest, database_bytes }.
+  queryLogStats: () => request('GET', '/querylogs/stats'),
   testLogExport: (log_export) => request('POST', '/log-export/test', { log_export }),
   rpzStatus: () => request('GET', '/rpz'),
   dhcp: () => request('GET', '/dhcp'),

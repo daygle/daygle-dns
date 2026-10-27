@@ -117,7 +117,8 @@ pub struct DnsDispatcher {
     /// `logging.query_log_enabled`; best-effort, never blocks a response.
     query_logger: Option<Arc<daygle_dns_core::QueryLogger>>,
     /// Async SQLite query-log sink feeding the console's searchable Query
-    /// Logs view. `None` unless `logging.query_db_enabled`; best-effort.
+    /// Logs view (it skips entries while `logging.query_db_enabled` is off);
+    /// best-effort.
     query_db_logger: Option<Arc<crate::query_db_log::QueryDbLogger>>,
     /// Coalesces recent authoritative record-use updates so queries do not
     /// serialize SQLite writes at request volume.
