@@ -505,6 +505,34 @@ ms=...`, message id `query`). Lines are queued and sent in the background;
 if the server cannot be reached they are dropped and counted, and the count
 is sent once it can be.
 
+`log_export` (`{enabled, url, format, authorization, batch_size,
+flush_secs}`, replaced whole) POSTs every answered query, as JSON, to an
+HTTP(S) endpoint such as Vector, Fluent Bit, Logstash or Splunk HEC. Each
+query is an object with `time` (RFC 3339, UTC), `server` (this host),
+`client`, `qname`, `qtype`, `protocol`, `outcome`, `rcode` (or `null`) and
+`elapsed_ms`; `format` `ndjson` (default) sends one per line
+(`application/x-ndjson`), `json` sends an array (`application/json`).
+`authorization`, when set, is sent as the `Authorization` header (e.g.
+`Bearer abc` or `Splunk <token>`); it reads back as `[redacted]`, and
+sending `[redacted]` keeps the stored one. A request goes out once
+`batch_size` queries (1-10000, default 500) are queued, or `flush_secs`
+(1-300, default 5) after the first. A batch the endpoint does not accept
+(not 2xx) is tried twice more, 2 and 4 seconds apart, then dropped; drops
+are counted and noted in the server log once the endpoint answers again.
+
+```
+GET  /api/log-export
+POST /api/log-export/test
+```
+
+`GET /api/log-export` answers `{"sent", "dropped", "last_error"}`: queries
+delivered and dropped since start, and why the last batch failed (`null`
+once one succeeds). `POST /api/log-export/test` sends one sample query
+(`qname` `test.daygle-dns.invalid`, `outcome` `test`) with the saved
+settings, or with `{"log_export": {...}}` from the body (unsaved form
+values), whether or not export is enabled. It answers `{"sent": true}`,
+`400` for invalid settings, or `502` with why the endpoint refused it.
+
 `dns64` (`{enabled, prefix, clients}`, replaced whole) turns on DNS64
 (RFC 6147) for IPv6-only networks behind NAT64: when a recursive AAAA query
 finds no IPv6 address (NODATA, or only `::ffff:` mapped addresses), the
@@ -685,6 +713,26 @@ NOTIFYs for its secondary zones (and followed catalog zones) on the main UDP por
 the current SOA, and refreshes that zone immediately (the refresh interval
 remains the fallback and serials are always compared before a transfer).
 
+### Zone aliases
+
+```
+PUT    /api/zones/{id}/aliases   { "aliases": ["example.net", "example.org"] }
+GET    /api/zone-aliases
+```
+
+A zone alias serves a zone under another name too: every query for a name
+in the alias is answered from the zone's records, with the owner name
+moved into the alias (`www.example.net` answers like `www.example.com`) and
+record data unchanged, NXDOMAIN and NODATA included; the alias has the
+zone's SOA under its own name. Changes to the zone show at once. Aliases
+are served unsigned, are not transferred, and are not listed in a
+published catalog zone. `PUT` replaces the zone's aliases and answers with
+them (`[{name, zone_id, created_at}]`); a name that is a hosted zone,
+another zone's alias, the catalog zone, or inside or above the zone itself
+is refused (409 or 400), as are reverse zones. A zone cannot be created
+under a name that is an alias. Deleting the zone removes its aliases.
+`GET /api/zone-aliases` lists every alias.
+
 ### Catalog zones (RFC 9432)
 
 A catalog zone is a zone listing other zones, so secondaries can follow a
@@ -758,7 +806,8 @@ PUT /api/zones/{id}/records
 ```
 
 Supported `rtype` values: `A`, `AAAA`, `CNAME`, `MX`, `TXT`, `NS`, `SOA`,
-`SRV`, `PTR`, `CAA`, `HTTPS`, `SVCB`, `DS`, `TLSA`, `SSHFP`, `NAPTR`, `ALIAS`.
+`SRV`, `PTR`, `CAA`, `HTTPS`, `SVCB`, `DS`, `TLSA`, `SSHFP`, `NAPTR`, `ALIAS`,
+`AUTOPTR`.
 `content` must parse as that type's RDATA, otherwise the request fails with
 400. `priority` is not served: MX and SRV take their priority from `content`.
 For A and AAAA records with health checks it is the failover priority (see
@@ -808,6 +857,36 @@ priority makes a record a backup; when none is healthy, all are served.
 `GET /api/health-checks` lists every check with its record (`zone_id`,
 `name`, `rtype`, `address`, `priority`) and `healthy`, `last_checked` (UNIX
 seconds) and `last_error`. Zone transfers still carry every record.
+
+**Weighted load balancing.** An A or AAAA record can carry a weight:
+
+```
+PUT    /api/zones/{id}/records/{rid}/weight   { "weight": 3 }
+GET    /api/record-weights
+```
+
+At a name whose A (or AAAA) records include a weighted one, each answer
+holds a single record, picked at random in proportion to the weights
+(`3` gets three times the answers of `1`); records with weight `0` (the
+default, and how a weight is removed) are not picked. Failover applies
+first, so records that are down are not picked either. `weight` is
+0-10000; other record types are refused with 400. A DNSSEC-signed zone
+always answers with the whole RRset (its signature covers every record),
+and zone transfers carry every record. `GET /api/record-weights` answers
+`{record_id: weight}` for every weighted record.
+
+**Automatic PTR records.** An `AUTOPTR` record in a reverse zone
+(`in-addr.arpa` or `ip6.arpa`) makes up a PTR answer for every address
+under its name that has no PTR record of its own. Its `content` is a host
+name template containing `{ip}`, which becomes the address with dashes:
+`ip-{ip}.home.arpa.` answers `47.1.168.192.in-addr.arpa` with
+`ip-192-168-1-47.home.arpa.`, and an IPv6 address gives every group in hex
+(`2001-db8-0-0-0-0-0-1`). Put it at `@` to cover the whole zone, or lower to
+cover part of it (the most specific one wins); the answer's TTL is the
+record's. A name may have one AUTOPTR record. Like ALIAS, AUTOPTR answers
+are made when asked, so the record cannot be added to a DNSSEC-signed zone
+(nor can a zone holding one be signed), and it is not sent in zone
+transfers.
 
 An `ALIAS` record (also called ANAME) lets a name - including the zone apex,
 where a CNAME is not allowed - follow another host's addresses: its `content`

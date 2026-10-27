@@ -85,7 +85,13 @@ listener:
    entry never swallows A queries.
 2. **Authoritative.** If the query name falls inside a hosted zone
    (`Catalog::find`), the Hickory catalog answers. Signed zones carry DNSSEC
-   signatures and NSEC proofs.
+   signatures and NSEC proofs. A few answers are made by the dispatcher
+   first, from indexes the catalog rebuilds with the zones: ALIAS records
+   (A/AAAA from the target), weighted A/AAAA RRsets (one record picked in
+   proportion to the weights, after failover; unsigned zones only) and
+   AUTOPTR records (a PTR made from the address when the name has none).
+   Zone aliases are served as zones of their own, built from the aliased
+   zone's records with the owner names moved into the alias.
 3. **Zone transfers.** AXFR/IXFR queries are intercepted before the normal
    lookup path (`DnsDispatcher::handle_transfer`). Transfers are gated by
    `authoritative.axfr_enabled` and the `axfr_networks` client allow-list, and

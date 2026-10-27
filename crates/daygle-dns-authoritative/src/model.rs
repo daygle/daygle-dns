@@ -151,8 +151,21 @@ fn default_ttl() -> u32 {
 /// The set of record types Daygle understands.
 pub const KNOWN_RECORD_TYPES: &[&str] = &[
     "A", "AAAA", "CNAME", "MX", "TXT", "NS", "SOA", "SRV", "PTR", "CAA", "HTTPS", "SVCB", "DS",
-    "TLSA", "SSHFP", "NAPTR", "ALIAS",
+    "TLSA", "SSHFP", "NAPTR", "ALIAS", "AUTOPTR",
 ];
+
+/// Another name a zone is served under: every query for a name in `name`
+/// is answered from the zone's records, as if asked for the same name in
+/// the zone (`www.example.net` answers like `www.example.com`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ZoneAlias {
+    /// The alias, e.g. `example.net` (lowercase, no trailing dot).
+    pub name: String,
+    /// The zone it serves.
+    pub zone_id: String,
+    /// RFC 3339 creation timestamp.
+    pub created_at: String,
+}
 
 /// One deletion in an RFC 2136 dynamic update: an RRset (name + type), a
 /// single RR (name + type + content), or everything at a name (type `None`).
