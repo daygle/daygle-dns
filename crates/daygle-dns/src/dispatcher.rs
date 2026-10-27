@@ -1572,19 +1572,34 @@ impl RequestHandler for DnsDispatcher {
                 message: format!("lookup task failed: {e}"),
                 response_code: None,
             }),
+            // Out of time: answer from an expired cached answer when there is
+            // one (RFC 8767 client response timer) - the lookup carries on
+            // and refreshes the cache - and SERVFAIL otherwise.
             Err(_elapsed) => {
-                debug!(
-                    query = %qname,
-                    client_timeout = ?self.client_timeout,
-                    "no answer within server.client_timeout_ms, replying SERVFAIL"
-                );
-                Err(DaygleError::Resolution {
-                    message: format!(
-                        "no answer within the client timeout of {} ms",
-                        self.client_timeout.as_millis()
-                    ),
-                    response_code: None,
-                })
+                match resolver.stale_answer_for_client(client, &qname, info.query.query_type()) {
+                    Some(stale) => {
+                        debug!(
+                            query = %qname,
+                            client_timeout = ?self.client_timeout,
+                            "no answer within server.client_timeout_ms, serving stale answer"
+                        );
+                        Ok((stale, true))
+                    }
+                    None => {
+                        debug!(
+                            query = %qname,
+                            client_timeout = ?self.client_timeout,
+                            "no answer within server.client_timeout_ms, replying SERVFAIL"
+                        );
+                        Err(DaygleError::Resolution {
+                            message: format!(
+                                "no answer within the client timeout of {} ms",
+                                self.client_timeout.as_millis()
+                            ),
+                            response_code: None,
+                        })
+                    }
+                }
             }
         };
         match lookup {

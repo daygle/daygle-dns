@@ -3,11 +3,12 @@
 //!
 //! NXDOMAIN and NODATA are normal answers, so they count as recursive, not
 //! as errors. A lookup slower than `server.client_timeout_ms` gets SERVFAIL
-//! but keeps running, so the client's retry is answered from the cache.
+//! but keeps running, so the client's retry is answered from the cache -
+//! unless an expired answer is on hand, which is served instead (RFC 8767).
 
 mod common;
 
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -21,6 +22,16 @@ use serde_json::Value;
 /// names are NXDOMAIN, AAAA queries are NODATA, and A queries get
 /// 192.0.2.1. Returns the address and a count of queries received.
 async fn fake_upstream(delay: Duration) -> (std::net::SocketAddr, Arc<AtomicUsize>) {
+    let delay_ms = Arc::new(AtomicU64::new(delay.as_millis() as u64));
+    fake_upstream_with(delay_ms, 300).await
+}
+
+/// [`fake_upstream`] with a delay that can change while it runs and answers
+/// that live `ttl` seconds.
+async fn fake_upstream_with(
+    delay_ms: Arc<AtomicU64>,
+    ttl: u32,
+) -> (std::net::SocketAddr, Arc<AtomicUsize>) {
     let socket = Arc::new(tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap());
     let addr = socket.local_addr().unwrap();
     let count = Arc::new(AtomicUsize::new(0));
@@ -36,6 +47,7 @@ async fn fake_upstream(delay: Duration) -> (std::net::SocketAddr, Arc<AtomicUsiz
             };
             seen.fetch_add(1, Ordering::SeqCst);
             let socket = socket.clone();
+            let delay = Duration::from_millis(delay_ms.load(Ordering::SeqCst));
             tokio::spawn(async move {
                 tokio::time::sleep(delay).await;
                 let q = query.queries[0].clone();
@@ -48,7 +60,7 @@ async fn fake_upstream(delay: Duration) -> (std::net::SocketAddr, Arc<AtomicUsiz
                 } else if q.query_type() == RecordType::A {
                     reply.add_answer(Record::from_rdata(
                         q.name().clone(),
-                        300,
+                        ttl,
                         RData::A(A::new(192, 0, 2, 1)),
                     ));
                 }
@@ -139,6 +151,41 @@ async fn slow_lookup_still_fills_the_cache() {
         sent,
         "the retry must not query upstream"
     );
+
+    shutdown(server).await;
+}
+
+#[tokio::test]
+async fn slow_lookup_serves_a_stale_answer_when_one_is_on_hand() {
+    let dir = tempfile::tempdir().unwrap();
+    let delay_ms = Arc::new(AtomicU64::new(0));
+    let (upstream, _) = fake_upstream_with(delay_ms.clone(), 1).await;
+    let mut cfg = forwarding_config(&dir.path().join("d.db"), upstream);
+    cfg.server.client_timeout_ms = 1000;
+    cfg.recursive.timeout_secs = 3;
+    cfg.recursive.attempts = 1;
+    cfg.recursive.min_cache_ttl = 0;
+    cfg.recursive.prefetch_enabled = false;
+    let server = spawn(cfg).await;
+    let udp = server.udp_addr.expect("UDP enabled");
+
+    // A good answer, cached for one second...
+    let fresh = udp_query(udp, "bank.example.", RecordType::A).await;
+    assert_eq!(fresh.response_code, ResponseCode::NoError);
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+
+    // ...has expired when the upstream turns slow: rather than SERVFAIL at
+    // the client timeout, the client gets the expired answer.
+    delay_ms.store(1500, Ordering::SeqCst);
+    let started = Instant::now();
+    let slow = udp_query(udp, "bank.example.", RecordType::A).await;
+    assert_eq!(slow.response_code, ResponseCode::NoError);
+    assert_eq!(first_answer(&slow).as_deref(), Some("192.0.2.1"));
+    assert!(
+        started.elapsed() < Duration::from_millis(1400),
+        "the stale answer must not wait for the upstream"
+    );
+    assert_eq!(stats_sum(&server, "errors").await, 0);
 
     shutdown(server).await;
 }
