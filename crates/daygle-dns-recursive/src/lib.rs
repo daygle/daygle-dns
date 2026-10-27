@@ -54,6 +54,49 @@ tokio::task_local! {
     static SERVED_STALE: std::cell::Cell<bool>;
 }
 
+tokio::task_local! {
+    /// The SOA of the negative answer (NXDOMAIN or NODATA) the lookup
+    /// running in this task came back with, if the upstream sent one.
+    static NEGATIVE_SOA: std::cell::RefCell<Option<hickory_proto::rr::Record>>;
+}
+
+/// Run a lookup and report the SOA of its negative answer, if it was one,
+/// so the response can carry it in the authority section: without it a
+/// client cannot cache the negative answer (RFC 2308) and asks again.
+pub async fn track_negative_soa<F: std::future::Future>(
+    lookup: F,
+) -> (F::Output, Option<hickory_proto::rr::Record>) {
+    NEGATIVE_SOA
+        .scope(std::cell::RefCell::new(None), async {
+            let output = lookup.await;
+            (output, NEGATIVE_SOA.with(|soa| soa.borrow_mut().take()))
+        })
+        .await
+}
+
+/// Record the SOA of a negative answer for [`track_negative_soa`]. Its TTL
+/// becomes the negative-caching TTL, the smaller of the record's own and
+/// its MINIMUM field (RFC 2308 section 5).
+pub(crate) fn note_negative_soa(soa: Option<hickory_proto::rr::Record>) {
+    let Some(mut soa) = soa else {
+        return;
+    };
+    if let hickory_proto::rr::RData::SOA(data) = &soa.data {
+        soa.ttl = soa.ttl.min(data.minimum);
+    } else {
+        return;
+    }
+    let _ = NEGATIVE_SOA.try_with(|slot| *slot.borrow_mut() = Some(soa));
+}
+
+/// The SOA noted for the lookup running in this task, if any.
+fn noted_negative_soa() -> Option<hickory_proto::rr::Record> {
+    NEGATIVE_SOA
+        .try_with(|slot| slot.borrow().clone())
+        .ok()
+        .flatten()
+}
+
 /// Run a lookup and report whether its answer was served stale (the
 /// upstream failed and an expired answer was used instead).
 pub async fn track_stale<F: std::future::Future>(lookup: F) -> (F::Output, bool) {
@@ -191,15 +234,13 @@ impl Route {
     /// `NoError`); transport failures carry none.
     async fn lookup(self, name: Name, record_type: RecordType) -> Result<Lookup> {
         match self {
-            Route::Forward(resolver) => {
-                resolver
-                    .lookup(name, record_type)
-                    .await
-                    .map_err(|e| DaygleError::Resolution {
-                        message: e.to_string(),
-                        response_code: negative_response_code(&e),
-                    })
-            }
+            Route::Forward(resolver) => resolver.lookup(name, record_type).await.map_err(|e| {
+                note_negative_soa(negative_soa(&e));
+                DaygleError::Resolution {
+                    message: e.to_string(),
+                    response_code: negative_response_code(&e),
+                }
+            }),
             Route::Recursive(recursor) => recursor::lookup(&recursor, name, record_type).await,
             Route::NoSuchTld => Err(DaygleError::Resolution {
                 message: "top-level domain not in the root zone".to_string(),
@@ -748,6 +789,7 @@ impl Inner {
         // The code is replayed as a Resolution error so the dispatcher surfaces
         // the right RCODE (an empty Lookup would wrongly read as NoError).
         if let Some(code) = inner.cache_assist.cached_failure_code(&key) {
+            note_negative_soa(inner.cache_assist.cached_failure_soa(&key));
             debug!(
                 name = %key.name,
                 code,
@@ -799,6 +841,9 @@ impl Inner {
                             RecordType::from(key.rtype),
                         );
                         inner.cache_assist.record_failure(&key, &query, code, until);
+                        if let Some(soa) = noted_negative_soa() {
+                            inner.cache_assist.set_failure_soa(&key, soa);
+                        }
                     }
                 }
                 Err(e)
@@ -931,6 +976,21 @@ fn allowed_clients(settings: &RecursiveSettings) -> Option<Vec<ipnet::IpNet>> {
 /// does not exist, `NoError` for NODATA - the name exists without records of
 /// the asked type), explicit upstream error codes are passed through, and
 /// everything else (timeouts, transport failures) has no code.
+/// The SOA a negative answer from Hickory's resolver came with.
+pub(crate) fn negative_soa(
+    e: &hickory_resolver::net::NetError,
+) -> Option<hickory_proto::rr::Record> {
+    match e {
+        hickory_resolver::net::NetError::Dns(hickory_resolver::net::DnsError::NoRecordsFound(
+            no_records,
+        )) => no_records
+            .soa
+            .as_ref()
+            .map(|soa| soa.as_ref().clone().into_record_of_rdata()),
+        _ => None,
+    }
+}
+
 fn negative_response_code(e: &hickory_resolver::net::NetError) -> Option<u16> {
     match e {
         hickory_resolver::net::NetError::Dns(hickory_resolver::net::DnsError::NoRecordsFound(

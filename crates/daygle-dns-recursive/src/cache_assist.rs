@@ -72,6 +72,9 @@ struct Snapshot {
     failure_until: Option<Instant>,
     /// The DNS response code to replay the cached failure with.
     failure_code: Option<u16>,
+    /// The SOA of a cached negative answer (NXDOMAIN or NODATA), replayed
+    /// in the authority section so clients can cache it too (RFC 2308).
+    failure_soa: Option<Record>,
 }
 
 /// Sliding-window popularity for one (name, type).
@@ -140,6 +143,7 @@ impl CacheAssistant {
             fetched_at: now,
             failure_until: None,
             failure_code: None,
+            failure_soa: None,
         };
 
         let mut snapshots = self.snapshots.lock();
@@ -268,9 +272,33 @@ impl CacheAssistant {
             fetched_at: Instant::now(),
             failure_until: None,
             failure_code: None,
+            failure_soa: None,
         });
         snapshot.failure_until = Some(until);
         snapshot.failure_code = Some(code);
+        snapshot.failure_soa = None;
+    }
+
+    /// Keep the SOA of the negative answer just recorded with
+    /// [`Self::record_failure`], for [`Self::cached_failure_soa`].
+    pub fn set_failure_soa(&self, key: &CacheKey, soa: Record) {
+        if let Some(snapshot) = self.snapshots.lock().get_mut(key) {
+            snapshot.failure_soa = Some(soa);
+        }
+    }
+
+    /// The SOA of the fresh cached failure for `key`, its TTL cut to what
+    /// is left of the failure, so a client caches it no longer than we do.
+    pub fn cached_failure_soa(&self, key: &CacheKey) -> Option<Record> {
+        let now = Instant::now();
+        let snapshots = self.snapshots.lock();
+        let snapshot = snapshots.get(key)?;
+        let left = snapshot.failure_until?.checked_duration_since(now)?;
+        let mut soa = snapshot.failure_soa.clone()?;
+        soa.ttl = soa
+            .ttl
+            .min(u32::try_from(left.as_secs()).unwrap_or(u32::MAX));
+        Some(soa)
     }
 
     /// Bump the sliding-window counter; returns whether the name has crossed
@@ -674,6 +702,54 @@ mod tests {
         assert_eq!(ca.cached_failure_code(&key), None);
         let stale = ca.stale_answer(&key).expect("stale fallback");
         assert_eq!(stale.answers().first().unwrap().ttl, STALE_TTL_SECS);
+    }
+
+    /// A cached negative answer replays its SOA, with the TTL cut to what is
+    /// left of the cached failure; a new failure forgets the old SOA.
+    #[test]
+    fn cached_negative_answer_keeps_its_soa() {
+        use hickory_proto::rr::rdata::SOA;
+        use hickory_proto::rr::{Name, RData};
+        let ca = CacheAssistant::new(config());
+        let key = key_for("v6less.example.");
+        let query = lookup_a("v6less.example.", 300).query().clone();
+        let nodata = hickory_proto::op::ResponseCode::NoError.into();
+        let soa = Record::from_rdata(
+            Name::from_ascii("example.").unwrap(),
+            300,
+            RData::SOA(SOA::new(
+                Name::from_ascii("ns1.example.").unwrap(),
+                Name::from_ascii("admin.example.").unwrap(),
+                1,
+                3600,
+                600,
+                86400,
+                300,
+            )),
+        );
+
+        ca.record_failure(
+            &key,
+            &query,
+            nodata,
+            Instant::now() + Duration::from_secs(60),
+        );
+        assert!(ca.cached_failure_soa(&key).is_none(), "none noted yet");
+        ca.set_failure_soa(&key, soa);
+        let replayed = ca.cached_failure_soa(&key).expect("SOA replayed");
+        assert!(
+            replayed.ttl <= 60,
+            "TTL {} outlives the cached failure",
+            replayed.ttl
+        );
+
+        ca.record_failure(
+            &key,
+            &query,
+            nodata,
+            Instant::now() + Duration::from_secs(60),
+        );
+        assert!(ca.cached_failure_soa(&key).is_none(), "stale SOA kept");
     }
 
     #[test]

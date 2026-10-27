@@ -347,13 +347,28 @@ pub async fn lookup(
                 lookup.extend_additionals(message.additionals.iter().cloned());
                 Ok(lookup)
             }
-            ResponseCode::NoError => Err(negative(ResponseCode::NoError, "no records")),
-            code => Err(negative(code, "negative response")),
+            code => {
+                crate::note_negative_soa(
+                    message
+                        .authorities
+                        .iter()
+                        .find(|r| r.record_type() == RecordType::SOA)
+                        .cloned(),
+                );
+                Err(if code == ResponseCode::NoError {
+                    negative(ResponseCode::NoError, "no records")
+                } else {
+                    negative(code, "negative response")
+                })
+            }
         },
-        Err(e) => Err(DaygleError::Resolution {
-            message: e.to_string(),
-            response_code: recursor_error_code(&e),
-        }),
+        Err(e) => {
+            crate::note_negative_soa(recursor_error_soa(&e));
+            Err(DaygleError::Resolution {
+                message: e.to_string(),
+                response_code: recursor_error_code(&e),
+            })
+        }
     }
 }
 
@@ -361,6 +376,18 @@ fn negative(code: ResponseCode, message: &str) -> DaygleError {
     DaygleError::Resolution {
         message: message.to_string(),
         response_code: Some(code.into()),
+    }
+}
+
+/// The SOA a negative recursor answer came with.
+fn recursor_error_soa(e: &RecursorError) -> Option<hickory_proto::rr::Record> {
+    match e {
+        RecursorError::Negative(data) => data
+            .soa
+            .as_ref()
+            .map(|soa| soa.as_ref().clone().into_record_of_rdata()),
+        RecursorError::Net(net) => crate::negative_soa(net),
+        _ => None,
     }
 }
 

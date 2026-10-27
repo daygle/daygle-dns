@@ -752,3 +752,42 @@ async fn spawn_upstream_answering(owner: &'static str, ip: Ipv4Addr) -> SocketAd
     });
     addr
 }
+
+/// Recursive-mode NODATA and NXDOMAIN carry the zone's SOA in the authority
+/// section, fresh and from the cache, so clients cache them (RFC 2308)
+/// rather than asking again every few seconds.
+#[tokio::test]
+async fn recursive_negative_answers_carry_the_soa() {
+    let port = spawn_hierarchy().await;
+    let dir = tempfile::tempdir().unwrap();
+    let server = spawn(recursive_config(&dir, port)).await;
+    let udp = server.udp_addr.unwrap();
+
+    for (qname, qtype, code) in [
+        ("www.example.test.", RecordType::AAAA, ResponseCode::NoError),
+        ("www.example.test.", RecordType::AAAA, ResponseCode::NoError),
+        (
+            "missing.example.test.",
+            RecordType::A,
+            ResponseCode::NXDomain,
+        ),
+        (
+            "missing.example.test.",
+            RecordType::A,
+            ResponseCode::NXDomain,
+        ),
+    ] {
+        let msg = udp_query(udp, qname, qtype).await;
+        assert_eq!(msg.response_code, code, "{qname} {qtype}");
+        assert!(msg.answers.is_empty(), "{qname} {qtype}");
+        let soa = msg
+            .authorities
+            .iter()
+            .find(|r| r.record_type() == RecordType::SOA)
+            .unwrap_or_else(|| panic!("{qname} {qtype}: no SOA in {:?}", msg.authorities));
+        assert_eq!(soa.name.to_string(), "example.test.", "{qname} {qtype}");
+        assert!(soa.ttl <= 300, "{qname} {qtype}: TTL {}", soa.ttl);
+    }
+
+    shutdown(server).await;
+}
