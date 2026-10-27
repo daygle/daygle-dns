@@ -2,7 +2,7 @@
   import { onDestroy, onMount } from 'svelte';
   import { api, getToken, formatApiError, getStoredUser } from '../api.js';
   import PageHeader from '../PageHeader.svelte';
-  import { icons } from '../icons.svelte.js';
+  import { icons, actionIcons } from '../icons.svelte.js';
   import { formatDateTime, displayZoneName, zonedInputToIso } from '../datetime.svelte.js';
   import ClientLabel from '../ClientLabel.svelte';
   import { addressFor, deviceName, loadDeviceNames } from '../devices.svelte.js';
@@ -202,7 +202,7 @@
   let fOutcome = $state('');
   let fRcode = $state('');
   let fBlockSource = $state('');
-  // The query log row "Why?" was opened for, or null.
+  // The query log row whose "why blocked" info was opened, or null.
   let why = $state(null);
   let fFrom = $state('');
   let fTo = $state('');
@@ -609,7 +609,9 @@
                   <span title={entry.block?.reason || 'Logged before reasons were kept'}>
                     {entry.block ? blockSourceLabel(entry.block.source) : 'Unknown'}{#if entry.block?.matched}: <code>{entry.block.matched}</code>{/if}{#if entry.block?.group} <span class="muted">({entry.block.group})</span>{/if}
                   </span>
-                  <button type="button" class="link why" onclick={() => (why = entry)} title="Every check this domain meets for this device, and which one decides">Why?</button>
+                  <button type="button" class="link why" onclick={() => (why = entry)} title="Why was this blocked? Every check this domain meets for this device, and which one decides" aria-label="Why was this blocked?">
+                    <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d={actionIcons.info} /></svg>
+                  </button>
                 {:else}<span class="muted">-</span>{/if}
               </td>
             {/if}
@@ -660,7 +662,7 @@
 <style>
   .small { font-size: 0.78rem; margin-top: 2px; }
   .reason { max-width: 340px; }
-  .why { margin-left: 6px; font-size: 0.8rem; }
+  .why { margin-left: 6px; padding: 0; line-height: 0; vertical-align: middle; }
   .modal-backdrop { position: fixed; inset: 0; background: rgb(0 0 0 / 0.65); display: grid; place-items: center; padding: 16px; z-index: 50; }
   .modal.wide { width: min(980px, 100%); max-height: calc(100vh - 32px); overflow: auto; }
   .filter-grid {

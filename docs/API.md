@@ -1327,14 +1327,14 @@ Returns `404` when no sources are configured.
 `PUT` replaces the complete source list (body: `{"sources": [...]}` with the
 same fields as the config file) - this is what the console's add / edit /
 remove flow calls. An optional `"renames": {"old name": "new name"}` keeps
-the client groups that select a renamed source pointing at it; groups drop
+the filtering groups that select a renamed source pointing at it; groups drop
 any source that is no longer in the list.
 
 A source's `scope` is `everyone` (the default: it blocks for every client)
-or `groups` (it blocks only for the client groups that list it in their
+or `groups` (it blocks only for the filtering groups that list it in their
 `blocklists`; see Blocking groups below). The legacy `dot` scope is still
 accepted for existing configurations but is no longer offered in the console.
-For listener-specific filtering, use a client group whose `clients` includes
+For listener-specific filtering, use a filtering group whose `clients` includes
 `DOT`, `DOH` or `DOQ`. Each source is validated, the list is persisted to the
 **SQLite database** (the config file is no longer rewritten), and the
 running server swaps its sources and refetches
@@ -1512,7 +1512,7 @@ unless `listener` is `dot`, `doh` or `doq`. It answers:
 It changes nothing, so read-only accounts may use it.
 
 `POST /api/policy/blocking/test` evaluates a `{client, domain}` pair against
-the live blocking groups and reports whether (and why) it is blocked, so an
+the live filtering groups and reports whether (and why) it is blocked, so an
 operator can verify rules before relying on them. It also reports
 `ai_blocking` (whether the AI may auto-block that client's queries) and
 `ai_group` (the group that decided; `null` when the client is in no
