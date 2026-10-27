@@ -363,12 +363,12 @@ if [ "$KIND" = "install" ]; then
   ) &
   WORKER="$!"
 
-  LAST="installer: hand-off accepted"
+  LAST="Installer: hand-off accepted"
   state applying "$LAST"
   while kill -0 "$WORKER" 2>/dev/null; do
     sleep 3
     STEP="$(tail -n 20 "$LOG" 2>/dev/null | tr '\r' '\n' | grep -v '^[[:space:]]*$' | tail -n 1 | cut -c1-160)"
-    NEW="installer: ${STEP:-working...}"
+    NEW="Installer: ${STEP:-working...}"
     if [ "$NEW" != "$LAST" ]; then
       LAST="$NEW"
       state applying "$LAST"
