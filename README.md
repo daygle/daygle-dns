@@ -153,7 +153,7 @@ metrics.
 
 ```bash
 # One-line installer (Linux/macOS; auto-installs Rust, a C compiler, and git if missing)
-curl -fsSL https://raw.githubusercontent.com/daygle/daygle-dns/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/daygle/daygle-dns/main/install.sh | sudo sh
 
 # ...or build and run directly from source
 cargo run --release -p daygle-dns -- --config daygle-dns.toml.example
@@ -199,7 +199,9 @@ UDP) and 5380 to private networks only: 10.0.0.0/8, 172.16.0.0/12,
 and the IPv6 local ranges fc00::/7 and fe80::/10. These are the same networks
 Recursion Access → Private Networks Only trusts. Other firewalls are left to you.
 
-Then open the dashboard at <http://127.0.0.1:5380>.
+The installer finishes by checking that the service is running and printing
+the web console address (open it to create the admin account) and the DNS
+server address to give your router or devices.
 
 Test a query:
 
@@ -400,12 +402,12 @@ real server on ephemeral ports and exercise:
 ### Installer-based installs (systemd)
 
 The one-line installer is **idempotent** - re-running it is the supported
-upgrade path. It detects the existing installation, fetches the latest `main`,
-rebuilds the release binary, replaces `/usr/local/bin/daygle-dns`, preserves
+upgrade path. It detects the existing installation, fetches the latest release,
+rebuilds the binary, replaces `/usr/local/bin/daygle-dns`, preserves
 `/etc/daygle-dns/daygle-dns.toml`, and restarts (or re-enables) the service:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/daygle/daygle-dns/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/daygle/daygle-dns/main/install.sh | sudo sh
 ```
 
 The installer never overwrites an existing `/etc/daygle-dns/daygle-dns.toml`,
