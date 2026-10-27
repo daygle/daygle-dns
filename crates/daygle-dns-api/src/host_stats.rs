@@ -36,7 +36,10 @@ pub fn snapshot() -> Value {
         value.insert("cpu".into(), cpu());
         value.insert("load".into(), load());
         value.insert("memory".into(), memory());
-        value.insert("disks".into(), Value::Array(root_disk().into_iter().collect()));
+        value.insert(
+            "disks".into(),
+            Value::Array(root_disk().into_iter().collect()),
+        );
         Value::Object(value)
     }
     #[cfg(not(target_os = "linux"))]
@@ -147,12 +150,15 @@ fn cpu() -> Value {
     // Aggregate line: "cpu user nice system idle iowait irq softirq steal".
     // (io wait is close to idle for this purpose; guest time is already
     // counted inside user time, so the denominator is simply their sum.)
-    let reading = text.lines().find(|l| l.starts_with("cpu ")).and_then(|line| {
-        let vals = fields(line, 1);
-        let total: u64 = vals.iter().sum();
-        let idle = *vals.get(3)? + vals.get(4)?;
-        Some((total, idle))
-    });
+    let reading = text
+        .lines()
+        .find(|l| l.starts_with("cpu "))
+        .and_then(|line| {
+            let vals = fields(line, 1);
+            let total: u64 = vals.iter().sum();
+            let idle = *vals.get(3)? + vals.get(4)?;
+            Some((total, idle))
+        });
     let cores = text
         .lines()
         .filter(|line| {
@@ -234,8 +240,7 @@ fn memory() -> Value {
         text.lines()
             .find_map(|line| {
                 let (name, rest) = line.split_once(':')?;
-                (name.trim() == key)
-                    .then(|| rest.split_whitespace().next()?.parse::<u64>().ok())
+                (name.trim() == key).then(|| rest.split_whitespace().next()?.parse::<u64>().ok())
             })
             .flatten()
     };
@@ -254,7 +259,10 @@ fn memory() -> Value {
         }
         _ => None,
     };
-    let swap_percent = round_percent(swap_used.map(|u| u as f64), swap_total.map(|t| t as f64).unwrap_or(0.0));
+    let swap_percent = round_percent(
+        swap_used.map(|u| u as f64),
+        swap_total.map(|t| t as f64).unwrap_or(0.0),
+    );
     json!({
         "total_kb": total,
         "available_kb": available,
