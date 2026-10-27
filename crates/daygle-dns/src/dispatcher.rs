@@ -1569,16 +1569,21 @@ impl RequestHandler for DnsDispatcher {
                 let _permit = permit;
                 daygle_dns_recursive::with_client_subnet(
                     subnet,
-                    daygle_dns_recursive::track_stale(async move {
-                        resolver.lookup_for_client(client, &name, rtype).await
-                    }),
+                    daygle_dns_recursive::track_negative_soa(daygle_dns_recursive::track_stale(
+                        async move { resolver.lookup_for_client(client, &name, rtype).await },
+                    )),
                 )
                 .await
             })
         };
+        // The SOA of a negative answer, for its authority section.
+        let mut negative_soa = None;
         let client_timeout = self.client_timeout();
         let lookup = match tokio::time::timeout(client_timeout, lookup_task).await {
-            Ok(Ok((result, stale))) => result.map(|lookup| (lookup, stale)),
+            Ok(Ok(((result, stale), soa))) => {
+                negative_soa = soa;
+                result.map(|lookup| (lookup, stale))
+            }
             Ok(Err(e)) => Err(DaygleError::Resolution {
                 message: format!("lookup task failed: {e}"),
                 response_code: None,
@@ -1898,6 +1903,11 @@ impl RequestHandler for DnsDispatcher {
                     Some(&rcode_label(code)),
                     started,
                 );
+                if negative {
+                    if let Some(soa) = negative_soa {
+                        return send_negative(&mut response_handle, request, code, soa).await;
+                    }
+                }
                 let why = if code == ResponseCode::ServFail {
                     Some(failure_ede(&e))
                 } else {
@@ -2731,6 +2741,41 @@ async fn send_error<R: ResponseHandler>(
         Ok(info) => info,
         Err(e) => {
             debug!("failed to send error response: {e}");
+            fallback_response()
+        }
+    }
+}
+
+/// Send a negative recursive answer (NXDOMAIN or NODATA) with the zone's
+/// SOA in the authority section, so the client can cache it for the SOA's
+/// TTL (RFC 2308) instead of asking again at once.
+async fn send_negative<R: ResponseHandler>(
+    handle: &mut R,
+    request: &Request,
+    code: ResponseCode,
+    soa: Record,
+) -> ResponseInfo {
+    let mut metadata = request.metadata;
+    metadata.message_type = MessageType::Response;
+    metadata.response_code = code;
+    metadata.recursion_available = true;
+    metadata.authentic_data = false;
+    let edns = response_edns(request, None);
+    let mut builder = MessageResponseBuilder::from_message_request(request);
+    if let Some(edns) = &edns {
+        builder.edns(edns);
+    }
+    let response = builder.build(
+        metadata,
+        std::iter::empty(),
+        std::iter::once(&soa),
+        std::iter::empty(),
+        std::iter::empty(),
+    );
+    match handle.send_response(response).await {
+        Ok(info) => info,
+        Err(e) => {
+            debug!("failed to send negative answer: {e}");
             fallback_response()
         }
     }

@@ -230,3 +230,79 @@ async fn client_timeout_changes_from_the_console_apply_live() {
 
     shutdown(server).await;
 }
+
+/// A forwarding target with no IPv6: A queries get 192.0.2.1, AAAA queries
+/// get NODATA with the zone's SOA in the authority section (TTL 3600,
+/// MINIMUM 300), as a real authoritative server sends.
+async fn upstream_with_soa() -> std::net::SocketAddr {
+    use hickory_proto::rr::rdata::SOA;
+    use hickory_proto::rr::Name;
+    let socket = Arc::new(tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap());
+    let addr = socket.local_addr().unwrap();
+    tokio::spawn(async move {
+        let mut buf = vec![0u8; 4096];
+        loop {
+            let Ok((n, from)) = socket.recv_from(&mut buf).await else {
+                return;
+            };
+            let Ok(query) = Message::from_vec(&buf[..n]) else {
+                continue;
+            };
+            let q = query.queries[0].clone();
+            let mut reply = Message::new(query.id, MessageType::Response, query.op_code);
+            reply.metadata.recursion_desired = true;
+            reply.metadata.recursion_available = true;
+            reply.add_query(q.clone());
+            if q.query_type() == RecordType::A {
+                reply.add_answer(Record::from_rdata(
+                    q.name().clone(),
+                    300,
+                    RData::A(A::new(192, 0, 2, 1)),
+                ));
+            } else {
+                let zone = Name::from_ascii("example.").unwrap();
+                reply.add_authority(Record::from_rdata(
+                    zone.clone(),
+                    3600,
+                    RData::SOA(SOA::new(
+                        Name::from_ascii("ns1.example.").unwrap(),
+                        Name::from_ascii("admin.example.").unwrap(),
+                        1,
+                        3600,
+                        600,
+                        86400,
+                        300,
+                    )),
+                ));
+            }
+            let _ = socket.send_to(&reply.to_vec().unwrap(), from).await;
+        }
+    });
+    addr
+}
+
+#[tokio::test]
+async fn negative_answers_carry_the_soa_so_clients_can_cache_them() {
+    let dir = tempfile::tempdir().unwrap();
+    let upstream = upstream_with_soa().await;
+    let server = spawn(forwarding_config(&dir.path().join("d.db"), upstream)).await;
+    let udp = server.udp_addr.expect("UDP enabled");
+
+    // Fresh from upstream, then again from the cache: NODATA, and the SOA
+    // in the authority section with its negative-caching TTL (the smaller
+    // of the record's TTL and its MINIMUM, so 300 at most).
+    for attempt in ["upstream", "cache"] {
+        let nodata = udp_query(udp, "www.example.", RecordType::AAAA).await;
+        assert_eq!(nodata.response_code, ResponseCode::NoError, "{attempt}");
+        assert!(nodata.answers.is_empty(), "{attempt}");
+        let soa = nodata
+            .authorities
+            .iter()
+            .find(|r| r.record_type() == RecordType::SOA)
+            .unwrap_or_else(|| panic!("{attempt}: no SOA in {:?}", nodata.authorities));
+        assert_eq!(soa.name.to_string(), "example.", "{attempt}");
+        assert!(soa.ttl > 0 && soa.ttl <= 300, "{attempt}: TTL {}", soa.ttl);
+    }
+
+    shutdown(server).await;
+}
