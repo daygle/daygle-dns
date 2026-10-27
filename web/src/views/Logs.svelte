@@ -529,16 +529,16 @@
       </div>
       <div class="spread" style="margin-top: 12px; gap: 8px; flex-wrap: wrap">
         <div class="row" style="gap: 8px">
+          <button type="button" class="secondary" onclick={exportCsv} title="Download every matching query as CSV">Export CSV</button>
+          <button type="button" class="danger" onclick={clearLog}>Clear Log</button>
+        </div>
+        <div class="row" style="gap: 8px; margin-left: auto">
           <button type="submit">Search</button>
           <button type="button" class="secondary" onclick={resetFilters} disabled={!filtersActive}>Reset Filters</button>
           <label class="live">
             <input type="checkbox" checked={live} onchange={toggleLive} />
             <span>Live Update</span>
           </label>
-        </div>
-        <div class="row" style="gap: 8px">
-          <button type="button" class="secondary" onclick={exportCsv} title="Download every matching query as CSV">Export CSV</button>
-          <button type="button" class="danger" onclick={clearLog}>Clear Log</button>
         </div>
       </div>
     </form>
