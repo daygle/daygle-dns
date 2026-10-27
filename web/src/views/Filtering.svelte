@@ -41,7 +41,7 @@
     },
     {
       id: 'why',
-      label: 'Why Blocked?',
+      label: 'Domain Check',
       tagline:
         'Why a domain is or is not blocked for a device: every blocklist, list, filtering group, AI verdict and response policy zone it meets, in order, what each does with it, and which one decides.',
     },
