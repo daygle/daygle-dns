@@ -3071,7 +3071,7 @@ pub async fn move_blocking_group(
                 Err(e) => map_err(e),
             }
         }
-        Ok(false) => error_response(StatusCode::NOT_FOUND, "blocking group not found"),
+        Ok(false) => error_response(StatusCode::NOT_FOUND, "filtering group not found"),
         Err(e) => map_err(e),
     }
 }
@@ -3086,7 +3086,7 @@ pub async fn delete_blocking_group(
             rebuild_advanced_blocking(&state);
             StatusCode::NO_CONTENT.into_response()
         }
-        Ok(false) => error_response(StatusCode::NOT_FOUND, "blocking group not found"),
+        Ok(false) => error_response(StatusCode::NOT_FOUND, "filtering group not found"),
         Err(e) => map_err(e),
     }
 }

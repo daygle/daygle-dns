@@ -750,7 +750,7 @@ impl ZoneStore {
         let name = input.name.trim().to_string();
         if name.is_empty() {
             return Err(DaygleError::InvalidRecord(
-                "blocking group name is empty".to_string(),
+                "filtering group name is empty".to_string(),
             ));
         }
         let clients = encode_json(&input.clients, "clients")?;
@@ -775,7 +775,7 @@ impl ZoneStore {
             )?;
             if duplicate {
                 return Err(DaygleError::InvalidRecord(format!(
-                    "a blocking group named '{name}' already exists"
+                    "a filtering group named '{name}' already exists"
                 )));
             }
             let updated = conn.execute(
@@ -806,11 +806,11 @@ impl ZoneStore {
             )?;
             drop(conn);
             if updated == 0 {
-                return Err(DaygleError::NotFound(format!("blocking group {id}")));
+                return Err(DaygleError::NotFound(format!("filtering group {id}")));
             }
             return self
                 .get_blocking_group(id)?
-                .ok_or_else(|| DaygleError::NotFound(format!("blocking group {id}")));
+                .ok_or_else(|| DaygleError::NotFound(format!("filtering group {id}")));
         }
         let id = Uuid::new_v4().to_string();
         // New rows land after every existing group; updates keep their spot.
@@ -877,7 +877,7 @@ impl ZoneStore {
     }
 
     /// Point the stored references to the network `old` (any case) at
-    /// `new`: split horizon entries and client groups.
+    /// `new`: split horizon entries and filtering groups.
     pub fn rename_network_refs(&self, old: &str, new: &str) -> Result<()> {
         let rename = |list: &[String]| -> Option<Vec<String>> {
             let hit = list
