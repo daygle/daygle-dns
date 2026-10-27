@@ -386,12 +386,13 @@ PUT /api/config
 }
 ```
 
-Editable groups: `server` (listen/ipv6_only/port/udp_enabled/tcp_enabled; `dns_cookies` and `proxy_protocol` are file-only), `recursive`
+Editable groups: `server` (listen/ipv6_only/port/udp_enabled/tcp_enabled/proxy_protocol,
+and the stored, console-edited `client_timeout_ms` (1000-10000, applied live),
+`tcp_timeout_ms` and `dns_cookies`), `recursive`
 (enabled/mode/upstreams/use_system_config/dnssec_validate/cache_size/
 min_cache_ttl/max_cache_ttl/negative_cache_ttl/failure_cache_ttl/
-prefetch_* /serve_stale_secs/max_concurrent_lookups/
-client_timeout_ms (sets `server.client_timeout_ms`, 1000-10000, applied live)/
-conditional_zones/recursion_access/recursion_networks/root_hints/
+prefetch_* (including prefetch_window_secs)/serve_stale_secs/max_concurrent_lookups/
+timeout_secs (per nameserver, 1-300)/conditional_zones/recursion_access/recursion_networks/root_hints/
 case_randomization/rebinding_protection/local_root/opportunistic_encryption/
 outbound_ip_versions/client_policies), `dot`,
 `doh`, `doq` (enabled/port/self_signed/server_name/cert_path/key_path/
@@ -414,12 +415,20 @@ their forced Safe Search addresses, and YouTube with Restricted Mode, for
 every client - see Safe Search below), and `authoritative`
 (default_record_ttl/default_primary_ns/default_admin_mailbox/axfr_enabled/axfr_networks/
 allow_dynamic_updates/update_networks/notify_enabled/notify_targets/
-notify_listen_enabled/stub_zones/catalog_zone/catalog_consumers). Runtime groups (`recursive`, `dot`, `doh`, `doq`,
-`policy`, `authoritative`, `ai`, `display`, `alerts`, `rrl`, `rpz`) are stored in the database and survive restarts and
-config-file edits; `server.*` and `api.*` stay config-file-owned so a broken
-listener can always be fixed by editing the file. A `server` or `api` group
-in a `PUT` is applied to the running server but not stored, so it reverts
-at the next restart; the console shows these values read-only.
+notify_listen_enabled/stub_zones/catalog_zone/catalog_consumers, and the
+DNSSEC timing dnssec_enabled/dnssec_sig_validity_days/dnssec_rollover_days/
+dnssec_rollover_overlap_days/dnssec_rollover_retire_days/dnssec_maintenance_secs,
+applied live: turning signing on or off or a new validity re-signs at once),
+and `rate_limit` (the whole `[rate_limit]` section: enabled/client_max_queries/
+client_window_secs/domain_max_queries/domain_window_secs/exempt_loopback/
+client_ipv6_prefix, applied live). Runtime groups (`recursive`, `dot`, `doh`, `doq`,
+`policy`, `authoritative`, `ai`, `display`, `alerts`, `rrl`, `rate_limit`, `rpz`)
+are stored in the database and survive restarts and config-file edits, as
+are `server.client_timeout_ms`/`tcp_timeout_ms`/`dns_cookies`; the rest of
+`server.*` and `api.*` stay config-file-owned so a broken listener can always
+be fixed by editing the file. Those are applied to the running server when
+sent in a `PUT` but not stored, so they revert at the next restart; the
+console shows them read-only.
 
 `web` controls how the console and API themselves are served:
 `http_enabled`/`http_port` (0 = `api.port`), `https_enabled`/`https_port`,

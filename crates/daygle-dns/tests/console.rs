@@ -2261,3 +2261,109 @@ async fn hidden_columns_are_kept_per_account() {
     assert_eq!(resp.status(), 401);
     shutdown(server).await;
 }
+
+/// The settings added to the console (Client Timeout, nameserver timeout,
+/// prefetch window, root hints, TCP idle timeout, DNS cookies, DoQ idle
+/// timeout, query rate limiting and DNSSEC timing) are accepted, checked,
+/// published and kept across a restart.
+#[tokio::test]
+async fn newly_exposed_settings_apply_and_persist() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg_path = dir.path().join("daygle-dns.toml");
+    std::fs::write(
+        &cfg_path,
+        DaygleConfig::default().to_toml().expect("serialize"),
+    )
+    .unwrap();
+    let server = spawn_with_users(&dir, Some(cfg_path.clone())).await;
+    let client = reqwest::Client::new();
+    let (token, _) = login(server.api_addr, "admin", "secret").await;
+
+    // Out of range is refused.
+    for bad in [
+        json!({ "server": { "client_timeout_ms": 500 } }),
+        json!({ "server": { "tcp_timeout_ms": 0 } }),
+        json!({ "recursive": { "timeout_secs": 0 } }),
+        json!({ "recursive": { "prefetch_window_secs": 0 } }),
+        json!({ "rate_limit": { "enabled": true, "client_max_queries": 0 } }),
+        json!({ "authoritative": { "dnssec_maintenance_secs": 10 } }),
+    ] {
+        let resp = client
+            .put(api_url(server.api_addr, "/api/config"))
+            .bearer_auth(&token)
+            .json(&bad)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 400, "{bad} was accepted");
+    }
+
+    let resp = client
+        .put(api_url(server.api_addr, "/api/config"))
+        .bearer_auth(&token)
+        .json(&json!({
+            "server": { "client_timeout_ms": 3500, "tcp_timeout_ms": 7000, "dns_cookies": false },
+            "recursive": {
+                "timeout_secs": 4,
+                "prefetch_window_secs": 120,
+                "root_hints": ["198.41.0.4"],
+            },
+            "doq": { "idle_timeout_secs": 900 },
+            "rate_limit": {
+                "enabled": true,
+                "client_max_queries": 500,
+                "client_window_secs": 2,
+                "domain_max_queries": 800,
+                "domain_window_secs": 3,
+                "exempt_loopback": true,
+                "client_ipv6_prefix": 56,
+            },
+            "authoritative": {
+                "dnssec_enabled": true,
+                "dnssec_sig_validity_days": 21,
+                "dnssec_rollover_days": 60,
+                "dnssec_rollover_overlap_days": 10,
+                "dnssec_rollover_retire_days": 5,
+                "dnssec_maintenance_secs": 1800,
+            },
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
+
+    let check = |cfg: &serde_json::Value| {
+        assert_eq!(cfg["server"]["client_timeout_ms"], json!(3500));
+        assert_eq!(cfg["server"]["tcp_timeout_ms"], json!(7000));
+        assert_eq!(cfg["server"]["dns_cookies"], json!(false));
+        assert_eq!(cfg["recursive"]["timeout_secs"], json!(4));
+        assert_eq!(cfg["recursive"]["prefetch_window_secs"], json!(120));
+        assert_eq!(cfg["recursive"]["root_hints"], json!(["198.41.0.4"]));
+        assert_eq!(cfg["doq"]["idle_timeout_secs"], json!(900));
+        assert_eq!(cfg["rate_limit"]["enabled"], json!(true));
+        assert_eq!(cfg["rate_limit"]["client_max_queries"], json!(500));
+        assert_eq!(cfg["rate_limit"]["client_ipv6_prefix"], json!(56));
+        assert_eq!(cfg["authoritative"]["dnssec_sig_validity_days"], json!(21));
+        assert_eq!(cfg["authoritative"]["dnssec_rollover_days"], json!(60));
+        assert_eq!(cfg["authoritative"]["dnssec_maintenance_secs"], json!(1800));
+    };
+    let get = |addr, token: String| async move {
+        reqwest::Client::new()
+            .get(api_url(addr, "/api/config"))
+            .bearer_auth(&token)
+            .send()
+            .await
+            .unwrap()
+            .json::<serde_json::Value>()
+            .await
+            .unwrap()
+    };
+    check(&get(server.api_addr, token.clone()).await);
+    shutdown(server).await;
+
+    // Restart: the database overlay brings them back.
+    let server = spawn_with_users(&dir, Some(cfg_path.clone())).await;
+    let (token, _) = login(server.api_addr, "admin", "secret").await;
+    check(&get(server.api_addr, token).await);
+    shutdown(server).await;
+}

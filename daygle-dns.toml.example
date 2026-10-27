@@ -18,6 +18,8 @@ listen = "0.0.0.0"
 # back, and ones whose server cookie checks out (so cannot be spoofing their
 # address) get ten times the per-client rate limit.
 # dns_cookies = true
+# dns_cookies, tcp_timeout_ms and client_timeout_ms are also on the console's
+# Settings page: once saved there, the database copy wins over this file.
 #
 # PROXY protocol (HAProxy v1/v2) for load balancers in front of the TCP, DoT
 # and DoH listeners: connections from these networks must start with a PROXY
@@ -417,6 +419,8 @@ allowed_networks = []
 # most *_max_queries requests per *_window_secs; requests over the limit
 # get SERVFAIL and count toward the `rate_limited` metric. Each counter is
 # independent. Off by default.
+# Edited on the console's Settings -> Rate Limiting tab: once saved there,
+# the database copy wins over these values.
 [rate_limit]
 enabled = false
 client_max_queries = 1000

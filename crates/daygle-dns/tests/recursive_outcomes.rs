@@ -211,7 +211,7 @@ async fn client_timeout_changes_from_the_console_apply_live() {
     assert_eq!(first.response_code, ResponseCode::ServFail);
 
     // A longer timeout applies to the next query, no restart needed.
-    let saved = put(serde_json::json!({ "recursive": { "client_timeout_ms": 3000 } }))
+    let saved = put(serde_json::json!({ "server": { "client_timeout_ms": 3000 } }))
         .await
         .unwrap();
     assert_eq!(saved.status(), 200);

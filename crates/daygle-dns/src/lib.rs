@@ -322,13 +322,12 @@ pub async fn bind_with(
     }
 
     // DNSSEC maintenance: renews RRSIGs before they expire and rolls keys
-    // on schedule, so signed zones never go bogus.
-    if config.authoritative.dnssec_enabled {
-        let maintenance = daygle_dns_authoritative::DnssecMaintenance::new(
-            store.clone(),
-            catalog.clone(),
-            &config.authoritative,
-        );
+    // on schedule, so signed zones never go bogus. It follows the catalog's
+    // live settings (idle while signing is off), so a console change to
+    // signing or its timing applies without a restart.
+    {
+        let maintenance =
+            daygle_dns_authoritative::DnssecMaintenance::live(store.clone(), catalog.clone());
         tokio::spawn({
             let shutdown = shutdown.clone();
             async move {
@@ -767,6 +766,7 @@ pub async fn bind_with(
                 shared
                     .recursive_admission
                     .set_limit(config.recursive.max_concurrent_lookups);
+                shared.rate_limiter.set_settings(&config.rate_limit);
                 reload::apply_rrl(&shared, config);
                 if let Some(rpz) = &shared.rpz {
                     rpz.set_zones(&config.rpz);

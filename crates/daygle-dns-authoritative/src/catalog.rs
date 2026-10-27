@@ -354,8 +354,8 @@ impl AuthorityCatalog {
     /// RFC 2136 dynamic-update policy. The dispatcher and update handler read
     /// these per request, so changes apply immediately.
     ///
-    /// DNSSEC signing parameters are deliberately untouched: they are baked
-    /// into the signed zone data at build time and still require a restart.
+    /// DNSSEC signing parameters are swapped separately, by
+    /// [`Self::update_dnssec_settings`].
     pub fn update_gate_settings(
         &self,
         axfr_enabled: bool,
@@ -371,6 +371,35 @@ impl AuthorityCatalog {
             s.update_networks = update_networks.clone();
             s
         });
+    }
+
+    /// Hot-swap the DNSSEC signing and key-rollover settings. Returns
+    /// whether the signed zone data is now stale (signing turned on or off,
+    /// or a new signature validity), in which case the caller reloads to
+    /// re-sign. The maintenance task reads the rest on its next check.
+    pub fn update_dnssec_settings(&self, new: &AuthoritativeSettings) -> bool {
+        let old = self.settings.load_full();
+        let resign = old.dnssec_enabled != new.dnssec_enabled
+            || old.dnssec_sig_validity_days != new.dnssec_sig_validity_days;
+        let unchanged = !resign
+            && old.dnssec_rollover_days == new.dnssec_rollover_days
+            && old.dnssec_rollover_overlap_days == new.dnssec_rollover_overlap_days
+            && old.dnssec_rollover_retire_days == new.dnssec_rollover_retire_days
+            && old.dnssec_maintenance_secs == new.dnssec_maintenance_secs;
+        if unchanged {
+            return false;
+        }
+        self.settings.rcu(|s| {
+            let mut s = AuthoritativeSettings::clone(s);
+            s.dnssec_enabled = new.dnssec_enabled;
+            s.dnssec_sig_validity_days = new.dnssec_sig_validity_days;
+            s.dnssec_rollover_days = new.dnssec_rollover_days;
+            s.dnssec_rollover_overlap_days = new.dnssec_rollover_overlap_days;
+            s.dnssec_rollover_retire_days = new.dnssec_rollover_retire_days;
+            s.dnssec_maintenance_secs = new.dnssec_maintenance_secs;
+            s
+        });
+        resign
     }
 
     /// The TSIG key ring built from the authoritative settings. Keys are
@@ -1497,6 +1526,36 @@ mod tests {
         assert!(catalog.contains(&LowerName::from(
             Name::from_ascii("www.example.net.").unwrap()
         )));
+    }
+
+    /// DNSSEC settings swap live; only turning signing on or off, or a new
+    /// signature validity, asks for a re-sign.
+    #[test]
+    fn dnssec_settings_swap_live() {
+        let catalog = catalog();
+        let mut new = AuthoritativeSettings::clone(&catalog.settings());
+        assert!(!catalog.update_dnssec_settings(&new), "nothing changed");
+
+        new.dnssec_maintenance_secs += 60;
+        new.dnssec_rollover_days += 1;
+        assert!(
+            !catalog.update_dnssec_settings(&new),
+            "timing needs no re-sign"
+        );
+        assert_eq!(
+            catalog.settings().dnssec_maintenance_secs,
+            new.dnssec_maintenance_secs
+        );
+        assert_eq!(
+            catalog.settings().dnssec_rollover_days,
+            new.dnssec_rollover_days
+        );
+
+        new.dnssec_sig_validity_days += 1;
+        assert!(catalog.update_dnssec_settings(&new), "validity re-signs");
+        new.dnssec_enabled = !new.dnssec_enabled;
+        assert!(catalog.update_dnssec_settings(&new), "on/off re-signs");
+        assert_eq!(catalog.settings().dnssec_enabled, new.dnssec_enabled);
     }
 
     /// Every change to a primary zone's serial, however it was made, is

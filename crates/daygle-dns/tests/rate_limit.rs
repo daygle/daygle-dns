@@ -125,22 +125,22 @@ async fn disabled_by_default() {
     shutdown(server).await;
 }
 
+/// Rate limiting is a console setting: changing it on the Settings page
+/// (`PUT /api/config`) applies to the next query, and it is stored in the
+/// database, so editing `[rate_limit]` in the config file afterwards no
+/// longer overrides it (the file only seeds it on first boot).
 #[tokio::test]
-async fn rate_limit_settings_reload_live() {
+async fn rate_limit_settings_apply_live_from_the_console() {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("daygle-dns.db");
     let cfg_path = dir.path().join("daygle-dns.toml");
 
-    // Start with a strict limit, then relax it via reload. The config file
-    // must pass validation, so give every listener a real (non-zero) port;
-    // dot/doh stay disabled so only the numbers matter.
+    // Start with a strict limit, then relax it from the console. Settings
+    // saves validate the whole config, so give every listener a real port.
     let mut cfg = rate_limited_config(&db, 3, 1000);
-    cfg.server.port = 15353;
-    cfg.api.port = 15380;
-    cfg.dot.port = 1853;
-    cfg.doh.port = 1443;
-    let toml = toml::to_string(&cfg).unwrap();
-    std::fs::write(&cfg_path, &toml).unwrap();
+    cfg.server.port = free_port();
+    cfg.api.port = free_port();
+    std::fs::write(&cfg_path, toml::to_string(&cfg).unwrap()).unwrap();
 
     let server = daygle_dns::bind_with(std::sync::Arc::new(cfg.clone()), Some(cfg_path.clone()))
         .await
@@ -155,14 +155,27 @@ async fn rate_limit_settings_reload_live() {
     let limited = udp_query(udp, "z.rl.test.", RecordType::A).await;
     assert_eq!(limited.response_code, ResponseCode::ServFail);
 
-    // Relax the limits in the file and reload - the change applies live.
-    cfg.rate_limit.client_max_queries = 100;
-    cfg.rate_limit.domain_max_queries = 100;
-    let toml = toml::to_string(&cfg).unwrap();
-    std::fs::write(&cfg_path, &toml).unwrap();
-    server.reload().await.expect("reload");
+    let mut relaxed = cfg.rate_limit.clone();
+    relaxed.client_max_queries = 100;
+    relaxed.domain_max_queries = 100;
+    let resp = reqwest::Client::new()
+        .put(format!("http://{}/api/config", server.api_addr))
+        .json(&serde_json::json!({ "rate_limit": relaxed }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
 
     for _ in 0..50 {
+        let msg = udp_query(udp, "z.rl.test.", RecordType::A).await;
+        assert_ne!(msg.response_code, ResponseCode::ServFail);
+    }
+
+    // A later file edit does not override the console's value.
+    cfg.rate_limit.client_max_queries = 3;
+    std::fs::write(&cfg_path, toml::to_string(&cfg).unwrap()).unwrap();
+    server.reload().await.expect("reload");
+    for _ in 0..20 {
         let msg = udp_query(udp, "z.rl.test.", RecordType::A).await;
         assert_ne!(msg.response_code, ResponseCode::ServFail);
     }
