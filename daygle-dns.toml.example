@@ -398,18 +398,19 @@ filter_aaaa_except = []
 denied_networks = []
 allowed_networks = []
 
-# Ordered per-client rules. `clients` defaults to everyone when empty.
-# action: allow | block | redirect
-[[policy.rules]]
-clients = ["192.168.1.0/24"]
-domains = ["*.internal.test"]
-action = "redirect"
-redirect = "0.0.0.0"
-
-[[policy.rules]]
-clients = ["10.0.0.0/8"]
-domains = []
-action = "block"
+# Ordered per-client rules. `clients` defaults to everyone when empty, and
+# so does `domains`: a rule without domains matches every query from its
+# clients. action: allow | block | redirect
+# [[policy.rules]]
+# clients = ["192.168.1.0/24"]
+# domains = ["*.internal.test"]
+# action = "redirect"
+# redirect = "0.0.0.0"
+#
+# [[policy.rules]]
+# clients = ["10.0.0.0/8"]
+# domains = ["*.example.com"]
+# action = "block"
 
 # Per-client and per-domain query rate limiting.
 # Fixed windows: a client (source IP) or domain (query name) may send at
@@ -418,7 +419,7 @@ action = "block"
 # independent. Off by default.
 [rate_limit]
 enabled = false
-client_max_queries = 100
+client_max_queries = 1000
 client_window_secs = 60
 domain_max_queries = 600
 domain_window_secs = 60

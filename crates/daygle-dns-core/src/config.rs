@@ -4540,7 +4540,7 @@ impl Default for RateLimitSettings {
     fn default() -> Self {
         Self {
             enabled: false,
-            client_max_queries: 100,
+            client_max_queries: 1000,
             client_window_secs: 60,
             domain_max_queries: 600,
             domain_window_secs: 60,
@@ -4668,6 +4668,7 @@ pub fn normalize_domains(entries: impl IntoIterator<Item = String>) -> BTreeSet<
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
 
     /// Every setting the console saves into the database overlay must come
     /// back from it on the next start (and on a config-file reload, which
@@ -5473,25 +5474,71 @@ fd0000000000000000000000000000aa 02 40 00 80     eth0
     }
 
     #[test]
-    fn example_config_cache_settings_match_defaults() {
-        // The installer copies the example as the live config, so any cache
-        // value it pins overrides the built-in default on every new install.
+    fn example_config_matches_defaults() {
+        // The installer copies the example as the live config, so any value
+        // it pins overrides the built-in default on every new install. Only
+        // the keys below may differ: install paths, the bundled AI models
+        // and placeholders the operator is expected to edit.
+        const INTENDED: &[&str] = &[
+            "ai.enabled",
+            "ai.model_path",
+            "ai.verifier_model_path",
+            "authoritative.database",
+            "authoritative.zones_dir",
+            "doh.server_name",
+            "doq.server_name",
+            "dot.server_name",
+            "recursive.mode",
+        ];
+        fn flatten(prefix: &str, value: &toml::Value, out: &mut BTreeMap<String, String>) {
+            match value {
+                toml::Value::Table(table) => {
+                    for (key, value) in table {
+                        let path = if prefix.is_empty() {
+                            key.clone()
+                        } else {
+                            format!("{prefix}.{key}")
+                        };
+                        flatten(&path, value, out);
+                    }
+                }
+                other => {
+                    out.insert(prefix.to_string(), other.to_string());
+                }
+            }
+        }
         let path =
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../daygle-dns.toml.example");
         let text = std::fs::read_to_string(&path).expect("daygle-dns.toml.example is readable");
-        let example = DaygleConfig::parse(&text).unwrap().recursive;
-        let defaults = RecursiveSettings::default();
-        assert_eq!(example.cache_size, defaults.cache_size);
-        assert_eq!(example.min_cache_ttl, defaults.min_cache_ttl);
-        assert_eq!(example.negative_cache_ttl, defaults.negative_cache_ttl);
-        assert_eq!(example.prefetch_enabled, defaults.prefetch_enabled);
-        assert_eq!(
-            example.prefetch_ttl_fraction_pct,
-            defaults.prefetch_ttl_fraction_pct
+        let (mut example, mut defaults) = (BTreeMap::new(), BTreeMap::new());
+        flatten(
+            "",
+            &toml::Value::try_from(DaygleConfig::parse(&text).unwrap()).unwrap(),
+            &mut example,
         );
-        assert_eq!(example.prefetch_min_queries, defaults.prefetch_min_queries);
-        assert_eq!(example.prefetch_window_secs, defaults.prefetch_window_secs);
-        assert_eq!(example.serve_stale_secs, defaults.serve_stale_secs);
+        flatten(
+            "",
+            &toml::Value::try_from(DaygleConfig::default()).unwrap(),
+            &mut defaults,
+        );
+        let keys: BTreeSet<&String> = example.keys().chain(defaults.keys()).collect();
+        let drift: Vec<String> = keys
+            .into_iter()
+            .filter(|key| !INTENDED.contains(&key.as_str()))
+            .filter(|key| example.get(*key) != defaults.get(*key))
+            .map(|key| {
+                format!(
+                    "{key}: example {:?}, default {:?}",
+                    example.get(key),
+                    defaults.get(key)
+                )
+            })
+            .collect();
+        assert!(
+            drift.is_empty(),
+            "example differs from defaults:\n{}",
+            drift.join("\n")
+        );
     }
 
     #[test]
