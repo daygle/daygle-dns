@@ -4,7 +4,7 @@
 //! applied by the root oneshot `update-apply.sh`):
 //!
 //! 1. **Full installer run** (default): stage the canonical installer - the
-//!    same one-line `curl -fsSL .../install.sh | sh` an operator would run
+//!    same one-line `curl -fsSL .../install.sh | sudo sh` an operator would run
 //!    by hand - and let the root apply service execute it. The installer
 //!    resolves the latest release, builds daygle-dns from source with that
 //!    version stamped, installs the binary, re-provisions the systemd units
@@ -432,7 +432,7 @@ fn check_update_service() -> Option<PreflightCheck> {
     let update_dir = resolved_updates_dir().unwrap_or_else(|| "/var/lib/daygle-dns/updates".into());
     let staging = update_dir.join("staging");
     let install_command =
-        "curl -fsSL https://raw.githubusercontent.com/daygle/daygle-dns/main/install.sh | sh"
+        "curl -fsSL https://raw.githubusercontent.com/daygle/daygle-dns/main/install.sh | sudo sh"
             .to_string();
 
     if !path_unit.is_file() {

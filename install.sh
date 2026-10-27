@@ -2,7 +2,7 @@
 # Daygle DNS - one-line installer.
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/daygle/daygle-dns/main/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/daygle/daygle-dns/main/install.sh | sudo sh
 #
 # The script installs the `daygle-dns` binary to /usr/local/bin, a
 # configuration file and a systemd unit (systemd-based Linux only). Missing
@@ -15,9 +15,13 @@
 # DAYGLE_DNS_GUI_UPDATE=1 marks an update run driven by the installed
 # console (its updater stages this script and the root apply service
 # executes it): everything still runs, but configuration-affecting rewrites
-# - the [api] listen rebind, generated console accounts and firewall rule
-# changes - are skipped, because the deployment's own config is
-# authoritative on a host that is merely being updated.
+# - the [api] listen rebind, generated console accounts, firewall rule
+# changes and freeing port 53 from systemd-resolved - are skipped, because
+# the deployment's own config is authoritative on a host that is merely
+# being updated.
+#
+# DAYGLE_DNS_KEEP_RESOLVED=1 leaves the systemd-resolved stub listener on
+# (by default it is turned off so the server can bind port 53).
 
 set -eu
 
@@ -59,6 +63,16 @@ fi
 log() { printf '\033[1;32m[daygle-dns-install]\033[0m %s\n' "$1"; }
 
 have_cmd() { command -v "$1" >/dev/null 2>&1; }
+
+# The binary, unit files and /etc paths all need root: check now rather than
+# failing with "Permission denied" after a several-minute build.
+if [ "$(id -u)" -ne 0 ]; then
+    printf '%s\n' \
+        'error: the installer must run as root. Re-run it with sudo:' \
+        '' \
+        '    curl -fsSL https://raw.githubusercontent.com/daygle/daygle-dns/main/install.sh | sudo sh' >&2
+    exit 1
+fi
 
 download_url() {
     if have_cmd curl; then
@@ -183,7 +197,7 @@ install_dns_tools() {
         run_as_root zypper -n install bind-utils || true
     fi
     if have_cmd dig; then
-        log "Installed dig - try: dig @127.0.0.1 example.com A"
+        log "Installed dig (DNS test tool)."
     else
         log "dig not installed; DNS test tools are optional (dnsutils/bind-utils)."
     fi
@@ -243,35 +257,45 @@ Unit=daygle-dns-update.service
 WantedBy=multi-user.target
 EOF
     run_as_root systemctl daemon-reload || return 1
-    run_as_root systemctl enable --now daygle-dns-update.path || return 1
+    run_as_root systemctl enable --quiet --now daygle-dns-update.path || return 1
     # Remove the sudo-based privilege plumbing provisioned by older installer
     # runs (it is obsolete and can no longer be exercised by the updater).
     run_as_root rm -f /etc/sudoers.d/"$SERVICE_USER" "$PRIV_LIB_DIR/update-priv.sh"
 }
 
+# Networks the installer opens the firewall to: the same private ranges the
+# server's "Private Networks Only" recursion access trusts (PRIVATE_NETWORKS
+# in config.rs, loopback aside): RFC 1918, CGNAT 100.64.0.0/10 (also used by
+# Tailscale), link-local, and IPv6 unique local and link-local addresses.
+LAN_NETS_V4="10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 100.64.0.0/10 169.254.0.0/16"
+LAN_NETS_V6="fc00::/7 fe80::/10"
+
 open_lan_firewall() {
     # Best-effort: open LAN-scoped rules where possible, warn otherwise.
     # Prints a warning when a firewall is active that we cannot configure.
+    # Port 853 is DNS over TLS (TCP) and DNS over QUIC (UDP).
     if command -v ufw >/dev/null 2>&1; then
         if ufw status 2>/dev/null | grep -qi '^Status: active'; then
-            log "Opening ports 53, 853, and 5380 for private LAN ranges in ufw..."
-            for net in 192.168.0.0/16 172.16.0.0/12 10.0.0.0/8; do
+            log "Opening ports 53, 853, and 5380 for private LAN ranges (IPv4 and IPv6) in ufw..."
+            for net in $LAN_NETS_V4 $LAN_NETS_V6; do
                 ufw allow from "$net" to any port 5380 proto tcp >/dev/null 2>&1 || true
                 ufw allow from "$net" to any port 53 >/dev/null 2>&1 || true
-                ufw allow from "$net" to any port 853 proto tcp >/dev/null 2>&1 || true
+                ufw allow from "$net" to any port 853 >/dev/null 2>&1 || true
             done
             return 0
         fi
-        log "ufw is installed but inactive - no local firewall rules to open."
         return 0
     fi
     if command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state >/dev/null 2>&1; then
-        log "Opening ports 53, 853, and 5380 for private LAN ranges in firewalld..."
-        for net in 192.168.0.0/16 172.16.0.0/12 10.0.0.0/8; do
-            firewall-cmd --permanent --add-rich-rule="rule family=ipv4 source address=$net port port=5380 protocol=tcp accept" >/dev/null 2>&1 || true
-            firewall-cmd --permanent --add-rich-rule="rule family=ipv4 source address=$net port port=53 protocol=udp accept" >/dev/null 2>&1 || true
-            firewall-cmd --permanent --add-rich-rule="rule family=ipv4 source address=$net port port=53 protocol=tcp accept" >/dev/null 2>&1 || true
-            firewall-cmd --permanent --add-rich-rule="rule family=ipv4 source address=$net port port=853 protocol=tcp accept" >/dev/null 2>&1 || true
+        log "Opening ports 53, 853, and 5380 for private LAN ranges (IPv4 and IPv6) in firewalld..."
+        for net in $LAN_NETS_V4 $LAN_NETS_V6; do
+            case "$net" in
+                *:*) family=ipv6 ;;
+                *) family=ipv4 ;;
+            esac
+            for rule in 5380/tcp 53/udp 53/tcp 853/tcp 853/udp; do
+                firewall-cmd --permanent --add-rich-rule="rule family=$family source address=$net port port=${rule%/*} protocol=${rule#*/} accept" >/dev/null 2>&1 || true
+            done
         done
         firewall-cmd --reload >/dev/null 2>&1 || true
         return 0
@@ -287,6 +311,91 @@ open_lan_firewall() {
         return 0
     fi
     return 0
+}
+
+# The value of `key` in config file section `[$1]` (empty when unset).
+config_setting() {
+    awk -v section="[$1]" -v key="$2" '
+        /^\[/ { in_section = ($1 == section) ; next }
+        in_section && $1 == key {
+            sub(/^[^=]*=[[:space:]]*/, "")
+            sub(/[[:space:]]*#.*$/, "")
+            gsub(/["\r]/, "")
+            print
+            exit
+        }
+    ' "$CONFIG_FILE" 2>/dev/null || true
+}
+
+# Programs other than Daygle DNS listening on TCP or UDP port 53, as
+# `address (program)` lines. Empty when `ss` is missing.
+port_53_holders() {
+    have_cmd ss || return 0
+    ss -Hlntup 'sport = :53' 2>/dev/null | awk '
+        $0 !~ /"daygle-dns"/ {
+            prog = "unknown program"
+            if (match($0, /users:\(\("[^"]+"/)) prog = substr($0, RSTART + 9, RLENGTH - 10)
+            print $5 " (" prog ")"
+        }
+    ' | sort -u
+}
+
+# Free port 53 for the DNS server. systemd-resolved (Ubuntu, Fedora and
+# other systemd distributions) runs a stub resolver on 127.0.0.53:53 and
+# 127.0.0.54:53, and Linux will not let a wildcard listener share the port
+# with it, so the service would exit with "Address already in use". Turn the
+# stub off with a drop-in and point /etc/resolv.conf at the upstream servers
+# systemd-resolved knows (not at this server, so the host keeps resolving
+# while Daygle DNS is stopped). DAYGLE_DNS_KEEP_RESOLVED=1 leaves it alone.
+free_dns_port() {
+    port="$(config_setting server port)"
+    [ -z "$port" ] || [ "$port" = "53" ] || return 0
+    listen="$(config_setting server listen)"
+    case ",${listen:-0.0.0.0}," in
+        *0.0.0.0*|*,::,*|*'[::]'*|*127.0.0.53*|*127.0.0.54*) ;;
+        *) return 0 ;; # only specific addresses: they do not collide
+    esac
+
+    if have_cmd systemctl && systemctl is-active --quiet systemd-resolved 2>/dev/null; then
+        stub_on=1
+        if have_cmd ss && ! ss -Hlntu 'sport = :53' 2>/dev/null | grep -qE '127\.0\.0\.5[34](%[^:]*)?:53'; then
+            stub_on=0
+        fi
+        if [ "$stub_on" = "1" ]; then
+            if [ "${DAYGLE_DNS_KEEP_RESOLVED:-}" = "1" ]; then
+                log "WARNING: systemd-resolved is listening on port 53 and DAYGLE_DNS_KEEP_RESOLVED=1 is set,"
+                log "         so Daygle DNS cannot bind port 53 until its stub listener is turned off."
+                return 0
+            fi
+            log "Turning off the systemd-resolved stub listener so Daygle DNS can use port 53..."
+            run_as_root mkdir -p /etc/systemd/resolved.conf.d
+            run_as_root tee /etc/systemd/resolved.conf.d/daygle-dns.conf >/dev/null <<'EOF'
+# Written by the Daygle DNS installer. Daygle DNS answers on port 53, so the
+# systemd-resolved stub listener (127.0.0.53 and 127.0.0.54) is turned off.
+# To undo: delete this file, link /etc/resolv.conf back to
+# /run/systemd/resolve/stub-resolv.conf and restart systemd-resolved.
+[Resolve]
+DNSStubListener=no
+EOF
+            # The stub resolv.conf names 127.0.0.53, which stops answering:
+            # use the list of real upstream servers instead.
+            if [ -L /etc/resolv.conf ] && readlink /etc/resolv.conf | grep -q 'stub-resolv\.conf$'; then
+                run_as_root ln -sf /run/systemd/resolve/resolv.conf /etc/resolv.conf
+                log "Linked /etc/resolv.conf to /run/systemd/resolve/resolv.conf (the upstream DNS servers)."
+            elif grep -qE '^[[:space:]]*nameserver[[:space:]]+127\.0\.0\.5[34]' /etc/resolv.conf 2>/dev/null; then
+                log "WARNING: /etc/resolv.conf names 127.0.0.53 but is not the systemd-resolved stub link;"
+                log "         point it at your DNS servers (or at this server) so this host keeps resolving."
+            fi
+            run_as_root systemctl restart systemd-resolved || log "WARNING: could not restart systemd-resolved."
+        fi
+    fi
+
+    holders="$(port_53_holders)"
+    if [ -n "$holders" ]; then
+        log "WARNING: port 53 is still in use, so Daygle DNS may fail to start:"
+        printf '%s\n' "$holders" | while IFS= read -r line; do log "           $line"; done
+        log "         Stop or reconfigure that program (dnsmasq, bind9, unbound, another DNS server)."
+    fi
 }
 
 # ---- prerequisites -----------------------------------------------------
@@ -380,7 +489,8 @@ if ! printf '%s\n' "$RELEASE_VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([+-][0
     log "ERROR: Could not resolve a valid latest GitHub release version; refusing to build with a stale version."
     exit 1
 fi
-git clone --depth 1 --branch "$RELEASE_TAG" https://github.com/daygle/daygle-dns.git "$SRC_DIR"
+git -c advice.detachedHead=false clone --quiet --depth 1 --branch "$RELEASE_TAG" \
+    https://github.com/daygle/daygle-dns.git "$SRC_DIR"
 cd "$SRC_DIR"
 
 # Cargo embeds the workspace package version into the binary, and a tag's
@@ -534,6 +644,10 @@ EOF
     # the database with every private key: keep other local accounts out of
     # both (existing installs included, whose files were created 0644).
     chmod 0750 "$CONFIG_DIR" "$DATA_DIR"
+    # A GUI-driven update leaves the host's resolver setup alone.
+    if [ "${DAYGLE_DNS_GUI_UPDATE:-}" != "1" ]; then
+        free_dns_port || true
+    fi
     systemctl daemon-reload
     if [ "$INSTALL_MODE" = "upgrade" ]; then
         WAS_ACTIVE=0
@@ -557,16 +671,11 @@ EOF
             systemctl restart daygle-dns
         else
             # Also repairs an interrupted or previously disabled installation.
-            systemctl enable --now daygle-dns
+            systemctl enable --quiet --now daygle-dns
         fi
-        log "Daygle DNS upgraded and started via systemd."
     else
-        systemctl enable --now daygle-dns
-        log "Daygle DNS started via systemd."
+        systemctl enable --quiet --now daygle-dns
     fi
-else
-    log "No systemd detected. Start the server manually:"
-    log "  $PREFIX/bin/daygle-dns --config $CONFIG_DIR/daygle-dns.toml"
 fi
 
 # ---- web GUI on the LAN -----------------------------------------
@@ -581,8 +690,7 @@ fi
 if [ "${DAYGLE_DNS_GUI_UPDATE:-}" = "1" ]; then
     log "Update run: configuration, [api] listener, accounts and firewall rules left untouched."
 elif [ "${DAYGLE_DNS_LAN_GUI:-}" = "0" ]; then
-    LAN_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
-    log "Web GUI left on the loopback interface (DAYGLE_DNS_LAN_GUI=0)."
+    :
 else
     ADMIN_USER="${DAYGLE_DNS_ADMIN_USER:-}"
     PRESERVE_USERS=0
@@ -604,7 +712,7 @@ else
                 # Never derive it from the clock/pid: those are guessable.
                 ADMIN_PASSWORD="$(od -An -N12 -tx1 /dev/urandom | tr -d ' \n')"
             fi
-            log "No DAYGLE_DNS_ADMIN_PASSWORD given; generated one for user '$ADMIN_USER'."
+            GENERATED_PASSWORD=1
         fi
     else
         # No explicit credentials: leave ADMIN_USER / ADMIN_PASSWORD empty so
@@ -648,43 +756,121 @@ EOF
     fi
 
     open_lan_firewall || true
-    LAN_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
+fi
 
-    # ---- summary -------------------------------------------------------
-    log ""
-    log "──────────────────────────────────────────"
-    log "  Installation Summary"
-    log "──────────────────────────────────────────"
-    log "  Mode:        $INSTALL_MODE"
-    log "  Binary:      $PREFIX/bin/daygle-dns"
-    log "  Config dir:  $CONFIG_DIR"
+# ---- summary -------------------------------------------------------------
+# Restart so the console listens where the config now says, wait until the
+# service is up and the console answers, then report what is true: the
+# addresses to use, the next step, and where to look if it is not running.
 
-    if [ -n "$LAN_IP" ]; then
-        log "  Web GUI (LAN): http://$LAN_IP:5380"
+# Whether something answers HTTP(S) at $1 (any status counts: the console
+# may redirect or ask for a login).
+answers() {
+    if have_cmd curl; then
+        code="$(curl -sk -o /dev/null -w '%{http_code}' --max-time 2 "$1" 2>/dev/null || true)"
+        [ -n "$code" ] && [ "$code" != "000" ]
+    elif have_cmd wget; then
+        # 8: the server answered with an error status, which still counts.
+        rc=0
+        wget -q -O /dev/null --no-check-certificate -T 2 -t 1 "$1" 2>/dev/null || rc=$?
+        [ "$rc" -eq 0 ] || [ "$rc" -eq 8 ]
     else
-        log "  Web GUI (LAN): http://$LAN_IP:5380 (LAN IP could not be determined)"
+        return 1
     fi
+}
 
-    log "  Configuration: $CONFIG_DIR/daygle-dns.toml"
-    if [ -f "$CONFIG_DIR/models/daygle-starter.bin" ]; then
-        log "  AI scanner:   enabled (train mode; model: $CONFIG_DIR/models/daygle-starter.bin)"
-    fi
-    log "──────────────────────────────────────────"
+# The console URL on `$1` (an address), or empty when it does not answer.
+# Settings → General may have moved it to HTTPS, so both ports are tried.
+console_url() {
+    for url in "http://$1:$API_PORT" "https://$1:$HTTPS_PORT"; do
+        if answers "$url"; then
+            printf '%s\n' "$url"
+            return 0
+        fi
+    done
+}
 
-    if command -v systemctl >/dev/null 2>&1; then
+# Run only when the installer is run by hand: a GUI-driven update has its
+# own health check and rollback, and its output goes to the journal.
+if [ "${DAYGLE_DNS_GUI_UPDATE:-}" != "1" ]; then
+    API_PORT="$(config_setting api port)"; API_PORT="${API_PORT:-5380}"
+    HTTPS_PORT="$(config_setting web https_port)"; HTTPS_PORT="${HTTPS_PORT:-5443}"
+    DNS_PORT="$(config_setting server port)"; DNS_PORT="${DNS_PORT:-53}"
+    LAN_IP="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"
+    VERSION="$("$PREFIX/bin/daygle-dns" --version 2>/dev/null | awk '{print $2}' || true)"
+    if [ "$INSTALL_MODE" = "upgrade" ]; then DONE="upgraded"; else DONE="installed"; fi
+
+    RUNNING=""
+    LOCAL_URL=""
+    if have_cmd systemctl && [ -f "$SERVICE_FILE" ]; then
         systemctl restart daygle-dns 2>/dev/null || true
-        # Verify the API listener actually landed on 0.0.0.0 after restart.
-        # If it didn't (for example the service failed to start, or the bind
-        # was overridden by a runtime config overlay), tell the user plainly
-        # so they are not left guessing why the LAN URL does not answer.
-        sleep 1
-        ACTUAL_LISTEN="$(api_listen_address)"
-        if [ "$ACTUAL_LISTEN" = "0.0.0.0" ]; then
-            :
-        elif [ -n "$LAN_IP" ]; then
-            log "NOTE: the web GUI is listening on $ACTUAL_LISTEN:5380, not on the LAN."
-            log "      If the GUI is not reachable from other machines, re-run the installer,"
-            log "      or edit $CONFIG_FILE and set listen = \"0.0.0.0\" under [api]."
+        tries=0
+        while [ "$tries" -lt 30 ]; do
+            if systemctl is-active --quiet daygle-dns; then
+                RUNNING=1
+                LOCAL_URL="$(console_url 127.0.0.1)"
+                [ -n "$LOCAL_URL" ] && break
+            else
+                RUNNING=""
+            fi
+            tries=$((tries + 1))
+            sleep 1
+        done
+    fi
+
+    log ""
+    if [ -z "$RUNNING" ] && ! { have_cmd systemctl && [ -f "$SERVICE_FILE" ]; }; then
+        log "Daygle DNS ${VERSION:+v$VERSION }is $DONE. No systemd was found, so start it yourself:"
+        log "    $PREFIX/bin/daygle-dns --config $CONFIG_FILE"
+    elif [ -z "$RUNNING" ]; then
+        log "Daygle DNS ${VERSION:+v$VERSION }is $DONE, but the service is NOT running."
+        log "See why with:  journalctl -u daygle-dns -n 30"
+        log "Configuration: $CONFIG_FILE"
+        exit 1
+    else
+        log "Daygle DNS ${VERSION:+v$VERSION }is $DONE and running."
+    fi
+    log ""
+
+    # The console as other devices reach it, else as this machine does.
+    SHOWN_URL=""
+    if [ -n "$LOCAL_URL" ] && [ -n "$LAN_IP" ] && [ "$(api_listen_address)" != "127.0.0.1" ]; then
+        SHOWN_URL="$(console_url "$LAN_IP")"
+    fi
+    if [ -n "$SHOWN_URL" ]; then
+        log "  Web console:  $SHOWN_URL"
+    elif [ -n "$LOCAL_URL" ]; then
+        log "  Web console:  $LOCAL_URL (this machine only)"
+    elif [ -n "$RUNNING" ]; then
+        log "  Web console:  not answering yet on port $API_PORT; see journalctl -u daygle-dns"
+    elif [ -n "$LAN_IP" ]; then
+        log "  Web console:  http://$LAN_IP:$API_PORT once started"
+    else
+        log "  Web console:  http://<this server's address>:$API_PORT once started"
+    fi
+    if [ -n "${GENERATED_PASSWORD:-}" ]; then
+        log "  Admin login:  $ADMIN_USER / $ADMIN_PASSWORD"
+        log "                Shown only now: sign in and change it on the Account page."
+    elif [ -n "${ADMIN_USER:-}" ]; then
+        log "  Admin login:  $ADMIN_USER"
+    elif [ "$INSTALL_MODE" = "install" ] && [ -n "$RUNNING" ]; then
+        log "                Open it now to create the admin account."
+    elif [ "$INSTALL_MODE" = "install" ]; then
+        log "                Open it to create the admin account."
+    fi
+
+    DNS_HOST="${LAN_IP:-<this server's address>}"
+    if [ "$DNS_PORT" = "53" ]; then
+        log "  DNS server:   $DNS_HOST (set it as the DNS server on your router or devices)"
+    else
+        log "  DNS server:   $DNS_HOST port $DNS_PORT"
+    fi
+    log "  Config file:  $CONFIG_FILE"
+    if have_cmd dig && [ -n "$RUNNING" ]; then
+        if [ "$DNS_PORT" = "53" ]; then
+            log "  Test:         dig @${LAN_IP:-127.0.0.1} example.com"
+        else
+            log "  Test:         dig @${LAN_IP:-127.0.0.1} -p $DNS_PORT example.com"
         fi
     fi
 fi

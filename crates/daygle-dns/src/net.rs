@@ -28,10 +28,39 @@ fn socket_for(
     Ok(socket)
 }
 
+/// A bind error with the address it was for and, when the port is taken,
+/// the likely culprit: the bare OS error ("Address already in use") does
+/// not say which listener failed.
+fn bind_error(err: std::io::Error, addr: SocketAddr, protocol: &str) -> std::io::Error {
+    if err.kind() != std::io::ErrorKind::AddrInUse {
+        return std::io::Error::new(
+            err.kind(),
+            format!("cannot listen on {addr} ({protocol}): {err}"),
+        );
+    }
+    let hint = if addr.port() == 53 {
+        " On Ubuntu and other systemd-based systems this is usually systemd-resolved's \
+         stub listener: set DNSStubListener=no in a /etc/systemd/resolved.conf.d/ drop-in \
+         and restart systemd-resolved (the installer does this). dnsmasq or another DNS \
+         server can also hold the port; `ss -lntup 'sport = :53'` shows which."
+    } else {
+        ""
+    };
+    std::io::Error::new(
+        err.kind(),
+        format!(
+            "cannot listen on {addr} ({protocol}): port {} is already in use by another program.{hint}",
+            addr.port()
+        ),
+    )
+}
+
 /// A UDP socket bound to `addr` (blocking; callers configure and convert it).
 pub fn bind_udp_std(addr: SocketAddr, v6_only: bool) -> std::io::Result<std::net::UdpSocket> {
     let socket = socket_for(addr, v6_only, Type::DGRAM, Protocol::UDP)?;
-    socket.bind(&addr.into())?;
+    socket
+        .bind(&addr.into())
+        .map_err(|e| bind_error(e, addr, "UDP"))?;
     Ok(socket.into())
 }
 
@@ -48,8 +77,34 @@ pub fn bind_tcp(addr: SocketAddr, v6_only: bool) -> std::io::Result<tokio::net::
     let socket = socket_for(addr, v6_only, Type::STREAM, Protocol::TCP)?;
     #[cfg(unix)]
     socket.set_reuse_address(true)?;
-    socket.bind(&addr.into())?;
+    socket
+        .bind(&addr.into())
+        .map_err(|e| bind_error(e, addr, "TCP"))?;
     socket.listen(1024)?;
     socket.set_nonblocking(true)?;
     tokio::net::TcpListener::from_std(socket.into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn port_in_use_names_the_address() {
+        let taken = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = taken.local_addr().unwrap();
+        let msg = bind_tcp(addr, false).unwrap_err().to_string();
+        assert!(msg.contains(&format!("{addr} (TCP)")), "{msg}");
+        assert!(msg.contains("already in use"), "{msg}");
+        assert!(!msg.contains("systemd-resolved"), "{msg}");
+    }
+
+    #[test]
+    fn port_53_in_use_points_at_systemd_resolved() {
+        let addr: SocketAddr = "0.0.0.0:53".parse().unwrap();
+        let in_use = std::io::Error::from(std::io::ErrorKind::AddrInUse);
+        let msg = bind_error(in_use, addr, "TCP").to_string();
+        assert!(msg.contains("0.0.0.0:53 (TCP)"), "{msg}");
+        assert!(msg.contains("DNSStubListener=no"), "{msg}");
+    }
 }

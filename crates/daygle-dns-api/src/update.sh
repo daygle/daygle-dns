@@ -4,7 +4,7 @@
 # Usage: sh daygle-dns-update.sh [--models] <current-binary> <state-dir>
 #
 # Default path: stage the canonical installer (the same one-line
-# `curl -fsSL .../install.sh | sh` an operator would run by hand) and hand it
+# `curl -fsSL .../install.sh | sudo sh` an operator would run by hand) and hand it
 # to the root apply service, which runs it. The installer resolves the latest
 # release, builds daygle-dns from source with that release version stamped,
 # installs the binary, re-provisions the systemd units and seeds AI settings

@@ -153,7 +153,7 @@ metrics.
 
 ```bash
 # One-line installer (Linux/macOS; auto-installs Rust, a C compiler, and git if missing)
-curl -fsSL https://raw.githubusercontent.com/daygle/daygle-dns/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/daygle/daygle-dns/main/install.sh | sudo sh
 
 # ...or build and run directly from source
 cargo run --release -p daygle-dns -- --config daygle-dns.toml.example
@@ -184,7 +184,24 @@ account immediately. On upgrades the installer rebinds the API listener to
 0.0.0.0:5380 when it is still on 127.0.0.1 and preserves any existing console
 account (its password is never replaced).
 
-Then open the dashboard at <http://127.0.0.1:5380>.
+Port 53 must be free. On Ubuntu, Fedora and other systemd distributions,
+systemd-resolved runs a stub resolver on 127.0.0.53:53 that would stop the
+server starting, so the installer turns it off with
+`/etc/systemd/resolved.conf.d/daygle-dns.conf` (`DNSStubListener=no`) and links
+`/etc/resolv.conf` to `/run/systemd/resolve/resolv.conf`, the upstream servers
+systemd-resolved already knows, so the host itself keeps resolving. Set
+`DAYGLE_DNS_KEEP_RESOLVED=1` to leave systemd-resolved alone. Any other program
+still on port 53 (dnsmasq, bind9, unbound) is named in a warning.
+
+When ufw or firewalld is active, the installer opens ports 53, 853 (TCP and
+UDP) and 5380 to private networks only: 10.0.0.0/8, 172.16.0.0/12,
+192.168.0.0/16, 100.64.0.0/10 (CGNAT, also used by Tailscale), 169.254.0.0/16
+and the IPv6 local ranges fc00::/7 and fe80::/10. These are the same networks
+Recursion Access → Private Networks Only trusts. Other firewalls are left to you.
+
+The installer finishes by checking that the service is running and printing
+the web console address (open it to create the admin account) and the DNS
+server address to give your router or devices.
 
 Test a query:
 
@@ -385,12 +402,12 @@ real server on ephemeral ports and exercise:
 ### Installer-based installs (systemd)
 
 The one-line installer is **idempotent** - re-running it is the supported
-upgrade path. It detects the existing installation, fetches the latest `main`,
-rebuilds the release binary, replaces `/usr/local/bin/daygle-dns`, preserves
+upgrade path. It detects the existing installation, fetches the latest release,
+rebuilds the binary, replaces `/usr/local/bin/daygle-dns`, preserves
 `/etc/daygle-dns/daygle-dns.toml`, and restarts (or re-enables) the service:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/daygle/daygle-dns/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/daygle/daygle-dns/main/install.sh | sudo sh
 ```
 
 The installer never overwrites an existing `/etc/daygle-dns/daygle-dns.toml`,

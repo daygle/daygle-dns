@@ -5493,6 +5493,30 @@ fd0000000000000000000000000000aa 02 40 00 80     eth0
     }
 
     #[test]
+    fn installer_firewall_ranges_match_private_networks() {
+        // install.sh opens its firewall rules to the networks "Private
+        // Networks Only" trusts; loopback is never firewalled.
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../install.sh");
+        let script = std::fs::read_to_string(&path).expect("install.sh is readable");
+        let mut opened: Vec<&str> = script
+            .lines()
+            .filter_map(|line| {
+                line.strip_prefix("LAN_NETS_V4=\"")
+                    .or_else(|| line.strip_prefix("LAN_NETS_V6=\""))
+            })
+            .flat_map(|list| list.trim_end_matches('"').split_whitespace())
+            .collect();
+        let mut private: Vec<&str> = PRIVATE_NETWORKS
+            .iter()
+            .copied()
+            .filter(|net| *net != "127.0.0.0/8" && *net != "::1/128")
+            .collect();
+        opened.sort_unstable();
+        private.sort_unstable();
+        assert_eq!(opened, private);
+    }
+
+    #[test]
     fn example_config_matches_defaults() {
         // The installer copies the example as the live config, so any value
         // it pins overrides the built-in default on every new install. Only
