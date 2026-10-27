@@ -3531,6 +3531,94 @@ pub async fn auth_set_preferences(
     Json(serde_json::json!({ "preferences": preferences })).into_response()
 }
 
+// ---- Table columns -------------------------------------------------------
+
+/// The named setting holding one user's hidden table columns.
+fn columns_key(username: &str) -> String {
+    format!("console_columns:{username}")
+}
+
+/// Hidden columns, by table.
+type HiddenColumns = std::collections::BTreeMap<String, Vec<String>>;
+
+/// Body of `PUT /api/auth/columns`.
+#[derive(Deserialize)]
+pub struct ColumnsInput {
+    /// The table, e.g. `query-log`.
+    table: String,
+    /// The columns hidden in it; empty shows them all again.
+    hidden: Vec<String>,
+}
+
+/// Whether `text` is a short id of lowercase letters, digits, `-` and `_`.
+fn column_id(text: &str) -> bool {
+    !text.is_empty()
+        && text.len() <= 64
+        && text
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_')
+}
+
+/// `GET /api/auth/columns` - the signed-in user's hidden table columns.
+pub async fn auth_columns(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+) -> Response {
+    let token = bearer_token(&headers).unwrap_or_default();
+    let Some(session) = state.sessions.verify(&token) else {
+        return error_response(StatusCode::UNAUTHORIZED, "not authenticated");
+    };
+    let columns: HiddenColumns = state
+        .catalog
+        .store()
+        .get_named_setting(&columns_key(&session.username))
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    Json(serde_json::json!({ "columns": columns })).into_response()
+}
+
+/// `PUT /api/auth/columns` - the signed-in user hides columns of one table
+/// (their own view only, so read-only accounts may too).
+pub async fn auth_set_columns(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    axum::Json(input): axum::Json<ColumnsInput>,
+) -> Response {
+    let token = bearer_token(&headers).unwrap_or_default();
+    let Some(session) = state.sessions.verify(&token) else {
+        return error_response(StatusCode::UNAUTHORIZED, "not authenticated");
+    };
+    if !column_id(&input.table)
+        || input.hidden.len() > 50
+        || !input.hidden.iter().all(|c| column_id(c))
+    {
+        return error_response(StatusCode::BAD_REQUEST, "invalid table or column name");
+    }
+    let store = state.catalog.store();
+    let key = columns_key(&session.username);
+    let mut columns: HiddenColumns = store
+        .get_named_setting(&key)
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    if input.hidden.is_empty() {
+        columns.remove(&input.table);
+    } else {
+        if columns.len() >= 100 && !columns.contains_key(&input.table) {
+            return error_response(StatusCode::BAD_REQUEST, "too many tables");
+        }
+        let mut hidden = input.hidden;
+        hidden.sort();
+        hidden.dedup();
+        columns.insert(input.table, hidden);
+    }
+    if let Err(e) = store.put_named_setting(&key, &columns) {
+        return map_err(e);
+    }
+    Json(serde_json::json!({ "columns": columns })).into_response()
+}
+
 // ---- Self-service password change ---------------------------------------
 
 /// Body of `POST /api/auth/password`.

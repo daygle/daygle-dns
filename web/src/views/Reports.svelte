@@ -2,6 +2,17 @@
   import { api, formatApiError } from '../api.js';
   import { formatDateTime } from '../datetime.svelte.js';
   import ClientLabel from '../ClientLabel.svelte';
+  import ColumnPicker from '../ColumnPicker.svelte';
+  import { isHidden } from '../columns.svelte.js';
+
+  const COLUMNS = [
+    { key: 'device', label: 'Device', locked: true },
+    { key: 'queries', label: 'Queries' },
+    { key: 'blocked', label: 'Blocked' },
+    { key: 'blocked-percent', label: 'Blocked %' },
+    { key: 'last-seen', label: 'Last Seen' },
+  ];
+  const show = (key) => !isHidden('report-devices', key);
 
   // `onShowQueries(client)` opens the Query Log filtered to one device.
   let { onShowQueries = null } = $props();
@@ -95,21 +106,31 @@
 
 {#if report}
   <div class="card" style="margin-bottom: 14px">
-    <h3 style="margin: 0 0 10px">Devices</h3>
+    <div class="spread" style="margin-bottom: 10px">
+      <h3 style="margin: 0">Devices</h3>
+      <ColumnPicker table="report-devices" columns={COLUMNS} />
+    </div>
     {#if report.clients.length}
       <div class="table-wrap">
         <table>
           <thead>
-            <tr><th>Device</th><th class="num">Queries</th><th class="num">Blocked</th><th class="num">Blocked %</th><th>Last Seen</th><th class="num">Actions</th></tr>
+            <tr>
+              <th>Device</th>
+              {#if show('queries')}<th class="num">Queries</th>{/if}
+              {#if show('blocked')}<th class="num">Blocked</th>{/if}
+              {#if show('blocked-percent')}<th class="num">Blocked %</th>{/if}
+              {#if show('last-seen')}<th>Last Seen</th>{/if}
+              <th class="num">Actions</th>
+            </tr>
           </thead>
           <tbody>
             {#each report.clients as c (c.client)}
               <tr class:selected={device === c.client}>
                 <td><ClientLabel address={c.client} /></td>
-                <td class="num">{fmt(c.queries)}</td>
-                <td class="num">{fmt(c.blocked)}</td>
-                <td class="num">{percent(c.blocked, c.queries)}</td>
-                <td class="muted nowrap">{formatDateTime(c.last_seen)}</td>
+                {#if show('queries')}<td class="num">{fmt(c.queries)}</td>{/if}
+                {#if show('blocked')}<td class="num">{fmt(c.blocked)}</td>{/if}
+                {#if show('blocked-percent')}<td class="num">{percent(c.blocked, c.queries)}</td>{/if}
+                {#if show('last-seen')}<td class="muted nowrap">{formatDateTime(c.last_seen)}</td>{/if}
                 <td class="num">
                   <div class="row" style="gap: 6px; justify-content: flex-end">
                     <button class="secondary" onclick={() => loadDevice(c.client)}>Details</button>

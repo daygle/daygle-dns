@@ -1,11 +1,11 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
   <rect width="24" height="24" rx="5.5" fill="#131a30"/>
+  <!-- The console's logo: an outlined hexagon (⬡), point up. -->
   <path
-    d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zm0 0v20M2 12h20"
+    d="M12 2.6 20.1 7.3v9.4L12 21.4 3.9 16.7V7.3z"
     fill="none"
     stroke="#5b8cff"
-    stroke-width="2"
-    stroke-linecap="round"
+    stroke-width="2.4"
     stroke-linejoin="round"
   />
 </svg>

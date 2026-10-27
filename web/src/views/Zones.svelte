@@ -3,6 +3,18 @@
   import { reverseZoneName } from '../reverseZone.js';
   import { formatDateTime } from '../datetime.svelte.js';
   import { duration } from '../aiLabels.js';
+  import ColumnPicker from '../ColumnPicker.svelte';
+  import { isHidden } from '../columns.svelte.js';
+
+  const COLUMNS = [
+    { key: 'name', label: 'Name', locked: true },
+    { key: 'type', label: 'Type' },
+    { key: 'details', label: 'Details' },
+    { key: 'dnssec', label: 'DNSSEC' },
+    { key: 'status', label: 'Status' },
+    { key: 'last-modified', label: 'Last Modified' },
+  ];
+  const show = (key) => !isHidden('zones', key);
 
   let { onOpenRecords = () => {} } = $props();
 
@@ -549,24 +561,37 @@
 <div class="card">
   <div class="spread" style="margin-bottom: 10px">
     <h3 style="margin: 0">Zones ({rowCount})</h3>
-    <button onclick={openAddZone}>Add Zone</button>
+    <div class="row" style="gap: 8px">
+      <ColumnPicker table="zones" columns={COLUMNS} />
+      <button onclick={openAddZone}>Add Zone</button>
+    </div>
   </div>
   <div class="table-wrap">
     <table>
       <thead>
-        <tr><th>Name</th><th>Type</th><th>Details</th><th>DNSSEC</th><th>Status</th><th>Last Modified</th><th class="num">Actions</th></tr>
+        <tr>
+          <th>Name</th>
+          {#if show('type')}<th>Type</th>{/if}
+          {#if show('details')}<th>Details</th>{/if}
+          {#if show('dnssec')}<th>DNSSEC</th>{/if}
+          {#if show('status')}<th>Status</th>{/if}
+          {#if show('last-modified')}<th>Last Modified</th>{/if}
+          <th class="num">Actions</th>
+        </tr>
       </thead>
       <tbody>
         {#each zones as zone (zone.id)}
           <tr class:disabled={!zone.enabled}>
             <td><code>{zone.name}</code></td>
-            <td><span class="pill">{zone.zone_type === 'secondary' ? 'Secondary' : 'Primary'}</span></td>
-            <td class="muted">
-              Serial {zone.serial}{#if zone.zone_type === 'secondary' && zone.masters?.length}{` · from ${zone.masters.join(', ')}`}{/if}{#if zone.catalog}{` · catalog ${zone.catalog}`}{/if}
-            </td>
-            <td><span class:pill={true} class:ok={zone.dnssec}>{zone.dnssec ? (zone.nsec3 ? 'Signed · NSEC3' : 'Signed · NSEC') : 'Unsigned'}</span></td>
-            <td><span class:pill={true} class:ok={zone.enabled} title={zone.enabled ? 'Serving this zone' : 'Not served until enabled'}>{zone.enabled ? 'Enabled' : 'Disabled'}</span></td>
-            <td class="muted nowrap" title={zone.last_modified_at || zone.created_at}>{formatTime(zone.last_modified_at || zone.created_at)}</td>
+            {#if show('type')}<td><span class="pill">{zone.zone_type === 'secondary' ? 'Secondary' : 'Primary'}</span></td>{/if}
+            {#if show('details')}
+              <td class="muted">
+                Serial {zone.serial}{#if zone.zone_type === 'secondary' && zone.masters?.length}{` · from ${zone.masters.join(', ')}`}{/if}{#if zone.catalog}{` · catalog ${zone.catalog}`}{/if}
+              </td>
+            {/if}
+            {#if show('dnssec')}<td><span class:pill={true} class:ok={zone.dnssec}>{zone.dnssec ? (zone.nsec3 ? 'Signed · NSEC3' : 'Signed · NSEC') : 'Unsigned'}</span></td>{/if}
+            {#if show('status')}<td><span class:pill={true} class:ok={zone.enabled} title={zone.enabled ? 'Serving this zone' : 'Not served until enabled'}>{zone.enabled ? 'Enabled' : 'Disabled'}</span></td>{/if}
+            {#if show('last-modified')}<td class="muted nowrap" title={zone.last_modified_at || zone.created_at}>{formatTime(zone.last_modified_at || zone.created_at)}</td>{/if}
             <td class="num">
               <div class="row" style="gap: 6px; justify-content: flex-end">
                 <button class="secondary" onclick={() => openSoa(zone)} title="Edit the zone's settings: serving state, and its SOA (nameserver, contact, timers)">Edit</button>
@@ -591,11 +616,11 @@
         {#each stubs as stub (stub.name)}
           <tr class:disabled={!stub.enabled}>
             <td><code>{stub.name}</code></td>
-            <td><span class="pill">Stub</span></td>
-            <td class="muted">NS {stub.nss.join(', ') || '-'}</td>
-            <td class="muted">-</td>
-            <td class="muted">-</td>
-            <td><span class:pill={true} class:ok={stub.enabled}>{stub.enabled ? 'Enabled' : 'Disabled'}</span></td>
+            {#if show('type')}<td><span class="pill">Stub</span></td>{/if}
+            {#if show('details')}<td class="muted">NS {stub.nss.join(', ') || '-'}</td>{/if}
+            {#if show('dnssec')}<td class="muted">-</td>{/if}
+            {#if show('status')}<td><span class:pill={true} class:ok={stub.enabled}>{stub.enabled ? 'Enabled' : 'Disabled'}</span></td>{/if}
+            {#if show('last-modified')}<td class="muted">-</td>{/if}
             <td class="num">
               <div class="row" style="gap: 6px; justify-content: flex-end">
                 <button class="secondary" onclick={() => openEditStub(stub)}>Edit</button>
@@ -607,7 +632,8 @@
         {#if rootEnabled}
           <tr>
             <td><code>.</code></td>
-            <td><span class="pill" style="white-space: nowrap">Secondary ROOT</span></td>
+            {#if show('type')}<td><span class="pill" style="white-space: nowrap">Secondary ROOT</span></td>{/if}
+            {#if show('details')}
             <td class="muted">
               {#if rootStatus?.serving}
                 <span title={`Last checked ${formatTime(rootStatus.last_checked)} · from ${rootStatus.source}`}>
@@ -619,15 +645,18 @@
                 Transferring and Verifying the Root Zone...
               {/if}
             </td>
-            <td>
-              {#if rootStatus?.serving}
-                <span class="pill ok" title="ZONEMD digest and DNSSEC signatures verified">Verified</span>
-              {:else}
-                <span class="muted">-</span>
-              {/if}
-            </td>
-            <td class="muted">-</td>
-            <td><span class="pill ok" title="Configured and in use">Enabled</span></td>
+            {/if}
+            {#if show('dnssec')}
+              <td>
+                {#if rootStatus?.serving}
+                  <span class="pill ok" title="ZONEMD digest and DNSSEC signatures verified">Verified</span>
+                {:else}
+                  <span class="muted">-</span>
+                {/if}
+              </td>
+            {/if}
+            {#if show('status')}<td><span class="pill ok" title="Configured and in use">Enabled</span></td>{/if}
+            {#if show('last-modified')}<td class="muted">-</td>{/if}
             <td class="num">
               <div class="row" style="gap: 6px; justify-content: flex-end">
                 <button class="secondary" onclick={refreshRoot}>Refresh</button>
@@ -640,11 +669,11 @@
         {#each forwarders as fwd (fwd.name)}
           <tr>
             <td><code>{fwd.name}</code></td>
-            <td><span class="pill">Forwarder</span></td>
-            <td class="muted">→ {fwd.upstreams.join(', ')}</td>
-            <td class="muted">-</td>
-            <td class="muted">-</td>
-            <td><span class="pill ok" title="Configured and in use">Enabled</span></td>
+            {#if show('type')}<td><span class="pill">Forwarder</span></td>{/if}
+            {#if show('details')}<td class="muted">→ {fwd.upstreams.join(', ')}</td>{/if}
+            {#if show('dnssec')}<td class="muted">-</td>{/if}
+            {#if show('status')}<td><span class="pill ok" title="Configured and in use">Enabled</span></td>{/if}
+            {#if show('last-modified')}<td class="muted">-</td>{/if}
             <td class="num">
               <div class="row" style="gap: 6px; justify-content: flex-end">
                 <button class="secondary" onclick={() => openEditForwarder(fwd)}>Edit</button>

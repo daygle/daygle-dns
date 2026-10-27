@@ -68,6 +68,8 @@ Additional endpoints:
 |----------|---------|
 | `GET /api/auth/me` | identity of the presented session or API token (`username`, `role`, `expires_at_secs`, `api_token`), the account's own date/time `preferences` and the server's `display_defaults` |
 | `PUT /api/auth/preferences` | signed-in user sets their own `{time_zone, date_format, time_format}`; an empty field means the server default (viewers may use it too) |
+| `GET /api/auth/columns` | the signed-in user's hidden table columns: `{"columns": {"<table>": ["<column>", ...]}}` |
+| `PUT /api/auth/columns` | signed-in user hides columns of one table: `{"table": "query-log", "hidden": ["took"]}` (an empty list shows them all again); names are lowercase letters, digits, `-` and `_`, at most 50 columns and 100 tables (viewers may use it too) |
 | `POST /api/auth/logout` | revoke the presented token |
 | `POST /api/auth/password` | signed-in user rotates their own password (current password required; other sessions revoked) |
 | `GET /api/auth/tokens` | the signed-in account's API tokens (`id`, `name`, `read_only`, `created_at`, `last_used_at`, `expires_at`; UNIX seconds, 0 = never) |
