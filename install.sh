@@ -253,16 +253,24 @@ EOF
     run_as_root rm -f /etc/sudoers.d/"$SERVICE_USER" "$PRIV_LIB_DIR/update-priv.sh"
 }
 
+# Networks the installer opens the firewall to: the same private ranges the
+# server's "Private Networks Only" recursion access trusts (PRIVATE_NETWORKS
+# in config.rs, loopback aside): RFC 1918, CGNAT 100.64.0.0/10 (also used by
+# Tailscale), link-local, and IPv6 unique local and link-local addresses.
+LAN_NETS_V4="10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 100.64.0.0/10 169.254.0.0/16"
+LAN_NETS_V6="fc00::/7 fe80::/10"
+
 open_lan_firewall() {
     # Best-effort: open LAN-scoped rules where possible, warn otherwise.
     # Prints a warning when a firewall is active that we cannot configure.
+    # Port 853 is DNS over TLS (TCP) and DNS over QUIC (UDP).
     if command -v ufw >/dev/null 2>&1; then
         if ufw status 2>/dev/null | grep -qi '^Status: active'; then
-            log "Opening ports 53, 853, and 5380 for private LAN ranges in ufw..."
-            for net in 192.168.0.0/16 172.16.0.0/12 10.0.0.0/8; do
+            log "Opening ports 53, 853, and 5380 for private LAN ranges (IPv4 and IPv6) in ufw..."
+            for net in $LAN_NETS_V4 $LAN_NETS_V6; do
                 ufw allow from "$net" to any port 5380 proto tcp >/dev/null 2>&1 || true
                 ufw allow from "$net" to any port 53 >/dev/null 2>&1 || true
-                ufw allow from "$net" to any port 853 proto tcp >/dev/null 2>&1 || true
+                ufw allow from "$net" to any port 853 >/dev/null 2>&1 || true
             done
             return 0
         fi
@@ -270,12 +278,15 @@ open_lan_firewall() {
         return 0
     fi
     if command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state >/dev/null 2>&1; then
-        log "Opening ports 53, 853, and 5380 for private LAN ranges in firewalld..."
-        for net in 192.168.0.0/16 172.16.0.0/12 10.0.0.0/8; do
-            firewall-cmd --permanent --add-rich-rule="rule family=ipv4 source address=$net port port=5380 protocol=tcp accept" >/dev/null 2>&1 || true
-            firewall-cmd --permanent --add-rich-rule="rule family=ipv4 source address=$net port port=53 protocol=udp accept" >/dev/null 2>&1 || true
-            firewall-cmd --permanent --add-rich-rule="rule family=ipv4 source address=$net port port=53 protocol=tcp accept" >/dev/null 2>&1 || true
-            firewall-cmd --permanent --add-rich-rule="rule family=ipv4 source address=$net port port=853 protocol=tcp accept" >/dev/null 2>&1 || true
+        log "Opening ports 53, 853, and 5380 for private LAN ranges (IPv4 and IPv6) in firewalld..."
+        for net in $LAN_NETS_V4 $LAN_NETS_V6; do
+            case "$net" in
+                *:*) family=ipv6 ;;
+                *) family=ipv4 ;;
+            esac
+            for rule in 5380/tcp 53/udp 53/tcp 853/tcp 853/udp; do
+                firewall-cmd --permanent --add-rich-rule="rule family=$family source address=$net port port=${rule%/*} protocol=${rule#*/} accept" >/dev/null 2>&1 || true
+            done
         done
         firewall-cmd --reload >/dev/null 2>&1 || true
         return 0

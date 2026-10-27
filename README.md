@@ -193,6 +193,12 @@ systemd-resolved already knows, so the host itself keeps resolving. Set
 `DAYGLE_DNS_KEEP_RESOLVED=1` to leave systemd-resolved alone. Any other program
 still on port 53 (dnsmasq, bind9, unbound) is named in a warning.
 
+When ufw or firewalld is active, the installer opens ports 53, 853 (TCP and
+UDP) and 5380 to private networks only: 10.0.0.0/8, 172.16.0.0/12,
+192.168.0.0/16, 100.64.0.0/10 (CGNAT, also used by Tailscale), 169.254.0.0/16
+and the IPv6 local ranges fc00::/7 and fe80::/10. These are the same networks
+Recursion Access → Private Networks Only trusts. Other firewalls are left to you.
+
 Then open the dashboard at <http://127.0.0.1:5380>.
 
 Test a query:
