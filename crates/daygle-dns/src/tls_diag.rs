@@ -14,6 +14,9 @@
 //!   Across clients, at most [`LINES_PER_INTERVAL`] lines per protocol are
 //!   written per interval; the rest (an internet scan of a public DoT port
 //!   comes from many addresses) are counted and reported in one line.
+//!   Handshakes the client could never have completed (only old TLS
+//!   versions, unknown ciphers or ALPN, or not TLS at all - what scanners
+//!   send) stay at `debug` and are not written to the Server Log.
 //!   Entries carry the same protocol values the query log records (`tls`,
 //!   `https`, `quic`) as their console Server Log component, so the two logs
 //!   correlate, and they feed syslog when it is enabled.
@@ -125,6 +128,10 @@ impl SessionLog {
     /// could not attribute one (Hickory's DoH handshake timeouts log no
     /// peer).
     pub fn record(&self, protocol: &'static str, client: Option<IpAddr>, reason: &str) {
+        if offered_nothing_acceptable(reason) {
+            tracing::debug!(protocol, client = ?client, reason, "encrypted DNS client rejected");
+            return;
+        }
         let now = Instant::now();
         let (message, failures) = {
             let mut map = self.inner.lock().unwrap_or_else(|e| e.into_inner());
@@ -232,6 +239,24 @@ impl SessionLog {
         let client = peer.map(|addr| crate::proxy_protocol::real_client(addr).ip());
         self.record(protocol, client, reason);
     }
+}
+
+/// Whether `reason` is a handshake the client could never have completed:
+/// it offered only protocol versions, cipher suites or ALPN protocols the
+/// server does not accept, or sent bytes that are not TLS at all. Internet
+/// scanners probing a public port do this constantly; real DoT, DoH and DoQ
+/// clients never do. Those stay at `debug` so the warnings that remain -
+/// certificate alerts, timeouts, dropped connections - are the actionable
+/// ones. Matches rustls' error text, which DoQ (quinn) and DoH (Hickory)
+/// carry inside their own messages.
+fn offered_nothing_acceptable(reason: &str) -> bool {
+    [
+        "peer is incompatible:",
+        "peer doesn't support any known protocol",
+        "received corrupt message",
+    ]
+    .iter()
+    .any(|needle| reason.contains(needle))
 }
 
 /// Whether a DoT certificate can serve public clients such as Android's
@@ -682,6 +707,38 @@ mod tests {
             .filter(|e| e.level == LogLevel::Warn && e.component == component)
             .map(|e| e.message)
             .collect()
+    }
+
+    #[test]
+    fn clients_offering_nothing_acceptable_stay_out_of_the_log() {
+        let logs = store();
+        let session = SessionLog::new(logs.clone());
+        let client = Some(IpAddr::from(Ipv4Addr::new(192, 0, 2, 20)));
+
+        for reason in [
+            "TLS handshake failed: peer doesn't support any known protocol",
+            "TLS handshake failed: peer is incompatible: NoCipherSuitesInCommon",
+            "TLS handshake failed: peer is incompatible: Tls12NotOffered",
+            "TLS handshake failed: peer is incompatible: SignatureAlgorithmsExtensionRequired",
+            "TLS handshake failed: received corrupt message of type InvalidContentType",
+        ] {
+            session.record(TLS, client, reason);
+        }
+        session.record(
+            QUIC,
+            client,
+            "handshake failed: the cryptographic handshake failed: error 40: \
+             peer is incompatible: NoCipherSuitesInCommon",
+        );
+        assert!(logs.entries().is_empty(), "{:?}", logs.entries());
+
+        // A client rejecting the certificate is still worth a warning.
+        session.record(
+            TLS,
+            client,
+            "TLS handshake failed: received fatal alert: UnknownCA",
+        );
+        assert_eq!(warns(&logs, TLS).len(), 1);
     }
 
     #[test]
