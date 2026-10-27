@@ -1,5 +1,7 @@
 <script>
   import IconButton from '../IconButton.svelte';
+  import PageHeader from '../PageHeader.svelte';
+  import { icons } from '../icons.svelte.js';
   import { api, formatApiError } from '../api.js';
   import { formatDateTime } from '../datetime.svelte.js';
   import ClientLabel from '../ClientLabel.svelte';
@@ -15,8 +17,9 @@
   ];
   const show = (key) => !isHidden('report-devices', key);
 
-  // `onShowQueries(client)` opens the Query Log filtered to one device.
-  let { onShowQueries = null } = $props();
+  // `onShowQueries(client)` opens the Query Log filtered to one device;
+  // `onOpenSettings(tab)` opens a Settings tab (null for read-only accounts).
+  let { onShowQueries = null, onOpenSettings = null } = $props();
 
   const PERIODS = [
     [24, 'Last 24 Hours'],
@@ -72,6 +75,12 @@
   });
 </script>
 
+<PageHeader
+  icon={icons.reports}
+  title="Reports"
+  tagline="What the query log adds up to: queries and blocks over a period, the most active devices, and the most asked and most blocked domains, overall or for one device."
+/>
+
 {#if error}
   <div class="card" style="border-color: var(--danger); color: var(--danger); margin-bottom: 14px">{error}</div>
 {/if}
@@ -101,7 +110,12 @@
   {/if}
   <p class="muted help">
     Totals from the query log. A daily or weekly summary can also be sent
-    by email or webhook under Settings → Alerts.
+    by email or webhook under
+    {#if onOpenSettings}
+      <button type="button" class="link" onclick={() => onOpenSettings('alerts')}>Settings → Alerts</button>.
+    {:else}
+      Settings → Alerts.
+    {/if}
   </p>
 </div>
 
@@ -205,6 +219,9 @@
   .nowrap { white-space: nowrap; }
   tr.selected td { background: color-mix(in srgb, var(--accent) 10%, transparent); }
   code { word-break: break-all; }
+  /* An inline link to another page, in running text. */
+  .link { background: none; border: none; padding: 0; font: inherit; color: var(--accent); cursor: pointer; }
+  .link:hover { text-decoration: underline; }
   @media (max-width: 760px) {
     .split { grid-template-columns: 1fr; }
   }

@@ -1572,7 +1572,7 @@
       email above (alerts do not need to be switched on). Times use the time
       zone under General → Date &amp; Time Defaults. Send Report Now sends
       one with the destinations as saved. The same figures, for any period
-      and per device, are under Logs → Reports.
+      and per device, are on the Reports page.
     </p>
   </div>
   {:else if tab === 'backup'}

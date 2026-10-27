@@ -49,8 +49,8 @@ Daygle DNS combines, in a single process:
 - **Block page**: blocked sites can point at a page on this server that
   says what was blocked and why, instead of "site not found".
 - **Reports**: queries, blocks, the busiest devices and the most asked and
-  most blocked domains for any period (overall or per device) under
-  Logs → Reports, and a daily or weekly summary by email or webhook.
+  most blocked domains for any period (overall or per device) on the
+  Reports page, and a daily or weekly summary by email or webhook.
 - **Device names**: logs, reports and the dashboard show "Kids-iPad"
   instead of 192.168.1.47. Name devices under Clients → Devices, or let
   names come from DHCP leases and reverse DNS.
