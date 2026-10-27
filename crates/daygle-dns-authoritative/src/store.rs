@@ -856,7 +856,7 @@ impl ZoneStore {
     }
 
     /// The stored settings that name the network `name` (any case): split
-    /// horizon entries and client groups, labelled for the console.
+    /// horizon entries and filtering groups, labelled for the console.
     pub fn network_users(&self, name: &str) -> Result<Vec<String>> {
         let named = |list: &[String]| {
             list.iter()
@@ -870,7 +870,7 @@ impl ZoneStore {
         }
         for group in self.list_blocking_groups()? {
             if named(&group.clients) {
-                users.push(format!("Client group '{}'", group.name));
+                users.push(format!("Filtering group '{}'", group.name));
             }
         }
         Ok(users)
