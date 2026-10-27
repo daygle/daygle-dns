@@ -42,7 +42,7 @@
     {
       id: 'domains',
       label: 'Domains',
-      tagline: 'The most asked and the most blocked domains, for every device.',
+      tagline: 'The most asked and the most blocked domains, and the domains asked for the first time.',
     },
     {
       id: 'blocking',
@@ -53,6 +53,16 @@
       id: 'responses',
       label: 'Responses',
       tagline: 'The response codes the server answered with, and the domains that most often failed to resolve.',
+    },
+    {
+      id: 'performance',
+      label: 'Performance',
+      tagline: 'How quickly the server answered the queries it had to resolve, and which domains were slowest.',
+    },
+    {
+      id: 'traffic',
+      label: 'Traffic',
+      tagline: 'What kinds of records devices ask for, how they reach the server (plain or encrypted DNS), and the traffic to the zones you host.',
     },
   ];
   let tab = $state('overview');
@@ -125,6 +135,34 @@
   };
   const rcodeLabel = (r) => (r ? (RCODES[r] ? `${r} (${RCODES[r]})` : r) : 'Not Recorded');
   const sourceLabel = (s) => (s ? blockSourceLabel(s) : 'Unknown (logged before reasons were kept)');
+
+  const PROTOCOLS = {
+    udp: 'UDP (plain DNS)',
+    tcp: 'TCP (plain DNS)',
+    tls: 'DNS over TLS',
+    https: 'DNS over HTTPS',
+    h3: 'DNS over HTTP/3',
+    quic: 'DNS over QUIC',
+  };
+  const protocolLabel = (p) => PROTOCOLS[p] || p || 'Unknown';
+  const typeLabel = (t) => t || 'Unknown';
+
+  const LATENCY = {
+    under_10: 'Under 10 ms',
+    '10_50': '10 - 50 ms',
+    '50_200': '50 - 200 ms',
+    '200_1000': '200 ms - 1 s',
+    over_1000: 'Over 1 s',
+  };
+  const latencyLabel = (b) => LATENCY[b] || b;
+  function ms(n) {
+    const v = Number(n || 0);
+    return v >= 1000 ? `${(v / 1000).toFixed(v >= 10000 ? 0 : 1)} s` : `${v} ms`;
+  }
+  // Share of all queries sent over an encrypted transport.
+  const encrypted = $derived(
+    (report?.protocols || []).filter((p) => !['udp', 'tcp'].includes(p.name)).reduce((a, p) => a + p.count, 0),
+  );
 
   // Queries per hour (24 hours) or per day in the display time zone (longer
   // periods), with the empty ones filled in. The server counts per UTC hour.
@@ -315,11 +353,43 @@
       </div>
     {/if}
   {:else if tab === 'domains'}
-    <div class="card">
+    <div class="card" style="margin-bottom: 14px">
       <div class="split">
         {@render names('Most Asked Domains', report.top_domains)}
         {@render names('Most Blocked Domains', report.top_blocked)}
       </div>
+    </div>
+    <div class="card">
+      <div class="spread" style="margin-bottom: 10px; gap: 10px; flex-wrap: wrap">
+        <h3 style="margin: 0">Newly Seen Domains</h3>
+        <span class="muted small">{fmt(report.new_names_total)} first asked in this period</span>
+      </div>
+      {#if report.new_names.length}
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr><th>Domain</th><th>First Asked</th><th class="num">Queries</th><th class="num">Blocked</th></tr>
+            </thead>
+            <tbody>
+              {#each report.new_names as n (n.name)}
+                <tr>
+                  <td><code>{n.name}</code></td>
+                  <td class="muted nowrap">{formatDateTime(n.first_seen)}</td>
+                  <td class="num">{fmt(n.queries)}</td>
+                  <td class="num">{n.blocked ? fmt(n.blocked) : '-'}</td>
+                </tr>
+              {/each}
+            </tbody>
+          </table>
+        </div>
+        <p class="muted help">
+          The newest first. "First" goes back as far as the query log is kept
+          (Settings → Logging), so new apps, devices and unexpected lookups show
+          up here.
+        </p>
+      {:else}
+        <p class="muted">No new domains in this period.</p>
+      {/if}
     </div>
   {:else if tab === 'blocking'}
     <div class="card" style="margin-bottom: 14px">
@@ -390,6 +460,100 @@
         <p class="muted">No failed lookups in this period.</p>
       {/if}
     </div>
+  {:else if tab === 'performance'}
+    {@const lat = report.latency}
+    <div class="card" style="margin-bottom: 14px">
+      <h3 style="margin: 0">Response Times</h3>
+      {#if lat.queries}
+        <div class="tiles">
+          <div class="tile"><div class="value">{ms(lat.average_ms)}</div><div class="muted">Average</div></div>
+          <div class="tile"><div class="value">{ms(lat.median_ms)}</div><div class="muted">Median</div></div>
+          <div class="tile"><div class="value">{ms(lat.p95_ms)}</div><div class="muted">95% Answered Within</div></div>
+          <div class="tile"><div class="value">{ms(lat.max_ms)}</div><div class="muted">Slowest</div></div>
+        </div>
+        <h4 class="sub">Spread</h4>
+        {@render shares(report.latency_buckets.filter((b) => b.count), lat.queries, latencyLabel)}
+        <p class="muted help">
+          {fmt(lat.queries)} resolved queries, cache hits included (those take a
+          millisecond or two). Answers from your zones and blocks are left out.
+          A median well above a few milliseconds suggests the cache is not
+          doing much; a slow 95% points at a slow upstream.
+        </p>
+      {:else}
+        <p class="muted">No resolved queries in this period.</p>
+      {/if}
+    </div>
+    <div class="card">
+      <h3 style="margin: 0 0 10px">Slowest Domains</h3>
+      {#if report.slowest.length}
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr><th>Domain</th><th class="num">Queries</th><th class="num">Average</th><th class="num">Slowest</th></tr>
+            </thead>
+            <tbody>
+              {#each report.slowest as s (s.name)}
+                <tr>
+                  <td><code>{s.name}</code></td>
+                  <td class="num">{fmt(s.queries)}</td>
+                  <td class="num">{ms(s.average_ms)}</td>
+                  <td class="num">{ms(s.max_ms)}</td>
+                </tr>
+              {/each}
+            </tbody>
+          </table>
+        </div>
+        <p class="muted help">Domains asked at least 3 times, by their average response time.</p>
+      {:else}
+        <p class="muted">Not enough repeated lookups in this period.</p>
+      {/if}
+    </div>
+  {:else if tab === 'traffic'}
+    <div class="card" style="margin-bottom: 14px">
+      <h3 style="margin: 0 0 10px">Record Types</h3>
+      {@render shares(report.qtypes, report.queries, typeLabel)}
+      <p class="muted help">
+        A and AAAA are IPv4 and IPv6 addresses; HTTPS records let browsers find
+        encrypted connections; PTR are reverse lookups.
+      </p>
+    </div>
+    <div class="card" style="margin-bottom: 14px">
+      <h3 style="margin: 0 0 10px">Transports</h3>
+      {@render shares(report.protocols, report.queries, protocolLabel)}
+      <p class="muted help">
+        {percent(encrypted, report.queries)} of queries arrived over encrypted DNS.
+        Plain UDP and TCP can be read by anyone on the network path.
+      </p>
+    </div>
+    <div class="card">
+      <h3 style="margin: 0 0 10px">Your Zones</h3>
+      {#if report.zones.length}
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr><th>Zone</th><th class="num">Queries</th><th class="num">NXDOMAIN</th><th class="num">Share</th></tr>
+            </thead>
+            <tbody>
+              {#each report.zones as z (z.zone)}
+                <tr>
+                  <td><code>{z.zone}</code></td>
+                  <td class="num">{fmt(z.queries)}</td>
+                  <td class="num">{fmt(z.nxdomain)}</td>
+                  <td class="num">{percent(z.queries, report.queries)}</td>
+                </tr>
+              {/each}
+            </tbody>
+          </table>
+        </div>
+        <p class="muted help">
+          Queries answered from the zones this server hosts (aliases count
+          towards their zone). Many NXDOMAIN answers mean devices ask for names
+          the zone does not have.
+        </p>
+      {:else}
+        <p class="muted">No queries were answered from your zones in this period.</p>
+      {/if}
+    </div>
   {/if}
 {:else if loading}
   <div class="card"><p class="muted">Loading...</p></div>
@@ -427,14 +591,16 @@
 {/snippet}
 
 <style>
-  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 10px; margin-top: 12px; }
+  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 10px; margin-top: 12px; }
   .tile { border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; }
   .value { font-size: 1.5rem; font-weight: 600; }
   .split { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
   .rank { width: 2em; }
   .nowrap { white-space: nowrap; }
   tr.selected td { background: color-mix(in srgb, var(--accent) 10%, transparent); }
-  code { word-break: break-all; }
+  /* Long names wrap only when they must; narrow tables scroll instead of
+     breaking every name a letter at a time. */
+  code { overflow-wrap: break-word; }
   /* An inline link to another page, in running text. */
   .link { background: none; border: none; padding: 0; font: inherit; color: var(--accent); cursor: pointer; }
   .link:hover { text-decoration: underline; }
@@ -457,6 +623,7 @@
   .key { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin: 0 3px 0 8px; vertical-align: -1px; }
   .key.queries { background: var(--accent); }
   .key.blocked { background: var(--danger); }
+  .sub { margin: 16px 0 6px; font-size: 0.9rem; }
 
   /* Breakdowns: label, share bar, count and percentage. */
   /* A fixed value column so every row's bar starts and ends in line. */

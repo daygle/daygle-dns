@@ -1701,7 +1701,12 @@ last `hours` (default 24, at most 90 days), for every client or only
 "timeline": [{"hour", "queries", "blocked"}], "outcomes": [{"name",
 "count"}], "rcodes": [...], "block_sources": [...], "block_rules":
 [{"source", "group", "matched", "count"}], "failing": [{"name", "rcode",
-"count"}]}}`, the lists cut to `top` entries (default 20, at most 100),
+"count"}], "qtypes": [{"name", "count"}], "protocols": [...], "latency":
+{"queries", "average_ms", "median_ms", "p95_ms", "max_ms"},
+"latency_buckets": [{"name", "count"}], "slowest": [{"name", "queries",
+"average_ms", "max_ms"}], "new_names_total", "new_names": [{"name",
+"first_seen", "queries", "blocked"}], "zones": [{"zone", "queries",
+"nxdomain"}]}}`, the lists cut to `top` entries (default 20, at most 100),
 busiest first.
 
 - `timeline`: queries and blocks per UTC hour (`hour` is its start, RFC
@@ -1715,6 +1720,18 @@ busiest first.
   matched entry, list, service, AI category or zone.
 - `failing`: the names answered NXDOMAIN, SERVFAIL or REFUSED most often,
   not counting the server's own blocks and rate limiting.
+- `qtypes`, `protocols`: every query by record type and by transport
+  (`udp`, `tcp`, `tls`, `https`, `quic`, `h3`). Not cut to `top`.
+- `latency`: response times of resolved (`recursive`) queries, cache hits
+  included; the server's own answers are left out. `latency_buckets`
+  counts them as `under_10`, `10_50`, `50_200`, `200_1000` and
+  `over_1000` milliseconds, in that order. `slowest`: the names asked at
+  least 3 times with the highest average, slowest first.
+- `new_names_total`: how many names (for `client`, when given) were asked
+  for the first time in the period, as far back as the query log is kept;
+  `new_names` lists the newest of them.
+- `zones`: queries answered from each hosted zone, with a zone's aliases
+  counted towards it and each name going to the longest zone it is in.
 
 The `reports` settings group (Settings → Alerts, replaced as a whole by
 `PUT /api/config` with `{"reports": {...}}`) sends that summary as plain
