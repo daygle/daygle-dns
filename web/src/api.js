@@ -191,6 +191,8 @@ export const api = {
 
   // ---- data ----
   status: () => request('GET', '/status'),
+  // Host CPU/load/memory/disk readings (Linux hosts; `supported: false` elsewhere).
+  hostStats: () => request('GET', '/host-stats'),
   metrics: () => request('GET', '/metrics'),
   stats: (window) => request('GET', `/stats?window=${window || '1h'}`),
   config: () => request('GET', '/config'),

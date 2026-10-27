@@ -675,6 +675,7 @@ dependencies = [
  "hickory-proto",
  "instant-acme",
  "lettre",
+ "nix",
  "parking_lot 0.13.0",
  "rand 0.10.3",
  "reqwest",

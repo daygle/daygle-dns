@@ -9,6 +9,7 @@
 //! |----------|-----------------------------------|---------|
 //! | `GET`    | `/api/health`                     | unauthenticated liveness (used by the in-place updater) |
 //! | `GET`    | `/api/status`                     | server status |
+//! | `GET`    | `/api/host-stats`                 | host CPU / load / memory / disk usage (admin role or static token) |
 //! | `GET`    | `/api/metrics`                    | runtime metrics |
 //! | `GET`    | `/api/logs?limit=N`               | recent log entries |
 //! | `GET`    | `/api/config`                     | effective configuration |
@@ -76,6 +77,7 @@ pub mod acme;
 pub mod alerts;
 mod audit;
 pub mod devices;
+pub mod host_stats;
 mod handlers;
 pub mod log_export;
 mod networks;
@@ -444,6 +446,7 @@ pub fn router(state: AppState) -> Router {
     let api = Router::new()
         .route("/status", get(handlers::status))
         .route("/health", get(handlers::health))
+        .route("/host-stats", get(handlers::host_stats))
         .route("/metrics", get(handlers::metrics))
         .route("/metrics/prometheus", get(handlers::metrics_prometheus))
         .route("/stats", get(handlers::stats))
@@ -737,15 +740,17 @@ async fn security_headers(mut response: Response) -> Response {
 }
 
 /// `GET` endpoints that still need the admin role: they make the server
-/// reach out (fetch an arbitrary URL, probe GitHub, write a probe file), so
-/// read-only accounts - and the legacy open-GET token mode - must not be
-/// able to trigger them. Matched on both the full and nested path forms.
+/// reach out (fetch an arbitrary URL, probe GitHub, write a probe file), or
+/// expose host resource usage a read-only account has no business seeing,
+/// so readers - and the legacy open-GET token mode - must not get them.
+/// Matched on both the full and nested path forms.
 fn is_privileged_read(path: &str) -> bool {
     let path = path.strip_prefix("/api").unwrap_or(path);
     matches!(
         path,
         "/policy/blocklist/sources/validate"
             | "/update/preflight"
+            | "/host-stats"
             | "/backup"
             | "/backup/restore"
             | "/audit"

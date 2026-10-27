@@ -649,6 +649,16 @@ pub async fn metrics(State(state): State<AppState>) -> Response {
     Json(state.metrics.snapshot()).into_response()
 }
 
+/// `GET /api/host-stats` - CPU, load, memory and disk usage of the host the
+/// server runs on (Linux only; the endpoint reports `supported: false` and
+/// no numbers elsewhere). Admin-only like `/update/preflight` (see
+/// `is_privileged_read`): the numbers themselves describe the host machine,
+/// which a read-only console account has no call to see. The response's
+/// shape is defined by [`crate::host_stats::snapshot`].
+pub async fn host_stats() -> Response {
+    Json(crate::host_stats::snapshot()).into_response()
+}
+
 /// `GET /api/metrics/prometheus` - every counter in the Prometheus text
 /// format, for scraping (authorize with a read-only API token).
 pub async fn metrics_prometheus(State(state): State<AppState>) -> Response {

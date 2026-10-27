@@ -13,6 +13,9 @@
   let status = $state(null);
   let metrics = $state(null);
   let stats = $state(null);
+  // Host resource readings (optional endpoint): null until the first
+  // response, and kept as-is when a later fetch fails.
+  let host = $state(null);
   let window_ = $state('1h');
   let error = $state(null);
   // When the data on screen was fetched (shown if a later refresh fails).
@@ -38,6 +41,9 @@
       status = s;
       metrics = m;
       stats = st;
+      // Host stats ride along on the same cadence but must never fail the
+      // page: an error just keeps whatever is already on screen.
+      api.hostStats().then((h) => (host = h)).catch(() => {});
       loadedAt = Date.now();
       refreshKey += 1;
     } catch (e) {
@@ -170,6 +176,60 @@
   function clockLabel(t) {
     return formatTime(t * 1000);
   }
+
+  // ---- host resources (Server card, from /api/host-stats) -------------------
+  // A kibibyte count from the kernel as a compact string; '?' when absent.
+  function fmtKb(kb) {
+    if (kb == null || Number.isNaN(kb)) return '?';
+    const gib = kb / 1024 / 1024;
+    if (gib >= 1) return `${gib >= 100 ? Math.round(gib) : gib.toFixed(1)} GiB`;
+    return `${Math.round(kb / 1024)} MiB`;
+  }
+
+  const hostRows = $derived.by(() => {
+    if (!host?.supported) return [];
+    const mem = host.memory ?? {};
+    const memUsed =
+      mem.total_kb != null &&
+      mem.available_kb != null &&
+      mem.total_kb >= mem.available_kb
+        ? mem.total_kb - mem.available_kb
+        : null;
+    const disk = host.disks?.find((d) => d.mount === '/') ?? host.disks?.[0];
+    const rows = [
+      {
+        label: 'CPU',
+        pct: host.cpu?.usage_percent ?? null,
+        value:
+          host.cpu?.usage_percent == null
+            ? `${host.cpu?.cores ?? '?'} cores`
+            : `${host.cpu.usage_percent}% · ${host.cpu.cores ?? '?'} cores`,
+      },
+      {
+        label: 'Load',
+        pct: null,
+        value:
+          host.load?.one == null
+            ? '?'
+            : `${host.load.one} / ${host.load.five} / ${host.load.fifteen}`,
+        hint: '(1 / 5 / 15 min)',
+      },
+      {
+        label: 'Memory',
+        pct: mem.used_percent ?? null,
+        value:
+          memUsed == null ? (mem.used_percent != null ? `${mem.used_percent}%` : '?') : `${fmtKb(memUsed)} / ${fmtKb(mem.total_kb)}`,
+      },
+    ];
+    if (disk?.total_kb != null) {
+      rows.push({
+        label: 'Disk /',
+        pct: disk.used_percent ?? null,
+        value: `${fmtKb(disk.used_kb)} / ${fmtKb(disk.total_kb)}`,
+      });
+    }
+    return rows;
+  });
 </script>
 
 <PageHeader icon={icons.status} title="Server Status" tagline="Live traffic and health at a glance. Updates every 10 seconds." />
@@ -209,6 +269,34 @@
       </div>
     {/each}
   </div>
+
+  {#if hostRows.length}
+    <div class="card" style="margin-top: 14px">
+      <div class="spread" style="margin-bottom: 10px">
+        <h3 style="margin: 0">Server</h3>
+        <span class="muted small">
+          {#if host.hostname}{host.hostname} · {/if}up
+          {host.uptime_secs == null ? '?' : formatUptime(host.uptime_secs)}
+        </span>
+      </div>
+      {#each hostRows as row (row.label)}
+        <div class="host-row">
+          <span class="host-label muted">{row.label}</span>
+          <div class="host-bar" aria-hidden="true">
+            {#if row.pct != null}
+              <div
+                class="host-fill"
+                class:warn={row.pct >= 80}
+                class:danger={row.pct >= 92}
+                style="width: {row.pct}%"
+              ></div>
+            {/if}
+          </div>
+          <span class="host-val">{row.value} {row.hint ? row.hint : ''}</span>
+        </div>
+      {/each}
+    </div>
+  {/if}
 
   <div class="card" style="margin-top: 14px">
     <div class="spread" style="margin-bottom: 10px">
@@ -372,6 +460,33 @@
   .stat .big { font-size: 1.6rem; font-weight: 700; margin-top: 6px; }
   .since { margin: 0 0 8px; font-size: 0.85rem; }
   .small-h { font-size: 0.72rem; font-weight: 500; margin-left: 6px; }
+
+  /* Server card: one row per reading (label, bar, value). The bar has a
+     fixed height and round caps like the resolver dashboard's. */
+  .host-row {
+    display: grid;
+    grid-template-columns: 90px minmax(0, 1fr) auto;
+    gap: 12px;
+    align-items: center;
+    padding: 5px 0;
+  }
+  .host-label { font-size: 0.85rem; }
+  .host-bar {
+    height: 8px;
+    border-radius: 4px;
+    background: color-mix(in srgb, var(--accent) 12%, transparent);
+    overflow: hidden;
+  }
+  .host-fill {
+    height: 100%;
+    min-width: 0;
+    background: var(--accent);
+    border-radius: 4px;
+    transition: width 0.4s ease;
+  }
+  .host-fill.warn { background: var(--warn); }
+  .host-fill.danger { background: var(--danger); }
+  .host-val { font-size: 0.85rem; font-variant-numeric: tabular-nums; text-align: right; }
 
   .chart-wrap { position: relative; }
   .chart { width: 100%; height: 190px; display: block; touch-action: none; }
