@@ -3973,6 +3973,41 @@ impl ZoneStore {
             None => Ok(0),
         }
     }
+
+    /// Delete query-log rows older than `before` (RFC 3339, UTC as the log
+    /// writes it), returning how many went. Uses the `ts` index.
+    pub fn delete_query_logs_before(&self, before: &str) -> Result<usize> {
+        let conn = self.lock_conn()?;
+        Ok(conn.execute("DELETE FROM query_logs WHERE ts < ?1", [before])?)
+    }
+
+    /// How big the query log is: its rows, the oldest row's time, and the
+    /// size of the whole database file (settings, zones and logs together).
+    pub fn query_log_stats(&self) -> Result<QueryLogStats> {
+        let conn = self.lock_conn()?;
+        // MAX(id) - MIN(id) would be cheaper but overcounts after deletes in
+        // the middle; COUNT(*) on the rowid table is quick enough.
+        let (rows, oldest): (i64, Option<String>) =
+            conn.query_row("SELECT COUNT(*), MIN(ts) FROM query_logs", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })?;
+        let page_count: i64 = conn.query_row("PRAGMA page_count", [], |r| r.get(0))?;
+        let page_size: i64 = conn.query_row("PRAGMA page_size", [], |r| r.get(0))?;
+        Ok(QueryLogStats {
+            rows: rows as u64,
+            oldest,
+            database_bytes: (page_count * page_size).max(0) as u64,
+        })
+    }
+}
+
+/// See [`ZoneStore::query_log_stats`].
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct QueryLogStats {
+    pub rows: u64,
+    /// RFC 3339; `None` when the log is empty.
+    pub oldest: Option<String>,
+    pub database_bytes: u64,
 }
 
 /// Render a zone as a BIND-style zone file (used by the export API).
@@ -5051,6 +5086,43 @@ mod tests {
                 ("broken.example", "SERVFAIL", 1),
             ]
         );
+    }
+
+    #[test]
+    fn query_logs_are_deleted_by_age_and_counted() {
+        let s = store();
+        let row = |ts: &str| QueryLogRow {
+            id: 0,
+            ts: ts.to_string(),
+            client: "10.0.0.1".to_string(),
+            qname: "a.example".to_string(),
+            qtype: "A".to_string(),
+            protocol: "udp".to_string(),
+            outcome: "recursive".to_string(),
+            rcode: None,
+            elapsed_ms: 1,
+            block: None,
+        };
+        s.insert_query_logs(&[
+            row("2026-09-01T00:00:00+00:00"),
+            row("2026-10-01T00:00:00+00:00"),
+            row("2026-10-20T00:00:00+00:00"),
+        ])
+        .unwrap();
+        let stats = s.query_log_stats().unwrap();
+        assert_eq!(stats.rows, 3);
+        assert_eq!(stats.oldest.as_deref(), Some("2026-09-01T00:00:00+00:00"));
+        assert!(stats.database_bytes > 0);
+        assert_eq!(
+            s.delete_query_logs_before("2026-10-01T00:00:00+00:00")
+                .unwrap(),
+            1
+        );
+        let stats = s.query_log_stats().unwrap();
+        assert_eq!(stats.rows, 2);
+        assert_eq!(stats.oldest.as_deref(), Some("2026-10-01T00:00:00+00:00"));
+        s.clear_query_logs().unwrap();
+        assert_eq!(s.query_log_stats().unwrap().oldest, None);
     }
 
     #[test]

@@ -4,7 +4,7 @@
   import BackupRestore from './BackupRestore.svelte';
   import NetworkPicker from '../NetworkPicker.svelte';
   import { icons } from '../icons.svelte.js';
-  import { display, setDisplayDefaults, timeZoneOptions, DATE_FORMAT_OPTIONS, TIME_FORMAT_OPTIONS, previewDateTime } from '../datetime.svelte.js';
+  import { display, setDisplayDefaults, timeZoneOptions, DATE_FORMAT_OPTIONS, TIME_FORMAT_OPTIONS, previewDateTime, formatDateTime } from '../datetime.svelte.js';
   import { THEME_OPTIONS } from '../theme.svelte.js';
   import { duration } from '../aiLabels.js';
 
@@ -39,7 +39,7 @@
     cache: 'How long answers are kept, how many, and how popular names are refreshed before they expire. Changes apply immediately.',
     listeners: 'Encrypted DNS: DNS over TLS, HTTPS and QUIC, and the certificate each one presents. Changes apply immediately.',
     zones: 'Defaults for new zones and records, and how other DNS servers may copy, update and be notified about your zones.',
-    logging: 'Sending the server log, and optionally every query, to a syslog server, and every query to a log collector over HTTP. The logs themselves are on the Logs page.',
+    logging: 'How long the query log is kept, optional daily log files, and sending the server log and queries to a syslog server or a log collector over HTTP. The logs themselves are on the Logs page.',
     ai: 'The background scanner that classifies the domains in your DNS traffic and can block unsafe ones.',
     'rate-limiting': 'Response rate limiting (RRL): stop this server being used to flood someone else with DNS answers sent to a forged address.',
     alerts: 'Email and webhook alerts when something needs attention: failing blocklists or zone transfers, expiring certificates, DNSSEC, updates and AI blocks.',
@@ -114,10 +114,30 @@
   let exportStatus = $state(null);
   let exportTest = $state(null);
   let exportTesting = $state(false);
+  // Query log storage and retention (Logging tab), and how big it is now.
+  const LOGGING_DEFAULTS = {
+    query_db_enabled: true,
+    query_db_max_rows: 200000,
+    query_db_retention_days: 0,
+    query_log_enabled: false,
+    query_log_dir: '/var/log/daygle-dns',
+    query_log_retention_days: 30,
+  };
+  let logging_ = $state({ ...LOGGING_DEFAULTS });
+  let queryLogStats = $state(null);
+  // Age limits offered for the query log (0: none); a configured value
+  // outside these is kept as its own option.
+  const KEEP_DAYS = [0, 7, 14, 30, 60, 90, 180, 365];
   $effect(() => {
     if (tab !== 'logging') return;
     api.logExportStatus().then((s) => { exportStatus = s; }).catch(() => {});
+    api.queryLogStats().then((s) => { queryLogStats = s; }).catch(() => {});
   });
+  function fmtBytes(n) {
+    if (n >= 1024 ** 3) return `${(n / 1024 ** 3).toFixed(1)} GB`;
+    if (n >= 1024 ** 2) return `${(n / 1024 ** 2).toFixed(1)} MB`;
+    return `${Math.round(n / 1024)} KB`;
+  }
 
   function exportBody() {
     return {
@@ -324,6 +344,9 @@
       };
       syslog_ = { enabled: false, server: '', facility: 'daemon', level: 'info', queries: false, ...config.syslog };
       export_ = { ...EXPORT_DEFAULTS, ...config.log_export };
+      logging_ = Object.fromEntries(
+        Object.entries(LOGGING_DEFAULTS).map(([k, v]) => [k, config.logging?.[k] ?? v]),
+      );
       alerts_ = { ...ALERT_DEFAULTS, ...config.alerts };
       rrl_ = { ...RRL_DEFAULTS, ...config.rrl };
       ddr_ = { enabled: true, name: '', ...config.ddr };
@@ -465,6 +488,7 @@
       aiCategoriesText = (a.auto_block_categories || []).join(', ');
     } else if (tab === 'logging') {
       syslog_ = { ...syslog_, ...pick(d.syslog, ['enabled', 'facility', 'level', 'queries']) };
+      logging_ = { ...logging_, ...pick(d.logging, Object.keys(LOGGING_DEFAULTS)) };
     } else if (tab === 'rate-limiting') {
       // The never-limited list lives in rrlExempt, which is left alone.
       rrl_ = { ...rrl_, ...d.rrl };
@@ -620,6 +644,14 @@
         queries: !!syslog_.queries,
       },
       log_export: exportBody(),
+      logging: {
+        query_db_enabled: !!logging_.query_db_enabled,
+        query_db_max_rows: Number(logging_.query_db_max_rows) || 0,
+        query_db_retention_days: Number(logging_.query_db_retention_days) || 0,
+        query_log_enabled: !!logging_.query_log_enabled,
+        query_log_dir: (logging_.query_log_dir || '').trim(),
+        query_log_retention_days: Number(logging_.query_log_retention_days) || 0,
+      },
       authoritative: {
         default_record_ttl: Number(authoritative.default_record_ttl),
         default_primary_ns: authoritative.default_primary_ns || '',
@@ -1327,6 +1359,55 @@
     </p>
   </div>
   {:else if tab === 'logging'}
+  <div class="card" style="margin-bottom: 14px">
+    <h3 style="margin: 0 0 10px">Query Log</h3>
+    <div class="form-grid">
+      <label class="check"><input type="checkbox" bind:checked={logging_.query_db_enabled} /> <span>Keep a Searchable Query Log</span></label>
+      <label>
+        <span>Keep Queries For</span>
+        <select bind:value={logging_.query_db_retention_days} disabled={!logging_.query_db_enabled}>
+          {#each KEEP_DAYS.includes(Number(logging_.query_db_retention_days)) ? KEEP_DAYS : [...KEEP_DAYS, Number(logging_.query_db_retention_days)].sort((a, b) => a - b) as d (d)}
+            <option value={d}>{d ? `${d} Days` : 'No Time Limit'}</option>
+          {/each}
+        </select>
+      </label>
+      <label>
+        <span>At Most (Entries)</span>
+        <input type="number" min="0" step="10000" bind:value={logging_.query_db_max_rows} disabled={!logging_.query_db_enabled} />
+      </label>
+    </div>
+    <p class="muted help">
+      Every answered query, for Logs → Query Log and the Reports page, which
+      only see what is kept here. The oldest entries go once either limit is
+      reached, whichever comes first; 0 entries means no limit on the number.
+      Changes apply as soon as they are saved.
+      {#if queryLogStats}
+        <br />
+        Now holding {queryLogStats.rows.toLocaleString()} queries{#if queryLogStats.oldest}, going back to {formatDateTime(queryLogStats.oldest)}{/if}.
+        The database (settings, zones and logs together) is {fmtBytes(queryLogStats.database_bytes)}.
+      {/if}
+    </p>
+  </div>
+  <div class="card" style="margin-bottom: 14px">
+    <h3 style="margin: 0 0 10px">Query Log Files</h3>
+    <div class="form-grid">
+      <label class="check"><input type="checkbox" bind:checked={logging_.query_log_enabled} /> <span>Also Write Daily Log Files</span></label>
+      <label>
+        <span>Folder</span>
+        <input placeholder="/var/log/daygle-dns" bind:value={logging_.query_log_dir} disabled={!logging_.query_log_enabled} spellcheck="false" />
+      </label>
+      <label>
+        <span>Keep Files For (Days)</span>
+        <input type="number" min="0" max="3650" bind:value={logging_.query_log_retention_days} disabled={!logging_.query_log_enabled} />
+      </label>
+    </div>
+    <p class="muted help">
+      One file per day (<code>queries-YYYY-MM-DD.log</code>, a JSON object per
+      line) for other tools to read. Files older than the limit are deleted;
+      0 keeps them all. The service needs write access to the folder.
+      These settings take effect after the service restarts.
+    </p>
+  </div>
   <div class="card" style="margin-bottom: 14px">
     <h3 style="margin: 0 0 10px">Remote Logging (Syslog)</h3>
     <div class="form-grid">

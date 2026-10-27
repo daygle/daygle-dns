@@ -1285,6 +1285,15 @@ pub async fn query_logs(
     }
 }
 
+/// `GET /api/querylogs/stats` - how big the query log is: `{"rows",
+/// "oldest", "database_bytes"}` (the whole database file's size).
+pub async fn query_log_stats(State(state): State<AppState>) -> Response {
+    match state.catalog.store().query_log_stats() {
+        Ok(stats) => Json(stats).into_response(),
+        Err(e) => map_err(e),
+    }
+}
+
 /// `DELETE /api/querylogs` - clear the whole query log.
 pub async fn clear_query_logs(State(state): State<AppState>) -> Response {
     match state.catalog.store().clear_query_logs() {
@@ -5035,6 +5044,8 @@ pub struct SettingsUpdate {
     pub ai: Option<AiUpdate>,
     pub display: Option<DisplayUpdate>,
     pub web: Option<WebUpdate>,
+    /// Query log storage and retention in `[logging]`.
+    pub logging: Option<LoggingUpdate>,
     /// Replaces the whole `[syslog]` section.
     pub syslog: Option<daygle_dns_core::config::SyslogSettings>,
     /// Replaces the whole `[log_export]` section; an `authorization` of
@@ -5061,6 +5072,20 @@ pub struct SettingsUpdate {
     pub ecs: Option<daygle_dns_core::config::EcsSettings>,
     /// Replaces the whole `[updates]` section.
     pub updates: Option<daygle_dns_core::config::UpdateCheckSettings>,
+}
+
+/// Partial update for the query log settings in `[logging]` (the log level
+/// and the in-memory server log size stay file-only). The database log
+/// applies at once; the daily files after a restart.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LoggingUpdate {
+    pub query_db_enabled: Option<bool>,
+    pub query_db_max_rows: Option<usize>,
+    pub query_db_retention_days: Option<u32>,
+    pub query_log_enabled: Option<bool>,
+    pub query_log_dir: Option<String>,
+    pub query_log_retention_days: Option<u32>,
 }
 
 /// Partial update for how the web console is served (HTTP and/or HTTPS).
@@ -5705,6 +5730,38 @@ pub async fn update_settings(
             return error_response(StatusCode::BAD_REQUEST, format!("alerts: {msg}"));
         }
         config.alerts = alerts;
+    }
+    if let Some(logging) = &update.logging {
+        let log = &mut config.logging;
+        if let Some(v) = logging.query_db_enabled {
+            log.query_db_enabled = v;
+        }
+        if let Some(v) = logging.query_db_max_rows {
+            log.query_db_max_rows = v;
+        }
+        if let Some(v) = logging.query_db_retention_days {
+            log.query_db_retention_days = v;
+        }
+        if let Some(v) = logging.query_log_enabled {
+            log.query_log_enabled = v;
+        }
+        if let Some(dir) = &logging.query_log_dir {
+            let dir = dir.trim();
+            // The service writes there: only a full path, never one that
+            // climbs out of where it points.
+            if !dir.is_empty()
+                && (!std::path::Path::new(dir).is_absolute() || dir.split('/').any(|p| p == ".."))
+            {
+                return error_response(
+                    StatusCode::BAD_REQUEST,
+                    "logging: the query log folder must be a full path, like /var/log/daygle-dns",
+                );
+            }
+            log.query_log_dir = dir.to_string();
+        }
+        if let Some(v) = logging.query_log_retention_days {
+            log.query_log_retention_days = v;
+        }
     }
     if let Some(syslog) = &update.syslog {
         let syslog = daygle_dns_core::config::SyslogSettings {

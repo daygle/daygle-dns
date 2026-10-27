@@ -3337,6 +3337,11 @@ impl DaygleConfig {
                 "logging.query_db_max_rows must be 0 (unlimited) or >= 100".to_string(),
             ));
         }
+        if log.query_db_retention_days > 3650 {
+            return Err(DaygleError::Config(
+                "logging.query_db_retention_days must be <= 3650".to_string(),
+            ));
+        }
         let ai = &self.ai;
         if !(1..=32).contains(&ai.workers) {
             return Err(DaygleError::Config(
@@ -4663,6 +4668,9 @@ pub struct LoggingSettings {
     /// Retention cap for the database query log: at most this many rows are
     /// kept (the oldest are deleted opportunistically). 0 keeps everything.
     pub query_db_max_rows: usize,
+    /// Also delete database query-log rows older than this many days (0:
+    /// no age limit, only `query_db_max_rows`).
+    pub query_db_retention_days: u32,
 }
 
 impl Default for LoggingSettings {
@@ -4675,6 +4683,7 @@ impl Default for LoggingSettings {
             query_log_retention_days: 30,
             query_db_enabled: true,
             query_db_max_rows: 200_000,
+            query_db_retention_days: 0,
         }
     }
 }

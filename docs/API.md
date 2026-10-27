@@ -312,6 +312,7 @@ outside `recursion_access` would be refused recursion on it.
 
 ```
 GET    /api/querylogs?client=&qname=&qtype=&protocol=&outcome=&rcode=&block_source=&from=&to=&page=1&per_page=50
+GET    /api/querylogs/stats
 DELETE /api/querylogs
 ```
 
@@ -346,8 +347,14 @@ and substring matching otherwise; `from`/`to` are RFC 3339 timestamps
 with any UTC offset (a bare `YYYY-MM-DDTHH:MM[:SS]` is taken as UTC;
 anything else is `400`), both inclusive to the second;
 `per_page` is capped at 500. `format=csv` streams the whole filtered set
-(no pagination) as a CSV download. `DELETE` clears the log (admin only);
-retention is bounded by `logging.query_db_max_rows` (0 = unlimited).
+(no pagination) as a CSV download. `DELETE` clears the log (admin only).
+
+Retention: the oldest rows are deleted beyond `logging.query_db_max_rows`
+rows (0 = no limit) and, when `logging.query_db_retention_days` is set,
+once older than that many days (checked every minute); whichever limit is
+reached first applies. `GET /api/querylogs/stats` returns `{"rows",
+"oldest", "database_bytes"}`: the number of kept rows, the oldest one's
+time (`null` when empty), and the size of the whole database file.
 
 ### Configuration
 
@@ -511,6 +518,12 @@ listener's port. `::` next to IPv4 addresses covers every IPv6 address plus
 those IPv4 ones. A repeated address, or one a wildcard in the same list
 already covers (`"0.0.0.0, 192.168.1.2"`), is a config error, since the
 second socket could not be bound.
+
+`logging` takes any of `query_db_enabled`, `query_db_max_rows`,
+`query_db_retention_days` (the database query log; applied at once, see
+Query logs above), `query_log_enabled`, `query_log_dir` (a full path) and
+`query_log_retention_days` (the daily JSON-lines files; applied when the
+service restarts). The log level and server log size stay file-only.
 
 `syslog` (`{enabled, server, facility, level, queries}`, replaced whole)
 sends the server log to a syslog server as RFC 5424 lines: `server` is

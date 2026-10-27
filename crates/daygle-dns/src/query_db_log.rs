@@ -5,12 +5,18 @@
 //! background task drains that channel in batches through
 //! `ZoneStore::insert_query_logs`. When the channel is full the entry is
 //! dropped and a counter is bumped - a logging backlog can never slow queries
-//! down. Retention (`logging.query_db_max_rows`) is enforced opportunistically
-//! by the same writer task.
+//! down. Retention (`logging.query_db_max_rows` and
+//! `logging.query_db_retention_days`) is enforced by the same writer task.
+//!
+//! The `[logging]` settings are read from the live configuration, so turning
+//! the database log on or off and changing its retention in the console
+//! apply at once.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
+use arc_swap::ArcSwap;
+use daygle_dns_core::config::DaygleConfig;
 use tokio::sync::mpsc;
 use tracing::debug;
 
@@ -21,6 +27,9 @@ const CHANNEL_CAPACITY: usize = 8192;
 
 /// Rows buffered before an early flush (latency bound for quiet servers).
 const BATCH_MAX_ROWS: usize = 512;
+
+/// Writer ticks (500 ms each) between age-based trims: once a minute.
+const AGE_TRIM_TICKS: u32 = 120;
 
 /// One queued query-log entry (pre-insert shape; the id is assigned by SQLite).
 pub struct QueryDbEntry {
@@ -41,6 +50,7 @@ pub struct QueryDbEntry {
 pub struct QueryDbLogger {
     tx: mpsc::Sender<QueryDbEntry>,
     dropped: Arc<AtomicU64>,
+    config: Arc<ArcSwap<DaygleConfig>>,
 }
 
 impl QueryDbLogger {
@@ -48,21 +58,29 @@ impl QueryDbLogger {
     /// The writer stops when every handle is dropped or `shutdown` fires.
     pub fn spawn(
         store: daygle_dns_authoritative::ZoneStore,
-        max_rows: usize,
+        config: Arc<ArcSwap<DaygleConfig>>,
         shutdown: tokio_util::sync::CancellationToken,
     ) -> Self {
         let (tx, rx) = mpsc::channel::<QueryDbEntry>(CHANNEL_CAPACITY);
         let dropped = Arc::new(AtomicU64::new(0));
         let writer_dropped = Arc::clone(&dropped);
-        let handle = Self { tx, dropped };
+        let handle = Self {
+            tx,
+            dropped,
+            config: Arc::clone(&config),
+        };
         tokio::spawn(async move {
-            run_writer(store, max_rows, rx, shutdown, writer_dropped).await;
+            run_writer(store, config, rx, shutdown, writer_dropped).await;
         });
         handle
     }
 
-    /// Queue one entry. Never blocks; drops (counted) under pressure.
+    /// Queue one entry, when the database log is on. Never blocks; drops
+    /// (counted) under pressure.
     pub fn log(&self, entry: QueryDbEntry) {
+        if !self.config.load().logging.query_db_enabled {
+            return;
+        }
         if self.tx.try_send(entry).is_err() {
             self.dropped.fetch_add(1, Ordering::Relaxed);
         }
@@ -76,7 +94,7 @@ impl QueryDbLogger {
 
 async fn run_writer(
     store: daygle_dns_authoritative::ZoneStore,
-    max_rows: usize,
+    config: Arc<ArcSwap<DaygleConfig>>,
     mut rx: mpsc::Receiver<QueryDbEntry>,
     shutdown: tokio_util::sync::CancellationToken,
     dropped: Arc<AtomicU64>,
@@ -86,6 +104,8 @@ async fn run_writer(
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut pending: Vec<daygle_dns_authoritative::QueryLogRow> =
         Vec::with_capacity(BATCH_MAX_ROWS);
+    // Trim by age on the first tick, then once a minute.
+    let mut ticks_to_age_trim = 0u32;
 
     loop {
         tokio::select! {
@@ -96,7 +116,13 @@ async fn run_writer(
             }
             _ = tick.tick() => {
                 flush(&store, &mut pending).await;
-                trim(&store, max_rows).await;
+                let logging = config.load().logging.clone();
+                trim(&store, logging.query_db_max_rows).await;
+                if ticks_to_age_trim == 0 {
+                    trim_by_age(&store, logging.query_db_retention_days).await;
+                    ticks_to_age_trim = AGE_TRIM_TICKS;
+                }
+                ticks_to_age_trim -= 1;
             }
             maybe = rx.recv() => {
                 match maybe {
@@ -174,6 +200,24 @@ async fn trim(store: &daygle_dns_authoritative::ZoneStore, max_rows: usize) {
     }
 }
 
+/// Delete rows older than `days` (0 keeps them). Runs off the async runtime.
+async fn trim_by_age(store: &daygle_dns_authoritative::ZoneStore, days: u32) {
+    if days == 0 {
+        return;
+    }
+    let before = (chrono::Utc::now() - chrono::Duration::days(i64::from(days))).to_rfc3339();
+    let res = tokio::task::spawn_blocking({
+        let store = store.clone();
+        move || store.delete_query_logs_before(&before)
+    })
+    .await;
+    match res {
+        Ok(Ok(_)) => {}
+        Ok(Err(e)) => debug!(error = %e, "query db log age trim failed"),
+        Err(e) => debug!(error = %e, "query db log age trim join failed"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -192,24 +236,70 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn writes_and_trims_through_the_channel() {
-        let store = daygle_dns_authoritative::ZoneStore::open(":memory:").unwrap();
-        let shutdown = tokio_util::sync::CancellationToken::new();
-        let logger = QueryDbLogger::spawn(store.clone(), 10, shutdown.clone());
-        for i in 0..25 {
-            logger.log(entry(&format!("name{i}.example")));
-        }
-        // Wait for the writer to drain and trim (flush ticks every 500 ms).
+    fn config(max_rows: usize, days: u32, enabled: bool) -> Arc<ArcSwap<DaygleConfig>> {
+        let mut config = DaygleConfig::default();
+        config.logging.query_db_enabled = enabled;
+        config.logging.query_db_max_rows = max_rows;
+        config.logging.query_db_retention_days = days;
+        Arc::new(ArcSwap::from_pointee(config))
+    }
+
+    async fn count_settles_at(store: &daygle_dns_authoritative::ZoneStore, want: u64) -> u64 {
         let mut count = 0u64;
         for _ in 0..40 {
             let (_, c) = store.search_query_logs(&Default::default()).unwrap();
             count = c;
-            if count == 10 {
+            if count == want {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
+        count
+    }
+
+    #[tokio::test]
+    async fn age_limit_and_switch_follow_the_live_config() {
+        let store = daygle_dns_authoritative::ZoneStore::open(":memory:").unwrap();
+        let old = daygle_dns_authoritative::QueryLogRow {
+            id: 0,
+            ts: (chrono::Utc::now() - chrono::Duration::days(10)).to_rfc3339(),
+            client: "127.0.0.1".to_string(),
+            qname: "old.example".to_string(),
+            qtype: "A".to_string(),
+            protocol: "udp".to_string(),
+            outcome: "recursive".to_string(),
+            rcode: None,
+            elapsed_ms: 1,
+            block: None,
+        };
+        store.insert_query_logs(&[old]).unwrap();
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        let live = config(0, 7, false);
+        let logger = QueryDbLogger::spawn(store.clone(), live.clone(), shutdown.clone());
+        // Off: nothing is written. The 10-day-old row goes on the first tick.
+        logger.log(entry("skipped.example"));
+        assert_eq!(
+            count_settles_at(&store, 0).await,
+            0,
+            "old row trimmed, off logs nothing"
+        );
+        // Switched on in the console: logged from then on.
+        live.store(config(0, 7, true).load_full());
+        logger.log(entry("kept.example"));
+        assert_eq!(count_settles_at(&store, 1).await, 1);
+        shutdown.cancel();
+    }
+
+    #[tokio::test]
+    async fn writes_and_trims_through_the_channel() {
+        let store = daygle_dns_authoritative::ZoneStore::open(":memory:").unwrap();
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        let logger = QueryDbLogger::spawn(store.clone(), config(10, 0, true), shutdown.clone());
+        for i in 0..25 {
+            logger.log(entry(&format!("name{i}.example")));
+        }
+        // Wait for the writer to drain and trim (flush ticks every 500 ms).
+        let count = count_settles_at(&store, 10).await;
         assert_eq!(count, 10, "retention cap keeps only the newest rows");
         shutdown.cancel();
     }

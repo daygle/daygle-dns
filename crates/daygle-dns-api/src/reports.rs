@@ -251,7 +251,7 @@ pub fn render(
     if report.queries == 0 {
         text.push_str(
             "\nNo queries were logged. The report reads the query log, which is \
-             kept while Logging -> Query Log (database) is on.\n",
+             kept while Settings -> Logging -> Keep a Searchable Query Log is on.\n",
         );
     }
     (title, text)
