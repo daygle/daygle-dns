@@ -136,6 +136,8 @@ pub struct DnsDispatcher {
     block_log: Arc<daygle_dns_core::block_log::BlockLog>,
     /// Remote logging of queries (`[syslog] queries`).
     syslog: Option<Arc<crate::syslog::SyslogSender>>,
+    /// Query export to an HTTP endpoint (`[log_export]`).
+    log_export: Option<Arc<daygle_dns_api::log_export::LogExporter>>,
     /// The live config, for settings read per query (`[dns64]`).
     config: Option<Arc<ArcSwap<daygle_dns_core::config::DaygleConfig>>>,
 }
@@ -203,6 +205,7 @@ impl DnsDispatcher {
             rpz: Arc::default(),
             block_log: Arc::default(),
             syslog: None,
+            log_export: None,
             config: None,
         }
     }
@@ -290,6 +293,15 @@ impl DnsDispatcher {
     /// Send query lines to syslog (when its settings ask for them).
     pub fn with_syslog(mut self, syslog: Option<Arc<crate::syslog::SyslogSender>>) -> Self {
         self.syslog = syslog;
+        self
+    }
+
+    /// Export queries to an HTTP endpoint (when its settings ask for it).
+    pub fn with_log_export(
+        mut self,
+        log_export: Option<Arc<daygle_dns_api::log_export::LogExporter>>,
+    ) -> Self {
+        self.log_export = log_export;
         self
     }
 
@@ -438,6 +450,17 @@ impl DnsDispatcher {
                 rcode,
                 elapsed_ms: started.elapsed().as_millis() as u64,
             });
+        }
+        if let Some(export) = &self.log_export {
+            export.query(
+                client,
+                qname,
+                qtype,
+                protocol,
+                outcome_label(outcome),
+                rcode,
+                started.elapsed().as_millis() as u64,
+            );
         }
     }
 
@@ -1304,7 +1327,59 @@ impl RequestHandler for DnsDispatcher {
             }
         }
 
-        // 2c. Authoritative zones.
+        // 2c. Load balancing: a weighted A/AAAA RRset is answered with one
+        // of its records, picked in proportion to the weights (failover has
+        // already left out the records that are down).
+        if matches!(info.query.query_type(), RecordType::A | RecordType::AAAA) {
+            if let Some(record) = self
+                .catalog
+                .weighted_answer(&qname, info.query.query_type())
+            {
+                self.metrics.inc(&self.metrics.authoritative);
+                self.observe(
+                    client,
+                    &qname,
+                    &rtype,
+                    protocol,
+                    Outcome::Authoritative,
+                    Some("NOERROR"),
+                    started,
+                );
+                self.mark_authoritative_records_used(&qname, &rtype);
+                let owner = Name::from(info.query.name().clone());
+                let answer = Record::from_rdata(owner, record.ttl, record.data.clone());
+                return send_records(&mut response_handle, request, &[answer], None).await;
+            }
+        }
+
+        // 2d. AUTOPTR records: a PTR query for an address with no PTR record
+        // of its own, under a name with an AUTOPTR record, is answered with
+        // a host name made from the address.
+        if info.query.query_type() == RecordType::PTR {
+            if let Some((target, ttl)) = self.catalog.auto_ptr(&qname) {
+                if let Ok(target) = Name::from_ascii(&target) {
+                    self.metrics.inc(&self.metrics.authoritative);
+                    self.observe(
+                        client,
+                        &qname,
+                        &rtype,
+                        protocol,
+                        Outcome::Authoritative,
+                        Some("NOERROR"),
+                        started,
+                    );
+                    let owner = Name::from(info.query.name().clone());
+                    let answer = Record::from_rdata(
+                        owner,
+                        ttl,
+                        RData::PTR(hickory_proto::rr::rdata::PTR(target)),
+                    );
+                    return send_records(&mut response_handle, request, &[answer], None).await;
+                }
+            }
+        }
+
+        // 2e. Authoritative zones.
         if self.catalog.contains(info.query.name()) {
             self.metrics.inc(&self.metrics.authoritative);
             // The catalog builds and sends the response itself; its exact

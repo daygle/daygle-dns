@@ -21,6 +21,7 @@
 //! - [`root_zone`] - the local root zone (RFC 8806), verified with
 //!   [`zonemd`] (RFC 8976).
 
+pub mod auto_ptr;
 pub mod backup;
 pub mod catalog;
 pub mod catalog_zone;

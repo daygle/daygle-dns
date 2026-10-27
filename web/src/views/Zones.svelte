@@ -92,10 +92,17 @@
     }
   }
 
+  // Zone aliases (other names a zone is served under), by zone id.
+  let aliases = $state({});
+
   async function loadZones() {
     error = null;
     try {
       zones = await api.zones();
+      const list = await api.zoneAliases().catch(() => []);
+      const byZone = {};
+      for (const a of list) (byZone[a.zone_id] ||= []).push(a.name);
+      aliases = byZone;
     } catch (e) {
       error = formatApiError(e);
     }
@@ -303,8 +310,12 @@
       expire: zone.expire,
       minimum: zone.minimum,
       bumpSerial: true,
+      aliasesText: (aliases[zone.id] || []).join('\n'),
+      aliasesBefore: (aliases[zone.id] || []).join('\n'),
     };
   }
+
+  const aliasesChanged = (form) => splitLines(form.aliasesText).join('\n') !== form.aliasesBefore;
 
   function closeSoa() {
     if (!savingSoa) soaEdit = null;
@@ -336,8 +347,13 @@
       if (statusChanged) {
         await api.setZoneEnabled(form.zone.id, !disabled);
       }
+      if (aliasesChanged(form)) {
+        await api.setZoneAliases(form.zone.id, splitLines(form.aliasesText));
+      }
       soaEdit = null;
-      if (form.secondary) {
+      if (form.secondary && !statusChanged) {
+        notice = `Settings for ${form.zone.name} saved and applied live.`;
+      } else if (form.secondary) {
         notice = disabled
           ? `${form.zone.name} disabled and is no longer being served.`
           : `${form.zone.name} enabled and is now being served.`;
@@ -586,7 +602,7 @@
             {#if show('type')}<td><span class="pill">{zone.zone_type === 'secondary' ? 'Secondary' : 'Primary'}</span></td>{/if}
             {#if show('details')}
               <td class="muted">
-                Serial {zone.serial}{#if zone.zone_type === 'secondary' && zone.masters?.length}{` · from ${zone.masters.join(', ')}`}{/if}{#if zone.catalog}{` · catalog ${zone.catalog}`}{/if}
+                Serial {zone.serial}{#if zone.zone_type === 'secondary' && zone.masters?.length}{` · from ${zone.masters.join(', ')}`}{/if}{#if zone.catalog}{` · catalog ${zone.catalog}`}{/if}{#if aliases[zone.id]?.length}{` · also ${aliases[zone.id].join(', ')}`}{/if}
               </td>
             {/if}
             {#if show('dnssec')}<td><span class:pill={true} class:ok={zone.dnssec}>{zone.dnssec ? (zone.nsec3 ? 'Signed · NSEC3' : 'Signed · NSEC') : 'Unsigned'}</span></td>{/if}
@@ -857,10 +873,21 @@
         {/if}
       {/if}
 
+      {#if !soaEdit.zone.name.endsWith('.arpa')}
+        <div class="section-title">Aliases</div>
+        <label>Also Serve This Zone As <textarea rows="2" placeholder={'example.net\nexample.org'} bind:value={soaEdit.aliasesText} spellcheck="false"></textarea></label>
+        <p class="muted help">
+          One domain per line. Every name in an alias answers with this zone's
+          records (<code>www.example.net</code> like <code>www.{soaEdit.zone.name}</code>),
+          with the record data as it is. Aliases are served unsigned, are not
+          transferred to secondaries, and cannot be a zone hosted here.
+        </p>
+      {/if}
+
       <div class="row actions">
         <button
           onclick={saveSoa}
-          disabled={savingSoa || (soaEdit.secondary && soaEdit.disabled === soaEdit.disabledBefore)}
+          disabled={savingSoa || (soaEdit.secondary && soaEdit.disabled === soaEdit.disabledBefore && !aliasesChanged(soaEdit))}
         >{savingSoa ? 'Saving...' : 'Save Zone'}</button>
         <button class="secondary" onclick={closeSoa} disabled={savingSoa}>Cancel</button>
       </div>

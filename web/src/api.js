@@ -216,6 +216,11 @@ export const api = {
   setRecordDisabled: (zoneId, recordId, disabled, query = '') =>
     request('PUT', `/zones/${zoneId}/records/${encodeURIComponent(recordId)}/disabled${query ? `?${query}` : ''}`, { disabled }),
   healthChecks: () => request('GET', '/health-checks'),
+  recordWeights: () => request('GET', '/record-weights'),
+  setRecordWeight: (zoneId, recordId, weight) =>
+    request('PUT', `/zones/${zoneId}/records/${encodeURIComponent(recordId)}/weight`, { weight }),
+  zoneAliases: () => request('GET', '/zone-aliases'),
+  setZoneAliases: (zoneId, aliases) => request('PUT', `/zones/${zoneId}/aliases`, { aliases }),
   setHealthCheck: (zoneId, recordId, body) =>
     request('PUT', `/zones/${zoneId}/records/${encodeURIComponent(recordId)}/health`, body),
   deleteHealthCheck: (zoneId, recordId) =>
@@ -262,6 +267,8 @@ export const api = {
   deleteBlockingGroup: (id) => request('DELETE', `/policy/blocking/${id}`),
   moveBlockingGroup: (id, direction) => request('POST', `/policy/blocking/${id}/move`, { direction }),
   testAlert: (alerts) => request('POST', '/alerts/test', { alerts }),
+  logExportStatus: () => request('GET', '/log-export'),
+  testLogExport: (log_export) => request('POST', '/log-export/test', { log_export }),
   rpzStatus: () => request('GET', '/rpz'),
   dhcp: () => request('GET', '/dhcp'),
   devices: (hours) => request('GET', `/devices?hours=${hours}`),

@@ -20,6 +20,7 @@ use hickory_server::store::in_memory::InMemoryZoneHandler;
 use hickory_server::zone_handler::{AxfrPolicy, Catalog, ZoneHandler, ZoneType};
 use tracing::{info, warn};
 
+use crate::auto_ptr::AutoPtrIndex;
 use crate::model::Record as DbRecord;
 use crate::model::SigningKeyRecord;
 use crate::split_horizon::SplitHorizonIndex;
@@ -55,6 +56,10 @@ pub struct AuthorityCatalog {
     /// ALIAS records by owner name (lowercase, no trailing dot), rebuilt
     /// with the catalog.
     aliases: arc_swap::ArcSwap<std::collections::HashMap<String, Alias>>,
+    /// Weighted A/AAAA RRsets (load balancing), rebuilt with the catalog.
+    weighted: arc_swap::ArcSwap<WeightedIndex>,
+    /// AUTOPTR records (made-up PTR answers), rebuilt with the catalog.
+    auto_ptr: arc_swap::ArcSwap<AutoPtrIndex>,
     /// Woken when the published catalog zone's member list changes, so
     /// its secondaries can be sent a NOTIFY.
     catalog_zone_changed: Arc<tokio::sync::Notify>,
@@ -82,6 +87,11 @@ pub struct AuthorityCatalog {
 
 /// A zone's served records, with their signatures.
 pub type ServedRecords = BTreeMap<RrKey, Arc<RecordSet>>;
+
+/// Weighted A/AAAA RRsets by owner name (lowercase, no trailing dot) and
+/// type: each answer holds one of the records, picked in proportion to
+/// its weight.
+pub type WeightedIndex = HashMap<(String, RecordType), Vec<(Record, u32)>>;
 
 /// How far signature inceptions are backdated. Hickory stamps each RRSIG
 /// with the signing time; a validator whose clock runs behind ours would
@@ -154,6 +164,10 @@ struct Built {
     /// Served SOA serial of each primary zone, by lowercase name.
     serials: HashMap<String, u32>,
     transfer_sets: HashMap<String, Arc<ServedRecords>>,
+    /// ALIAS records by owner name.
+    aliases: HashMap<String, Alias>,
+    weighted: WeightedIndex,
+    auto_ptr: AutoPtrIndex,
 }
 
 /// The key zones are filed under: lowercase, no trailing dot.
@@ -170,26 +184,82 @@ pub struct Alias {
     pub ttl: u32,
 }
 
-/// Every enabled ALIAS record in the store, by owner name.
-fn build_aliases(store: &ZoneStore) -> Result<std::collections::HashMap<String, Alias>> {
-    let mut aliases = std::collections::HashMap::new();
-    for (zone, records, _) in store.load_catalog_data()? {
-        if !zone.enabled {
-            continue;
-        }
-        for record in records {
-            if record.rtype == "ALIAS" && !record.disabled {
-                aliases.insert(
-                    record.name.trim_end_matches('.').to_ascii_lowercase(),
+/// Add a served zone's ALIAS and AUTOPTR records, PTR names and (when
+/// `weights` is given: the zone is served unsigned) weighted A/AAAA
+/// records to `built`'s indexes.
+fn index_records(built: &mut Built, records: &[DbRecord], weights: Option<&HashMap<String, u32>>) {
+    for record in records.iter().filter(|r| !r.disabled) {
+        let owner = record.name.trim_end_matches('.').to_ascii_lowercase();
+        match record.rtype.as_str() {
+            "ALIAS" => {
+                built.aliases.insert(
+                    owner,
                     Alias {
                         target: record.content.clone(),
                         ttl: record.ttl,
                     },
                 );
             }
+            "AUTOPTR" => built.auto_ptr.add_rule(&owner, &record.content, record.ttl),
+            "PTR" => built.auto_ptr.add_ptr_name(&owner),
+            "A" | "AAAA" => {
+                let Some(weight) = weights.and_then(|w| w.get(&record.id)).copied() else {
+                    continue;
+                };
+                if weight == 0 {
+                    continue;
+                }
+                let Ok(rr) = record_to_hickory(record) else {
+                    continue;
+                };
+                built
+                    .weighted
+                    .entry((owner, rr.record_type()))
+                    .or_default()
+                    .push((rr, weight));
+            }
+            _ => {}
         }
     }
-    Ok(aliases)
+}
+
+/// `zone`'s records as served under its alias `alias`: every owner name
+/// moved from the zone into the alias (`www.example.com` becomes
+/// `www.example.net`); record data is left as it is.
+fn alias_records(zone: &str, alias: &str, records: &[DbRecord]) -> Vec<DbRecord> {
+    let suffix = format!(".{zone}");
+    records
+        .iter()
+        .filter_map(|r| {
+            let name = r.name.trim_end_matches('.').to_ascii_lowercase();
+            let renamed = if name == zone {
+                alias.to_string()
+            } else {
+                format!("{}.{alias}", name.strip_suffix(&suffix)?)
+            };
+            Some(DbRecord {
+                name: renamed,
+                ..r.clone()
+            })
+        })
+        .collect()
+}
+
+/// Pick one of a weighted RRset's records, in proportion to the weights.
+fn pick_weighted(choices: &[(Record, u32)]) -> Option<&Record> {
+    let total: u64 = choices.iter().map(|(_, w)| u64::from(*w)).sum();
+    if total == 0 {
+        return None;
+    }
+    let mut point = rand::random::<u64>() % total;
+    for (record, weight) in choices {
+        let weight = u64::from(*weight);
+        if point < weight {
+            return Some(record);
+        }
+        point -= weight;
+    }
+    choices.last().map(|(r, _)| r)
 }
 
 impl AuthorityCatalog {
@@ -198,14 +268,15 @@ impl AuthorityCatalog {
         let built = build_catalog(&store, &settings, false, &Default::default())?;
         let networks = daygle_dns_core::config::builtin_networks();
         let split_horizon = Arc::new(build_split_horizon(&store, &networks)?);
-        let aliases = build_aliases(&store)?;
         Ok(Self {
             store,
             settings: arc_swap::ArcSwap::from_pointee(settings),
             catalog: arc_swap::ArcSwap::from_pointee(built.catalog),
             split_horizon: arc_swap::ArcSwap::from(split_horizon),
             networks: arc_swap::ArcSwap::from_pointee(networks),
-            aliases: arc_swap::ArcSwap::from_pointee(aliases),
+            aliases: arc_swap::ArcSwap::from_pointee(built.aliases),
+            weighted: arc_swap::ArcSwap::from_pointee(built.weighted),
+            auto_ptr: arc_swap::ArcSwap::from_pointee(built.auto_ptr),
             catalog_zone_changed: Arc::new(tokio::sync::Notify::new()),
             unhealthy: Default::default(),
             reload_lock: Mutex::new(()),
@@ -369,12 +440,14 @@ impl AuthorityCatalog {
         )?;
         self.catalog.store(Arc::new(built.catalog));
         self.transfer_sets.store(Arc::new(built.transfer_sets));
+        self.aliases.store(Arc::new(built.aliases));
+        self.weighted.store(Arc::new(built.weighted));
+        self.auto_ptr.store(Arc::new(built.auto_ptr));
         if built.catalog_zone_changed {
             self.catalog_zone_changed.notify_waiters();
         }
         let split_horizon = Arc::new(build_split_horizon(&self.store, &self.networks.load())?);
         self.split_horizon.store(split_horizon);
-        self.aliases.store(Arc::new(build_aliases(&self.store)?));
 
         let mut serials = self.serials.lock().unwrap_or_else(|e| e.into_inner());
         let changed: Vec<String> = built
@@ -438,6 +511,29 @@ impl AuthorityCatalog {
         aliases.get(name.trim_end_matches('.')).cloned()
     }
 
+    /// One record of the weighted `rtype` RRset at `name` (lowercase, no
+    /// trailing dot), picked in proportion to the records' weights; `None`
+    /// when the RRset is not weighted.
+    pub fn weighted_answer(&self, name: &str, rtype: RecordType) -> Option<Record> {
+        let weighted = self.weighted.load();
+        if weighted.is_empty() {
+            return None;
+        }
+        let choices = weighted.get(&(name.trim_end_matches('.').to_string(), rtype))?;
+        pick_weighted(choices).cloned()
+    }
+
+    /// The PTR target (with a trailing dot) and TTL an AUTOPTR record makes
+    /// up for `name` (lowercase, no trailing dot), if one covers it and the
+    /// name has no PTR record of its own.
+    pub fn auto_ptr(&self, name: &str) -> Option<(String, u32)> {
+        let index = self.auto_ptr.load();
+        if index.is_empty() {
+            return None;
+        }
+        index.lookup(name.trim_end_matches('.'))
+    }
+
     /// The enabled `rtype` records stored at `name` (lowercase, no trailing
     /// dot), for answering an ALIAS whose target is hosted here.
     pub fn local_records(&self, name: &str, rtype: RecordType) -> Result<Vec<Record>> {
@@ -494,10 +590,10 @@ impl AuthorityCatalog {
             .store
             .list_records(zone_id)?
             .iter()
-            .any(|r| r.rtype == "ALIAS")
+            .any(|r| r.rtype == "ALIAS" || r.rtype == "AUTOPTR")
         {
             return Err(DaygleError::InvalidRecord(
-                "the zone has ALIAS records, whose answers are made when asked and cannot be signed: replace them with A/AAAA or CNAME records first".to_string(),
+                "the zone has ALIAS or AUTOPTR records, whose answers are made when asked and cannot be signed: replace them with A/AAAA, CNAME or PTR records first".to_string(),
             ));
         }
         // With signing turned off the key would be stored but never used:
@@ -612,6 +708,14 @@ fn build_catalog(
     unhealthy: &std::collections::HashSet<String>,
 ) -> Result<Built> {
     let mut catalog = Catalog::new();
+    let weights = store.list_record_weights()?;
+    let mut zone_aliases: HashMap<String, Vec<String>> = HashMap::new();
+    for alias in store.list_zone_aliases()? {
+        zone_aliases
+            .entry(alias.zone_id)
+            .or_default()
+            .push(alias.name);
+    }
     let checked: std::collections::HashSet<String> = store
         .list_health_checks()?
         .into_iter()
@@ -624,9 +728,27 @@ fn build_catalog(
         .map(|s| s.zone_id)
         .collect();
 
+    let hosted: std::collections::HashSet<String> = data
+        .iter()
+        .map(|(zone, _, _)| zone_key(&zone.name))
+        .collect();
+
     let sig_validity = sig_duration(settings);
-    let mut serials = HashMap::new();
-    let mut transfer_sets = HashMap::new();
+    let mut built = Built {
+        catalog: Catalog::new(),
+        catalog_zone_changed: false,
+        serials: HashMap::new(),
+        transfer_sets: HashMap::new(),
+        aliases: HashMap::new(),
+        weighted: HashMap::new(),
+        auto_ptr: AutoPtrIndex::default(),
+    };
+    let serials = &mut built.serials;
+    let transfer_sets = &mut built.transfer_sets;
+    // Zones served under other names, with the records they serve:
+    // indexed (ALIAS, AUTOPTR, weights) once the loop is done.
+    let mut alias_zones: Vec<(crate::model::Zone, String, Vec<DbRecord>)> = Vec::new();
+    let mut indexed: Vec<(Vec<DbRecord>, bool)> = Vec::new();
 
     for (zone, records, keys) in data {
         if !zone.enabled {
@@ -664,6 +786,11 @@ fn build_catalog(
                 Arc::new(handler.records_get_mut().clone()),
             );
             catalog.upsert(lower, vec![Arc::new(handler) as Arc<dyn ZoneHandler>]);
+            for alias in zone_aliases.get(&zone.id).into_iter().flatten() {
+                let renamed = alias_records(&zone_key(&zone.name), alias, &records);
+                alias_zones.push((zone.clone(), alias.clone(), renamed));
+            }
+            indexed.push((records, false));
             continue;
         }
 
@@ -703,6 +830,7 @@ fn build_catalog(
                 }
             }
         };
+        let signed = handler.is_some();
         let handler = match handler {
             Some(handler) => handler,
             None => ZoneData::new(
@@ -716,6 +844,40 @@ fn build_catalog(
         };
         serials.insert(zone_key(&zone.name), zone.serial);
         catalog.upsert(lower, vec![Arc::new(handler) as Arc<dyn ZoneHandler>]);
+        for alias in zone_aliases.get(&zone.id).into_iter().flatten() {
+            let renamed = alias_records(&zone_key(&zone.name), alias, &records);
+            alias_zones.push((zone.clone(), alias.clone(), renamed));
+        }
+        // Signed RRsets are served whole: picking one record would break
+        // their signatures.
+        indexed.push((records, !signed));
+    }
+
+    // Zone aliases: the zone's records under the alias's name, served
+    // unsigned. A zone hosted under the same name wins.
+    for (zone, alias, records) in alias_zones {
+        if hosted.contains(&alias) {
+            warn!(alias = %alias, zone = %zone.name, "a hosted zone has the alias's name; not serving the alias");
+            continue;
+        }
+        let served_as = crate::model::Zone {
+            name: alias.clone(),
+            ..zone.clone()
+        };
+        let origin = fqdn_name(&alias)?;
+        let handler = ZoneData::new(
+            origin.clone(),
+            zone_rrsets(&served_as, &records)?,
+            ZoneType::Primary,
+            AxfrPolicy::Deny,
+            None,
+        )
+        .map_err(DaygleError::InvalidRecord)?;
+        catalog.upsert(
+            LowerName::from(origin),
+            vec![Arc::new(handler) as Arc<dyn ZoneHandler>],
+        );
+        indexed.push((records, true));
     }
 
     let mut catalog_changed = false;
@@ -748,12 +910,12 @@ fn build_catalog(
         }
     }
 
-    Ok(Built {
-        catalog,
-        catalog_zone_changed: catalog_changed,
-        serials,
-        transfer_sets,
-    })
+    built.catalog = catalog;
+    built.catalog_zone_changed = catalog_changed;
+    for (records, weighted) in &indexed {
+        index_records(&mut built, records, weighted.then_some(&weights));
+    }
+    Ok(built)
 }
 
 /// Build and sign a primary zone with `signers`.
@@ -1072,8 +1234,9 @@ fn zone_rrsets(
 
     // Insert every enabled record.
     for record in records {
-        // ALIAS is answered by the dispatcher, not served as a record.
-        if record.disabled || record.rtype == "ALIAS" {
+        // ALIAS and AUTOPTR are answered by the dispatcher, not served as
+        // records.
+        if record.disabled || record.rtype == "ALIAS" || record.rtype == "AUTOPTR" {
             continue;
         }
         match record_to_hickory(record) {
@@ -1254,6 +1417,86 @@ mod tests {
             )
             .unwrap();
         AuthorityCatalog::new(store, settings).unwrap()
+    }
+
+    #[test]
+    fn weighted_answers_draw_from_healthy_records_under_aliases_too() {
+        let catalog = catalog();
+        let store = catalog.store();
+        let zone = store.find_zone_by_name("example.com").unwrap().unwrap();
+        let second = store
+            .upsert_record(
+                &zone.id,
+                &RecordInput {
+                    name: "www".to_string(),
+                    rtype: "A".to_string(),
+                    content: "192.0.2.11".to_string(),
+                    ttl: 300,
+                    priority: 0,
+                    disabled: false,
+                },
+            )
+            .unwrap();
+        let first = store
+            .list_records(&zone.id)
+            .unwrap()
+            .into_iter()
+            .find(|r| r.content == "192.0.2.10")
+            .unwrap();
+        catalog.reload().unwrap();
+        assert!(
+            catalog
+                .weighted_answer("www.example.com", RecordType::A)
+                .is_none(),
+            "no weights: served whole by the zone"
+        );
+        store.set_record_weight(&first.id, 1).unwrap();
+        store.set_record_weight(&second.id, 1).unwrap();
+        store
+            .set_health_check(&crate::model::HealthCheck {
+                record_id: first.id.clone(),
+                kind: "tcp".to_string(),
+                port: 1,
+                path: String::new(),
+                host: String::new(),
+                interval_secs: 30,
+            })
+            .unwrap();
+        catalog.reload().unwrap();
+        let drawn: BTreeSet<String> = (0..200)
+            .map(|_| {
+                catalog
+                    .weighted_answer("www.example.com", RecordType::A)
+                    .unwrap()
+                    .data
+                    .to_string()
+            })
+            .collect();
+        assert_eq!(drawn.len(), 2, "{drawn:?}");
+
+        // A record that is down is not drawn.
+        catalog
+            .set_unhealthy([first.id.clone()].into_iter().collect())
+            .unwrap();
+        for _ in 0..50 {
+            let answer = catalog
+                .weighted_answer("www.example.com", RecordType::A)
+                .unwrap();
+            assert_eq!(answer.data.to_string(), "192.0.2.11");
+        }
+
+        // Under an alias, with the alias's name.
+        store
+            .set_zone_aliases(&zone.id, &["Example.NET.".to_string()])
+            .unwrap();
+        catalog.reload().unwrap();
+        let answer = catalog
+            .weighted_answer("www.example.net", RecordType::A)
+            .unwrap();
+        assert_eq!(answer.data.to_string(), "192.0.2.11");
+        assert!(catalog.contains(&LowerName::from(
+            Name::from_ascii("www.example.net.").unwrap()
+        )));
     }
 
     /// Every change to a primary zone's serial, however it was made, is

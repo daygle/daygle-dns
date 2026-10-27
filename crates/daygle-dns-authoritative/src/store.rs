@@ -1,5 +1,6 @@
 //! SQLite-backed zone and record storage.
 
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
@@ -18,6 +19,9 @@ use crate::validate_name;
 use daygle_dns_core::blocking::{BlockingGroup, BlockingGroupInput};
 use daygle_dns_core::config::{DisplaySettings, Role};
 use daygle_dns_core::error::{DaygleError, Result};
+
+/// The highest load-balancing weight a record can have.
+pub const MAX_RECORD_WEIGHT: u32 = 10_000;
 
 /// Every zone paired with its records and signing keys, as consumed by the
 /// catalog builder.
@@ -77,6 +81,20 @@ CREATE TABLE IF NOT EXISTS health_checks (
     path           TEXT NOT NULL DEFAULT '',
     host           TEXT NOT NULL DEFAULT '',
     interval_secs  INTEGER NOT NULL DEFAULT 30
+);
+
+-- Load-balancing weights on A/AAAA records (no foreign key, like
+-- health_checks: editing a record re-inserts its row).
+CREATE TABLE IF NOT EXISTS record_weights (
+    record_id  TEXT PRIMARY KEY,
+    weight     INTEGER NOT NULL
+);
+
+-- Other names a zone is served under (zone aliases).
+CREATE TABLE IF NOT EXISTS zone_aliases (
+    name       TEXT PRIMARY KEY,
+    zone_id    TEXT NOT NULL REFERENCES zones(id) ON DELETE CASCADE,
+    created_at TEXT NOT NULL
 );
 
 -- Zones added by a consumed catalog zone (RFC 9432), and which catalog.
@@ -362,6 +380,8 @@ impl ZoneStore {
              DELETE FROM zone_dnssec WHERE zone_id NOT IN (SELECT id FROM zones);
              DELETE FROM catalog_members WHERE zone_id NOT IN (SELECT id FROM zones);
              DELETE FROM health_checks WHERE record_id NOT IN (SELECT id FROM records);
+             DELETE FROM record_weights WHERE record_id NOT IN (SELECT id FROM records);
+             DELETE FROM zone_aliases WHERE zone_id NOT IN (SELECT id FROM zones);
              DELETE FROM secondary_zones WHERE zone_id NOT IN (SELECT id FROM zones);
              PRAGMA foreign_keys = ON;",
         )?;
@@ -441,6 +461,20 @@ impl ZoneStore {
 
         let mut conn = self.lock_conn()?;
         let tx = conn.transaction()?;
+        let aliased: Option<String> = tx
+            .query_row(
+                "SELECT z.name FROM zone_aliases a JOIN zones z ON z.id = a.zone_id
+                 WHERE a.name = ?1",
+                [&zone.name],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if let Some(target) = aliased {
+            return Err(DaygleError::AlreadyExists(format!(
+                "{} is an alias of the zone {target}: remove the alias first",
+                zone.name
+            )));
+        }
         tx.execute(
             "INSERT INTO zones (id, name, primary_ns, admin_mailbox, serial,
                                 refresh, retry, expire, minimum, created_at, enabled, last_modified_at)
@@ -1599,6 +1633,151 @@ impl ZoneStore {
             "DELETE FROM health_checks WHERE record_id = ?1",
             [record_id],
         )? > 0)
+    }
+
+    // ---- Record weights --------------------------------------------------
+
+    /// The load-balancing weight of every weighted A or AAAA record, by
+    /// record id.
+    pub fn list_record_weights(&self) -> Result<HashMap<String, u32>> {
+        let conn = self.lock_conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT w.record_id, w.weight FROM record_weights w
+             JOIN records r ON r.id = w.record_id
+             WHERE r.rtype IN ('A', 'AAAA')",
+        )?;
+        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        Ok(rows.collect::<std::result::Result<HashMap<_, _>, _>>()?)
+    }
+
+    /// Set a record's load-balancing weight; 0 removes it.
+    pub fn set_record_weight(&self, record_id: &str, weight: u32) -> Result<()> {
+        if weight > MAX_RECORD_WEIGHT {
+            return Err(DaygleError::InvalidRecord(format!(
+                "weight must be 0 to {MAX_RECORD_WEIGHT}"
+            )));
+        }
+        let conn = self.lock_conn()?;
+        if weight == 0 {
+            conn.execute(
+                "DELETE FROM record_weights WHERE record_id = ?1",
+                [record_id],
+            )?;
+        } else {
+            conn.execute(
+                "INSERT INTO record_weights (record_id, weight) VALUES (?1, ?2)
+                 ON CONFLICT(record_id) DO UPDATE SET weight = excluded.weight",
+                params![record_id, weight],
+            )?;
+        }
+        Ok(())
+    }
+
+    // ---- Zone aliases ----------------------------------------------------
+
+    /// Every zone alias, by name.
+    pub fn list_zone_aliases(&self) -> Result<Vec<crate::model::ZoneAlias>> {
+        let conn = self.lock_conn()?;
+        let mut stmt =
+            conn.prepare("SELECT name, zone_id, created_at FROM zone_aliases ORDER BY name")?;
+        let rows = stmt.query_map([], |row| {
+            Ok(crate::model::ZoneAlias {
+                name: row.get(0)?,
+                zone_id: row.get(1)?,
+                created_at: row.get(2)?,
+            })
+        })?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    /// Replace the aliases of `zone_id` with `names`, returning them as
+    /// stored. A name may not be a hosted zone, another zone's alias, or
+    /// inside or above the zone itself.
+    pub fn set_zone_aliases(
+        &self,
+        zone_id: &str,
+        names: &[String],
+    ) -> Result<Vec<crate::model::ZoneAlias>> {
+        let zone = self
+            .get_zone(zone_id)?
+            .ok_or_else(|| DaygleError::NotFound(format!("zone {zone_id}")))?;
+        let mut wanted: Vec<String> = Vec::new();
+        for name in names {
+            let name = normalize_fqdn(name);
+            if name.is_empty() {
+                continue;
+            }
+            validate_name(&name, false)?;
+            if name == "arpa" || name.ends_with(".arpa") {
+                return Err(DaygleError::InvalidRecord(format!(
+                    "{name}: reverse zones cannot be aliases"
+                )));
+            }
+            let inside = |a: &str, b: &str| a == b || a.ends_with(&format!(".{b}"));
+            if inside(&name, &zone.name) || inside(&zone.name, &name) {
+                return Err(DaygleError::InvalidRecord(format!(
+                    "{name} overlaps the zone {} itself",
+                    zone.name
+                )));
+            }
+            if !wanted.contains(&name) {
+                wanted.push(name);
+            }
+        }
+        let mut conn = self.lock_conn()?;
+        let tx = conn.transaction()?;
+        for name in &wanted {
+            let hosted: i64 =
+                tx.query_row("SELECT COUNT(*) FROM zones WHERE name = ?1", [name], |r| {
+                    r.get(0)
+                })?;
+            if hosted > 0 {
+                return Err(DaygleError::AlreadyExists(format!(
+                    "{name} is a zone hosted here"
+                )));
+            }
+            let other: Option<String> = tx
+                .query_row(
+                    "SELECT z.name FROM zone_aliases a JOIN zones z ON z.id = a.zone_id
+                     WHERE a.name = ?1 AND a.zone_id != ?2",
+                    params![name, zone_id],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            if let Some(other) = other {
+                return Err(DaygleError::AlreadyExists(format!(
+                    "{name} is already an alias of the zone {other}"
+                )));
+            }
+        }
+        let now = Utc::now().to_rfc3339();
+        let mut kept: HashMap<String, String> = HashMap::new();
+        {
+            let mut stmt =
+                tx.prepare("SELECT name, created_at FROM zone_aliases WHERE zone_id = ?1")?;
+            let rows = stmt.query_map([zone_id], |r| Ok((r.get(0)?, r.get(1)?)))?;
+            for row in rows {
+                let (name, created): (String, String) = row?;
+                kept.insert(name, created);
+            }
+        }
+        tx.execute("DELETE FROM zone_aliases WHERE zone_id = ?1", [zone_id])?;
+        let mut stored = Vec::new();
+        for name in wanted {
+            let created_at = kept.remove(&name).unwrap_or_else(|| now.clone());
+            tx.execute(
+                "INSERT INTO zone_aliases (name, zone_id, created_at) VALUES (?1, ?2, ?3)",
+                params![name, zone_id, created_at],
+            )?;
+            stored.push(crate::model::ZoneAlias {
+                name,
+                zone_id: zone_id.to_string(),
+                created_at,
+            });
+        }
+        tx.commit()?;
+        stored.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(stored)
     }
 
     // ---- Catalog zones (RFC 9432) ----------------------------------------
@@ -3570,6 +3749,8 @@ fn insert_record_in_tx(
     let mut content = input.content.trim().to_string();
     if rtype == "ALIAS" {
         content = check_alias(tx, zone_id, &name, &content)?;
+    } else if rtype == "AUTOPTR" {
+        content = check_auto_ptr(tx, zone_id, &name, &content, input.disabled)?;
     } else {
         let rr_type = rtype
             .parse::<RecordType>()
@@ -3669,6 +3850,63 @@ fn check_alias(
         }));
     }
     Ok(format!("{target}."))
+}
+
+/// Check an AUTOPTR record (PTR answers made up for every address in a
+/// reverse zone that has no PTR record of its own) and return its template
+/// in stored form (lowercase, trailing dot). Like ALIAS, its answers are
+/// made when asked, so it is kept out of signed zones.
+fn check_auto_ptr(
+    tx: &rusqlite::Transaction<'_>,
+    zone_id: &str,
+    name: &str,
+    template: &str,
+    disabled: bool,
+) -> Result<String> {
+    if !(name.ends_with("in-addr.arpa") || name.ends_with("ip6.arpa")) {
+        return Err(DaygleError::InvalidRecord(
+            "AUTOPTR records belong in a reverse zone (in-addr.arpa or ip6.arpa)".to_string(),
+        ));
+    }
+    let template = template.trim().trim_end_matches('.').to_ascii_lowercase();
+    if !template.contains(crate::auto_ptr::IP_PLACEHOLDER) {
+        return Err(DaygleError::InvalidRecord(format!(
+            "the AUTOPTR template must contain {0}, e.g. ip-{0}.home.arpa",
+            crate::auto_ptr::IP_PLACEHOLDER
+        )));
+    }
+    for sample in ["192.0.2.255", "2001:db8::ffff:1"] {
+        let host = crate::auto_ptr::expand(&template, sample.parse().expect("valid address"));
+        validate_name(&host, false).map_err(|_| {
+            DaygleError::InvalidRecord(format!(
+                "the AUTOPTR template '{template}' does not make a host name ({host})"
+            ))
+        })?;
+    }
+    let signed: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM dnssec_keys WHERE zone_id = ?1",
+        [zone_id],
+        |r| r.get(0),
+    )?;
+    if signed > 0 {
+        return Err(DaygleError::InvalidRecord(
+            "AUTOPTR records cannot be used in a DNSSEC-signed zone: their answers are made when asked and cannot be signed".to_string(),
+        ));
+    }
+    if !disabled {
+        let clash: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM records
+             WHERE zone_id = ?1 AND name = ?2 AND rtype = 'AUTOPTR' AND disabled = 0",
+            params![zone_id, name],
+            |r| r.get(0),
+        )?;
+        if clash > 0 {
+            return Err(DaygleError::InvalidRecord(format!(
+                "{name} already has an AUTOPTR record"
+            )));
+        }
+    }
+    Ok(format!("{template}."))
 }
 
 /// Resolve `@`, bare relative names, and trailing dots against the zone name.

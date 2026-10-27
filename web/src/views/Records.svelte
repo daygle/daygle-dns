@@ -36,6 +36,7 @@
     NS: 'ns1.example.com.',
     SRV: '10 5 5060 sip.example.com.',
     PTR: 'host.example.com.',
+    AUTOPTR: 'ip-{ip}.home.arpa.',
     CAA: '0 issue "letsencrypt.org"',
     HTTPS: '1 . alpn=h2,h3',
     SVCB: '1 svc.example.com. port=8443',
@@ -82,6 +83,8 @@
   // edited (null when the dialog is closed).
   let health = $state({});
   let healthEdit = $state(null);
+  // Load-balancing weights of this zone's records, by record id.
+  let weights = $state({});
 
   // Record list filter.
   let filterText = $state('');
@@ -142,6 +145,7 @@
       records = await api.records(zoneId);
       const checks = await api.healthChecks().catch(() => []);
       health = Object.fromEntries(checks.filter((c) => c.zone_id === zoneId).map((c) => [c.record_id, c]));
+      weights = await api.recordWeights().catch(() => ({}));
     } catch (e) {
       error = formatApiError(e);
       records = [];
@@ -205,6 +209,8 @@
           createZone: false,
           isNew: false,
           disabledBefore: Boolean(record.disabled),
+          weight: weights[record.id] || 0,
+          weightBefore: weights[record.id] || 0,
         }
       : {
           name: '',
@@ -217,6 +223,8 @@
           isNew: true,
           disabled: false,
           disabledBefore: false,
+          weight: 0,
+          weightBefore: 0,
         };
   }
 
@@ -259,6 +267,11 @@
           ptrQuery ? 'update_ptr=true' : '',
         );
         stagedNotice = edit.disabled ? ' It is disabled, so it is not served.' : ' It is served again.';
+      }
+      // The weight is kept beside the record (like its health check).
+      const weight = Math.max(0, Math.round(Number(edit.weight) || 0));
+      if (['A', 'AAAA'].includes(body.rtype) && weight !== edit.weightBefore) {
+        await api.setRecordWeight(selected.id, savedRecord.id, weight);
       }
       const ptrNotice = reverseNotice(combineReverse(savedRecord?.reverse, staged?.reverse));
       // A new reverse zone: refresh the list (the PTR option looks there).
@@ -504,6 +517,9 @@
                       title={health[record.id].last_error || `${health[record.id].kind.toUpperCase()} check on port ${health[record.id].port}`}
                     >{health[record.id].healthy ? 'Healthy' : 'Down'}{record.priority ? ` · Backup ${record.priority}` : ''}</span>
                   {/if}
+                  {#if weights[record.id]}
+                    <span class="pill" title="Load balanced: answers hold one address, picked in proportion to the weights">Weight {weights[record.id]}</span>
+                  {/if}
                 </td>
                 {/if}
                 {#if show('last-used')}<td class="muted" title={record.last_used_at || ''}>{record.last_used_at ? formatDateTime(record.last_used_at) : 'Never'}</td>{/if}
@@ -587,14 +603,32 @@
             target's current addresses. The name cannot also have A, AAAA or
             CNAME records, and a DNSSEC-signed zone cannot have ALIAS records.
           {/if}
+          {#if edit.rtype === 'AUTOPTR'}
+            In a reverse zone: every address under this name without a PTR
+            record of its own is answered with the host name the template
+            makes, <code>{'{ip}'}</code> becoming the address with dashes
+            (<code>ip-192-168-1-47.home.arpa.</code>). Use <code>@</code> to
+            cover the whole zone. A DNSSEC-signed zone cannot have AUTOPTR
+            records.
+          {/if}
           End a host name with a dot when it is a full name.
         </p>
         <div class="grid2" style="margin-top: 10px">
           <label>TTL (Seconds) <span class="hint">{duration(Number(edit.ttl) || 0)}</span><input type="number" min="0" bind:value={edit.ttl} /></label>
           {#if edit.rtype === 'A' || edit.rtype === 'AAAA'}
             <label>Failover Priority <span class="hint">0 = primary</span><input type="number" min="0" bind:value={edit.priority} /></label>
+            <label>Load-Balancing Weight <span class="hint">0 = off</span><input type="number" min="0" max="10000" bind:value={edit.weight} /></label>
           {/if}
         </div>
+        {#if (edit.rtype === 'A' || edit.rtype === 'AAAA') && Number(edit.weight) > 0}
+          <p class="muted help">
+            Answers for this name hold one of its weighted addresses, picked
+            in proportion to the weights (3 gets three times the share of 1);
+            addresses without a weight get none. Failover still leaves out
+            addresses that are down. DNSSEC-signed zones always answer with
+            every address.
+          </p>
+        {/if}
         <label class="checkbox option">
           <input type="checkbox" bind:checked={edit.disabled} />
           <span>Disabled (Keep for Later)</span>

@@ -16,6 +16,13 @@ Daygle DNS combines, in a single process:
   HTTPS are left out of answers while down, with backups by priority.
 - **ALIAS (ANAME) records**: point a zone apex at another host name (a CDN or
   load balancer) and answer A/AAAA with that host's current addresses.
+- **Weighted load balancing**: give A/AAAA records weights and each answer
+  holds one address, picked in proportion to them (alongside failover).
+- **Automatic PTR records**: an AUTOPTR record in a reverse zone answers every
+  address without a PTR record with a name made from it
+  (`ip-192-168-1-47.home.arpa`), so reverse lookups never come back empty.
+- **Zone aliases**: serve a zone under other names too (`example.net` and
+  `example.org` answering like `example.com`).
 - **Zone transfers**: serve **AXFR/IXFR** (RFC 5936, with per-network ACLs)
   and replicate **secondary zones** from remote masters on a refresh interval.
 - **Catalog zones (RFC 9432)**: publish a catalog of your zones so
@@ -105,6 +112,9 @@ Daygle DNS combines, in a single process:
   domains - all bounded in memory.
 - **Remote logging** to a syslog server (RFC 5424, UDP or TCP): the
   server log, and optionally a line per query.
+- **Query export** over HTTP(S): every query as JSON (NDJSON or an array),
+  batched to a log collector such as Vector, Fluent Bit, Logstash or Splunk
+  HEC, with an optional Authorization header.
 - An **audit log** of every change and sign-in, with who, how and from where.
 - **Prometheus metrics** at `/api/metrics/prometheus`.
 - A **searchable query log**: every served query is recorded into SQLite

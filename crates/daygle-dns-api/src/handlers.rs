@@ -126,6 +126,16 @@ fn redacted_config_json(
             serde_json::json!(if set { REDACTED } else { "" }),
         );
     }
+    if let Some(export) = value.get_mut("log_export").and_then(|a| a.as_object_mut()) {
+        let set = export
+            .get("authorization")
+            .and_then(|p| p.as_str())
+            .is_some_and(|p| !p.is_empty());
+        export.insert(
+            "authorization".to_string(),
+            serde_json::json!(if set { REDACTED } else { "" }),
+        );
+    }
     if let Some(api) = value.get_mut("api").and_then(|a| a.as_object_mut()) {
         let token = api.get("api_token").and_then(|t| t.as_str()).unwrap_or("");
         let redacted = if token.is_empty() { "" } else { "[redacted]" };
@@ -165,6 +175,30 @@ fn normalize_alerts(
             .map(|a| a.trim().to_string())
             .filter(|a| !a.is_empty())
             .collect(),
+        ..input.clone()
+    }
+}
+
+/// Query export settings as submitted, trimmed, with the redaction
+/// placeholder standing for the stored authorization.
+fn normalize_log_export(
+    input: &daygle_dns_core::config::LogExportSettings,
+    stored: &daygle_dns_core::config::LogExportSettings,
+) -> daygle_dns_core::config::LogExportSettings {
+    let authorization = if input.authorization == REDACTED {
+        stored.authorization.clone()
+    } else {
+        input.authorization.trim().to_string()
+    };
+    let format = input.format.trim().to_ascii_lowercase();
+    daygle_dns_core::config::LogExportSettings {
+        url: input.url.trim().to_string(),
+        format: if format.is_empty() {
+            "ndjson".to_string()
+        } else {
+            format
+        },
+        authorization,
         ..input.clone()
     }
 }
@@ -439,6 +473,54 @@ pub async fn test_alert(
         Ok(()) => Json(serde_json::json!({ "sent": true })).into_response(),
         Err(e) => error_response(StatusCode::BAD_GATEWAY, e),
     }
+}
+
+/// Body of `POST /api/log-export/test`: the settings to try (as on the
+/// form, saved or not); omitted, the saved ones.
+#[derive(Deserialize, Default)]
+pub struct LogExportTestInput {
+    #[serde(default)]
+    pub log_export: Option<daygle_dns_core::config::LogExportSettings>,
+}
+
+/// `POST /api/log-export/test` - send one sample query to the export
+/// endpoint and report whether it was accepted.
+pub async fn test_log_export(
+    State(state): State<AppState>,
+    body: Option<Json<LogExportTestInput>>,
+) -> Response {
+    let stored = state.config.load().log_export.clone();
+    let settings = match body.and_then(|Json(b)| b.log_export) {
+        Some(input) => normalize_log_export(&input, &stored),
+        None => stored,
+    };
+    let settings = daygle_dns_core::config::LogExportSettings {
+        enabled: true,
+        ..settings
+    };
+    if let Err(msg) = settings.check() {
+        return error_response(StatusCode::BAD_REQUEST, msg);
+    }
+    let client = match crate::log_export::client() {
+        Ok(client) => client,
+        Err(e) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, e),
+    };
+    let event = crate::log_export::test_event();
+    match crate::log_export::post(&client, &settings, &[event]).await {
+        Ok(()) => Json(serde_json::json!({ "sent": true })).into_response(),
+        Err(e) => error_response(StatusCode::BAD_GATEWAY, e),
+    }
+}
+
+/// `GET /api/log-export` - queries exported and dropped since start, and
+/// the last delivery error.
+pub async fn log_export_status(State(state): State<AppState>) -> Response {
+    let status = state
+        .log_export
+        .as_ref()
+        .map(|e| e.status())
+        .unwrap_or_default();
+    Json(status).into_response()
 }
 
 fn config_response(config: &daygle_dns_core::config::DaygleConfig) -> Response {
@@ -2563,6 +2645,99 @@ pub async fn delete_health_check(
     }
 }
 
+/// Body of `PUT /api/zones/{id}/records/{rid}/weight`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RecordWeightInput {
+    /// 0 (not load-balanced) to 10000.
+    pub weight: u32,
+}
+
+/// `GET /api/record-weights` - the load-balancing weight of every weighted
+/// record, by record id.
+pub async fn list_record_weights(State(state): State<AppState>) -> Response {
+    match state.catalog.store().list_record_weights() {
+        Ok(weights) => Json(weights).into_response(),
+        Err(e) => map_err(e),
+    }
+}
+
+/// `PUT /api/zones/{id}/records/{rid}/weight` - set the load-balancing
+/// weight of an A or AAAA record (0 takes it out of load balancing).
+pub async fn set_record_weight(
+    State(state): State<AppState>,
+    Path((zone_id, rid)): Path<(String, String)>,
+    axum::Json(input): axum::Json<RecordWeightInput>,
+) -> Response {
+    if let Some(response) = reject_secondary_mutation(&state, &zone_id) {
+        return response;
+    }
+    let record = match state.catalog.store().get_record(&rid) {
+        Ok(Some(r)) if r.zone_id == zone_id => r,
+        Ok(_) => return error_response(StatusCode::NOT_FOUND, "record not found"),
+        Err(e) => return map_err(e),
+    };
+    if !matches!(record.rtype.as_str(), "A" | "AAAA") {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "only A and AAAA records can be load-balanced",
+        );
+    }
+    if let Err(e) = state.catalog.store().set_record_weight(&rid, input.weight) {
+        return map_err(e);
+    }
+    let _ = state.catalog.reload();
+    Json(serde_json::json!({ "record_id": rid, "weight": input.weight })).into_response()
+}
+
+/// Body of `PUT /api/zones/{id}/aliases`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ZoneAliasesInput {
+    /// Every name the zone should also be served under.
+    pub aliases: Vec<String>,
+}
+
+/// `GET /api/zone-aliases` - every zone alias.
+pub async fn list_zone_aliases(State(state): State<AppState>) -> Response {
+    match state.catalog.store().list_zone_aliases() {
+        Ok(aliases) => Json(aliases).into_response(),
+        Err(e) => map_err(e),
+    }
+}
+
+/// `PUT /api/zones/{id}/aliases` - replace the names the zone is also
+/// served under.
+pub async fn set_zone_aliases(
+    State(state): State<AppState>,
+    Path(zone_id): Path<String>,
+    axum::Json(input): axum::Json<ZoneAliasesInput>,
+) -> Response {
+    let catalog_zone = state.config.load().authoritative.catalog_zone.clone();
+    if !catalog_zone.is_empty()
+        && input
+            .aliases
+            .iter()
+            .any(|a| daygle_dns_core::config::normalize_zone_name(a) == catalog_zone)
+    {
+        return error_response(
+            StatusCode::CONFLICT,
+            format!("{catalog_zone} is the published catalog zone"),
+        );
+    }
+    match state
+        .catalog
+        .store()
+        .set_zone_aliases(&zone_id, &input.aliases)
+    {
+        Ok(aliases) => {
+            let _ = state.catalog.reload();
+            Json(aliases).into_response()
+        }
+        Err(e) => map_err(e),
+    }
+}
+
 /// `GET /api/zones/{id}/export` - the zone as a BIND-style zone file
 /// (`text/plain`), including SOA and every record. Disabled records are
 /// included as `; disabled:` comments, so an export doubles as a full-zone
@@ -4622,6 +4797,9 @@ pub struct SettingsUpdate {
     pub web: Option<WebUpdate>,
     /// Replaces the whole `[syslog]` section.
     pub syslog: Option<daygle_dns_core::config::SyslogSettings>,
+    /// Replaces the whole `[log_export]` section; an `authorization` of
+    /// `[redacted]` keeps the stored one.
+    pub log_export: Option<daygle_dns_core::config::LogExportSettings>,
     /// Replaces the whole `[rrl]` section (response rate limiting).
     pub rrl: Option<daygle_dns_core::config::RrlSettings>,
     /// Replaces the response policy zones (`[[rpz]]`), in order.
@@ -5298,6 +5476,13 @@ pub async fn update_settings(
             return error_response(StatusCode::BAD_REQUEST, format!("syslog: {msg}"));
         }
         config.syslog = syslog;
+    }
+    if let Some(export) = &update.log_export {
+        let export = normalize_log_export(export, &config.log_export);
+        if let Err(msg) = export.check() {
+            return error_response(StatusCode::BAD_REQUEST, format!("log_export: {msg}"));
+        }
+        config.log_export = export;
     }
     if let Some(updates) = &update.updates {
         config.updates = updates.clone();

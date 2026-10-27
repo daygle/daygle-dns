@@ -46,6 +46,8 @@ pub struct DaygleConfig {
     pub updates: UpdateCheckSettings,
     /// Sending logs to a syslog server.
     pub syslog: SyslogSettings,
+    /// Sending every query, as JSON, to an HTTP endpoint (a log collector).
+    pub log_export: LogExportSettings,
     /// DNS64 (RFC 6147): AAAA answers made from A records for IPv6-only
     /// clients behind NAT64.
     pub dns64: Dns64Settings,
@@ -820,6 +822,73 @@ impl Default for SyslogSettings {
     }
 }
 
+/// Query export: every answered query, as JSON, posted in batches to an
+/// HTTP(S) endpoint such as Vector, Fluent Bit, Logstash, Splunk HEC or a
+/// webhook. Edited in Settings -> Logging and stored in the database.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct LogExportSettings {
+    pub enabled: bool,
+    /// `http://` or `https://` URL each batch is POSTed to.
+    pub url: String,
+    /// `ndjson` (one JSON object per line) or `json` (one JSON array).
+    pub format: String,
+    /// Sent as the `Authorization` header when set, e.g. `Bearer abc123`
+    /// or `Splunk <token>`. Write-only: the API never shows it.
+    pub authorization: String,
+    /// Most queries in one POST.
+    pub batch_size: u32,
+    /// Longest wait, in seconds, before a part-filled batch is sent.
+    pub flush_secs: u32,
+}
+
+impl Default for LogExportSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            url: String::new(),
+            format: "ndjson".to_string(),
+            authorization: String::new(),
+            batch_size: 500,
+            flush_secs: 5,
+        }
+    }
+}
+
+impl LogExportSettings {
+    /// Whether batches are sent as a JSON array (else NDJSON).
+    pub fn json_array(&self) -> bool {
+        self.format.trim() == "json"
+    }
+
+    /// Problems that stop the settings being used.
+    pub fn check(&self) -> std::result::Result<(), String> {
+        if !matches!(self.format.trim(), "" | "ndjson" | "json") {
+            return Err(format!(
+                "unknown format '{}': use ndjson or json",
+                self.format
+            ));
+        }
+        if !(1..=10_000).contains(&self.batch_size) {
+            return Err("batch_size must be 1 to 10000".to_string());
+        }
+        if !(1..=300).contains(&self.flush_secs) {
+            return Err("flush_secs must be 1 to 300".to_string());
+        }
+        if self.authorization.contains(['\r', '\n']) {
+            return Err("authorization must be one line".to_string());
+        }
+        let url = self.url.trim();
+        if self.enabled || !url.is_empty() {
+            let parsed = url::Url::parse(url).map_err(|_| format!("'{url}' is not a URL"))?;
+            if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
+                return Err(format!("'{url}' is not an http:// or https:// URL"));
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Where syslog lines go, parsed from [`SyslogSettings::server`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SyslogTarget {
@@ -1199,6 +1268,8 @@ pub struct RuntimeSettings {
     pub web: Option<WebSettings>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub syslog: Option<SyslogSettings>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub log_export: Option<LogExportSettings>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub updates: Option<UpdateCheckSettings>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1978,6 +2049,7 @@ impl RuntimeSettings {
             && self.display.is_none()
             && self.web.is_none()
             && self.syslog.is_none()
+            && self.log_export.is_none()
             && self.updates.is_none()
             && self.dns64.is_none()
             && self.ecs.is_none()
@@ -2187,6 +2259,9 @@ impl RuntimeSettings {
         }
         if let Some(s) = &self.syslog {
             config.syslog = s.clone();
+        }
+        if let Some(e) = &self.log_export {
+            config.log_export = e.clone();
         }
         if let Some(a) = &self.alerts {
             config.alerts = a.clone();
@@ -2426,6 +2501,7 @@ impl RuntimeSettings {
             web: Some(config.web.clone()),
             updates: Some(config.updates.clone()),
             syslog: Some(config.syslog.clone()),
+            log_export: Some(config.log_export.clone()),
             dns64: Some(config.dns64.clone()),
             ecs: Some(config.ecs.clone()),
             networks: Some(config.networks.clone()),
@@ -3324,6 +3400,9 @@ impl DaygleConfig {
         self.syslog
             .check()
             .map_err(|e| DaygleError::Config(format!("syslog: {e}")))?;
+        self.log_export
+            .check()
+            .map_err(|e| DaygleError::Config(format!("log_export: {e}")))?;
         self.alerts
             .check()
             .map_err(|e| DaygleError::Config(format!("alerts: {e}")))?;
@@ -4843,6 +4922,10 @@ mod tests {
         c.syslog.enabled = true;
         c.syslog.server = s("192.0.2.15:514");
         c.syslog.queries = true;
+        c.log_export.enabled = true;
+        c.log_export.url = s("https://logs.example/ingest");
+        c.log_export.format = s("json");
+        c.log_export.authorization = s("Bearer abc");
         c.dns64.enabled = true;
         c.dns64.prefix = s("64:ff9b::/96");
         c.dns64.clients = vec![s("2001:db8::/64")];
@@ -4901,6 +4984,7 @@ mod tests {
         assert_eq!(restored.web, c.web, "web");
         assert_eq!(restored.updates, c.updates, "updates");
         assert_eq!(restored.syslog, c.syslog, "syslog");
+        assert_eq!(restored.log_export, c.log_export, "log_export");
         assert_eq!(restored.dns64, c.dns64, "dns64");
         assert_eq!(restored.ecs, c.ecs, "ecs");
         assert_eq!(restored.networks, c.networks, "networks");
@@ -5301,6 +5385,32 @@ fd0000000000000000000000000000aa 02 40 00 80     eth0
         s.level = "warn".into();
         s.enabled = true;
         assert!(s.check().is_err(), "enabled needs a server");
+    }
+
+    #[test]
+    fn log_export_checks() {
+        let mut e = LogExportSettings::default();
+        assert!(e.check().is_ok(), "off and empty is fine");
+        e.enabled = true;
+        assert!(e.check().is_err(), "enabled needs a URL");
+        e.url = "ftp://logs.example".into();
+        assert!(e.check().is_err(), "only http(s)");
+        e.url = "https://logs.example:8088/services/collector/raw".into();
+        assert!(e.check().is_ok());
+        assert!(!e.json_array());
+        e.format = "json".into();
+        assert!(e.json_array());
+        e.format = "xml".into();
+        assert!(e.check().is_err());
+        e.format = "ndjson".into();
+        e.batch_size = 0;
+        assert!(e.check().is_err());
+        e.batch_size = 100;
+        e.flush_secs = 301;
+        assert!(e.check().is_err());
+        e.flush_secs = 2;
+        e.authorization = "Bearer a\nX-Evil: 1".into();
+        assert!(e.check().is_err(), "no header injection");
     }
 
     #[test]
