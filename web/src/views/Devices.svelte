@@ -1,4 +1,5 @@
 <script>
+  import IconButton from '../IconButton.svelte';
   import { api, formatApiError, getStoredUser } from '../api.js';
   import { formatDateTime } from '../datetime.svelte.js';
   import { loadDeviceNames } from '../devices.svelte.js';
@@ -152,9 +153,9 @@
                 <td class="num">
                   {#if editing?.address !== d.address}
                     <div class="row" style="gap: 6px; justify-content: flex-end">
-                      <button class="secondary" onclick={() => startEdit(d)}>{d.manual_name ? 'Rename' : 'Name'}</button>
+                      <IconButton icon="edit" label={d.manual_name ? 'Rename' : 'Name this device'} onclick={() => startEdit(d)} />
                       {#if d.manual_name}
-                        <button class="secondary" onclick={() => { editing = { address: d.address, mac: d.mac, value: '' }; saveName(''); }} title="Go back to the name from DHCP or reverse DNS">Clear</button>
+                        <IconButton icon="undo" label="Clear the name: go back to the name from DHCP or reverse DNS" onclick={() => { editing = { address: d.address, mac: d.mac, value: '' }; saveName(''); }} />
                       {/if}
                     </div>
                   {/if}

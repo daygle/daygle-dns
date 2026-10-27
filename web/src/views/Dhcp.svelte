@@ -1,4 +1,5 @@
 <script>
+  import IconButton from '../IconButton.svelte';
   import PageHeader from '../PageHeader.svelte';
   import { icons } from '../icons.svelte.js';
   import { api, formatApiError, getStoredUser } from '../api.js';
@@ -370,9 +371,9 @@
                     <td class="num">
                       <div class="row" style="gap: 6px; justify-content: flex-end">
                         {#if l.state === 'bound' && l.hw_address && scopeOf(l) >= 0 && !reserved(l)}
-                          <button class="secondary" onclick={() => reserve(l)} disabled={saving} title="Always give this device this address">Reserve</button>
+                          <IconButton icon="pin" label="Reserve: always give this device this address" onclick={() => reserve(l)} disabled={saving} />
                         {/if}
-                        <button class="danger" onclick={() => removeLease(l)} aria-label="Remove lease {l.address}">✕</button>
+                        <IconButton icon="delete" variant="danger" label="Remove lease {l.address}" onclick={() => removeLease(l)} />
                       </div>
                     </td>
                   {/if}
@@ -418,8 +419,8 @@
                   {#if isAdmin}
                     <td class="num">
                       <div class="row" style="gap: 6px; justify-content: flex-end">
-                        <button class="secondary" onclick={() => startEdit(tab, i)}>Edit</button>
-                        <button class="danger" onclick={() => removeScope(tab, i)} aria-label="Delete {s.name}">✕</button>
+                        <IconButton icon="edit" label="Edit" onclick={() => startEdit(tab, i)} />
+                        <IconButton icon="delete" variant="danger" label="Delete {s.name}" onclick={() => removeScope(tab, i)} />
                       </div>
                     </td>
                   {/if}

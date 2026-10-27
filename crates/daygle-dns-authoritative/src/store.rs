@@ -181,6 +181,7 @@ CREATE TABLE IF NOT EXISTS console_users (
     time_zone     TEXT NOT NULL DEFAULT '',
     date_format   TEXT NOT NULL DEFAULT '',
     time_format   TEXT NOT NULL DEFAULT '',
+    theme         TEXT NOT NULL DEFAULT '',
     last_login_at TEXT
 );
 
@@ -1915,6 +1916,7 @@ fn row_to_console_user(row: &rusqlite::Row<'_>) -> rusqlite::Result<ConsoleUser>
             time_zone: row.get(8)?,
             date_format: row.get(9)?,
             time_format: row.get(10)?,
+            theme: row.get(13)?,
         },
         two_factor: row.get(11)?,
         last_login_at: row.get(12)?,
@@ -2598,7 +2600,7 @@ impl ZoneStore {
                     time_zone, date_format, time_format,
                     EXISTS(SELECT 1 FROM console_user_two_factor t
                            WHERE t.username = console_users.username AND t.secret != ''),
-                    last_login_at
+                    last_login_at, theme
              FROM console_users ORDER BY username",
         )?;
         let rows = stmt.query_map([], row_to_console_user)?;
@@ -2631,7 +2633,7 @@ impl ZoneStore {
                     time_zone, date_format, time_format,
                     EXISTS(SELECT 1 FROM console_user_two_factor t
                            WHERE t.username = console_users.username AND t.secret != ''),
-                    last_login_at
+                    last_login_at, theme
              FROM console_users WHERE username = ?1",
             [username],
             row_to_console_user,
@@ -2660,6 +2662,7 @@ impl ZoneStore {
                 time_zone: String::new(),
                 date_format: String::new(),
                 time_format: String::new(),
+                theme: String::new(),
             },
             two_factor: false,
             last_login_at: None,
@@ -2715,13 +2718,15 @@ impl ZoneStore {
             .map_err(DaygleError::InvalidRecord)?;
         let conn = self.lock_conn()?;
         let n = conn.execute(
-            "UPDATE console_users SET time_zone = ?2, date_format = ?3, time_format = ?4
+            "UPDATE console_users SET time_zone = ?2, date_format = ?3, time_format = ?4,
+                    theme = ?5
              WHERE username = ?1",
             params![
                 username,
                 preferences.time_zone,
                 preferences.date_format,
-                preferences.time_format
+                preferences.time_format,
+                preferences.theme
             ],
         )?;
         if n == 0 {
@@ -3985,6 +3990,7 @@ fn migrate_console_user_profile(conn: &Connection) -> Result<()> {
         ("time_zone", "''"),
         ("date_format", "''"),
         ("time_format", "''"),
+        ("theme", "''"),
     ] {
         let has: bool = conn.query_row(
             "SELECT EXISTS(

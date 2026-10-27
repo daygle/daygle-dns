@@ -67,7 +67,7 @@ Additional endpoints:
 | Endpoint | Purpose |
 |----------|---------|
 | `GET /api/auth/me` | identity of the presented session or API token (`username`, `role`, `expires_at_secs`, `api_token`), the account's own date/time `preferences` and the server's `display_defaults` |
-| `PUT /api/auth/preferences` | signed-in user sets their own `{time_zone, date_format, time_format}`; an empty field means the server default (viewers may use it too) |
+| `PUT /api/auth/preferences` | signed-in user sets their own `{time_zone, date_format, time_format, theme}`; an empty field means the server default (viewers may use it too) |
 | `GET /api/auth/columns` | the signed-in user's hidden table columns: `{"columns": {"<table>": ["<column>", ...]}}` |
 | `PUT /api/auth/columns` | signed-in user hides columns of one table: `{"table": "query-log", "hidden": ["took"]}` (an empty list shows them all again); names are lowercase letters, digits, `-` and `_`, at most 50 columns and 100 tables (viewers may use it too) |
 | `POST /api/auth/logout` | revoke the presented token |
@@ -378,7 +378,7 @@ those that learn of it through DDR (below); browsers are not told through
 `Alt-Svc`; it cannot share a UDP port with DoQ), `api`
 (gui_enabled/cors_origins), `display` (the console's date/time defaults:
 `time_zone` = `system`, `UTC` or an IANA zone; `date_format` = `system`/`dmy`/
-`mdy`/`ymd`/`d_mon_y`; `time_format` = `system`/`24h`/`12h`), `syslog`, `dns64` and `ecs` (see below), `policy`
+`mdy`/`ymd`/`d_mon_y`; `time_format` = `system`/`24h`/`12h`; `theme` = `system`/`light`/`dark`), `syslog`, `dns64` and `ecs` (see below), `policy`
 (allowlist/blocklist/denied_networks/allowed_networks/filter_aaaa/
 filter_aaaa_except/blocklist_sources, and `cname_inspection`, default on:
 a recursive answer whose CNAME chain reaches a blocked name is blocked

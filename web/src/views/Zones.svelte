@@ -1,4 +1,5 @@
 <script>
+  import IconButton from '../IconButton.svelte';
   import { api, formatApiError } from '../api.js';
   import { reverseZoneName } from '../reverseZone.js';
   import { formatDateTime } from '../datetime.svelte.js';
@@ -594,20 +595,20 @@
             {#if show('last-modified')}<td class="muted nowrap" title={zone.last_modified_at || zone.created_at}>{formatTime(zone.last_modified_at || zone.created_at)}</td>{/if}
             <td class="num">
               <div class="row" style="gap: 6px; justify-content: flex-end">
-                <button class="secondary" onclick={() => openSoa(zone)} title="Edit the zone's settings: serving state, and its SOA (nameserver, contact, timers)">Edit</button>
-                <button class="secondary" onclick={() => onOpenRecords(zone.id)}>Records</button>
+                <IconButton icon="edit" label="Edit the zone's settings: serving state, and its SOA (nameserver, contact, timers)" onclick={() => openSoa(zone)} />
+                <IconButton icon="records" label="Records" onclick={() => onOpenRecords(zone.id)} />
                 {#if zone.zone_type !== 'secondary'}
-                  <button class="secondary" onclick={() => toggleSign(zone)} title={zone.dnssec ? 'Stop DNSSEC signing' : 'Sign the zone with DNSSEC'}>{zone.dnssec ? 'Unsign' : 'Sign'}</button>
+                  <IconButton icon={zone.dnssec ? 'unsign' : 'sign'} label={zone.dnssec ? 'Unsign: stop DNSSEC signing' : 'Sign the zone with DNSSEC'} onclick={() => toggleSign(zone)} />
                   {#if zone.dnssec && zone.ds?.length}
-                    <button class="secondary" onclick={() => (dsZone = zone)} title="The DS record to publish at the parent zone (your registrar)">DS</button>
+                    <IconButton icon="key" label="DS record to publish at the parent zone (your registrar)" onclick={() => (dsZone = zone)} />
                   {/if}
                   {#if zone.dnssec}
-                    <button class="secondary" onclick={() => toggleNsec3(zone)} title={zone.nsec3 ? 'Prove missing names with NSEC' : 'Prove missing names with NSEC3, which keeps the zone from being listed by walking it'}>{zone.nsec3 ? 'Use NSEC' : 'Use NSEC3'}</button>
+                    <IconButton icon="hash" label={zone.nsec3 ? 'Use NSEC: prove missing names with NSEC' : 'Use NSEC3: prove missing names with NSEC3, which keeps the zone from being listed by walking it'} onclick={() => toggleNsec3(zone)} />
                   {/if}
                 {/if}
-                <button class="secondary" onclick={() => exportZone(zone)} title="Download as a zone file">Export</button>
+                <IconButton icon="download" label="Export: download as a zone file" onclick={() => exportZone(zone)} />
                 {#if !zone.catalog}
-                  <button class="danger" onclick={() => removeZone(zone)} aria-label="Delete {zone.name}">✕</button>
+                  <IconButton icon="delete" variant="danger" label="Delete {zone.name}" onclick={() => removeZone(zone)} />
                 {/if}
               </div>
             </td>
@@ -623,8 +624,8 @@
             {#if show('last-modified')}<td class="muted">-</td>{/if}
             <td class="num">
               <div class="row" style="gap: 6px; justify-content: flex-end">
-                <button class="secondary" onclick={() => openEditStub(stub)}>Edit</button>
-                <button class="danger" onclick={() => removeSettingsZone('stub', stub.name)} aria-label="Delete {stub.name}">✕</button>
+                <IconButton icon="edit" label="Edit" onclick={() => openEditStub(stub)} />
+                <IconButton icon="delete" variant="danger" label="Delete {stub.name}" onclick={() => removeSettingsZone('stub', stub.name)} />
               </div>
             </td>
           </tr>
@@ -659,9 +660,9 @@
             {#if show('last-modified')}<td class="muted">-</td>{/if}
             <td class="num">
               <div class="row" style="gap: 6px; justify-content: flex-end">
-                <button class="secondary" onclick={refreshRoot}>Refresh</button>
-                <button class="secondary" onclick={openEditRoot}>Edit</button>
-                <button class="danger" onclick={() => removeSettingsZone('root', '.')} aria-label="Delete the Secondary ROOT Zone">✕</button>
+                <IconButton icon="refresh" label="Refresh: transfer and verify the root zone now" onclick={refreshRoot} />
+                <IconButton icon="edit" label="Edit" onclick={openEditRoot} />
+                <IconButton icon="delete" variant="danger" label="Delete the Secondary ROOT Zone" onclick={() => removeSettingsZone('root', '.')} />
               </div>
             </td>
           </tr>
@@ -676,8 +677,8 @@
             {#if show('last-modified')}<td class="muted">-</td>{/if}
             <td class="num">
               <div class="row" style="gap: 6px; justify-content: flex-end">
-                <button class="secondary" onclick={() => openEditForwarder(fwd)}>Edit</button>
-                <button class="danger" onclick={() => removeSettingsZone('forwarder', fwd.name)} aria-label="Delete {fwd.name}">✕</button>
+                <IconButton icon="edit" label="Edit" onclick={() => openEditForwarder(fwd)} />
+                <IconButton icon="delete" variant="danger" label="Delete {fwd.name}" onclick={() => removeSettingsZone('forwarder', fwd.name)} />
               </div>
             </td>
           </tr>

@@ -139,6 +139,6 @@
 <style>
   .row { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 20px; }
   .row input[type='file'] { flex: 1 1 260px; min-width: 0; }
-  .pending { border-color: #f5b041; }
+  .pending { border-color: var(--warn); }
   .check { display: flex; align-items: center; gap: 8px; }
 </style>

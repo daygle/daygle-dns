@@ -7,15 +7,17 @@
 // Every layer has the same three fields: `time_zone` (`system`, `UTC` or an
 // IANA zone such as `Europe/London`), `date_format` (`system`, `dmy`, `mdy`,
 // `ymd`, `d_mon_y`) and `time_format` (`system`, `24h`, `12h`). In a user's
-// preferences an empty field means "use the server default".
+// preferences an empty field means "use the server default". The colour
+// `theme` (`system`, `light`, `dark`) rides along in the same layers; see
+// theme.svelte.js.
 //
 // `$state` makes the values reactive: every template that calls the
 // formatters below re-renders when a preference changes - no refresh needed.
 
 import { api } from './api.js';
 
-const SYSTEM = { time_zone: 'system', date_format: 'system', time_format: 'system' };
-const UNSET = { time_zone: '', date_format: '', time_format: '' };
+const SYSTEM = { time_zone: 'system', date_format: 'system', time_format: 'system', theme: 'dark' };
+const UNSET = { time_zone: '', date_format: '', time_format: '', theme: '' };
 
 // Older consoles kept a per-browser choice here; it is moved onto the
 // account the first time the user signs in with this version.
@@ -43,6 +45,7 @@ function normalize(value, base) {
     time_zone: value?.time_zone ?? base.time_zone,
     date_format: value?.date_format ?? base.date_format,
     time_format: value?.time_format ?? base.time_format,
+    theme: value?.theme ?? base.theme,
   };
 }
 

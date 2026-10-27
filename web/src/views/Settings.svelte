@@ -5,6 +5,7 @@
   import NetworkPicker from '../NetworkPicker.svelte';
   import { icons } from '../icons.svelte.js';
   import { display, setDisplayDefaults, timeZoneOptions, DATE_FORMAT_OPTIONS, TIME_FORMAT_OPTIONS, previewDateTime } from '../datetime.svelte.js';
+  import { THEME_OPTIONS } from '../theme.svelte.js';
   import { duration } from '../aiLabels.js';
 
   let config = $state(null);
@@ -97,8 +98,8 @@
     return Number.isInteger(n) && n > 0 ? duration(n) : '';
   }
 
-  // Server-wide date and time display defaults (saved with the page).
-  let display_ = $state({ time_zone: 'system', date_format: 'system', time_format: 'system' });
+  // Server-wide date, time and theme display defaults (saved with the page).
+  let display_ = $state({ time_zone: 'system', date_format: 'system', time_format: 'system', theme: 'dark' });
   // How the web console is served (Settings -> General). `http_port` 0 in
   // the stored settings means the config file's api.port; the form shows
   // the real number.
@@ -195,7 +196,7 @@
   const zoneChoices = timeZoneOptions();
   // Users who chose their own settings don't see the defaults change.
   const ownPrefsSet = $derived(
-    !!(display.mine && (display.mine.time_zone || display.mine.date_format || display.mine.time_format)),
+    !!(display.mine && (display.mine.time_zone || display.mine.date_format || display.mine.time_format || display.mine.theme)),
   );
 
   // What empty SOA defaults resolve to (this server's name, the first
@@ -257,7 +258,7 @@
         doq = {};
         api_ = {};
         ai_ = {};
-        display_ = { time_zone: 'system', date_format: 'system', time_format: 'system' };
+        display_ = { time_zone: 'system', date_format: 'system', time_format: 'system', theme: 'dark' };
         aiCategoriesText = '';
         aiBackendCategories = [];
         upstreamText = '';
@@ -282,7 +283,7 @@
       dohNetworks = [...(config.doh?.allowed_networks || [])];
       doqNetworks = [...(config.doq?.allowed_networks || [])];
       api_ = { ...config.api };
-      display_ = { time_zone: 'system', date_format: 'system', time_format: 'system', ...config.display };
+      display_ = { time_zone: 'system', date_format: 'system', time_format: 'system', theme: 'dark', ...config.display };
       web_ = {
         http_enabled: true, https_enabled: false, https_port: 5443, https_certificate: '', redirect_http: false,
         ...config.web,
@@ -785,7 +786,7 @@
     </p>
   </div>
   <div class="card" style="margin-bottom: 14px">
-    <h3 style="margin: 0 0 10px">Date & Time Defaults</h3>
+    <h3 style="margin: 0 0 10px">Display Defaults</h3>
     <div class="form-grid">
       <label><span>Time Zone</span>
         <select bind:value={display_.time_zone}>
@@ -802,6 +803,11 @@
           {#each TIME_FORMAT_OPTIONS as [value, label]}<option value={value}>{label}</option>{/each}
         </select>
       </label>
+      <label><span>Theme</span>
+        <select bind:value={display_.theme}>
+          {#each THEME_OPTIONS as [value, label]}<option value={value}>{label}</option>{/each}
+        </select>
+      </label>
     </div>
     <p class="muted help">
       Example: <strong>{previewDateTime(display_)}</strong>. These are the
@@ -809,7 +815,8 @@
       the Preferences tab of their <strong>Account</strong> page.
       {#if ownPrefsSet}Your own preferences are set, so you won't see a change
         here until you reset them.{/if}
-      "Device Time Zone" and "Browser Default" follow each viewer's computer.
+      "Device Time Zone", "Browser Default" and "Match the Device" follow each
+      viewer's computer.
       Filtering group schedules also use this time zone ("Device Time Zone"
       there means the server's own).
     </p>
@@ -1540,7 +1547,7 @@
     gap: 4px 12px;
     margin-top: 6px;
   }
-  .help.restart { color: #f5b041; margin-top: 8px; }
+  .help.restart { color: var(--warn); margin-top: 8px; }
   /* Save bar: stays in view while scrolling a long tab. */
   .actions {
     position: sticky;
@@ -1550,7 +1557,7 @@
     padding: 10px 0;
     background: var(--bg);
   }
-  .unsaved { color: #f5b041; font-size: 0.85rem; }
+  .unsaved { color: var(--warn); font-size: 0.85rem; }
   .form-grid.top { align-items: start; }
   .access { display: flex; flex-direction: column; gap: 10px; }
   .access-row { display: grid; grid-template-columns: 110px 140px minmax(0, 1fr); gap: 12px; align-items: end; }
