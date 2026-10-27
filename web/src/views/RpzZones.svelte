@@ -1,4 +1,5 @@
 <script>
+  import IconButton from '../IconButton.svelte';
   import { api, formatApiError, getStoredUser } from '../api.js';
   import { formatDateTime } from '../datetime.svelte.js';
 
@@ -235,10 +236,10 @@
                 {#if isAdmin}
                   <td class="num">
                     <div class="row" style="gap: 6px; justify-content: flex-end">
-                      <button class="secondary" onclick={() => move(i, -1)} disabled={i === 0 || saving} aria-label="Move {z.name} up">↑</button>
-                      <button class="secondary" onclick={() => move(i, 1)} disabled={i === zones.length - 1 || saving} aria-label="Move {z.name} down">↓</button>
-                      <button class="secondary" onclick={() => startEdit(i)}>Edit</button>
-                      <button class="danger" onclick={() => removeZone(i)} aria-label="Delete {z.name}">✕</button>
+                      <IconButton icon="up" label="Move {z.name} up" onclick={() => move(i, -1)} disabled={i === 0 || saving} />
+                      <IconButton icon="down" label="Move {z.name} down" onclick={() => move(i, 1)} disabled={i === zones.length - 1 || saving} />
+                      <IconButton icon="edit" label="Edit" onclick={() => startEdit(i)} />
+                      <IconButton icon="delete" variant="danger" label="Delete {z.name}" onclick={() => removeZone(i)} />
                     </div>
                   </td>
                 {/if}

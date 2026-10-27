@@ -1,4 +1,5 @@
 <script>
+  import IconButton from '../IconButton.svelte';
   import { api, formatApiError, getStoredUser } from '../api.js';
   import PageHeader from '../PageHeader.svelte';
   import { icons } from '../icons.svelte.js';
@@ -380,17 +381,18 @@
                 <td class="num">
                   <div class="row" style="gap: 6px; justify-content: flex-end; flex-wrap: nowrap">
                     {#if cert.acme}
-                      <button class="secondary" disabled={busy || cert.acme.status === 'pending'} onclick={() => renew(cert)} title="Ask the CA for a new certificate now">{cert.not_after ? 'Renew Now' : 'Retry'}</button>
+                      <IconButton icon="refresh" label={cert.not_after ? 'Renew now: ask the CA for a new certificate' : 'Retry: ask the CA for the certificate again'} disabled={busy || cert.acme.status === 'pending'} onclick={() => renew(cert)} />
                     {:else}
-                      <button class="secondary" onclick={() => openReplace(cert)} title="Upload a renewed certificate under this name">Replace</button>
+                      <IconButton icon="upload" label="Replace: upload a renewed certificate under this name" onclick={() => openReplace(cert)} />
                     {/if}
-                    <button
-                      class="danger"
+                    <IconButton
+                      icon="delete"
+                      variant="danger"
                       disabled={busy || cert.in_use?.length > 0}
-                      title={cert.in_use?.length ? `Used by ${cert.in_use.join(', ')}: choose another certificate in Settings first` : 'Delete'}
-                      aria-label="Delete {cert.name}"
+                      title={cert.in_use?.length ? `Used by ${cert.in_use.join(', ')}: choose another certificate in Settings first` : `Delete ${cert.name}`}
+                      label="Delete {cert.name}"
                       onclick={() => remove(cert)}
-                    >✕</button>
+                    />
                   </div>
                 </td>
               {/if}

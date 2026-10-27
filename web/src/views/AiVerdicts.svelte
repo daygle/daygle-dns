@@ -1,4 +1,5 @@
 <script>
+  import IconButton from '../IconButton.svelte';
   import { api, formatApiError, getStoredUser } from '../api.js';
   import { formatDate, formatDateTime } from '../datetime.svelte.js';
   import { backendLabel, percent, STATUS_LABELS, titleCase } from '../aiLabels.js';
@@ -206,9 +207,9 @@
             {#if isAdmin}
               <td class="num">
                 {#if r.overridden}
-                  <button class="secondary" onclick={() => setExempt(r.domain, false)} title="Let the AI block this domain again">Unexempt</button>
+                  <IconButton icon="disallow" label="Unexempt: let the AI block this domain again" onclick={() => setExempt(r.domain, false)} />
                 {:else}
-                  <button class="secondary" onclick={() => setExempt(r.domain, true)} title="Never let the AI block this domain or its subdomains">Exempt</button>
+                  <IconButton icon="allow" label="Exempt: never let the AI block this domain or its subdomains" onclick={() => setExempt(r.domain, true)} />
                 {/if}
               </td>
             {/if}

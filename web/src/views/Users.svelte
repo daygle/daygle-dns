@@ -1,4 +1,5 @@
 <script>
+  import IconButton from '../IconButton.svelte';
   import { api, formatApiError, getStoredUser } from '../api.js';
   import PageHeader from '../PageHeader.svelte';
   import { icons } from '../icons.svelte.js';
@@ -285,7 +286,7 @@
               <td class="muted nowrap" title={user.created_at || ''}>{formatDateTime(user.created_at)}</td>
               <td class="muted nowrap" title={user.last_login_at || ''}>{user.last_login_at ? formatDateTime(user.last_login_at) : 'Never'}</td>
               <td class="num">
-                <button class="secondary" onclick={(e) => { e.stopPropagation(); openEdit(user); }}>Edit</button>
+                <IconButton icon="edit" label="Edit" onclick={(e) => { e.stopPropagation(); openEdit(user); }} />
               </td>
             </tr>
           {/each}

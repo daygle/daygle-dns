@@ -1,4 +1,5 @@
 <script>
+  import IconButton from '../IconButton.svelte';
   import { api, formatApiError, getStoredUser } from '../api.js';
 
   // One of the two lists: kind is 'allow' (policy.allowlist) or 'block'
@@ -193,7 +194,7 @@
               </td>
               {#if isAdmin}
                 <td class="num">
-                  <button class="secondary" onclick={() => remove(domain)} disabled={busy}>Remove</button>
+                  <IconButton icon="delete" variant="danger" label="Remove {domain}" onclick={() => remove(domain)} disabled={busy} />
                 </td>
               {/if}
             </tr>

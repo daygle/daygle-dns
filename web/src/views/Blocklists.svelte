@@ -1,4 +1,5 @@
 <script>
+  import IconButton from '../IconButton.svelte';
   import { api, formatApiError } from '../api.js';
   import { formatDateTime } from '../datetime.svelte.js';
   import ColumnPicker from '../ColumnPicker.svelte';
@@ -395,8 +396,8 @@
             {/if}
             <td class="num">
               <div class="row" style="gap: 6px; justify-content: flex-end">
-                <button class="secondary" onclick={() => openEdit(s)}>Edit</button>
-                <button class="danger" onclick={() => removeSource(s)} aria-label="Delete {s.name}">✕</button>
+                <IconButton icon="edit" label="Edit" onclick={() => openEdit(s)} />
+                <IconButton icon="delete" variant="danger" label="Delete {s.name}" onclick={() => removeSource(s)} />
               </div>
             </td>
           </tr>
