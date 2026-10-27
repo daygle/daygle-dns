@@ -1404,6 +1404,13 @@ pub async fn config(State(state): State<AppState>) -> Response {
     config_response(&state.config.load_full())
 }
 
+/// `GET /api/config/defaults` - the built-in default configuration, in the
+/// same shape as `GET /api/config`, so the console can reset a settings tab
+/// without duplicating the defaults.
+pub async fn config_defaults() -> Response {
+    config_response(&daygle_dns_core::config::DaygleConfig::default())
+}
+
 /// Re-read the configuration file and apply policy/upstream/listener changes
 /// immediately.
 pub async fn reload_config(State(state): State<AppState>) -> Response {

@@ -4550,7 +4550,7 @@ impl Default for RateLimitSettings {
     fn default() -> Self {
         Self {
             enabled: false,
-            client_max_queries: 100,
+            client_max_queries: 1000,
             client_window_secs: 60,
             domain_max_queries: 600,
             domain_window_secs: 60,
@@ -4678,6 +4678,7 @@ pub fn normalize_domains(entries: impl IntoIterator<Item = String>) -> BTreeSet<
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
 
     /// Every setting the console saves into the database overlay must come
     /// back from it on the next start (and on a config-file reload, which
@@ -5489,6 +5490,74 @@ fd0000000000000000000000000000aa 02 40 00 80     eth0
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../daygle-dns.toml.example");
         let text = std::fs::read_to_string(&path).expect("daygle-dns.toml.example is readable");
         DaygleConfig::parse(&text).expect("daygle-dns.toml.example must parse and validate");
+    }
+
+    #[test]
+    fn example_config_matches_defaults() {
+        // The installer copies the example as the live config, so any value
+        // it pins overrides the built-in default on every new install. Only
+        // the keys below may differ: install paths, the bundled AI models
+        // and placeholders the operator is expected to edit.
+        const INTENDED: &[&str] = &[
+            "ai.enabled",
+            "ai.model_path",
+            "ai.verifier_model_path",
+            "authoritative.database",
+            "authoritative.zones_dir",
+            "doh.server_name",
+            "doq.server_name",
+            "dot.server_name",
+            "recursive.mode",
+        ];
+        fn flatten(prefix: &str, value: &toml::Value, out: &mut BTreeMap<String, String>) {
+            match value {
+                toml::Value::Table(table) => {
+                    for (key, value) in table {
+                        let path = if prefix.is_empty() {
+                            key.clone()
+                        } else {
+                            format!("{prefix}.{key}")
+                        };
+                        flatten(&path, value, out);
+                    }
+                }
+                other => {
+                    out.insert(prefix.to_string(), other.to_string());
+                }
+            }
+        }
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../daygle-dns.toml.example");
+        let text = std::fs::read_to_string(&path).expect("daygle-dns.toml.example is readable");
+        let (mut example, mut defaults) = (BTreeMap::new(), BTreeMap::new());
+        flatten(
+            "",
+            &toml::Value::try_from(DaygleConfig::parse(&text).unwrap()).unwrap(),
+            &mut example,
+        );
+        flatten(
+            "",
+            &toml::Value::try_from(DaygleConfig::default()).unwrap(),
+            &mut defaults,
+        );
+        let keys: BTreeSet<&String> = example.keys().chain(defaults.keys()).collect();
+        let drift: Vec<String> = keys
+            .into_iter()
+            .filter(|key| !INTENDED.contains(&key.as_str()))
+            .filter(|key| example.get(*key) != defaults.get(*key))
+            .map(|key| {
+                format!(
+                    "{key}: example {:?}, default {:?}",
+                    example.get(key),
+                    defaults.get(key)
+                )
+            })
+            .collect();
+        assert!(
+            drift.is_empty(),
+            "example differs from defaults:\n{}",
+            drift.join("\n")
+        );
     }
 
     #[test]

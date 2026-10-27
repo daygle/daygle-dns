@@ -348,6 +348,105 @@
     load();
   }
 
+  // What each tab's Reset to Defaults leaves alone: things typed for this
+  // network (addresses, lists, names, credentials, certificates) rather
+  // than tuning. The General tab's web access is left too, so a reset can
+  // never move the console out from under the browser.
+  const RESET_KEEPS = {
+    general: 'Web console access is kept.',
+    recursive: 'Upstream servers, DNS64 clients and the ECS subnet are kept.',
+    cache: '',
+    listeners: 'Certificates, server names, allowed networks and the DDR name are kept.',
+    zones: 'Allowed networks, NOTIFY targets and catalog zones are kept.',
+    ai: '',
+    logging: 'The syslog server is kept.',
+    'rate-limiting': 'The never-limited list is kept.',
+    alerts: 'The webhook, email server, sender and recipients are kept.',
+  };
+
+  // Fill the current tab's fields with the built-in defaults. Nothing is
+  // saved until Save Changes, so Discard Changes undoes it.
+  async function resetTab() {
+    const label = TABS.find(([id]) => id === tab)?.[1] || tab;
+    const keeps = RESET_KEEPS[tab] ? ` ${RESET_KEEPS[tab]}` : '';
+    if (!confirm(`Reset the ${label} settings to their defaults?${keeps} Nothing is saved until you click Save Changes.`)) return;
+    notice = null;
+    error = null;
+    let d;
+    try {
+      d = await api.configDefaults();
+    } catch (e) {
+      error = formatApiError(e);
+      return;
+    }
+    const pick = (src, keys) => Object.fromEntries(keys.map((k) => [k, src[k]]));
+    const r = d.recursive;
+    if (tab === 'general') {
+      display_ = { time_zone: 'system', date_format: 'system', time_format: 'system', ...d.display };
+    } else if (tab === 'recursive') {
+      recursive = {
+        ...recursive,
+        ...pick(r, ['enabled', 'dnssec_validate', 'case_randomization', 'rebinding_protection',
+          'opportunistic_encryption', 'use_system_config']),
+        // An unset mode means: forwarding when upstreams exist, else recursive.
+        mode: r.mode || (parseUpstreams(upstreamText).length ? 'forwarding' : 'recursive'),
+        outbound_ip_versions: r.outbound_ip_versions || 'both',
+      };
+      dns64 = { ...dns64, enabled: !!d.dns64?.enabled, prefix: d.dns64?.prefix || '64:ff9b::/96' };
+      ecs = { ...ecs, ...pick(d.ecs, ['enabled', 'ipv4_prefix', 'ipv6_prefix']) };
+    } else if (tab === 'cache') {
+      recursive = {
+        ...recursive,
+        ...pick(r, ['min_cache_ttl', 'negative_cache_ttl', 'max_cache_ttl', 'failure_cache_ttl',
+          'cache_size', 'max_concurrent_lookups', 'prefetch_enabled', 'prefetch_ttl_fraction_pct',
+          'prefetch_min_queries', 'serve_stale_secs']),
+      };
+    } else if (tab === 'listeners') {
+      ddr_ = { ...ddr_, enabled: d.ddr.enabled };
+      dot = { ...dot, ...pick(d.dot, ['enabled', 'port', 'handshake_timeout_secs', 'max_connections']) };
+      doh = { ...doh, ...pick(d.doh, ['enabled', 'port', 'handshake_timeout_secs', 'max_connections', 'endpoint', 'http3']) };
+      doq = { ...doq, ...pick(d.doq, ['enabled', 'port', 'max_connections', 'max_concurrent_streams']) };
+    } else if (tab === 'zones') {
+      authoritative = {
+        ...authoritative,
+        ...pick(d.authoritative, ['default_record_ttl', 'default_primary_ns', 'default_admin_mailbox',
+          'axfr_enabled', 'allow_dynamic_updates', 'notify_enabled', 'notify_listen_enabled']),
+      };
+    } else if (tab === 'ai') {
+      const a = d.ai;
+      ai_ = {
+        ...ai_,
+        ...pick(a, ['enabled', 'workers', 'max_domains_per_scan', 'scan_interval_secs', 'expire_check_secs',
+          'block_threshold', 'confidence_floor', 'category_ttl_secs', 'threat_ttl_secs']),
+        mode: a.mode || 'train',
+      };
+      aiForm = {
+        scanMinutes: round2(a.scan_interval_secs / 60),
+        expireMinutes: round2(a.expire_check_secs / 60),
+        threatDays: round2(a.threat_ttl_secs / 86400),
+        categoryDays: round2(a.category_ttl_secs / 86400),
+        thresholdPct: round2(a.block_threshold * 100),
+        floorPct: round2(a.confidence_floor * 100),
+      };
+      aiCategoriesText = (a.auto_block_categories || []).join(', ');
+    } else if (tab === 'logging') {
+      syslog_ = { ...syslog_, ...pick(d.syslog, ['enabled', 'facility', 'level', 'queries']) };
+    } else if (tab === 'rate-limiting') {
+      // The never-limited list lives in rrlExempt, which is left alone.
+      rrl_ = { ...rrl_, ...d.rrl };
+    } else if (tab === 'alerts') {
+      alerts_ = {
+        ...alerts_,
+        enabled: d.alerts.enabled,
+        smtp_port: d.alerts.smtp_port,
+        smtp_security: d.alerts.smtp_security,
+        ...pick(d.alerts, ALERT_EVENTS.map(([key]) => key)),
+      };
+      reports_ = { ...reports_, ...d.reports };
+    }
+    notice = `${label} settings reset to their defaults. Click Save Changes to apply them.`;
+  }
+
   function parseUpstreams(text) {
     return text.split('\n').map((l) => l.trim()).filter(Boolean);
   }
@@ -616,6 +715,7 @@
   <div class="actions" class:dirty>
     <button onclick={save} disabled={busy || !dirty}>{busy ? 'Saving...' : 'Save Changes'}</button>
     <button class="secondary" onclick={reload} disabled={busy}>{dirty ? 'Discard Changes' : 'Reload'}</button>
+    <button class="secondary" onclick={resetTab} disabled={busy}>Reset to Defaults</button>
     {#if dirty}<span class="unsaved">Unsaved changes (Save covers every tab)</span>{/if}
   </div>
   {/if}
