@@ -29,9 +29,22 @@ const MAX_BODY_BYTES: usize = 64 * 1024 * 1024;
 /// keyed by lower-cased source name. Shared between the refresh loop, which
 /// fills it, and the client-group matcher, which reads it on every query; a
 /// list selected by several groups is held once.
+///
+/// It also keeps the entries of each source that applies to everyone or to
+/// the DoT listener (those are merged into one list for the policy engine),
+/// so a block can be traced back to the source that listed the name.
 #[derive(Debug, Default)]
 pub struct GroupBlocklists {
     lists: RwLock<Arc<HashMap<String, Arc<Blocklist>>>>,
+    merged_sources: RwLock<Arc<MergedSources>>,
+}
+
+/// The entries of the sources merged into the engine's lists, by source
+/// name (shared with the source status, so this costs no copy).
+#[derive(Debug, Default)]
+struct MergedSources {
+    everyone: Vec<(String, Arc<BTreeSet<String>>)>,
+    dot: Vec<(String, Arc<BTreeSet<String>>)>,
 }
 
 impl GroupBlocklists {
@@ -48,6 +61,24 @@ impl GroupBlocklists {
 
     pub(crate) fn set(&self, lists: HashMap<String, Arc<Blocklist>>) {
         *self.lists.write().unwrap() = Arc::new(lists);
+    }
+
+    /// Every source merged into the everyone list (or, with `dot`, the DoT
+    /// listener's list) that lists `domain`, with the entry that lists it:
+    /// `(source name, entry)`, in source order.
+    pub fn sources_listing(&self, domain: &str, dot: bool) -> Vec<(String, String)> {
+        let merged = self.merged_sources.read().unwrap().clone();
+        let sources = if dot { &merged.dot } else { &merged.everyone };
+        sources
+            .iter()
+            .filter_map(|(name, entries)| {
+                crate::blocklist::entry_for(entries, domain).map(|entry| (name.clone(), entry))
+            })
+            .collect()
+    }
+
+    fn set_merged_sources(&self, merged: MergedSources) {
+        *self.merged_sources.write().unwrap() = Arc::new(merged);
     }
 }
 
@@ -371,6 +402,7 @@ impl BlocklistSourceManager {
         // DoT-scoped sources are merged into their own listener-scoped set.
         let mut group_sets: Vec<(String, Arc<BTreeSet<String>>)> = Vec::new();
         let mut dot_merged: BTreeSet<String> = BTreeSet::new();
+        let mut merged_sources = MergedSources::default();
         {
             let status = self.status.lock().unwrap();
             for (i, source) in sources.iter().enumerate() {
@@ -381,14 +413,20 @@ impl BlocklistSourceManager {
                     if describes(st, source) {
                         match source.scope {
                             BlocklistScope::Everyone => {
-                                merged.extend(st.cached_domains.iter().cloned())
+                                merged.extend(st.cached_domains.iter().cloned());
+                                merged_sources
+                                    .everyone
+                                    .push((source.name.clone(), st.cached_domains.clone()));
                             }
                             BlocklistScope::Groups => group_sets.push((
                                 source.name.to_ascii_lowercase(),
                                 st.cached_domains.clone(),
                             )),
                             BlocklistScope::Dot => {
-                                dot_merged.extend(st.cached_domains.iter().cloned())
+                                dot_merged.extend(st.cached_domains.iter().cloned());
+                                merged_sources
+                                    .dot
+                                    .push((source.name.clone(), st.cached_domains.clone()));
                             }
                         }
                     }
@@ -396,6 +434,7 @@ impl BlocklistSourceManager {
             }
         }
         self.publish_group_lists(group_sets);
+        self.group_lists.set_merged_sources(merged_sources);
 
         // Publish the DoT-scoped merge the same way: an emptied or disabled
         // source stops blocking on the listener immediately.

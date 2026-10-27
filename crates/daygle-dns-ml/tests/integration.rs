@@ -152,6 +152,7 @@ fn log_row(ts: &str, qname: &str) -> daygle_dns_authoritative::QueryLogRow {
         outcome: "recursive".into(),
         rcode: Some("NOERROR".into()),
         elapsed_ms: 1,
+        block: None,
     }
 }
 

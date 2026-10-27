@@ -344,6 +344,7 @@ impl ZoneStore {
         conn.execute_batch(SCHEMA)?;
         migrate_zone_metadata(&conn)?;
         migrate_record_metadata(&conn)?;
+        migrate_query_log_block_reasons(&conn)?;
         migrate_split_horizon_records(&conn)?;
         migrate_split_horizon_timestamps(&conn)?;
         migrate_dnssec_keys(&conn)?;
@@ -3011,6 +3012,9 @@ pub struct QueryLogRow {
     /// Response code (`NOERROR`, `NXDOMAIN`, ...) when known.
     pub rcode: Option<String>,
     pub elapsed_ms: i64,
+    /// Why it was blocked, for blocked queries (`null` otherwise, and for
+    /// queries logged before reasons were kept).
+    pub block: Option<daygle_dns_core::block_log::BlockReason>,
 }
 
 /// Filters for [`ZoneStore::search_query_logs`]; `None`/empty means unfiltered.
@@ -3023,6 +3027,8 @@ pub struct QueryLogFilter {
     pub protocol: Option<String>,
     pub outcome: Option<String>,
     pub rcode: Option<String>,
+    /// What blocked it (a `block.source` value).
+    pub block_source: Option<String>,
     /// Inclusive lower bound (RFC 3339).
     pub from: Option<String>,
     /// Inclusive upper bound (RFC 3339).
@@ -3281,21 +3287,7 @@ impl ZoneStore {
     /// Append one query-log entry.
     pub fn insert_query_log(&self, entry: &QueryLogRow) -> Result<()> {
         let conn = self.lock_conn()?;
-        conn.execute(
-            "INSERT INTO query_logs (ts, client, qname, qtype, protocol, outcome, rcode, elapsed_ms)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            params![
-                entry.ts,
-                entry.client,
-                entry.qname,
-                entry.qtype,
-                entry.protocol,
-                entry.outcome,
-                entry.rcode,
-                entry.elapsed_ms,
-            ],
-        )?;
-        Ok(())
+        insert_query_log_row(&conn, entry)
     }
 
     /// Append many entries in one transaction (the background writer's bulk path).
@@ -3306,20 +3298,7 @@ impl ZoneStore {
         let mut conn = self.lock_conn()?;
         let tx = conn.transaction()?;
         for entry in entries {
-            tx.execute(
-                "INSERT INTO query_logs (ts, client, qname, qtype, protocol, outcome, rcode, elapsed_ms)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                params![
-                    entry.ts,
-                    entry.client,
-                    entry.qname,
-                    entry.qtype,
-                    entry.protocol,
-                    entry.outcome,
-                    entry.rcode,
-                    entry.elapsed_ms,
-                ],
-            )?;
+            insert_query_log_row(&tx, entry)?;
         }
         tx.commit()?;
         Ok(())
@@ -3373,6 +3352,7 @@ impl ZoneStore {
             (filter.protocol.as_deref(), "protocol"),
             (filter.outcome.as_deref(), "outcome"),
             (filter.rcode.as_deref(), "rcode"),
+            (filter.block_source.as_deref(), "block_source"),
         ] {
             if let Some(v) = value.map(str::trim).filter(|s| !s.is_empty()) {
                 params_vec.push(Box::new(v.to_string()));
@@ -3415,7 +3395,8 @@ impl ZoneStore {
             |r| r.get::<_, i64>(0),
         )? as u64;
         let mut stmt = conn.prepare(&format!(
-            "SELECT id, ts, client, qname, qtype, protocol, outcome, rcode, elapsed_ms
+            "SELECT id, ts, client, qname, qtype, protocol, outcome, rcode, elapsed_ms,
+                    block_source, block_group, block_matched, block_reason
              FROM query_logs {where_clause}
              ORDER BY id DESC LIMIT {per_page} OFFSET {offset}"
         ))?;
@@ -3433,6 +3414,7 @@ impl ZoneStore {
                         outcome: r.get(6)?,
                         rcode: r.get(7)?,
                         elapsed_ms: r.get(8)?,
+                        block: block_reason_columns(r, 9)?,
                     })
                 },
             )?
@@ -3813,6 +3795,78 @@ fn canonicalize_split_horizon_records(
 }
 
 /// Add per-record last-modified/last-used metadata to older databases.
+/// Write one query-log row.
+fn insert_query_log_row(conn: &Connection, entry: &QueryLogRow) -> Result<()> {
+    let block = entry.block.as_ref();
+    conn.execute(
+        "INSERT INTO query_logs (ts, client, qname, qtype, protocol, outcome, rcode, elapsed_ms,
+                                 block_source, block_group, block_matched, block_reason)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+        params![
+            entry.ts,
+            entry.client,
+            entry.qname,
+            entry.qtype,
+            entry.protocol,
+            entry.outcome,
+            entry.rcode,
+            entry.elapsed_ms,
+            block.map(|b| b.source.as_str()),
+            block.and_then(|b| b.group.as_deref()),
+            block.and_then(|b| b.matched.as_deref()),
+            block.map(|b| b.reason.as_str()),
+        ],
+    )?;
+    Ok(())
+}
+
+/// The block reason stored in a query-log row's four `block_*` columns,
+/// starting at `first`.
+fn block_reason_columns(
+    row: &rusqlite::Row<'_>,
+    first: usize,
+) -> rusqlite::Result<Option<daygle_dns_core::block_log::BlockReason>> {
+    let source: Option<String> = row.get(first)?;
+    Ok(match source {
+        Some(source) => Some(daygle_dns_core::block_log::BlockReason {
+            source,
+            group: row.get(first + 1)?,
+            matched: row.get(first + 2)?,
+            reason: row.get::<_, Option<String>>(first + 3)?.unwrap_or_default(),
+        }),
+        None => None,
+    })
+}
+
+/// Keep why a query was blocked (older databases lack the columns).
+fn migrate_query_log_block_reasons(conn: &Connection) -> Result<()> {
+    for column in [
+        "block_source",
+        "block_group",
+        "block_matched",
+        "block_reason",
+    ] {
+        let has: bool = conn.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM pragma_table_info('query_logs') WHERE name = ?1
+             )",
+            [column],
+            |row| row.get(0),
+        )?;
+        if !has {
+            conn.execute(
+                &format!("ALTER TABLE query_logs ADD COLUMN {column} TEXT"),
+                [],
+            )?;
+        }
+    }
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_query_logs_block_source ON query_logs (block_source)",
+        [],
+    )?;
+    Ok(())
+}
+
 fn migrate_record_metadata(conn: &Connection) -> Result<()> {
     for (column, definition) in [
         ("last_modified_at", "TEXT NOT NULL DEFAULT ''"),
@@ -4113,6 +4167,7 @@ mod tests {
             outcome: outcome.to_string(),
             rcode: None,
             elapsed_ms: 1,
+            block: None,
         };
         s.insert_query_logs(&[
             row(
@@ -4180,6 +4235,7 @@ mod tests {
                 outcome: "recursive".to_string(),
                 rcode: Some("NOERROR".to_string()),
                 elapsed_ms: 1,
+                block: None,
             })
             .collect();
         s.insert_query_logs(&rows).unwrap();

@@ -274,6 +274,7 @@ export const api = {
   sendReport: (reports) => request('POST', '/reports/send', { reports }),
   rpzRefresh: () => request('POST', '/rpz'),
   rpzTest: (client, domain) => request('POST', '/rpz/test', { client, domain }),
+  explainBlocking: (params) => request('GET', `/policy/explain?${new URLSearchParams(params)}`),
   testBlocking: (client, domain, listener) =>
     request('POST', '/policy/blocking/test', { client, domain, listener }),
   networks: () => request('GET', '/networks'),

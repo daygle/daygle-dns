@@ -592,6 +592,7 @@ pub fn router(state: AppState) -> Router {
             get(handlers::validate_blocklist_source),
         )
         .route("/policy/blocking/test", post(handlers::test_blocking))
+        .route("/policy/explain", get(handlers::explain_blocking))
         .route("/alerts/test", post(handlers::test_alert))
         .route("/reports", get(handlers::report))
         .route("/reports/send", post(handlers::send_report))

@@ -184,6 +184,7 @@ async fn query_log_time_filter_honours_offsets() {
         outcome: "recursive".to_string(),
         rcode: Some("NOERROR".to_string()),
         elapsed_ms: 1,
+        block: None,
     };
     // Stored the way the dispatcher writes them (`Utc::now().to_rfc3339()`:
     // the fraction is left out when it is zero).

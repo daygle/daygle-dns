@@ -564,6 +564,9 @@ pub async fn bind_with(
     // Their schedules are read in the display time zone.
     daygle_dns_core::schedule::set_time_zone(&config.display.time_zone);
     let group_blocklists = Arc::new(daygle_dns_policy::GroupBlocklists::default());
+    // Blocks from the merged blocklist sources name the source that listed
+    // the domain (the refresher keeps each source's entries there).
+    policy.set_source_attribution(group_blocklists.clone());
     let advanced_blocking = Arc::new(ArcSwap::from_pointee(
         daygle_dns_policy::AdvancedBlocking::build(
             &resolved.resolve_blocking_groups(catalog.store().list_blocking_groups()?),
