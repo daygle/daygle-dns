@@ -12,6 +12,7 @@
 //! | `GET`    | `/api/metrics`                    | runtime metrics |
 //! | `GET`    | `/api/logs?limit=N`               | recent log entries |
 //! | `GET`    | `/api/config`                     | effective configuration |
+//! | `GET`    | `/api/config/defaults`            | built-in default configuration |
 //! | `POST`   | `/api/config/reload`              | re-read the config file (live reload) |
 //! | `GET`    | `/api/zones`                      | list zones |
 //! | `POST`   | `/api/zones`                      | create a primary or secondary zone |
@@ -460,6 +461,7 @@ pub fn router(state: AppState) -> Router {
                 .put(handlers::update_settings)
                 .post(handlers::reload_config),
         )
+        .route("/config/defaults", get(handlers::config_defaults))
         .route("/auth/login", post(handlers::auth_login))
         .route("/auth/logout", post(handlers::auth_logout))
         .route("/auth/me", get(handlers::auth_me))

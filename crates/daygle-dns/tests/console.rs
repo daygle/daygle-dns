@@ -782,6 +782,45 @@ async fn tsig_secrets_are_redacted_from_the_config_endpoint() {
 }
 
 #[tokio::test]
+async fn config_defaults_endpoint_returns_built_in_defaults() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut cfg = base_config(&dir.path().join("daygle-dns.db"));
+    cfg.server.port = free_port();
+    cfg.api.port = free_port();
+    cfg.api.users = vec![daygle_dns_core::config::ApiUser {
+        username: "auditor".to_string(),
+        password_hash: daygle_dns_core::auth::hash_password_with("watch", 100),
+        role: daygle_dns_core::config::Role::Viewer,
+    }];
+    cfg.recursive.prefetch_enabled = false;
+    cfg.recursive.serve_stale_secs = 0;
+    let server = spawn(cfg).await;
+
+    let (token, _) = login(server.api_addr, "auditor", "watch").await;
+    let defaults: serde_json::Value = reqwest::Client::new()
+        .get(api_url(server.api_addr, "/api/config/defaults"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let expected = DaygleConfig::default().recursive;
+    assert_eq!(
+        defaults["recursive"]["prefetch_enabled"],
+        json!(expected.prefetch_enabled)
+    );
+    assert_eq!(
+        defaults["recursive"]["serve_stale_secs"],
+        json!(expected.serve_stale_secs)
+    );
+    assert_eq!(defaults["api"]["users"], json!([]));
+
+    shutdown(server).await;
+}
+
+#[tokio::test]
 async fn db_settings_survive_restart_and_win_over_the_file() {
     let dir = tempfile::tempdir().unwrap();
     let cfg_path = dir.path().join("daygle-dns.toml");
