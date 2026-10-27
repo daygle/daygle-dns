@@ -3380,8 +3380,75 @@ pub struct NameCount {
     pub count: u64,
 }
 
-/// A summary of the query log since a moment (for one client, or all).
+/// Queries and blocks in one hour of a report's period.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct HourCount {
+    /// RFC 3339: the start of the hour, in UTC.
+    pub hour: String,
+    pub queries: u64,
+    pub blocked: u64,
+}
+
+/// How many queries one blocking rule blocked: what blocked them (a
+/// `BlockReason` source), and the group and entry/list/zone when known.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct BlockRuleCount {
+    /// Empty for blocks logged before reasons were kept.
+    pub source: String,
+    pub group: Option<String>,
+    pub matched: Option<String>,
+    pub count: u64,
+}
+
+/// A name that failed to resolve, and how often with that response code.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct FailingName {
+    pub name: String,
+    pub rcode: String,
+    pub count: u64,
+}
+
+/// How long resolved (recursive) queries took, in milliseconds.
+#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
+pub struct LatencySummary {
+    /// How many queries the figures cover.
+    pub queries: u64,
+    pub average_ms: u64,
+    pub median_ms: u64,
+    pub p95_ms: u64,
+    pub max_ms: u64,
+}
+
+/// A name that was slow to resolve.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct SlowName {
+    pub name: String,
+    pub queries: u64,
+    pub average_ms: u64,
+    pub max_ms: u64,
+}
+
+/// A name asked for the first time (in the kept query log) in the period.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct NewName {
+    pub name: String,
+    /// RFC 3339.
+    pub first_seen: String,
+    pub queries: u64,
+    pub blocked: u64,
+}
+
+/// Queries one hosted zone (or one of its aliases) answered.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ZoneTraffic {
+    pub zone: String,
+    pub queries: u64,
+    /// Of those, answered NXDOMAIN (a name the zone does not have).
+    pub nxdomain: u64,
+}
+
+/// A summary of the query log since a moment (for one client, or all).
+#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
 pub struct QueryLogReport {
     /// RFC 3339: the start of the period.
     pub since: String,
@@ -3393,6 +3460,42 @@ pub struct QueryLogReport {
     pub clients: Vec<ClientActivity>,
     pub top_domains: Vec<NameCount>,
     pub top_blocked: Vec<NameCount>,
+    /// Queries per UTC hour, oldest first; hours with none are left out.
+    pub timeline: Vec<HourCount>,
+    /// Queries by outcome (`recursive`, `authoritative`, `blocked`, ...),
+    /// most first.
+    pub outcomes: Vec<NameCount>,
+    /// Queries by response code (`NOERROR`, `NXDOMAIN`, ...; empty when
+    /// none was recorded), most first.
+    pub rcodes: Vec<NameCount>,
+    /// Blocked queries by what blocked them (a `BlockReason` source; empty
+    /// for blocks logged before reasons were kept), most first.
+    pub block_sources: Vec<NameCount>,
+    /// The blocking rules that blocked most.
+    pub block_rules: Vec<BlockRuleCount>,
+    /// The names that failed most (NXDOMAIN, SERVFAIL or REFUSED answers
+    /// the server gave, not counting its own blocks or rate limiting).
+    pub failing: Vec<FailingName>,
+    /// Queries by record type (`A`, `AAAA`, `HTTPS`, ...), most first.
+    pub qtypes: Vec<NameCount>,
+    /// Queries by transport (`udp`, `tcp`, `tls`, `https`, `quic`, `h3`),
+    /// most first.
+    pub protocols: Vec<NameCount>,
+    /// Response times of resolved queries (cache hits included).
+    pub latency: LatencySummary,
+    /// Resolved queries by response time: `under_10`, `10_50`, `50_200`,
+    /// `200_1000` and `over_1000` milliseconds, in that order.
+    pub latency_buckets: Vec<NameCount>,
+    /// The slowest names to resolve (asked at least 3 times), slowest first.
+    pub slowest: Vec<SlowName>,
+    /// How many names were asked for the first time in the period (as far
+    /// back as the query log is kept).
+    pub new_names_total: u64,
+    /// The most recent of those, newest first.
+    pub new_names: Vec<NewName>,
+    /// Queries answered from each hosted zone, most first (a zone's
+    /// aliases count towards it).
+    pub zones: Vec<ZoneTraffic>,
 }
 
 impl ZoneStore {
@@ -3452,6 +3555,210 @@ impl ZoneStore {
         };
         let top_domains = names("")?;
         let top_blocked = names(" AND outcome = 'blocked'")?;
+        // Every row of `column` grouped, most first (no limit: these have a
+        // handful of values each).
+        let breakdown = |column: &str, extra: &str| -> Result<Vec<NameCount>> {
+            let mut stmt = conn.prepare(&format!(
+                "SELECT COALESCE({column}, ''), COUNT(*) FROM query_logs WHERE {filter}{extra}
+                 GROUP BY 1 ORDER BY 2 DESC, 1"
+            ))?;
+            let rows = stmt
+                .query_map(params![since, client], |r| {
+                    Ok(NameCount {
+                        name: r.get(0)?,
+                        count: r.get::<_, i64>(1)? as u64,
+                    })
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            Ok(rows)
+        };
+        let outcomes = breakdown("outcome", "")?;
+        let rcodes = breakdown("rcode", "")?;
+        let block_sources = breakdown("block_source", " AND outcome = 'blocked'")?;
+        let qtypes = breakdown("qtype", "")?;
+        let protocols = breakdown("protocol", "")?;
+
+        // Response times: only resolved queries; the server's own answers
+        // (zones, blocks) take no time worth reporting.
+        let resolved = format!("{filter} AND outcome = 'recursive'");
+        let (lat_n, lat_avg, lat_max): (i64, f64, i64) = conn.query_row(
+            &format!(
+                "SELECT COUNT(*), COALESCE(AVG(elapsed_ms), 0), COALESCE(MAX(elapsed_ms), 0)
+                 FROM query_logs WHERE {resolved}"
+            ),
+            params![since, client],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )?;
+        // The value `fraction` of the way up the sorted response times.
+        let percentile = |fraction: f64| -> Result<u64> {
+            if lat_n == 0 {
+                return Ok(0);
+            }
+            let offset = ((lat_n as f64 * fraction) as i64).min(lat_n - 1);
+            let ms: i64 = conn.query_row(
+                &format!(
+                    "SELECT elapsed_ms FROM query_logs WHERE {resolved}
+                     ORDER BY elapsed_ms LIMIT 1 OFFSET ?3"
+                ),
+                params![since, client, offset],
+                |r| r.get(0),
+            )?;
+            Ok(ms.max(0) as u64)
+        };
+        let latency = LatencySummary {
+            queries: lat_n as u64,
+            average_ms: lat_avg.round().max(0.0) as u64,
+            median_ms: percentile(0.5)?,
+            p95_ms: percentile(0.95)?,
+            max_ms: lat_max.max(0) as u64,
+        };
+        let (b10, b50, b200, b1000, over): (i64, i64, i64, i64, i64) = conn.query_row(
+            &format!(
+                "SELECT COALESCE(SUM(elapsed_ms < 10), 0),
+                        COALESCE(SUM(elapsed_ms >= 10 AND elapsed_ms < 50), 0),
+                        COALESCE(SUM(elapsed_ms >= 50 AND elapsed_ms < 200), 0),
+                        COALESCE(SUM(elapsed_ms >= 200 AND elapsed_ms < 1000), 0),
+                        COALESCE(SUM(elapsed_ms >= 1000), 0)
+                 FROM query_logs WHERE {resolved}"
+            ),
+            params![since, client],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+        )?;
+        let latency_buckets = [
+            ("under_10", b10),
+            ("10_50", b50),
+            ("50_200", b200),
+            ("200_1000", b1000),
+            ("over_1000", over),
+        ]
+        .into_iter()
+        .map(|(name, count)| NameCount {
+            name: name.to_string(),
+            count: count as u64,
+        })
+        .collect();
+        let mut stmt = conn.prepare(&format!(
+            "SELECT qname, COUNT(*), AVG(elapsed_ms), MAX(elapsed_ms) FROM query_logs
+             WHERE {resolved} GROUP BY qname HAVING COUNT(*) >= 3
+             ORDER BY 3 DESC, 1 LIMIT ?3"
+        ))?;
+        let slowest = stmt
+            .query_map(params![since, client, top], |r| {
+                Ok(SlowName {
+                    name: r.get(0)?,
+                    queries: r.get::<_, i64>(1)? as u64,
+                    average_ms: r.get::<_, f64>(2)?.round().max(0.0) as u64,
+                    max_ms: r.get::<_, i64>(3)?.max(0) as u64,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+
+        // Names first asked in the period: their earliest row in the whole
+        // log (for this client, when there is one) falls inside it.
+        let first_seen = "SELECT qname, MIN(ts) AS first, COUNT(*) AS n,
+                                 COALESCE(SUM(outcome = 'blocked'), 0) AS b
+                          FROM query_logs WHERE ?2 IS NULL OR client = ?2
+                          GROUP BY qname HAVING MIN(ts) >= ?1";
+        let new_names_total: i64 = conn.query_row(
+            &format!("SELECT COUNT(*) FROM ({first_seen})"),
+            params![since, client],
+            |r| r.get(0),
+        )?;
+        let mut stmt = conn.prepare(&format!(
+            "SELECT qname, first, n, b FROM ({first_seen}) ORDER BY first DESC, qname LIMIT ?3"
+        ))?;
+        let new_names = stmt
+            .query_map(params![since, client, top], |r| {
+                Ok(NewName {
+                    name: r.get(0)?,
+                    first_seen: r.get(1)?,
+                    queries: r.get::<_, i64>(2)? as u64,
+                    blocked: r.get::<_, i64>(3)? as u64,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+
+        // Hosted zones: each answered name goes to the longest zone or alias
+        // it is in. (Suffix compare, not LIKE: `_` is a LIKE wildcard.)
+        let mut stmt = conn.prepare(&format!(
+            "WITH names AS (
+                 SELECT lower(rtrim(name, '.')) AS n, name AS zone FROM zones
+                 UNION ALL
+                 SELECT lower(rtrim(a.name, '.')), z.name
+                 FROM zone_aliases a JOIN zones z ON z.id = a.zone_id
+             ),
+             asked AS (
+                 SELECT qname, COUNT(*) AS c, COALESCE(SUM(rcode = 'NXDOMAIN'), 0) AS nx
+                 FROM query_logs WHERE {filter} AND outcome = 'authoritative'
+                 GROUP BY qname
+             ),
+             matched AS (
+                 SELECT c, nx, (SELECT zone FROM names
+                                WHERE asked.qname = n
+                                   OR substr(asked.qname, -length(n) - 1) = '.' || n
+                                ORDER BY length(n) DESC LIMIT 1) AS zone
+                 FROM asked
+             )
+             SELECT zone, SUM(c), SUM(nx) FROM matched WHERE zone IS NOT NULL
+             GROUP BY zone ORDER BY 2 DESC, 1 LIMIT ?3"
+        ))?;
+        let zones = stmt
+            .query_map(params![since, client, top], |r| {
+                Ok(ZoneTraffic {
+                    zone: r.get(0)?,
+                    queries: r.get::<_, i64>(1)? as u64,
+                    nxdomain: r.get::<_, i64>(2)? as u64,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+
+        // Timestamps are UTC RFC 3339 (`2026-10-20T09:15:00...+00:00`), so
+        // the first 13 characters name the hour.
+        let mut stmt = conn.prepare(&format!(
+            "SELECT substr(ts, 1, 13), COUNT(*), COALESCE(SUM(outcome = 'blocked'), 0)
+             FROM query_logs WHERE {filter} GROUP BY 1 ORDER BY 1"
+        ))?;
+        let timeline = stmt
+            .query_map(params![since, client], |r| {
+                Ok(HourCount {
+                    hour: format!("{}:00:00Z", r.get::<_, String>(0)?),
+                    queries: r.get::<_, i64>(1)? as u64,
+                    blocked: r.get::<_, i64>(2)? as u64,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let mut stmt = conn.prepare(&format!(
+            "SELECT COALESCE(block_source, ''), block_group, block_matched, COUNT(*)
+             FROM query_logs WHERE {filter} AND outcome = 'blocked'
+             GROUP BY 1, 2, 3 ORDER BY 4 DESC, 1, 2, 3 LIMIT ?3"
+        ))?;
+        let block_rules = stmt
+            .query_map(params![since, client, top], |r| {
+                Ok(BlockRuleCount {
+                    source: r.get(0)?,
+                    group: r.get(1)?,
+                    matched: r.get(2)?,
+                    count: r.get::<_, i64>(3)? as u64,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        // A block can answer NXDOMAIN or REFUSED too, and rate limiting
+        // REFUSED; neither is a name failing to resolve.
+        let mut stmt = conn.prepare(&format!(
+            "SELECT qname, rcode, COUNT(*) FROM query_logs
+             WHERE {filter} AND outcome NOT IN ('blocked', 'rate_limited')
+               AND rcode IN ('NXDOMAIN', 'SERVFAIL', 'REFUSED')
+             GROUP BY 1, 2 ORDER BY 3 DESC, 1, 2 LIMIT ?3"
+        ))?;
+        let failing = stmt
+            .query_map(params![since, client, top], |r| {
+                Ok(FailingName {
+                    name: r.get(0)?,
+                    rcode: r.get(1)?,
+                    count: r.get::<_, i64>(2)? as u64,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(QueryLogReport {
             since: since.to_string(),
             queries: queries as u64,
@@ -3460,6 +3767,20 @@ impl ZoneStore {
             clients,
             top_domains,
             top_blocked,
+            timeline,
+            outcomes,
+            rcodes,
+            block_sources,
+            block_rules,
+            failing,
+            qtypes,
+            protocols,
+            latency,
+            latency_buckets,
+            slowest,
+            new_names_total: new_names_total as u64,
+            new_names,
+            zones,
         })
     }
 
@@ -4457,6 +4778,279 @@ mod tests {
             .query_log_report("2026-10-15T00:00:00+00:00", Some("10.0.0.2"), 10)
             .unwrap();
         assert_eq!((one.queries, one.blocked, one.clients_seen), (1, 1, 1));
+    }
+
+    #[test]
+    fn query_log_report_covers_speed_types_new_names_and_zones() {
+        let s = store();
+        {
+            let conn = s.lock_conn().unwrap();
+            conn.execute_batch(
+                "INSERT INTO zones (id, name, primary_ns, admin_mailbox, created_at)
+                     VALUES ('z1', 'home.example', 'ns1.home.example.', 'admin.home.example.', '');
+                 INSERT INTO zones (id, name, primary_ns, admin_mailbox, created_at)
+                     VALUES ('z2', 'lab.home.example', 'ns1.home.example.', 'admin.home.example.', '');
+                 INSERT INTO zone_aliases (name, zone_id, created_at) VALUES ('home.test', 'z1', '');",
+            )
+            .unwrap();
+        }
+        let row = |ts: &str, qname: &str, qtype: &str, protocol: &str, outcome: &str, ms: i64| {
+            QueryLogRow {
+                id: 0,
+                ts: ts.to_string(),
+                client: "10.0.0.1".to_string(),
+                qname: qname.to_string(),
+                qtype: qtype.to_string(),
+                protocol: protocol.to_string(),
+                outcome: outcome.to_string(),
+                rcode: Some("NOERROR".to_string()),
+                elapsed_ms: ms,
+                block: None,
+            }
+        };
+        let mut rows = vec![
+            // Seen before the period: not new.
+            row(
+                "2026-10-01T00:00:00+00:00",
+                "old.example",
+                "A",
+                "udp",
+                "recursive",
+                5,
+            ),
+            row(
+                "2026-10-20T00:00:00+00:00",
+                "old.example",
+                "A",
+                "udp",
+                "recursive",
+                5,
+            ),
+            row(
+                "2026-10-20T01:00:00+00:00",
+                "nas.home.example",
+                "A",
+                "udp",
+                "authoritative",
+                0,
+            ),
+            row(
+                "2026-10-20T01:01:00+00:00",
+                "nas.home.test",
+                "AAAA",
+                "tls",
+                "authoritative",
+                0,
+            ),
+            row(
+                "2026-10-20T01:02:00+00:00",
+                "pi.lab.home.example",
+                "A",
+                "https",
+                "authoritative",
+                0,
+            ),
+            row(
+                "2026-10-20T01:03:00+00:00",
+                "ads.example",
+                "A",
+                "udp",
+                "blocked",
+                0,
+            ),
+        ];
+        for (i, ms) in [400, 600, 800].into_iter().enumerate() {
+            rows.push(row(
+                &format!("2026-10-20T02:0{i}:00+00:00"),
+                "slow.example",
+                "A",
+                "udp",
+                "recursive",
+                ms,
+            ));
+        }
+        s.insert_query_logs(&rows).unwrap();
+        let report = s
+            .query_log_report("2026-10-15T00:00:00+00:00", None, 10)
+            .unwrap();
+
+        assert_eq!(
+            report.qtypes[0],
+            NameCount {
+                name: "A".to_string(),
+                count: 7
+            }
+        );
+        assert_eq!(report.protocols[0].name, "udp");
+        // Resolved only: 5, 400, 600, 800 ms.
+        assert_eq!(
+            report.latency,
+            LatencySummary {
+                queries: 4,
+                average_ms: 451,
+                median_ms: 600,
+                p95_ms: 800,
+                max_ms: 800,
+            }
+        );
+        let buckets: Vec<_> = report.latency_buckets.iter().map(|b| b.count).collect();
+        assert_eq!(buckets, [1, 0, 0, 3, 0]);
+        assert_eq!(
+            report.slowest.len(),
+            1,
+            "names asked fewer than 3 times are left out"
+        );
+        assert_eq!(report.slowest[0].name, "slow.example");
+        assert_eq!(
+            (report.slowest[0].average_ms, report.slowest[0].max_ms),
+            (600, 800)
+        );
+        assert_eq!(report.new_names_total, 5);
+        assert!(report.new_names.iter().all(|n| n.name != "old.example"));
+        assert_eq!(report.new_names[0].name, "slow.example");
+        assert_eq!(report.new_names[0].queries, 3);
+        let ads = report
+            .new_names
+            .iter()
+            .find(|n| n.name == "ads.example")
+            .unwrap();
+        assert_eq!(ads.blocked, 1);
+        // The alias counts towards its zone; the child zone keeps its own.
+        let zones: Vec<_> = report
+            .zones
+            .iter()
+            .map(|z| (z.zone.as_str(), z.queries))
+            .collect();
+        assert_eq!(zones, [("home.example", 2), ("lab.home.example", 1)]);
+    }
+
+    #[test]
+    fn query_log_report_breaks_queries_down() {
+        let s = store();
+        let row = |ts: &str, qname: &str, outcome: &str, rcode: &str| QueryLogRow {
+            id: 0,
+            ts: ts.to_string(),
+            client: "10.0.0.1".to_string(),
+            qname: qname.to_string(),
+            qtype: "A".to_string(),
+            protocol: "udp".to_string(),
+            outcome: outcome.to_string(),
+            rcode: Some(rcode.to_string()),
+            elapsed_ms: 1,
+            block: None,
+        };
+        let blocked = |ts: &str, source: &str, matched: &str| QueryLogRow {
+            block: Some(daygle_dns_core::block_log::BlockReason {
+                source: source.to_string(),
+                group: None,
+                matched: Some(matched.to_string()),
+                reason: String::new(),
+            }),
+            ..row(ts, "ads.example", "blocked", "NXDOMAIN")
+        };
+        s.insert_query_logs(&[
+            row(
+                "2026-10-20T09:05:00+00:00",
+                "a.example",
+                "recursive",
+                "NOERROR",
+            ),
+            row(
+                "2026-10-20T09:40:00+00:00",
+                "gone.example",
+                "recursive",
+                "NXDOMAIN",
+            ),
+            row(
+                "2026-10-20T09:50:00+00:00",
+                "gone.example",
+                "recursive",
+                "NXDOMAIN",
+            ),
+            row(
+                "2026-10-20T11:00:00+00:00",
+                "broken.example",
+                "error",
+                "SERVFAIL",
+            ),
+            row(
+                "2026-10-20T11:01:00+00:00",
+                "flood.example",
+                "rate_limited",
+                "REFUSED",
+            ),
+            blocked("2026-10-20T11:02:00+00:00", "blocklist_source", "Ads List"),
+            blocked("2026-10-20T11:03:00+00:00", "blocklist_source", "Ads List"),
+            blocked("2026-10-20T11:04:00+00:00", "ai", "malware"),
+            // Logged before block reasons were kept.
+            row(
+                "2026-10-20T11:05:00+00:00",
+                "old.example",
+                "blocked",
+                "NXDOMAIN",
+            ),
+        ])
+        .unwrap();
+        let report = s
+            .query_log_report("2026-10-15T00:00:00+00:00", None, 10)
+            .unwrap();
+
+        let hours: Vec<_> = report
+            .timeline
+            .iter()
+            .map(|h| (h.hour.as_str(), h.queries, h.blocked))
+            .collect();
+        assert_eq!(
+            hours,
+            [
+                ("2026-10-20T09:00:00Z", 3, 0),
+                ("2026-10-20T11:00:00Z", 6, 4)
+            ]
+        );
+        let counts = |rows: &[NameCount]| -> Vec<(String, u64)> {
+            rows.iter().map(|r| (r.name.clone(), r.count)).collect()
+        };
+        assert_eq!(
+            counts(&report.outcomes),
+            [
+                ("blocked".to_string(), 4),
+                ("recursive".to_string(), 3),
+                ("error".to_string(), 1),
+                ("rate_limited".to_string(), 1),
+            ]
+        );
+        assert_eq!(
+            report.rcodes[0],
+            NameCount {
+                name: "NXDOMAIN".to_string(),
+                count: 6
+            }
+        );
+        assert_eq!(
+            counts(&report.block_sources),
+            [
+                ("blocklist_source".to_string(), 2),
+                (String::new(), 1),
+                ("ai".to_string(), 1),
+            ]
+        );
+        assert_eq!(report.block_rules[0].source, "blocklist_source");
+        assert_eq!(report.block_rules[0].matched.as_deref(), Some("Ads List"));
+        assert_eq!(report.block_rules[0].count, 2);
+        // Blocks and rate limiting answer NXDOMAIN/REFUSED too, but only real
+        // failures are listed.
+        let failing: Vec<_> = report
+            .failing
+            .iter()
+            .map(|f| (f.name.as_str(), f.rcode.as_str(), f.count))
+            .collect();
+        assert_eq!(
+            failing,
+            [
+                ("gone.example", "NXDOMAIN", 2),
+                ("broken.example", "SERVFAIL", 1),
+            ]
+        );
     }
 
     #[test]

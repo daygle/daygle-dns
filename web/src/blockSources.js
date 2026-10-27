@@ -1,4 +1,4 @@
-// What can block a query, as the query log and the "Why Blocked?" tool name
+// What can block a query, as the query log and the Domain Check tool name
 // it (the server's `block.source` / check `source` values).
 export const BLOCK_SOURCES = [
   ['blocklist_source', 'Blocklist'],

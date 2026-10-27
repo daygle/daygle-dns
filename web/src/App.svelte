@@ -6,6 +6,7 @@
   import Status from './views/Status.svelte';
   import ZonesPage from './views/ZonesPage.svelte';
   import Logs from './views/Logs.svelte';
+  import Reports from './views/Reports.svelte';
   import Filtering from './views/Filtering.svelte';
   import Clients from './views/Clients.svelte';
   import Settings from './views/Settings.svelte';
@@ -69,6 +70,12 @@ import { loadDisplayPreferences } from './datetime.svelte.js';
     }
     settingsTab = tab;
     view = 'settings';
+  }
+  // A device the Logs page opens its Query Log filtered to (set by Reports).
+  let logsClient = $state(null);
+  function openLogs(client) {
+    logsClient = client;
+    view = 'logs';
   }
   // The Clients page's tab to open (Devices unless another page asks).
   let clientsTab = $state('devices');
@@ -177,6 +184,7 @@ import { loadDisplayPreferences } from './datetime.svelte.js';
   ];
   const tabs = [
     { id: 'status', label: 'Status', icon: icons.status, section: 'monitor' },
+    { id: 'reports', label: 'Reports', icon: icons.reports, section: 'monitor' },
     { id: 'logs', label: 'Logs', icon: icons.logs, section: 'monitor' },
     { id: 'zones', label: 'Zones', icon: icons.zones, viewer: true, section: 'dns' },
     { id: 'filtering', label: 'Filtering', icon: icons.filtering, viewer: true, section: 'dns' },
@@ -256,6 +264,7 @@ import { loadDisplayPreferences } from './datetime.svelte.js';
               view = tab.id;
               settingsTab = 'general';
               clientsTab = 'devices';
+              logsClient = null;
               if (isNarrow()) setSidebar(false);
             }}
           >
@@ -314,8 +323,12 @@ import { loadDisplayPreferences } from './datetime.svelte.js';
         <Donate />
       {:else if view === 'update'}
         <Update />
+      {:else if view === 'reports'}
+        <Reports onShowQueries={openLogs} onOpenSettings={isViewer ? null : openSettings} />
       {:else if view === 'logs'}
-        <Logs />
+        {#key logsClient}
+          <Logs initialClient={logsClient} />
+        {/key}
       {:else}
         <Settings initialTab={settingsTab} onOpenClients={openClients} />
       {/if}

@@ -1,6 +1,6 @@
 <script>
   import { onMount } from 'svelte';
-  import { api, formatApiError, formatUptime } from '../api.js';
+  import { api, formatApiError, formatUptime, getStoredUser } from '../api.js';
   import PageHeader from '../PageHeader.svelte';
   import ResolverDashboard from './ResolverDashboard.svelte';
   import { icons } from '../icons.svelte.js';
@@ -16,6 +16,10 @@
   // Host resource readings (optional endpoint): null until the first
   // response, and kept as-is when a later fetch fails.
   let host = $state(null);
+  // Why the host stats could not be fetched (shown on the Server card).
+  let hostError = $state(null);
+  // Host stats are admin-only; a viewer's request would only ever be refused.
+  const isAdmin = getStoredUser()?.role !== 'viewer';
   let window_ = $state('1h');
   let error = $state(null);
   // When the data on screen was fetched (shown if a later refresh fails).
@@ -42,8 +46,17 @@
       metrics = m;
       stats = st;
       // Host stats ride along on the same cadence but must never fail the
-      // page: an error just keeps whatever is already on screen.
-      api.hostStats().then((h) => (host = h)).catch(() => {});
+      // page: an error keeps whatever is already on screen and says why.
+      // A host that reported it cannot collect them is not asked again.
+      if (isAdmin && host?.supported !== false) {
+        api
+          .hostStats()
+          .then((h) => {
+            host = h;
+            hostError = null;
+          })
+          .catch((e) => (hostError = formatApiError(e)));
+      }
       loadedAt = Date.now();
       refreshKey += 1;
     } catch (e) {
@@ -270,15 +283,26 @@
     {/each}
   </div>
 
-  {#if hostRows.length}
+  {#if hostRows.length || (isAdmin && (host || hostError))}
     <div class="card" style="margin-top: 14px">
       <div class="spread" style="margin-bottom: 10px">
         <h3 style="margin: 0">Server</h3>
-        <span class="muted small">
-          {#if host.hostname}{host.hostname} · {/if}up
-          {host.uptime_secs == null ? '?' : formatUptime(host.uptime_secs)}
-        </span>
+        {#if hostRows.length}
+          <span class="muted small">
+            {#if host.hostname}{host.hostname} · {/if}up
+            {host.uptime_secs == null ? '?' : formatUptime(host.uptime_secs)}
+          </span>
+        {/if}
       </div>
+      {#if host && !host.supported}
+        <p class="muted small" style="margin: 0">
+          Server resource usage is not available: {host.reason || 'this host does not report it'}.
+        </p>
+      {:else if hostError}
+        <p class="muted small" style="margin: {hostRows.length ? '0 0 8px' : '0'}">
+          {hostRows.length ? 'Could not refresh' : 'Could not load'} server resource usage: {hostError}
+        </p>
+      {/if}
       {#each hostRows as row (row.label)}
         <div class="host-row">
           <span class="host-label muted">{row.label}</span>

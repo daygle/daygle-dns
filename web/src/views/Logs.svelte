@@ -2,7 +2,6 @@
   import { onDestroy, onMount } from 'svelte';
   import { api, getToken, formatApiError, getStoredUser } from '../api.js';
   import PageHeader from '../PageHeader.svelte';
-  import Reports from './Reports.svelte';
   import { icons } from '../icons.svelte.js';
   import { formatDateTime, displayZoneName, zonedInputToIso } from '../datetime.svelte.js';
   import ClientLabel from '../ClientLabel.svelte';
@@ -11,6 +10,9 @@
   import { isHidden } from '../columns.svelte.js';
   import WhyBlocked from '../WhyBlocked.svelte';
   import { BLOCK_SOURCES, blockSourceLabel } from '../blockSources.js';
+
+  // A device to open the Query Log filtered to (set by the Reports page).
+  let { initialClient = null } = $props();
 
   // The query log's columns (Columns menu); Domain is always shown.
   const QUERY_COLUMNS = [
@@ -51,12 +53,6 @@
       label: 'Query Log',
       tagline:
         'Every query the server answered, newest first. Filter by client, domain, type or result, export the matches as CSV, or follow new queries live. Click a client or domain to filter by it.',
-    },
-    {
-      id: 'reports',
-      label: 'Reports',
-      tagline:
-        'What the query log adds up to: queries and blocks over a period, the most active devices, and the most asked and most blocked domains, overall or for one device.',
     },
     {
       id: 'server',
@@ -364,7 +360,8 @@
   // Load the first page once. (Re-running whenever the list came back empty
   // would poll the server in a loop while the log is empty, and an effect
   // would re-run on every keystroke in the filter fields it reads.)
-  onMount(() => runQuery(1));
+  // A device passed in by another page (Reports) opens filtered to it.
+  onMount(() => (initialClient ? filterBy('client', initialClient) : runQuery(1)));
 </script>
 
 <PageHeader icon={icons.logs} title="Logs" tagline={current.tagline} />
@@ -375,9 +372,7 @@
   {/each}
 </div>
 
-{#if tab === 'reports'}
-  <Reports onShowQueries={(client) => { tab = 'queries'; filterBy('client', client); }} />
-{:else if tab === 'audit'}
+{#if tab === 'audit'}
   {#if auditError}
     <div class="card" style="border-color: var(--danger); color: var(--danger); margin-bottom: 14px">{auditError}</div>
   {/if}

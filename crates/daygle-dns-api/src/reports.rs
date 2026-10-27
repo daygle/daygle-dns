@@ -1,5 +1,5 @@
-//! Reports: summaries of the query log, shown in the console (Logs ->
-//! Reports) and sent on a schedule to the alert destinations.
+//! Reports: summaries of the query log, shown in the console (the Reports
+//! page) and sent on a schedule to the alert destinations.
 
 use std::time::Duration;
 
@@ -40,6 +40,54 @@ fn number(n: u64) -> String {
         out.push(c);
     }
     out
+}
+
+/// How a query was answered, as the console's Reports page names it.
+fn outcome_label(outcome: &str) -> &str {
+    match outcome {
+        "recursive" => "Resolved",
+        "authoritative" => "Your zones",
+        "split_horizon" => "Split horizon",
+        "blocked" => "Blocked",
+        "rate_limited" => "Rate limited",
+        "error" => "Error",
+        other => other,
+    }
+}
+
+/// What blocked a query (a `BlockReason` source), as the console names it.
+fn block_source_label(source: &str) -> &str {
+    match source {
+        "blocklist_source" => "Blocklist",
+        "blocklist" => "Block List",
+        "group" => "Filtering Group",
+        "service" => "Blocked Service",
+        "group_blocklist" => "Group Blocklist",
+        "ai" => "AI Scanner",
+        "rpz" => "Response Policy Zone",
+        "cname" => "CNAME Inspection",
+        "denied_network" => "Denied Network",
+        "listener" => "Listener Access",
+        "aaaa_filter" => "Filter AAAA",
+        "client_rule" => "Client Rule",
+        "safe_search" => "Safe Search",
+        "plugin" => "Plugin",
+        "" => "Unknown (logged before reasons were kept)",
+        other => other,
+    }
+}
+
+/// A query's transport, as the console names it.
+fn protocol_label(protocol: &str) -> &str {
+    match protocol {
+        "udp" => "UDP",
+        "tcp" => "TCP",
+        "tls" => "DNS over TLS",
+        "https" => "DNS over HTTPS",
+        "h3" => "DNS over HTTP/3",
+        "quic" => "DNS over QUIC",
+        other => other,
+    }
 }
 
 fn percent(part: u64, whole: u64) -> String {
@@ -113,6 +161,93 @@ pub fn render(
         })
         .collect();
     list(&mut text, "Most active devices", &devices);
+    // Shares of all queries, or (block sources) of all blocks.
+    let shares = |rows: &[daygle_dns_authoritative::store::NameCount],
+                  whole: u64,
+                  label: &dyn Fn(&str) -> String| {
+        rows.iter()
+            .map(|r| {
+                (
+                    label(&r.name),
+                    format!("{} ({})", number(r.count), percent(r.count, whole)),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    list(
+        &mut text,
+        "How queries were answered",
+        &shares(&report.outcomes, report.queries, &|o| {
+            outcome_label(o).to_string()
+        }),
+    );
+    list(
+        &mut text,
+        "Blocked by",
+        &shares(&report.block_sources, report.blocked, &|s| {
+            block_source_label(s).to_string()
+        }),
+    );
+    list(
+        &mut text,
+        "Response codes",
+        &shares(&report.rcodes, report.queries, &|r| {
+            if r.is_empty() { "Not recorded" } else { r }.to_string()
+        }),
+    );
+    let failing: Vec<(String, String)> = report
+        .failing
+        .iter()
+        .map(|f| (f.name.clone(), format!("{} {}", number(f.count), f.rcode)))
+        .collect();
+    list(&mut text, "Most failing domains", &failing);
+    let lat = &report.latency;
+    if lat.queries > 0 {
+        text.push_str(&format!(
+            "\nResponse times (resolved queries): average {} ms, median {} ms, \
+             95% under {} ms, slowest {} ms\n",
+            lat.average_ms, lat.median_ms, lat.p95_ms, lat.max_ms
+        ));
+    }
+    list(
+        &mut text,
+        "Transports",
+        &shares(&report.protocols, report.queries, &|p| {
+            protocol_label(p).to_string()
+        }),
+    );
+    if report.new_names_total > 0 {
+        let new: Vec<(String, String)> = report
+            .new_names
+            .iter()
+            .map(|n| (n.name.clone(), format!("{} queries", number(n.queries))))
+            .collect();
+        list(
+            &mut text,
+            &format!(
+                "New domains ({} first asked in this period; the newest)",
+                number(report.new_names_total)
+            ),
+            &new,
+        );
+    }
+    if !report.zones.is_empty() {
+        let zones: Vec<(String, String)> = report
+            .zones
+            .iter()
+            .map(|z| {
+                (
+                    z.zone.clone(),
+                    format!(
+                        "{} queries, {} NXDOMAIN",
+                        number(z.queries),
+                        number(z.nxdomain)
+                    ),
+                )
+            })
+            .collect();
+        list(&mut text, "Your zones", &zones);
+    }
     if report.queries == 0 {
         text.push_str(
             "\nNo queries were logged. The report reads the query log, which is \
@@ -287,6 +422,38 @@ mod tests {
                 count: 500,
             }],
             top_blocked: vec![],
+            outcomes: vec![daygle_dns_authoritative::store::NameCount {
+                name: "recursive".to_string(),
+                count: 11_111,
+            }],
+            block_sources: vec![daygle_dns_authoritative::store::NameCount {
+                name: "blocklist_source".to_string(),
+                count: 1_234,
+            }],
+            failing: vec![daygle_dns_authoritative::store::FailingName {
+                name: "gone.example".to_string(),
+                rcode: "NXDOMAIN".to_string(),
+                count: 42,
+            }],
+            protocols: vec![daygle_dns_authoritative::store::NameCount {
+                name: "https".to_string(),
+                count: 12_345,
+            }],
+            latency: daygle_dns_authoritative::store::LatencySummary {
+                queries: 11_111,
+                average_ms: 21,
+                median_ms: 2,
+                p95_ms: 90,
+                max_ms: 1_500,
+            },
+            new_names_total: 7,
+            new_names: vec![daygle_dns_authoritative::store::NewName {
+                name: "new.example".to_string(),
+                first_seen: String::new(),
+                queries: 3,
+                blocked: 0,
+            }],
+            ..QueryLogReport::default()
         };
         let names = [("192.168.1.8".to_string(), "Kids-iPad".to_string())].into();
         let (title, text) = render(&report, &ReportSettings::default(), &names);
@@ -303,5 +470,19 @@ mod tests {
             text.contains("Kids-iPad (192.168.1.8)  10 queries"),
             "{text}"
         );
+        assert!(text.contains("1. Resolved  11,111 (90.0%)"), "{text}");
+        assert!(text.contains("1. Blocklist  1,234 (100.0%)"), "{text}");
+        assert!(text.contains("1. gone.example  42 NXDOMAIN"), "{text}");
+        assert!(
+            text.contains("average 21 ms, median 2 ms, 95% under 90 ms, slowest 1500 ms"),
+            "{text}"
+        );
+        assert!(
+            text.contains("1. DNS over HTTPS  12,345 (100.0%)"),
+            "{text}"
+        );
+        assert!(text.contains("New domains (7 first asked"), "{text}");
+        assert!(text.contains("1. new.example  3 queries"), "{text}");
+        assert!(!text.contains("Your zones"), "no zones, no section: {text}");
     }
 }

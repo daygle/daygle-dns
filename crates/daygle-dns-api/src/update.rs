@@ -1757,7 +1757,9 @@ mod tests {
         // models_dir/config_dir are missing, so the tick must never reach
         // start_models. The failure mode to guard against is a run attempt
         // whose state file gets primed, so assert no workspace state was
-        // written by this call.
+        // written by this call. Other tests write that same file, so hold
+        // their lock or one of their writes can land between the two checks.
+        let _guard = STATE_LOCK.lock().unwrap();
         if workspace_dir().join("state.json").exists() {
             let _ = std::fs::remove_file(workspace_dir().join("state.json"));
         }
