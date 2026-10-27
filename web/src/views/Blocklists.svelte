@@ -505,7 +505,7 @@
   .url { font-size: 0.78rem; max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .pill-row { display: flex; flex-wrap: wrap; gap: 6px; }
   .fetch-error { font-size: 0.78rem; color: var(--danger); max-width: 320px; }
-  .modal-backdrop { position: fixed; inset: 0; background: rgb(0 0 0 / 0.65); display: grid; place-items: center; padding: 20px; z-index: 10; }
+  .modal-backdrop { position: fixed; inset: 0; background: rgb(0 0 0 / 0.65); display: grid; place-items: center; padding: 20px; z-index: 50; }
   .modal { width: min(680px, 100%); max-height: calc(100vh - 40px); overflow: auto; }
   .modal-title { margin-bottom: 12px; }
   .checkbox { display: inline-flex; align-items: center; gap: 8px; margin-top: 12px; font-size: 0.85rem; }

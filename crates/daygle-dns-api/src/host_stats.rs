@@ -170,7 +170,12 @@ fn cpu() -> Value {
     let now = Instant::now();
     let mut measured = false;
     let usage = match (&*PREV_CPU.read(), reading) {
-        (None, _) => None,
+        // First reading: nothing to compare against yet, but it becomes
+        // the baseline the next request measures from.
+        (None, reading) => {
+            measured = reading.is_some();
+            None
+        }
         (Some(prev), _) if now.duration_since(prev.at).as_millis() < MIN_SAMPLE_MS => prev.usage,
         (Some(prev), Some((total, idle))) => {
             measured = true;
@@ -301,4 +306,20 @@ fn root_disk() -> Option<Value> {
         "available_kb": available,
         "used_percent": round_percent(Some(used as f64), total as f64),
     }))
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cpu_usage_is_reported_from_the_second_reading() {
+        if !std::path::Path::new("/proc/stat").exists() {
+            return;
+        }
+        assert!(cpu()["usage_percent"].is_null());
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let usage = cpu()["usage_percent"].as_f64();
+        assert!(matches!(usage, Some(pct) if (0.0..=100.0).contains(&pct)));
+    }
 }

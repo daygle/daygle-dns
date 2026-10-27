@@ -339,7 +339,7 @@
   .checkbox { flex-direction: row; align-items: center; gap: 8px; margin-top: 12px; }
   .checkbox input { width: auto; }
   .checkbox span { color: var(--text); }
-  .modal-backdrop { position: fixed; inset: 0; background: rgb(0 0 0 / 0.65); display: grid; place-items: center; padding: 20px; z-index: 10; }
+  .modal-backdrop { position: fixed; inset: 0; background: rgb(0 0 0 / 0.65); display: grid; place-items: center; padding: 20px; z-index: 50; }
   .modal { width: min(640px, 100%); max-height: calc(100vh - 40px); overflow: auto; }
   .modal-title { margin-bottom: 12px; }
   .section-title {

@@ -666,7 +666,7 @@
   .small { font-size: 0.78rem; margin-top: 2px; }
   .reason { max-width: 340px; }
   .why { margin-left: 6px; font-size: 0.8rem; }
-  .modal-backdrop { position: fixed; inset: 0; background: rgb(0 0 0 / 0.65); display: grid; place-items: center; padding: 16px; z-index: 10; }
+  .modal-backdrop { position: fixed; inset: 0; background: rgb(0 0 0 / 0.65); display: grid; place-items: center; padding: 16px; z-index: 50; }
   .modal.wide { width: min(980px, 100%); max-height: calc(100vh - 32px); overflow: auto; }
   .filter-grid {
     display: grid;

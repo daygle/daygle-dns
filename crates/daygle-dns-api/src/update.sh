@@ -140,7 +140,7 @@ fi
 
 fetch() { # url dest
   case "$DOWNLOADER" in
-    curl) curl -fSL --retry 3 --connect-timeout 15 -o "$2" "$1" ;;
+    curl) curl -fsSL --retry 3 --connect-timeout 15 -o "$2" "$1" ;;
     wget) wget -q --tries=3 -O "$2" "$1" ;;
     *) return 1 ;;
   esac
