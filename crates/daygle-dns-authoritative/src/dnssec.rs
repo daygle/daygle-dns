@@ -76,6 +76,10 @@ pub struct DnssecMaintenance {
     store: ZoneStore,
     catalog: Arc<AuthorityCatalog>,
     config: MaintenanceConfig,
+    /// Re-read the thresholds (and whether signing is on) from the catalog's
+    /// live settings on every check, so console changes apply without a
+    /// restart. Off for [`Self::new`], whose settings are fixed.
+    live: bool,
 }
 
 impl DnssecMaintenance {
@@ -88,16 +92,36 @@ impl DnssecMaintenance {
             store,
             catalog,
             config: MaintenanceConfig::from_settings(settings),
+            live: false,
+        }
+    }
+
+    /// A caretaker that follows the catalog's live settings: it sleeps
+    /// while signing is off and picks up new thresholds on its next check.
+    pub fn live(store: ZoneStore, catalog: Arc<AuthorityCatalog>) -> Self {
+        let config = MaintenanceConfig::from_settings(&catalog.settings());
+        Self {
+            store,
+            catalog,
+            config,
+            live: true,
         }
     }
 
     /// Run until `shutdown` is cancelled, checking on `config.interval`.
-    pub async fn run_forever(self, shutdown: CancellationToken) {
+    pub async fn run_forever(mut self, shutdown: CancellationToken) {
         let mut last_resign = Instant::now();
         loop {
             tokio::select! {
                 _ = shutdown.cancelled() => return,
                 _ = tokio::time::sleep(self.config.interval) => {}
+            }
+            if self.live {
+                let settings = self.catalog.settings();
+                self.config = MaintenanceConfig::from_settings(&settings);
+                if !settings.dnssec_enabled {
+                    continue;
+                }
             }
 
             // 1. RRSIG renewal: reload re-signs everything with fresh

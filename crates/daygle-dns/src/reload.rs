@@ -226,6 +226,12 @@ pub fn apply_config(shared: &Shared, new: Arc<DaygleConfig>) -> bool {
     if old.rrl != new.rrl || old.networks != new.networks {
         apply_rrl(shared, &new);
     }
+    if shared.catalog.update_dnssec_settings(&new.authoritative) {
+        match shared.catalog.reload() {
+            Ok(()) => info!("zones re-signed after a DNSSEC settings change"),
+            Err(e) => warn!(error = %e, "cannot re-sign zones after a DNSSEC settings change"),
+        }
+    }
     if old.rate_limit != new.rate_limit {
         shared.rate_limiter.set_settings(&new.rate_limit);
         if new.rate_limit.enabled {

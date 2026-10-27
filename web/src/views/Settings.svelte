@@ -66,6 +66,10 @@
   // empty when unavailable, in which case the text field is the only UI.
   let aiBackendCategories = $state([]);
   let upstreamText = $state('');
+  // Root server addresses, one per line (empty: the built-in IANA roots).
+  let rootHintsText = $state('');
+  // Per-client and per-domain query limits (`[rate_limit]`).
+  let rateLimit_ = $state({});
   // Named networks (Clients -> Networks) for the pickers below.
   let networks = $state([]);
   // Encrypted-listener client networks (Settings -> Listeners).
@@ -315,6 +319,8 @@
         aiCategoriesText = '';
         aiBackendCategories = [];
         upstreamText = '';
+        rootHintsText = '';
+        rateLimit_ = {};
         dotNetworks = [];
         dohNetworks = [];
         doqNetworks = [];
@@ -349,6 +355,7 @@
       );
       alerts_ = { ...ALERT_DEFAULTS, ...config.alerts };
       rrl_ = { ...RRL_DEFAULTS, ...config.rrl };
+      rateLimit_ = { ...config.rate_limit };
       ddr_ = { enabled: true, name: '', ...config.ddr };
       reports_ = { ...REPORT_DEFAULTS, ...config.reports };
       rrlExempt = [...(config.rrl?.exempt || [])];
@@ -384,6 +391,7 @@
       dohCertMode = certModeOf(doh);
       doqCertMode = certModeOf(doq);
       upstreamText = (recursive.upstreams || []).join('\n');
+      rootHintsText = (recursive.root_hints || []).join('\n');
       axfrNetworks = [...(authoritative.axfr_networks || [])];
       updateNetworks = [...(authoritative.update_networks || [])];
       notifyTargetsText = (authoritative.notify_targets || []).join('\n');
@@ -409,6 +417,8 @@
   // network (addresses, lists, names, credentials, certificates) rather
   // than tuning. The General tab's web access is left too, so a reset can
   // never move the console out from under the browser.
+  const DNSSEC_FIELDS = ['dnssec_enabled', 'dnssec_sig_validity_days', 'dnssec_rollover_days',
+    'dnssec_rollover_overlap_days', 'dnssec_rollover_retire_days', 'dnssec_maintenance_secs'];
   const RESET_KEEPS = {
     general: 'Web console access is kept.',
     recursive: 'Upstream servers, DNS64 clients and the ECS subnet are kept.',
@@ -440,11 +450,13 @@
     const r = d.recursive;
     if (tab === 'general') {
       display_ = { time_zone: 'system', date_format: 'system', time_format: 'system', ...d.display };
+      server = { ...server, ...pick(d.server, ['tcp_timeout_ms', 'dns_cookies']) };
     } else if (tab === 'recursive') {
+      rootHintsText = (r.root_hints || []).join('\n');
       recursive = {
         ...recursive,
         ...pick(r, ['enabled', 'dnssec_validate', 'case_randomization', 'rebinding_protection',
-          'opportunistic_encryption', 'use_system_config']),
+          'opportunistic_encryption', 'use_system_config', 'timeout_secs']),
         // An unset mode means: forwarding when upstreams exist, else recursive.
         mode: r.mode || (parseUpstreams(upstreamText).length ? 'forwarding' : 'recursive'),
         outbound_ip_versions: r.outbound_ip_versions || 'both',
@@ -456,18 +468,20 @@
         ...recursive,
         ...pick(r, ['min_cache_ttl', 'negative_cache_ttl', 'max_cache_ttl', 'failure_cache_ttl',
           'cache_size', 'max_concurrent_lookups', 'prefetch_enabled', 'prefetch_ttl_fraction_pct',
-          'prefetch_min_queries', 'serve_stale_secs']),
+          'prefetch_min_queries', 'prefetch_window_secs', 'serve_stale_secs']),
       };
+      server = { ...server, client_timeout_ms: d.server.client_timeout_ms };
     } else if (tab === 'listeners') {
       ddr_ = { ...ddr_, enabled: d.ddr.enabled };
       dot = { ...dot, ...pick(d.dot, ['enabled', 'port', 'handshake_timeout_secs', 'max_connections']) };
       doh = { ...doh, ...pick(d.doh, ['enabled', 'port', 'handshake_timeout_secs', 'max_connections', 'endpoint', 'http3']) };
-      doq = { ...doq, ...pick(d.doq, ['enabled', 'port', 'max_connections', 'max_concurrent_streams']) };
+      doq = { ...doq, ...pick(d.doq, ['enabled', 'port', 'max_connections', 'max_concurrent_streams', 'idle_timeout_secs']) };
     } else if (tab === 'zones') {
       authoritative = {
         ...authoritative,
         ...pick(d.authoritative, ['default_record_ttl', 'default_primary_ns', 'default_admin_mailbox',
-          'axfr_enabled', 'allow_dynamic_updates', 'notify_enabled', 'notify_listen_enabled']),
+          'axfr_enabled', 'allow_dynamic_updates', 'notify_enabled', 'notify_listen_enabled',
+          ...DNSSEC_FIELDS]),
       };
     } else if (tab === 'ai') {
       const a = d.ai;
@@ -492,6 +506,7 @@
     } else if (tab === 'rate-limiting') {
       // The never-limited list lives in rrlExempt, which is left alone.
       rrl_ = { ...rrl_, ...d.rrl };
+      rateLimit_ = { ...d.rate_limit };
     } else if (tab === 'alerts') {
       alerts_ = {
         ...alerts_,
@@ -562,6 +577,23 @@
         max_cache_ttl: Number(recursive.max_cache_ttl),
         failure_cache_ttl: Number(recursive.failure_cache_ttl),
         max_concurrent_lookups: Number(recursive.max_concurrent_lookups),
+        timeout_secs: Number(recursive.timeout_secs),
+        prefetch_window_secs: Number(recursive.prefetch_window_secs),
+        root_hints: parseUpstreams(rootHintsText),
+      },
+      server: {
+        client_timeout_ms: Number(server.client_timeout_ms),
+        tcp_timeout_ms: Number(server.tcp_timeout_ms),
+        dns_cookies: !!server.dns_cookies,
+      },
+      rate_limit: {
+        enabled: !!rateLimit_.enabled,
+        client_max_queries: Number(rateLimit_.client_max_queries),
+        client_window_secs: Number(rateLimit_.client_window_secs),
+        domain_max_queries: Number(rateLimit_.domain_max_queries),
+        domain_window_secs: Number(rateLimit_.domain_window_secs),
+        exempt_loopback: !!rateLimit_.exempt_loopback,
+        client_ipv6_prefix: Number(rateLimit_.client_ipv6_prefix),
       },
       dot: {
         enabled: !!dot.enabled,
@@ -599,6 +631,7 @@
         certificate: doq.certificate || '',
         max_connections: Number(doq.max_connections),
         max_concurrent_streams: Number(doq.max_concurrent_streams),
+        idle_timeout_secs: Number(doq.idle_timeout_secs),
         allowed_networks: [...doqNetworks],
       },
       display: { ...display_ },
@@ -664,6 +697,12 @@
         notify_targets: parseLines(notifyTargetsText),
         notify_listen_enabled: !!authoritative.notify_listen_enabled,
         catalog_zone: (authoritative.catalog_zone || '').trim(),
+        dnssec_enabled: !!authoritative.dnssec_enabled,
+        dnssec_sig_validity_days: Number(authoritative.dnssec_sig_validity_days),
+        dnssec_rollover_days: Number(authoritative.dnssec_rollover_days),
+        dnssec_rollover_overlap_days: Number(authoritative.dnssec_rollover_overlap_days),
+        dnssec_rollover_retire_days: Number(authoritative.dnssec_rollover_retire_days),
+        dnssec_maintenance_secs: Number(authoritative.dnssec_maintenance_secs),
         catalog_consumers: catalogConsumers
           .filter((c) => c.name.trim())
           .map((c) => ({
@@ -851,6 +890,18 @@
       listens on {config?.api?.listen}. DNS over TLS, HTTPS and QUIC are on
       the Encrypted DNS tab.
     </p>
+    <div class="form-grid" style="margin-top: 12px">
+      <label><span>TCP Idle Timeout (Milliseconds)</span><input type="number" min="100" max="3600000" step="100" bind:value={server.tcp_timeout_ms} /></label>
+      <label class="check"><input type="checkbox" bind:checked={server.dns_cookies} /> <span>DNS Cookies (RFC 7873)</span></label>
+    </div>
+    <p class="muted help">
+      TCP Idle Timeout is how long a plain DNS-over-TCP connection may sit
+      unused before it is closed. DNS cookies let clients prove they really
+      own their address, which protects against spoofed queries; clients that
+      send a valid cookie are never response-rate-limited and get ten times
+      the per-client query limit (Rate Limiting tab). Changing either
+      restarts the DNS listeners for a moment.
+    </p>
   </div>
   <div class="card" style="margin-bottom: 14px">
     <h3 style="margin: 0 0 10px">Display Defaults</h3>
@@ -924,6 +975,15 @@
         over TLS or QUIC in the background and uses it where it works, falling back
         to plain DNS; it is experimental and adds some connection overhead.
       </p>
+      <label class="stacked" style="margin-top: 12px">
+        <span>Root Hints (one address per line; empty uses the built-in root servers)</span>
+        <textarea rows="3" bind:value={rootHintsText} placeholder={'198.41.0.4\n2001:503:ba3e::2:30'}></textarea>
+      </label>
+      <p class="muted help">
+        The servers resolution starts from. Leave empty to use the 13 IANA root
+        servers built in; the full current list is fetched from whichever of
+        these answers first.
+      </p>
     {:else}
       <div class="form-grid" style="margin-top: 4px">
         <label class="check"><input type="checkbox" bind:checked={recursive.use_system_config} /> <span>Use System DNS Configuration</span></label>
@@ -938,6 +998,15 @@
       </p>
     {/if}
     {#if recursive.enabled}
+      <h4>Query Timeout</h4>
+      <div class="form-grid">
+        <label><span>Per-Server Timeout (Seconds)</span><input type="number" min="1" max="300" bind:value={recursive.timeout_secs} /></label>
+      </div>
+      <p class="muted help">
+        How long to wait for one {recursive.mode === 'recursive' ? 'name server' : 'upstream server'}
+        before trying the next. The client's own wait is the Client Timeout on
+        the Cache tab.
+      </p>
       <h4>Outbound IP Versions</h4>
       <div class="form-grid">
         <label>
@@ -1043,13 +1112,20 @@
       <label class="check"><input type="checkbox" bind:checked={recursive.prefetch_enabled} /> <span>Refresh Popular Names Early</span></label>
       <label><span>Refresh When TTL Left Is Below (%)</span><input type="number" min="1" max="99" bind:value={recursive.prefetch_ttl_fraction_pct} disabled={!recursive.prefetch_enabled} /></label>
       <label><span>Refresh Names Queried At Least (Times)</span><input type="number" min="1" bind:value={recursive.prefetch_min_queries} disabled={!recursive.prefetch_enabled} /></label>
+      <label><span>Counted Over (Seconds)</span><span class="hint">{hint(recursive.prefetch_window_secs)}</span><input type="number" min="1" bind:value={recursive.prefetch_window_secs} disabled={!recursive.prefetch_enabled} /></label>
       <label><span>Serve-Stale Window (Seconds)</span><span class="hint">{hint(recursive.serve_stale_secs)}</span><input type="number" min="0" bind:value={recursive.serve_stale_secs} /></label>
+      <label><span>Client Timeout (Milliseconds)</span><input type="number" min="1000" max="10000" step="100" bind:value={server.client_timeout_ms} /></label>
     </div>
     <p class="muted help">
       Refreshing popular names early re-fetches a name before it expires once
-      it has been asked for often enough, so clients rarely wait. Serve-stale
+      it has been asked for often enough within the counting window, so
+      clients rarely wait. Serve-stale
       answers from an expired entry for this long when the upstream cannot be
-      reached. The Cache page shows hit rates and can flush the cache.
+      reached. Client Timeout is how long a client waits for a lookup
+      (1000-10000 ms): when it runs out the client gets the expired answer if
+      there is one, else SERVFAIL, and the lookup carries on to fill the
+      cache. Raise it if slow sites fail on first visit. The Cache page shows
+      hit rates and can flush the cache.
     </p>
   </div>
   {:else if tab === 'zones'}
@@ -1065,6 +1141,28 @@
       own. New zones use the DNS Server Domain as their primary nameserver
       and the email as their contact; leave either empty to use this
       server's own name and the first administrator's email.
+    </p>
+  </div>
+
+  <div class="card" style="margin-bottom: 14px">
+    <h3 style="margin: 0 0 10px">DNSSEC Signing</h3>
+    <label class="check"><input type="checkbox" bind:checked={authoritative.dnssec_enabled} /> <span>Sign Zones That Have Signing Keys</span></label>
+    <div class="form-grid" style="margin-top: 10px">
+      <label><span>Signature Validity (Days)</span><input type="number" min="1" bind:value={authoritative.dnssec_sig_validity_days} disabled={!authoritative.dnssec_enabled} /></label>
+      <label><span>Roll Keys After (Days, 0 = Never)</span><input type="number" min="0" bind:value={authoritative.dnssec_rollover_days} disabled={!authoritative.dnssec_enabled} /></label>
+      <label><span>Old and New Key Overlap (Days)</span><input type="number" min="1" bind:value={authoritative.dnssec_rollover_overlap_days} disabled={!authoritative.dnssec_enabled} /></label>
+      <label><span>Keep Retired Key Published (Days)</span><input type="number" min="1" bind:value={authoritative.dnssec_rollover_retire_days} disabled={!authoritative.dnssec_enabled} /></label>
+      <label><span>Check Every (Seconds)</span><span class="hint">{hint(authoritative.dnssec_maintenance_secs)}</span><input type="number" min="60" bind:value={authoritative.dnssec_maintenance_secs} disabled={!authoritative.dnssec_enabled} /></label>
+    </div>
+    <p class="muted help">
+      Signatures last for the validity period and are renewed automatically at
+      half of it. When key rollover is on, a key older than the rollover age
+      is replaced: both keys sign for the overlap period (submit the new DS
+      record to your registrar then), and the old key stays published for the
+      retire period so cached signatures still verify. Turning signing on or
+      off, or changing the validity, re-signs the zones at once; the other
+      settings apply at the next check. Keys are managed per zone on the
+      Zones page.
     </p>
   </div>
 
@@ -1252,6 +1350,7 @@
       <label><span>Port</span><input type="number" bind:value={doq.port} /></label>
       <label><span>Maximum Connections</span><input type="number" min="1" max="65536" bind:value={doq.max_connections} /></label>
       <label><span>Concurrent DNS Streams per Connection</span><input type="number" min="1" max="65536" bind:value={doq.max_concurrent_streams} /></label>
+      <label><span>Idle Timeout (Seconds)</span><span class="hint">{hint(doq.idle_timeout_secs)}</span><input type="number" min="30" bind:value={doq.idle_timeout_secs} /></label>
       <label>
         <span>Certificate</span>
         <select bind:value={doqCertMode} onchange={(e) => applyCertMode(doq, e.currentTarget.value)}>
@@ -1275,6 +1374,8 @@
     </div>
     <p class="muted help">
       Clients connect to UDP port {doq.port || 853} (the standard port is 853).
+      An idle connection is closed after the idle timeout (RFC 9250
+      recommends at least 600 seconds; the minimum is 30).
       Clients outside these networks get REFUSED on this listener; clients
       inside it may use recursion here even when Recursion Access (Clients →
       Access) is set to Private Networks Only.
@@ -1486,6 +1587,26 @@
     </p>
   </div>
   {:else if tab === 'rate-limiting'}
+  <div class="card" style="margin-bottom: 14px">
+    <h3 style="margin: 0 0 10px">Query Rate Limiting</h3>
+    <label class="check"><input type="checkbox" bind:checked={rateLimit_.enabled} /> <span>Limit Queries per Client and per Domain</span></label>
+    <div class="form-grid" style="margin-top: 10px">
+      <label><span>Queries per Client</span><input type="number" min="1" bind:value={rateLimit_.client_max_queries} disabled={!rateLimit_.enabled} /></label>
+      <label><span>Per Client Window (Seconds)</span><input type="number" min="1" bind:value={rateLimit_.client_window_secs} disabled={!rateLimit_.enabled} /></label>
+      <label><span>Queries per Domain</span><input type="number" min="1" bind:value={rateLimit_.domain_max_queries} disabled={!rateLimit_.enabled} /></label>
+      <label><span>Per Domain Window (Seconds)</span><input type="number" min="1" bind:value={rateLimit_.domain_window_secs} disabled={!rateLimit_.enabled} /></label>
+      <label><span>IPv6 Client Network Size (Prefix)</span><input type="number" min="1" max="128" bind:value={rateLimit_.client_ipv6_prefix} disabled={!rateLimit_.enabled} /></label>
+      <label class="check"><input type="checkbox" bind:checked={rateLimit_.exempt_loopback} disabled={!rateLimit_.enabled} /> <span>Never Limit This Server (Loopback)</span></label>
+    </div>
+    <p class="muted help">
+      Caps how many queries one client, and one domain name, may send in each
+      window; queries over the limit get SERVFAIL and are counted as Rate
+      Limited on the Dashboard and in the query log. This protects the server
+      from a misbehaving device or a flood of lookups for one name. IPv6
+      clients are counted per network of the given size, since one device
+      usually holds a whole /64. Changes apply immediately.
+    </p>
+  </div>
   <div class="card" style="margin-bottom: 14px">
     <h3 style="margin: 0 0 10px">Response Rate Limiting (RRL)</h3>
     <label class="check"><input type="checkbox" bind:checked={rrl_.enabled} /> <span>Limit Identical Responses</span></label>

@@ -1311,6 +1311,22 @@ pub struct RuntimeSettings {
     pub reports: Option<ReportSettings>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dhcp: Option<crate::dhcp::DhcpSettings>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server: Option<ServerRuntimeUpdate>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rate_limit: Option<RateLimitSettings>,
+}
+
+/// The `[server]` settings the console edits. The rest of `[server]` (listen
+/// addresses, ports, buffers) stays in the config file.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct ServerRuntimeUpdate {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_timeout_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tcp_timeout_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dns_cookies: Option<bool>,
 }
 
 /// Partial updates for the recursive resolver (matches the API's shape).
@@ -1370,6 +1386,10 @@ pub struct RecursiveUpdate {
     pub client_policies: Option<Vec<ClientPolicyConfig>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_concurrent_lookups: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timeout_secs: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prefetch_window_secs: Option<u64>,
 }
 
 impl RecursiveUpdate {
@@ -1827,9 +1847,44 @@ pub struct AuthoritativeUpdate {
     /// Consumed catalog zones (the whole list).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub catalog_consumers: Option<Vec<CatalogConsumerConfig>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dnssec_enabled: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dnssec_sig_validity_days: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dnssec_rollover_days: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dnssec_rollover_overlap_days: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dnssec_rollover_retire_days: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dnssec_maintenance_secs: Option<u64>,
 }
 
 impl AuthoritativeUpdate {
+    /// Apply the DNSSEC signing and key-rollover fields (shared by the
+    /// database overlay and the console's settings save).
+    pub fn apply_dnssec(&self, settings: &mut AuthoritativeSettings) {
+        if let Some(v) = self.dnssec_enabled {
+            settings.dnssec_enabled = v;
+        }
+        if let Some(v) = self.dnssec_sig_validity_days {
+            settings.dnssec_sig_validity_days = v;
+        }
+        if let Some(v) = self.dnssec_rollover_days {
+            settings.dnssec_rollover_days = v;
+        }
+        if let Some(v) = self.dnssec_rollover_overlap_days {
+            settings.dnssec_rollover_overlap_days = v;
+        }
+        if let Some(v) = self.dnssec_rollover_retire_days {
+            settings.dnssec_rollover_retire_days = v;
+        }
+        if let Some(v) = self.dnssec_maintenance_secs {
+            settings.dnssec_maintenance_secs = v;
+        }
+    }
+
     /// Trim stub zones: names are normalized like conditional zones and blank
     /// nameserver entries are dropped.
     pub fn normalize_stub_zones(zones: &[StubZoneConfig]) -> Vec<StubZoneConfig> {
@@ -2071,6 +2126,8 @@ impl RuntimeSettings {
             && self.ddr.is_none()
             && self.reports.is_none()
             && self.dhcp.is_none()
+            && self.server.is_none()
+            && self.rate_limit.is_none()
     }
 
     /// Apply the overlay to `config` in place. `None` fields are untouched.
@@ -2108,6 +2165,12 @@ impl RuntimeSettings {
             }
             if let Some(v) = r.max_concurrent_lookups {
                 config.recursive.max_concurrent_lookups = v;
+            }
+            if let Some(v) = r.timeout_secs {
+                config.recursive.timeout_secs = v;
+            }
+            if let Some(v) = r.prefetch_window_secs {
+                config.recursive.prefetch_window_secs = v;
             }
             if let Some(v) = &r.conditional_zones {
                 config.recursive.conditional_zones =
@@ -2294,6 +2357,20 @@ impl RuntimeSettings {
         if let Some(d) = &self.dhcp {
             config.dhcp = d.clone();
         }
+        if let Some(sv) = &self.server {
+            if let Some(v) = sv.client_timeout_ms {
+                config.server.client_timeout_ms = v;
+            }
+            if let Some(v) = sv.tcp_timeout_ms {
+                config.server.tcp_timeout_ms = v;
+            }
+            if let Some(v) = sv.dns_cookies {
+                config.server.dns_cookies = v;
+            }
+        }
+        if let Some(r) = &self.rate_limit {
+            config.rate_limit = r.clone();
+        }
         if let Some(w) = &self.web {
             config.web = w.clone();
         }
@@ -2379,6 +2456,7 @@ impl RuntimeSettings {
                 config.authoritative.catalog_consumers =
                     AuthoritativeUpdate::normalize_catalog_consumers(v);
             }
+            a.apply_dnssec(&mut config.authoritative);
             if let Some(v) = &a.default_admin_mailbox {
                 config.authoritative.default_admin_mailbox = v.clone();
             }
@@ -2420,6 +2498,8 @@ impl RuntimeSettings {
                 use_system_config: Some(config.recursive.use_system_config),
                 failure_cache_ttl: Some(config.recursive.failure_cache_ttl),
                 max_concurrent_lookups: Some(config.recursive.max_concurrent_lookups),
+                timeout_secs: Some(config.recursive.timeout_secs),
+                prefetch_window_secs: Some(config.recursive.prefetch_window_secs),
                 conditional_zones: Some(config.recursive.conditional_zones.clone()),
                 // Store the effective mode so a later upstreams change cannot
                 // silently flip an install between recursive and forwarding.
@@ -2505,6 +2585,14 @@ impl RuntimeSettings {
                 stub_zones: Some(config.authoritative.stub_zones.clone()),
                 catalog_zone: Some(config.authoritative.catalog_zone.clone()),
                 catalog_consumers: Some(config.authoritative.catalog_consumers.clone()),
+                dnssec_enabled: Some(config.authoritative.dnssec_enabled),
+                dnssec_sig_validity_days: Some(config.authoritative.dnssec_sig_validity_days),
+                dnssec_rollover_days: Some(config.authoritative.dnssec_rollover_days),
+                dnssec_rollover_overlap_days: Some(
+                    config.authoritative.dnssec_rollover_overlap_days,
+                ),
+                dnssec_rollover_retire_days: Some(config.authoritative.dnssec_rollover_retire_days),
+                dnssec_maintenance_secs: Some(config.authoritative.dnssec_maintenance_secs),
             }),
             ai: Some(AiUpdate::capture_ai(&config.ai)),
             display: Some(config.display.clone()),
@@ -2522,6 +2610,12 @@ impl RuntimeSettings {
             ddr: Some(config.ddr.clone()),
             reports: Some(config.reports.clone()),
             dhcp: Some(config.dhcp.clone()),
+            server: Some(ServerRuntimeUpdate {
+                client_timeout_ms: Some(config.server.client_timeout_ms),
+                tcp_timeout_ms: Some(config.server.tcp_timeout_ms),
+                dns_cookies: Some(config.server.dns_cookies),
+            }),
+            rate_limit: Some(config.rate_limit.clone()),
         }
     }
 }
@@ -2861,6 +2955,16 @@ impl DaygleConfig {
         if !(8..=65_536).contains(&self.server.udp_send_buffer_kb) {
             return Err(DaygleError::Config(
                 "server.udp_send_buffer_kb must be in 8..=65536 (KiB)".to_string(),
+            ));
+        }
+        if !(100..=3_600_000).contains(&self.server.tcp_timeout_ms) {
+            return Err(DaygleError::Config(
+                "server.tcp_timeout_ms must be in 100..=3600000".to_string(),
+            ));
+        }
+        if !(1..=300).contains(&self.recursive.timeout_secs) {
+            return Err(DaygleError::Config(
+                "recursive.timeout_secs must be in 1..=300".to_string(),
             ));
         }
         if !(8..=65_536).contains(&self.server.udp_recv_buffer_kb) {
@@ -4794,6 +4898,8 @@ mod tests {
         r.use_system_config = !r.use_system_config;
         r.failure_cache_ttl += 1;
         r.max_concurrent_lookups += 1;
+        r.timeout_secs += 1;
+        r.prefetch_window_secs += 1;
         r.conditional_zones = vec![ConditionalZoneConfig {
             name: s("corp.example"),
             upstreams: vec![s("192.0.2.1")],
@@ -4989,12 +5095,31 @@ mod tests {
             range_end: s("192.168.1.199"),
             ..Default::default()
         });
+        c.server.client_timeout_ms += 1;
+        c.server.tcp_timeout_ms += 1;
+        c.server.dns_cookies = !c.server.dns_cookies;
+        c.rate_limit.enabled = !c.rate_limit.enabled;
+        c.rate_limit.client_max_queries += 1;
+        c.rate_limit.client_window_secs += 1;
+        c.rate_limit.domain_max_queries += 1;
+        c.rate_limit.domain_window_secs += 1;
+        c.rate_limit.exempt_loopback = !c.rate_limit.exempt_loopback;
+        c.rate_limit.client_ipv6_prefix -= 1;
+        let a = &mut c.authoritative;
+        a.dnssec_enabled = !a.dnssec_enabled;
+        a.dnssec_sig_validity_days += 1;
+        a.dnssec_rollover_days += 1;
+        a.dnssec_rollover_overlap_days += 1;
+        a.dnssec_rollover_retire_days += 1;
+        a.dnssec_maintenance_secs += 1;
         let stored = serde_json::to_string(&RuntimeSettings::capture(&c)).unwrap();
         let overlay: RuntimeSettings = serde_json::from_str(&stored).unwrap();
         let mut restored = DaygleConfig::default();
         overlay.apply_to(&mut restored);
 
         assert_eq!(restored.recursive, c.recursive, "recursive");
+        assert_eq!(restored.server, c.server, "server");
+        assert_eq!(restored.rate_limit, c.rate_limit, "rate_limit");
         assert_eq!(restored.dot, c.dot, "dot");
         assert_eq!(restored.doh, c.doh, "doh");
         assert_eq!(restored.doq, c.doq, "doq");
@@ -5054,6 +5179,16 @@ mod tests {
         assert_eq!(restored.doq.max_connections, 20);
         assert_eq!(restored.doq.max_concurrent_streams, 21);
         restored.validate().unwrap();
+
+        let mut timeout = DaygleConfig::default();
+        timeout.server.client_timeout_ms = 3000;
+        let mut restored = DaygleConfig::default();
+        RuntimeSettings::capture(&timeout).apply_to(&mut restored);
+        assert_eq!(restored.server.client_timeout_ms, 3000);
+        for bad in [999, 10_001] {
+            timeout.server.client_timeout_ms = bad;
+            assert!(timeout.validate().is_err(), "{bad} ms accepted");
+        }
 
         let mut invalid = DaygleConfig::default();
         invalid.recursive.max_concurrent_lookups = 0;

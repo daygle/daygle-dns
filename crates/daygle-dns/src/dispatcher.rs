@@ -124,7 +124,9 @@ pub struct DnsDispatcher {
     /// serialize SQLite writes at request volume.
     record_use_cache: Arc<Mutex<RecordUseCache>>,
     /// Client Timeout (`server.client_timeout_ms`): how long the recursive
-    /// path may take before the client receives SERVFAIL. Default 2000 ms.
+    /// path may take before the client receives a stale answer or SERVFAIL.
+    /// Default 2000 ms; the live config's value wins when there is one (see
+    /// [`Self::client_timeout`]).
     client_timeout: Duration,
     /// Global cap for recursive lookups, including work outliving client timeouts.
     recursive_admission: Arc<RecursiveAdmission>,
@@ -276,10 +278,18 @@ impl DnsDispatcher {
 
     /// Bound the time spent waiting for an answer (`server.client_timeout_ms`).
     /// When recursion cannot produce a response in time, the client receives
-    /// SERVFAIL and the whole recursion is cancelled.
+    /// a stale answer or SERVFAIL; the lookup carries on to fill the cache.
     pub fn with_client_timeout(mut self, client_timeout: Duration) -> Self {
         self.client_timeout = client_timeout;
         self
+    }
+
+    /// The Client Timeout in effect: the live config's, so a console change
+    /// applies at once, else the one this dispatcher was built with.
+    fn client_timeout(&self) -> Duration {
+        self.config.as_ref().map_or(self.client_timeout, |config| {
+            Duration::from_millis(config.load().server.client_timeout_ms)
+        })
     }
 
     /// Use the shared recursive admission gate for this server.
@@ -1566,25 +1576,41 @@ impl RequestHandler for DnsDispatcher {
                 .await
             })
         };
-        let lookup = match tokio::time::timeout(self.client_timeout, lookup_task).await {
+        let client_timeout = self.client_timeout();
+        let lookup = match tokio::time::timeout(client_timeout, lookup_task).await {
             Ok(Ok((result, stale))) => result.map(|lookup| (lookup, stale)),
             Ok(Err(e)) => Err(DaygleError::Resolution {
                 message: format!("lookup task failed: {e}"),
                 response_code: None,
             }),
+            // Out of time: answer from an expired cached answer when there is
+            // one (RFC 8767 client response timer) - the lookup carries on
+            // and refreshes the cache - and SERVFAIL otherwise.
             Err(_elapsed) => {
-                debug!(
-                    query = %qname,
-                    client_timeout = ?self.client_timeout,
-                    "no answer within server.client_timeout_ms, replying SERVFAIL"
-                );
-                Err(DaygleError::Resolution {
-                    message: format!(
-                        "no answer within the client timeout of {} ms",
-                        self.client_timeout.as_millis()
-                    ),
-                    response_code: None,
-                })
+                match resolver.stale_answer_for_client(client, &qname, info.query.query_type()) {
+                    Some(stale) => {
+                        debug!(
+                            query = %qname,
+                            ?client_timeout,
+                            "no answer within server.client_timeout_ms, serving stale answer"
+                        );
+                        Ok((stale, true))
+                    }
+                    None => {
+                        debug!(
+                            query = %qname,
+                            ?client_timeout,
+                            "no answer within server.client_timeout_ms, replying SERVFAIL"
+                        );
+                        Err(DaygleError::Resolution {
+                            message: format!(
+                                "no answer within the client timeout of {} ms",
+                                client_timeout.as_millis()
+                            ),
+                            response_code: None,
+                        })
+                    }
+                }
             }
         };
         match lookup {
@@ -1704,7 +1730,7 @@ impl RequestHandler for DnsDispatcher {
                     // has such triggers, within the client timeout.
                     let ns = if rpz.checks_name_servers() {
                         tokio::time::timeout(
-                            self.client_timeout,
+                            self.client_timeout(),
                             self.name_servers_of(
                                 Arc::clone(&resolver),
                                 client,
@@ -2061,7 +2087,7 @@ impl DnsDispatcher {
                 .await
             })
         };
-        let lookup = tokio::time::timeout(self.client_timeout, lookup_task)
+        let lookup = tokio::time::timeout(self.client_timeout(), lookup_task)
             .await
             .ok()?
             .ok()?
@@ -2614,7 +2640,7 @@ impl DnsDispatcher {
                 .await
             })
         };
-        let lookup = tokio::time::timeout(self.client_timeout, lookup_task).await;
+        let lookup = tokio::time::timeout(self.client_timeout(), lookup_task).await;
         match lookup {
             Ok(Ok((Ok(found), _stale))) => (
                 ResponseCode::NoError,

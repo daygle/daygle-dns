@@ -421,6 +421,28 @@ impl RecursiveResolver {
             .await
     }
 
+    /// The serve-stale answer `client` would be given for `name`/
+    /// `record_type`, if one expired less than `serve_stale_secs` ago. For
+    /// when the client timeout runs out before the lookup finishes (RFC 8767
+    /// client response timer): the client gets the last good answer, and the
+    /// lookup carries on to refresh the cache.
+    pub fn stale_answer_for_client(
+        &self,
+        client: IpAddr,
+        name: &str,
+        record_type: RecordType,
+    ) -> Option<Lookup> {
+        let name = Name::from_utf8(name).ok()?;
+        let policy = self.inner.policy_for(client);
+        let (_, _, scope) = self.inner.route(&name, policy);
+        let key = cache_key(&name, record_type).scoped(scope);
+        let stale = self.inner.cache_assist.stale_answer(&key)?;
+        self.inner
+            .metrics
+            .inc(&self.inner.metrics.resolver.stale_served);
+        Some(stale)
+    }
+
     /// Flush the response cache.
     pub fn clear_cache(&self) {
         if let DefaultBackend::Forward(resolver) = &self.inner.default {

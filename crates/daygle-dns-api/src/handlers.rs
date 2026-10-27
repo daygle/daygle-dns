@@ -5053,6 +5053,9 @@ pub struct SettingsUpdate {
     pub log_export: Option<daygle_dns_core::config::LogExportSettings>,
     /// Replaces the whole `[rrl]` section (response rate limiting).
     pub rrl: Option<daygle_dns_core::config::RrlSettings>,
+    /// Replaces the whole `[rate_limit]` section (per-client and per-domain
+    /// query limits). Applies live.
+    pub rate_limit: Option<daygle_dns_core::config::RateLimitSettings>,
     /// Replaces the response policy zones (`[[rpz]]`), in order.
     pub rpz: Option<Vec<daygle_dns_core::config::RpzZoneConfig>>,
     /// Replaces the whole `[block_page]` section.
@@ -5136,6 +5139,14 @@ pub struct AuthoritativeUpdate {
     pub catalog_zone: Option<String>,
     /// Replaces the whole list of consumed catalog zones.
     pub catalog_consumers: Option<Vec<daygle_dns_core::config::CatalogConsumerConfig>>,
+    /// DNSSEC signing and key rollover. Apply live: a change to signing or
+    /// the signature validity re-signs the zones.
+    pub dnssec_enabled: Option<bool>,
+    pub dnssec_sig_validity_days: Option<u32>,
+    pub dnssec_rollover_days: Option<u32>,
+    pub dnssec_rollover_overlap_days: Option<u32>,
+    pub dnssec_rollover_retire_days: Option<u32>,
+    pub dnssec_maintenance_secs: Option<u64>,
 }
 
 /// Partial update for policy-engine settings surfaced in the console (only the
@@ -5191,6 +5202,13 @@ pub struct ServerUpdate {
     /// Load balancers trusted to send PROXY protocol headers (addresses or
     /// network names).
     pub proxy_protocol: Option<Vec<String>>,
+    /// How long a recursive lookup may take before the client gets a stale
+    /// answer or SERVFAIL. Applies live.
+    pub client_timeout_ms: Option<u64>,
+    /// Plain-TCP idle timeout. Rebinds the listeners.
+    pub tcp_timeout_ms: Option<u64>,
+    /// DNS cookies (RFC 7873). Rebinds the listeners.
+    pub dns_cookies: Option<bool>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -5207,6 +5225,11 @@ pub struct RecursiveUpdate {
     pub max_cache_ttl: Option<u32>,
     pub failure_cache_ttl: Option<u32>,
     pub max_concurrent_lookups: Option<usize>,
+    /// Per-nameserver timeout in seconds.
+    pub timeout_secs: Option<u64>,
+    /// Window, in seconds, over which queries are counted to decide which
+    /// names are popular enough to prefetch.
+    pub prefetch_window_secs: Option<u64>,
     /// Replaces the whole conditional-forwarder list.
     pub conditional_zones: Option<Vec<daygle_dns_core::config::ConditionalZoneConfig>>,
     pub mode: Option<daygle_dns_core::config::ResolutionMode>,
@@ -5370,6 +5393,18 @@ pub async fn update_settings(
         if let Some(v) = s.reload_enabled {
             config.server.reload_enabled = v;
         }
+        // Read from the live config on every query: no rebind.
+        if let Some(v) = s.client_timeout_ms {
+            config.server.client_timeout_ms = v;
+        }
+        if let Some(v) = s.tcp_timeout_ms {
+            config.server.tcp_timeout_ms = v;
+            listeners_affected = true;
+        }
+        if let Some(v) = s.dns_cookies {
+            config.server.dns_cookies = v;
+            listeners_affected = true;
+        }
     }
     if let Some(r) = &update.recursive {
         if let Some(v) = r.enabled {
@@ -5447,6 +5482,12 @@ pub async fn update_settings(
         }
         if let Some(v) = r.max_concurrent_lookups {
             config.recursive.max_concurrent_lookups = v;
+        }
+        if let Some(v) = r.timeout_secs {
+            config.recursive.timeout_secs = v;
+        }
+        if let Some(v) = r.prefetch_window_secs {
+            config.recursive.prefetch_window_secs = v;
         }
     }
     if let Some(d) = &update.dot {
@@ -5917,6 +5958,19 @@ pub async fn update_settings(
             config.authoritative.catalog_consumers =
                 daygle_dns_core::config::AuthoritativeUpdate::normalize_catalog_consumers(v);
         }
+        daygle_dns_core::config::AuthoritativeUpdate {
+            dnssec_enabled: a.dnssec_enabled,
+            dnssec_sig_validity_days: a.dnssec_sig_validity_days,
+            dnssec_rollover_days: a.dnssec_rollover_days,
+            dnssec_rollover_overlap_days: a.dnssec_rollover_overlap_days,
+            dnssec_rollover_retire_days: a.dnssec_rollover_retire_days,
+            dnssec_maintenance_secs: a.dnssec_maintenance_secs,
+            ..Default::default()
+        }
+        .apply_dnssec(&mut config.authoritative);
+    }
+    if let Some(rate_limit) = &update.rate_limit {
+        config.rate_limit = rate_limit.clone();
     }
     let mut policy_changed = false;
     if let Some(p) = &update.policy {
@@ -6155,6 +6209,16 @@ pub async fn update_settings(
             state
                 .logs
                 .warn("api", format!("cannot publish the catalog zone: {e}"));
+        }
+    }
+    // DNSSEC signing settings: the maintenance task reads them each cycle;
+    // turning signing on or off, or a new signature validity, re-signs now.
+    if state.catalog.update_dnssec_settings(&config.authoritative) {
+        if let Err(e) = state.catalog.reload() {
+            state.logs.warn(
+                "api",
+                format!("cannot re-sign zones after a DNSSEC change: {e}"),
+            );
         }
     }
     if authoritative_changed {
