@@ -1,4 +1,5 @@
 <script>
+  import IconButton from '../IconButton.svelte';
   import { api, formatApiError } from '../api.js';
   import NetworkPicker from '../NetworkPicker.svelte';
   import { formatDateTime } from '../datetime.svelte.js';
@@ -179,10 +180,10 @@
               <td class="muted" style="white-space: nowrap">{p.modified_at ? formatDateTime(p.modified_at) : '-'}</td>
               <td class="num">
                 <div class="row" style="gap: 6px; justify-content: flex-end">
-                  <button class="secondary" onclick={() => move(i, -1)} disabled={i === 0} aria-label="Move up">↑</button>
-                  <button class="secondary" onclick={() => move(i, 1)} disabled={i === policies.length - 1} aria-label="Move down">↓</button>
-                  <button class="secondary" onclick={() => openEdit(i)}>Edit</button>
-                  <button class="danger" onclick={() => remove(i)} aria-label="Delete {p.name}">✕</button>
+                  <IconButton icon="up" label="Move up" onclick={() => move(i, -1)} disabled={i === 0} />
+                  <IconButton icon="down" label="Move down" onclick={() => move(i, 1)} disabled={i === policies.length - 1} />
+                  <IconButton icon="edit" label="Edit" onclick={() => openEdit(i)} />
+                  <IconButton icon="delete" variant="danger" label="Delete {p.name}" onclick={() => remove(i)} />
                 </div>
               </td>
             </tr>

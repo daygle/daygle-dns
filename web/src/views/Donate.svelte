@@ -79,7 +79,7 @@
   .sponsor-btn {
     flex: 0 0 auto;
     background: var(--accent);
-    color: #0b1020;
+    color: #fff;
     font-weight: 600;
     border-radius: 6px;
     padding: 9px 16px;

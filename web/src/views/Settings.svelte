@@ -5,6 +5,7 @@
   import NetworkPicker from '../NetworkPicker.svelte';
   import { icons } from '../icons.svelte.js';
   import { display, setDisplayDefaults, timeZoneOptions, DATE_FORMAT_OPTIONS, TIME_FORMAT_OPTIONS, previewDateTime } from '../datetime.svelte.js';
+  import { THEME_OPTIONS } from '../theme.svelte.js';
   import { duration } from '../aiLabels.js';
 
   let config = $state(null);
@@ -97,8 +98,8 @@
     return Number.isInteger(n) && n > 0 ? duration(n) : '';
   }
 
-  // Server-wide date and time display defaults (saved with the page).
-  let display_ = $state({ time_zone: 'system', date_format: 'system', time_format: 'system' });
+  // Server-wide date, time and theme display defaults (saved with the page).
+  let display_ = $state({ time_zone: 'system', date_format: 'system', time_format: 'system', theme: 'dark' });
   // How the web console is served (Settings -> General). `http_port` 0 in
   // the stored settings means the config file's api.port; the form shows
   // the real number.
@@ -228,7 +229,7 @@
   const zoneChoices = timeZoneOptions();
   // Users who chose their own settings don't see the defaults change.
   const ownPrefsSet = $derived(
-    !!(display.mine && (display.mine.time_zone || display.mine.date_format || display.mine.time_format)),
+    !!(display.mine && (display.mine.time_zone || display.mine.date_format || display.mine.time_format || display.mine.theme)),
   );
 
   // What empty SOA defaults resolve to (this server's name, the first
@@ -290,7 +291,7 @@
         doq = {};
         api_ = {};
         ai_ = {};
-        display_ = { time_zone: 'system', date_format: 'system', time_format: 'system' };
+        display_ = { time_zone: 'system', date_format: 'system', time_format: 'system', theme: 'dark' };
         aiCategoriesText = '';
         aiBackendCategories = [];
         upstreamText = '';
@@ -315,7 +316,7 @@
       dohNetworks = [...(config.doh?.allowed_networks || [])];
       doqNetworks = [...(config.doq?.allowed_networks || [])];
       api_ = { ...config.api };
-      display_ = { time_zone: 'system', date_format: 'system', time_format: 'system', ...config.display };
+      display_ = { time_zone: 'system', date_format: 'system', time_format: 'system', theme: 'dark', ...config.display };
       web_ = {
         http_enabled: true, https_enabled: false, https_port: 5443, https_certificate: '', redirect_http: false,
         ...config.web,
@@ -379,6 +380,105 @@
     if (dirty && !confirm('Discard your unsaved changes?')) return;
     notice = null;
     load();
+  }
+
+  // What each tab's Reset to Defaults leaves alone: things typed for this
+  // network (addresses, lists, names, credentials, certificates) rather
+  // than tuning. The General tab's web access is left too, so a reset can
+  // never move the console out from under the browser.
+  const RESET_KEEPS = {
+    general: 'Web console access is kept.',
+    recursive: 'Upstream servers, DNS64 clients and the ECS subnet are kept.',
+    cache: '',
+    listeners: 'Certificates, server names, allowed networks and the DDR name are kept.',
+    zones: 'Allowed networks, NOTIFY targets and catalog zones are kept.',
+    ai: '',
+    logging: 'The syslog server is kept.',
+    'rate-limiting': 'The never-limited list is kept.',
+    alerts: 'The webhook, email server, sender and recipients are kept.',
+  };
+
+  // Fill the current tab's fields with the built-in defaults. Nothing is
+  // saved until Save Changes, so Discard Changes undoes it.
+  async function resetTab() {
+    const label = TABS.find(([id]) => id === tab)?.[1] || tab;
+    const keeps = RESET_KEEPS[tab] ? ` ${RESET_KEEPS[tab]}` : '';
+    if (!confirm(`Reset the ${label} settings to their defaults?${keeps} Nothing is saved until you click Save Changes.`)) return;
+    notice = null;
+    error = null;
+    let d;
+    try {
+      d = await api.configDefaults();
+    } catch (e) {
+      error = formatApiError(e);
+      return;
+    }
+    const pick = (src, keys) => Object.fromEntries(keys.map((k) => [k, src[k]]));
+    const r = d.recursive;
+    if (tab === 'general') {
+      display_ = { time_zone: 'system', date_format: 'system', time_format: 'system', ...d.display };
+    } else if (tab === 'recursive') {
+      recursive = {
+        ...recursive,
+        ...pick(r, ['enabled', 'dnssec_validate', 'case_randomization', 'rebinding_protection',
+          'opportunistic_encryption', 'use_system_config']),
+        // An unset mode means: forwarding when upstreams exist, else recursive.
+        mode: r.mode || (parseUpstreams(upstreamText).length ? 'forwarding' : 'recursive'),
+        outbound_ip_versions: r.outbound_ip_versions || 'both',
+      };
+      dns64 = { ...dns64, enabled: !!d.dns64?.enabled, prefix: d.dns64?.prefix || '64:ff9b::/96' };
+      ecs = { ...ecs, ...pick(d.ecs, ['enabled', 'ipv4_prefix', 'ipv6_prefix']) };
+    } else if (tab === 'cache') {
+      recursive = {
+        ...recursive,
+        ...pick(r, ['min_cache_ttl', 'negative_cache_ttl', 'max_cache_ttl', 'failure_cache_ttl',
+          'cache_size', 'max_concurrent_lookups', 'prefetch_enabled', 'prefetch_ttl_fraction_pct',
+          'prefetch_min_queries', 'serve_stale_secs']),
+      };
+    } else if (tab === 'listeners') {
+      ddr_ = { ...ddr_, enabled: d.ddr.enabled };
+      dot = { ...dot, ...pick(d.dot, ['enabled', 'port', 'handshake_timeout_secs', 'max_connections']) };
+      doh = { ...doh, ...pick(d.doh, ['enabled', 'port', 'handshake_timeout_secs', 'max_connections', 'endpoint', 'http3']) };
+      doq = { ...doq, ...pick(d.doq, ['enabled', 'port', 'max_connections', 'max_concurrent_streams']) };
+    } else if (tab === 'zones') {
+      authoritative = {
+        ...authoritative,
+        ...pick(d.authoritative, ['default_record_ttl', 'default_primary_ns', 'default_admin_mailbox',
+          'axfr_enabled', 'allow_dynamic_updates', 'notify_enabled', 'notify_listen_enabled']),
+      };
+    } else if (tab === 'ai') {
+      const a = d.ai;
+      ai_ = {
+        ...ai_,
+        ...pick(a, ['enabled', 'workers', 'max_domains_per_scan', 'scan_interval_secs', 'expire_check_secs',
+          'block_threshold', 'confidence_floor', 'category_ttl_secs', 'threat_ttl_secs']),
+        mode: a.mode || 'train',
+      };
+      aiForm = {
+        scanMinutes: round2(a.scan_interval_secs / 60),
+        expireMinutes: round2(a.expire_check_secs / 60),
+        threatDays: round2(a.threat_ttl_secs / 86400),
+        categoryDays: round2(a.category_ttl_secs / 86400),
+        thresholdPct: round2(a.block_threshold * 100),
+        floorPct: round2(a.confidence_floor * 100),
+      };
+      aiCategoriesText = (a.auto_block_categories || []).join(', ');
+    } else if (tab === 'logging') {
+      syslog_ = { ...syslog_, ...pick(d.syslog, ['enabled', 'facility', 'level', 'queries']) };
+    } else if (tab === 'rate-limiting') {
+      // The never-limited list lives in rrlExempt, which is left alone.
+      rrl_ = { ...rrl_, ...d.rrl };
+    } else if (tab === 'alerts') {
+      alerts_ = {
+        ...alerts_,
+        enabled: d.alerts.enabled,
+        smtp_port: d.alerts.smtp_port,
+        smtp_security: d.alerts.smtp_security,
+        ...pick(d.alerts, ALERT_EVENTS.map(([key]) => key)),
+      };
+      reports_ = { ...reports_, ...d.reports };
+    }
+    notice = `${label} settings reset to their defaults. Click Save Changes to apply them.`;
   }
 
   function parseUpstreams(text) {
@@ -650,6 +750,7 @@
   <div class="actions" class:dirty>
     <button onclick={save} disabled={busy || !dirty}>{busy ? 'Saving...' : 'Save Changes'}</button>
     <button class="secondary" onclick={reload} disabled={busy}>{dirty ? 'Discard Changes' : 'Reload'}</button>
+    <button class="secondary" onclick={resetTab} disabled={busy}>Reset to Defaults</button>
     {#if dirty}<span class="unsaved">Unsaved changes (Save covers every tab)</span>{/if}
   </div>
   {/if}
@@ -720,7 +821,7 @@
     </p>
   </div>
   <div class="card" style="margin-bottom: 14px">
-    <h3 style="margin: 0 0 10px">Date & Time Defaults</h3>
+    <h3 style="margin: 0 0 10px">Display Defaults</h3>
     <div class="form-grid">
       <label><span>Time Zone</span>
         <select bind:value={display_.time_zone}>
@@ -737,6 +838,11 @@
           {#each TIME_FORMAT_OPTIONS as [value, label]}<option value={value}>{label}</option>{/each}
         </select>
       </label>
+      <label><span>Theme</span>
+        <select bind:value={display_.theme}>
+          {#each THEME_OPTIONS as [value, label]}<option value={value}>{label}</option>{/each}
+        </select>
+      </label>
     </div>
     <p class="muted help">
       Example: <strong>{previewDateTime(display_)}</strong>. These are the
@@ -744,7 +850,8 @@
       the Preferences tab of their <strong>Account</strong> page.
       {#if ownPrefsSet}Your own preferences are set, so you won't see a change
         here until you reset them.{/if}
-      "Device Time Zone" and "Browser Default" follow each viewer's computer.
+      "Device Time Zone", "Browser Default" and "Match the Device" follow each
+      viewer's computer.
       Filtering group schedules also use this time zone ("Device Time Zone"
       there means the server's own).
     </p>
@@ -1519,7 +1626,7 @@
     gap: 4px 12px;
     margin-top: 6px;
   }
-  .help.restart { color: #f5b041; margin-top: 8px; }
+  .help.restart { color: var(--warn); margin-top: 8px; }
   /* Save bar: stays in view while scrolling a long tab. */
   .actions {
     position: sticky;
@@ -1529,7 +1636,7 @@
     padding: 10px 0;
     background: var(--bg);
   }
-  .unsaved { color: #f5b041; font-size: 0.85rem; }
+  .unsaved { color: var(--warn); font-size: 0.85rem; }
   .form-grid.top { align-items: start; }
   .access { display: flex; flex-direction: column; gap: 10px; }
   .access-row { display: grid; grid-template-columns: 110px 140px minmax(0, 1fr); gap: 12px; align-items: end; }

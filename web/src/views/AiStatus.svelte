@@ -1,4 +1,5 @@
 <script>
+  import IconButton from '../IconButton.svelte';
   import { api, formatApiError, getStoredUser } from '../api.js';
   import { onDestroy } from 'svelte';
   import { formatDateTime } from '../datetime.svelte.js';
@@ -418,7 +419,7 @@
                 <td class="muted">{o.reason || '-'}</td>
                 <td class="muted">{when(o.created_at)}</td>
                 {#if isAdmin}
-                  <td class="num"><button class="danger" onclick={() => removeExemption(o.domain)} aria-label="Remove exemption for {o.domain}" title="Let the AI block this domain again">✕</button></td>
+                  <td class="num"><IconButton icon="delete" variant="danger" label="Remove exemption for {o.domain}" title="Remove the exemption: let the AI block this domain again" onclick={() => removeExemption(o.domain)} /></td>
                 {/if}
               </tr>
             {/each}
@@ -507,7 +508,7 @@
     gap: 12px;
     margin-top: 14px;
   }
-  .warn { border-color: #f5b041; }
+  .warn { border-color: var(--warn); }
   .exempt-row { display: flex; gap: 8px; flex-wrap: wrap; }
   .small { font-size: 0.85rem; }
   .auto-row { margin-bottom: 10px; }

@@ -1,4 +1,5 @@
 <script>
+  import IconButton from '../IconButton.svelte';
   import { api, formatApiError } from '../api.js';
   import { formatDateTime } from '../datetime.svelte.js';
   import ClientLabel from '../ClientLabel.svelte';
@@ -133,8 +134,8 @@
                 {#if show('last-seen')}<td class="muted nowrap">{formatDateTime(c.last_seen)}</td>{/if}
                 <td class="num">
                   <div class="row" style="gap: 6px; justify-content: flex-end">
-                    <button class="secondary" onclick={() => loadDevice(c.client)}>Details</button>
-                    {#if onShowQueries}<button class="secondary" onclick={() => onShowQueries(c.client)}>Queries</button>{/if}
+                    <IconButton icon="info" label="Details" onclick={() => loadDevice(c.client)} />
+                    {#if onShowQueries}<IconButton icon="list" label="Show this client's queries" onclick={() => onShowQueries(c.client)} />{/if}
                   </div>
                 </td>
               </tr>

@@ -782,6 +782,45 @@ async fn tsig_secrets_are_redacted_from_the_config_endpoint() {
 }
 
 #[tokio::test]
+async fn config_defaults_endpoint_returns_built_in_defaults() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut cfg = base_config(&dir.path().join("daygle-dns.db"));
+    cfg.server.port = free_port();
+    cfg.api.port = free_port();
+    cfg.api.users = vec![daygle_dns_core::config::ApiUser {
+        username: "auditor".to_string(),
+        password_hash: daygle_dns_core::auth::hash_password_with("watch", 100),
+        role: daygle_dns_core::config::Role::Viewer,
+    }];
+    cfg.recursive.prefetch_enabled = false;
+    cfg.recursive.serve_stale_secs = 0;
+    let server = spawn(cfg).await;
+
+    let (token, _) = login(server.api_addr, "auditor", "watch").await;
+    let defaults: serde_json::Value = reqwest::Client::new()
+        .get(api_url(server.api_addr, "/api/config/defaults"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let expected = DaygleConfig::default().recursive;
+    assert_eq!(
+        defaults["recursive"]["prefetch_enabled"],
+        json!(expected.prefetch_enabled)
+    );
+    assert_eq!(
+        defaults["recursive"]["serve_stale_secs"],
+        json!(expected.serve_stale_secs)
+    );
+    assert_eq!(defaults["api"]["users"], json!([]));
+
+    shutdown(server).await;
+}
+
+#[tokio::test]
 async fn db_settings_survive_restart_and_win_over_the_file() {
     let dir = tempfile::tempdir().unwrap();
     let cfg_path = dir.path().join("daygle-dns.toml");
@@ -1627,15 +1666,19 @@ async fn gui_cache_headers_allow_updates_without_hard_refresh() {
 
     // The hashed entry bundle the shell references is immutable-cached.
     let shell = resp.text().await.unwrap();
-    let src = shell
+    let scripts: Vec<&str> = shell
         .split("src=\"")
-        .nth(1)
-        .and_then(|s| s.split('"').next())
-        .expect("index.html references an entry script");
-    assert!(
-        src.starts_with("/assets/"),
-        "expected a hashed Vite asset, got {src}"
-    );
+        .skip(1)
+        .filter_map(|s| s.split('"').next())
+        .collect();
+    let src = scripts
+        .iter()
+        .find(|s| s.starts_with("/assets/"))
+        .unwrap_or_else(|| panic!("expected a hashed Vite asset among {scripts:?}"));
+    // The early theme script has a stable name, so it is revalidated too.
+    let resp = reqwest::get(format!("{base}/theme-init.js")).await.unwrap();
+    assert_eq!(resp.status(), 200);
+    assert_eq!(resp.headers().get("cache-control").unwrap(), "no-cache");
     let resp = reqwest::get(format!("{base}{src}")).await.unwrap();
     assert_eq!(resp.status(), 200);
     assert_eq!(
@@ -1818,10 +1861,20 @@ async fn display_defaults_and_personal_preferences() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 400);
+    let resp = put(json!({ "display": { "theme": "purple" } }))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+    // The colour theme defaults to dark.
+    assert_eq!(
+        me(viewer.clone()).await["display_defaults"]["theme"],
+        json!("dark")
+    );
     let resp = put(json!({ "display": {
         "time_zone": "Australia/Sydney",
         "date_format": "dmy",
         "time_format": "24h",
+        "theme": "system",
     } }))
     .await
     .unwrap();
@@ -1832,12 +1885,13 @@ async fn display_defaults_and_personal_preferences() {
         json!("Australia/Sydney")
     );
     assert_eq!(m["display_defaults"]["date_format"], json!("dmy"));
+    assert_eq!(m["display_defaults"]["theme"], json!("system"));
 
     // A read-only account may set its own preferences (and only those).
     let resp = client
         .put(format!("{base}/api/auth/preferences"))
         .bearer_auth(&viewer)
-        .json(&json!({ "time_zone": "UTC", "date_format": "", "time_format": "12h" }))
+        .json(&json!({ "time_zone": "UTC", "date_format": "", "time_format": "12h", "theme": "light" }))
         .send()
         .await
         .unwrap();
@@ -1854,6 +1908,7 @@ async fn display_defaults_and_personal_preferences() {
     assert_eq!(m["preferences"]["time_zone"], json!("UTC"));
     assert_eq!(m["preferences"]["date_format"], json!(""));
     assert_eq!(m["preferences"]["time_format"], json!("12h"));
+    assert_eq!(m["preferences"]["theme"], json!("light"));
     // Another account's preferences are untouched.
     let m = me(admin.clone()).await;
     assert_eq!(m["preferences"]["time_zone"], json!(""));
@@ -1887,6 +1942,8 @@ async fn display_defaults_and_personal_preferences() {
         json!("Australia/Sydney")
     );
     assert_eq!(m["preferences"]["time_format"], json!("12h"));
+    assert_eq!(m["preferences"]["theme"], json!("light"));
+    assert_eq!(m["display_defaults"]["theme"], json!("system"));
     shutdown(server).await;
 }
 

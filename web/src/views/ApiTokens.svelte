@@ -1,4 +1,5 @@
 <script>
+  import IconButton from '../IconButton.svelte';
   import { onMount } from 'svelte';
   import { api, formatApiError } from '../api.js';
   import { formatDate } from '../datetime.svelte.js';
@@ -140,7 +141,7 @@
               {t.expires_at ? (t.expires_at * 1000 < Date.now() ? 'Expired' : `Expires ${when(t.expires_at)}`) : 'Never expires'}
             </div>
           </div>
-          <button type="button" class="danger" disabled={busy} onclick={() => revoke(t)}>Revoke</button>
+          <IconButton icon="delete" variant="danger" label="Revoke {t.name}" disabled={busy} onclick={() => revoke(t)} />
         </div>
       {/each}
     {/if}

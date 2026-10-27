@@ -1,4 +1,5 @@
 <script>
+  import IconButton from '../IconButton.svelte';
   import { api, formatApiError } from '../api.js';
 
   // Named networks (LAN, VPN, IoT...) that settings taking client networks
@@ -128,13 +129,14 @@
               <td class="num">
                 {#if !n.builtin}
                   <div class="row" style="gap: 6px; justify-content: flex-end">
-                    <button class="secondary" onclick={() => startEdit(n)}>Edit</button>
-                    <button
-                      class="danger"
+                    <IconButton icon="edit" label="Edit" onclick={() => startEdit(n)} />
+                    <IconButton
+                      icon="delete"
+                      variant="danger"
                       onclick={() => remove(n)}
                       disabled={n.used_by.length > 0}
-                      title={n.used_by.length ? 'In use: remove it from the settings listed first' : 'Delete'}
-                      aria-label="Delete {n.name}">✕</button>
+                      title={n.used_by.length ? 'In use: remove it from the settings listed first' : `Delete ${n.name}`}
+                      label="Delete {n.name}" />
                   </div>
                 {/if}
               </td>

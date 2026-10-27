@@ -1,4 +1,5 @@
 <script>
+  import IconButton from '../IconButton.svelte';
   import { api, formatApiError } from '../api.js';
   import NetworkPicker from '../NetworkPicker.svelte';
   import { formatDateTime } from '../datetime.svelte.js';
@@ -299,10 +300,10 @@
               </td>
               <td class="num">
                 <div class="row" style="gap: 6px; justify-content: flex-end">
-                  <button class="secondary" onclick={() => move(g, 'up')} disabled={i === 0} aria-label="Move {g.name} up">↑</button>
-                  <button class="secondary" onclick={() => move(g, 'down')} disabled={i === groups.length - 1} aria-label="Move {g.name} down">↓</button>
-                  <button class="secondary" onclick={() => startEdit(g)}>Edit</button>
-                  <button class="danger" onclick={() => removeGroup(g)} aria-label="Delete {g.name}">✕</button>
+                  <IconButton icon="up" label="Move {g.name} up" onclick={() => move(g, 'up')} disabled={i === 0} />
+                  <IconButton icon="down" label="Move {g.name} down" onclick={() => move(g, 'down')} disabled={i === groups.length - 1} />
+                  <IconButton icon="edit" label="Edit" onclick={() => startEdit(g)} />
+                  <IconButton icon="delete" variant="danger" label="Delete {g.name}" onclick={() => removeGroup(g)} />
                 </div>
               </td>
             </tr>

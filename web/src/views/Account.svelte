@@ -3,6 +3,7 @@
   import { icons } from '../icons.svelte.js';
   import { api } from '../api.js';
   import TwoFactor from './TwoFactor.svelte';
+  import { THEME_OPTIONS, previewTheme } from '../theme.svelte.js';
   import ApiTokens from './ApiTokens.svelte';
   import {
     display,
@@ -25,7 +26,7 @@
       {
         id: 'preferences',
         label: 'Preferences',
-        tagline: 'How dates and times are shown to you, on any device you sign in from.',
+        tagline: 'How dates, times and colours are shown to you, on any device you sign in from.',
         personal: true,
       },
       {
@@ -52,7 +53,14 @@
 
   // Preferences.
   const zoneChoices = timeZoneOptions();
-  let prefsDraft = $state({ time_zone: '', date_format: '', time_format: '', ...display.mine });
+  let prefsDraft = $state({ time_zone: '', date_format: '', time_format: '', theme: '', ...display.mine });
+
+  // Show the theme being chosen straight away; leaving the page without
+  // saving goes back to the saved one.
+  $effect(() => {
+    previewTheme(prefsDraft.theme || display.defaults.theme);
+    return () => previewTheme(null);
+  });
   let prefsError = $state(null);
   let prefsNotice = $state(null);
   let savingPrefs = $state(false);
@@ -146,6 +154,13 @@
         <select bind:value={prefsDraft.time_format}>
           <option value="">Server Default ({choiceLabel('time_format', display.defaults.time_format)})</option>
           {#each TIME_FORMAT_OPTIONS as [value, label]}<option value={value}>{label}</option>{/each}
+        </select>
+      </label>
+      <label>
+        <span>Theme</span>
+        <select bind:value={prefsDraft.theme}>
+          <option value="">Server Default ({THEME_OPTIONS.find(([v]) => v === display.defaults.theme)?.[1] || 'Dark'})</option>
+          {#each THEME_OPTIONS as [value, label]}<option value={value}>{label}</option>{/each}
         </select>
       </label>
     </div>

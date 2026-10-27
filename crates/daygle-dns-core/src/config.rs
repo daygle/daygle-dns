@@ -1092,8 +1092,9 @@ impl WebSettings {
     }
 }
 
-/// How the console shows dates and times to users who have not chosen their
-/// own (each console account can override these in its preferences).
+/// How the console shows dates, times and colours to users who have not
+/// chosen their own (each console account can override these in its
+/// preferences).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct DisplaySettings {
@@ -1104,6 +1105,9 @@ pub struct DisplaySettings {
     pub date_format: String,
     /// `system` (the browser's locale), `24h` or `12h`.
     pub time_format: String,
+    /// The console's colours: `system` (follow the device's light or dark
+    /// setting), `light` or `dark`.
+    pub theme: String,
 }
 
 impl Default for DisplaySettings {
@@ -1112,6 +1116,7 @@ impl Default for DisplaySettings {
             time_zone: "system".to_string(),
             date_format: "system".to_string(),
             time_format: "system".to_string(),
+            theme: "dark".to_string(),
         }
     }
 }
@@ -1120,6 +1125,8 @@ impl Default for DisplaySettings {
 pub const DATE_FORMATS: &[&str] = &["system", "dmy", "mdy", "ymd", "d_mon_y"];
 /// Accepted `time_format` values.
 pub const TIME_FORMATS: &[&str] = &["system", "24h", "12h"];
+/// Accepted `theme` values.
+pub const THEMES: &[&str] = &["system", "light", "dark"];
 
 /// Check a display time zone: `system`, `UTC`, or something shaped like an
 /// IANA zone name (`Area/Location`, letters, digits, `_`, `-`, `+`). The
@@ -1157,6 +1164,9 @@ impl DisplaySettings {
         }
         if !unset(&self.time_format) && !TIME_FORMATS.contains(&self.time_format.as_str()) {
             return Err(format!("unknown time format '{}'", self.time_format));
+        }
+        if !unset(&self.theme) && !THEMES.contains(&self.theme.as_str()) {
+            return Err(format!("unknown theme '{}'", self.theme));
         }
         Ok(())
     }
@@ -4619,7 +4629,7 @@ impl Default for RateLimitSettings {
     fn default() -> Self {
         Self {
             enabled: false,
-            client_max_queries: 100,
+            client_max_queries: 1000,
             client_window_secs: 60,
             domain_max_queries: 600,
             domain_window_secs: 60,
@@ -4747,6 +4757,7 @@ pub fn normalize_domains(entries: impl IntoIterator<Item = String>) -> BTreeSet<
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
 
     /// Every setting the console saves into the database overlay must come
     /// back from it on the next start (and on a config-file reload, which
@@ -4910,6 +4921,7 @@ mod tests {
             time_zone: s("UTC"),
             date_format: s("ymd"),
             time_format: s("24h"),
+            theme: s("light"),
         };
         c.web.http_port = 8080;
         c.web.https_enabled = true;
@@ -5546,6 +5558,7 @@ fd0000000000000000000000000000aa 02 40 00 80     eth0
                 time_zone: tz.into(),
                 date_format: d.into(),
                 time_format: t.into(),
+                theme: "system".into(),
             }
             .check(false)
         };
@@ -5558,11 +5571,18 @@ fd0000000000000000000000000000aa 02 40 00 80     eth0
         assert!(ok("", "dmy", "24h").is_err());
         assert!(ok("UTC", "yyyy", "24h").is_err());
         assert!(ok("UTC", "dmy", "25h").is_err());
+        assert!(DisplaySettings {
+            theme: "purple".into(),
+            ..Default::default()
+        }
+        .check(false)
+        .is_err());
         // A user's preferences may leave fields empty (server default).
         assert!(DisplaySettings {
             time_zone: String::new(),
             date_format: String::new(),
             time_format: "12h".into(),
+            theme: String::new(),
         }
         .check(true)
         .is_ok());
@@ -5580,6 +5600,98 @@ fd0000000000000000000000000000aa 02 40 00 80     eth0
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../daygle-dns.toml.example");
         let text = std::fs::read_to_string(&path).expect("daygle-dns.toml.example is readable");
         DaygleConfig::parse(&text).expect("daygle-dns.toml.example must parse and validate");
+    }
+
+    #[test]
+    fn installer_firewall_ranges_match_private_networks() {
+        // install.sh opens its firewall rules to the networks "Private
+        // Networks Only" trusts; loopback is never firewalled.
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../install.sh");
+        let script = std::fs::read_to_string(&path).expect("install.sh is readable");
+        let mut opened: Vec<&str> = script
+            .lines()
+            .filter_map(|line| {
+                line.strip_prefix("LAN_NETS_V4=\"")
+                    .or_else(|| line.strip_prefix("LAN_NETS_V6=\""))
+            })
+            .flat_map(|list| list.trim_end_matches('"').split_whitespace())
+            .collect();
+        let mut private: Vec<&str> = PRIVATE_NETWORKS
+            .iter()
+            .copied()
+            .filter(|net| *net != "127.0.0.0/8" && *net != "::1/128")
+            .collect();
+        opened.sort_unstable();
+        private.sort_unstable();
+        assert_eq!(opened, private);
+    }
+
+    #[test]
+    fn example_config_matches_defaults() {
+        // The installer copies the example as the live config, so any value
+        // it pins overrides the built-in default on every new install. Only
+        // the keys below may differ: install paths, the bundled AI models
+        // and placeholders the operator is expected to edit.
+        const INTENDED: &[&str] = &[
+            "ai.enabled",
+            "ai.model_path",
+            "ai.verifier_model_path",
+            "authoritative.database",
+            "authoritative.zones_dir",
+            "doh.server_name",
+            "doq.server_name",
+            "dot.server_name",
+            "recursive.mode",
+        ];
+        fn flatten(prefix: &str, value: &toml::Value, out: &mut BTreeMap<String, String>) {
+            match value {
+                toml::Value::Table(table) => {
+                    for (key, value) in table {
+                        let path = if prefix.is_empty() {
+                            key.clone()
+                        } else {
+                            format!("{prefix}.{key}")
+                        };
+                        flatten(&path, value, out);
+                    }
+                }
+                other => {
+                    out.insert(prefix.to_string(), other.to_string());
+                }
+            }
+        }
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../daygle-dns.toml.example");
+        let text = std::fs::read_to_string(&path).expect("daygle-dns.toml.example is readable");
+        let (mut example, mut defaults) = (BTreeMap::new(), BTreeMap::new());
+        flatten(
+            "",
+            &toml::Value::try_from(DaygleConfig::parse(&text).unwrap()).unwrap(),
+            &mut example,
+        );
+        flatten(
+            "",
+            &toml::Value::try_from(DaygleConfig::default()).unwrap(),
+            &mut defaults,
+        );
+        let keys: BTreeSet<&String> = example.keys().chain(defaults.keys()).collect();
+        let drift: Vec<String> = keys
+            .into_iter()
+            .filter(|key| !INTENDED.contains(&key.as_str()))
+            .filter(|key| example.get(*key) != defaults.get(*key))
+            .map(|key| {
+                format!(
+                    "{key}: example {:?}, default {:?}",
+                    example.get(key),
+                    defaults.get(key)
+                )
+            })
+            .collect();
+        assert!(
+            drift.is_empty(),
+            "example differs from defaults:\n{}",
+            drift.join("\n")
+        );
     }
 
     #[test]

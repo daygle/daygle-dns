@@ -118,6 +118,29 @@
   let error = $state(null);
   let logLevel = $state('');
   let logSearch = $state('');
+  let logComponent = $state('');
+  // Friendly names for the components that write to the server log; any
+  // other is shown with its first letter capitalised.
+  const COMPONENTS = {
+    tls: 'DoT (DNS over TLS)',
+    https: 'DoH (DNS over HTTPS)',
+    quic: 'DoQ (DNS over QUIC)',
+    dhcp: 'DHCP',
+    ai: 'AI',
+    api: 'Console and API',
+    acme: 'Certificates (ACME)',
+    'block-page': 'Block Page',
+    authoritative: 'Zones',
+    transfer: 'Zone Transfers',
+    reload: 'Configuration Reload',
+  };
+  function componentLabel(component) {
+    return COMPONENTS[component] || component.charAt(0).toUpperCase() + component.slice(1).replace(/[-_]/g, ' ');
+  }
+  // The components present in the log, by name.
+  const logComponents = $derived(
+    [...new Set(logs.map((e) => e.component))].sort((a, b) => componentLabel(a).localeCompare(componentLabel(b))),
+  );
   const LEVELS = [
     ['error', 'Errors'],
     ['warn', 'Warnings and Errors'],
@@ -128,9 +151,15 @@
   const shownLogs = $derived(
     logs
       .filter((e) => !logLevel || (RANK[e.level] ?? 0) >= RANK[logLevel])
+      .filter((e) => !logComponent || e.component === logComponent)
       .filter((e) => {
         const q = logSearch.trim().toLowerCase();
-        return !q || e.message.toLowerCase().includes(q) || e.component.toLowerCase().includes(q);
+        return (
+          !q ||
+          e.message.toLowerCase().includes(q) ||
+          e.component.toLowerCase().includes(q) ||
+          componentLabel(e.component).toLowerCase().includes(q)
+        );
       })
       .slice()
       .reverse(),
@@ -411,6 +440,11 @@
       <h3 style="margin: 0">Server Log ({fmt(shownLogs.length)}{shownLogs.length !== logs.length ? ` of ${fmt(logs.length)}` : ''})</h3>
       <div class="row" style="gap: 8px; flex-wrap: wrap">
         <input type="search" placeholder="Search Messages" bind:value={logSearch} style="min-width: 200px" />
+        <select bind:value={logComponent} aria-label="Component">
+          <option value="">All Components</option>
+          {#each logComponents as c (c)}<option value={c}>{componentLabel(c)}</option>{/each}
+          {#if logComponent && !logComponents.includes(logComponent)}<option value={logComponent}>{componentLabel(logComponent)}</option>{/if}
+        </select>
         <select bind:value={logLevel} aria-label="Level">
           <option value="">All Levels</option>
           {#each LEVELS as [value, label] (value)}<option value={value}>{label}</option>{/each}
@@ -430,7 +464,7 @@
               <td><span class:pill={true} class:ok={entry.level === 'info'} class:err={entry.level === 'error'} class:warn={entry.level === 'warn'}>
                 {levelLabel(entry.level)}
               </span></td>
-              <td>{entry.component}</td>
+              <td><button type="button" class="link" onclick={() => (logComponent = entry.component)} title="Show only this component">{componentLabel(entry.component)}</button></td>
               <td class="message">{entry.message}</td>
             </tr>
           {/each}
@@ -621,7 +655,7 @@
   }
   .link:hover code { color: var(--accent); text-decoration: underline; }
   .pill.warn {
-    color: #e0a34e;
-    border-color: #e0a34e;
+    color: var(--warn);
+    border-color: var(--warn);
   }
 </style>

@@ -16,10 +16,15 @@
         'Block ads, trackers and malware with published lists (plain domain lists, hosts files, adblock filters or response policy zones). Lists are checked before they are saved, refresh on their own schedule, and every change applies immediately.',
     },
     {
-      id: 'domain-lists',
-      label: 'Allow & Block Lists',
+      id: 'allow',
+      label: 'Allow List',
       tagline:
-        'Your own lists of domains to always allow or always block, for every client. An allowed domain is never blocked by a blocklist or the AI.',
+        'Your own list of domains to always allow, for every client. An allowed domain is never blocked by a blocklist, the block list or the AI.',
+    },
+    {
+      id: 'block',
+      label: 'Block List',
+      tagline: 'Your own list of domains to always block, for every client, whatever the blocklists say.',
     },
     {
       id: 'response-filters',
@@ -49,8 +54,8 @@
 
 {#if tab === 'blocklists'}
   <Blocklists />
-{:else if tab === 'domain-lists'}
-  <DomainLists />
+{:else if tab === 'allow' || tab === 'block'}
+  <DomainLists kind={tab} />
 {:else if tab === 'rpz'}
   <RpzZones />
 {:else}

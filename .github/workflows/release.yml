@@ -20,7 +20,7 @@ jobs:
     name: Build linux-x86_64
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set version from release tag
         # Rewrite Cargo.toml + Cargo.lock from the pushed tag (v1.2.7 -> 1.2.7)
@@ -58,7 +58,7 @@ jobs:
         run: sha256sum daygle-dns-linux-x86_64 > daygle-dns-linux-x86_64.sha256
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: daygle-dns-linux-x86_64
           path: stage/*
@@ -71,7 +71,7 @@ jobs:
     runs-on: ubuntu-latest
     continue-on-error: true
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set version from release tag
         # Rewrite Cargo.toml + Cargo.lock from the pushed tag (v1.2.7 -> 1.2.7)
@@ -111,7 +111,7 @@ jobs:
         run: sha256sum daygle-dns-linux-x86_64-musl > daygle-dns-linux-x86_64-musl.sha256
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: daygle-dns-linux-x86_64-musl
           path: stage/*
@@ -125,7 +125,7 @@ jobs:
     runs-on: ubuntu-24.04-arm
     continue-on-error: true
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set version from release tag
         # Rewrite Cargo.toml + Cargo.lock from the pushed tag (v1.2.7 -> 1.2.7)
@@ -156,7 +156,7 @@ jobs:
         run: sha256sum daygle-dns-linux-aarch64 > daygle-dns-linux-aarch64.sha256
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: daygle-dns-linux-aarch64
           path: stage/*
@@ -170,7 +170,7 @@ jobs:
     runs-on: windows-latest
     continue-on-error: true
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set version from release tag
         # Rewrite Cargo.toml + Cargo.lock from the pushed tag (v1.2.7 -> 1.2.7)
@@ -203,7 +203,7 @@ jobs:
         run: sha256sum daygle-dns-windows-x86_64.exe > daygle-dns-windows-x86_64.exe.sha256
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: daygle-dns-windows-x86_64
           path: stage/*
@@ -214,7 +214,7 @@ jobs:
     runs-on: macos-latest
     continue-on-error: true
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set version from release tag
         # Rewrite Cargo.toml + Cargo.lock from the pushed tag (v1.2.7 -> 1.2.7)
@@ -252,7 +252,7 @@ jobs:
         run: shasum -a 256 daygle-dns-darwin-aarch64 > daygle-dns-darwin-aarch64.sha256
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: daygle-dns-darwin-aarch64
           path: stage/*
@@ -266,7 +266,7 @@ jobs:
     name: Build AI models bundle
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Stage bundle
         run: |
@@ -305,7 +305,7 @@ jobs:
           sha256sum daygle-dns-models.tar.gz > daygle-dns-models.tar.gz.sha256
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: daygle-dns-models-bundle
           path: stage/*
@@ -329,13 +329,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Download artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           merge-multiple: true
           path: stage
 
       - name: Create release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           draft: false
           generate_release_notes: true
