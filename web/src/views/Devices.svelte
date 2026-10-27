@@ -2,6 +2,18 @@
   import { api, formatApiError, getStoredUser } from '../api.js';
   import { formatDateTime } from '../datetime.svelte.js';
   import { loadDeviceNames } from '../devices.svelte.js';
+  import ColumnPicker from '../ColumnPicker.svelte';
+  import { isHidden } from '../columns.svelte.js';
+
+  const COLUMNS = [
+    { key: 'address', label: 'Address', locked: true },
+    { key: 'mac', label: 'MAC Address' },
+    { key: 'name', label: 'Name' },
+    { key: 'queries', label: 'Queries' },
+    { key: 'blocked', label: 'Blocked' },
+    { key: 'last-seen', label: 'Last Seen' },
+  ];
+  const show = (key) => !isHidden('devices', key);
 
   // Viewers are read-only (the server refuses their changes).
   const isAdmin = getStoredUser()?.role !== 'viewer';
@@ -91,6 +103,7 @@
         {#each PERIODS as [value, label] (value)}<option value={value}>{label}</option>{/each}
       </select>
       <button class="secondary" onclick={load}>Reload</button>
+      <ColumnPicker table="devices" columns={COLUMNS} />
     </div>
   </div>
   {#if !loaded}
@@ -102,7 +115,12 @@
       <table>
         <thead>
           <tr>
-            <th>Address</th><th>MAC Address</th><th>Name</th><th class="num">Queries</th><th class="num">Blocked</th><th>Last Seen</th>
+            <th>Address</th>
+            {#if show('mac')}<th>MAC Address</th>{/if}
+            {#if show('name') || editing}<th>Name</th>{/if}
+            {#if show('queries')}<th class="num">Queries</th>{/if}
+            {#if show('blocked')}<th class="num">Blocked</th>{/if}
+            {#if show('last-seen')}<th>Last Seen</th>{/if}
             {#if isAdmin}<th class="num">Actions</th>{/if}
           </tr>
         </thead>
@@ -110,7 +128,8 @@
           {#each shown as d (d.address)}
             <tr>
               <td><code>{d.address}</code></td>
-              <td><code class="muted">{d.mac || '-'}</code></td>
+              {#if show('mac')}<td><code class="muted">{d.mac || '-'}</code></td>{/if}
+              {#if show('name') || editing}
               <td>
                 {#if editing?.address === d.address}
                   <form class="row" style="gap: 6px" onsubmit={(e) => { e.preventDefault(); saveName(editing.value); }}>
@@ -125,9 +144,10 @@
                   <span class="muted">-</span>
                 {/if}
               </td>
-              <td class="num">{fmt(d.queries)}</td>
-              <td class="num">{fmt(d.blocked)}</td>
-              <td class="muted nowrap">{d.last_seen ? formatDateTime(d.last_seen) : '-'}</td>
+              {/if}
+              {#if show('queries')}<td class="num">{fmt(d.queries)}</td>{/if}
+              {#if show('blocked')}<td class="num">{fmt(d.blocked)}</td>{/if}
+              {#if show('last-seen')}<td class="muted nowrap">{d.last_seen ? formatDateTime(d.last_seen) : '-'}</td>{/if}
               {#if isAdmin}
                 <td class="num">
                   {#if editing?.address !== d.address}

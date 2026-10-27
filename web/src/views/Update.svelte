@@ -117,18 +117,6 @@
       });
   }
 
-  function reloadConsole() {
-    // A manual reload is a deliberate "move on" action: clear the recorded
-    // run snapshot as well, so the console comes back actionable instead of
-    // re-showing the done/error card. The auto-reload after an update goes
-    // through pingServer() below and deliberately keeps the snapshot so the
-    // completion confirmation is still visible.
-    api
-      .updateDismiss()
-      .then(() => location.reload())
-      .catch(() => location.reload());
-  }
-
   function scheduleReload() {
     if (waitingForServer) return;
     waitingForServer = true;
@@ -475,18 +463,12 @@
       {:else if run?.phase === 'done'}
         {#if isRollback(run)}
           <p style="margin: 8px 0; color: var(--danger)">The update failed: {run.message}</p>
-          <div style="display: flex; gap: 8px; margin-top: 8px">
-            <button class="secondary" onclick={dismissRun}>Dismiss</button>
-            <button class="secondary" onclick={reloadConsole}>Reload Console</button>
-          </div>
+          <button class="secondary" onclick={dismissRun} style="margin-top: 8px">Dismiss</button>
         {:else}
           <p style="margin: 8px 0">
             <span style="color: var(--ok)">✓</span> {run?.message || 'Update complete.'}
           </p>
-          <div style="display: flex; gap: 8px; margin-top: 8px">
-            <button class="secondary" onclick={reloadConsole}>Reload Console</button>
-            <button class="secondary" onclick={dismissRun}>Dismiss</button>
-          </div>
+          <button class="secondary" onclick={dismissRun} style="margin-top: 8px">Dismiss</button>
           {#if waitingForServer}
             <p class="muted small" style="margin-top: 10px">
               Waiting for the restarted service to come back, then reloading automatically...
