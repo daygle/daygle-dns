@@ -655,7 +655,7 @@
   }
   .link:hover code { color: var(--accent); text-decoration: underline; }
   .pill.warn {
-    color: #e0a34e;
-    border-color: #e0a34e;
+    color: var(--warn);
+    border-color: var(--warn);
   }
 </style>

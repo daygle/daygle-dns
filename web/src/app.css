@@ -8,7 +8,24 @@
   --accent: #5b8cff;
   --danger: #ff5b6a;
   --ok: #34d399;
+  --warn: #f5b041;
   color-scheme: dark;
+}
+
+/* The light theme (Account → Preferences, or the server default in
+   Settings → General; see theme.svelte.js). */
+:root[data-theme="light"] {
+  --bg: #f3f5fa;
+  --panel: #ffffff;
+  --panel-2: #eef1f7;
+  --border: #d4dae6;
+  --text: #182033;
+  --muted: #5b6478;
+  --accent: #3d6fe0;
+  --danger: #d63a4a;
+  --ok: #0e8f62;
+  --warn: #a8670a;
+  color-scheme: light;
 }
 
 * { box-sizing: border-box; }

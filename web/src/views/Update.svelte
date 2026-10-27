@@ -581,7 +581,7 @@
   }
   .bootstrap {
     background: var(--panel-2);
-    border: 1px solid var(--warn, #b58900);
+    border: 1px solid var(--warn);
     border-radius: 6px;
     padding: 10px 12px;
     margin: 10px 0;
@@ -606,7 +606,7 @@
     font-size: 0.9rem;
   }
   .v-label { color: var(--muted); }
-  .pill.new { color: var(--warn, #b58900); border-color: var(--warn, #b58900); }
+  .pill.new { color: var(--warn); border-color: var(--warn); }
   .spin {
     display: inline-block;
     width: 10px;

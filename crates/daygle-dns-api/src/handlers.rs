@@ -3490,8 +3490,8 @@ pub async fn auth_me(State(state): State<AppState>, headers: axum::http::HeaderM
     }
 }
 
-/// `PUT /api/auth/preferences` - the signed-in user sets their own date and
-/// time display preferences. An empty field means "use the server default".
+/// `PUT /api/auth/preferences` - the signed-in user sets their own date,
+/// time and theme display preferences. An empty field means "use the server default".
 /// Available to `viewer` accounts too (it only affects their own view).
 pub async fn auth_set_preferences(
     State(state): State<AppState>,
@@ -3506,6 +3506,7 @@ pub async fn auth_set_preferences(
         time_zone: input.time_zone.trim().to_string(),
         date_format: input.date_format.trim().to_string(),
         time_format: input.time_format.trim().to_string(),
+        theme: input.theme.trim().to_string(),
     };
     let store = state.catalog.store();
     match store.get_console_user(&session.username) {
@@ -4659,13 +4660,14 @@ pub struct WebUpdate {
     pub redirect_http: Option<bool>,
 }
 
-/// Partial update for the console's date and time display defaults.
+/// Partial update for the console's display defaults (date, time and theme).
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DisplayUpdate {
     pub time_zone: Option<String>,
     pub date_format: Option<String>,
     pub time_format: Option<String>,
+    pub theme: Option<String>,
 }
 
 /// Partial update for authoritative-zone settings surfaced in the console.
@@ -5362,6 +5364,9 @@ pub async fn update_settings(
         }
         if let Some(v) = &d.time_format {
             config.display.time_format = v.clone();
+        }
+        if let Some(v) = &d.theme {
+            config.display.theme = v.clone();
         }
     }
     let mut authoritative_changed = false;

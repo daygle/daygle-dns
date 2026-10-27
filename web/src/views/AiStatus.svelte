@@ -508,7 +508,7 @@
     gap: 12px;
     margin-top: 14px;
   }
-  .warn { border-color: #f5b041; }
+  .warn { border-color: var(--warn); }
   .exempt-row { display: flex; gap: 8px; flex-wrap: wrap; }
   .small { font-size: 0.85rem; }
   .auto-row { margin-bottom: 10px; }

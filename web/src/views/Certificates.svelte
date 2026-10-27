@@ -603,8 +603,8 @@
   .nowrap { white-space: nowrap; }
   .nowrap div { margin-bottom: 4px; }
   .pill.used { border-color: var(--accent); margin-right: 4px; }
-  .pill.warn { color: #e0a34e; border-color: #e0a34e; }
-  .warn-card { border-color: #e0a34e; }
+  .pill.warn { color: var(--warn); border-color: var(--warn); }
+  .warn-card { border-color: var(--warn); }
   .warn-card.expired { border-color: var(--danger); }
   .foot { margin-top: 12px; gap: 12px; flex-wrap: wrap; }
   .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 12px; }

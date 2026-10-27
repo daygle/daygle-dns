@@ -352,8 +352,8 @@
 {/if}
 
 <style>
-  .update-available { border-color: var(--warn, #b58900); background: rgba(181, 137, 0, 0.08); margin-bottom: 14px; }
-  .update-available strong { color: var(--warn, #b58900); }
+  .update-available { border-color: var(--warn); background: color-mix(in srgb, var(--warn) 8%, transparent); margin-bottom: 14px; }
+  .update-available strong { color: var(--warn); }
 
   /* Five tiles: one row, or rows of three and two, or (on phones) Total
      Queries across the top over two rows of two - never a lone tile. */

@@ -1023,8 +1023,9 @@ impl WebSettings {
     }
 }
 
-/// How the console shows dates and times to users who have not chosen their
-/// own (each console account can override these in its preferences).
+/// How the console shows dates, times and colours to users who have not
+/// chosen their own (each console account can override these in its
+/// preferences).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct DisplaySettings {
@@ -1035,6 +1036,9 @@ pub struct DisplaySettings {
     pub date_format: String,
     /// `system` (the browser's locale), `24h` or `12h`.
     pub time_format: String,
+    /// The console's colours: `system` (follow the device's light or dark
+    /// setting), `light` or `dark`.
+    pub theme: String,
 }
 
 impl Default for DisplaySettings {
@@ -1043,6 +1047,7 @@ impl Default for DisplaySettings {
             time_zone: "system".to_string(),
             date_format: "system".to_string(),
             time_format: "system".to_string(),
+            theme: "dark".to_string(),
         }
     }
 }
@@ -1051,6 +1056,8 @@ impl Default for DisplaySettings {
 pub const DATE_FORMATS: &[&str] = &["system", "dmy", "mdy", "ymd", "d_mon_y"];
 /// Accepted `time_format` values.
 pub const TIME_FORMATS: &[&str] = &["system", "24h", "12h"];
+/// Accepted `theme` values.
+pub const THEMES: &[&str] = &["system", "light", "dark"];
 
 /// Check a display time zone: `system`, `UTC`, or something shaped like an
 /// IANA zone name (`Area/Location`, letters, digits, `_`, `-`, `+`). The
@@ -1088,6 +1095,9 @@ impl DisplaySettings {
         }
         if !unset(&self.time_format) && !TIME_FORMATS.contains(&self.time_format.as_str()) {
             return Err(format!("unknown time format '{}'", self.time_format));
+        }
+        if !unset(&self.theme) && !THEMES.contains(&self.theme.as_str()) {
+            return Err(format!("unknown theme '{}'", self.theme));
         }
         Ok(())
     }
@@ -4831,6 +4841,7 @@ mod tests {
             time_zone: s("UTC"),
             date_format: s("ymd"),
             time_format: s("24h"),
+            theme: s("light"),
         };
         c.web.http_port = 8080;
         c.web.https_enabled = true;
@@ -5436,6 +5447,7 @@ fd0000000000000000000000000000aa 02 40 00 80     eth0
                 time_zone: tz.into(),
                 date_format: d.into(),
                 time_format: t.into(),
+                theme: "system".into(),
             }
             .check(false)
         };
@@ -5448,11 +5460,18 @@ fd0000000000000000000000000000aa 02 40 00 80     eth0
         assert!(ok("", "dmy", "24h").is_err());
         assert!(ok("UTC", "yyyy", "24h").is_err());
         assert!(ok("UTC", "dmy", "25h").is_err());
+        assert!(DisplaySettings {
+            theme: "purple".into(),
+            ..Default::default()
+        }
+        .check(false)
+        .is_err());
         // A user's preferences may leave fields empty (server default).
         assert!(DisplaySettings {
             time_zone: String::new(),
             date_format: String::new(),
             time_format: "12h".into(),
+            theme: String::new(),
         }
         .check(true)
         .is_ok());
