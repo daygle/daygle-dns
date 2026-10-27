@@ -340,6 +340,10 @@ POST /api/config
 `GET` returns the effective `DaygleConfig` document (the TOML configuration,
 serialized as JSON) with secrets redacted (see [Console users and roles](#console-users-and-roles)).
 
+`GET /api/config/defaults` returns the built-in defaults in the same shape,
+which is what a key left out of the config file gets. The Settings page's
+**Reset to Defaults** button reads it.
+
 `PUT /api/config` applies a **partial settings update** from the console
 (the Settings page uses this). `null`/absent fields are left unchanged;
 unknown fields are rejected with `400`. The merged configuration is validated

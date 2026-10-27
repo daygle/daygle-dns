@@ -192,6 +192,7 @@ export const api = {
   metrics: () => request('GET', '/metrics'),
   stats: (window) => request('GET', `/stats?window=${window || '1h'}`),
   config: () => request('GET', '/config'),
+  configDefaults: () => request('GET', '/config/defaults'),
   updateSettings: (body) => request('PUT', '/config', body),
   logs: (n) => request('GET', `/logs?limit=${n || 200}`),
   // Searchable per-query history (SQLite-backed). `qs` is a raw query string.
