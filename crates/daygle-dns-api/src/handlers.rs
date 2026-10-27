@@ -5207,6 +5207,9 @@ pub struct RecursiveUpdate {
     pub max_cache_ttl: Option<u32>,
     pub failure_cache_ttl: Option<u32>,
     pub max_concurrent_lookups: Option<usize>,
+    /// `server.client_timeout_ms`: how long a recursive lookup may take
+    /// before the client gets a stale answer or SERVFAIL. Applies live.
+    pub client_timeout_ms: Option<u64>,
     /// Replaces the whole conditional-forwarder list.
     pub conditional_zones: Option<Vec<daygle_dns_core::config::ConditionalZoneConfig>>,
     pub mode: Option<daygle_dns_core::config::ResolutionMode>,
@@ -5447,6 +5450,9 @@ pub async fn update_settings(
         }
         if let Some(v) = r.max_concurrent_lookups {
             config.recursive.max_concurrent_lookups = v;
+        }
+        if let Some(v) = r.client_timeout_ms {
+            config.server.client_timeout_ms = v;
         }
     }
     if let Some(d) = &update.dot {

@@ -324,7 +324,7 @@
         return;
       }
       server = { ...config.server };
-      recursive = { ...config.recursive };
+      recursive = { ...config.recursive, client_timeout_ms: config.server.client_timeout_ms };
       // An unset mode means: forwarding when upstreams exist, else recursive.
       recursive.mode = config.recursive.mode || (config.recursive.upstreams?.length ? 'forwarding' : 'recursive');
       recursive.outbound_ip_versions = config.recursive.outbound_ip_versions || 'both';
@@ -457,6 +457,7 @@
         ...pick(r, ['min_cache_ttl', 'negative_cache_ttl', 'max_cache_ttl', 'failure_cache_ttl',
           'cache_size', 'max_concurrent_lookups', 'prefetch_enabled', 'prefetch_ttl_fraction_pct',
           'prefetch_min_queries', 'serve_stale_secs']),
+        client_timeout_ms: d.server.client_timeout_ms,
       };
     } else if (tab === 'listeners') {
       ddr_ = { ...ddr_, enabled: d.ddr.enabled };
@@ -562,6 +563,7 @@
         max_cache_ttl: Number(recursive.max_cache_ttl),
         failure_cache_ttl: Number(recursive.failure_cache_ttl),
         max_concurrent_lookups: Number(recursive.max_concurrent_lookups),
+        client_timeout_ms: Number(recursive.client_timeout_ms),
       },
       dot: {
         enabled: !!dot.enabled,
@@ -1044,12 +1046,17 @@
       <label><span>Refresh When TTL Left Is Below (%)</span><input type="number" min="1" max="99" bind:value={recursive.prefetch_ttl_fraction_pct} disabled={!recursive.prefetch_enabled} /></label>
       <label><span>Refresh Names Queried At Least (Times)</span><input type="number" min="1" bind:value={recursive.prefetch_min_queries} disabled={!recursive.prefetch_enabled} /></label>
       <label><span>Serve-Stale Window (Seconds)</span><span class="hint">{hint(recursive.serve_stale_secs)}</span><input type="number" min="0" bind:value={recursive.serve_stale_secs} /></label>
+      <label><span>Client Timeout (Milliseconds)</span><input type="number" min="1000" max="10000" step="100" bind:value={recursive.client_timeout_ms} /></label>
     </div>
     <p class="muted help">
       Refreshing popular names early re-fetches a name before it expires once
       it has been asked for often enough, so clients rarely wait. Serve-stale
       answers from an expired entry for this long when the upstream cannot be
-      reached. The Cache page shows hit rates and can flush the cache.
+      reached. Client Timeout is how long a client waits for a lookup
+      (1000-10000 ms): when it runs out the client gets the expired answer if
+      there is one, else SERVFAIL, and the lookup carries on to fill the
+      cache. Raise it if slow sites fail on first visit. The Cache page shows
+      hit rates and can flush the cache.
     </p>
   </div>
   {:else if tab === 'zones'}

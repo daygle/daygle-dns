@@ -1370,6 +1370,11 @@ pub struct RecursiveUpdate {
     pub client_policies: Option<Vec<ClientPolicyConfig>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_concurrent_lookups: Option<usize>,
+    /// `server.client_timeout_ms`: kept with the resolver settings because
+    /// it only applies to recursive lookups (the console shows it beside
+    /// the serve-stale window).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_timeout_ms: Option<u64>,
 }
 
 impl RecursiveUpdate {
@@ -2109,6 +2114,9 @@ impl RuntimeSettings {
             if let Some(v) = r.max_concurrent_lookups {
                 config.recursive.max_concurrent_lookups = v;
             }
+            if let Some(v) = r.client_timeout_ms {
+                config.server.client_timeout_ms = v;
+            }
             if let Some(v) = &r.conditional_zones {
                 config.recursive.conditional_zones =
                     RecursiveUpdate::normalize_conditional_zones(v);
@@ -2420,6 +2428,7 @@ impl RuntimeSettings {
                 use_system_config: Some(config.recursive.use_system_config),
                 failure_cache_ttl: Some(config.recursive.failure_cache_ttl),
                 max_concurrent_lookups: Some(config.recursive.max_concurrent_lookups),
+                client_timeout_ms: Some(config.server.client_timeout_ms),
                 conditional_zones: Some(config.recursive.conditional_zones.clone()),
                 // Store the effective mode so a later upstreams change cannot
                 // silently flip an install between recursive and forwarding.
@@ -4794,6 +4803,8 @@ mod tests {
         r.use_system_config = !r.use_system_config;
         r.failure_cache_ttl += 1;
         r.max_concurrent_lookups += 1;
+        c.server.client_timeout_ms += 1;
+        let r = &mut c.recursive;
         r.conditional_zones = vec![ConditionalZoneConfig {
             name: s("corp.example"),
             upstreams: vec![s("192.0.2.1")],
@@ -4995,6 +5006,10 @@ mod tests {
         overlay.apply_to(&mut restored);
 
         assert_eq!(restored.recursive, c.recursive, "recursive");
+        assert_eq!(
+            restored.server.client_timeout_ms, c.server.client_timeout_ms,
+            "server.client_timeout_ms"
+        );
         assert_eq!(restored.dot, c.dot, "dot");
         assert_eq!(restored.doh, c.doh, "doh");
         assert_eq!(restored.doq, c.doq, "doq");
@@ -5054,6 +5069,16 @@ mod tests {
         assert_eq!(restored.doq.max_connections, 20);
         assert_eq!(restored.doq.max_concurrent_streams, 21);
         restored.validate().unwrap();
+
+        let mut timeout = DaygleConfig::default();
+        timeout.server.client_timeout_ms = 3000;
+        let mut restored = DaygleConfig::default();
+        RuntimeSettings::capture(&timeout).apply_to(&mut restored);
+        assert_eq!(restored.server.client_timeout_ms, 3000);
+        for bad in [999, 10_001] {
+            timeout.server.client_timeout_ms = bad;
+            assert!(timeout.validate().is_err(), "{bad} ms accepted");
+        }
 
         let mut invalid = DaygleConfig::default();
         invalid.recursive.max_concurrent_lookups = 0;

@@ -389,7 +389,8 @@ PUT /api/config
 Editable groups: `server` (listen/ipv6_only/port/udp_enabled/tcp_enabled; `dns_cookies` and `proxy_protocol` are file-only), `recursive`
 (enabled/mode/upstreams/use_system_config/dnssec_validate/cache_size/
 min_cache_ttl/max_cache_ttl/negative_cache_ttl/failure_cache_ttl/
-prefetch_* /serve_stale_secs/
+prefetch_* /serve_stale_secs/max_concurrent_lookups/
+client_timeout_ms (sets `server.client_timeout_ms`, 1000-10000, applied live)/
 conditional_zones/recursion_access/recursion_networks/root_hints/
 case_randomization/rebinding_protection/local_root/opportunistic_encryption/
 outbound_ip_versions/client_policies), `dot`,

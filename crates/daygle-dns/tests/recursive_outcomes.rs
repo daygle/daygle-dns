@@ -189,3 +189,44 @@ async fn slow_lookup_serves_a_stale_answer_when_one_is_on_hand() {
 
     shutdown(server).await;
 }
+
+#[tokio::test]
+async fn client_timeout_changes_from_the_console_apply_live() {
+    let dir = tempfile::tempdir().unwrap();
+    let (upstream, _) = fake_upstream(Duration::from_millis(1500)).await;
+    let mut cfg = forwarding_config(&dir.path().join("d.db"), upstream);
+    cfg.server.client_timeout_ms = 1000;
+    cfg.recursive.timeout_secs = 3;
+    cfg.recursive.attempts = 1;
+    let server = spawn(cfg).await;
+    let udp = server.udp_addr.expect("UDP enabled");
+    let put = |body: Value| {
+        reqwest::Client::new()
+            .put(format!("http://{}/api/config", server.api_addr))
+            .json(&body)
+            .send()
+    };
+
+    let first = udp_query(udp, "first.example.", RecordType::A).await;
+    assert_eq!(first.response_code, ResponseCode::ServFail);
+
+    // A longer timeout applies to the next query, no restart needed.
+    let saved = put(serde_json::json!({ "recursive": { "client_timeout_ms": 3000 } }))
+        .await
+        .unwrap();
+    assert_eq!(saved.status(), 200);
+    let config: Value = reqwest::Client::new()
+        .get(format!("http://{}/api/config", server.api_addr))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(config["server"]["client_timeout_ms"], 3000);
+    let second = udp_query(udp, "second.example.", RecordType::A).await;
+    assert_eq!(second.response_code, ResponseCode::NoError);
+    assert_eq!(first_answer(&second).as_deref(), Some("192.0.2.1"));
+
+    shutdown(server).await;
+}
