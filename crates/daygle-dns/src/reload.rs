@@ -72,6 +72,8 @@ pub struct Shared {
     pub local_root: Arc<daygle_dns_authoritative::LocalRoot>,
     /// Remote logging (syslog); `None` in tests.
     pub syslog: Option<Arc<crate::syslog::SyslogSender>>,
+    /// Query export to an HTTP endpoint; `None` in tests.
+    pub log_export: Option<Arc<daygle_dns_api::log_export::LogExporter>>,
     /// Held while the configuration is read, changed and published (console
     /// saves and config-file reloads), so two changes landing together
     /// cannot overwrite each other.
@@ -452,6 +454,7 @@ mod tests {
                 None,
             )),
             syslog: None,
+            log_export: None,
             config_write: Arc::default(),
         }
     }

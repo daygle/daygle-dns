@@ -617,6 +617,13 @@ pub async fn bind_with(
         let syslog = syslog.clone();
         Arc::new(move |entry| syslog.log_entry(entry))
     });
+    // Query export (Settings -> Logging): every query, as JSON, to an HTTP
+    // endpoint when `[log_export]` is on.
+    let log_export = daygle_dns_api::log_export::LogExporter::start(
+        config_swap.clone(),
+        logs.clone(),
+        shutdown.clone(),
+    );
     // Encrypted-DNS session diagnostics: certificate lifecycle reports and
     // coalesced handshake/connection failure warnings for DoT/DoH/DoQ.
     // Registered before any listener binds, so the hickory bridge in the
@@ -653,6 +660,7 @@ pub async fn bind_with(
         tsig_keys: tsig_keys.clone(),
         local_root: local_root.clone(),
         syslog: Some(syslog),
+        log_export: Some(log_export),
         config_write: Arc::default(),
     });
 
@@ -780,6 +788,7 @@ pub async fn bind_with(
         rpz: Some(rpz_manager.clone()),
         dhcp: Some(dhcp.clone()),
         devices: Arc::default(),
+        log_export: shared.log_export.clone(),
     };
     // Scheduled reports (Settings -> Alerts).
     tokio::spawn(daygle_dns_api::reports::run_reports(
@@ -1015,6 +1024,7 @@ fn build_dispatcher(shared: &Shared, config: &DaygleConfig) -> DnsDispatcher {
     .with_cookies(config.server.dns_cookies)
     .with_config(shared.config.clone())
     .with_syslog(shared.syslog.clone())
+    .with_log_export(shared.log_export.clone())
     .with_advanced_blocking(shared.advanced_blocking.clone())
     .with_query_logger(shared.query_logger.clone())
     .with_query_db_logger(shared.query_db_logger.clone())

@@ -39,7 +39,7 @@
     cache: 'How long answers are kept, how many, and how popular names are refreshed before they expire. Changes apply immediately.',
     listeners: 'Encrypted DNS: DNS over TLS, HTTPS and QUIC, and the certificate each one presents. Changes apply immediately.',
     zones: 'Defaults for new zones and records, and how other DNS servers may copy, update and be notified about your zones.',
-    logging: 'Sending the server log, and optionally every query, to a syslog server. The logs themselves are on the Logs page.',
+    logging: 'Sending the server log, and optionally every query, to a syslog server, and every query to a log collector over HTTP. The logs themselves are on the Logs page.',
     ai: 'The background scanner that classifies the domains in your DNS traffic and can block unsafe ones.',
     'rate-limiting': 'Response rate limiting (RRL): stop this server being used to flood someone else with DNS answers sent to a forged address.',
     alerts: 'Email and webhook alerts when something needs attention: failing blocklists or zone transfers, expiring certificates, DNSSEC, updates and AI blocks.',
@@ -109,6 +109,39 @@
   let dns64Clients = $state([]);
   let ecs = $state({ enabled: false, subnet: '', ipv4_prefix: 24, ipv6_prefix: 56 });
   let syslog_ = $state({ enabled: false, server: '', facility: 'daemon', level: 'info', queries: false });
+  const EXPORT_DEFAULTS = { enabled: false, url: '', format: 'ndjson', authorization: '', batch_size: 500, flush_secs: 5 };
+  let export_ = $state({ ...EXPORT_DEFAULTS });
+  let exportStatus = $state(null);
+  let exportTest = $state(null);
+  let exportTesting = $state(false);
+  $effect(() => {
+    if (tab !== 'logging') return;
+    api.logExportStatus().then((s) => { exportStatus = s; }).catch(() => {});
+  });
+
+  function exportBody() {
+    return {
+      enabled: !!export_.enabled,
+      url: (export_.url || '').trim(),
+      format: export_.format || 'ndjson',
+      authorization: (export_.authorization || '').trim(),
+      batch_size: Number(export_.batch_size),
+      flush_secs: Number(export_.flush_secs),
+    };
+  }
+
+  async function testExport() {
+    exportTesting = true;
+    exportTest = null;
+    try {
+      await api.testLogExport(exportBody());
+      exportTest = { ok: true, msg: 'Test query sent and accepted.' };
+    } catch (e) {
+      exportTest = { ok: false, msg: formatApiError(e) };
+    } finally {
+      exportTesting = false;
+    }
+  }
   const ALERT_DEFAULTS = {
     enabled: false, webhook_url: '', smtp_server: '', smtp_port: 587, smtp_security: 'starttls',
     smtp_username: '', smtp_password: '', email_from: '', email_to: [],
@@ -290,6 +323,7 @@
         http_port: config.web?.http_port || config.api?.port || 5380,
       };
       syslog_ = { enabled: false, server: '', facility: 'daemon', level: 'info', queries: false, ...config.syslog };
+      export_ = { ...EXPORT_DEFAULTS, ...config.log_export };
       alerts_ = { ...ALERT_DEFAULTS, ...config.alerts };
       rrl_ = { ...RRL_DEFAULTS, ...config.rrl };
       ddr_ = { enabled: true, name: '', ...config.ddr };
@@ -585,6 +619,7 @@
         level: syslog_.level || 'info',
         queries: !!syslog_.queries,
       },
+      log_export: exportBody(),
       authoritative: {
         default_record_ttl: Number(authoritative.default_record_ttl),
         default_primary_ns: authoritative.default_primary_ns || '',
@@ -1323,6 +1358,50 @@
       syslog, over UDP by default (port 514), or TCP with
       <code>tcp://host:port</code>. Changes apply as soon as they are saved.
       Every query can be a lot of traffic on a busy server.
+    </p>
+  </div>
+  <div class="card" style="margin-bottom: 14px">
+    <h3 style="margin: 0 0 10px">Query Export (HTTP)</h3>
+    <div class="form-grid">
+      <label class="check"><input type="checkbox" bind:checked={export_.enabled} /> <span>Send Every Query to a Log Collector</span></label>
+      <label>
+        <span>Endpoint URL</span>
+        <input placeholder="https://logs.example.com:8088/ingest" bind:value={export_.url} disabled={!export_.enabled} spellcheck="false" />
+      </label>
+      <label>
+        <span>Format</span>
+        <select bind:value={export_.format} disabled={!export_.enabled}>
+          <option value="ndjson">NDJSON (One Query per Line)</option>
+          <option value="json">JSON Array</option>
+        </select>
+      </label>
+      <label>
+        <span>Authorization Header</span>
+        <input type="password" autocomplete="new-password" placeholder="Bearer abc123" bind:value={export_.authorization} disabled={!export_.enabled} />
+      </label>
+      <label><span>Queries per Request</span><input type="number" min="1" max="10000" bind:value={export_.batch_size} disabled={!export_.enabled} /></label>
+      <label><span>Send at Least Every (Seconds)</span><input type="number" min="1" max="300" bind:value={export_.flush_secs} disabled={!export_.enabled} /></label>
+    </div>
+    <div class="row" style="margin-top: 14px; gap: 10px; flex-wrap: wrap; align-items: center">
+      <button class="secondary" onclick={testExport} disabled={exportTesting || !(export_.url || '').trim()}>{exportTesting ? 'Sending...' : 'Send Test Query'}</button>
+      {#if exportTest}<span style="color: {exportTest.ok ? 'var(--ok)' : 'var(--danger)'}">{exportTest.msg}</span>{/if}
+    </div>
+    {#if exportStatus && (exportStatus.sent || exportStatus.dropped || exportStatus.last_error)}
+      <p class="muted help">
+        Since the server started: {exportStatus.sent.toLocaleString()} queries sent, {exportStatus.dropped.toLocaleString()} dropped.
+        {#if exportStatus.last_error}<span style="color: var(--danger)">Last error: {exportStatus.last_error}</span>{/if}
+      </p>
+    {/if}
+    <p class="muted help">
+      Queries are sent in batches as an HTTP <code>POST</code>, each a JSON
+      object with <code>time</code>, <code>server</code>, <code>client</code>,
+      <code>qname</code>, <code>qtype</code>, <code>protocol</code>,
+      <code>outcome</code>, <code>rcode</code> and <code>elapsed_ms</code>, for
+      Vector, Fluent Bit, Logstash, Splunk HEC (<code>Splunk &lt;token&gt;</code>)
+      and the like. The Authorization header, when set, is never shown again
+      (leave it as is to keep it). A batch the endpoint does not accept is
+      retried twice, then dropped; Send Test Query uses the settings on this
+      page, saved or not.
     </p>
   </div>
   {:else if tab === 'rate-limiting'}

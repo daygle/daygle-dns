@@ -77,6 +77,7 @@ pub mod alerts;
 mod audit;
 pub mod devices;
 mod handlers;
+pub mod log_export;
 mod networks;
 pub mod reports;
 pub mod reverse;
@@ -419,6 +420,9 @@ pub struct AppState {
     pub dhcp: Option<Arc<daygle_dns_dhcp::DhcpService>>,
     /// Device names (remembered reverse DNS answers).
     pub devices: Arc<devices::DeviceNames>,
+    /// Query export to an HTTP endpoint; `None` when the API runs without a
+    /// server.
+    pub log_export: Option<Arc<log_export::LogExporter>>,
 }
 
 /// Build the API router (REST endpoints plus the embedded GUI).
@@ -542,6 +546,13 @@ pub fn router(state: AppState) -> Router {
             put(handlers::set_health_check).delete(handlers::delete_health_check),
         )
         .route("/health-checks", get(handlers::list_health_checks))
+        .route(
+            "/zones/{id}/records/{rid}/weight",
+            put(handlers::set_record_weight),
+        )
+        .route("/record-weights", get(handlers::list_record_weights))
+        .route("/zones/{id}/aliases", put(handlers::set_zone_aliases))
+        .route("/zone-aliases", get(handlers::list_zone_aliases))
         .route("/zones/{id}/export", get(handlers::export_zone))
         .route(
             "/zones/{id}/records/{rid}",
@@ -594,6 +605,8 @@ pub fn router(state: AppState) -> Router {
         .route("/policy/blocking/test", post(handlers::test_blocking))
         .route("/policy/explain", get(handlers::explain_blocking))
         .route("/alerts/test", post(handlers::test_alert))
+        .route("/log-export", get(handlers::log_export_status))
+        .route("/log-export/test", post(handlers::test_log_export))
         .route("/reports", get(handlers::report))
         .route("/reports/send", post(handlers::send_report))
         .route("/policy/services", get(handlers::blockable_services))

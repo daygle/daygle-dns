@@ -103,7 +103,7 @@ async fn send_webhook(url: &str, alert: &Alert) -> Result<(), String> {
 }
 
 /// An error with its causes ("error sending request: connection refused").
-fn describe(error: &dyn std::error::Error) -> String {
+pub(crate) fn describe(error: &dyn std::error::Error) -> String {
     let mut text = error.to_string();
     let mut source = error.source();
     while let Some(cause) = source {
