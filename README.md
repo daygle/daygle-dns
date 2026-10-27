@@ -184,6 +184,15 @@ account immediately. On upgrades the installer rebinds the API listener to
 0.0.0.0:5380 when it is still on 127.0.0.1 and preserves any existing console
 account (its password is never replaced).
 
+Port 53 must be free. On Ubuntu, Fedora and other systemd distributions,
+systemd-resolved runs a stub resolver on 127.0.0.53:53 that would stop the
+server starting, so the installer turns it off with
+`/etc/systemd/resolved.conf.d/daygle-dns.conf` (`DNSStubListener=no`) and links
+`/etc/resolv.conf` to `/run/systemd/resolve/resolv.conf`, the upstream servers
+systemd-resolved already knows, so the host itself keeps resolving. Set
+`DAYGLE_DNS_KEEP_RESOLVED=1` to leave systemd-resolved alone. Any other program
+still on port 53 (dnsmasq, bind9, unbound) is named in a warning.
+
 Then open the dashboard at <http://127.0.0.1:5380>.
 
 Test a query:

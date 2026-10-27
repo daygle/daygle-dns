@@ -15,9 +15,13 @@
 # DAYGLE_DNS_GUI_UPDATE=1 marks an update run driven by the installed
 # console (its updater stages this script and the root apply service
 # executes it): everything still runs, but configuration-affecting rewrites
-# - the [api] listen rebind, generated console accounts and firewall rule
-# changes - are skipped, because the deployment's own config is
-# authoritative on a host that is merely being updated.
+# - the [api] listen rebind, generated console accounts, firewall rule
+# changes and freeing port 53 from systemd-resolved - are skipped, because
+# the deployment's own config is authoritative on a host that is merely
+# being updated.
+#
+# DAYGLE_DNS_KEEP_RESOLVED=1 leaves the systemd-resolved stub listener on
+# (by default it is turned off so the server can bind port 53).
 
 set -eu
 
@@ -289,6 +293,92 @@ open_lan_firewall() {
     return 0
 }
 
+# The [server] value of `key` from the config file (empty when unset).
+server_setting() {
+    awk -v key="$1" '
+        /^\[server\][[:space:]]*$/ { in_server = 1; next }
+        /^\[/ { in_server = 0 }
+        in_server && $1 == key {
+            sub(/^[^=]*=[[:space:]]*/, "")
+            sub(/[[:space:]]*#.*$/, "")
+            gsub(/["\r]/, "")
+            print
+            exit
+        }
+    ' "$CONFIG_FILE" 2>/dev/null || true
+}
+
+# Programs other than Daygle DNS listening on TCP or UDP port 53, as
+# `address (program)` lines. Empty when `ss` is missing.
+port_53_holders() {
+    have_cmd ss || return 0
+    ss -Hlntup 'sport = :53' 2>/dev/null | awk '
+        $0 !~ /"daygle-dns"/ {
+            prog = "unknown program"
+            if (match($0, /users:\(\("[^"]+"/)) prog = substr($0, RSTART + 9, RLENGTH - 10)
+            print $5 " (" prog ")"
+        }
+    ' | sort -u
+}
+
+# Free port 53 for the DNS server. systemd-resolved (Ubuntu, Fedora and
+# other systemd distributions) runs a stub resolver on 127.0.0.53:53 and
+# 127.0.0.54:53, and Linux will not let a wildcard listener share the port
+# with it, so the service would exit with "Address already in use". Turn the
+# stub off with a drop-in and point /etc/resolv.conf at the upstream servers
+# systemd-resolved knows (not at this server, so the host keeps resolving
+# while Daygle DNS is stopped). DAYGLE_DNS_KEEP_RESOLVED=1 leaves it alone.
+free_dns_port() {
+    port="$(server_setting port)"
+    [ -z "$port" ] || [ "$port" = "53" ] || return 0
+    listen="$(server_setting listen)"
+    case ",${listen:-0.0.0.0}," in
+        *0.0.0.0*|*,::,*|*'[::]'*|*127.0.0.53*|*127.0.0.54*) ;;
+        *) return 0 ;; # only specific addresses: they do not collide
+    esac
+
+    if have_cmd systemctl && systemctl is-active --quiet systemd-resolved 2>/dev/null; then
+        stub_on=1
+        if have_cmd ss && ! ss -Hlntu 'sport = :53' 2>/dev/null | grep -qE '127\.0\.0\.5[34](%[^:]*)?:53'; then
+            stub_on=0
+        fi
+        if [ "$stub_on" = "1" ]; then
+            if [ "${DAYGLE_DNS_KEEP_RESOLVED:-}" = "1" ]; then
+                log "WARNING: systemd-resolved is listening on port 53 and DAYGLE_DNS_KEEP_RESOLVED=1 is set,"
+                log "         so Daygle DNS cannot bind port 53 until its stub listener is turned off."
+                return 0
+            fi
+            log "Turning off the systemd-resolved stub listener so Daygle DNS can use port 53..."
+            run_as_root mkdir -p /etc/systemd/resolved.conf.d
+            run_as_root tee /etc/systemd/resolved.conf.d/daygle-dns.conf >/dev/null <<'EOF'
+# Written by the Daygle DNS installer. Daygle DNS answers on port 53, so the
+# systemd-resolved stub listener (127.0.0.53 and 127.0.0.54) is turned off.
+# To undo: delete this file, link /etc/resolv.conf back to
+# /run/systemd/resolve/stub-resolv.conf and restart systemd-resolved.
+[Resolve]
+DNSStubListener=no
+EOF
+            # The stub resolv.conf names 127.0.0.53, which stops answering:
+            # use the list of real upstream servers instead.
+            if [ -L /etc/resolv.conf ] && readlink /etc/resolv.conf | grep -q 'stub-resolv\.conf$'; then
+                run_as_root ln -sf /run/systemd/resolve/resolv.conf /etc/resolv.conf
+                log "Linked /etc/resolv.conf to /run/systemd/resolve/resolv.conf (the upstream DNS servers)."
+            elif grep -qE '^[[:space:]]*nameserver[[:space:]]+127\.0\.0\.5[34]' /etc/resolv.conf 2>/dev/null; then
+                log "WARNING: /etc/resolv.conf names 127.0.0.53 but is not the systemd-resolved stub link;"
+                log "         point it at your DNS servers (or at this server) so this host keeps resolving."
+            fi
+            run_as_root systemctl restart systemd-resolved || log "WARNING: could not restart systemd-resolved."
+        fi
+    fi
+
+    holders="$(port_53_holders)"
+    if [ -n "$holders" ]; then
+        log "WARNING: port 53 is still in use, so Daygle DNS may fail to start:"
+        printf '%s\n' "$holders" | while IFS= read -r line; do log "           $line"; done
+        log "         Stop or reconfigure that program (dnsmasq, bind9, unbound, another DNS server)."
+    fi
+}
+
 # ---- prerequisites -----------------------------------------------------
 # System packages first so curl is available for the rustup fetch below.
 if need_cc || need_git || need_downloader; then
@@ -534,6 +624,10 @@ EOF
     # the database with every private key: keep other local accounts out of
     # both (existing installs included, whose files were created 0644).
     chmod 0750 "$CONFIG_DIR" "$DATA_DIR"
+    # A GUI-driven update leaves the host's resolver setup alone.
+    if [ "${DAYGLE_DNS_GUI_UPDATE:-}" != "1" ]; then
+        free_dns_port || true
+    fi
     systemctl daemon-reload
     if [ "$INSTALL_MODE" = "upgrade" ]; then
         WAS_ACTIVE=0
