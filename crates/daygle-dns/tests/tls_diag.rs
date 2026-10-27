@@ -65,24 +65,43 @@ fn warns(server: &BoundServer, protocol: &str) -> Vec<String> {
         .collect()
 }
 
-/// Connect a QUIC client offering the wrong ALPN (`h2` instead of `doq`):
-/// the server rejects the handshake, which is exactly what should be logged.
-async fn doq_alpn_mismatch(addr: SocketAddr, cert_path: &Path) {
+/// A TLS client config offering `alpn`. With `trusted_cert` it trusts the
+/// server's certificate; without one it trusts nothing, so it rejects the
+/// server's certificate with an alert - the failure a real, misconfigured
+/// client produces.
+fn client_tls(trusted_cert: Option<&Path>, alpn: &[u8]) -> rustls::ClientConfig {
     let mut roots = rustls::RootCertStore::empty();
-    for cert in
-        rustls::pki_types::CertificateDer::<'_>::pem_file_iter(cert_path).expect("read cert file")
-    {
-        roots.add(cert.expect("parse cert")).expect("add root");
+    if let Some(cert_path) = trusted_cert {
+        for cert in rustls::pki_types::CertificateDer::<'_>::pem_file_iter(cert_path)
+            .expect("read cert file")
+        {
+            roots.add(cert.expect("parse cert")).expect("add root");
+        }
     }
     let provider = Arc::new(rustls::crypto::ring::default_provider());
-    let tls = rustls::ClientConfig::builder_with_provider(provider)
+    let mut tls = rustls::ClientConfig::builder_with_provider(provider)
         .with_safe_default_protocol_versions()
         .expect("tls versions")
         .with_root_certificates(roots)
         .with_no_client_auth();
-    let mut tls = tls;
-    tls.alpn_protocols = vec![b"h2".to_vec()];
+    tls.alpn_protocols = vec![alpn.to_vec()];
+    tls
+}
 
+/// Connect a DoT client that does not trust the server's certificate.
+async fn dot_untrusted(addr: SocketAddr) {
+    let connector = tokio_rustls::TlsConnector::from(Arc::new(client_tls(None, b"dot")));
+    let stream = tokio::net::TcpStream::connect(addr)
+        .await
+        .expect("connect DoT");
+    let name = rustls::pki_types::ServerName::try_from("daygle.test").unwrap();
+    // Err on both sides: the client rejects the certificate with an alert.
+    let _ = connector.connect(name, stream).await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+}
+
+/// Connect a QUIC client with `tls`; the handshake is expected to fail.
+async fn doq_failing(addr: SocketAddr, tls: rustls::ClientConfig) {
     let mut endpoint = quinn::Endpoint::client("127.0.0.1:0".parse().unwrap()).expect("endpoint");
     endpoint.set_default_client_config(quinn::ClientConfig::new(Arc::new(
         quinn::crypto::rustls::QuicClientConfig::try_from(tls).expect("quic client config"),
@@ -158,16 +177,26 @@ async fn encrypted_dns_failures_and_certificates_reach_the_server_log() {
         );
     }
 
-    // 2. DoT handshake failures: warn, tagged tls, with the client address -
-    //    and coalesced: three failing connections from one client, one line.
+    // 2. DoT handshake failures. A scanner's handshake (bytes that are not
+    //    TLS) stays out of the Server Log. A client rejecting the certificate
+    //    warns, tagged tls, with the client address - and is coalesced:
+    //    three failing connections from one client, one line.
     use tokio::io::AsyncWriteExt as _;
     let dot = server.dot_addr.expect("DoT is enabled");
-    for _ in 0..3 {
+    {
         let mut stream = tokio::net::TcpStream::connect(dot)
             .await
             .expect("connect DoT");
         let _ = stream.write_all(b"definitely not TLS\n").await;
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    assert!(
+        warns(&server, "tls").is_empty(),
+        "{:?}",
+        warns(&server, "tls")
+    );
+    for _ in 0..3 {
+        dot_untrusted(dot).await;
     }
     wait_until(|| warns(&server, "tls").len() == 1).await;
     let tls_warns = warns(&server, "tls");
@@ -210,12 +239,20 @@ async fn encrypted_dns_failures_and_certificates_reach_the_server_log() {
         "repeated DoH misuse was not coalesced"
     );
 
-    // 4. DoQ: a server-rejected handshake (wrong ALPN), three times from the
-    //    same IP (each attempt uses a fresh source port) - one warn line,
-    //    tagged quic, naming the client and the reason.
+    // 4. DoQ. A wrong ALPN (`h2` instead of `doq`) is a scanner's handshake
+    //    and stays out of the Server Log. A client rejecting the certificate,
+    //    three times from the same IP (each attempt uses a fresh source
+    //    port), is one warn line, tagged quic, naming the client and reason.
     let doq = server.doq_addr.expect("DoQ is enabled");
+    doq_failing(doq, client_tls(Some(&cert), b"h2")).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(
+        warns(&server, "quic").is_empty(),
+        "{:?}",
+        warns(&server, "quic")
+    );
     for _ in 0..3 {
-        doq_alpn_mismatch(doq, &cert).await;
+        doq_failing(doq, client_tls(None, b"doq")).await;
     }
     wait_until(|| warns(&server, "quic").len() == 1).await;
     let quic_warns = warns(&server, "quic");
