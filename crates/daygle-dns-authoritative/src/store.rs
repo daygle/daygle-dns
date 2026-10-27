@@ -3380,8 +3380,36 @@ pub struct NameCount {
     pub count: u64,
 }
 
-/// A summary of the query log since a moment (for one client, or all).
+/// Queries and blocks in one hour of a report's period.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct HourCount {
+    /// RFC 3339: the start of the hour, in UTC.
+    pub hour: String,
+    pub queries: u64,
+    pub blocked: u64,
+}
+
+/// How many queries one blocking rule blocked: what blocked them (a
+/// `BlockReason` source), and the group and entry/list/zone when known.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct BlockRuleCount {
+    /// Empty for blocks logged before reasons were kept.
+    pub source: String,
+    pub group: Option<String>,
+    pub matched: Option<String>,
+    pub count: u64,
+}
+
+/// A name that failed to resolve, and how often with that response code.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct FailingName {
+    pub name: String,
+    pub rcode: String,
+    pub count: u64,
+}
+
+/// A summary of the query log since a moment (for one client, or all).
+#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
 pub struct QueryLogReport {
     /// RFC 3339: the start of the period.
     pub since: String,
@@ -3393,6 +3421,22 @@ pub struct QueryLogReport {
     pub clients: Vec<ClientActivity>,
     pub top_domains: Vec<NameCount>,
     pub top_blocked: Vec<NameCount>,
+    /// Queries per UTC hour, oldest first; hours with none are left out.
+    pub timeline: Vec<HourCount>,
+    /// Queries by outcome (`recursive`, `authoritative`, `blocked`, ...),
+    /// most first.
+    pub outcomes: Vec<NameCount>,
+    /// Queries by response code (`NOERROR`, `NXDOMAIN`, ...; empty when
+    /// none was recorded), most first.
+    pub rcodes: Vec<NameCount>,
+    /// Blocked queries by what blocked them (a `BlockReason` source; empty
+    /// for blocks logged before reasons were kept), most first.
+    pub block_sources: Vec<NameCount>,
+    /// The blocking rules that blocked most.
+    pub block_rules: Vec<BlockRuleCount>,
+    /// The names that failed most (NXDOMAIN, SERVFAIL or REFUSED answers
+    /// the server gave, not counting its own blocks or rate limiting).
+    pub failing: Vec<FailingName>,
 }
 
 impl ZoneStore {
@@ -3452,6 +3496,73 @@ impl ZoneStore {
         };
         let top_domains = names("")?;
         let top_blocked = names(" AND outcome = 'blocked'")?;
+        // Every row of `column` grouped, most first (no limit: these have a
+        // handful of values each).
+        let breakdown = |column: &str, extra: &str| -> Result<Vec<NameCount>> {
+            let mut stmt = conn.prepare(&format!(
+                "SELECT COALESCE({column}, ''), COUNT(*) FROM query_logs WHERE {filter}{extra}
+                 GROUP BY 1 ORDER BY 2 DESC, 1"
+            ))?;
+            let rows = stmt
+                .query_map(params![since, client], |r| {
+                    Ok(NameCount {
+                        name: r.get(0)?,
+                        count: r.get::<_, i64>(1)? as u64,
+                    })
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            Ok(rows)
+        };
+        let outcomes = breakdown("outcome", "")?;
+        let rcodes = breakdown("rcode", "")?;
+        let block_sources = breakdown("block_source", " AND outcome = 'blocked'")?;
+        // Timestamps are UTC RFC 3339 (`2026-10-20T09:15:00...+00:00`), so
+        // the first 13 characters name the hour.
+        let mut stmt = conn.prepare(&format!(
+            "SELECT substr(ts, 1, 13), COUNT(*), COALESCE(SUM(outcome = 'blocked'), 0)
+             FROM query_logs WHERE {filter} GROUP BY 1 ORDER BY 1"
+        ))?;
+        let timeline = stmt
+            .query_map(params![since, client], |r| {
+                Ok(HourCount {
+                    hour: format!("{}:00:00Z", r.get::<_, String>(0)?),
+                    queries: r.get::<_, i64>(1)? as u64,
+                    blocked: r.get::<_, i64>(2)? as u64,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let mut stmt = conn.prepare(&format!(
+            "SELECT COALESCE(block_source, ''), block_group, block_matched, COUNT(*)
+             FROM query_logs WHERE {filter} AND outcome = 'blocked'
+             GROUP BY 1, 2, 3 ORDER BY 4 DESC, 1, 2, 3 LIMIT ?3"
+        ))?;
+        let block_rules = stmt
+            .query_map(params![since, client, top], |r| {
+                Ok(BlockRuleCount {
+                    source: r.get(0)?,
+                    group: r.get(1)?,
+                    matched: r.get(2)?,
+                    count: r.get::<_, i64>(3)? as u64,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        // A block can answer NXDOMAIN or REFUSED too, and rate limiting
+        // REFUSED; neither is a name failing to resolve.
+        let mut stmt = conn.prepare(&format!(
+            "SELECT qname, rcode, COUNT(*) FROM query_logs
+             WHERE {filter} AND outcome NOT IN ('blocked', 'rate_limited')
+               AND rcode IN ('NXDOMAIN', 'SERVFAIL', 'REFUSED')
+             GROUP BY 1, 2 ORDER BY 3 DESC, 1, 2 LIMIT ?3"
+        ))?;
+        let failing = stmt
+            .query_map(params![since, client, top], |r| {
+                Ok(FailingName {
+                    name: r.get(0)?,
+                    rcode: r.get(1)?,
+                    count: r.get::<_, i64>(2)? as u64,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(QueryLogReport {
             since: since.to_string(),
             queries: queries as u64,
@@ -3460,6 +3571,12 @@ impl ZoneStore {
             clients,
             top_domains,
             top_blocked,
+            timeline,
+            outcomes,
+            rcodes,
+            block_sources,
+            block_rules,
+            failing,
         })
     }
 
@@ -4457,6 +4574,135 @@ mod tests {
             .query_log_report("2026-10-15T00:00:00+00:00", Some("10.0.0.2"), 10)
             .unwrap();
         assert_eq!((one.queries, one.blocked, one.clients_seen), (1, 1, 1));
+    }
+
+    #[test]
+    fn query_log_report_breaks_queries_down() {
+        let s = store();
+        let row = |ts: &str, qname: &str, outcome: &str, rcode: &str| QueryLogRow {
+            id: 0,
+            ts: ts.to_string(),
+            client: "10.0.0.1".to_string(),
+            qname: qname.to_string(),
+            qtype: "A".to_string(),
+            protocol: "udp".to_string(),
+            outcome: outcome.to_string(),
+            rcode: Some(rcode.to_string()),
+            elapsed_ms: 1,
+            block: None,
+        };
+        let blocked = |ts: &str, source: &str, matched: &str| QueryLogRow {
+            block: Some(daygle_dns_core::block_log::BlockReason {
+                source: source.to_string(),
+                group: None,
+                matched: Some(matched.to_string()),
+                reason: String::new(),
+            }),
+            ..row(ts, "ads.example", "blocked", "NXDOMAIN")
+        };
+        s.insert_query_logs(&[
+            row(
+                "2026-10-20T09:05:00+00:00",
+                "a.example",
+                "recursive",
+                "NOERROR",
+            ),
+            row(
+                "2026-10-20T09:40:00+00:00",
+                "gone.example",
+                "recursive",
+                "NXDOMAIN",
+            ),
+            row(
+                "2026-10-20T09:50:00+00:00",
+                "gone.example",
+                "recursive",
+                "NXDOMAIN",
+            ),
+            row(
+                "2026-10-20T11:00:00+00:00",
+                "broken.example",
+                "error",
+                "SERVFAIL",
+            ),
+            row(
+                "2026-10-20T11:01:00+00:00",
+                "flood.example",
+                "rate_limited",
+                "REFUSED",
+            ),
+            blocked("2026-10-20T11:02:00+00:00", "blocklist_source", "Ads List"),
+            blocked("2026-10-20T11:03:00+00:00", "blocklist_source", "Ads List"),
+            blocked("2026-10-20T11:04:00+00:00", "ai", "malware"),
+            // Logged before block reasons were kept.
+            row(
+                "2026-10-20T11:05:00+00:00",
+                "old.example",
+                "blocked",
+                "NXDOMAIN",
+            ),
+        ])
+        .unwrap();
+        let report = s
+            .query_log_report("2026-10-15T00:00:00+00:00", None, 10)
+            .unwrap();
+
+        let hours: Vec<_> = report
+            .timeline
+            .iter()
+            .map(|h| (h.hour.as_str(), h.queries, h.blocked))
+            .collect();
+        assert_eq!(
+            hours,
+            [
+                ("2026-10-20T09:00:00Z", 3, 0),
+                ("2026-10-20T11:00:00Z", 6, 4)
+            ]
+        );
+        let counts = |rows: &[NameCount]| -> Vec<(String, u64)> {
+            rows.iter().map(|r| (r.name.clone(), r.count)).collect()
+        };
+        assert_eq!(
+            counts(&report.outcomes),
+            [
+                ("blocked".to_string(), 4),
+                ("recursive".to_string(), 3),
+                ("error".to_string(), 1),
+                ("rate_limited".to_string(), 1),
+            ]
+        );
+        assert_eq!(
+            report.rcodes[0],
+            NameCount {
+                name: "NXDOMAIN".to_string(),
+                count: 6
+            }
+        );
+        assert_eq!(
+            counts(&report.block_sources),
+            [
+                ("blocklist_source".to_string(), 2),
+                (String::new(), 1),
+                ("ai".to_string(), 1),
+            ]
+        );
+        assert_eq!(report.block_rules[0].source, "blocklist_source");
+        assert_eq!(report.block_rules[0].matched.as_deref(), Some("Ads List"));
+        assert_eq!(report.block_rules[0].count, 2);
+        // Blocks and rate limiting answer NXDOMAIN/REFUSED too, but only real
+        // failures are listed.
+        let failing: Vec<_> = report
+            .failing
+            .iter()
+            .map(|f| (f.name.as_str(), f.rcode.as_str(), f.count))
+            .collect();
+        assert_eq!(
+            failing,
+            [
+                ("gone.example", "NXDOMAIN", 2),
+                ("broken.example", "SERVFAIL", 1),
+            ]
+        );
     }
 
     #[test]

@@ -1697,8 +1697,24 @@ POST   /api/reports/send
 last `hours` (default 24, at most 90 days), for every client or only
 `client`: `{"hours", "query_log_enabled", "report": {"since", "queries",
 "blocked", "clients_seen", "clients": [{"client", "queries", "blocked",
-"last_seen"}], "top_domains": [{"name", "count"}], "top_blocked": [...]}}`,
-the lists cut to `top` entries (default 20, at most 100), busiest first.
+"last_seen"}], "top_domains": [{"name", "count"}], "top_blocked": [...],
+"timeline": [{"hour", "queries", "blocked"}], "outcomes": [{"name",
+"count"}], "rcodes": [...], "block_sources": [...], "block_rules":
+[{"source", "group", "matched", "count"}], "failing": [{"name", "rcode",
+"count"}]}}`, the lists cut to `top` entries (default 20, at most 100),
+busiest first.
+
+- `timeline`: queries and blocks per UTC hour (`hour` is its start, RFC
+  3339), oldest first; hours without queries are left out.
+- `outcomes`, `rcodes`: every query by outcome (`recursive`,
+  `authoritative`, `split_horizon`, `blocked`, `rate_limited`, `error`) and
+  by response code (`""` when none was recorded). Not cut to `top`.
+- `block_sources`: blocked queries by what blocked them (the query log's
+  `block.source`; `""` for blocks logged before reasons were kept). Not cut
+  to `top`. `block_rules` breaks them down further by filtering group and
+  matched entry, list, service, AI category or zone.
+- `failing`: the names answered NXDOMAIN, SERVFAIL or REFUSED most often,
+  not counting the server's own blocks and rate limiting.
 
 The `reports` settings group (Settings → Alerts, replaced as a whole by
 `PUT /api/config` with `{"reports": {...}}`) sends that summary as plain
