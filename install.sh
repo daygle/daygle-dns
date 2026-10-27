@@ -661,8 +661,15 @@ EOF
         systemctl stop daygle-dns 2>/dev/null || true
         if [ "${DAYGLE_DNS_AI:-}" != "0" ] && id "$SERVICE_USER" >/dev/null 2>&1; then
             # (global --config must precede the subcommand)
-            if run_as_service "$PREFIX/bin/daygle-dns" --config "$CONFIG_FILE" seed-ai-settings; then
-                log "AI runtime settings synchronized from the config file (bundled starter model, train mode)."
+            # Its stdout says which branch it took; report that through log
+            # rather than letting the bare line interleave with ours.
+            if SEED_OUT=$(run_as_service "$PREFIX/bin/daygle-dns" --config "$CONFIG_FILE" seed-ai-settings); then
+                case "$SEED_OUT" in
+                    *"left untouched"*)
+                        log "AI runtime settings were changed in the web console; keeping them (config file [ai] section not applied)." ;;
+                    *)
+                        log "AI runtime settings synchronized from the config file (bundled starter model, train mode)." ;;
+                esac
             else
                 log "WARNING: could not synchronize AI runtime settings; enable the AI scanner from the console's AI page if you want it."
             fi

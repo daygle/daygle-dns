@@ -169,7 +169,7 @@ fn main() {
                         }
                     }
                 } else {
-                    println!("stored ai settings were edited by the console - left untouched");
+                    println!("ai settings were changed in the console - left untouched");
                 }
             }
             Err(e) => {
