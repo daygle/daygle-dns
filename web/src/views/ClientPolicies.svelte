@@ -247,7 +247,7 @@
   .notice.ok { color: var(--ok); }
   .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
   label { display: flex; flex-direction: column; gap: 4px; font-size: 0.85rem; color: var(--muted); }
-  .modal-backdrop { position: fixed; inset: 0; background: rgb(0 0 0 / 0.65); display: grid; place-items: center; padding: 20px; z-index: 10; }
+  .modal-backdrop { position: fixed; inset: 0; background: rgb(0 0 0 / 0.65); display: grid; place-items: center; padding: 20px; z-index: 50; }
   .modal { width: min(640px, 100%); max-height: calc(100vh - 40px); overflow: auto; }
   .modal-title { margin-bottom: 12px; }
   .section-title {

@@ -194,7 +194,7 @@
   textarea { width: 100%; }
   .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
   label { display: flex; flex-direction: column; gap: 4px; font-size: 0.85rem; color: var(--muted); }
-  .modal-backdrop { position: fixed; inset: 0; background: rgb(0 0 0 / 0.65); display: grid; place-items: center; padding: 20px; z-index: 10; }
+  .modal-backdrop { position: fixed; inset: 0; background: rgb(0 0 0 / 0.65); display: grid; place-items: center; padding: 20px; z-index: 50; }
   .modal { width: min(620px, 100%); max-height: calc(100vh - 40px); overflow: auto; }
   .actions { margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--border); }
   .dialog-error { color: var(--danger); margin: 0 0 10px; }

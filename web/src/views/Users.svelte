@@ -468,7 +468,7 @@
   .reset input { flex: 1; }
   .reset-ok { color: var(--ok); margin: 8px 0 0; font-size: 0.85rem; }
   .dialog-error { color: var(--danger); margin: 0 0 10px; }
-  .modal-backdrop { position: fixed; inset: 0; background: rgb(0 0 0 / 0.65); display: grid; place-items: center; padding: 20px; z-index: 10; }
+  .modal-backdrop { position: fixed; inset: 0; background: rgb(0 0 0 / 0.65); display: grid; place-items: center; padding: 20px; z-index: 50; }
   .modal { width: min(560px, 100%); max-height: calc(100vh - 40px); overflow: auto; }
   .modal-title { margin-bottom: 12px; }
   .section-title {

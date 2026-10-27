@@ -627,7 +627,7 @@
   .choice strong { color: var(--text); font-weight: 600; }
   .choice small { color: var(--muted); font-size: 0.78rem; line-height: 1.35; }
   .dialog-error { color: var(--danger); margin: 0 0 10px; }
-  .modal-backdrop { position: fixed; inset: 0; background: rgb(0 0 0 / 0.65); display: grid; place-items: center; padding: 20px; z-index: 10; }
+  .modal-backdrop { position: fixed; inset: 0; background: rgb(0 0 0 / 0.65); display: grid; place-items: center; padding: 20px; z-index: 50; }
   .modal { width: min(680px, 100%); max-height: calc(100vh - 40px); overflow: auto; }
   .modal-title { margin-bottom: 12px; }
   .actions { margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--border); }

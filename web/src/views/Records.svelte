@@ -758,7 +758,7 @@
   .filters input { flex: 0 1 280px; min-width: 180px; }
   .value { word-break: break-all; }
   .full { margin-top: 10px; }
-  .modal-backdrop { position: fixed; inset: 0; background: rgb(0 0 0 / 0.65); display: grid; place-items: center; padding: 20px; z-index: 10; }
+  .modal-backdrop { position: fixed; inset: 0; background: rgb(0 0 0 / 0.65); display: grid; place-items: center; padding: 20px; z-index: 50; }
   .modal { width: min(640px, 100%); max-height: calc(100vh - 40px); overflow: auto; }
   .modal-title { margin-bottom: 12px; }
   .actions { margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--border); }
