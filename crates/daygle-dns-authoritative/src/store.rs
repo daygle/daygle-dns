@@ -3380,6 +3380,21 @@ pub struct NameCount {
     pub count: u64,
 }
 
+/// A blocked name, how often it was blocked, and the rule that blocked
+/// the most of those queries.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct BlockedName {
+    pub name: String,
+    pub count: u64,
+    /// What blocked the dominant share (a `BlockReason` source). Empty for
+    /// blocks logged before reasons were kept.
+    pub source: String,
+    /// The filtering group that decided, when known.
+    pub group: Option<String>,
+    /// The blocklist entry or list that matched, when known.
+    pub matched: Option<String>,
+}
+
 /// Queries and blocks in one hour of a report's period.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct HourCount {
@@ -3459,7 +3474,10 @@ pub struct QueryLogReport {
     /// The most active clients.
     pub clients: Vec<ClientActivity>,
     pub top_domains: Vec<NameCount>,
-    pub top_blocked: Vec<NameCount>,
+    /// Most blocked names, each with the rule that blocked it most (a
+    /// `BlockedName`; `source` empty for blocks logged before reasons were
+    /// kept).
+    pub top_blocked: Vec<BlockedName>,
     /// Queries per UTC hour, oldest first; hours with none are left out.
     pub timeline: Vec<HourCount>,
     /// Queries by outcome (`recursive`, `authoritative`, `blocked`, ...),
@@ -3554,7 +3572,71 @@ impl ZoneStore {
             Ok(rows)
         };
         let top_domains = names("")?;
-        let top_blocked = names(" AND outcome = 'blocked'")?;
+        // The most blocked names, with the rule behind most of their
+        // blocks as the reason (a name blocked by several keeps the
+        // dominant one). No reason is kept for blocks logged before the
+        // query log recorded them; those show empty fields.
+        let top_blocked_names = names(" AND outcome = 'blocked'")?;
+        let mut top_blocked: Vec<BlockedName> = top_blocked_names
+            .iter()
+            .map(|n| BlockedName {
+                name: n.name.clone(),
+                count: n.count,
+                source: String::new(),
+                group: None,
+                matched: None,
+            })
+            .collect();
+        if !top_blocked.is_empty() {
+            let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = vec![
+                Box::new(since.to_string()),
+                Box::new(client.map(str::to_string)),
+            ];
+            for name in &top_blocked {
+                params_vec.push(Box::new(name.name.clone()));
+            }
+            let placeholders = vec!["?"; top_blocked.len()].join(", ");
+            let mut reason_stmt = conn.prepare(&format!(
+                "SELECT qname, COALESCE(block_source, ''), block_group, block_matched, COUNT(*)
+                 FROM query_logs
+                 WHERE {filter} AND outcome = 'blocked' AND qname IN ({placeholders})
+                 GROUP BY 1, 2, 3, 4"
+            ))?;
+            let params_ref: Vec<&dyn rusqlite::ToSql> =
+                params_vec.iter().map(|p| p.as_ref()).collect();
+            let mut best: std::collections::HashMap<String, u64> =
+                top_blocked.iter().map(|n| (n.name.clone(), 0)).collect();
+            let reason_rows = reason_stmt
+                .query_map(
+                    rusqlite::params_from_iter(params_ref.iter().copied()),
+                    |r| {
+                        Ok((
+                            r.get::<_, String>(0)?,
+                            r.get::<_, String>(1)?,
+                            r.get::<_, Option<String>>(2)?,
+                            r.get::<_, Option<String>>(3)?,
+                            r.get::<_, i64>(4)? as u64,
+                        ))
+                    },
+                )?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            for (name, source, group, matched, count) in reason_rows {
+                let Some(entry) = top_blocked.iter_mut().find(|n| n.name == name) else {
+                    continue;
+                };
+                let best = best.entry(name).or_insert(0);
+                // Keep the rule with the largest share of the name's
+                // blocks; the total count on the entry stays the total.
+                if count > *best {
+                    *best = count;
+                    if !source.is_empty() {
+                        entry.source = source;
+                        entry.group = group;
+                        entry.matched = matched;
+                    }
+                }
+            }
+        }
         // Every row of `column` grouped, most first (no limit: these have a
         // handful of values each).
         let breakdown = |column: &str, extra: &str| -> Result<Vec<NameCount>> {

@@ -136,6 +136,16 @@
   const rcodeLabel = (r) => (r ? (RCODES[r] ? `${r} (${RCODES[r]})` : r) : 'Not Recorded');
   const sourceLabel = (s) => (s ? blockSourceLabel(s) : 'Unknown (logged before reasons were kept)');
 
+  // The rule behind most of a blocked domain's queries, for the small
+  // reason line under its name in the Most Blocked lists.
+  function blockedReason(r) {
+    if (!r?.source) return 'Reason not recorded';
+    let text = blockSourceLabel(r.source);
+    if (r.matched) text += `: ${r.matched}`;
+    if (r.group) text += ` (${r.group})`;
+    return text;
+  }
+
   const PROTOCOLS = {
     udp: 'UDP (plain DNS)',
     tcp: 'TCP (plain DNS)',
@@ -345,7 +355,7 @@
           </p>
           <div class="split">
             {@render names('Most Asked', deviceReport.top_domains)}
-            {@render names('Most Blocked', deviceReport.top_blocked)}
+            {@render names('Most Blocked', deviceReport.top_blocked, true)}
           </div>
         {:else}
           <p class="muted">Loading...</p>
@@ -356,7 +366,7 @@
     <div class="card" style="margin-bottom: 14px">
       <div class="split">
         {@render names('Most Asked Domains', report.top_domains)}
-        {@render names('Most Blocked Domains', report.top_blocked)}
+        {@render names('Most Blocked Domains', report.top_blocked, true)}
       </div>
     </div>
     <div class="card">
@@ -559,14 +569,21 @@
   <div class="card"><p class="muted">Loading...</p></div>
 {/if}
 
-{#snippet names(title, rows)}
+{#snippet names(title, rows, reason = false)}
   <div>
     <h3 style="margin: 0 0 10px">{title}</h3>
     {#if rows.length}
       <table>
         <tbody>
           {#each rows as r, i (r.name)}
-            <tr><td class="muted rank">{i + 1}</td><td><code>{r.name}</code></td><td class="num">{fmt(r.count)}</td></tr>
+            <tr>
+              <td class="muted rank">{i + 1}</td>
+              <td>
+                <code>{r.name}</code>
+                {#if reason}<div class="reason">{blockedReason(r)}</div>{/if}
+              </td>
+              <td class="num">{fmt(r.count)}</td>
+            </tr>
           {/each}
         </tbody>
       </table>
@@ -597,6 +614,8 @@
   .split { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
   .rank { width: 2em; }
   .nowrap { white-space: nowrap; }
+  /* The reason line under a blocked domain in the Most Blocked lists. */
+  .reason { font-size: 0.75rem; color: var(--muted); margin-top: 2px; }
   tr.selected td { background: color-mix(in srgb, var(--accent) 10%, transparent); }
   /* Long names wrap only when they must; narrow tables scroll instead of
      breaking every name a letter at a time. */

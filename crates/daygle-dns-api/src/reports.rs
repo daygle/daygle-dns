@@ -137,11 +137,40 @@ pub fn render(
             .map(|r| (r.name.clone(), number(r.count)))
             .collect::<Vec<_>>()
     };
+    // Blocked names, with the rule that blocked most of them as the
+    // reason (like the console's Most Blocked list).
+    let blocked_names = |rows: &[daygle_dns_authoritative::store::BlockedName]| {
+        rows.iter()
+            .map(|r| {
+                let reason = if r.source.is_empty() {
+                    String::new()
+                } else {
+                    let mut text = r.source.replace('_', " ");
+                    if let Some(matched) = r.matched.as_deref().filter(|m| !m.is_empty()) {
+                        text.push_str(": ");
+                        text.push_str(matched);
+                    }
+                    if let Some(group) = r.group.as_deref().filter(|g| !g.is_empty()) {
+                        text.push_str(&format!(" ({group})"));
+                    }
+                    text
+                };
+                (
+                    r.name.clone(),
+                    if reason.is_empty() {
+                        number(r.count)
+                    } else {
+                        format!("{} ({reason})", number(r.count))
+                    },
+                )
+            })
+            .collect::<Vec<_>>()
+    };
     list(&mut text, "Most asked domains", &names(&report.top_domains));
     list(
         &mut text,
         "Most blocked domains",
-        &names(&report.top_blocked),
+        &blocked_names(&report.top_blocked),
     );
     let devices: Vec<(String, String)> = report
         .clients

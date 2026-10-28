@@ -1742,7 +1742,8 @@ POST   /api/reports/send
 last `hours` (default 24, at most 90 days), for every client or only
 `client`: `{"hours", "query_log_enabled", "report": {"since", "queries",
 "blocked", "clients_seen", "clients": [{"client", "queries", "blocked",
-"last_seen"}], "top_domains": [{"name", "count"}], "top_blocked": [...],
+"last_seen"}], "top_domains": [{"name", "count"}], "top_blocked":
+[{"name", "count", "source", "group", "matched"}],
 "timeline": [{"hour", "queries", "blocked"}], "outcomes": [{"name",
 "count"}], "rcodes": [...], "block_sources": [...], "block_rules":
 [{"source", "group", "matched", "count"}], "failing": [{"name", "rcode",
@@ -1763,6 +1764,11 @@ busiest first.
   `block.source`; `""` for blocks logged before reasons were kept). Not cut
   to `top`. `block_rules` breaks them down further by filtering group and
   matched entry, list, service, AI category or zone.
+- `top_blocked`: like `top_domains`, but each name also carries the rule
+  behind most of its blocked queries: `source` (the query log's
+  `block.source`, `""` for blocks logged before reasons were kept),
+  `group`, and `matched`
+  (the entry, list, service, AI category or zone).
 - `failing`: the names answered NXDOMAIN, SERVFAIL or REFUSED most often,
   not counting the server's own blocks and rate limiting.
 - `qtypes`, `protocols`: every query by record type and by transport
