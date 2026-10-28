@@ -1790,6 +1790,11 @@ impl RequestHandler for DnsDispatcher {
                         }
                     }
                 }
+                // CNAME chain order, starting at the query name: DNSSEC
+                // validation rebuilds the answer in no particular order, and
+                // Android's resolver (and other strict stubs) read it in
+                // order, dropping addresses not yet reached by a CNAME.
+                let answers = order_cname_chain(&Name::from(info.query.name().clone()), answers);
                 // Forwarding: the upstream's AD bit. Recursive mode validates
                 // locally and records the outcome on each record instead.
                 // Synthesized answers are never validated (RFC 6147 §5.5).
@@ -2746,6 +2751,37 @@ async fn send_error<R: ResponseHandler>(
     }
 }
 
+/// Put an answer section in CNAME-chain order (RFC 1034 §3.6.2, RFC 2181
+/// §10.1.1): the records owned by `qname` first, then those owned by the
+/// target of its CNAME, and so on down the chain; anything else keeps its
+/// place at the end. Each owner's records (RRSIGs included) keep their
+/// relative order. A recursor or cache can return the chain in any order,
+/// and stub resolvers that read it top to bottom - Android's, used by every
+/// app - discard the addresses when they come before the CNAMEs leading to
+/// them, so the app finds no address.
+fn order_cname_chain(qname: &Name, records: Vec<Record>) -> Vec<Record> {
+    let mut rest = records;
+    let mut ordered = Vec::with_capacity(rest.len());
+    let mut owner = qname.clone();
+    // At most one step per record: a looping chain cannot run forever.
+    for _ in 0..=rest.len() {
+        let (here, others): (Vec<Record>, Vec<Record>) =
+            rest.into_iter().partition(|r| r.name == owner);
+        rest = others;
+        let next = here.iter().find_map(|r| match &r.data {
+            RData::CNAME(target) => Some(target.0.clone()),
+            _ => None,
+        });
+        ordered.extend(here);
+        match next {
+            Some(target) => owner = target,
+            None => break,
+        }
+    }
+    ordered.extend(rest);
+    ordered
+}
+
 /// Send a negative recursive answer (NXDOMAIN or NODATA) with the zone's
 /// SOA in the authority section, so the client can cache it for the SOA's
 /// TTL (RFC 2308) instead of asking again at once.
@@ -3012,6 +3048,79 @@ fn fallback_response() -> ResponseInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The order Daygle sent for www.nab.com.au (addresses first, then the
+    /// chain backwards) comes out as the chain from the query name, which
+    /// is what Android's resolver needs to find the addresses.
+    #[test]
+    fn answers_are_put_in_cname_chain_order() {
+        use hickory_proto::rr::rdata::{A, CNAME};
+        let name = |n: &str| Name::from_ascii(n).unwrap();
+        let cname = |owner: &str, target: &str| {
+            Record::from_rdata(name(owner), 60, RData::CNAME(CNAME(name(target))))
+        };
+        let a = |owner: &str, ip: [u8; 4]| {
+            Record::from_rdata(
+                name(owner),
+                20,
+                RData::A(A::new(ip[0], ip[1], ip[2], ip[3])),
+            )
+        };
+        let received = vec![
+            a("e191523.a.akamaiedge.net.", [104, 71, 131, 86]),
+            a("e191523.a.akamaiedge.net.", [23, 220, 77, 42]),
+            cname("www.nab.com.au.edgekey.net.", "e191523.a.akamaiedge.net."),
+            cname("www.nab.com.au.", "www.nab.com.au.edgekey.net."),
+        ];
+        let owners = |records: &[Record]| -> Vec<String> {
+            records
+                .iter()
+                .map(|r| format!("{} {}", r.name, r.record_type()))
+                .collect()
+        };
+
+        let ordered = order_cname_chain(&name("WWW.nab.com.au."), received);
+        assert_eq!(
+            owners(&ordered),
+            [
+                "www.nab.com.au. CNAME",
+                "www.nab.com.au.edgekey.net. CNAME",
+                "e191523.a.akamaiedge.net. A",
+                "e191523.a.akamaiedge.net. A",
+            ]
+        );
+        // The two addresses keep their order.
+        assert_eq!(ordered[2].data, RData::A(A::new(104, 71, 131, 86)));
+
+        // Already in order, no chain, and a loop: all left as they are.
+        let in_order = ordered.clone();
+        assert_eq!(
+            order_cname_chain(&name("www.nab.com.au."), in_order.clone()),
+            in_order
+        );
+        let plain = vec![a("host.example.", [192, 0, 2, 1])];
+        assert_eq!(
+            order_cname_chain(&name("host.example."), plain.clone()),
+            plain
+        );
+        let looped = vec![
+            cname("b.example.", "a.example."),
+            cname("a.example.", "b.example."),
+        ];
+        assert_eq!(
+            owners(&order_cname_chain(&name("a.example."), looped)),
+            ["a.example. CNAME", "b.example. CNAME"]
+        );
+        // Records off the chain go last.
+        let stray = vec![
+            a("other.example.", [192, 0, 2, 9]),
+            cname("x.example.", "y.example."),
+        ];
+        assert_eq!(
+            owners(&order_cname_chain(&name("x.example."), stray)),
+            ["x.example. CNAME", "other.example. A"]
+        );
+    }
 
     #[test]
     fn transfer_acl_accepts_bare_addresses_and_networks() {
