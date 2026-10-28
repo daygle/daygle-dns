@@ -1028,14 +1028,6 @@
         for: IPv6 (AAAA) records are still resolved and served.
       </p>
     {/if}
-    <h4>Who May Use This Server</h4>
-    <p class="muted help" style="margin: 0">
-      Recursion Access (who may have names resolved) and the always-refused
-      networks are under <strong>Clients → Access</strong>.
-    </p>
-    {#if onOpenClients}
-      <button class="secondary" style="margin-top: 10px" onclick={() => onOpenClients('access')}>Open Access</button>
-    {/if}
   </div>
   <div class="card" style="margin-bottom: 14px">
     <h3 style="margin: 0 0 10px">DNS64 (RFC 6147)</h3>
