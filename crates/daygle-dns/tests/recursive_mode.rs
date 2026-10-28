@@ -98,6 +98,13 @@ fn tld_server(qname: &str, qtype: RecordType) -> Reply {
             vec![a("ns.example.test.", AUTH)],
         );
     }
+    // A second zone on the same server, like a CDN's.
+    if is_under(qname, "cdn.test.") {
+        return Reply::Referral(
+            vec![ns("cdn.test.", "ns.cdn.test.")],
+            vec![a("ns.cdn.test.", AUTH)],
+        );
+    }
     Reply::NxDomain(soa("test."))
 }
 
@@ -112,6 +119,21 @@ fn auth_server(qname: &str, qtype: RecordType) -> Reply {
         ("www.example.test.", RecordType::A) => {
             Reply::Answer(vec![a("www.example.test.", Ipv4Addr::new(198, 51, 100, 7))])
         }
+        // A chain through another zone and back, as a CDN-fronted name
+        // has (www.nab.com.au -> edgekey.net -> akamaiedge.net).
+        ("alias.example.test.", _) => Reply::Answer(vec![Record::from_rdata(
+            name("alias.example.test."),
+            300,
+            RData::CNAME(hickory_proto::rr::rdata::CNAME(name("edge.cdn.test."))),
+        )]),
+        ("edge.cdn.test.", _) => Reply::Answer(vec![Record::from_rdata(
+            name("edge.cdn.test."),
+            300,
+            RData::CNAME(hickory_proto::rr::rdata::CNAME(name("www.example.test."))),
+        )]),
+        ("cdn.test.", RecordType::NS) => Reply::Answer(vec![ns("cdn.test.", "ns.cdn.test.")]),
+        ("cdn.test.", RecordType::SOA) => Reply::Answer(vec![soa("cdn.test.")]),
+        ("ns.cdn.test.", RecordType::A) => Reply::Answer(vec![a("ns.cdn.test.", AUTH)]),
         ("www.example.test." | "example.test." | "ns.example.test.", _) => {
             Reply::NoData(soa("example.test."))
         }
@@ -787,6 +809,40 @@ async fn recursive_negative_answers_carry_the_soa() {
             .unwrap_or_else(|| panic!("{qname} {qtype}: no SOA in {:?}", msg.authorities));
         assert_eq!(soa.name.to_string(), "example.test.", "{qname} {qtype}");
         assert!(soa.ttl <= 300, "{qname} {qtype}: TTL {}", soa.ttl);
+    }
+
+    shutdown(server).await;
+}
+
+/// A CNAME chain through two zones comes back in order from the query
+/// name, fresh and from the cache: Android's resolver drops addresses that
+/// come before the CNAMEs leading to them, so apps would find no address.
+/// (The reordering itself comes from DNSSEC validation, which this unsigned
+/// hierarchy cannot run; `answers_are_put_in_cname_chain_order` covers it.)
+#[tokio::test]
+async fn cname_chains_are_answered_in_order() {
+    let port = spawn_hierarchy().await;
+    let dir = tempfile::tempdir().unwrap();
+    let server = spawn(recursive_config(&dir, port)).await;
+    let udp = server.udp_addr.unwrap();
+
+    for attempt in ["fresh", "cached"] {
+        let msg = udp_query(udp, "alias.example.test.", RecordType::A).await;
+        assert_eq!(msg.response_code, ResponseCode::NoError, "{attempt}");
+        let order: Vec<String> = msg
+            .answers
+            .iter()
+            .map(|r| format!("{} {}", r.name, r.record_type()))
+            .collect();
+        assert_eq!(
+            order,
+            [
+                "alias.example.test. CNAME",
+                "edge.cdn.test. CNAME",
+                "www.example.test. A",
+            ],
+            "{attempt}"
+        );
     }
 
     shutdown(server).await;
