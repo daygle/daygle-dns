@@ -22,6 +22,10 @@
 #
 # DAYGLE_DNS_KEEP_RESOLVED=1 leaves the systemd-resolved stub listener on
 # (by default it is turned off so the server can bind port 53).
+#
+# DAYGLE_DNS_ONNX=0 builds without the MiniLM/ONNX AI verifier, =1 with it.
+# By default it is left out on x86 CPUs without AVX2, which its prebuilt
+# ONNX Runtime needs (the binary would stop with "Illegal instruction").
 
 set -eu
 
@@ -511,9 +515,43 @@ if ! awk -v version="$RELEASE_VERSION" '
     exit 1
 fi
 mv Cargo.toml.tmp Cargo.toml
+# The MiniLM/ONNX AI verifier links a prebuilt ONNX Runtime compiled for
+# CPUs with AVX2. On older or low-power x86 CPUs without it (Atom, many
+# Celerons) the whole binary dies with "Illegal instruction" before it
+# starts, so build without the verifier there: the AI scanner keeps its
+# fastText classifier. DAYGLE_DNS_ONNX=0 or 1 forces the choice.
+BUILD_FEATURES=""
+case "${DAYGLE_DNS_ONNX:-auto}" in
+    0) BUILD_FEATURES="--no-default-features" ;;
+    1) ;;
+    *)
+        case "$(uname -m)" in
+            x86_64 | amd64)
+                if [ -r /proc/cpuinfo ] && ! grep -qw avx2 /proc/cpuinfo; then
+                    BUILD_FEATURES="--no-default-features"
+                    log "This CPU has no AVX2: building without the ONNX AI verifier (the AI scanner keeps its fastText classifier)."
+                fi
+                ;;
+        esac
+        ;;
+esac
+built_version() {
+    target/release/daygle-dns --version 2>/dev/null | awk '{print $2}'
+}
 log "Building Daygle DNS release $RELEASE_TAG (this may take a few minutes)..."
-cargo build --release -p daygle-dns
-BUILT_VERSION="$(target/release/daygle-dns --version 2>/dev/null | awk '{print $2}')"
+# shellcheck disable=SC2086 # BUILD_FEATURES is empty or one flag
+cargo build --release -p daygle-dns $BUILD_FEATURES
+BUILT_VERSION="$(built_version)"
+# Safety net for a CPU the check above missed: a build with the verifier
+# that will not run here is rebuilt without it.
+if [ "$BUILT_VERSION" != "$RELEASE_VERSION" ] && [ -z "$BUILD_FEATURES" ] \
+    && [ "${DAYGLE_DNS_ONNX:-auto}" != "1" ]; then
+    log "The built binary does not run on this CPU: rebuilding without the ONNX AI verifier..."
+    BUILD_FEATURES="--no-default-features"
+    # shellcheck disable=SC2086
+    cargo build --release -p daygle-dns $BUILD_FEATURES
+    BUILT_VERSION="$(built_version)"
+fi
 if [ "$BUILT_VERSION" != "$RELEASE_VERSION" ]; then
     log "ERROR: Built binary reports version '$BUILT_VERSION', expected '$RELEASE_VERSION'."
     exit 1
