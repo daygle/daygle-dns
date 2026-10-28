@@ -126,12 +126,12 @@
 
   // Response codes, with what they mean.
   const RCODES = {
-    NOERROR: 'answered',
-    NXDOMAIN: 'name does not exist',
-    SERVFAIL: 'server failure',
-    REFUSED: 'refused',
-    FORMERR: 'malformed query',
-    NOTIMP: 'not implemented',
+    NOERROR: 'Answered',
+    NXDOMAIN: 'Name Does Not Exist',
+    SERVFAIL: 'Server Failure',
+    REFUSED: 'Refused',
+    FORMERR: 'Malformed Query',
+    NOTIMP: 'Not Implemented',
   };
   const rcodeLabel = (r) => (r ? (RCODES[r] ? `${r} (${RCODES[r]})` : r) : 'Not Recorded');
   const sourceLabel = (s) => (s ? blockSourceLabel(s) : 'Unknown (logged before reasons were kept)');
