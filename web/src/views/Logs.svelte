@@ -647,7 +647,7 @@
   <div class="modal-backdrop" role="presentation" onclick={(e) => e.target === e.currentTarget && (why = null)}>
     <div class="modal card wide" role="dialog" aria-modal="true" aria-labelledby="why-title">
       <div class="spread" style="margin-bottom: 10px">
-        <h3 id="why-title" style="margin: 0">Why Was {why.qname} Blocked?</h3>
+        <h3 id="why-title" style="margin: 0">Block Details: {why.qname}</h3>
         <button class="secondary" style="padding: 2px 10px" onclick={() => (why = null)} aria-label="Close">✕</button>
       </div>
       {#if why.block}
