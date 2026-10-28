@@ -101,13 +101,33 @@ tokio::task_local! {
     static SENT_UPSTREAM: std::cell::Cell<bool>;
     /// The EDNS Client Subnet (RFC 7871) to send upstream for the lookup
     /// running in this task.
-    static CLIENT_SUBNET: Option<IpNet>;
+    static CLIENT_SUBNET: Option<EcsSubnet>;
+}
+
+/// The EDNS Client Subnet a lookup sends to forwarding upstreams.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EcsSubnet {
+    /// The network sent (host bits zero).
+    pub net: IpNet,
+    /// Whether it is the client's own network rather than one subnet sent
+    /// for everyone. The answer is then for that network alone (RFC 7871
+    /// section 7.3), so it is neither taken from nor kept in the caches
+    /// other clients share.
+    pub per_client: bool,
 }
 
 /// Run a lookup sending `subnet` upstream as its EDNS Client Subnet (to
-/// forwarding upstreams; the subnet's host bits must be zero).
-pub async fn with_client_subnet<F: Future>(subnet: Option<IpNet>, lookup: F) -> F::Output {
+/// forwarding upstreams).
+pub async fn with_client_subnet<F: Future>(subnet: Option<EcsSubnet>, lookup: F) -> F::Output {
     CLIENT_SUBNET.scope(subnet, lookup).await
+}
+
+/// Whether the lookup running in this task sends the client's own network
+/// (see [`EcsSubnet::per_client`]).
+pub(crate) fn per_client_subnet() -> bool {
+    CLIENT_SUBNET
+        .try_with(|s| s.is_some_and(|s| s.per_client))
+        .unwrap_or(false)
 }
 
 /// Run a lookup and report whether it sent any query upstream. A lookup
@@ -146,7 +166,7 @@ impl<C: DnsHandle> DnsHandle for TrackedConn<C> {
         // nothing to flag.
         let _ = SENT_UPSTREAM.try_with(|sent| sent.set(true));
         if self.client_subnet {
-            if let Ok(Some(subnet)) = CLIENT_SUBNET.try_with(|s| *s) {
+            if let Ok(Some(EcsSubnet { net: subnet, .. })) = CLIENT_SUBNET.try_with(|s| *s) {
                 // Only on requests already using EDNS (not a retry without).
                 if let Some(edns) = request.edns.as_mut() {
                     edns.options_mut()

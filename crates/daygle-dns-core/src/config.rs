@@ -649,6 +649,13 @@ impl EcsSettings {
 }
 
 impl Ecs {
+    /// Whether each client's own network is sent (no fixed subnet): the
+    /// answers are then for that network alone and must not be shared
+    /// between clients through a cache (RFC 7871 section 7.3).
+    pub fn per_client(&self) -> bool {
+        self.fixed.is_none()
+    }
+
     /// The subnet to send for `client`: the fixed one, else the client's
     /// network when its address is public.
     pub fn subnet_for(&self, client: IpAddr) -> Option<ipnet::IpNet> {
