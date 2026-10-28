@@ -301,7 +301,7 @@ impl Scanner {
                     if added.len() == 1 { "" } else { "s" }
                 ),
                 format!(
-                    "The AI scanner started blocking: {}{}. Review them under AI -> Verdicts, \
+                    "The AI scanner started blocking: {}{}. Review them under AI -> Threats, \
                      and exempt any that should stay reachable.",
                     list.join(", "),
                     if more > 0 {

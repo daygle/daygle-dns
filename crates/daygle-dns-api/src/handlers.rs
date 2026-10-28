@@ -1207,6 +1207,15 @@ pub struct AiVerdictsQuery {
     per_page: Option<u32>,
 }
 
+/// `GET /api/ai/threats` query params.
+#[derive(Debug, Default, serde::Deserialize)]
+pub struct AiThreatsQuery {
+    /// Optional domain substring search.
+    q: Option<String>,
+    page: Option<u32>,
+    per_page: Option<u32>,
+}
+
 /// `POST /api/ai/override` body.
 #[derive(Debug, serde::Deserialize)]
 pub struct AiOverrideBody {
@@ -1405,6 +1414,56 @@ pub async fn ai_verdicts(
             })),
         )
             .into_response(),
+        Err(e) => map_err(e),
+    }
+}
+
+/// `GET /api/ai/threats?q=&page=&per_page=` - paginated list of the
+/// scanner's classified threat verdicts (`threat` and `disputed` severity),
+/// highest confidence first. Each row carries `blocked`: whether the domain
+/// is in the *current* block snapshot, i.e. actually auto-blocked in
+/// enforce mode (an empty snapshot in train mode therefore reports every
+/// row as not blocked).
+pub async fn ai_threats(
+    State(state): State<AppState>,
+    Query(query): Query<AiThreatsQuery>,
+) -> Response {
+    let Some(ai) = ai_engine(&state) else {
+        return map_err(daygle_dns_ml::ai_disabled_error());
+    };
+    let per_page = query.per_page.unwrap_or(50).clamp(1, 500);
+    let page = query.page.unwrap_or(1).max(1);
+    match ai
+        .store
+        .list_threats(query.q.as_deref(), per_page, (page - 1).saturating_mul(per_page))
+    {
+        Ok((rows, total)) => {
+            let snapshot = ai.snapshot().load();
+            (StatusCode::OK,
+                axum::Json(serde_json::json!({
+                    "entries": rows.iter().map(|r| serde_json::json!({
+                        "domain": r.domain,
+                        "category": r.category,
+                        "severity": r.severity,
+                        "status": r.status,
+                        "confidence": r.confidence,
+                        "backend": r.backend,
+                        "evidence": r.evidence,
+                        "observations": r.observations,
+                        "overridden": r.overridden,
+                        "blocked": snapshot.contains_key(&r.domain),
+                        "classified_at": chrono::DateTime::<chrono::Utc>::from_timestamp(r.classified_at, 0)
+                            .map(|t| t.to_rfc3339()),
+                        "expires_at": chrono::DateTime::<chrono::Utc>::from_timestamp(r.expires_at, 0)
+                            .map(|t| t.to_rfc3339()),
+                    }))
+                    .collect::<Vec<_>>(),
+                    "total": total,
+                    "per_page": per_page,
+                    "page": page,
+                })),
+            ).into_response()
+        }
         Err(e) => map_err(e),
     }
 }

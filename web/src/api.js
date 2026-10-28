@@ -305,6 +305,7 @@ export const api = {
   // ---- AI subsystem (404 = the [ai] section is disabled) ----
   aiStatus: () => request('GET', '/ai/status'),
   aiVerdicts: (qs) => request('GET', `/ai/verdicts${qs ? `?${qs}` : ''}`),
+  aiThreats: (qs) => request('GET', `/ai/threats${qs ? `?${qs}` : ''}`),
   aiOverride: (domain, action, reason = '') =>
     request('POST', '/ai/override', { domain, action, reason }),
   aiOverrides: () => request('GET', '/ai/overrides'),

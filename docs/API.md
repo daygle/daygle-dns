@@ -1389,9 +1389,12 @@ the URL fetched fine but the content does not parse as (or does not match)
 ```
 GET  /api/ai/status
 GET  /api/ai/verdicts?status=classified&q=example&page=1&per_page=50
+GET  /api/ai/threats?q=example&page=1&per_page=50
 GET  /api/ai/overrides
 POST /api/ai/override          {"domain": "x.example", "action": "allow|clear", "reason": "..."}
 POST /api/ai/rescan
+GET  /api/ai/model-status
+POST /api/ai/update-models
 ```
 
 Available when `[ai] enabled = true`. `GET /api/ai/status` reports the mode
@@ -1420,6 +1423,22 @@ category, severity, status, confidence, backend, evidence, observation count
 `classified_at`/`expires_at` in RFC 3339 (at expiry the verdict is
 re-checked if the domain has been queried since; otherwise it is dropped,
 and the domain starts over if it is queried again). `per_page` is capped at 500.
+
+`GET /api/ai/threats` is the same paging with the same row shape, restricted
+to classified threats: verdicts with severity `threat` or `disputed`,
+highest confidence first, with an optional domain substring `q`. Each row
+also carries `blocked`, whether the domain is in the *current* block
+snapshot - actually auto-blocked in enforce mode (in train mode the snapshot
+is empty, so every row is `false`). The console's AI → Threats tab renders
+this list.
+
+Model files are managed over the API too: `GET /api/ai/model-status` reports
+the models directory, each installed model file (presence, size, sha256) and
+the shared update state (so an in-flight update can be followed from there);
+`POST /api/ai/update-models` starts a models-only update - download the
+models bundle from the latest release and hand it to the privileged apply
+service, which installs the files and restarts the server. A `202` only
+means the update began; poll `GET /api/ai/model-status` until `done`/`error`.
 
 `POST /api/ai/override` with `action: "allow"` exempts a domain and its
 subdomains from AI blocking; `clear` removes the exemption (`404` when there

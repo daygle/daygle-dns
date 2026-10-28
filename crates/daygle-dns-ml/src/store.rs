@@ -470,6 +470,65 @@ impl AiStore {
         Ok((collected, total as u64))
     }
 
+    /// Paginated threat list: classified verdicts with `threat` or
+    /// `disputed` (verifier-overruled, never auto-blocked) severity, highest
+    /// confidence first. Same shape as [`Self::list_verdicts`], restricted
+    /// to the rows the AI page's Threats tab shows.
+    pub fn list_threats(
+        &self,
+        search: Option<&str>,
+        limit: u32,
+        offset: u32,
+    ) -> Result<(Vec<VerdictRow>, u64)> {
+        let conn = self.lock()?;
+        let limit = limit.clamp(1, 500);
+        let offset = offset.min(u32::MAX - limit);
+        // LIKE pattern with the wildcard characters escaped.
+        let search = search
+            .unwrap_or("")
+            .trim()
+            .to_ascii_lowercase()
+            .replace('\\', "\\\\")
+            .replace('%', "\\%")
+            .replace('_', "\\_");
+        let pattern = format!("%{search}%");
+        let filter =
+            "v.status = 'classified' AND v.severity IN ('threat', 'disputed')
+                 AND v.domain LIKE ?1 ESCAPE '\\'";
+        let total: i64 = conn.query_row(
+            &format!("SELECT COUNT(*) FROM ai_verdicts v WHERE {filter}"),
+            params![pattern],
+            |r| r.get(0),
+        )?;
+        let mut stmt = conn.prepare(&format!(
+            "SELECT v.domain, v.category, v.severity, v.status, v.confidence, v.backend,
+                    v.evidence, v.observations, v.classified_at, v.expires_at,
+                    EXISTS (SELECT 1 FROM ai_overrides o
+                            WHERE o.domain = v.domain AND o.action = 'allow')
+             FROM ai_verdicts v WHERE {filter}
+             ORDER BY v.confidence DESC, v.classified_at DESC, v.domain
+             LIMIT {limit} OFFSET {offset}"
+        ))?;
+        let collected = stmt
+            .query_map(params![pattern], |r| {
+                Ok(VerdictRow {
+                    domain: r.get(0)?,
+                    category: r.get(1)?,
+                    severity: r.get(2)?,
+                    status: r.get(3)?,
+                    confidence: r.get::<_, f64>(4)? as f32,
+                    backend: r.get(5)?,
+                    evidence: r.get(6)?,
+                    observations: r.get::<_, i64>(7)? as u32,
+                    classified_at: r.get(8)?,
+                    expires_at: r.get(9)?,
+                    overridden: r.get(10)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok((collected, total as u64))
+    }
+
     /// Per-status counts, for the status endpoint (missing statuses are absent).
     pub fn status_counts(&self) -> Result<Vec<(String, usize)>> {
         let conn = self.lock()?;

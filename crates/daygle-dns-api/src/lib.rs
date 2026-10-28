@@ -58,6 +58,7 @@
 //! | `GET`    | `/api/policy/blocklist/sources/validate` | probe a URL and validate / auto-detect its format |
 //! | `GET`    | `/api/ai/status`                  | AI scanner configuration and per-status counts |
 //! | `GET`    | `/api/ai/verdicts`                | paginated per-domain AI verdicts |
+//! | `GET`    | `/api/ai/threats`                 | paginated AI-detected threat domains |
 //! | `POST`   | `/api/ai/override`                | allow-exempt or clear overrides for a domain |
 //! | `POST`   | `/api/ai/rescan`                  | wake the scanner for an immediate cycle |
 //! | `GET`    | `/api/ai/model-status`            | installed AI model files (size, sha256) + update-run state |
@@ -458,6 +459,7 @@ pub fn router(state: AppState) -> Router {
         .route("/querylogs/stats", get(handlers::query_log_stats))
         .route("/ai/status", get(handlers::ai_status))
         .route("/ai/verdicts", get(handlers::ai_verdicts))
+        .route("/ai/threats", get(handlers::ai_threats))
         .route("/ai/override", post(handlers::ai_override))
         .route("/ai/overrides", get(handlers::ai_overrides))
         .route("/ai/rescan", post(handlers::ai_rescan))
