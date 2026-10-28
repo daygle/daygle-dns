@@ -3,8 +3,9 @@
   import { api, formatApiError, formatUptime, getStoredUser } from '../api.js';
   import PageHeader from '../PageHeader.svelte';
   import ResolverDashboard from './ResolverDashboard.svelte';
-  import { icons } from '../icons.svelte.js';
+  import { icons, actionIcons } from '../icons.svelte.js';
   import { formatTime, formatTimeShort, formatDateTime } from '../datetime.svelte.js';
+  import WhyBlocked from '../WhyBlocked.svelte';
   import ClientLabel from '../ClientLabel.svelte';
 
   // Navigate to the Update page (passed by the app shell).
@@ -18,6 +19,24 @@
   let host = $state(null);
   // Why the host stats could not be fetched (shown on the Server card).
   let hostError = $state(null);
+  // The Top Blocked row being explained: after a lookup of that domain's
+  // newest blocked query-log row, the same Block Details modal the Query
+  // Log shows ({ qname, client, qtype, ts, block, note }).
+  let why = $state(null);
+
+  async function openWhyBlocked(row) {
+    try {
+      const data = await api.queryLogs(
+        `qname=${encodeURIComponent(row.key)}&outcome=blocked&per_page=1`,
+      );
+      const entry = (data.entries || [])[0];
+      why = entry
+        ? { qname: entry.qname, client: entry.client, qtype: entry.qtype, ts: entry.ts, block: entry.block }
+        : { qname: row.key, client: '', qtype: 'A', ts: null, block: null, note: 'No blocked query for this domain in the kept query log.' };
+    } catch (e) {
+      why = { qname: row.key, client: '', qtype: 'A', ts: null, block: null, note: formatApiError(e) };
+    }
+  }
   // Host stats are admin-only; a viewer's request would only ever be refused.
   const isAdmin = getStoredUser()?.role !== 'viewer';
   let window_ = $state('1h');
@@ -433,7 +452,16 @@
         <table>
           <tbody>
             {#each stats.top_blocked as row, i (row.key)}
-              <tr><td class="muted">#{i + 1}</td><td><code>{row.key}</code></td><td class="num">{fmt(row.count)}</td></tr>
+              <tr>
+                <td class="muted">#{i + 1}</td>
+                <td>
+                  <code>{row.key}</code>
+                  <button type="button" class="link why" onclick={() => openWhyBlocked(row)} title="Block details: every check this domain meets for this device, and which one decides the block" aria-label="Block details">
+                    <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d={actionIcons.info} /></svg>
+                  </button>
+                </td>
+                <td class="num">{fmt(row.count)}</td>
+              </tr>
             {/each}
           </tbody>
         </table>
@@ -463,9 +491,33 @@
   </div>
 {/if}
 
+{#if why}
+  <div class="modal-backdrop" role="presentation" onclick={(e) => e.target === e.currentTarget && (why = null)}>
+    <div class="modal card wide" role="dialog" aria-modal="true" aria-labelledby="why-title">
+      <div class="spread" style="margin-bottom: 10px">
+        <h3 id="why-title" style="margin: 0">Block Details: {why.qname}</h3>
+        <button class="secondary" style="padding: 2px 10px" onclick={() => (why = null)} aria-label="Close">✕</button>
+      </div>
+      {#if why.block}
+        <p style="margin-top: 0">At {formatDateTime(why.ts)}: {why.block.reason}.</p>
+      {:else if why.note}
+        <p class="muted" style="margin-top: 0">{why.note}</p>
+      {/if}
+      <p class="muted help" style="margin-top: 0">How the server treats it now:</p>
+      <WhyBlocked domain={why.qname} client={why.client} qtype={why.qtype} auto={Boolean(why.client)} />
+    </div>
+  </div>
+{/if}
+
 <style>
   .update-available { border-color: var(--warn); background: color-mix(in srgb, var(--warn) 8%, transparent); margin-bottom: 14px; }
   .update-available strong { color: var(--warn); }
+
+  /* Block Details: the same info link and modal the Query Log has. */
+  .why { margin-left: 6px; padding: 0; line-height: 0; vertical-align: middle; }
+  .modal-backdrop { position: fixed; inset: 0; background: rgb(0 0 0 / 0.65); display: grid; place-items: center; padding: 16px; z-index: 50; }
+  .modal.wide { width: min(980px, 100%); max-height: calc(100vh - 32px); overflow: auto; }
+  .help { margin-bottom: 0; }
 
   /* Five tiles: one row, or rows of three and two, or (on phones) Total
      Queries across the top over two rows of two - never a lone tile. */
