@@ -152,7 +152,7 @@
         <tr>
           <th>Domain</th>
           {#if show('category')}<th>Category</th>{/if}
-          {#if show('state')}<th class="num">State</th>{/if}
+          {#if show('state')}<th>State</th>{/if}
           {#if show('confidence')}<th class="num">Confidence</th>{/if}
           {#if show('seen')}<th class="num" title="In how many scans the domain showed up in your DNS traffic">Seen</th>{/if}
           {#if show('evidence')}<th>Evidence</th>{/if}
@@ -170,7 +170,7 @@
             <td>{#if r.category}{titleCase(r.category)}{:else}<span class="muted">-</span>{/if}</td>
             {/if}
             {#if show('state')}
-            <td class="num state">
+            <td>
               {#if r.severity === 'disputed'}
                 <span class="pill" title="The verifier disagreed with the threat verdict: this domain is never auto-blocked">Disputed</span>
               {:else if r.blocked}
@@ -178,7 +178,7 @@
               {:else if r.overridden}
                 <span class="pill ok tag" title="Exempt: the operator's allow override vetoed blocking for this domain">Exempt</span>
               {:else}
-                <span class="pill" title="Not in the block snapshot: below the block threshold, not an auto-block category, or expired">Detected</span>
+                <span class="pill" title="Not in the block snapshot: below the block threshold, not an auto-block category, or expired">Not Blocked</span>
               {/if}
             </td>
             {/if}
@@ -227,7 +227,5 @@
 
 <style>
   .nowrap { white-space: nowrap; }
-  .state .pill { min-width: 92px; }
-  .state { text-align: left; }
   .evidence { max-width: 200px; font-size: 0.78rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 </style>
