@@ -609,7 +609,7 @@
                   <span title={entry.block?.reason || 'Logged before reasons were kept'}>
                     {entry.block ? blockSourceLabel(entry.block.source) : 'Unknown'}{#if entry.block?.matched}: <code>{entry.block.matched}</code>{/if}{#if entry.block?.group} <span class="muted">({entry.block.group})</span>{/if}
                   </span>
-                  <button type="button" class="link why" onclick={() => (why = entry)} title="Why was this blocked? Every check this domain meets for this device, and which one decides" aria-label="Why was this blocked?">
+                  <button type="button" class="link why" onclick={() => (why = entry)} title="Block details: every check this domain meets for this device, and which one decides the block" aria-label="Block details">
                     <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d={actionIcons.info} /></svg>
                   </button>
                 {:else}<span class="muted">-</span>{/if}
