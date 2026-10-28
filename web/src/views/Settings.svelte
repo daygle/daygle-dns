@@ -1697,6 +1697,14 @@
       needed if the server asks for them; the saved password is never shown
       again (leave it as is to keep it). Recipients go one per line.
     </p>
+    <div class="row" style="margin-top: 12px; gap: 10px; flex-wrap: wrap; align-items: center">
+      <button class="secondary" onclick={testAlert} disabled={alertTesting}>{alertTesting ? 'Sending...' : 'Send Test Alert'}</button>
+      {#if alertTest}<span style="color: {alertTest.ok ? 'var(--ok)' : 'var(--danger)'}">{alertTest.msg}</span>{/if}
+    </div>
+    <p class="muted help">
+      Send Test Alert uses the settings on this page, saved or not, so you
+      can check them before saving.
+    </p>
   </div>
   <div class="card" style="margin-bottom: 14px">
     <h3 style="margin: 0 0 10px">Events</h3>
@@ -1705,14 +1713,6 @@
         <label class="check"><input type="checkbox" bind:checked={alerts_[key]} /> <span>{label}</span></label>
       {/each}
     </div>
-    <div class="row" style="margin-top: 14px; gap: 10px; flex-wrap: wrap; align-items: center">
-      <button class="secondary" onclick={testAlert} disabled={alertTesting}>{alertTesting ? 'Sending...' : 'Send Test Alert'}</button>
-      {#if alertTest}<span style="color: {alertTest.ok ? 'var(--ok)' : 'var(--danger)'}">{alertTest.msg}</span>{/if}
-    </div>
-    <p class="muted help">
-      Send Test Alert uses the settings on this page, saved or not, so you
-      can check them before saving.
-    </p>
   </div>
   <div class="card" style="margin-bottom: 14px">
     <h3 style="margin: 0 0 10px">Scheduled Report</h3>
