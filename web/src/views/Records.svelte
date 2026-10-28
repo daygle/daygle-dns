@@ -466,7 +466,10 @@
       <div class="spread" style="margin-bottom: 10px">
         <h3 style="margin: 0">Records for <code>{selected.name}</code> ({records.length})</h3>
         {#if selected.zone_type !== 'secondary'}
-          <button onclick={() => startEdit(null)}>Add Record</button>
+          <div class="row" style="gap: 8px">
+            <ColumnPicker table="records" columns={COLUMNS} />
+            <button onclick={() => startEdit(null)}>Add Record</button>
+          </div>
         {/if}
       </div>
 
@@ -482,7 +485,6 @@
             {#each typesPresent as t (t)}<option value={t}>{t}</option>{/each}
           </select>
           {#if shown.length !== records.length}<span class="muted">Showing {shown.length} of {records.length}</span>{/if}
-          <span style="margin-left: auto"><ColumnPicker table="records" columns={COLUMNS} /></span>
         </div>
       {/if}
 
