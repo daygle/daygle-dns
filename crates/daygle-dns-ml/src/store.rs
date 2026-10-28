@@ -492,8 +492,7 @@ impl AiStore {
             .replace('%', "\\%")
             .replace('_', "\\_");
         let pattern = format!("%{search}%");
-        let filter =
-            "v.status = 'classified' AND v.severity IN ('threat', 'disputed')
+        let filter = "v.status = 'classified' AND v.severity IN ('threat', 'disputed')
                  AND v.domain LIKE ?1 ESCAPE '\\'";
         let total: i64 = conn.query_row(
             &format!("SELECT COUNT(*) FROM ai_verdicts v WHERE {filter}"),

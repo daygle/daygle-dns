@@ -1433,10 +1433,11 @@ pub async fn ai_threats(
     };
     let per_page = query.per_page.unwrap_or(50).clamp(1, 500);
     let page = query.page.unwrap_or(1).max(1);
-    match ai
-        .store
-        .list_threats(query.q.as_deref(), per_page, (page - 1).saturating_mul(per_page))
-    {
+    match ai.store.list_threats(
+        query.q.as_deref(),
+        per_page,
+        (page - 1).saturating_mul(per_page),
+    ) {
         Ok((rows, total)) => {
             let snapshot = ai.snapshot().load();
             (StatusCode::OK,
