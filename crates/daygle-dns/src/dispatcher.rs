@@ -2008,9 +2008,13 @@ fn response_edns(request: &Request, ede: Option<&Ede>) -> Option<hickory_proto::
 
 impl DnsDispatcher {
     /// The EDNS Client Subnet to send upstream for `client` (`[ecs]`).
-    fn client_subnet(&self, client: IpAddr) -> Option<ipnet::IpNet> {
+    fn client_subnet(&self, client: IpAddr) -> Option<daygle_dns_recursive::EcsSubnet> {
         let config = self.config.as_ref()?.load();
-        config.ecs.compile().ok().flatten()?.subnet_for(client)
+        let ecs = config.ecs.compile().ok().flatten()?;
+        Some(daygle_dns_recursive::EcsSubnet {
+            net: ecs.subnet_for(client)?,
+            per_client: ecs.per_client(),
+        })
     }
 
     /// The DNS64 settings, when they apply to this request: DNS64 is on,

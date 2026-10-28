@@ -592,9 +592,12 @@ ALIAS targets), so CDNs answer with servers near the client. `subnet` (e.g.
 address is sent cut to `ipv4_prefix` (24) / `ipv6_prefix` (56) bits, and
 nothing is sent for private, loopback, link-local or documentation
 addresses. It is never sent when walking the hierarchy from the root, so
-root and TLD servers do not see it. The cache is shared between clients:
-with per-client subnets, an answer fetched for one network can be given to
-another for its TTL.
+root and TLD servers do not see it. A fixed `subnet` is the same for every
+client, so its answers are cached as usual. A per-client subnet's answer is
+for that network alone (RFC 7871 section 7.3): such a lookup bypasses the
+shared caches and goes to the upstream every time (which caches per
+network itself), and its answer is never kept for other clients. Clients
+with no subnet sent (private addresses) are cached as usual.
 
 `server.proxy_protocol` (file-only) lists the networks of trusted load
 balancers that speak the PROXY protocol (HAProxy v1 or v2) on the TCP, DoT

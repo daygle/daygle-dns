@@ -1072,8 +1072,10 @@
       203.0.113.0/24) to send it for every query; leave it empty to send each
       client's own public network, cut to the bits above (private addresses are
       never sent). Only forwarding upstreams get it, not the root and TLD
-      servers. The cache is shared, so per-client networks are best when clients
-      are near each other.
+      servers. An answer for one client's own network is never given to
+      another: those lookups skip this server's cache and go to the upstream
+      each time (it keeps its own per-network cache), while clients on private
+      addresses, and a fixed network, are cached as usual.
     </p>
   </div>
   <div class="card" style="margin-bottom: 14px">

@@ -45,7 +45,7 @@ use hickory_resolver::lookup::Lookup;
 use hickory_resolver::Resolver;
 use tracing::{debug, info, warn};
 
-pub use recursor::with_client_subnet;
+pub use recursor::{with_client_subnet, EcsSubnet};
 pub use upstream::{parse_upstreams, parse_upstreams_for};
 
 tokio::task_local! {
@@ -152,10 +152,63 @@ struct Inner {
 /// policies) on the shared upstream connection provider.
 type ForwardResolver = Resolver<recursor::UpstreamConnections>;
 
+/// A forwarding route's resolver, and an uncached twin on the same
+/// upstreams for lookups that send the client's own network as their EDNS
+/// Client Subnet: such an answer is for that network alone (RFC 7871
+/// section 7.3), so it must not be cached where other clients would get it.
+/// Dereferences to the shared resolver.
+#[derive(Clone)]
+struct Forwarder {
+    shared: ForwardResolver,
+    per_client: ForwardResolver,
+}
+
+impl Forwarder {
+    fn build(
+        config: ResolverConfig,
+        opts: ResolverOpts,
+        metrics: &Arc<Metrics>,
+    ) -> std::result::Result<Self, String> {
+        let build = |config: ResolverConfig, opts: ResolverOpts| {
+            ForwardResolver::builder_with_config(
+                config,
+                recursor::UpstreamConnections::forwarding(metrics.clone()),
+            )
+            .with_options(opts)
+            .build()
+            .map_err(|e| e.to_string())
+        };
+        let mut uncached = opts.clone();
+        uncached.cache_size = 0;
+        Ok(Self {
+            shared: build(config.clone(), opts)?,
+            per_client: build(config, uncached)?,
+        })
+    }
+
+    /// The resolver for a lookup: the uncached twin when it sends the
+    /// client's own network.
+    fn pick(&self, per_client: bool) -> ForwardResolver {
+        if per_client {
+            self.per_client.clone()
+        } else {
+            self.shared.clone()
+        }
+    }
+}
+
+impl std::ops::Deref for Forwarder {
+    type Target = ForwardResolver;
+
+    fn deref(&self) -> &ForwardResolver {
+        &self.shared
+    }
+}
+
 /// The resolver for names outside conditional and stub zones.
 enum DefaultBackend {
     /// Forwarding mode: upstreams or the system resolver.
-    Forward(Box<ForwardResolver>),
+    Forward(Box<Forwarder>),
     /// Recursive mode: iteration from the root servers ([`Inner::recursor`]).
     Recursive,
 }
@@ -168,7 +221,7 @@ struct ClientPolicy {
 
 enum PolicyBackend {
     /// The policy's own upstreams.
-    Forward(Box<ForwardResolver>),
+    Forward(Box<Forwarder>),
     /// Iteration from the root servers ([`Inner::recursor`]).
     Recursive,
     /// No recursion for these clients.
@@ -258,7 +311,7 @@ impl Route {
 /// trailing dot stripped) and its own resolver.
 struct ConditionalResolver {
     zone: String,
-    resolver: ForwardResolver,
+    resolver: Forwarder,
 }
 
 impl std::fmt::Debug for RecursiveResolver {
@@ -313,13 +366,8 @@ impl RecursiveResolver {
             ResolutionMode::Forwarding => {
                 let (config, opts) = build_config(settings)?;
                 DefaultBackend::Forward(Box::new(
-                    ForwardResolver::builder_with_config(
-                        config,
-                        recursor::UpstreamConnections::forwarding(metrics.clone()),
-                    )
-                    .with_options(opts)
-                    .build()
-                    .map_err(|e| DaygleError::Config(format!("cannot build resolver: {e}")))?,
+                    Forwarder::build(config, opts, &metrics)
+                        .map_err(|e| DaygleError::Config(format!("cannot build resolver: {e}")))?,
                 ))
             }
         };
@@ -328,13 +376,7 @@ impl RecursiveResolver {
         for zone in &settings.conditional_zones {
             let zone_name = normalize_zone(&zone.name);
             let (zconfig, zopts) = build_zone_config(zone, settings)?;
-            let resolver = ForwardResolver::builder_with_config(
-                zconfig,
-                recursor::UpstreamConnections::forwarding(metrics.clone()),
-            )
-            .with_options(zopts)
-            .build()
-            .map_err(|e| {
+            let resolver = Forwarder::build(zconfig, zopts, &metrics).map_err(|e| {
                 DaygleError::Config(format!(
                     "cannot build conditional resolver for '{}': {e}",
                     zone.name
@@ -371,13 +413,7 @@ impl RecursiveResolver {
             // stub zones skip validation (conditional forwarding keeps it).
             opts.validate = false;
             let zconfig = ResolverConfig::from_parts(None, vec![], nss);
-            let resolver = ForwardResolver::builder_with_config(
-                zconfig,
-                recursor::UpstreamConnections::forwarding(metrics.clone()),
-            )
-            .with_options(opts)
-            .build()
-            .map_err(|e| {
+            let resolver = Forwarder::build(zconfig, opts, &metrics).map_err(|e| {
                 DaygleError::Config(format!(
                     "cannot build stub resolver for '{}': {e}",
                     stub.name
@@ -475,7 +511,7 @@ impl RecursiveResolver {
     ) -> Option<Lookup> {
         let name = Name::from_utf8(name).ok()?;
         let policy = self.inner.policy_for(client);
-        let (_, _, scope) = self.inner.route(&name, policy);
+        let (_, _, scope) = self.inner.route(&name, policy, false);
         let key = cache_key(&name, record_type).scoped(scope);
         let stale = self.inner.cache_assist.stale_answer(&key)?;
         self.inner
@@ -535,12 +571,12 @@ impl RecursiveResolver {
         let inner = &self.inner;
         let mut forwarders: Vec<&ForwardResolver> = Vec::new();
         if let DefaultBackend::Forward(resolver) = &inner.default {
-            forwarders.push(resolver);
+            forwarders.push(&resolver.shared);
         }
-        forwarders.extend(inner.conditional.iter().map(|z| &z.resolver));
-        forwarders.extend(inner.stubs.iter().map(|z| &z.resolver));
+        forwarders.extend(inner.conditional.iter().map(|z| &z.resolver.shared));
+        forwarders.extend(inner.stubs.iter().map(|z| &z.resolver.shared));
         forwarders.extend(inner.policies.iter().filter_map(|p| match &p.backend {
-            PolicyBackend::Forward(resolver) => Some(resolver.as_ref()),
+            PolicyBackend::Forward(resolver) => Some(&resolver.shared),
             _ => None,
         }));
         for resolver in forwarders {
@@ -671,9 +707,20 @@ impl Inner {
     /// The local root zone applies here: the recursor is rebuilt when the
     /// zone starts or stops being served, and a forwarded name under a
     /// top-level domain the root zone does not have is answered NXDOMAIN.
-    fn route(&self, name: &Name, policy: Option<usize>) -> (Route, RouteKind, u16) {
+    /// `per_client`: the lookup sends the client's own network as its EDNS
+    /// Client Subnet, so a forwarding route takes the uncached resolver.
+    fn route(
+        &self,
+        name: &Name,
+        policy: Option<usize>,
+        per_client: bool,
+    ) -> (Route, RouteKind, u16) {
         if let Some((resolver, kind)) = zone_resolver(&self.conditional, &self.stubs, name) {
-            return (Route::Forward(Box::new(resolver)), kind, SCOPE_DEFAULT);
+            return (
+                Route::Forward(Box::new(resolver.pick(per_client))),
+                kind,
+                SCOPE_DEFAULT,
+            );
         }
         let policy = policy.and_then(|i| self.policies.get(i).map(|p| (i, p)));
         match (policy, &self.default) {
@@ -684,7 +731,7 @@ impl Inner {
                     }
                     let scope = SCOPE_POLICY + i as u16;
                     (
-                        Route::Forward(resolver.clone()),
+                        Route::Forward(Box::new(resolver.pick(per_client))),
                         RouteKind::ClientPolicy,
                         scope,
                     )
@@ -706,7 +753,7 @@ impl Inner {
                     return (Route::NoSuchTld, RouteKind::LocalRoot, SCOPE_DEFAULT);
                 }
                 (
-                    Route::Forward(resolver.clone()),
+                    Route::Forward(Box::new(resolver.pick(per_client))),
                     RouteKind::Forwarding,
                     SCOPE_DEFAULT,
                 )
@@ -781,14 +828,24 @@ impl Inner {
         })?;
         // Answers are kept per route so one policy's answers (say, a
         // filtering upstream's) are never replayed to another's clients.
-        let (route, kind, scope) = inner.route(&name, policy);
+        let (route, kind, scope) = inner.route(&name, policy, recursor::per_client_subnet());
         let key = cache_key(&name, record_type).scoped(scope);
+        // A forwarded lookup sending the client's own network: its answer
+        // is for that network alone, so it skips Hickory's cache and the
+        // failure cache, and is not kept for serve-stale or prefetch. (A
+        // shared stale answer, fetched without a subnet, may still cover an
+        // outage.) The recursor never sends a client subnet.
+        let shared = !(recursor::per_client_subnet() && matches!(route, Route::Forward(_)));
 
         // Replay a fresh cached failure before any upstream round trip, so a
         // broken or refusing upstream is not hammered on every client query.
         // The code is replayed as a Resolution error so the dispatcher surfaces
         // the right RCODE (an empty Lookup would wrongly read as NoError).
-        if let Some(code) = inner.cache_assist.cached_failure_code(&key) {
+        if let Some(code) = inner
+            .cache_assist
+            .cached_failure_code(&key)
+            .filter(|_| shared)
+        {
             note_negative_soa(inner.cache_assist.cached_failure_soa(&key));
             debug!(
                 name = %key.name,
@@ -810,7 +867,7 @@ impl Inner {
             key.clone(),
             name,
             record_type,
-            true,
+            shared,
         )
         .await
         {
@@ -833,7 +890,7 @@ impl Inner {
                 } else if let Some(code) = response_code {
                     // Negative answers (NXDOMAIN/NODATA etc.) and upstream error
                     // codes: cache the failure for next time (when enabled).
-                    if inner.cache_assist.failure_cache_ttl() > 0 {
+                    if shared && inner.cache_assist.failure_cache_ttl() > 0 {
                         let until = Instant::now()
                             + Duration::from_secs(inner.cache_assist.failure_cache_ttl() as u64);
                         let query = Query::query(
@@ -866,7 +923,8 @@ impl Inner {
         // Clone the routed resolver out of `inner` before awaiting so no
         // borrow of `Inner` is held across the lookup, and never spawn
         // again here (acyclic => provably `Send`).
-        let (route, _, _) = self.route(&name, self.policy_for_scope(key.scope));
+        // Refreshes send no client subnet: they keep the shared cache.
+        let (route, _, _) = self.route(&name, self.policy_for_scope(key.scope), false);
         match route.lookup(name, record_type).await {
             Ok(lookup) => {
                 self.cache_assist.on_success(&key, &lookup);
@@ -879,8 +937,8 @@ impl Inner {
     }
 
     /// Shared resolution core: route to the conditional or default resolver,
-    /// record metrics and cache-assistant state, optionally trigger a
-    /// prefetch spawn.
+    /// record metrics and, when `shared` (no per-client subnet), the
+    /// cache-assistant state, which may trigger a prefetch spawn.
     ///
     /// The chosen `ForwardResolver` is cloned out of `inner` **before** the
     /// await so no borrow of `Inner` is held across it (this keeps the
@@ -892,7 +950,7 @@ impl Inner {
         key: cache_assist::CacheKey,
         name: Name,
         record_type: RecordType,
-        allow_prefetch: bool,
+        shared: bool,
     ) -> Result<Lookup> {
         debug!(query = %name, rtype = ?record_type, route = ?kind, "lookup routing");
         let r = &inner.metrics.resolver;
@@ -927,13 +985,14 @@ impl Inner {
 
         match result {
             Ok(lookup) => {
-                if allow_prefetch && inner.cache_assist.on_success(&key, &lookup) {
-                    if inner.cache_assist.try_begin_prefetch(&key) {
-                        let task_inner = Arc::clone(&inner);
-                        tokio::spawn(task_inner.refresh(key.clone(), record_type));
-                    }
-                } else if !allow_prefetch {
-                    inner.cache_assist.on_success(&key, &lookup);
+                // An answer for one client's own network is not kept for
+                // serve-stale or prefetch, which would hand it to others.
+                if shared
+                    && inner.cache_assist.on_success(&key, &lookup)
+                    && inner.cache_assist.try_begin_prefetch(&key)
+                {
+                    let task_inner = Arc::clone(&inner);
+                    tokio::spawn(task_inner.refresh(key.clone(), record_type));
                 }
                 debug!(
                     query = %lookup.query().name(),
@@ -1042,7 +1101,7 @@ fn zone_resolver(
     conditional: &[ConditionalResolver],
     stubs: &[ConditionalResolver],
     name: &Name,
-) -> Option<(ForwardResolver, RouteKind)> {
+) -> Option<(Forwarder, RouteKind)> {
     let conditional_match = match_conditional_zones(conditional, name);
     let stub_match = match_conditional_zones(stubs, name);
     let (zone, kind) = match (conditional_match, stub_match) {
@@ -1079,18 +1138,13 @@ fn build_policies(
                         |e| DaygleError::Config(format!("client policy '{}': {e}", policy.name)),
                     )?;
                 let config = ResolverConfig::from_parts(None, vec![], upstreams);
-                let resolver = ForwardResolver::builder_with_config(
-                    config,
-                    recursor::UpstreamConnections::forwarding(metrics.clone()),
-                )
-                .with_options(resolver_opts(settings))
-                .build()
-                .map_err(|e| {
-                    DaygleError::Config(format!(
-                        "cannot build the resolver for client policy '{}': {e}",
-                        policy.name
-                    ))
-                })?;
+                let resolver =
+                    Forwarder::build(config, resolver_opts(settings), metrics).map_err(|e| {
+                        DaygleError::Config(format!(
+                            "cannot build the resolver for client policy '{}': {e}",
+                            policy.name
+                        ))
+                    })?;
                 PolicyBackend::Forward(Box::new(resolver))
             }
             ClientPolicyAction::Recursive => PolicyBackend::Recursive,
