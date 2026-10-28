@@ -116,9 +116,18 @@
       <p class="muted">Recursive resolution is disabled, so there is no active cache.</p>
     {:else}
       <div class="summary">
-        <span><span class="muted">Capacity</span> {cache.capacity.toLocaleString()} Entries</span>
-        <span><span class="muted">Serve-Stale Window</span> {duration(cache.serve_stale_secs)}</span>
-        <span><span class="muted">Refresh Popular Names Early</span> {cache.prefetch_enabled ? 'On' : 'Off'}</span>
+        <div class="pair">
+          <span class="muted">Capacity</span>
+          <span class="value" title="Maximum entries kept in the cache">{cache.capacity.toLocaleString()} Entries</span>
+        </div>
+        <div class="pair">
+          <span class="muted">Serve-Stale Window</span>
+          <span class="value">{duration(cache.serve_stale_secs)}</span>
+        </div>
+        <div class="pair">
+          <span class="muted">Refresh Popular Names Early</span>
+          <span class="value">{cache.prefetch_enabled ? 'On' : 'Off'}</span>
+        </div>
         {#if onOpenSettings}
           <button class="secondary" onclick={() => onOpenSettings('cache')}>Settings</button>
         {/if}
@@ -164,8 +173,10 @@
 <style>
   .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; }
   .stat .big { font-size: 1.6rem; font-weight: 700; margin-top: 6px; }
-  .summary { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 22px; }
-  .summary .muted { margin-right: 6px; }
+  .summary { display: flex; flex-wrap: wrap; align-items: center; gap: 14px 36px; }
+  .pair { display: flex; flex-direction: column; gap: 3px; }
+  .pair .muted { font-size: 0.78rem; }
+  .pair .value { font-size: 1.15rem; font-weight: 600; font-variant-numeric: tabular-nums; }
   .summary button { margin-left: auto; }
   .flush { display: grid; grid-template-columns: minmax(0, 1fr) 160px auto; gap: 12px; align-items: end; }
   @media (max-width: 640px) {
