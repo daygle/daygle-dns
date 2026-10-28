@@ -330,7 +330,7 @@ import { loadDisplayPreferences } from './datetime.svelte.js';
           <Logs initialClient={logsClient} />
         {/key}
       {:else}
-        <Settings initialTab={settingsTab} onOpenClients={openClients} />
+        <Settings initialTab={settingsTab} />
       {/if}
     </main>
   </div>

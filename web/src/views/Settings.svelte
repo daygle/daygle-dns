@@ -17,9 +17,7 @@
   // stays navigable as more options are added.
   // `initialTab` lets another page open a tab directly (the Cache page's
   // "Settings" button).
-  // `onOpenClients(tab)` opens the Clients page (networks and per-client
-  // rules live there).
-  let { initialTab = 'general', onOpenClients = null } = $props();
+  let { initialTab = 'general' } = $props();
   let tab = $state(initialTab);
   const TABS = [
     ['general', 'General'],
@@ -1069,17 +1067,6 @@
       each time (it keeps its own per-network cache), while clients on private
       addresses, and a fixed network, are cached as usual.
     </p>
-  </div>
-  <div class="card" style="margin-bottom: 14px">
-    <h3 style="margin: 0 0 10px">Resolution Policies</h3>
-    <p class="muted help" style="margin: 0">
-      Forwarding some clients to particular upstreams, resolving them from the
-      root servers, or refusing them is set per client under
-      <strong>Clients → Resolution Policies</strong>.
-    </p>
-    {#if onOpenClients}
-      <button class="secondary" style="margin-top: 10px" onclick={() => onOpenClients('resolution-policies')}>Open Resolution Policies</button>
-    {/if}
   </div>
   {:else if tab === 'cache'}
   <div class="card" style="margin-bottom: 14px">
