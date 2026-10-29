@@ -513,7 +513,15 @@
   .update-available { border-color: var(--warn); background: color-mix(in srgb, var(--warn) 8%, transparent); margin-bottom: 14px; }
   .update-available strong { color: var(--warn); }
 
-  /* Block Details: the same info link and modal the Query Log has. */
+  /* Match the inline info button used by Query Logs. */
+  .link {
+    background: none;
+    border: none;
+    padding: 0;
+    color: inherit;
+    cursor: pointer;
+    text-align: left;
+  }
   .why { margin-left: 6px; padding: 0; line-height: 0; vertical-align: middle; }
   .modal-backdrop { position: fixed; inset: 0; background: rgb(0 0 0 / 0.65); display: grid; place-items: center; padding: 16px; z-index: 50; }
   .modal.wide { width: min(980px, 100%); max-height: calc(100vh - 32px); overflow: auto; }
