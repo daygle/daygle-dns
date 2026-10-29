@@ -114,6 +114,24 @@ async fn reports_summarize_and_send() {
         .unwrap();
     assert_eq!(one["report"]["queries"], 0);
 
+    // A device's own report carries what blocked its queries: the sources and
+    // the rules (the Blocks per Device tab reads these).
+    let device: serde_json::Value = client
+        .get(format!("{base}/reports?hours=1&client=127.0.0.1"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(device["report"]["blocked"], 3);
+    assert_eq!(device["report"]["block_sources"][0]["count"], 3);
+    assert_eq!(device["report"]["block_rules"][0]["count"], 3);
+    assert_eq!(
+        device["report"]["top_blocked"][0]["name"],
+        "ads.report.test"
+    );
+
     // Without a destination, sending is refused with the reason.
     let resp = client
         .post(format!("{base}/reports/send"))

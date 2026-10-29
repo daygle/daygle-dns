@@ -8,6 +8,7 @@
   import ColumnPicker from '../ColumnPicker.svelte';
   import { isHidden } from '../columns.svelte.js';
   import { blockSourceLabel } from '../blockSources.js';
+  import { deviceName } from '../devices.svelte.js';
 
   const COLUMNS = [
     { key: 'device', label: 'Device', locked: true },
@@ -38,6 +39,11 @@
       id: 'devices',
       label: 'Devices',
       tagline: 'The most active devices, with their own most asked and most blocked domains.',
+    },
+    {
+      id: 'device-blocks',
+      label: 'Blocks per Device',
+      tagline: 'Pick a device to see what blocked its queries: blocklists, custom blocks, the AI scanner, and every other rule.',
     },
     {
       id: 'domains',
@@ -78,6 +84,12 @@
   // The device being looked at, and its own report.
   let device = $state(null);
   let deviceReport = $state(null);
+  // The device picked on the Blocks per Device tab, its own report, and the
+  // devices it can pick from (busiest first).
+  let blocksDevice = $state(null);
+  let blocksReport = $state(null);
+  let blocksLoading = $state(false);
+  let blocksDevices = $state([]);
 
   async function load() {
     loading = true;
@@ -88,6 +100,7 @@
       loadedAt = Date.now();
       logEnabled = data.query_log_enabled !== false;
       if (device) await loadDevice(device);
+      if (blocksDevice) await loadBlocks(blocksDevice);
     } catch (e) {
       error = formatApiError(e);
     } finally {
@@ -104,6 +117,44 @@
       error = formatApiError(e);
     }
   }
+
+  async function loadBlocks(client) {
+    blocksDevice = client;
+    if (!client) {
+      blocksReport = null;
+      return;
+    }
+    blocksLoading = true;
+    blocksReport = null;
+    error = null;
+    try {
+      blocksReport = (await api.report(hours, client)).report;
+    } catch (e) {
+      error = formatApiError(e);
+      blocksReport = null;
+    } finally {
+      blocksLoading = false;
+    }
+  }
+
+  async function loadBlocksDevices() {
+    try {
+      const data = await api.devices(hours);
+      blocksDevices = data.devices || [];
+    } catch (e) {
+      // The report's own client list still works as a fallback.
+      error = formatApiError(e);
+    }
+  }
+
+  // The devices the Blocks per Device tab can pick from: every device seen in
+  // the period, or the report's busiest clients while that list is loading.
+  const blockDeviceOptions = $derived.by(() => {
+    if (blocksDevices.length) {
+      return blocksDevices.map((d) => ({ address: d.address, name: d.name }));
+    }
+    return (report?.clients || []).map((c) => ({ address: c.client, name: deviceName(c.client) }));
+  });
 
   function fmt(n) {
     return Number(n || 0).toLocaleString();
@@ -212,6 +263,20 @@
   $effect(() => {
     hours;
     load();
+  });
+
+  // The Blocks per Device tab lists every device seen in the period (the
+  // report's own client list is cut to the busiest few).
+  $effect(() => {
+    if (tab !== 'device-blocks') return;
+    hours;
+    loadBlocksDevices();
+  });
+
+  // Start with the busiest device, so the tab has something to show.
+  $effect(() => {
+    if (tab !== 'device-blocks' || blocksDevice || !blockDeviceOptions.length) return;
+    loadBlocks(blockDeviceOptions[0].address);
   });
 </script>
 
@@ -360,6 +425,92 @@
         {:else}
           <p class="muted">Loading...</p>
         {/if}
+      </div>
+    {/if}
+  {:else if tab === 'device-blocks'}
+    <div class="card" style="margin-bottom: 14px">
+      <div class="spread" style="margin-bottom: 10px; gap: 10px; flex-wrap: wrap">
+        <h3 style="margin: 0">Blocks per Device</h3>
+        <select
+          value={blocksDevice ?? ''}
+          onchange={(e) => loadBlocks(e.currentTarget.value)}
+          aria-label="Device"
+          disabled={!blockDeviceOptions.length}
+        >
+          {#if !blockDeviceOptions.length}
+            <option value="">No devices</option>
+          {/if}
+          {#if blocksDevice && !blockDeviceOptions.some((d) => d.address === blocksDevice)}
+            <option value={blocksDevice}>
+              {deviceName(blocksDevice) ? `${deviceName(blocksDevice)} (${blocksDevice})` : blocksDevice}
+            </option>
+          {/if}
+          {#each blockDeviceOptions as d (d.address)}
+            <option value={d.address}>{d.name ? `${d.name} (${d.address})` : d.address}</option>
+          {/each}
+        </select>
+      </div>
+      {#if !blockDeviceOptions.length}
+        <p class="muted">No devices had queries in this period.</p>
+      {:else if blocksLoading}
+        <p class="muted">Loading...</p>
+      {:else if blocksReport}
+        <p class="muted" style="margin: 0 0 10px">
+          <ClientLabel address={blocksDevice} />:
+          {fmt(blocksReport.queries)} queries, {fmt(blocksReport.blocked)} blocked
+          ({percent(blocksReport.blocked, blocksReport.queries)}).
+        </p>
+        <div class="tiles">
+          <div class="tile"><div class="value">{fmt(blocksReport.blocked)}</div><div class="muted">Blocked</div></div>
+          <div class="tile"><div class="value">{percent(blocksReport.blocked, blocksReport.queries)}</div><div class="muted">Of Its Queries</div></div>
+          <div class="tile"><div class="value">{fmt(blocksReport.block_sources.length)}</div><div class="muted">Kinds of Block</div></div>
+        </div>
+      {:else}
+        <p class="muted">Choose a device to see what blocked its queries.</p>
+      {/if}
+    </div>
+
+    {#if blocksReport}
+      <div class="card" style="margin-bottom: 14px">
+        <h3 style="margin: 0 0 10px">Blocked By</h3>
+        {@render shares(blocksReport.block_sources, blocksReport.blocked, sourceLabel)}
+        <p class="muted help">
+          Every blocked query from this device, by what blocked it. AI Scanner,
+          Blocklists and Custom Block are named the same as in the Query Log's
+          Block Details.
+        </p>
+      </div>
+      <div class="card" style="margin-bottom: 14px">
+        <h3 style="margin: 0 0 10px">Top Blocking Rules</h3>
+        {#if blocksReport.block_rules.length}
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr><th>Blocked By</th><th>Matched</th><th>Filtering Group</th><th class="num">Blocked</th><th class="num">Share</th></tr>
+              </thead>
+              <tbody>
+                {#each blocksReport.block_rules as r, i (i)}
+                  <tr>
+                    <td>{sourceLabel(r.source)}</td>
+                    <td>{#if r.matched}<code>{r.matched}</code>{:else}<span class="muted">-</span>{/if}</td>
+                    <td>{r.group || '-'}</td>
+                    <td class="num">{fmt(r.count)}</td>
+                    <td class="num">{percent(r.count, blocksReport.blocked)}</td>
+                  </tr>
+                {/each}
+              </tbody>
+            </table>
+          </div>
+          <p class="muted help">
+            Matched identifies the Blocklists source, Custom Block entry, service,
+            AI category or zone that blocked this device's query.
+          </p>
+        {:else}
+          <p class="muted">Nothing was blocked for this device in this period.</p>
+        {/if}
+      </div>
+      <div class="card">
+        {@render names('Most Blocked Domains', blocksReport.top_blocked, true)}
       </div>
     {/if}
   {:else if tab === 'domains'}
