@@ -1201,6 +1201,12 @@ fn csv_escape(value: &str) -> String {
 pub struct AiVerdictsQuery {
     /// Optional status filter (`pending`, `classified`, `skipped`).
     status: Option<String>,
+    /// Optional category substring filter.
+    category: Option<String>,
+    /// Optional severity filter (`info`, `threat`, `disputed`).
+    severity: Option<String>,
+    /// Optional exemption filter (`exempt`, `not_exempt`).
+    exemption: Option<String>,
     /// Optional domain substring search.
     q: Option<String>,
     page: Option<u32>,
@@ -1210,6 +1216,12 @@ pub struct AiVerdictsQuery {
 /// `GET /api/ai/threats` query params.
 #[derive(Debug, Default, serde::Deserialize)]
 pub struct AiThreatsQuery {
+    /// Optional category substring filter.
+    category: Option<String>,
+    /// Optional severity filter (`threat`, `disputed`).
+    severity: Option<String>,
+    /// Optional exemption filter (`exempt`, `not_exempt`).
+    exemption: Option<String>,
     /// Optional domain substring search.
     q: Option<String>,
     page: Option<u32>,
@@ -1383,8 +1395,11 @@ pub async fn ai_verdicts(
     };
     let per_page = query.per_page.unwrap_or(50).clamp(1, 500);
     let page = query.page.unwrap_or(1).max(1);
-    match ai.store.list_verdicts(
+    match ai.store.list_verdicts_filtered(
         query.status.as_deref(),
+        query.category.as_deref(),
+        query.severity.as_deref(),
+        query.exemption.as_deref(),
         query.q.as_deref(),
         per_page,
         (page - 1).saturating_mul(per_page),
@@ -1418,7 +1433,7 @@ pub async fn ai_verdicts(
     }
 }
 
-/// `GET /api/ai/threats?q=&page=&per_page=` - paginated list of the
+/// `GET /api/ai/threats?q=&category=&severity=&exemption=&page=&per_page=` - paginated list of the
 /// scanner's classified threat verdicts (`threat` and `disputed` severity),
 /// highest confidence first. Each row carries `blocked`: whether the domain
 /// is in the *current* block snapshot, i.e. actually auto-blocked in
@@ -1433,7 +1448,10 @@ pub async fn ai_threats(
     };
     let per_page = query.per_page.unwrap_or(50).clamp(1, 500);
     let page = query.page.unwrap_or(1).max(1);
-    match ai.store.list_threats(
+    match ai.store.list_threats_filtered(
+        query.category.as_deref(),
+        query.severity.as_deref(),
+        query.exemption.as_deref(),
         query.q.as_deref(),
         per_page,
         (page - 1).saturating_mul(per_page),
@@ -1478,6 +1496,20 @@ pub async fn ai_override(
         return map_err(daygle_dns_ml::ai_disabled_error());
     };
     let domain = body.domain.trim().trim_matches('.').to_ascii_lowercase();
+    if body.action == "allow" && body.reason.trim().is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "a reason is required when adding an AI exemption"})),
+        )
+            .into_response();
+    }
+    if body.reason.len() > 200 {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "the exemption reason must be 200 characters or fewer"})),
+        )
+            .into_response();
+    }
     let domain_ok = !domain.is_empty()
         && domain.len() <= 253
         && domain.split('.').all(|label| {
@@ -5199,9 +5231,15 @@ pub struct AuthoritativeUpdate {
     pub catalog_zone: Option<String>,
     /// Replaces the whole list of consumed catalog zones.
     pub catalog_consumers: Option<Vec<daygle_dns_core::config::CatalogConsumerConfig>>,
+    /// Empty (SOA/NS-only) reverse zones answered authoritatively
+    /// (RFC 6303). Replaces the whole list.
+    pub empty_zones: Option<Vec<String>>,
     /// DNSSEC signing and key rollover. Apply live: a change to signing or
     /// the signature validity re-signs the zones.
     pub dnssec_enabled: Option<bool>,
+    /// Algorithm for newly generated signing keys (ECDSAP256SHA256,
+    /// ECDSAP384SHA384 or ED25519); blank keeps the current one.
+    pub dnssec_algorithm: Option<String>,
     pub dnssec_sig_validity_days: Option<u32>,
     pub dnssec_rollover_days: Option<u32>,
     pub dnssec_rollover_overlap_days: Option<u32>,
@@ -6017,9 +6055,18 @@ pub async fn update_settings(
         if let Some(v) = &a.catalog_consumers {
             config.authoritative.catalog_consumers =
                 daygle_dns_core::config::AuthoritativeUpdate::normalize_catalog_consumers(v);
+            authoritative_changed = true;
+        }
+        if let Some(v) = &a.empty_zones {
+            config.authoritative.empty_zones = v
+                .iter()
+                .map(|z| daygle_dns_core::config::normalize_zone_name(z))
+                .collect();
+            authoritative_changed = true;
         }
         daygle_dns_core::config::AuthoritativeUpdate {
             dnssec_enabled: a.dnssec_enabled,
+            dnssec_algorithm: a.dnssec_algorithm.clone(),
             dnssec_sig_validity_days: a.dnssec_sig_validity_days,
             dnssec_rollover_days: a.dnssec_rollover_days,
             dnssec_rollover_overlap_days: a.dnssec_rollover_overlap_days,

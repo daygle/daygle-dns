@@ -415,7 +415,8 @@ their forced Safe Search addresses, and YouTube with Restricted Mode, for
 every client - see Safe Search below), and `authoritative`
 (default_record_ttl/default_primary_ns/default_admin_mailbox/axfr_enabled/axfr_networks/
 allow_dynamic_updates/update_networks/notify_enabled/notify_targets/
-notify_listen_enabled/stub_zones/catalog_zone/catalog_consumers, and the
+notify_listen_enabled/stub_zones/catalog_zone/catalog_consumers/empty_zones
+(below), and the
 DNSSEC timing dnssec_enabled/dnssec_sig_validity_days/dnssec_rollover_days/
 dnssec_rollover_overlap_days/dnssec_rollover_retire_days/dnssec_maintenance_secs,
 applied live: turning signing on or off or a new validity re-signs at once),
@@ -472,6 +473,18 @@ accepts an email address.
 `setting`/`admin_email`/`none`), `admin_email` (the mailbox as an email
 address when unambiguous), and the automatic fallbacks `server_name` and
 `first_admin_email` whatever is set.
+
+`authoritative.empty_zones` sets the RFC 6303 (BCP 163) empty zones answered
+directly by this server: reverse zones whose addresses never appear on the
+public Internet (RFC 1918 private space, RFC 5737 documentation space, IPv6
+unique-local and link-local space and friends) are answered authoritatively
+from a synthesized SOA/NS-only zone instead of being recursed, so those
+lookups never leak upstream and fail fast even with recursion off. The list
+starts with the RFC's recommended zones; `PUT /api/config` replaces it
+wholesale (an empty JSON list disables the feature). Zone names may carry a
+trailing dot and are lowercased and canonicalized on save. A hosted
+(primary, secondary or stub) zone that contains the queried name is served
+as usual and wins over an empty zone of the same address space.
 
 `recursive.mode` is `"recursive"` (resolve from the root servers; DNSSEC is
 validated against the built-in root trust anchor and query names are
@@ -1190,8 +1203,15 @@ no opt-out (NSEC3PARAM is published at the apex). Calling `sign` on a signed
 zone with `nsec3` switches between the two without changing keys; without a
 body it keeps the zone's current choice. `GET /api/zones` reports `dnssec`
 and `nsec3` for each zone, and `ds`: the DS records (SHA-256) the parent
-zone must publish, one per active key (two during a key rollover). `sign`
-fails while `authoritative.dnssec_enabled` is off.
+zone must publish, one per active key (two during a key rollover).`sign` fails while `authoritative.dnssec_enabled` is off.
+
+A signed zone also publishes RFC 8078 CDS and CDNSKEY RRsets at its apex,
+one record per active key with a SHA-256 digest and the same TTL the zone
+uses for its DNSSEC records: a parent that supports the automated DS
+exchange (a CDS-scanning registrar or `dnssec-monitor` tooling) can fetch
+them and publish the matching DS without the DS being copied by hand.
+During a rollover the records of both the active and retired keys appear,
+just like the DS report.
 
 Once signed, a zone is maintained automatically: RRSIGs are renewed before
 they expire (with a serial bump, so secondaries pick up the new signatures)
@@ -1388,8 +1408,8 @@ the URL fetched fine but the content does not parse as (or does not match)
 
 ```
 GET  /api/ai/status
-GET  /api/ai/verdicts?status=classified&q=example&page=1&per_page=50
-GET  /api/ai/threats?q=example&page=1&per_page=50
+GET  /api/ai/verdicts?status=classified&category=phish&severity=threat&exemption=not_exempt&q=example&page=1&per_page=50
+GET  /api/ai/threats?category=phish&severity=threat&exemption=not_exempt&q=example&page=1&per_page=50
 GET  /api/ai/overrides
 POST /api/ai/override          {"domain": "x.example", "action": "allow|clear", "reason": "..."}
 POST /api/ai/rescan
@@ -1417,7 +1437,9 @@ lookups, local-only suffixes (`.local`, `.home.arpa`, `.internal`, `.lan`,
 
 `GET /api/ai/verdicts` pages through the verdict store, most recently
 classified first (pending rows last), optionally filtered by `status`
-(`pending`/`classified`/`skipped`) and a domain substring `q`: domain,
+(`pending`/`classified`/`skipped`), category substring `category`, severity
+(`info`/`threat`/`disputed`), exemption (`exempt`/`not_exempt`), and domain
+substring `q`: domain,
 category, severity, status, confidence, backend, evidence, observation count
 (scan cycles the domain appeared in), `overridden` (the domain is exempt) and
 `classified_at`/`expires_at` in RFC 3339 (at expiry the verdict is
@@ -1426,7 +1448,9 @@ and the domain starts over if it is queried again). `per_page` is capped at 500.
 
 `GET /api/ai/threats` is the same paging with the same row shape, restricted
 to classified threats: verdicts with severity `threat` or `disputed`,
-highest confidence first, with an optional domain substring `q`. Each row
+highest confidence first, with optional category substring `category`, severity
+(`threat`/`disputed`), exemption (`exempt`/`not_exempt`) and domain substring
+`q` filters. Each row
 also carries `blocked`, whether the domain is in the *current* block
 snapshot - actually auto-blocked in enforce mode (in train mode the snapshot
 is empty, so every row is `false`). The console's AI → Threats tab renders

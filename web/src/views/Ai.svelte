@@ -3,6 +3,7 @@
   import { icons } from '../icons.svelte.js';
   import AiStatus from './AiStatus.svelte';
   import AiThreats from './AiThreats.svelte';
+  import AiExemptions from './AiExemptions.svelte';
   import AiVerdicts from './AiVerdicts.svelte';
 
   // Opens Settings on a tab (null for viewers, who cannot).
@@ -29,6 +30,12 @@
       tagline:
         "Domain verdicts the scanner classifies badly enough to matter: highest confidence first, each with its current auto-block state. Disputed verdicts (the verifier disagreed) are shown but never block.",
     },
+    {
+      id: 'exemptions',
+      label: 'Exemptions',
+      tagline:
+        'Review domains exempted from AI blocking, including false positives, and remove exemptions when they are no longer needed.',
+    },
   ];
 
   let tab = $state('scanner');
@@ -47,6 +54,8 @@
   <AiStatus {onOpenSettings} />
 {:else if tab === 'threats'}
   <AiThreats />
+{:else if tab === 'exemptions'}
+  <AiExemptions />
 {:else}
   <AiVerdicts />
 {/if}

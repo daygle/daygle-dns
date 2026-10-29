@@ -18,11 +18,25 @@
   const show = (key) => !isHidden('ai-threats', key);
 
   const PER_PAGE = 50;
+  const SEVERITY_FILTERS = [
+    { value: '', label: 'All Severity' },
+    { value: 'threat', label: 'Threat' },
+    { value: 'disputed', label: 'Disputed' },
+  ];
+  const EXEMPTION_FILTERS = [
+    { value: '', label: 'All Threats' },
+    { value: 'exempt', label: 'Exempt' },
+    { value: 'not_exempt', label: 'Not Exempt' },
+  ];
 
   let rows = $state([]);
   let total = $state(0);
   let page = $state(1); // 1-based; mirrors the server's clamped parameter
   let search = $state('');
+  let categoryFilter = $state('');
+  let categories = $state([]);
+  let severityFilter = $state('');
+  let exemptionFilter = $state('');
   let loading = $state(true);
   let error = $state(null);
   let notice = $state(null);
@@ -32,9 +46,21 @@
   // with sign-in off there is no stored user at all.
   const isAdmin = getStoredUser()?.role !== 'viewer';
 
+  async function loadCategories() {
+    try {
+      const status = await api.aiStatus();
+      categories = [...new Set(status?.backend_categories || [])].sort();
+    } catch {
+      categories = [];
+    }
+  }
+
   function qs() {
     const params = new URLSearchParams();
     if (search.trim()) params.set('q', search.trim());
+    if (categoryFilter.trim()) params.set('category', categoryFilter.trim());
+    if (severityFilter) params.set('severity', severityFilter);
+    if (exemptionFilter) params.set('exemption', exemptionFilter);
     params.set('page', String(page));
     params.set('per_page', String(PER_PAGE));
     return params.toString();
@@ -75,10 +101,26 @@
   }
 
   async function setExempt(domain, exempt) {
+    let reason = '';
+    if (exempt) {
+      const response = window.prompt(`Why should ${domain} and its subdomains be exempt from AI blocking?`);
+      if (response === null) return;
+      reason = response.trim();
+      if (!reason) {
+        notice = null;
+        error = 'Enter a reason to record before exempting this domain.';
+        return;
+      }
+      if (reason.length > 200) {
+        notice = null;
+        error = 'The exemption reason must be 200 characters or fewer.';
+        return;
+      }
+    }
     notice = null;
     error = null;
     try {
-      await api.aiOverride(domain, exempt ? 'allow' : 'clear');
+      await api.aiOverride(domain, exempt ? 'allow' : 'clear', reason);
       notice = exempt
         ? `${domain} and its subdomains are now exempt from AI blocking.`
         : `${domain} is no longer exempt; blocking applies again once a fresh verdict qualifies.`;
@@ -106,8 +148,13 @@
   // Reload on mount and whenever the search box changes (back to page 1,
   // since the filter changed the list). Typing waits for a pause.
   let searchTimer;
+  loadCategories();
+
   $effect(() => {
     search;
+    categoryFilter;
+    severityFilter;
+    exemptionFilter;
     clearTimeout(searchTimer);
     searchTimer = setTimeout(() => {
       page = 1;
@@ -142,6 +189,22 @@
       <h3 style="margin: 0">Detected Threats ({fmt(total)})</h3>
       <div class="row" style="gap: 8px; flex-wrap: wrap">
         <input type="search" placeholder="Search Domains" bind:value={search} style="min-width: 200px" />
+        <select bind:value={categoryFilter} aria-label="Filter by category" style="min-width: 150px">
+          <option value="">All Categories</option>
+          {#each categories as category (category)}
+            <option value={category}>{titleCase(category)}</option>
+          {/each}
+        </select>
+        <select bind:value={severityFilter} aria-label="Filter by severity" style="min-width: 145px">
+          {#each SEVERITY_FILTERS as f (f.label)}
+            <option value={f.value}>{f.label}</option>
+          {/each}
+        </select>
+        <select bind:value={exemptionFilter} aria-label="Filter by exemption" style="min-width: 145px">
+          {#each EXEMPTION_FILTERS as f (f.label)}
+            <option value={f.value}>{f.label}</option>
+          {/each}
+        </select>
         <button class="secondary" onclick={load}>Reload</button>
         <ColumnPicker table="ai-threats" columns={COLUMNS} />
       </div>
@@ -206,8 +269,8 @@
     </div>
     {#if !rows.length}
       <p class="muted">
-        {#if search.trim()}
-          No threats match this search.
+        {#if search.trim() || categoryFilter.trim() || severityFilter || exemptionFilter}
+          No threats match these filters.
         {:else}
           No threat verdicts yet - benign lookups never appear here; entries
           show up when the scanner classifies a domain badly enough to matter.

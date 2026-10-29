@@ -528,6 +528,124 @@ impl AiStore {
         Ok((collected, total as u64))
     }
 
+    /// Paginated verdict list with optional status, category, severity,
+    /// exemption and domain filters.
+    pub fn list_verdicts_filtered(
+        &self,
+        status: Option<&str>,
+        category: Option<&str>,
+        severity: Option<&str>,
+        exemption: Option<&str>,
+        search: Option<&str>,
+        limit: u32,
+        offset: u32,
+    ) -> Result<(Vec<VerdictRow>, u64)> {
+        self.list_filtered(
+            false, status, category, severity, exemption, search, limit, offset,
+        )
+    }
+
+    /// Paginated threat list with optional category, severity and exemption
+    /// filters, plus a domain search.
+    pub fn list_threats_filtered(
+        &self,
+        category: Option<&str>,
+        severity: Option<&str>,
+        exemption: Option<&str>,
+        search: Option<&str>,
+        limit: u32,
+        offset: u32,
+    ) -> Result<(Vec<VerdictRow>, u64)> {
+        self.list_filtered(
+            true, None, category, severity, exemption, search, limit, offset,
+        )
+    }
+
+    fn list_filtered(
+        &self,
+        threats_only: bool,
+        status: Option<&str>,
+        category: Option<&str>,
+        severity: Option<&str>,
+        exemption: Option<&str>,
+        search: Option<&str>,
+        limit: u32,
+        offset: u32,
+    ) -> Result<(Vec<VerdictRow>, u64)> {
+        let conn = self.lock()?;
+        let limit = limit.clamp(1, 500);
+        let offset = offset.min(u32::MAX - limit);
+        let status = status.unwrap_or("").trim().to_ascii_lowercase();
+        let category = category
+            .unwrap_or("")
+            .trim()
+            .to_ascii_lowercase()
+            .replace('\\', "\\\\")
+            .replace('%', "\\%")
+            .replace('_', "\\_");
+        let category = format!("%{category}%");
+        let severity = severity.unwrap_or("").trim().to_ascii_lowercase();
+        let exemption = exemption.unwrap_or("").trim().to_ascii_lowercase();
+        let search = search
+            .unwrap_or("")
+            .trim()
+            .to_ascii_lowercase()
+            .replace('\\', "\\\\")
+            .replace('%', "\\%")
+            .replace('_', "\\_");
+        let search = format!("%{search}%");
+        let filter =
+            "(?1 = 0 OR (v.status = 'classified' AND v.severity IN ('threat', 'disputed')))
+            AND (?2 = '' OR v.status = ?2)
+            AND (?3 = '%%' OR lower(v.category) LIKE ?3 ESCAPE '\\')
+            AND (?4 = '' OR v.severity = ?4)
+            AND (?5 = '' OR (?5 = 'exempt' AND EXISTS (
+                SELECT 1 FROM ai_overrides o WHERE o.domain = v.domain AND o.action = 'allow'))
+                OR (?5 = 'not_exempt' AND NOT EXISTS (
+                SELECT 1 FROM ai_overrides o WHERE o.domain = v.domain AND o.action = 'allow')))
+            AND v.domain LIKE ?6 ESCAPE '\\'";
+        let params = params![threats_only, status, category, severity, exemption, search];
+        let total: i64 = conn.query_row(
+            &format!("SELECT COUNT(*) FROM ai_verdicts v WHERE {filter}"),
+            params,
+            |r| r.get(0),
+        )?;
+        let order = if threats_only {
+            "v.confidence DESC, v.classified_at DESC, v.domain"
+        } else {
+            "v.classified_at DESC, v.domain"
+        };
+        let mut stmt = conn.prepare(&format!(
+            "SELECT v.domain, v.category, v.severity, v.status, v.confidence, v.backend,
+                    v.evidence, v.observations, v.classified_at, v.expires_at,
+                    EXISTS (SELECT 1 FROM ai_overrides o
+                            WHERE o.domain = v.domain AND o.action = 'allow')
+             FROM ai_verdicts v WHERE {filter}
+             ORDER BY {order} LIMIT {limit} OFFSET {offset}"
+        ))?;
+        let collected = stmt
+            .query_map(
+                params![threats_only, status, category, severity, exemption, search],
+                |r| {
+                    Ok(VerdictRow {
+                        domain: r.get(0)?,
+                        category: r.get(1)?,
+                        severity: r.get(2)?,
+                        status: r.get(3)?,
+                        confidence: r.get::<_, f64>(4)? as f32,
+                        backend: r.get(5)?,
+                        evidence: r.get(6)?,
+                        observations: r.get::<_, i64>(7)? as u32,
+                        classified_at: r.get(8)?,
+                        expires_at: r.get(9)?,
+                        overridden: r.get(10)?,
+                    })
+                },
+            )?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok((collected, total as u64))
+    }
+
     /// Per-status counts, for the status endpoint (missing statuses are absent).
     pub fn status_counts(&self) -> Result<Vec<(String, usize)>> {
         let conn = self.lock()?;

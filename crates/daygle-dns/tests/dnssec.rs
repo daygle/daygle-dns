@@ -11,6 +11,7 @@ use common::*;
 use daygle_dns_authoritative::model::{RecordInput, ZoneInput};
 use daygle_dns_authoritative::DnssecMaintenance;
 use daygle_dns_core::config::DaygleConfig;
+use hickory_proto::dnssec::PublicKey;
 use hickory_proto::op::{Edns, Message, ResponseCode};
 use hickory_proto::rr::RecordType;
 
@@ -150,7 +151,7 @@ async fn rollover_transitions_are_served() {
 
     // The first key is backdated 2 days (past the 1-day rollover threshold)
     // and the zone is signed with it.
-    let (algorithm, der) = daygle_dns_authoritative::generate_signing_key().unwrap();
+    let (algorithm, der) = daygle_dns_authoritative::generate_signing_key("").unwrap();
     store
         .store_signing_key_created(
             &zone_id,
@@ -222,6 +223,86 @@ async fn rollover_transitions_are_served() {
     shutdown(server).await;
 }
 
+/// Every supported algorithm name (canonical, number, default fallback)
+/// generates a key of the right DNSSEC algorithm number.
+#[test]
+fn each_supported_algorithm_generates_a_key() {
+    for (name, id) in [
+        ("", 13),
+        ("ECDSAP256SHA256", 13),
+        ("13", 13),
+        ("ECDSAP384SHA384", 14),
+        ("14", 14),
+        ("ED25519", 15),
+        ("15", 15),
+    ] {
+        let (algorithm, der) = daygle_dns_authoritative::generate_signing_key(name).unwrap();
+        assert_eq!(algorithm, id, "wrong id for {name:?}");
+        assert!(!der.is_empty());
+    }
+    // An unknown name falls back to the default so signing never stalls.
+    assert_eq!(
+        daygle_dns_authoritative::generate_signing_key("RSA")
+            .unwrap()
+            .0,
+        13
+    );
+}
+
+/// The configured signing algorithm is what new keys get, here Ed25519
+/// (15): the served DNSKEY and every RRSIG in the zone carry algorithm 15.
+#[tokio::test]
+async fn signing_uses_the_configured_algorithm() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("daygle-dns.db");
+    let mut cfg = dnssec_config(&db);
+    cfg.authoritative.dnssec_algorithm = "ED25519".to_string();
+    let server = spawn(cfg).await;
+    let zone_id = seed_zone(&server, "ed.test").await;
+    server.catalog.sign_zone(&zone_id).unwrap();
+
+    let udp = server.udp_addr.expect("UDP enabled");
+    let reply = udp_query_do(udp, "ed.test.", RecordType::DNSKEY).await;
+    assert_eq!(reply.response_code, ResponseCode::NoError);
+
+    let dnskey = reply
+        .answers
+        .iter()
+        .find(|r| r.record_type() == RecordType::DNSKEY)
+        .expect("DNSKEY expected");
+    let hickory_proto::rr::RData::DNSSEC(hickory_proto::dnssec::rdata::DNSSECRData::DNSKEY(key)) =
+        &dnskey.data
+    else {
+        panic!("unexpected DNSKEY rdata");
+    };
+    assert_eq!(
+        u8::from(key.public_key().algorithm()),
+        15,
+        "DNSKEY must use Ed25519"
+    );
+
+    let rrsigs: Vec<&hickory_proto::rr::Record> = reply
+        .answers
+        .iter()
+        .filter(|r| r.record_type() == RecordType::RRSIG)
+        .collect();
+    assert!(!rrsigs.is_empty(), "signatures expected");
+    for rrsig in rrsigs {
+        let hickory_proto::rr::RData::DNSSEC(hickory_proto::dnssec::rdata::DNSSECRData::RRSIG(sig)) =
+            &rrsig.data
+        else {
+            panic!("unexpected RRSIG rdata");
+        };
+        assert_eq!(
+            u8::from(sig.input().algorithm),
+            15,
+            "RRSIG must use Ed25519"
+        );
+    }
+
+    shutdown(server).await;
+}
+
 fn authority_types(msg: &Message) -> Vec<RecordType> {
     msg.authorities.iter().map(|r| r.record_type()).collect()
 }
@@ -286,6 +367,84 @@ async fn nsec3_denial_of_existence() {
     let types = authority_types(&reply);
     assert!(types.contains(&RecordType::NSEC), "{types:?}");
     assert!(!types.contains(&RecordType::NSEC3), "{types:?}");
+
+    shutdown(server).await;
+}
+
+/// A signed zone publishes RFC 8078 CDS and CDNSKEY at the apex for its
+/// active key so the parent can be told which DS to trust.
+#[tokio::test]
+async fn cds_and_cdnskey_are_published() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("daygle-dns.db");
+    let server = spawn(dnssec_config(&db)).await;
+    let zone_id = seed_zone(&server, "dele.test").await;
+    server.catalog.sign_zone(&zone_id).unwrap();
+
+    let udp = server.udp_addr.expect("UDP enabled");
+    for rtype in [RecordType::CDS, RecordType::CDNSKEY] {
+        let reply = udp_query_do(udp, "dele.test.", rtype).await;
+        assert_eq!(reply.response_code, ResponseCode::NoError);
+        let count = reply
+            .answers
+            .iter()
+            .filter(|r| r.record_type() == rtype)
+            .count();
+        assert_eq!(count, 1, "one {rtype} expected");
+
+        let record = reply
+            .answers
+            .iter()
+            .find(|r| r.record_type() == rtype)
+            .unwrap();
+        match &record.data {
+            hickory_proto::rr::RData::DNSSEC(
+                hickory_proto::dnssec::rdata::DNSSECRData::CDNSKEY(key),
+            ) => {
+                assert!(key.zone_key(), "CDNSKEY zone-key flag expected");
+                assert!(key.secure_entry_point(), "CDNSKEY SEP flag expected");
+                assert_eq!(
+                    key.algorithm().map(u8::from),
+                    Some(13),
+                    "CDNSKEY must carry the key's algorithm"
+                );
+                assert!(!key.public_key().unwrap().public_bytes().is_empty());
+
+                // The CDNSKEY the zone publishes must mirror the DNSKEY the
+                // zone serves, so what a parent reads matches what it would
+                // trust from the child itself.
+                let dnskey_reply = udp_query_do(udp, "dele.test.", RecordType::DNSKEY).await;
+                let served_dnskey = dnskey_reply
+                    .answers
+                    .iter()
+                    .find(|r| r.record_type() == RecordType::DNSKEY)
+                    .unwrap();
+                let hickory_proto::rr::RData::DNSSEC(
+                    hickory_proto::dnssec::rdata::DNSSECRData::DNSKEY(dnskey),
+                ) = &served_dnskey.data
+                else {
+                    panic!("unexpected DNSKEY rdata");
+                };
+                assert_eq!(
+                    dnskey.public_key().public_bytes(),
+                    key.public_key().unwrap().public_bytes(),
+                    "CDNSKEY must mirror the served DNSKEY"
+                );
+            }
+            hickory_proto::rr::RData::DNSSEC(hickory_proto::dnssec::rdata::DNSSECRData::CDS(
+                ds,
+            )) => {
+                assert_eq!(u8::from(ds.algorithm().unwrap()), 13);
+                assert_eq!(
+                    u8::from(ds.digest_type()),
+                    2,
+                    "CDS digest must be SHA-256 (RFC 4509)"
+                );
+                assert_eq!(ds.digest().len(), 32, "SHA-256 digest is 32 bytes");
+            }
+            other => panic!("unexpected rdata for {rtype}: {other:?}"),
+        }
+    }
 
     shutdown(server).await;
 }

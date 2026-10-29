@@ -24,11 +24,26 @@
     { value: 'pending', label: 'Waiting' },
     { value: 'skipped', label: 'Skipped' },
   ];
+  const SEVERITY_FILTERS = [
+    { value: '', label: 'All Severities' },
+    { value: 'threat', label: 'Threat' },
+    { value: 'disputed', label: 'Disputed' },
+    { value: 'info', label: 'Informational' },
+  ];
+  const EXEMPTION_FILTERS = [
+    { value: '', label: 'All Domains' },
+    { value: 'exempt', label: 'Exempt' },
+    { value: 'not_exempt', label: 'Not Exempt' },
+  ];
 
   let rows = $state([]);
   let total = $state(0);
   let page = $state(1); // 1-based; mirrors the server's clamped parameter
   let statusFilter = $state('');
+  let categoryFilter = $state('');
+  let categories = $state([]);
+  let severityFilter = $state('');
+  let exemptionFilter = $state('');
   let search = $state('');
   let loading = $state(true);
   let error = $state(null);
@@ -39,9 +54,21 @@
   // with sign-in off there is no stored user at all.
   const isAdmin = getStoredUser()?.role !== 'viewer';
 
+  async function loadCategories() {
+    try {
+      const status = await api.aiStatus();
+      categories = [...new Set(status?.backend_categories || [])].sort();
+    } catch {
+      categories = [];
+    }
+  }
+
   function qs() {
     const params = new URLSearchParams();
     if (statusFilter) params.set('status', statusFilter);
+    if (categoryFilter.trim()) params.set('category', categoryFilter.trim());
+    if (severityFilter) params.set('severity', severityFilter);
+    if (exemptionFilter) params.set('exemption', exemptionFilter);
     if (search.trim()) params.set('q', search.trim());
     params.set('page', String(page));
     params.set('per_page', String(PER_PAGE));
@@ -83,10 +110,26 @@
   }
 
   async function setExempt(domain, exempt) {
+    let reason = '';
+    if (exempt) {
+      const response = window.prompt(`Why should ${domain} and its subdomains be exempt from AI blocking?`);
+      if (response === null) return;
+      reason = response.trim();
+      if (!reason) {
+        notice = null;
+        error = 'Enter a reason to record before exempting this domain.';
+        return;
+      }
+      if (reason.length > 200) {
+        notice = null;
+        error = 'The exemption reason must be 200 characters or fewer.';
+        return;
+      }
+    }
     notice = null;
     error = null;
     try {
-      await api.aiOverride(domain, exempt ? 'allow' : 'clear');
+      await api.aiOverride(domain, exempt ? 'allow' : 'clear', reason);
       notice = exempt
         ? `${domain} and its subdomains are now exempt from AI blocking.`
         : `${domain} is no longer exempt.`;
@@ -114,8 +157,13 @@
   // Reload on mount and whenever a filter changes (back to page 1, since the
   // filter changed the list). Typing in the search box waits for a pause.
   let searchTimer;
+  loadCategories();
+
   $effect(() => {
     statusFilter;
+    categoryFilter;
+    severityFilter;
+    exemptionFilter;
     search;
     clearTimeout(searchTimer);
     searchTimer = setTimeout(() => {
@@ -151,8 +199,24 @@
       <h3 style="margin: 0">Verdicts ({fmt(total)})</h3>
       <div class="row" style="gap: 8px; flex-wrap: wrap">
         <input type="search" placeholder="Search Domains" bind:value={search} style="min-width: 200px" />
-        <select bind:value={statusFilter} style="min-width: 150px">
+        <select bind:value={categoryFilter} aria-label="Filter by category" style="min-width: 150px">
+          <option value="">All Categories</option>
+          {#each categories as category (category)}
+            <option value={category}>{titleCase(category)}</option>
+          {/each}
+        </select>
+        <select bind:value={statusFilter} aria-label="Filter by status" style="min-width: 150px">
           {#each STATUS_FILTERS as f (f.label)}
+            <option value={f.value}>{f.label}</option>
+          {/each}
+        </select>
+        <select bind:value={severityFilter} aria-label="Filter by severity" style="min-width: 150px">
+          {#each SEVERITY_FILTERS as f (f.label)}
+            <option value={f.value}>{f.label}</option>
+          {/each}
+        </select>
+        <select bind:value={exemptionFilter} aria-label="Filter by exemption" style="min-width: 150px">
+          {#each EXEMPTION_FILTERS as f (f.label)}
             <option value={f.value}>{f.label}</option>
           {/each}
         </select>
@@ -220,7 +284,7 @@
     </div>
     {#if !rows.length}
       <p class="muted">
-        {#if search.trim() || statusFilter}
+        {#if search.trim() || categoryFilter.trim() || statusFilter || severityFilter || exemptionFilter}
           No verdicts match these filters.
         {:else}
           No verdicts yet - they appear as the scanner classifies domains from

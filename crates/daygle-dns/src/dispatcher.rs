@@ -1483,6 +1483,38 @@ impl RequestHandler for DnsDispatcher {
             return response;
         }
 
+        // 2f. RFC 6303 empty zones: reverse zones for private, loopback,
+        // link-local and other non-public address space are answered
+        // authoritatively instead of being recursed, so these queries can
+        // never leak to public upstreams and fail fast (RFC 6303, BCP 163;
+        // configurable via `authoritative.empty_zones`).
+        if let Some(zone) = self.empty_zone_covering(&qname) {
+            let at_apex = qname.eq_ignore_ascii_case(&zone);
+            let served = self
+                .serve_empty_zone(
+                    &mut response_handle,
+                    request,
+                    info.query.query_type(),
+                    &zone,
+                    at_apex,
+                )
+                .await;
+            self.observe(
+                client,
+                &qname,
+                &rtype,
+                protocol,
+                Outcome::Authoritative,
+                Some(&rcode_label(if at_apex {
+                    ResponseCode::NoError
+                } else {
+                    ResponseCode::NXDomain
+                })),
+                started,
+            );
+            return served;
+        }
+
         // 3. Recursive resolution. The resolver is swapped atomically on
         // reload; clone out the current one for this query.
         let resolver = self.resolver.load_full();
@@ -2007,6 +2039,152 @@ fn response_edns(request: &Request, ede: Option<&Ede>) -> Option<hickory_proto::
 }
 
 impl DnsDispatcher {
+    /// Send an RFC 6303 empty-zone response: the server is authoritative
+    /// for the zones it serves (AA=1, RFC 6303 section 2), unlike the
+    /// recursive negative answers above.
+    async fn send_empty_zone_response<R: ResponseHandler>(
+        &self,
+        handle: &mut R,
+        request: &Request,
+        code: ResponseCode,
+        answers: &[Record],
+        authority: Option<&Record>,
+    ) -> ResponseInfo {
+        let mut metadata = request.metadata;
+        metadata.message_type = MessageType::Response;
+        metadata.authoritative = true;
+        metadata.response_code = code;
+        metadata.recursion_available = true;
+        metadata.authentic_data = false;
+        let edns = response_edns(request, None);
+        let mut builder = MessageResponseBuilder::from_message_request(request);
+        if let Some(edns) = &edns {
+            builder.edns(edns);
+        }
+        let response = builder.build(
+            metadata,
+            answers.iter(),
+            authority,
+            std::iter::empty::<&Record>(),
+            std::iter::empty(),
+        );
+        match handle.send_response(response).await {
+            Ok(info) => info,
+            Err(e) => {
+                debug!("failed to send empty-zone answer: {e}");
+                fallback_response()
+            }
+        }
+    }
+
+    /// The RFC 6303 empty zone that answers `qname`: the longest name in
+    /// `authoritative.empty_zones` that contains it. `None` when empty
+    /// zones are not configured, or the query is not reverse-mapped (the
+    /// RFC's zones are all `in-addr.arpa`/`ip6.arpa`).
+    fn empty_zone_covering(&self, qname: &str) -> Option<String> {
+        // Cheap prefilter: an empty zone is always a reverse zone.
+        if !(qname.ends_with(".in-addr.arpa") || qname.ends_with(".ip6.arpa")) {
+            return None;
+        }
+        // Compare the RFC 6303 zone names against `qname` (no trailing dot,
+        // lower-case) case-insensitively, longest match first.
+        self.config
+            .as_ref()?
+            .load()
+            .authoritative
+            .empty_zones
+            .iter()
+            .map(|zone| zone.trim().trim_end_matches('.').to_ascii_lowercase())
+            .filter(|zone| !zone.is_empty())
+            .filter(|zone| {
+                if qname.len() < zone.len() {
+                    return false;
+                }
+                let suffix_start = qname.len() - zone.len();
+                if !qname[suffix_start..].eq_ignore_ascii_case(zone) {
+                    return false;
+                }
+                // Either the qname is the zone itself, or the zone is a
+                // dot-separated suffix of it.
+                suffix_start == 0 || qname.as_bytes()[suffix_start - 1] == b'.'
+            })
+            .max_by_key(|zone| zone.len())
+    }
+
+    /// Answer `qname` from the RFC 6303 empty zone `zone`: the apex serves
+    /// its SOA/NS records (and NODATA for anything else), any name inside
+    /// the zone gets an authoritative NXDOMAIN carrying the SOA in the
+    /// authority section (RFC 2308 negative caching). TTLs follow the
+    /// RFC's example (three hours; RFC 6303, section 3).
+    async fn serve_empty_zone<R: ResponseHandler>(
+        &self,
+        handle: &mut R,
+        request: &Request,
+        rtype: RecordType,
+        zone: &str,
+        at_apex: bool,
+    ) -> ResponseInfo {
+        let Ok(apex) = Name::from_ascii(zone) else {
+            debug!("invalid empty-zone name {}", zone);
+            return send_error(handle, request, ResponseCode::ServFail, None).await;
+        };
+        let Ok(mailbox) = Name::from_ascii("nobody.invalid.") else {
+            return send_error(handle, request, ResponseCode::ServFail, None).await;
+        };
+        // MNAME is the zone's own name and the NS points at it: no address
+        // records are needed, exactly as the RFC recommends.
+        let soa = Record::from_rdata(
+            apex.clone(),
+            10800,
+            RData::SOA(hickory_proto::rr::rdata::SOA::new(
+                apex.clone(),
+                mailbox,
+                1,
+                3600,
+                1200,
+                604800,
+                10800,
+            )),
+        );
+        let ns = Record::from_rdata(
+            apex.clone(),
+            10800,
+            RData::NS(hickory_proto::rr::rdata::NS(apex)),
+        );
+
+        if at_apex {
+            match rtype {
+                RecordType::SOA => {
+                    self.send_empty_zone_response(
+                        handle,
+                        request,
+                        ResponseCode::NoError,
+                        &[soa],
+                        None,
+                    )
+                    .await
+                }
+                RecordType::NS => {
+                    self.send_empty_zone_response(
+                        handle,
+                        request,
+                        ResponseCode::NoError,
+                        &[ns],
+                        None,
+                    )
+                    .await
+                }
+                _ => {
+                    self.send_empty_zone_response(handle, request, ResponseCode::NoError, &[], None)
+                        .await
+                }
+            }
+        } else {
+            self.send_empty_zone_response(handle, request, ResponseCode::NXDomain, &[], Some(&soa))
+                .await
+        }
+    }
+
     /// The EDNS Client Subnet to send upstream for `client` (`[ecs]`).
     fn client_subnet(&self, client: IpAddr) -> Option<daygle_dns_recursive::EcsSubnet> {
         let config = self.config.as_ref()?.load();

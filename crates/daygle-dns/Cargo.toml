@@ -26,6 +26,12 @@ axum.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 
+## The DoH (RFC 8484) listener is built on h2 directly, so it can answer the
+## standard's GET method, which Hickory's own HTTPS front rejects.
+h2.workspace = true
+http.workspace = true
+bytes.workspace = true
+base64.workspace = true
 async-trait.workspace = true
 arc-swap.workspace = true
 ipnet.workspace = true

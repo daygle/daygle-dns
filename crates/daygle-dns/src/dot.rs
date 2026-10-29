@@ -138,13 +138,15 @@ pub async fn serve_dot(
 }
 
 /// Connections one client may hold: an eighth of the listener, at least 4.
-fn per_client_limit(max_connections: usize) -> usize {
+/// Shared with the DoH listener, which uses the same admission surface.
+pub(crate) fn per_client_limit(max_connections: usize) -> usize {
     (max_connections / 8).max(4)
 }
 
 /// Live connections per public client. IPv6 clients are counted per /64,
-/// the smallest prefix a single subscriber normally gets.
-struct ClientSlots {
+/// the smallest prefix a single subscriber normally gets. Shared with the
+/// DoH listener, which uses the same admission surface.
+pub(crate) struct ClientSlots {
     limit: usize,
     open: Mutex<HashMap<IpAddr, usize>>,
     /// Private and loopback networks, which are not capped.
@@ -152,7 +154,7 @@ struct ClientSlots {
 }
 
 impl ClientSlots {
-    fn new(limit: usize) -> Self {
+    pub(crate) fn new(limit: usize) -> Self {
         Self {
             limit,
             open: Mutex::new(HashMap::new()),
@@ -176,7 +178,7 @@ impl ClientSlots {
 
     /// A slot for `ip`, released when the guard drops; `None` past the
     /// per-client limit.
-    fn acquire(self: &Arc<Self>, ip: IpAddr) -> Option<ClientSlot> {
+    pub(crate) fn acquire(self: &Arc<Self>, ip: IpAddr) -> Option<ClientSlot> {
         let ip = ip.to_canonical();
         if self.uncapped.iter().any(|net| net.contains(&ip)) {
             return Some(ClientSlot {
@@ -198,7 +200,7 @@ impl ClientSlots {
     }
 }
 
-struct ClientSlot {
+pub(crate) struct ClientSlot {
     slots: Arc<ClientSlots>,
     /// `None` for an uncapped (private) client.
     key: Option<IpAddr>,
@@ -449,7 +451,7 @@ fn frame(message: &[u8]) -> Option<Vec<u8>> {
 
 /// A bare response header with `code` (FORMERR for an undecodable query,
 /// SERVFAIL when an answer cannot be encoded).
-fn error_message(id: u16, code: ResponseCode) -> Vec<u8> {
+pub(crate) fn error_message(id: u16, code: ResponseCode) -> Vec<u8> {
     let mut metadata = Metadata::new(id, MessageType::Response, OpCode::Query);
     metadata.response_code = code;
     let header = Header {

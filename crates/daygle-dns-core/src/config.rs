@@ -1812,6 +1812,101 @@ pub fn normalize_zone_name(name: &str) -> String {
     name.trim().trim_end_matches('.').to_ascii_lowercase()
 }
 
+/// The DNSSEC signing algorithms new keys can be generated with (RFC 8624
+/// `MUST implement` and `RECOMMENDED` set). Numbers are the DNSSEC
+/// algorithm assignments: 13 ECDSA P-256/SHA-256, 14 ECDSA P-384/SHA-384,
+/// 15 Ed25519.
+pub const DNSSEC_ALGORITHMS: &[(&str, u8)] = &[
+    ("ECDSAP256SHA256", 13),
+    ("ECDSAP384SHA384", 14),
+    ("ED25519", 15),
+];
+
+pub fn parse_dnssec_algorithm(name: &str) -> Result<(String, u8)> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(DaygleError::Config(
+            "DNSSEC algorithm must not be empty; use ECDSAP256SHA256, ECDSAP384SHA384 or ED25519"
+                .to_string(),
+        ));
+    }
+    if let Ok(number) = name.parse::<u8>() {
+        let (canonical, _) = DNSSEC_ALGORITHMS
+            .iter()
+            .find(|(_, n)| *n == number)
+            .ok_or_else(|| {
+                DaygleError::Config(format!(
+                    "unsupported DNSSEC algorithm {number}: use ECDSAP256SHA256, ECDSAP384SHA384 or ED25519"
+                ))
+            })?;
+        return Ok((canonical.to_string(), number));
+    }
+    let (canonical, id) = DNSSEC_ALGORITHMS
+        .iter()
+        .find(|(n, _)| n.eq_ignore_ascii_case(name))
+        .ok_or_else(|| {
+            DaygleError::Config(format!(
+                "unsupported DNSSEC algorithm '{name}': use ECDSAP256SHA256, ECDSAP384SHA384 or ED25519"
+            ))
+        })?;
+    Ok((canonical.to_string(), *id))
+}
+
+/// The RFC 6303 "locally served" reverse zones, served as empty
+/// authoritative zones by default: private, loopback, link-local, test,
+/// ULA, documentation and broadcast address space that must never leak to
+/// public upstreams. Queries inside them are answered authoritatively.
+pub const RFC6303_ZONES: &[&str] = &[
+    // RFC 1918 private IPv4 space.
+    "0.in-addr.arpa",
+    "10.in-addr.arpa",
+    "16.172.in-addr.arpa",
+    "17.172.in-addr.arpa",
+    "18.172.in-addr.arpa",
+    "19.172.in-addr.arpa",
+    "20.172.in-addr.arpa",
+    "21.172.in-addr.arpa",
+    "22.172.in-addr.arpa",
+    "23.172.in-addr.arpa",
+    "24.172.in-addr.arpa",
+    "25.172.in-addr.arpa",
+    "26.172.in-addr.arpa",
+    "27.172.in-addr.arpa",
+    "28.172.in-addr.arpa",
+    "29.172.in-addr.arpa",
+    "30.172.in-addr.arpa",
+    "31.172.in-addr.arpa",
+    "168.192.in-addr.arpa",
+    // RFC 5735 special-use IPv4 space.
+    "127.in-addr.arpa",
+    "254.169.in-addr.arpa",
+    "2.0.192.in-addr.arpa",
+    "100.51.198.in-addr.arpa",
+    "113.0.203.in-addr.arpa",
+    "255.255.255.255.in-addr.arpa",
+    // IPv6: the unspecified and loopback addresses (32 reverse labels each).
+    "0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.ip6.arpa",
+    "1.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.ip6.arpa",
+    // fd00::/8 locally assigned IPv6 space.
+    "d.f.ip6.arpa",
+    // fe80::/10 link-local IPv6 space.
+    "8.e.f.ip6.arpa",
+    "9.e.f.ip6.arpa",
+    "a.e.f.ip6.arpa",
+    "b.e.f.ip6.arpa",
+    // 2001:db8::/32 documentation prefix.
+    "8.b.d.0.1.0.0.2.ip6.arpa",
+];
+
+/// The canonical algorithm name for the current setting (upper case); an
+/// unknown value maps to "ECDSAP256SHA256" so a corrupt setting cannot
+/// stall signing (the validity check in the config loader reports it).
+fn normalize_dnssec_algorithm(name: &str) -> String {
+    parse_dnssec_algorithm(name)
+        .map(|(canonical, _)| canonical)
+        .unwrap_or_else(|_| "ECDSAP256SHA256".to_string())
+}
+
 /// Partial updates for authoritative-zone defaults (the runtime-tunable
 /// subset of [`AuthoritativeSettings`], matching the API's shape).
 ///
@@ -1854,8 +1949,16 @@ pub struct AuthoritativeUpdate {
     /// Consumed catalog zones (the whole list).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub catalog_consumers: Option<Vec<CatalogConsumerConfig>>,
+    /// Empty (SOA/NS-only) reverse zones answered authoritatively
+    /// (RFC 6303); replaces the whole list.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub empty_zones: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dnssec_enabled: Option<bool>,
+    /// Algorithm for newly generated signing keys (see
+    /// [`dnssec_algorithm_names`]); empty means "keep the current one".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dnssec_algorithm: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dnssec_sig_validity_days: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1872,6 +1975,9 @@ impl AuthoritativeUpdate {
     /// Apply the DNSSEC signing and key-rollover fields (shared by the
     /// database overlay and the console's settings save).
     pub fn apply_dnssec(&self, settings: &mut AuthoritativeSettings) {
+        if let Some(v) = &self.dnssec_algorithm {
+            settings.dnssec_algorithm = normalize_dnssec_algorithm(v);
+        }
         if let Some(v) = self.dnssec_enabled {
             settings.dnssec_enabled = v;
         }
@@ -2463,6 +2569,10 @@ impl RuntimeSettings {
                 config.authoritative.catalog_consumers =
                     AuthoritativeUpdate::normalize_catalog_consumers(v);
             }
+            if let Some(v) = &a.empty_zones {
+                config.authoritative.empty_zones =
+                    v.iter().map(|z| normalize_zone_name(z)).collect();
+            }
             a.apply_dnssec(&mut config.authoritative);
             if let Some(v) = &a.default_admin_mailbox {
                 config.authoritative.default_admin_mailbox = v.clone();
@@ -2592,7 +2702,9 @@ impl RuntimeSettings {
                 stub_zones: Some(config.authoritative.stub_zones.clone()),
                 catalog_zone: Some(config.authoritative.catalog_zone.clone()),
                 catalog_consumers: Some(config.authoritative.catalog_consumers.clone()),
+                empty_zones: Some(config.authoritative.empty_zones.clone()),
                 dnssec_enabled: Some(config.authoritative.dnssec_enabled),
+                dnssec_algorithm: Some(config.authoritative.dnssec_algorithm.clone()),
                 dnssec_sig_validity_days: Some(config.authoritative.dnssec_sig_validity_days),
                 dnssec_rollover_days: Some(config.authoritative.dnssec_rollover_days),
                 dnssec_rollover_overlap_days: Some(
@@ -4109,6 +4221,11 @@ pub struct AuthoritativeSettings {
     pub default_record_ttl: u32,
     /// Whether zones with signing keys are DNSSEC-signed on reload.
     pub dnssec_enabled: bool,
+    /// DNSSEC signing algorithm for *newly generated* keys: one of the
+    /// `dnssec_algorithm_names()`. Existing keys keep the algorithm they
+    /// were generated with, so a change only affects the next signature or
+    /// rollover (or a zone signed for the first time).
+    pub dnssec_algorithm: String,
     /// RRSIG validity window in days. The DNSSEC maintenance task re-signs
     /// zones at half this age so signatures never expire in service.
     pub dnssec_sig_validity_days: u32,
@@ -4170,6 +4287,11 @@ pub struct AuthoritativeSettings {
     /// Stub zones: queries for names inside these zones are resolved
     /// directly against the zone's own nameservers (see [`StubZoneConfig`]).
     pub stub_zones: Vec<StubZoneConfig>,
+    /// Empty (SOA/NS-only) reverse zones answered authoritatively instead of
+    /// recursion (RFC 6303). Seeded with the RFC 6303 list; add names here
+    /// (e.g. the reverse zone for your own_ip space) to keep locally assigned
+    /// space from leaking upstream. Real authoritative zones always win.
+    pub empty_zones: Vec<String>,
     /// When true, a TSIG-signed request must also carry a valid signature on
     /// our response (request MAC inclusion) per RFC 8945 §5. Always enabled
     /// for responses we sign.
@@ -4185,6 +4307,7 @@ impl Default for AuthoritativeSettings {
             default_admin_mailbox: String::new(),
             default_record_ttl: 3600,
             dnssec_enabled: true,
+            dnssec_algorithm: "ECDSAP256SHA256".to_string(),
             dnssec_sig_validity_days: 14,
             dnssec_rollover_days: 90,
             dnssec_rollover_overlap_days: 30,
@@ -4205,6 +4328,7 @@ impl Default for AuthoritativeSettings {
             tsig_update_zones: vec![],
             tsig_require_request_mac: true,
             stub_zones: vec![],
+            empty_zones: RFC6303_ZONES.iter().map(|z| z.to_string()).collect(),
         }
     }
 }
@@ -5023,6 +5147,7 @@ mod tests {
             refresh_secs: 900,
             enabled: true,
         }];
+        a.empty_zones = vec![s("custom.reverse.example")];
 
         let ai = &mut c.ai;
         ai.enabled = !ai.enabled;
@@ -5114,6 +5239,7 @@ mod tests {
         c.rate_limit.client_ipv6_prefix -= 1;
         let a = &mut c.authoritative;
         a.dnssec_enabled = !a.dnssec_enabled;
+        a.dnssec_algorithm = "ED25519".to_string();
         a.dnssec_sig_validity_days += 1;
         a.dnssec_rollover_days += 1;
         a.dnssec_rollover_overlap_days += 1;

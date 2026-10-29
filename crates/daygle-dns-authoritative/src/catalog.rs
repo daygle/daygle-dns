@@ -8,9 +8,14 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use hickory_proto::dnssec::crypto::EcdsaSigningKey;
+use hickory_proto::dnssec::crypto::{EcdsaSigningKey, Ed25519SigningKey};
+use hickory_proto::dnssec::rdata::cdnskey::CDNSKEY;
+use hickory_proto::dnssec::rdata::cds::CDS;
 use hickory_proto::dnssec::rdata::dnskey::DNSKEY;
+use hickory_proto::dnssec::rdata::ds::DS;
 use hickory_proto::dnssec::rdata::DNSSECRData;
+use hickory_proto::dnssec::DigestType;
+use hickory_proto::dnssec::PublicKey;
 use hickory_proto::dnssec::{Algorithm, DnssecSigner, SigningKey};
 use hickory_proto::rr::{LowerName, Name, RData, Record, RecordSet, RecordType, RrKey};
 use hickory_proto::serialize::binary::{BinDecodable, BinDecoder, BinEncodable, BinEncoder};
@@ -637,7 +642,7 @@ impl AuthorityCatalog {
             self.store.set_zone_nsec3(zone_id, nsec3)?;
         }
         if self.store.list_signing_keys(zone_id)?.is_empty() {
-            let (algorithm, der) = generate_signing_key()?;
+            let (algorithm, der) = generate_signing_key(&self.settings.load().dnssec_algorithm)?;
             self.store.store_signing_key(zone_id, algorithm, &der)?;
             info!("generated DNSSEC signing key for zone {zone_id}");
         }
@@ -709,14 +714,20 @@ impl AuthorityCatalog {
     }
 }
 
-/// Generate an ECDSA P-256 signing key, returning `(algorithm, pkcs8_der)`.
-pub fn generate_signing_key() -> Result<(u8, Vec<u8>)> {
-    let der = EcdsaSigningKey::generate_pkcs8(Algorithm::ECDSAP256SHA256)
-        .map_err(|e| DaygleError::Internal(format!("key generation failed: {e}")))?;
-    Ok((
-        u8::from(Algorithm::ECDSAP256SHA256),
-        der.secret_pkcs8_der().to_vec(),
-    ))
+/// Generate a signing key with the configured algorithm, returning
+/// `(algorithm, pkcs8_der)`. An empty or unknown name falls back to
+/// ECDSA P-256 (the config loader reports unknown values; signing must
+/// never stall on a corrupt setting).
+pub fn generate_signing_key(algorithm_name: &str) -> Result<(u8, Vec<u8>)> {
+    let (_, id) = daygle_dns_core::config::parse_dnssec_algorithm(algorithm_name)
+        .unwrap_or(("ECDSAP256SHA256".to_string(), 13));
+    let der = match id {
+        14 => EcdsaSigningKey::generate_pkcs8(Algorithm::ECDSAP384SHA384),
+        15 => Ed25519SigningKey::generate_pkcs8(),
+        _ => EcdsaSigningKey::generate_pkcs8(Algorithm::ECDSAP256SHA256),
+    }
+    .map_err(|e| DaygleError::Internal(format!("key generation failed: {e}")))?;
+    Ok((id, der.secret_pkcs8_der().to_vec()))
 }
 
 /// Build the split-horizon index from the named networks and the store's
@@ -828,9 +839,10 @@ fn build_catalog(
         // Every active key signs every RRset (and the DNSKEY RRset), which
         // is what makes pre-publish/double-sign rollover work: validators
         // can pick either key while both are published.
+        let active: Vec<&SigningKeyRecord> = keys.iter().filter(|k| k.is_active()).collect();
         let signers: Vec<DnssecSigner> = if sign_zones {
-            keys.iter()
-                .filter(|k| k.is_active())
+            active
+                .iter()
                 .filter_map(|key| {
                     build_signer(origin.clone(), key.algorithm, &key.key_der, sig_validity)
                         .map_err(|e| warn!("cannot reconstruct signing key for {}: {e}", zone.name))
@@ -845,7 +857,7 @@ fn build_catalog(
             None
         } else {
             let retired: Vec<&SigningKeyRecord> = keys.iter().filter(|k| k.is_retired()).collect();
-            match signed_zone(store, &zone, &records, &origin, signers, &retired) {
+            match signed_zone(store, &zone, &records, &origin, signers, &active, &retired) {
                 Ok(mut handler) => {
                     transfer_sets.insert(
                         zone_key(&zone.name),
@@ -947,13 +959,16 @@ fn build_catalog(
     Ok(built)
 }
 
-/// Build and sign a primary zone with `signers`.
+/// Build and sign a primary zone with `signers`; the zone publishes the
+/// RFC 8078 CDS/CDNSKEY RRsets for the KSKs in `active` so the parent can
+/// fetch the DS it should trust.
 fn signed_zone(
     store: &ZoneStore,
     zone: &crate::model::Zone,
     records: &[DbRecord],
     origin: &Name,
     signers: Vec<DnssecSigner>,
+    active: &[&SigningKeyRecord],
     retired: &[&SigningKeyRecord],
 ) -> Result<ZoneData> {
     // Hickory bumps the SOA serial when it signs. Start one below the
@@ -970,6 +985,58 @@ fn signed_zone(
         match build_dnskey_record(origin, key.algorithm, &key.key_der, zone.minimum.max(300)) {
             Ok(record) => insert_record_set(&mut map, record)?,
             Err(e) => warn!(zone = %zone.name, error = %e, "cannot publish retired DNSKEY"),
+        }
+    }
+
+    // CDS/CDNSKEY for every active key (RFC 8078): the parent's automating
+    // (CDS scans like dnssec-monitor, or the operator clicking through) reads
+    // the apex for the DS it should publish. Hashed as SHA-256 (RFC 4509).
+    let key_ttl = zone.minimum.max(300);
+    for key in active {
+        match build_dnskey_rdata(key.algorithm, &key.key_der) {
+            Ok(dnskey) => {
+                if let Err(e) = insert_record_set(
+                    &mut map,
+                    Record::from_rdata(
+                        origin.clone(),
+                        key_ttl,
+                        RData::DNSSEC(DNSSECRData::CDNSKEY(CDNSKEY::new(
+                            true,
+                            true,
+                            false,
+                            Some(Algorithm::from_u8(key.algorithm)),
+                            dnskey.public_key().public_bytes().to_vec(),
+                        ))),
+                    ),
+                ) {
+                    warn!(zone = %zone.name, error = %e, "cannot publish CDNSKEY");
+                }
+                match DS::from_key(dnskey.public_key(), origin, DigestType::SHA256) {
+                    Ok(ds) => {
+                        if let Err(e) = insert_record_set(
+                            &mut map,
+                            Record::from_rdata(
+                                origin.clone(),
+                                key_ttl,
+                                RData::DNSSEC(DNSSECRData::CDS(CDS::new(
+                                    ds.key_tag(),
+                                    Some(ds.algorithm()),
+                                    ds.digest_type(),
+                                    ds.digest().to_vec(),
+                                ))),
+                            ),
+                        ) {
+                            warn!(zone = %zone.name, error = %e, "cannot publish CDS");
+                        }
+                    }
+                    Err(e) => warn!(zone = %zone.name, error = %e, "cannot build CDS digest"),
+                }
+            }
+            Err(e) => warn!(
+                zone = %zone.name,
+                error = %e,
+                "cannot build the child key's DNSKEY for CDS/CDNSKEY"
+            ),
         }
     }
 
@@ -1328,37 +1395,65 @@ pub(crate) fn build_signer(
     der: &[u8],
     sig_duration: Duration,
 ) -> Result<DnssecSigner> {
-    let algorithm = Algorithm::from_u8(algorithm);
     let key_der = rustls_pki_types::PrivatePkcs8KeyDer::from(der);
-    let key = EcdsaSigningKey::from_pkcs8(&key_der, algorithm)
-        .map_err(|e| DaygleError::Internal(format!("invalid signing key: {e}")))?;
-    let public = key
-        .to_public_key()
-        .map_err(|e| DaygleError::Internal(format!("cannot derive public key: {e}")))?;
-    let dnskey = DNSKEY::new(true, true, false, public);
-    Ok(DnssecSigner::new(
-        dnskey,
-        Box::new(key),
-        origin,
-        sig_duration,
-    ))
+    let dnskey = match Algorithm::from_u8(algorithm) {
+        Algorithm::ED25519 => {
+            let key = Ed25519SigningKey::from_pkcs8(&key_der)
+                .map_err(|e| DaygleError::Internal(format!("invalid signing key: {e}")))?;
+            let public = key
+                .to_public_key()
+                .map_err(|e| DaygleError::Internal(format!("cannot derive public key: {e}")))?;
+            (
+                DNSKEY::new(true, true, false, public),
+                Box::new(key) as Box<dyn SigningKey>,
+            )
+        }
+        algorithm => {
+            let key = EcdsaSigningKey::from_pkcs8(&key_der, algorithm)
+                .map_err(|e| DaygleError::Internal(format!("invalid signing key: {e}")))?;
+            let public = key
+                .to_public_key()
+                .map_err(|e| DaygleError::Internal(format!("cannot derive public key: {e}")))?;
+            (
+                DNSKEY::new(true, true, false, public),
+                Box::new(key) as Box<dyn SigningKey>,
+            )
+        }
+    };
+    Ok(DnssecSigner::new(dnskey.0, dnskey.1, origin, sig_duration))
 }
 
 /// Build the DNSKEY record for a stored key without a signer (used to keep
 /// retired keys published during the rollover grace period).
+/// Reconstruct the DNSKEY record data for a stored pkcs8 key.
+pub(crate) fn build_dnskey_rdata(algorithm: u8, der: &[u8]) -> Result<DNSKEY> {
+    let key_der = rustls_pki_types::PrivatePkcs8KeyDer::from(der);
+    let public = match Algorithm::from_u8(algorithm) {
+        Algorithm::ED25519 => Ed25519SigningKey::from_pkcs8(&key_der)
+            .and_then(|key| key.to_public_key())
+            .map_err(|e| DaygleError::Internal(format!("invalid signing key: {e}")))?,
+        algorithm => EcdsaSigningKey::from_pkcs8(&key_der, algorithm)
+            .and_then(|key| key.to_public_key())
+            .map_err(|e| DaygleError::Internal(format!("invalid signing key: {e}")))?,
+    };
+    Ok(DNSKEY::new(true, true, false, public))
+}
+
 pub(crate) fn build_dnskey_record(
     origin: &Name,
     algorithm: u8,
     der: &[u8],
     ttl: u32,
 ) -> Result<Record> {
-    let algorithm = Algorithm::from_u8(algorithm);
     let key_der = rustls_pki_types::PrivatePkcs8KeyDer::from(der);
-    let key = EcdsaSigningKey::from_pkcs8(&key_der, algorithm)
-        .map_err(|e| DaygleError::Internal(format!("invalid signing key: {e}")))?;
-    let public = key
-        .to_public_key()
-        .map_err(|e| DaygleError::Internal(format!("cannot derive public key: {e}")))?;
+    let public = match Algorithm::from_u8(algorithm) {
+        Algorithm::ED25519 => Ed25519SigningKey::from_pkcs8(&key_der)
+            .and_then(|key| key.to_public_key())
+            .map_err(|e| DaygleError::Internal(format!("invalid signing key: {e}")))?,
+        algorithm => EcdsaSigningKey::from_pkcs8(&key_der, algorithm)
+            .and_then(|key| key.to_public_key())
+            .map_err(|e| DaygleError::Internal(format!("invalid signing key: {e}")))?,
+    };
     let dnskey = DNSKEY::new(true, true, false, public);
     Ok(Record::from_rdata(
         origin.clone(),

@@ -92,12 +92,20 @@ listener:
    AUTOPTR records (a PTR made from the address when the name has none).
    Zone aliases are served as zones of their own, built from the aliased
    zone's records with the owner names moved into the alias.
-3. **Zone transfers.** AXFR/IXFR queries are intercepted before the normal
+3. **RFC 6303 empty zones.** When the query name falls in one of
+   `authoritative.empty_zones` (by default the RFC 6303 reverse zones for
+   private, loopback, ULA, link-local and documentation address space) and
+   no hosted zone covers it, the dispatcher answers authoritatively
+   without recursing: the apex serves its SOA and NS, interior names get
+   NXDOMAIN carrying the empty zone's SOA (RFC 2308), and every answer
+   carries the AA bit. This keeps reverse lookups for never-routable
+   address space from leaking to public upstreams.
+4. **Zone transfers.** AXFR/IXFR queries are intercepted before the normal
    lookup path (`DnsDispatcher::handle_transfer`). Transfers are gated by
    `authoritative.axfr_enabled` and the `axfr_networks` client allow-list, and
    answered with the full zone record set (`SOA, records..., SOA` per RFC 5936;
    IXFR always gets a full transfer, which RFC 1995 permits).
-4. **Recursive.** Otherwise the query goes to `daygle-dns-recursive`; the
+5. **Recursive.** Otherwise the query goes to `daygle-dns-recursive`; the
    `RecursiveResolver` routes by name - the most specific configured
    conditional zone (longest label-aligned suffix) is resolved by its own
    dedicated resolver/upstreams, everything else by the default ones. The
@@ -207,11 +215,13 @@ same path for per-source status.
   further `dnssec_rollover_retire_days` (default 14) from its retirement so validators holding cached
   RRSIGs can still build a chain (RFC 6781 pre-publish rollover), then the
   key is deleted and its DNSKEY disappears. A rollover never removes the
-  only active key, does not stack a third key while one is in flight, and
-  skips secondary zones. Caveat: automatic rollover cannot update the
-  parent's DS record - submit the new DS (or CDS/CDNSKEY) to the registrar
-  during the overlap window; Daygle DNS keeps the old key published long enough
-  for that exchange.
+  only active key, does not stack a third key while one is in flight, and   skips secondary zones. CDS/CDNSKEY (RFC 8078) is published on the signed
+   zone's apex for every active key, so a parent that supports the
+   automated DS exchange can fetch it. Caveat: automatic rollover still
+   cannot update the parent's DS record by itself - submit the new DS (or
+   make sure the parent reads CDS/CDNSKEY) to the registrar during the
+   overlap window; Daygle DNS keeps the old key published long enough
+   for that exchange.
 
 ## AI scanner (`daygle-dns-ml`)
 

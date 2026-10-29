@@ -5,9 +5,9 @@
 //! runnable server. The `daygle-dns` binary is a thin CLI wrapper around this.
 
 mod block_page;
-mod connection_admission;
 pub mod cookies;
 pub mod dispatcher;
+mod doh;
 mod doq;
 mod dot;
 mod net;
@@ -1400,23 +1400,25 @@ async fn bind_listeners_inner(
         for (addr, v6_only) in listen_addrs("doh", &config.doh.listen, config.doh.port, ipv6_only)?
         {
             let public = net::bind_tcp(addr, v6_only)?;
-            let admission = crate::connection_admission::ConnectionAdmission::new(
-                public,
-                config.doh.max_connections,
-                server.shutdown_token().clone(),
-                proxy_trusted.clone(),
-            )?;
-            let bound = admission.public_addr;
-            let _admission_task = admission.task;
+            let bound = public.local_addr()?;
             addrs.doh.get_or_insert(bound);
-            daygle_dns_dot::register_doh(
-                server,
-                admission.backend,
+            // Hickory's own HTTPS front cannot answer the RFC 8484 GET
+            // method; this one handles it (and POST) itself, with the same
+            // admission limits as DoT.
+            let options = crate::doh::DohOptions {
+                max_connections: config.doh.max_connections,
+                timeout: Duration::from_secs(config.doh.handshake_timeout_secs),
+                proxy_trusted: proxy_trusted.clone(),
+                endpoint: config.doh.endpoint.clone(),
+            };
+            native_tasks.push(tokio::spawn(crate::doh::serve_doh(
+                public,
                 tls_config.clone(),
-                Duration::from_secs(config.doh.handshake_timeout_secs),
-                None,
-                &config.doh.endpoint,
-            )?;
+                dispatcher.clone(),
+                session.clone(),
+                server.shutdown_token().clone(),
+                options,
+            )));
             info!(addr = %bound, endpoint = %config.doh.endpoint, "DNS over HTTPS listening");
             if let Some(h3_tls_config) = &h3_tls_config {
                 let socket =

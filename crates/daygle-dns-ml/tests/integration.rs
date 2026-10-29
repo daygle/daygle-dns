@@ -469,6 +469,69 @@ fn verdict_list_searches_and_flags_exemptions() {
 }
 
 #[test]
+fn filtered_verdict_and_threat_lists_apply_filters_before_pagination() {
+    let dir = TempDir::new().unwrap();
+    let store = tmp_store(&dir);
+    for (domain, category, severity) in [
+        ("bad-phish.example", "phishing", "threat"),
+        ("bad-malware.example", "malware", "threat"),
+        ("disputed.example", "phishing", "disputed"),
+        ("news.example", "news", "info"),
+    ] {
+        store.observe(domain).unwrap();
+        store
+            .save_verdict(
+                domain,
+                category,
+                severity,
+                "classified",
+                0.9,
+                "test",
+                "evidence",
+                3600,
+            )
+            .unwrap();
+    }
+    store
+        .set_override("bad-phish.example", "allow", "false positive")
+        .unwrap();
+
+    let (rows, total) = store
+        .list_verdicts_filtered(
+            None,
+            Some("PHISH"),
+            Some("threat"),
+            Some("exempt"),
+            None,
+            10,
+            0,
+        )
+        .unwrap();
+    assert_eq!(total, 1);
+    assert_eq!(rows[0].domain, "bad-phish.example");
+    assert!(rows[0].overridden);
+
+    let (rows, total) = store
+        .list_threats_filtered(
+            Some("malware"),
+            Some("threat"),
+            Some("not_exempt"),
+            None,
+            10,
+            0,
+        )
+        .unwrap();
+    assert_eq!(total, 1);
+    assert_eq!(rows[0].domain, "bad-malware.example");
+    assert!(!rows[0].overridden);
+
+    let (_, total) = store
+        .list_threats_filtered(None, Some("disputed"), None, None, 10, 0)
+        .unwrap();
+    assert_eq!(total, 1);
+}
+
+#[test]
 fn harvest_reads_only_the_requested_window() {
     let dir = TempDir::new().unwrap();
     let zones = zone_store(&dir);

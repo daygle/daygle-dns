@@ -229,7 +229,8 @@ impl DnssecMaintenance {
                 && retired.is_empty()
                 && key_age(active[0]) >= self.config.rollover_after
             {
-                let (algorithm, der) = generate_signing_key()?;
+                let (algorithm, der) =
+                    generate_signing_key(&self.catalog.settings().dnssec_algorithm)?;
                 self.store.store_signing_key(&zone.id, algorithm, &der)?;
                 changed = true;
                 events += 1;
@@ -363,7 +364,7 @@ mod tests {
                 },
             )
             .unwrap();
-        let (algorithm, der) = generate_signing_key().unwrap();
+        let (algorithm, der) = generate_signing_key("").unwrap();
         m.store
             .store_signing_key_created(&zone.id, algorithm, &der, Utc::now() - age)
             .unwrap();
@@ -463,7 +464,7 @@ mod tests {
         // (36 h) is past rollover age but not yet at the 48 h retire
         // threshold, so no key is generated and none is retired.
         let zone = zone_with_key(&m, "stack.test", chrono::Duration::hours(36));
-        let (algorithm, der) = generate_signing_key().unwrap();
+        let (algorithm, der) = generate_signing_key("").unwrap();
         m.store
             .store_signing_key_created(
                 &zone.id,

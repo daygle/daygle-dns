@@ -415,7 +415,7 @@
   // network (addresses, lists, names, credentials, certificates) rather
   // than tuning. The General tab's web access is left too, so a reset can
   // never move the console out from under the browser.
-  const DNSSEC_FIELDS = ['dnssec_enabled', 'dnssec_sig_validity_days', 'dnssec_rollover_days',
+  const DNSSEC_FIELDS = ['dnssec_enabled', 'dnssec_algorithm', 'dnssec_sig_validity_days', 'dnssec_rollover_days',
     'dnssec_rollover_overlap_days', 'dnssec_rollover_retire_days', 'dnssec_maintenance_secs'];
   const RESET_KEEPS = {
     general: 'Web console access is kept.',
@@ -696,6 +696,7 @@
         notify_listen_enabled: !!authoritative.notify_listen_enabled,
         catalog_zone: (authoritative.catalog_zone || '').trim(),
         dnssec_enabled: !!authoritative.dnssec_enabled,
+        dnssec_algorithm: authoritative.dnssec_algorithm || 'ECDSAP256SHA256',
         dnssec_sig_validity_days: Number(authoritative.dnssec_sig_validity_days),
         dnssec_rollover_days: Number(authoritative.dnssec_rollover_days),
         dnssec_rollover_overlap_days: Number(authoritative.dnssec_rollover_overlap_days),
@@ -1129,6 +1130,7 @@
     <h3 style="margin: 0 0 10px">DNSSEC Signing</h3>
     <label class="check"><input type="checkbox" bind:checked={authoritative.dnssec_enabled} /> <span>Sign Zones That Have Signing Keys</span></label>
     <div class="form-grid" style="margin-top: 10px">
+      <label><span>Signing Algorithm</span><select bind:value={authoritative.dnssec_algorithm} disabled={!authoritative.dnssec_enabled}><option value="ECDSAP256SHA256">ECDSA P-256 / SHA-256 (13)</option><option value="ECDSAP384SHA384">ECDSA P-384 / SHA-384 (14)</option><option value="ED25519">Ed25519 (15)</option></select></label>
       <label><span>Signature Validity (Days)</span><input type="number" min="1" bind:value={authoritative.dnssec_sig_validity_days} disabled={!authoritative.dnssec_enabled} /></label>
       <label><span>Roll Keys After (Days, 0 = Never)</span><input type="number" min="0" bind:value={authoritative.dnssec_rollover_days} disabled={!authoritative.dnssec_enabled} /></label>
       <label><span>Old and New Key Overlap (Days)</span><input type="number" min="1" bind:value={authoritative.dnssec_rollover_overlap_days} disabled={!authoritative.dnssec_enabled} /></label>
@@ -1142,8 +1144,9 @@
       record to your registrar then), and the old key stays published for the
       retire period so cached signatures still verify. Turning signing on or
       off, or changing the validity, re-signs the zones at once; the other
-      settings apply at the next check. Keys are managed per zone on the
-      Zones page.
+      settings apply at the next check. A changed algorithm is used for the
+      next key: rolling a key publishes both keys while you update the DS
+      record. Keys are managed per zone on the Zones page.
     </p>
   </div>
 

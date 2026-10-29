@@ -1,9 +1,8 @@
 <script>
-  import IconButton from '../IconButton.svelte';
   import { api, formatApiError, getStoredUser } from '../api.js';
   import { onDestroy } from 'svelte';
   import { formatDateTime } from '../datetime.svelte.js';
-  import { backendLabel, cleanDomain, duration, percent, titleCase } from '../aiLabels.js';
+  import { backendLabel, duration, percent, titleCase } from '../aiLabels.js';
 
   // `onOpenSettings(tab)` opens Settings on a tab; null for viewers.
   let { onOpenSettings = null } = $props();
@@ -12,7 +11,6 @@
   // When the scanner is not running: whether Settings has it turned on
   // (it then only needs a restart), or null when unknown.
   let enabledInSettings = $state(null);
-  let overrides = $state([]);
   // Enabled filtering groups whose clients the AI never auto-blocks.
   let aiOffGroups = $state([]);
   let loading = $state(true);
@@ -92,17 +90,11 @@
 
   onDestroy(() => clearTimeout(pollTimer));
 
-  // New exemption form.
-  let exemptDomain = $state('');
-  let exemptReason = $state('');
-  let exemptBusy = $state(false);
-
   async function load() {
     loading = true;
     error = null;
     try {
       status = await api.aiStatus();
-      overrides = (await api.aiOverrides())?.overrides || [];
       api
         .blockingGroups()
         .then((groups) => {
@@ -143,54 +135,12 @@
     }
   }
 
-  async function exempt() {
-    if (!exemptDomain.trim()) return;
-    const domain = cleanDomain(exemptDomain);
-    if (!domain) {
-      notice = null;
-      error = `"${exemptDomain.trim()}" is not a domain name. Enter one such as news.example.com.`;
-      return;
-    }
-    exemptBusy = true;
-    notice = null;
-    error = null;
-    try {
-      await api.aiOverride(domain, 'allow', exemptReason.trim());
-      notice = `${domain} and its subdomains are now exempt from AI blocking.`;
-      exemptDomain = '';
-      exemptReason = '';
-      await load();
-    } catch (e) {
-      error = formatApiError(e);
-    } finally {
-      exemptBusy = false;
-    }
-  }
-
-  async function removeExemption(domain) {
-    notice = null;
-    error = null;
-    try {
-      await api.aiOverride(domain, 'clear');
-      notice = `${domain} is no longer exempt.`;
-      await load();
-    } catch (e) {
-      error = formatApiError(e);
-    }
-  }
-
   function countFor(key) {
     return status?.status_counts?.[key] ?? 0;
   }
 
   function fmt(n) {
     return Number(n || 0).toLocaleString();
-  }
-
-  function when(stamp) {
-    if (!stamp) return '-';
-    const ms = Date.parse(stamp);
-    return Number.isNaN(ms) ? '-' : formatDateTime(ms);
   }
 
   const enforcing = $derived(status?.mode === 'enforce');
@@ -334,7 +284,7 @@
     </div>
 
     <div class="card">
-      <h3 style="margin: 0 0 4px">{enforcing && !switchedOff ? 'Auto-Blocked Domains' : 'Would Auto-Block'}</h3>
+      <h3 style="margin: 0 0 4px">{enforcing && !switchedOff ? 'Auto-Blocked Domains' : 'Eligible for Auto-Blocking'}</h3>
       <p class="muted small" style="margin: 0 0 10px">
         Domains with a current verdict in an auto-block category at or above
         the block threshold, minus exempt domains and verdicts the verifier
@@ -358,43 +308,6 @@
         <p class="muted">None.</p>
       {/if}
     </div>
-  </div>
-
-  <div class="card" style="margin-top: 14px">
-    <h3 style="margin: 0 0 10px">Exempt Domains ({overrides.length})</h3>
-    {#if isAdmin}
-      <form class="exempt-row" onsubmit={(e) => { e.preventDefault(); exempt(); }}>
-        <input bind:value={exemptDomain} placeholder="Domain, e.g. news.example.com" aria-label="Domain to exempt" spellcheck="false" autocapitalize="off" style="flex: 2; min-width: 200px" />
-        <input bind:value={exemptReason} placeholder="Reason (Optional)" aria-label="Reason" maxlength="200" style="flex: 1; min-width: 160px" />
-        <button type="submit" disabled={exemptBusy || !exemptDomain.trim()}>Exempt</button>
-      </form>
-    {/if}
-    {#if overrides.length}
-      <div class="table-wrap" style="margin-top: 12px">
-        <table>
-          <thead>
-            <tr><th>Domain</th><th>Reason</th><th>Added</th>{#if isAdmin}<th class="num">Actions</th>{/if}</tr>
-          </thead>
-          <tbody>
-            {#each overrides as o (o.domain)}
-              <tr>
-                <td><code>{o.domain}</code></td>
-                <td class="muted">{o.reason || '-'}</td>
-                <td class="muted">{when(o.created_at)}</td>
-                {#if isAdmin}
-                  <td class="num"><IconButton icon="delete" variant="danger" label="Remove exemption for {o.domain}" title="Remove the exemption: let the AI block this domain again" onclick={() => removeExemption(o.domain)} /></td>
-                {/if}
-              </tr>
-            {/each}
-          </tbody>
-        </table>
-      </div>
-    {/if}
-    <p class="muted help">
-      An exempt domain and its subdomains are never auto-blocked by the AI,
-      whatever their verdict. Verdicts are still recorded. You can paste a
-      URL; only its domain is used.
-    </p>
   </div>
 
   <div class="card" style="margin-top: 14px">
@@ -459,6 +372,5 @@
     margin-top: 14px;
   }
   .warn { border-color: var(--warn); }
-  .exempt-row { display: flex; gap: 8px; flex-wrap: wrap; }
   .small { font-size: 0.85rem; }
 </style>

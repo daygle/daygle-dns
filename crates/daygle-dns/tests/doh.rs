@@ -82,6 +82,96 @@ async fn serves_queries_over_doh() {
     shutdown(server).await;
 }
 
+/// RFC 8484 §4.1 GET (`?dns=`, base64url): the same answer as POST. This is
+/// what `dig +https` sends by default.
+#[tokio::test]
+async fn serves_queries_over_doh_get() {
+    use base64::Engine;
+
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("daygle-dns.db");
+    let cert = dir.path().join("server.crt");
+    let key = dir.path().join("server.key");
+
+    let mut config = base_config(&db);
+    config.doh.enabled = true;
+    config.doh.self_signed = true;
+    config.doh.cert_path = cert.to_string_lossy().to_string();
+    config.doh.key_path = key.to_string_lossy().to_string();
+    config.doh.server_name = "daygle.test".to_string();
+
+    let server = spawn(config).await;
+    let zone = server
+        .catalog
+        .store()
+        .create_zone(&ZoneInput {
+            name: "https.test".to_string(),
+            ..Default::default()
+        })
+        .unwrap();
+    server
+        .catalog
+        .store()
+        .upsert_record(
+            &zone.id,
+            &RecordInput {
+                name: "secure".to_string(),
+                rtype: "A".to_string(),
+                content: "203.0.113.7".to_string(),
+                ttl: 300,
+                priority: 0,
+                disabled: false,
+            },
+        )
+        .unwrap();
+    server.catalog.reload().unwrap();
+
+    let doh = server.doh_addr.expect("DoH is enabled");
+
+    let mut query = Message::new(0, MessageType::Query, OpCode::Query);
+    query.add_query(Query::query(
+        Name::from_utf8("secure.https.test.").unwrap(),
+        RecordType::A,
+    ));
+    let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .encode(query.to_vec().expect("encode query"));
+
+    let client = reqwest::Client::builder()
+        .danger_accept_invalid_certs(true) // lgtm
+        .build()
+        .unwrap();
+    let resp = client
+        .get(format!("https://{doh}/dns-query")) // lgtm
+        .query(&[("dns", encoded.as_str())])
+        .header("Accept", "application/dns-message")
+        .send()
+        .await
+        .expect("DoH GET request");
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    assert_eq!(
+        resp.headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok()),
+        Some("application/dns-message")
+    );
+
+    let bytes = resp.bytes().await.unwrap();
+    let response = Message::from_vec(&bytes).expect("decode DoH GET response");
+    assert_eq!(response.response_code, ResponseCode::NoError);
+    assert_eq!(first_answer(&response).as_deref(), Some("203.0.113.7"));
+
+    // A GET without the `dns` parameter is an HTTP 400 (RFC 8484 clients
+    // read only the status): there is no DNS id to match an error against.
+    let bad = client
+        .get(format!("https://{doh}/dns-query")) // lgtm
+        .send()
+        .await
+        .expect("DoH GET request without dns");
+    assert_eq!(bad.status(), reqwest::StatusCode::BAD_REQUEST);
+
+    shutdown(server).await;
+}
+
 #[tokio::test]
 async fn allowed_networks_refuse_clients_outside_the_list() {
     let dir = tempfile::tempdir().unwrap();
