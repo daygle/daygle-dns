@@ -5,6 +5,7 @@
   import { backendLabel, percent, STATUS_LABELS, titleCase } from '../aiLabels.js';
   import ColumnPicker from '../ColumnPicker.svelte';
   import { isHidden } from '../columns.svelte.js';
+  import AiExemptionDialog from './AiExemptionDialog.svelte';
 
   const COLUMNS = [
     { key: 'domain', label: 'Domain', locked: true },
@@ -48,6 +49,7 @@
   let loading = $state(true);
   let error = $state(null);
   let notice = $state(null);
+  let exemptionDomain = $state(null);
   let disabled = $state(false); // true when the scanner is off (404)
 
   // Viewers are read-only (the server refuses their exemption changes);
@@ -109,23 +111,16 @@
     load();
   }
 
-  async function setExempt(domain, exempt) {
-    let reason = '';
+  function setExempt(domain, exempt) {
     if (exempt) {
-      const response = window.prompt(`Why should ${domain} and its subdomains be exempt from AI blocking?`);
-      if (response === null) return;
-      reason = response.trim();
-      if (!reason) {
-        notice = null;
-        error = 'Enter a reason to record before exempting this domain.';
-        return;
-      }
-      if (reason.length > 200) {
-        notice = null;
-        error = 'The exemption reason must be 200 characters or fewer.';
-        return;
-      }
+      exemptionDomain = domain;
+      return;
     }
+    applyExemption(domain, false, '');
+  }
+
+  async function applyExemption(domain, exempt, reason) {
+    exemptionDomain = null;
     notice = null;
     error = null;
     try {
@@ -301,6 +296,14 @@
       <button class="secondary" onclick={() => goPage(1)} disabled={page >= pages()}>Next →</button>
     </div>
   {/if}
+{/if}
+
+{#if exemptionDomain}
+  <AiExemptionDialog
+    domain={exemptionDomain}
+    onCancel={() => (exemptionDomain = null)}
+    onConfirm={(reason) => applyExemption(exemptionDomain, true, reason)}
+  />
 {/if}
 
 <style>
