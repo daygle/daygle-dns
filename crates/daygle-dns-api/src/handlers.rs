@@ -1395,15 +1395,18 @@ pub async fn ai_verdicts(
     };
     let per_page = query.per_page.unwrap_or(50).clamp(1, 500);
     let page = query.page.unwrap_or(1).max(1);
-    match ai.store.list_verdicts_filtered(
-        query.status.as_deref(),
-        query.category.as_deref(),
-        query.severity.as_deref(),
-        query.exemption.as_deref(),
-        query.q.as_deref(),
-        per_page,
-        (page - 1).saturating_mul(per_page),
-    ) {
+    let filter = daygle_dns_ml::store::VerdictFilter {
+        status: query.status.as_deref(),
+        category: query.category.as_deref(),
+        severity: query.severity.as_deref(),
+        exemption: query.exemption.as_deref(),
+        search: query.q.as_deref(),
+    };
+    let page_bounds = daygle_dns_ml::store::VerdictPage {
+        limit: per_page,
+        offset: (page - 1).saturating_mul(per_page),
+    };
+    match ai.store.list_verdicts_filtered(&filter, page_bounds) {
         Ok((rows, total)) => (
             StatusCode::OK,
             axum::Json(serde_json::json!({
@@ -1448,14 +1451,18 @@ pub async fn ai_threats(
     };
     let per_page = query.per_page.unwrap_or(50).clamp(1, 500);
     let page = query.page.unwrap_or(1).max(1);
-    match ai.store.list_threats_filtered(
-        query.category.as_deref(),
-        query.severity.as_deref(),
-        query.exemption.as_deref(),
-        query.q.as_deref(),
-        per_page,
-        (page - 1).saturating_mul(per_page),
-    ) {
+    let filter = daygle_dns_ml::store::VerdictFilter {
+        category: query.category.as_deref(),
+        severity: query.severity.as_deref(),
+        exemption: query.exemption.as_deref(),
+        search: query.q.as_deref(),
+        ..Default::default()
+    };
+    let page_bounds = daygle_dns_ml::store::VerdictPage {
+        limit: per_page,
+        offset: (page - 1).saturating_mul(per_page),
+    };
+    match ai.store.list_threats_filtered(&filter, page_bounds) {
         Ok((rows, total)) => {
             let snapshot = ai.snapshot().load();
             (StatusCode::OK,

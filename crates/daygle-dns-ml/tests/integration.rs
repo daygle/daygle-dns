@@ -498,13 +498,16 @@ fn filtered_verdict_and_threat_lists_apply_filters_before_pagination() {
 
     let (rows, total) = store
         .list_verdicts_filtered(
-            None,
-            Some("PHISH"),
-            Some("threat"),
-            Some("exempt"),
-            None,
-            10,
-            0,
+            &daygle_dns_ml::store::VerdictFilter {
+                category: Some("PHISH"),
+                severity: Some("threat"),
+                exemption: Some("exempt"),
+                ..Default::default()
+            },
+            daygle_dns_ml::store::VerdictPage {
+                limit: 10,
+                offset: 0,
+            },
         )
         .unwrap();
     assert_eq!(total, 1);
@@ -513,12 +516,16 @@ fn filtered_verdict_and_threat_lists_apply_filters_before_pagination() {
 
     let (rows, total) = store
         .list_threats_filtered(
-            Some("malware"),
-            Some("threat"),
-            Some("not_exempt"),
-            None,
-            10,
-            0,
+            &daygle_dns_ml::store::VerdictFilter {
+                category: Some("malware"),
+                severity: Some("threat"),
+                exemption: Some("not_exempt"),
+                ..Default::default()
+            },
+            daygle_dns_ml::store::VerdictPage {
+                limit: 10,
+                offset: 0,
+            },
         )
         .unwrap();
     assert_eq!(total, 1);
@@ -526,7 +533,16 @@ fn filtered_verdict_and_threat_lists_apply_filters_before_pagination() {
     assert!(!rows[0].overridden);
 
     let (_, total) = store
-        .list_threats_filtered(None, Some("disputed"), None, None, 10, 0)
+        .list_threats_filtered(
+            &daygle_dns_ml::store::VerdictFilter {
+                severity: Some("disputed"),
+                ..Default::default()
+            },
+            daygle_dns_ml::store::VerdictPage {
+                limit: 10,
+                offset: 0,
+            },
+        )
         .unwrap();
     assert_eq!(total, 1);
 }

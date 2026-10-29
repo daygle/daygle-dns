@@ -25,6 +25,24 @@ use std::sync::{Arc, Mutex};
 use daygle_dns_core::error::{DaygleError, Result};
 use rusqlite::{params, Connection, OptionalExtension};
 
+/// Filters shared by the paginated verdict and threat lists.
+#[derive(Debug, Default)]
+pub struct VerdictFilter<'a> {
+    pub status: Option<&'a str>,
+    pub category: Option<&'a str>,
+    pub severity: Option<&'a str>,
+    /// `exempt` or `not_exempt`.
+    pub exemption: Option<&'a str>,
+    pub search: Option<&'a str>,
+}
+
+/// Page bounds for a paginated verdict or threat list.
+#[derive(Debug, Clone, Copy)]
+pub struct VerdictPage {
+    pub limit: u32,
+    pub offset: u32,
+}
+
 /// One stored verdict row.
 #[derive(Debug, Clone)]
 pub struct VerdictRow {
@@ -532,51 +550,34 @@ impl AiStore {
     /// exemption and domain filters.
     pub fn list_verdicts_filtered(
         &self,
-        status: Option<&str>,
-        category: Option<&str>,
-        severity: Option<&str>,
-        exemption: Option<&str>,
-        search: Option<&str>,
-        limit: u32,
-        offset: u32,
+        filter: &VerdictFilter<'_>,
+        page: VerdictPage,
     ) -> Result<(Vec<VerdictRow>, u64)> {
-        self.list_filtered(
-            false, status, category, severity, exemption, search, limit, offset,
-        )
+        self.list_filtered(false, filter, page)
     }
 
     /// Paginated threat list with optional category, severity and exemption
     /// filters, plus a domain search.
     pub fn list_threats_filtered(
         &self,
-        category: Option<&str>,
-        severity: Option<&str>,
-        exemption: Option<&str>,
-        search: Option<&str>,
-        limit: u32,
-        offset: u32,
+        filter: &VerdictFilter<'_>,
+        page: VerdictPage,
     ) -> Result<(Vec<VerdictRow>, u64)> {
-        self.list_filtered(
-            true, None, category, severity, exemption, search, limit, offset,
-        )
+        self.list_filtered(true, filter, page)
     }
 
     fn list_filtered(
         &self,
         threats_only: bool,
-        status: Option<&str>,
-        category: Option<&str>,
-        severity: Option<&str>,
-        exemption: Option<&str>,
-        search: Option<&str>,
-        limit: u32,
-        offset: u32,
+        filter: &VerdictFilter<'_>,
+        page: VerdictPage,
     ) -> Result<(Vec<VerdictRow>, u64)> {
         let conn = self.lock()?;
-        let limit = limit.clamp(1, 500);
-        let offset = offset.min(u32::MAX - limit);
-        let status = status.unwrap_or("").trim().to_ascii_lowercase();
-        let category = category
+        let limit = page.limit.clamp(1, 500);
+        let offset = page.offset.min(u32::MAX - limit);
+        let status = filter.status.unwrap_or("").trim().to_ascii_lowercase();
+        let category = filter
+            .category
             .unwrap_or("")
             .trim()
             .to_ascii_lowercase()
@@ -584,9 +585,10 @@ impl AiStore {
             .replace('%', "\\%")
             .replace('_', "\\_");
         let category = format!("%{category}%");
-        let severity = severity.unwrap_or("").trim().to_ascii_lowercase();
-        let exemption = exemption.unwrap_or("").trim().to_ascii_lowercase();
-        let search = search
+        let severity = filter.severity.unwrap_or("").trim().to_ascii_lowercase();
+        let exemption = filter.exemption.unwrap_or("").trim().to_ascii_lowercase();
+        let search = filter
+            .search
             .unwrap_or("")
             .trim()
             .to_ascii_lowercase()
