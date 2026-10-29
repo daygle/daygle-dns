@@ -84,12 +84,19 @@
   // The device being looked at, and its own report.
   let device = $state(null);
   let deviceReport = $state(null);
+  // Bumped per request, like the Blocks per Device tab: clicking Details on
+  // another device must not let the first answer land last.
+  let deviceRequest = 0;
   // The device picked on the Blocks per Device tab, its own report, and the
   // devices it can pick from (busiest first).
   let blocksDevice = $state(null);
   let blocksReport = $state(null);
   let blocksLoading = $state(false);
   let blocksDevices = $state([]);
+  // Bumped per request so a slower, older response cannot overwrite a newer
+  // one (the user can switch devices or periods faster than the API answers).
+  let blocksRequest = 0;
+  let blocksDevicesRequest = 0;
 
   async function load() {
     loading = true;
@@ -109,39 +116,51 @@
   }
 
   async function loadDevice(client) {
+    const request = ++deviceRequest;
     device = client;
     deviceReport = null;
     try {
-      deviceReport = (await api.report(hours, client)).report;
+      const data = await api.report(hours, client);
+      if (request !== deviceRequest) return;
+      deviceReport = data.report;
     } catch (e) {
+      if (request !== deviceRequest) return;
       error = formatApiError(e);
     }
   }
 
   async function loadBlocks(client) {
+    const request = ++blocksRequest;
     blocksDevice = client;
     if (!client) {
       blocksReport = null;
+      blocksLoading = false;
       return;
     }
     blocksLoading = true;
     blocksReport = null;
     error = null;
     try {
-      blocksReport = (await api.report(hours, client)).report;
+      const data = await api.report(hours, client);
+      if (request !== blocksRequest) return;
+      blocksReport = data.report;
     } catch (e) {
+      if (request !== blocksRequest) return;
       error = formatApiError(e);
       blocksReport = null;
     } finally {
-      blocksLoading = false;
+      if (request === blocksRequest) blocksLoading = false;
     }
   }
 
   async function loadBlocksDevices() {
+    const request = ++blocksDevicesRequest;
     try {
       const data = await api.devices(hours);
+      if (request !== blocksDevicesRequest) return;
       blocksDevices = data.devices || [];
     } catch (e) {
+      if (request !== blocksDevicesRequest) return;
       // The report's own client list still works as a fallback.
       error = formatApiError(e);
     }
@@ -432,7 +451,7 @@
       <div class="spread" style="margin-bottom: 10px; gap: 10px; flex-wrap: wrap">
         <h3 style="margin: 0">Blocks per Device</h3>
         <select
-          value={blocksDevice ?? ''}
+          bind:value={blocksDevice}
           onchange={(e) => loadBlocks(e.currentTarget.value)}
           aria-label="Device"
           disabled={!blockDeviceOptions.length}
