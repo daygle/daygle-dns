@@ -2609,7 +2609,15 @@ pub async fn delete_record(
     if let Some(response) = reject_secondary_mutation(&state, &zone_id) {
         return response;
     }
-    let before = state.catalog.store().get_record(&rid).ok().flatten();
+    // The route's zone id must own the record: `ZoneStore::delete_record`
+    // keys off the record id alone, so without this a record could be
+    // deleted through another zone's URL - including a secondary zone's,
+    // which `reject_secondary_mutation` only checks on the path's zone.
+    let before = match state.catalog.store().get_record(&rid) {
+        Ok(Some(record)) if record.zone_id == zone_id => Some(record),
+        Ok(_) => return error_response(StatusCode::NOT_FOUND, "record not found"),
+        Err(e) => return map_err(e),
+    };
     match state.catalog.store().delete_record(&rid) {
         Ok(true) => {
             // With update_ptr, the record's PTR goes with it.
@@ -2653,6 +2661,13 @@ pub async fn set_record_disabled(
 ) -> Response {
     if let Some(response) = reject_secondary_mutation(&state, &zone_id) {
         return response;
+    }
+    // Scoped to the route's zone for the same reason as `delete_record`:
+    // the store toggles by record id and never looks at the zone.
+    match state.catalog.store().get_record(&rid) {
+        Ok(Some(record)) if record.zone_id == zone_id => {}
+        Ok(_) => return error_response(StatusCode::NOT_FOUND, "record not found"),
+        Err(e) => return map_err(e),
     }
     match state
         .catalog

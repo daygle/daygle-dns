@@ -215,6 +215,9 @@
   let qNotice = $state(null);
   let qLoading = $state(false);
   let qLoaded = $state(false);
+  // Bumped per request so a slower, older answer (live update every few
+  // seconds, or a page you clicked past) cannot overwrite a newer one.
+  let qRequest = 0;
   let live = $state(false);
   let liveTimer = null;
 
@@ -241,18 +244,23 @@
   }
 
   async function runQuery(newPage = 1) {
+    const request = ++qRequest;
     page = newPage;
     qLoading = true;
     qError = null;
     try {
       const data = await api.queryLogs(buildQuery({ page, per_page: perPage }));
+      if (request !== qRequest) return;
       qEntries = data.entries || [];
       qTotal = data.total || 0;
     } catch (e) {
+      if (request !== qRequest) return;
       qError = formatApiError(e);
     } finally {
-      qLoading = false;
-      qLoaded = true;
+      if (request === qRequest) {
+        qLoading = false;
+        qLoaded = true;
+      }
     }
   }
 

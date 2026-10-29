@@ -182,23 +182,28 @@ import { loadDisplayPreferences } from './datetime.svelte.js';
     { id: 'server', label: 'Server' },
     { id: 'info', label: null },
   ];
-  const tabs = [
-    { id: 'status', label: 'Status', icon: icons.status, section: 'monitor' },
-    { id: 'reports', label: 'Reports', icon: icons.reports, section: 'monitor' },
-    { id: 'logs', label: 'Logs', icon: icons.logs, section: 'monitor' },
-    { id: 'zones', label: 'Zones', icon: icons.zones, viewer: true, section: 'dns' },
-    { id: 'filtering', label: 'Filtering', icon: icons.filtering, viewer: true, section: 'dns' },
-    { id: 'clients', label: 'Clients', icon: icons.clients, viewer: true, section: 'dns' },
-    { id: 'dhcp', label: 'DHCP', icon: icons.dhcp, section: 'dns' },
-    { id: 'ai', label: 'AI', icon: icons.ai, viewer: true, section: 'dns' },
-    { id: 'cache', label: 'Cache', icon: icons.cache, section: 'dns' },
-    { id: 'settings', label: 'Settings', icon: icons.settings, viewer: true, section: 'server' },
-    { id: 'certificates', label: 'Certificates', icon: icons.certificates, section: 'server' },
-    { id: 'users', label: 'Users', icon: icons.users, viewer: true, section: 'server' },
-    { id: 'update', label: 'Update', icon: icons.update, section: 'server' },
-    { id: 'about', label: 'About', icon: icons.about, section: 'info' },
-    { id: 'donate', label: 'Donate', icon: icons.heart, section: 'info' },
-  ].filter((t) => !isViewer || !t.viewer);
+  // `$derived`: the filter has to re-run when the role changes (a sign-in
+  // or sign-out on this page), or the sidebar keeps the tabs of the role the
+  // console booted with.
+  const tabs = $derived(
+    [
+      { id: 'status', label: 'Status', icon: icons.status, section: 'monitor' },
+      { id: 'reports', label: 'Reports', icon: icons.reports, section: 'monitor' },
+      { id: 'logs', label: 'Logs', icon: icons.logs, section: 'monitor' },
+      { id: 'zones', label: 'Zones', icon: icons.zones, viewer: true, section: 'dns' },
+      { id: 'filtering', label: 'Filtering', icon: icons.filtering, viewer: true, section: 'dns' },
+      { id: 'clients', label: 'Clients', icon: icons.clients, viewer: true, section: 'dns' },
+      { id: 'dhcp', label: 'DHCP', icon: icons.dhcp, section: 'dns' },
+      { id: 'ai', label: 'AI', icon: icons.ai, viewer: true, section: 'dns' },
+      { id: 'cache', label: 'Cache', icon: icons.cache, section: 'dns' },
+      { id: 'settings', label: 'Settings', icon: icons.settings, viewer: true, section: 'server' },
+      { id: 'certificates', label: 'Certificates', icon: icons.certificates, section: 'server' },
+      { id: 'users', label: 'Users', icon: icons.users, viewer: true, section: 'server' },
+      { id: 'update', label: 'Update', icon: icons.update, section: 'server' },
+      { id: 'about', label: 'About', icon: icons.about, section: 'info' },
+      { id: 'donate', label: 'Donate', icon: icons.heart, section: 'info' },
+    ].filter((t) => !isViewer || !t.viewer),
+  );
   const navSections = $derived(
     SECTIONS.map((s) => ({ ...s, items: tabs.filter((t) => t.section === s.id) })).filter(
       (s) => s.items.length,

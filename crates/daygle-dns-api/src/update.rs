@@ -1999,6 +1999,13 @@ mod tests {
         // Run each script's json_escape on a coloured install.sh log line
         // with a box-drawing character, and parse what state() would write.
         let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        // Like the updater itself, the program is written to a file and run
+        // from there. Handing the whole script to `sh -c` instead round-trips
+        // it through the Windows argument encoding, which mangles the
+        // backslash runs in the sed expressions ("unknown option to `s'") and
+        // leaves json_escape with nothing to emit.
+        let program_path =
+            std::env::temp_dir().join(format!("daygle-json-escape-{}.sh", std::process::id()));
         for script in ["src/update.sh", "src/update-apply.sh"] {
             let text = std::fs::read_to_string(manifest_dir.join(script)).unwrap();
             let start = text.find("json_escape() {").expect("json_escape");
@@ -2007,14 +2014,16 @@ mod tests {
                 "{}\nprintf '{{\"phase\":\"applying\",\"pid\":1,\"started_at\":\"\",\"message\":\"%s\",\"exit_code\":0}}' \"$(json_escape \"$(printf '\\033[1;32m[x]\\033[0m \\342\\224\\200 building')\")\"",
                 &text[start..end]
             );
+            std::fs::write(&program_path, &program).unwrap();
             let out = std::process::Command::new("sh")
-                .arg("-c")
-                .arg(&program)
+                .arg(&program_path)
                 .output()
                 .expect("sh runs");
+            let _ = std::fs::remove_file(&program_path);
+            let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
             let json = String::from_utf8(out.stdout).expect("ASCII output");
-            let st: UpdateState =
-                serde_json::from_str(&json).unwrap_or_else(|e| panic!("{script}: {e}: {json}"));
+            let st: UpdateState = serde_json::from_str(&json)
+                .unwrap_or_else(|e| panic!("{script}: {e}: {json} (sh stderr: {stderr})"));
             assert_eq!(st.message, "[x]  building", "{script}");
         }
     }

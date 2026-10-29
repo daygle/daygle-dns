@@ -12,3 +12,9 @@ web/dist/** -text -diff
 # Force LF for the web sources so both platforms compile identical output.
 web/index.html text eol=lf
 web/src/** text eol=lf
+
+# Shell scripts are executed by sh and embedded into the binary with
+# include_str!, so a CRLF checkout would both break the update helper's
+# json_escape test (which slices the function out on a "\n}\n" boundary) and
+# ship scripts the updater cannot run. Keep them LF everywhere.
+*.sh text eol=lf

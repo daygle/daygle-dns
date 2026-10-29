@@ -1190,6 +1190,112 @@ async fn zone_form_creates_primary_import_and_secondary_zones() {
     shutdown(server).await;
 }
 
+// The zone id in the route must own the record: `ZoneStore::delete_record`
+// and `ZoneStore::set_record_disabled` key off the record id alone, so a
+// mismatched zone id would delete or stage a record of a *different* zone -
+// and slip past `reject_secondary_mutation`, which only inspects the zone in
+// the path.
+#[tokio::test]
+async fn record_routes_only_reach_records_of_their_own_zone() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut cfg = base_config(&dir.path().join("daygle-dns.db"));
+    cfg.server.port = free_port();
+    cfg.api.port = free_port();
+    let server = spawn(cfg).await;
+    let client = reqwest::Client::new();
+    let base = api_url(server.api_addr, "");
+
+    let owner: serde_json::Value = client
+        .post(format!("{base}/api/zones"))
+        .json(&json!({ "name": "owner.test", "zone_type": "primary" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let owner_id = owner["id"].as_str().unwrap().to_string();
+
+    let other: serde_json::Value = client
+        .post(format!("{base}/api/zones"))
+        .json(&json!({ "name": "other.test", "zone_type": "primary" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let other_id = other["id"].as_str().unwrap().to_string();
+
+    let created: serde_json::Value = client
+        .put(format!("{base}/api/zones/{other_id}/records"))
+        .json(&json!({ "name": "www", "rtype": "A", "content": "192.0.2.1" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let rid = created["id"].as_str().unwrap().to_string();
+
+    // A zone that does not own the record cannot delete it...
+    let resp = client
+        .delete(format!("{base}/api/zones/{owner_id}/records/{rid}"))
+        .send()
+        .await
+        .unwrap();
+    let status = resp.status();
+    let body = resp.text().await.unwrap();
+    assert_eq!(status, 404, "delete through another zone's url: {body}");
+
+    // ...nor stage it...
+    let resp = client
+        .put(format!(
+            "{base}/api/zones/{owner_id}/records/{rid}/disabled"
+        ))
+        .json(&json!({ "disabled": true }))
+        .send()
+        .await
+        .unwrap();
+    let status = resp.status();
+    let body = resp.text().await.unwrap();
+    assert_eq!(status, 404, "disable through another zone's url: {body}");
+
+    // ...and the record is untouched in the zone that does own it.
+    let records: Vec<serde_json::Value> = client
+        .get(format!("{base}/api/zones/{other_id}/records"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let found = records
+        .iter()
+        .find(|r| r["id"] == json!(rid))
+        .expect("the record survived a delete through another zone");
+    assert_eq!(found["disabled"], json!(false), "{found}");
+
+    // The owning zone's own URL still works.
+    let resp = client
+        .put(format!(
+            "{base}/api/zones/{other_id}/records/{rid}/disabled"
+        ))
+        .json(&json!({ "disabled": true }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "body: {}", resp.text().await.unwrap());
+    let resp = client
+        .delete(format!("{base}/api/zones/{other_id}/records/{rid}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 204);
+
+    shutdown(server).await;
+}
+
 #[tokio::test]
 async fn editing_a_record_replaces_it_in_place() {
     let dir = tempfile::tempdir().unwrap();

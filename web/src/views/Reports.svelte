@@ -81,6 +81,9 @@
   let loading = $state(false);
   // When the shown report was fetched (the end of its period).
   let loadedAt = $state(Date.now());
+  // Bumped per request, like the device tabs below: changing the period
+  // twice quickly must not let the first answer land last.
+  let reportRequest = 0;
   // The device being looked at, and its own report.
   let device = $state(null);
   let deviceReport = $state(null);
@@ -99,19 +102,22 @@
   let blocksDevicesRequest = 0;
 
   async function load() {
+    const request = ++reportRequest;
     loading = true;
     error = null;
     try {
       const data = await api.report(hours);
+      if (request !== reportRequest) return;
       report = data.report;
       loadedAt = Date.now();
       logEnabled = data.query_log_enabled !== false;
       if (device) await loadDevice(device);
       if (blocksDevice) await loadBlocks(blocksDevice);
     } catch (e) {
+      if (request !== reportRequest) return;
       error = formatApiError(e);
     } finally {
-      loading = false;
+      if (request === reportRequest) loading = false;
     }
   }
 
