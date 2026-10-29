@@ -1385,8 +1385,8 @@
     <p class="muted help">
       Classifies the domains seen in your DNS traffic in the background, never
       on the query path. Start in Train mode and review the verdicts on the AI
-      page before switching to Enforce. Your allowlist and the AI page's exempt
-      domains are never blocked.
+      page before switching to Enforce. Custom Allow entries and domains
+      exempted on the AI page are never blocked.
     </p>
 
     <h4>Scanning</h4>

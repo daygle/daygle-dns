@@ -10,17 +10,17 @@
     allow: {
       key: 'allowlist',
       other: 'blocklist',
-      title: 'Allow List',
-      otherTitle: 'Block List',
-      help: 'Never blocked by the blocklists, the Block List or the AI.',
+      title: 'Custom Allow',
+      otherTitle: 'Custom Block',
+      help: 'Never blocked by Blocklists, Custom Block or the AI.',
       placeholder: 'updates.example.com',
     },
     block: {
       key: 'blocklist',
       other: 'allowlist',
-      title: 'Block List',
-      otherTitle: 'Allow List',
-      help: 'Blocked for every client, whatever the blocklists say. A domain on the Allow List is still allowed.',
+      title: 'Custom Block',
+      otherTitle: 'Custom Allow',
+      help: 'Blocked for every client, whatever Blocklists say. A domain on Custom Allow is still allowed.',
       placeholder: 'ads.example.com',
     },
   };
@@ -182,7 +182,7 @@
               <td>
                 <code>{domain}</code>
                 {#if otherSet.has(norm(domain))}
-                  <span class="pill" title="The Allow List wins, so this domain is allowed">Also on {k.otherTitle}</span>
+                  <span class="pill" title="Custom Allow takes precedence, so this domain is allowed">Also on {k.otherTitle}</span>
                 {/if}
               </td>
               <td class="muted">

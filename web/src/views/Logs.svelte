@@ -515,10 +515,11 @@
           </select>
         </label>
         <label>Blocked By
-          <select bind:value={fBlockSource} onchange={apply}>
+          <select bind:value={fBlockSource} onchange={apply} title="Blocklists: subscribed external feeds. Custom Block: domains you added under Filtering → Custom Block.">
             <option value="">Any</option>
             {#each BLOCK_SOURCES.filter(([v]) => v !== 'allowlist' && v !== 'safe_search') as [value, label] (value)}<option value={value}>{label}</option>{/each}
           </select>
+          <span class="muted small">Blocklists are subscribed external feeds; Custom Block contains domains you added yourself.</span>
         </label>
         <label>From <span class="tz">{displayZoneName()}</span>
           <input type="datetime-local" bind:value={fFrom} />

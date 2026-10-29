@@ -314,9 +314,9 @@
   {/if}
   <p class="muted help">
     Groups covering the client are checked top to bottom. The first one that
-    lists the domain decides: on its allow list, the domain is never blocked
-    (later groups are skipped); on its block list or one of its blocklists,
-    it is blocked with that group's response. Otherwise the next group is
+    lists the domain decides: if it is on Custom Allow, it is never blocked
+    (later groups are skipped); if it is on Custom Block or one of the group's
+    subscribed Blocklists, it is blocked with that group's response. Otherwise the next group is
     checked. A group with no client networks covers every client. AI
     auto-blocking, Safe Search and YouTube Restricted Mode follow the first
     group covering the client: a group can turn AI auto-blocking off, or Safe
@@ -448,8 +448,8 @@
       <p class="muted help">
         Blocks every domain the service uses, and their subdomains (hover a
         service to see them). Combine with a schedule to block, for example,
-        games and social media at bedtime only. The Allow list below still
-        wins. Apps change their domains from time to time, so a blocked
+        games and social media at bedtime only. Custom Allow below still takes
+        precedence. Apps change their domains from time to time, so a blocked
         service may occasionally work partly until the list is updated.
       </p>
 
@@ -466,7 +466,8 @@
         </div>
         <p class="muted help">
           Blocks the domains on the ticked lists for this group's clients; the
-          Allow list below still wins. Lists set to Everyone already apply to
+          Custom Allow below still takes precedence. Lists set to Everyone
+          already apply to
           every client.
         </p>
       {:else}

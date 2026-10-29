@@ -121,7 +121,7 @@
     </div>
   {/if}
   <p class="muted help">
-    A query meets these checks top to bottom: the allow list stops every later
+    A query meets these checks top to bottom: Custom Allow stops every later
     check, the first block answers the query, and a filtering group's own
     allow entries stop later groups. CNAME inspection and response policy
     zone rules on answers run once the answer arrives, so they show in the

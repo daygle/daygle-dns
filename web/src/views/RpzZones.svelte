@@ -255,8 +255,8 @@
       or an address in the answer) and an action (NXDOMAIN, NODATA, drop,
       TCP-only, passthru, or records to answer with instead). Zones are
       checked top to bottom and the first match decides. They apply to what
-      the blocklists and filtering groups let through, and a name on the
-      allow list is never affected. A zone whose source cannot be loaded
+      Blocklists and filtering groups let through, and a domain on Custom Allow
+      is never affected. A zone whose source cannot be loaded
       keeps its last loaded rules.
     </p>
   </div>
@@ -276,7 +276,7 @@
     {#if testResult}
       <div class="result">
         {#if testResult.allowlisted}
-          <span class="pill ok">Allowed</span><span class="muted">The domain is on the allow list, so no zone applies.</span>
+          <span class="pill ok">Allowed</span><span class="muted">The domain is on Custom Allow, so no zone applies.</span>
         {:else if !testResult.matches.length}
           <span class="pill ok">No Match</span><span class="muted">No zone matches this query.</span>
         {:else}

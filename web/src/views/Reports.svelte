@@ -428,9 +428,9 @@
           </table>
         </div>
         <p class="muted help">
-          Matched is the blocklist, list entry, service, AI category or zone that
-          blocked the query. A blocklist that never shows up here may not be worth
-          keeping.
+          Matched identifies the Blocklists source, Custom Block entry, service,
+          AI category or zone that blocked the query. A Blocklists source that
+          never shows up here may not be worth keeping.
         </p>
       {:else}
         <p class="muted">Nothing was blocked in this period.</p>

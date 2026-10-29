@@ -1,9 +1,9 @@
 // What can block a query, as the query log and the Domain Check tool name
 // it (the server's `block.source` / check `source` values).
 export const BLOCK_SOURCES = [
-  ['blocklist_source', 'Blocklist'],
-  ['blocklist', 'Block List'],
-  ['allowlist', 'Allow List'],
+  ['blocklist_source', 'Blocklists'],
+  ['blocklist', 'Custom Block'],
+  ['allowlist', 'Custom Allow'],
   ['group', 'Filtering Group'],
   ['service', 'Blocked Service'],
   ['group_blocklist', 'Group Blocklist'],

@@ -58,8 +58,8 @@ fn outcome_label(outcome: &str) -> &str {
 /// What blocked a query (a `BlockReason` source), as the console names it.
 fn block_source_label(source: &str) -> &str {
     match source {
-        "blocklist_source" => "Blocklist",
-        "blocklist" => "Block List",
+        "blocklist_source" => "Blocklists",
+        "blocklist" => "Custom Block",
         "group" => "Filtering Group",
         "service" => "Blocked Service",
         "group_blocklist" => "Group Blocklist",
@@ -500,7 +500,7 @@ mod tests {
             "{text}"
         );
         assert!(text.contains("1. Resolved  11,111 (90.0%)"), "{text}");
-        assert!(text.contains("1. Blocklist  1,234 (100.0%)"), "{text}");
+        assert!(text.contains("1. Blocklists  1,234 (100.0%)"), "{text}");
         assert!(text.contains("1. gone.example  42 NXDOMAIN"), "{text}");
         assert!(
             text.contains("average 21 ms, median 2 ms, 95% under 90 ms, slowest 1500 ms"),

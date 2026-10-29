@@ -32,7 +32,7 @@
     {
       icon: icons.filtering,
       title: 'Filtering and Policies',
-      text: 'Blocklists, allow and block lists, filtering groups, and per-client resolution policies.',
+      text: 'Blocklists, Custom Allow, Custom Block, filtering groups, and per-client resolution policies.',
     },
     {
       icon: icons.ai,

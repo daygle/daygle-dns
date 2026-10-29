@@ -138,8 +138,8 @@
       the query when one of them is blocked. Trackers often hide behind a
       first-party name (<code>metrics.shop.example</code> pointing to
       <code>tracker.example</code>) that a blocklist alone would let through.
-      Blocklists, Allow and Block Lists and filtering groups all apply; a
-      name on the allow list is never blocked this way.
+      Blocklists, Custom Allow, Custom Block and filtering groups all apply;
+      a name on Custom Allow is never blocked this way.
     </p>
     <div class="row">
       <button onclick={saveCnameInspection} disabled={cnameBusy}>{cnameBusy ? 'Saving...' : 'Save'}</button>
@@ -194,8 +194,8 @@
       normally on port 80, so it cannot be the web console's port. Most sites
       use HTTPS, and for those the browser shows its own security warning
       instead of the page (a site's certificate cannot be imitated); the page
-      shows for plain links and apps that use HTTP. Applies to blocklists,
-      Allow and Block Lists, CNAME inspection, the AI and filtering groups
+      shows for plain links and apps that use HTTP. Applies to Blocklists,
+      Custom Allow, Custom Block, CNAME inspection, the AI and filtering groups
       whose blocked response is NXDOMAIN.
     </p>
     <div class="row">

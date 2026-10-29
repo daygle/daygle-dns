@@ -326,11 +326,11 @@ name/type, transport (`udp`, `tcp`, `tls`, `https`, `quic`), outcome
 A blocked query also keeps why it was blocked, as `block`:
 `{"source", "group", "matched", "reason"}` (`null` for queries that were
 not blocked, and for blocks logged before reasons were kept). `source`
-says what blocked it: `blocklist` (the server's own block list),
-`blocklist_source` (a blocklist source that applies to everyone or to the
-DoT listener; `matched` is its name), `group` (a filtering group's own
+says what blocked it: `blocklist` (the server's own Custom Block list),
+`blocklist_source` (a feed configured under Blocklists that applies to
+everyone or to the DoT listener; `matched` is its name), `group` (a filtering group's own
 block entries or patterns; `matched` is the entry), `service` (a blocked
-service; `matched` is its name), `group_blocklist` (a blocklist source
+service; `matched` is its name), `group_blocklist` (a source from Blocklists
 selected by a group), `ai` (`matched` is the category), `rpz` (`matched` is
 the zone), `cname` (the answer led through a CNAME to a blocked name;
 `matched` is that name), `denied_network`, `listener` (the client may not
@@ -1551,12 +1551,12 @@ unless `listener` is `dot`, `doh` or `doq`. It answers:
   query is: `{"blocked": true, "source", "group", "matched", "reason",
   "action"}` (`source` as in the query log; `action` is `block` for
   NXDOMAIN, `refused`, `redirect`, `nodata`, or the RPZ action), or
-  `{"blocked": false, "source", "reason"}` (`source` is `allowlist` when the
-  allow list lets it through).
+  `{"blocked": false, "source", "reason"}` (`source` is `allowlist` when
+  Custom Allow lets it through).
 - `checks`: every check that is set up, in the order queries meet them, and
   what each does with the domain, without stopping at the first that
-  decides: denied networks, the allow list, the block list, each blocklist
-  source that lists it, per-client rules, Filter AAAA, the AI scanner,
+  decides: denied networks, Custom Allow, Custom Block, each subscribed
+  feed in Blocklists that lists it, per-client rules, Filter AAAA, the AI scanner,
   then each filtering group covering the device (including groups outside
   their schedule, as `off`), response policy zones and Safe Search. Each is
   `{"source", "result", "detail", "matched", "group", "action"}`, with
@@ -1693,8 +1693,8 @@ saying what was blocked and why:
 | `listen`, `port` | `0.0.0.0`, `80` | Where the page is served (plain HTTP). The port may not be one the web console, the API or a DoH/DoT listener uses (`400`). |
 | `message` | `""` | Extra text on the page (escaped; 2000 characters at most). |
 
-It applies to blocks that would be NXDOMAIN: blocklists, the allow and
-block lists, the AI scanner, CNAME inspection, and filtering groups whose
+It applies to blocks that would be NXDOMAIN: Blocklists, Custom Allow and
+Custom Block, the AI scanner, CNAME inspection, and filtering groups whose
 `response` is NXDOMAIN. `HTTPS`/`SVCB` queries for blocked names are
 answered empty. The page answers every path with `403` and HTML naming the
 `Host` and, when the visitor's lookup was within the last 10 minutes, the

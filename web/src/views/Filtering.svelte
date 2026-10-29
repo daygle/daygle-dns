@@ -18,14 +18,15 @@
     },
     {
       id: 'allow',
-      label: 'Allow List',
+      label: 'Custom Allow',
       tagline:
-        'Your own list of domains to always allow, for every client. An allowed domain is never blocked by a blocklist, the block list or the AI.',
+        'Your own list of domains to always allow, for every client. A domain here is never blocked by Blocklists, Custom Block or the AI.',
     },
     {
       id: 'block',
-      label: 'Block List',
-      tagline: 'Your own list of domains to always block, for every client, whatever the blocklists say.',
+      label: 'Custom Block',
+      tagline:
+        'Your own list of domains to always block, for every client, whatever Blocklists say. Custom Allow always takes precedence.',
     },
     {
       id: 'response-filters',
