@@ -1249,18 +1249,16 @@ fn auto_install_tick(store: &daygle_dns_authoritative::store::ZoneStore, hour: u
         return;
     };
     match start_auto_install(&exe, config_dir_hint()) {
-        Ok(pid) => tracing::info!(
-            "started scheduled update to Daygle DNS {latest} (updater pid {pid})"
-        ),
+        Ok(pid) => {
+            tracing::info!("started scheduled update to Daygle DNS {latest} (updater pid {pid})")
+        }
         Err(StartError::AlreadyRunning) => {
             tracing::info!(
                 "skipping scheduled update to Daygle DNS {latest}: another update run started first"
             );
         }
         Err(error) => {
-            tracing::warn!(
-                "could not start scheduled update to Daygle DNS {latest}: {error}"
-            );
+            tracing::warn!("could not start scheduled update to Daygle DNS {latest}: {error}");
             let failed = UpdateState {
                 phase: "error".to_string(),
                 pid: 0,
@@ -1278,7 +1276,7 @@ fn auto_install_tick(store: &daygle_dns_authoritative::store::ZoneStore, hour: u
             } else {
                 report_auto_install_failure(store, &failed);
             }
-        },
+        }
     }
 }
 
@@ -1290,19 +1288,13 @@ fn auto_install_due(
     hour: u8,
     last_date: Option<&str>,
 ) -> bool {
-    hour <= 23
-        && now.minute / 60 == u32::from(hour)
-        && last_date != Some(today)
+    hour <= 23 && now.minute / 60 == u32::from(hour) && last_date != Some(today)
 }
 
 /// GitHub normally omits prereleases from `/releases/latest`; keep an explicit
 /// guard as a second line of defence for fallback/changed release responses.
 fn is_stable_release(version: &str) -> bool {
-    !version
-        .split('+')
-        .next()
-        .unwrap_or(version)
-        .contains('-')
+    !version.split('+').next().unwrap_or(version).contains('-')
 }
 
 /// The AI model files managed by the models-bundle update flow (flat names
@@ -1870,8 +1862,14 @@ mod tests {
             update.contains("MODE=\"install\""),
             "update.sh default MODE must be the installer kind"
         );
-        assert!(update.contains("--automatic"), "scheduled runs must be tagged");
-        assert!(update.contains("\"automatic\":%s"), "the staged manifest carries the run tag");
+        assert!(
+            update.contains("--automatic"),
+            "scheduled runs must be tagged"
+        );
+        assert!(
+            update.contains("\"automatic\":%s"),
+            "the staged manifest carries the run tag"
+        );
         assert!(
             apply.contains("\"automatic\":%s"),
             "terminal state preserves the run tag"
@@ -2004,7 +2002,12 @@ mod tests {
         };
         assert!(auto_install_due(during_hour, today, hour, None));
         assert!(!auto_install_due(during_hour, today, hour, Some(today)));
-        assert!(auto_install_due(during_hour, today, hour, Some("2026-10-29")));
+        assert!(auto_install_due(
+            during_hour,
+            today,
+            hour,
+            Some("2026-10-29")
+        ));
         assert!(!auto_install_due(
             daygle_dns_core::schedule::WeekTime {
                 day: 4,
@@ -2320,7 +2323,10 @@ mod tests {
         // A run-shaped state whose helper is dead becomes a terminal error.
         let dead = normalize_stale(running(4242), None, |_| false);
         assert_eq!(dead.phase, "error");
-        assert!(dead.automatic, "automatic-run identity survives stale normalization");
+        assert!(
+            dead.automatic,
+            "automatic-run identity survives stale normalization"
+        );
         assert!(dead.is_terminal());
         assert!(!dead.is_running());
 
