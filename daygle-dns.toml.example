@@ -547,6 +547,10 @@ time_format = "system"
 [updates]
 enabled = true
 check_interval_secs = 3600
+# Automatically install stable binary releases at this hour (0-23) in the
+# display time zone. This restarts the DNS service; disabled by default.
+auto_install = false
+auto_install_hour = 3
 
 # Named networks (Settings -> Networks): give a set of addresses a name that
 # settings taking client networks can use instead of the addresses. `Private`

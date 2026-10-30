@@ -1745,6 +1745,7 @@ needs attention:
 | `certificate_expiry` | `true` | A console-managed certificate expires within 14 days, or an ACME request failed (`certificate_expiry`). |
 | `dnssec` | `true` | A key rollover started (the parent DS needs the new key), or re-signing failed (`dnssec`). |
 | `update_available` | `true` | A newer release is available (`update_available`), once per release. |
+| `update_failure` | `true` | A scheduled stable-release update failed; includes rollback and service health-check results (`update_failure`). |
 | `ai_blocks` | `false` | The AI scanner in Enforce mode started blocking new domains (`ai_blocks`). |
 
 A failure that persists is reported again after 6 hours at the soonest (24

@@ -22,6 +22,7 @@ pub enum AlertKind {
     CertificateExpiry,
     Dnssec,
     UpdateAvailable,
+    UpdateFailure,
     AiBlocks,
     /// Sent from the console to check the settings.
     Test,
@@ -36,8 +37,8 @@ impl AlertKind {
         Duration::from_secs(match self {
             Self::BlocklistFailure | Self::ZoneTransferFailure | Self::Dnssec => 6 * HOUR,
             Self::CertificateExpiry => 24 * HOUR,
-            // Keyed by version: one alert per release.
-            Self::UpdateAvailable => u64::MAX / 4,
+            // Keyed by version/run: one alert per release or failed run.
+            Self::UpdateAvailable | Self::UpdateFailure => u64::MAX / 4,
             Self::AiBlocks | Self::Test | Self::Report => 0,
         })
     }
@@ -78,7 +79,7 @@ pub fn raise(
     key: impl Into<String>,
     title: impl Into<String>,
     message: impl Into<String>,
-) {
+) -> bool {
     let alert = Alert {
         kind,
         key: key.into(),
@@ -92,7 +93,7 @@ pub fn raise(
         .get(&alert.key)
         .is_some_and(|at| now.duration_since(*at) < kind.repeat_after())
     {
-        return;
+        return true;
     }
     let delivered = SENDER
         .read()
@@ -102,6 +103,7 @@ pub fn raise(
     if delivered {
         sent.insert(alert.key, now);
     }
+    delivered
 }
 
 /// The cause of `key` has cleared: the next occurrence alerts right away.

@@ -36,6 +36,7 @@ EXE="__DAYGLE_DNS_EXE__"
 UPDATES_DIR="__DAYGLE_DNS_UPDATES_DIR__"
 MODELS_DIR="__DAYGLE_DNS_MODELS_DIR__"
 SERVICE_USER="__DAYGLE_DNS_USER__"
+AUTOMATIC=false
 STAGING="$UPDATES_DIR/staging"
 REQ="$UPDATES_DIR/request"
 DIR="${DAYGLE_DNS_UPDATE_DIR:-/tmp/daygle-dns-update}"
@@ -113,14 +114,14 @@ json_escape() {
 # Write state atomically (temp file + rename) so status polls never observe a
 # half-written file.
 state() { # phase message
-  printf '{"phase":"%s","pid":%s,"started_at":"%s","message":"%s","exit_code":0}\n' \
-    "$1" "$$" "$(date -u +%FT%TZ)" "$(json_escape "$2")" > "$PRIV/state.json" \
+  printf '{"phase":"%s","pid":%s,"started_at":"%s","message":"%s","exit_code":0,"automatic":%s}\n' \
+    "$1" "$$" "$(date -u +%FT%TZ)" "$(json_escape "$2")" "$AUTOMATIC" > "$PRIV/state.json" \
     && publish "$PRIV/state.json" state.json
 }
 
 fail() { # message
-  printf '{"phase":"error","pid":%s,"started_at":"%s","message":"%s","exit_code":1}\n' \
-    "$$" "$(date -u +%FT%TZ)" "$(json_escape "$1")" > "$PRIV/state.json" \
+  printf '{"phase":"error","pid":%s,"started_at":"%s","message":"%s","exit_code":1,"automatic":%s}\n' \
+    "$$" "$(date -u +%FT%TZ)" "$(json_escape "$1")" "$AUTOMATIC" > "$PRIV/state.json" \
     && publish "$PRIV/state.json" state.json
 }
 
@@ -228,6 +229,9 @@ fi
 VERSION="$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$MANIFEST" | head -n 1)"
 SHA256="$(sed -n 's/.*"sha256"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$MANIFEST" | head -n 1)"
 KIND="$(sed -n 's/.*"kind"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$MANIFEST" | head -n 1)"
+if [ "$KIND" = install ] && grep -q '"automatic"[[:space:]]*:[[:space:]]*true' "$MANIFEST"; then
+  AUTOMATIC=true
+fi
 BAD=""
 case "$KIND" in
   install|models) ;;
@@ -397,7 +401,15 @@ if [ "$KIND" = "install" ]; then
         fail "v${VERSION} did not come up, and neither did the restored previous version. Check 'systemctl status daygle-dns' (details in apply.log)."
       fi
     else
-      fail "the installer completed but the service health check failed, and no previous binary could be restored. Check 'systemctl status daygle-dns' (details in apply.log)."
+      if [ -n "$ROLLBACK" ] && [ -s "$ROLLBACK" ] && [ "$(file_sha "$ROLLBACK")" = "$(file_sha "$EXE")" ]; then
+        if health_check; then
+          fail "v${VERSION} failed its health check, but the previous binary was already in place and the service recovered. Details in apply.log."
+        else
+          fail "v${VERSION} failed its health check; the previous binary was already in place, but the service still did not pass its health check. Check 'systemctl status daygle-dns' (details in apply.log)."
+        fi
+      else
+        fail "the installer completed but the service health check failed, and no previous binary could be restored. Check 'systemctl status daygle-dns' (details in apply.log)."
+      fi
     fi
     exit 1
   fi
@@ -407,10 +419,24 @@ if [ "$KIND" = "install" ]; then
   STOP="$(last_log_error_from_file "$LOG")"
   rm -f "$REQ.processing" "$MANIFEST" "$STAGED_BIN"
   if rollback_binary; then
-    WHAT="the previous version was restored"
+    if health_check; then
+      WHAT="the previous version was restored and passed its health check"
+    else
+      WHAT="the previous version was restored but did not pass its health check"
+    fi
   else
     systemctl start daygle-dns 2>>"$LOG" || true
-    WHAT="nothing was replaced"
+    if [ -n "$ROLLBACK" ] && [ -s "$ROLLBACK" ] && [ "$(file_sha "$ROLLBACK")" = "$(file_sha "$EXE")" ]; then
+      if health_check; then
+        WHAT="the installer left the previous binary unchanged and the service passed its health check"
+      else
+        WHAT="the installer left the previous binary unchanged but the service did not pass its health check"
+      fi
+    elif health_check; then
+      WHAT="the previous version could not be restored, though the service passed its health check"
+    else
+      WHAT="the previous version could not be restored and the service did not pass its health check"
+    fi
   fi
   fail "the full installer failed (exit ${RC})${STOP:+ - last installer message: $STOP}; ${WHAT}. Details in apply.log."
   exit 1

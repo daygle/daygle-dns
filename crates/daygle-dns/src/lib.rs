@@ -840,6 +840,12 @@ pub async fn bind_with(
         shared.config.clone(),
         shutdown.clone(),
     ));
+    // Install stable releases at the configured local hour when opted in.
+    tokio::spawn(daygle_dns_api::auto_install_forever(
+        shared.config.clone(),
+        catalog.store_handle(),
+        shutdown.clone(),
+    ));
     let app = router(app_state);
     let web = Arc::new(web::WebServer::new(
         app,

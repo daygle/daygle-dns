@@ -67,6 +67,9 @@ pub struct UpdateState {
     pub message: String,
     #[serde(default)]
     pub exit_code: i64,
+    /// True only for an opt-in scheduled stable-release installation.
+    #[serde(default)]
+    pub automatic: bool,
 }
 
 impl UpdateState {
@@ -183,6 +186,7 @@ fn normalize_stale(
         started_at: st.started_at,
         message: "the updater helper is no longer running (the server may have restarted mid-run); it is safe to start a new update".to_string(),
         exit_code: 1,
+        automatic: st.automatic,
     }
 }
 
@@ -816,8 +820,9 @@ mod manual_check_tests {
 
 /// The latest published release version read off the server, cached across
 /// the console's status polls. Only the background warmer writes it (at the
-/// configured `[updates].check_interval_secs` cadence), so the console's
-/// frequent reads never count against GitHub's unauthenticated API budget
+/// configured `[updates].check_interval_secs` cadence (plus the scheduled
+/// auto-install check when enabled), so the console's frequent reads never
+/// count against GitHub's unauthenticated API budget
 /// (60 requests per hour per client IP, shared with everything else using
 /// that address).
 static LATEST_RELEASE: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
@@ -956,7 +961,7 @@ fn extract_html_tag(body: &str) -> Option<String> {
     let idx = body.find(marker)?;
     let rest = &body[idx + marker.len()..];
     let end = rest
-        .find(|c: char| !(c.is_ascii_alphanumeric() || c == '.' || c == '_'))
+        .find(|c: char| !(c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-'))
         .unwrap_or(rest.len());
     if end == 0 {
         return None;
@@ -1096,6 +1101,208 @@ pub async fn refresh_release_forever(
             wait = std::time::Duration::from_secs(30);
         }
     }
+}
+
+/// Persistent date marker for the last scheduled binary auto-install
+/// attempt. The marker is written before starting, so a service restart or
+/// failed update cannot launch another attempt on the same local calendar day.
+const AUTO_INSTALL_LAST_DATE: &str = "updates_last_auto_install";
+const AUTO_INSTALL_FAILURE_REPORTED: &str = "updates_auto_install_failure_reported";
+
+/// Deliver a failed automatic update once per terminal run. The run's start
+/// time and helper pid distinguish repeated failures of the same release;
+/// the SQLite marker survives service restarts. If alerts are disabled or the
+/// alert is not accepted, a later tick retries it.
+fn report_auto_install_failure(
+    store: &daygle_dns_authoritative::store::ZoneStore,
+    state: &UpdateState,
+) {
+    if !state.automatic || state.phase != "error" {
+        return;
+    }
+    let key = format!("auto-update-failure:{}:{}", state.started_at, state.pid);
+    let previous = match store.get_named_setting::<String>(AUTO_INSTALL_FAILURE_REPORTED) {
+        Ok(previous) => previous,
+        Err(error) => {
+            tracing::warn!("cannot read scheduled auto-update alert marker: {error}");
+            return;
+        }
+    };
+    if previous.as_deref() == Some(key.as_str()) {
+        return;
+    }
+    let accepted = daygle_dns_core::alerts::raise(
+        daygle_dns_core::alerts::AlertKind::UpdateFailure,
+        key.clone(),
+        "Scheduled Daygle DNS update failed",
+        format!(
+            "{} (updater log: {})",
+            state.message,
+            workspace_dir().join(APPLY_LOG).display()
+        ),
+    );
+    // `raise` returns false when alerts are disabled or no sender accepts the
+    // alert, so a later tick retries. Accepted attempts are recorded durably
+    // to prevent repeats after a service restart; delivery errors are logged
+    // by the existing alert dispatcher.
+    if accepted {
+        if let Err(error) = store.put_named_setting(AUTO_INSTALL_FAILURE_REPORTED, &key) {
+            tracing::warn!("cannot persist scheduled auto-update alert marker: {error}");
+        }
+    }
+}
+
+/// Run the scheduled stable-release installer independently of the release
+/// check cadence. This polls the configured local hour once per minute, while
+/// the release itself is fetched only when the scheduled attempt is due.
+pub async fn auto_install_forever(
+    config: std::sync::Arc<arc_swap::ArcSwap<daygle_dns_core::config::DaygleConfig>>,
+    store: daygle_dns_authoritative::store::ZoneStore,
+    shutdown: tokio_util::sync::CancellationToken,
+) {
+    if !can_update(config_dir_hint()) {
+        return;
+    }
+    let mut wait = std::time::Duration::ZERO;
+    loop {
+        tokio::select! {
+            _ = shutdown.cancelled() => return,
+            _ = tokio::time::sleep(wait) => {}
+        }
+        wait = std::time::Duration::from_secs(60);
+        let state = read_state();
+        if state.automatic && state.phase == "error" {
+            report_auto_install_failure(&store, &state);
+        }
+        let settings = config.load().updates.clone();
+        if !settings.enabled || !settings.auto_install {
+            continue;
+        }
+        let store = store.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            auto_install_tick(&store, settings.auto_install_hour)
+        })
+        .await;
+    }
+}
+
+/// One scheduled auto-install check. Any run that passes all gates uses the
+/// same staged, privileged, checksum/re-fetch and rollback-protected updater
+/// as the console's Update Now action.
+fn auto_install_tick(store: &daygle_dns_authoritative::store::ZoneStore, hour: u8) {
+    if update_in_progress() || !can_update(config_dir_hint()) {
+        return;
+    }
+    let (now, date) = daygle_dns_core::schedule::now_and_today();
+    let today = date.format("%Y-%m-%d").to_string();
+    let last_date = match store.get_named_setting::<String>(AUTO_INSTALL_LAST_DATE) {
+        Ok(last_date) => last_date,
+        Err(error) => {
+            tracing::warn!("cannot read the scheduled auto-update marker: {error}");
+            return;
+        }
+    };
+    if !auto_install_due(now, &today, hour, last_date.as_deref()) {
+        return;
+    }
+
+    // Persist the day's scheduled check before network or install work, so a
+    // restart or failed check cannot repeat it during the same local date.
+    if let Err(error) = store.put_named_setting(AUTO_INSTALL_LAST_DATE, &today) {
+        tracing::warn!("cannot persist the scheduled auto-update marker: {error}");
+        return;
+    }
+    // Fetch a fresh release in this scheduled hour; a release published
+    // since the normal check should not have to wait for tomorrow.
+    if !refresh_latest_release_cache() {
+        return;
+    }
+    let Some(latest) = latest_release_cached() else {
+        return;
+    };
+    if !is_stable_release(&latest) || !version_lt(daygle_dns_core::VERSION, &latest) {
+        return;
+    }
+    if version_lt(daygle_dns_core::VERSION, updater_min_version()) {
+        tracing::warn!(
+            "cannot automatically install Daygle DNS {latest}: this installation needs one manual updater bootstrap first"
+        );
+        return;
+    }
+
+    let readiness = preflight(config_dir_hint());
+    if !readiness.ready {
+        let failed: Vec<_> = readiness
+            .checks
+            .iter()
+            .filter(|check| !check.ok)
+            .map(|check| check.message.as_str())
+            .collect();
+        tracing::warn!(
+            "scheduled auto-update skipped after failed preflight: {}",
+            failed.join("; ")
+        );
+        return;
+    }
+    let Ok(exe) = std::env::current_exe() else {
+        tracing::warn!("cannot automatically update: cannot locate the running binary");
+        return;
+    };
+    match start_auto_install(&exe, config_dir_hint()) {
+        Ok(pid) => tracing::info!(
+            "started scheduled update to Daygle DNS {latest} (updater pid {pid})"
+        ),
+        Err(StartError::AlreadyRunning) => {
+            tracing::info!(
+                "skipping scheduled update to Daygle DNS {latest}: another update run started first"
+            );
+        }
+        Err(error) => {
+            tracing::warn!(
+                "could not start scheduled update to Daygle DNS {latest}: {error}"
+            );
+            let failed = UpdateState {
+                phase: "error".to_string(),
+                pid: 0,
+                started_at: now_rfc3339(),
+                message: format!(
+                    "could not start automatic installation of Daygle DNS {latest}: {error}"
+                ),
+                exit_code: 1,
+                automatic: true,
+            };
+            if let Err(write_error) =
+                write_state_atomic(&workspace_dir().join("state.json"), &failed)
+            {
+                tracing::warn!("cannot record scheduled auto-update start failure: {write_error}");
+            } else {
+                report_auto_install_failure(store, &failed);
+            }
+        },
+    }
+}
+
+/// True only during the configured local hour and before the local date has
+/// been attempted. The date marker survives service restarts.
+fn auto_install_due(
+    now: daygle_dns_core::schedule::WeekTime,
+    today: &str,
+    hour: u8,
+    last_date: Option<&str>,
+) -> bool {
+    hour <= 23
+        && now.minute / 60 == u32::from(hour)
+        && last_date != Some(today)
+}
+
+/// GitHub normally omits prereleases from `/releases/latest`; keep an explicit
+/// guard as a second line of defence for fallback/changed release responses.
+fn is_stable_release(version: &str) -> bool {
+    !version
+        .split('+')
+        .next()
+        .unwrap_or(version)
+        .contains('-')
 }
 
 /// The AI model files managed by the models-bundle update flow (flat names
@@ -1359,7 +1566,13 @@ impl std::fmt::Display for StartError {
 /// Begin an update run. Resets the state file, writes the embedded helper and
 /// spawns it detached; returns the helper's pid.
 pub fn start(exe: &Path, config_dir: Option<&Path>) -> Result<u32, StartError> {
-    launch_run(None, exe, config_dir, "Preparing update...")
+    launch_run(None, exe, config_dir, "Preparing update...", false)
+}
+
+/// Begin a scheduled stable-release update; its terminal failure remains
+/// tagged across the privileged handoff and the service restart.
+fn start_auto_install(exe: &Path, config_dir: Option<&Path>) -> Result<u32, StartError> {
+    launch_run(None, exe, config_dir, "Preparing scheduled update...", true)
 }
 
 /// Begin a **model-only** update run: download the `daygle-dns-models.tar.gz`
@@ -1377,6 +1590,7 @@ pub fn start_models(exe: &Path, config_dir: Option<&Path>) -> Result<u32, StartE
         exe,
         config_dir,
         "Preparing AI model update...",
+        false,
     )
 }
 
@@ -1387,6 +1601,7 @@ fn launch_run(
     exe: &Path,
     config_dir: Option<&Path>,
     preparing_message: &str,
+    automatic: bool,
 ) -> Result<u32, StartError> {
     if !can_update(config_dir) {
         return Err(StartError::NotUpdateable);
@@ -1432,10 +1647,11 @@ fn launch_run(
         started_at: now_rfc3339(),
         message: preparing_message.to_string(),
         exit_code: 0,
+        automatic,
     };
     let state_path = dir.join("state.json");
     write_state_atomic(&state_path, &primed).map_err(StartError::Io)?;
-    match spawn(script_path(&dir), exe, &dir, mode) {
+    match spawn(script_path(&dir), exe, &dir, mode, automatic) {
         Ok(pid) => Ok(pid),
         Err(e) => {
             // Never leave the primed "preparing" snapshot behind: nothing
@@ -1447,6 +1663,7 @@ fn launch_run(
                 started_at: now_rfc3339(),
                 message: format!("failed to launch the updater helper: {e}"),
                 exit_code: 1,
+                automatic,
             };
             let _ = write_state_atomic(&state_path, &failed);
             Err(StartError::Io(e))
@@ -1549,12 +1766,21 @@ fn clear_state_for(st: UpdateState) -> Result<(), StartError> {
 /// `mode`: `None` for a release-binary update, `Some("--models")` for an
 /// AI-models bundle update (the helper reads it as its first argument).
 #[cfg(unix)]
-fn spawn(script: PathBuf, exe: &Path, dir: &Path, mode: Option<&str>) -> std::io::Result<u32> {
+fn spawn(
+    script: PathBuf,
+    exe: &Path,
+    dir: &Path,
+    mode: Option<&str>,
+    automatic: bool,
+) -> std::io::Result<u32> {
     use std::os::unix::process::CommandExt;
     let mut cmd = std::process::Command::new("sh");
     cmd.arg(&script);
     if let Some(m) = mode {
         cmd.arg(m);
+    }
+    if automatic {
+        cmd.arg("--automatic");
     }
     cmd.arg(exe)
         .arg(dir)
@@ -1576,7 +1802,13 @@ fn spawn(script: PathBuf, exe: &Path, dir: &Path, mode: Option<&str>) -> std::io
 }
 
 #[cfg(not(unix))]
-fn spawn(_script: PathBuf, _exe: &Path, _dir: &Path, _mode: Option<&str>) -> std::io::Result<u32> {
+fn spawn(
+    _script: PathBuf,
+    _exe: &Path,
+    _dir: &Path,
+    _mode: Option<&str>,
+    _automatic: bool,
+) -> std::io::Result<u32> {
     Err(std::io::Error::new(
         std::io::ErrorKind::Unsupported,
         "self-update is only supported on Linux",
@@ -1638,6 +1870,16 @@ mod tests {
             update.contains("MODE=\"install\""),
             "update.sh default MODE must be the installer kind"
         );
+        assert!(update.contains("--automatic"), "scheduled runs must be tagged");
+        assert!(update.contains("\"automatic\":%s"), "the staged manifest carries the run tag");
+        assert!(
+            apply.contains("\"automatic\":%s"),
+            "terminal state preserves the run tag"
+        );
+        assert!(
+            apply.contains("automatic") && apply.contains("grep -q"),
+            "the root apply step reads the run tag from the staged manifest"
+        );
         assert!(
             update.contains("stage_and_trigger \"$STAGE_SRC\" \"$TARGET_VERSION\" \"$MODE\""),
             "update.sh must stage through stage_and_trigger with the request kind"
@@ -1668,6 +1910,7 @@ mod tests {
             started_at: "2026-09-07T00:00:00Z".to_string(),
             message: "compiling...".to_string(),
             exit_code: 0,
+            automatic: true,
         };
         let json = serde_json::to_string(&st).unwrap();
         let back: UpdateState = serde_json::from_str(&json).unwrap();
@@ -1749,6 +1992,36 @@ mod tests {
             file_info("leftover.bin", true, Some("dead")),
         ];
         assert!(!models_bundle_differs(&extra, &manifest));
+    }
+
+    #[test]
+    fn auto_install_is_due_once_per_local_date_during_the_selected_hour() {
+        let hour = 3;
+        let today = "2026-10-30";
+        let during_hour = daygle_dns_core::schedule::WeekTime {
+            day: 4,
+            minute: 3 * 60 + 17,
+        };
+        assert!(auto_install_due(during_hour, today, hour, None));
+        assert!(!auto_install_due(during_hour, today, hour, Some(today)));
+        assert!(auto_install_due(during_hour, today, hour, Some("2026-10-29")));
+        assert!(!auto_install_due(
+            daygle_dns_core::schedule::WeekTime {
+                day: 4,
+                minute: 4 * 60,
+            },
+            today,
+            hour,
+            None,
+        ));
+    }
+
+    #[test]
+    fn auto_install_skips_prereleases_but_accepts_stable_build_metadata() {
+        assert!(!is_stable_release("1.2.3-rc1"));
+        assert!(!is_stable_release("1.2.3-beta.2+build"));
+        assert!(is_stable_release("1.2.3"));
+        assert!(is_stable_release("1.2.3+build.7"));
     }
 
     #[test]
@@ -1948,6 +2221,10 @@ mod tests {
 
         let html = "<html><head><title>Release v1.0.3</title>\n<meta content=\"https://github.com/daygle/daygle-dns/releases/tag/v1.0.3\">";
         assert_eq!(extract_html_tag(html).as_deref(), Some("v1.0.3"));
+        assert_eq!(
+            extract_html_tag("https://github.com/daygle/daygle-dns/releases/tag/v1.0.4-rc1"),
+            Some("v1.0.4-rc1".to_string()),
+        );
         assert_eq!(extract_html_tag("no marker here"), None);
         assert_eq!(extract_html_tag("releases/tag/"), None);
     }
@@ -1980,6 +2257,7 @@ mod tests {
         let mut bytes = b"{\"phase\":\"applying\",\"pid\":7,\"started_at\":\"t\",\"message\":\"installer: \x1b[1;32m[daygle-dns-install]\x1b[0m Building \xe2\x94\",\"exit_code\":0}\n".to_vec();
         let st = parse_state(&bytes);
         assert_eq!(st.phase, "applying");
+        assert!(!st.automatic);
         assert!(st.is_running());
         assert!(
             st.message
@@ -2036,11 +2314,13 @@ mod tests {
             started_at: "2026-09-07T00:00:00Z".to_string(),
             message: "compiling...".to_string(),
             exit_code: 0,
+            automatic: true,
         };
 
         // A run-shaped state whose helper is dead becomes a terminal error.
         let dead = normalize_stale(running(4242), None, |_| false);
         assert_eq!(dead.phase, "error");
+        assert!(dead.automatic, "automatic-run identity survives stale normalization");
         assert!(dead.is_terminal());
         assert!(!dead.is_running());
 

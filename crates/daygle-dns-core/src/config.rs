@@ -491,6 +491,8 @@ pub struct AlertSettings {
     pub dnssec: bool,
     /// A newer Daygle DNS release is available.
     pub update_available: bool,
+    /// A scheduled automatic update failed (including its recovery result).
+    pub update_failure: bool,
     /// The AI scanner (in Enforce mode) started blocking new domains.
     pub ai_blocks: bool,
 }
@@ -512,6 +514,7 @@ impl Default for AlertSettings {
             certificate_expiry: true,
             dnssec: true,
             update_available: true,
+            update_failure: true,
             ai_blocks: false,
         }
     }
@@ -532,6 +535,7 @@ impl AlertSettings {
             K::CertificateExpiry => self.certificate_expiry,
             K::Dnssec => self.dnssec,
             K::UpdateAvailable => self.update_available,
+            K::UpdateFailure => self.update_failure,
             K::AiBlocks => self.ai_blocks,
             K::Test | K::Report => true,
         }
@@ -1046,6 +1050,14 @@ pub struct UpdateCheckSettings {
     /// no run.
     #[serde(default)]
     pub auto_refresh_models: bool,
+    /// Automatically install stable binary releases at `auto_install_hour`.
+    /// Opt-in because installing a release restarts the DNS service.
+    #[serde(default)]
+    pub auto_install: bool,
+    /// Local hour (0-23, in `display.time_zone`) when automatic installs may
+    /// start. The server checks during that hour and records one attempt/day.
+    #[serde(default)]
+    pub auto_install_hour: u8,
 }
 
 impl Default for UpdateCheckSettings {
@@ -1057,6 +1069,8 @@ impl Default for UpdateCheckSettings {
             // within an hour of publication.
             check_interval_secs: 3600,
             auto_refresh_models: false,
+            auto_install: false,
+            auto_install_hour: 3,
         }
     }
 }
@@ -3714,6 +3728,11 @@ impl DaygleConfig {
                 MIN_UPDATE_CHECK_INTERVAL_SECS
             )));
         }
+        if self.updates.auto_install_hour > 23 {
+            return Err(DaygleError::Config(
+                "updates.auto_install_hour must be between 0 and 23".to_string(),
+            ));
+        }
         Ok(())
     }
 }
@@ -5045,6 +5064,18 @@ mod tests {
     use super::*;
     use std::collections::BTreeMap;
 
+    #[test]
+    fn update_failure_alert_defaults_on_and_can_be_disabled() {
+        let mut alerts = AlertSettings::default();
+        assert!(alerts.wants(crate::alerts::AlertKind::UpdateFailure));
+        alerts.update_failure = false;
+        assert!(!alerts.wants(crate::alerts::AlertKind::UpdateFailure));
+
+        // Older persisted settings do not contain the new preference.
+        let legacy: AlertSettings = serde_json::from_str(r#"{"enabled":false}"#).unwrap();
+        assert!(legacy.update_failure);
+    }
+
     /// Every setting the console saves into the database overlay must come
     /// back from it on the next start (and on a config-file reload, which
     /// re-applies the overlay): change each owned field, store the overlay
@@ -5220,6 +5251,8 @@ mod tests {
         c.updates.enabled = !c.updates.enabled;
         c.updates.check_interval_secs += 1;
         c.updates.auto_refresh_models = !c.updates.auto_refresh_models;
+        c.updates.auto_install = !c.updates.auto_install;
+        c.updates.auto_install_hour = 4;
         c.syslog.enabled = true;
         c.syslog.server = s("192.0.2.15:514");
         c.syslog.queries = true;
@@ -5394,11 +5427,17 @@ mod tests {
         let cfg = DaygleConfig::parse("").unwrap();
         assert!(cfg.updates.enabled);
         assert_eq!(cfg.updates.check_interval_secs, 3600);
+        assert!(!cfg.updates.auto_install);
+        assert_eq!(cfg.updates.auto_install_hour, 3);
         // Explicitly parsed section; unknown keys rejected.
-        let cfg = DaygleConfig::parse("[updates]\nenabled = false\ncheck_interval_secs = 86400\n")
-            .unwrap();
+        let cfg = DaygleConfig::parse(
+            "[updates]\nenabled = false\ncheck_interval_secs = 86400\nauto_install = true\nauto_install_hour = 4\n",
+        )
+        .unwrap();
         assert!(!cfg.updates.enabled);
         assert_eq!(cfg.updates.check_interval_secs, 86400);
+        assert!(cfg.updates.auto_install);
+        assert_eq!(cfg.updates.auto_install_hour, 4);
         assert!(DaygleConfig::parse("[updates]\nnope = 1\n").is_err());
         // The interval floor applies only while checks are enabled.
         let mut cfg = DaygleConfig::parse("").unwrap();
@@ -5409,6 +5448,8 @@ mod tests {
         cfg.updates.enabled = true;
         cfg.updates.check_interval_secs = 600;
         assert!(cfg.validate().is_ok());
+        cfg.updates.auto_install_hour = 24;
+        assert!(cfg.validate().is_err());
     }
 
     #[test]

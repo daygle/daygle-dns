@@ -133,11 +133,27 @@ pub fn set_time_zone(name: &str) {
 
 /// The current moment in the week, in the schedule time zone.
 pub fn now() -> WeekTime {
+    now_and_today().0
+}
+
+/// The current calendar date in the same time zone used by [`now`].
+pub fn today() -> chrono::NaiveDate {
+    now_and_today().1
+}
+
+/// One consistent snapshot of local schedule time and date.
+pub fn now_and_today() -> (WeekTime, chrono::NaiveDate) {
     let utc = Utc::now();
     let tz = TIME_ZONE.read().ok().and_then(|slot| *slot);
     match tz {
-        Some(tz) => week_time(&tz.from_utc_datetime(&utc.naive_utc())),
-        None => week_time(&utc.with_timezone(&chrono::Local)),
+        Some(tz) => {
+            let local = tz.from_utc_datetime(&utc.naive_utc());
+            (week_time(&local), local.date_naive())
+        }
+        None => {
+            let local = utc.with_timezone(&chrono::Local);
+            (week_time(&local), local.date_naive())
+        }
     }
 }
 

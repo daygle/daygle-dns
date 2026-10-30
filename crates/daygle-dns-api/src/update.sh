@@ -43,8 +43,12 @@ set -eu
 # bundle (daygle-dns-models.tar.gz) instead - no architecture matching,
 # since models are platform-independent data.
 MODE="install"
+AUTOMATIC=0
 if [ "$1" = "--models" ]; then
   MODE="models"
+  shift
+elif [ "$1" = "--automatic" ]; then
+  AUTOMATIC=1
   shift
 fi
 
@@ -78,14 +82,14 @@ json_escape() {
 # Write state atomically (temp file + rename) so the server's status polls
 # never observe a half-written file.
 state() { # phase message
-  printf '{"phase":"%s","pid":%s,"started_at":"%s","message":"%s","exit_code":0}\n' \
-    "$1" "$$" "$(date -u +%FT%TZ)" "$(json_escape "$2")" > "$DIR/state.json.tmp" \
+  printf '{"phase":"%s","pid":%s,"started_at":"%s","message":"%s","exit_code":0,"automatic":%s}\n' \
+    "$1" "$$" "$(date -u +%FT%TZ)" "$(json_escape "$2")" "$([ "$AUTOMATIC" -eq 1 ] && printf true || printf false)" > "$DIR/state.json.tmp" \
     && mv -f "$DIR/state.json.tmp" "$DIR/state.json"
 }
 
 fail() { # message
-  printf '{"phase":"error","pid":%s,"started_at":"%s","message":"%s","exit_code":1}\n' \
-    "$$" "$(date -u +%FT%TZ)" "$(json_escape "$1")" > "$DIR/state.json.tmp" \
+  printf '{"phase":"error","pid":%s,"started_at":"%s","message":"%s","exit_code":1,"automatic":%s}\n' \
+    "$$" "$(date -u +%FT%TZ)" "$(json_escape "$1")" "$([ "$AUTOMATIC" -eq 1 ] && printf true || printf false)" > "$DIR/state.json.tmp" \
     && mv -f "$DIR/state.json.tmp" "$DIR/state.json"
 }
 
@@ -268,7 +272,7 @@ stage_and_trigger() { # staged-file target-version kind
   cp -f "$stage_file" "$STAGING/apply.bin" 2>/dev/null || return 1
   sha="$( (sha256sum "$STAGING/apply.bin" 2>/dev/null || shasum -a 256 "$STAGING/apply.bin" 2>/dev/null) | cut -d' ' -f1 | tr -d '[:space:]')"
   [ -n "$sha" ] || return 1
-  printf '{"kind":"%s","version":"%s","sha256":"%s"}\n' "$stage_kind" "$tgt_ver" "$sha" > "$STAGING/apply.json" || return 1
+  printf '{"kind":"%s","version":"%s","sha256":"%s","automatic":%s}\n' "$stage_kind" "$tgt_ver" "$sha" "$([ "$AUTOMATIC" -eq 1 ] && printf true || printf false)" > "$STAGING/apply.json" || return 1
   : > "$UPDATES_DIR/request" || return 1
 }
 
