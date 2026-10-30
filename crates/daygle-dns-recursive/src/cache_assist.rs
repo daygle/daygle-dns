@@ -75,6 +75,12 @@ struct Snapshot {
     /// The SOA of a cached negative answer (NXDOMAIN or NODATA), replayed
     /// in the authority section so clients can cache it too (RFC 2308).
     failure_soa: Option<Record>,
+    /// Whether this entry was imported from the snapshot file (rather than
+    /// captured from a live answer). Only such entries are handed out by
+    /// [`Self::fresh_answer`]: Hickory's own cache covers live repeats, and
+    /// an early assistant hit there would skip the route/metrics
+    /// bookkeeping the resolution path records.
+    restored: bool,
 }
 
 /// One cache entry exported for (or restored from) the snapshot file, as
@@ -175,6 +181,7 @@ impl CacheAssistant {
             failure_until: None,
             failure_code: None,
             failure_soa: None,
+            restored: false,
         };
 
         let mut snapshots = self.snapshots.lock();
@@ -304,6 +311,7 @@ impl CacheAssistant {
             failure_until: None,
             failure_code: None,
             failure_soa: None,
+            restored: false,
         });
         snapshot.failure_until = Some(until);
         snapshot.failure_code = Some(code);
@@ -494,6 +502,7 @@ impl CacheAssistant {
                     failure_until,
                     failure_code: entry.failure_code,
                     failure_soa: entry.failure_soa,
+                    restored: true,
                 },
             );
             restored += 1;
@@ -516,6 +525,14 @@ impl CacheAssistant {
         let snapshot = snapshots.get(key)?;
         // Failure-only snapshots are preceded by a `cached_failure_code`
         // replay; anything without answers is not repliable here.
+        // Live answers are NOT handed out here: Hickory's own cache covers
+        // them, and an early assistant hit would skip the route/hit/miss
+        // bookkeeping recorded by the resolution path (and the prefetch
+        // refresh could re-fill a just-flushed entry). Only entries restored
+        // from the snapshot file are served from here.
+        if !snapshot.restored {
+            return None;
+        }
         if snapshot.answers.is_empty() {
             return None;
         }
