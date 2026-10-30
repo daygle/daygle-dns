@@ -1304,6 +1304,11 @@ pub struct RuntimeSettings {
     pub ai: Option<AiUpdate>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display: Option<DisplaySettings>,
+    /// The `[logging]` section the console keeps in the database (the query
+    /// log settings). Without this they reverted to the config file's values
+    /// at the next start or update.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub logging: Option<LoggingSettings>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub alerts: Option<AlertSettings>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2225,6 +2230,7 @@ impl RuntimeSettings {
             && self.authoritative.is_none()
             && self.ai.is_none()
             && self.display.is_none()
+            && self.logging.is_none()
             && self.web.is_none()
             && self.syslog.is_none()
             && self.log_export.is_none()
@@ -2433,6 +2439,9 @@ impl RuntimeSettings {
         }
         if let Some(d) = &self.display {
             config.display = d.clone();
+        }
+        if let Some(l) = &self.logging {
+            config.logging = l.clone();
         }
         if let Some(d) = &self.dns64 {
             config.dns64 = d.clone();
@@ -2715,6 +2724,7 @@ impl RuntimeSettings {
             }),
             ai: Some(AiUpdate::capture_ai(&config.ai)),
             display: Some(config.display.clone()),
+            logging: Some(config.logging.clone()),
             web: Some(config.web.clone()),
             updates: Some(config.updates.clone()),
             syslog: Some(config.syslog.clone()),
@@ -5234,6 +5244,12 @@ mod tests {
         c.server.client_timeout_ms += 1;
         c.server.tcp_timeout_ms += 1;
         c.server.dns_cookies = !c.server.dns_cookies;
+        c.logging.query_db_enabled = !c.logging.query_db_enabled;
+        c.logging.query_db_max_rows += 1;
+        c.logging.query_db_retention_days += 1;
+        c.logging.query_log_enabled = !c.logging.query_log_enabled;
+        c.logging.query_log_dir = s("/tmp/query-logs");
+        c.logging.query_log_retention_days += 1;
         c.rate_limit.enabled = !c.rate_limit.enabled;
         c.rate_limit.client_max_queries += 1;
         c.rate_limit.client_window_secs += 1;
@@ -5264,6 +5280,7 @@ mod tests {
         assert_eq!(restored.authoritative, c.authoritative, "authoritative");
         assert_eq!(restored.ai, c.ai, "ai");
         assert_eq!(restored.display, c.display, "display");
+        assert_eq!(restored.logging, c.logging, "logging");
         assert_eq!(restored.web, c.web, "web");
         assert_eq!(restored.updates, c.updates, "updates");
         assert_eq!(restored.syslog, c.syslog, "syslog");
