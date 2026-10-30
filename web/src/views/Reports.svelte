@@ -1,4 +1,5 @@
 <script>
+  import { tick } from 'svelte';
   import IconButton from '../IconButton.svelte';
   import PageHeader from '../PageHeader.svelte';
   import { icons } from '../icons.svelte.js';
@@ -42,7 +43,7 @@
     },
     {
       id: 'device-blocks',
-      label: 'Blocks per Device',
+      label: 'Blocks by Device',
       tagline: 'Pick a device to see what blocked its queries: blocklists, custom blocks, the AI scanner, and every other rule.',
     },
     {
@@ -87,10 +88,12 @@
   // The device being looked at, and its own report.
   let device = $state(null);
   let deviceReport = $state(null);
-  // Bumped per request, like the Blocks per Device tab: clicking Details on
+  // The details card, for scrolling into view when Details is clicked.
+  let detailsCard;
+  // Bumped per request, like the Blocks by Device tab: clicking Details on
   // another device must not let the first answer land last.
   let deviceRequest = 0;
-  // The device picked on the Blocks per Device tab, its own report, and the
+  // The device picked on the Blocks by Device tab, its own report, and the
   // devices it can pick from (busiest first).
   let blocksDevice = $state(null);
   let blocksReport = $state(null);
@@ -135,6 +138,14 @@
     }
   }
 
+  // Like loadDevice, but brings the card into view first: it renders below
+  // the table, out of sight when the device list is longer than the page.
+  async function showDevice(client) {
+    loadDevice(client);
+    await tick();
+    detailsCard?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  }
+
   async function loadBlocks(client) {
     const request = ++blocksRequest;
     blocksDevice = client;
@@ -172,7 +183,7 @@
     }
   }
 
-  // The devices the Blocks per Device tab can pick from: every device seen in
+  // The devices the Blocks by Device tab can pick from: every device seen in
   // the period, or the report's busiest clients while that list is loading.
   const blockDeviceOptions = $derived.by(() => {
     if (blocksDevices.length) {
@@ -223,8 +234,8 @@
   }
 
   const PROTOCOLS = {
-    udp: 'UDP (plain DNS)',
-    tcp: 'TCP (plain DNS)',
+    udp: 'UDP (Plain DNS)',
+    tcp: 'TCP (Plain DNS)',
     tls: 'DNS over TLS',
     https: 'DNS over HTTPS',
     h3: 'DNS over HTTP/3',
@@ -290,7 +301,7 @@
     load();
   });
 
-  // The Blocks per Device tab lists every device seen in the period (the
+  // The Blocks by Device tab lists every device seen in the period (the
   // report's own client list is cut to the busiest few).
   $effect(() => {
     if (tab !== 'device-blocks') return;
@@ -418,7 +429,7 @@
                   {#if show('last-seen')}<td class="muted nowrap">{formatDateTime(c.last_seen)}</td>{/if}
                   <td class="num">
                     <div class="row" style="gap: 6px; justify-content: flex-end">
-                      <IconButton icon="info" label="Details" onclick={() => loadDevice(c.client)} />
+                      <IconButton icon="info" label="Details" onclick={() => showDevice(c.client)} />
                       {#if onShowQueries}<IconButton icon="list" label="Show this client's queries" onclick={() => onShowQueries(c.client)} />{/if}
                     </div>
                   </td>
@@ -434,7 +445,7 @@
     </div>
 
     {#if device}
-      <div class="card">
+      <div class="card" bind:this={detailsCard}>
         <div class="spread" style="margin-bottom: 10px">
           <h3 style="margin: 0">Device <ClientLabel address={device} /></h3>
           <button class="secondary" onclick={() => { device = null; deviceReport = null; }} aria-label="Close device details">✕</button>
@@ -455,7 +466,7 @@
   {:else if tab === 'device-blocks'}
     <div class="card" style="margin-bottom: 14px">
       <div class="spread" style="margin-bottom: 10px; gap: 10px; flex-wrap: wrap">
-        <h3 style="margin: 0">Blocks per Device</h3>
+        <h3 style="margin: 0">Blocks by Device</h3>
         <select
           bind:value={blocksDevice}
           onchange={(e) => loadBlocks(e.currentTarget.value)}

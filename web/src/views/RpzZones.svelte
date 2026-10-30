@@ -284,7 +284,7 @@
             <div class="match">
               <span class="pill" class:err={!m.log_only && i === testResult.matches.findIndex((x) => !x.log_only)}>{m.action}</span>
               <span><strong>{m.zone}</strong> <span class="muted">{m.trigger}</span></span>
-              {#if m.log_only}<span class="muted">(log only)</span>{:else if i !== testResult.matches.findIndex((x) => !x.log_only)}<span class="muted">(an earlier zone decides)</span>{/if}
+              {#if m.log_only}<span class="muted">(Log Only)</span>{:else if i !== testResult.matches.findIndex((x) => !x.log_only)}<span class="muted">(an earlier zone decides)</span>{/if}
             </div>
           {/each}
         {/if}
