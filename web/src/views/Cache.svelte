@@ -110,7 +110,12 @@
   <div class="card" style="margin-top: 14px">
     <div class="spread" style="margin-bottom: 10px">
       <h3 style="margin: 0">Cache Controls</h3>
-      <button class="danger" onclick={flush} disabled={busy || !cache.enabled}>Flush Cache</button>
+      <div class="row" style="gap: 8px">
+        {#if onOpenSettings}
+          <button class="secondary" onclick={() => onOpenSettings('cache')}>Settings</button>
+        {/if}
+        <button class="danger" onclick={flush} disabled={busy || !cache.enabled}>Flush Cache</button>
+      </div>
     </div>
     {#if !cache.enabled}
       <p class="muted">Recursive resolution is disabled, so there is no active cache.</p>
@@ -128,9 +133,6 @@
           <span class="muted">Refresh Popular Names Early</span>
           <span class="value">{cache.prefetch_enabled ? 'On' : 'Off'}</span>
         </div>
-        {#if onOpenSettings}
-          <button class="secondary" onclick={() => onOpenSettings('cache')}>Settings</button>
-        {/if}
       </div>
       <p class="muted help">
         Cache size, TTL limits, serve-stale and prefetch are configured in
@@ -177,7 +179,6 @@
   .pair { display: flex; flex-direction: column; gap: 3px; }
   .pair .muted { font-size: 0.78rem; }
   .pair .value { font-size: 1.15rem; font-weight: 600; font-variant-numeric: tabular-nums; }
-  .summary button { margin-left: auto; }
   .flush { display: grid; grid-template-columns: minmax(0, 1fr) 160px auto; gap: 12px; align-items: end; }
   @media (max-width: 640px) {
     .flush { grid-template-columns: 1fr; }
