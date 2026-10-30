@@ -128,19 +128,12 @@ pub fn read_snapshot(path: &Path) -> Result<Vec<PersistedEntry>, DecodeError> {
     };
     let header = SNAPSHOT_MAGIC.len() + 4;
     if bytes.len() < header || &bytes[..SNAPSHOT_MAGIC.len()] != SNAPSHOT_MAGIC {
-        return Err(DecodeError(
-            "not a forward-cache snapshot file".to_string(),
-        ));
+        return Err(DecodeError("not a forward-cache snapshot file".to_string()));
     }
-    let count = u32::from_be_bytes(
-        bytes[header - 4..header]
-            .try_into()
-            .expect("4 byte count"),
-    );
+    let count = u32::from_be_bytes(bytes[header - 4..header].try_into().expect("4 byte count"));
     // The count comes from the file: a damaged one must not make us
     // reserve gigabytes up front (an entry is at least a few dozen bytes).
-    let mut entries =
-        Vec::with_capacity((count as usize).min(bytes.len() / (ENTRY_OVERHEAD + 4)));
+    let mut entries = Vec::with_capacity((count as usize).min(bytes.len() / (ENTRY_OVERHEAD + 4)));
     let mut decoder = BinDecoder::new(&bytes);
     decoder
         .read_slice(header)
@@ -187,10 +180,11 @@ fn read_records(decoder: &mut BinDecoder, count: usize) -> Result<Vec<Record>, D
         let wire_len = read_u16(decoder)? as usize;
         if wire_len == 0 {
             return Err(DecodeError("empty record".to_string()));
-        }        let slice = decoder
-        .read_slice(wire_len)
-        .map_err(|e| DecodeError(format!("truncated record: {e}")))?
-        .unverified();
+        }
+        let slice = decoder
+            .read_slice(wire_len)
+            .map_err(|e| DecodeError(format!("truncated record: {e}")))?
+            .unverified();
         let mut record_decoder = BinDecoder::new(slice);
         records.push(
             Record::read(&mut record_decoder)
@@ -274,7 +268,7 @@ pub fn load_cache_assistant(assistant: &CacheAssistant, path: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cache_assist::{cache_key, MAX_TRACKED_ENTRIES};
+    use crate::cache_assist::cache_key;
     use std::time::Duration;
 
     fn entry_a() -> PersistedEntry {
@@ -283,9 +277,9 @@ mod tests {
         let answers = vec![hickory_proto::rr::Record::from_rdata(
             name.clone(),
             300,
-            hickory_proto::rr::RData::A(hickory_proto::rr::rdata::a::A(
-                std::net::Ipv4Addr::new(192, 0, 2, 1),
-            )),
+            hickory_proto::rr::RData::A(hickory_proto::rr::rdata::a::A(std::net::Ipv4Addr::new(
+                192, 0, 2, 1,
+            ))),
         )];
         let soa_at = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -305,7 +299,8 @@ mod tests {
 
     fn entry_failure() -> PersistedEntry {
         let name = Name::from_utf8("gone.example.").unwrap();
-        let query = hickory_proto::op::Query::query(name.clone(), hickory_proto::rr::RecordType::AAAA);
+        let query =
+            hickory_proto::op::Query::query(name.clone(), hickory_proto::rr::RecordType::AAAA);
         let soa = hickory_proto::rr::Record::from_rdata(
             Name::from_utf8("zone.example.").unwrap(),
             60,
@@ -354,15 +349,19 @@ mod tests {
             assert_eq!(a.failure_through_secs, b.failure_through_secs);
             assert_eq!(a.failure_code, b.failure_code);
             assert_eq!(a.answers.len(), b.answers.len());
-            assert_eq!(a.failure_soa.as_ref().map(|r| r.data.to_string()),
-                       b.failure_soa.as_ref().map(|r| r.data.to_string()));
+            assert_eq!(
+                a.failure_soa.as_ref().map(|r| r.data.to_string()),
+                b.failure_soa.as_ref().map(|r| r.data.to_string())
+            );
         }
     }
 
     #[test]
     fn missing_file_is_empty() {
         let dir = tempdir();
-        assert!(read_snapshot(&dir.path().join("nope.bin")).unwrap().is_empty());
+        assert!(read_snapshot(&dir.path().join("nope.bin"))
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
@@ -421,7 +420,6 @@ mod tests {
         far.valid_through_secs += 90 * 24 * 60 * 60;
         assert_eq!(assistant.import_persisted(vec![far]), 0);
         assert!(assistant.tracked_names() >= 3);
-        assert!(MAX_TRACKED_ENTRIES > 0);
     }
 
     fn tempdir() -> tempfile_stub::Dir {

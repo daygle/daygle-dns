@@ -406,9 +406,8 @@ impl CacheAssistant {
 
     fn export_persisted_at(&self, now: Instant) -> Vec<PersistedEntry> {
         let unix_now = unix_secs();
-        let through = |deadline: Instant| {
-            unix_now + deadline.saturating_duration_since(now).as_secs()
-        };
+        let through =
+            |deadline: Instant| unix_now + deadline.saturating_duration_since(now).as_secs();
         self.snapshots
             .lock()
             .iter()
@@ -442,7 +441,8 @@ impl CacheAssistant {
         let now_wall = unix_secs();
         let stale_window = self.config.serve_stale_secs;
         let failure_ttl = self.config.failure_cache_ttl;
-        let max_ttl = u64::from(self.config.max_cache_ttl);        let mut snapshots = self.snapshots.lock();
+        let max_ttl = u64::from(self.config.max_cache_ttl);
+        let mut snapshots = self.snapshots.lock();
         let mut restored = 0usize;
         for entry in entries {
             let valid_left = entry.valid_through_secs.saturating_sub(now_wall);
@@ -459,11 +459,7 @@ impl CacheAssistant {
             }
             // An expired answer is only worth restoring while serve-stale
             // can still serve it (or a live failure needs its SOA).
-            if has_answers
-                && valid_left == 0
-                && expired_for > stale_window
-                && !failure_keep
-            {
+            if has_answers && valid_left == 0 && expired_for > stale_window && !failure_keep {
                 continue;
             }
             // A validity window this far out means the wall clock moved
@@ -478,8 +474,8 @@ impl CacheAssistant {
             } else {
                 valid_left
             };
-            let failure_until =
-                failure_keep.then(|| now + Duration::from_secs(failure_left.min(u64::from(failure_ttl))));
+            let failure_until = failure_keep
+                .then(|| now + Duration::from_secs(failure_left.min(u64::from(failure_ttl))));
 
             if snapshots.len() >= MAX_TRACKED_ENTRIES && !snapshots.contains_key(&entry.key) {
                 evict_batch(&mut snapshots, |snap| snap.fetched_at);

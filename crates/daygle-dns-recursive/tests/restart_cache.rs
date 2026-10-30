@@ -105,13 +105,9 @@ async fn snapshot_warms_a_fresh_resolver() {
     let snapshot = scratch_file("warm");
 
     // First run: resolve once (one upstream trip), then shut down.
-    let resolver = RecursiveResolver::build(
-        &settings(upstream),
-        Arc::new(Metrics::default()),
-        &[],
-        None,
-    )
-    .unwrap();
+    let resolver =
+        RecursiveResolver::build(&settings(upstream), Arc::new(Metrics::default()), &[], None)
+            .unwrap();
     let answer = resolver
         .lookup("host.restart.test.", RecordType::A)
         .await
@@ -124,13 +120,9 @@ async fn snapshot_warms_a_fresh_resolver() {
     drop(resolver);
 
     // Second run (the restart): a fresh resolver reloads the snapshot.
-    let restart = RecursiveResolver::build(
-        &settings(upstream),
-        Arc::new(Metrics::default()),
-        &[],
-        None,
-    )
-    .unwrap();
+    let restart =
+        RecursiveResolver::build(&settings(upstream), Arc::new(Metrics::default()), &[], None)
+            .unwrap();
     restart.load_cache(&snapshot);
 
     let answer = restart
@@ -161,13 +153,9 @@ async fn sustained_entries_keep_their_ttl_budget() {
     let (upstream, queries) = spawn_stub("slow.test", "203.0.113.5").await;
     let snapshot = scratch_file("ttl");
 
-    let resolver = RecursiveResolver::build(
-        &settings(upstream),
-        Arc::new(Metrics::default()),
-        &[],
-        None,
-    )
-    .unwrap();
+    let resolver =
+        RecursiveResolver::build(&settings(upstream), Arc::new(Metrics::default()), &[], None)
+            .unwrap();
     let answer = resolver
         .lookup("host.slow.test.", RecordType::A)
         .await
@@ -193,13 +181,9 @@ async fn sustained_entries_keep_their_ttl_budget() {
         .expect("the name is snapshotted");
     assert!(entry.valid_through_secs > now, "still within its TTL");
 
-    let restart = RecursiveResolver::build(
-        &settings(upstream),
-        Arc::new(Metrics::default()),
-        &[],
-        None,
-    )
-    .unwrap();
+    let restart =
+        RecursiveResolver::build(&settings(upstream), Arc::new(Metrics::default()), &[], None)
+            .unwrap();
     restart.load_cache(&snapshot);
     let answer = restart
         .lookup("host.slow.test.", RecordType::A)
@@ -224,8 +208,7 @@ async fn persist_cache_off_writes_nothing() {
 
     let mut cfg = settings(upstream);
     cfg.persist_cache = false;
-    let resolver =
-        RecursiveResolver::build(&cfg, Arc::new(Metrics::default()), &[], None).unwrap();
+    let resolver = RecursiveResolver::build(&cfg, Arc::new(Metrics::default()), &[], None).unwrap();
     resolver
         .lookup("host.off.test.", RecordType::A)
         .await

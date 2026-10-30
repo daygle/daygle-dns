@@ -700,9 +700,8 @@ impl RecursiveResolver {
             return Ok(0);
         }
         let entries = self.inner.cache_assist.export_persisted();
-        cache_persist::write_snapshot(path, &entries).map_err(|e| {
-            DaygleError::Internal(format!("cannot write the cache snapshot: {e}"))
-        })
+        cache_persist::write_snapshot(path, &entries)
+            .map_err(|e| DaygleError::Internal(format!("cannot write the cache snapshot: {e}")))
     }
 }
 
