@@ -168,6 +168,16 @@ pub fn apply_config(shared: &Shared, new: Arc<DaygleConfig>) -> bool {
         || old_r.authoritative.stub_zones != new_r.authoritative.stub_zones
     {
         if new_r.recursive.enabled {
+            // Snapshot the current cache before it is replaced so the new
+            // resolver re-warms from it (entries keep their remaining TTLs).
+            let snapshot = crate::cache_snapshot_path(&new_r.authoritative.database);
+            if let Some(path) = &snapshot {
+                if let Some(old) = shared.resolver.load_full() {
+                    if let Err(e) = old.persist_cache(path) {
+                        warn!("cannot snapshot the previous cache: {e}");
+                    }
+                }
+            }
             match RecursiveResolver::build(
                 &new_r.recursive,
                 shared.metrics.clone(),
@@ -175,6 +185,9 @@ pub fn apply_config(shared: &Shared, new: Arc<DaygleConfig>) -> bool {
                 Some(shared.local_root.clone()),
             ) {
                 Ok(resolver) => {
+                    if let Some(path) = &snapshot {
+                        resolver.load_cache(path);
+                    }
                     shared.resolver.store(Some(Arc::new(resolver)));
                     info!("recursive resolver reloaded");
                 }

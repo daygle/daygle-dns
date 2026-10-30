@@ -110,6 +110,13 @@ prefetch_window_secs = 600
 # Serve-stale: keep serving last-known-good answers for up to this long when
 # every upstream is unreachable (0 disables). 86400 = 24 hours.
 serve_stale_secs = 86400
+# Cache persistence: write the forwarding cache to a snapshot file next to
+# the database on shutdown and reload it on startup, so a restart (a
+# console update, a reboot) never starts with an empty cache: answers that
+# are still inside their TTL are served right away, and serve-stale is
+# covered from the first moment. Entries past their TTL are dropped when
+# the snapshot is loaded. Set false to keep the cache memory-only.
+# persist_cache = true
 
 # Conditional forwarding: queries for these zones are resolved by the zone's
 # own upstreams instead of the defaults above. Useful for split-horizon DNS,

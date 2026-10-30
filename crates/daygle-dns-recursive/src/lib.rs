@@ -24,10 +24,19 @@
 //!   resolved through the system resolver once at build time).
 
 mod cache_assist;
+mod cache_persist;
 pub mod recursor;
 mod upstream;
 
+/// Snapshot-file access for integration tests and diagnostics: the same
+/// codec the resolver itself uses (see [`cache_persist`]).
+#[doc(hidden)]
+pub mod persistence {
+    pub use crate::cache_persist::{read_snapshot, DecodeError};
+}
+
 use std::net::IpAddr;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -672,6 +681,29 @@ impl RecursiveResolver {
     pub fn tracked_names(&self) -> usize {
         self.inner.cache_assist.tracked_names()
     }
+
+    /// Restore cache entries from `path` (a snapshot written by
+    /// [`Self::persist_cache`]). A missing snapshot is normal (first boot);
+    /// a damaged one is logged and skipped: a snapshot is an optimization,
+    /// never a requirement. No-op when `persist_cache` is off.
+    pub fn load_cache(&self, path: &Path) {
+        if !self.inner.settings.persist_cache {
+            return;
+        }
+        cache_persist::load_cache_assistant(&self.inner.cache_assist, path);
+    }
+
+    /// Write the cache snapshot the next startup will load, and report how
+    /// many entries it holds. No-op when `persist_cache` is off.
+    pub fn persist_cache(&self, path: &Path) -> Result<usize> {
+        if !self.inner.settings.persist_cache {
+            return Ok(0);
+        }
+        let entries = self.inner.cache_assist.export_persisted();
+        cache_persist::write_snapshot(path, &entries).map_err(|e| {
+            DaygleError::Internal(format!("cannot write the cache snapshot: {e}"))
+        })
+    }
 }
 
 impl Inner {
@@ -858,6 +890,24 @@ impl Inner {
                 message: "cached failure response".to_string(),
                 response_code: Some(code),
             });
+        }
+
+        // An entry restored from the previous run's snapshot file lives
+        // only in the cache assistant (Hickory's cache starts empty after a
+        // restart), so it is served straight from there, carrying the same
+        // bookkeeping as a fresh resolution: it answers without an upstream
+        // round trip until it expires, then serve-stale takes over.
+        if shared {
+            if let Some(restored) = inner.cache_assist.fresh_answer(&key) {
+                inner.metrics.inc(&inner.metrics.cache_hits);
+                if inner.cache_assist.on_success(&key, &restored)
+                    && inner.cache_assist.try_begin_prefetch(&key)
+                {
+                    let task_inner = Arc::clone(&inner);
+                    tokio::spawn(task_inner.refresh(key.clone(), record_type));
+                }
+                return Ok(restored);
+            }
         }
 
         match Self::resolve(

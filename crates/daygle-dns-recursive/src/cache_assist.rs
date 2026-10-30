@@ -21,7 +21,7 @@
 //! flat regardless of query volume.
 
 use std::collections::{HashMap, HashSet};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use hickory_proto::op::Query;
 use hickory_proto::rr::{Record, RecordType};
@@ -77,6 +77,37 @@ struct Snapshot {
     failure_soa: Option<Record>,
 }
 
+/// One cache entry exported for (or restored from) the snapshot file, as
+/// written by the `persist` module. Expiries are absolute Unix-epoch seconds
+/// so a restore is deterministic however much time passed between the write
+/// (shutdown) and the next startup.
+#[derive(Clone)]
+pub struct PersistedEntry {
+    pub key: CacheKey,
+    pub query: Query,
+    pub answers: Vec<Record>,
+    /// When the entry's answer validity ends (Unix seconds).
+    pub valid_through_secs: u64,
+    /// When the cached failure stops being replayed (Unix seconds; 0 = none).
+    pub failure_through_secs: u64,
+    pub failure_code: Option<u16>,
+    /// The SOA of the cached negative answer (RFC 2308).
+    pub failure_soa: Option<Record>,
+}
+
+fn unix_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Upper bound for a *restored* validity window, to shed entries whose
+/// expiry is absurdly far out because the wall clock moved between the
+/// snapshot and the restore. Real TTLs (and the failure cache) stay well
+/// under it.
+const MAX_RESTORED_VALID_SECS: u64 = 7 * 24 * 60 * 60;
+
 /// Sliding-window popularity for one (name, type).
 #[derive(Clone, Copy, Debug)]
 struct Popularity {
@@ -93,7 +124,7 @@ pub struct CacheAssistant {
     config: PrefetchConfig,
 }
 
-#[derive(Clone, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct CacheKey {
     pub name: String,
     pub rtype: u16,
@@ -363,6 +394,156 @@ impl CacheAssistant {
     /// The configured failure-cache TTL (0 disables failure caching).
     pub fn failure_cache_ttl(&self) -> u32 {
         self.config.failure_cache_ttl
+    }
+
+    /// Export every stored entry for the snapshot file (see the `persist`
+    /// module). Even expired entries are exported: with their absolute
+    /// expiry intact, a restore can keep using them inside the serve-stale
+    /// window, which is exactly what they are for.
+    pub fn export_persisted(&self) -> Vec<PersistedEntry> {
+        self.export_persisted_at(Instant::now())
+    }
+
+    fn export_persisted_at(&self, now: Instant) -> Vec<PersistedEntry> {
+        let unix_now = unix_secs();
+        let through = |deadline: Instant| {
+            unix_now + deadline.saturating_duration_since(now).as_secs()
+        };
+        self.snapshots
+            .lock()
+            .iter()
+            .map(|(key, snap)| PersistedEntry {
+                key: key.clone(),
+                query: snap.query.clone(),
+                answers: snap.answers.clone(),
+                valid_through_secs: through(snap.valid_until),
+                failure_through_secs: snap
+                    .failure_until
+                    .and_then(|until| {
+                        // A failure already spent does not carry over.
+                        until.checked_duration_since(now).map(|_| through(until))
+                    })
+                    .unwrap_or(0),
+                failure_code: snap.failure_code,
+                failure_soa: snap.failure_soa.clone(),
+            })
+            .collect()
+    }
+
+    /// Restore entries from a snapshot file (see the `persist` module) and
+    /// return how many were imported.
+    ///
+    /// Entries are dropped when their answer TTL and their cached failure
+    /// are both spent (beyond their serve-stale or failure-cache windows);
+    /// restoring stale-eligible answers keeps an upstream outage that starts
+    /// right after a restart covered.
+    pub fn import_persisted(&self, entries: Vec<PersistedEntry>) -> usize {
+        let now = Instant::now();
+        let now_wall = unix_secs();
+        let stale_window = self.config.serve_stale_secs;
+        let failure_ttl = self.config.failure_cache_ttl;
+        let max_ttl = u64::from(self.config.max_cache_ttl);        let mut snapshots = self.snapshots.lock();
+        let mut restored = 0usize;
+        for entry in entries {
+            let valid_left = entry.valid_through_secs.saturating_sub(now_wall);
+            // How long ago the answer expired (only meaningful when both
+            // wall-clock readings are on the same side; a clock that moved
+            // backwards yields 0 here, and an expired entry is simply kept
+            // stale-eligible rather than dropped).
+            let expired_for = now_wall.saturating_sub(entry.valid_through_secs);
+            let failure_left = entry.failure_through_secs.saturating_sub(now_wall);
+            let has_answers = !entry.answers.is_empty();
+            let failure_keep = failure_left > 0 && failure_ttl > 0;
+            if !has_answers && !failure_keep {
+                continue;
+            }
+            // An expired answer is only worth restoring while serve-stale
+            // can still serve it (or a live failure needs its SOA).
+            if has_answers
+                && valid_left == 0
+                && expired_for > stale_window
+                && !failure_keep
+            {
+                continue;
+            }
+            // A validity window this far out means the wall clock moved
+            // between the snapshot and the restore, not a real TTL: shed it.
+            if valid_left > MAX_RESTORED_VALID_SECS {
+                continue;
+            }
+            // TTLs were already capped when they were captured; only a
+            // clock move can make the remaining TTL exceed `max_cache_ttl`.
+            let capped_valid = if max_ttl > 0 {
+                valid_left.min(max_ttl)
+            } else {
+                valid_left
+            };
+            let failure_until =
+                failure_keep.then(|| now + Duration::from_secs(failure_left.min(u64::from(failure_ttl))));
+
+            if snapshots.len() >= MAX_TRACKED_ENTRIES && !snapshots.contains_key(&entry.key) {
+                evict_batch(&mut snapshots, |snap| snap.fetched_at);
+            }
+            snapshots.insert(
+                entry.key.clone(),
+                Snapshot {
+                    query: entry.query,
+                    answers: entry.answers,
+                    valid_until: if capped_valid > 0 {
+                        now + Duration::from_secs(capped_valid)
+                    } else {
+                        now_in_the_past()
+                    },
+                    fetched_at: now,
+                    failure_until,
+                    failure_code: entry.failure_code,
+                    failure_soa: entry.failure_soa,
+                },
+            );
+            restored += 1;
+        }
+        restored
+    }
+
+    /// A still-valid snapshot for `key`, served without an upstream round
+    /// trip.
+    ///
+    /// Normally Hickory's cache answers first, and the assistant only holds
+    /// a parallel copy. Entries restored from a snapshot file start out in
+    /// the assistant alone (Hickory's cache is empty after a restart), so a
+    /// restored entry is handed out directly until it is naturally
+    /// superseded. The answer's TTLs are cut to what remains of the entry's
+    /// validity.
+    pub fn fresh_answer(&self, key: &CacheKey) -> Option<Lookup> {
+        let now = Instant::now();
+        let snapshots = self.snapshots.lock();
+        let snapshot = snapshots.get(key)?;
+        // Failure-only snapshots are preceded by a `cached_failure_code`
+        // replay; anything without answers is not repliable here.
+        if snapshot.answers.is_empty() {
+            return None;
+        }
+        let remaining = snapshot.valid_until.checked_duration_since(now)?;
+        let ttl = u32::try_from(remaining.as_secs()).unwrap_or(u32::MAX);
+        debug!(
+            name = %key.name,
+            rtype = key.rtype,
+            ttl_secs = ttl,
+            "serving restored cache entry"
+        );
+        Some(Lookup::new_with_deadline(
+            snapshot.query.clone(),
+            snapshot
+                .answers
+                .iter()
+                .map(|r| {
+                    let mut rec = r.clone();
+                    rec.ttl = ttl;
+                    rec
+                })
+                .collect::<Vec<_>>(),
+            snapshot.valid_until,
+        ))
     }
 }
 

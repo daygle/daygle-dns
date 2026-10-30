@@ -112,6 +112,9 @@ Daygle DNS combines, in a single process:
 - **Cache prefetch & serve-stale**: popular names are refreshed in the
   background as their TTLs near expiry, and the last-known-good answers keep
   being served during upstream outages (bounded staleness, e.g. 1 h).
+  With `recursive.persist_cache` the cache is snapshotted on shutdown and
+  reloaded on startup (remaining TTLs kept; expired and stale-past-window
+  entries pruned), so a restart or reboot does not start with a cold cache.
 - A **dashboard with charts & top-N tables**: per-minute query time-series
   (1 h / 6 h / 24 h windows), top clients, top domains, and top blocked
   domains - all bounded in memory.

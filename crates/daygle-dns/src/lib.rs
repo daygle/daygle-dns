@@ -169,7 +169,7 @@ impl BoundServer {
         if let Some(task) = self.reload_task.take() {
             task.abort();
         }
-        match self.dns_task.take() {
+        let result = match self.dns_task.take() {
             Some(task) => match task.await {
                 Ok(result) => result,
                 Err(e) => Err(DaygleError::Internal(format!(
@@ -177,6 +177,31 @@ impl BoundServer {
                 ))),
             },
             None => Ok(()),
+        };
+        self.persist_cache_snapshot();
+        result
+    }
+
+    /// Write the forward-cache snapshot for the next startup (when
+    /// `recursive.persist_cache` is on; see [`cache_snapshot_path`]).
+    /// Called on every shutdown path; failures are logged and continue:
+    /// the snapshot is an optimization, never a requirement.
+    fn persist_cache_snapshot(&self) {
+        let config = self.shared.config.load_full();
+        let Some(path) = cache_snapshot_path(&config.authoritative.database) else {
+            return;
+        };
+        let Some(resolver) = self.shared.resolver.load_full() else {
+            return;
+        };
+        match resolver.persist_cache(&path) {
+            Ok(0) => {}
+            Ok(entries) => info!(
+                path = %path.display(),
+                entries,
+                "cache snapshot written"
+            ),
+            Err(e) => warn!("{e}"),
         }
     }
 
@@ -197,6 +222,7 @@ impl BoundServer {
         if let Some(task) = self.reload_task.take() {
             task.abort();
         }
+        self.persist_cache_snapshot();
 
         dns
     }
@@ -496,12 +522,19 @@ pub async fn bind_with(
 
     // Recursive.
     let resolver = if config.recursive.enabled {
-        Some(Arc::new(RecursiveResolver::build(
+        let resolver = RecursiveResolver::build(
             &resolved.recursive,
             metrics.clone(),
             &resolved.authoritative.stub_zones,
             Some(local_root.clone()),
-        )?))
+        )?;
+        // Warm the cache from the snapshot the previous run left behind
+        // (when `recursive.persist_cache` is on), so answers that are still
+        // inside their TTL serve without an upstream round trip.
+        if let Some(path) = cache_snapshot_path(&config.authoritative.database) {
+            resolver.load_cache(&path);
+        }
+        Some(Arc::new(resolver))
     } else {
         warn!("recursion is disabled");
         None
@@ -1582,6 +1615,16 @@ fn local_root_cache_path(database: &str) -> Option<std::path::PathBuf> {
         return None;
     }
     Some(std::path::Path::new(database).with_file_name("local-root.zone"))
+}
+
+/// Where the recursive resolver's forwarding cache is snapshotted: next to
+/// the database, like the local root zone's copy (none for an in-memory
+/// database).
+fn cache_snapshot_path(database: &str) -> Option<std::path::PathBuf> {
+    if database.is_empty() || database == ":memory:" {
+        return None;
+    }
+    Some(std::path::Path::new(database).with_file_name("resolver-cache.bin"))
 }
 
 #[cfg(test)]

@@ -3811,6 +3811,9 @@ pub struct RecursiveSettings {
     /// error). A cached failure blocks repeated lookups to a broken upstream
     /// for this long; 0 disables failure caching.
     pub failure_cache_ttl: u32,
+    /// Keep the resolver's forwarding cache across restarts (see
+    /// [`RecursiveSettings::persist_cache`]).
+    pub persist_cache: bool,
     /// Conditional forwarding: queries for these zones are resolved by the
     /// zone's dedicated upstreams instead of the default ones. The most
     /// specific (deepest) matching zone wins.
@@ -4169,6 +4172,7 @@ impl Default for RecursiveSettings {
             negative_cache_ttl: 3600,
             max_cache_ttl: 0,
             failure_cache_ttl: 10,
+            persist_cache: true,
             conditional_zones: vec![],
             prefetch_enabled: true,
             prefetch_ttl_fraction_pct: 10,
