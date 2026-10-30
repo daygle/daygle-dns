@@ -334,9 +334,30 @@ jobs:
           merge-multiple: true
           path: stage
 
+      # The action keeps the body an existing release already has and then
+      # appends the freshly generated notes to it, so a second run for the
+      # same tag - or a release written before this workflow got there -
+      # posts the same "Full Changelog" line twice
+      # (softprops/action-gh-release#827). Generate notes only while the
+      # release has no body of its own; look releases up through the list
+      # endpoint because the by-tag one cannot see drafts.
+      - name: Generate notes only if the release has none
+        id: notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          existing="$(gh api "repos/${GITHUB_REPOSITORY}/releases" \
+            --jq "[.[] | select(.tag_name == \"${GITHUB_REF_NAME}\")] | first | .body // \"\"" \
+            || true)"
+          if [ -n "$(printf '%s' "$existing" | tr -d '[:space:]')" ]; then
+            echo "generate=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "generate=true" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Create release
         uses: softprops/action-gh-release@v3
         with:
           draft: false
-          generate_release_notes: true
+          generate_release_notes: ${{ steps.notes.outputs.generate }}
           files: stage/*
