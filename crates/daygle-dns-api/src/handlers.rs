@@ -5144,7 +5144,9 @@ pub async fn delete_user(State(state): State<AppState>, Path(username): Path<Str
 /// Partial update of the editable settings. `None` fields are left unchanged.
 /// Applied to the live config, validated, persisted to the database, and
 /// (when listeners are affected) DNS listeners are rebound.
-#[derive(Debug, Default, Deserialize)]
+/// serde serialize on it lets the settings-persistence test enumerate the
+/// sections the API accepts; it is not an accepted request format.
+#[derive(Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SettingsUpdate {
     pub server: Option<ServerUpdate>,
@@ -5194,7 +5196,7 @@ pub struct SettingsUpdate {
 /// Partial update for the query log settings in `[logging]` (the log level
 /// and the in-memory server log size stay file-only). The database log
 /// applies at once; the daily files after a restart.
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LoggingUpdate {
     pub query_db_enabled: Option<bool>,
@@ -5206,7 +5208,7 @@ pub struct LoggingUpdate {
 }
 
 /// Partial update for how the web console is served (HTTP and/or HTTPS).
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WebUpdate {
     pub http_enabled: Option<bool>,
@@ -5220,7 +5222,7 @@ pub struct WebUpdate {
 }
 
 /// Partial update for the console's display defaults (date, time and theme).
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DisplayUpdate {
     pub time_zone: Option<String>,
@@ -5233,7 +5235,7 @@ pub struct DisplayUpdate {
 /// Mirrors `daygle_dns_core::config::AuthoritativeUpdate` (the DB overlay
 /// shape); kept separate so the HTTP API and persistence formats evolve
 /// independently.
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AuthoritativeUpdate {
     pub default_record_ttl: Option<u32>,
@@ -5271,7 +5273,7 @@ pub struct AuthoritativeUpdate {
 
 /// Partial update for policy-engine settings surfaced in the console (only the
 /// fields the UI edits; blocklists/rules are managed through their own APIs).
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PolicyUpdate {
     pub allowlist: Option<Vec<String>>,
@@ -5290,7 +5292,7 @@ pub struct PolicyUpdate {
 /// Partial update for the AI scanner (mirrors `AiSettings` fields; the
 /// fields the console edits on the Settings page). Bounds and cross-field
 /// invariants are enforced by `DaygleConfig::validate()` once applied.
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AiUpdate {
     pub enabled: Option<bool>,
@@ -5310,7 +5312,8 @@ pub struct AiUpdate {
     pub threat_ttl_secs: Option<u64>,
 }
 
-#[derive(Debug, Default, Deserialize)]
+/// listener-relevant `[server]` fields apply live; the rest are restarts.
+#[derive(Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ServerUpdate {
     pub listen: Option<String>,
@@ -5331,7 +5334,7 @@ pub struct ServerUpdate {
     pub dns_cookies: Option<bool>,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RecursiveUpdate {
     pub enabled: Option<bool>,
@@ -5399,7 +5402,7 @@ fn check_outbound_servers(r: &daygle_dns_core::config::RecursiveSettings) -> Res
 }
 
 /// Fields shared by the DoT and DoQ listeners.
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ListenerUpdate {
     pub enabled: Option<bool>,
@@ -5419,7 +5422,7 @@ pub struct ListenerUpdate {
     pub allowed_networks: Option<Vec<String>>,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DohUpdate {
     pub enabled: Option<bool>,
@@ -5439,7 +5442,7 @@ pub struct DohUpdate {
     pub http3: Option<bool>,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ApiUpdate {
     pub gui_enabled: Option<bool>,
@@ -6850,5 +6853,107 @@ fn serve_gui(path: &str) -> Response {
             (headers, asset.bytes).into_response()
         }
         None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+/// Guards the settings-persistence contract: every section `PUT /api/config`
+/// accepts (and the console sends) must be captured into the database
+/// overlay ([`daygle_dns_core::config::RuntimeSettings`]), which is applied
+/// over the config file on every boot. A section the overlay does not
+/// capture applies to the running server and then reverts to the config
+/// file's values at the next restart or update — exactly what happened to
+/// the `[logging]` and `[api]` sections before the overlay learned them.
+#[cfg(test)]
+mod settings_persistence_tests {
+    use super::*;
+
+    /// Keep in sync with the fields of [`SettingsUpdate`] above: one entry
+    /// per section the settings API accepts. The test below then refuses to
+    /// match when either side drifts (a new `SettingsUpdate` section, a new
+    /// overlay field, or a renamed one), so the fix always forces a
+    /// decision about persistence instead of a silent revert.
+    const SETTINGS_SECTIONS: &[&str] = &[
+        "server",
+        "recursive",
+        "dot",
+        "doh",
+        "doq",
+        "api",
+        "policy",
+        "authoritative",
+        "ai",
+        "display",
+        "web",
+        "logging",
+        "syslog",
+        "log_export",
+        "rrl",
+        "rate_limit",
+        "rpz",
+        "block_page",
+        "dhcp",
+        "ddr",
+        "reports",
+        "alerts",
+        "dns64",
+        "ecs",
+        "updates",
+    ];
+
+    /// Overlay fields the settings API does not accept: they are saved
+    /// through their own endpoints, which capture the overlay there —
+    /// `networks` from the Settings → Networks page (networks.rs).
+    const OVERLAY_ONLY_SECTIONS: &[&str] = &["networks"];
+
+    #[test]
+    fn runtime_overlay_captures_every_settings_section() {
+        // 1. Every listed name must really be a `SettingsUpdate` field:
+        //    unknown fields are refused, so a typo or rename fails here.
+        let update: SettingsUpdate = serde_json::from_value(serde_json::value::Value::Object(
+            SETTINGS_SECTIONS
+                .iter()
+                .map(|name| (name.to_string(), serde_json::Value::Null))
+                .collect(),
+        ))
+        .expect("SETTINGS_SECTIONS no longer matches the fields of SettingsUpdate");
+
+        // 2. Nothing may be missing from the list: serialize a default
+        //    update (every section present as null) and check the listed
+        //    names cover all of them.
+        let update_json = serde_json::to_value(&update).expect("update cannot serialize");
+        let request_fields = update_json
+            .as_object()
+            .expect("SettingsUpdate must be an object")
+            .keys()
+            .count();
+        assert_eq!(
+            request_fields,
+            SETTINGS_SECTIONS.len(),
+            "a SettingsUpdate field is missing from SETTINGS_SECTIONS"
+        );
+
+        // 3. The overlay must capture every section the API accepts.
+        let overlay = daygle_dns_core::config::RuntimeSettings::capture(
+            &daygle_dns_core::config::DaygleConfig::default(),
+        );
+        let overlay_json =
+            serde_json::to_value(&overlay).expect("RuntimeSettings cannot serialize");
+        let mut overlay_keys: Vec<String> = overlay_json
+            .as_object()
+            .expect("RuntimeSettings must serialize to an object")
+            .keys()
+            .cloned()
+            .collect();
+        let mut listed: Vec<String> = SETTINGS_SECTIONS
+            .iter()
+            .chain(OVERLAY_ONLY_SECTIONS.iter())
+            .map(|s| s.to_string())
+            .collect();
+        overlay_keys.sort();
+        listed.sort();
+        assert_eq!(
+            overlay_keys, listed,
+            "RuntimeSettings::capture does not capture every settings section"
+        );
     }
 }

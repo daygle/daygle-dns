@@ -1325,6 +1325,11 @@ pub struct RuntimeSettings {
     pub dhcp: Option<crate::dhcp::DhcpSettings>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub server: Option<ServerRuntimeUpdate>,
+    /// The `[api]` section the console keeps in the database (the GUI and
+    /// CORS settings). Without this they reverted to the config file's values
+    /// at the next start or update.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api: Option<ApiRuntimeUpdate>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rate_limit: Option<RateLimitSettings>,
 }
@@ -1339,6 +1344,16 @@ pub struct ServerRuntimeUpdate {
     pub tcp_timeout_ms: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dns_cookies: Option<bool>,
+}
+
+/// The `[api]` settings the console edits. The rest of `[api]` (listen
+/// address, port, token, users) stays in the config file.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct ApiRuntimeUpdate {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gui_enabled: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cors_origins: Option<Vec<String>>,
 }
 
 /// Partial updates for the recursive resolver (matches the API's shape).
@@ -2246,6 +2261,7 @@ impl RuntimeSettings {
             && self.reports.is_none()
             && self.dhcp.is_none()
             && self.server.is_none()
+            && self.api.is_none()
             && self.rate_limit.is_none()
     }
 
@@ -2439,6 +2455,14 @@ impl RuntimeSettings {
         }
         if let Some(d) = &self.display {
             config.display = d.clone();
+        }
+        if let Some(a) = &self.api {
+            if let Some(v) = a.gui_enabled {
+                config.api.gui_enabled = v;
+            }
+            if let Some(v) = &a.cors_origins {
+                config.api.cors_origins = v.clone();
+            }
         }
         if let Some(l) = &self.logging {
             config.logging = l.clone();
@@ -2745,6 +2769,10 @@ impl RuntimeSettings {
                 dns_cookies: Some(config.server.dns_cookies),
             }),
             rate_limit: Some(config.rate_limit.clone()),
+            api: Some(ApiRuntimeUpdate {
+                gui_enabled: Some(config.api.gui_enabled),
+                cors_origins: Some(config.api.cors_origins.clone()),
+            }),
         }
     }
 }
@@ -5244,6 +5272,8 @@ mod tests {
         c.server.client_timeout_ms += 1;
         c.server.tcp_timeout_ms += 1;
         c.server.dns_cookies = !c.server.dns_cookies;
+        c.api.gui_enabled = !c.api.gui_enabled;
+        c.api.cors_origins.push(s("https://console.example.com"));
         c.logging.query_db_enabled = !c.logging.query_db_enabled;
         c.logging.query_db_max_rows += 1;
         c.logging.query_db_retention_days += 1;
@@ -5281,6 +5311,7 @@ mod tests {
         assert_eq!(restored.ai, c.ai, "ai");
         assert_eq!(restored.display, c.display, "display");
         assert_eq!(restored.logging, c.logging, "logging");
+        assert_eq!(restored.api, c.api, "api");
         assert_eq!(restored.web, c.web, "web");
         assert_eq!(restored.updates, c.updates, "updates");
         assert_eq!(restored.syslog, c.syslog, "syslog");
