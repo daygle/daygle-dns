@@ -16,7 +16,7 @@
       id: 'scanner',
       label: 'Scanner',
       tagline:
-        'Labels the domains in your DNS traffic in the background, never on the query path. Train mode only records verdicts; Enforce mode also blocks the threats this list finds. Blocking a content category is a filtering-group rule, not a scanner decision.',
+        'Labels the domains in your DNS traffic in the background, never on the query path. Train mode only records what it finds; Enforce mode also blocks the threats it detects. Blocking a content category is a filtering-group rule, not a scanner decision.',
     },
     {
       id: 'classifications',
@@ -28,7 +28,7 @@
       id: 'threats',
       label: 'Threats',
       tagline:
-        "Domains the threat detector flagged, highest confidence first, each with its current block state. In Enforce mode this is the list the AI blocks for clients whose group allows it. Disputed verdicts (the verifier disagreed) are shown but never block.",
+        "Domains the threat detector flagged, highest confidence first, each with its current block state. In Enforce mode this is the list the AI blocks for clients whose group allows it. Disputed threats (the verifier disagreed) are shown but never block.",
     },
     {
       id: 'exemptions',

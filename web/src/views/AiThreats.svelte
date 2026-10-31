@@ -118,7 +118,7 @@
       await api.aiOverride(domain, exempt ? 'allow' : 'clear', reason);
       notice = exempt
         ? `${domain} and its subdomains are now exempt from AI blocking.`
-        : `${domain} is no longer exempt; blocking applies again once a fresh verdict qualifies.`;
+        : `${domain} is no longer exempt; blocking applies again once a fresh threat qualifies.`;
       await load();
     } catch (e) {
       error = formatApiError(e);
@@ -174,7 +174,7 @@
   <div class="card">
     <h3 style="margin: 0 0 10px">AI Scanner Is Off</h3>
     <p class="muted" style="margin: 0">
-      There are no verdicts. Turn the scanner on in Settings → AI Scanner; it
+      There are no threats. Turn the scanner on in Settings → AI Scanner; it
       starts after the next restart.
     </p>
   </div>
@@ -214,7 +214,7 @@
           {#if show('confidence')}<th class="num">Confidence</th>{/if}
           {#if show('seen')}<th class="num" title="In how many scans the domain showed up in your DNS traffic">Seen</th>{/if}
           {#if show('evidence')}<th>Evidence</th>{/if}
-          {#if show('re-check')}<th title="When the verdict expires: it is checked again if the domain is still being queried, and dropped otherwise">Re-Check</th>{/if}
+          {#if show('re-check')}<th title="When the threat expires: it is checked again if the domain is still being queried, and dropped otherwise">Re-Check</th>{/if}
           {#if isAdmin}<th class="num">Actions</th>{/if}
         </tr>
       </thead>
@@ -230,7 +230,7 @@
             {#if show('state')}
             <td>
               {#if r.severity === 'disputed'}
-                <span class="pill" title="The verifier disagreed with the threat verdict: this domain is never auto-blocked">Disputed</span>
+                <span class="pill" title="The verifier disagreed with this threat detection: the domain is never auto-blocked">Disputed</span>
               {:else if r.blocked}
                 <span class="pill err" title="In the current block snapshot: auto-blocked in enforce mode">Auto-Blocked</span>
               {:else if r.overridden}
@@ -267,7 +267,7 @@
         {#if search.trim() || categoryFilter.trim() || severityFilter || exemptionFilter}
           No threats match these filters.
         {:else}
-          No threat verdicts yet - benign lookups never appear here; entries
+          No threats yet - benign lookups never appear here; entries
           show up when the scanner classifies a domain badly enough to matter.
         {/if}
       </p>

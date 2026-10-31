@@ -192,14 +192,14 @@
   {#if switchedOff}
     <div class="card warn" style="margin-bottom: 14px">
       <strong>The AI scanner is turned off.</strong>
-      It is not classifying domains or blocking any. The verdicts below are
-      from before; turn it back on in Settings → AI Scanner.
+      It is not classifying domains or blocking any. The classifications and
+      threats below are from before; turn it back on in Settings → AI Scanner.
     </div>
   {:else if enforcing && heuristicOnly}
     <div class="card warn" style="margin-bottom: 14px">
       <strong>Nothing can be auto-blocked yet.</strong>
       Enforce mode is on, but the scanner is using its built-in heuristic
-      rules, whose verdicts never reach the block threshold. Set a trained
+      rules, whose detections never reach the block threshold. Set a trained
       model in Settings → AI Scanner (see AI Models below) to auto-block.
     </div>
   {/if}
@@ -276,8 +276,8 @@
             </td>
           </tr>
           <tr>
-            <td class="muted">Verdicts Re-Checked After</td>
-            <td>{duration(status.threat_ttl_secs)} (Threats) · {duration(status.category_ttl_secs)} (Other)</td>
+            <td class="muted">Re-Checked After</td>
+            <td>{duration(status.threat_ttl_secs)} (Threats) · {duration(status.category_ttl_secs)} (Classifications)</td>
           </tr>
         </tbody>
       </table>
@@ -286,8 +286,8 @@
     <div class="card">
       <h3 style="margin: 0 0 4px">{enforcing && !switchedOff ? 'Auto-Blocked Domains' : 'Eligible for Auto-Blocking'}</h3>
       <p class="muted small" style="margin: 0 0 10px">
-        Domains with a current verdict in an auto-block category at or above
-        the block threshold, minus exempt domains and verdicts the verifier
+        Domains with a current threat in an auto-block category at or above
+        the block threshold, minus exempt domains and threats the verifier
         disputed{enforcing && !switchedOff ? '' : ': what Enforce mode would block'}.
       </p>
       {#if blockable.length}

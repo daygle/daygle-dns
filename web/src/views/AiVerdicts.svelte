@@ -205,7 +205,7 @@
   <div class="card">
     <h3 style="margin: 0 0 10px">AI Scanner Is Off</h3>
     <p class="muted" style="margin: 0">
-      There are no verdicts. Turn the scanner on in Settings → AI Scanner; it
+      There are no classifications. Turn the scanner on in Settings → AI Scanner; it
       starts after the next restart.
     </p>
   </div>
@@ -250,7 +250,7 @@
           {#if show('confidence')}<th class="num">Confidence</th>{/if}
           {#if show('seen')}<th class="num" title="In how many scans the domain showed up in your DNS traffic">Seen</th>{/if}
           {#if show('evidence')}<th>Evidence</th>{/if}
-          {#if show('re-check')}<th title="When the verdict expires: it is checked again if the domain is still being queried, and dropped otherwise">Re-Check</th>{/if}
+          {#if show('re-check')}<th title="When the classification expires: it is checked again if the domain is still being queried, and dropped otherwise">Re-Check</th>{/if}
           {#if isAdmin}<th class="num">Actions</th>{/if}
         </tr>
       </thead>

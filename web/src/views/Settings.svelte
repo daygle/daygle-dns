@@ -1375,7 +1375,7 @@
       <label>
         <span>Mode</span>
         <select bind:value={ai_.mode}>
-          <option value="train">Train - Record Verdicts Only</option>
+          <option value="train">Train - Record Only</option>
           <option value="enforce">Enforce - Auto-Block Qualifying Domains</option>
         </select>
       </label>
@@ -1385,9 +1385,9 @@
     {/if}
     <p class="muted help">
       Classifies the domains seen in your DNS traffic in the background, never
-      on the query path. Start in Train mode and review the verdicts on the AI
-      page before switching to Enforce. Custom Allow entries and domains
-      exempted on the AI page are never blocked.
+      on the query path. Start in Train mode and review the classifications
+      and threats on the AI page before switching to Enforce. Custom Allow
+      entries and domains exempted on the AI page are never blocked.
     </p>
 
     <h4>Scanning</h4>
@@ -1427,21 +1427,24 @@
       {/if}
     </div>
     <p class="muted help">
-      In Enforce mode a domain is blocked when its current verdict is in a
+      In Enforce mode a domain is blocked when a detected threat is in a
       ticked category with a confidence at or above the block threshold (50 to
-      100%). Verdicts below the confidence floor are recorded as skipped.
+      100%). Detections below the confidence floor are recorded as skipped.
+      Content classifications never auto-block on their own: blocking a
+      category is a filtering-group rule.
     </p>
 
-    <h4>Verdict Lifetime</h4>
+    <h4>Lifetime</h4>
     <div class="form-grid">
-      <label><span>Re-Check Threat Verdicts After (Days)</span><input type="number" min="0.01" step="any" bind:value={aiForm.threatDays} /></label>
-      <label><span>Re-Check Other Verdicts After (Days)</span><input type="number" min="0.01" step="any" bind:value={aiForm.categoryDays} /></label>
-      <label><span>Look for Expired Verdicts Every (Minutes)</span><input type="number" min="0.17" step="any" bind:value={aiForm.expireMinutes} /></label>
+      <label><span>Re-Check Threats After (Days)</span><input type="number" min="0.01" step="any" bind:value={aiForm.threatDays} /></label>
+      <label><span>Re-Check Classifications After (Days)</span><input type="number" min="0.01" step="any" bind:value={aiForm.categoryDays} /></label>
+      <label><span>Look for Expired Entries Every (Minutes)</span><input type="number" min="0.17" step="any" bind:value={aiForm.expireMinutes} /></label>
     </div>
     <p class="muted help">
-      Sites change, so verdicts expire and the domain is classified again;
-      an expired verdict stops blocking until then. Threats (malware, phishing)
-      are re-checked sooner than other categories.
+      Each channel keeps its own lifetime: an expired threat stops blocking,
+      and an expired classification stops matching blocked categories, until
+      the domain is scanned again. Threats (malware, phishing) age out faster
+      than classifications, which rarely change.
     </p>
   </div>
   {:else if tab === 'logging'}
