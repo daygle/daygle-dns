@@ -22,7 +22,7 @@ use regex::RegexSet;
 use tracing::warn;
 
 use daygle_dns_core::blocking::{BlockResponse, BlockingGroup};
-use daygle_dns_core::config::normalize_domains;
+use daygle_dns_core::config::{normalize_domains, AiMode};
 use daygle_dns_core::schedule::{self, CompiledWindow, WeekTime};
 
 use crate::engine::{source, Check};
@@ -59,8 +59,9 @@ struct CompiledGroup {
     blocklists: Vec<(String, String)>,
     /// Response returned when this group blocks a query.
     action: Action,
-    /// Whether the AI scanner may auto-block this group's clients.
-    ai_blocking: bool,
+    /// This group's AI enforcement override: `None` follows the global
+    /// `ai.mode`, `Some` replaces it for this group's clients.
+    ai_mode: Option<AiMode>,
     /// Whether this group's clients get forced Safe Search.
     safe_search: bool,
     /// Whether this group's clients get YouTube Restricted Mode.
@@ -171,7 +172,7 @@ impl AdvancedBlocking {
                     .map(|n| (n.to_ascii_lowercase(), n.clone()))
                     .collect(),
                 action: response_to_action(&g.response),
-                ai_blocking: g.ai_blocking,
+                ai_mode: g.ai_mode,
                 blocked_categories: g
                     .blocked_categories
                     .iter()
@@ -267,13 +268,21 @@ impl AdvancedBlocking {
         self.groups.len()
     }
 
-    /// Whether the AI scanner may auto-block a query from `client` on
-    /// `listener`: the first enabled group the client belongs to decides,
-    /// and clients in no group are covered. Returns the deciding group's
-    /// name with the answer (`None` when no group matched).
-    pub fn ai_blocking(&self, client: IpAddr, listener: Option<&str>) -> (bool, Option<&str>) {
+    /// How AI threat blocking applies to a query from `client` on `listener`:
+    /// the first enabled group the client belongs to may override `default`
+    /// (the global `ai.mode`); otherwise the default stands, clients in no
+    /// group included. Returns the deciding group's name when one matched
+    /// (`None` when no group did), so a caller can explain the answer.
+    pub fn ai_mode(
+        &self,
+        client: IpAddr,
+        listener: Option<&str>,
+        default: AiMode,
+    ) -> (AiMode, Option<&str>) {
         self.first_group(client, listener)
-            .map_or((true, None), |g| (g.ai_blocking, Some(g.name.as_str())))
+            .map_or((default, None), |g| {
+                (g.ai_mode.unwrap_or(default), Some(g.name.as_str()))
+            })
     }
 
     /// The AI content categories the first enabled group `client` on
@@ -564,7 +573,7 @@ mod tests {
             block_regex: vec![],
             blocklists: vec![],
             response: BlockResponse::NxDomain,
-            ai_blocking: true,
+            ai_mode: None,
             safe_search: false,
             youtube_restricted: false,
             schedule: vec![],
@@ -579,38 +588,50 @@ mod tests {
         s.parse().unwrap()
     }
 
-    /// The first enabled group a client belongs to decides whether the AI
-    /// may block its queries; listener groups match by listener, and
-    /// clients in no group stay covered.
+    /// The first enabled group a client belongs to can override the global
+    /// enforcement mode; listener groups match by listener, and clients in no
+    /// group follow the global mode.
     #[test]
-    fn first_matching_group_decides_ai_blocking() {
+    fn first_matching_group_decides_ai_mode() {
         let mut kids = group("kids");
         kids.clients = vec!["192.168.50.0/24".to_string()];
         let mut public = group("public dot");
         public.clients = vec!["DoT".to_string()];
-        public.ai_blocking = false;
+        public.ai_mode = Some(AiMode::Train);
         let mut everyone = group("everyone");
-        everyone.ai_blocking = false;
+        everyone.ai_mode = Some(AiMode::Train);
         let ab = AdvancedBlocking::build(&[kids, public], Arc::default());
+        // Kids inherits whatever the global mode is.
         assert_eq!(
-            ab.ai_blocking(ip("192.168.50.7"), None),
-            (true, Some("kids"))
+            ab.ai_mode(ip("192.168.50.7"), None, AiMode::Enforce),
+            (AiMode::Enforce, Some("kids"))
         );
         assert_eq!(
-            ab.ai_blocking(ip("203.0.113.9"), Some("dot")),
-            (false, Some("public dot"))
+            ab.ai_mode(ip("192.168.50.7"), None, AiMode::Train),
+            (AiMode::Train, Some("kids"))
         );
-        assert_eq!(ab.ai_blocking(ip("203.0.113.9"), None), (true, None));
+        assert_eq!(
+            ab.ai_mode(ip("203.0.113.9"), Some("dot"), AiMode::Enforce),
+            (AiMode::Train, Some("public dot"))
+        );
+        assert_eq!(
+            ab.ai_mode(ip("203.0.113.9"), None, AiMode::Enforce),
+            (AiMode::Enforce, None)
+        );
 
-        // A catch-all group with AI off, last: only the groups before it
-        // keep AI blocking.
+        // Enforce for one group while the server records only, and the
+        // catch-all group at the bottom records only for everyone else.
         let mut kids = group("kids");
         kids.clients = vec!["192.168.50.0/24".to_string()];
+        kids.ai_mode = Some(AiMode::Enforce);
         let ab = AdvancedBlocking::build(&[kids, everyone], Arc::default());
-        assert!(ab.ai_blocking(ip("192.168.50.7"), None).0);
         assert_eq!(
-            ab.ai_blocking(ip("10.0.0.2"), None),
-            (false, Some("everyone"))
+            ab.ai_mode(ip("192.168.50.7"), None, AiMode::Train).0,
+            AiMode::Enforce
+        );
+        assert_eq!(
+            ab.ai_mode(ip("10.0.0.2"), None, AiMode::Train),
+            (AiMode::Train, Some("everyone"))
         );
     }
 
@@ -644,7 +665,7 @@ mod tests {
         let mut kids = group("kids");
         kids.block = vec!["games.test".to_string()];
         kids.safe_search = true;
-        kids.ai_blocking = false;
+        kids.ai_mode = Some(AiMode::Train);
         kids.schedule = vec![daygle_dns_core::schedule::ScheduleWindow {
             days: vec!["mon".to_string(), "tue".to_string()],
             start: "21:00".to_string(),
@@ -658,14 +679,20 @@ mod tests {
         for ab in [at(0, 22 * 60), at(1, 6 * 60)] {
             assert!(ab.evaluate(ip("1.2.3.4"), "games.test", None).is_some());
             assert!(ab.safe_search(ip("1.2.3.4"), None).0);
-            assert!(!ab.ai_blocking(ip("1.2.3.4"), None).0);
+            assert_eq!(
+                ab.ai_mode(ip("1.2.3.4"), None, AiMode::Enforce).0,
+                AiMode::Train
+            );
             assert!(ab.scheduled_off(ip("1.2.3.4"), None).is_empty());
         }
         // Monday noon and Thursday 06:00: outside.
         for ab in [at(0, 12 * 60), at(3, 6 * 60)] {
             assert!(ab.evaluate(ip("1.2.3.4"), "games.test", None).is_none());
             assert_eq!(ab.safe_search(ip("1.2.3.4"), None), (false, false, None));
-            assert_eq!(ab.ai_blocking(ip("1.2.3.4"), None), (true, None));
+            assert_eq!(
+                ab.ai_mode(ip("1.2.3.4"), None, AiMode::Enforce),
+                (AiMode::Enforce, None)
+            );
             assert_eq!(ab.scheduled_off(ip("1.2.3.4"), None), vec!["kids"]);
         }
     }

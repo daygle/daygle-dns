@@ -18,9 +18,9 @@
 //!    operator decisions always supersede AI verdicts.
 //! 4. This plugin runs last.
 //!
-//! Client groups can turn AI blocking off for their clients
-//! (`ai_blocking`): the first enabled group a client belongs to decides,
-//! and clients in no group are covered.
+//! Client groups can override the enforcement mode for their clients
+//! (`ai_mode`: inherit, enforce, record only): the first enabled group a
+//! client belongs to decides, and clients in no group follow `ai.mode`.
 
 use std::sync::Arc;
 
@@ -61,7 +61,7 @@ pub struct AiBlockPlugin {
     snapshot: Arc<ArcSwap<BlockSnapshot>>,
     categories: Arc<ArcSwap<CategorySnapshot>>,
     settings: Arc<ArcSwap<AiSettings>>,
-    /// The live client groups, consulted for their `ai_blocking` switch
+    /// The live client groups, consulted for their per-group enforcement mode
     /// (installed once the server has built them).
     groups: arc_swap::ArcSwapOption<ArcSwap<AdvancedBlocking>>,
 }
@@ -108,30 +108,31 @@ impl PolicyPlugin for AiBlockPlugin {
         let now = Utc::now().timestamp();
         let groups = self.groups.load();
 
-        // 1. Detected threats (enforce mode only).
-        if settings.mode == AiMode::Enforce {
+        // 1. Detected threats: blocked where the effective mode is enforce.
+        //    The global mode is the default; the first enabled group covering
+        //    the client can replace it either way (enforce one group while
+        //    the server records, or record for one while it enforces).
+        let mode = groups.as_deref().map_or(settings.mode, |groups| {
+            groups
+                .load()
+                .ai_mode(context.client, context.listener, settings.mode)
+                .0
+        });
+        if mode == AiMode::Enforce {
             let snapshot = self.snapshot.load_full();
             if let Some(block) = suffix_match(&context.query_name, &snapshot, now, |b| b.expires_at)
             {
-                let may_block = groups.as_deref().is_none_or(|groups| {
-                    groups
-                        .load()
-                        .ai_blocking(context.client, context.listener)
-                        .0
-                });
-                if may_block {
-                    return Some(
-                        Decision::new(
-                            format!(
-                                "'{}' auto-blocked by AI verdict (category '{}')",
-                                context.query_name, block.category
-                            ),
-                            Action::Block,
-                        )
-                        .with_group("ai")
-                        .with_source(daygle_dns_policy::source::AI, Some(block.category.clone())),
-                    );
-                }
+                return Some(
+                    Decision::new(
+                        format!(
+                            "'{}' auto-blocked by AI threat detection (category '{}')",
+                            context.query_name, block.category
+                        ),
+                        Action::Block,
+                    )
+                    .with_group("ai")
+                    .with_source(daygle_dns_policy::source::AI, Some(block.category.clone())),
+                );
             }
         }
 
@@ -202,8 +203,12 @@ mod tests {
         snapshot
     }
 
-    /// A group covering 10.0.0.0/24 that blocks `categories`.
-    fn groups_blocking(categories: &[&str]) -> Arc<ArcSwap<AdvancedBlocking>> {
+    /// A group covering 10.0.0.0/24 that blocks `categories`, with the given
+    /// AI enforcement override (`None` follows the global mode).
+    fn groups_blocking(
+        categories: &[&str],
+        ai_mode: Option<AiMode>,
+    ) -> Arc<ArcSwap<AdvancedBlocking>> {
         let group = daygle_dns_core::blocking::BlockingGroup {
             id: "g".to_string(),
             name: "kids".to_string(),
@@ -215,7 +220,7 @@ mod tests {
             block_regex: vec![],
             blocklists: vec![],
             response: Default::default(),
-            ai_blocking: true,
+            ai_mode,
             safe_search: false,
             youtube_restricted: false,
             schedule: vec![],
@@ -279,10 +284,10 @@ mod tests {
         snapshot.clear();
     }
 
-    /// A client group with AI blocking off exempts its clients; others are
-    /// still blocked.
+    /// A client group that records only exempts its clients; others are still
+    /// blocked.
     #[tokio::test]
-    async fn client_groups_can_turn_ai_blocking_off() {
+    async fn a_group_can_record_only_while_the_rest_enforce() {
         let mut snapshot = BlockSnapshot::new();
         snapshot.insert(
             "bad.example.com".to_string(),
@@ -292,35 +297,35 @@ mod tests {
             },
         );
         let p = plugin(AiMode::Enforce, snapshot);
-        let group = daygle_dns_core::blocking::BlockingGroup {
-            id: "g".to_string(),
-            name: "no ai".to_string(),
-            enabled: true,
-            clients: vec!["10.0.0.0/24".to_string()],
-            allow: vec![],
-            block: vec![],
-            allow_regex: vec![],
-            block_regex: vec![],
-            blocklists: vec![],
-            response: Default::default(),
-            ai_blocking: false,
-            safe_search: false,
-            youtube_restricted: false,
-            schedule: vec![],
-            blocked_services: vec![],
-            blocked_categories: vec![],
-            position: 0,
-            last_modified_at: None,
-        };
-        p.set_client_groups(Arc::new(ArcSwap::from_pointee(AdvancedBlocking::build(
-            &[group],
-            Arc::default(),
-        ))));
+        p.set_client_groups(groups_blocking(&[], Some(AiMode::Train)));
         // ctx() queries from 10.0.0.5, inside the group.
         assert!(p.evaluate(&ctx("bad.example.com")).await.is_none());
         let mut outside = ctx("bad.example.com");
         outside.client = "192.0.2.1".parse().unwrap();
         assert!(p.evaluate(&outside).await.is_some());
+    }
+
+    /// The other direction: one group enforces while the global mode (and a
+    /// client in no group) records only.
+    #[tokio::test]
+    async fn a_group_can_enforce_while_the_rest_record() {
+        let mut snapshot = BlockSnapshot::new();
+        snapshot.insert(
+            "bad.example.com".to_string(),
+            ActiveBlock {
+                category: "malware".to_string(),
+                expires_at: i64::MAX,
+            },
+        );
+        let p = plugin(AiMode::Train, snapshot);
+        assert!(p.evaluate(&ctx("bad.example.com")).await.is_none());
+
+        p.set_client_groups(groups_blocking(&[], Some(AiMode::Enforce)));
+        let d = p.evaluate(&ctx("bad.example.com")).await.unwrap();
+        assert_eq!(d.action, Action::Block);
+        let mut outside = ctx("bad.example.com");
+        outside.client = "192.0.2.1".parse().unwrap();
+        assert!(p.evaluate(&outside).await.is_none());
     }
 
     #[tokio::test]
@@ -371,7 +376,7 @@ mod tests {
                 BlockSnapshot::new(),
                 category("casino.example", "gambling"),
             );
-            p.set_client_groups(groups_blocking(&["gambling"]));
+            p.set_client_groups(groups_blocking(&["gambling"], None));
 
             let d = p.evaluate(&ctx("www.casino.example")).await.unwrap();
             assert_eq!(d.action, Action::Block);
@@ -391,7 +396,7 @@ mod tests {
             BlockSnapshot::new(),
             category("shop.example", "shopping"),
         );
-        p.set_client_groups(groups_blocking(&["gambling"]));
+        p.set_client_groups(groups_blocking(&["gambling"], None));
         assert!(p.evaluate(&ctx("shop.example")).await.is_none());
     }
 
@@ -405,7 +410,7 @@ mod tests {
         // No client groups installed at all.
         assert!(p.evaluate(&ctx("casino.example")).await.is_none());
         // Installed, but this client belongs to none of them.
-        p.set_client_groups(groups_blocking(&["gambling"]));
+        p.set_client_groups(groups_blocking(&["gambling"], None));
         let mut outside = ctx("casino.example");
         outside.client = "192.0.2.1".parse().unwrap();
         assert!(p.evaluate(&outside).await.is_none());

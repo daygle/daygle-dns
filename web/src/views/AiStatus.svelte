@@ -11,8 +11,14 @@
   // When the scanner is not running: whether Settings has it turned on
   // (it then only needs a restart), or null when unknown.
   let enabledInSettings = $state(null);
-  // Enabled filtering groups whose clients the AI never auto-blocks.
-  let aiOffGroups = $state([]);
+  // Enabled filtering groups that override the global mode, split by the
+  // override they chose.
+  let aiEnforceGroups = $state([]);
+  let aiRecordGroups = $state([]);
+  const aiOverrides = $derived([
+    ...aiEnforceGroups.map((name) => ({ name, label: 'Always enforce' })),
+    ...aiRecordGroups.map((name) => ({ name, label: 'Record only' })),
+  ]);
   let loading = $state(true);
   let error = $state(null);
   let notice = $state(null);
@@ -98,8 +104,12 @@
       api
         .blockingGroups()
         .then((groups) => {
-          aiOffGroups = (groups || [])
-            .filter((g) => g.enabled && g.ai_blocking === false)
+          const enabled = (groups || []).filter((g) => g.enabled);
+          aiEnforceGroups = enabled
+            .filter((g) => g.ai_mode === 'enforce')
+            .map((g) => g.name);
+          aiRecordGroups = enabled
+            .filter((g) => g.ai_mode === 'train')
             .map((g) => g.name);
         })
         .catch(() => {});
@@ -266,12 +276,11 @@
           <tr>
             <td class="muted">Applies To</td>
             <td>
-              {#if aiOffGroups.length}
-                Turned off for filtering groups
-                {#each aiOffGroups as g (g)}<span class="pill" style="margin-left: 4px">{g}</span>{/each}
+              {#each aiOverrides as o (o.name)}
+                <span class="pill" style="margin-right: 4px">{o.name}: {o.label}</span>
               {:else}
                 All Clients
-              {/if}
+              {/each}
               <div class="muted small">Change this per group under Clients → Filtering Groups.</div>
             </td>
           </tr>

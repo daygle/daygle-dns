@@ -3350,9 +3350,14 @@ pub async fn test_blocking(
     } else {
         groups.evaluate(client, &domain, listener)
     };
-    // Whether the AI may auto-block this client's queries, and which group
-    // decided that (none: the client is in no group).
-    let (ai_blocking, ai_group) = groups.ai_blocking(client, listener);
+    // The AI enforcement mode for this client (its group's override, else the
+    // global mode) and which group decided that (none: the client is in no
+    // group).
+    let (ai_mode, ai_group) = groups.ai_mode(client, listener, state.config.load_full().ai.mode);
+    let ai_mode = match ai_mode {
+        daygle_dns_core::config::AiMode::Train => "train",
+        daygle_dns_core::config::AiMode::Enforce => "enforce",
+    };
     let ai_group = ai_group.map(str::to_string);
     // Safe Search for this client: the global switches, or its group's.
     let policy = state.policy.load();
@@ -3387,7 +3392,7 @@ pub async fn test_blocking(
         "action": action,
         "reason": reason,
         "group": group,
-        "ai_blocking": ai_blocking,
+        "ai_mode": ai_mode,
         "ai_group": ai_group,
         "safe_search": safe_search,
         "youtube_restricted": youtube_restricted,

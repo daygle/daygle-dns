@@ -8,6 +8,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::config::AiMode;
 use crate::schedule::ScheduleWindow;
 
 /// What to answer when a query is blocked by an Advanced Blocking group.
@@ -55,13 +56,15 @@ pub struct BlockingGroup {
     pub blocklists: Vec<String>,
     /// Response returned for blocked queries.
     pub response: BlockResponse,
-    /// Whether the AI scanner may auto-block these clients' queries (in
-    /// enforce mode). The first enabled group a client belongs to decides;
-    /// clients in no group are covered.
-    #[serde(default = "default_true")]
-    pub ai_blocking: bool,
+    /// How AI *threat* auto-blocking applies to these clients: `None`
+    /// follows the global `ai.mode`, `Some(Train)` records threats without
+    /// blocking them, and `Some(Enforce)` auto-blocks them even when the
+    /// global mode is Train. The first enabled group a client belongs to
+    /// decides; clients in no group follow the global mode.
+    #[serde(default)]
+    pub ai_mode: Option<AiMode>,
     /// Force Safe Search on Google, Bing and DuckDuckGo for these clients.
-    /// Like `ai_blocking`, the first enabled group a client belongs to
+    /// Like `ai_mode`, the first enabled group a client belongs to
     /// decides (the global switch applies to everyone either way).
     #[serde(default)]
     pub safe_search: bool,
@@ -78,7 +81,7 @@ pub struct BlockingGroup {
     /// AI content categories this group blocks (lowercase labels, e.g.
     /// `gambling`, `ads`). The scanner only *labels* a domain; blocking a
     /// label is an operator policy, scoped to these clients. Independent of
-    /// `ai_blocking`, which governs auto-blocking of detected threats.
+    /// `ai_mode`, which governs auto-blocking of detected threats.
     #[serde(default)]
     pub blocked_categories: Vec<String>,
     /// Ordering position (lower groups are evaluated first).
@@ -119,8 +122,8 @@ pub struct BlockingGroupInput {
     pub blocklists: Vec<String>,
     #[serde(default)]
     pub response: BlockResponse,
-    #[serde(default = "default_true")]
-    pub ai_blocking: bool,
+    #[serde(default)]
+    pub ai_mode: Option<AiMode>,
     #[serde(default)]
     pub safe_search: bool,
     #[serde(default)]
@@ -147,7 +150,7 @@ impl BlockingGroup {
             block_regex: self.block_regex.clone(),
             blocklists: self.blocklists.clone(),
             response: self.response.clone(),
-            ai_blocking: self.ai_blocking,
+            ai_mode: self.ai_mode,
             safe_search: self.safe_search,
             youtube_restricted: self.youtube_restricted,
             schedule: self.schedule.clone(),

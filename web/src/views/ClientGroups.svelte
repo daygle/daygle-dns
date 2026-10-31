@@ -16,6 +16,8 @@
   // AI content categories the scanner can label a domain with (empty when
   // the AI subsystem is off: then there is nothing to block by category).
   let aiCategories = $state([]);
+  // The global `ai.mode`, which a group inherits unless it overrides it.
+  let aiGlobalMode = $state('train');
   const serviceCategories = $derived([...new Set(services.map((s) => s.category))]);
   let error = $state(null);
   let notice = $state(null);
@@ -46,7 +48,10 @@
     api.networks().then((data) => { networks = data.networks || []; }).catch(() => {});
     api.blockableServices().then((data) => { services = data.services || []; }).catch(() => {});
     api.aiStatus()
-      .then((data) => { aiCategories = [...new Set(data?.backend_categories || [])].sort(); })
+      .then((data) => {
+        aiCategories = [...new Set(data?.backend_categories || [])].sort();
+        aiGlobalMode = data?.mode || 'train';
+      })
       .catch(() => { aiCategories = []; });
     try {
       groups = await api.blockingGroups();
@@ -93,7 +98,7 @@
           blocklists: [...(group.blocklists || [])],
           responseKind: group.response?.kind || 'nx_domain',
           redirectAddr: group.response?.address || '0.0.0.0',
-          ai_blocking: group.ai_blocking !== false,
+          ai_mode: group.ai_mode || 'inherit',
           safe_search: !!group.safe_search,
           youtube_restricted: !!group.youtube_restricted,
           schedule: (group.schedule || []).map((w) => ({ ...w, days: [...(w.days || [])] })),
@@ -113,7 +118,7 @@
           blocklists: [],
           responseKind: 'nx_domain',
           redirectAddr: '0.0.0.0',
-          ai_blocking: true,
+          ai_mode: 'inherit',
           safe_search: false,
           youtube_restricted: false,
           schedule: [],
@@ -186,7 +191,7 @@
       block_regex: parseList(edit.block_regex),
       blocklists: edit.blocklists,
       response,
-      ai_blocking: edit.ai_blocking,
+      ai_mode: edit.ai_mode === 'inherit' ? null : edit.ai_mode,
       safe_search: edit.safe_search,
       youtube_restricted: edit.youtube_restricted,
       schedule: edit.schedule,
@@ -294,7 +299,8 @@
               <td>
                 <strong>{g.name}</strong>
                 {#if !g.enabled}<span class="pill">Disabled</span>{/if}
-                {#if g.ai_blocking === false}<span class="pill" title="The AI never auto-blocks these clients' queries">AI Off</span>{/if}
+                {#if g.ai_mode === 'train'}<span class="pill" title="AI threats are recorded for these clients but never auto-blocked">AI Record Only</span>{/if}
+                {#if g.ai_mode === 'enforce'}<span class="pill ok" title="AI threats auto-block these clients even if the global mode records only">AI Enforce</span>{/if}
                 {#if g.safe_search}<span class="pill" title="Google, Bing and DuckDuckGo always use Safe Search for these clients">Safe Search</span>{/if}
                 {#if g.youtube_restricted}<span class="pill" title="YouTube always uses Restricted Mode for these clients">YouTube Restricted</span>{/if}
                 {#if g.schedule?.length}<span class="pill" title={'Applies only: ' + g.schedule.map(describeWindow).join('; ')}>Scheduled</span>{/if}
@@ -370,10 +376,10 @@
         <span class="pill group">By {testResult.group}</span>
       {/if}
       <span class="muted">{testResult.reason}</span>
-      {#if testResult.ai_blocking !== undefined}
+      {#if testResult.ai_mode}
         <span class="muted ai-note">
-          AI auto-blocking: {testResult.ai_blocking ? 'On' : 'Off'}
-          {testResult.ai_group ? `(group "${testResult.ai_group}")` : '(client is in no group)'}
+          AI threat blocking: {testResult.ai_mode === 'enforce' ? 'Enforce' : 'Record only'}
+          {testResult.ai_group ? `(group "${testResult.ai_group}")` : '(global mode)'}
         </span>
       {/if}
       {#if testResult.scheduled_off?.length}
@@ -523,13 +529,24 @@
         </p>
       {/if}
 
-      <div class="section-title">AI Auto-Blocking</div>
-      <label class="checkbox"><input type="checkbox" bind:checked={edit.ai_blocking} /><span>Let the AI auto-block these clients' queries</span></label>
+      <div class="section-title">AI Threat Blocking</div>
+      <label class="checkbox">
+        <input type="radio" bind:group={edit.ai_mode} value="inherit" />
+        <span>Follow the global mode ({aiGlobalMode === 'enforce' ? 'Enforce' : 'Train'})</span>
+      </label>
+      <label class="checkbox">
+        <input type="radio" bind:group={edit.ai_mode} value="enforce" />
+        <span>Always enforce - auto-block detected threats</span>
+      </label>
+      <label class="checkbox">
+        <input type="radio" bind:group={edit.ai_mode} value="train" />
+        <span>Record only - never auto-block</span>
+      </label>
       <p class="muted help">
-        Applies when the AI scanner is in Enforce mode. A client follows the
-        first group (from the top) that covers it; clients in no group are
-        covered. To use the AI for some groups only, add a group covering every
-        client with this off and move it to the bottom.
+        Auto-blocking covers detected threats only; the Blocked Categories
+        above are this group's own rule and apply in either mode. A client
+        follows the first group (from the top) that covers it; clients in no
+        group follow the global mode.
       </p>
 
       <div class="section-title">Safe Search</div>

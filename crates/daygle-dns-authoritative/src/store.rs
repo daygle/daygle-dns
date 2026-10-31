@@ -17,7 +17,7 @@ use crate::model::{
 };
 use crate::validate_name;
 use daygle_dns_core::blocking::{BlockingGroup, BlockingGroupInput};
-use daygle_dns_core::config::{DisplaySettings, Role};
+use daygle_dns_core::config::{AiMode, DisplaySettings, Role};
 use daygle_dns_core::error::{DaygleError, Result};
 
 /// The highest load-balancing weight a record can have.
@@ -181,6 +181,7 @@ CREATE TABLE IF NOT EXISTS blocking_groups (
     position    INTEGER NOT NULL DEFAULT 0,
     last_modified_at TEXT,
     ai_blocking INTEGER NOT NULL DEFAULT 1,
+    ai_mode     TEXT,
     safe_search INTEGER NOT NULL DEFAULT 0,
     youtube_restricted INTEGER NOT NULL DEFAULT 0,
     schedule    TEXT NOT NULL DEFAULT '[]',
@@ -720,7 +721,7 @@ impl ZoneStore {
         let conn = self.lock_conn()?;
         let mut stmt = conn.prepare(
             "SELECT id, name, enabled, clients, allow, block, allow_regex, block_regex,
-                    response, position, blocklists, last_modified_at, ai_blocking,
+                    response, position, blocklists, last_modified_at, ai_mode,
                     safe_search, youtube_restricted, schedule, blocked_services,
                     blocked_categories
              FROM blocking_groups ORDER BY position, name",
@@ -735,7 +736,7 @@ impl ZoneStore {
         let group = conn
             .query_row(
                 "SELECT id, name, enabled, clients, allow, block, allow_regex, block_regex,
-                        response, position, blocklists, last_modified_at, ai_blocking,
+                        response, position, blocklists, last_modified_at, ai_mode,
                     safe_search, youtube_restricted, schedule, blocked_services,
                     blocked_categories
                  FROM blocking_groups WHERE id = ?1",
@@ -787,7 +788,8 @@ impl ZoneStore {
                     allow = ?5, block = ?6, allow_regex = ?7, block_regex = ?8,
                     response = ?9, blocklists = ?10, last_modified_at = ?11,
                     ai_blocking = ?12, safe_search = ?13, youtube_restricted = ?14,
-                    schedule = ?15, blocked_services = ?16, blocked_categories = ?17
+                    schedule = ?15, blocked_services = ?16, blocked_categories = ?17,
+                    ai_mode = ?18
                  WHERE id = ?1",
                 params![
                     id,
@@ -801,12 +803,16 @@ impl ZoneStore {
                     response,
                     blocklists,
                     now,
-                    input.ai_blocking as i64,
+                    // `ai_blocking` is the pre-override column: keep it in
+                    // step (on unless this group records only) so a
+                    // downgraded binary still reads the nearest equivalent.
+                    !matches!(input.ai_mode, Some(AiMode::Train)) as i64,
                     input.safe_search as i64,
                     input.youtube_restricted as i64,
                     schedule,
                     blocked_services,
                     blocked_categories,
+                    ai_mode_name(input.ai_mode),
                 ],
             )?;
             drop(conn);
@@ -824,16 +830,16 @@ impl ZoneStore {
                 (id, name, enabled, clients, allow, block, allow_regex, block_regex,
                  response, blocklists, position, last_modified_at, ai_blocking,
                  safe_search, youtube_restricted, schedule, blocked_services,
-                 blocked_categories)
+                 blocked_categories, ai_mode)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
                  (SELECT COALESCE(MAX(position), -1) + 1 FROM blocking_groups), ?11, ?12,
-                 ?13, ?14, ?15, ?16, ?17)
+                 ?13, ?14, ?15, ?16, ?17, ?18)
              ON CONFLICT(name) DO UPDATE SET
                 enabled = ?3, clients = ?4, allow = ?5, block = ?6,
                 allow_regex = ?7, block_regex = ?8, response = ?9, blocklists = ?10,
                 last_modified_at = ?11, ai_blocking = ?12, safe_search = ?13,
                 youtube_restricted = ?14, schedule = ?15, blocked_services = ?16,
-                blocked_categories = ?17",
+                blocked_categories = ?17, ai_mode = ?18",
             params![
                 id,
                 name,
@@ -846,12 +852,13 @@ impl ZoneStore {
                 response,
                 blocklists,
                 now,
-                input.ai_blocking as i64,
+                !matches!(input.ai_mode, Some(AiMode::Train)) as i64,
                 input.safe_search as i64,
                 input.youtube_restricted as i64,
                 schedule,
                 blocked_services,
                 blocked_categories,
+                ai_mode_name(input.ai_mode),
             ],
         )?;
         drop(conn);
@@ -2060,6 +2067,26 @@ fn decode_list(row: &rusqlite::Row<'_>, idx: usize) -> rusqlite::Result<Vec<Stri
     Ok(serde_json::from_str(&row.get::<_, String>(idx)?).unwrap_or_default())
 }
 
+/// A group's stored AI enforcement override (`NULL` = follow the global
+/// `ai.mode`), spelled as the settings enum serializes it.
+fn ai_mode_name(mode: Option<AiMode>) -> Option<&'static str> {
+    match mode {
+        None => None,
+        Some(AiMode::Train) => Some("train"),
+        Some(AiMode::Enforce) => Some("enforce"),
+    }
+}
+
+/// Parse a stored override. Anything unrecognised follows the global mode, so
+/// a hand-edited database cannot leave a group with no answer.
+fn parse_ai_mode(value: Option<String>) -> Option<AiMode> {
+    match value.as_deref() {
+        Some("train") => Some(AiMode::Train),
+        Some("enforce") => Some(AiMode::Enforce),
+        _ => None,
+    }
+}
+
 /// Build a [`BlockingGroup`] from a `blocking_groups` row. Malformed JSON
 /// list/response columns fall back to safe defaults rather than erroring.
 fn row_to_blocking_group(row: &rusqlite::Row<'_>) -> rusqlite::Result<BlockingGroup> {
@@ -2077,7 +2104,7 @@ fn row_to_blocking_group(row: &rusqlite::Row<'_>) -> rusqlite::Result<BlockingGr
         response,
         position: row.get(9)?,
         last_modified_at: row.get(11)?,
-        ai_blocking: row.get::<_, i64>(12)? != 0,
+        ai_mode: parse_ai_mode(row.get::<_, Option<String>>(12)?),
         safe_search: row.get::<_, i64>(13)? != 0,
         youtube_restricted: row.get::<_, i64>(14)? != 0,
         schedule: serde_json::from_str(&row.get::<_, String>(15)?).unwrap_or_default(),
@@ -4691,7 +4718,9 @@ fn migrate_blocking_group_lists(conn: &Connection) -> Result<()> {
 /// Add the `last_modified_at` column to `blocking_groups` for databases
 /// created before it existed (existing rows stay `NULL` until first edited),
 /// `ai_blocking` (on, as before it existed), the Safe Search switches
-/// (off), `schedule` (none: always active) and `blocked_services` (none).
+/// (off), `schedule` (none: always active), `blocked_services` (none) and
+/// `ai_mode` (the per-group enforcement override, migrated from
+/// `ai_blocking`: off becomes record-only, on keeps following `ai.mode`).
 fn migrate_blocking_group_timestamps(conn: &Connection) -> Result<()> {
     for (column, definition) in [
         ("last_modified_at", "TEXT"),
@@ -4701,6 +4730,7 @@ fn migrate_blocking_group_timestamps(conn: &Connection) -> Result<()> {
         ("schedule", "TEXT NOT NULL DEFAULT '[]'"),
         ("blocked_services", "TEXT NOT NULL DEFAULT '[]'"),
         ("blocked_categories", "TEXT NOT NULL DEFAULT '[]'"),
+        ("ai_mode", "TEXT"),
     ] {
         let has: bool = conn.query_row(
             "SELECT EXISTS(
@@ -4716,6 +4746,13 @@ fn migrate_blocking_group_timestamps(conn: &Connection) -> Result<()> {
             )?;
         }
     }
+    // Groups that predate the override kept their choice in `ai_blocking`:
+    // off means they record threats without blocking, on follows the global
+    // mode (the value `NULL` already carries).
+    conn.execute(
+        "UPDATE blocking_groups SET ai_mode = 'train' WHERE ai_mode IS NULL AND ai_blocking = 0",
+        [],
+    )?;
     Ok(())
 }
 
@@ -5260,7 +5297,7 @@ mod tests {
                 allow_regex: vec![],
                 block_regex: vec![r"^ad".to_string()],
                 blocklists: vec![],
-                ai_blocking: true,
+                ai_mode: Some(AiMode::Enforce),
                 safe_search: false,
                 youtube_restricted: false,
                 schedule: vec![],
@@ -5270,6 +5307,7 @@ mod tests {
             })
             .unwrap();
         assert_eq!(created.name, "Kids");
+        assert_eq!(created.ai_mode, Some(AiMode::Enforce));
         assert_eq!(created.block, vec!["*.games.test".to_string()]);
         assert_eq!(
             created.response,
@@ -5292,7 +5330,8 @@ mod tests {
                 allow_regex: vec![],
                 block_regex: vec![],
                 blocklists: vec![],
-                ai_blocking: true,
+                // Back to inheriting: `NULL` must survive the round trip.
+                ai_mode: None,
                 safe_search: false,
                 youtube_restricted: false,
                 schedule: vec![],
@@ -5304,6 +5343,7 @@ mod tests {
         assert_eq!(updated.id, created.id);
         assert_eq!(updated.position, created.position);
         assert!(!updated.enabled);
+        assert_eq!(updated.ai_mode, None, "inherit is stored as NULL");
         assert_ne!(
             created.last_modified_at, updated.last_modified_at,
             "editing a group rewrites its last-modified time"
@@ -5317,6 +5357,54 @@ mod tests {
         assert!(s.delete_blocking_group(&created.id).unwrap());
         assert!(s.list_blocking_groups().unwrap().is_empty());
         assert!(!s.delete_blocking_group(&created.id).unwrap());
+    }
+
+    /// A database written before the per-group override kept "AI blocking
+    /// off" in `ai_blocking`: that becomes record-only, so an upgrade never
+    /// starts auto-blocking for clients an operator had excluded.
+    #[test]
+    fn legacy_ai_blocking_flag_migrates_to_record_only() {
+        use daygle_dns_core::blocking::BlockingGroupInput;
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("legacy-ai.db");
+        let path = db.to_string_lossy().to_string();
+        let s = ZoneStore::open(&path).unwrap();
+        let group = s
+            .upsert_blocking_group(&BlockingGroupInput {
+                id: None,
+                name: "guests".to_string(),
+                enabled: true,
+                clients: vec![],
+                allow: vec![],
+                block: vec![],
+                allow_regex: vec![],
+                block_regex: vec![],
+                blocklists: vec![],
+                ai_mode: None,
+                safe_search: false,
+                youtube_restricted: false,
+                schedule: vec![],
+                blocked_services: vec![],
+                blocked_categories: vec![],
+                response: Default::default(),
+            })
+            .unwrap();
+        drop(s);
+
+        // Rewrite the row the way the old schema left it: no override, flag
+        // off.
+        {
+            let conn = rusqlite::Connection::open(&db).unwrap();
+            conn.execute(
+                "UPDATE blocking_groups SET ai_mode = NULL, ai_blocking = 0 WHERE id = ?1",
+                [&group.id],
+            )
+            .unwrap();
+        }
+
+        let s = ZoneStore::open(&path).unwrap();
+        let migrated = s.get_blocking_group(&group.id).unwrap().unwrap();
+        assert_eq!(migrated.ai_mode, Some(AiMode::Train));
     }
 
     #[test]
@@ -5333,7 +5421,7 @@ mod tests {
             allow_regex: vec![],
             block_regex: vec![],
             blocklists: vec![],
-            ai_blocking: true,
+            ai_mode: None,
             safe_search: false,
             youtube_restricted: false,
             schedule: vec![],

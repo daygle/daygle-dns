@@ -272,9 +272,13 @@ Opt-in via `[ai] enabled = true`; the DNS hot path nevers runs a model.
   fresh *threat-channel* verdicts (disputed ones excluded) whose category is
   in `auto_block_categories` and whose confidence meets `block_threshold`.
   Content-channel rows never reach this snapshot, whatever they are called.
-  The plugin suffix-matches at label boundaries (a verdict on
-  `bad.example.com` also blocks `www.bad.example.com`) and returns
-  NXDOMAIN via `Action::Block`, tagged with group `ai`.
+  Whether the snapshot applies is decided per client: the global `ai.mode`,
+  unless the first enabled filtering group covering the client sets
+  `ai_mode` (`enforce` or `train`), so one group can auto-block while the
+  rest record, or the reverse. The plugin suffix-matches at label
+  boundaries (a verdict on `bad.example.com` also blocks
+  `www.bad.example.com`) and returns NXDOMAIN via `Action::Block`, tagged
+  with group `ai`.
 - **Category blocking (operator policy).** The same plugin also consults a
   second, independently-published snapshot mapping each domain to its
   current *content* category. A client group's `blocked_categories` list
@@ -284,7 +288,7 @@ Opt-in via `[ai] enabled = true`; the DNS hot path nevers runs a model.
   AI acted on: it applies in **both** train and enforce mode, and `ai.mode`
   only governs auto-blocking of detected threats. Clients in no group block
   no categories; the first enabled group that covers a client decides, the
-  same rule `ai_blocking` uses. Snapshot build applies operator relabels
+  same rule `ai_mode` uses. Snapshot build applies operator relabels
   and drops domains an `allow` override exempts.
 - **Relabelling.** `POST /api/ai/override` with `action: "category"` stores
   an operator label in `ai_category_overrides`; it is shown instead of the

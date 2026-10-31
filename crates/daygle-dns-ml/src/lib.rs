@@ -150,8 +150,8 @@ impl AiEngine {
         self.plugin.clone()
     }
 
-    /// Let the live client groups decide which clients AI blocking covers
-    /// (their `ai_blocking` switch).
+    /// Let the live client groups override the enforcement mode per client
+    /// (their `ai_mode` setting: inherit, enforce, record only).
     pub fn set_client_groups(&self, groups: Arc<ArcSwap<daygle_dns_policy::AdvancedBlocking>>) {
         self.plugin.set_client_groups(groups);
     }

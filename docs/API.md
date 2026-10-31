@@ -1518,11 +1518,15 @@ blocklist sources whose
 `scope` is `groups`: their domains are blocked for the group's clients, and
 the group's `allow` list still overrides them (`400` for a name that is not
 a configured source).
-`ai_blocking` (default `true`) lets the AI scanner auto-block the group's
-clients in enforce mode. A client follows the first enabled group that
-covers it, and clients in no group are covered; to use the AI for some
-groups only, put a group covering every client with `ai_blocking: false`
-last.
+`ai_mode` (default `null`) overrides the global `ai.mode` for the group's
+clients: `null` follows it, `"enforce"` auto-blocks detected threats for
+them even while the server records only, and `"train"` records their
+threats without ever auto-blocking (a dry run for one group). A client
+follows the first enabled group that covers it, and clients in no group
+follow the global mode. Databases written before this field existed
+migrate in place: `ai_blocking: false` becomes `"train"` and
+`ai_blocking: true` becomes `null`, so an upgrade never starts blocking
+for clients an operator had excluded.
 `safe_search` and `youtube_restricted` (default `false`) turn Safe Search
 and YouTube Restricted Mode on for the group's clients, by the same
 first-group rule; the global `policy.safe_search` and
@@ -1536,9 +1540,9 @@ an unknown id; ids are stored in their canonical form). `GET
 `blocked_categories` lists AI content categories (lowercase labels, e.g.
 `["gambling", "ads"]`; the model's own labels as reported by
 `GET /api/ai/status`'s `backend_categories`) whose domains the group
-blocks, subdomains included. It is independent of `ai_blocking`: the AI
+blocks, subdomains included. It is independent of `ai_mode`: the AI
 scanner only supplies the label, so this applies in both `train` and
-`enforce` mode, while `ai_blocking` governs auto-blocking of detected
+`enforce` mode, while `ai_mode` governs auto-blocking of detected
 threats. The group's `allow` list and any AI exemption still win.
 `schedule` limits when the group applies: a list of
 `{"days": ["mon", "fri"], "start": "21:00", "end": "07:00"}` windows
@@ -1596,9 +1600,10 @@ It changes nothing, so read-only accounts may use it.
 `POST /api/policy/blocking/test` evaluates a `{client, domain}` pair against
 the live filtering groups and reports whether (and why) it is blocked, so an
 operator can verify rules before relying on them. It also reports
-`ai_blocking` (whether the AI may auto-block that client's queries) and
-`ai_group` (the group that decided; `null` when the client is in no
-group), whether `safe_search` and `youtube_restricted` apply to the client,
+`ai_mode` (`"train"` or `"enforce"`: the mode that applies to that client,
+from its group's override or the global `ai.mode`) and `ai_group` (the
+group that decided; `null` when the client is in no group), whether
+`safe_search` and `youtube_restricted` apply to the client,
 and `safe_search_target`: the safe address the domain is answered with
 (`null` when it is not rewritten), and `scheduled_off`: the groups covering
 the client that are outside their schedule right now.
