@@ -288,7 +288,9 @@ fi
 # this helper). If the apply step never picks the request up, report it.
 i=0
 while [ $i -lt 60 ]; do
-  if ! grep -q "\"pid\":$$" "$DIR/state.json" 2>/dev/null; then
+  # Match the exact pid: a bare prefix match (pid 12 vs 123) keeps waiting on
+  # a state file that now belongs to a different run.
+  if ! grep -q "\"pid\":$$[,}]" "$DIR/state.json" 2>/dev/null; then
     exit 0
   fi
   sleep 1

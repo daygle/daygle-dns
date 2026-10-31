@@ -4776,6 +4776,9 @@ pub async fn create_api_token(
             "a token can last at most 3650 days",
         );
     }
+    // Held across the count and the insert so concurrent creates cannot
+    // both pass the 50-token cap.
+    let _config_write = state.config_write.lock().await;
     let store = state.catalog.store();
     match store.list_api_tokens(&user.username) {
         Ok(tokens) if tokens.len() >= 50 => {
