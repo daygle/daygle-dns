@@ -16,9 +16,15 @@ export function backendLabel(name) {
     .join(' + ');
 }
 
-// "phishing" -> "Phishing".
+// "phishing" -> "Phishing", "real-estate" -> "Real Estate".
 export function titleCase(s) {
-  return s ? s.charAt(0).toUpperCase() + s.slice(1) : s;
+  if (!s) return s;
+  // Split on the separators category labels use, never on spaces: this also
+  // runs over free-text evidence, where only the first letter should change.
+  return String(s)
+    .split(/[-_]/)
+    .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+    .join(' ');
 }
 
 // 0.995 -> "99.5%", 0.3 -> "30%". Rounded to one decimal first: values

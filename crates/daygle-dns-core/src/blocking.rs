@@ -75,6 +75,12 @@ pub struct BlockingGroup {
     /// Services (by id, e.g. `tiktok`) whose domains the group blocks.
     #[serde(default)]
     pub blocked_services: Vec<String>,
+    /// AI content categories this group blocks (lowercase labels, e.g.
+    /// `gambling`, `ads`). The scanner only *labels* a domain; blocking a
+    /// label is an operator policy, scoped to these clients. Independent of
+    /// `ai_blocking`, which governs auto-blocking of detected threats.
+    #[serde(default)]
+    pub blocked_categories: Vec<String>,
     /// Ordering position (lower groups are evaluated first).
     pub position: i64,
     /// When the group was last created or edited through the console or API,
@@ -123,6 +129,8 @@ pub struct BlockingGroupInput {
     pub schedule: Vec<ScheduleWindow>,
     #[serde(default)]
     pub blocked_services: Vec<String>,
+    #[serde(default)]
+    pub blocked_categories: Vec<String>,
 }
 
 impl BlockingGroup {
@@ -144,6 +152,7 @@ impl BlockingGroup {
             youtube_restricted: self.youtube_restricted,
             schedule: self.schedule.clone(),
             blocked_services: self.blocked_services.clone(),
+            blocked_categories: self.blocked_categories.clone(),
         }
     }
 }

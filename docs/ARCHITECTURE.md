@@ -228,37 +228,68 @@ same path for per-source status.
 A CPU-only background classifier over domains observed in the query log.
 Opt-in via `[ai] enabled = true`; the DNS hot path nevers runs a model.
 
+- **Two channels.** The subsystem does two different jobs, and they are
+  separate passes rather than one label that has to serve both:
+  `Channel::Content` categorizes (`news`, `shopping`, ...) and stores a
+  label only, and `Channel::Threat` looks only for the labels in
+  `ai.auto_block_categories` and is the only channel that can block on its
+  own. Each
+  has its own model (`ai.category_model_path` / `ai.threat_model_path`,
+  falling back to `ai.model_path`), its own confidence floor
+  (`ai.category_confidence_floor` / `ai.confidence_floor`) and its own
+  verdict TTL (`ai.category_ttl_secs` / `ai.threat_ttl_secs`).
+  `channel::ChannelBackend` is what scopes a classifier to one job; a
+  single model can still drive both channels.
 - **Backends.** A [`DomainClassifier`] trait abstracts the model: the
   built-in `HeuristicBackend` (zero-model keyword tables, deliberately
   low-confidence so it can never auto-block on its own) and the
   `FastTextBackend` (supervised fastText `.bin` models trained out of
   process - labels like `__label__malware`). Backends compose: the optional
-  MiniLM/ONNX verifier (`verifier-onnx` feature, wrapping an inner
-  classifier with `verify.rs` and the ONNX runtime in
-  `verifier_onnx.rs`) re-checks the inner classifier's *threat* verdicts
-  against an embedding-distance reference set (cosine threshold
-  `ai.verifier_threshold`, default 0.35): corroboration raises confidence,
-  a disagreement downgrades the verdict to severity `disputed` (kept in the
-  console, never auto-blocked), and a tie-out below threshold leaves the
-  base verdict `unverified`.
+  MiniLM/ONNX verifier (`verifier-onnx` feature, wrapping the threat
+  channel with `verify.rs` and the ONNX runtime in `verifier_onnx.rs`)
+  re-checks threat verdicts against an embedding-distance reference set
+  (cosine threshold `ai.verifier_threshold`, default 0.35): corroboration
+  raises confidence, a disagreement downgrades the verdict to severity
+  `disputed` (kept in the console, never auto-blocked), and a tie-out below
+  threshold leaves the base verdict `unverified`. The categorizer is never
+  verified: it decides nothing.
 - **Scanner.** Every `scan_interval_secs`, a worker harvests new domains
   via `ZoneStore::distinct_recent_query_names`, normalizes them, classifies
-  each one, and writes verdicts into a **separate** SQLite database
-  (`ai.db` beside the zone database by default): category, severity,
-  confidence, backend, evidence, observation counter, and an expiry
-  timestamp (`category_ttl_secs` for content categories,
-  `threat_ttl_secs` for threats). Expired verdicts re-enter `pending` and
-  are re-classified; categories never carry over, so a site that changed
-  gets re-judged. Off the DNS path entirely: the classifier only runs on
-  the scan cycle.
-- **Enforcement.** The `AiBlockPlugin` (a `PolicyPlugin` registered last in
-  the engine) consults a pre-built, atomically-swapped block snapshot
-  (`ArcSwap<HashMap<domain, block>>`). In `train` mode the snapshot stays
-  empty and nothing blocks; in `enforce` mode it contains fresh verdicts
-  (disputed ones excluded) in the configured `auto_block_categories` that
-  meet `block_threshold` - any labellable category, not only threats. The plugin suffix-matches at label boundaries (a
-  verdict on `bad.example.com` also blocks `www.bad.example.com`) and
-  returns NXDOMAIN via `Action::Block`, tagged with group `ai`.
+  each one **once per channel**, and writes verdicts into a **separate**
+  SQLite database (`ai.db` beside the zone database by default). A row is
+  one channel's verdict for one domain (PRIMARY KEY `(domain, channel)`):
+  category, severity, confidence, backend, evidence, observation counter
+  and an expiry from that channel's TTL. Expired verdicts re-enter
+  `pending` and are re-classified; categories never carry over, so a site
+  that changed gets re-judged. Off the DNS path entirely: the classifier
+  only runs on the scan cycle. A database from before the split is
+  upgraded in place: the old verdict lands in the channel its severity
+  implies (so nothing stops blocking) and the other channel is queued.
+- **Enforcement (threats).** The `AiBlockPlugin` (a `PolicyPlugin`
+  registered last in the engine) consults a pre-built, atomically-swapped
+  block snapshot (`ArcSwap<HashMap<domain, block>>`). In `train` mode the
+  snapshot stays empty and nothing blocks; in `enforce` mode it contains
+  fresh *threat-channel* verdicts (disputed ones excluded) whose category is
+  in `auto_block_categories` and whose confidence meets `block_threshold`.
+  Content-channel rows never reach this snapshot, whatever they are called.
+  The plugin suffix-matches at label boundaries (a verdict on
+  `bad.example.com` also blocks `www.bad.example.com`) and returns
+  NXDOMAIN via `Action::Block`, tagged with group `ai`.
+- **Category blocking (operator policy).** The same plugin also consults a
+  second, independently-published snapshot mapping each domain to its
+  current *content* category. A client group's `blocked_categories` list
+  (console: Filtering → Client Groups) names the categories that group
+  blocks, so the same label can block for a kids' network and be ignored
+  everywhere else. This is an operator rule over a label, not a verdict the
+  AI acted on: it applies in **both** train and enforce mode, and `ai.mode`
+  only governs auto-blocking of detected threats. Clients in no group block
+  no categories; the first enabled group that covers a client decides, the
+  same rule `ai_blocking` uses. Snapshot build applies operator relabels
+  and drops domains an `allow` override exempts.
+- **Relabelling.** `POST /api/ai/override` with `action: "category"` stores
+  an operator label in `ai_category_overrides`; it is shown instead of the
+  model's label and is what category blocking matches, while the scanner
+  keeps classifying (and re-checking) the domain. `clear_category` drops it.
 - **Operator precedence.** The engine evaluates the user allowlist and
   operator blocklists *before* plugins, and `ai_overrides` rows (the
   `allow` action of `POST /api/ai/override`) are filtered out at snapshot

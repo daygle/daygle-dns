@@ -1411,35 +1411,48 @@ GET  /api/ai/status
 GET  /api/ai/verdicts?status=classified&category=phish&severity=threat&exemption=not_exempt&q=example&page=1&per_page=50
 GET  /api/ai/threats?category=phish&severity=threat&exemption=not_exempt&q=example&page=1&per_page=50
 GET  /api/ai/overrides
-POST /api/ai/override          {"domain": "x.example", "action": "allow|clear", "reason": "..."}
+POST /api/ai/override          {"domain": "x.example", "action": "allow|clear|category|clear_category", "category": "gambling", "reason": "..."}
 POST /api/ai/rescan
 GET  /api/ai/model-status
 POST /api/ai/update-models
 ```
 
-Available when `[ai] enabled = true`. `GET /api/ai/status` reports the mode
-(`train`/`enforce`), the classification pipeline actually running
-(`backend`: `heuristic`, `fasttext` or `fasttext+minilm-onnx`; a configured
-model file that is missing falls back to `heuristic`), workers, intervals,
-TTLs and thresholds, per-status verdict counts, `blockable_counts` (domains
-that qualify for auto-blocking, by category: blocked in enforce mode, what
-would be blocked in train mode) and the current block-snapshot size.
+Available when `[ai] enabled = true`. The scanner runs two independent
+channels: `content` categorizes sites (`news`, `shopping`, ...) and stores a
+label only, `threat` looks only for `ai.auto_block_categories` and is the
+only channel that can block on its own. Each channel has its own model,
+confidence floor and verdict TTL. Blocking a *content* category is an
+operator rule on a client group (`blocked_categories`, see Advanced
+blocking) - the label comes from the scanner, the decision does not.
 
-A domain qualifies for auto-blocking when its current verdict is in one of
-`ai.auto_block_categories` (any category, not only threats) with a
-confidence at or above `ai.block_threshold`, and neither it nor a parent
-domain is exempt. A threat verdict the MiniLM verifier disagreed with
-(severity `disputed`, decided at `ai.verifier_threshold`) never qualifies.
+`GET /api/ai/status` reports the mode (`train`/`enforce`), the pipelines
+actually running (`backend`, plus `content_backend` and `threat_backend`
+individually: `heuristic`, `fasttext` or `fasttext+minilm-onnx`; a
+configured model file that is missing falls back to `heuristic`), workers,
+intervals, TTLs and thresholds (`confidence_floor` is the threat channel's,
+`category_confidence_floor` the categorizer's), per-status domain counts,
+`blockable_counts` (domains that qualify for auto-blocking, by category:
+blocked in enforce mode, what would be blocked in train mode) and the
+current block-snapshot size.
+
+A domain qualifies for auto-blocking when its *threat-channel* verdict is in
+one of `ai.auto_block_categories` with a confidence at or above
+`ai.block_threshold`, and neither it nor a parent domain is exempt. A
+content-channel verdict never qualifies, whatever it is called. A threat
+verdict the MiniLM verifier disagreed with (severity `disputed`, decided at
+`ai.verifier_threshold`) never qualifies.
 The built-in heuristic rules score at most 0.35, so they never auto-block on
 their own. Only internet names are classified: single-label names, reverse
 lookups, local-only suffixes (`.local`, `.home.arpa`, `.internal`, `.lan`,
 ...) and names in zones this server hosts are skipped.
 
-`GET /api/ai/verdicts` pages through the verdict store, most recently
+`GET /api/ai/verdicts` pages through the categorizer's verdicts (`channel`
+defaults to `content`; `channel=threat` shows the threat channel, which
+`/api/ai/threats` presents), most recently
 classified first (pending rows last), optionally filtered by `status`
 (`pending`/`classified`/`skipped`), category substring `category`, severity
 (`info`/`threat`/`disputed`), exemption (`exempt`/`not_exempt`), and domain
-substring `q`: domain,
+substring `q`: domain, channel,
 category, severity, status, confidence, backend, evidence, observation count
 (scan cycles the domain appeared in), `overridden` (the domain is exempt) and
 `classified_at`/`expires_at` in RFC 3339 (at expiry the verdict is
@@ -1467,6 +1480,12 @@ means the update began; poll `GET /api/ai/model-status` until `done`/`error`.
 `POST /api/ai/override` with `action: "allow"` exempts a domain and its
 subdomains from AI blocking; `clear` removes the exemption (`404` when there
 is none). `GET /api/ai/overrides` lists the exemptions, newest first.
+`action: "category"` relabels the domain with `category` (one of the
+labels reported in `backend_categories`; `400` otherwise, with the known
+list), and `clear_category` drops the relabel (`404` when there is none).
+A relabel is shown and filtered instead of the model's label, survives
+re-scans, and is what category blocking matches; the row also carries
+`category_overridden` so the console can mark it.
 `POST /api/ai/rescan` wakes the scanner for one immediate cycle.
 
 All of these return `404` when the AI subsystem is disabled.
@@ -1514,6 +1533,13 @@ group blocks: every domain the service uses, and its subdomains (`400` for
 an unknown id; ids are stored in their canonical form). `GET
 /api/policy/services` returns the catalog: `{"services": [{"id", "name",
 "category", "domains"}]}`. The group's `allow` list still wins.
+`blocked_categories` lists AI content categories (lowercase labels, e.g.
+`["gambling", "ads"]`; the model's own labels as reported by
+`GET /api/ai/status`'s `backend_categories`) whose domains the group
+blocks, subdomains included. It is independent of `ai_blocking`: the AI
+scanner only supplies the label, so this applies in both `train` and
+`enforce` mode, while `ai_blocking` governs auto-blocking of detected
+threats. The group's `allow` list and any AI exemption still win.
 `schedule` limits when the group applies: a list of
 `{"days": ["mon", "fri"], "start": "21:00", "end": "07:00"}` windows
 (`days` from `mon`..`sun`, full names accepted, empty for every day; times

@@ -1207,6 +1207,9 @@ pub struct AiVerdictsQuery {
     severity: Option<String>,
     /// Optional exemption filter (`exempt`, `not_exempt`).
     exemption: Option<String>,
+    /// Optional channel filter (`content`, `threat`); defaults to `content`,
+    /// the categorization channel. The threat channel has its own endpoint.
+    channel: Option<String>,
     /// Optional domain substring search.
     q: Option<String>,
     page: Option<u32>,
@@ -1233,7 +1236,11 @@ pub struct AiThreatsQuery {
 pub struct AiOverrideBody {
     pub domain: String,
     /// `allow` installs an AI-exempt override; `clear` removes it.
+    /// `category` relabels the domain; `clear_category` drops the relabel.
     pub action: String,
+    /// The operator's label for `action = "category"`.
+    #[serde(default)]
+    pub category: String,
     /// Optional justification, shown in the console.
     #[serde(default)]
     pub reason: String,
@@ -1360,13 +1367,18 @@ pub async fn ai_status(State(state): State<AppState>) -> Response {
             daygle_dns_core::config::AiMode::Train => "train",
             daygle_dns_core::config::AiMode::Enforce => "enforce",
         },
-        // The pipeline actually running (a missing model file falls back to
-        // the heuristic rules whatever `model_path` says).
+        // The pipelines actually running, per channel (a missing model file
+        // falls back to the heuristic rules whatever the paths say).
         "backend": ai.backend_name(),
+        "content_backend": ai.content_backend_name(),
+        "threat_backend": ai.threat_backend_name(),
         "workers": settings.workers,
         "scan_interval_secs": settings.scan_interval_secs,
         "expire_check_secs": settings.expire_check_secs,
+        // `confidence_floor` is the threat channel's; categorizations use
+        // `category_confidence_floor`.
         "confidence_floor": settings.confidence_floor,
+        "category_confidence_floor": settings.category_confidence_floor,
         "category_ttl_secs": settings.category_ttl_secs,
         "threat_ttl_secs": settings.threat_ttl_secs,
         "block_threshold": settings.block_threshold,
@@ -1401,6 +1413,7 @@ pub async fn ai_verdicts(
         severity: query.severity.as_deref(),
         exemption: query.exemption.as_deref(),
         search: query.q.as_deref(),
+        channel: query.channel.as_deref(),
     };
     let page_bounds = daygle_dns_ml::store::VerdictPage {
         limit: per_page,
@@ -1412,6 +1425,7 @@ pub async fn ai_verdicts(
             axum::Json(serde_json::json!({
                 "entries": rows.iter().map(|r| serde_json::json!({
                     "domain": r.domain,
+                    "channel": r.channel,
                     "category": r.category,
                     "severity": r.severity,
                     "status": r.status,
@@ -1420,6 +1434,7 @@ pub async fn ai_verdicts(
                     "evidence": r.evidence,
                     "observations": r.observations,
                     "overridden": r.overridden,
+                    "category_overridden": r.category_overridden,
                     "classified_at": chrono::DateTime::<chrono::Utc>::from_timestamp(r.classified_at, 0)
                         .map(|t| t.to_rfc3339()),
                     "expires_at": chrono::DateTime::<chrono::Utc>::from_timestamp(r.expires_at, 0)
@@ -1469,6 +1484,7 @@ pub async fn ai_threats(
                 axum::Json(serde_json::json!({
                     "entries": rows.iter().map(|r| serde_json::json!({
                         "domain": r.domain,
+                        "channel": r.channel,
                         "category": r.category,
                         "severity": r.severity,
                         "status": r.status,
@@ -1549,6 +1565,49 @@ pub async fn ai_override(
             }
             Err(e) => map_err(e),
         },
+        "category" => {
+            let category = body.category.trim().to_ascii_lowercase();
+            let known = ai.backend_categories();
+            if !known.iter().any(|c| c.eq_ignore_ascii_case(&category)) {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({
+                        "error": format!("unknown category '{category}'"),
+                        "categories": known,
+                    })),
+                )
+                    .into_response();
+            }
+            match ai.set_category_override(&domain, &category) {
+                Ok(()) => {
+                    state.logs.push(
+                        daygle_dns_core::LogLevel::Info,
+                        "api",
+                        format!("AI category override: '{domain}' is now '{category}'"),
+                    );
+                    Json(serde_json::json!({"domain": domain, "action": "category", "category": category}))
+                        .into_response()
+                }
+                Err(e) => map_err(e),
+            }
+        }
+        "clear_category" => match ai.clear_category_override(&domain) {
+            Ok(true) => {
+                state.logs.push(
+                    daygle_dns_core::LogLevel::Info,
+                    "api",
+                    format!("AI category override cleared for '{domain}'"),
+                );
+                Json(serde_json::json!({"domain": domain, "action": "clear_category"}))
+                    .into_response()
+            }
+            Ok(false) => (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": "no category override exists"})),
+            )
+                .into_response(),
+            Err(e) => map_err(e),
+        },
         "clear" => match ai.clear_override(&domain) {
             Ok(true) => {
                 state.logs.push(
@@ -1568,7 +1627,9 @@ pub async fn ai_override(
         other => (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({
-                "error": format!("unknown action '{other}' (expected allow or clear)")
+                "error": format!(
+                    "unknown action '{other}' (expected allow, clear, category or clear_category)"
+                )
             })),
         )
             .into_response(),
@@ -3108,6 +3169,40 @@ pub async fn upsert_blocking_group(
         }
     }
     input.blocked_services = services;
+    // Blocked AI categories: lower-cased, once each, and only labels the
+    // loaded scanner can actually emit - a typo would otherwise be a rule
+    // that silently never matches.
+    let known_categories = ai_engine(&state)
+        .map(|ai| ai.backend_categories())
+        .unwrap_or_default();
+    let mut categories: Vec<String> = Vec::new();
+    for raw in &input.blocked_categories {
+        let category = raw.trim().to_ascii_lowercase();
+        if category.is_empty() {
+            continue;
+        }
+        if !known_categories
+            .iter()
+            .any(|known| known.eq_ignore_ascii_case(&category))
+        {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                format!(
+                    "'{raw}' is not a category the AI scanner can label{} - \
+                     blocking a category needs the scanner enabled with a model loaded",
+                    if known_categories.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" (known: {})", known_categories.join(", "))
+                    }
+                ),
+            );
+        }
+        if !categories.contains(&category) {
+            categories.push(category);
+        }
+    }
+    input.blocked_categories = categories;
     // Client networks are addresses or names of configured networks.
     let config = state.config.load_full();
     if let Some(entry) = input

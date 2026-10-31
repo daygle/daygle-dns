@@ -14,9 +14,12 @@ use daygle_dns_core::error::{DaygleError, Result};
 use crate::backend::{ClassificationInput, DomainClassifier, Severity, Verdict};
 
 /// Category names that a real model may emit which count as threats (as in
-/// the heuristic backend). Everything else is `info` severity. Severity sets
-/// the verdict TTL and which verdicts the verifier re-checks; whether a
-/// category auto-blocks is `ai.auto_block_categories`.
+/// the heuristic backend). Everything else is `info` severity here.
+///
+/// In the scanner this is overridden by the channel wrapper
+/// ([`crate::channel`]): the threat channel promotes exactly the categories
+/// in `ai.auto_block_categories`, and the content channel is always `info`.
+/// The mapping is kept for callers that run the backend on its own.
 const DEFAULT_THREAT_CATEGORIES: &[&str] = &["malware", "phishing"];
 
 /// fastText supervised classifier over a trained `.bin` model.

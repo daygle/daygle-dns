@@ -2,6 +2,11 @@
 //! classifies them off the DNS hot path, persists verdicts with TTLs, and
 //! publishes the block snapshot the policy plugin consults.
 //!
+//! Every domain is classified **twice, independently**: once by the content
+//! categorizer and once by the threat detector ([`Channel`]). Each channel has
+//! its own backend, confidence floor and verdict TTL, and only the threat
+//! channel can auto-block - a categorization is information, not a decision.
+//!
 //! Everything here runs at scan-cycle cadence (default every 5 min) on
 //! `workers` blocking threads; DNS latency is never touched. Expiry follows
 //! the "verdicts age out" design: every `expire_check_secs`, expired
@@ -21,7 +26,7 @@ use daygle_dns_core::LogStore;
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
-use crate::backend::{ClassificationInput, DomainClassifier, Severity, Verdict};
+use crate::backend::{Channel, ClassificationInput, DomainClassifier, Severity, Verdict};
 use crate::store::{AiStore, NewVerdict};
 
 /// A domain currently auto-blocked in `enforce` mode.
@@ -35,12 +40,29 @@ pub struct ActiveBlock {
 /// every override change, so the policy plugin's hot path is one map lookup.
 pub type BlockSnapshot = HashMap<String, ActiveBlock>;
 
+/// A domain's current content category, with the expiry of the verdict it
+/// came from (or `i64::MAX` for an operator relabel, which has no TTL).
+#[derive(Debug, Clone)]
+pub struct ActiveCategory {
+    pub category: String,
+    pub expires_at: i64,
+}
+
+/// Domain → content category. This is what "block category X" matches
+/// against: the scanner only labels, the operator's policy decides.
+pub type CategorySnapshot = HashMap<String, ActiveCategory>;
+
 /// Shared scanner handles (also handed to the policy plugin and API).
 pub struct Scanner {
     store: Arc<AiStore>,
-    classifier: Box<dyn DomainClassifier + Send + Sync>,
+    /// Content categorization: labels sites, never blocks.
+    content: Box<dyn DomainClassifier + Send + Sync>,
+    /// Threat detection: the only channel that feeds the block snapshot.
+    threat: Box<dyn DomainClassifier + Send + Sync>,
     settings: Arc<ArcSwap<AiSettings>>,
     snapshot: Arc<ArcSwap<BlockSnapshot>>,
+    /// Domain → content category, for per-group category blocking.
+    categories: Arc<ArcSwap<CategorySnapshot>>,
     logs: Arc<LogStore>,
     /// Wakes the scan loop for an immediate cycle (rescan API, settings
     /// changes).
@@ -56,18 +78,24 @@ pub struct Scanner {
 }
 
 impl Scanner {
+    /// Build a scanner over the two channel backends (seen
+    /// [`crate::channel::ChannelBackend`]).
     pub fn new(
         store: Arc<AiStore>,
-        classifier: Box<dyn DomainClassifier + Send + Sync>,
+        content: Box<dyn DomainClassifier + Send + Sync>,
+        threat: Box<dyn DomainClassifier + Send + Sync>,
         settings: Arc<ArcSwap<AiSettings>>,
         snapshot: Arc<ArcSwap<BlockSnapshot>>,
+        categories: Arc<ArcSwap<CategorySnapshot>>,
         logs: Arc<LogStore>,
     ) -> Arc<Self> {
         Arc::new(Self {
             store,
-            classifier,
+            content,
+            threat,
             settings,
             snapshot,
+            categories,
             logs,
             rescan_notify: Arc::new(Notify::new()),
             last_expiry: AtomicI64::new(0),
@@ -86,9 +114,11 @@ impl Scanner {
 
     /// One scan cycle: re-queue expired verdicts (every
     /// `expire_check_secs`), record the domains queried since `since_epoch`,
-    /// classify every pending domain (new, re-queued or left over), and
-    /// refresh the block snapshot. Returns the number of domains classified
-    /// (above the confidence floor). Public so tests drive cycles directly.
+    /// classify every pending `(domain, channel)` pair (new, re-queued or left
+    /// over), and refresh the block snapshot. Returns the number of verdicts
+    /// recorded above the confidence floor - one per channel per domain, so
+    /// up to twice the number of domains. Public so tests drive cycles
+    /// directly.
     pub fn run_cycle(
         &self,
         since_epoch: i64,
@@ -131,26 +161,30 @@ impl Scanner {
         let verdicts = self.classify_all(&pending, cfg.workers);
         let mut classified = 0usize;
         let mut skipped = 0usize;
-        let backend = self.classifier.name().to_string();
         let rows: Vec<NewVerdict> = pending
             .iter()
             .zip(verdicts)
-            .map(|(name, verdict)| {
-                let (verdict, status, ttl) = match verdict {
-                    None => (None, "skipped", cfg.category_ttl_secs),
-                    Some(v) if v.confidence < cfg.confidence_floor => {
-                        (Some(v), "skipped", cfg.category_ttl_secs)
-                    }
-                    Some(v) => {
-                        // Threats, disputed ones included, are re-checked
-                        // on the shorter threat schedule.
-                        let ttl = if v.severity == Severity::Info {
-                            cfg.category_ttl_secs
-                        } else {
-                            cfg.threat_ttl_secs
-                        };
-                        (Some(v), "classified", ttl)
-                    }
+            .map(|((name, channel), verdict)| {
+                // Each channel carries its own floor and TTL: a floor
+                // tightened for threat precision must not blank out ordinary
+                // categorizations, and a threat is re-checked on a shorter
+                // schedule than a content label.
+                let (floor, ttl, backend) = match channel {
+                    Channel::Content => (
+                        cfg.category_confidence_floor,
+                        cfg.category_ttl_secs,
+                        self.content.name(),
+                    ),
+                    Channel::Threat => (
+                        cfg.confidence_floor,
+                        cfg.threat_ttl_secs,
+                        self.threat.name(),
+                    ),
+                };
+                let (verdict, status) = match verdict {
+                    None => (None, "skipped"),
+                    Some(v) if v.confidence < floor => (Some(v), "skipped"),
+                    Some(v) => (Some(v), "classified"),
                 };
                 if status == "classified" {
                     classified += 1;
@@ -159,6 +193,7 @@ impl Scanner {
                 }
                 NewVerdict {
                     domain: name.clone(),
+                    channel: *channel,
                     category: verdict
                         .as_ref()
                         .map(|v| v.category.clone())
@@ -169,7 +204,7 @@ impl Scanner {
                         .unwrap_or_default(),
                     status: status.to_string(),
                     confidence: verdict.as_ref().map_or(0.0, |v| v.confidence),
-                    backend: backend.clone(),
+                    backend: backend.to_string(),
                     evidence: verdict
                         .map(|v| v.evidence)
                         .unwrap_or_else(|| "no signal".to_string()),
@@ -179,9 +214,10 @@ impl Scanner {
             .collect();
         self.store.save_verdicts(&rows)?;
         if !pending.is_empty() {
+            let domains: HashSet<&str> = pending.iter().map(|(d, _)| d.as_str()).collect();
             self.log_info(format!(
-                "AI scanned {} domain(s): {classified} classified, {skipped} skipped",
-                pending.len()
+                "AI scanned {} domain(s) on both channels: {classified} classified, {skipped} skipped",
+                domains.len()
             ));
         }
 
@@ -190,24 +226,29 @@ impl Scanner {
         Ok(classified)
     }
 
-    /// Classify `domains` on up to `workers` threads, keeping their order:
-    /// result `i` is always domain `i`'s.
-    fn classify_all(&self, domains: &[String], workers: u32) -> Vec<Option<Verdict>> {
-        let classify_part = |part: &[String]| -> Vec<Option<Verdict>> {
+    /// Classify every pending `(domain, channel)` pair on up to `workers`
+    /// threads, keeping their order: result `i` is always pair `i`'s, so a
+    /// chunked worker can never shift one domain's verdict onto another. Each
+    /// pair goes to its own channel's backend.
+    fn classify_all(&self, pending: &[(String, Channel)], workers: u32) -> Vec<Option<Verdict>> {
+        let classify_part = |part: &[(String, Channel)]| -> Vec<Option<Verdict>> {
             part.iter()
-                .map(|d| {
-                    self.classifier
-                        .classify(&ClassificationInput::domain_only(d.clone()))
+                .map(|(domain, channel)| {
+                    let backend: &dyn DomainClassifier = match channel {
+                        Channel::Content => self.content.as_ref(),
+                        Channel::Threat => self.threat.as_ref(),
+                    };
+                    backend.classify(&ClassificationInput::domain_only(domain.clone()))
                 })
                 .collect()
         };
-        let workers = (workers.clamp(1, 32) as usize).min(domains.len().max(1));
+        let workers = (workers.clamp(1, 32) as usize).min(pending.len().max(1));
         if workers == 1 {
-            return classify_part(domains);
+            return classify_part(pending);
         }
-        let chunk = domains.len().div_ceil(workers);
+        let chunk = pending.len().div_ceil(workers);
         std::thread::scope(|scope| {
-            let handles: Vec<_> = domains
+            let handles: Vec<_> = pending
                 .chunks(chunk)
                 .map(|part| (part.len(), scope.spawn(move || classify_part(part))))
                 .collect();
@@ -228,15 +269,40 @@ impl Scanner {
         })
     }
 
-    /// The backend recorded on verdicts (e.g. `heuristic`, `fasttext`,
-    /// `fasttext+minilm-onnx`).
-    pub fn backend_name(&self) -> &str {
-        self.classifier.name()
+    /// Both channels' pipelines, for the status endpoint: the bare name when
+    /// they run the same pipeline, else one per channel (e.g. `fasttext
+    /// (categories) / fasttext+minilm-onnx (threats)`).
+    pub fn backend_name(&self) -> String {
+        let (content, threat) = (self.content.name(), self.threat.name());
+        if content == threat {
+            content.to_string()
+        } else {
+            format!("{content} (categories) / {threat} (threats)")
+        }
     }
 
-    /// Categories the loaded backend can emit, for console pickers.
+    /// The content-categorization pipeline actually running.
+    pub fn content_backend_name(&self) -> &str {
+        self.content.name()
+    }
+
+    /// The threat-detection pipeline actually running (verifier included).
+    pub fn threat_backend_name(&self) -> &str {
+        self.threat.name()
+    }
+
+    /// Every label either channel can emit, for console pickers (the verdict
+    /// page filters content labels, the auto-block list offers threat ones).
     pub fn categories(&self) -> Vec<String> {
-        self.classifier.categories()
+        let mut all: Vec<String> = self
+            .content
+            .categories()
+            .into_iter()
+            .chain(self.threat.categories())
+            .collect();
+        all.sort();
+        all.dedup();
+        all
     }
 
     /// The domains that qualify for auto-blocking right now: fresh verdicts
@@ -261,11 +327,52 @@ impl Scanner {
         Ok(eligible)
     }
 
+    /// The domain → category map published for category blocking: fresh
+    /// content verdicts, relabelled by any operator override, minus domains
+    /// an allow override exempts. A relabel also stands on its own, so an
+    /// operator can categorize a domain the model has not got to yet.
+    pub fn eligible_categories(&self, now: i64) -> Result<CategorySnapshot> {
+        let overrides = self.store.allow_overrides()?;
+        let relabels = self.store.category_overrides()?;
+        let mut snapshot = CategorySnapshot::new();
+        for (domain, category, expires_at) in self.store.fresh_categories(now)? {
+            if exempt(&domain, &overrides) {
+                continue;
+            }
+            let category = relabels.get(&domain).cloned().unwrap_or(category);
+            snapshot.insert(
+                domain,
+                ActiveCategory {
+                    category,
+                    expires_at,
+                },
+            );
+        }
+        for (domain, category) in &relabels {
+            if exempt(domain, &overrides) {
+                continue;
+            }
+            snapshot
+                .entry(domain.clone())
+                .or_insert_with(|| ActiveCategory {
+                    category: category.clone(),
+                    expires_at: i64::MAX,
+                });
+        }
+        Ok(snapshot)
+    }
+
     /// Force-swap the block snapshot from the current store contents. Used
     /// by the scanner after each cycle and by operators after an override
     /// or settings change; enforce mode => populated, train mode => empty.
+    /// The category snapshot is published in both modes: blocking a category
+    /// is the operator's rule, not a verdict the AI acted on.
     pub fn refresh_snapshot(&self, cfg: &AiSettings, now: i64) {
         let _publishing = self.publishing.lock().unwrap_or_else(|e| e.into_inner());
+        match self.eligible_categories(now) {
+            Ok(categories) => self.categories.store(Arc::new(categories)),
+            Err(e) => self.log_warn(format!("AI category snapshot refresh failed: {e}")),
+        }
         let snapshot = if cfg.mode == AiMode::Enforce {
             match self.eligible_blocks(cfg, now) {
                 Ok(eligible) => eligible,

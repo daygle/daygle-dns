@@ -9,28 +9,37 @@
 //!
 //! | Module                      | Role |
 //! |-----------------------------|------|
-//! | [`backend`]                 | the pluggable classifier trait |
+//! | [`backend`]                 | the pluggable classifier trait and its two [`backend::Channel`]s |
+//! | [`channel`]                 | scopes a classifier to one job (categorize, or detect threats) |
 //! | [`heuristic`]               | zero-model keyword fallback |
 //! | [`fasttext_backend`]        | supervised fastText `.bin` models |
 //! | [`store`]                   | SQLite verdict + override store |
-//! | [`scanner`]                 | background worker, block snapshot |
+//! | [`scanner`]                 | background worker, block + category snapshots |
 //! | [`plugin`]                  | the policy engine integration |
 //!
 //! Design guards:
 //!
-//! 1. **Never on the DNS hot path.** The plugin consults a pre-built,
+//! 1. **Two jobs, two channels.** Categorization and threat detection are
+//!    separate passes (`Channel::Content` / `Channel::Threat`), each with its
+//!    own model, confidence floor and verdict TTL. Only the threat channel
+//!    feeds the auto-block snapshot; content labels feed the category
+//!    snapshot instead, which is only read by per-group category policy. So
+//!    a label never blocks by itself, and a blocked category is always an
+//!    operator rule over a label.
+//! 2. **Never on the DNS hot path.** The plugin consults a pre-built,
 //!    atomically-swapped map; the classifier itself only runs on the
 //!    background scan cycle.
-//! 2. **Train-first.** The default `AiMode::Train` records verdicts only -
+//! 3. **Train-first.** The default `AiMode::Train` records verdicts only -
 //!    flipping to enforce is a deliberate operator action.
-//! 3. **Operator overrides always win.** The user's allowlist is checked
+//! 4. **Operator overrides always win.** The user's allowlist is checked
 //!    by the policy engine *before* plugins, and `ai_overrides` rows veto
 //!    individual verdicts at snapshot build time.
-//! 4. **Expiry means re-check, not stale blocking.** Verdicts carry TTLs;
+//! 5. **Expiry means re-check, not stale blocking.** Verdicts carry TTLs;
 //!    expired verdicts re-enter the scan queue and drop out of the block
 //!    snapshot until a fresh classification exists.
 
 pub mod backend;
+pub mod channel;
 pub mod fasttext_backend;
 pub mod heuristic;
 pub mod plugin;
@@ -50,8 +59,8 @@ use daygle_dns_core::error::{DaygleError, Result};
 use daygle_dns_core::LogStore;
 use tokio_util::sync::CancellationToken;
 
-use crate::backend::DomainClassifier;
-use crate::scanner::{BlockSnapshot, Scanner};
+use crate::backend::{Channel, DomainClassifier};
+use crate::scanner::{BlockSnapshot, CategorySnapshot, Scanner};
 use crate::store::AiStore;
 use std::path::Path;
 
@@ -61,6 +70,7 @@ pub struct AiEngine {
     pub scanner: Arc<Scanner>,
     pub settings: Arc<ArcSwap<AiSettings>>,
     snapshot: Arc<ArcSwap<BlockSnapshot>>,
+    categories: Arc<ArcSwap<CategorySnapshot>>,
     plugin: Arc<plugin::AiBlockPlugin>,
     query_store: Arc<daygle_dns_authoritative::ZoneStore>,
 }
@@ -78,93 +88,58 @@ impl AiEngine {
     ) -> Result<Arc<Self>> {
         let database_path = database_path(settings, authoritative_database);
         let store = Arc::new(AiStore::open(&database_path)?);
+        // Live settings, shared by the scanner, the plugin and the threat
+        // channel's category list, so editing `auto_block_categories` takes
+        // effect without a restart.
+        let settings_swap = Arc::new(ArcSwap::from_pointee(settings.clone()));
 
-        // Backend selection: trained model when configured, heuristics
-        // otherwise. A configured-but-corrupt model is a startup error (fail
-        // fast) rather than a silent downgrade. A configured-but-*missing*
-        // model file only degrades to the heuristic backend (with a log line)
-        // so installs stay alive if the bundled model was moved or deleted.
-        let classifier: Box<dyn DomainClassifier + Send + Sync> =
-            if settings.model_path.trim().is_empty() {
-                Box::new(heuristic::HeuristicBackend)
-            } else if !Path::new(settings.model_path.trim()).is_file() {
-                logs.push(
-                    daygle_dns_core::LogLevel::Warn,
-                    "ai",
-                    format!(
-                        "AI model '{}' not found on disk; using the built-in heuristic backend",
-                        settings.model_path
-                    ),
-                );
-                Box::new(heuristic::HeuristicBackend)
-            } else {
-                Box::new(fasttext_backend::FastTextBackend::load(
-                    &settings.model_path,
-                )?)
-            };
+        // One model per channel: each channel uses its own path when
+        // configured and falls back to the shared `ai.model_path`, so a
+        // deployment can run a wide categorizer and a narrow, high-precision
+        // threat detector side by side - or one model for both.
+        let content_model_path =
+            resolve_model_path(&settings.category_model_path, &settings.model_path);
+        let threat_model_path =
+            resolve_model_path(&settings.threat_model_path, &settings.model_path);
 
-        // Optional verifying second pass (feature-gated): threat verdicts
-        // from the primary classifier get re-checked against the bundled
-        // MiniLM/ONNX embedding verifier. A load failure degrades gracefully
-        // to the primary classifier - it never disables the AI subsystem.
+        let content: Box<dyn DomainClassifier + Send + Sync> =
+            Box::new(channel::ChannelBackend::content(load_primary(
+                content_model_path,
+                Channel::Content,
+                &logs,
+            )?));
+        let threat: Box<dyn DomainClassifier + Send + Sync> =
+            Box::new(channel::ChannelBackend::threat(
+                load_primary(threat_model_path, Channel::Threat, &logs)?,
+                settings_swap.clone(),
+            ));
+
+        // The verifier second-checks the threat channel only: categorization
+        // needs no second opinion, and a content label never blocks. A load
+        // failure degrades to the primary classifier - it never disables the
+        // AI subsystem.
         #[cfg(feature = "verifier-onnx")]
-        let classifier: Box<dyn DomainClassifier + Send + Sync> = if !settings
-            .verifier_model_path
-            .trim()
-            .is_empty()
-        {
-            match verifier_onnx::MiniLmVerifier::load(
-                &settings.verifier_model_path,
-                if settings.verifier_reference_path.trim().is_empty() {
-                    None
-                } else {
-                    Some(settings.verifier_reference_path.as_str())
-                },
-            ) {
-                Ok(verifier) => {
-                    let log = logs.clone();
-                    log.push(
-                        daygle_dns_core::LogLevel::Info,
-                        "ai",
-                        format!(
-                            "AI verifier active: MiniLM model '{}' corroborates threat verdicts",
-                            settings.verifier_model_path
-                        ),
-                    );
-                    Box::new(verify::VerifyingBackend::new(
-                        classifier,
-                        verifier,
-                        settings.verifier_threshold,
-                    ))
-                }
-                Err(e) => {
-                    logs.push(
-                            daygle_dns_core::LogLevel::Warn,
-                            "ai",
-                            format!("MiniLM verifier not loaded ({e}); threat verdicts rely on the primary classifier only"),
-                        );
-                    classifier
-                }
-            }
-        } else {
-            classifier
-        };
+        let threat = wrap_verifier(threat, settings, &logs);
 
-        let settings = Arc::new(ArcSwap::from_pointee(settings.clone()));
         let snapshot = Arc::new(ArcSwap::from_pointee(BlockSnapshot::new()));
+        let categories = Arc::new(ArcSwap::from_pointee(CategorySnapshot::new()));
         let scanner = Scanner::new(
             store.clone(),
-            classifier,
-            settings.clone(),
+            content,
+            threat,
+            settings_swap.clone(),
             snapshot.clone(),
+            categories.clone(),
             logs.clone(),
         );
-        let plugin = plugin::AiBlockPlugin::new(snapshot.clone(), settings.clone());
+        let plugin =
+            plugin::AiBlockPlugin::new(snapshot.clone(), categories.clone(), settings_swap.clone());
         Ok(Arc::new(Self {
             store,
             scanner,
-            settings,
+            settings: settings_swap,
             snapshot,
+            categories,
             plugin,
             query_store,
         }))
@@ -186,11 +161,28 @@ impl AiEngine {
         self.scanner.rescan_notify.notify_one();
     }
 
-    /// Add an `allow` override and refresh the block snapshot immediately.
+    /// Add an `allow` override and refresh the snapshots immediately.
     pub fn set_allow_override(&self, domain: &str, reason: &str) -> Result<()> {
         self.store.set_override(domain, "allow", reason)?;
         self.refresh_snapshot_now();
         Ok(())
+    }
+
+    /// Relabel `domain` as `category` for the console and category blocking.
+    /// The scanner keeps classifying it; the operator's label wins.
+    pub fn set_category_override(&self, domain: &str, category: &str) -> Result<()> {
+        self.store.set_category_override(domain, category)?;
+        self.refresh_snapshot_now();
+        Ok(())
+    }
+
+    /// Drop a category relabel, so the model's label applies again.
+    pub fn clear_category_override(&self, domain: &str) -> Result<bool> {
+        let existed = self.store.clear_category_override(domain)?;
+        if existed {
+            self.refresh_snapshot_now();
+        }
+        Ok(existed)
     }
 
     /// Drop an override and refresh the block snapshot immediately.
@@ -230,11 +222,28 @@ impl AiEngine {
         self.snapshot.clone()
     }
 
-    /// The classification pipeline actually running (e.g. `heuristic`,
-    /// `fasttext`, `fasttext+minilm-onnx`): a missing model file falls back
-    /// to `heuristic`, whatever the settings say.
+    /// Snapshot accessor for the category snapshot (tests and diagnostics).
+    pub fn category_snapshot(&self) -> Arc<ArcSwap<CategorySnapshot>> {
+        self.categories.clone()
+    }
+
+    /// The pipelines actually running, one per channel (e.g.
+    /// `fasttext (categories) / fasttext+minilm-onnx (threats)`); both
+    /// channels collapse to the bare name when they run the same pipeline. A
+    /// missing model file falls back to `heuristic`, whatever the settings
+    /// say.
     pub fn backend_name(&self) -> String {
-        self.scanner.backend_name().to_string()
+        self.scanner.backend_name()
+    }
+
+    /// The content-categorization pipeline actually running.
+    pub fn content_backend_name(&self) -> &str {
+        self.scanner.content_backend_name()
+    }
+
+    /// The threat-detection pipeline actually running (verifier included).
+    pub fn threat_backend_name(&self) -> &str {
+        self.scanner.threat_backend_name()
     }
 
     /// Domains that qualify for auto-blocking now, counted by category:
@@ -256,6 +265,88 @@ impl AiEngine {
     /// rules), for the console's auto-block category picker.
     pub fn backend_categories(&self) -> Vec<String> {
         self.scanner.categories()
+    }
+}
+
+/// Resolve a channel's model path: its own when configured, else the shared
+/// `ai.model_path`.
+fn resolve_model_path<'a>(channel_path: &'a str, shared_path: &'a str) -> &'a str {
+    if channel_path.trim().is_empty() {
+        shared_path
+    } else {
+        channel_path
+    }
+}
+
+/// Load a channel's primary classifier: the configured model, or the
+/// zero-model heuristic rules.
+///
+/// A configured-but-corrupt model is a startup error (fail fast) rather than a
+/// silent downgrade. A configured-but-*missing* file only degrades that channel
+/// to the heuristic backend (with a log line naming the channel), so installs
+/// stay alive if a bundled model was moved or deleted.
+fn load_primary(
+    model_path: &str,
+    channel: Channel,
+    logs: &Arc<LogStore>,
+) -> Result<Box<dyn DomainClassifier + Send + Sync>> {
+    let path = model_path.trim();
+    if path.is_empty() {
+        return Ok(Box::new(heuristic::HeuristicBackend));
+    }
+    if !Path::new(path).is_file() {
+        logs.push(
+            daygle_dns_core::LogLevel::Warn,
+            "ai",
+            format!(
+                "AI {} model '{path}' not found on disk; using the built-in heuristic backend",
+                channel.as_str()
+            ),
+        );
+        return Ok(Box::new(heuristic::HeuristicBackend));
+    }
+    Ok(Box::new(fasttext_backend::FastTextBackend::load(path)?))
+}
+
+/// Wrap the threat channel in the MiniLM/ONNX verifier when one is configured.
+#[cfg(feature = "verifier-onnx")]
+fn wrap_verifier(
+    inner: Box<dyn DomainClassifier + Send + Sync>,
+    settings: &AiSettings,
+    logs: &Arc<LogStore>,
+) -> Box<dyn DomainClassifier + Send + Sync> {
+    if settings.verifier_model_path.trim().is_empty() {
+        return inner;
+    }
+    let reference = if settings.verifier_reference_path.trim().is_empty() {
+        None
+    } else {
+        Some(settings.verifier_reference_path.as_str())
+    };
+    match verifier_onnx::MiniLmVerifier::load(&settings.verifier_model_path, reference) {
+        Ok(verifier) => {
+            logs.push(
+                daygle_dns_core::LogLevel::Info,
+                "ai",
+                format!(
+                    "AI verifier active: MiniLM model '{}' corroborates threat verdicts",
+                    settings.verifier_model_path
+                ),
+            );
+            Box::new(verify::VerifyingBackend::new(
+                inner,
+                verifier,
+                settings.verifier_threshold,
+            ))
+        }
+        Err(e) => {
+            logs.push(
+                daygle_dns_core::LogLevel::Warn,
+                "ai",
+                format!("MiniLM verifier not loaded ({e}); threat verdicts rely on the primary classifier only"),
+            );
+            inner
+        }
     }
 }
 

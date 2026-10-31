@@ -92,11 +92,20 @@ fn main() {
     // Round-trip check: the four menace-theater domains below must land in
     // their trained categories or the committed artifact is useless.
     let reload = fasttext::FastText::load_model(&output_path).expect("reload trained model");
+    // One probe per tier: harm, policy-blockable content, and plain content.
     let probes = [
         ("secure-obviousaccount-verify-login.com", "phishing"),
         ("trojan-botnet-payload-download.click", "malware"),
+        ("lottery-winner-claim.info", "scam"),
         ("casino-slot-bonus-spin.win", "gambling"),
+        ("tinder.com", "dating"),
         ("wikipedia.org", "education"),
+        ("doubleclick.net", "ads"),
+        ("zillow.com", "real-estate"),
+        ("indeed.com", "jobs"),
+        ("nfl.com", "sports"),
+        ("gov.uk", "government"),
+        ("ethereum.org", "crypto"),
     ];
     let mut failures = 0;
     for (probe, want) in probes {

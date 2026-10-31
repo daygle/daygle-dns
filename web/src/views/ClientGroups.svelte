@@ -4,6 +4,7 @@
   import NetworkPicker from '../NetworkPicker.svelte';
   import { formatDateTime } from '../datetime.svelte.js';
   import { deviceName, loadDeviceNames } from '../devices.svelte.js';
+  import { titleCase } from '../aiLabels.js';
 
   let groups = $state([]);
   // Named networks (Clients -> Networks) for the client picker.
@@ -12,6 +13,9 @@
   let groupLists = $state([]);
   // Services a group can block with one tick, and their categories in order.
   let services = $state([]);
+  // AI content categories the scanner can label a domain with (empty when
+  // the AI subsystem is off: then there is nothing to block by category).
+  let aiCategories = $state([]);
   const serviceCategories = $derived([...new Set(services.map((s) => s.category))]);
   let error = $state(null);
   let notice = $state(null);
@@ -41,6 +45,9 @@
   async function load() {
     api.networks().then((data) => { networks = data.networks || []; }).catch(() => {});
     api.blockableServices().then((data) => { services = data.services || []; }).catch(() => {});
+    api.aiStatus()
+      .then((data) => { aiCategories = [...new Set(data?.backend_categories || [])].sort(); })
+      .catch(() => { aiCategories = []; });
     try {
       groups = await api.blockingGroups();
     } catch (e) {
@@ -91,6 +98,7 @@
           youtube_restricted: !!group.youtube_restricted,
           schedule: (group.schedule || []).map((w) => ({ ...w, days: [...(w.days || [])] })),
           blocked_services: [...(group.blocked_services || [])],
+          blocked_categories: [...(group.blocked_categories || [])],
         }
       : {
           id: null,
@@ -110,7 +118,14 @@
           youtube_restricted: false,
           schedule: [],
           blocked_services: [],
+          blocked_categories: [],
         };
+  }
+
+  function toggleCategory(category) {
+    edit.blocked_categories = edit.blocked_categories.includes(category)
+      ? edit.blocked_categories.filter((c) => c !== category)
+      : [...edit.blocked_categories, category];
   }
 
   function toggleService(id) {
@@ -176,6 +191,7 @@
       youtube_restricted: edit.youtube_restricted,
       schedule: edit.schedule,
       blocked_services: edit.blocked_services,
+      blocked_categories: edit.blocked_categories,
     };
     saving = true;
     error = null;
@@ -292,6 +308,11 @@
                 {/if}
                 {#if g.blocked_services?.length}
                   <div title={serviceNames(g.blocked_services)}>{count(g.blocked_services.length, 'Blocked Service')}</div>
+                {/if}
+                {#if g.blocked_categories?.length}
+                  <div title={g.blocked_categories.map(titleCase).join(', ')}>
+                    {g.blocked_categories.length} Blocked Categor{g.blocked_categories.length === 1 ? 'y' : 'ies'}
+                  </div>
                 {/if}
               </td>
               <td class="muted">{responseLabel(g.response)}</td>
@@ -452,6 +473,30 @@
         precedence. Apps change their domains from time to time, so a blocked
         service may occasionally work partly until the list is updated.
       </p>
+
+      <div class="section-title">Blocked Categories</div>
+      {#if aiCategories.length}
+        <div class="services">
+          {#each aiCategories as category (category)}
+            <label class="service" class:on={edit.blocked_categories.includes(category)}>
+              <input type="checkbox" checked={edit.blocked_categories.includes(category)} onchange={() => toggleCategory(category)} />{titleCase(category)}
+            </label>
+          {/each}
+        </div>
+        <p class="muted help">
+          Blocks domains the AI scanner has categorized as one of the ticked
+          categories, and their subdomains, for this group's clients. The AI
+          only supplies the label: this rule applies in both Train and Enforce
+          mode, and Custom Allow below still takes precedence. Categories come
+          from the loaded model, so changing the model can change the list.
+        </p>
+      {:else}
+        <p class="muted help">
+          No AI categories are available. Turn the AI scanner on under Settings
+          → AI Scanner (or check its model) to categorize domains, then come
+          back to block a category here.
+        </p>
+      {/if}
 
       <div class="section-title">Blocklists</div>
       {#if groupLists.length}

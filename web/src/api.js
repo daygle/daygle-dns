@@ -306,8 +306,8 @@ export const api = {
   aiStatus: () => request('GET', '/ai/status'),
   aiVerdicts: (qs) => request('GET', `/ai/verdicts${qs ? `?${qs}` : ''}`),
   aiThreats: (qs) => request('GET', `/ai/threats${qs ? `?${qs}` : ''}`),
-  aiOverride: (domain, action, reason = '') =>
-    request('POST', '/ai/override', { domain, action, reason }),
+  aiOverride: (domain, action, reason = '', category = '') =>
+    request('POST', '/ai/override', { domain, action, reason, category }),
   aiOverrides: () => request('GET', '/ai/overrides'),
   aiRescan: () => request('POST', '/ai/rescan'),
   aiModelStatus: () => request('GET', '/ai/model-status'),

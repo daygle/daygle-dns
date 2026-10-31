@@ -184,7 +184,8 @@ CREATE TABLE IF NOT EXISTS blocking_groups (
     safe_search INTEGER NOT NULL DEFAULT 0,
     youtube_restricted INTEGER NOT NULL DEFAULT 0,
     schedule    TEXT NOT NULL DEFAULT '[]',
-    blocked_services TEXT NOT NULL DEFAULT '[]'
+    blocked_services TEXT NOT NULL DEFAULT '[]',
+    blocked_categories TEXT NOT NULL DEFAULT '[]'
 );
 
 CREATE TABLE IF NOT EXISTS console_users (
@@ -720,7 +721,8 @@ impl ZoneStore {
         let mut stmt = conn.prepare(
             "SELECT id, name, enabled, clients, allow, block, allow_regex, block_regex,
                     response, position, blocklists, last_modified_at, ai_blocking,
-                    safe_search, youtube_restricted, schedule, blocked_services
+                    safe_search, youtube_restricted, schedule, blocked_services,
+                    blocked_categories
              FROM blocking_groups ORDER BY position, name",
         )?;
         let rows = stmt.query_map([], row_to_blocking_group)?;
@@ -734,7 +736,8 @@ impl ZoneStore {
             .query_row(
                 "SELECT id, name, enabled, clients, allow, block, allow_regex, block_regex,
                         response, position, blocklists, last_modified_at, ai_blocking,
-                    safe_search, youtube_restricted, schedule, blocked_services
+                    safe_search, youtube_restricted, schedule, blocked_services,
+                    blocked_categories
                  FROM blocking_groups WHERE id = ?1",
                 [id],
                 row_to_blocking_group,
@@ -762,6 +765,7 @@ impl ZoneStore {
         let schedule = serde_json::to_string(&input.schedule)
             .map_err(|e| DaygleError::Database(format!("encode schedule: {e}")))?;
         let blocked_services = encode_json(&input.blocked_services, "blocked_services")?;
+        let blocked_categories = encode_json(&input.blocked_categories, "blocked_categories")?;
         let response = serde_json::to_string(&input.response)
             .map_err(|e| DaygleError::Database(format!("encode response: {e}")))?;
         // Both branches below stamp the wall-clock time of this create/edit.
@@ -783,7 +787,7 @@ impl ZoneStore {
                     allow = ?5, block = ?6, allow_regex = ?7, block_regex = ?8,
                     response = ?9, blocklists = ?10, last_modified_at = ?11,
                     ai_blocking = ?12, safe_search = ?13, youtube_restricted = ?14,
-                    schedule = ?15, blocked_services = ?16
+                    schedule = ?15, blocked_services = ?16, blocked_categories = ?17
                  WHERE id = ?1",
                 params![
                     id,
@@ -802,6 +806,7 @@ impl ZoneStore {
                     input.youtube_restricted as i64,
                     schedule,
                     blocked_services,
+                    blocked_categories,
                 ],
             )?;
             drop(conn);
@@ -818,15 +823,17 @@ impl ZoneStore {
             "INSERT INTO blocking_groups
                 (id, name, enabled, clients, allow, block, allow_regex, block_regex,
                  response, blocklists, position, last_modified_at, ai_blocking,
-                 safe_search, youtube_restricted, schedule, blocked_services)
+                 safe_search, youtube_restricted, schedule, blocked_services,
+                 blocked_categories)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
                  (SELECT COALESCE(MAX(position), -1) + 1 FROM blocking_groups), ?11, ?12,
-                 ?13, ?14, ?15, ?16)
+                 ?13, ?14, ?15, ?16, ?17)
              ON CONFLICT(name) DO UPDATE SET
                 enabled = ?3, clients = ?4, allow = ?5, block = ?6,
                 allow_regex = ?7, block_regex = ?8, response = ?9, blocklists = ?10,
                 last_modified_at = ?11, ai_blocking = ?12, safe_search = ?13,
-                youtube_restricted = ?14, schedule = ?15, blocked_services = ?16",
+                youtube_restricted = ?14, schedule = ?15, blocked_services = ?16,
+                blocked_categories = ?17",
             params![
                 id,
                 name,
@@ -844,6 +851,7 @@ impl ZoneStore {
                 input.youtube_restricted as i64,
                 schedule,
                 blocked_services,
+                blocked_categories,
             ],
         )?;
         drop(conn);
@@ -2074,6 +2082,7 @@ fn row_to_blocking_group(row: &rusqlite::Row<'_>) -> rusqlite::Result<BlockingGr
         youtube_restricted: row.get::<_, i64>(14)? != 0,
         schedule: serde_json::from_str(&row.get::<_, String>(15)?).unwrap_or_default(),
         blocked_services: decode_list(row, 16)?,
+        blocked_categories: decode_list(row, 17)?,
     })
 }
 
@@ -4691,6 +4700,7 @@ fn migrate_blocking_group_timestamps(conn: &Connection) -> Result<()> {
         ("youtube_restricted", "INTEGER NOT NULL DEFAULT 0"),
         ("schedule", "TEXT NOT NULL DEFAULT '[]'"),
         ("blocked_services", "TEXT NOT NULL DEFAULT '[]'"),
+        ("blocked_categories", "TEXT NOT NULL DEFAULT '[]'"),
     ] {
         let has: bool = conn.query_row(
             "SELECT EXISTS(
@@ -5255,6 +5265,7 @@ mod tests {
                 youtube_restricted: false,
                 schedule: vec![],
                 blocked_services: vec![],
+                blocked_categories: vec![],
                 response: BlockResponse::Redirect("0.0.0.0".parse().unwrap()),
             })
             .unwrap();
@@ -5286,6 +5297,7 @@ mod tests {
                 youtube_restricted: false,
                 schedule: vec![],
                 blocked_services: vec![],
+                blocked_categories: vec![],
                 response: BlockResponse::NxDomain,
             })
             .unwrap();
@@ -5326,6 +5338,7 @@ mod tests {
             youtube_restricted: false,
             schedule: vec![],
             blocked_services: vec![],
+            blocked_categories: vec![],
             response: Default::default(),
         };
         let a = s.upsert_blocking_group(&input(None, "A")).unwrap();

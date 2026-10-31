@@ -67,6 +67,61 @@ const RULES: &[Rule] = &[
         rule_confidence: 0.3,
         severity: Severity::Info,
     },
+    // Fake offers and social engineering: a label, not a blocking decision -
+    // the threat channel turns only `auto_block_categories` labels into
+    // Threats entries.
+    Rule {
+        tokens: &["scam", "giveaway", "doubler", "airdrop", "refundclaim"],
+        category: "scam",
+        rule_confidence: 0.35,
+        severity: Severity::Threat,
+    },
+    Rule {
+        tokens: &["dating", "singles", "matchmaker", "hookup"],
+        category: "dating",
+        rule_confidence: 0.3,
+        severity: Severity::Info,
+    },
+    Rule {
+        tokens: &[
+            "ads",
+            "adserver",
+            "adservice",
+            "adnetwork",
+            "adnxs",
+            "doubleclick",
+            "googlesyndication",
+            "taboola",
+            "outbrain",
+        ],
+        category: "ads",
+        rule_confidence: 0.3,
+        severity: Severity::Info,
+    },
+    Rule {
+        tokens: &["crypto", "bitcoin", "ethereum", "blockchain", "defi", "nft"],
+        category: "crypto",
+        rule_confidence: 0.3,
+        severity: Severity::Info,
+    },
+    Rule {
+        tokens: &["jobs", "careers", "recruit", "hiring"],
+        category: "jobs",
+        rule_confidence: 0.3,
+        severity: Severity::Info,
+    },
+    Rule {
+        tokens: &["realestate", "realtor", "property", "zillow", "rightmove"],
+        category: "real-estate",
+        rule_confidence: 0.3,
+        severity: Severity::Info,
+    },
+    Rule {
+        tokens: &["autotrader", "dealership", "motors", "carparts"],
+        category: "auto",
+        rule_confidence: 0.3,
+        severity: Severity::Info,
+    },
 ];
 
 /// Label-boundary token match: `bet` matches label `bet` or `bet-slip` but

@@ -13,7 +13,52 @@
 //! [`crate::verifier_onnx`] / [`crate::verify`]) plugs in the same way:
 //! threat verdicts from the primary get a second, more expensive pass that
 //! corroborates or downgrades them.
+//!
+//! Every backend is scoped to a [`Channel`]: the scanner runs two of them, a
+//! categorizer and a threat detector, each with its own model, thresholds and
+//! verdict TTL. A label is only ever a threat because the *threat* channel
+//! said so - see [`crate::channel`].
 
+/// Which of the scanner's two jobs a backend performs.
+///
+/// The jobs have different precision requirements, so they are separate
+/// passes with separate models, thresholds and TTLs rather than one label
+/// that has to serve both: a categorizer wants coverage (label as much as it
+/// can), a threat detector wants precision (say nothing when unsure).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Channel {
+    /// Content categorization: which kind of site is this (`news`,
+    /// `shopping`, ...). Verdicts are informational and never auto-block.
+    Content,
+    /// Threat detection: is this site one an operator declared block-worthy
+    /// (`ai.auto_block_categories`)? Only this channel can auto-block.
+    Threat,
+}
+
+impl Channel {
+    /// The name recorded on verdict rows and used in the database.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Channel::Content => "content",
+            Channel::Threat => "threat",
+        }
+    }
+
+    /// Parse a channel name as stored in the verdict database (unknown
+    /// values are `None`).
+    pub fn from_stored(name: &str) -> Option<Self> {
+        match name.trim().to_ascii_lowercase().as_str() {
+            "content" => Some(Channel::Content),
+            "threat" => Some(Channel::Threat),
+            _ => None,
+        }
+    }
+
+    /// Both channels, in the order the scanner classifies them.
+    pub fn all() -> [Channel; 2] {
+        [Channel::Content, Channel::Threat]
+    }
+}
 /// Severity attached to a verdict category.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Severity {
@@ -25,6 +70,17 @@ pub enum Severity {
     /// A threat verdict an independent verifier disagreed with: kept and
     /// shown, never auto-blocked, and re-checked on the threat schedule.
     Disputed,
+}
+
+impl Severity {
+    /// The short name stored in the verdict database and shown by the API.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Severity::Info => "info",
+            Severity::Threat => "threat",
+            Severity::Disputed => "disputed",
+        }
+    }
 }
 
 /// One classification verdict produced by a backend.

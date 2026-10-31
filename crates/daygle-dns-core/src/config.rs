@@ -1219,8 +1219,20 @@ pub struct AiSettings {
     /// authoritative zone database.
     pub database: String,
     /// fastText supervised model (.bin) used for classification; empty uses
-    /// the built-in heuristic keyword backend.
+    /// the built-in heuristic keyword backend. The default model for both
+    /// channels: `category_model_path` and `threat_model_path` override it
+    /// per channel.
     pub model_path: String,
+    /// Content-categorization model (`.bin`). Empty uses `model_path`, and
+    /// the heuristic keyword rules when that is empty too. This channel only
+    /// labels sites (`news`, `shopping`, ...): it never auto-blocks.
+    pub category_model_path: String,
+    /// Threat-detection model (`.bin`). Empty uses `model_path`, and the
+    /// heuristic keyword rules when that is empty too. This channel only
+    /// looks for the categories in `auto_block_categories`; the MiniLM
+    /// verifier second-checks its verdicts and content labels are not its
+    /// business.
+    pub threat_model_path: String,
     /// Background classification workers (off the DNS path).
     pub workers: u32,
     /// How often the scanner harvests unseen query-log domains, in seconds.
@@ -1229,13 +1241,23 @@ pub struct AiSettings {
     pub expire_check_secs: u64,
     /// Domains per scan cycle (older ones are picked up on later cycles).
     pub max_domains_per_scan: u32,
-    /// Categories eligible to auto-block in `enforce` mode (lowercase,
-    /// e.g. `malware`, `phishing`). Other categories only feed the console.
+    /// The labels that make a domain a *threat* (lowercase, e.g. `malware`,
+    /// `phishing`, `scam`). The threat channel reports these and nothing else;
+    /// in `enforce` mode they auto-block above `block_threshold`. Ordinary
+    /// categories (news, gambling, ...) never appear here - blocking those is
+    /// a per-group `blocked_categories` policy in the console, not a config
+    /// decision.
     pub auto_block_categories: Vec<String>,
-    /// Minimum confidence for a threat verdict to auto-block.
+    /// Minimum confidence for a threat-channel verdict to auto-block.
     pub block_threshold: f32,
-    /// Verdicts below this confidence are skipped entirely.
+    /// Threat-channel verdicts below this confidence are skipped entirely.
+    /// A categorization floor would be the wrong setting here: this one is
+    /// tuned for the precision auto-blocking needs.
     pub confidence_floor: f32,
+    /// Content-categorization verdicts below this confidence are skipped.
+    /// Kept separate from `confidence_floor` so a floor tightened for threat
+    /// precision does not also blank out ordinary categorizations.
+    pub category_confidence_floor: f32,
     /// Freshness window for ordinary content-category verdicts, in seconds.
     pub category_ttl_secs: u64,
     /// Freshness window for threat verdicts, in seconds (re-scanned when expired).
@@ -1259,13 +1281,20 @@ impl Default for AiSettings {
             mode: AiMode::Train,
             database: String::new(),
             model_path: String::new(),
+            category_model_path: String::new(),
+            threat_model_path: String::new(),
             workers: 2,
             scan_interval_secs: 300,
             expire_check_secs: 3600,
             max_domains_per_scan: 5120,
-            auto_block_categories: vec!["malware".to_string(), "phishing".to_string()],
+            auto_block_categories: vec![
+                "malware".to_string(),
+                "phishing".to_string(),
+                "scam".to_string(),
+            ],
             block_threshold: 0.99,
             confidence_floor: 0.2,
+            category_confidence_floor: 0.2,
             category_ttl_secs: 30 * 86400,
             threat_ttl_secs: 7 * 86400,
             verifier_model_path: String::new(),
@@ -3648,6 +3677,11 @@ impl DaygleConfig {
         if !(0.0..ai.block_threshold).contains(&ai.confidence_floor) {
             return Err(DaygleError::Config(
                 "ai.confidence_floor must be < ai.block_threshold".to_string(),
+            ));
+        }
+        if !(0.0..=1.0).contains(&ai.category_confidence_floor) {
+            return Err(DaygleError::Config(
+                "ai.category_confidence_floor must be in 0.0..=1.0".to_string(),
             ));
         }
         if ai.category_ttl_secs < 60 {

@@ -69,6 +69,8 @@ struct CompiledGroup {
     schedule: Vec<CompiledWindow>,
     /// Blocked services: (display name, their domains and subdomains).
     services: Vec<(&'static str, Blocklist)>,
+    /// AI content categories this group blocks (lower-cased labels).
+    blocked_categories: Vec<String>,
 }
 
 impl CompiledGroup {
@@ -170,6 +172,12 @@ impl AdvancedBlocking {
                     .collect(),
                 action: response_to_action(&g.response),
                 ai_blocking: g.ai_blocking,
+                blocked_categories: g
+                    .blocked_categories
+                    .iter()
+                    .map(|c| c.trim().to_ascii_lowercase())
+                    .filter(|c| !c.is_empty())
+                    .collect(),
                 schedule: g
                     .schedule
                     .iter()
@@ -266,6 +274,20 @@ impl AdvancedBlocking {
     pub fn ai_blocking(&self, client: IpAddr, listener: Option<&str>) -> (bool, Option<&str>) {
         self.first_group(client, listener)
             .map_or((true, None), |g| (g.ai_blocking, Some(g.name.as_str())))
+    }
+
+    /// The AI content categories the first enabled group `client` on
+    /// `listener` belongs to blocks, plus that group's name. Clients in no
+    /// group block no categories; an empty slice means this group blocks none.
+    pub fn blocked_categories(
+        &self,
+        client: IpAddr,
+        listener: Option<&str>,
+    ) -> (Option<&[String]>, Option<&str>) {
+        self.first_group(client, listener)
+            .map_or((None, None), |g| {
+                (Some(g.blocked_categories.as_slice()), Some(g.name.as_str()))
+            })
     }
 
     /// The Safe Search and YouTube Restricted Mode switches of the first
@@ -547,6 +569,7 @@ mod tests {
             youtube_restricted: false,
             schedule: vec![],
             blocked_services: vec![],
+            blocked_categories: vec![],
             position: 0,
             last_modified_at: None,
         }

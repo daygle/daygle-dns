@@ -64,7 +64,8 @@ Daygle DNS combines, in a single process:
   → Domain Check walks a domain through every check for a device and shows
   which one decides.
 - **Blocked services**: block TikTok, YouTube, Roblox, Discord, ChatGPT and
-  30-odd other apps for a filtering group with one tick each.
+  30-odd other apps for a filtering group with one tick each, or block a
+  whole AI content category (gambling, adult, ads, ...) for that group.
 - **Per-client rules** on the console's Clients page: **filtering groups**
   (extra allow/block rules, blocklists and AI auto-blocking for a set of
   clients) and **resolution policies** (forward some clients to their own
@@ -132,15 +133,24 @@ Daygle DNS combines, in a single process:
 - An **AI scanner** (`daygle-dns-ml`): a small CPU-only classifier
   ships with the install (a bundled fastText starter model under
   [`models/`](models/)) and runs in the background over domains observed in
-  the query log, assigns categories (malware, phishing, adult, ...) with
-  confidence scores and expiry dates, and can auto-block fresh
-  high-confidence threat verdicts. On by default after an install in
-  **train mode** (records verdicts, nothing blocks) - flip `ai.mode` to
-  `enforce` in the config or GUI when you are happy with the verdict log.
-  Operator allowlist always wins, and expired verdicts re-enter the scan
-  queue. Point `ai.model_path` at your own supervised fastText `.bin`
-  (or empty it for the zero-model heuristic backend) to replace the
-  starter model. Verdicts are visible via the REST API (`/api/ai/*`).
+  the query log. It works in two independent channels, each with its own
+  model, confidence floor and verdict TTL: **categorization** labels sites
+  (news, shopping, adult, ...) and never blocks, while **threat detection**
+  looks only for the categories you list in `ai.auto_block_categories` and is
+  the only channel that can auto-block fresh high-confidence verdicts. The
+  two lists are separate on purpose: the AI → Classifications tab is the
+  categorizer's growing list of visited domains (relabel any of them
+  yourself), the AI → Threats tab is what the AI blocks, and blocking an
+  ordinary category (gambling, ads, ...) is a per-filtering-group setting
+  rather than a scanner decision. On by
+  default after an install in **train mode** (records verdicts, nothing
+  blocks) - flip `ai.mode` to `enforce` in the config or GUI when you are
+  happy with the verdict log. Operator allowlist always wins, and expired
+  verdicts re-enter the scan queue. Point `ai.model_path` at your own
+  supervised fastText `.bin` (or empty it for the zero-model heuristic
+  backend) to replace the starter model, and `ai.category_model_path` /
+  `ai.threat_model_path` to give a channel its own model. Verdicts are
+  visible via the REST API (`/api/ai/*`).
 - A **REST API** (tower/axum) for configuration, zone management, logs, and
 metrics.
 - An embedded **Svelte** web GUI with **username/password login and roles**

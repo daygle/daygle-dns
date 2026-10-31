@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use daygle_dns_core::config::{AiMode, AiSettings};
 use daygle_dns_core::LogStore;
+use daygle_dns_ml::backend::Channel;
 use daygle_dns_ml::store::{AiStore, VerdictRow};
 use daygle_dns_ml::AiEngine;
 use tempfile::TempDir;
@@ -24,6 +25,108 @@ fn settings(mode: AiMode) -> AiSettings {
 
 // ── Store semantics ─────────────────────────────────────────────────────────
 
+/// A database from before the channel split stored one verdict per domain.
+/// Opening it must keep every threat verdict blocking, and queue the channel
+/// that never ran so the next scan fills it in.
+#[test]
+fn store_upgrades_a_pre_channel_database() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("ai.db");
+    {
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE ai_verdicts (
+                domain        TEXT PRIMARY KEY,
+                category      TEXT NOT NULL DEFAULT '',
+                severity      TEXT NOT NULL DEFAULT '',
+                status        TEXT NOT NULL DEFAULT 'pending',
+                confidence    REAL NOT NULL DEFAULT 0,
+                backend       TEXT NOT NULL DEFAULT '',
+                evidence      TEXT NOT NULL DEFAULT '',
+                observations  INTEGER NOT NULL DEFAULT 0,
+                classified_at INTEGER NOT NULL DEFAULT 0,
+                expires_at    INTEGER NOT NULL DEFAULT 0,
+                last_seen     INTEGER NOT NULL DEFAULT 0
+            );
+            INSERT INTO ai_verdicts
+                (domain, category, severity, status, confidence, backend,
+                 evidence, observations, classified_at, expires_at, last_seen)
+            VALUES
+                ('bad.example', 'phishing', 'threat', 'classified', 0.999,
+                 'fasttext', 'ev', 3, 1000, 9999999999, 2000),
+                ('news.example', 'news', 'info', 'classified', 0.8,
+                 'fasttext', 'ev', 1, 1000, 9999999999, 500);",
+        )
+        .unwrap();
+    }
+
+    let store = AiStore::open(&path).expect("old database upgrades");
+    let now = chrono::Utc::now().timestamp();
+    // The old threat verdict still blocks: an upgrade must not unblock
+    // domains while the next scan runs.
+    assert_eq!(store.fresh_blocked(now, 0.99).unwrap().len(), 1);
+
+    let (rows, total) = store.list_verdicts(None, None, 10, 0).unwrap();
+    assert_eq!(total, 4, "each domain gains its missing channel: {rows:?}");
+    let row = |domain: &str, channel: &str| {
+        rows.iter()
+            .find(|r| r.domain == domain && r.channel == channel)
+            .unwrap_or_else(|| panic!("no {channel} row for {domain}: {rows:?}"))
+    };
+    let bad_threat = row("bad.example", "threat");
+    assert_eq!(bad_threat.category, "phishing");
+    assert_eq!(bad_threat.status, "classified");
+    assert_eq!(bad_threat.observations, 3, "observation counts survive");
+    assert_eq!(row("bad.example", "content").status, "pending");
+    let news_content = row("news.example", "content");
+    assert_eq!(news_content.category, "news");
+    assert_eq!(news_content.status, "classified");
+    assert_eq!(row("news.example", "threat").status, "pending");
+}
+
+/// Categorization is information, not a decision: a content verdict never
+/// reaches the block snapshot, whatever it is called and however confident.
+#[test]
+fn content_categorizations_never_auto_block() {
+    let dir = TempDir::new().unwrap();
+    let store = tmp_store(&dir);
+    store.observe("shop.example").unwrap();
+    store
+        .save_verdict(
+            Channel::Content,
+            "shop.example",
+            "malware",
+            "info",
+            "classified",
+            1.0,
+            "fasttext",
+            "categorizer said malware",
+            3600,
+        )
+        .unwrap();
+    let now = chrono::Utc::now().timestamp();
+    assert!(
+        store.fresh_blocked(now, 0.99).unwrap().is_empty(),
+        "a content row must never be block-eligible"
+    );
+
+    // The same label on the threat channel is what blocks.
+    store
+        .save_verdict(
+            Channel::Threat,
+            "shop.example",
+            "malware",
+            "threat",
+            "classified",
+            1.0,
+            "fasttext",
+            "threat model said malware",
+            3600,
+        )
+        .unwrap();
+    assert_eq!(store.fresh_blocked(now, 0.99).unwrap().len(), 1);
+}
+
 #[test]
 fn observe_bumps_counter_once_per_domain() {
     let dir = TempDir::new().unwrap();
@@ -40,6 +143,7 @@ fn verdict_lifecycle_and_expiry() {
     store.observe("bad.example.net").unwrap();
     store
         .save_verdict(
+            Channel::Threat,
             "bad.example.net",
             "phishing",
             "threat",
@@ -86,7 +190,7 @@ fn verdict_lifecycle_and_expiry() {
         .expect("expiry update ran");
     assert_eq!(expired, 1);
     let (rows, _) = store.list_verdicts(Some("pending"), None, 100, 0).unwrap();
-    assert_eq!(rows.len(), 1);
+    assert_eq!(rows.len(), 2, "both channels re-queue together");
     // No longer fresh ⇒ no longer block-eligible (freshly-scanned again).
     assert_eq!(
         store
@@ -105,6 +209,7 @@ fn allow_override_vetoes_block_snapshot() {
     store.observe("site.example.org").unwrap();
     store
         .save_verdict(
+            Channel::Threat,
             "site.example.org",
             "malware",
             "threat",
@@ -180,8 +285,12 @@ fn scanner_cycle_classifies_query_log_domains() {
     let since = chrono::Utc::now().timestamp() - 3600;
     ai.scanner.run_cycle(since, zones.as_ref()).unwrap();
 
+    // Two observed domains, and both channels classify each of them.
     let (rows, total) = ai.store.list_verdicts(None, None, 100, 0).unwrap();
-    assert_eq!(total, 2, "both observed domains are candidates");
+    assert_eq!(
+        total, 4,
+        "both observed domains are candidates in both channels"
+    );
     assert!(
         rows.iter().any(|r| r.domain == "evil-virus-site.net"
             && r.status == "classified"
@@ -248,6 +357,7 @@ fn expired_verdicts_are_requeued_and_visible_again() {
     // 1-second TTL verdict already expired by the time we check.
     store
         .save_verdict(
+            Channel::Content,
             "x.example",
             "gambling",
             "info",
@@ -265,6 +375,7 @@ fn expired_verdicts_are_requeued_and_visible_again() {
     // The row is pending again; a later save (new scan) overwrites the verdict.
     store
         .save_verdict(
+            Channel::Content,
             "x.example",
             "news",
             "info",
@@ -289,6 +400,7 @@ fn engine_snapshot_never_contains_below_threshold_verdicts() {
     // Threat verdict just below the default 0.99 threshold.
     store
         .save_verdict(
+            Channel::Threat,
             "t.example",
             "phishing",
             "threat",
@@ -343,6 +455,7 @@ fn expired_verdicts_are_reclassified_by_the_next_cycle() {
     ai.store.observe("evil-virus-site.net").unwrap();
     ai.store
         .save_verdict(
+            Channel::Threat,
             "evil-virus-site.net",
             "malware",
             "threat",
@@ -382,6 +495,7 @@ fn expiry_runs_on_its_own_interval() {
     ai.store.observe("x.example").unwrap();
     ai.store
         .save_verdict(
+            Channel::Content,
             "x.example",
             "news",
             "info",
@@ -446,6 +560,7 @@ fn verdict_list_searches_and_flags_exemptions() {
     }
     store
         .save_verdict(
+            Channel::Content,
             "b.example",
             "news",
             "info",
@@ -458,8 +573,9 @@ fn verdict_list_searches_and_flags_exemptions() {
         .unwrap();
     store.set_override("a.example", "allow", "").unwrap();
 
+    // Two matching domains, one row per channel each.
     let (rows, total) = store.list_verdicts(None, Some("EXAMPLE"), 10, 0).unwrap();
-    assert_eq!(total, 2);
+    assert_eq!(total, 4);
     // Most recently classified first, pending last.
     assert_eq!(rows[0].domain, "b.example");
     assert!(rows.iter().any(|r| r.domain == "a.example" && r.overridden));
@@ -472,15 +588,16 @@ fn verdict_list_searches_and_flags_exemptions() {
 fn filtered_verdict_and_threat_lists_apply_filters_before_pagination() {
     let dir = TempDir::new().unwrap();
     let store = tmp_store(&dir);
-    for (domain, category, severity) in [
-        ("bad-phish.example", "phishing", "threat"),
-        ("bad-malware.example", "malware", "threat"),
-        ("disputed.example", "phishing", "disputed"),
-        ("news.example", "news", "info"),
+    for (domain, category, severity, channel) in [
+        ("bad-phish.example", "phishing", "threat", Channel::Threat),
+        ("bad-malware.example", "malware", "threat", Channel::Threat),
+        ("disputed.example", "phishing", "disputed", Channel::Threat),
+        ("news.example", "news", "info", Channel::Content),
     ] {
         store.observe(domain).unwrap();
         store
             .save_verdict(
+                channel,
                 domain,
                 category,
                 severity,
@@ -502,6 +619,7 @@ fn filtered_verdict_and_threat_lists_apply_filters_before_pagination() {
                 category: Some("PHISH"),
                 severity: Some("threat"),
                 exemption: Some("exempt"),
+                channel: Some("threat"),
                 ..Default::default()
             },
             daygle_dns_ml::store::VerdictPage {
@@ -569,8 +687,8 @@ fn harvest_reads_only_the_requested_window() {
         .run_cycle(now.timestamp() - 3600, zones.as_ref())
         .unwrap();
     let (rows, total) = ai.store.list_verdicts(None, None, 10, 0).unwrap();
-    assert_eq!(total, 1, "{rows:?}");
-    assert_eq!(rows[0].domain, "new.example");
+    assert_eq!(total, 2, "one row per channel: {rows:?}");
+    assert!(rows.iter().all(|r| r.domain == "new.example"), "{rows:?}");
 }
 
 /// A domain nobody has queried since its verdict was made is dropped when
@@ -581,18 +699,21 @@ fn expired_verdicts_of_unqueried_domains_are_dropped() {
     let dir = TempDir::new().unwrap();
     let store = tmp_store(&dir);
     store.observe("gone.example.com").unwrap();
-    store
-        .save_verdict(
-            "gone.example.com",
-            "news",
-            "info",
-            "classified",
-            0.8,
-            "fasttext",
-            "ev",
-            1,
-        )
-        .unwrap();
+    for channel in Channel::all() {
+        store
+            .save_verdict(
+                channel,
+                "gone.example.com",
+                "news",
+                "info",
+                "classified",
+                0.8,
+                "fasttext",
+                "ev",
+                1,
+            )
+            .unwrap();
+    }
     let later = chrono::Utc::now().timestamp() + 5;
     assert_eq!(store.expire_old(later, 100).unwrap(), 0);
     let (_, total) = store.list_verdicts(None, None, 10, 0).unwrap();
@@ -609,6 +730,7 @@ fn disputed_threats_never_auto_block() {
     store.observe("disputed.example.com").unwrap();
     store
         .save_verdict(
+            Channel::Threat,
             "disputed.example.com",
             "phishing",
             "disputed",
@@ -656,8 +778,11 @@ fn local_and_hosted_names_are_not_classified() {
     .unwrap();
     ai.scanner.run_cycle(0, zones.as_ref()).unwrap();
     let (rows, _) = ai.store.list_verdicts(None, None, 100, 0).unwrap();
-    let domains: Vec<&str> = rows.iter().map(|r| r.domain.as_str()).collect();
-    assert_eq!(domains, vec!["evil-virus-site.net"]);
+    assert!(!rows.is_empty());
+    assert!(
+        rows.iter().all(|r| r.domain == "evil-virus-site.net"),
+        "only the internet name is classified: {rows:?}"
+    );
 }
 
 /// A classifier that panics on one domain: in a multi-worker cycle the
@@ -694,10 +819,12 @@ fn a_panicking_worker_does_not_shift_verdicts() {
     let scanner = daygle_dns_ml::scanner::Scanner::new(
         store.clone(),
         Box::new(PanicsOnOne),
+        Box::new(PanicsOnOne),
         Arc::new(arc_swap::ArcSwap::from_pointee(AiSettings {
             workers: 4,
             ..settings(AiMode::Train)
         })),
+        Arc::new(arc_swap::ArcSwap::from_pointee(Default::default())),
         Arc::new(arc_swap::ArcSwap::from_pointee(Default::default())),
         Arc::new(LogStore::new(128)),
     );
@@ -710,4 +837,137 @@ fn a_panicking_worker_does_not_shift_verdicts() {
             assert_eq!(row.category, row.domain, "verdict stayed with its domain");
         }
     }
+}
+
+// ── Category blocking (operator policy over content labels) ─────────────────
+
+/// The content label reaches the category snapshot - which is what a group's
+/// `blocked_categories` matches - while the auto-block snapshot stays empty.
+#[test]
+fn content_labels_feed_the_category_snapshot_only() {
+    let dir = TempDir::new().unwrap();
+    let ai = engine(&dir, settings(AiMode::Train));
+    ai.store.observe("casino.example").unwrap();
+    ai.store
+        .save_verdict(
+            Channel::Content,
+            "casino.example",
+            "gambling",
+            "info",
+            "classified",
+            1.0,
+            "fasttext",
+            "categorizer said gambling",
+            3600,
+        )
+        .unwrap();
+    ai.refresh_snapshot_now();
+
+    let categories = ai.category_snapshot().load();
+    assert_eq!(
+        categories.get("casino.example").unwrap().category,
+        "gambling"
+    );
+    assert!(
+        ai.snapshot().load().is_empty(),
+        "a content label must never become an auto-block"
+    );
+    drop(categories);
+
+    // Expired verdicts leave the category snapshot with the block snapshot.
+    let (rows, _) = ai.store.list_verdicts(None, None, 10, 0).unwrap();
+    assert!(!rows.is_empty());
+    ai.store
+        .set_override("casino.example", "allow", "test")
+        .unwrap();
+    ai.refresh_snapshot_now();
+    assert!(
+        ai.category_snapshot().load().is_empty(),
+        "an allow override exempts a domain from category blocking too"
+    );
+}
+
+/// An operator relabel wins over the model, survives re-classification and is
+/// what the console and category blocking see.
+#[test]
+fn category_override_relabels_and_survives_rescans() {
+    let dir = TempDir::new().unwrap();
+    let ai = engine(&dir, settings(AiMode::Train));
+    ai.store.observe("thing.example").unwrap();
+    ai.store
+        .save_verdict(
+            Channel::Content,
+            "thing.example",
+            "news",
+            "info",
+            "classified",
+            0.9,
+            "fasttext",
+            "model said news",
+            3600,
+        )
+        .unwrap();
+    ai.refresh_snapshot_now();
+
+    let category_of = |domain: &str| -> Option<String> {
+        ai.category_snapshot()
+            .load()
+            .get(domain)
+            .map(|c| c.category.clone())
+    };
+    assert_eq!(category_of("thing.example").as_deref(), Some("news"));
+
+    ai.set_category_override("thing.example", "gambling")
+        .unwrap();
+    assert_eq!(category_of("thing.example").as_deref(), Some("gambling"));
+
+    // A later scan overwrites the model's verdict; the operator's label stays.
+    ai.store
+        .save_verdict(
+            Channel::Content,
+            "thing.example",
+            "news",
+            "info",
+            "classified",
+            0.95,
+            "fasttext",
+            "model said news again",
+            3600,
+        )
+        .unwrap();
+    ai.refresh_snapshot_now();
+    assert_eq!(category_of("thing.example").as_deref(), Some("gambling"));
+
+    let (rows, _) = ai.store.list_verdicts(None, None, 10, 0).unwrap();
+    let row = rows.iter().find(|r| r.domain == "thing.example").unwrap();
+    assert_eq!(row.category, "gambling", "the console shows the relabel");
+    assert!(row.category_overridden);
+
+    assert!(ai.clear_category_override("thing.example").unwrap());
+    assert_eq!(category_of("thing.example").as_deref(), Some("news"));
+    let (rows, _) = ai.store.list_verdicts(None, None, 10, 0).unwrap();
+    assert!(
+        !rows
+            .iter()
+            .find(|r| r.domain == "thing.example")
+            .unwrap()
+            .category_overridden
+    );
+}
+
+/// A relabel stands on its own: an operator can categorize a domain the model
+/// has not classified yet, and that label is blockable straight away.
+#[test]
+fn relabel_without_a_verdict_is_blockable() {
+    let dir = TempDir::new().unwrap();
+    let ai = engine(&dir, settings(AiMode::Train));
+    ai.set_category_override("untouched.example", "gambling")
+        .unwrap();
+    ai.refresh_snapshot_now();
+    let categories = ai.category_snapshot().load();
+    let entry = categories
+        .get("untouched.example")
+        .expect("relabel published");
+    assert_eq!(entry.category, "gambling");
+    assert_eq!(entry.expires_at, i64::MAX, "an operator label has no TTL");
 }

@@ -111,6 +111,27 @@
     load();
   }
 
+  // Relabel a domain: the operator's category wins over the model's and is
+  // what filtering groups match when they block a category.
+  async function setCategory(row, category) {
+    if (category === (row.category || '')) return;
+    notice = null;
+    error = null;
+    try {
+      if (category) {
+        await api.aiOverride(row.domain, 'category', '', category);
+        notice = `${row.domain} is now categorized as ${titleCase(category)}.`;
+      } else {
+        if (!row.category_overridden) return;
+        await api.aiOverride(row.domain, 'clear_category', '');
+        notice = `${row.domain} uses the scanner's category again.`;
+      }
+      await load();
+    } catch (e) {
+      error = formatApiError(e);
+    }
+  }
+
   function setExempt(domain, exempt) {
     if (exempt) {
       exemptionDomain = domain;
@@ -191,7 +212,7 @@
 {:else}
   <div class="card">
     <div class="spread" style="margin-bottom: 10px; gap: 10px; flex-wrap: wrap">
-      <h3 style="margin: 0">Verdicts ({fmt(total)})</h3>
+      <h3 style="margin: 0">Classifications ({fmt(total)})</h3>
       <div class="row" style="gap: 8px; flex-wrap: wrap">
         <input type="search" placeholder="Search Domains" bind:value={search} style="min-width: 200px" />
         <select bind:value={categoryFilter} aria-label="Filter by category" style="min-width: 150px">
@@ -241,8 +262,23 @@
             </td>
             {#if show('category')}
             <td>
-              {#if r.category}
-                {titleCase(r.category)} {#if r.severity === 'threat'}<span class="pill err">Threat</span>{:else if r.severity === 'disputed'}<span class="pill" title="The verifier disagreed: this verdict never auto-blocks">Disputed</span>{/if}
+              {#if isAdmin && categories.length}
+                <div class="category-cell">
+                  <select
+                    class="category-select"
+                    value={r.category || ''}
+                    title={r.category_overridden ? "Your label overrides the scanner's" : "The scanner's label"}
+                    onchange={(e) => setCategory(r, e.currentTarget.value)}
+                  >
+                    <option value="">-</option>
+                    {#each categories as category (category)}
+                      <option value={category}>{titleCase(category)}</option>
+                    {/each}
+                  </select>
+                  {#if r.category_overridden}<span class="pill ok tag" title="You set this category; the scanner keeps classifying the domain">Set By You</span>{/if}
+                </div>
+              {:else if r.category}
+                {titleCase(r.category)}
               {:else}<span class="muted">-</span>{/if}
             </td>
             {/if}
@@ -280,10 +316,10 @@
     {#if !rows.length}
       <p class="muted">
         {#if search.trim() || categoryFilter.trim() || statusFilter || severityFilter || exemptionFilter}
-          No verdicts match these filters.
+          No classifications match these filters.
         {:else}
-          No verdicts yet - they appear as the scanner classifies domains from
-          your DNS traffic.
+          No classifications yet - they appear as the scanner categorizes
+          domains from your DNS traffic.
         {/if}
       </p>
     {/if}
@@ -309,5 +345,10 @@
 <style>
   .nowrap { white-space: nowrap; }
   .tag { margin-left: 6px; }
+  /* The relabel marker sits beside the dropdown, not under it: one line per
+     row, and the pill never invents a second row in a narrow column. */
+  .category-cell { display: flex; align-items: center; gap: 6px; }
+  .category-cell .tag { margin-left: 0; white-space: nowrap; flex: none; }
+  .category-select { min-width: 132px; }
   .evidence { max-width: 200px; font-size: 0.78rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 </style>

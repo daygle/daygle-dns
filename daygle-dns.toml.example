@@ -464,40 +464,63 @@ query_db_retention_days = 0
 # overrides at POST /api/ai/override, and an immediate rescan trigger at
 # POST /api/ai/rescan.
 #
+# Two jobs, two channels. Every domain is classified twice, independently:
+#   - the CONTENT channel (category_model_path) labels what kind of site it
+#     is: news, shopping, gaming, ... Its verdicts never block by themselves;
+#     they are the labels Filtering → AI → Classifications lists, and an
+#     operator can relabel any domain there.
+#   - the THREAT channel (threat_model_path) looks only for the categories
+#     named in auto_block_categories, and is the only channel that can block
+#     on its own. Its verdicts are what Filtering → AI → Threats lists.
+# Each channel has its own confidence floor and its own verdict TTL, so a
+# floor or TTL tuned for one job does not distort the other.
+#
+# Blocking a content category (gambling, adult, ads, ...) is a client-group
+# rule, not a scanner decision: tick the categories on Filtering → Client
+# Groups and that group's clients get them blocked. It applies in both train
+# and enforce mode, since the operator chose the rule; mode only governs
+# auto-blocking of detected threats.
+#
 # Safety model:
 #   - mode = "train" records verdicts only; nothing is ever blocked.
 #     Inspect the verdict log for a while, then flip to "enforce".
-#   - In "enforce" mode only the categories listed in auto_block_categories
-#     (e.g. malware, phishing) auto-block, and only above block_threshold
-#     confidence while the verdict is fresh (threat_ttl_secs).
+#   - In "enforce" mode only threat-channel verdicts in
+#     auto_block_categories (e.g. malware, phishing) auto-block, and only
+#     above block_threshold confidence while fresh (threat_ttl_secs).
 #   - The user allowlist and operator blocklists still apply before AI
 #     verdicts, and POST /api/ai/override pins a domain AI-exempt.
 #   - Expired verdicts re-enter the scan queue; a site that changed is
 #     re-classified and old categories never carry over.
 #
-# Backends: the supervised fastText starter model shipped under
-# models/ (installed to <config dir>/models/daygle-starter.bin) is the
-# default below; delete it or point model_path elsewhere for your own
-# trained .bin, or empty it to use the built-in low-confidence heuristic
-# keyword table. See docs/ARCHITECTURE.md.
+# Models: the supervised fastText starter model shipped under models/
+# (installed to <config dir>/models/daygle-starter.bin) is the default for
+# both channels; delete it or point model_path elsewhere for your own trained
+# .bin, or empty it to use the built-in low-confidence heuristic keyword
+# table. category_model_path / threat_model_path override model_path for one
+# channel, so a wide categorizer and a narrow, high-precision threat detector
+# can run side by side. See docs/ARCHITECTURE.md.
 [ai]
 enabled = true
 mode = "train"
 database = ""
 model_path = "/etc/daygle-dns/models/daygle-starter.bin"
+category_model_path = ""
+threat_model_path = ""
 workers = 2
 scan_interval_secs = 300
 expire_check_secs = 3600
 max_domains_per_scan = 5120
-auto_block_categories = ["malware", "phishing"]
+auto_block_categories = ["malware", "phishing", "scam"]
 block_threshold = 0.99
 confidence_floor = 0.2
+category_confidence_floor = 0.2
 category_ttl_secs = 2592000
 threat_ttl_secs = 604800
-# Verifier: threat verdicts from the model above are re-checked against a
-# bundled MiniLM embedding model (all-MiniLM-L6-v2, int8) before they can
-# matter in enforce mode: agreement raises confidence, confident disagreement
-# downgrades to informational. Empty disables the second pass. The tokenizer
+# Verifier: threat-channel verdicts are re-checked against a bundled MiniLM
+# embedding model (all-MiniLM-L6-v2, int8) before they can matter in enforce
+# mode: agreement raises confidence, confident disagreement downgrades to
+# `disputed` (never blocks). Categorizations are not verified - they block
+# nothing. Empty disables the second pass. The tokenizer
 # (minilm-tokenizer.json) and centroid reference (minilm-centroids.json) are
 # looked up beside the .onnx file; verifier_threshold is the minimum
 # embedding cosine for the verifier to assert a category.

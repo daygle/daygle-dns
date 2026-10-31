@@ -16,19 +16,19 @@
       id: 'scanner',
       label: 'Scanner',
       tagline:
-        'Classifies the domains in your DNS traffic in the background, never on the query path. Train mode only records verdicts; Enforce mode blocks domains in the auto-block categories once their verdict reaches the block threshold. Exempt domains are never blocked by the AI.',
+        'Labels the domains in your DNS traffic in the background, never on the query path. Train mode only records verdicts; Enforce mode also blocks the threats this list finds. Blocking a content category is a filtering-group rule, not a scanner decision.',
     },
     {
-      id: 'verdicts',
-      label: 'Verdicts',
+      id: 'classifications',
+      label: 'Classifications',
       tagline:
-        'Every domain the scanner has looked at, most recently classified first. Exempt a domain to keep the AI from ever blocking it or its subdomains.',
+        'Every domain the scanner has categorized from your DNS traffic, most recently classified first. Pick a different category to relabel a domain yourself: your label survives re-scans and is what category blocking matches.',
     },
     {
       id: 'threats',
       label: 'Threats',
       tagline:
-        "Domain verdicts the scanner classifies badly enough to matter: highest confidence first, each with its current auto-block state. Disputed verdicts (the verifier disagreed) are shown but never block.",
+        "Domains the threat detector flagged, highest confidence first, each with its current block state. In Enforce mode this is the list the AI blocks for clients whose group allows it. Disputed verdicts (the verifier disagreed) are shown but never block.",
     },
     {
       id: 'exemptions',

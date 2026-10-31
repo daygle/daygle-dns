@@ -1,7 +1,13 @@
-//! The AI policy plugin: consults the scanner's block snapshot and returns
-//! `Action::Block` for fresh, high-confidence threat verdicts in enforce
-//! mode. In `train` mode it always defers (`None`) - verdicts are recorded,
-//! nothing blocks.
+//! The AI policy plugin: two independent jobs, one per channel.
+//!
+//! - **Threats** consult the block snapshot and return `Action::Block` for
+//!   fresh, high-confidence threat verdicts in enforce mode. In `train` mode
+//!   they defer: verdicts are recorded, nothing blocks.
+//! - **Categories** consult the category snapshot and block a query whose
+//!   domain (or a parent domain) is labelled with a category one of the
+//!   client's groups blocks. This is the operator's rule, not the model's
+//!   decision, so it applies in both modes; `ai.mode` only governs
+//!   auto-blocking of detected threats.
 //!
 //! Placement in the engine's evaluation order does the safety work:
 //!
@@ -24,19 +30,26 @@ use chrono::Utc;
 use daygle_dns_core::config::{AiMode, AiSettings};
 use daygle_dns_policy::{Action, AdvancedBlocking, Decision, PolicyContext, PolicyPlugin};
 
-use crate::scanner::{ActiveBlock, BlockSnapshot};
+#[cfg(test)]
+use crate::scanner::ActiveBlock;
+use crate::scanner::{BlockSnapshot, CategorySnapshot};
 
 /// Longest suffix match against the snapshot: a verdict recorded on
 /// `bad.example.com` also blocks `www.bad.example.com`, while a verdict on
 /// `example.com` covers every subdomain. Anchor on label boundaries. Walks
 /// borrowed suffixes of one lowercased copy (no allocation per label).
-fn suffix_match<'a>(qname: &str, snapshot: &'a BlockSnapshot, now: i64) -> Option<&'a ActiveBlock> {
+fn suffix_match<'a, T>(
+    qname: &str,
+    snapshot: &'a std::collections::HashMap<String, T>,
+    now: i64,
+    expires_at: impl Fn(&T) -> i64,
+) -> Option<&'a T> {
     let name = qname.trim_end_matches('.').to_ascii_lowercase();
     let mut candidate = name.as_str();
     loop {
-        if let Some(block) = snapshot.get(candidate) {
-            if block.expires_at > now {
-                return Some(block);
+        if let Some(found) = snapshot.get(candidate) {
+            if expires_at(found) > now {
+                return Some(found);
             }
         }
         candidate = candidate.split_once('.')?.1;
@@ -46,6 +59,7 @@ fn suffix_match<'a>(qname: &str, snapshot: &'a BlockSnapshot, now: i64) -> Optio
 /// The plugin installed into the [`daygle_dns_policy::PolicyEngine`].
 pub struct AiBlockPlugin {
     snapshot: Arc<ArcSwap<BlockSnapshot>>,
+    categories: Arc<ArcSwap<CategorySnapshot>>,
     settings: Arc<ArcSwap<AiSettings>>,
     /// The live client groups, consulted for their `ai_blocking` switch
     /// (installed once the server has built them).
@@ -55,10 +69,12 @@ pub struct AiBlockPlugin {
 impl AiBlockPlugin {
     pub fn new(
         snapshot: Arc<ArcSwap<BlockSnapshot>>,
+        categories: Arc<ArcSwap<CategorySnapshot>>,
         settings: Arc<ArcSwap<AiSettings>>,
     ) -> Arc<Self> {
         Arc::new(Self {
             snapshot,
+            categories,
             settings,
             groups: arc_swap::ArcSwapOption::empty(),
         })
@@ -86,31 +102,64 @@ impl PolicyPlugin for AiBlockPlugin {
 
     async fn evaluate(&self, context: &PolicyContext) -> Option<Decision> {
         let settings = self.settings.load_full();
-        if settings.mode != AiMode::Enforce || !settings.enabled {
-            return None; // train mode: never block
+        if !settings.enabled {
+            return None; // scanner off: no verdicts to act on
         }
-        let snapshot = self.snapshot.load_full();
         let now = Utc::now().timestamp();
-        let block = suffix_match(&context.query_name, &snapshot, now)?;
-        if let Some(groups) = self.groups.load().as_deref() {
-            if !groups
-                .load()
-                .ai_blocking(context.client, context.listener)
-                .0
+        let groups = self.groups.load();
+
+        // 1. Detected threats (enforce mode only).
+        if settings.mode == AiMode::Enforce {
+            let snapshot = self.snapshot.load_full();
+            if let Some(block) = suffix_match(&context.query_name, &snapshot, now, |b| b.expires_at)
             {
-                return None;
+                let may_block = groups.as_deref().is_none_or(|groups| {
+                    groups
+                        .load()
+                        .ai_blocking(context.client, context.listener)
+                        .0
+                });
+                if may_block {
+                    return Some(
+                        Decision::new(
+                            format!(
+                                "'{}' auto-blocked by AI verdict (category '{}')",
+                                context.query_name, block.category
+                            ),
+                            Action::Block,
+                        )
+                        .with_group("ai")
+                        .with_source(daygle_dns_policy::source::AI, Some(block.category.clone())),
+                    );
+                }
             }
+        }
+
+        // 2. Blocked categories (both modes: this is an operator policy).
+        let groups = groups.as_deref()?.load();
+        let (blocked, group_name) = groups.blocked_categories(context.client, context.listener);
+        let blocked = blocked?;
+        if blocked.is_empty() {
+            return None;
+        }
+        let categories = self.categories.load_full();
+        let labelled = suffix_match(&context.query_name, &categories, now, |c| c.expires_at)?;
+        let category = labelled.category.as_str();
+        if !blocked.iter().any(|c| c.eq_ignore_ascii_case(category)) {
+            return None;
         }
         Some(
             Decision::new(
                 format!(
-                    "'{}' auto-blocked by AI verdict (category '{}')",
-                    context.query_name, block.category
+                    "'{}' blocked by category policy (category '{}', group '{}')",
+                    context.query_name,
+                    category,
+                    group_name.unwrap_or("filtering group")
                 ),
                 Action::Block,
             )
             .with_group("ai")
-            .with_source(daygle_dns_policy::source::AI, Some(block.category.clone())),
+            .with_source(daygle_dns_policy::source::AI, Some(category.to_string())),
         )
     }
 }
@@ -121,6 +170,14 @@ mod tests {
     use daygle_dns_core::config::AiMode;
 
     fn plugin(mode: AiMode, snapshot: BlockSnapshot) -> Arc<AiBlockPlugin> {
+        plugin_with(mode, snapshot, CategorySnapshot::new())
+    }
+
+    fn plugin_with(
+        mode: AiMode,
+        snapshot: BlockSnapshot,
+        categories: CategorySnapshot,
+    ) -> Arc<AiBlockPlugin> {
         let settings = AiSettings {
             enabled: true,
             mode,
@@ -128,8 +185,49 @@ mod tests {
         };
         AiBlockPlugin::new(
             Arc::new(ArcSwap::from_pointee(snapshot)),
+            Arc::new(ArcSwap::from_pointee(categories)),
             Arc::new(ArcSwap::from_pointee(settings)),
         )
+    }
+
+    fn category(domain: &str, category: &str) -> CategorySnapshot {
+        let mut snapshot = CategorySnapshot::new();
+        snapshot.insert(
+            domain.to_string(),
+            crate::scanner::ActiveCategory {
+                category: category.to_string(),
+                expires_at: i64::MAX,
+            },
+        );
+        snapshot
+    }
+
+    /// A group covering 10.0.0.0/24 that blocks `categories`.
+    fn groups_blocking(categories: &[&str]) -> Arc<ArcSwap<AdvancedBlocking>> {
+        let group = daygle_dns_core::blocking::BlockingGroup {
+            id: "g".to_string(),
+            name: "kids".to_string(),
+            enabled: true,
+            clients: vec!["10.0.0.0/24".to_string()],
+            allow: vec![],
+            block: vec![],
+            allow_regex: vec![],
+            block_regex: vec![],
+            blocklists: vec![],
+            response: Default::default(),
+            ai_blocking: true,
+            safe_search: false,
+            youtube_restricted: false,
+            schedule: vec![],
+            blocked_services: vec![],
+            blocked_categories: categories.iter().map(|c| c.to_string()).collect(),
+            position: 0,
+            last_modified_at: None,
+        };
+        Arc::new(ArcSwap::from_pointee(AdvancedBlocking::build(
+            &[group],
+            Arc::default(),
+        )))
     }
 
     fn ctx(query_name: &str) -> PolicyContext {
@@ -210,6 +308,7 @@ mod tests {
             youtube_restricted: false,
             schedule: vec![],
             blocked_services: vec![],
+            blocked_categories: vec![],
             position: 0,
             last_modified_at: None,
         };
@@ -255,8 +354,60 @@ mod tests {
         );
         let p = AiBlockPlugin::new(
             Arc::new(ArcSwap::from_pointee(snapshot)),
+            Arc::new(ArcSwap::from_pointee(CategorySnapshot::new())),
             Arc::new(ArcSwap::from_pointee(settings)),
         );
         assert!(p.evaluate(&ctx("bad.example.com")).await.is_none());
+    }
+
+    /// A category the group blocks is blocked for its clients and nobody
+    /// else, and in train mode too: this is the operator's rule, not a
+    /// verdict the AI acted on.
+    #[tokio::test]
+    async fn blocked_category_blocks_group_clients_in_both_modes() {
+        for mode in [AiMode::Train, AiMode::Enforce] {
+            let p = plugin_with(
+                mode,
+                BlockSnapshot::new(),
+                category("casino.example", "gambling"),
+            );
+            p.set_client_groups(groups_blocking(&["gambling"]));
+
+            let d = p.evaluate(&ctx("www.casino.example")).await.unwrap();
+            assert_eq!(d.action, Action::Block);
+            assert!(d.reason.contains("gambling"), "{}", d.reason);
+
+            // A client outside the group is untouched.
+            let mut outside = ctx("casino.example");
+            outside.client = "192.0.2.1".parse().unwrap();
+            assert!(p.evaluate(&outside).await.is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn unlisted_category_is_not_blocked() {
+        let p = plugin_with(
+            AiMode::Train,
+            BlockSnapshot::new(),
+            category("shop.example", "shopping"),
+        );
+        p.set_client_groups(groups_blocking(&["gambling"]));
+        assert!(p.evaluate(&ctx("shop.example")).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn clients_in_no_group_block_no_categories() {
+        let p = plugin_with(
+            AiMode::Train,
+            BlockSnapshot::new(),
+            category("casino.example", "gambling"),
+        );
+        // No client groups installed at all.
+        assert!(p.evaluate(&ctx("casino.example")).await.is_none());
+        // Installed, but this client belongs to none of them.
+        p.set_client_groups(groups_blocking(&["gambling"]));
+        let mut outside = ctx("casino.example");
+        outside.client = "192.0.2.1".parse().unwrap();
+        assert!(p.evaluate(&outside).await.is_none());
     }
 }
