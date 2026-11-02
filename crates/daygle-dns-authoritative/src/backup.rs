@@ -64,7 +64,9 @@ fn db_err(context: &str, e: impl std::fmt::Display) -> DaygleError {
 }
 
 impl ZoneStore {
-    /// Write a backup to `dest` (which must not exist). `ai_database` is the
+    /// Write a backup to `dest`, which must not exist or be an empty file
+    /// (create it owner-only first to keep the copy private from the
+    /// start). `ai_database` is the
     /// AI scanner's database, whose operator overrides are included when the
     /// file exists.
     pub fn backup_to(

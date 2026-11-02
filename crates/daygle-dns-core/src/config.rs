@@ -5088,15 +5088,62 @@ pub fn validate_domain_pattern(pattern: &str) -> std::result::Result<(), String>
 pub fn normalize_domains(entries: impl IntoIterator<Item = String>) -> BTreeSet<String> {
     entries
         .into_iter()
-        .map(|d| d.trim().trim_end_matches('.').to_ascii_lowercase())
+        .map(|d| to_ascii_domain(d.trim().trim_end_matches('.')).to_ascii_lowercase())
         .filter(|d| !d.is_empty())
         .collect()
+}
+
+/// An internationalized entry (`bücher.de`, `*.bücher.de`, `@@bücher.de`)
+/// in the punycode form queries arrive in (`xn--bcher-kva.de`), so it
+/// matches the query name. ASCII entries, and ones IDNA rejects, are
+/// returned unchanged.
+fn to_ascii_domain(entry: &str) -> String {
+    if entry.is_ascii() {
+        return entry.to_string();
+    }
+    let (exception, rest) = match entry.strip_prefix("@@") {
+        Some(rest) => ("@@", rest),
+        None => ("", entry),
+    };
+    let (wildcard, name) = match rest.strip_prefix("*.") {
+        Some(name) => ("*.", name),
+        None => ("", rest),
+    };
+    match url::Host::parse(name) {
+        Ok(url::Host::Domain(ascii)) => format!("{exception}{wildcard}{ascii}"),
+        _ => entry.to_string(),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
+
+    #[test]
+    fn normalize_domains_puts_internationalized_entries_in_punycode() {
+        let set = normalize_domains(
+            [
+                "Bücher.DE.",
+                "*.bücher.de",
+                "@@bücher.de",
+                "@@*.bücher.de",
+                "xn--bcher-kva.de",
+                "Ads.Example.com",
+            ]
+            .map(String::from),
+        );
+        let want: BTreeSet<String> = [
+            "xn--bcher-kva.de",
+            "*.xn--bcher-kva.de",
+            "@@xn--bcher-kva.de",
+            "@@*.xn--bcher-kva.de",
+            "ads.example.com",
+        ]
+        .map(String::from)
+        .into();
+        assert_eq!(set, want);
+    }
 
     #[test]
     fn update_failure_alert_defaults_on_and_can_be_disabled() {

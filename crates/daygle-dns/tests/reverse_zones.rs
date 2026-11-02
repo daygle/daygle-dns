@@ -154,3 +154,22 @@ async fn rfc6303_empty_zones_answer_locally() {
 
     shutdown(server).await;
 }
+
+/// An internationalized label under a reverse zone is answered, not dropped:
+/// its Unicode rendering (`中`, three bytes) once put the RFC 6303 suffix
+/// check's byte offset inside a character and panicked the request.
+#[tokio::test]
+async fn internationalized_reverse_names_do_not_panic() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = spawn(base_config(&dir.path().join("daygle-dns.db"))).await;
+    let udp = server.udp_addr.expect("UDP is enabled");
+
+    // A reply at all (udp_query panics on a timeout) is the point.
+    let msg = udp_query(udp, "xn--fiq.in-addr.arpa.", RecordType::PTR).await;
+    assert_ne!(msg.response_code, ResponseCode::NXDomain, "{msg:?}");
+    // And the server still answers its empty zones.
+    let msg = udp_query(udp, "7.10.in-addr.arpa.", RecordType::PTR).await;
+    assert_eq!(msg.response_code, ResponseCode::NXDomain);
+
+    shutdown(server).await;
+}

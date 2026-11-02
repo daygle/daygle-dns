@@ -2979,10 +2979,16 @@ pub async fn export_zone(State(state): State<AppState>, Path(id): Path<String>) 
 
 /// A scratch file next to the database (or in the system temp directory
 /// for an in-memory one), removed when dropped.
+///
+/// It is created empty and owner-only (`0600`) up front: backups and
+/// uploaded restores hold password hashes and private keys, and a file
+/// created later by SQLite or `fs::write` would get the process umask
+/// (typically world-readable) until narrowed. SQLite's `VACUUM INTO`
+/// accepts an existing empty file.
 struct ScratchFile(std::path::PathBuf);
 
 impl ScratchFile {
-    fn new(database: &str, purpose: &str) -> Self {
+    fn new(database: &str, purpose: &str) -> std::io::Result<Self> {
         let name = format!(
             "daygle-dns-{purpose}-{}-{}.tmp",
             std::process::id(),
@@ -2993,7 +2999,14 @@ impl ScratchFile {
             .filter(|p| database != ":memory:" && !p.as_os_str().is_empty())
             .map(std::path::Path::to_path_buf)
             .unwrap_or_else(std::env::temp_dir);
-        Self(dir.join(name))
+        let path = dir.join(name);
+        let mut options = std::fs::OpenOptions::new();
+        // `create_new`: never follow or reuse a file planted at this name.
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+        options.open(&path)?;
+        Ok(Self(path))
     }
 }
 
@@ -3020,7 +3033,7 @@ pub async fn download_backup(
     let ai_database = daygle_dns_ml::database_path(&config.ai, &database);
     let store = state.catalog.store().clone();
     let made = tokio::task::spawn_blocking(move || {
-        let scratch = ScratchFile::new(&database, "backup");
+        let scratch = ScratchFile::new(&database, "backup")?;
         store.backup_to(&scratch.0, query.query_logs, Some(&ai_database))?;
         Ok::<_, daygle_dns_core::error::DaygleError>(std::fs::read(&scratch.0)?)
     })
@@ -3070,7 +3083,7 @@ pub async fn stage_restore(State(state): State<AppState>, body: axum::body::Byte
         );
     }
     let staged = tokio::task::spawn_blocking(move || {
-        let scratch = ScratchFile::new(&database, "upload");
+        let scratch = ScratchFile::new(&database, "upload")?;
         std::fs::write(&scratch.0, &body)?;
         daygle_dns_authoritative::backup::stage_restore(&database, &scratch.0)
     })

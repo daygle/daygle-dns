@@ -342,3 +342,27 @@ async fn block_page_explains_blocks() {
 
     shutdown(server).await;
 }
+
+/// Internationalized names are matched in the punycode form they arrive in:
+/// a list entry written in punycode (as published blocklists are) and one
+/// typed in Unicode both block the query, and an unlisted IDN is not caught.
+#[tokio::test]
+async fn internationalized_names_are_blocked() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = base_config(&dir.path().join("daygle-dns.db"));
+    config.policy.blocklist = vec![
+        "*.xn--e1afmkfd.test".to_string(),
+        "bücher2.test".to_string(),
+    ];
+    let server = spawn(config).await;
+    let udp = server.udp_addr.unwrap();
+
+    let reply = udp_query(udp, "ads.xn--e1afmkfd.test.", RecordType::A).await;
+    assert_eq!(reply.response_code, ResponseCode::NXDomain, "{reply:?}");
+    let reply = udp_query(udp, "xn--bcher2-3ya.test.", RecordType::A).await;
+    assert_eq!(reply.response_code, ResponseCode::NXDomain, "{reply:?}");
+    let reply = udp_query(udp, "xn--bcher-kva.test.", RecordType::A).await;
+    assert_ne!(reply.response_code, ResponseCode::NXDomain, "{reply:?}");
+
+    shutdown(server).await;
+}

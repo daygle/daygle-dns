@@ -99,13 +99,14 @@ fn identify(state: &AppState, req: &Request) -> (String, &'static str) {
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
         .unwrap_or("");
-    if let Some(session) = state.sessions.authenticate(bearer) {
+    // The session `require_auth` authenticated (it runs first).
+    if let Some(session) = req.extensions().get::<crate::Session>() {
         let via = if session.api_token.is_some() {
             "api_token"
         } else {
             "session"
         };
-        return (session.username, via);
+        return (session.username.clone(), via);
     }
     let static_token = state.config.load().api.api_token.trim().to_string();
     if !static_token.is_empty()

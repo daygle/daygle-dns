@@ -175,6 +175,22 @@ struct Built {
     auto_ptr: AutoPtrIndex,
 }
 
+/// Whether two zone names are the same zone, comparing their ASCII
+/// (punycode) forms: a TSIG binding written `bücher.de=key` must still
+/// guard a zone stored, or asked for, as `xn--bcher-kva.de` (and the
+/// reverse), or the key requirement would silently not apply.
+fn same_zone(a: &str, b: &str) -> bool {
+    fn ascii(name: &str) -> String {
+        let name = name.trim().trim_end_matches('.');
+        Name::from_utf8(name)
+            .map(|n| n.to_ascii())
+            .unwrap_or_else(|_| name.to_string())
+            .trim_end_matches('.')
+            .to_ascii_lowercase()
+    }
+    ascii(a) == ascii(b)
+}
+
 /// The key zones are filed under: lowercase, no trailing dot.
 fn zone_key(name: &str) -> String {
     name.trim().trim_end_matches('.').to_ascii_lowercase()
@@ -422,10 +438,7 @@ impl AuthorityCatalog {
         let ring = crate::tsig::TsigKeyRing::from_configs(&settings.tsig_keys).unwrap_or_default();
         for binding in &settings.tsig_transfer_zones {
             if let Some((zone, key)) = binding.split_once('=') {
-                if zone
-                    .trim_end_matches('.')
-                    .eq_ignore_ascii_case(zone_name.trim_end_matches('.'))
-                {
+                if same_zone(zone, zone_name) {
                     return ring.get_by_config_name(key).cloned();
                 }
             }
@@ -439,10 +452,7 @@ impl AuthorityCatalog {
         let ring = crate::tsig::TsigKeyRing::from_configs(&settings.tsig_keys).unwrap_or_default();
         for binding in &settings.tsig_update_zones {
             if let Some((zone, key)) = binding.split_once('=') {
-                if zone
-                    .trim_end_matches('.')
-                    .eq_ignore_ascii_case(zone_name.trim_end_matches('.'))
-                {
+                if same_zone(zone, zone_name) {
                     return ring.get_by_config_name(key).cloned();
                 }
             }
@@ -1467,6 +1477,14 @@ mod tests {
     use super::*;
     use crate::model::{RecordInput, ZoneInput};
     use chrono::Utc;
+
+    #[test]
+    fn tsig_zone_bindings_match_either_name_form() {
+        assert!(same_zone("bücher.de", "xn--bcher-kva.de."));
+        assert!(same_zone("XN--BCHER-KVA.DE", "Bücher.de"));
+        assert!(same_zone("Example.com.", "example.com"));
+        assert!(!same_zone("example.com", "example.org"));
+    }
 
     #[test]
     fn failover_serves_the_healthy_records_of_the_best_priority() {

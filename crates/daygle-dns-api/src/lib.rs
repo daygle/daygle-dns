@@ -777,7 +777,7 @@ fn is_privileged_read(path: &str) -> bool {
 ///   treated like mutations: admin role or the static token.
 async fn require_auth(
     axum::extract::State(state): axum::extract::State<AppState>,
-    req: Request,
+    mut req: Request,
     next: Next,
 ) -> Response {
     // Within the nested router axum strips the `/api` prefix, so match both
@@ -861,6 +861,9 @@ async fn require_auth(
                 )
                     .into_response();
             }
+            // Handed on so the audit layer need not authenticate again (a
+            // personal API token costs database reads and a write).
+            req.extensions_mut().insert(session);
             return next.run(req).await;
         }
         return (
