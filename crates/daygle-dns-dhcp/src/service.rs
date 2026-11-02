@@ -292,12 +292,12 @@ fn decode_hex(text: &str) -> Option<Vec<u8>> {
     if bytes.is_empty() || !bytes.len().is_multiple_of(2) {
         return None;
     }
+    let digit = |b: u8| char::from(b).to_digit(16);
     bytes
-        .chunks_exact(2)
-        .map(|pair| {
-            let digit = |b: u8| char::from(b).to_digit(16);
-            Some((digit(pair[0])? * 16 + digit(pair[1])?) as u8)
-        })
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|&[hi, lo]| Some((digit(hi)? * 16 + digit(lo)?) as u8))
         .collect()
 }
 
