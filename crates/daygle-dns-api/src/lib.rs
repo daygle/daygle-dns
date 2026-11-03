@@ -74,6 +74,7 @@
 //! resolver in `ArcSwap` containers so the live-reload machinery can publish
 //! new values without locking or restarting.
 
+pub mod accounts;
 pub mod acme;
 pub mod alerts;
 mod audit;
@@ -482,6 +483,8 @@ pub struct AppState {
     /// Query export to an HTTP endpoint; `None` when the API runs without a
     /// server.
     pub log_export: Option<Arc<log_export::LogExporter>>,
+    /// DNS accounts the encrypted listeners recognise (shared with them).
+    pub accounts: Arc<daygle_dns_policy::identity::AccountDirectory>,
 }
 
 /// Build the API router (REST endpoints plus the embedded GUI).
@@ -677,6 +680,12 @@ pub fn router(state: AppState) -> Router {
             get(handlers::rpz_status).post(handlers::rpz_refresh),
         )
         .route("/rpz/test", post(handlers::rpz_test))
+        .route("/accounts", get(accounts::list).post(accounts::create))
+        .route(
+            "/accounts/{id}",
+            put(accounts::update).delete(accounts::delete),
+        )
+        .route("/accounts/{id}/new-id", post(accounts::new_client_id))
         .route("/devices", get(handlers::list_devices))
         .route("/devices/name", put(handlers::set_device_name))
         .route("/dhcp", get(handlers::dhcp_status))

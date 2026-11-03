@@ -1103,6 +1103,8 @@ pub struct QueryLogsQuery {
     rcode: Option<String>,
     /// What blocked the query (`blocklist_source`, `group`, `rpz`, ...).
     block_source: Option<String>,
+    /// The DNS account it came from.
+    account: Option<String>,
     from: Option<String>,
     to: Option<String>,
     page: Option<u32>,
@@ -1171,6 +1173,7 @@ fn query_log_filter(
         outcome: query.outcome.clone(),
         rcode: query.rcode.clone(),
         block_source: query.block_source.clone(),
+        account: query.account.clone(),
         from: bound(&query.from, Bound::From)?,
         to: bound(&query.to, Bound::To)?,
         page: query.page,
@@ -3216,21 +3219,43 @@ pub async fn upsert_blocking_group(
         }
     }
     input.blocked_categories = categories;
-    // Client networks are addresses or names of configured networks.
+    // Clients are addresses, names of configured networks, listener names,
+    // or `account:<name>` for an existing DNS account (stored under the
+    // account's own spelling).
     let config = state.config.load_full();
-    if let Some(entry) = input
-        .clients
-        .iter()
-        .find(|c| !config.is_network_entry(c.trim()) && !daygle_dns_policy::is_listener_keyword(c))
-    {
-        return error_response(
-            StatusCode::BAD_REQUEST,
-            format!(
-                "'{}' is not a network, an address, a network name, or a listener name (DoT, DoH, DoQ)",
-                entry.trim()
-            ),
-        );
+    let accounts = match state.catalog.store().list_dns_accounts() {
+        Ok(accounts) => accounts,
+        Err(e) => return map_err(e),
+    };
+    let mut clients = Vec::with_capacity(input.clients.len());
+    for entry in &input.clients {
+        if let Some(name) = daygle_dns_policy::account_entry(entry) {
+            let Some(account) = accounts.iter().find(|a| a.name.eq_ignore_ascii_case(name)) else {
+                return error_response(
+                    StatusCode::BAD_REQUEST,
+                    format!("there is no DNS account named '{name}'"),
+                );
+            };
+            clients.push(format!(
+                "{}{}",
+                daygle_dns_policy::ACCOUNT_PREFIX,
+                account.name
+            ));
+            continue;
+        }
+        if !config.is_network_entry(entry.trim()) && !daygle_dns_policy::is_listener_keyword(entry)
+        {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                format!(
+                    "'{}' is not a network, an address, a network name, a listener name (DoT, DoH, DoQ) or an account (account:<name>)",
+                    entry.trim()
+                ),
+            );
+        }
+        clients.push(entry.clone());
     }
+    input.clients = clients;
     // Selected blocklists must name configured sources; store each under the
     // source's own spelling.
     let mut blocklists: Vec<String> = Vec::new();
@@ -3325,15 +3350,55 @@ pub struct BlockingTestInput {
     /// existing console calls keep working.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     listener: Option<String>,
+    /// DNS account to evaluate as (its name); omitted for none.
+    #[serde(default)]
+    account: Option<String>,
+}
+
+/// The identity of an `account` named in a tester request: the account
+/// itself (under its own spelling), anonymous when none is named, or the
+/// response for a name that is no account.
+#[allow(clippy::result_large_err)]
+fn tester_identity(
+    state: &AppState,
+    account: Option<&str>,
+) -> Result<daygle_dns_policy::identity::Identity, Response> {
+    use daygle_dns_policy::identity::Identity;
+    let Some(name) = account.map(str::trim).filter(|a| !a.is_empty()) else {
+        return Ok(Identity::Anonymous);
+    };
+    match state.catalog.store().list_dns_accounts() {
+        Ok(accounts) => accounts
+            .into_iter()
+            .find(|a| a.name.eq_ignore_ascii_case(name))
+            .map(|a| Identity::Account(Arc::from(a.name)))
+            .ok_or_else(|| {
+                error_response(
+                    StatusCode::BAD_REQUEST,
+                    format!("there is no DNS account named '{name}'"),
+                )
+            }),
+        Err(e) => Err(map_err(e)),
+    }
 }
 
 /// `POST /api/policy/blocking/test` - evaluate a `{client, domain}` pair
-/// against the live blocking groups and report whether (and why) it is
-/// blocked, so an operator can verify rules before relying on them.
+/// (optionally as a DNS account) against the live blocking groups and report
+/// whether (and why) it is blocked, so an operator can verify rules before
+/// relying on them.
 pub async fn test_blocking(
     State(state): State<AppState>,
     Json(input): Json<BlockingTestInput>,
 ) -> Response {
+    match tester_identity(&state, input.account.as_deref()) {
+        Ok(identity) => {
+            daygle_dns_policy::identity::scope(identity, test_blocking_as(state, input)).await
+        }
+        Err(response) => response,
+    }
+}
+
+async fn test_blocking_as(state: AppState, input: BlockingTestInput) -> Response {
     // Queries reach the policy with IPv4-mapped sources unmapped; test the
     // same address the resolver would see.
     let client: IpAddr = match input.client.trim().parse::<IpAddr>() {
@@ -3430,16 +3495,28 @@ pub struct ExplainInput {
     /// plain DNS.
     #[serde(default)]
     listener: Option<String>,
+    /// The DNS account asked as (its name); omitted for none.
+    #[serde(default)]
+    account: Option<String>,
 }
 
 /// `GET /api/policy/explain` - why a domain is (or is not) blocked for a
-/// device: the verdict the server gives, every check in the order queries
-/// meet them and what each does with the domain, and the latest logged
-/// blocks of the domain with their reasons.
+/// device (optionally as a DNS account): the verdict the server gives, every
+/// check in the order queries meet them and what each does with the domain,
+/// and the latest logged blocks of the domain with their reasons.
 pub async fn explain_blocking(
     State(state): State<AppState>,
     Query(input): Query<ExplainInput>,
 ) -> Response {
+    match tester_identity(&state, input.account.as_deref()) {
+        Ok(identity) => {
+            daygle_dns_policy::identity::scope(identity, explain_blocking_as(state, input)).await
+        }
+        Err(response) => response,
+    }
+}
+
+async fn explain_blocking_as(state: AppState, input: ExplainInput) -> Response {
     use daygle_dns_policy::{source, Action, Check};
     let domain = input
         .domain
@@ -5321,6 +5398,8 @@ pub struct SettingsUpdate {
     pub dhcp: Option<daygle_dns_core::dhcp::DhcpSettings>,
     /// Replaces the whole `[ddr]` section (encrypted DNS discovery).
     pub ddr: Option<daygle_dns_core::config::DdrSettings>,
+    /// Replaces the whole `[accounts]` section (DNS accounts).
+    pub accounts: Option<daygle_dns_core::config::AccountSettings>,
     /// Replaces the whole `[reports]` section (scheduled reports).
     pub reports: Option<daygle_dns_core::config::ReportSettings>,
     /// Replaces the whole `[alerts]` section; an `smtp_password` of
@@ -5995,6 +6074,16 @@ pub async fn update_settings(
             return error_response(StatusCode::BAD_REQUEST, format!("ddr: {msg}"));
         }
         config.ddr = ddr;
+    }
+    if let Some(accounts) = &update.accounts {
+        let accounts = daygle_dns_core::config::AccountSettings {
+            domain: accounts.normalized_domain(),
+            ..accounts.clone()
+        };
+        if let Err(msg) = accounts.check() {
+            return error_response(StatusCode::BAD_REQUEST, format!("accounts: {msg}"));
+        }
+        config.accounts = accounts;
     }
     if let Some(page) = &update.block_page {
         let page = daygle_dns_core::config::BlockPageSettings {

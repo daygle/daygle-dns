@@ -258,6 +258,7 @@ fn log_row(ts: &str, qname: &str) -> daygle_dns_authoritative::QueryLogRow {
         rcode: Some("NOERROR".into()),
         elapsed_ms: 1,
         block: None,
+        account: None,
     }
 }
 

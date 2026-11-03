@@ -78,6 +78,8 @@ pub struct Shared {
     /// saves and config-file reloads), so two changes landing together
     /// cannot overwrite each other.
     pub config_write: Arc<tokio::sync::Mutex<()>>,
+    /// DNS accounts the encrypted listeners recognise (`[accounts]`).
+    pub accounts: Arc<daygle_dns_policy::identity::AccountDirectory>,
 }
 
 /// The currently bound DNS listener addresses.
@@ -475,6 +477,7 @@ mod tests {
             syslog: None,
             log_export: None,
             config_write: Arc::default(),
+            accounts: Arc::default(),
         }
     }
 

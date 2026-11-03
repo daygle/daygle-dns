@@ -43,6 +43,8 @@ pub struct QueryDbEntry {
     pub elapsed_ms: u64,
     /// Why it was blocked, for blocked queries.
     pub block: Option<daygle_dns_core::block_log::BlockReason>,
+    /// The DNS account the query came from, when it named one.
+    pub account: Option<String>,
 }
 
 /// Async query-log writer. Cloneable handle for the dispatcher.
@@ -138,6 +140,7 @@ async fn run_writer(
                             rcode: entry.rcode,
                             elapsed_ms: entry.elapsed_ms as i64,
                             block: entry.block,
+                            account: entry.account,
                         });
                         if pending.len() >= BATCH_MAX_ROWS {
                             flush(&store, &mut pending).await;
@@ -233,6 +236,7 @@ mod tests {
             rcode: Some("NOERROR".to_string()),
             elapsed_ms: 1,
             block: None,
+            account: None,
         }
     }
 
@@ -271,6 +275,7 @@ mod tests {
             rcode: None,
             elapsed_ms: 1,
             block: None,
+            account: None,
         };
         store.insert_query_logs(&[old]).unwrap();
         let shutdown = tokio_util::sync::CancellationToken::new();

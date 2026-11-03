@@ -660,6 +660,11 @@ pub async fn bind_with(
     // server binary's tracing setup forwards into this Server Log.
     let session = Arc::new(tls_diag::SessionLog::new(logs.clone()));
     tls_diag::set_current(session.clone());
+    // DNS accounts: settings from the live config, accounts from the store.
+    let accounts = Arc::new(daygle_dns_policy::identity::AccountDirectory::with_config(
+        config_swap.clone(),
+    ));
+    daygle_dns_api::accounts::load(&store, &accounts);
     let shared = Arc::new(Shared {
         catalog: catalog.clone(),
         policy: Arc::new(ArcSwap::from_pointee(policy)),
@@ -692,6 +697,7 @@ pub async fn bind_with(
         syslog: Some(syslog),
         log_export: Some(log_export),
         config_write: Arc::default(),
+        accounts: accounts.clone(),
     });
 
     // DNS listeners (bound immediately so the server serves right away).
@@ -820,6 +826,7 @@ pub async fn bind_with(
         dhcp: Some(dhcp.clone()),
         devices: Arc::default(),
         log_export: shared.log_export.clone(),
+        accounts: accounts.clone(),
     };
     // Scheduled reports (Settings -> Alerts).
     tokio::spawn(daygle_dns_api::reports::run_reports(
@@ -1068,6 +1075,7 @@ fn build_dispatcher(shared: &Shared, config: &DaygleConfig) -> DnsDispatcher {
     .with_rrl(shared.rrl.clone())
     .with_block_log(shared.block_log.clone())
     .with_rpz(shared.rpz.as_ref().map(|rpz| rpz.set()).unwrap_or_default())
+    .with_accounts(shared.accounts.clone())
 }
 
 /// Bind listeners for a specific configuration snapshot (the current one, or

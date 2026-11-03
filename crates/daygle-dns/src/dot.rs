@@ -304,12 +304,24 @@ impl Connection {
                     return;
                 }
             };
-        self.serve(tls, client).await;
+        // A DNS account, from the client ID in the name the device asked
+        // for (`<client id>.<accounts.domain>`); every query of the
+        // connection is answered as it.
+        let identity = self
+            .handler
+            .accounts()
+            .identify(tls.get_ref().1.server_name(), None);
+        self.serve(tls, client, identity).await;
     }
 
     /// Read framed queries until the client closes, goes idle, sends
     /// garbage or the listener stops; answer each concurrently.
-    async fn serve(self, tls: tokio_rustls::server::TlsStream<TcpStream>, client: SocketAddr) {
+    async fn serve(
+        self,
+        tls: tokio_rustls::server::TlsStream<TcpStream>,
+        client: SocketAddr,
+        identity: daygle_dns_policy::identity::Identity,
+    ) {
         let (mut reader, mut writer) = tokio::io::split(tls);
         let (tx, mut rx) = mpsc::channel::<Vec<u8>>(WRITE_QUEUE);
 
@@ -384,9 +396,14 @@ impl Connection {
             let handler = self.handler.clone();
             let session = self.session.clone();
             let tx = tx.clone();
+            let identity = identity.clone();
             queries.spawn(async move {
                 let _permit = permit;
-                answer(body, client, handler, &session, tx).await;
+                daygle_dns_policy::identity::scope(
+                    identity,
+                    answer(body, client, handler, &session, tx),
+                )
+                .await;
             });
         }
 
