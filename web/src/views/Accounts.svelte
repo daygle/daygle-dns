@@ -69,10 +69,9 @@
 
   function saveSettings(e) {
     e.preventDefault();
-    const accountsSettings = {
-      domain: settings.domain.trim().replace(/\.$/, '').toLowerCase(),
-      require: !!settings.require,
-    };
+    const domainValue = settings.domain.trim().replace(/\.$/, '').toLowerCase();
+    // Without a domain nothing can be recognised, so nothing is required.
+    const accountsSettings = { domain: domainValue, require: !!settings.require && !!domainValue };
     run(async () => {
       await api.updateSettings({ accounts: accountsSettings });
       settings = { ...accountsSettings };
@@ -153,7 +152,7 @@
       </label>
     </div>
     <label class="check">
-      <input type="checkbox" bind:checked={settings.require} disabled={!isAdmin || !settings.domain.trim()} />
+      <input type="checkbox" bind:checked={settings.require} disabled={!isAdmin || (!settings.domain.trim() && !settings.require)} />
       <span>Require an account: refuse DoT, DoH and DoQ queries that name no known, enabled account (plain DNS is not affected)</span>
     </label>
     {#if isAdmin}

@@ -71,12 +71,22 @@
   const listenersOn = $derived(
     LISTENERS.map((l) => l.key).filter((key) => value.some((v) => String(v).trim().toUpperCase() === key)),
   );
-  // Ticked accounts, as the entries the server stores ("account:Kid").
+  // Ticked accounts, as the entries the server stores ("account:Kid"),
+  // read from `value` itself (so saved ones survive while the account list
+  // is loading or failed to load), spelt as the account list spells them.
   const accountsOn = $derived(
-    accounts
-      .filter((name) => value.some((v) => isAccount(v) && accountOf(v) === name.toLowerCase()))
-      .map((name) => `account:${name}`),
+    value.filter(isAccount).map((v) => {
+      const known = accounts.find((name) => name.toLowerCase() === accountOf(v));
+      return `account:${known ?? String(v).trim().slice('account:'.length).trim()}`;
+    }),
   );
+  // Chips: every account, plus selected ones the list does not (yet) show.
+  const accountChips = $derived([
+    ...accounts,
+    ...accountsOn
+      .map((entry) => entry.slice('account:'.length))
+      .filter((name) => !accounts.some((a) => a.toLowerCase() === name.toLowerCase())),
+  ]);
   let extra = $state(value.filter((v) => !nameOf(v) && !isListener(v) && !isAccount(v)).join(', '));
 
   function others(text) {
@@ -143,7 +153,7 @@
       </label>
     {/each}
   {/if}
-  {#each accounts as name (name)}
+  {#each accountChips as name (name)}
     <label class="chip" class:on={accountsOn.includes(`account:${name}`)} title="Queries from the DNS account '{name}', wherever it connects from">
       <input type="checkbox" checked={accountsOn.includes(`account:${name}`)} onchange={() => toggleAccount(name)} />
       Account: {name}

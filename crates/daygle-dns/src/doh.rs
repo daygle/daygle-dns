@@ -265,8 +265,10 @@ fn path_client_id<'p>(path: &'p str, endpoint: &str) -> Result<Option<&'p str>, 
     if path == endpoint {
         return Ok(None);
     }
+    // `<endpoint>/<id>`, also for an endpoint written with a trailing `/`
+    // (the account page advertises it without one).
     match path
-        .strip_prefix(endpoint)
+        .strip_prefix(endpoint.trim_end_matches('/'))
         .and_then(|rest| rest.strip_prefix('/'))
     {
         Some(id) if !id.is_empty() && !id.contains('/') => Ok(Some(id)),
@@ -559,5 +561,11 @@ mod tests {
         assert_eq!(path_client_id("/dns-query/a/b", "/dns-query"), Err(()));
         assert_eq!(path_client_id("/dns-queryx", "/dns-query"), Err(()));
         assert_eq!(path_client_id("/other", "/dns-query"), Err(()));
+        // An endpoint configured with a trailing slash.
+        assert_eq!(path_client_id("/dns-query/", "/dns-query/"), Ok(None));
+        assert_eq!(
+            path_client_id("/dns-query/kid1", "/dns-query/"),
+            Ok(Some("kid1"))
+        );
     }
 }

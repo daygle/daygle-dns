@@ -304,14 +304,13 @@ impl Connection {
                     return;
                 }
             };
-        // A DNS account, from the client ID in the name the device asked
-        // for (`<client id>.<accounts.domain>`); every query of the
-        // connection is answered as it.
-        let identity = self
-            .handler
-            .accounts()
-            .identify(tls.get_ref().1.server_name(), None);
-        self.serve(tls, client, identity).await;
+        // The name the device asked for, for DNS accounts
+        // (`<client id>.<accounts.domain>`). It is resolved against the
+        // live account list for every query, so disabling, deleting,
+        // renaming or re-keying an account applies to connections already
+        // open.
+        let server_name: Option<Arc<str>> = tls.get_ref().1.server_name().map(Arc::from);
+        self.serve(tls, client, server_name).await;
     }
 
     /// Read framed queries until the client closes, goes idle, sends
@@ -320,7 +319,7 @@ impl Connection {
         self,
         tls: tokio_rustls::server::TlsStream<TcpStream>,
         client: SocketAddr,
-        identity: daygle_dns_policy::identity::Identity,
+        server_name: Option<Arc<str>>,
     ) {
         let (mut reader, mut writer) = tokio::io::split(tls);
         let (tx, mut rx) = mpsc::channel::<Vec<u8>>(WRITE_QUEUE);
@@ -396,9 +395,10 @@ impl Connection {
             let handler = self.handler.clone();
             let session = self.session.clone();
             let tx = tx.clone();
-            let identity = identity.clone();
+            let server_name = server_name.clone();
             queries.spawn(async move {
                 let _permit = permit;
+                let identity = handler.accounts().identify(server_name.as_deref(), None);
                 daygle_dns_policy::identity::scope(
                     identity,
                     answer(body, client, handler, &session, tx),

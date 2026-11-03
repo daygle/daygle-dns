@@ -31,6 +31,46 @@ fn wildcard_certificate(dir: &Path) -> (String, String) {
     )
 }
 
+type DotStream = tokio_rustls::client::TlsStream<tokio::net::TcpStream>;
+
+/// One DoT connection, kept open, to `addr` as `server_name`.
+async fn dot_connect(addr: std::net::SocketAddr, cert: &Path, server_name: &str) -> DotStream {
+    use rustls_pki_types::pem::PemObject as _;
+    let mut roots = rustls::RootCertStore::empty();
+    for c in rustls::pki_types::CertificateDer::pem_file_iter(cert).unwrap() {
+        roots.add(c.unwrap()).unwrap();
+    }
+    let provider = std::sync::Arc::new(rustls::crypto::ring::default_provider());
+    let mut tls = rustls::ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    tls.alpn_protocols = vec![b"dot".to_vec()];
+    let tcp = tokio::net::TcpStream::connect(addr).await.unwrap();
+    tokio_rustls::TlsConnector::from(std::sync::Arc::new(tls))
+        .connect(
+            rustls::pki_types::ServerName::try_from(server_name.to_string()).unwrap(),
+            tcp,
+        )
+        .await
+        .unwrap()
+}
+
+/// Ask `name` A on an open DoT connection.
+async fn ask_on(stream: &mut DotStream, name: &str) -> Message {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    let bytes = query_message(name, RecordType::A).to_vec().unwrap();
+    let mut framed = (bytes.len() as u16).to_be_bytes().to_vec();
+    framed.extend_from_slice(&bytes);
+    stream.write_all(&framed).await.unwrap();
+    let mut len = [0u8; 2];
+    stream.read_exact(&mut len).await.unwrap();
+    let mut body = vec![0u8; u16::from_be_bytes(len) as usize];
+    stream.read_exact(&mut body).await.unwrap();
+    Message::from_vec(&body).unwrap()
+}
+
 async fn api(server: &daygle_dns::BoundServer, method: &str, path: &str, body: Value) -> Value {
     let url = format!("http://{}/api{path}", server.api_addr);
     let client = reqwest::Client::new();
@@ -223,6 +263,13 @@ async fn accounts_are_recognised_filtered_logged_and_required() {
         ask("kid1.acct.test").await.response_code,
         ResponseCode::NXDomain
     );
+    // A connection opened as the account before it is disabled below: its
+    // later queries must see the change.
+    let mut open = dot_connect(dot, cert_path, "kid1.acct.test").await;
+    assert_eq!(
+        ask_on(&mut open, "games.test.").await.response_code,
+        ResponseCode::NXDomain
+    );
     let id = kid["id"].as_str().unwrap();
     api(
         &server,
@@ -234,6 +281,11 @@ async fn accounts_are_recognised_filtered_logged_and_required() {
     assert_eq!(
         ask("kid1.acct.test").await.response_code,
         ResponseCode::Refused
+    );
+    assert_eq!(
+        ask_on(&mut open, "games.test.").await.response_code,
+        ResponseCode::Refused,
+        "a disabled account is refused on a connection opened before"
     );
     // Plain DNS cannot carry an account and is not affected.
     let plain = udp_query(server.udp_addr.unwrap(), "games.test.", RecordType::A).await;

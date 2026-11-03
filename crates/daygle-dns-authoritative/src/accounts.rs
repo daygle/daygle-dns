@@ -154,13 +154,38 @@ fn rewrite_group_entries(conn: &Connection, old: &str, new: Option<&str>) -> Res
                 new.map(|name| format!("{ACCOUNT_ENTRY_PREFIX}{name}"))
             })
             .collect();
+        // A group left with no clients would cover every client: one that
+        // only named the deleted account is turned off instead.
         conn.execute(
-            "UPDATE blocking_groups SET clients = ?2 WHERE id = ?1",
+            "UPDATE blocking_groups
+             SET clients = ?2, enabled = CASE WHEN ?3 THEN 0 ELSE enabled END
+             WHERE id = ?1",
             params![
                 id,
-                serde_json::to_string(&rewritten).expect("strings serialize")
+                serde_json::to_string(&rewritten).expect("strings serialize"),
+                rewritten.is_empty(),
             ],
         )?;
+    }
+    Ok(())
+}
+
+/// Refuse `name` when another account (not `except`) has it, ignoring
+/// case the way filtering groups match names (Unicode lowercase; SQLite's
+/// `NOCASE` only folds ASCII, so `Éva` and `éva` would both get in).
+fn ensure_name_free(conn: &Connection, name: &str, except: Option<&str>) -> Result<()> {
+    let folded = name.to_lowercase();
+    let mut stmt = conn.prepare("SELECT id, name FROM dns_accounts")?;
+    let taken = stmt
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?
+        .filter_map(std::result::Result::ok)
+        .any(|(id, other)| Some(id.as_str()) != except && other.to_lowercase() == folded);
+    if taken {
+        return Err(DaygleError::Config(format!(
+            "an account named '{name}' already exists"
+        )));
     }
     Ok(())
 }
@@ -222,7 +247,9 @@ impl ZoneStore {
             last_seen_at: None,
         };
         self.with_conn(|conn| {
-            conn.execute(
+            let tx = conn.unchecked_transaction()?;
+            ensure_name_free(&tx, &account.name, None)?;
+            tx.execute(
                 "INSERT INTO dns_accounts (id, name, client_id, enabled, created_at)
                  VALUES (?1, ?2, ?3, ?4, ?5)",
                 params![
@@ -234,6 +261,7 @@ impl ZoneStore {
                 ],
             )
             .map_err(|e| constraint_error(e, &account.name, &account.client_id))?;
+            tx.commit()?;
             Ok(())
         })?;
         Ok(account)
@@ -258,6 +286,7 @@ impl ZoneStore {
                 )
                 .optional()?
                 .ok_or_else(|| DaygleError::NotFound(format!("account '{id}'")))?;
+            ensure_name_free(&tx, &name, Some(id))?;
             let client_id = if requested_id.is_empty() {
                 current.client_id.clone()
             } else {
@@ -351,6 +380,18 @@ mod tests {
             .create_dns_account(&input("Tablet", "two.labels"))
             .is_err());
         assert_eq!(store.list_dns_accounts().unwrap().len(), 2);
+
+        // Case is ignored beyond ASCII too (SQLite's NOCASE would not).
+        store.create_dns_account(&input("Éva", "")).unwrap();
+        assert!(store.create_dns_account(&input("éva", "")).is_err());
+        // Renaming onto another account's name is refused; changing the
+        // case of its own name is not.
+        assert!(store
+            .update_dns_account(&chosen.id, &input("ÉVA", ""))
+            .is_err());
+        store
+            .update_dns_account(&chosen.id, &input("PHONE", ""))
+            .unwrap();
     }
 
     #[test]
@@ -384,6 +425,30 @@ mod tests {
             .unwrap()
             .clients;
         assert_eq!(clients, vec!["192.168.1.0/24"]);
+        assert!(
+            store
+                .get_blocking_group(&group.id)
+                .unwrap()
+                .unwrap()
+                .enabled
+        );
         assert!(!store.delete_dns_account(&kid.id).unwrap());
+
+        // A group that named only the deleted account is turned off rather
+        // than left covering every client.
+        let solo = store.create_dns_account(&input("Solo", "")).unwrap();
+        let only = store
+            .upsert_blocking_group(
+                &serde_json::from_value::<BlockingGroupInput>(serde_json::json!({
+                    "name": "Solo only",
+                    "clients": ["account:Solo"],
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        store.delete_dns_account(&solo.id).unwrap();
+        let only = store.get_blocking_group(&only.id).unwrap().unwrap();
+        assert!(only.clients.is_empty());
+        assert!(!only.enabled);
     }
 }

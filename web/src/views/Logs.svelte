@@ -428,7 +428,7 @@
                   <div class="muted small">HTTP {entry.status}</div>
                 </td>
               {/if}
-              {#if showA('from')}<td><ClientLabel address={entry.client} />{#if entry.account}<button type="button" class="pill account" title="DNS account: show only its queries" onclick={() => { fAccount = entry.account; apply(); }}>{entry.account}</button>{/if}</td>{/if}
+              {#if showA('from')}<td><ClientLabel address={entry.client} /></td>{/if}
             </tr>
           {/each}
         </tbody>
@@ -602,7 +602,10 @@
               <td>
                 {#if deviceName(entry.client)}
                   <button type="button" class="link" onclick={() => filterBy('client', entry.client)} title="Show only this device">{deviceName(entry.client)}</button>
-                {:else}<span class="muted">-</span>{/if}
+                {:else if !entry.account}<span class="muted">-</span>{/if}
+                {#if entry.account}
+                  <button type="button" class="pill account" title="DNS account: show only its queries" onclick={() => { fAccount = entry.account; apply(); }}>{entry.account}</button>
+                {/if}
               </td>
             {/if}
             {#if showQ('ip')}<td><button type="button" class="link" onclick={() => filterBy('client', entry.client)} title="Show only this client"><code>{entry.client}</code></button></td>{/if}
