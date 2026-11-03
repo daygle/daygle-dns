@@ -7,9 +7,13 @@
 //! - **HTTP-01**: the CA fetches `http://<name>/.well-known/acme-challenge/
 //!   <token>`, which the web console's HTTP listener answers. The CA always
 //!   connects to port 80, so the name must reach that listener on port 80.
-//! - **DNS-01**: a TXT record at `_acme-challenge.<name>` in a zone this
-//!   server hosts, so the zone must be delegated to this server. The only
-//!   way to get a wildcard (`*.example.com`) certificate.
+//! - **DNS-01**: a TXT record at `_acme-challenge.<name>`. The only way to
+//!   get a wildcard (`*.example.com`) certificate. Either the name's zone is
+//!   hosted here (and delegated to this server), or - for a domain whose
+//!   DNS is elsewhere - the provider has a one-time CNAME from
+//!   `_acme-challenge.<name>` to a name in a zone this server hosts and
+//!   serves publicly; the TXT record goes there, and the CA follows the
+//!   CNAME (CNAME delegation, as acme-dns uses).
 //!
 //! Issued certificates are stored like any other on the Certificates page,
 //! so listeners using them pick up renewals in place.
@@ -332,7 +336,7 @@ async fn prove_control(
         };
         let key_authorization = challenge.key_authorization();
         if dns {
-            let id = add_txt_record(state, &domain, &key_authorization.dns_value())?;
+            let id = add_txt_record(state, &domain, &key_authorization.dns_value()).await?;
             challenges.txt_records.push(id);
         } else {
             state.acme.http_tokens.lock().insert(
@@ -382,29 +386,87 @@ fn order_problem(order: &mut instant_acme::Order, status: OrderStatus) -> String
     }
 }
 
-/// Put the DNS-01 TXT record for `domain` in the zone this server hosts
-/// for it. Returns the record's id, for removal.
-fn add_txt_record(state: &AppState, domain: &str, value: &str) -> Result<String, String> {
+/// The primary zone this server hosts that holds `name` (the most
+/// specific), if any.
+fn hosted_primary_zone(
+    state: &AppState,
+    name: &str,
+) -> Result<Option<daygle_dns_authoritative::model::Zone>, String> {
     let store = state.catalog.store();
-    let name = format!("_acme-challenge.{}", domain.trim_end_matches('.'));
     let secondaries: HashSet<String> = store
         .list_secondary()
         .map_err(|e| e.to_string())?
         .into_iter()
         .map(|s| s.zone_id)
         .collect();
-    let zone = store
+    Ok(store
         .list_zones()
         .map_err(|e| e.to_string())?
         .into_iter()
         .filter(|z| !secondaries.contains(&z.id))
         .filter(|z| name == z.name || name.ends_with(&format!(".{}", z.name)))
-        .max_by_key(|z| z.name.len())
-        .ok_or_else(|| {
-            format!(
-                "no zone on this server holds {name}: the DNS challenge needs the domain's zone hosted (as a primary) here"
-            )
-        })?;
+        .max_by_key(|z| z.name.len()))
+}
+
+/// Where `name` is CNAMEd to in public DNS (lowercase, no trailing dot),
+/// looked up through this server's resolver.
+async fn cname_target(state: &AppState, name: &str) -> Result<Option<String>, String> {
+    let Some(resolver) = state.resolver.load_full() else {
+        return Err("recursion is off, so this server cannot look up where it points".into());
+    };
+    let Ok(lookup) = resolver
+        .lookup(&format!("{name}."), hickory_proto::rr::RecordType::CNAME)
+        .await
+    else {
+        return Ok(None);
+    };
+    Ok(lookup
+        .answers()
+        .iter()
+        .find_map(|record| match &record.data {
+            hickory_proto::rr::RData::CNAME(target) => Some(
+                target
+                    .0
+                    .to_ascii()
+                    .trim_end_matches('.')
+                    .to_ascii_lowercase(),
+            ),
+            _ => None,
+        }))
+}
+
+/// Put the DNS-01 TXT record for `domain` in the zone this server hosts
+/// for `_acme-challenge.<domain>`, or for the name a CNAME there delegates
+/// to. Returns the record's id, for removal.
+async fn add_txt_record(state: &AppState, domain: &str, value: &str) -> Result<String, String> {
+    let challenge = format!(
+        "_acme-challenge.{}",
+        domain.trim_end_matches('.').to_ascii_lowercase()
+    );
+    let (name, zone) = match hosted_primary_zone(state, &challenge)? {
+        Some(zone) => (challenge, zone),
+        None => {
+            let not_here = |why: &str| {
+                format!(
+                    "no zone on this server holds {challenge}{why}. Host the domain's zone here, or at the domain's DNS provider add a CNAME from {challenge} to a name in a zone this server hosts and serves publicly"
+                )
+            };
+            let target = match cname_target(state, &challenge).await {
+                Ok(Some(target)) => target,
+                Ok(None) => return Err(not_here(", and it is not a CNAME")),
+                Err(e) => return Err(not_here(&format!(" ({e})"))),
+            };
+            match hosted_primary_zone(state, &target)? {
+                Some(zone) => (target, zone),
+                None => {
+                    return Err(not_here(&format!(
+                        ", and its CNAME target {target} is not in one either"
+                    )))
+                }
+            }
+        }
+    };
+    let store = state.catalog.store();
     let relative = name
         .strip_suffix(&format!(".{}", zone.name))
         .unwrap_or("@")
