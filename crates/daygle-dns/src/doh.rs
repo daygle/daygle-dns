@@ -211,6 +211,9 @@ impl Connection {
     /// stops; answer each DNS request concurrently.
     async fn serve(self, tls: tokio_rustls::server::TlsStream<TcpStream>, client: SocketAddr) {
         let idle = self.options.timeout;
+        // The name the device asked for, for DNS accounts
+        // (`<client id>.<accounts.domain>`).
+        let server_name: Option<Arc<str>> = tls.get_ref().1.server_name().map(Arc::from);
         let mut h2 = match h2::server::handshake(tls).await {
             Ok(h2) => h2,
             Err(e) => {
@@ -232,14 +235,44 @@ impl Connection {
             let handler = self.handler.clone();
             let endpoint = self.options.endpoint.clone();
             let session = self.session.clone();
+            let server_name = server_name.clone();
             tokio::spawn(async move {
+                let target = Target {
+                    endpoint: &endpoint,
+                    server_name: server_name.as_deref(),
+                };
                 if let Err(detail) =
-                    answer(request, respond, client, handler, &endpoint, idle, &session).await
+                    answer(request, respond, client, handler, target, idle, &session).await
                 {
                     debug!(%client, detail, "DoH request rejected");
                 }
             });
         }
+    }
+}
+
+/// Where a request was sent: the DNS endpoint path, and the TLS server
+/// name of its connection.
+struct Target<'a> {
+    endpoint: &'a str,
+    server_name: Option<&'a str>,
+}
+
+/// The client ID in a request path: `None` for the bare endpoint,
+/// `Some(id)` for `<endpoint>/<id>` (a DNS account), `Err` for any other
+/// path.
+fn path_client_id<'p>(path: &'p str, endpoint: &str) -> Result<Option<&'p str>, ()> {
+    if path == endpoint {
+        return Ok(None);
+    }
+    // `<endpoint>/<id>`, also for an endpoint written with a trailing `/`
+    // (the account page advertises it without one).
+    match path
+        .strip_prefix(endpoint.trim_end_matches('/'))
+        .and_then(|rest| rest.strip_prefix('/'))
+    {
+        Some(id) if !id.is_empty() && !id.contains('/') => Ok(Some(id)),
+        _ => Err(()),
     }
 }
 
@@ -252,12 +285,12 @@ async fn answer(
     mut respond: SendResponse<Bytes>,
     client: SocketAddr,
     handler: DnsDispatcher,
-    endpoint: &str,
+    target: Target<'_>,
     timeout: Duration,
     session: &SessionLog,
 ) -> Result<(), String> {
     let (parts, mut body) = request.into_parts();
-    if parts.uri.path() != endpoint {
+    let Ok(path_id) = path_client_id(parts.uri.path(), target.endpoint) else {
         return Err(rejected(
             session,
             client,
@@ -265,7 +298,9 @@ async fn answer(
             StatusCode::NOT_FOUND,
             "bad path",
         ));
-    }
+    };
+    // A DNS account: the client ID in the path, else in the server name.
+    let identity = handler.accounts().identify(target.server_name, path_id);
     let bytes = match parts.method {
         Method::GET => {
             // RFC 8484 §4.1: GET with `dns=` (base64url) carries the
@@ -337,9 +372,11 @@ async fn answer(
         return Ok(());
     }
     let responder = H2Responder::new(respond);
-    handler
-        .handle_request::<_, TokioTime>(&request, responder)
-        .await;
+    daygle_dns_policy::identity::scope(
+        identity,
+        handler.handle_request::<_, TokioTime>(&request, responder),
+    )
+    .await;
     Ok(())
 }
 
@@ -506,5 +543,29 @@ impl ResponseHandler for H2Responder {
             .map_err(|e| NetError::Msg(format!("servfail frame: {e}")))?;
         self.send(bytes).await?;
         Ok(ResponseInfo::from(header))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::path_client_id;
+
+    #[test]
+    fn account_client_ids_ride_in_the_path() {
+        assert_eq!(path_client_id("/dns-query", "/dns-query"), Ok(None));
+        assert_eq!(
+            path_client_id("/dns-query/laptop1", "/dns-query"),
+            Ok(Some("laptop1"))
+        );
+        assert_eq!(path_client_id("/dns-query/", "/dns-query"), Err(()));
+        assert_eq!(path_client_id("/dns-query/a/b", "/dns-query"), Err(()));
+        assert_eq!(path_client_id("/dns-queryx", "/dns-query"), Err(()));
+        assert_eq!(path_client_id("/other", "/dns-query"), Err(()));
+        // An endpoint configured with a trailing slash.
+        assert_eq!(path_client_id("/dns-query/", "/dns-query/"), Ok(None));
+        assert_eq!(
+            path_client_id("/dns-query/kid1", "/dns-query/"),
+            Ok(Some("kid1"))
+        );
     }
 }

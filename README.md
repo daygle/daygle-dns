@@ -105,8 +105,15 @@ Daygle DNS combines, in a single process:
   and every response to an EDNS client carries an OPT record.
 - **Let's Encrypt certificates** (ACME): issued from the Certificates page
   and renewed automatically, proving control over HTTP (the web console) or
-  DNS (a TXT record in a zone hosted here, so wildcards work too). A private
-  ACME CA such as step-ca works as well.
+  DNS (a TXT record in a zone hosted here - directly, or through a one-time
+  CNAME from a domain whose DNS is elsewhere - so wildcards work too). A
+  private ACME CA such as step-ca works as well.
+- **DNS accounts**, as NextDNS does them: each device or person gets a
+  client ID and connects to DoT/DoQ as `<client id>.dns.example.com`
+  (Android Private DNS, Apple profiles) or to DoH at `/dns-query/<client id>`,
+  and is recognised from any network: filtering groups can target the
+  account, the query log names it, and the server can refuse encrypted
+  queries that name no account.
 - **Backup and restore** of everything the server keeps (zones, keys,
   settings, users, certificates) as one file, from the console or
   `daygle-dns backup` / `daygle-dns restore`.

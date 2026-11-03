@@ -44,6 +44,9 @@ pub struct QueryLogEntry {
     /// Why it was blocked, for blocked queries.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub block: Option<crate::block_log::BlockReason>,
+    /// The DNS account the query came from, when it named one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<String>,
 }
 
 struct Inner {
@@ -249,6 +252,7 @@ mod tests {
             rcode: Some("NOERROR".to_string()),
             elapsed_ms: 3,
             block: None,
+            account: None,
         }
     }
 

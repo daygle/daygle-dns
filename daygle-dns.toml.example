@@ -328,6 +328,19 @@ self_signed = true
 server_name = "dns.example.com"
 idle_timeout_secs = 600
 
+# DNS accounts (Clients -> DNS Accounts), as NextDNS does them: a device that
+# connects to DoT/DoQ as <client id>.<domain> (Android "Private DNS", Apple
+# profiles), or to DoH at /dns-query/<client id>, is recognised as that
+# account from any network, so filtering groups can target it and the query
+# log names it. The accounts themselves are made in the console. The
+# listeners' certificate must cover <domain> and *.<domain> (the Certificates
+# page issues one with the DNS challenge). Usually set from the console.
+[accounts]
+domain = ""
+# Refuse DoT/DoH/DoQ queries that name no known, enabled account (plain DNS
+# on port 53 cannot carry one and is unaffected).
+require = false
+
 # REST API + embedded web GUI.
 [api]
 enabled = true

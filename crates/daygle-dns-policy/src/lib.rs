@@ -20,13 +20,17 @@ pub mod advanced;
 mod blocklist;
 mod blocklist_source;
 mod engine;
+pub mod identity;
 mod plugin;
 mod rule;
 pub mod safe_search;
 pub mod services;
 
 pub use acl::Acl;
-pub use advanced::{is_listener_keyword, validate_regex, AdvancedBlocking, LISTENER_KEYWORDS};
+pub use advanced::{
+    account_entry, is_listener_keyword, validate_regex, AdvancedBlocking, ACCOUNT_PREFIX,
+    LISTENER_KEYWORDS,
+};
 pub use blocklist::Blocklist;
 pub use blocklist_source::{
     detect_blocklist_format, detect_blocklist_format_at, domain_count, parse_blocklist,

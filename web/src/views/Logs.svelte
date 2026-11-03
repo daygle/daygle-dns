@@ -196,6 +196,8 @@
 
   // Filter form model. `qname` supports `*` wildcards and substring match.
   let fClient = $state('');
+  // A DNS account (Clients -> DNS Accounts), by name.
+  let fAccount = $state('');
   let fQname = $state('');
   let fQtype = $state('');
   let fProtocol = $state('');
@@ -222,7 +224,7 @@
   let liveTimer = null;
 
   const filtersActive = $derived(
-    !!(fClient.trim() || fQname.trim() || fQtype || fProtocol || fOutcome || fRcode || fBlockSource || fFrom || fTo),
+    !!(fClient.trim() || fAccount.trim() || fQname.trim() || fQtype || fProtocol || fOutcome || fRcode || fBlockSource || fFrom || fTo),
   );
 
   function buildQuery(overrides = {}) {
@@ -230,6 +232,7 @@
     const put = (key, value) => { if (String(value).trim() !== '') params.set(key, String(value).trim()); };
     // A device name (Clients -> Devices) stands for its address.
     put('client', addressFor(fClient));
+    put('account', fAccount);
     put('qname', fQname);
     put('qtype', fQtype);
     put('protocol', fProtocol);
@@ -272,7 +275,7 @@
   }
 
   function resetFilters() {
-    fClient = fQname = fQtype = fProtocol = fOutcome = fRcode = fBlockSource = fFrom = fTo = '';
+    fClient = fAccount = fQname = fQtype = fProtocol = fOutcome = fRcode = fBlockSource = fFrom = fTo = '';
     apply();
   }
 
@@ -493,6 +496,9 @@
         <label>Client
           <input placeholder="192.168.1.20 or a device name" bind:value={fClient} />
         </label>
+        <label>DNS Account
+          <input placeholder="account name" bind:value={fAccount} />
+        </label>
         <label>Domain
           <input placeholder="example.com or *.example.com" bind:value={fQname} />
         </label>
@@ -596,7 +602,10 @@
               <td>
                 {#if deviceName(entry.client)}
                   <button type="button" class="link" onclick={() => filterBy('client', entry.client)} title="Show only this device">{deviceName(entry.client)}</button>
-                {:else}<span class="muted">-</span>{/if}
+                {:else if !entry.account}<span class="muted">-</span>{/if}
+                {#if entry.account}
+                  <button type="button" class="pill account" title="DNS account: show only its queries" onclick={() => { fAccount = entry.account; apply(); }}>{entry.account}</button>
+                {/if}
               </td>
             {/if}
             {#if showQ('ip')}<td><button type="button" class="link" onclick={() => filterBy('client', entry.client)} title="Show only this client"><code>{entry.client}</code></button></td>{/if}
@@ -666,6 +675,7 @@
 {/if}
 
 <style>
+  .pill.account { margin-left: 6px; cursor: pointer; border: none; font: inherit; font-size: 0.75rem; }
   .small { font-size: 0.78rem; margin-top: 2px; }
   .reason { max-width: 340px; }
   .why { margin-left: 6px; padding: 0; line-height: 0; vertical-align: middle; }

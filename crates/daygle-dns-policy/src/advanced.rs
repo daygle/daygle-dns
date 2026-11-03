@@ -35,6 +35,20 @@ use crate::{Action, Blocklist, Decision, GroupBlocklists};
 /// as networks ("everything except my private ranges" is not a CIDR set).
 pub const LISTENER_KEYWORDS: [&str; 3] = ["dot", "doh", "doq"];
 
+/// The client-list entry prefix that names a DNS account
+/// (`account:<name>`, the name case-insensitive).
+pub const ACCOUNT_PREFIX: &str = "account:";
+
+/// The account an `account:<name>` client-list entry names.
+pub fn account_entry(entry: &str) -> Option<&str> {
+    let entry = entry.trim();
+    let prefix = entry.get(..ACCOUNT_PREFIX.len())?;
+    prefix
+        .eq_ignore_ascii_case(ACCOUNT_PREFIX)
+        .then(|| entry[ACCOUNT_PREFIX.len()..].trim())
+        .filter(|name| !name.is_empty())
+}
+
 /// Whether `entry` names an encrypted listener in a client list.
 pub fn is_listener_keyword(entry: &str) -> bool {
     LISTENER_KEYWORDS.contains(&entry.trim().to_ascii_lowercase().as_str())
@@ -50,6 +64,9 @@ struct CompiledGroup {
     /// to, from the special client-list entries; empty means no listener
     /// matches.
     listeners: Vec<&'static str>,
+    /// DNS accounts (lowercased names) this group applies to, from
+    /// `account:<name>` client-list entries.
+    accounts: Vec<String>,
     allow: Blocklist,
     block: Blocklist,
     allow_regex: RegexSet,
@@ -79,14 +96,18 @@ impl CompiledGroup {
     /// (`Some("dot"/"doh"/"doq") when the query arrived over one of them,
     /// `None` for plain DNS) matches the group: it does when the group has
     /// no client customers at all (every client), when a listed network
-    /// contains the address, or when the query arrived over a listed
-    /// listener.
+    /// contains the address, when the query arrived over a listed
+    /// listener, or when it came from a listed DNS account (read from the
+    /// query's [`identity`](crate::identity)).
     fn matches_client(&self, client: IpAddr, listener: Option<&str>) -> bool {
-        if self.clients.is_empty() && self.listeners.is_empty() {
+        if self.clients.is_empty() && self.listeners.is_empty() && self.accounts.is_empty() {
             return true;
         }
         self.clients.iter().any(|net| net.contains(&client))
             || matches!(listener, Some(l) if self.listeners.contains(&l))
+            || (!self.accounts.is_empty()
+                && crate::identity::current_account()
+                    .is_some_and(|account| self.accounts.contains(&account.to_lowercase())))
     }
 
     /// Whether the group covers this query now: the client matches and the
@@ -152,15 +173,23 @@ impl AdvancedBlocking {
             if !g.enabled {
                 continue;
             }
+            let accounts: Vec<String> = g
+                .clients
+                .iter()
+                .filter_map(|c| account_entry(c))
+                .map(str::to_lowercase)
+                .collect();
             let (networks, listener_entries): (Vec<String>, Vec<String>) = g
                 .clients
                 .iter()
+                .filter(|c| account_entry(c).is_none())
                 .cloned()
                 .partition(|c| !is_listener_keyword(c));
             let listeners = networkless_listeners(&listener_entries, &g.name);
             let clients = parse_networks(&networks, &g.name);
             compiled.push(CompiledGroup {
                 listeners,
+                accounts,
                 clients,
                 allow: Blocklist::from_set(normalize_domains(g.allow.iter().cloned())),
                 block: Blocklist::from_set(normalize_domains(g.block.iter().cloned())),
@@ -775,6 +804,38 @@ mod tests {
     /// `DoT` in a group's client list matches external DoT users only;
     /// plain-DNS and other-listener clients are untouched, and a group
     /// already network-scoped only also matches on the listed listener.
+    #[tokio::test]
+    async fn account_entries_scope_the_group_to_those_accounts() {
+        use crate::identity::{scope, Identity};
+        let mut g = group("kids");
+        g.clients = vec!["Account: Kid Tablet".to_string()];
+        g.block = vec!["games.test".to_string()];
+        let ab = AdvancedBlocking::build(&[g], Arc::default());
+        let as_account = |name: &str| Identity::Account(Arc::from(name));
+        // The account matches wherever it connects from (case-insensitive).
+        let hit = scope(as_account("kid tablet"), async {
+            ab.evaluate(ip("203.0.113.7"), "games.test", Some("dot"))
+        })
+        .await;
+        assert!(hit.is_some());
+        // Another account, an unknown ID and no account are not matched: an
+        // account-only group is not an "every client" group.
+        for identity in [
+            as_account("Laptop"),
+            Identity::Unknown(Arc::from("kid tablet")),
+            Identity::Anonymous,
+        ] {
+            let miss = scope(identity, async {
+                ab.evaluate(ip("203.0.113.7"), "games.test", Some("dot"))
+            })
+            .await;
+            assert!(miss.is_none());
+        }
+        assert_eq!(account_entry(" ACCOUNT:Kid "), Some("Kid"));
+        assert_eq!(account_entry("account:"), None);
+        assert_eq!(account_entry("192.168.1.0/24"), None);
+    }
+
     #[test]
     fn dot_listener_keyword_scopes_the_group_to_encrypted_clients() {
         let mut g = group("public");

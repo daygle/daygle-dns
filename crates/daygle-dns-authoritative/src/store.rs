@@ -365,6 +365,7 @@ impl ZoneStore {
         migrate_zone_metadata(&conn)?;
         migrate_record_metadata(&conn)?;
         migrate_query_log_block_reasons(&conn)?;
+        crate::accounts::migrate(&conn)?;
         migrate_split_horizon_records(&conn)?;
         migrate_split_horizon_timestamps(&conn)?;
         migrate_dnssec_keys(&conn)?;
@@ -3230,6 +3231,9 @@ pub struct QueryLogRow {
     /// Why it was blocked, for blocked queries (`null` otherwise, and for
     /// queries logged before reasons were kept).
     pub block: Option<daygle_dns_core::block_log::BlockReason>,
+    /// The DNS account the query came from, when it named one.
+    #[serde(default)]
+    pub account: Option<String>,
 }
 
 /// Filters for [`ZoneStore::search_query_logs`]; `None`/empty means unfiltered.
@@ -3244,6 +3248,8 @@ pub struct QueryLogFilter {
     pub rcode: Option<String>,
     /// What blocked it (a `block.source` value).
     pub block_source: Option<String>,
+    /// The DNS account it came from (exact name).
+    pub account: Option<String>,
     /// Inclusive lower bound (RFC 3339).
     pub from: Option<String>,
     /// Inclusive upper bound (RFC 3339).
@@ -3971,6 +3977,7 @@ impl ZoneStore {
             (filter.outcome.as_deref(), "outcome"),
             (filter.rcode.as_deref(), "rcode"),
             (filter.block_source.as_deref(), "block_source"),
+            (filter.account.as_deref(), "account"),
         ] {
             if let Some(v) = value.map(str::trim).filter(|s| !s.is_empty()) {
                 params_vec.push(Box::new(v.to_string()));
@@ -4014,7 +4021,7 @@ impl ZoneStore {
         )? as u64;
         let mut stmt = conn.prepare(&format!(
             "SELECT id, ts, client, qname, qtype, protocol, outcome, rcode, elapsed_ms,
-                    block_source, block_group, block_matched, block_reason
+                    block_source, block_group, block_matched, block_reason, account
              FROM query_logs {where_clause}
              ORDER BY id DESC LIMIT {per_page} OFFSET {offset}"
         ))?;
@@ -4033,6 +4040,7 @@ impl ZoneStore {
                         rcode: r.get(7)?,
                         elapsed_ms: r.get(8)?,
                         block: block_reason_columns(r, 9)?,
+                        account: r.get(13)?,
                     })
                 },
             )?
@@ -4512,8 +4520,9 @@ fn insert_query_log_row(conn: &Connection, entry: &QueryLogRow) -> Result<()> {
     let block = entry.block.as_ref();
     conn.execute(
         "INSERT INTO query_logs (ts, client, qname, qtype, protocol, outcome, rcode, elapsed_ms,
-                                 block_source, block_group, block_matched, block_reason)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                                 block_source, block_group, block_matched, block_reason,
+                                 account)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
         params![
             entry.ts,
             entry.client,
@@ -4527,6 +4536,7 @@ fn insert_query_log_row(conn: &Connection, entry: &QueryLogRow) -> Result<()> {
             block.and_then(|b| b.group.as_deref()),
             block.and_then(|b| b.matched.as_deref()),
             block.map(|b| b.reason.as_str()),
+            entry.account,
         ],
     )?;
     Ok(())
@@ -4891,6 +4901,7 @@ mod tests {
             rcode: None,
             elapsed_ms: 1,
             block: None,
+            account: None,
         };
         s.insert_query_logs(&[
             row(
@@ -4970,6 +4981,7 @@ mod tests {
                 rcode: Some("NOERROR".to_string()),
                 elapsed_ms: ms,
                 block: None,
+                account: None,
             }
         };
         let mut rows = vec![
@@ -5102,6 +5114,7 @@ mod tests {
             rcode: Some(rcode.to_string()),
             elapsed_ms: 1,
             block: None,
+            account: None,
         };
         let blocked = |ts: &str, source: &str, matched: &str| QueryLogRow {
             block: Some(daygle_dns_core::block_log::BlockReason {
@@ -5231,6 +5244,7 @@ mod tests {
             rcode: None,
             elapsed_ms: 1,
             block: None,
+            account: None,
         };
         s.insert_query_logs(&[
             row("2026-09-01T00:00:00+00:00"),
@@ -5269,6 +5283,7 @@ mod tests {
                 rcode: Some("NOERROR".to_string()),
                 elapsed_ms: 1,
                 block: None,
+                account: None,
             })
             .collect();
         s.insert_query_logs(&rows).unwrap();

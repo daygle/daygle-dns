@@ -1190,7 +1190,12 @@ issued it. Control of each name is proven by:
   on port 80.
 - `dns` (DNS-01): a TXT record at `_acme-challenge.<name>` is added to the
   primary zone hosted here that holds it, and removed afterwards. The zone
-  must be delegated to this server. Wildcard names need `dns`.
+  must be delegated to this server. When no hosted zone holds it (the
+  domain's DNS is elsewhere), the server looks `_acme-challenge.<name>` up
+  through its resolver (recursion must be on): if the domain's DNS provider
+  has a CNAME from it to a name in a primary zone hosted here and served
+  publicly, the TXT record goes there and the CA follows the CNAME (set the
+  CNAME up once; renewals reuse it). Wildcard names need `dns`.
 
 Certificates are checked a minute after start and then twice a day, and
 renewed `renew_days` before expiry; `POST /api/certificates/{name}/renew`
@@ -1722,6 +1727,47 @@ Other queries under `resolver.arpa` are never forwarded: `resolver.arpa` and
 under it NXDOMAIN. Devices verify the designated resolver's certificate
 (it must be trusted and cover the address they use for this server), so a
 self-signed certificate is usually not taken up.
+
+### DNS accounts
+
+```
+GET    /api/accounts
+POST   /api/accounts
+PUT    /api/accounts/{id}
+POST   /api/accounts/{id}/new-id
+DELETE /api/accounts/{id}
+```
+
+Devices recognised wherever they connect from, as NextDNS does: each account
+has a `client_id` (one DNS label), and a device that reaches DoT or DoQ as
+`<client_id>.<accounts.domain>` (read from the TLS server name, SNI) or DoH
+at `<doh.endpoint>/<client_id>` (the path wins over the server name) is
+answered as that account. DoH over HTTP/3 and plain DNS cannot carry an
+account. The listeners' certificate must cover `<domain>` and `*.<domain>`
+(see Certificates: DNS-01 issues wildcards).
+
+The `accounts` settings group (`PUT /api/config`, Clients → DNS Accounts):
+
+| Field | Default | Meaning |
+|---|---|---|
+| `domain` | `""` | The name client IDs go under; empty turns recognition off. |
+| `require` | `false` | Refuse DoT/DoH/DoQ queries (REFUSED, EDE 18 Prohibited) that name no known, enabled account. Needs `domain`. |
+
+`GET` returns `{ "settings": {...}, "accounts": [...] }`; each account has
+`id`, `name` (unique, ignoring case), `client_id`, `enabled`, `created_at`,
+`last_seen_at` (to the minute), `hostname` (`<client_id>.<domain>`, empty
+while no domain is set) and `doh_path`. `POST` takes `{ "name",
+"client_id"?, "enabled"? }` (an empty `client_id` gets 12 random
+characters); `PUT` the same, an empty `client_id` keeping the current one;
+`new-id` replaces the client ID with a random one (the old host name stops
+working). A client ID is an identifier, not a password: it travels in the
+clear in the TLS handshake.
+
+Filtering groups name an account with an `account:<name>` client entry
+(matched wherever the account connects from); renaming an account rewrites
+those entries and deleting one removes them. The blocking tester and
+`GET /api/policy/explain` take an optional `account` (its name). Query-log
+entries carry `account` and `GET /api/querylogs` filters on `account=`.
 
 ### Block page
 

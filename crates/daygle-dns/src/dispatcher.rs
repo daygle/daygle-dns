@@ -144,6 +144,8 @@ pub struct DnsDispatcher {
     log_export: Option<Arc<daygle_dns_api::log_export::LogExporter>>,
     /// The live config, for settings read per query (`[dns64]`).
     config: Option<Arc<ArcSwap<daygle_dns_core::config::DaygleConfig>>>,
+    /// DNS accounts the encrypted listeners recognise (`[accounts]`).
+    accounts: Arc<daygle_dns_policy::identity::AccountDirectory>,
 }
 
 impl DnsDispatcher {
@@ -211,6 +213,7 @@ impl DnsDispatcher {
             syslog: None,
             log_export: None,
             config: None,
+            accounts: Arc::default(),
         }
     }
 
@@ -344,6 +347,20 @@ impl DnsDispatcher {
         self
     }
 
+    /// Share the DNS account directory (`[accounts]`).
+    pub fn with_accounts(
+        mut self,
+        accounts: Arc<daygle_dns_policy::identity::AccountDirectory>,
+    ) -> Self {
+        self.accounts = accounts;
+        self
+    }
+
+    /// The DNS accounts, for the encrypted listeners to recognise clients.
+    pub fn accounts(&self) -> &Arc<daygle_dns_policy::identity::AccountDirectory> {
+        &self.accounts
+    }
+
     /// Turn DNS cookies (RFC 7873) on or off.
     pub fn with_cookies(mut self, enabled: bool) -> Self {
         self.cookies = Arc::new(crate::cookies::Cookies::new(enabled));
@@ -406,6 +423,8 @@ impl DnsDispatcher {
                 rcode: rcode.map(|r| r.to_string()),
                 elapsed_ms: started.elapsed().as_millis() as u64,
                 block,
+                account: daygle_dns_policy::identity::current_account()
+                    .map(|account| account.to_string()),
             });
         }
     }
@@ -436,6 +455,8 @@ impl DnsDispatcher {
                 rcode: rcode.map(|r| r.to_string()),
                 elapsed_ms: started.elapsed().as_millis() as u64,
                 block,
+                account: daygle_dns_policy::identity::current_account()
+                    .map(|account| account.to_string()),
             });
         }
     }
@@ -863,6 +884,16 @@ impl RequestHandler for DnsDispatcher {
                 )),
             )
             .await;
+        }
+
+        // DNS accounts: with `accounts.require`, an encrypted query must name
+        // a known, enabled account (plain DNS cannot carry one). A known
+        // account's "last seen" time is noted about once a minute.
+        if let Some(response) = self
+            .account_gate(client, request, protocol, started, &mut response_handle)
+            .await
+        {
+            return response;
         }
 
         // DNS cookies (RFC 7873): every response to a client that sent one
@@ -2224,6 +2255,61 @@ impl DnsDispatcher {
     /// UDP/TCP, an empty list (the default), or no live config. Entries
     /// are literal addresses/CIDRs or names of Settings -> Networks (the
     /// stored config keeps names).
+    /// Refuse an encrypted query that names no known account while accounts
+    /// are required (`Some(response)`), and note a known account as seen.
+    async fn account_gate<R: ResponseHandler>(
+        &self,
+        client: IpAddr,
+        request: &Request,
+        protocol: &'static str,
+        started: Instant,
+        response_handle: &mut R,
+    ) -> Option<ResponseInfo> {
+        use daygle_dns_policy::identity::Identity;
+        use hickory_server::net::xfer::Protocol as P;
+        let identity = daygle_dns_policy::identity::current();
+        if let Identity::Account(name) = &identity {
+            let minute = chrono::Utc::now().timestamp().div_euclid(60);
+            if self.accounts.first_sighting(name, minute)
+                && tokio::runtime::Handle::try_current().is_ok()
+            {
+                let store = self.catalog.store_handle();
+                let name = name.to_string();
+                let when = chrono::Utc::now().to_rfc3339();
+                tokio::task::spawn_blocking(move || store.touch_dns_account(&name, &when));
+            }
+            return None;
+        }
+        let encrypted = matches!(request.protocol(), P::Tls | P::Quic | P::Https | P::H3);
+        if !encrypted || !self.accounts.required() {
+            return None;
+        }
+        let why = match identity {
+            Identity::Unknown(_) => "unknown or disabled DNS account",
+            _ => "this server needs a DNS account: connect as <client id>.<account domain>",
+        };
+        debug!(%client, protocol, ?identity, "query refused: no DNS account");
+        self.metrics.inc(&self.metrics.blocked);
+        self.observe_blocked(
+            client,
+            "(account-required)",
+            "",
+            protocol,
+            Some("REFUSED"),
+            started,
+            block_reason(source::LISTENER, None, None, why),
+        );
+        Some(
+            send_error(
+                response_handle,
+                request,
+                ResponseCode::Refused,
+                Some(Ede::new(ede::PROHIBITED, why)),
+            )
+            .await,
+        )
+    }
+
     fn listener_gate(
         &self,
         client: IpAddr,

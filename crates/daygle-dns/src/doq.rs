@@ -164,6 +164,14 @@ async fn handle_connection(
             return;
         }
     };
+    // The name the device asked for, for DNS accounts
+    // (`<client id>.<accounts.domain>`), resolved against the live account
+    // list for every stream (so account changes reach open connections).
+    let server_name: Option<Arc<str>> = connection
+        .handshake_data()
+        .and_then(|data| data.downcast::<quinn::crypto::rustls::HandshakeData>().ok())
+        .and_then(|data| data.server_name)
+        .map(Arc::from);
     let per_connection = Arc::new(tokio::sync::Semaphore::new(max_concurrent_streams));
     loop {
         match connection.accept_bi().await {
@@ -188,7 +196,8 @@ async fn handle_connection(
                 };
                 let handler = handler.clone();
                 let session = Arc::clone(session);
-                tokio::spawn(async move {
+                let identity = handler.accounts().identify(server_name.as_deref(), None);
+                tokio::spawn(daygle_dns_policy::identity::scope(identity, async move {
                     let _permit = permit;
                     let _connection_permit = connection_permit;
                     if let Err(e) =
@@ -196,7 +205,7 @@ async fn handle_connection(
                     {
                         debug!(%src, "DoQ stream error: {e}");
                     }
-                });
+                }));
             }
             Err(e) if benign_close(&e) => {
                 debug!(%src, "DoQ connection closed: {e}");

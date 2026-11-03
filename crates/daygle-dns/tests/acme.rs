@@ -51,6 +51,63 @@ async fn wait_for(client: &reqwest::Client, api: &str, name: &str) -> Value {
     panic!("certificate '{name}' was not issued in time");
 }
 
+/// A running Pebble and how to use it.
+struct Ca {
+    _process: Pebble,
+    directory: String,
+    root: String,
+}
+
+/// Start Pebble, validating HTTP-01 against `http_port` and resolving names
+/// through `dns`.
+async fn start_pebble(
+    pebble: &str,
+    pebble_dir: &str,
+    dir: &std::path::Path,
+    http_port: u16,
+    dns: std::net::SocketAddr,
+) -> Ca {
+    let ca_port = free_port();
+    let config = dir.join("pebble.json");
+    std::fs::write(
+        &config,
+        json!({ "pebble": {
+            "listenAddress": format!("127.0.0.1:{ca_port}"),
+            "managementListenAddress": format!("127.0.0.1:{}", free_port()),
+            "certificate": format!("{pebble_dir}/test/certs/localhost/cert.pem"),
+            "privateKey": format!("{pebble_dir}/test/certs/localhost/key.pem"),
+            "httpPort": http_port,
+            "tlsPort": free_port(),
+            "ocspResponderURL": "",
+            "externalAccountBindingRequired": false,
+        }})
+        .to_string(),
+    )
+    .unwrap();
+    let process = Pebble(
+        std::process::Command::new(pebble)
+            .args(["-config", config.to_str().unwrap(), "-dnsserver"])
+            .arg(dns.to_string())
+            .env("PEBBLE_VA_NOSLEEP", "1")
+            .env("PEBBLE_WFE_NONCEREJECT", "0")
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .expect("start pebble"),
+    );
+    for _ in 0..50 {
+        if std::net::TcpStream::connect(("127.0.0.1", ca_port)).is_ok() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    Ca {
+        _process: process,
+        directory: format!("https://localhost:{ca_port}/dir"),
+        root: std::fs::read_to_string(format!("{pebble_dir}/test/certs/pebble.minica.pem"))
+            .unwrap(),
+    }
+}
+
 #[tokio::test]
 async fn certificates_from_an_acme_ca() {
     let (Ok(pebble), Ok(pebble_dir)) = (std::env::var("PEBBLE"), std::env::var("PEBBLE_DIR"))
@@ -87,45 +144,17 @@ async fn certificates_from_an_acme_ca() {
     }
     server.catalog.reload().unwrap();
 
-    let ca_port = free_port();
-    let config = dir.path().join("pebble.json");
-    std::fs::write(
-        &config,
-        json!({ "pebble": {
-            "listenAddress": format!("127.0.0.1:{ca_port}"),
-            "managementListenAddress": format!("127.0.0.1:{}", free_port()),
-            "certificate": format!("{pebble_dir}/test/certs/localhost/cert.pem"),
-            "privateKey": format!("{pebble_dir}/test/certs/localhost/key.pem"),
-            "httpPort": server.api_addr.port(),
-            "tlsPort": free_port(),
-            "ocspResponderURL": "",
-            "externalAccountBindingRequired": false,
-        }})
-        .to_string(),
+    let ca = start_pebble(
+        &pebble,
+        &pebble_dir,
+        dir.path(),
+        server.api_addr.port(),
+        server.udp_addr.unwrap(),
     )
-    .unwrap();
-    let _pebble = Pebble(
-        std::process::Command::new(&pebble)
-            .args(["-config", config.to_str().unwrap(), "-dnsserver"])
-            .arg(server.udp_addr.unwrap().to_string())
-            .env("PEBBLE_VA_NOSLEEP", "1")
-            .env("PEBBLE_WFE_NONCEREJECT", "0")
-            .stdout(std::process::Stdio::null())
-            .spawn()
-            .expect("start pebble"),
-    );
-    let directory = format!("https://localhost:{ca_port}/dir");
-    let root =
-        std::fs::read_to_string(format!("{pebble_dir}/test/certs/pebble.minica.pem")).unwrap();
+    .await;
+    let (directory, root) = (ca.directory.clone(), ca.root.clone());
     let client = reqwest::Client::new();
     let api = format!("http://{}/api", server.api_addr);
-    for _ in 0..50 {
-        if std::net::TcpStream::connect(("127.0.0.1", ca_port)).is_ok() {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-
     // Requests need the terms accepted.
     let request = |name: &str, domains: Value, challenge: &str| {
         client
@@ -219,5 +248,146 @@ async fn certificates_from_an_acme_ca() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 204);
+    shutdown(server).await;
+}
+
+/// One UDP exchange with `server`.
+async fn exchange(
+    server: std::net::SocketAddr,
+    query: &[u8],
+) -> Option<hickory_proto::op::Message> {
+    let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.ok()?;
+    socket.send_to(query, server).await.ok()?;
+    let mut buf = vec![0u8; 4096];
+    let (n, _) = tokio::time::timeout(Duration::from_secs(3), socket.recv_from(&mut buf))
+        .await
+        .ok()?
+        .ok()?;
+    hickory_proto::op::Message::from_vec(&buf[..n]).ok()
+}
+
+/// A resolver for Pebble that behaves like a public recursive one: it asks
+/// `outside` (the domain's own DNS) and, when the answer is a CNAME into
+/// this server's zone, asks `ours` for the target and returns the whole
+/// chain. (Pebble does not chase CNAMEs itself; Let's Encrypt's resolvers
+/// do.)
+async fn chasing_resolver(
+    outside: std::net::SocketAddr,
+    ours: std::net::SocketAddr,
+) -> std::net::SocketAddr {
+    use hickory_proto::rr::RData;
+    let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let addr = socket.local_addr().unwrap();
+    tokio::spawn(async move {
+        let mut buf = vec![0u8; 4096];
+        while let Ok((n, peer)) = socket.recv_from(&mut buf).await {
+            let Ok(query) = hickory_proto::op::Message::from_vec(&buf[..n]) else {
+                continue;
+            };
+            let Some(mut reply) = exchange(outside, &buf[..n]).await else {
+                continue;
+            };
+            let target = reply.answers.iter().find_map(|r| match &r.data {
+                RData::CNAME(target) => Some(target.0.clone()),
+                _ => None,
+            });
+            if let (Some(target), Some(question)) = (target, query.queries.first()) {
+                let mut chase = query.clone();
+                chase.queries[0] = hickory_proto::op::Query::query(target, question.query_type());
+                if let Some(chased) = exchange(ours, &chase.to_vec().unwrap()).await {
+                    reply.answers.extend(chased.answers);
+                    reply.metadata.response_code = chased.metadata.response_code;
+                }
+            }
+            let _ = socket.send_to(&reply.to_vec().unwrap(), peer).await;
+        }
+    });
+    addr
+}
+
+/// DNS-01 for a domain whose DNS is elsewhere: its provider CNAMEs
+/// `_acme-challenge.<name>` to a name in a zone this server hosts; the TXT
+/// record is put there (found through this server's resolver) and the
+/// certificate is issued.
+#[tokio::test]
+async fn dns_challenges_follow_a_cname_into_a_hosted_zone() {
+    let (Ok(pebble), Ok(pebble_dir)) = (std::env::var("PEBBLE"), std::env::var("PEBBLE_DIR"))
+    else {
+        eprintln!("PEBBLE / PEBBLE_DIR not set: ACME test skipped");
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    // The domain's own DNS, with the one-time delegation CNAME.
+    let outside = spawn_upstream_with(
+        &dir.path().join("outside.db"),
+        "outside.test",
+        &[(
+            "_acme-challenge.dns",
+            "CNAME",
+            "dns.outside.test.acme-delegate.test.",
+        )],
+    )
+    .await;
+    let mut cfg = base_config(&dir.path().join("daygle-dns.db"));
+    cfg.api.port = free_port();
+    cfg.recursive.enabled = true;
+    cfg.recursive.mode = Some(daygle_dns_core::config::ResolutionMode::Forwarding);
+    cfg.recursive.upstreams = vec![outside.to_string()];
+    cfg.recursive.dnssec_validate = false;
+    let server = spawn(cfg).await;
+    let store = server.catalog.store();
+    let zone = store
+        .create_zone(&ZoneInput {
+            name: "acme-delegate.test".into(),
+            ..Default::default()
+        })
+        .unwrap();
+    server.catalog.reload().unwrap();
+
+    let resolver = chasing_resolver(outside, server.udp_addr.unwrap()).await;
+    let ca = start_pebble(
+        &pebble,
+        &pebble_dir,
+        dir.path(),
+        server.api_addr.port(),
+        resolver,
+    )
+    .await;
+    let client = reqwest::Client::new();
+    let api = format!("http://{}/api", server.api_addr);
+    let resp = client
+        .put(format!("{api}/acme"))
+        .json(&json!({
+            "email": "ops@outside.test",
+            "directory": ca.directory,
+            "agree_terms": true,
+            "ca_certificate": ca.root,
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
+
+    // The wildcard and its parent: two TXT values at the delegated name.
+    let resp = client
+        .post(format!("{api}/certificates/acme"))
+        .json(&json!({
+            "name": "accounts",
+            "domains": ["dns.outside.test", "*.dns.outside.test"],
+            "challenge": "dns",
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 202);
+    let cert = wait_for(&client, &api, "accounts").await;
+    assert_eq!(cert["acme"]["status"], json!("valid"), "{cert}");
+    let txt_left = store
+        .list_records(&zone.id)
+        .unwrap()
+        .iter()
+        .any(|r| r.rtype == "TXT");
+    assert!(!txt_left, "challenge TXT records are removed");
+
     shutdown(server).await;
 }

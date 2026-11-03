@@ -2,6 +2,7 @@
   import PageHeader from '../PageHeader.svelte';
   import { icons } from '../icons.svelte.js';
   import Devices from './Devices.svelte';
+  import Accounts from './Accounts.svelte';
   import Networks from './Networks.svelte';
   import ClientGroups from './ClientGroups.svelte';
   import ClientPolicies from './ClientPolicies.svelte';
@@ -18,6 +19,12 @@
       label: 'Devices',
       tagline:
         'The devices using this server, and what they are called: name them here, or let names come from DHCP leases and reverse DNS, so the logs and reports say "Kids-iPad" instead of an address.',
+    },
+    {
+      id: 'accounts',
+      label: 'DNS Accounts',
+      tagline:
+        'Recognise devices wherever they connect from, by the host name they use for encrypted DNS (<client id>.your-domain), as NextDNS does: give each one its own filtering, and see it by name in the logs.',
     },
     {
       id: 'networks',
@@ -59,6 +66,8 @@
 
 {#if tab === 'devices'}
   <Devices />
+{:else if tab === 'accounts'}
+  <Accounts />
 {:else if tab === 'networks'}
   <Networks />
 {:else if tab === 'access'}

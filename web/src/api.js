@@ -272,6 +272,13 @@ export const api = {
   dhcp: () => request('GET', '/dhcp'),
   devices: (hours) => request('GET', `/devices?hours=${hours}`),
   setDeviceName: (address, mac, name) => request('PUT', '/devices/name', { address, mac, name }),
+  // DNS accounts: devices recognised by the client ID in their DoT/DoQ host
+  // name or DoH path. `{ settings, accounts }`.
+  accounts: () => request('GET', '/accounts'),
+  createAccount: (body) => request('POST', '/accounts', body),
+  updateAccount: (id, body) => request('PUT', `/accounts/${encodeURIComponent(id)}`, body),
+  newAccountClientId: (id) => request('POST', `/accounts/${encodeURIComponent(id)}/new-id`, {}),
+  deleteAccount: (id) => request('DELETE', `/accounts/${encodeURIComponent(id)}`),
   deleteDhcpLease: (address) => request('DELETE', `/dhcp/leases/${encodeURIComponent(address)}`),
   blockableServices: () => request('GET', '/policy/services'),
   report: (hours, client) =>
@@ -280,8 +287,8 @@ export const api = {
   rpzRefresh: () => request('POST', '/rpz'),
   rpzTest: (client, domain) => request('POST', '/rpz/test', { client, domain }),
   explainBlocking: (params) => request('GET', `/policy/explain?${new URLSearchParams(params)}`),
-  testBlocking: (client, domain, listener) =>
-    request('POST', '/policy/blocking/test', { client, domain, listener }),
+  testBlocking: (client, domain, listener, account) =>
+    request('POST', '/policy/blocking/test', { client, domain, listener, account }),
   networks: () => request('GET', '/networks'),
   saveNetwork: (body) => request('POST', '/networks', body),
   deleteNetwork: (name) => request('DELETE', `/networks/${encodeURIComponent(name)}`),

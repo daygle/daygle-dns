@@ -67,6 +67,9 @@ pub struct DaygleConfig {
     pub block_page: BlockPageSettings,
     /// Discovery of Designated Resolvers (RFC 9462).
     pub ddr: DdrSettings,
+    /// DNS accounts: devices identified by the host name they reach the
+    /// encrypted listeners at (`<client id>.<domain>`).
+    pub accounts: AccountSettings,
     /// A scheduled summary sent to the alert destinations.
     pub reports: ReportSettings,
     /// The DHCP service (DHCPv4 and DHCPv6).
@@ -169,6 +172,50 @@ impl DdrSettings {
             return Err(format!("'{name}' is not a host name"));
         }
         Ok(())
+    }
+}
+
+/// DNS accounts, as NextDNS does them: each account has a client ID, and a
+/// device configured with `<client id>.<domain>` as its DoT / DoQ host name
+/// (Android's Private DNS, Apple profiles), or DoH URL path
+/// `/dns-query/<client id>`, is recognised as that account wherever it
+/// connects from. Filtering groups can then target accounts as well as
+/// addresses, and the query log names them. The accounts themselves live in
+/// the database (Accounts page); this is Settings -> Encrypted DNS.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct AccountSettings {
+    /// The name client IDs go under (`dns.example.com`: devices use
+    /// `<client id>.dns.example.com`). The listeners' certificate must
+    /// cover `*.<domain>`. Empty turns account recognition off.
+    pub domain: String,
+    /// Refuse encrypted (DoT, DoH, DoQ) queries that name no known,
+    /// enabled account. Plain DNS on port 53 cannot carry an account and
+    /// is not affected.
+    pub require: bool,
+}
+
+impl AccountSettings {
+    /// Problems that stop the settings being used.
+    pub fn check(&self) -> std::result::Result<(), String> {
+        let domain = self.domain.trim();
+        if !domain.is_empty()
+            && (domain.starts_with("*.") || validate_domain_pattern(domain).is_err())
+        {
+            return Err(format!("'{domain}' is not a host name"));
+        }
+        if self.require && domain.is_empty() {
+            return Err("set the account domain before requiring accounts".to_string());
+        }
+        Ok(())
+    }
+
+    /// The domain as matched: lowercase, without the trailing dot.
+    pub fn normalized_domain(&self) -> String {
+        self.domain
+            .trim()
+            .trim_end_matches('.')
+            .to_ascii_lowercase()
     }
 }
 
@@ -1363,6 +1410,8 @@ pub struct RuntimeSettings {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ddr: Option<DdrSettings>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accounts: Option<AccountSettings>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reports: Option<ReportSettings>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dhcp: Option<crate::dhcp::DhcpSettings>,
@@ -2301,6 +2350,7 @@ impl RuntimeSettings {
             && self.rpz.is_none()
             && self.block_page.is_none()
             && self.ddr.is_none()
+            && self.accounts.is_none()
             && self.reports.is_none()
             && self.dhcp.is_none()
             && self.server.is_none()
@@ -2539,6 +2589,9 @@ impl RuntimeSettings {
         }
         if let Some(d) = &self.ddr {
             config.ddr = d.clone();
+        }
+        if let Some(a) = &self.accounts {
+            config.accounts = a.clone();
         }
         if let Some(r) = &self.reports {
             config.reports = r.clone();
@@ -2804,6 +2857,7 @@ impl RuntimeSettings {
             rpz: Some(config.rpz.clone()),
             block_page: Some(config.block_page.clone()),
             ddr: Some(config.ddr.clone()),
+            accounts: Some(config.accounts.clone()),
             reports: Some(config.reports.clone()),
             dhcp: Some(config.dhcp.clone()),
             server: Some(ServerRuntimeUpdate {
@@ -3559,6 +3613,9 @@ impl DaygleConfig {
                 )));
             }
         }
+        self.accounts
+            .check()
+            .map_err(|e| DaygleError::Config(format!("accounts: {e}")))?;
         for entry in &self.api.trusted_proxies {
             if parse_network(entry).is_none() {
                 return Err(DaygleError::Config(format!(
@@ -5386,6 +5443,8 @@ mod tests {
         c.block_page.message = s("Ask Sam");
         c.ddr.enabled = false;
         c.ddr.name = s("dns.example.com");
+        c.accounts.domain = s("dns.example.com");
+        c.accounts.require = true;
         c.reports.enabled = true;
         c.reports.frequency = s("daily");
         c.reports.hour = 7;

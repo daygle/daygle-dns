@@ -206,3 +206,53 @@ async fn rejects_nonzero_message_id() {
 
     shutdown(server).await;
 }
+
+/// A DNS account is recognised from the QUIC server name
+/// (`<client id>.<accounts.domain>`): with accounts required, a connection
+/// naming a known account is answered and one without is refused.
+#[tokio::test]
+async fn accounts_are_recognised_from_the_server_name() {
+    let dir = tempfile::tempdir().unwrap();
+    let key = rcgen::KeyPair::generate().unwrap();
+    let cert =
+        rcgen::CertificateParams::new(vec!["acct.test".to_string(), "*.acct.test".to_string()])
+            .unwrap()
+            .self_signed(&key)
+            .unwrap();
+    let cert_path = dir.path().join("wildcard.crt");
+    let key_path = dir.path().join("wildcard.key");
+    std::fs::write(&cert_path, cert.pem()).unwrap();
+    std::fs::write(&key_path, key.serialize_pem()).unwrap();
+    let (server, _) = doq_server_with(dir.path(), |config| {
+        config.doq.self_signed = false;
+        config.doq.cert_path = cert_path.to_string_lossy().to_string();
+        config.doq.key_path = key_path.to_string_lossy().to_string();
+        config.accounts.domain = "acct.test".to_string();
+        config.accounts.require = true;
+    })
+    .await;
+    let created = reqwest::Client::new()
+        .post(format!("http://{}/api/accounts", server.api_addr))
+        .json(&serde_json::json!({ "name": "Phone", "client_id": "phone1" }))
+        .send()
+        .await
+        .unwrap();
+    assert!(created.status().is_success());
+
+    let doq = server.doq_addr.expect("DoQ is enabled");
+    let endpoint = doq_endpoint(&cert_path);
+    for (server_name, expected) in [
+        ("phone1.acct.test", ResponseCode::NoError),
+        ("acct.test", ResponseCode::Refused),
+    ] {
+        let connection = endpoint
+            .connect(doq, server_name)
+            .unwrap()
+            .await
+            .expect("QUIC handshake");
+        let msg = doq_query("secure.quic.test.", RecordType::A, &connection).await;
+        assert_eq!(msg.response_code, expected, "{server_name}");
+    }
+
+    shutdown(server).await;
+}
