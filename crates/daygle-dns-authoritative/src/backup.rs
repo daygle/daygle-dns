@@ -374,7 +374,11 @@ mod tests {
             .create_console_user(
                 "admin",
                 &crate::store::ConsoleUserInput {
-                    password_hash: daygle_dns_core::auth::hash_password_with("pw", 1),
+                    // Any password: the account only has to exist.
+                    password_hash: daygle_dns_core::auth::hash_password_with(
+                        &uuid::Uuid::new_v4().to_string(),
+                        1,
+                    ),
                     role: daygle_dns_core::config::Role::Admin,
                     enabled: true,
                     ..Default::default()
