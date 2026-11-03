@@ -3227,7 +3227,7 @@ pub async fn upsert_blocking_group(
         Ok(accounts) => accounts,
         Err(e) => return map_err(e),
     };
-    let mut clients = Vec::with_capacity(input.clients.len());
+    let mut clients = Vec::new();
     for entry in &input.clients {
         if let Some(name) = daygle_dns_policy::account_entry(entry) {
             let Some(account) = accounts.iter().find(|a| a.name.eq_ignore_ascii_case(name)) else {
