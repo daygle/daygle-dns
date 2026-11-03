@@ -968,10 +968,14 @@ impl RequestHandler for DnsDispatcher {
             }
         };
 
+        // The ASCII (punycode) form, not `Display`: hickory renders `xn--`
+        // labels as Unicode there, which blocklists, RPZ triggers and every
+        // other name list (all kept in the wire's ASCII form) would never
+        // match, and byte-offset suffix checks could split a character.
         let qname = info
             .query
             .name()
-            .to_string()
+            .to_ascii()
             .trim_end_matches('.')
             .to_ascii_lowercase();
         let rtype = info.query.query_type().to_string();

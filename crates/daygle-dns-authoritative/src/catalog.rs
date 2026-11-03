@@ -175,6 +175,30 @@ struct Built {
     auto_ptr: AutoPtrIndex,
 }
 
+/// Whether two zone names are the same zone, comparing their ASCII
+/// (punycode) forms: a TSIG binding written `bücher.de=key` must still
+/// guard a zone stored, or asked for, as `xn--bcher-kva.de` (and the
+/// reverse), or the key requirement would silently not apply.
+fn same_zone(a: &str, b: &str) -> bool {
+    ascii_name(a) == ascii_name(b)
+}
+
+/// A domain name in the one form the server matches names in: its ASCII
+/// (punycode) labels, lowercase, without the trailing dot - the form
+/// queries arrive in and hosted names are stored in (`validate_name` admits
+/// ASCII labels only), so `bücher.de` and `xn--bcher-kva.de` are the same
+/// name here. An ASCII name is only lowercased; one that is not a valid
+/// name is lowercased as it is.
+pub fn ascii_name(name: &str) -> String {
+    let name = name.trim().trim_end_matches('.');
+    if name.is_ascii() {
+        return name.to_ascii_lowercase();
+    }
+    Name::from_utf8(name)
+        .map(|n| n.to_ascii().trim_end_matches('.').to_ascii_lowercase())
+        .unwrap_or_else(|_| name.to_lowercase())
+}
+
 /// The key zones are filed under: lowercase, no trailing dot.
 fn zone_key(name: &str) -> String {
     name.trim().trim_end_matches('.').to_ascii_lowercase()
@@ -422,10 +446,7 @@ impl AuthorityCatalog {
         let ring = crate::tsig::TsigKeyRing::from_configs(&settings.tsig_keys).unwrap_or_default();
         for binding in &settings.tsig_transfer_zones {
             if let Some((zone, key)) = binding.split_once('=') {
-                if zone
-                    .trim_end_matches('.')
-                    .eq_ignore_ascii_case(zone_name.trim_end_matches('.'))
-                {
+                if same_zone(zone, zone_name) {
                     return ring.get_by_config_name(key).cloned();
                 }
             }
@@ -439,10 +460,7 @@ impl AuthorityCatalog {
         let ring = crate::tsig::TsigKeyRing::from_configs(&settings.tsig_keys).unwrap_or_default();
         for binding in &settings.tsig_update_zones {
             if let Some((zone, key)) = binding.split_once('=') {
-                if zone
-                    .trim_end_matches('.')
-                    .eq_ignore_ascii_case(zone_name.trim_end_matches('.'))
-                {
+                if same_zone(zone, zone_name) {
                     return ring.get_by_config_name(key).cloned();
                 }
             }
@@ -1467,6 +1485,25 @@ mod tests {
     use super::*;
     use crate::model::{RecordInput, ZoneInput};
     use chrono::Utc;
+
+    #[test]
+    fn names_have_one_ascii_form() {
+        assert_eq!(ascii_name("Bücher.DE."), "xn--bcher-kva.de");
+        assert_eq!(ascii_name("*.bücher.de"), "*.xn--bcher-kva.de");
+        assert_eq!(
+            ascii_name("_sip._tcp.bücher.de"),
+            "_sip._tcp.xn--bcher-kva.de"
+        );
+        assert_eq!(ascii_name("WWW.Example.com."), "www.example.com");
+    }
+
+    #[test]
+    fn tsig_zone_bindings_match_either_name_form() {
+        assert!(same_zone("bücher.de", "xn--bcher-kva.de."));
+        assert!(same_zone("XN--BCHER-KVA.DE", "Bücher.de"));
+        assert!(same_zone("Example.com.", "example.com"));
+        assert!(!same_zone("example.com", "example.org"));
+    }
 
     #[test]
     fn failover_serves_the_healthy_records_of_the_best_priority() {

@@ -1,21 +1,21 @@
 // Thin API client for the Daygle DNS REST API.
 //
-// Auth: when the server has console users configured, a session token from
-// `POST /api/auth/login` is stored and sent as a Bearer token on every call.
+// Auth: signing in sets the session as an HttpOnly cookie, which the
+// browser sends with every call; page script never sees the token, so
+// injected script cannot steal it. Every request carries the console's
+// header, which the server requires on cookie-authenticated changes (CSRF).
 // A 401 response with `login: true` raises `onUnauthorized` so the shell can
-// switch to the login screen.
+// switch to the login screen. Only the signed-in user's name and role are
+// kept in local storage, to draw the shell.
 
 const BASE = '/api';
-const TOKEN_KEY = 'daygle_token';
 const USER_KEY = 'daygle_user';
+// Where earlier versions kept the session token itself: no longer used.
+const LEGACY_TOKEN_KEY = 'daygle_token';
+try { localStorage.removeItem(LEGACY_TOKEN_KEY); } catch (_) { /* storage blocked */ }
 
-export function getToken() {
-  return localStorage.getItem(TOKEN_KEY) || '';
-}
-
-export function setToken(token) {
-  localStorage.setItem(TOKEN_KEY, token);
-}
+// Sent on every request; see the note above.
+export const CONSOLE_HEADERS = { 'X-Daygle-Console': '1' };
 
 export function getStoredUser() {
   try {
@@ -31,9 +31,7 @@ export function setUnauthorizedHandler(fn) {
 }
 
 async function request(method, path, body, opts = {}) {
-  const init = { method, headers: {} };
-  const token = getToken();
-  if (token) init.headers['Authorization'] = `Bearer ${token}`;
+  const init = { method, headers: { ...CONSOLE_HEADERS }, credentials: 'same-origin' };
   if (opts.raw) {
     // A file or blob sent as-is (e.g. a backup to restore).
     init.headers['Content-Type'] = 'application/octet-stream';
@@ -120,7 +118,6 @@ export const api = {
   login: async (username, password, code = '') => {
     const data = await request('POST', '/auth/login', { username, password, code }, { noLoginRedirect: true });
     if (data?.token) {
-      setToken(data.token);
       localStorage.setItem(
         USER_KEY,
         JSON.stringify({ username: data.username, role: data.role || 'admin' }),
@@ -147,11 +144,9 @@ export const api = {
     request('DELETE', `/users/${encodeURIComponent(username)}/two-factor`),
   logout: async () => {
     try { await request('POST', '/auth/logout', {}); } catch (_) { /* ignore */ }
-    localStorage.removeItem(TOKEN_KEY);
     localStorage.removeItem(USER_KEY);
   },
   clearLocalSession: () => {
-    localStorage.removeItem(TOKEN_KEY);
     localStorage.removeItem(USER_KEY);
   },
   me: () => request('GET', '/auth/me'),
@@ -180,7 +175,6 @@ export const api = {
     )
       .then((data) => {
         if (data?.token) {
-          setToken(data.token);
           localStorage.setItem(
             USER_KEY,
             JSON.stringify({ username: data.username, name: data.name, email: data.email, role: data.role || 'admin' }),

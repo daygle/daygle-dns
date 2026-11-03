@@ -2979,10 +2979,16 @@ pub async fn export_zone(State(state): State<AppState>, Path(id): Path<String>) 
 
 /// A scratch file next to the database (or in the system temp directory
 /// for an in-memory one), removed when dropped.
+///
+/// It is created empty and owner-only (`0600`) up front: backups and
+/// uploaded restores hold password hashes and private keys, and a file
+/// created later by SQLite or `fs::write` would get the process umask
+/// (typically world-readable) until narrowed. SQLite's `VACUUM INTO`
+/// accepts an existing empty file.
 struct ScratchFile(std::path::PathBuf);
 
 impl ScratchFile {
-    fn new(database: &str, purpose: &str) -> Self {
+    fn new(database: &str, purpose: &str) -> std::io::Result<Self> {
         let name = format!(
             "daygle-dns-{purpose}-{}-{}.tmp",
             std::process::id(),
@@ -2993,7 +2999,14 @@ impl ScratchFile {
             .filter(|p| database != ":memory:" && !p.as_os_str().is_empty())
             .map(std::path::Path::to_path_buf)
             .unwrap_or_else(std::env::temp_dir);
-        Self(dir.join(name))
+        let path = dir.join(name);
+        let mut options = std::fs::OpenOptions::new();
+        // `create_new`: never follow or reuse a file planted at this name.
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+        options.open(&path)?;
+        Ok(Self(path))
     }
 }
 
@@ -3020,7 +3033,7 @@ pub async fn download_backup(
     let ai_database = daygle_dns_ml::database_path(&config.ai, &database);
     let store = state.catalog.store().clone();
     let made = tokio::task::spawn_blocking(move || {
-        let scratch = ScratchFile::new(&database, "backup");
+        let scratch = ScratchFile::new(&database, "backup")?;
         store.backup_to(&scratch.0, query.query_logs, Some(&ai_database))?;
         Ok::<_, daygle_dns_core::error::DaygleError>(std::fs::read(&scratch.0)?)
     })
@@ -3070,7 +3083,7 @@ pub async fn stage_restore(State(state): State<AppState>, body: axum::body::Byte
         );
     }
     let staged = tokio::task::spawn_blocking(move || {
-        let scratch = ScratchFile::new(&database, "upload");
+        let scratch = ScratchFile::new(&database, "upload")?;
         std::fs::write(&scratch.0, &body)?;
         daygle_dns_authoritative::backup::stage_restore(&database, &scratch.0)
     })
@@ -3934,6 +3947,7 @@ pub struct LoginInput {
 pub async fn auth_login(
     State(state): State<AppState>,
     connect_info: Option<axum::Extension<axum::extract::ConnectInfo<std::net::SocketAddr>>>,
+    secure: Option<axum::Extension<crate::SecureTransport>>,
     axum::Json(input): axum::Json<LoginInput>,
 ) -> Response {
     let client_ip = client_ip_of(connect_info);
@@ -4049,13 +4063,14 @@ pub async fn auth_login(
         "api",
         format!("user '{}' logged in", user.username),
     );
-    Json(serde_json::json!({
+    let body = Json(serde_json::json!({
         "token": token,
         "username": user.username,
         "role": user.role.as_str(),
         "expires_in_secs": ttl.as_secs(),
     }))
-    .into_response()
+    .into_response();
+    with_session_cookie(body, Some(&token), ttl, secure.is_some())
 }
 
 #[derive(Deserialize)]
@@ -4086,11 +4101,17 @@ pub async fn audit_log(
 /// `POST /api/auth/logout` - revoke the presented session token.
 pub async fn auth_logout(
     State(state): State<AppState>,
+    secure: Option<axum::Extension<crate::SecureTransport>>,
     headers: axum::http::HeaderMap,
 ) -> Response {
     let token = bearer_token(&headers).unwrap_or_default();
     state.sessions.revoke(&token);
-    StatusCode::NO_CONTENT.into_response()
+    with_session_cookie(
+        StatusCode::NO_CONTENT.into_response(),
+        None,
+        Duration::ZERO,
+        secure.is_some(),
+    )
 }
 
 /// `GET /api/auth/me` - identity of the presented session, with the
@@ -4876,12 +4897,27 @@ pub async fn reset_user_two_factor(
     }
 }
 
+/// The session or API token the request presents: a bearer token, else
+/// the console's session cookie.
 fn bearer_token(headers: &axum::http::HeaderMap) -> Option<String> {
-    headers
-        .get(axum::http::header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
-        .map(|s| s.to_string())
+    let (token, _) = crate::presented_token(headers);
+    (!token.is_empty()).then_some(token)
+}
+
+/// `response` with the console's session cookie set to `token` (or
+/// cleared, for `None`).
+fn with_session_cookie(
+    mut response: Response,
+    token: Option<&str>,
+    ttl: Duration,
+    secure: bool,
+) -> Response {
+    if let Ok(value) =
+        header::HeaderValue::from_str(&crate::session_cookie(token, ttl.as_secs(), secure))
+    {
+        response.headers_mut().append(header::SET_COOKIE, value);
+    }
+    response
 }
 
 // ---- First-run setup -----------------------------------------------------
@@ -4935,6 +4971,7 @@ pub struct SetupInput {
 /// session for it is returned, so the GUI lands straight in the console.
 pub async fn auth_setup(
     State(state): State<AppState>,
+    secure: Option<axum::Extension<crate::SecureTransport>>,
     axum::Json(input): axum::Json<SetupInput>,
 ) -> Response {
     // Serialize setup attempts: the "no account exists yet" check and the
@@ -5004,13 +5041,14 @@ pub async fn auth_setup(
         "api",
         format!("initial admin account '{username}' created via console setup"),
     );
-    Json(serde_json::json!({
+    let body = Json(serde_json::json!({
         "token": token,
         "username": username,
         "role": "admin",
         "expires_in_secs": ttl.as_secs(),
     }))
-    .into_response()
+    .into_response();
+    with_session_cookie(body, Some(&token), ttl, secure.is_some())
 }
 
 // ---- Console user management (admin only) --------------------------------

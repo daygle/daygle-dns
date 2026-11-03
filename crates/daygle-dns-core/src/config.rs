@@ -3559,6 +3559,13 @@ impl DaygleConfig {
                 )));
             }
         }
+        for entry in &self.api.trusted_proxies {
+            if parse_network(entry).is_none() {
+                return Err(DaygleError::Config(format!(
+                    "api.trusted_proxies: '{entry}' is not a network or address"
+                )));
+            }
+        }
         for entry in &self.server.proxy_protocol {
             if !self.is_network_entry(entry) {
                 return Err(DaygleError::Config(format!(
@@ -4700,6 +4707,13 @@ pub struct ApiSettings {
     pub gui_enabled: bool,
     /// Comma-separated list of allowed CORS origins.
     pub cors_origins: Vec<String>,
+    /// Reverse proxies in front of the console (addresses or networks).
+    /// A request from one of them is attributed to the client its
+    /// `X-Forwarded-For` header names (the nearest address that is not
+    /// itself a trusted proxy), for the failed-login throttle and the audit
+    /// log; `X-Forwarded-Proto: https` from one makes the session cookie
+    /// `Secure`. Empty (the default) believes no forwarding header.
+    pub trusted_proxies: Vec<String>,
 }
 
 impl Default for ApiSettings {
@@ -4714,6 +4728,7 @@ impl Default for ApiSettings {
             session_ttl_secs: 43_200,
             gui_enabled: true,
             cors_origins: vec![],
+            trusted_proxies: vec![],
         }
     }
 }
@@ -5088,15 +5103,62 @@ pub fn validate_domain_pattern(pattern: &str) -> std::result::Result<(), String>
 pub fn normalize_domains(entries: impl IntoIterator<Item = String>) -> BTreeSet<String> {
     entries
         .into_iter()
-        .map(|d| d.trim().trim_end_matches('.').to_ascii_lowercase())
+        .map(|d| to_ascii_domain(d.trim().trim_end_matches('.')).to_ascii_lowercase())
         .filter(|d| !d.is_empty())
         .collect()
+}
+
+/// An internationalized entry (`bücher.de`, `*.bücher.de`, `@@bücher.de`)
+/// in the punycode form queries arrive in (`xn--bcher-kva.de`), so it
+/// matches the query name. ASCII entries, and ones IDNA rejects, are
+/// returned unchanged.
+fn to_ascii_domain(entry: &str) -> String {
+    if entry.is_ascii() {
+        return entry.to_string();
+    }
+    let (exception, rest) = match entry.strip_prefix("@@") {
+        Some(rest) => ("@@", rest),
+        None => ("", entry),
+    };
+    let (wildcard, name) = match rest.strip_prefix("*.") {
+        Some(name) => ("*.", name),
+        None => ("", rest),
+    };
+    match url::Host::parse(name) {
+        Ok(url::Host::Domain(ascii)) => format!("{exception}{wildcard}{ascii}"),
+        _ => entry.to_string(),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
+
+    #[test]
+    fn normalize_domains_puts_internationalized_entries_in_punycode() {
+        let set = normalize_domains(
+            [
+                "Bücher.DE.",
+                "*.bücher.de",
+                "@@bücher.de",
+                "@@*.bücher.de",
+                "xn--bcher-kva.de",
+                "Ads.Example.com",
+            ]
+            .map(String::from),
+        );
+        let want: BTreeSet<String> = [
+            "xn--bcher-kva.de",
+            "*.xn--bcher-kva.de",
+            "@@xn--bcher-kva.de",
+            "@@*.xn--bcher-kva.de",
+            "ads.example.com",
+        ]
+        .map(String::from)
+        .into();
+        assert_eq!(set, want);
+    }
 
     #[test]
     fn update_failure_alert_defaults_on_and_can_be_disabled() {

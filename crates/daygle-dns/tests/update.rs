@@ -431,3 +431,30 @@ async fn update_refuses_deleting_last_apex_ns() {
 
     shutdown(server).await;
 }
+
+/// Updates to an internationalized zone apply: its names arrive and are
+/// stored in punycode (they were once compared, and written, in Unicode,
+/// so the zone was never found and such updates were refused).
+#[tokio::test]
+async fn update_to_an_internationalized_zone_applies() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = spawn(config_with_updates(&dir.path().join("daygle-dns.db"))).await;
+    setup_zone(&server, "xn--bcher-kva.test").await;
+    let udp = server.udp_addr.expect("UDP is enabled");
+
+    let msg = update_message(
+        "xn--bcher-kva.test.",
+        vec![prereq_name_not_in_use("host.xn--bcher-kva.test.")],
+        vec![add_a_record(
+            "host.xn--bcher-kva.test.",
+            [192, 0, 2, 77],
+            300,
+        )],
+    );
+    let resp = udp_send(udp, &msg).await;
+    assert_eq!(resp.response_code, ResponseCode::NoError, "{resp:?}");
+    let query = udp_query(udp, "host.xn--bcher-kva.test.", RecordType::A).await;
+    assert_eq!(first_answer(&query).as_deref(), Some("192.0.2.77"));
+
+    shutdown(server).await;
+}

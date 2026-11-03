@@ -257,7 +257,11 @@ impl WebServer {
             }
         });
         let listener = TlsListener { rx, addr }.tap_io(|_| {});
-        let app = self.app.clone();
+        // Requests here arrived over TLS: the session cookie is `Secure`.
+        let app = self
+            .app
+            .clone()
+            .layer(axum::Extension(daygle_dns_api::SecureTransport));
         let done = stop.clone();
         tokio::spawn(async move {
             let served = axum::serve(

@@ -104,6 +104,15 @@ The last enabled `admin` account cannot be deleted, demoted, or disabled. The in
 Password, role, and enabled changes (and deletions) immediately revoke the
 affected account's sessions; disabled accounts cannot log in.
 
+The web console keeps its session in a cookie, `daygle_session` (`HttpOnly`,
+`SameSite=Strict`, `Path=/api`, and `Secure` over HTTPS or when a trusted proxy
+sends `X-Forwarded-Proto: https`), set by `POST /api/auth/login` and
+`POST /api/auth/setup` and cleared by `POST /api/auth/logout`. A request
+authenticated by that cookie alone must send `X-Daygle-Console: 1` for any
+method other than `GET`/`HEAD`, or it is refused with `403` (cross-site request
+forgery protection). Scripts keep using the `token` from the login response as
+`Authorization: Bearer <token>`, which needs no extra header.
+
 Roles:
 
 - `admin` - full access (reads *and* mutations).
@@ -121,6 +130,10 @@ username exists. After 10 failed logins from one client address within
 5 minutes, further `POST /api/auth/login` attempts from it get
 `429 Too Many Requests` (with `Retry-After`) until the window lapses; a
 successful login resets the count. Passwords are limited to 8-1024 characters.
+Behind a reverse proxy, list it in `api.trusted_proxies` (addresses or CIDR
+networks, config file only): requests from it are then attributed to the
+client its `X-Forwarded-For` header names - the rightmost hop that is not
+itself a listed proxy - for the throttle and the audit log.
 
 `api.cors_origins` lists browser origins (e.g. `https://ops.example`, or `*`)
 allowed to call the API cross-origin; it is read live, so a console edit

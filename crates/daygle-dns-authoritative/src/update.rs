@@ -93,7 +93,9 @@ pub async fn handle_update_with_notify<R: ResponseHandler>(
         )
         .await;
     }
-    let zone_name = lower_name(&zone_query.name().to_string());
+    // Names are compared and stored in their ASCII form: hosted names are
+    // punycode, and `to_string()` would render `xn--` labels as Unicode.
+    let zone_name = lower_name(&zone_query.name().to_ascii());
 
     // -- Policy gate ------------------------------------------------------
     if !settings.allow_dynamic_updates || !update_client_allowed(&settings.update_networks, client)
@@ -244,7 +246,7 @@ pub async fn handle_update_with_notify<R: ResponseHandler>(
 
     // -- Prerequisites (RFC 2136 §2.4) ------------------------------------
     for prereq in update.prerequisites() {
-        let name = lower_name(&prereq.name.to_string());
+        let name = lower_name(&prereq.name.to_ascii());
         if !name_in_zone(&name, &zone.name) {
             return respond(
                 update,
@@ -268,7 +270,7 @@ pub async fn handle_update_with_notify<R: ResponseHandler>(
     // -- Build the update plan (RFC 2136 §2.5) ----------------------------
     let mut plan = DynamicUpdate::default();
     for record in update.updates() {
-        let name = lower_name(&record.name.to_string());
+        let name = lower_name(&record.name.to_ascii());
         if !name_in_zone(&name, &zone.name) {
             return respond(
                 update,
@@ -437,8 +439,8 @@ fn build_update(
                         return Ok(());
                     }
                     RData::SOA(soa) => SoaUpdate {
-                        primary_ns: soa.mname.to_string(),
-                        admin_mailbox: soa.rname.to_string(),
+                        primary_ns: soa.mname.to_ascii(),
+                        admin_mailbox: soa.rname.to_ascii(),
                         serial: soa.serial,
                         refresh: soa.refresh as u32,
                         retry: soa.retry as u32,

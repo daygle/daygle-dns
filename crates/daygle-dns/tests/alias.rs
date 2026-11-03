@@ -166,3 +166,44 @@ async fn alias_records_answer_with_their_target() {
         .contains("DNSSEC"));
     shutdown(server).await;
 }
+
+/// An internationalized zone (stored, like every hosted name, in punycode)
+/// answers its ALIAS for the punycode name clients query. The lookup is by
+/// name string, and the query name was once its Unicode rendering, which
+/// never matched.
+#[tokio::test]
+async fn internationalized_zones_answer_their_alias_records() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = spawn(base_config(&dir.path().join("daygle-dns.db"))).await;
+    let store = server.catalog.store();
+    let zone = store
+        .create_zone(&ZoneInput {
+            name: "xn--bcher-kva.test".into(),
+            ..Default::default()
+        })
+        .unwrap();
+    store
+        .upsert_record(&zone.id, &record("origin", "A", "192.0.2.10", 120))
+        .unwrap();
+    store
+        .upsert_record(
+            &zone.id,
+            &record("www", "ALIAS", "origin.xn--bcher-kva.test.", 600),
+        )
+        .unwrap();
+    server.catalog.reload().unwrap();
+    let udp = server.udp_addr.unwrap();
+
+    let msg = udp_query(udp, "www.xn--bcher-kva.test.", RecordType::A).await;
+    assert_eq!(msg.response_code, ResponseCode::NoError, "{msg:?}");
+    assert_eq!(
+        a_of(&msg),
+        vec![(
+            "www.xn--bcher-kva.test.".to_string(),
+            120,
+            "192.0.2.10".to_string()
+        )]
+    );
+
+    shutdown(server).await;
+}

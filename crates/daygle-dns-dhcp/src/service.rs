@@ -284,15 +284,21 @@ impl DhcpService {
     }
 }
 
+/// Decode a hex string. Works on bytes, so a stored value with a stray
+/// multi-byte character is rejected instead of panicking on a `str` slice
+/// that splits it.
 fn decode_hex(text: &str) -> Option<Vec<u8>> {
-    (text.len().is_multiple_of(2) && !text.is_empty())
-        .then(|| {
-            (0..text.len())
-                .step_by(2)
-                .map(|i| u8::from_str_radix(&text[i..i + 2], 16).ok())
-                .collect()
-        })
-        .flatten()
+    let bytes = text.as_bytes();
+    if bytes.is_empty() || !bytes.len().is_multiple_of(2) {
+        return None;
+    }
+    let digit = |b: u8| char::from(b).to_digit(16);
+    bytes
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|&[hi, lo]| Some((digit(hi)? * 16 + digit(lo)?) as u8))
+        .collect()
 }
 
 #[cfg(target_os = "linux")]
@@ -480,5 +486,21 @@ impl DhcpService {
     fn listen_v6(self: &Arc<Self>, port: Option<u16>, _token: &CancellationToken) -> String {
         port.map_or("Off", |_| "Not supported on this platform")
             .to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::decode_hex;
+
+    #[test]
+    fn decode_hex_round_trips_and_rejects_bad_input() {
+        assert_eq!(decode_hex("00ff1A"), Some(vec![0x00, 0xff, 0x1a]));
+        assert_eq!(decode_hex(""), None);
+        assert_eq!(decode_hex("abc"), None);
+        assert_eq!(decode_hex("zz"), None);
+        // A multi-byte character straddling a pair used to panic.
+        assert_eq!(decode_hex("aé1"), None);
+        assert_eq!(decode_hex("éé"), None);
     }
 }

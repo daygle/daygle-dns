@@ -292,6 +292,62 @@ impl SessionStore {
 /// sessions (and recognisable if leaked).
 pub const API_TOKEN_PREFIX: &str = "dgl_";
 
+/// The cookie the console keeps its login session in. It is `HttpOnly`, so
+/// script injected into the page cannot read the token, and
+/// `SameSite=Strict`, so other sites cannot make the browser send it.
+pub const SESSION_COOKIE: &str = "daygle_session";
+
+/// Header the console sends on every request. A change (any method but
+/// `GET`/`HEAD`) authenticated by the session cookie must carry it: a page
+/// on another site cannot add a custom header without a CORS preflight,
+/// which the API never grants it, so this stops cross-site request forgery
+/// even in a browser that ignores `SameSite`.
+pub const CONSOLE_HEADER: &str = "x-daygle-console";
+
+/// Marks a request that reached the console over HTTPS (directly, or via a
+/// trusted proxy that says so), so the session cookie is made `Secure`.
+#[derive(Debug, Clone, Copy)]
+pub struct SecureTransport;
+
+/// The credential a request presents: an `Authorization: Bearer` token,
+/// else the console's session cookie. The flag says it came from the
+/// cookie. Empty when there is neither.
+pub fn presented_token(headers: &axum::http::HeaderMap) -> (String, bool) {
+    if let Some(bearer) = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+    {
+        return (bearer.to_string(), false);
+    }
+    let cookie = headers
+        .get_all(axum::http::header::COOKIE)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|v| v.split(';'))
+        .find_map(|pair| {
+            let (name, value) = pair.trim().split_once('=')?;
+            (name == SESSION_COOKIE).then(|| value.to_string())
+        });
+    match cookie {
+        Some(token) => (token, true),
+        None => (String::new(), false),
+    }
+}
+
+/// `Set-Cookie` for a login session (`token`), or one that clears it when
+/// `token` is `None`.
+pub fn session_cookie(token: Option<&str>, max_age_secs: u64, secure: bool) -> String {
+    let (value, max_age) = match token {
+        Some(token) => (token, max_age_secs),
+        None => ("", 0),
+    };
+    format!(
+        "{SESSION_COOKIE}={value}; Path=/api; HttpOnly; SameSite=Strict; Max-Age={max_age}{}",
+        if secure { "; Secure" } else { "" }
+    )
+}
+
 /// A new personal API token (256 random bits).
 pub fn new_api_token() -> String {
     let random: String = (0..32)
@@ -677,8 +733,78 @@ pub fn router(state: AppState) -> Router {
             .route("/{*path}", get(handlers::gui_asset));
     }
 
-    app.layer(cors_layer(state.config.clone()))
-        .layer(middleware::map_response(security_headers))
+    app.layer(middleware::from_fn_with_state(
+        state.clone(),
+        forwarded_client,
+    ))
+    .layer(cors_layer(state.config.clone()))
+    .layer(middleware::map_response(security_headers))
+}
+
+/// Behind a trusted reverse proxy (`api.trusted_proxies`), attribute the
+/// request to the client the proxy names in `X-Forwarded-For`, so the
+/// failed-login throttle and the audit log see real clients rather than
+/// one shared proxy address; `X-Forwarded-Proto: https` from one marks the
+/// request [`SecureTransport`]. Runs before everything that reads the peer.
+async fn forwarded_client(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    mut req: Request,
+    next: Next,
+) -> Response {
+    use axum::extract::ConnectInfo;
+    let peer = req
+        .extensions()
+        .get::<ConnectInfo<std::net::SocketAddr>>()
+        .map(|info| info.0);
+    if let Some(peer) = peer {
+        let config = state.config.load();
+        if !config.api.trusted_proxies.is_empty() {
+            let trusted: Vec<_> = config
+                .api
+                .trusted_proxies
+                .iter()
+                .filter_map(|t| daygle_dns_core::config::parse_network(t))
+                .collect();
+            let is_trusted = |ip: &std::net::IpAddr| trusted.iter().any(|n| n.contains(ip));
+            if is_trusted(&peer.ip().to_canonical()) {
+                let https = req
+                    .headers()
+                    .get("x-forwarded-proto")
+                    .and_then(|v| v.to_str().ok())
+                    .is_some_and(|v| v.trim().eq_ignore_ascii_case("https"));
+                if https {
+                    req.extensions_mut().insert(SecureTransport);
+                }
+            }
+            if let Some(client) = forwarded_client_ip(peer.ip(), req.headers(), is_trusted) {
+                req.extensions_mut()
+                    .insert(ConnectInfo(std::net::SocketAddr::new(client, peer.port())));
+            }
+        }
+    }
+    next.run(req).await
+}
+
+/// The client behind `peer` when `peer` is a trusted proxy: the rightmost
+/// `X-Forwarded-For` address that is not itself trusted (entries further
+/// left are written by the client and cannot be believed). `None` keeps
+/// the peer: it is not trusted, sent no header, or sent one that does not
+/// parse.
+fn forwarded_client_ip(
+    peer: std::net::IpAddr,
+    headers: &axum::http::HeaderMap,
+    is_trusted: impl Fn(&std::net::IpAddr) -> bool,
+) -> Option<std::net::IpAddr> {
+    if !is_trusted(&peer.to_canonical()) {
+        return None;
+    }
+    let mut hops = Vec::new();
+    for value in headers.get_all("x-forwarded-for") {
+        for hop in value.to_str().ok()?.split(',') {
+            hops.push(hop.trim().parse::<std::net::IpAddr>().ok()?.to_canonical());
+        }
+    }
+    hops.into_iter().rev().find(|ip| !is_trusted(ip))
 }
 
 /// CORS for `api.cors_origins`. The allow-list is read from the live config
@@ -777,7 +903,7 @@ fn is_privileged_read(path: &str) -> bool {
 ///   treated like mutations: admin role or the static token.
 async fn require_auth(
     axum::extract::State(state): axum::extract::State<AppState>,
-    req: Request,
+    mut req: Request,
     next: Next,
 ) -> Response {
     // Within the nested router axum strips the `/api` prefix, so match both
@@ -811,16 +937,12 @@ async fn require_auth(
         return next.run(req).await;
     }
 
-    let bearer = req
-        .headers()
-        .get(axum::http::header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
-        .unwrap_or("")
-        .to_string();
+    let (bearer, from_cookie) = presented_token(req.headers());
 
-    // A static api_token always authorizes (backwards compatible).
-    if !static_token.is_empty()
+    // A static api_token always authorizes (backwards compatible). It is
+    // a bearer credential only, never a cookie.
+    if !from_cookie
+        && !static_token.is_empty()
         && daygle_dns_core::auth::constant_time_eq(bearer.as_bytes(), static_token.as_bytes())
     {
         return next.run(req).await;
@@ -831,6 +953,21 @@ async fn require_auth(
     // method. In legacy token-only mode, GETs stay open.
     if users_configured {
         if let Some(session) = state.sessions.authenticate(&bearer) {
+            // A change sent with only the session cookie must come from the
+            // console itself (see [`CONSOLE_HEADER`]).
+            let changes = !matches!(
+                *req.method(),
+                axum::http::Method::GET | axum::http::Method::HEAD
+            );
+            if from_cookie && changes && !req.headers().contains_key(CONSOLE_HEADER) {
+                return (
+                    StatusCode::FORBIDDEN,
+                    axum::Json(serde_json::json!({
+                        "error": "cross-site request refused: missing the console's request header",
+                    })),
+                )
+                    .into_response();
+            }
             // `viewer` accounts are read-only: any state-changing method is
             // rejected with 403 even though the session itself is valid.
             let mutating = privileged_read
@@ -861,6 +998,9 @@ async fn require_auth(
                 )
                     .into_response();
             }
+            // Handed on so the audit layer need not authenticate again (a
+            // personal API token costs database reads and a write).
+            req.extensions_mut().insert(session);
             return next.run(req).await;
         }
         return (
@@ -893,4 +1033,69 @@ async fn require_auth(
     }
 
     (StatusCode::UNAUTHORIZED, "missing or invalid bearer token").into_response()
+}
+
+#[cfg(test)]
+mod forwarded_tests {
+    use super::forwarded_client_ip;
+    use axum::http::{HeaderMap, HeaderValue};
+    use std::net::IpAddr;
+
+    fn ip(s: &str) -> IpAddr {
+        s.parse().unwrap()
+    }
+
+    fn headers(values: &[&str]) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        for v in values {
+            h.append("x-forwarded-for", HeaderValue::from_str(v).unwrap());
+        }
+        h
+    }
+
+    /// 10.0.0.0/8 plays the trusted proxies.
+    fn trusted(ip: &IpAddr) -> bool {
+        matches!(ip, IpAddr::V4(v4) if v4.octets()[0] == 10)
+    }
+
+    #[test]
+    fn only_trusted_peers_are_believed() {
+        let h = headers(&["198.51.100.7"]);
+        assert_eq!(
+            forwarded_client_ip(ip("10.0.0.1"), &h, trusted),
+            Some(ip("198.51.100.7"))
+        );
+        // A client that is not a proxy cannot claim another address.
+        assert_eq!(forwarded_client_ip(ip("203.0.113.9"), &h, trusted), None);
+        // An IPv4-mapped peer address counts as its IPv4 form.
+        assert_eq!(
+            forwarded_client_ip(ip("::ffff:10.0.0.1"), &h, trusted),
+            Some(ip("198.51.100.7"))
+        );
+    }
+
+    #[test]
+    fn the_rightmost_untrusted_hop_is_the_client() {
+        // The client forged the first entry; proxies appended the rest.
+        let h = headers(&["192.0.2.66, 198.51.100.7", "10.0.0.2"]);
+        assert_eq!(
+            forwarded_client_ip(ip("10.0.0.1"), &h, trusted),
+            Some(ip("198.51.100.7"))
+        );
+    }
+
+    #[test]
+    fn missing_or_garbled_headers_keep_the_peer() {
+        assert_eq!(
+            forwarded_client_ip(ip("10.0.0.1"), &headers(&[]), trusted),
+            None
+        );
+        let bad = headers(&["198.51.100.7, unknown"]);
+        assert_eq!(forwarded_client_ip(ip("10.0.0.1"), &bad, trusted), None);
+        let only_proxies = headers(&["10.0.0.3"]);
+        assert_eq!(
+            forwarded_client_ip(ip("10.0.0.1"), &only_proxies, trusted),
+            None
+        );
+    }
 }
