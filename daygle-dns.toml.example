@@ -356,6 +356,12 @@ session_ttl_secs = 43200
 # role = "admin"
 gui_enabled = true
 cors_origins = []
+# Reverse proxies in front of the console (addresses or CIDR networks). A
+# request from one is attributed to the client named in its X-Forwarded-For
+# header (the nearest hop that is not itself listed), for the failed-login
+# throttle and the audit log. Leave empty unless a proxy sets the header:
+# a listed proxy is trusted to name any client.
+trusted_proxies = []
 
 # Policy engine: trusted domains, blocklists, ACLs and per-client rules.
 [policy]

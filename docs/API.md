@@ -121,6 +121,10 @@ username exists. After 10 failed logins from one client address within
 5 minutes, further `POST /api/auth/login` attempts from it get
 `429 Too Many Requests` (with `Retry-After`) until the window lapses; a
 successful login resets the count. Passwords are limited to 8-1024 characters.
+Behind a reverse proxy, list it in `api.trusted_proxies` (addresses or CIDR
+networks, config file only): requests from it are then attributed to the
+client its `X-Forwarded-For` header names - the rightmost hop that is not
+itself a listed proxy - for the throttle and the audit log.
 
 `api.cors_origins` lists browser origins (e.g. `https://ops.example`, or `*`)
 allowed to call the API cross-origin; it is read live, so a console edit

@@ -677,8 +677,67 @@ pub fn router(state: AppState) -> Router {
             .route("/{*path}", get(handlers::gui_asset));
     }
 
-    app.layer(cors_layer(state.config.clone()))
-        .layer(middleware::map_response(security_headers))
+    app.layer(middleware::from_fn_with_state(
+        state.clone(),
+        forwarded_client,
+    ))
+    .layer(cors_layer(state.config.clone()))
+    .layer(middleware::map_response(security_headers))
+}
+
+/// Behind a trusted reverse proxy (`api.trusted_proxies`), attribute the
+/// request to the client the proxy names in `X-Forwarded-For`, so the
+/// failed-login throttle and the audit log see real clients rather than
+/// one shared proxy address. Runs before everything that reads the peer.
+async fn forwarded_client(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    mut req: Request,
+    next: Next,
+) -> Response {
+    use axum::extract::ConnectInfo;
+    let peer = req
+        .extensions()
+        .get::<ConnectInfo<std::net::SocketAddr>>()
+        .map(|info| info.0);
+    if let Some(peer) = peer {
+        let config = state.config.load();
+        if !config.api.trusted_proxies.is_empty() {
+            let trusted: Vec<_> = config
+                .api
+                .trusted_proxies
+                .iter()
+                .filter_map(|t| daygle_dns_core::config::parse_network(t))
+                .collect();
+            let is_trusted = |ip: &std::net::IpAddr| trusted.iter().any(|n| n.contains(ip));
+            if let Some(client) = forwarded_client_ip(peer.ip(), req.headers(), is_trusted) {
+                req.extensions_mut()
+                    .insert(ConnectInfo(std::net::SocketAddr::new(client, peer.port())));
+            }
+        }
+    }
+    next.run(req).await
+}
+
+/// The client behind `peer` when `peer` is a trusted proxy: the rightmost
+/// `X-Forwarded-For` address that is not itself trusted (entries further
+/// left are written by the client and cannot be believed). `None` keeps
+/// the peer: it is not trusted, sent no header, or sent one that does not
+/// parse.
+fn forwarded_client_ip(
+    peer: std::net::IpAddr,
+    headers: &axum::http::HeaderMap,
+    is_trusted: impl Fn(&std::net::IpAddr) -> bool,
+) -> Option<std::net::IpAddr> {
+    if !is_trusted(&peer.to_canonical()) {
+        return None;
+    }
+    let mut hops = Vec::new();
+    for value in headers.get_all("x-forwarded-for") {
+        for hop in value.to_str().ok()?.split(',') {
+            hops.push(hop.trim().parse::<std::net::IpAddr>().ok()?.to_canonical());
+        }
+    }
+    hops.into_iter().rev().find(|ip| !is_trusted(ip))
 }
 
 /// CORS for `api.cors_origins`. The allow-list is read from the live config
@@ -896,4 +955,69 @@ async fn require_auth(
     }
 
     (StatusCode::UNAUTHORIZED, "missing or invalid bearer token").into_response()
+}
+
+#[cfg(test)]
+mod forwarded_tests {
+    use super::forwarded_client_ip;
+    use axum::http::{HeaderMap, HeaderValue};
+    use std::net::IpAddr;
+
+    fn ip(s: &str) -> IpAddr {
+        s.parse().unwrap()
+    }
+
+    fn headers(values: &[&str]) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        for v in values {
+            h.append("x-forwarded-for", HeaderValue::from_str(v).unwrap());
+        }
+        h
+    }
+
+    /// 10.0.0.0/8 plays the trusted proxies.
+    fn trusted(ip: &IpAddr) -> bool {
+        matches!(ip, IpAddr::V4(v4) if v4.octets()[0] == 10)
+    }
+
+    #[test]
+    fn only_trusted_peers_are_believed() {
+        let h = headers(&["198.51.100.7"]);
+        assert_eq!(
+            forwarded_client_ip(ip("10.0.0.1"), &h, trusted),
+            Some(ip("198.51.100.7"))
+        );
+        // A client that is not a proxy cannot claim another address.
+        assert_eq!(forwarded_client_ip(ip("203.0.113.9"), &h, trusted), None);
+        // An IPv4-mapped peer address counts as its IPv4 form.
+        assert_eq!(
+            forwarded_client_ip(ip("::ffff:10.0.0.1"), &h, trusted),
+            Some(ip("198.51.100.7"))
+        );
+    }
+
+    #[test]
+    fn the_rightmost_untrusted_hop_is_the_client() {
+        // The client forged the first entry; proxies appended the rest.
+        let h = headers(&["192.0.2.66, 198.51.100.7", "10.0.0.2"]);
+        assert_eq!(
+            forwarded_client_ip(ip("10.0.0.1"), &h, trusted),
+            Some(ip("198.51.100.7"))
+        );
+    }
+
+    #[test]
+    fn missing_or_garbled_headers_keep_the_peer() {
+        assert_eq!(
+            forwarded_client_ip(ip("10.0.0.1"), &headers(&[]), trusted),
+            None
+        );
+        let bad = headers(&["198.51.100.7, unknown"]);
+        assert_eq!(forwarded_client_ip(ip("10.0.0.1"), &bad, trusted), None);
+        let only_proxies = headers(&["10.0.0.3"]);
+        assert_eq!(
+            forwarded_client_ip(ip("10.0.0.1"), &only_proxies, trusted),
+            None
+        );
+    }
 }

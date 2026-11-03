@@ -99,6 +99,11 @@ fn finish_backup(
 ) -> Result<BackupInfo> {
     restrict(dest);
     let conn = Connection::open(dest).map_err(|e| db_err("cannot open the backup", e))?;
+    // Zero what is deleted below rather than leaving it in free pages: a
+    // backup that keeps its query logs skips the final VACUUM, and the
+    // login-session rows must not survive in the file.
+    conn.pragma_update(None, "secure_delete", true)
+        .map_err(|e| db_err("cannot open the backup", e))?;
     if !include_query_logs {
         conn.execute("DELETE FROM query_logs", [])
             .map_err(|e| db_err("cannot leave out query logs", e))?;
@@ -358,6 +363,42 @@ fn restrict(path: &Path) {
 mod tests {
     use super::*;
     use crate::model::ZoneInput;
+
+    #[test]
+    fn backups_keeping_query_logs_hold_no_trace_of_login_sessions() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("daygle-dns.db");
+        let store = ZoneStore::open(db.to_str().unwrap()).unwrap();
+        let hash = "f00dfacecafe".repeat(5);
+        store
+            .create_console_user(
+                "admin",
+                &crate::store::ConsoleUserInput {
+                    password_hash: daygle_dns_core::auth::hash_password_with("pw", 1),
+                    role: daygle_dns_core::config::Role::Admin,
+                    enabled: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        store
+            .put_session(&crate::store::StoredSession {
+                token_hash: hash.clone(),
+                username: "admin".into(),
+                role: daygle_dns_core::config::Role::Admin,
+                expires_at: i64::MAX,
+            })
+            .unwrap();
+        // With query logs the backup skips its final VACUUM, so the deleted
+        // session row would otherwise stay readable in a free page.
+        let backup = dir.path().join("backup.db");
+        store.backup_to(&backup, true, None).unwrap();
+        let bytes = std::fs::read(&backup).unwrap();
+        assert!(
+            !bytes.windows(hash.len()).any(|w| w == hash.as_bytes()),
+            "a login session's token hash survived in the backup file"
+        );
+    }
 
     #[test]
     fn backup_stage_and_restore_round_trip() {

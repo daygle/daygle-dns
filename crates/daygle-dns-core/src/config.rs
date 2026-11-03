@@ -3559,6 +3559,13 @@ impl DaygleConfig {
                 )));
             }
         }
+        for entry in &self.api.trusted_proxies {
+            if parse_network(entry).is_none() {
+                return Err(DaygleError::Config(format!(
+                    "api.trusted_proxies: '{entry}' is not a network or address"
+                )));
+            }
+        }
         for entry in &self.server.proxy_protocol {
             if !self.is_network_entry(entry) {
                 return Err(DaygleError::Config(format!(
@@ -4700,6 +4707,12 @@ pub struct ApiSettings {
     pub gui_enabled: bool,
     /// Comma-separated list of allowed CORS origins.
     pub cors_origins: Vec<String>,
+    /// Reverse proxies in front of the console (addresses or networks).
+    /// A request from one of them is attributed to the client its
+    /// `X-Forwarded-For` header names (the nearest address that is not
+    /// itself a trusted proxy), for the failed-login throttle and the audit
+    /// log. Empty (the default) believes no forwarding header.
+    pub trusted_proxies: Vec<String>,
 }
 
 impl Default for ApiSettings {
@@ -4714,6 +4727,7 @@ impl Default for ApiSettings {
             session_ttl_secs: 43_200,
             gui_enabled: true,
             cors_origins: vec![],
+            trusted_proxies: vec![],
         }
     }
 }

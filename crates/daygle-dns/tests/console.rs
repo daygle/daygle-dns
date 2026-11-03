@@ -741,6 +741,48 @@ async fn repeated_failed_logins_are_throttled_per_client() {
     shutdown(server).await;
 }
 
+/// Behind a trusted reverse proxy each forwarded client has its own failed
+/// login count: one guesser locked out does not lock out everyone else.
+#[tokio::test]
+async fn trusted_proxies_throttle_each_forwarded_client() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut cfg = base_config(&dir.path().join("daygle-dns.db"));
+    cfg.server.port = free_port();
+    cfg.api.port = free_port();
+    cfg.api.users = vec![daygle_dns_core::config::ApiUser {
+        username: "admin".to_string(),
+        password_hash: daygle_dns_core::auth::hash_password_with("secret", 100),
+        role: daygle_dns_core::config::Role::Admin,
+    }];
+    // The test client connects over loopback: it plays the proxy.
+    cfg.api.trusted_proxies = vec!["127.0.0.0/8".to_string(), "::1".to_string()];
+    let server = spawn(cfg).await;
+    let attempt = |client: &'static str, password: &'static str| {
+        let addr = server.api_addr;
+        async move {
+            reqwest::Client::new()
+                .post(api_url(addr, "/api/auth/login"))
+                .header("x-forwarded-for", client)
+                .json(&json!({ "username": "admin", "password": password }))
+                .send()
+                .await
+                .unwrap()
+                .status()
+                .as_u16()
+        }
+    };
+    for _ in 0..daygle_dns_api::LoginThrottle::MAX_FAILURES {
+        assert_eq!(attempt("198.51.100.7", "wrong").await, 401);
+    }
+    assert_eq!(attempt("198.51.100.7", "secret").await, 429);
+    // Another client behind the same proxy still signs in.
+    assert_eq!(attempt("198.51.100.8", "secret").await, 200);
+    // A spoofed leftmost entry does not escape the guesser's own lockout.
+    assert_eq!(attempt("192.0.2.1, 198.51.100.7", "secret").await, 429);
+
+    shutdown(server).await;
+}
+
 #[tokio::test]
 async fn tsig_secrets_are_redacted_from_the_config_endpoint() {
     let dir = tempfile::tempdir().unwrap();
