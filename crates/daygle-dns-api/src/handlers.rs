@@ -7123,6 +7123,7 @@ mod settings_persistence_tests {
         "block_page",
         "dhcp",
         "ddr",
+        "accounts",
         "reports",
         "alerts",
         "dns64",

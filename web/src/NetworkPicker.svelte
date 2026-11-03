@@ -16,6 +16,10 @@
     // Offer named devices (Clients -> Devices): picking one adds its address,
     // and typed addresses of named devices show their names.
     devices = false,
+    // DNS account names (Clients -> DNS Accounts), shown as chips that add
+    // `account:<name>` entries. Only where the server accepts them
+    // (filtering groups).
+    accounts = [],
   } = $props();
 
   // Named devices, by name.
@@ -40,12 +44,12 @@
     e.currentTarget.value = '';
     if (!address || others(extra).includes(address)) return;
     extra = [...others(extra), address].join(', ');
-    value = [...listenersOn, ...named, ...others(extra)];
+    value = [...listenersOn, ...accountsOn, ...named, ...others(extra)];
   }
 
   function removeDevice(address) {
     extra = others(extra).filter((entry) => entry !== address).join(', ');
-    value = [...listenersOn, ...named, ...others(extra)];
+    value = [...listenersOn, ...accountsOn, ...named, ...others(extra)];
   }
 
   const LISTENERS = [
@@ -54,6 +58,9 @@
     { key: 'DOQ', label: 'DoQ' },
   ];
   const isListener = (entry) => LISTENERS.some((l) => l.key === String(entry).trim().toUpperCase());
+  // `account:<name>` entries, and the account each names (lowercase).
+  const isAccount = (entry) => /^account:/i.test(String(entry).trim());
+  const accountOf = (entry) => String(entry).trim().slice('account:'.length).trim().toLowerCase();
 
   const nameOf = (entry) =>
     networks.find((n) => n.name.toLowerCase() === String(entry).trim().toLowerCase())?.name;
@@ -64,7 +71,13 @@
   const listenersOn = $derived(
     LISTENERS.map((l) => l.key).filter((key) => value.some((v) => String(v).trim().toUpperCase() === key)),
   );
-  let extra = $state(value.filter((v) => !nameOf(v) && !isListener(v)).join(', '));
+  // Ticked accounts, as the entries the server stores ("account:Kid").
+  const accountsOn = $derived(
+    accounts
+      .filter((name) => value.some((v) => isAccount(v) && accountOf(v) === name.toLowerCase()))
+      .map((name) => `account:${name}`),
+  );
+  let extra = $state(value.filter((v) => !nameOf(v) && !isListener(v) && !isAccount(v)).join(', '));
 
   function others(text) {
     return text
@@ -74,22 +87,30 @@
   }
 
   function rebuild() {
-    return [...listenersOn, ...named, ...others(extra)];
+    return [...listenersOn, ...accountsOn, ...named, ...others(extra)];
   }
 
   function toggle(name) {
     const next = named.includes(name) ? named.filter((n) => n !== name) : [...named, name];
-    value = [...listenersOn, ...next, ...others(extra)];
+    value = [...listenersOn, ...accountsOn, ...next, ...others(extra)];
   }
 
   function toggleListener(key) {
     const next = listenersOn.includes(key) ? listenersOn.filter((k) => k !== key) : [...listenersOn, key];
-    value = [...next, ...named, ...others(extra)];
+    value = [...next, ...accountsOn, ...named, ...others(extra)];
+  }
+
+  function toggleAccount(name) {
+    const entry = `account:${name}`;
+    const next = accountsOn.includes(entry)
+      ? accountsOn.filter((a) => a !== entry)
+      : [...accountsOn, entry];
+    value = [...listenersOn, ...next, ...named, ...others(extra)];
   }
 
   function typed(e) {
     extra = e.currentTarget.value;
-    value = [...listenersOn, ...named, ...others(extra)];
+    value = [...listenersOn, ...accountsOn, ...named, ...others(extra)];
   }
 </script>
 
@@ -122,6 +143,12 @@
       </label>
     {/each}
   {/if}
+  {#each accounts as name (name)}
+    <label class="chip" class:on={accountsOn.includes(`account:${name}`)} title="Queries from the DNS account '{name}', wherever it connects from">
+      <input type="checkbox" checked={accountsOn.includes(`account:${name}`)} onchange={() => toggleAccount(name)} />
+      Account: {name}
+    </label>
+  {/each}
 </div>
 <label class="other">{label} <input {placeholder} value={extra} oninput={typed} /></label>
 {#if devices}

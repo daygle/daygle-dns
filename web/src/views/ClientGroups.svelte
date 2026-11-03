@@ -9,6 +9,8 @@
   let groups = $state([]);
   // Named networks (Clients -> Networks) for the client picker.
   let networks = $state([]);
+  // DNS account names, offered as group clients.
+  let accountNames = $state([]);
   // Blocklists (Filtering -> Blocklists) set to apply to selected groups only.
   let groupLists = $state([]);
   // Services a group can block with one tick, and their categories in order.
@@ -29,6 +31,7 @@
   // Tester.
   let testClient = $state('');
   let testDomain = $state('');
+  let testAccount = $state('');
   let testListener = $state('');
   let testResult = $state(null);
 
@@ -46,6 +49,7 @@
 
   async function load() {
     api.networks().then((data) => { networks = data.networks || []; }).catch(() => {});
+    api.accounts().then((data) => { accountNames = (data.accounts || []).map((a) => a.name); }).catch(() => {});
     api.blockableServices().then((data) => { services = data.services || []; }).catch(() => {});
     api.aiStatus()
       .then((data) => {
@@ -244,6 +248,7 @@
         testClient.trim(),
         testDomain.trim(),
         testListener || undefined,
+        testAccount || undefined,
       );
     } catch (e) {
       error = formatApiError(e);
@@ -284,8 +289,8 @@
 
   {#if groups.length === 0}
     <p class="muted">
-      No filtering groups yet. Add one to give a set of devices (by IP or network)
-      their own allow and block rules.
+      No filtering groups yet. Add one to give a set of devices (by IP, network
+      or DNS account) their own allow and block rules.
     </p>
   {:else}
     <div class="table-wrap">
@@ -305,7 +310,7 @@
                 {#if g.youtube_restricted}<span class="pill" title="YouTube always uses Restricted Mode for these clients">YouTube Restricted</span>{/if}
                 {#if g.schedule?.length}<span class="pill" title={'Applies only: ' + g.schedule.map(describeWindow).join('; ')}>Scheduled</span>{/if}
               </td>
-              <td class="muted">{g.clients.length ? g.clients.map((c) => (deviceName(c) ? `${deviceName(c)} (${c})` : c)).join(', ') : 'All Clients'}</td>
+              <td class="muted">{g.clients.length ? g.clients.map((c) => (deviceName(c) ? `${deviceName(c)} (${c})` : c.replace(/^account:\s*/i, 'Account: '))).join(', ') : 'All Clients'}</td>
               <td class="muted">
                 {count(g.allow.length + g.allow_regex.length, 'Allow Rule')} ·
                 {count(g.block.length + g.block_regex.length, 'Block Rule')}
@@ -365,6 +370,12 @@
       <option value="doh">DoH</option>
       <option value="doq">DoQ</option>
     </select>
+    {#if accountNames.length}
+      <select bind:value={testAccount} title="DNS account the query comes from">
+        <option value="">No Account</option>
+        {#each accountNames as a (a)}<option value={a}>Account: {a}</option>{/each}
+      </select>
+    {/if}
     <button type="submit" disabled={!testClient.trim() || !testDomain.trim()}>Test</button>
   </form>
   {#if testResult}
@@ -420,14 +431,15 @@
       <label class="checkbox"><input type="checkbox" bind:checked={edit.enabled} /><span>Enabled</span></label>
 
       <div class="section-title">Clients</div>
-      <NetworkPicker {networks} listeners devices bind:value={edit.clients} />
+      <NetworkPicker {networks} listeners devices accounts={accountNames} bind:value={edit.clients} />
       <p class="muted help">
         Tick named networks, pick named devices (Clients → Devices) and/or
         type addresses. A device is matched by its address, so give it a
         DHCP reservation to keep the address fixed. DoT, DoH and DoQ match any
         client connecting over that encrypted listener, wherever it is - use
         them (alone or combined) to give public/remote users their own rules.
-        Leave empty for every client.
+        A DNS account (Clients → DNS Accounts) matches its devices wherever
+        they connect from, over DoT, DoH or DoQ. Leave empty for every client.
       </p>
 
       <div class="section-title">Schedule</div>

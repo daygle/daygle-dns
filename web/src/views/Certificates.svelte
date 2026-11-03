@@ -481,7 +481,7 @@
               <input type="radio" bind:group={form.challenge} value="dns" />
               <span>
                 <strong>DNS Zone Hosted Here</strong>
-                <small>A temporary TXT record in the name's zone on this server, which must be the zone's public DNS server. Needed for wildcards (*.example.com).</small>
+                <small>A temporary TXT record in the name's zone on this server, which must be the zone's public DNS server. If the domain's DNS is elsewhere, add a CNAME there once from <code>_acme-challenge.&lt;name&gt;</code> to a name in a zone this server serves publicly. Needed for wildcards (*.example.com), such as DNS accounts' *.dns.example.com.</small>
               </span>
             </label>
           </div>
