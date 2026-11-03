@@ -741,6 +741,81 @@ async fn repeated_failed_logins_are_throttled_per_client() {
     shutdown(server).await;
 }
 
+/// The console's session rides in an HttpOnly, SameSite cookie; changes
+/// made with only the cookie need the console's own request header (CSRF),
+/// and signing out clears the cookie and ends the session.
+#[tokio::test]
+async fn console_sessions_use_an_httponly_cookie() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = spawn_with_roles(&dir).await;
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(api_url(server.api_addr, "/api/auth/login"))
+        .json(&json!({ "username": "admin", "password": "secret" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let set_cookie = resp.headers()["set-cookie"].to_str().unwrap().to_string();
+    for part in ["daygle_session=", "HttpOnly", "SameSite=Strict", "Path=/api"] {
+        assert!(set_cookie.contains(part), "{set_cookie}");
+    }
+    // Plain HTTP: a Secure cookie would be dropped by the browser.
+    assert!(!set_cookie.contains("Secure"), "{set_cookie}");
+    let cookie = set_cookie.split(';').next().unwrap().to_string();
+
+    // Reads work with the cookie alone.
+    let me = client
+        .get(api_url(server.api_addr, "/api/auth/me"))
+        .header("cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(me.status(), 200);
+
+    // A change with only the cookie, as a forged cross-site form would send
+    // it, is refused; the console's header lets it through.
+    let prefs = api_url(server.api_addr, "/api/auth/preferences");
+    let forged = client
+        .put(&prefs)
+        .header("cookie", &cookie)
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(forged.status(), 403);
+    let ok = client
+        .put(&prefs)
+        .header("cookie", &cookie)
+        .header("x-daygle-console", "1")
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert!(ok.status().is_success(), "{}", ok.status());
+
+    // Signing out clears the cookie and revokes the session behind it.
+    let out = client
+        .post(api_url(server.api_addr, "/api/auth/logout"))
+        .header("cookie", &cookie)
+        .header("x-daygle-console", "1")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(out.status(), 204);
+    let cleared = out.headers()["set-cookie"].to_str().unwrap();
+    assert!(cleared.contains("Max-Age=0"), "{cleared}");
+    let me = client
+        .get(api_url(server.api_addr, "/api/auth/me"))
+        .header("cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(me.status(), 401);
+
+    shutdown(server).await;
+}
+
 /// Behind a trusted reverse proxy each forwarded client has its own failed
 /// login count: one guesser locked out does not lock out everyone else.
 #[tokio::test]
@@ -779,6 +854,19 @@ async fn trusted_proxies_throttle_each_forwarded_client() {
     assert_eq!(attempt("198.51.100.8", "secret").await, 200);
     // A spoofed leftmost entry does not escape the guesser's own lockout.
     assert_eq!(attempt("192.0.2.1, 198.51.100.7", "secret").await, 429);
+
+    // TLS ended at the proxy: its X-Forwarded-Proto makes the cookie Secure.
+    let resp = reqwest::Client::new()
+        .post(api_url(server.api_addr, "/api/auth/login"))
+        .header("x-forwarded-for", "198.51.100.9")
+        .header("x-forwarded-proto", "https")
+        .json(&json!({ "username": "admin", "password": "secret" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let set_cookie = resp.headers()["set-cookie"].to_str().unwrap();
+    assert!(set_cookie.contains("; Secure"), "{set_cookie}");
 
     shutdown(server).await;
 }

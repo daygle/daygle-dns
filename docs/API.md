@@ -104,6 +104,15 @@ The last enabled `admin` account cannot be deleted, demoted, or disabled. The in
 Password, role, and enabled changes (and deletions) immediately revoke the
 affected account's sessions; disabled accounts cannot log in.
 
+The web console keeps its session in a cookie, `daygle_session` (`HttpOnly`,
+`SameSite=Strict`, `Path=/api`, and `Secure` over HTTPS or when a trusted proxy
+sends `X-Forwarded-Proto: https`), set by `POST /api/auth/login` and
+`POST /api/auth/setup` and cleared by `POST /api/auth/logout`. A request
+authenticated by that cookie alone must send `X-Daygle-Console: 1` for any
+method other than `GET`/`HEAD`, or it is refused with `403` (cross-site request
+forgery protection). Scripts keep using the `token` from the login response as
+`Authorization: Bearer <token>`, which needs no extra header.
+
 Roles:
 
 - `admin` - full access (reads *and* mutations).

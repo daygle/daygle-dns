@@ -4711,7 +4711,8 @@ pub struct ApiSettings {
     /// A request from one of them is attributed to the client its
     /// `X-Forwarded-For` header names (the nearest address that is not
     /// itself a trusted proxy), for the failed-login throttle and the audit
-    /// log. Empty (the default) believes no forwarding header.
+    /// log; `X-Forwarded-Proto: https` from one makes the session cookie
+    /// `Secure`. Empty (the default) believes no forwarding header.
     pub trusted_proxies: Vec<String>,
 }
 

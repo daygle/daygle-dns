@@ -1,6 +1,6 @@
 <script>
   import { onDestroy, onMount } from 'svelte';
-  import { api, getToken, formatApiError, getStoredUser } from '../api.js';
+  import { api, CONSOLE_HEADERS, formatApiError, getStoredUser } from '../api.js';
   import PageHeader from '../PageHeader.svelte';
   import { icons, actionIcons } from '../icons.svelte.js';
   import { formatDateTime, displayZoneName, zonedInputToIso } from '../datetime.svelte.js';
@@ -288,9 +288,7 @@
 
   function exportCsv() {
     const qs = buildQuery({ format: 'csv' });
-    const token = getToken();
-    const headers = token ? { Authorization: `Bearer ${token}` } : {};
-    fetch(`/api/querylogs?${qs}`, { headers })
+    fetch(`/api/querylogs?${qs}`, { headers: CONSOLE_HEADERS, credentials: 'same-origin' })
       .then(async (res) => {
         if (!res.ok) {
           let detail = res.statusText;
