@@ -405,8 +405,8 @@ fn records_to_inputs(zone: &Name, records: &[Record]) -> (Option<SoaFields>, Vec
         if record.record_type() == RecordType::SOA {
             if let RData::SOA(soa_data) = &record.data {
                 soa = Some((
-                    soa_data.mname.to_string(),
-                    soa_data.rname.to_string(),
+                    soa_data.mname.to_ascii(),
+                    soa_data.rname.to_ascii(),
                     soa_data.serial,
                     soa_data.refresh.max(0) as u32,
                     soa_data.retry.max(0) as u32,
@@ -426,7 +426,9 @@ fn records_to_inputs(zone: &Name, records: &[Record]) -> (Option<SoaFields>, Vec
         if !crate::model::KNOWN_RECORD_TYPES.contains(&rtype.as_str()) {
             continue;
         }
-        let name = strip_dot(&record.name.to_string());
+        // ASCII form: names are stored in punycode (`to_string()` renders
+        // `xn--` labels as Unicode, which the store rejects).
+        let name = strip_dot(&record.name.to_ascii());
         inputs.push(RecordInput {
             name,
             rtype,

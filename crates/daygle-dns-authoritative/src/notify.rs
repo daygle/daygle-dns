@@ -180,7 +180,9 @@ impl NotifyInbound {
                 .await;
         }
 
-        let zone = normalize(query.name().to_string());
+        // ASCII form: hosted zone names are stored in punycode, and
+        // `to_string()` renders `xn--` labels as Unicode.
+        let zone = normalize(query.name().to_ascii());
         let src_ip = request.src().ip().to_canonical();
         let from_master = |masters: &[String]| {
             masters.iter().any(|m| {

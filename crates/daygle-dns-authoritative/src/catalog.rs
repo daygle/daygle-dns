@@ -180,15 +180,23 @@ struct Built {
 /// guard a zone stored, or asked for, as `xn--bcher-kva.de` (and the
 /// reverse), or the key requirement would silently not apply.
 fn same_zone(a: &str, b: &str) -> bool {
-    fn ascii(name: &str) -> String {
-        let name = name.trim().trim_end_matches('.');
-        Name::from_utf8(name)
-            .map(|n| n.to_ascii())
-            .unwrap_or_else(|_| name.to_string())
-            .trim_end_matches('.')
-            .to_ascii_lowercase()
+    ascii_name(a) == ascii_name(b)
+}
+
+/// A domain name in the one form the server matches names in: its ASCII
+/// (punycode) labels, lowercase, without the trailing dot - the form
+/// queries arrive in and hosted names are stored in (`validate_name` admits
+/// ASCII labels only), so `bücher.de` and `xn--bcher-kva.de` are the same
+/// name here. An ASCII name is only lowercased; one that is not a valid
+/// name is lowercased as it is.
+pub fn ascii_name(name: &str) -> String {
+    let name = name.trim().trim_end_matches('.');
+    if name.is_ascii() {
+        return name.to_ascii_lowercase();
     }
-    ascii(a) == ascii(b)
+    Name::from_utf8(name)
+        .map(|n| n.to_ascii().trim_end_matches('.').to_ascii_lowercase())
+        .unwrap_or_else(|_| name.to_lowercase())
 }
 
 /// The key zones are filed under: lowercase, no trailing dot.
@@ -1477,6 +1485,17 @@ mod tests {
     use super::*;
     use crate::model::{RecordInput, ZoneInput};
     use chrono::Utc;
+
+    #[test]
+    fn names_have_one_ascii_form() {
+        assert_eq!(ascii_name("Bücher.DE."), "xn--bcher-kva.de");
+        assert_eq!(ascii_name("*.bücher.de"), "*.xn--bcher-kva.de");
+        assert_eq!(
+            ascii_name("_sip._tcp.bücher.de"),
+            "_sip._tcp.xn--bcher-kva.de"
+        );
+        assert_eq!(ascii_name("WWW.Example.com."), "www.example.com");
+    }
 
     #[test]
     fn tsig_zone_bindings_match_either_name_form() {

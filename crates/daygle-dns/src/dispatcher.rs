@@ -1336,22 +1336,6 @@ impl RequestHandler for DnsDispatcher {
             }
         }
 
-        // Hosted zones, aliases and split-horizon entries are keyed by names
-        // as the operator typed them, which for an internationalized name is
-        // the Unicode form; look those up by it (as before) while policy
-        // above matched the ASCII form. Only `xn--` names differ.
-        let zone_qname: std::borrow::Cow<'_, str> = if qname.contains("xn--") {
-            std::borrow::Cow::Owned(
-                info.query
-                    .name()
-                    .to_string()
-                    .trim_end_matches('.')
-                    .to_ascii_lowercase(),
-            )
-        } else {
-            std::borrow::Cow::Borrowed(qname.as_str())
-        };
-
         // 1c. Split horizon: per-client synthetic answers. This runs after
         // policy (blocklists/redirects win) and before the authoritative
         // catalog, so internal clients see internal answers even for hosted
@@ -1362,7 +1346,7 @@ impl RequestHandler for DnsDispatcher {
         // query falls through to normal resolution.
         if rtype.as_str() == "ANY" || SPLIT_HORIZON_RECORD_TYPES.contains(&rtype.as_str()) {
             let index = self.catalog.split_horizon();
-            if let Some(m) = index.lookup(client, &zone_qname, info.query.query_type()) {
+            if let Some(m) = index.lookup(client, &qname, info.query.query_type()) {
                 debug!(query = %qname, %client, "split-horizon answer");
                 self.metrics.inc(&self.metrics.split_horizon);
                 self.mark_split_horizon_entry_used(&m.entry_id);
@@ -1385,7 +1369,7 @@ impl RequestHandler for DnsDispatcher {
         // valid per RFC 1995.
         if rtype_is_transfer(&rtype) {
             return self
-                .handle_transfer(request, &zone_qname, client, response_handle)
+                .handle_transfer(request, &qname, client, response_handle)
                 .await;
         }
 
@@ -1393,7 +1377,7 @@ impl RequestHandler for DnsDispatcher {
         // target's addresses, looked up now (the catalog has no record for
         // them).
         if matches!(info.query.query_type(), RecordType::A | RecordType::AAAA) {
-            if let Some(alias) = self.catalog.alias(&zone_qname) {
+            if let Some(alias) = self.catalog.alias(&qname) {
                 let (rcode, records, ede) = self
                     .resolve_alias(alias, client, info.query.query_type())
                     .await;
@@ -1413,7 +1397,7 @@ impl RequestHandler for DnsDispatcher {
                 if records.is_empty() {
                     return send_empty(&mut response_handle, request, None).await;
                 }
-                self.mark_authoritative_records_used(&zone_qname, &rtype);
+                self.mark_authoritative_records_used(&qname, &rtype);
                 let owner = Name::from(info.query.name().clone());
                 let answers: Vec<Record> = records
                     .into_iter()
@@ -1429,7 +1413,7 @@ impl RequestHandler for DnsDispatcher {
         if matches!(info.query.query_type(), RecordType::A | RecordType::AAAA) {
             if let Some(record) = self
                 .catalog
-                .weighted_answer(&zone_qname, info.query.query_type())
+                .weighted_answer(&qname, info.query.query_type())
             {
                 self.metrics.inc(&self.metrics.authoritative);
                 self.observe(
@@ -1441,7 +1425,7 @@ impl RequestHandler for DnsDispatcher {
                     Some("NOERROR"),
                     started,
                 );
-                self.mark_authoritative_records_used(&zone_qname, &rtype);
+                self.mark_authoritative_records_used(&qname, &rtype);
                 let owner = Name::from(info.query.name().clone());
                 let answer = Record::from_rdata(owner, record.ttl, record.data.clone());
                 return send_records(&mut response_handle, request, &[answer], None).await;
@@ -1452,7 +1436,7 @@ impl RequestHandler for DnsDispatcher {
         // of its own, under a name with an AUTOPTR record, is answered with
         // a host name made from the address.
         if info.query.query_type() == RecordType::PTR {
-            if let Some((target, ttl)) = self.catalog.auto_ptr(&zone_qname) {
+            if let Some((target, ttl)) = self.catalog.auto_ptr(&qname) {
                 if let Ok(target) = Name::from_ascii(&target) {
                     self.metrics.inc(&self.metrics.authoritative);
                     self.observe(
@@ -1498,7 +1482,7 @@ impl RequestHandler for DnsDispatcher {
                 .lookup(request, edns, now, response_handle)
                 .await;
             if response.counts().answers > 0 {
-                self.mark_authoritative_records_used(&zone_qname, &rtype);
+                self.mark_authoritative_records_used(&qname, &rtype);
             }
             return response;
         }

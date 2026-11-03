@@ -757,7 +757,12 @@ async fn console_sessions_use_an_httponly_cookie() {
         .unwrap();
     assert_eq!(resp.status(), 200);
     let set_cookie = resp.headers()["set-cookie"].to_str().unwrap().to_string();
-    for part in ["daygle_session=", "HttpOnly", "SameSite=Strict", "Path=/api"] {
+    for part in [
+        "daygle_session=",
+        "HttpOnly",
+        "SameSite=Strict",
+        "Path=/api",
+    ] {
         assert!(set_cookie.contains(part), "{set_cookie}");
     }
     // Plain HTTP: a Secure cookie would be dropped by the browser.
