@@ -2,7 +2,7 @@
 //! one such as step-ca), issued from the Certificates page and renewed
 //! automatically.
 //!
-//! Control of each name is proven one of two ways:
+//! Control of each name is proven one of three ways:
 //!
 //! - **HTTP-01**: the CA fetches `http://<name>/.well-known/acme-challenge/
 //!   <token>`, which the web console's HTTP listener answers. The CA always
@@ -14,6 +14,10 @@
 //!   `_acme-challenge.<name>` to a name in a zone this server hosts and
 //!   serves publicly; the TXT record goes there, and the CA follows the
 //!   CNAME (CNAME delegation, as acme-dns uses).
+//! - **Cloudflare**: DNS-01 for a domain whose DNS is hosted at Cloudflare:
+//!   the TXT record is added there through the Cloudflare API (an API token
+//!   with DNS edit rights for the zone, in the settings), so this server
+//!   need not serve any zone publicly.
 //!
 //! Issued certificates are stored like any other on the Certificates page,
 //! so listeners using them pick up renewals in place.
@@ -31,6 +35,7 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
+use crate::cloudflare::{Cloudflare, TxtRecord};
 use crate::AppState;
 
 pub const LETS_ENCRYPT: &str = "https://acme-v02.api.letsencrypt.org/directory";
@@ -42,6 +47,9 @@ const DEFAULT_RENEW_DAYS: u32 = 30;
 const CHECK_EVERY: Duration = Duration::from_secs(12 * 3600);
 /// How long the CA gets to validate the challenges and issue.
 const ORDER_TIMEOUT: Duration = Duration::from_secs(180);
+/// How long a TXT record added at Cloudflare gets to reach all of its name
+/// servers before the CA is told to look.
+const CLOUDFLARE_PROPAGATION: Duration = Duration::from_secs(10);
 
 const SETTINGS_KEY: &str = "acme";
 
@@ -60,6 +68,9 @@ pub struct AcmeSettings {
     pub ca_certificate: String,
     /// Renew this many days before expiry (0: the default, 30).
     pub renew_days: u32,
+    /// Cloudflare API token (DNS edit rights for the zones) for the
+    /// `cloudflare` challenge. Write-only: the API never sends it back.
+    pub cloudflare_api_token: String,
 }
 
 impl AcmeSettings {
@@ -149,6 +160,15 @@ impl Acme {
     }
 }
 
+/// The challenge kinds a certificate can use: `http` (HTTP-01), `dns`
+/// (DNS-01 in a zone hosted here) and `cloudflare` (DNS-01 at Cloudflare).
+pub const CHALLENGES: [&str; 3] = ["http", "dns", "cloudflare"];
+
+/// Whether `challenge` proves control with a DNS TXT record (DNS-01).
+pub fn is_dns_challenge(challenge: &str) -> bool {
+    matches!(challenge, "dns" | "cloudflare")
+}
+
 fn now() -> i64 {
     chrono::Utc::now().timestamp()
 }
@@ -176,7 +196,7 @@ pub fn check_domains(domains: &[String], challenge: &str) -> Result<Vec<String>,
         if !valid {
             return Err(format!("'{domain}' is not a domain name"));
         }
-        if d.starts_with("*.") && challenge != "dns" {
+        if d.starts_with("*.") && !is_dns_challenge(challenge) {
             return Err(format!(
                 "'{d}' is a wildcard: wildcard certificates need the DNS challenge"
             ));
@@ -254,12 +274,12 @@ async fn issue_locked(state: &AppState, name: &str) -> Result<(), String> {
         .map_err(|e| format!("the CA refused the order: {e}"))?;
 
     let mut challenges = Challenges::default();
-    let ready = prove_control(state, &cert, &mut order, &mut challenges).await;
+    let ready = prove_control(state, &settings, &cert, &mut order, &mut challenges).await;
     let finished = match ready {
         Ok(()) => finish_order(&mut order).await,
         Err(e) => Err(e),
     };
-    challenges.clean_up(state);
+    challenges.clean_up(state).await;
     let (cert_pem, key_pem) = finished?;
 
     crate::handlers::install_certificate(
@@ -281,10 +301,23 @@ async fn issue_locked(state: &AppState, name: &str) -> Result<(), String> {
 struct Challenges {
     http_tokens: Vec<String>,
     txt_records: Vec<String>,
+    cloudflare: Option<Cloudflare>,
+    cloudflare_records: Vec<TxtRecord>,
 }
 
 impl Challenges {
-    fn clean_up(self, state: &AppState) {
+    async fn clean_up(self, state: &AppState) {
+        if let Some(cloudflare) = &self.cloudflare {
+            for record in &self.cloudflare_records {
+                if let Err(e) = cloudflare.delete(record).await {
+                    state.logs.push(
+                        daygle_dns_core::LogLevel::Warn,
+                        "acme",
+                        format!("the ACME challenge record could not be removed: {e}"),
+                    );
+                }
+            }
+        }
         {
             let mut tokens = state.acme.http_tokens.lock();
             for token in &self.http_tokens {
@@ -305,11 +338,15 @@ impl Challenges {
 
 async fn prove_control(
     state: &AppState,
+    settings: &AcmeSettings,
     cert: &AcmeCertificate,
     order: &mut instant_acme::Order,
     challenges: &mut Challenges,
 ) -> Result<(), String> {
-    let dns = cert.challenge == "dns";
+    let dns = is_dns_challenge(&cert.challenge);
+    if cert.challenge == "cloudflare" {
+        challenges.cloudflare = Some(Cloudflare::new(&settings.cloudflare_api_token)?);
+    }
     let mut authorizations = order.authorizations();
     while let Some(authorization) = authorizations.next().await {
         let mut authorization =
@@ -335,7 +372,14 @@ async fn prove_control(
             return Err("only DNS names are supported".into());
         };
         let key_authorization = challenge.key_authorization();
-        if dns {
+        if let Some(cloudflare) = &challenges.cloudflare {
+            let name = format!("_acme-challenge.{}", domain.trim_end_matches('.'));
+            let record = cloudflare
+                .add_txt(&name, &key_authorization.dns_value())
+                .await?;
+            challenges.cloudflare_records.push(record);
+            tokio::time::sleep(CLOUDFLARE_PROPAGATION).await;
+        } else if dns {
             let id = add_txt_record(state, &domain, &key_authorization.dns_value()).await?;
             challenges.txt_records.push(id);
         } else {
@@ -661,10 +705,12 @@ mod tests {
         assert!(check_domains(&list(&["*.example.com"]), "http")
             .unwrap_err()
             .contains("wildcard"));
-        assert_eq!(
-            check_domains(&list(&["*.example.com"]), "dns").unwrap(),
-            ["*.example.com"]
-        );
+        for challenge in ["dns", "cloudflare"] {
+            assert_eq!(
+                check_domains(&list(&["*.example.com"]), challenge).unwrap(),
+                ["*.example.com"]
+            );
+        }
         for bad in [
             "localhost",
             "bad_name.example.com",

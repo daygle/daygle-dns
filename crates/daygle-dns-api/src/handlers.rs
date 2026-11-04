@@ -6903,7 +6903,11 @@ pub async fn acme_http_challenge(
 
 /// `GET /api/acme` - the ACME settings.
 pub async fn get_acme_settings(State(state): State<AppState>) -> Response {
-    let settings = crate::acme::settings(&state);
+    let mut settings = crate::acme::settings(&state);
+    // Write-only: the browser sees only whether one is stored.
+    if !settings.cloudflare_api_token.is_empty() {
+        settings.cloudflare_api_token = REDACTED.to_string();
+    }
     Json(serde_json::json!({
         "settings": settings,
         "directory_url": settings.directory_url(),
@@ -6918,9 +6922,15 @@ pub async fn put_acme_settings(
     State(state): State<AppState>,
     axum::Json(settings): axum::Json<crate::acme::AcmeSettings>,
 ) -> Response {
+    let cloudflare_api_token = if settings.cloudflare_api_token == REDACTED {
+        crate::acme::settings(&state).cloudflare_api_token
+    } else {
+        settings.cloudflare_api_token.trim().to_string()
+    };
     let settings = crate::acme::AcmeSettings {
         email: settings.email.trim().to_string(),
         directory: settings.directory.trim().to_string(),
+        cloudflare_api_token,
         ..settings
     };
     match crate::acme::save_settings(&state, &settings) {
@@ -6957,12 +6967,12 @@ pub async fn request_acme_certificate(
         return error_response(StatusCode::BAD_REQUEST, msg);
     }
     let challenge = match input.challenge.trim() {
-        "" | "http" => "http",
-        "dns" => "dns",
+        "" => "http",
+        c if crate::acme::CHALLENGES.contains(&c) => c,
         other => {
             return error_response(
                 StatusCode::BAD_REQUEST,
-                format!("unknown challenge '{other}': use http or dns"),
+                format!("unknown challenge '{other}': use http, dns or cloudflare"),
             )
         }
     };
@@ -6970,10 +6980,17 @@ pub async fn request_acme_certificate(
         Ok(d) => d,
         Err(e) => return error_response(StatusCode::BAD_REQUEST, e),
     };
-    if !crate::acme::settings(&state).agree_terms {
+    let settings = crate::acme::settings(&state);
+    if !settings.agree_terms {
         return error_response(
             StatusCode::BAD_REQUEST,
             "accept the CA's terms of service in the Let's Encrypt settings first",
+        );
+    }
+    if challenge == "cloudflare" && settings.cloudflare_api_token.is_empty() {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "set a Cloudflare API token in the Let's Encrypt settings first",
         );
     }
     let store = state.catalog.store();

@@ -78,6 +78,7 @@ pub mod accounts;
 pub mod acme;
 pub mod alerts;
 mod audit;
+pub mod cloudflare;
 pub mod devices;
 mod handlers;
 pub mod host_stats;
