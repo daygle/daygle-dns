@@ -75,6 +75,8 @@
       agree_terms: !!f.agree_terms,
       ca_certificate: f.ca === 'custom' ? (f.ca_certificate || '') : '',
       renew_days: Number(f.renew_days) || 30,
+      // '[redacted]' (sent back unchanged) keeps the stored token.
+      cloudflare_api_token: (f.cloudflare_api_token || '').trim(),
     };
   }
 
@@ -120,6 +122,7 @@
     form = {
       replacing: null, mode: 'self', name: '', serverName: '', certPem: '', keyPem: '',
       domains: '', challenge: 'http', email: acme?.settings?.email || '', agree: !!acme?.settings?.agree_terms,
+      cloudflareToken: '',
     };
   }
 
@@ -211,10 +214,20 @@
       formError = `Accept the terms of service of ${caName()} to continue.`;
       return;
     }
+    const token = form.challenge === 'cloudflare' ? form.cloudflareToken.trim() : '';
+    if (form.challenge === 'cloudflare' && !token && !acme.settings.cloudflare_api_token) {
+      formError = 'Enter a Cloudflare API token with DNS edit rights for the zone.';
+      return;
+    }
     busy = true;
     try {
-      if (!acme.settings.agree_terms || (form.email.trim() && form.email.trim() !== acme.settings.email)) {
-        acme = await api.saveAcmeSettings({ ...acme.settings, email: form.email.trim(), agree_terms: true });
+      if (!acme.settings.agree_terms || (form.email.trim() && form.email.trim() !== acme.settings.email) || token) {
+        acme = await api.saveAcmeSettings({
+          ...acme.settings,
+          email: form.email.trim(),
+          agree_terms: true,
+          ...(token ? { cloudflare_api_token: token } : {}),
+        });
       }
       await api.requestAcmeCertificate({ name, domains, challenge: form.challenge });
       notice = `Requesting '${name}' from ${caName()}. This usually takes under a minute.`;
@@ -441,7 +454,7 @@
               <input type="radio" bind:group={form.mode} value="acme" />
               <span>
                 <strong>Let's Encrypt</strong>
-                <small>Free and trusted everywhere, issued and renewed automatically. The names must be reachable from the internet.</small>
+                <small>Free and trusted everywhere, issued and renewed automatically. You prove the names are yours over the web or DNS (including Cloudflare).</small>
               </span>
             </label>
             <label class="choice" class:on={form.mode === 'upload'}>
@@ -469,7 +482,7 @@
             <span>Domain Names (one per line)</span>
             <textarea rows="3" bind:value={form.domains} placeholder={'dns.example.com\n*.example.com'} spellcheck="false"></textarea>
           </label>
-          <div class="choices two" role="radiogroup" aria-label="How to prove the names are yours">
+          <div class="choices spaced" role="radiogroup" aria-label="How to prove the names are yours">
             <label class="choice" class:on={form.challenge === 'http'}>
               <input type="radio" bind:group={form.challenge} value="http" />
               <span>
@@ -484,7 +497,21 @@
                 <small>A temporary TXT record in the name's zone on this server, which must be the zone's public DNS server. If the domain's DNS is elsewhere, add a CNAME there once from <code>_acme-challenge.&lt;name&gt;</code> to a name in a zone this server serves publicly. Needed for wildcards (*.example.com), such as DNS accounts' *.dns.example.com.</small>
               </span>
             </label>
+            <label class="choice" class:on={form.challenge === 'cloudflare'}>
+              <input type="radio" bind:group={form.challenge} value="cloudflare" />
+              <span>
+                <strong>Cloudflare DNS</strong>
+                <small>For a domain whose DNS is at Cloudflare: a temporary TXT record is added there with your API token and removed afterwards. Nothing here needs to be reachable from the internet. Works for wildcards.</small>
+              </span>
+            </label>
           </div>
+          {#if form.challenge === 'cloudflare'}
+            <label class="full">
+              <span>Cloudflare API Token</span>
+              <input type="password" bind:value={form.cloudflareToken} placeholder={acme?.settings?.cloudflare_api_token ? 'Saved; leave blank to keep it' : 'Token with Zone → DNS → Edit'} autocomplete="off" spellcheck="false" />
+              <small class="muted">Create it at Cloudflare under My Profile → API Tokens with the "Edit zone DNS" template, limited to the domain's zone. Don't keep a CNAME at <code>_acme-challenge.&lt;name&gt;</code> there: it would conflict with the TXT record.</small>
+            </label>
+          {/if}
           {#if !acme?.settings?.agree_terms}
             <label class="full">
               <span>Email for Expiry Notices (Optional)</span>
@@ -573,6 +600,10 @@
             <input type="number" min="1" max="60" bind:value={acmeForm.renew_days} />
           </label>
         </div>
+        <label class="full">
+          <span>Cloudflare API Token (for the Cloudflare DNS challenge)</span>
+          <input type="password" bind:value={acmeForm.cloudflare_api_token} placeholder="Token with Zone → DNS → Edit" autocomplete="off" spellcheck="false" />
+        </label>
         <label class="check full">
           <input type="checkbox" bind:checked={acmeForm.agree_terms} />
           <span>I accept the CA's terms of service{#if acmeForm.ca !== 'custom'}{' '}(<a href="https://letsencrypt.org/repository/" target="_blank" rel="noopener">Let's Encrypt Subscriber Agreement</a>){/if}.</span>
@@ -596,7 +627,7 @@
   .check input { width: auto; margin-top: 2px; }
   .check span { color: var(--text); }
   .acme { margin-top: 4px; font-size: 0.8rem; }
-  .choices.two { margin-top: 12px; }
+  .choices.spaced { margin-top: 12px; }
   label { display: flex; flex-direction: column; gap: 4px; font-size: 0.85rem; }
   label span { color: var(--muted); }
   .full { margin-top: 12px; }
@@ -611,7 +642,6 @@
   textarea { font: 0.8rem/1.4 ui-monospace, 'Cascadia Code', Consolas, monospace; width: 100%; }
   input[type='file'] { font-size: 0.8rem; }
   .choices { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
-  .choices.two { grid-template-columns: 1fr 1fr; }
   .choice {
     flex-direction: row;
     align-items: flex-start;

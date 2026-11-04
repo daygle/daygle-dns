@@ -417,3 +417,77 @@ async fn entries_track_last_modified_and_last_used() {
 
     shutdown(server).await;
 }
+
+/// DNS accounts over DoT: devices reach `<client id>.dns.example.test`, which
+/// the hosted zone answers with a wildcard CNAME to the apex (the public
+/// view). A wildcard split-horizon entry gives LAN clients the internal
+/// address for every such name, ahead of the zone.
+#[tokio::test]
+async fn wildcard_entry_covers_every_name_below_its_suffix() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("daygle-dns.db");
+    let server = spawn(config_with_zone(&db)).await;
+    let store = server.catalog.store();
+
+    let zone = store
+        .create_zone(&ZoneInput {
+            name: "dns.example.test".to_string(),
+            ..Default::default()
+        })
+        .unwrap();
+    for (name, rtype, content) in [
+        ("@", "A", "192.0.2.53"),
+        ("*", "CNAME", "dns.example.test."),
+    ] {
+        store
+            .upsert_record(
+                &zone.id,
+                &RecordInput {
+                    name: name.to_string(),
+                    rtype: rtype.to_string(),
+                    content: content.to_string(),
+                    ttl: 300,
+                    priority: 0,
+                    disabled: false,
+                },
+            )
+            .unwrap();
+    }
+    let lan_entry = |domain: &str, ip: &str| SplitHorizonEntryInput {
+        domain: domain.to_string(),
+        networks: vec!["LAN".to_string()],
+        ips: vec![],
+        records: vec![SplitHorizonRecord {
+            rtype: "A".to_string(),
+            content: ip.to_string(),
+        }],
+        ttl: 30,
+        disabled: false,
+    };
+    store
+        .create_split_horizon_entry(&lan_entry("*.dns.example.test", "10.0.0.53"))
+        .unwrap();
+    store
+        .create_split_horizon_entry(&lan_entry("dns.example.test", "10.0.0.53"))
+        .unwrap();
+    // Only for clients on the VPN, which the test client is not.
+    store
+        .create_split_horizon_entry(&SplitHorizonEntryInput {
+            networks: vec!["VPN".to_string()],
+            ..lan_entry("*.dns.example.test", "10.8.0.1")
+        })
+        .unwrap();
+    server.catalog.reload().unwrap();
+    let udp = server.udp_addr.expect("UDP is enabled");
+
+    for qname in ["abc123.dns.example.test.", "dns.example.test."] {
+        let msg = udp_query(udp, qname, RecordType::A).await;
+        assert_eq!(msg.response_code, ResponseCode::NoError);
+        assert_eq!(msg.answers.len(), 1, "{qname}: {:?}", msg.answers);
+        assert_eq!(msg.answers[0].name.to_string(), qname);
+        assert_eq!(first_answer(&msg).as_deref(), Some("10.0.0.53"));
+    }
+    assert_eq!(server.metrics.snapshot().split_horizon, 2);
+
+    shutdown(server).await;
+}

@@ -1112,6 +1112,12 @@ records; when both are present `records` wins.
 ordering position). Entries are evaluated in order; the first one whose domain
 matches and whose networks contain the client wins, so a catch-all entry with
 no networks acts as the public fallback behind the specific internal ones.
+A `domain` of `*.example.com` is a wildcard: it covers every name below
+`example.com` (`a.example.com`, `a.b.example.com`), but not `example.com`
+itself, and its records are served under the queried name. Entries for the
+exact name are tried first, then wildcards from the closest suffix out, so
+`www.example.com` beats `*.example.com`. `*` is only allowed as the first
+label.
 Matching applies to A/AAAA queries; an entry with no address of the requested
 family falls through to normal resolution.
 
@@ -1170,10 +1176,13 @@ GET  /.well-known/acme-challenge/{token}
 
 Certificates can be issued and renewed automatically by an ACME CA: Let's
 Encrypt, or a private one such as step-ca. `PUT /api/acme` sets
-`{email, directory, agree_terms, ca_certificate, renew_days}`: `directory`
+`{email, directory, agree_terms, ca_certificate, renew_days,
+cloudflare_api_token}`: `directory`
 empty means Let's Encrypt; `ca_certificate` is a PEM root to trust for a
 private CA's directory; `renew_days` (default 30) is how long before expiry
-to renew. `GET /api/acme` returns the `settings`, the `directory_url` in use,
+to renew. `cloudflare_api_token` is write-only: `GET` shows `"[redacted]"`
+when one is stored, sending `"[redacted]"` back keeps it, and `""` clears
+it. `GET /api/acme` returns the `settings`, the `directory_url` in use,
 and the Let's Encrypt (`lets_encrypt`, `lets_encrypt_staging`) directories.
 An account with the CA is created on first use and kept in the database.
 
@@ -1195,7 +1204,17 @@ issued it. Control of each name is proven by:
   through its resolver (recursion must be on): if the domain's DNS provider
   has a CNAME from it to a name in a primary zone hosted here and served
   publicly, the TXT record goes there and the CA follows the CNAME (set the
-  CNAME up once; renewals reuse it). Wildcard names need `dns`.
+  CNAME up once; renewals reuse it).
+- `cloudflare` (DNS-01 at Cloudflare): for a domain whose DNS is hosted at
+  Cloudflare. The TXT record at `_acme-challenge.<name>` is added in the
+  Cloudflare zone holding it through the Cloudflare API, using
+  `cloudflare_api_token` (a token with Zone → DNS → Edit for that zone,
+  e.g. Cloudflare's "Edit zone DNS" template), and deleted afterwards.
+  Nothing on this server has to be reachable from the internet. The token
+  must be set first (`400` otherwise), and there must be no CNAME at
+  `_acme-challenge.<name>` at Cloudflare.
+
+Wildcard names need `dns` or `cloudflare`.
 
 Certificates are checked a minute after start and then twice a day, and
 renewed `renew_days` before expiry; `POST /api/certificates/{name}/renew`

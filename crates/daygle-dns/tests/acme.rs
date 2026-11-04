@@ -391,3 +391,64 @@ async fn dns_challenges_follow_a_cname_into_a_hosted_zone() {
 
     shutdown(server).await;
 }
+
+/// The Cloudflare API token is write-only: `GET /api/acme` shows only that
+/// one is stored, sending the placeholder back keeps it, and a Cloudflare
+/// certificate cannot be requested until one is set. Needs no CA.
+#[tokio::test]
+async fn cloudflare_token_is_write_only_and_required() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = spawn(base_config(&dir.path().join("daygle-dns.db"))).await;
+    let api = format!("http://{}/api", server.api_addr);
+    let client = reqwest::Client::builder().no_proxy().build().unwrap();
+    let put = |body: Value| {
+        let (client, api) = (client.clone(), api.clone());
+        async move {
+            let response = client
+                .put(format!("{api}/acme"))
+                .json(&body)
+                .send()
+                .await
+                .unwrap();
+            assert!(response.status().is_success(), "{}", response.status());
+            response.json::<Value>().await.unwrap()
+        }
+    };
+    let request = || async {
+        client
+            .post(format!("{api}/certificates/acme"))
+            .json(&json!({
+                "name": "dot",
+                "domains": ["dns.example.com", "*.dns.example.com"],
+                "challenge": "cloudflare",
+            }))
+            .send()
+            .await
+            .unwrap()
+    };
+
+    let got = put(json!({ "agree_terms": true })).await;
+    assert_eq!(got["settings"]["cloudflare_api_token"], "");
+    let response = request().await;
+    assert_eq!(response.status(), 400);
+    let body = response.text().await.unwrap();
+    assert!(body.contains("Cloudflare API token"), "{body}");
+
+    let got = put(json!({ "agree_terms": true, "cloudflare_api_token": " secret-token " })).await;
+    assert_eq!(got["settings"]["cloudflare_api_token"], "[redacted]");
+    let stored = |store: &daygle_dns_authoritative::ZoneStore| {
+        store.get_named_setting::<Value>("acme").unwrap().unwrap()["cloudflare_api_token"].clone()
+    };
+    assert_eq!(stored(server.catalog.store()), "secret-token");
+
+    // Saving other settings with the placeholder keeps the token.
+    put(json!({
+        "agree_terms": true,
+        "renew_days": 20,
+        "cloudflare_api_token": "[redacted]",
+    }))
+    .await;
+    assert_eq!(stored(server.catalog.store()), "secret-token");
+
+    shutdown(server).await;
+}

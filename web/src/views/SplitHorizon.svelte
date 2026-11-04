@@ -254,7 +254,10 @@
       first whose networks contain the client answers. Put the internal views
       first and the public fallback (no networks, so every client) last; ↑/↓
       reorder entries of the same domain. An entry answers queries of the types
-      it lists, and a CNAME answers every type.
+      it lists, and a CNAME answers every type. A domain of
+      <code>*.example.com</code> covers every name below example.com (not
+      example.com itself); entries for the exact name are checked before
+      wildcards.
     </p>
   </div>
 </div>
@@ -269,7 +272,7 @@
         </div>
         {#if dialogError}<p class="dialog-error">{dialogError}</p>{/if}
         <div class="grid2">
-          <label>Domain <input placeholder="intranet.example.com" bind:value={edit.domain} /></label>
+          <label>Domain <input placeholder="intranet.example.com or *.example.com" bind:value={edit.domain} /></label>
           <label>TTL (Seconds) <span class="hint">{duration(Number(edit.ttl) || 0)}</span><input type="number" min="0" bind:value={edit.ttl} /></label>
         </div>
 
