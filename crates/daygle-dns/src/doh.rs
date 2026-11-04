@@ -497,10 +497,12 @@ impl H2Responder {
             .header(http::header::CONTENT_LENGTH, bytes.len())
             .body(())
             .expect("a valid response");
+        // Recover from lock poisoning: a panic while sending one response
+        // must not turn every later response on this stream into a panic.
         let mut stream = self
             .respond
             .lock()
-            .expect("h2 send lock poisoned")
+            .unwrap_or_else(|e| e.into_inner())
             .send_response(response, false)
             .map_err(|e| NetError::Msg(format!("h2: {e}")))?;
         stream

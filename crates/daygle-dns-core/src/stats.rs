@@ -134,6 +134,13 @@ impl QueryStats {
         let now_min = epoch_minutes();
         {
             let mut buckets = self.inner.buckets.lock();
+            // A wall clock that steps backwards (NTP correction, a suspended
+            // VM) would otherwise push a bucket for an earlier minute than
+            // the last one: the ring then holds duplicate minutes for the
+            // same minute and `series` keeps only one of them, losing the
+            // newest counts. Clamping keeps the ring monotonic and folds the
+            // step-back into the current minute.
+            let now_min = now_min.max(buckets.last().map_or(now_min, |b| b.minute));
             if !matches!(buckets.last(), Some(b) if b.minute == now_min) {
                 // New minute (possibly after a gap): rotate.
                 buckets.push(Bucket::new(now_min));
@@ -317,6 +324,33 @@ mod tests {
         assert_eq!(map.len(), TOP_KEEP);
         // The hottest key (count 6) must survive.
         assert!(map.values().any(|&c| c == 6));
+    }
+
+    #[test]
+    fn a_backward_clock_step_does_not_duplicate_minutes() {
+        let s = QueryStats::new();
+        {
+            // A bucket stamped in the future: the wall clock has stepped
+            // back since it was written.
+            let mut buckets = s.inner.buckets.lock();
+            buckets.push(Bucket::new(epoch_minutes() + 5));
+        }
+        let ip = IpAddr::V4(Ipv4Addr::LOCALHOST);
+        s.record(ip, "x.example", Outcome::Recursive);
+        {
+            let buckets = s.inner.buckets.lock();
+            assert_eq!(
+                buckets.len(),
+                1,
+                "the step-back is folded into the current bucket, not a new one"
+            );
+            assert_eq!(buckets[0].queries, 1);
+        }
+        // The series the dashboard is given never repeats or reorders a
+        // minute (it maps minutes to points, so duplicates would drop a
+        // bucket's counts).
+        let series = s.series(240);
+        assert!(series.windows(2).all(|w| w[0].t < w[1].t));
     }
 
     #[test]

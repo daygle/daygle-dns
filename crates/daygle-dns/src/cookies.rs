@@ -6,7 +6,8 @@
 //! A client that sends a cookie gets its client cookie back with a fresh
 //! server cookie on every response. A request whose server cookie checks
 //! out comes from the address it claims (a spoofed source could not have
-//! received the cookie), so it is not held to the per-client rate limit.
+//! received the cookie), so it earns a larger per-client rate-limit
+//! allowance (see `RateLimiter::check_verified_client`), not an exemption.
 //! Requests without a cookie, or with a stale one, are answered as usual.
 
 use std::hash::Hasher;
