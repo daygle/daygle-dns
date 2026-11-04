@@ -347,6 +347,16 @@ async fn prove_control(
     if cert.challenge == "cloudflare" {
         challenges.cloudflare = Some(Cloudflare::new(&settings.cloudflare_api_token)?);
     }
+    let kind = if dns {
+        ChallengeType::Dns01
+    } else {
+        ChallengeType::Http01
+    };
+    // Every answer goes in place before the CA is told to look at any. A
+    // name and its wildcard (`example.com`, `*.example.com`) share one
+    // `_acme-challenge` name: told about the first while the second record
+    // was still missing, the CA could cache the TXT set without it.
+    let mut ready_names: Vec<String> = Vec::new();
     let mut authorizations = order.authorizations();
     while let Some(authorization) = authorizations.next().await {
         let mut authorization =
@@ -356,12 +366,7 @@ async fn prove_control(
             AuthorizationStatus::Valid => continue,
             other => return Err(format!("the CA's authorization is {other:?}")),
         }
-        let kind = if dns {
-            ChallengeType::Dns01
-        } else {
-            ChallengeType::Http01
-        };
-        let mut challenge = authorization.challenge(kind).ok_or_else(|| {
+        let challenge = authorization.challenge(kind.clone()).ok_or_else(|| {
             format!(
                 "the CA does not offer the {} challenge",
                 if dns { "DNS-01" } else { "HTTP-01" }
@@ -378,7 +383,6 @@ async fn prove_control(
                 .add_txt(&name, &key_authorization.dns_value())
                 .await?;
             challenges.cloudflare_records.push(record);
-            tokio::time::sleep(CLOUDFLARE_PROPAGATION).await;
         } else if dns {
             let id = add_txt_record(state, &domain, &key_authorization.dns_value()).await?;
             challenges.txt_records.push(id);
@@ -389,6 +393,25 @@ async fn prove_control(
             );
             challenges.http_tokens.push(challenge.token.clone());
         }
+        ready_names.push(domain);
+    }
+    if !challenges.cloudflare_records.is_empty() {
+        tokio::time::sleep(CLOUDFLARE_PROPAGATION).await;
+    }
+
+    // Then tell the CA, in the same order.
+    let mut names = ready_names.into_iter();
+    let mut authorizations = order.authorizations();
+    while let Some(authorization) = authorizations.next().await {
+        let mut authorization =
+            authorization.map_err(|e| format!("cannot read the CA's challenges: {e}"))?;
+        if authorization.status != AuthorizationStatus::Pending {
+            continue;
+        }
+        let domain = names.next().unwrap_or_default();
+        let mut challenge = authorization
+            .challenge(kind.clone())
+            .ok_or_else(|| format!("the CA no longer offers the challenge for {domain}"))?;
         challenge
             .set_ready()
             .await
