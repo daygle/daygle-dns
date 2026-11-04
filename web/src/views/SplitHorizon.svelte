@@ -94,7 +94,8 @@
   async function saveEntry() {
     if (!edit) return;
     const body = {
-      domain: edit.domain.trim(),
+      // Phone keyboards put a space after a dot; a name never has one.
+      domain: edit.domain.replace(/\s+/g, ''),
       networks: edit.networks,
       records: edit.records
         .filter((r) => r.rtype && r.content.trim())

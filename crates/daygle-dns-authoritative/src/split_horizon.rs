@@ -629,7 +629,13 @@ mod tests {
             .create_split_horizon_entry(&input("*.DNS.example.com."))
             .unwrap();
         assert_eq!(made.domain, "*.dns.example.com");
-        for bad in ["www.*.example.com", "*foo.example.com", "*.com", "*"] {
+        for bad in [
+            "www.*.example.com",
+            "*foo.example.com",
+            "*.com",
+            "*",
+            "*. example.com",
+        ] {
             assert!(
                 store.create_split_horizon_entry(&input(bad)).is_err(),
                 "{bad}"
