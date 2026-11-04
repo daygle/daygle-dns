@@ -452,3 +452,73 @@ async fn cloudflare_token_is_write_only_and_required() {
 
     shutdown(server).await;
 }
+
+/// When the CA cannot validate a name, the certificate's error carries the
+/// CA's own reason for it (from the failed challenge), not just "invalid".
+#[tokio::test]
+async fn failed_validation_reports_the_cas_reason() {
+    let (Ok(pebble), Ok(pebble_dir)) = (std::env::var("PEBBLE"), std::env::var("PEBBLE_DIR"))
+    else {
+        eprintln!("PEBBLE / PEBBLE_DIR not set: ACME test skipped");
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let mut cfg = base_config(&dir.path().join("daygle-dns.db"));
+    cfg.api.port = free_port();
+    let server = spawn(cfg).await;
+    // The zone exists, but `missing.acme.test` has no address.
+    server
+        .catalog
+        .store()
+        .create_zone(&ZoneInput {
+            name: "acme.test".into(),
+            ..Default::default()
+        })
+        .unwrap();
+    server.catalog.reload().unwrap();
+    let ca = start_pebble(
+        &pebble,
+        &pebble_dir,
+        dir.path(),
+        server.api_addr.port(),
+        server.udp_addr.unwrap(),
+    )
+    .await;
+    let client = reqwest::Client::builder().no_proxy().build().unwrap();
+    let api = format!("http://{}/api", server.api_addr);
+    let resp = client
+        .put(format!("{api}/acme"))
+        .json(&json!({
+            "directory": ca.directory,
+            "agree_terms": true,
+            "ca_certificate": ca.root,
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
+    let resp = client
+        .post(format!("{api}/certificates/acme"))
+        .json(&json!({ "name": "broken", "domains": ["missing.acme.test"], "challenge": "http" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 202);
+
+    let cert = wait_for(&client, &api, "broken").await;
+    assert_eq!(cert["acme"]["status"], json!("failed"), "{cert}");
+    let error = cert["acme"]["last_error"].as_str().unwrap();
+    // Pebble reports it on the order; Let's Encrypt on the name's
+    // challenge. Either way the reason names the host it could not reach.
+    assert!(
+        error.starts_with("the CA could not verify the names"),
+        "{error}"
+    );
+    assert!(error.contains("missing.acme.test"), "{error}");
+    assert!(
+        !error.contains("order Invalid") && !error.contains("API error"),
+        "{error}"
+    );
+
+    shutdown(server).await;
+}

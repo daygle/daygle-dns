@@ -401,12 +401,16 @@ async fn finish_order(order: &mut instant_acme::Order) -> Result<(String, String
     let retry = RetryPolicy::default()
         .initial_delay(Duration::from_secs(1))
         .timeout(ORDER_TIMEOUT);
-    let status = order
-        .poll_ready(&retry)
-        .await
-        .map_err(|e| format!("waiting for the CA failed: {e}"))?;
+    let status = order.poll_ready(&retry).await.map_err(|e| match e {
+        // Some CAs (Pebble) put the reason on the order itself.
+        instant_acme::Error::Api(problem) => format!(
+            "the CA could not verify the names: {}",
+            describe_problem(&problem)
+        ),
+        other => format!("waiting for the CA failed: {other}"),
+    })?;
     if status != OrderStatus::Ready {
-        return Err(order_problem(order, status));
+        return Err(order_problem(order, status).await);
     }
     let key_pem = order
         .finalize()
@@ -419,14 +423,48 @@ async fn finish_order(order: &mut instant_acme::Order) -> Result<(String, String
     Ok((cert_pem, key_pem))
 }
 
-/// Why an order did not become ready, from the CA's own report.
-fn order_problem(order: &mut instant_acme::Order, status: OrderStatus) -> String {
-    let state = order.state();
-    match &state.error {
-        Some(problem) => format!("the CA could not verify the names: {problem}"),
-        None => format!(
+/// Why an order did not become ready, from the CA's own report: the
+/// order's error if it has one, else each failed challenge's error (where
+/// Let's Encrypt puts the reason, e.g. "No TXT record found at ...").
+async fn order_problem(order: &mut instant_acme::Order, status: OrderStatus) -> String {
+    if let Some(problem) = &order.state().error {
+        return format!(
+            "the CA could not verify the names: {}",
+            describe_problem(problem)
+        );
+    }
+    let mut reasons: Vec<String> = Vec::new();
+    let mut authorizations = order.authorizations();
+    while let Some(authorization) = authorizations.next().await {
+        let Ok(mut authorization) = authorization else {
+            continue;
+        };
+        // The stored state is from before validation; ask for the outcome.
+        let Ok(state) = authorization.refresh().await else {
+            continue;
+        };
+        let name = state.identifier().to_string();
+        for challenge in &state.challenges {
+            if let Some(problem) = &challenge.error {
+                reasons.push(format!("{name}: {}", describe_problem(problem)));
+            }
+        }
+    }
+    if reasons.is_empty() {
+        format!(
             "the CA could not verify the names (order {status:?}); check that each name reaches this server as the chosen challenge needs"
-        ),
+        )
+    } else {
+        format!("the CA could not verify the names. {}", reasons.join("; "))
+    }
+}
+
+/// A CA problem document as one readable line: its detail, else its type.
+fn describe_problem(problem: &instant_acme::Problem) -> String {
+    match (&problem.detail, &problem.r#type) {
+        (Some(detail), _) => detail.clone(),
+        (None, Some(kind)) => kind.clone(),
+        (None, None) => "no reason given".to_string(),
     }
 }
 
