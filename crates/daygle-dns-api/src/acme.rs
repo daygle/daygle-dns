@@ -347,6 +347,16 @@ async fn prove_control(
     if cert.challenge == "cloudflare" {
         challenges.cloudflare = Some(Cloudflare::new(&settings.cloudflare_api_token)?);
     }
+    let kind = if dns {
+        ChallengeType::Dns01
+    } else {
+        ChallengeType::Http01
+    };
+    // Every answer goes in place before the CA is told to look at any. A
+    // name and its wildcard (`example.com`, `*.example.com`) share one
+    // `_acme-challenge` name: told about the first while the second record
+    // was still missing, the CA could cache the TXT set without it.
+    let mut ready_names: Vec<String> = Vec::new();
     let mut authorizations = order.authorizations();
     while let Some(authorization) = authorizations.next().await {
         let mut authorization =
@@ -356,12 +366,7 @@ async fn prove_control(
             AuthorizationStatus::Valid => continue,
             other => return Err(format!("the CA's authorization is {other:?}")),
         }
-        let kind = if dns {
-            ChallengeType::Dns01
-        } else {
-            ChallengeType::Http01
-        };
-        let mut challenge = authorization.challenge(kind).ok_or_else(|| {
+        let challenge = authorization.challenge(kind.clone()).ok_or_else(|| {
             format!(
                 "the CA does not offer the {} challenge",
                 if dns { "DNS-01" } else { "HTTP-01" }
@@ -378,7 +383,6 @@ async fn prove_control(
                 .add_txt(&name, &key_authorization.dns_value())
                 .await?;
             challenges.cloudflare_records.push(record);
-            tokio::time::sleep(CLOUDFLARE_PROPAGATION).await;
         } else if dns {
             let id = add_txt_record(state, &domain, &key_authorization.dns_value()).await?;
             challenges.txt_records.push(id);
@@ -389,6 +393,25 @@ async fn prove_control(
             );
             challenges.http_tokens.push(challenge.token.clone());
         }
+        ready_names.push(domain);
+    }
+    if !challenges.cloudflare_records.is_empty() {
+        tokio::time::sleep(CLOUDFLARE_PROPAGATION).await;
+    }
+
+    // Then tell the CA, in the same order.
+    let mut names = ready_names.into_iter();
+    let mut authorizations = order.authorizations();
+    while let Some(authorization) = authorizations.next().await {
+        let mut authorization =
+            authorization.map_err(|e| format!("cannot read the CA's challenges: {e}"))?;
+        if authorization.status != AuthorizationStatus::Pending {
+            continue;
+        }
+        let domain = names.next().unwrap_or_default();
+        let mut challenge = authorization
+            .challenge(kind.clone())
+            .ok_or_else(|| format!("the CA no longer offers the challenge for {domain}"))?;
         challenge
             .set_ready()
             .await
@@ -401,12 +424,16 @@ async fn finish_order(order: &mut instant_acme::Order) -> Result<(String, String
     let retry = RetryPolicy::default()
         .initial_delay(Duration::from_secs(1))
         .timeout(ORDER_TIMEOUT);
-    let status = order
-        .poll_ready(&retry)
-        .await
-        .map_err(|e| format!("waiting for the CA failed: {e}"))?;
+    let status = order.poll_ready(&retry).await.map_err(|e| match e {
+        // Some CAs (Pebble) put the reason on the order itself.
+        instant_acme::Error::Api(problem) => format!(
+            "the CA could not verify the names: {}",
+            describe_problem(&problem)
+        ),
+        other => format!("waiting for the CA failed: {other}"),
+    })?;
     if status != OrderStatus::Ready {
-        return Err(order_problem(order, status));
+        return Err(order_problem(order, status).await);
     }
     let key_pem = order
         .finalize()
@@ -419,14 +446,48 @@ async fn finish_order(order: &mut instant_acme::Order) -> Result<(String, String
     Ok((cert_pem, key_pem))
 }
 
-/// Why an order did not become ready, from the CA's own report.
-fn order_problem(order: &mut instant_acme::Order, status: OrderStatus) -> String {
-    let state = order.state();
-    match &state.error {
-        Some(problem) => format!("the CA could not verify the names: {problem}"),
-        None => format!(
+/// Why an order did not become ready, from the CA's own report: the
+/// order's error if it has one, else each failed challenge's error (where
+/// Let's Encrypt puts the reason, e.g. "No TXT record found at ...").
+async fn order_problem(order: &mut instant_acme::Order, status: OrderStatus) -> String {
+    if let Some(problem) = &order.state().error {
+        return format!(
+            "the CA could not verify the names: {}",
+            describe_problem(problem)
+        );
+    }
+    let mut reasons: Vec<String> = Vec::new();
+    let mut authorizations = order.authorizations();
+    while let Some(authorization) = authorizations.next().await {
+        let Ok(mut authorization) = authorization else {
+            continue;
+        };
+        // The stored state is from before validation; ask for the outcome.
+        let Ok(state) = authorization.refresh().await else {
+            continue;
+        };
+        let name = state.identifier().to_string();
+        for challenge in &state.challenges {
+            if let Some(problem) = &challenge.error {
+                reasons.push(format!("{name}: {}", describe_problem(problem)));
+            }
+        }
+    }
+    if reasons.is_empty() {
+        format!(
             "the CA could not verify the names (order {status:?}); check that each name reaches this server as the chosen challenge needs"
-        ),
+        )
+    } else {
+        format!("the CA could not verify the names. {}", reasons.join("; "))
+    }
+}
+
+/// A CA problem document as one readable line: its detail, else its type.
+fn describe_problem(problem: &instant_acme::Problem) -> String {
+    match (&problem.detail, &problem.r#type) {
+        (Some(detail), _) => detail.clone(),
+        (None, Some(kind)) => kind.clone(),
+        (None, None) => "no reason given".to_string(),
     }
 }
 
