@@ -25,12 +25,6 @@
     { value: 'pending', label: 'Waiting' },
     { value: 'skipped', label: 'Skipped' },
   ];
-  const SEVERITY_FILTERS = [
-    { value: '', label: 'All Severities' },
-    { value: 'threat', label: 'Threat' },
-    { value: 'disputed', label: 'Disputed' },
-    { value: 'info', label: 'Informational' },
-  ];
   const EXEMPTION_FILTERS = [
     { value: '', label: 'All Domains' },
     { value: 'exempt', label: 'Exempt' },
@@ -43,7 +37,6 @@
   let statusFilter = $state('');
   let categoryFilter = $state('');
   let categories = $state([]);
-  let severityFilter = $state('');
   let exemptionFilter = $state('');
   let search = $state('');
   let loading = $state(true);
@@ -69,7 +62,6 @@
     const params = new URLSearchParams();
     if (statusFilter) params.set('status', statusFilter);
     if (categoryFilter.trim()) params.set('category', categoryFilter.trim());
-    if (severityFilter) params.set('severity', severityFilter);
     if (exemptionFilter) params.set('exemption', exemptionFilter);
     if (search.trim()) params.set('q', search.trim());
     params.set('page', String(page));
@@ -77,11 +69,17 @@
     return params.toString();
   }
 
+  // Only the newest request may update the table: a slow response for an
+  // old filter must not overwrite the one for the filter now shown.
+  let requestSeq = 0;
+
   async function load() {
+    const seq = ++requestSeq;
     loading = rows.length === 0;
     error = null;
     try {
       const data = await api.aiVerdicts(qs());
+      if (seq !== requestSeq) return;
       rows = data.entries || [];
       total = data.total || 0;
       disabled = false;
@@ -93,6 +91,7 @@
         return load();
       }
     } catch (e) {
+      if (seq !== requestSeq) return;
       rows = [];
       total = 0;
       // 404 means the scanner is off: an empty state, not a failure.
@@ -102,7 +101,7 @@
         error = formatApiError(e);
       }
     } finally {
-      loading = false;
+      if (seq === requestSeq) loading = false;
     }
   }
 
@@ -113,8 +112,19 @@
 
   // Relabel a domain: the operator's category wins over the model's and is
   // what filtering groups match when they block a category.
-  async function setCategory(row, category) {
-    if (category === (row.category || '')) return;
+  // `select` is the dropdown: it is one-way bound, so a change that is not
+  // applied (nothing to clear, or the request failed) is put back on screen.
+  async function setCategory(row, category, select) {
+    const shown = row.category || '';
+    const revert = () => {
+      if (select) select.value = shown;
+    };
+    if (category === shown) return;
+    if (!category && !row.category_overridden) {
+      // "-" on the scanner's own label: there is no relabel to clear.
+      revert();
+      return;
+    }
     notice = null;
     error = null;
     try {
@@ -122,14 +132,23 @@
         await api.aiOverride(row.domain, 'category', '', category);
         notice = `${row.domain} is now categorized as ${titleCase(category)}.`;
       } else {
-        if (!row.category_overridden) return;
         await api.aiOverride(row.domain, 'clear_category', '');
         notice = `${row.domain} uses the scanner's category again.`;
       }
       await load();
     } catch (e) {
+      revert();
       error = formatApiError(e);
     }
+  }
+
+  // The dropdown's choices for one row: the backend's labels plus the row's
+  // own, which a model swap may have dropped from the list (without it the
+  // dropdown silently showed another category).
+  function rowCategories(row) {
+    return row.category && !categories.includes(row.category)
+      ? [...categories, row.category].sort()
+      : categories;
   }
 
   function setExempt(domain, exempt) {
@@ -173,19 +192,21 @@
   // Reload on mount and whenever a filter changes (back to page 1, since the
   // filter changed the list). Typing in the search box waits for a pause.
   let searchTimer;
+  let firstLoad = true;
   loadCategories();
 
   $effect(() => {
     statusFilter;
     categoryFilter;
-    severityFilter;
     exemptionFilter;
     search;
     clearTimeout(searchTimer);
+    // The first load runs at once; only later changes wait for a pause.
     searchTimer = setTimeout(() => {
       page = 1;
       load();
-    }, 250);
+    }, firstLoad ? 0 : 250);
+    firstLoad = false;
     return () => clearTimeout(searchTimer);
   });
 </script>
@@ -226,11 +247,6 @@
             <option value={f.value}>{f.label}</option>
           {/each}
         </select>
-        <select bind:value={severityFilter} aria-label="Filter by severity" style="min-width: 150px">
-          {#each SEVERITY_FILTERS as f (f.label)}
-            <option value={f.value}>{f.label}</option>
-          {/each}
-        </select>
         <select bind:value={exemptionFilter} aria-label="Filter by exemption" style="min-width: 150px">
           {#each EXEMPTION_FILTERS as f (f.label)}
             <option value={f.value}>{f.label}</option>
@@ -268,10 +284,10 @@
                     class="category-select"
                     value={r.category || ''}
                     title={r.category_overridden ? "Your label overrides the scanner's" : "The scanner's label"}
-                    onchange={(e) => setCategory(r, e.currentTarget.value)}
+                    onchange={(e) => setCategory(r, e.currentTarget.value, e.currentTarget)}
                   >
                     <option value="">-</option>
-                    {#each categories as category (category)}
+                    {#each rowCategories(r) as category (category)}
                       <option value={category}>{titleCase(category)}</option>
                     {/each}
                   </select>
@@ -315,7 +331,7 @@
     </div>
     {#if !rows.length}
       <p class="muted">
-        {#if search.trim() || categoryFilter.trim() || statusFilter || severityFilter || exemptionFilter}
+        {#if search.trim() || categoryFilter.trim() || statusFilter || exemptionFilter}
           No classifications match these filters.
         {:else}
           No classifications yet - they appear as the scanner categorizes

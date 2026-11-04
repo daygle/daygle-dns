@@ -29,7 +29,7 @@
 use std::sync::{Arc, Mutex};
 
 use daygle_dns_core::error::{DaygleError, Result};
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection};
 
 use crate::backend::Channel;
 
@@ -114,6 +114,19 @@ pub struct OverrideRow {
 
 fn now_epoch() -> i64 {
     chrono::Utc::now().timestamp()
+}
+
+/// A case-insensitive "contains" LIKE pattern for `ESCAPE '\\'`, with the
+/// wildcard characters in `text` escaped (`%%` when `text` is blank).
+fn contains_pattern(text: Option<&str>) -> String {
+    let escaped = text
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase()
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_");
+    format!("%{escaped}%")
 }
 
 /// The verdict table: one row per domain per channel. Both channels classify
@@ -280,10 +293,12 @@ impl AiStore {
         })
     }
 
+    /// The connection. A panic while the lock was held poisons it; the
+    /// connection itself is still usable (SQLite rolls back any open
+    /// transaction), so recover the guard instead of failing every later
+    /// call - an error here used to stop the scanner and the AI API for good.
     fn lock(&self) -> Result<std::sync::MutexGuard<'_, Connection>> {
-        self.conn
-            .lock()
-            .map_err(|e| DaygleError::Internal(format!("AI store lock poisoned: {e}")))
+        Ok(self.conn.lock().unwrap_or_else(|e| e.into_inner()))
     }
 
     /// Record that `domain` was observed (bumping the observation counter)
@@ -308,23 +323,27 @@ impl AiStore {
                  ON CONFLICT(domain, channel) DO NOTHING",
             )?;
             let mut bump = tx.prepare(
-                "UPDATE ai_verdicts SET observations = observations + 1, last_seen = ?2
-                 WHERE domain = ?1",
+                "UPDATE ai_verdicts SET observations = observations + 1, last_seen = ?3
+                 WHERE domain = ?1 AND channel = ?2",
             )?;
             for domain in domains {
                 // A new domain starts a pending row in *both* channels: the
                 // categorizer and the threat detector classify it
-                // independently, each on its own schedule.
+                // independently, each on its own schedule. A channel row that
+                // already existed counts the sighting instead - also when the
+                // other channel's row was dropped on expiry and is recreated
+                // here, which used to leave the surviving row's `last_seen`
+                // stale, so it was deleted rather than re-checked.
                 let mut inserted = false;
                 for channel in Channel::all() {
                     if insert.execute(params![domain, channel.as_str(), now])? == 1 {
                         inserted = true;
+                    } else {
+                        bump.execute(params![domain, channel.as_str(), now])?;
                     }
                 }
                 if inserted {
                     new += 1;
-                } else {
-                    bump.execute(params![domain, now])?;
                 }
             }
         }
@@ -619,19 +638,6 @@ impl AiStore {
         Ok(collected)
     }
 
-    /// Whether the domain has an `allow` override.
-    pub fn is_overridden_allow(&self, domain: &str) -> Result<bool> {
-        let conn = self.lock()?;
-        Ok(conn
-            .query_row(
-                "SELECT 1 FROM ai_overrides WHERE domain = ?1 AND action = 'allow'",
-                params![domain],
-                |_| Ok(()),
-            )
-            .optional()?
-            .is_some())
-    }
-
     /// Paginated verdict list, most recently classified first (pending rows
     /// last), with an optional status filter and a domain substring search.
     /// Returns the page plus the total row count under the same filter.
@@ -646,15 +652,7 @@ impl AiStore {
         let limit = limit.clamp(1, 500);
         let offset = offset.min(u32::MAX - limit);
         let status = status.unwrap_or("").trim().to_string();
-        // LIKE pattern with the wildcard characters escaped.
-        let search = search
-            .unwrap_or("")
-            .trim()
-            .to_ascii_lowercase()
-            .replace('\\', "\\\\")
-            .replace('%', "\\%")
-            .replace('_', "\\_");
-        let pattern = format!("%{search}%");
+        let pattern = contains_pattern(search);
         let filter = "(?1 = '' OR v.status = ?1) AND v.domain LIKE ?2 ESCAPE '\\'";
         let total: i64 = conn.query_row(
             &format!("SELECT COUNT(*) FROM ai_verdicts v WHERE {filter}"),
@@ -669,48 +667,6 @@ impl AiStore {
         ))?;
         let collected = stmt
             .query_map(params![status, pattern], verdict_row)?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        Ok((collected, total as u64))
-    }
-
-    /// Paginated threat list: classified verdicts with `threat` or
-    /// `disputed` (verifier-overruled, never auto-blocked) severity, highest
-    /// confidence first. Same shape as [`Self::list_verdicts`], restricted
-    /// to the rows the AI page's Threats tab shows.
-    pub fn list_threats(
-        &self,
-        search: Option<&str>,
-        limit: u32,
-        offset: u32,
-    ) -> Result<(Vec<VerdictRow>, u64)> {
-        let conn = self.lock()?;
-        let limit = limit.clamp(1, 500);
-        let offset = offset.min(u32::MAX - limit);
-        // LIKE pattern with the wildcard characters escaped.
-        let search = search
-            .unwrap_or("")
-            .trim()
-            .to_ascii_lowercase()
-            .replace('\\', "\\\\")
-            .replace('%', "\\%")
-            .replace('_', "\\_");
-        let pattern = format!("%{search}%");
-        let filter = "v.channel = 'threat' AND v.status = 'classified'
-                 AND v.severity IN ('threat', 'disputed')
-                 AND v.domain LIKE ?1 ESCAPE '\\'";
-        let total: i64 = conn.query_row(
-            &format!("SELECT COUNT(*) FROM ai_verdicts v WHERE {filter}"),
-            params![pattern],
-            |r| r.get(0),
-        )?;
-        let mut stmt = conn.prepare(&format!(
-            "SELECT {VERDICT_COLUMNS}
-             FROM ai_verdicts v WHERE {filter}
-             ORDER BY v.confidence DESC, v.classified_at DESC, v.domain
-             LIMIT {limit} OFFSET {offset}"
-        ))?;
-        let collected = stmt
-            .query_map(params![pattern], verdict_row)?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok((collected, total as u64))
     }
@@ -745,26 +701,10 @@ impl AiStore {
         let limit = page.limit.clamp(1, 500);
         let offset = page.offset.min(u32::MAX - limit);
         let status = filter.status.unwrap_or("").trim().to_ascii_lowercase();
-        let category = filter
-            .category
-            .unwrap_or("")
-            .trim()
-            .to_ascii_lowercase()
-            .replace('\\', "\\\\")
-            .replace('%', "\\%")
-            .replace('_', "\\_");
-        let category = format!("%{category}%");
+        let category = contains_pattern(filter.category);
         let severity = filter.severity.unwrap_or("").trim().to_ascii_lowercase();
         let exemption = filter.exemption.unwrap_or("").trim().to_ascii_lowercase();
-        let search = filter
-            .search
-            .unwrap_or("")
-            .trim()
-            .to_ascii_lowercase()
-            .replace('\\', "\\\\")
-            .replace('%', "\\%")
-            .replace('_', "\\_");
-        let search = format!("%{search}%");
+        let search = contains_pattern(filter.search);
         // Each list shows its own channel: the verdict list the
         // categorizer's labels, the threat list the threat detector's.
         let channel = filter

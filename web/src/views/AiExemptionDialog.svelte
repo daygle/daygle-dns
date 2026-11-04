@@ -11,6 +11,8 @@
   let reason = $state('');
 </script>
 
+<svelte:window onkeydown={(event) => event.key === 'Escape' && onCancel()} />
+
 <div class="modal-backdrop" role="presentation" onclick={(event) => event.target === event.currentTarget && onCancel()}>
   <div class="modal card" role="dialog" aria-modal="true" aria-labelledby="exemption-title">
     <div class="spread modal-title">

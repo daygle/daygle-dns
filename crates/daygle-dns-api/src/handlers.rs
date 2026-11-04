@@ -1354,12 +1354,17 @@ pub async fn ai_status(State(state): State<AppState>) -> Response {
     let Some(ai) = ai_engine(&state) else {
         return map_err(daygle_dns_ml::ai_disabled_error());
     };
-    let settings = ai.settings.load();
-    let statuses = match ai.store.status_counts() {
-        Ok(s) => s,
-        Err(e) => return map_err(e),
-    };
-    let blockable = match ai.blockable_counts() {
+    let settings = ai.settings.load_full();
+    // SQLite work (and a wait on the store lock while a scan cycle commits)
+    // stays off the async workers that also serve DNS-over-HTTPS and the API.
+    let counts = run_blocking({
+        let ai = ai.clone();
+        move || -> daygle_dns_core::error::Result<_> {
+            Ok((ai.store.status_counts()?, ai.blockable_counts()?))
+        }
+    })
+    .await;
+    let (statuses, blockable) = match counts {
         Ok(counts) => counts,
         Err(e) => return map_err(e),
     };
@@ -1410,19 +1415,26 @@ pub async fn ai_verdicts(
     };
     let per_page = query.per_page.unwrap_or(50).clamp(1, 500);
     let page = query.page.unwrap_or(1).max(1);
-    let filter = daygle_dns_ml::store::VerdictFilter {
-        status: query.status.as_deref(),
-        category: query.category.as_deref(),
-        severity: query.severity.as_deref(),
-        exemption: query.exemption.as_deref(),
-        search: query.q.as_deref(),
-        channel: query.channel.as_deref(),
-    };
     let page_bounds = daygle_dns_ml::store::VerdictPage {
         limit: per_page,
         offset: (page - 1).saturating_mul(per_page),
     };
-    match ai.store.list_verdicts_filtered(&filter, page_bounds) {
+    let listed = run_blocking({
+        let ai = ai.clone();
+        move || {
+            let filter = daygle_dns_ml::store::VerdictFilter {
+                status: query.status.as_deref(),
+                category: query.category.as_deref(),
+                severity: query.severity.as_deref(),
+                exemption: query.exemption.as_deref(),
+                search: query.q.as_deref(),
+                channel: query.channel.as_deref(),
+            };
+            ai.store.list_verdicts_filtered(&filter, page_bounds)
+        }
+    })
+    .await;
+    match listed {
         Ok((rows, total)) => (
             StatusCode::OK,
             axum::Json(serde_json::json!({
@@ -1469,18 +1481,25 @@ pub async fn ai_threats(
     };
     let per_page = query.per_page.unwrap_or(50).clamp(1, 500);
     let page = query.page.unwrap_or(1).max(1);
-    let filter = daygle_dns_ml::store::VerdictFilter {
-        category: query.category.as_deref(),
-        severity: query.severity.as_deref(),
-        exemption: query.exemption.as_deref(),
-        search: query.q.as_deref(),
-        ..Default::default()
-    };
     let page_bounds = daygle_dns_ml::store::VerdictPage {
         limit: per_page,
         offset: (page - 1).saturating_mul(per_page),
     };
-    match ai.store.list_threats_filtered(&filter, page_bounds) {
+    let listed = run_blocking({
+        let ai = ai.clone();
+        move || {
+            let filter = daygle_dns_ml::store::VerdictFilter {
+                category: query.category.as_deref(),
+                severity: query.severity.as_deref(),
+                exemption: query.exemption.as_deref(),
+                search: query.q.as_deref(),
+                ..Default::default()
+            };
+            ai.store.list_threats_filtered(&filter, page_bounds)
+        }
+    })
+    .await;
+    match listed {
         Ok((rows, total)) => {
             let snapshot = ai.snapshot().load();
             (StatusCode::OK,
@@ -1536,18 +1555,9 @@ pub async fn ai_override(
         )
             .into_response();
     }
-    let domain_ok = !domain.is_empty()
-        && domain.len() <= 253
-        && domain.split('.').all(|label| {
-            !label.is_empty()
-                && label.len() <= 63
-                && label
-                    .bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
-                && !label.starts_with('-')
-                && !label.ends_with('-')
-        });
-    if !domain_ok {
+    // The scanner's own notion of a classifiable name, so an override can
+    // be set on exactly the names that can carry a verdict.
+    if !daygle_dns_ml::scanner::looks_like_domain(&domain) {
         return (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({
@@ -1556,20 +1566,11 @@ pub async fn ai_override(
         )
             .into_response();
     }
-    match body.action.as_str() {
-        "allow" => match ai.set_allow_override(&domain, &body.reason) {
-            Ok(()) => {
-                state.logs.push(
-                    daygle_dns_core::LogLevel::Info,
-                    "api",
-                    format!("AI override: '{domain}' is now AI-exempt"),
-                );
-                Json(serde_json::json!({"domain": domain, "action": "allow"})).into_response()
-            }
-            Err(e) => map_err(e),
-        },
+    let action = body.action.as_str();
+    let category = body.category.trim().to_ascii_lowercase();
+    match action {
+        "allow" | "clear" | "clear_category" => {}
         "category" => {
-            let category = body.category.trim().to_ascii_lowercase();
             let known = ai.backend_categories();
             if !known.iter().any(|c| c.eq_ignore_ascii_case(&category)) {
                 return (
@@ -1581,53 +1582,8 @@ pub async fn ai_override(
                 )
                     .into_response();
             }
-            match ai.set_category_override(&domain, &category) {
-                Ok(()) => {
-                    state.logs.push(
-                        daygle_dns_core::LogLevel::Info,
-                        "api",
-                        format!("AI category override: '{domain}' is now '{category}'"),
-                    );
-                    Json(serde_json::json!({"domain": domain, "action": "category", "category": category}))
-                        .into_response()
-                }
-                Err(e) => map_err(e),
-            }
         }
-        "clear_category" => match ai.clear_category_override(&domain) {
-            Ok(true) => {
-                state.logs.push(
-                    daygle_dns_core::LogLevel::Info,
-                    "api",
-                    format!("AI category override cleared for '{domain}'"),
-                );
-                Json(serde_json::json!({"domain": domain, "action": "clear_category"}))
-                    .into_response()
-            }
-            Ok(false) => (
-                StatusCode::NOT_FOUND,
-                Json(serde_json::json!({"error": "no category override exists"})),
-            )
-                .into_response(),
-            Err(e) => map_err(e),
-        },
-        "clear" => match ai.clear_override(&domain) {
-            Ok(true) => {
-                state.logs.push(
-                    daygle_dns_core::LogLevel::Info,
-                    "api",
-                    format!("AI override cleared for '{domain}'"),
-                );
-                Json(serde_json::json!({"domain": domain, "action": "clear"})).into_response()
-            }
-            Ok(false) => (
-                StatusCode::NOT_FOUND,
-                Json(serde_json::json!({"error": "no override exists"})),
-            )
-                .into_response(),
-            Err(e) => map_err(e),
-        },
-        other => (
+        other => return (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({
                 "error": format!(
@@ -1637,6 +1593,55 @@ pub async fn ai_override(
         )
             .into_response(),
     }
+    // Each change rebuilds the block and category snapshots from SQLite:
+    // blocking work, kept off the async workers.
+    let applied = run_blocking({
+        let ai = ai.clone();
+        let action = body.action.clone();
+        let domain = domain.clone();
+        let reason = body.reason.clone();
+        let category = category.clone();
+        move || match action.as_str() {
+            "allow" => ai.set_allow_override(&domain, &reason).map(|()| true),
+            "category" => ai.set_category_override(&domain, &category).map(|()| true),
+            "clear_category" => ai.clear_category_override(&domain),
+            _ => ai.clear_override(&domain),
+        }
+    })
+    .await;
+    let (message, missing) = match action {
+        "allow" => (format!("AI override: '{domain}' is now AI-exempt"), ""),
+        "category" => (
+            format!("AI category override: '{domain}' is now '{category}'"),
+            "",
+        ),
+        "clear_category" => (
+            format!("AI category override cleared for '{domain}'"),
+            "no category override exists",
+        ),
+        _ => (
+            format!("AI override cleared for '{domain}'"),
+            "no override exists",
+        ),
+    };
+    match applied {
+        Ok(true) => {
+            state
+                .logs
+                .push(daygle_dns_core::LogLevel::Info, "api", message);
+            let mut reply = serde_json::json!({"domain": domain, "action": action});
+            if action == "category" {
+                reply["category"] = serde_json::Value::from(category);
+            }
+            Json(reply).into_response()
+        }
+        Ok(false) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": missing})),
+        )
+            .into_response(),
+        Err(e) => map_err(e),
+    }
 }
 
 /// `GET /api/ai/overrides` - the exempted domains (an exemption also covers
@@ -1645,7 +1650,12 @@ pub async fn ai_overrides(State(state): State<AppState>) -> Response {
     let Some(ai) = ai_engine(&state) else {
         return map_err(daygle_dns_ml::ai_disabled_error());
     };
-    match ai.store.list_overrides() {
+    let listed = run_blocking({
+        let ai = ai.clone();
+        move || ai.store.list_overrides()
+    })
+    .await;
+    match listed {
         Ok(rows) => Json(serde_json::json!({
             "overrides": rows.iter().map(|o| serde_json::json!({
                 "domain": o.domain,
@@ -1818,7 +1828,7 @@ fn config_dir(state: &AppState) -> Option<std::path::PathBuf> {
 async fn run_blocking<T: Send + 'static>(job: impl FnOnce() -> T + Send + 'static) -> T {
     tokio::task::spawn_blocking(job)
         .await
-        .expect("blocking update task panicked")
+        .expect("blocking task panicked")
 }
 
 fn start_error_response(e: crate::update::StartError) -> Response {
@@ -6373,62 +6383,53 @@ pub async fn update_settings(
             policy_changed = true;
         }
     }
-    let mut ai_changed = false;
     if let Some(a) = &update.ai {
         if let Some(v) = a.enabled {
             config.ai.enabled = v;
-            ai_changed = true;
         }
         if let Some(v) = a.mode {
             config.ai.mode = v;
-            ai_changed = true;
         }
         if let Some(v) = &a.database {
             config.ai.database = v.trim().to_string();
-            ai_changed = true;
         }
         if let Some(v) = &a.model_path {
             config.ai.model_path = v.trim().to_string();
-            ai_changed = true;
         }
         if let Some(v) = a.workers {
             config.ai.workers = v;
-            ai_changed = true;
         }
         if let Some(v) = a.scan_interval_secs {
             config.ai.scan_interval_secs = v;
-            ai_changed = true;
         }
         if let Some(v) = a.expire_check_secs {
             config.ai.expire_check_secs = v;
-            ai_changed = true;
         }
         if let Some(v) = a.max_domains_per_scan {
             config.ai.max_domains_per_scan = v;
-            ai_changed = true;
         }
         if let Some(v) = &a.auto_block_categories {
             config.ai.auto_block_categories =
                 daygle_dns_core::config::AiUpdate::normalize_categories(v.clone());
-            ai_changed = true;
         }
         if let Some(v) = a.block_threshold {
             config.ai.block_threshold = v;
-            ai_changed = true;
         }
         if let Some(v) = a.confidence_floor {
             config.ai.confidence_floor = v;
-            ai_changed = true;
         }
         if let Some(v) = a.category_ttl_secs {
             config.ai.category_ttl_secs = v;
-            ai_changed = true;
         }
         if let Some(v) = a.threat_ttl_secs {
             config.ai.threat_ttl_secs = v;
-            ai_changed = true;
         }
     }
+
+    // Only a real change touches the running engine: the console sends the
+    // whole AI form with every save, and reacting to an unchanged one forced
+    // a snapshot rebuild and a full scan cycle on every unrelated edit.
+    let ai_changed = config.ai != old_config.ai;
 
     // A selected console-managed certificate must exist in the store.
     for (label, name) in [

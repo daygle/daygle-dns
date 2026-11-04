@@ -26,7 +26,7 @@ use daygle_dns_core::LogStore;
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
-use crate::backend::{Channel, ClassificationInput, DomainClassifier, Severity, Verdict};
+use crate::backend::{Channel, ClassificationInput, DomainClassifier, Verdict};
 use crate::store::{AiStore, NewVerdict};
 
 /// A domain currently auto-blocked in `enforce` mode.
@@ -200,7 +200,7 @@ impl Scanner {
                         .unwrap_or_default(),
                     severity: verdict
                         .as_ref()
-                        .map(|v| severity_name(v.severity).to_string())
+                        .map(|v| v.severity.as_str().to_string())
                         .unwrap_or_default(),
                     status: status.to_string(),
                     confidence: verdict.as_ref().map_or(0.0, |v| v.confidence),
@@ -492,15 +492,6 @@ fn exempt(domain: &str, overrides: &HashSet<String>) -> bool {
             Some((_, parent)) => candidate = parent,
             None => return false,
         }
-    }
-}
-
-/// Lowercase `info`/`threat`, shared by store writes.
-fn severity_name(s: crate::backend::Severity) -> &'static str {
-    match s {
-        Severity::Info => "info",
-        Severity::Threat => "threat",
-        Severity::Disputed => "disputed",
     }
 }
 

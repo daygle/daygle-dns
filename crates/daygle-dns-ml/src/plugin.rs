@@ -30,8 +30,6 @@ use chrono::Utc;
 use daygle_dns_core::config::{AiMode, AiSettings};
 use daygle_dns_policy::{Action, AdvancedBlocking, Decision, PolicyContext, PolicyPlugin};
 
-#[cfg(test)]
-use crate::scanner::ActiveBlock;
 use crate::scanner::{BlockSnapshot, CategorySnapshot};
 
 /// Longest suffix match against the snapshot: a verdict recorded on
@@ -101,7 +99,9 @@ impl PolicyPlugin for AiBlockPlugin {
     }
 
     async fn evaluate(&self, context: &PolicyContext) -> Option<Decision> {
-        let settings = self.settings.load_full();
+        // `load()` guards are cheaper than `load_full()` Arc clones, and
+        // this runs once per DNS query.
+        let settings = self.settings.load();
         if !settings.enabled {
             return None; // scanner off: no verdicts to act on
         }
@@ -119,7 +119,7 @@ impl PolicyPlugin for AiBlockPlugin {
                 .0
         });
         if mode == AiMode::Enforce {
-            let snapshot = self.snapshot.load_full();
+            let snapshot = self.snapshot.load();
             if let Some(block) = suffix_match(&context.query_name, &snapshot, now, |b| b.expires_at)
             {
                 return Some(
@@ -143,7 +143,7 @@ impl PolicyPlugin for AiBlockPlugin {
         if blocked.is_empty() {
             return None;
         }
-        let categories = self.categories.load_full();
+        let categories = self.categories.load();
         let labelled = suffix_match(&context.query_name, &categories, now, |c| c.expires_at)?;
         let category = labelled.category.as_str();
         if !blocked.iter().any(|c| c.eq_ignore_ascii_case(category)) {
@@ -168,7 +168,7 @@ impl PolicyPlugin for AiBlockPlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use daygle_dns_core::config::AiMode;
+    use crate::scanner::ActiveBlock;
 
     fn plugin(mode: AiMode, snapshot: BlockSnapshot) -> Arc<AiBlockPlugin> {
         plugin_with(mode, snapshot, CategorySnapshot::new())
@@ -268,7 +268,7 @@ mod tests {
                 expires_at: i64::MAX,
             },
         );
-        let p = plugin(AiMode::Enforce, snapshot.clone());
+        let p = plugin(AiMode::Enforce, snapshot);
 
         let d = p.evaluate(&ctx("bad.example.com")).await.unwrap();
         assert_eq!(d.action, Action::Block);
@@ -281,7 +281,6 @@ mod tests {
         assert!(p.evaluate(&ctx("fine.example.org")).await.is_none());
         // does not match label-suffix collisions
         assert!(p.evaluate(&ctx("notbad.example.com")).await.is_none());
-        snapshot.clear();
     }
 
     /// A client group that records only exempts its clients; others are still

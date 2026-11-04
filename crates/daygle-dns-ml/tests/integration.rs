@@ -202,6 +202,70 @@ fn verdict_lifecycle_and_expiry() {
     );
 }
 
+/// When one channel's row was dropped on expiry (the domain had not been
+/// queried since) and the domain shows up again, the recreated row is new,
+/// but the surviving channel's row must still count the sighting - otherwise
+/// its `last_seen` stays old and its own expiry deletes it instead of
+/// re-checking a domain that is plainly in use.
+#[test]
+fn a_recreated_channel_row_still_bumps_the_surviving_one() {
+    let dir = TempDir::new().unwrap();
+    let store = tmp_store(&dir);
+    assert!(store.observe("mixed.example").unwrap());
+    // The threat verdict expires quickly; the content one much later.
+    store
+        .save_verdict(
+            Channel::Threat,
+            "mixed.example",
+            "",
+            "",
+            "skipped",
+            0.0,
+            "test",
+            "no signal",
+            1,
+        )
+        .unwrap();
+    store
+        .save_verdict(
+            Channel::Content,
+            "mixed.example",
+            "news",
+            "info",
+            "classified",
+            0.9,
+            "test",
+            "label",
+            86400,
+        )
+        .unwrap();
+    let now = chrono::Utc::now().timestamp();
+    // Not queried since: the threat row is dropped, not re-queued.
+    assert_eq!(store.expire_old(now + 10, 100).unwrap(), 0);
+    let row = |channel: &str| -> VerdictRow {
+        let (rows, _) = store.list_verdicts(None, None, 100, 0).unwrap();
+        rows.into_iter()
+            .find(|r| r.channel == channel)
+            .unwrap_or_else(|| panic!("{channel} row exists"))
+    };
+    assert_eq!(store.list_verdicts(None, None, 100, 0).unwrap().1, 1);
+
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    assert!(
+        store.observe("mixed.example").unwrap(),
+        "the dropped threat row starts over as new"
+    );
+    assert_eq!(row("threat").status, "pending");
+    assert_eq!(
+        row("content").observations,
+        2,
+        "the surviving content row counts the sighting"
+    );
+    // Seen after it was classified: its own expiry re-checks it.
+    assert_eq!(store.expire_old(now + 2 * 86400, 100).unwrap(), 1);
+    assert_eq!(row("content").status, "pending");
+}
+
 #[test]
 fn allow_override_vetoes_block_snapshot() {
     let dir = TempDir::new().unwrap();
