@@ -44,6 +44,11 @@ pub mod source {
     pub const GROUP: &str = "group";
     /// A blocked service (TikTok, YouTube, ...) of a filtering group.
     pub const SERVICE: &str = "service";
+    /// A security category (Dynamic DNS, Free Hosting, ...) of a filtering
+    /// group.
+    pub const SECURITY: &str = "security";
+    /// A top-level domain a filtering group blocks.
+    pub const TLD: &str = "tld";
     /// A blocklist source selected by a filtering group.
     pub const GROUP_BLOCKLIST: &str = "group_blocklist";
     /// A response policy zone.

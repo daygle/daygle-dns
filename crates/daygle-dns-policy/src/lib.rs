@@ -24,6 +24,7 @@ pub mod identity;
 mod plugin;
 mod rule;
 pub mod safe_search;
+pub mod security;
 pub mod services;
 
 pub use acl::Acl;

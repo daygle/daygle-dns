@@ -84,6 +84,14 @@ pub struct BlockingGroup {
     /// `ai_mode`, which governs auto-blocking of detected threats.
     #[serde(default)]
     pub blocked_categories: Vec<String>,
+    /// Security categories (by id, e.g. `dynamic_dns`) whose built-in lists
+    /// the group blocks.
+    #[serde(default)]
+    pub blocked_security: Vec<String>,
+    /// Top-level domains (lowercase punycode, no dots, e.g. `zip`) whose
+    /// every name the group blocks.
+    #[serde(default)]
+    pub blocked_tlds: Vec<String>,
     /// Ordering position (lower groups are evaluated first).
     pub position: i64,
     /// When the group was last created or edited through the console or API,
@@ -134,6 +142,10 @@ pub struct BlockingGroupInput {
     pub blocked_services: Vec<String>,
     #[serde(default)]
     pub blocked_categories: Vec<String>,
+    #[serde(default)]
+    pub blocked_security: Vec<String>,
+    #[serde(default)]
+    pub blocked_tlds: Vec<String>,
 }
 
 impl BlockingGroup {
@@ -156,6 +168,8 @@ impl BlockingGroup {
             schedule: self.schedule.clone(),
             blocked_services: self.blocked_services.clone(),
             blocked_categories: self.blocked_categories.clone(),
+            blocked_security: self.blocked_security.clone(),
+            blocked_tlds: self.blocked_tlds.clone(),
         }
     }
 }

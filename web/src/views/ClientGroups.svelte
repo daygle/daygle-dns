@@ -15,6 +15,8 @@
   let groupLists = $state([]);
   // Services a group can block with one tick, and their categories in order.
   let services = $state([]);
+  // Security categories (Dynamic DNS, Free Hosting, ...) a group can block.
+  let securityCategories = $state([]);
   // AI content categories the scanner can label a domain with (empty when
   // the AI subsystem is off: then there is nothing to block by category).
   let aiCategories = $state([]);
@@ -51,6 +53,7 @@
     api.networks().then((data) => { networks = data.networks || []; }).catch(() => {});
     api.accounts().then((data) => { accountNames = (data.accounts || []).map((a) => a.name); }).catch(() => {});
     api.blockableServices().then((data) => { services = data.services || []; }).catch(() => {});
+    api.securityCategories().then((data) => { securityCategories = data.categories || []; }).catch(() => {});
     api.aiStatus()
       .then((data) => {
         aiCategories = [...new Set(data?.backend_categories || [])].sort();
@@ -108,6 +111,8 @@
           schedule: (group.schedule || []).map((w) => ({ ...w, days: [...(w.days || [])] })),
           blocked_services: [...(group.blocked_services || [])],
           blocked_categories: [...(group.blocked_categories || [])],
+          blocked_security: [...(group.blocked_security || [])],
+          blocked_tlds: (group.blocked_tlds || []).map((t) => '.' + t).join('\n'),
         }
       : {
           id: null,
@@ -128,6 +133,8 @@
           schedule: [],
           blocked_services: [],
           blocked_categories: [],
+          blocked_security: [],
+          blocked_tlds: '',
         };
   }
 
@@ -141,6 +148,23 @@
     edit.blocked_services = edit.blocked_services.includes(id)
       ? edit.blocked_services.filter((s) => s !== id)
       : [...edit.blocked_services, id];
+  }
+
+  function toggleSecurity(id) {
+    edit.blocked_security = edit.blocked_security.includes(id)
+      ? edit.blocked_security.filter((s) => s !== id)
+      : [...edit.blocked_security, id];
+  }
+
+  function securityNames(ids) {
+    return ids.map((id) => securityCategories.find((c) => c.id === id)?.name || id).join(', ');
+  }
+
+  // A category's entries for its tooltip: what it blocks, then what it keeps.
+  function describeEntries(entries) {
+    const blocked = entries.filter((e) => !e.startsWith('@@'));
+    const kept = entries.filter((e) => e.startsWith('@@')).map((e) => e.slice(2));
+    return blocked.join(', ') + (kept.length ? `\n\nNot blocked: ${kept.join(', ')}` : '');
   }
 
   function serviceNames(ids) {
@@ -201,6 +225,8 @@
       schedule: edit.schedule,
       blocked_services: edit.blocked_services,
       blocked_categories: edit.blocked_categories,
+      blocked_security: edit.blocked_security,
+      blocked_tlds: parseList(edit.blocked_tlds),
     };
     saving = true;
     error = null;
@@ -261,8 +287,8 @@
     return RESPONSES.find((r) => r.value === response.kind)?.label || response.kind;
   }
 
-  function count(n, word) {
-    return `${n} ${word}${n === 1 ? '' : 's'}`;
+  function count(n, word, plural = `${word}s`) {
+    return `${n} ${n === 1 ? word : plural}`;
   }
 
   $effect(() => {
@@ -316,6 +342,12 @@
                 {count(g.block.length + g.block_regex.length, 'Block Rule')}
                 {#if g.blocklists?.length}
                   <div title={g.blocklists.join(', ')}>{count(g.blocklists.length, 'Blocklist')}</div>
+                {/if}
+                {#if g.blocked_security?.length}
+                  <div title={securityNames(g.blocked_security)}>{count(g.blocked_security.length, 'Security Category', 'Security Categories')}</div>
+                {/if}
+                {#if g.blocked_tlds?.length}
+                  <div title={g.blocked_tlds.map((t) => '.' + t).join(', ')}>{count(g.blocked_tlds.length, 'Blocked TLD')}</div>
                 {/if}
                 {#if g.blocked_services?.length}
                   <div title={serviceNames(g.blocked_services)}>{count(g.blocked_services.length, 'Blocked Service')}</div>
@@ -471,6 +503,29 @@
         until 07:00 on Friday covers Friday night into Saturday morning).
         Times use the server's time zone under Settings → General → Date &amp;
         Time Defaults.
+      </p>
+
+      <div class="section-title">Security</div>
+      <div class="security-list">
+        {#each securityCategories as c (c.id)}
+          <label class="security" title={describeEntries(c.entries)}>
+            <input type="checkbox" checked={edit.blocked_security.includes(c.id)} onchange={() => toggleSecurity(c.id)} />
+            <span>
+              <strong>{c.name}</strong>
+              <span class="muted">{c.description}</span>
+            </span>
+          </label>
+        {/each}
+      </div>
+      <label>
+        Blocked TLDs
+        <textarea rows="2" bind:value={edit.blocked_tlds} placeholder=".zip, .mov"></textarea>
+      </label>
+      <p class="muted help">
+        Blocks every domain under these top-level domains, one per line or
+        separated by commas. Custom Allow below still takes precedence over
+        both the security categories and blocked TLDs (hover a category to see
+        its list).
       </p>
 
       <div class="section-title">Blocked Services</div>
@@ -629,6 +684,12 @@
   .day input { position: absolute; opacity: 0; width: 1px; height: 1px; }
   .day:focus-within { outline: 2px solid var(--accent); outline-offset: 1px; }
   .time { width: 120px; }
+  .security-list { display: grid; gap: 6px; margin-bottom: 10px; }
+  .security { flex-direction: row; align-items: flex-start; gap: 10px; padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; cursor: pointer; }
+  .security:has(input:checked) { border-color: var(--danger); }
+  .security input { margin-top: 3px; width: auto; }
+  .security > span { display: flex; flex-direction: column; gap: 2px; font-size: 0.85rem; }
+  .security .muted { font-size: 0.8rem; }
   .service-category { font-size: 0.78rem; color: var(--muted); margin: 8px 0 4px; }
   .services { display: flex; flex-wrap: wrap; gap: 6px; }
   .service { flex-direction: row; align-items: center; gap: 0; padding: 5px 10px; border: 1px solid var(--border); border-radius: 999px; cursor: pointer; color: var(--text); font-size: 0.82rem; }

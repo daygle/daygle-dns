@@ -245,6 +245,8 @@ mod tests {
             schedule: vec![],
             blocked_services: vec![],
             blocked_categories: categories.iter().map(|c| c.to_string()).collect(),
+            blocked_security: vec![],
+            blocked_tlds: vec![],
             position: 0,
             last_modified_at: None,
         };

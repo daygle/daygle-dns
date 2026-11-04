@@ -87,6 +87,10 @@ struct CompiledGroup {
     schedule: Vec<CompiledWindow>,
     /// Blocked services: (display name, their domains and subdomains).
     services: Vec<(&'static str, Blocklist)>,
+    /// Blocked security categories: (display name, their entries).
+    security: Vec<(&'static str, Blocklist)>,
+    /// Blocked top-level domains (`*.tld` entries).
+    tlds: Blocklist,
     /// AI content categories this group blocks (lower-cased labels).
     blocked_categories: Vec<String>,
 }
@@ -237,6 +241,31 @@ impl AdvancedBlocking {
                         (s.name, Blocklist::from_set(normalize_domains(domains)))
                     })
                     .collect(),
+                security: g
+                    .blocked_security
+                    .iter()
+                    .filter_map(|id| {
+                        let found = crate::security::find(id);
+                        if found.is_none() {
+                            warn!(group = %g.name, category = %id, "skipping unknown security category");
+                        }
+                        found
+                    })
+                    .map(|c| (c.name, Blocklist::from_lines(c.entries.iter().copied())))
+                    .collect(),
+                tlds: Blocklist::from_set(
+                    g.blocked_tlds
+                        .iter()
+                        .filter_map(|t| {
+                            let tld = crate::security::normalize_tld(t);
+                            if tld.is_none() {
+                                warn!(group = %g.name, tld = %t, "skipping invalid TLD");
+                            }
+                            tld
+                        })
+                        .map(|t| format!("*.{t}"))
+                        .collect(),
+                ),
                 safe_search: g.safe_search,
                 youtube_restricted: g.youtube_restricted,
                 name: g.name.clone(),
@@ -386,6 +415,27 @@ impl AdvancedBlocking {
                     source::SERVICE,
                     service.to_string(),
                 ))
+            } else if let Some(category) = group
+                .security
+                .iter()
+                .find(|(_, entries)| entries.contains(qname))
+                .map(|(name, _)| *name)
+            {
+                Some((
+                    format!("'{qname}' blocked as {category} by group '{}'", group.name),
+                    source::SECURITY,
+                    category.to_string(),
+                ))
+            } else if let Some(entry) = group.tlds.matching_entry(qname) {
+                Some((
+                    format!(
+                        "'{qname}' blocked by group '{}' (TLD '{}')",
+                        group.name,
+                        tld_of(&entry)
+                    ),
+                    source::TLD,
+                    entry,
+                ))
             } else if group.blocklists.is_empty() {
                 None
             } else {
@@ -482,6 +532,32 @@ impl AdvancedBlocking {
                     });
                 }
             }
+            for (category, entries) in &group.security {
+                if entries.contains(qname) {
+                    checks.push(Check {
+                        matched: Some(category.to_string()),
+                        ..in_group(
+                            "block",
+                            source::SECURITY,
+                            format!("{category}, blocked by group '{}'", group.name),
+                        )
+                    });
+                }
+            }
+            if let Some(entry) = group.tlds.matching_entry(qname) {
+                checks.push(Check {
+                    matched: Some(entry.clone()),
+                    ..in_group(
+                        "block",
+                        source::TLD,
+                        format!(
+                            "In the TLD '{}', blocked by group '{}'",
+                            tld_of(&entry),
+                            group.name
+                        ),
+                    )
+                });
+            }
             for (key, name) in &group.blocklists {
                 if let Some(entry) = lists.get(key).and_then(|l| l.matching_entry(qname)) {
                     checks.push(Check {
@@ -510,6 +586,11 @@ impl AdvancedBlocking {
         }
         checks
     }
+}
+
+/// The TLD a `*.tld` entry of a group's TLD list names.
+fn tld_of(entry: &str) -> &str {
+    entry.strip_prefix("*.").unwrap_or(entry)
 }
 
 /// Lowercase listener entries, dropping anything unexpected (already
@@ -608,6 +689,8 @@ mod tests {
             schedule: vec![],
             blocked_services: vec![],
             blocked_categories: vec![],
+            blocked_security: vec![],
+            blocked_tlds: vec![],
             position: 0,
             last_modified_at: None,
         }
@@ -740,6 +823,37 @@ mod tests {
         // The group's allow list still wins.
         assert!(ab.evaluate(ip("1.2.3.4"), "ok.tiktok.com", None).is_none());
         assert!(ab.evaluate(ip("1.2.3.4"), "example.com", None).is_none());
+    }
+
+    #[test]
+    fn security_categories_and_tlds_block_with_their_own_source() {
+        let mut g = group("secure");
+        g.blocked_security = vec!["dynamic_dns".to_string(), "unknown".to_string()];
+        g.blocked_tlds = vec![".ZIP".to_string(), "not.valid".to_string()];
+        g.allow = vec!["home.duckdns.org".to_string()];
+        let ab = AdvancedBlocking::build(&[g], Arc::default());
+        let d = ab
+            .evaluate(ip("1.2.3.4"), "phish.duckdns.org", None)
+            .unwrap();
+        assert!(d.reason.contains("Dynamic DNS"), "{}", d.reason);
+        assert_eq!(d.source, source::SECURITY);
+        // The provider's own site, and the group's allow list, stay open.
+        assert!(ab
+            .evaluate(ip("1.2.3.4"), "www.duckdns.org", None)
+            .is_none());
+        assert!(ab
+            .evaluate(ip("1.2.3.4"), "home.duckdns.org", None)
+            .is_none());
+
+        let d = ab.evaluate(ip("1.2.3.4"), "update.zip", None).unwrap();
+        assert_eq!(d.source, source::TLD);
+        assert_eq!(d.matched.as_deref(), Some("*.zip"));
+        assert!(ab.evaluate(ip("1.2.3.4"), "example.com", None).is_none());
+
+        let checks = ab.explain(ip("1.2.3.4"), "a.b.zip", None);
+        assert!(checks
+            .iter()
+            .any(|c| c.source == source::TLD && c.result == "block"));
     }
 
     #[test]

@@ -6,6 +6,8 @@ export const BLOCK_SOURCES = [
   ['allowlist', 'Custom Allow'],
   ['group', 'Filtering Group'],
   ['service', 'Blocked Service'],
+  ['security', 'Security Category'],
+  ['tld', 'Blocked TLD'],
   ['group_blocklist', 'Group Blocklist'],
   ['ai', 'AI Scanner'],
   ['rpz', 'Response Policy Zone'],
