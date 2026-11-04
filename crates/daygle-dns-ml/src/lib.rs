@@ -132,8 +132,12 @@ impl AiEngine {
             categories.clone(),
             logs.clone(),
         );
-        let plugin =
-            plugin::AiBlockPlugin::new(snapshot.clone(), categories.clone(), settings_swap.clone());
+        let plugin = plugin::AiBlockPlugin::new(
+            snapshot.clone(),
+            categories.clone(),
+            scanner.exemptions(),
+            settings_swap.clone(),
+        );
         Ok(Arc::new(Self {
             store,
             scanner,

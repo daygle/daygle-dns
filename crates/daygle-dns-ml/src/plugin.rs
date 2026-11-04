@@ -30,20 +30,19 @@ use chrono::Utc;
 use daygle_dns_core::config::{AiMode, AiSettings};
 use daygle_dns_policy::{Action, AdvancedBlocking, Decision, PolicyContext, PolicyPlugin};
 
-use crate::scanner::{BlockSnapshot, CategorySnapshot};
+use crate::scanner::{exempt, BlockSnapshot, CategorySnapshot, ExemptionSnapshot};
 
 /// Longest suffix match against the snapshot: a verdict recorded on
 /// `bad.example.com` also blocks `www.bad.example.com`, while a verdict on
 /// `example.com` covers every subdomain. Anchor on label boundaries. Walks
 /// borrowed suffixes of one lowercased copy (no allocation per label).
 fn suffix_match<'a, T>(
-    qname: &str,
+    name: &str,
     snapshot: &'a std::collections::HashMap<String, T>,
     now: i64,
     expires_at: impl Fn(&T) -> i64,
 ) -> Option<&'a T> {
-    let name = qname.trim_end_matches('.').to_ascii_lowercase();
-    let mut candidate = name.as_str();
+    let mut candidate = name;
     loop {
         if let Some(found) = snapshot.get(candidate) {
             if expires_at(found) > now {
@@ -58,6 +57,10 @@ fn suffix_match<'a, T>(
 pub struct AiBlockPlugin {
     snapshot: Arc<ArcSwap<BlockSnapshot>>,
     categories: Arc<ArcSwap<CategorySnapshot>>,
+    /// Operator exemptions. Snapshots already leave out exempt domains and
+    /// their subdomains; this also covers a query for an exempt subdomain
+    /// whose verdict sits on a parent domain.
+    exemptions: Arc<ArcSwap<ExemptionSnapshot>>,
     settings: Arc<ArcSwap<AiSettings>>,
     /// The live client groups, consulted for their per-group enforcement mode
     /// (installed once the server has built them).
@@ -68,11 +71,13 @@ impl AiBlockPlugin {
     pub fn new(
         snapshot: Arc<ArcSwap<BlockSnapshot>>,
         categories: Arc<ArcSwap<CategorySnapshot>>,
+        exemptions: Arc<ArcSwap<ExemptionSnapshot>>,
         settings: Arc<ArcSwap<AiSettings>>,
     ) -> Arc<Self> {
         Arc::new(Self {
             snapshot,
             categories,
+            exemptions,
             settings,
             groups: arc_swap::ArcSwapOption::empty(),
         })
@@ -107,6 +112,13 @@ impl PolicyPlugin for AiBlockPlugin {
         }
         let now = Utc::now().timestamp();
         let groups = self.groups.load();
+        let name = context
+            .query_name
+            .trim_end_matches('.')
+            .to_ascii_lowercase();
+        // Checked only once something would block, so the common no-match
+        // query pays nothing for it.
+        let is_exempt = || exempt(&name, &self.exemptions.load());
 
         // 1. Detected threats: blocked where the effective mode is enforce.
         //    The global mode is the default; the first enabled group covering
@@ -120,7 +132,8 @@ impl PolicyPlugin for AiBlockPlugin {
         });
         if mode == AiMode::Enforce {
             let snapshot = self.snapshot.load();
-            if let Some(block) = suffix_match(&context.query_name, &snapshot, now, |b| b.expires_at)
+            if let Some(block) =
+                suffix_match(&name, &snapshot, now, |b| b.expires_at).filter(|_| !is_exempt())
             {
                 return Some(
                     Decision::new(
@@ -144,9 +157,9 @@ impl PolicyPlugin for AiBlockPlugin {
             return None;
         }
         let categories = self.categories.load();
-        let labelled = suffix_match(&context.query_name, &categories, now, |c| c.expires_at)?;
+        let labelled = suffix_match(&name, &categories, now, |c| c.expires_at)?;
         let category = labelled.category.as_str();
-        if !blocked.iter().any(|c| c.eq_ignore_ascii_case(category)) {
+        if !blocked.iter().any(|c| c.eq_ignore_ascii_case(category)) || is_exempt() {
             return None;
         }
         Some(
@@ -187,8 +200,14 @@ mod tests {
         AiBlockPlugin::new(
             Arc::new(ArcSwap::from_pointee(snapshot)),
             Arc::new(ArcSwap::from_pointee(categories)),
+            Arc::default(),
             Arc::new(ArcSwap::from_pointee(settings)),
         )
+    }
+
+    fn exempting(p: &AiBlockPlugin, domains: &[&str]) {
+        p.exemptions
+            .store(Arc::new(domains.iter().map(|d| d.to_string()).collect()));
     }
 
     fn category(domain: &str, category: &str) -> CategorySnapshot {
@@ -327,6 +346,45 @@ mod tests {
         assert!(p.evaluate(&outside).await.is_none());
     }
 
+    /// An exemption on a subdomain holds even though the verdict that
+    /// matches the query is on its parent; the parent and its other
+    /// subdomains stay blocked.
+    #[tokio::test]
+    async fn exempt_subdomain_of_a_blocked_parent_is_not_blocked() {
+        let mut snapshot = BlockSnapshot::new();
+        snapshot.insert(
+            "bad.example.com".to_string(),
+            ActiveBlock {
+                category: "malware".to_string(),
+                expires_at: i64::MAX,
+            },
+        );
+        let p = plugin(AiMode::Enforce, snapshot);
+        exempting(&p, &["www.bad.example.com"]);
+
+        assert!(p.evaluate(&ctx("www.bad.example.com")).await.is_none());
+        assert!(p.evaluate(&ctx("WWW.Bad.Example.com.")).await.is_none());
+        assert!(p.evaluate(&ctx("cdn.www.bad.example.com")).await.is_none());
+        assert!(p.evaluate(&ctx("bad.example.com")).await.is_some());
+        assert!(p.evaluate(&ctx("api.bad.example.com")).await.is_some());
+    }
+
+    /// The same for category blocking: an exempt subdomain of a labelled
+    /// domain is not blocked for the group.
+    #[tokio::test]
+    async fn exempt_subdomain_escapes_category_blocking() {
+        let p = plugin_with(
+            AiMode::Train,
+            BlockSnapshot::new(),
+            category("casino.example", "gambling"),
+        );
+        p.set_client_groups(groups_blocking(&["gambling"], None));
+        exempting(&p, &["help.casino.example"]);
+
+        assert!(p.evaluate(&ctx("help.casino.example")).await.is_none());
+        assert!(p.evaluate(&ctx("www.casino.example")).await.is_some());
+    }
+
     #[tokio::test]
     async fn expired_verdicts_stop_blocking() {
         let mut snapshot = BlockSnapshot::new();
@@ -359,6 +417,7 @@ mod tests {
         let p = AiBlockPlugin::new(
             Arc::new(ArcSwap::from_pointee(snapshot)),
             Arc::new(ArcSwap::from_pointee(CategorySnapshot::new())),
+            Arc::default(),
             Arc::new(ArcSwap::from_pointee(settings)),
         );
         assert!(p.evaluate(&ctx("bad.example.com")).await.is_none());

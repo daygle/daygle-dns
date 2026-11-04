@@ -1036,3 +1036,61 @@ fn relabel_without_a_verdict_is_blockable() {
     assert_eq!(entry.category, "gambling");
     assert_eq!(entry.expires_at, i64::MAX, "an operator label has no TTL");
 }
+
+/// An exemption added through the engine on a *subdomain* of a blocked
+/// domain reaches the policy plugin: queries for that subdomain resolve,
+/// while the parent stays blocked. (The block snapshot is keyed on the
+/// verdict's domain, so this needs the plugin's query-time check.)
+#[tokio::test]
+async fn subdomain_exemption_reaches_the_policy_plugin() {
+    use daygle_dns_policy::{PolicyContext, PolicyPlugin};
+
+    let dir = TempDir::new().unwrap();
+    let ai = engine(
+        &dir,
+        AiSettings {
+            auto_block_categories: vec!["malware".to_string()],
+            ..settings(AiMode::Enforce)
+        },
+    );
+    ai.store.observe("bad.example.com").unwrap();
+    ai.store
+        .save_verdict(
+            Channel::Threat,
+            "bad.example.com",
+            "malware",
+            "threat",
+            "classified",
+            1.0,
+            "test",
+            "test",
+            3600,
+        )
+        .unwrap();
+    ai.refresh_snapshot_now();
+    let plugin = ai.block_plugin();
+    let query = |name: &str| PolicyContext {
+        client: "192.0.2.1".parse().unwrap(),
+        query_name: name.to_string(),
+        record_type: "A".to_string(),
+        listener: None,
+    };
+    assert!(plugin
+        .evaluate(&query("www.bad.example.com"))
+        .await
+        .is_some());
+
+    ai.set_allow_override("www.bad.example.com", "Testing")
+        .unwrap();
+    assert!(plugin
+        .evaluate(&query("www.bad.example.com"))
+        .await
+        .is_none());
+    assert!(plugin.evaluate(&query("bad.example.com")).await.is_some());
+
+    ai.clear_override("www.bad.example.com").unwrap();
+    assert!(plugin
+        .evaluate(&query("www.bad.example.com"))
+        .await
+        .is_some());
+}
