@@ -1112,6 +1112,12 @@ records; when both are present `records` wins.
 ordering position). Entries are evaluated in order; the first one whose domain
 matches and whose networks contain the client wins, so a catch-all entry with
 no networks acts as the public fallback behind the specific internal ones.
+A `domain` of `*.example.com` is a wildcard: it covers every name below
+`example.com` (`a.example.com`, `a.b.example.com`), but not `example.com`
+itself, and its records are served under the queried name. Entries for the
+exact name are tried first, then wildcards from the closest suffix out, so
+`www.example.com` beats `*.example.com`. `*` is only allowed as the first
+label.
 Matching applies to A/AAAA queries; an entry with no address of the requested
 family falls through to normal resolution.
 

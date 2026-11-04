@@ -4,7 +4,10 @@
 //! Networks) and the stored entries. For
 //! each query the dispatcher asks the index which records a given client
 //! should receive for a domain and query type; the first entry whose domain
-//! matches and whose networks contain the client wins. Entries with no
+//! matches and whose networks contain the client wins. A domain may be a
+//! wildcard, `*.example.com`, covering every name below `example.com` (not
+//! `example.com` itself); entries for the exact name are tried before
+//! wildcards, and a closer wildcard before a farther one. Entries with no
 //! networks match every client, so a catch-all "external" entry can sit
 //! behind specific internal ones (order is controlled by `position`).
 //!
@@ -137,46 +140,59 @@ impl SplitHorizonIndex {
     ) -> Option<SplitHorizonMatch> {
         let qname = qname.trim().trim_end_matches('.').to_ascii_lowercase();
         let name = Name::from_utf8(format!("{qname}.")).ok()?;
-        for entry in &self.entries {
-            if entry.domain != qname {
-                continue;
+        // Entries for the name itself come first; then wildcard entries,
+        // closest first: `a.b.example.com` tries `*.b.example.com`, then
+        // `*.example.com`, and so on. A wildcard never covers its own
+        // suffix (`*.example.com` does not answer `example.com`).
+        let wildcards = qname
+            .match_indices('.')
+            .map(|(i, _)| format!("*{}", &qname[i..]));
+        for domain in std::iter::once(qname.clone()).chain(wildcards) {
+            for entry in self.entries.iter().filter(|e| e.domain == domain) {
+                if let Some(found) = entry.answer(client, &name, rtype) {
+                    return Some(found);
+                }
             }
-            let in_network =
-                entry.match_all || entry.networks.iter().any(|net| net.contains(&client));
-            if !in_network {
-                continue;
-            }
-            if entry.records.is_empty() {
-                continue;
-            }
-
-            // A CNAME at the name answers every query type (RFC 1034 §3.6.2).
-            let has_cname = entry.records.iter().any(|(t, _)| *t == RecordType::CNAME);
-            let selected: Vec<&(RecordType, RData)> = if has_cname {
-                entry
-                    .records
-                    .iter()
-                    .filter(|(t, _)| *t == RecordType::CNAME)
-                    .collect()
-            } else if rtype == RecordType::ANY {
-                entry.records.iter().collect()
-            } else {
-                entry.records.iter().filter(|(t, _)| *t == rtype).collect()
-            };
-            if selected.is_empty() {
-                continue;
-            }
-
-            let records: Vec<Record> = selected
-                .into_iter()
-                .map(|(_, rdata)| Record::from_rdata(name.clone(), entry.ttl, rdata.clone()))
-                .collect();
-            return Some(SplitHorizonMatch {
-                entry_id: entry.id.clone(),
-                records,
-            });
         }
         None
+    }
+}
+
+impl ResolvedEntry {
+    /// This entry's records for `client` asking for `rtype` at `name`, if
+    /// the client is in its networks and it holds something of that type.
+    fn answer(&self, client: IpAddr, name: &Name, rtype: RecordType) -> Option<SplitHorizonMatch> {
+        let in_network = self.match_all || self.networks.iter().any(|net| net.contains(&client));
+        if !in_network || self.records.is_empty() {
+            return None;
+        }
+
+        // A CNAME at the name answers every query type (RFC 1034 §3.6.2).
+        let has_cname = self.records.iter().any(|(t, _)| *t == RecordType::CNAME);
+        let selected: Vec<&(RecordType, RData)> = if has_cname {
+            self.records
+                .iter()
+                .filter(|(t, _)| *t == RecordType::CNAME)
+                .collect()
+        } else if rtype == RecordType::ANY {
+            self.records.iter().collect()
+        } else {
+            self.records.iter().filter(|(t, _)| *t == rtype).collect()
+        };
+        if selected.is_empty() {
+            return None;
+        }
+
+        // Records are owned by the queried name, as a wildcard's are
+        // (RFC 4592 §3.3.1), never by `*.suffix`.
+        let records: Vec<Record> = selected
+            .into_iter()
+            .map(|(_, rdata)| Record::from_rdata(name.clone(), self.ttl, rdata.clone()))
+            .collect();
+        Some(SplitHorizonMatch {
+            entry_id: self.id.clone(),
+            records,
+        })
     }
 }
 
@@ -526,5 +542,98 @@ mod tests {
         assert!(idx
             .lookup(lan(), "www.example.com", RecordType::MX)
             .is_none());
+    }
+
+    #[test]
+    fn wildcard_entries_cover_names_below_their_suffix() {
+        let idx = index(
+            &[("LAN", &["192.168.20.0/24"])],
+            &[entry(
+                0,
+                "*.dns.example.com",
+                &["LAN"],
+                &[("A", "10.0.0.53")],
+            )],
+        );
+        for qname in ["abc123.dns.example.com", "a.b.dns.example.com."] {
+            let m = idx.lookup(lan(), qname, RecordType::A).expect(qname);
+            assert_eq!(rec(&m, 0), (RecordType::A, "10.0.0.53".to_string()));
+            // Owned by the queried name, not by `*.dns.example.com`.
+            assert_eq!(
+                m.records[0].name.to_string().trim_end_matches('.'),
+                qname.trim_end_matches('.')
+            );
+        }
+        // Not the suffix itself, a sibling, or a client outside the network.
+        assert!(idx
+            .lookup(lan(), "dns.example.com", RecordType::A)
+            .is_none());
+        assert!(idx.lookup(lan(), "x.example.com", RecordType::A).is_none());
+        assert!(idx
+            .lookup(outside(), "abc123.dns.example.com", RecordType::A)
+            .is_none());
+    }
+
+    #[test]
+    fn exact_entries_beat_wildcards_and_closer_wildcards_beat_farther() {
+        let idx = index(
+            &[("LAN", &["192.168.20.0/24"])],
+            &[
+                // Wildcards first by position, to show position does not
+                // outrank a closer match.
+                entry(0, "*.example.com", &["LAN"], &[("A", "10.0.0.1")]),
+                entry(1, "*.dns.example.com", &["LAN"], &[("A", "10.0.0.2")]),
+                entry(2, "www.dns.example.com", &["LAN"], &[("A", "10.0.0.3")]),
+            ],
+        );
+        let a = |q| rec(&idx.lookup(lan(), q, RecordType::A).unwrap(), 0).1;
+        assert_eq!(a("www.dns.example.com"), "10.0.0.3");
+        assert_eq!(a("abc.dns.example.com"), "10.0.0.2");
+        assert_eq!(a("dns.example.com"), "10.0.0.1");
+        assert_eq!(a("other.example.com"), "10.0.0.1");
+    }
+
+    #[test]
+    fn a_wildcard_answers_when_the_exact_entry_does_not() {
+        // The exact entry is for another network, or lacks the type: the
+        // wildcard still answers.
+        let idx = index(
+            &[("LAN", &["192.168.20.0/24"]), ("VPN", &["192.168.30.0/24"])],
+            &[
+                entry(0, "www.example.com", &["VPN"], &[("A", "10.0.0.9")]),
+                entry(1, "mail.example.com", &["LAN"], &[("TXT", "\"x\"")]),
+                entry(2, "*.example.com", &["LAN"], &[("A", "10.0.0.1")]),
+            ],
+        );
+        let a = |c, q| rec(&idx.lookup(c, q, RecordType::A).unwrap(), 0).1;
+        assert_eq!(a(vpn(), "www.example.com"), "10.0.0.9");
+        assert_eq!(a(lan(), "www.example.com"), "10.0.0.1");
+        assert_eq!(a(lan(), "mail.example.com"), "10.0.0.1");
+    }
+
+    #[test]
+    fn store_accepts_wildcard_domains_only_as_the_first_label() {
+        let store = ZoneStore::open(":memory:").unwrap();
+        let input = |domain: &str| SplitHorizonEntryInput {
+            domain: domain.to_string(),
+            records: vec![SplitHorizonRecord {
+                rtype: "A".to_string(),
+                content: "10.0.0.53".to_string(),
+            }],
+            networks: vec![],
+            ips: vec![],
+            ttl: 60,
+            disabled: false,
+        };
+        let made = store
+            .create_split_horizon_entry(&input("*.DNS.example.com."))
+            .unwrap();
+        assert_eq!(made.domain, "*.dns.example.com");
+        for bad in ["www.*.example.com", "*foo.example.com", "*.com", "*"] {
+            assert!(
+                store.create_split_horizon_entry(&input(bad)).is_err(),
+                "{bad}"
+            );
+        }
     }
 }

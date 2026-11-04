@@ -4425,7 +4425,8 @@ fn validate_split_horizon_network(input: &SplitHorizonNetworkInput) -> Result<()
 /// normalized (lowercase, no trailing dot). Record content validation happens
 /// in [`canonicalize_split_horizon_records`].
 fn validate_split_horizon_entry(domain: &str, _input: &SplitHorizonEntryInput) -> Result<()> {
-    validate_name(domain, false)
+    // `*.example.com` covers every name below example.com.
+    crate::validate_owner_name(domain)
 }
 
 /// Convert an `ips`-style list (IPv4/IPv6 addresses) into A/AAAA records.
