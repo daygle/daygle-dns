@@ -22,7 +22,6 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use daygle_dns_core::error::{DaygleError, Result};
 use parking_lot::Mutex;
@@ -31,15 +30,17 @@ use crate::backend::{ClassificationInput, DomainClassifier, Severity, Verdict};
 
 const TOKENIZER_FILE: &str = "minilm-tokenizer.json";
 const CENTROIDS_FILE: &str = "minilm-centroids.json";
-// Embeddings are unit-norm; cosine ~0.5+ is a solid match for a category
-// centroid, ~0.25 is noise for sentence-embedding geometry on short inputs.
-pub const DEFAULT_MATCH_THRESHOLD: f32 = 0.35;
+/// The encoder inputs this verifier knows how to feed.
+const KNOWN_INPUTS: [&str; 3] = ["input_ids", "attention_mask", "token_type_ids"];
 
 /// Embedding-based verifier over a bundled ONNX MiniLM model.
 pub struct MiniLmVerifier {
     // Sessions are documented as single-threaded; the scanner classifies
     // from background workers, so all inference goes through this mutex.
     session: Mutex<ort::session::Session>,
+    /// Which of [`KNOWN_INPUTS`] the model declares, read once at load time
+    /// (exports differ on `token_type_ids`).
+    inputs: [bool; 3],
     tokenizer: tokenizers::Tokenizer,
     centroids: Vec<(String, Vec<f32>)>,
 }
@@ -114,8 +115,39 @@ fn load_centroids(path: &Path) -> Result<CentroidMap> {
     Ok(map)
 }
 
-#[cfg(feature = "verifier-onnx")]
+/// Scale `v` to unit length in place; `None` when it has no direction (all
+/// zeros or non-finite), where a cosine would be meaningless.
+fn normalize(mut v: Vec<f32>) -> Option<Vec<f32>> {
+    let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if !norm.is_finite() || norm <= f32::EPSILON {
+        return None;
+    }
+    for x in &mut v {
+        *x /= norm;
+    }
+    Some(v)
+}
+
 impl MiniLmVerifier {
+    fn from_parts(
+        session: ort::session::Session,
+        tokenizer: tokenizers::Tokenizer,
+        centroids: Vec<(String, Vec<f32>)>,
+    ) -> Self {
+        let declared: Vec<String> = session
+            .inputs()
+            .iter()
+            .map(|o| o.name().to_string())
+            .collect();
+        let inputs = KNOWN_INPUTS.map(|name| declared.iter().any(|n| n == name));
+        Self {
+            session: Mutex::new(session),
+            inputs,
+            tokenizer,
+            centroids,
+        }
+    }
+
     /// Loader for tools that only need embeddings (the centroid generator).
     /// Otherwise identical to [`Self::load`], but the centroid reference is
     /// left empty - `classify` returns None on such an instance.
@@ -123,11 +155,7 @@ impl MiniLmVerifier {
         let model_path = model_path.as_ref();
         let tokenizer = load_tokenizer(model_path)?;
         let session = build_session(model_path)?;
-        Ok(Self {
-            session: Mutex::new(session),
-            tokenizer,
-            centroids: Vec::new(),
-        })
+        Ok(Self::from_parts(session, tokenizer, Vec::new()))
     }
 
     /// Load the verifier from an ONNX model path. The tokenizer and centroid
@@ -147,21 +175,16 @@ impl MiniLmVerifier {
 
         let session = build_session(model_path)?;
 
-        Ok(Self {
-            session: Mutex::new(session),
+        Ok(Self::from_parts(
+            session,
             tokenizer,
-            centroids: centroids.into_iter().collect(),
-        })
+            centroids.into_iter().collect(),
+        ))
     }
 
-    /// Public embedding API: unit-norm 384-d sentence embedding for one
-    /// input string (also used by `gen-minilm-centroids`).
+    /// Unit-norm 384-d sentence embedding for one input string (also used
+    /// by `gen-minilm-centroids`).
     pub fn embed_text(&self, text: &str) -> Result<Vec<f32>> {
-        self.embed(text)
-    }
-
-    /// Unit-norm 384-d sentence embedding for one input string.
-    fn embed(&self, text: &str) -> Result<Vec<f32>> {
         let encoding = self
             .tokenizer
             .encode(text, true)
@@ -181,30 +204,21 @@ impl MiniLmVerifier {
         let shape = vec![1, seq_len];
 
         // A `Tensor<i64>` *is* a `Value` in ort rc.14; sessions accept them
-        // directly in the input map.
-        let inputs: Vec<(&str, ort::value::Tensor<i64>)> = {
-            let session = self.session.lock();
-            let names: Vec<String> = session
-                .inputs()
-                .iter()
-                .map(|o| o.name().to_string())
-                .collect();
-            let mut inputs = Vec::new();
-            for (name, data) in [
-                ("input_ids", ids),
-                ("attention_mask", mask.clone()),
-                ("token_type_ids", type_ids),
-            ] {
-                if names.iter().any(|n| n == name) {
-                    let tensor =
-                        ort::value::Tensor::from_array((shape.clone(), data)).map_err(|e| {
-                            DaygleError::Internal(format!("MiniLM tensor '{name}': {e}"))
-                        })?;
-                    inputs.push((name, tensor));
-                }
+        // directly in the input map. Tensors are built before the session
+        // lock is taken, so workers only serialize on inference itself.
+        let mut inputs: Vec<(&str, ort::value::Tensor<i64>)> = Vec::with_capacity(3);
+        for ((name, wanted), data) in
+            KNOWN_INPUTS
+                .into_iter()
+                .zip(self.inputs)
+                .zip([ids, mask.clone(), type_ids])
+        {
+            if wanted {
+                let tensor = ort::value::Tensor::from_array((shape.clone(), data))
+                    .map_err(|e| DaygleError::Internal(format!("MiniLM tensor '{name}': {e}")))?;
+                inputs.push((name, tensor));
             }
-            inputs
-        };
+        }
 
         let mut session = self.session.lock();
         let outputs = session
@@ -223,13 +237,27 @@ impl MiniLmVerifier {
                     "MiniLM sentence_embedding has wrong shape".into(),
                 ));
             }
-            Ok(data[(data.len() - dim)..].to_vec())
+            // Exports normally L2-normalize here already; normalizing again
+            // keeps the centroid dot product a true cosine either way.
+            normalize(data[(data.len() - dim)..].to_vec()).ok_or_else(|| {
+                DaygleError::Internal("MiniLM sentence_embedding is a zero vector".into())
+            })
         } else if outputs.get("last_hidden_state").is_some() {
             let (shape, data) = outputs["last_hidden_state"]
                 .try_extract_tensor::<f32>()
                 .map_err(|e| DaygleError::Internal(format!("MiniLM hidden output: {e}")))?;
+            if shape.len() != 3 {
+                return Err(DaygleError::Internal(
+                    "MiniLM last_hidden_state has wrong shape".into(),
+                ));
+            }
             let seq = shape[1] as usize;
             let dim = shape[2] as usize;
+            if data.len() < seq * dim {
+                return Err(DaygleError::Internal(
+                    "MiniLM last_hidden_state is shorter than its shape".into(),
+                ));
+            }
             let mut pooled = vec![0f32; dim];
             let mut weight = 0f32;
             for t in 0..seq {
@@ -242,14 +270,11 @@ impl MiniLmVerifier {
             if weight <= 0.0 {
                 return Err(DaygleError::Internal("MiniLM empty attention mask".into()));
             }
-            for v in &mut pooled {
-                *v /= weight;
-            }
-            let norm: f32 = pooled.iter().map(|v| v * v).sum::<f32>().sqrt();
-            for v in &mut pooled {
-                *v /= norm;
-            }
-            Ok(pooled)
+            // Dividing by the mask weight is redundant before L2
+            // normalization: the direction is the same.
+            normalize(pooled).ok_or_else(|| {
+                DaygleError::Internal("MiniLM pooled embedding is a zero vector".into())
+            })
         } else {
             Err(DaygleError::Internal(
                 "MiniLM model exposes neither sentence_embedding nor last_hidden_state".into(),
@@ -277,7 +302,7 @@ impl DomainClassifier for MiniLmVerifier {
         } else {
             format!("{} {} {}", input.domain, input.title, input.text)
         };
-        let embedding = self.embed(&text).ok()?;
+        let embedding = self.embed_text(&text).ok()?;
         let (category, cosine) = self.top_match(&embedding)?;
         if cosine < f32::EPSILON {
             return None;
@@ -289,16 +314,6 @@ impl DomainClassifier for MiniLmVerifier {
             evidence: format!("MiniLM embedding cosine {cosine:.3}"),
         })
     }
-}
-
-/// Convenience constructor shared with the engine wiring.
-pub fn load_verifier(
-    settings: &daygle_dns_core::config::AiSettings,
-) -> Result<Arc<MiniLmVerifier>> {
-    Ok(Arc::new(MiniLmVerifier::load(
-        &settings.verifier_model_path,
-        Some(&settings.verifier_reference_path),
-    )?))
 }
 
 #[cfg(test)]
@@ -316,7 +331,7 @@ mod tests {
     #[test]
     fn embeds_to_normalized_vector() {
         let v = verifier();
-        let e = v.embed("www.pornhub.com").expect("embedding");
+        let e = v.embed_text("www.pornhub.com").expect("embedding");
         assert_eq!(e.len(), 384);
         assert!(
             (e.iter().map(|x| x * x).sum::<f32>().sqrt() - 1.0).abs() < 1e-2,
@@ -333,7 +348,7 @@ mod tests {
             ("www.reuters.com", "news"),
             ("netflix.com", "streaming"),
         ] {
-            let e = v.embed(domain).unwrap();
+            let e = v.embed_text(domain).unwrap();
             let (cat, score) = v.top_match(&e).unwrap();
             println!("{domain} -> {cat} ({score:.3})");
             assert_eq!(cat, want, "{domain} should embed nearest '{want}'");

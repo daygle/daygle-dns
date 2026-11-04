@@ -1,8 +1,8 @@
 <script>
   import IconButton from '../IconButton.svelte';
   import { api, formatApiError, getStoredUser } from '../api.js';
-  import { formatDate, formatDateTime } from '../datetime.svelte.js';
-  import { backendLabel, percent, titleCase } from '../aiLabels.js';
+  import { formatDate } from '../datetime.svelte.js';
+  import { percent, titleCase } from '../aiLabels.js';
   import ColumnPicker from '../ColumnPicker.svelte';
   import { isHidden } from '../columns.svelte.js';
   import AiExemptionDialog from './AiExemptionDialog.svelte';
@@ -20,7 +20,7 @@
 
   const PER_PAGE = 50;
   const SEVERITY_FILTERS = [
-    { value: '', label: 'All Severity' },
+    { value: '', label: 'All Severities' },
     { value: 'threat', label: 'Threat' },
     { value: 'disputed', label: 'Disputed' },
   ];
@@ -68,11 +68,17 @@
     return params.toString();
   }
 
+  // Only the newest request may update the table: a slow response for an
+  // old filter must not overwrite the one for the filter now shown.
+  let requestSeq = 0;
+
   async function load() {
+    const seq = ++requestSeq;
     loading = rows.length === 0;
     error = null;
     try {
       const data = await api.aiThreats(qs());
+      if (seq !== requestSeq) return;
       rows = data.entries || [];
       total = data.total || 0;
       disabled = false;
@@ -84,6 +90,7 @@
         return load();
       }
     } catch (e) {
+      if (seq !== requestSeq) return;
       rows = [];
       total = 0;
       // 404 means the scanner is off: an empty state, not a failure.
@@ -93,7 +100,7 @@
         error = formatApiError(e);
       }
     } finally {
-      loading = false;
+      if (seq === requestSeq) loading = false;
     }
   }
 
@@ -143,6 +150,7 @@
   // Reload on mount and whenever the search box changes (back to page 1,
   // since the filter changed the list). Typing waits for a pause.
   let searchTimer;
+  let firstLoad = true;
   loadCategories();
 
   $effect(() => {
@@ -151,10 +159,12 @@
     severityFilter;
     exemptionFilter;
     clearTimeout(searchTimer);
+    // The first load runs at once; only later changes wait for a pause.
     searchTimer = setTimeout(() => {
       page = 1;
       load();
-    }, 250);
+    }, firstLoad ? 0 : 250);
+    firstLoad = false;
     return () => clearTimeout(searchTimer);
   });
 </script>
@@ -245,7 +255,7 @@
             {/if}
             {#if show('seen')}<td class="num">{fmt(r.observations)}</td>{/if}
             {#if show('evidence')}
-              <td class="muted evidence" title={titleCase(r.evidence)}>{r.evidence || '-'}</td>
+              <td class="muted evidence" title={r.evidence}>{r.evidence || '-'}</td>
             {/if}
             {#if show('re-check')}<td class="muted nowrap">{stamp(r.expires_at, formatDate)}</td>{/if}
             {#if isAdmin}

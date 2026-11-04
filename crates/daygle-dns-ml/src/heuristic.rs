@@ -158,26 +158,26 @@ impl DomainClassifier for HeuristicBackend {
     }
 
     fn categories(&self) -> Vec<String> {
-        RULES
-            .iter()
-            .map(|r| r.category.to_string())
-            .collect::<Vec<_>>()
-            .into_iter()
-            .collect::<std::collections::BTreeSet<_>>()
-            .into_iter()
-            .collect()
+        let unique: std::collections::BTreeSet<&str> = RULES.iter().map(|r| r.category).collect();
+        unique.into_iter().map(str::to_string).collect()
     }
 
     fn classify(&self, input: &ClassificationInput) -> Option<Verdict> {
-        // Lowercase once; split on dots and hyphens - real sub-label boundary.
-        let hay = format!("{} {} {}", input.domain, input.title, input.text);
+        // Lowercase once (page title/text are not normalized like the query
+        // name is), then split on dots, hyphens, slashes and spaces: every
+        // `-token-` run is therefore already a label of its own.
+        let hay = if input.title.is_empty() && input.text.is_empty() {
+            input.domain.to_ascii_lowercase()
+        } else {
+            format!("{} {} {}", input.domain, input.title, input.text).to_ascii_lowercase()
+        };
         let labels: Vec<&str> = hay
             .split(['.', '-', '/', ' '])
             .filter(|s| !s.is_empty())
             .collect();
         for rule in RULES {
             for token in rule.tokens {
-                if label_has_token(&labels, token) || hay.contains(&format!("-{token}-")) {
+                if label_has_token(&labels, token) {
                     return Some(Verdict {
                         category: rule.category.to_string(),
                         confidence: rule.rule_confidence,
@@ -212,6 +212,24 @@ mod tests {
             .expect("malware verdict");
         assert_eq!(v.category, "malware");
         assert_eq!(v.severity, Severity::Threat);
+    }
+
+    #[test]
+    fn matching_ignores_case() {
+        let v = backend()
+            .classify(&ClassificationInput::domain_only("Online-CASINO.example"))
+            .expect("gambling verdict");
+        assert_eq!(v.category, "gambling");
+    }
+
+    #[test]
+    fn categories_are_sorted_and_unique() {
+        let categories = backend().categories();
+        let mut expected = categories.clone();
+        expected.sort();
+        expected.dedup();
+        assert_eq!(categories, expected);
+        assert!(categories.contains(&"malware".to_string()));
     }
 
     #[test]

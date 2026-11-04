@@ -26,7 +26,7 @@ use daygle_dns_core::LogStore;
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
-use crate::backend::{Channel, ClassificationInput, DomainClassifier, Severity, Verdict};
+use crate::backend::{Channel, ClassificationInput, DomainClassifier, Verdict};
 use crate::store::{AiStore, NewVerdict};
 
 /// A domain currently auto-blocked in `enforce` mode.
@@ -52,6 +52,13 @@ pub struct ActiveCategory {
 /// against: the scanner only labels, the operator's policy decides.
 pub type CategorySnapshot = HashMap<String, ActiveCategory>;
 
+/// Domains with an operator `allow` override, published with the snapshots.
+/// An exemption covers the domain and its subdomains, so the policy plugin
+/// checks the *queried* name against it too: an exemption on
+/// `www.bad.example` must hold even though the verdict that matches the
+/// query is on the parent `bad.example`.
+pub type ExemptionSnapshot = HashSet<String>;
+
 /// Shared scanner handles (also handed to the policy plugin and API).
 pub struct Scanner {
     store: Arc<AiStore>,
@@ -63,6 +70,8 @@ pub struct Scanner {
     snapshot: Arc<ArcSwap<BlockSnapshot>>,
     /// Domain → content category, for per-group category blocking.
     categories: Arc<ArcSwap<CategorySnapshot>>,
+    /// The operator's AI exemptions, for the plugin's query-time check.
+    exemptions: Arc<ArcSwap<ExemptionSnapshot>>,
     logs: Arc<LogStore>,
     /// Wakes the scan loop for an immediate cycle (rescan API, settings
     /// changes).
@@ -96,6 +105,7 @@ impl Scanner {
             settings,
             snapshot,
             categories,
+            exemptions: Arc::new(ArcSwap::from_pointee(ExemptionSnapshot::new())),
             logs,
             rescan_notify: Arc::new(Notify::new()),
             last_expiry: AtomicI64::new(0),
@@ -200,7 +210,7 @@ impl Scanner {
                         .unwrap_or_default(),
                     severity: verdict
                         .as_ref()
-                        .map(|v| severity_name(v.severity).to_string())
+                        .map(|v| v.severity.as_str().to_string())
                         .unwrap_or_default(),
                     status: status.to_string(),
                     confidence: verdict.as_ref().map_or(0.0, |v| v.confidence),
@@ -311,10 +321,18 @@ impl Scanner {
     /// In enforce mode these are blocked; in train mode they are what would
     /// be.
     pub fn eligible_blocks(&self, cfg: &AiSettings, now: i64) -> Result<BlockSnapshot> {
-        let overrides = self.store.allow_overrides()?;
+        self.blocks_with(cfg, now, &self.store.allow_overrides()?)
+    }
+
+    fn blocks_with(
+        &self,
+        cfg: &AiSettings,
+        now: i64,
+        overrides: &ExemptionSnapshot,
+    ) -> Result<BlockSnapshot> {
         let mut eligible = BlockSnapshot::new();
         for (domain, category, expires_at) in self.store.fresh_blocked(now, cfg.block_threshold)? {
-            if cfg.is_auto_block_category(&category) && !exempt(&domain, &overrides) {
+            if cfg.is_auto_block_category(&category) && !exempt(&domain, overrides) {
                 eligible.insert(
                     domain,
                     ActiveBlock {
@@ -332,11 +350,14 @@ impl Scanner {
     /// an allow override exempts. A relabel also stands on its own, so an
     /// operator can categorize a domain the model has not got to yet.
     pub fn eligible_categories(&self, now: i64) -> Result<CategorySnapshot> {
-        let overrides = self.store.allow_overrides()?;
+        self.categories_with(now, &self.store.allow_overrides()?)
+    }
+
+    fn categories_with(&self, now: i64, overrides: &ExemptionSnapshot) -> Result<CategorySnapshot> {
         let relabels = self.store.category_overrides()?;
         let mut snapshot = CategorySnapshot::new();
         for (domain, category, expires_at) in self.store.fresh_categories(now)? {
-            if exempt(&domain, &overrides) {
+            if exempt(&domain, overrides) {
                 continue;
             }
             let category = relabels.get(&domain).cloned().unwrap_or(category);
@@ -349,7 +370,7 @@ impl Scanner {
             );
         }
         for (domain, category) in &relabels {
-            if exempt(domain, &overrides) {
+            if exempt(domain, overrides) {
                 continue;
             }
             snapshot
@@ -369,12 +390,28 @@ impl Scanner {
     /// is the operator's rule, not a verdict the AI acted on.
     pub fn refresh_snapshot(&self, cfg: &AiSettings, now: i64) {
         let _publishing = self.publishing.lock().unwrap_or_else(|e| e.into_inner());
-        match self.eligible_categories(now) {
+        // One read of the exemptions serves both snapshots and the plugin.
+        let overrides = match self.store.allow_overrides() {
+            Ok(overrides) => overrides,
+            Err(e) => {
+                // Keep everything previously published rather than drop
+                // exemptions (or blocks) over a transient store error.
+                self.log_warn(format!("AI snapshot refresh failed: {e}"));
+                return;
+            }
+        };
+        // Exemptions go out before either snapshot: a newly exempted domain
+        // must never meet a block or category snapshot that still matches it
+        // without the exemption that clears it, and a failed block query
+        // below must not keep the new exemptions from the plugin.
+        let overrides = Arc::new(overrides);
+        self.exemptions.store(overrides.clone());
+        match self.categories_with(now, &overrides) {
             Ok(categories) => self.categories.store(Arc::new(categories)),
             Err(e) => self.log_warn(format!("AI category snapshot refresh failed: {e}")),
         }
         let snapshot = if cfg.mode == AiMode::Enforce {
-            match self.eligible_blocks(cfg, now) {
+            match self.blocks_with(cfg, now, &overrides) {
                 Ok(eligible) => eligible,
                 Err(e) => {
                     // Keep the previous snapshot rather than dropping every
@@ -420,6 +457,11 @@ impl Scanner {
             );
         }
         self.snapshot.store(Arc::new(snapshot));
+    }
+
+    /// The published exemptions, for the policy plugin.
+    pub fn exemptions(&self) -> Arc<ArcSwap<ExemptionSnapshot>> {
+        self.exemptions.clone()
     }
 
     /// The scanner loop: one cycle right away, then one per
@@ -482,7 +524,7 @@ fn catchup_secs(cfg: &AiSettings) -> u64 {
 
 /// Whether an allow override exempts `domain`: on the domain itself or on
 /// any parent domain (an exemption covers subdomains).
-fn exempt(domain: &str, overrides: &HashSet<String>) -> bool {
+pub fn exempt(domain: &str, overrides: &HashSet<String>) -> bool {
     let mut candidate = domain;
     loop {
         if overrides.contains(candidate) {
@@ -492,15 +534,6 @@ fn exempt(domain: &str, overrides: &HashSet<String>) -> bool {
             Some((_, parent)) => candidate = parent,
             None => return false,
         }
-    }
-}
-
-/// Lowercase `info`/`threat`, shared by store writes.
-fn severity_name(s: crate::backend::Severity) -> &'static str {
-    match s {
-        Severity::Info => "info",
-        Severity::Threat => "threat",
-        Severity::Disputed => "disputed",
     }
 }
 

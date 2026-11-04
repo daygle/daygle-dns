@@ -33,6 +33,9 @@
   let modelRun = $state(null); // active/finished model update run
   let modelBusy = $state(false);
   let pollTimer = null;
+  // Stops a poll that was in flight when the page closed from scheduling
+  // another one (and polling forever in the background).
+  let destroyed = false;
   // Must match UpdateState::is_running on the server.
   const RUNNING = ['preparing', 'downloading', 'cloning', 'building', 'installing', 'applying', 'restarting', 'rolling_back'];
 
@@ -60,6 +63,7 @@
 
   function scheduleModelPoll() {
     clearTimeout(pollTimer);
+    if (destroyed) return;
     pollTimer = setTimeout(async () => {
       try {
         const run = (await api.updateStatus())?.state;
@@ -94,10 +98,17 @@
     }
   }
 
-  onDestroy(() => clearTimeout(pollTimer));
+  let rescanTimer = null;
+  onDestroy(() => {
+    destroyed = true;
+    clearTimeout(pollTimer);
+    clearTimeout(rescanTimer);
+  });
 
-  async function load() {
-    loading = true;
+  // `quiet` refreshes the figures in place (after Scan Now) instead of
+  // blanking the page to a loading state.
+  async function load(quiet = false) {
+    loading = !quiet;
     error = null;
     try {
       status = await api.aiStatus();
@@ -136,7 +147,8 @@
     try {
       await api.aiRescan();
       notice = 'Scan started. The counts below update when it finishes.';
-      setTimeout(load, 3000);
+      clearTimeout(rescanTimer);
+      rescanTimer = setTimeout(() => load(true), 3000);
     } catch (e) {
       error = formatApiError(e);
     } finally {
@@ -158,14 +170,16 @@
   const blockableTotal = $derived(blockable.reduce((sum, [, n]) => sum + n, 0));
   // The heuristic rules score at most 35%, below any allowed threshold (a
   // verifier behind them corroborates, it does not lift them that far).
-  const heuristicOnly = $derived(!!status?.backend?.startsWith('heuristic'));
+  // Only the threat channel auto-blocks, so only its pipeline matters: the
+  // combined `backend` name starts with the categorizer's.
+  const heuristicOnly = $derived(
+    !!(status?.threat_backend ?? status?.backend)?.startsWith('heuristic'),
+  );
   // Turned off in Settings while running: nothing is classified or blocked.
   const switchedOff = $derived(status?.enabled === false);
 
-  $effect(() => {
-    load();
-    loadModels();
-  });
+  load();
+  loadModels();
 </script>
 
 {#if notice}
@@ -348,7 +362,7 @@
     {/if}
     {#if modelRun && RUNNING.includes(modelRun.phase)}
       <div style="margin-top: 10px">
-        <span class="pill">{titleCase(modelRun.phase.replace('_', ' '))}</span>
+        <span class="pill">{titleCase(modelRun.phase)}</span>
         <span class="muted">{modelRun.message} This page resumes after the service restart.</span>
       </div>
     {:else if isAdmin}
