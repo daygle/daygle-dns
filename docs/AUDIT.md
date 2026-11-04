@@ -71,14 +71,21 @@ unrecoverable without a restart. Availability-critical because the lookup is
 on the hot path even when no proxy protocol is configured.
 
 **Fix** Recover poisoned guards instead of panicking (`read_table()` /
-`write_table()` helpers). The map is a peer mapping: an interrupted mutation
-leaves it usable, and a lost entry only degrades attribution to the bridge
-address (which is also the pre-fix behaviour when no mapping exists).
+`write_table()` helpers). The map is a peer mapping, so an interrupted
+mutation leaves it structurally usable.
 
 **Risk/trade-off** A poisoned lock means some thread panicked mid-mutation, so
-the map may be missing one entry. That is strictly better than refusing all
-service: `real_client` already falls back to the socket's own address, and
-ACLs/rate limits then see the proxy's address (fail-closed for spoofing).
+the map may be missing one entry. `real_client` then falls back to the
+socket's own address — the loopback bridge address, not the original client
+(this is also the pre-fix behaviour whenever no mapping exists). That fallback
+is **not** fail-closed: with `rate_limit.exempt_loopback` enabled (the
+default), `check_client_scaled()` exempts a loopback client
+(`crates/daygle-dns-core/src/rate_limit.rs`), and ACLs evaluate the loopback
+address rather than the real client, so a lost entry can weaken rate limiting
+and ACL enforcement for that connection, not merely degrade attribution. It is
+still preferable to a permanent whole-server outage: the window is one bridged
+connection whose mapping was lost to a panic, versus every query failing until
+restart.
 
 ---
 
@@ -148,28 +155,35 @@ revocation window or blocking inside a lock.
 (invalidated on revoke), and update `last_used_at` at most once per minute per
 token.
 
-### M-4 The self-updater trusts an unauthenticated manifest (no signed releases)
+### M-4 The self-updater trusts upstream over HTTPS only (no signed releases)
 
-**Where** `crates/daygle-dns-api/src/update.rs`, `scripts/update.sh`,
-`scripts/update-apply.sh`.
+**Where** `crates/daygle-dns-api/src/update.rs`,
+`crates/daygle-dns-api/src/update-apply.sh`.
 
-**Problem** The privileged apply step verifies the staged binary against a
-`sha256` in `apply.json`, which is written by the *unprivileged* service
-account; the artifact itself comes from GitHub over TLS. There is no detached
-signature over the release. So the root trust boundary is “whatever the
-`daygle-dns` service account could write” plus “whatever GitHub served”.
+**What is already defended** The service account stages `apply.bin` and
+`apply.json`, but the privileged apply script does not trust either for
+content: the manifest's `sha256` only proves the staged copy is intact.
+For `kind=install`, root ignores the staged script and downloads the canonical
+`install.sh` itself (or takes it from a fresh clone of the canonical
+repository). For `kind=models`, root installs the bundle only if it matches the
+checksum published with that release, which root fetches itself. Any other
+kind is refused. So controlling the staging directory and manifest alone does
+**not** give a compromised service account root code execution.
 
-**Impact** A compromised service account (e.g. via any future request-handling
-bug) turns into root code execution; so does a compromised release or a
-CA-level MITM of `github.com`.
+**Remaining risk** Everything root runs or installs is authenticated only by
+HTTPS to GitHub. There is no detached signature over the installer or release
+artifacts, and the published models checksum comes from the same origin as the
+bundle. A compromised repository or release, or a CA-level MITM of
+`github.com` / `raw.githubusercontent.com`, therefore turns into root code
+execution on every host that applies an update. A compromised service account
+can still *trigger* an update run at a time of its choosing, which matters only
+in combination with one of those upstream compromises.
 
 **Risk/trade-off / why not changed** Fixing this needs release-signing
 infrastructure and key management (a maintainer key, a verification step in
 `update-apply.sh`, and a documented rotation story) — out of scope for an
 audit patch, and inventing a key would be worse than the current state.
-Recorded here as a residual risk; the code's own comments already state the
-manifest is unprivileged, so it is a known design boundary rather than a
-defect introduced by accident.
+Recorded here as a residual upstream-trust risk.
 
 ---
 

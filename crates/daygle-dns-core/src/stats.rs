@@ -166,9 +166,12 @@ impl QueryStats {
     /// materialized for gaps so the chart has a continuous x axis).
     pub fn series(&self, window_minutes: u32) -> Vec<SeriesPoint> {
         let window = window_minutes.clamp(1, MAX_BUCKETS as u32) as u64;
-        let now_min = epoch_minutes();
-        let first = now_min.saturating_sub(window - 1);
         let buckets = self.inner.buckets.lock();
+        // `record` clamps new buckets to the last bucket's minute when the
+        // wall clock steps back, so end the window there too: ending at the
+        // wall-clock minute would hide those queries until the clock caught up.
+        let now_min = epoch_minutes().max(buckets.last().map_or(0, |b| b.minute));
+        let first = now_min.saturating_sub(window - 1);
         let by_minute: HashMap<u64, &Bucket> = buckets.iter().map(|b| (b.minute, b)).collect();
         (first..=now_min)
             .map(|m| {
@@ -351,6 +354,10 @@ mod tests {
         // bucket's counts).
         let series = s.series(240);
         assert!(series.windows(2).all(|w| w[0].t < w[1].t));
+        // The query recorded after the step-back is in the series, not
+        // hidden past its end until the wall clock catches up.
+        assert_eq!(series.iter().map(|p| p.queries).sum::<u64>(), 1);
+        assert_eq!(series.iter().map(|p| p.recursive).sum::<u64>(), 1);
     }
 
     #[test]

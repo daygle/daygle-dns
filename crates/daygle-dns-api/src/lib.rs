@@ -819,10 +819,14 @@ fn forwarded_client_ip(
 /// CORS for `api.cors_origins`. The allow-list is read from the live config
 /// on every request, so a console edit applies without a restart; an empty
 /// list (the default) emits no CORS headers, i.e. same-origin only. `*`
-/// allows any origin. Credentials are never shared implicitly: the layer
-/// sets no `Access-Control-Allow-Credentials`, so a browser will not attach
-/// the session cookie to a cross-origin call, and a listed origin must send
-/// its credential as a bearer header.
+/// allows any origin. The layer sets no `Access-Control-Allow-Credentials`,
+/// so a cross-origin page cannot *read* the response to a credentialed
+/// request, and a listed origin must send its credential as a bearer header.
+/// That governs response exposure only, not whether the browser sends the
+/// cookie: `SameSite=Strict` keeps the session cookie off cross-site
+/// requests, but a same-site origin (e.g. another port on the same host) can
+/// still send it with `credentials: 'include'`. This layer is not a CSRF
+/// defence; state-changing routes must not rely on it.
 fn cors_layer(config: Arc<ArcSwap<DaygleConfig>>) -> tower_http::cors::CorsLayer {
     use tower_http::cors::{AllowOrigin, CorsLayer};
     CorsLayer::new()
