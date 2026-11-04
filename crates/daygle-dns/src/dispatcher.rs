@@ -1367,7 +1367,7 @@ impl RequestHandler for DnsDispatcher {
             }
         }
 
-        // 1c. Split horizon: per-client synthetic answers. This runs after
+        // 1e. Split horizon: per-client synthetic answers. This runs after
         // policy (blocklists/redirects win) and before the authoritative
         // catalog, so internal clients see internal answers even for hosted
         // zones. Entries carry typed records (A, AAAA, MX, TXT, CNAME, SRV);

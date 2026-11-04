@@ -25,26 +25,32 @@ fn table() -> &'static RwLock<HashMap<SocketAddr, SocketAddr>> {
     TABLE.get_or_init(Default::default)
 }
 
+/// The table, ignoring lock poisoning: the map is a peer mapping, so a panic
+/// in an unrelated thread that happened to hold the lock (which poisons it)
+/// must not turn every later query into a panic. `real_client` runs on the
+/// DNS query path, so an `expect` here would take the whole server down.
+fn read_table() -> std::sync::RwLockReadGuard<'static, HashMap<SocketAddr, SocketAddr>> {
+    table().read().unwrap_or_else(|e| e.into_inner())
+}
+
+fn write_table() -> std::sync::RwLockWriteGuard<'static, HashMap<SocketAddr, SocketAddr>> {
+    table().write().unwrap_or_else(|e| e.into_inner())
+}
+
 /// Register the peer on a loopback backend connection against its public
 /// client's address. Used when a transparent listener bridge is necessary.
 pub fn register_client(local: SocketAddr, client: SocketAddr) {
-    table()
-        .write()
-        .expect("proxy table lock poisoned")
-        .insert(local, client);
+    write_table().insert(local, client);
 }
 
 /// Remove a bridge's peer mapping when the bridged connection finishes.
 pub fn unregister_client(local: SocketAddr) {
-    table()
-        .write()
-        .expect("proxy table lock poisoned")
-        .remove(&local);
+    write_table().remove(&local);
 }
 
 /// The real client behind `src` when it is a connection from a front; else src.
 pub fn real_client(src: SocketAddr) -> SocketAddr {
-    let table = table().read().expect("proxy table lock poisoned");
+    let table = read_table();
     let mut current = src;
     // Listener admission and PROXY protocol can form multiple trusted local
     // bridge hops. Resolve them all to the original remote peer/client.
@@ -217,4 +223,72 @@ async fn splice(
     };
     unregister_client(local);
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A panic while another thread held the peer table's write lock poisons
+    /// it. The table is consulted for every DNS query (`real_client`), so
+    /// panicking on the poisoned lock would panic every later query - a
+    /// whole-server outage from one unrelated panic.
+    #[test]
+    fn a_poisoned_table_lock_does_not_break_client_lookup() {
+        let poisoned = std::panic::catch_unwind(|| {
+            let _guard = table().write().unwrap();
+            panic!("panic while holding the peer table lock");
+        });
+        assert!(poisoned.is_err());
+        assert!(
+            table().read().is_err(),
+            "the lock must really be poisoned for this test to prove anything"
+        );
+
+        let local: SocketAddr = "127.0.0.1:53001".parse().unwrap();
+        let client: SocketAddr = "192.0.2.9:1234".parse().unwrap();
+        register_client(local, client);
+        assert_eq!(real_client(local), client);
+        unregister_client(local);
+        assert_eq!(real_client(local), local);
+    }
+
+    #[test]
+    fn chained_bridges_resolve_to_the_original_client() {
+        let inner: SocketAddr = "127.0.0.1:53101".parse().unwrap();
+        let outer: SocketAddr = "127.0.0.1:53102".parse().unwrap();
+        let client: SocketAddr = "198.51.100.7:4444".parse().unwrap();
+        register_client(inner, client);
+        register_client(outer, inner);
+        assert_eq!(real_client(outer), client);
+        unregister_client(inner);
+        unregister_client(outer);
+        assert_eq!(real_client(outer), outer);
+    }
+
+    #[test]
+    fn proxy_headers_parse_v1_and_v2() {
+        assert_eq!(
+            parse_v1("PROXY TCP4 192.0.2.1 198.51.100.2 12345 443").unwrap(),
+            Some("192.0.2.1:12345".parse().unwrap())
+        );
+        assert_eq!(parse_v1("PROXY UNKNOWN").unwrap(), None);
+        assert!(parse_v1("PROXY TCP4 not-an-address 198.51.100.2 1 2").is_err());
+
+        // v2: `parse_v2` takes the version byte's low nibble (the command),
+        // so 0x21 reads as PROXY (1) and 0x20 as LOCAL (0), as `read_header`
+        // passes them. Family 0x11 is TCP4.
+        let mut body = vec![0u8; 12];
+        body[..4].copy_from_slice(&[192, 0, 2, 1]);
+        body[8..10].copy_from_slice(&12345u16.to_be_bytes());
+        assert_eq!(
+            parse_v2(0x21 & 0x0f, 0x11, &body).unwrap(),
+            Some("192.0.2.1:12345".parse().unwrap())
+        );
+        // LOCAL carries no address.
+        assert_eq!(parse_v2(0x20 & 0x0f, 0x00, &[]).unwrap(), None);
+        assert!(parse_v2(0x21 & 0x0f, 0x11, &[0u8; 4]).is_err());
+        // An unknown command is an error, not a silent "no address".
+        assert!(parse_v2(2, 0x11, &body).is_err());
+    }
 }

@@ -819,7 +819,14 @@ fn forwarded_client_ip(
 /// CORS for `api.cors_origins`. The allow-list is read from the live config
 /// on every request, so a console edit applies without a restart; an empty
 /// list (the default) emits no CORS headers, i.e. same-origin only. `*`
-/// allows any origin (credentials travel as a bearer header, not cookies).
+/// allows any origin. The layer sets no `Access-Control-Allow-Credentials`,
+/// so a cross-origin page cannot *read* the response to a credentialed
+/// request, and a listed origin must send its credential as a bearer header.
+/// That governs response exposure only, not whether the browser sends the
+/// cookie: `SameSite=Strict` keeps the session cookie off cross-site
+/// requests, but a same-site origin (e.g. another port on the same host) can
+/// still send it with `credentials: 'include'`. This layer is not a CSRF
+/// defence; state-changing routes must not rely on it.
 fn cors_layer(config: Arc<ArcSwap<DaygleConfig>>) -> tower_http::cors::CorsLayer {
     use tower_http::cors::{AllowOrigin, CorsLayer};
     CorsLayer::new()
@@ -848,10 +855,11 @@ fn cors_layer(config: Arc<ArcSwap<DaygleConfig>>) -> tower_http::cors::CorsLayer
 }
 
 /// Content Security Policy for the console: everything from this origin
-/// only. Session tokens live in the browser's local storage, so any script
-/// injected into the page could read them; this keeps injected markup from
-/// loading or running script from anywhere else. Inline styles stay allowed
-/// (the Svelte bundle sets `style` attributes).
+/// only. The session token is in an `HttpOnly` cookie, so injected script
+/// cannot read it, but such a script could still act as the signed-in user;
+/// this keeps injected markup from loading or running script from anywhere
+/// else. Inline styles stay allowed (the Svelte bundle sets `style`
+/// attributes).
 const CONTENT_SECURITY_POLICY: &str = "default-src 'self'; script-src 'self'; \
     style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; \
     object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'";
