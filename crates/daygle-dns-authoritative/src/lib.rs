@@ -95,6 +95,17 @@ pub fn validate_name(name: &str, allow_relative: bool) -> Result<()> {
     Ok(())
 }
 
+/// Validate a record owner name: like [`validate_name`], but the leftmost
+/// label may also be the wildcard `*` (RFC 4592), as in `*.example.com`.
+/// `*` anywhere else, or as part of a label (`*foo`), is still rejected.
+pub fn validate_owner_name(name: &str) -> Result<()> {
+    let trimmed = name.trim();
+    match trimmed.strip_prefix("*.") {
+        Some(rest) => validate_name(rest, false),
+        None => validate_name(trimmed, false),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -106,5 +117,17 @@ mod tests {
         assert!(validate_name("", true).is_err());
         assert!(validate_name("a..b", true).is_err());
         assert!(validate_name("-bad.example.com", true).is_err());
+        assert!(validate_name("*.example.com", false).is_err());
+    }
+
+    #[test]
+    fn owner_names_admit_a_leading_wildcard() {
+        assert!(validate_owner_name("*.example.com").is_ok());
+        assert!(validate_owner_name("*.sub.example.com").is_ok());
+        assert!(validate_owner_name("www.example.com").is_ok());
+        assert!(validate_owner_name("www.*.example.com").is_err());
+        assert!(validate_owner_name("*foo.example.com").is_err());
+        assert!(validate_owner_name("*.*.example.com").is_err());
+        assert!(validate_owner_name("*").is_err());
     }
 }

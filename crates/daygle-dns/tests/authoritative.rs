@@ -190,3 +190,48 @@ async fn policy_blocklist_returns_nxdomain() {
 
     shutdown(server).await;
 }
+
+#[tokio::test]
+async fn serves_wildcard_records() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("daygle-dns.db");
+    let server = spawn(config_with_zone(&db, None)).await;
+    let store = server.catalog.store();
+    let zone = store
+        .create_zone(&ZoneInput {
+            name: "wild.test".to_string(),
+            ..Default::default()
+        })
+        .unwrap();
+    for (name, rtype, content) in [
+        ("@", "A", "192.0.2.1"),
+        ("*", "CNAME", "wild.test."),
+        ("www", "A", "192.0.2.80"),
+    ] {
+        store
+            .upsert_record(
+                &zone.id,
+                &RecordInput {
+                    name: name.to_string(),
+                    rtype: rtype.to_string(),
+                    content: content.to_string(),
+                    ttl: 300,
+                    priority: 0,
+                    disabled: false,
+                },
+            )
+            .unwrap();
+    }
+    server.catalog.reload().unwrap();
+
+    let udp = server.udp_addr.expect("UDP is enabled");
+    // A name with no records of its own is answered by the wildcard.
+    let msg = udp_query(udp, "anything.wild.test.", RecordType::CNAME).await;
+    assert_eq!(msg.response_code, ResponseCode::NoError);
+    assert_eq!(first_answer(&msg).as_deref(), Some("wild.test."));
+    // An existing name is not covered by the wildcard.
+    let msg = udp_query(udp, "www.wild.test.", RecordType::A).await;
+    assert_eq!(first_answer(&msg).as_deref(), Some("192.0.2.80"));
+
+    shutdown(server).await;
+}
