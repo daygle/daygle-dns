@@ -59,8 +59,12 @@ recursion_access = "private_networks"
 # recursion_networks = ["192.168.1.0/24", "2001:db8::/48"]
 # Entries may also name a network from [[networks]], e.g. ["LAN", "10.9.0.0/16"].
 # Recursive mode only: randomize query-name case (0x20) to harden against
-# spoofing, and drop private/loopback addresses from public answers.
+# spoofing.
 # case_randomization = false
+# DNS rebinding protection (both modes): block answers that give a public
+# name a private, loopback or link-local address. Local names (single
+# labels, .lan, .home.arpa, .local, .internal, ...), conditional forwarders,
+# stub zones and the allowlist are not affected.
 # rebinding_protection = false
 # root_hints = []   # custom root server IPs; empty uses the IANA roots
 #

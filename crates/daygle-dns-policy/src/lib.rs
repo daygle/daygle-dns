@@ -29,8 +29,8 @@ pub mod services;
 
 pub use acl::Acl;
 pub use advanced::{
-    account_entry, is_listener_keyword, validate_regex, AdvancedBlocking, ACCOUNT_PREFIX,
-    LISTENER_KEYWORDS,
+    account_entry, is_listener_keyword, validate_regex, AdvancedBlocking, ResponseFilters,
+    ACCOUNT_PREFIX, LISTENER_KEYWORDS,
 };
 pub use blocklist::Blocklist;
 pub use blocklist_source::{

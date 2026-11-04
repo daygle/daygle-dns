@@ -4006,9 +4006,9 @@ pub struct RecursiveSettings {
     /// inject. Off by default: a few authoritative servers do not preserve
     /// case and would fail to resolve.
     pub case_randomization: bool,
-    /// DNS rebinding protection (recursive mode): drop private, loopback and
-    /// link-local addresses from public answers. Names served by local
-    /// zones, conditional forwarders and stub zones are not affected.
+    /// DNS rebinding protection (both modes): block answers that give a
+    /// public name a private, loopback or link-local address. Local names,
+    /// local zones, conditional forwarders and stub zones are not affected.
     pub rebinding_protection: bool,
     /// Local root zone (RFC 8806): keep a verified copy of the root zone and
     /// answer root queries from it instead of asking the root servers.

@@ -952,7 +952,18 @@
       </label>
       <label class="check"><input type="checkbox" bind:checked={recursive.enabled} /> <span>Recursion Enabled</span></label>
       <label class="check"><input type="checkbox" bind:checked={recursive.dnssec_validate} disabled={!recursive.enabled} /> <span>DNSSEC Validation</span></label>
+      <label class="check"><input type="checkbox" bind:checked={recursive.rebinding_protection} disabled={!recursive.enabled} /> <span>DNS Rebinding Protection</span></label>
     </div>
+    {#if recursive.enabled}
+      <p class="muted help">
+        Rebinding protection blocks answers that give a public name a private,
+        loopback or link-local address, for every client and in both modes (a
+        filtering group can turn it on for its own clients only). Local names
+        (single labels, .lan, .home.arpa, .local, .internal and the like),
+        conditional forwarders, stub zones, your own zones and the allowlist
+        are not affected.
+      </p>
+    {/if}
     {#if !recursive.enabled}
       <p class="help restart">
         Recursion is off: the server answers only for its own zones and
@@ -961,7 +972,6 @@
     {:else if recursive.mode === 'recursive'}
       <div class="form-grid" style="margin-top: 4px">
         <label class="check"><input type="checkbox" bind:checked={recursive.case_randomization} /> <span>Randomize Query Case (0x20)</span></label>
-        <label class="check"><input type="checkbox" bind:checked={recursive.rebinding_protection} /> <span>DNS Rebinding Protection</span></label>
         <label class="check"><input type="checkbox" bind:checked={recursive.opportunistic_encryption} /> <span>Opportunistic Encryption</span></label>
       </div>
       <p class="muted help">
@@ -969,9 +979,7 @@
         provider sees your queries. Query names are minimized (RFC 9156) and DNSSEC
         is validated against the root trust anchor. Query-case randomization makes
         spoofed answers harder to inject but can fail with the odd server that does
-        not preserve case. Rebinding protection drops private and loopback addresses
-        from public answers (your own zones, forwarders and stub zones are not
-        affected). Opportunistic encryption (RFC 9539) probes nameservers for DNS
+        not preserve case. Opportunistic encryption (RFC 9539) probes nameservers for DNS
         over TLS or QUIC in the background and uses it where it works, falling back
         to plain DNS; it is experimental and adds some connection overhead.
       </p>

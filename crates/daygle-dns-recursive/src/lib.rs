@@ -507,6 +507,15 @@ impl RecursiveResolver {
             .await
     }
 
+    /// Whether `name` is answered by a conditional forwarder or stub zone
+    /// (the operator's own infrastructure, whose private addresses are
+    /// expected) rather than by the default upstreams or the recursor.
+    pub fn is_zone_routed(&self, name: &str) -> bool {
+        Name::from_utf8(name).is_ok_and(|name| {
+            zone_resolver(&self.inner.conditional, &self.inner.stubs, &name).is_some()
+        })
+    }
+
     /// The serve-stale answer `client` would be given for `name`/
     /// `record_type`, if one expired less than `serve_stale_secs` ago. For
     /// when the client timeout runs out before the lookup finishes (RFC 8767

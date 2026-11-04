@@ -8,6 +8,8 @@ export const BLOCK_SOURCES = [
   ['service', 'Blocked Service'],
   ['security', 'Security Category'],
   ['tld', 'Blocked TLD'],
+  ['local_address', 'Local Network Address'],
+  ['payload', 'DNS Payload Limit'],
   ['group_blocklist', 'Group Blocklist'],
   ['ai', 'AI Scanner'],
   ['rpz', 'Response Policy Zone'],

@@ -1832,6 +1832,29 @@ impl RequestHandler for DnsDispatcher {
                         }
                     }
                 }
+                // Response filters: local network addresses for public names
+                // (DNS rebinding) and oversized payloads. Allowlisted names,
+                // and conditional forwarders and stub zones (the operator's
+                // own infrastructure), are trusted.
+                if !policy.is_allowlisted(&qname) && !resolver.is_zone_routed(&qname) {
+                    if let Some(block) =
+                        self.filter_response(client, &qname, listener, lookup.answers())
+                    {
+                        debug!(query = %qname, reason = %block.reason, "answer blocked by a response filter");
+                        self.metrics.inc(&self.metrics.blocked);
+                        let why = Some(Ede::new(ede::BLOCKED, block.reason.clone()));
+                        self.observe_blocked(
+                            client,
+                            &qname,
+                            &rtype,
+                            protocol,
+                            Some("NOERROR"),
+                            started,
+                            block,
+                        );
+                        return send_empty(&mut response_handle, request, why).await;
+                    }
+                }
                 let mut answers = lookup.answers().to_vec();
                 let mut authorities = lookup.authorities().to_vec();
                 let mut additionals = lookup.additionals().to_vec();
@@ -2403,6 +2426,56 @@ impl DnsDispatcher {
     /// The first CNAME target in `answers` that the blocklists, the
     /// client's per-client rules or its filtering groups block, with the
     /// blocking decision. Allowlisted targets are skipped.
+    /// Why a resolved answer for `qname` must not reach `client`: it holds a
+    /// local network address for a public name (Settings -> Recursion's
+    /// rebinding protection, or a filtering group's switch), or a payload
+    /// over the limits (a filtering group's switch).
+    fn filter_response(
+        &self,
+        client: IpAddr,
+        qname: &str,
+        listener: Option<&'static str>,
+        answers: &[Record],
+    ) -> Option<BlockReason> {
+        let groups = self.advanced_blocking.load();
+        let filters = groups.response_filters(client, qname, listener);
+        let global_rebinding = self
+            .config
+            .as_ref()
+            .is_some_and(|c| c.load().recursive.rebinding_protection);
+        if (global_rebinding || filters.local_addresses.is_some())
+            && !crate::response_filter::is_local_name(qname)
+        {
+            if let Some(ip) = crate::response_filter::local_address(answers) {
+                let group = filters.local_addresses.map(str::to_string);
+                let by = group
+                    .as_ref()
+                    .map_or("rebinding protection".to_string(), |g| {
+                        format!("group '{g}'")
+                    });
+                return Some(block_reason(
+                    source::LOCAL_ADDRESS,
+                    group,
+                    Some(ip.to_string()),
+                    format!(
+                        "'{qname}' answered with the local network address {ip}, blocked by {by}"
+                    ),
+                ));
+            }
+        }
+        if let Some(group) = filters.payloads {
+            if let Some(what) = crate::response_filter::oversized_payload(answers) {
+                return Some(block_reason(
+                    source::PAYLOAD,
+                    Some(group.to_string()),
+                    Some(what.clone()),
+                    format!("'{qname}' answered with {what}, over the DNS payload limit of group '{group}'"),
+                ));
+            }
+        }
+        None
+    }
+
     async fn blocked_cname_target(
         &self,
         policy: &PolicyEngine,
