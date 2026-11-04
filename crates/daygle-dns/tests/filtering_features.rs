@@ -584,3 +584,61 @@ async fn global_rebinding_protection_applies_when_forwarding() {
 
     shutdown(server).await;
 }
+
+/// The detector categories: IDN homographs and DGA names are blocked by
+/// name, and a parked domain once its name servers have been looked up.
+#[tokio::test]
+async fn groups_block_homographs_dga_and_parked_domains() {
+    let dir = tempfile::tempdir().unwrap();
+    let upstream = spawn_upstream_with(
+        &dir.path().join("upstream.db"),
+        "parked.test",
+        &[
+            ("@", "NS", "ns1.sedoparking.com."),
+            ("www", "A", "198.51.100.20"),
+        ],
+    )
+    .await;
+    let mut config = base_config(&dir.path().join("daygle-dns.db"));
+    config.recursive.enabled = true;
+    config.recursive.use_system_config = false;
+    config.recursive.upstreams = vec![upstream.to_string()];
+    config.recursive.dnssec_validate = false;
+    let server = spawn(config).await;
+    let udp = server.udp_addr.unwrap();
+    let base = format!("http://{}/api", server.api_addr);
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .post(format!("{base}/policy/blocking"))
+        .json(&serde_json::json!({
+            "name": "secure",
+            "blocked_security": ["idn_homographs", "dga_domains", "parked_domains"],
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_success(), "{}", resp.text().await.unwrap());
+
+    // `pаypal.com` with a Cyrillic 'а'.
+    for name in ["xn--pypal-4ve.com.", "lqomwlpfnvbibkf.com."] {
+        let reply = udp_query(udp, name, RecordType::A).await;
+        assert_eq!(reply.response_code, ResponseCode::NXDomain, "{name}");
+    }
+
+    // The first query of a parked domain gets through and starts the name
+    // server lookup; once that has finished, the domain is blocked.
+    let reply = udp_query(udp, "www.parked.test.", RecordType::A).await;
+    assert_eq!(first_answer(&reply).as_deref(), Some("198.51.100.20"));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let reply = udp_query(udp, "www.parked.test.", RecordType::A).await;
+        if reply.response_code == ResponseCode::NoError && reply.answers.is_empty() {
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "{reply:?}");
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+
+    shutdown(server).await;
+}

@@ -21,8 +21,25 @@ pub struct SecurityCategory {
     pub name: &'static str,
     /// What the category blocks and what it leaves alone, for the console.
     pub description: &'static str,
-    /// Blocklist entries (`*.suffix`, exact names, `@@` exceptions).
+    /// The detector that decides membership, for categories judged by
+    /// examining the name or its answer instead of a list.
+    pub detector: Option<Detector>,
+    /// Blocklist entries (`*.suffix`, exact names, `@@` exceptions); empty
+    /// for a detector.
     pub entries: &'static [&'static str],
+}
+
+/// A category decided by examining a name rather than by a list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Detector {
+    /// Internationalized names imitating Latin ones ([`crate::detect`]).
+    Homograph,
+    /// Names made up by malware's domain generation algorithms.
+    Dga,
+    /// Domains whose name servers belong to a parking service; decided once
+    /// the name servers are known, after resolution.
+    Parked,
 }
 
 /// Every known security category.
@@ -33,6 +50,7 @@ pub const SECURITY_CATEGORIES: &[SecurityCategory] = &[
         description: "Default subdomains handed out by free web hosts and site builders \
             (*.pages.dev, *.vercel.app, *.netlify.app, ...), heavily abused for phishing. \
             Sites on these hosts that use their own domain name are not affected.",
+        detector: None,
         entries: &[
             "*.pages.dev",
             "*.vercel.app",
@@ -67,6 +85,7 @@ pub const SECURITY_CATEGORIES: &[SecurityCategory] = &[
             FreeDNS, ...), which need no identity check and are common in phishing. The \
             services' own websites and update APIs stay reachable; allow your own DDNS \
             hostname under Custom Allow if you use one.",
+        detector: None,
         entries: &[
             // DuckDNS
             "*.duckdns.org",
@@ -150,6 +169,7 @@ pub const SECURITY_CATEGORIES: &[SecurityCategory] = &[
             internet (ngrok, Cloudflare quick tunnels, localtunnel, ...), used to host \
             phishing pages behind random subdomains. Named Cloudflare Tunnels on your own \
             domain are not affected.",
+        detector: None,
         entries: &[
             "*.ngrok.io",
             "*.ngrok.app",
@@ -175,6 +195,7 @@ pub const SECURITY_CATEGORIES: &[SecurityCategory] = &[
         description: "Paste sites, anonymous file drops, webhook and request catchers and \
             out-of-band DNS loggers, used to stage payloads and collect stolen data. This \
             blocks legitimate use of these services too.",
+        detector: None,
         entries: &[
             // Paste sites
             "pastebin.com",
@@ -253,6 +274,7 @@ pub const SECURITY_CATEGORIES: &[SecurityCategory] = &[
         name: "Decentralized Web Gateways",
         description: "Public gateways that serve IPFS and ENS content to ordinary browsers, \
             used to host phishing pages that cannot be taken down.",
+        detector: None,
         entries: &[
             "ipfs.io",
             "*.ipfs.io",
@@ -284,6 +306,7 @@ pub const SECURITY_CATEGORIES: &[SecurityCategory] = &[
         name: "Cryptocurrency Mining",
         description: "In-browser miners and mining pools, so a compromised device or page \
             cannot mine cryptocurrency (cryptojacking). This also stops intentional mining.",
+        detector: None,
         entries: &[
             // In-browser miners
             "coinhive.com",
@@ -348,6 +371,7 @@ pub const SECURITY_CATEGORIES: &[SecurityCategory] = &[
             reports (.zip, .mov, .top, .cfd, .sbs, the former Freenom TLDs, ...). The list \
             is curated and updated with each release; allow a site you need under Custom \
             Allow.",
+        detector: None,
         entries: &[
             "*.zip",
             "*.mov",
@@ -378,7 +402,64 @@ pub const SECURITY_CATEGORIES: &[SecurityCategory] = &[
             "*.gq",
         ],
     },
+    SecurityCategory {
+        id: "idn_homographs",
+        name: "IDN Homographs",
+        description: "Internationalized names that imitate a familiar one with look-alike \
+            letters from another alphabet (a Cyrillic 'а' in pаypal.com). Genuine names in \
+            other languages, such as bücher.de or яндекс.рф, are not affected.",
+        detector: Some(Detector::Homograph),
+        entries: &[],
+    },
+    SecurityCategory {
+        id: "dga_domains",
+        name: "DGA Domains",
+        description: "Random-looking names that malware generates to find its command-and-control \
+            servers (xjkqpwzvbnmtrd.com). Judged by how unlike real names the letters are; a \
+            rare genuine site may be caught, so allow it under Custom Allow.",
+        detector: Some(Detector::Dga),
+        entries: &[],
+    },
+    SecurityCategory {
+        id: "parked_domains",
+        name: "Parked Domains",
+        description:
+            "Domains served by parking services (Sedo, Bodis, ParkingCrew, ...) that show \
+            ads and redirects instead of a site. The name servers are looked up the first time \
+            a domain is seen, so that first visit is not blocked.",
+        detector: Some(Detector::Parked),
+        entries: &[],
+    },
 ];
+
+/// Name-server suffixes of domain parking services: a domain whose name
+/// servers are under one of these is parked.
+pub const PARKING_NAME_SERVERS: &[&str] = &[
+    "sedoparking.com",
+    "bodis.com",
+    "parkingcrew.net",
+    "above.com",
+    "parklogic.com",
+    "fabulous.com",
+    "cashparking.com",
+    "hugedomainsdns.com",
+    "dan.com",
+    "undeveloped.com",
+    "afternic.com",
+    "namedrive.com",
+    "voodoo.com",
+];
+
+/// Whether a name server (lowercase, no trailing dot) belongs to a parking
+/// service.
+pub fn is_parking_name_server(ns: &str) -> bool {
+    PARKING_NAME_SERVERS.iter().any(|suffix| {
+        ns == *suffix
+            || ns
+                .strip_suffix(suffix)
+                .is_some_and(|rest| rest.ends_with('.'))
+    })
+}
 
 /// The security category with id `id` (any case).
 pub fn find(id: &str) -> Option<&'static SecurityCategory> {
@@ -419,7 +500,12 @@ mod tests {
         let mut ids = std::collections::HashSet::new();
         for category in SECURITY_CATEGORIES {
             assert!(ids.insert(category.id), "duplicate id {}", category.id);
-            assert!(!category.entries.is_empty(), "{}", category.id);
+            assert_eq!(
+                category.entries.is_empty(),
+                category.detector.is_some(),
+                "{}",
+                category.id
+            );
             let mut seen = std::collections::HashSet::new();
             for entry in category.entries {
                 assert!(seen.insert(entry), "{}: duplicate {entry}", category.id);
@@ -451,6 +537,14 @@ mod tests {
         assert!(!list.contains("www.duckdns.org"));
         assert!(!list.contains("freedns.afraid.org"));
         assert!(list.contains("evil.mooo.com"));
+    }
+
+    #[test]
+    fn parking_name_servers() {
+        assert!(is_parking_name_server("ns1.sedoparking.com"));
+        assert!(is_parking_name_server("ns2.bodis.com"));
+        assert!(!is_parking_name_server("ns1.notbodis.com"));
+        assert!(!is_parking_name_server("ns1.example.com"));
     }
 
     #[test]

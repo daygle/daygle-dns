@@ -146,6 +146,8 @@ pub struct DnsDispatcher {
     config: Option<Arc<ArcSwap<daygle_dns_core::config::DaygleConfig>>>,
     /// DNS accounts the encrypted listeners recognise (`[accounts]`).
     accounts: Arc<daygle_dns_policy::identity::AccountDirectory>,
+    /// Which registered domains are parked, for the Parked Domains category.
+    parked: Arc<crate::response_filter::ParkedDomains>,
 }
 
 impl DnsDispatcher {
@@ -214,6 +216,7 @@ impl DnsDispatcher {
             log_export: None,
             config: None,
             accounts: Arc::default(),
+            parked: Arc::default(),
         }
     }
 
@@ -1838,7 +1841,7 @@ impl RequestHandler for DnsDispatcher {
                 // own infrastructure), are trusted.
                 if !policy.is_allowlisted(&qname) && !resolver.is_zone_routed(&qname) {
                     if let Some(block) =
-                        self.filter_response(client, &qname, listener, lookup.answers())
+                        self.filter_response(&resolver, client, &qname, listener, lookup.answers())
                     {
                         debug!(query = %qname, reason = %block.reason, "answer blocked by a response filter");
                         self.metrics.inc(&self.metrics.blocked);
@@ -2432,6 +2435,7 @@ impl DnsDispatcher {
     /// over the limits (a filtering group's switch).
     fn filter_response(
         &self,
+        resolver: &Arc<RecursiveResolver>,
         client: IpAddr,
         qname: &str,
         listener: Option<&'static str>,
@@ -2471,6 +2475,20 @@ impl DnsDispatcher {
                     Some(what.clone()),
                     format!("'{qname}' answered with {what}, over the DNS payload limit of group '{group}'"),
                 ));
+            }
+        }
+        if let Some(group) = filters.parked {
+            if let Some(domain) = daygle_dns_policy::detect::registered_domain(qname) {
+                if let Some(ns) = self.parked.check(resolver, client, domain) {
+                    return Some(block_reason(
+                        source::SECURITY,
+                        Some(group.to_string()),
+                        Some("Parked Domains".to_string()),
+                        format!(
+                            "'{domain}' is parked (name server {ns}), blocked as Parked Domains by group '{group}'"
+                        ),
+                    ));
+                }
             }
         }
         None

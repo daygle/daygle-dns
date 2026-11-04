@@ -19,6 +19,8 @@ mod acl;
 pub mod advanced;
 mod blocklist;
 mod blocklist_source;
+pub mod detect;
+mod dga_model;
 mod engine;
 pub mod identity;
 mod plugin;
