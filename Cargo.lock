@@ -823,12 +823,14 @@ version = "1.0.0"
 dependencies = [
  "arc-swap",
  "async-trait",
+ "chrono",
  "daygle-dns-core",
  "idna",
  "ipnet",
  "regex",
  "reqwest",
  "serde",
+ "serde_json",
  "tokio",
  "tracing",
 ]

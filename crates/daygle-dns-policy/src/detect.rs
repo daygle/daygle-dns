@@ -93,6 +93,243 @@ pub fn is_dga(qname: &str) -> bool {
         .is_some_and(|score| score < DGA_THRESHOLD_CENTI)
 }
 
+/// Brands phishing most often imitates, by registered label, and whether a
+/// one-letter typo of the label counts (off for brands one typo away from
+/// an everyday word or another real site: `icloud` and `pcloud`, `binance`
+/// and `finance`).
+const BRANDS: &[(&str, bool)] = &[
+    ("paypal", true),
+    ("apple", true),
+    ("icloud", false),
+    ("microsoft", true),
+    ("office365", true),
+    ("outlook", true),
+    ("hotmail", true),
+    ("onedrive", true),
+    ("sharepoint", true),
+    ("google", true),
+    ("gmail", true),
+    ("youtube", true),
+    ("amazon", true),
+    ("netflix", true),
+    ("facebook", true),
+    ("instagram", true),
+    ("whatsapp", true),
+    ("messenger", true),
+    ("twitter", true),
+    ("linkedin", true),
+    ("tiktok", false),
+    ("snapchat", true),
+    ("discord", true),
+    ("steampowered", true),
+    ("steamcommunity", true),
+    ("roblox", true),
+    ("epicgames", true),
+    ("playstation", true),
+    ("xbox", true),
+    ("nintendo", true),
+    ("spotify", true),
+    ("dropbox", true),
+    ("adobe", true),
+    ("docusign", true),
+    ("github", true),
+    ("yahoo", true),
+    ("ebay", true),
+    ("alibaba", true),
+    ("aliexpress", true),
+    ("walmart", false),
+    ("bestbuy", false),
+    ("costco", false),
+    ("etsy", true),
+    ("shopify", false),
+    ("airbnb", true),
+    ("expedia", false),
+    ("coinbase", true),
+    ("binance", false),
+    ("blockchain", true),
+    ("metamask", true),
+    ("trezor", true),
+    ("opensea", true),
+    ("bitfinex", true),
+    ("robinhood", true),
+    ("chase", true),
+    ("wellsfargo", true),
+    ("bankofamerica", true),
+    ("citibank", true),
+    ("capitalone", true),
+    ("americanexpress", true),
+    ("amex", true),
+    ("hsbc", true),
+    ("barclays", true),
+    ("santander", true),
+    ("lloydsbank", true),
+    ("natwest", true),
+    ("halifax", true),
+    ("revolut", true),
+    ("monzo", true),
+    ("westpac", true),
+    ("commbank", true),
+    ("scotiabank", true),
+    ("usaa", true),
+    ("navyfederal", true),
+    ("fedex", true),
+    ("dhl", true),
+    ("usps", true),
+    ("royalmail", true),
+    ("auspost", false),
+    ("canadapost", true),
+    ("hmrc", true),
+    ("rakuten", true),
+    ("mercari", false),
+    ("naver", true),
+    ("kakao", true),
+    ("baidu", true),
+    ("yandex", false),
+    ("mailru", true),
+    ("sberbank", true),
+    ("tinkoff", true),
+    ("disneyplus", true),
+    ("hulu", true),
+    ("primevideo", true),
+    ("verizon", true),
+    ("vodafone", true),
+    ("xfinity", true),
+    ("mcafee", true),
+    ("kaspersky", true),
+    ("quickbooks", true),
+    ("turbotax", true),
+    ("godaddy", true),
+    ("namecheap", true),
+    ("cloudflare", true),
+    ("wordpress", true),
+    ("salesforce", true),
+    ("webex", true),
+    ("skype", true),
+];
+
+/// Shortest brand label a one-letter typo is checked against: shorter
+/// labels are one typo away from too many real names.
+const TYPO_MIN_LEN: usize = 6;
+
+/// Shortest brand label checked for look-alike characters (`app1e`).
+const LOOKALIKE_MIN_LEN: usize = 4;
+
+/// Words phishing pairs a brand with in a hyphenated name
+/// (`paypal-login.com`, `secure-apple-id.net`).
+const PHISHING_WORDS: &[&str] = &[
+    "login",
+    "signin",
+    "secure",
+    "security",
+    "account",
+    "accounts",
+    "verify",
+    "verification",
+    "support",
+    "update",
+    "billing",
+    "wallet",
+    "auth",
+    "help",
+    "service",
+    "recovery",
+    "unlock",
+    "confirm",
+    "id",
+    "pay",
+    "payment",
+    "online",
+    "bank",
+    "banking",
+    "customer",
+    "alert",
+    "notice",
+];
+
+/// Brands' own registered domains that would otherwise match.
+const BRAND_DOMAINS: &[&str] = &[
+    "halifax-online.co.uk",
+    "rakuten-bank.co.jp",
+    "yahoo-help.jp",
+];
+
+/// Character sequences that pass for others in a domain name.
+const LOOKALIKE_CHARS: &[(&str, &str)] = &[
+    ("rn", "m"),
+    ("vv", "w"),
+    ("0", "o"),
+    ("1", "l"),
+    ("3", "e"),
+    ("5", "s"),
+    ("4", "a"),
+];
+
+/// Whether `a` and `b` differ by exactly one edit: a letter added, removed,
+/// changed, or two neighbours swapped.
+fn one_edit_apart(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    if a == b || a.len().abs_diff(b.len()) > 1 {
+        return false;
+    }
+    if a.len() == b.len() {
+        let diff: Vec<usize> = (0..a.len()).filter(|&i| a[i] != b[i]).collect();
+        return match diff.as_slice() {
+            [_] => true,
+            [i, j] => *j == i + 1 && a[*i] == b[*j] && a[*j] == b[*i],
+            _ => false,
+        };
+    }
+    let (short, long) = if a.len() < b.len() { (a, b) } else { (b, a) };
+    let i = short.iter().zip(long).take_while(|(x, y)| x == y).count();
+    short[i..] == long[i + 1..]
+}
+
+/// Why `qname` looks like it imitates a well-known brand, if it does: a
+/// one-letter typo of the brand (`paypa.com`, `gooogle.com`), look-alike
+/// characters (`app1e.com`, `rnicrosoft.com`), or the brand hyphenated with
+/// a word phishing uses (`paypal-login.com`). The brands' own names, under
+/// any TLD, are never matched.
+pub fn typosquat(qname: &str) -> Option<String> {
+    let domain = registered_domain(qname)?;
+    let label = registered_label(qname)?;
+    if BRAND_DOMAINS.contains(&domain) || label.starts_with("xn--") {
+        return None;
+    }
+    let is_brand = |l: &str| BRANDS.iter().any(|(b, _)| *b == l);
+    if is_brand(label) || is_brand(&label.replace('-', "")) {
+        return None;
+    }
+    let mut plain = label.to_string();
+    for (lookalike, real) in LOOKALIKE_CHARS {
+        plain = plain.replace(lookalike, real);
+    }
+    if plain != label && plain.len() >= LOOKALIKE_MIN_LEN && is_brand(&plain) {
+        return Some(format!(
+            "'{label}' imitates '{plain}' with look-alike characters"
+        ));
+    }
+    if let Some((brand, _)) = BRANDS
+        .iter()
+        .find(|(b, typo)| *typo && b.len() >= TYPO_MIN_LEN && one_edit_apart(label, b))
+    {
+        return Some(format!("'{label}' is one typo away from '{brand}'"));
+    }
+    let words: Vec<&str> = label.split('-').collect();
+    if words.len() > 1 {
+        if let Some(brand) = words
+            .iter()
+            .find(|w| w.len() >= LOOKALIKE_MIN_LEN && is_brand(w))
+        {
+            if words.iter().any(|w| PHISHING_WORDS.contains(w)) {
+                return Some(format!(
+                    "'{label}' pairs '{brand}' with a word phishing uses"
+                ));
+            }
+        }
+    }
+    None
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Script {
     Latin,
@@ -224,6 +461,49 @@ mod tests {
                 registered_label(name).and_then(dga_score)
             );
         }
+    }
+
+    #[test]
+    fn typosquats_are_flagged() {
+        for name in [
+            "paypa1.com",
+            "www.rnicrosoft.com",
+            "gooogle.com",
+            "faceboook.net",
+            "linkdin.com",
+            "amazom.co.uk",
+            "paypal-login.com",
+            "secure-apple-id.net",
+            "app1e.com",
+        ] {
+            assert!(typosquat(name).is_some(), "{name}");
+        }
+    }
+
+    #[test]
+    fn real_and_unrelated_names_are_not_typosquats() {
+        for name in [
+            "paypal.com",
+            "www.google.co.uk",
+            "google.de",
+            "t-mobile.com",
+            "wal-mart.com",
+            "halifax-online.co.uk",
+            "pcloud.com",
+            "finance.ua",
+            "tiktak.si",
+            "applesauce.com",
+            "goals.com",
+            "ample.com",
+            "apple-pie-recipes.com",
+            "example.com",
+            "dhl.de",
+        ] {
+            assert_eq!(typosquat(name), None, "{name}");
+        }
+        assert!(one_edit_apart("google", "gogle"));
+        assert!(one_edit_apart("google", "goolge"));
+        assert!(!one_edit_apart("google", "goggle1"));
     }
 
     #[test]

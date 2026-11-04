@@ -70,7 +70,9 @@ Daygle DNS combines, in a single process:
   one tick blocks free hosting subdomains, dynamic DNS hostnames, tunneling
   endpoints, data drop services, IPFS gateways, cryptocurrency mining or
   high-risk TLDs, and detectors block IDN homographs (`pаypal.com` with a
-  Cyrillic 'а'), malware's generated (DGA) names and parked domains; any
+  Cyrillic 'а'), malware's generated (DGA) names, parked domains,
+  typosquats of well-known brands (`paypa1.com`, `paypal-login.com`) and
+  domains registered in the last 30 days (looked up over RDAP); any
   TLD can be blocked by name; answers that give a
   public name a local network address (DNS rebinding) or carry an
   oversized payload (NULL records, large TXT data) are blocked.

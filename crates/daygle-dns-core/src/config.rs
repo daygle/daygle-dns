@@ -4883,6 +4883,9 @@ pub struct PolicySettings {
     pub safe_search: bool,
     /// Force YouTube Restricted Mode for every client.
     pub youtube_restricted: bool,
+    /// The RDAP bootstrap file (RFC 9224) the Newly Registered Domains
+    /// category finds each TLD's RDAP server in. Read at startup.
+    pub rdap_bootstrap: String,
 }
 
 impl Default for PolicySettings {
@@ -4901,6 +4904,7 @@ impl Default for PolicySettings {
             cname_inspection: true,
             safe_search: false,
             youtube_restricted: false,
+            rdap_bootstrap: "https://data.iana.org/rdap/dns.json".to_string(),
         }
     }
 }

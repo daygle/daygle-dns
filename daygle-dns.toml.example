@@ -426,6 +426,10 @@ filter_aaaa_except = []
 # format = "adblock"
 # refresh_secs = 43200
 
+# The RDAP bootstrap file (RFC 9224) the Newly Registered Domains security
+# category finds each TLD's RDAP server in. Read at startup.
+# rdap_bootstrap = "https://data.iana.org/rdap/dns.json"
+
 # Entries may name a [[networks]] network as well as an address.
 denied_networks = []
 allowed_networks = []

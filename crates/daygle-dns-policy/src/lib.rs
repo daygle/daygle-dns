@@ -24,6 +24,7 @@ mod dga_model;
 mod engine;
 pub mod identity;
 mod plugin;
+pub mod rdap;
 mod rule;
 pub mod safe_search;
 pub mod security;

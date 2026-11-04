@@ -40,6 +40,20 @@ pub enum Detector {
     /// Domains whose name servers belong to a parking service; decided once
     /// the name servers are known, after resolution.
     Parked,
+    /// Names imitating a well-known brand with a typo, look-alike
+    /// characters or a phishing word ([`crate::detect::typosquat`]).
+    Typosquat,
+    /// Domains registered less than 30 days ago; decided once the
+    /// registration date is known ([`crate::rdap`]), after resolution.
+    NewlyRegistered,
+}
+
+impl Detector {
+    /// Whether the dispatcher decides it after resolution, from data it
+    /// looks up in the background, rather than the engine from the name.
+    pub fn after_resolution(self) -> bool {
+        matches!(self, Self::Parked | Self::NewlyRegistered)
+    }
 }
 
 /// Every known security category.
@@ -428,6 +442,28 @@ pub const SECURITY_CATEGORIES: &[SecurityCategory] = &[
             ads and redirects instead of a site. The name servers are looked up the first time \
             a domain is seen, so that first visit is not blocked.",
         detector: Some(Detector::Parked),
+        entries: &[],
+    },
+    SecurityCategory {
+        id: "typosquatting",
+        name: "Typosquatting",
+        description:
+            "Names that imitate a brand phishing often targets (PayPal, Apple, Microsoft, banks, \
+            delivery companies, ...) with a typo (gooogle.com), look-alike characters \
+            (paypa1.com) or a phishing word (paypal-login.com). The brands' own sites are \
+            not affected.",
+        detector: Some(Detector::Typosquat),
+        entries: &[],
+    },
+    SecurityCategory {
+        id: "newly_registered",
+        name: "Newly Registered Domains",
+        description:
+            "Domains registered less than 30 days ago, which threat actors favour for new \
+            campaigns. Registration dates are looked up over RDAP the first time a domain is \
+            seen (so that first visit is not blocked), which tells the domain's registry the \
+            name, though not who asked; TLDs without RDAP are never blocked.",
+        detector: Some(Detector::NewlyRegistered),
         entries: &[],
     },
 ];
