@@ -100,6 +100,13 @@ pub fn validate_name(name: &str, allow_relative: bool) -> Result<()> {
 /// `*` anywhere else, or as part of a label (`*foo`), is still rejected.
 pub fn validate_owner_name(name: &str) -> Result<()> {
     let trimmed = name.trim();
+    // Checked here because `validate_name` trims, which would let
+    // `*. example.com` (a phone keyboard's space after the dot) through.
+    if trimmed.contains(char::is_whitespace) {
+        return Err(DaygleError::InvalidRecord(format!(
+            "name '{trimmed}' contains a space"
+        )));
+    }
     match trimmed.strip_prefix("*.") {
         Some(rest) => validate_name(rest, false),
         None => validate_name(trimmed, false),
@@ -129,5 +136,8 @@ mod tests {
         assert!(validate_owner_name("*foo.example.com").is_err());
         assert!(validate_owner_name("*.*.example.com").is_err());
         assert!(validate_owner_name("*").is_err());
+        assert!(validate_owner_name("*. example.com").is_err());
+        assert!(validate_owner_name("* .example.com").is_err());
+        assert!(validate_owner_name(" *.example.com ").is_ok());
     }
 }

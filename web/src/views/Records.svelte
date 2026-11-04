@@ -239,7 +239,8 @@
     saving = true;
     try {
       const body = {
-        name: edit.name,
+        // Phone keyboards put a space after a dot; a name never has one.
+        name: edit.name.replace(/\s+/g, ''),
         rtype: edit.rtype,
         content: edit.content,
         ttl: Number(edit.ttl) || defaultTtl,
