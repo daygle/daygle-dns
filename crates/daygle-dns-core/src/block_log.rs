@@ -13,8 +13,9 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BlockReason {
     /// What blocked it: `blocklist`, `blocklist_source`, `group`,
-    /// `service`, `group_blocklist`, `ai`, `rpz`, `cname`, `denied_network`,
-    /// `listener`, `aaaa_filter`, `client_rule` or `plugin`.
+    /// `service`, `security`, `tld`, `group_blocklist`, `ai`, `rpz`, `cname`,
+    /// `local_address`, `payload`, `denied_network`, `listener`,
+    /// `aaaa_filter`, `client_rule` or `plugin`.
     pub source: String,
     /// The filtering group, when a group blocked it.
     #[serde(default, skip_serializing_if = "Option::is_none")]

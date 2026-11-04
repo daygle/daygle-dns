@@ -13,7 +13,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use daygle_dns_core::config::{IpVersions, RecursiveSettings, REBINDING_DENY_NETWORKS};
+use daygle_dns_core::config::{IpVersions, RecursiveSettings};
 use daygle_dns_core::error::{DaygleError, Result};
 use daygle_dns_core::Metrics;
 use hickory_proto::op::{Query, ResponseCode};
@@ -305,12 +305,8 @@ pub fn build(
         },
         ..RecursorOptions::default()
     };
-    if settings.rebinding_protection {
-        options.deny_answers = REBINDING_DENY_NETWORKS
-            .iter()
-            .filter_map(|n| n.parse().ok())
-            .collect();
-    }
+    // Rebinding protection is applied by the dispatcher to every answer
+    // (forwarded or recursive), so blocks are logged with their reason.
     let mut connections = UpstreamConnections {
         local_root,
         metrics: Some(metrics),

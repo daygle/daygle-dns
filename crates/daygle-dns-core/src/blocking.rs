@@ -92,6 +92,14 @@ pub struct BlockingGroup {
     /// every name the group blocks.
     #[serde(default)]
     pub blocked_tlds: Vec<String>,
+    /// Block answers that carry private, loopback or link-local addresses
+    /// for public names (DNS rebinding protection) for these clients.
+    #[serde(default)]
+    pub block_local_addresses: bool,
+    /// Block answers that carry unusually large payloads (NULL records, or
+    /// more TXT data than everyday use needs) for these clients.
+    #[serde(default)]
+    pub limit_payloads: bool,
     /// Ordering position (lower groups are evaluated first).
     pub position: i64,
     /// When the group was last created or edited through the console or API,
@@ -146,6 +154,10 @@ pub struct BlockingGroupInput {
     pub blocked_security: Vec<String>,
     #[serde(default)]
     pub blocked_tlds: Vec<String>,
+    #[serde(default)]
+    pub block_local_addresses: bool,
+    #[serde(default)]
+    pub limit_payloads: bool,
 }
 
 impl BlockingGroup {
@@ -170,6 +182,8 @@ impl BlockingGroup {
             blocked_categories: self.blocked_categories.clone(),
             blocked_security: self.blocked_security.clone(),
             blocked_tlds: self.blocked_tlds.clone(),
+            block_local_addresses: self.block_local_addresses,
+            limit_payloads: self.limit_payloads,
         }
     }
 }

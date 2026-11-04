@@ -14,6 +14,7 @@ mod net;
 pub mod proxy_protocol;
 pub mod query_db_log;
 pub mod reload;
+mod response_filter;
 pub mod rrl;
 pub mod syslog;
 pub mod tls_diag;

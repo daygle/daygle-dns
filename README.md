@@ -66,6 +66,12 @@ Daygle DNS combines, in a single process:
 - **Blocked services**: block TikTok, YouTube, Roblox, Discord, ChatGPT and
   30-odd other apps for a filtering group with one tick each, or block a
   whole AI content category (gambling, adult, ads, ...) for that group.
+- **Security protections** for a filtering group, as NextDNS offers them:
+  one tick blocks free hosting subdomains, dynamic DNS hostnames, tunneling
+  endpoints, data drop services, IPFS gateways, cryptocurrency mining or
+  high-risk TLDs; any TLD can be blocked by name; answers that give a
+  public name a local network address (DNS rebinding) or carry an
+  oversized payload (NULL records, large TXT data) are blocked.
 - **Per-client rules** on the console's Clients page: **filtering groups**
   (extra allow/block rules, blocklists and AI auto-blocking for a set of
   clients) and **resolution policies** (forward some clients to their own

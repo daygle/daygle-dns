@@ -49,6 +49,11 @@ pub mod source {
     pub const SECURITY: &str = "security";
     /// A top-level domain a filtering group blocks.
     pub const TLD: &str = "tld";
+    /// The answer carried a local network address for a public name (DNS
+    /// rebinding protection).
+    pub const LOCAL_ADDRESS: &str = "local_address";
+    /// The answer carried more data than everyday DNS use needs.
+    pub const PAYLOAD: &str = "payload";
     /// A blocklist source selected by a filtering group.
     pub const GROUP_BLOCKLIST: &str = "group_blocklist";
     /// A response policy zone.

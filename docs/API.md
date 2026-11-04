@@ -345,7 +345,9 @@ everyone or to the DoT listener; `matched` is its name), `group` (a filtering gr
 block entries or patterns; `matched` is the entry), `service` (a blocked
 service; `matched` is its name), `security` (a group's security category;
 `matched` is its name), `tld` (a top-level domain a group blocks; `matched`
-is the `*.tld` entry), `group_blocklist` (a source from Blocklists
+is the `*.tld` entry), `local_address` (the answer gave a public name a
+local network address; `matched` is the address), `payload` (the answer
+was over a group's DNS payload limit; `matched` says how), `group_blocklist` (a source from Blocklists
 selected by a group), `ai` (`matched` is the category), `rpz` (`matched` is
 the zone), `cname` (the answer led through a CNAME to a blocked name;
 `matched` is that name), `denied_network`, `listener` (the client may not
@@ -511,11 +513,16 @@ may use recursion - `"private_networks"` (default: loopback, RFC 1918, CGNAT,
 link-local, IPv6 ULA, and the global IPv6 networks this host has addresses
 in, re-read every minute from `/proc/net/if_inet6`), `"allow"`, `"custom"` (the CIDRs or IPs in
 `recursion_networks`) or `"deny"`; refused clients get `REFUSED`, while the
-server's own zones are answered for everyone. In recursive mode,
-`case_randomization` enables 0x20 query-case randomization and
-`rebinding_protection` drops private, loopback and unspecified addresses
-from public answers, including IPv4-mapped IPv6 forms such as
-`::ffff:192.168.1.1`; `root_hints` overrides the built-in root server addresses.
+server's own zones are answered for everyone. `rebinding_protection`
+(both modes) blocks answers that give a public name a private, loopback,
+link-local or unspecified address, including IPv4-mapped IPv6 forms such as
+`::ffff:192.168.1.1`, with an empty `NOERROR` answer and EDE 15; local
+names (single labels and names under `home.arpa`, `local`, `lan`,
+`internal`, `localdomain`, `localhost`, `home`, `corp`, `intranet`,
+`private` and `fritz.box`), conditional forwarders, stub zones and
+allowlisted names are not affected. In recursive mode, `case_randomization`
+enables 0x20 query-case randomization; `root_hints` overrides the built-in
+root server addresses.
 
 `recursive.local_root` (`{ "enabled": true, "sources": [] }`) keeps a local
 copy of the root zone (RFC 8806; the console's **Secondary ROOT Zone**). It is
@@ -1588,6 +1595,16 @@ unknown id). `GET /api/policy/security` returns the catalog:
 (e.g. `["zip", "mov"]`; `.ZIP`, `*.zip` and Unicode TLDs are accepted and
 stored as lowercase punycode; `400` for anything that is not a single
 label). The group's `allow` list wins over both.
+`block_local_addresses` (bool) turns rebinding protection on for the
+group's clients (see `recursive.rebinding_protection`, which applies to
+everyone), and `limit_payloads` (bool) blocks answers carrying a NULL
+record, more than 1024 bytes of TXT data in total, or more than 255 bytes
+in one record of a type the server does not know - the ways DNS delivers
+commands and files to malware. Both block resolved answers only (not your
+own zones, conditional forwarders or stub zones) with an empty `NOERROR`
+answer and EDE 15, and the first group covering the client that turns one
+on is named in the block reason; a group whose `allow` list lets the name
+through stops later groups from filtering it.
 `blocked_categories` lists AI content categories (lowercase labels, e.g.
 `["gambling", "ads"]`; the model's own labels as reported by
 `GET /api/ai/status`'s `backend_categories`) whose domains the group

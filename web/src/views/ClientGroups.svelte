@@ -113,6 +113,8 @@
           blocked_categories: [...(group.blocked_categories || [])],
           blocked_security: [...(group.blocked_security || [])],
           blocked_tlds: (group.blocked_tlds || []).map((t) => '.' + t).join('\n'),
+          block_local_addresses: !!group.block_local_addresses,
+          limit_payloads: !!group.limit_payloads,
         }
       : {
           id: null,
@@ -135,6 +137,8 @@
           blocked_categories: [],
           blocked_security: [],
           blocked_tlds: '',
+          block_local_addresses: false,
+          limit_payloads: false,
         };
   }
 
@@ -227,6 +231,8 @@
       blocked_categories: edit.blocked_categories,
       blocked_security: edit.blocked_security,
       blocked_tlds: parseList(edit.blocked_tlds),
+      block_local_addresses: edit.block_local_addresses,
+      limit_payloads: edit.limit_payloads,
     };
     saving = true;
     error = null;
@@ -334,6 +340,8 @@
                 {#if g.ai_mode === 'enforce'}<span class="pill ok" title="AI threats auto-block these clients even if the global mode records only">AI Enforce</span>{/if}
                 {#if g.safe_search}<span class="pill" title="Google, Bing and DuckDuckGo always use Safe Search for these clients">Safe Search</span>{/if}
                 {#if g.youtube_restricted}<span class="pill" title="YouTube always uses Restricted Mode for these clients">YouTube Restricted</span>{/if}
+                {#if g.block_local_addresses}<span class="pill" title="Answers with local network addresses for public names are blocked">Rebinding Protection</span>{/if}
+                {#if g.limit_payloads}<span class="pill" title="Answers with oversized DNS payloads are blocked">Payload Limit</span>{/if}
                 {#if g.schedule?.length}<span class="pill" title={'Applies only: ' + g.schedule.map(describeWindow).join('; ')}>Scheduled</span>{/if}
               </td>
               <td class="muted">{g.clients.length ? g.clients.map((c) => (deviceName(c) ? `${deviceName(c)} (${c})` : c.replace(/^account:\s*/i, 'Account: '))).join(', ') : 'All Clients'}</td>
@@ -516,6 +524,25 @@
             </span>
           </label>
         {/each}
+        <label class="security">
+          <input type="checkbox" bind:checked={edit.block_local_addresses} />
+          <span>
+            <strong>Local Network Addresses</strong>
+            <span class="muted">Block answers that give a public name a private, loopback or link-local
+              address, which a web page could use to reach devices on your network (DNS rebinding).
+              Local names such as nas.lan or printer.home.arpa, conditional forwarders and stub zones
+              are not affected.</span>
+          </span>
+        </label>
+        <label class="security">
+          <input type="checkbox" bind:checked={edit.limit_payloads} />
+          <span>
+            <strong>DNS Payload Delivery</strong>
+            <span class="muted">Block answers carrying more data than everyday use needs (NULL records,
+              or over 1 KB of TXT data), which malware uses to receive hidden commands and files over
+              DNS. Websites and email are not affected.</span>
+          </span>
+        </label>
       </div>
       <label>
         Blocked TLDs

@@ -91,6 +91,10 @@ struct CompiledGroup {
     security: Vec<(&'static str, Blocklist)>,
     /// Blocked top-level domains (`*.tld` entries).
     tlds: Blocklist,
+    /// Block answers with local network addresses for public names.
+    block_local_addresses: bool,
+    /// Block answers with oversized payloads.
+    limit_payloads: bool,
     /// AI content categories this group blocks (lower-cased labels).
     blocked_categories: Vec<String>,
 }
@@ -266,6 +270,8 @@ impl AdvancedBlocking {
                         .map(|t| format!("*.{t}"))
                         .collect(),
                 ),
+                block_local_addresses: g.block_local_addresses,
+                limit_payloads: g.limit_payloads,
                 safe_search: g.safe_search,
                 youtube_restricted: g.youtube_restricted,
                 name: g.name.clone(),
@@ -369,6 +375,35 @@ impl AdvancedBlocking {
             .map_or((false, false, None), |g| {
                 (g.safe_search, g.youtube_restricted, Some(g.name.as_str()))
             })
+    }
+
+    /// The groups whose response filters apply to an answer for `qname`
+    /// sent to `client` on `listener`: like [`Self::evaluate`], groups are
+    /// taken in order and one whose allow rules let `qname` through stops
+    /// the rest, so an allowed name is never filtered by a later group.
+    pub fn response_filters(
+        &self,
+        client: IpAddr,
+        qname: &str,
+        listener: Option<&str>,
+    ) -> ResponseFilters<'_> {
+        let mut filters = ResponseFilters::default();
+        let mut now = self.clock();
+        for group in &self.groups {
+            if !group.applies(client, listener, &mut now) {
+                continue;
+            }
+            if group.allows(qname) {
+                break;
+            }
+            if group.block_local_addresses && filters.local_addresses.is_none() {
+                filters.local_addresses = Some(group.name.as_str());
+            }
+            if group.limit_payloads && filters.payloads.is_none() {
+                filters.payloads = Some(group.name.as_str());
+            }
+        }
+        filters
     }
 
     /// Evaluate `qname` (already normalized: lowercase, no trailing dot) for
@@ -588,6 +623,16 @@ impl AdvancedBlocking {
     }
 }
 
+/// The response filters a query's groups turn on: each names the first
+/// group that asks for it, or `None` when no group does.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ResponseFilters<'a> {
+    /// Block answers with local network addresses for public names.
+    pub local_addresses: Option<&'a str>,
+    /// Block answers with oversized payloads.
+    pub payloads: Option<&'a str>,
+}
+
 /// The TLD a `*.tld` entry of a group's TLD list names.
 fn tld_of(entry: &str) -> &str {
     entry.strip_prefix("*.").unwrap_or(entry)
@@ -691,6 +736,8 @@ mod tests {
             blocked_categories: vec![],
             blocked_security: vec![],
             blocked_tlds: vec![],
+            block_local_addresses: false,
+            limit_payloads: false,
             position: 0,
             last_modified_at: None,
         }
@@ -854,6 +901,31 @@ mod tests {
         assert!(checks
             .iter()
             .any(|c| c.source == source::TLD && c.result == "block"));
+    }
+
+    #[test]
+    fn response_filters_follow_group_order_and_allow_rules() {
+        let mut kids = group("kids");
+        kids.clients = vec!["192.168.50.0/24".to_string()];
+        kids.allow = vec!["plex.direct".to_string(), "*.plex.direct".to_string()];
+        kids.limit_payloads = true;
+        let mut everyone = group("everyone");
+        everyone.block_local_addresses = true;
+        everyone.limit_payloads = true;
+        let ab = AdvancedBlocking::build(&[kids, everyone], Arc::default());
+        let filters = ab.response_filters(ip("192.168.50.7"), "example.com", None);
+        assert_eq!(filters.payloads, Some("kids"));
+        assert_eq!(filters.local_addresses, Some("everyone"));
+        // An allowed name stops later groups too.
+        assert_eq!(
+            ab.response_filters(ip("192.168.50.7"), "x.plex.direct", None),
+            ResponseFilters::default()
+        );
+        assert_eq!(
+            ab.response_filters(ip("10.0.0.1"), "x.plex.direct", None)
+                .local_addresses,
+            Some("everyone")
+        );
     }
 
     #[test]

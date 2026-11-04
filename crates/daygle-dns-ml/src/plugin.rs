@@ -247,6 +247,8 @@ mod tests {
             blocked_categories: categories.iter().map(|c| c.to_string()).collect(),
             blocked_security: vec![],
             blocked_tlds: vec![],
+            block_local_addresses: false,
+            limit_payloads: false,
             position: 0,
             last_modified_at: None,
         };

@@ -188,7 +188,9 @@ CREATE TABLE IF NOT EXISTS blocking_groups (
     blocked_services TEXT NOT NULL DEFAULT '[]',
     blocked_categories TEXT NOT NULL DEFAULT '[]',
     blocked_security TEXT NOT NULL DEFAULT '[]',
-    blocked_tlds TEXT NOT NULL DEFAULT '[]'
+    blocked_tlds TEXT NOT NULL DEFAULT '[]',
+    block_local_addresses INTEGER NOT NULL DEFAULT 0,
+    limit_payloads INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS console_users (
@@ -726,7 +728,8 @@ impl ZoneStore {
             "SELECT id, name, enabled, clients, allow, block, allow_regex, block_regex,
                     response, position, blocklists, last_modified_at, ai_mode,
                     safe_search, youtube_restricted, schedule, blocked_services,
-                    blocked_categories, blocked_security, blocked_tlds
+                    blocked_categories, blocked_security, blocked_tlds,
+                    block_local_addresses, limit_payloads
              FROM blocking_groups ORDER BY position, name",
         )?;
         let rows = stmt.query_map([], row_to_blocking_group)?;
@@ -741,7 +744,8 @@ impl ZoneStore {
                 "SELECT id, name, enabled, clients, allow, block, allow_regex, block_regex,
                         response, position, blocklists, last_modified_at, ai_mode,
                     safe_search, youtube_restricted, schedule, blocked_services,
-                    blocked_categories, blocked_security, blocked_tlds
+                    blocked_categories, blocked_security, blocked_tlds,
+                    block_local_addresses, limit_payloads
                  FROM blocking_groups WHERE id = ?1",
                 [id],
                 row_to_blocking_group,
@@ -794,7 +798,8 @@ impl ZoneStore {
                     response = ?9, blocklists = ?10, last_modified_at = ?11,
                     ai_blocking = ?12, safe_search = ?13, youtube_restricted = ?14,
                     schedule = ?15, blocked_services = ?16, blocked_categories = ?17,
-                    ai_mode = ?18, blocked_security = ?19, blocked_tlds = ?20
+                    ai_mode = ?18, blocked_security = ?19, blocked_tlds = ?20,
+                    block_local_addresses = ?21, limit_payloads = ?22
                  WHERE id = ?1",
                 params![
                     id,
@@ -820,6 +825,8 @@ impl ZoneStore {
                     ai_mode_name(input.ai_mode),
                     blocked_security,
                     blocked_tlds,
+                    input.block_local_addresses as i64,
+                    input.limit_payloads as i64,
                 ],
             )?;
             drop(conn);
@@ -837,17 +844,18 @@ impl ZoneStore {
                 (id, name, enabled, clients, allow, block, allow_regex, block_regex,
                  response, blocklists, position, last_modified_at, ai_blocking,
                  safe_search, youtube_restricted, schedule, blocked_services,
-                 blocked_categories, ai_mode, blocked_security, blocked_tlds)
+                 blocked_categories, ai_mode, blocked_security, blocked_tlds,
+                 block_local_addresses, limit_payloads)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
                  (SELECT COALESCE(MAX(position), -1) + 1 FROM blocking_groups), ?11, ?12,
-                 ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)
+                 ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)
              ON CONFLICT(name) DO UPDATE SET
                 enabled = ?3, clients = ?4, allow = ?5, block = ?6,
                 allow_regex = ?7, block_regex = ?8, response = ?9, blocklists = ?10,
                 last_modified_at = ?11, ai_blocking = ?12, safe_search = ?13,
                 youtube_restricted = ?14, schedule = ?15, blocked_services = ?16,
                 blocked_categories = ?17, ai_mode = ?18, blocked_security = ?19,
-                blocked_tlds = ?20",
+                blocked_tlds = ?20, block_local_addresses = ?21, limit_payloads = ?22",
             params![
                 id,
                 name,
@@ -869,6 +877,8 @@ impl ZoneStore {
                 ai_mode_name(input.ai_mode),
                 blocked_security,
                 blocked_tlds,
+                input.block_local_addresses as i64,
+                input.limit_payloads as i64,
             ],
         )?;
         drop(conn);
@@ -2122,6 +2132,8 @@ fn row_to_blocking_group(row: &rusqlite::Row<'_>) -> rusqlite::Result<BlockingGr
         blocked_categories: decode_list(row, 17)?,
         blocked_security: decode_list(row, 18)?,
         blocked_tlds: decode_list(row, 19)?,
+        block_local_addresses: row.get::<_, i64>(20)? != 0,
+        limit_payloads: row.get::<_, i64>(21)? != 0,
     })
 }
 
@@ -4741,7 +4753,8 @@ fn migrate_blocking_group_lists(conn: &Connection) -> Result<()> {
 /// created before it existed (existing rows stay `NULL` until first edited),
 /// `ai_blocking` (on, as before it existed), the Safe Search switches
 /// (off), `schedule` (none: always active), `blocked_services`,
-/// `blocked_security` and `blocked_tlds` (none) and
+/// `blocked_security` and `blocked_tlds` (none), the response filters
+/// `block_local_addresses` and `limit_payloads` (off) and
 /// `ai_mode` (the per-group enforcement override, migrated from
 /// `ai_blocking`: off becomes record-only, on keeps following `ai.mode`).
 fn migrate_blocking_group_timestamps(conn: &Connection) -> Result<()> {
@@ -4756,6 +4769,8 @@ fn migrate_blocking_group_timestamps(conn: &Connection) -> Result<()> {
         ("ai_mode", "TEXT"),
         ("blocked_security", "TEXT NOT NULL DEFAULT '[]'"),
         ("blocked_tlds", "TEXT NOT NULL DEFAULT '[]'"),
+        ("block_local_addresses", "INTEGER NOT NULL DEFAULT 0"),
+        ("limit_payloads", "INTEGER NOT NULL DEFAULT 0"),
     ] {
         let has: bool = conn.query_row(
             "SELECT EXISTS(
@@ -5335,6 +5350,8 @@ mod tests {
                 blocked_categories: vec![],
                 blocked_security: vec![],
                 blocked_tlds: vec![],
+                block_local_addresses: false,
+                limit_payloads: false,
                 response: BlockResponse::Redirect("0.0.0.0".parse().unwrap()),
             })
             .unwrap();
@@ -5371,6 +5388,8 @@ mod tests {
                 blocked_categories: vec![],
                 blocked_security: vec![],
                 blocked_tlds: vec![],
+                block_local_addresses: false,
+                limit_payloads: false,
                 response: BlockResponse::NxDomain,
             })
             .unwrap();
@@ -5422,6 +5441,8 @@ mod tests {
                 blocked_categories: vec![],
                 blocked_security: vec![],
                 blocked_tlds: vec![],
+                block_local_addresses: false,
+                limit_payloads: false,
                 response: Default::default(),
             })
             .unwrap();
@@ -5465,6 +5486,8 @@ mod tests {
             blocked_categories: vec![],
             blocked_security: vec![],
             blocked_tlds: vec![],
+            block_local_addresses: false,
+            limit_payloads: false,
             response: Default::default(),
         };
         let a = s.upsert_blocking_group(&input(None, "A")).unwrap();
