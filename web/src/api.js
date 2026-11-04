@@ -281,6 +281,7 @@ export const api = {
   deleteAccount: (id) => request('DELETE', `/accounts/${encodeURIComponent(id)}`),
   deleteDhcpLease: (address) => request('DELETE', `/dhcp/leases/${encodeURIComponent(address)}`),
   blockableServices: () => request('GET', '/policy/services'),
+  securityCategories: () => request('GET', '/policy/security'),
   report: (hours, client) =>
     request('GET', `/reports?hours=${hours}${client ? `&client=${encodeURIComponent(client)}` : ''}`),
   sendReport: (reports) => request('POST', '/reports/send', { reports }),

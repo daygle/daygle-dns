@@ -676,6 +676,7 @@ pub fn router(state: AppState) -> Router {
         .route("/reports", get(handlers::report))
         .route("/reports/send", post(handlers::send_report))
         .route("/policy/services", get(handlers::blockable_services))
+        .route("/policy/security", get(handlers::security_categories))
         .route(
             "/rpz",
             get(handlers::rpz_status).post(handlers::rpz_refresh),

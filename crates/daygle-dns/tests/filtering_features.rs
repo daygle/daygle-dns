@@ -278,6 +278,92 @@ async fn groups_block_services() {
     shutdown(server).await;
 }
 
+/// A group blocks security categories and TLDs; unknown categories and
+/// anything that is not a TLD are refused, and TLDs are stored normalized.
+#[tokio::test]
+async fn groups_block_security_categories_and_tlds() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = search_server(&dir).await;
+    let udp = server.udp_addr.unwrap();
+    let base = format!("http://{}/api", server.api_addr);
+    let client = reqwest::Client::new();
+
+    let catalog: serde_json::Value = client
+        .get(format!("{base}/policy/security"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(catalog["categories"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|c| c["id"] == "dynamic_dns"));
+
+    for bad in [
+        serde_json::json!({ "name": "secure", "blocked_security": ["nope"] }),
+        serde_json::json!({ "name": "secure", "blocked_tlds": ["co.uk"] }),
+    ] {
+        let resp = client
+            .post(format!("{base}/policy/blocking"))
+            .json(&bad)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), reqwest::StatusCode::BAD_REQUEST, "{bad}");
+    }
+    let resp = client
+        .post(format!("{base}/policy/blocking"))
+        .json(&serde_json::json!({
+            "name": "secure",
+            "blocked_security": ["Dynamic_DNS", "dynamic_dns", "tunneling"],
+            "blocked_tlds": [".ZIP", "*.mov", "zip"],
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_success(), "{}", resp.text().await.unwrap());
+    let group: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(
+        group["blocked_security"],
+        serde_json::json!(["dynamic_dns", "tunneling"])
+    );
+    assert_eq!(group["blocked_tlds"], serde_json::json!(["zip", "mov"]));
+
+    for name in [
+        "phish.duckdns.org.",
+        "abc123.trycloudflare.com.",
+        "update.zip.",
+        "a.b.mov.",
+    ] {
+        let reply = udp_query(udp, name, RecordType::A).await;
+        assert_eq!(reply.response_code, ResponseCode::NXDomain, "{name}");
+    }
+    // Other names are untouched.
+    let reply = udp_query(udp, "www.google.com.", RecordType::A).await;
+    assert_eq!(first_answer(&reply).as_deref(), Some("192.0.2.80"));
+
+    // Domain Check names the category.
+    let explain: serde_json::Value = client
+        .get(format!(
+            "{base}/policy/explain?domain=phish.duckdns.org&client=127.0.0.1"
+        ))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        explain.to_string().contains("Dynamic DNS Hostnames"),
+        "{explain}"
+    );
+
+    shutdown(server).await;
+}
+
 /// With the block page on, a blocked name points at the page, and the page
 /// says what was blocked and why; turned off, it is NXDOMAIN again.
 #[tokio::test]

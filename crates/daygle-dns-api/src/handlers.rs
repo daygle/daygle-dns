@@ -270,6 +270,15 @@ pub async fn blockable_services() -> Response {
     Json(serde_json::json!({ "services": daygle_dns_policy::services::SERVICES })).into_response()
 }
 
+/// `GET /api/policy/security` - the security categories a filtering group
+/// can block.
+pub async fn security_categories() -> Response {
+    Json(serde_json::json!({
+        "categories": daygle_dns_policy::security::SECURITY_CATEGORIES
+    }))
+    .into_response()
+}
+
 /// `GET /api/rpz` - each response policy zone's state.
 pub async fn rpz_status(State(state): State<AppState>) -> Response {
     let zones = state.rpz.as_ref().map(|m| m.status()).unwrap_or_default();
@@ -3195,6 +3204,37 @@ pub async fn upsert_blocking_group(
         }
     }
     input.blocked_services = services;
+    // Security categories likewise, by canonical id, once each.
+    let mut security: Vec<String> = Vec::new();
+    for id in &input.blocked_security {
+        let Some(category) = daygle_dns_policy::security::find(id) else {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                format!("'{}' is not a known security category", id.trim()),
+            );
+        };
+        if !security.iter().any(|s| s == category.id) {
+            security.push(category.id.to_string());
+        }
+    }
+    input.blocked_security = security;
+    // TLDs as bare lowercase punycode labels (`.ZIP` -> `zip`), once each.
+    let mut tlds: Vec<String> = Vec::new();
+    for raw in &input.blocked_tlds {
+        if raw.trim().is_empty() {
+            continue;
+        }
+        let Some(tld) = daygle_dns_policy::security::normalize_tld(raw) else {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                format!("'{}' is not a top-level domain", raw.trim()),
+            );
+        };
+        if !tlds.contains(&tld) {
+            tlds.push(tld);
+        }
+    }
+    input.blocked_tlds = tlds;
     // Blocked AI categories: lower-cased, once each, and only labels the
     // loaded scanner can actually emit - a typo would otherwise be a rule
     // that silently never matches.

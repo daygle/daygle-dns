@@ -343,7 +343,9 @@ says what blocked it: `blocklist` (the server's own Custom Block list),
 `blocklist_source` (a feed configured under Blocklists that applies to
 everyone or to the DoT listener; `matched` is its name), `group` (a filtering group's own
 block entries or patterns; `matched` is the entry), `service` (a blocked
-service; `matched` is its name), `group_blocklist` (a source from Blocklists
+service; `matched` is its name), `security` (a group's security category;
+`matched` is its name), `tld` (a top-level domain a group blocks; `matched`
+is the `*.tld` entry), `group_blocklist` (a source from Blocklists
 selected by a group), `ai` (`matched` is the category), `rpz` (`matched` is
 the zone), `cname` (the answer led through a CNAME to a blocked name;
 `matched` is that name), `denied_network`, `listener` (the client may not
@@ -1574,6 +1576,18 @@ group blocks: every domain the service uses, and its subdomains (`400` for
 an unknown id; ids are stored in their canonical form). `GET
 /api/policy/services` returns the catalog: `{"services": [{"id", "name",
 "category", "domains"}]}`. The group's `allow` list still wins.
+`blocked_security` lists security categories (by id, e.g.
+`["dynamic_dns", "free_hosting"]`) whose built-in lists the group blocks:
+`free_hosting`, `dynamic_dns`, `tunneling`, `data_drop`,
+`decentralized_gateways`, `crypto_mining` and `high_risk_tlds` (`400` for an
+unknown id). `GET /api/policy/security` returns the catalog:
+`{"categories": [{"id", "name", "description", "entries"}]}`, where
+`entries` use the blocklist syntax (`*.suffix` covers subdomains only,
+`@@name` is an exception such as a provider's own website).
+`blocked_tlds` lists top-level domains whose every name the group blocks
+(e.g. `["zip", "mov"]`; `.ZIP`, `*.zip` and Unicode TLDs are accepted and
+stored as lowercase punycode; `400` for anything that is not a single
+label). The group's `allow` list wins over both.
 `blocked_categories` lists AI content categories (lowercase labels, e.g.
 `["gambling", "ads"]`; the model's own labels as reported by
 `GET /api/ai/status`'s `backend_categories`) whose domains the group
