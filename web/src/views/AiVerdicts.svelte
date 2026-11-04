@@ -114,7 +114,13 @@
   // what filtering groups match when they block a category.
   // `select` is the dropdown: it is one-way bound, so a change that is not
   // applied (nothing to clear, or the request failed) is put back on screen.
+  // Domains with a relabel in flight: their dropdown is disabled until the
+  // save and reload finish, so two changes to one row cannot overlap (a
+  // failed earlier save would otherwise roll back a later one that won).
+  let savingCategory = $state(new Set());
+
   async function setCategory(row, category, select) {
+    if (savingCategory.has(row.domain)) return;
     const shown = row.category || '';
     const revert = () => {
       if (select) select.value = shown;
@@ -127,6 +133,7 @@
     }
     notice = null;
     error = null;
+    savingCategory = new Set(savingCategory).add(row.domain);
     try {
       if (category) {
         await api.aiOverride(row.domain, 'category', '', category);
@@ -139,6 +146,10 @@
     } catch (e) {
       revert();
       error = formatApiError(e);
+    } finally {
+      const next = new Set(savingCategory);
+      next.delete(row.domain);
+      savingCategory = next;
     }
   }
 
@@ -283,6 +294,7 @@
                   <select
                     class="category-select"
                     value={r.category || ''}
+                    disabled={savingCategory.has(r.domain)}
                     title={r.category_overridden ? "Your label overrides the scanner's" : "The scanner's label"}
                     onchange={(e) => setCategory(r, e.currentTarget.value, e.currentTarget)}
                   >

@@ -400,6 +400,12 @@ impl Scanner {
                 return;
             }
         };
+        // Exemptions go out before either snapshot: a newly exempted domain
+        // must never meet a block or category snapshot that still matches it
+        // without the exemption that clears it, and a failed block query
+        // below must not keep the new exemptions from the plugin.
+        let overrides = Arc::new(overrides);
+        self.exemptions.store(overrides.clone());
         match self.categories_with(now, &overrides) {
             Ok(categories) => self.categories.store(Arc::new(categories)),
             Err(e) => self.log_warn(format!("AI category snapshot refresh failed: {e}")),
@@ -450,10 +456,6 @@ impl Scanner {
                 ),
             );
         }
-        // Exemptions go out before the blocks: a newly exempted domain must
-        // never meet a block snapshot that still lists it without the
-        // exemption that clears it.
-        self.exemptions.store(Arc::new(overrides));
         self.snapshot.store(Arc::new(snapshot));
     }
 
