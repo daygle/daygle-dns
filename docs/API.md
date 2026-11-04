@@ -1586,11 +1586,21 @@ an unknown id; ids are stored in their canonical form). `GET
 `blocked_security` lists security categories (by id, e.g.
 `["dynamic_dns", "free_hosting"]`) whose built-in lists the group blocks:
 `free_hosting`, `dynamic_dns`, `tunneling`, `data_drop`,
-`decentralized_gateways`, `crypto_mining` and `high_risk_tlds` (`400` for an
-unknown id). `GET /api/policy/security` returns the catalog:
-`{"categories": [{"id", "name", "description", "entries"}]}`, where
-`entries` use the blocklist syntax (`*.suffix` covers subdomains only,
-`@@name` is an exception such as a provider's own website).
+`decentralized_gateways`, `crypto_mining` and `high_risk_tlds`, plus three
+detectors that judge a name instead of listing it: `idn_homographs`
+(internationalized names that mix alphabets, or spell a whole label in
+another alphabet's Latin look-alikes outside that alphabet's own TLDs),
+`dga_domains` (registered labels of 10 or more letters whose letter pairs
+are far less likely than in real domain names, as malware's domain
+generation algorithms make them) and `parked_domains` (domains whose name
+servers belong to a parking service; the name servers are looked up in the
+background the first time a registered domain is seen and remembered for a
+day, so that first query is answered) (`400` for an unknown id).
+`GET /api/policy/security` returns the catalog:
+`{"categories": [{"id", "name", "description", "detector", "entries"}]}`,
+where `detector` is `homograph`, `dga`, `parked` or `null`, and `entries`
+use the blocklist syntax (`*.suffix` covers subdomains only, `@@name` is an
+exception such as a provider's own website; empty for a detector).
 `blocked_tlds` lists top-level domains whose every name the group blocks
 (e.g. `["zip", "mov"]`; `.ZIP`, `*.zip` and Unicode TLDs are accepted and
 stored as lowercase punycode; `400` for anything that is not a single

@@ -69,7 +69,9 @@ Daygle DNS combines, in a single process:
 - **Security protections** for a filtering group, as NextDNS offers them:
   one tick blocks free hosting subdomains, dynamic DNS hostnames, tunneling
   endpoints, data drop services, IPFS gateways, cryptocurrency mining or
-  high-risk TLDs; any TLD can be blocked by name; answers that give a
+  high-risk TLDs, and detectors block IDN homographs (`pаypal.com` with a
+  Cyrillic 'а'), malware's generated (DGA) names and parked domains; any
+  TLD can be blocked by name; answers that give a
   public name a local network address (DNS rebinding) or carry an
   oversized payload (NULL records, large TXT data) are blocked.
 - **Per-client rules** on the console's Clients page: **filtering groups**
