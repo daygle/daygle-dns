@@ -4211,7 +4211,7 @@ fn insert_record_in_tx(
     }
 
     let name = qualify_name(&input.name, zone_name)?;
-    validate_name(&name, false)?;
+    crate::validate_owner_name(&name)?;
 
     // Reject content the catalog could not serve: it parses records with the
     // same presentation-format parser and would otherwise skip them silently.
