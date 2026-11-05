@@ -100,7 +100,8 @@ fn log_safe(value: &str) -> String {
 }
 
 /// Serialize a configuration for the browser with secrets removed: password
-/// hashes, the static API token and TSIG shared secrets are write-only and
+/// hashes, the static API token, TSIG shared secrets, the SMTP password, the
+/// log export authorization and the Safe Browsing API key are write-only and
 /// never echoed back, not even to admins (viewers can read this endpoint, and
 /// a TSIG secret authorizes zone transfers and dynamic updates).
 fn redacted_config_json(
@@ -133,6 +134,16 @@ fn redacted_config_json(
             .is_some_and(|p| !p.is_empty());
         export.insert(
             "authorization".to_string(),
+            serde_json::json!(if set { REDACTED } else { "" }),
+        );
+    }
+    if let Some(policy) = value.get_mut("policy").and_then(|a| a.as_object_mut()) {
+        let set = policy
+            .get("safe_browsing_key")
+            .and_then(|p| p.as_str())
+            .is_some_and(|p| !p.is_empty());
+        policy.insert(
+            "safe_browsing_key".to_string(),
             serde_json::json!(if set { REDACTED } else { "" }),
         );
     }
@@ -5557,6 +5568,8 @@ pub struct PolicyUpdate {
     pub youtube_restricted: Option<bool>,
     pub safe_search: Option<bool>,
     pub cname_inspection: Option<bool>,
+    /// Google Safe Browsing API key; `[redacted]` keeps the stored one.
+    pub safe_browsing_key: Option<String>,
 }
 
 /// Partial update for the AI scanner (mirrors `AiSettings` fields; the
@@ -6417,6 +6430,12 @@ pub async fn update_settings(
         if let Some(v) = p.youtube_restricted {
             config.policy.youtube_restricted = v;
             policy_changed = true;
+        }
+        if let Some(v) = &p.safe_browsing_key {
+            if v != REDACTED {
+                config.policy.safe_browsing_key = v.trim().to_string();
+                policy_changed = true;
+            }
         }
         if let Some(v) = &p.filter_aaaa_except {
             config.policy.filter_aaaa_except = normalize_policy_domains(v);

@@ -46,13 +46,19 @@ pub enum Detector {
     /// Domains registered less than 30 days ago; decided once the
     /// registration date is known ([`crate::rdap`]), after resolution.
     NewlyRegistered,
+    /// Names on Google Safe Browsing's lists ([`crate::safe_browsing`]),
+    /// checked after resolution.
+    SafeBrowsing,
 }
 
 impl Detector {
     /// Whether the dispatcher decides it after resolution, from data it
     /// looks up in the background, rather than the engine from the name.
     pub fn after_resolution(self) -> bool {
-        matches!(self, Self::Parked | Self::NewlyRegistered)
+        matches!(
+            self,
+            Self::Parked | Self::NewlyRegistered | Self::SafeBrowsing
+        )
     }
 }
 
@@ -464,6 +470,18 @@ pub const SECURITY_CATEGORIES: &[SecurityCategory] = &[
             seen (so that first visit is not blocked), which tells the domain's registry the \
             name, though not who asked; TLDs without RDAP are never blocked.",
         detector: Some(Detector::NewlyRegistered),
+        entries: &[],
+    },
+    SecurityCategory {
+        id: "google_safe_browsing",
+        name: "Google Safe Browsing",
+        description:
+            "Malware and phishing sites on Google Safe Browsing's lists. The lists are kept on \
+            this server; Google is asked only when a name's hash matches one of them, and then \
+            only for a hash prefix shared with many names, never with your address. Needs a \
+            Safe Browsing API key under Filtering → Response Filters (the API is for \
+            non-commercial use only). Lists of single pages on a site cannot be checked by DNS.",
+        detector: Some(Detector::SafeBrowsing),
         entries: &[],
     },
 ];

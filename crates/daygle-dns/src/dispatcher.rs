@@ -150,6 +150,8 @@ pub struct DnsDispatcher {
     parked: Arc<crate::response_filter::ParkedDomains>,
     /// Registration dates, for the Newly Registered Domains category.
     registrations: Arc<daygle_dns_policy::rdap::RegistrationDates>,
+    /// Google Safe Browsing lists, for the Google Safe Browsing category.
+    safe_browsing: Arc<daygle_dns_policy::safe_browsing::SafeBrowsing>,
 }
 
 impl DnsDispatcher {
@@ -220,6 +222,9 @@ impl DnsDispatcher {
             accounts: Arc::default(),
             parked: Arc::default(),
             registrations: Arc::default(),
+            safe_browsing: Arc::new(daygle_dns_policy::safe_browsing::SafeBrowsing::new(
+                Arc::new(|| (String::new(), String::new())),
+            )),
         }
     }
 
@@ -336,6 +341,16 @@ impl DnsDispatcher {
             self.registrations =
                 Arc::new(daygle_dns_policy::rdap::RegistrationDates::new(&bootstrap));
         }
+        let settings = Arc::clone(&config);
+        self.safe_browsing = Arc::new(daygle_dns_policy::safe_browsing::SafeBrowsing::new(
+            Arc::new(move || {
+                let config = settings.load();
+                (
+                    config.policy.safe_browsing_key.clone(),
+                    config.policy.safe_browsing_url.clone(),
+                )
+            }),
+        ));
         self.config = Some(config);
         self
     }
@@ -1848,9 +1863,12 @@ impl RequestHandler for DnsDispatcher {
                 // and conditional forwarders and stub zones (the operator's
                 // own infrastructure), are trusted.
                 if !policy.is_allowlisted(&qname) && !resolver.is_zone_routed(&qname) {
-                    if let Some(block) =
-                        self.filter_response(&resolver, client, &qname, listener, lookup.answers())
-                    {
+                    let mut blocked =
+                        self.filter_response(&resolver, client, &qname, listener, lookup.answers());
+                    if blocked.is_none() {
+                        blocked = self.safe_browsing_block(client, &qname, listener).await;
+                    }
+                    if let Some(block) = blocked {
                         debug!(query = %qname, reason = %block.reason, "answer blocked by a response filter");
                         self.metrics.inc(&self.metrics.blocked);
                         let why = Some(Ede::new(ede::BLOCKED, block.reason.clone()));
@@ -2517,6 +2535,38 @@ impl DnsDispatcher {
             }
         }
         None
+    }
+
+    /// Why `qname` must not reach `client` because it is on Google Safe
+    /// Browsing's lists, when a filtering group covering the client blocks
+    /// them (Google Safe Browsing security category).
+    async fn safe_browsing_block(
+        &self,
+        client: IpAddr,
+        qname: &str,
+        listener: Option<&'static str>,
+    ) -> Option<BlockReason> {
+        let group = self
+            .advanced_blocking
+            .load()
+            .response_filters(client, qname, listener)
+            .safe_browsing
+            .map(str::to_string)?;
+        let threat = self.safe_browsing.check(qname).await?;
+        let kind = match threat.as_str() {
+            "SOCIAL_ENGINEERING" => "phishing",
+            "UNWANTED_SOFTWARE" => "unwanted software",
+            "POTENTIALLY_HARMFUL_APPLICATION" => "harmful apps",
+            _ => "malware",
+        };
+        Some(block_reason(
+            source::SECURITY,
+            Some(group.clone()),
+            Some("Google Safe Browsing".to_string()),
+            format!(
+                "'{qname}' is listed by Google Safe Browsing for {kind}, blocked by group '{group}'"
+            ),
+        ))
     }
 
     async fn blocked_cname_target(

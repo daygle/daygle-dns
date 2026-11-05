@@ -26,6 +26,7 @@ pub mod identity;
 mod plugin;
 pub mod rdap;
 mod rule;
+pub mod safe_browsing;
 pub mod safe_search;
 pub mod security;
 pub mod services;

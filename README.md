@@ -72,7 +72,9 @@ Daygle DNS combines, in a single process:
   high-risk TLDs, and detectors block IDN homographs (`pаypal.com` with a
   Cyrillic 'а'), malware's generated (DGA) names, parked domains,
   typosquats of well-known brands (`paypa1.com`, `paypal-login.com`) and
-  domains registered in the last 30 days (looked up over RDAP); any
+  domains registered in the last 30 days (looked up over RDAP), and
+  sites on Google Safe Browsing's lists (with your own API key; the lists
+  are kept locally, so Google never sees your queries or address); any
   TLD can be blocked by name; answers that give a
   public name a local network address (DNS rebinding) or carry an
   oversized payload (NULL records, large TXT data) are blocked.

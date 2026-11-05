@@ -429,6 +429,11 @@ filter_aaaa_except = []
 # The RDAP bootstrap file (RFC 9224) the Newly Registered Domains security
 # category finds each TLD's RDAP server in. Read at startup.
 # rdap_bootstrap = "https://data.iana.org/rdap/dns.json"
+# Google Safe Browsing API key for the Google Safe Browsing security
+# category (also set under Filtering -> Response Filters). The lists are
+# kept on this server; Google only sees 4-byte hash prefixes of names that
+# match them. Google allows the API for non-commercial use only.
+# safe_browsing_key = ""
 
 # Entries may name a [[networks]] network as well as an address.
 denied_networks = []

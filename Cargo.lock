@@ -650,6 +650,7 @@ dependencies = [
  "rustls",
  "rustls-pki-types",
  "serde_json",
+ "sha2",
  "siphasher",
  "socket2",
  "tempfile",
@@ -823,6 +824,7 @@ version = "1.0.0"
 dependencies = [
  "arc-swap",
  "async-trait",
+ "base64 0.23.1",
  "chrono",
  "daygle-dns-core",
  "idna",
@@ -831,6 +833,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "sha2",
  "tokio",
  "tracing",
 ]
