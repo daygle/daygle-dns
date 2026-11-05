@@ -94,6 +94,12 @@ jobs:
   test:
     name: Test
     runs-on: ubuntu-latest
+    env:
+      # Every file under crates/*/tests links its own binary, and with debug
+      # info each is ~470 MB: with ~60 of them the runner ran out of disk.
+      # Without it they are ~60 MB each. Failing assertions still report
+      # their file and line; only full backtraces lose line numbers.
+      CARGO_PROFILE_DEV_DEBUG: "0"
     steps:
       - uses: actions/checkout@v7
 
