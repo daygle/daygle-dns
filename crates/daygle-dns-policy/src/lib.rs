@@ -19,6 +19,7 @@ mod acl;
 pub mod advanced;
 mod blocklist;
 mod blocklist_source;
+pub mod cname_trackers;
 pub mod detect;
 mod dga_model;
 mod engine;

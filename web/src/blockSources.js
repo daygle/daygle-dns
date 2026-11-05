@@ -7,6 +7,7 @@ export const BLOCK_SOURCES = [
   ['group', 'Filtering Group'],
   ['service', 'Blocked Service'],
   ['security', 'Security Category'],
+  ['privacy', 'Privacy'],
   ['tld', 'Blocked TLD'],
   ['local_address', 'Local Network Address'],
   ['payload', 'DNS Payload Limit'],

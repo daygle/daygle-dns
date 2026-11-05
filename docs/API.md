@@ -345,7 +345,8 @@ everyone or to the DoT listener; `matched` is its name), `group` (a filtering gr
 block entries or patterns; `matched` is the entry), `service` (a blocked
 service; `matched` is its name), `security` (a group's security category;
 `matched` is its name), `tld` (a top-level domain a group blocks; `matched`
-is the `*.tld` entry), `local_address` (the answer gave a public name a
+is the `*.tld` entry), `privacy` (a group's privacy category; `matched` is
+its name), `local_address` (the answer gave a public name a
 local network address; `matched` is the address), `payload` (the answer
 was over a group's DNS payload limit; `matched` says how), `group_blocklist` (a source from Blocklists
 selected by a group), `ai` (`matched` is the category), `rpz` (`matched` is
@@ -1626,11 +1627,20 @@ remembered, a day for addresses and a week for networks, so the first
 queries of a name are answered; names and CNAME targets of CDNs that put
 caches inside ISPs (Google, Netflix, Meta, Akamai, Apple, CloudFront,
 Steam, Microsoft, Twitch, Ookla) are never judged, and services really run
-from a home connection need Custom Allow) (`400` for an unknown id).
+from a home connection need Custom Allow), and the privacy category
+`disguised_trackers` (answers whose CNAME chain leads to a tracking or ad
+company's infrastructure under a different registered domain from the
+query, as CNAME cloaking does: `metrics.shop.example` to
+`shop.eulerian.net`; the companies' CNAME targets are the `tracker` and
+`ad` entries of AdGuard's cname-trackers catalogue, MIT-licensed, bundled
+and refreshed with `scripts/update-cname-trackers.sh`; blocks are logged
+with `source` `privacy`) (`400` for an unknown id).
 `GET /api/policy/security` returns the catalog:
-`{"categories": [{"id", "name", "description", "detector", "entries"}]}`,
-where `detector` is `homograph`, `dga`, `parked`, `typosquat`,
-`newly_registered`, `safe_browsing`, `residential_hosting` or `null`, and `entries`
+`{"categories": [{"id", "name", "description", "section", "detector", "entries"}]}`,
+where `section` is `security` or `privacy` (where the console lists it),
+`detector` is `homograph`, `dga`, `parked`, `typosquat`,
+`newly_registered`, `safe_browsing`, `residential_hosting`,
+`cname_tracker` or `null`, and `entries`
 use the blocklist syntax (`*.suffix` covers subdomains only, `@@name` is an
 exception such as a provider's own website; empty for a detector).
 `blocked_tlds` lists top-level domains whose every name the group blocks
