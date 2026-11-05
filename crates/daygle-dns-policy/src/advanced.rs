@@ -399,6 +399,28 @@ impl AdvancedBlocking {
             })
     }
 
+    /// The group (and its allow category) that lets `qname` through for
+    /// `client` on `listener` ahead of every blocklist: the first enabled
+    /// group covering the client now with an allow category (Allow
+    /// Tracking Links) listing the name.
+    pub fn category_allow(
+        &self,
+        client: IpAddr,
+        qname: &str,
+        listener: Option<&str>,
+    ) -> Option<(String, &'static str)> {
+        let mut now = self.clock();
+        self.groups
+            .iter()
+            .filter(|g| g.applies(client, listener, &mut now))
+            .find_map(|g| {
+                g.security
+                    .iter()
+                    .find(|(_, d, entries)| *d == Some(Detector::Allow) && entries.contains(qname))
+                    .map(|(name, _, _)| (g.name.clone(), *name))
+            })
+    }
+
     /// The groups whose response filters apply to an answer for `qname`
     /// sent to `client` on `listener`: like [`Self::evaluate`], groups are
     /// taken in order and one whose allow rules let `qname` through stops
@@ -604,7 +626,21 @@ impl AdvancedBlocking {
                 }
             }
             for (category, detector, entries) in &group.security {
-                if detector.is_some_and(Detector::after_resolution) {
+                if *detector == Some(Detector::Allow) {
+                    if let Some(entry) = entries.matching_entry(qname) {
+                        checks.push(Check {
+                            matched: Some(category.to_string()),
+                            ..in_group(
+                                "allow",
+                                source::PRIVACY,
+                                format!(
+                                    "{category} (entry '{entry}'), turned on by group '{}': no blocklist blocks it",
+                                    group.name
+                                ),
+                            )
+                        });
+                    }
+                } else if detector.is_some_and(Detector::after_resolution) {
                     checks.push(in_group(
                         "none",
                         source::SECURITY,
@@ -712,7 +748,8 @@ fn security_check(
             | Detector::NewlyRegistered
             | Detector::SafeBrowsing
             | Detector::ResidentialHosting
-            | Detector::CnameTracker,
+            | Detector::CnameTracker
+            | Detector::Allow,
         ) => None,
     }
 }

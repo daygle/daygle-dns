@@ -67,6 +67,9 @@ pub enum Detector {
     /// Answers whose CNAME chain leads to a third-party tracker
     /// ([`crate::cname_trackers`]), checked after resolution.
     CnameTracker,
+    /// Not a block: the category's entries are let through for the group's
+    /// clients, ahead of every blocklist (Allow Tracking Links).
+    Allow,
 }
 
 impl Detector {
@@ -544,6 +547,83 @@ pub const SECURITY_CATEGORIES: &[SecurityCategory] = &[
         detector: Some(Detector::CnameTracker),
         entries: &[],
     },
+    SecurityCategory {
+        id: "allow_tracking_links",
+        name: "Allow Tracking Links",
+        description:
+            "Lets through the redirect services that links in emails, search ads and deal or \
+            affiliate sites pass through (Mailchimp, SendGrid, HubSpot, Klaviyo, Google Shopping \
+            ads, CJ, Awin, Rakuten, Skimlinks, ...), even when a blocklist blocks them, so \
+            clicking such a link works. They are only reached when a link is clicked. Unlike \
+            NextDNS, this cannot hide your address from the tracking service.",
+        section: Section::Privacy,
+        detector: Some(Detector::Allow),
+        entries: &[
+            // Email and marketing platforms' click tracking
+            "list-manage.com",
+            "*.list-manage.com",
+            "mandrillapp.com",
+            "*.mandrillapp.com",
+            "ct.sendgrid.net",
+            "*.ct.sendgrid.net",
+            "*.awstrack.me",
+            "hubspotlinks.com",
+            "*.hubspotlinks.com",
+            "klclick.com",
+            "*.klclick.com",
+            "klclick1.com",
+            "*.klclick1.com",
+            "klclick2.com",
+            "*.klclick2.com",
+            "klclick3.com",
+            "*.klclick3.com",
+            "mjt.lu",
+            "*.mjt.lu",
+            "rs6.net",
+            "*.rs6.net",
+            "*.pstmrk.it",
+            "cl.exct.net",
+            "*.cl.exct.net",
+            "click.exacttarget.com",
+            "links.iterable.com",
+            "track.customer.io",
+            "e.customeriomail.com",
+            "go.pardot.com",
+            // Search and shopping ad clicks
+            "googleadservices.com",
+            "*.googleadservices.com",
+            "clickserve.dartsearch.net",
+            // Affiliate networks and deal links
+            "anrdoezrs.net",
+            "*.anrdoezrs.net",
+            "dpbolvw.net",
+            "*.dpbolvw.net",
+            "jdoqocy.com",
+            "*.jdoqocy.com",
+            "kqzyfj.com",
+            "*.kqzyfj.com",
+            "tkqlhce.com",
+            "*.tkqlhce.com",
+            "awin1.com",
+            "*.awin1.com",
+            "click.linksynergy.com",
+            "go.skimresources.com",
+            "redirect.viglink.com",
+            "shareasale.com",
+            "*.shareasale.com",
+            "prf.hn",
+            "*.prf.hn",
+            "pjtra.com",
+            "*.pjtra.com",
+            "pntrs.com",
+            "*.pntrs.com",
+            "*.sjv.io",
+            "*.pxf.io",
+            "*.7eer.net",
+            "s.click.aliexpress.com",
+            "amzn.to",
+        ],
+    },
 ];
 
 /// Name-server suffixes of domain parking services: a domain whose name
@@ -616,7 +696,7 @@ mod tests {
             assert!(ids.insert(category.id), "duplicate id {}", category.id);
             assert_eq!(
                 category.entries.is_empty(),
-                category.detector.is_some(),
+                category.detector.is_some_and(|d| d != Detector::Allow),
                 "{}",
                 category.id
             );

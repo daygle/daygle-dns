@@ -1121,7 +1121,23 @@ impl RequestHandler for DnsDispatcher {
             hickory_server::net::xfer::Protocol::Quic => Some("doq"),
             _ => None,
         };
-        let decision = policy.evaluate_on(client, &qname, &rtype, listener).await;
+        // A filtering group's allow category (Allow Tracking Links) lets the
+        // name through like the allowlist: ahead of every blocklist, and
+        // trusted by the checks below that the allowlist exempts.
+        let group_allow = self
+            .advanced_blocking
+            .load()
+            .category_allow(client, &qname, listener);
+        let trusted = policy.is_allowlisted(&qname) || group_allow.is_some();
+        let decision = policy
+            .evaluate_allowing(
+                client,
+                &qname,
+                &rtype,
+                listener,
+                group_allow.as_ref().map(|(g, c)| (g.as_str(), *c)),
+            )
+            .await;
         match &decision.action {
             Action::Allow => {}
             Action::Refused => {
@@ -1233,7 +1249,7 @@ impl RequestHandler for DnsDispatcher {
         // after the base policy engine (an explicit allow list inside a group
         // can still let a name through) and before split-horizon/authoritative
         // resolution. `evaluate` only ever returns a blocking action.
-        if !policy.is_allowlisted(&qname) {
+        if !trusted {
             let encrypted_listener = match info.protocol {
                 hickory_server::net::xfer::Protocol::Tls => Some("dot"),
                 hickory_server::net::xfer::Protocol::Https
@@ -1316,7 +1332,7 @@ impl RequestHandler for DnsDispatcher {
         // let through; an allowlisted name is exempt, and a PASSTHRU rule
         // exempts the query from the rest of RPZ (its answer included).
         let rpz = self.rpz.load_full();
-        let mut rpz_done = rpz.is_empty() || policy.is_allowlisted(&qname);
+        let mut rpz_done = rpz.is_empty() || trusted;
         if !rpz_done {
             if let Some(hit) = rpz.check_query(client, &qname) {
                 if rpz_lets_through(&hit.action, info.protocol) {
@@ -1729,7 +1745,7 @@ impl RequestHandler for DnsDispatcher {
                 // through a CNAME to a blocked one, is blocked too (trackers
                 // put on a first-party subdomain, `metrics.shop.example ->
                 // tracker.example`). An allowlisted query name is trusted.
-                if policy.cname_inspection() && !policy.is_allowlisted(&qname) {
+                if policy.cname_inspection() && !trusted {
                     if let Some((target, decision)) = self
                         .blocked_cname_target(&policy, client, listener, lookup.answers())
                         .await
@@ -1874,7 +1890,7 @@ impl RequestHandler for DnsDispatcher {
                 // (DNS rebinding) and oversized payloads. Allowlisted names,
                 // and conditional forwarders and stub zones (the operator's
                 // own infrastructure), are trusted.
-                if !policy.is_allowlisted(&qname) && !resolver.is_zone_routed(&qname) {
+                if !trusted && !resolver.is_zone_routed(&qname) {
                     let mut blocked =
                         self.filter_response(&resolver, client, &qname, listener, lookup.answers());
                     if blocked.is_none() {
