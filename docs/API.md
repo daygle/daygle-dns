@@ -1624,17 +1624,7 @@ ever sent to Google to fetch full hashes, which are cached for the time
 Google gives; each name is checked as `host/` for itself and up to four
 parent domains, so page-level entries are not matched; needs
 `policy.safe_browsing_key`, and Google allows the API for non-commercial
-use only), `residential_hosting` (names whose public addresses, up to
-four, all belong to networks PeeringDB lists as `Cable/DSL/ISP`; each
-address's origin ASN comes from a TXT lookup in Team Cymru's IP-to-ASN
-zones, `policy.ip_asn_zone_v4`/`ip_asn_zone_v6`, through the server's
-own resolver, and each network's type from `policy.peeringdb_url`; both
-are remembered, a day for addresses and a week for networks, and the
-first query that needs them waits for the lookups, up to 2 seconds in
-all (lookups slower than that finish in the background for the next
-query); names
-and CNAME targets of CDNs that put caches inside ISPs are never judged,
-and services really run from a home connection need Custom Allow) and the
+use only) and the
 privacy category `disguised_trackers` (answers whose CNAME chain leads to
 a tracking or ad company's infrastructure under a different registered
 domain from the query, as CNAME cloaking does: `metrics.shop.example` to
@@ -1646,12 +1636,12 @@ Blocks by privacy categories are logged with `source` `privacy`, others
 with `security`. An unknown id is refused with `400`. Ids of retired
 categories (`free_hosting`, `tunneling`, `data_drop`, `parked_domains`,
 `allow_tracking_links`, `idn_homographs`, `dga_domains`, `typosquatting`,
-`native_sonos`, `native_vizio`) are dropped when a group is saved and
+`native_sonos`, `native_vizio`, `residential_hosting`) are dropped when a group is saved and
 ignored until then.
 `GET /api/policy/security` returns the catalog:
 `{"categories": [{"id", "name", "description", "section", "detector", "feed", "feed_status"}]}`,
 where `section` is `security` or `privacy` (where the console lists it),
-`detector` is `newly_registered`, `safe_browsing`, `residential_hosting`,
+`detector` is `newly_registered`, `safe_browsing`,
 `cname_tracker` or `null`, `feed` is the list (`{"source", "url",
 "format", "allow_url"}`) or `null`, and `feed_status` (for categories
 with a list) is `null` until a download has been tried, then

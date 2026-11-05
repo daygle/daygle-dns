@@ -78,9 +78,6 @@ pub enum Detector {
     /// Names on Google Safe Browsing's lists ([`crate::safe_browsing`]),
     /// checked after resolution.
     SafeBrowsing,
-    /// Names whose addresses all belong to consumer ISPs
-    /// ([`crate::residential`]), checked after resolution.
-    ResidentialHosting,
     /// Answers whose CNAME chain leads to a third-party tracker on the
     /// category's feed ([`crate::cname_trackers`]), checked after
     /// resolution.
@@ -110,6 +107,7 @@ pub const RETIRED: &[&str] = &[
     "typosquatting",
     "native_sonos",
     "native_vizio",
+    "residential_hosting",
 ];
 
 /// Whether `id` names a retired category.
@@ -205,20 +203,6 @@ pub const SECURITY_CATEGORIES: &[SecurityCategory] = &[
             non-commercial use only). Lists of single pages on a site cannot be checked by DNS.",
         section: Section::Security,
         detector: Some(Detector::SafeBrowsing),
-        feed: None,
-    },
-    SecurityCategory {
-        id: "residential_hosting",
-        name: "Residential Hosting",
-        description:
-            "Names whose addresses all belong to home internet providers rather than data \
-            centres, as botnet command servers and phishing proxies on compromised routers do. \
-            Networks are identified with Team Cymru's IP-to-ASN service and PeeringDB the first \
-            time an address is seen, and that query waits for them (up to 2 seconds); CDN \
-            caches inside ISPs are not affected. Services run from a home connection, including your ISP's own portal \
-            and your own home server, are blocked: allow them under Custom Allow.",
-        section: Section::Security,
-        detector: Some(Detector::ResidentialHosting),
         feed: None,
     },
     SecurityCategory {

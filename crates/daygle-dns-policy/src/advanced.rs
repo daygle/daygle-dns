@@ -438,9 +438,6 @@ impl AdvancedBlocking {
             if filters.safe_browsing.is_none() && group.uses(Detector::SafeBrowsing) {
                 filters.safe_browsing = Some(group.name.as_str());
             }
-            if filters.residential.is_none() && group.uses(Detector::ResidentialHosting) {
-                filters.residential = Some(group.name.as_str());
-            }
             if filters.cname_trackers.is_none() && group.uses(Detector::CnameTracker) {
                 filters.cname_trackers = Some(group.name.as_str());
             }
@@ -701,8 +698,6 @@ pub struct ResponseFilters<'a> {
     pub newly_registered: Option<&'a str>,
     /// Block names on Google Safe Browsing's lists.
     pub safe_browsing: Option<&'a str>,
-    /// Block names hosted only on consumer ISP networks.
-    pub residential: Option<&'a str>,
     /// Block answers that cloak a third-party tracker behind a CNAME.
     pub cname_trackers: Option<&'a str>,
 }

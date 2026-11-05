@@ -4899,12 +4899,14 @@ pub struct PolicySettings {
     pub safe_browsing_key: String,
     /// The Safe Browsing API's base URL.
     pub safe_browsing_url: String,
-    /// PeeringDB's base URL, where the Residential Hosting category looks
-    /// up which networks are consumer ISPs. Read at startup.
+    /// Settings of the retired Residential Hosting category, still accepted
+    /// (configs saved while it existed hold them) but ignored and no longer
+    /// written.
+    #[serde(skip_serializing)]
     pub peeringdb_url: String,
-    /// The IP-to-ASN DNS zones (Team Cymru's) the Residential Hosting
-    /// category finds an address's network in, for IPv4 and IPv6.
+    #[serde(skip_serializing)]
     pub ip_asn_zone_v4: String,
+    #[serde(skip_serializing)]
     pub ip_asn_zone_v6: String,
     /// A base URL to download the security and privacy categories' lists
     /// from instead of their own hosts (a local mirror): each list's URL,
@@ -4931,9 +4933,9 @@ impl Default for PolicySettings {
             rdap_bootstrap: "https://data.iana.org/rdap/dns.json".to_string(),
             safe_browsing_key: String::new(),
             safe_browsing_url: "https://safebrowsing.googleapis.com".to_string(),
-            peeringdb_url: "https://www.peeringdb.com".to_string(),
-            ip_asn_zone_v4: "origin.asn.cymru.com".to_string(),
-            ip_asn_zone_v6: "origin6.asn.cymru.com".to_string(),
+            peeringdb_url: String::new(),
+            ip_asn_zone_v4: String::new(),
+            ip_asn_zone_v6: String::new(),
             feed_mirror: String::new(),
         }
     }
@@ -5225,6 +5227,21 @@ fn to_ascii_domain(entry: &str) -> String {
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
+
+    /// Configs saved while the Residential Hosting category existed carry
+    /// its settings: they still load, and are not written back.
+    #[test]
+    fn retired_residential_hosting_settings_are_accepted_and_dropped() {
+        let cfg: DaygleConfig = toml::from_str(
+            "[policy]\npeeringdb_url = \"https://www.peeringdb.com\"\n\
+             ip_asn_zone_v4 = \"origin.asn.cymru.com\"\n\
+             ip_asn_zone_v6 = \"origin6.asn.cymru.com\"\n",
+        )
+        .unwrap();
+        let written = toml::to_string(&cfg).unwrap();
+        assert!(!written.contains("peeringdb_url"), "{written}");
+        assert!(!written.contains("ip_asn_zone"), "{written}");
+    }
 
     #[test]
     fn normalize_domains_puts_internationalized_entries_in_punycode() {

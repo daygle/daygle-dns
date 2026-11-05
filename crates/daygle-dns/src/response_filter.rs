@@ -11,12 +11,10 @@
 //!   strings), so an answer over those limits is blocked.
 
 use std::net::IpAddr;
-use std::sync::{Arc, OnceLock};
-use std::time::Duration;
+use std::sync::OnceLock;
 
 use daygle_dns_core::config::REBINDING_DENY_NETWORKS;
-use daygle_dns_recursive::RecursiveResolver;
-use hickory_proto::rr::{RData, Record, RecordType};
+use hickory_proto::rr::{RData, Record};
 use ipnet::IpNet;
 
 /// Most TXT data (the bytes of every string of every TXT record) one answer
@@ -94,106 +92,6 @@ pub fn oversized_payload(answers: &[Record]) -> Option<String> {
         }
     }
     (txt > TXT_LIMIT).then(|| format!("{txt} bytes of TXT data"))
-}
-
-/// Most addresses remembered; past it the expired ones are dropped, and all
-/// of them if none has expired.
-const CACHE_CAP: usize = 50_000;
-
-/// How long an address's origin networks are remembered.
-const ORIGIN_TTL: Duration = Duration::from_secs(24 * 3600);
-/// How long a failed origin lookup waits before it is tried again.
-const ORIGIN_RETRY: Duration = Duration::from_secs(3600);
-
-/// The origin networks (ASNs) of public addresses, from an IP-to-ASN DNS
-/// zone (Team Cymru's), for the Residential Hosting category.
-#[derive(Debug)]
-pub struct IpOrigins {
-    addresses: Arc<daygle_dns_policy::lookup_cache::LookupCache<IpAddr, Vec<u32>>>,
-}
-
-impl Default for IpOrigins {
-    fn default() -> Self {
-        Self {
-            addresses: Arc::new(daygle_dns_policy::lookup_cache::LookupCache::new(CACHE_CAP)),
-        }
-    }
-}
-
-impl IpOrigins {
-    /// The ASNs announcing `ip` (empty when the zone has none): from the
-    /// cache, or looked up now (the TXT record for `ip` under
-    /// `zone_v4`/`zone_v6`, with `resolver`) and waited for up to `wait`.
-    /// `None` while the lookup is still running.
-    #[allow(clippy::too_many_arguments)]
-    pub async fn origins(
-        &self,
-        resolver: &Arc<RecursiveResolver>,
-        client: IpAddr,
-        ip: IpAddr,
-        zone_v4: &str,
-        zone_v6: &str,
-        wait: Duration,
-    ) -> Option<Vec<u32>> {
-        let resolver = Arc::clone(resolver);
-        let name = daygle_dns_policy::residential::cymru_name(ip, zone_v4, zone_v6);
-        self.addresses
-            .get(ip, wait, async move {
-                match resolver
-                    .lookup_for_client(client, &name, RecordType::TXT)
-                    .await
-                {
-                    Ok(lookup) => {
-                        let asns = lookup
-                            .answers()
-                            .iter()
-                            .find_map(|r| match &r.data {
-                                RData::TXT(txt) => {
-                                    let text: String = txt
-                                        .txt_data
-                                        .iter()
-                                        .map(|s| String::from_utf8_lossy(s).into_owned())
-                                        .collect();
-                                    Some(daygle_dns_policy::residential::parse_cymru_txt(&text))
-                                }
-                                _ => None,
-                            })
-                            .unwrap_or_default();
-                        (asns, ORIGIN_TTL)
-                    }
-                    // An address the zone does not cover (NXDOMAIN) is known
-                    // to have no origin; other failures are retried.
-                    Err(e) if is_nxdomain(&e) => (Vec::new(), ORIGIN_TTL),
-                    Err(_) => (Vec::new(), ORIGIN_RETRY),
-                }
-            })
-            .await
-    }
-}
-
-fn is_nxdomain(error: &daygle_dns_core::DaygleError) -> bool {
-    matches!(
-        error,
-        daygle_dns_core::DaygleError::Resolution {
-            response_code: Some(code),
-            ..
-        } if *code == u16::from(hickory_proto::op::ResponseCode::NXDomain)
-    )
-}
-
-/// The public addresses among `answers`' A and AAAA records (at most
-/// `limit`), for checks that look their networks up.
-pub fn public_addresses(answers: &[Record], limit: usize) -> Vec<IpAddr> {
-    answers
-        .iter()
-        .filter_map(|record| match &record.data {
-            RData::A(a) => Some(IpAddr::V4(a.0)),
-            RData::AAAA(a) => Some(IpAddr::V6(a.0)),
-            _ => None,
-        })
-        .filter(|ip| !deny_networks().iter().any(|net| net.contains(ip)))
-        .take(limit)
-        .collect()
 }
 
 #[cfg(test)]

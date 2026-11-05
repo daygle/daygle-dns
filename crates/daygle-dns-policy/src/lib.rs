@@ -27,7 +27,6 @@ pub mod identity;
 pub mod lookup_cache;
 mod plugin;
 pub mod rdap;
-pub mod residential;
 mod rule;
 pub mod safe_browsing;
 pub mod safe_search;

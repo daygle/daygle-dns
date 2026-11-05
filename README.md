@@ -72,9 +72,8 @@ Daygle DNS combines, in a single process:
   high-risk TLDs, disguised CNAME trackers, and native tracking for Apple,
   Samsung, Xiaomi, Huawei, Windows, Amazon, Roku, LG, Vivo, OPPO and
   TikTok) or by an exact check: domains registered in the last 30 days
-  (RDAP), Google Safe Browsing (with your own API key; the lists are kept
-  locally, so Google never sees your queries or address) and names hosted
-  only on home internet connections (Team Cymru and PeeringDB). Any TLD
+  (RDAP) and Google Safe Browsing (with your own API key; the lists are
+  kept locally, so Google never sees your queries or address). Any TLD
   can be blocked by name, and answers that give a public name a local
   network address (DNS rebinding) or carry an oversized payload are
   blocked.
