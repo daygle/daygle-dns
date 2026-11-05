@@ -1616,11 +1616,21 @@ only a matching 4-byte prefix is ever sent to Google to fetch full hashes,
 which are cached for the time Google gives; each name is checked as
 `host/` for itself and up to four parent domains, so page-level entries
 are not matched; needs `policy.safe_browsing_key`, and Google allows the
-API for non-commercial use only) (`400` for an unknown id).
+API for non-commercial use only) and `residential_hosting` (names whose
+public addresses, up to four, all belong to networks PeeringDB lists as
+`Cable/DSL/ISP`; each address's origin ASN comes from a TXT lookup in
+Team Cymru's IP-to-ASN zones, `policy.ip_asn_zone_v4`/`ip_asn_zone_v6`,
+through the server's own resolver, and each network's type from
+`policy.peeringdb_url`; both are looked up in the background and
+remembered, a day for addresses and a week for networks, so the first
+queries of a name are answered; names and CNAME targets of CDNs that put
+caches inside ISPs (Google, Netflix, Meta, Akamai, Apple, CloudFront,
+Steam, Microsoft, Twitch, Ookla) are never judged, and services really run
+from a home connection need Custom Allow) (`400` for an unknown id).
 `GET /api/policy/security` returns the catalog:
 `{"categories": [{"id", "name", "description", "detector", "entries"}]}`,
 where `detector` is `homograph`, `dga`, `parked`, `typosquat`,
-`newly_registered`, `safe_browsing` or `null`, and `entries`
+`newly_registered`, `safe_browsing`, `residential_hosting` or `null`, and `entries`
 use the blocklist syntax (`*.suffix` covers subdomains only, `@@name` is an
 exception such as a provider's own website; empty for a detector).
 `blocked_tlds` lists top-level domains whose every name the group blocks

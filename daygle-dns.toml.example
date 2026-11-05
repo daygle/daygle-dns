@@ -434,6 +434,12 @@ filter_aaaa_except = []
 # kept on this server; Google only sees 4-byte hash prefixes of names that
 # match them. Google allows the API for non-commercial use only.
 # safe_browsing_key = ""
+# Where the Residential Hosting security category looks up an address's
+# network (Team Cymru's IP-to-ASN DNS zones) and whether that network is a
+# consumer ISP (PeeringDB). Read at startup.
+# peeringdb_url = "https://www.peeringdb.com"
+# ip_asn_zone_v4 = "origin.asn.cymru.com"
+# ip_asn_zone_v6 = "origin6.asn.cymru.com"
 
 # Entries may name a [[networks]] network as well as an address.
 denied_networks = []

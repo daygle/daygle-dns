@@ -49,6 +49,9 @@ pub enum Detector {
     /// Names on Google Safe Browsing's lists ([`crate::safe_browsing`]),
     /// checked after resolution.
     SafeBrowsing,
+    /// Names whose addresses all belong to consumer ISPs
+    /// ([`crate::residential`]), checked after resolution.
+    ResidentialHosting,
 }
 
 impl Detector {
@@ -57,7 +60,7 @@ impl Detector {
     pub fn after_resolution(self) -> bool {
         matches!(
             self,
-            Self::Parked | Self::NewlyRegistered | Self::SafeBrowsing
+            Self::Parked | Self::NewlyRegistered | Self::SafeBrowsing | Self::ResidentialHosting
         )
     }
 }
@@ -482,6 +485,19 @@ pub const SECURITY_CATEGORIES: &[SecurityCategory] = &[
             Safe Browsing API key under Filtering → Response Filters (the API is for \
             non-commercial use only). Lists of single pages on a site cannot be checked by DNS.",
         detector: Some(Detector::SafeBrowsing),
+        entries: &[],
+    },
+    SecurityCategory {
+        id: "residential_hosting",
+        name: "Residential Hosting",
+        description:
+            "Names whose addresses all belong to home internet providers rather than data \
+            centres, as botnet command servers and phishing proxies on compromised routers do. \
+            Networks are identified with Team Cymru's IP-to-ASN service and PeeringDB, looked up \
+            in the background (so the first visits are not blocked); CDN caches inside ISPs are \
+            not affected. Services run from a home connection, including your ISP's own portal \
+            and your own home server, are blocked: allow them under Custom Allow.",
+        detector: Some(Detector::ResidentialHosting),
         entries: &[],
     },
 ];

@@ -190,6 +190,123 @@ impl ParkedDomains {
     }
 }
 
+/// How long an address's origin networks are remembered.
+const ORIGIN_TTL: Duration = Duration::from_secs(24 * 3600);
+/// How long a failed origin lookup waits before it is tried again.
+const ORIGIN_RETRY: Duration = Duration::from_secs(3600);
+
+#[derive(Debug, Clone)]
+enum OriginState {
+    Pending,
+    Known(Vec<u32>, Instant),
+}
+
+/// The origin networks (ASNs) of public addresses, from an IP-to-ASN DNS
+/// zone (Team Cymru's), filled in the background, for the Residential
+/// Hosting category.
+#[derive(Debug, Default)]
+pub struct IpOrigins {
+    addresses: Mutex<HashMap<IpAddr, OriginState>>,
+}
+
+impl IpOrigins {
+    /// The ASNs announcing `ip`, when known (empty when the zone has none).
+    /// When nothing current is known, starts a background lookup of the TXT
+    /// record for `ip` under `zone_v4`/`zone_v6` with `resolver` and returns
+    /// `None`.
+    pub fn check(
+        self: &Arc<Self>,
+        resolver: &Arc<RecursiveResolver>,
+        client: IpAddr,
+        ip: IpAddr,
+        zone_v4: &str,
+        zone_v6: &str,
+    ) -> Option<Vec<u32>> {
+        let now = Instant::now();
+        {
+            let mut addresses = self.addresses.lock().unwrap_or_else(|e| e.into_inner());
+            match addresses.get(&ip) {
+                Some(OriginState::Pending) => return None,
+                Some(OriginState::Known(asns, until)) if *until > now => return Some(asns.clone()),
+                _ => {}
+            }
+            if addresses.len() >= PARKED_CAP {
+                addresses.retain(
+                    |_, state| matches!(state, OriginState::Known(_, until) if *until > now),
+                );
+                if addresses.len() >= PARKED_CAP {
+                    addresses.clear();
+                }
+            }
+            addresses.insert(ip, OriginState::Pending);
+        }
+        let this = Arc::clone(self);
+        let resolver = Arc::clone(resolver);
+        let name = daygle_dns_policy::residential::cymru_name(ip, zone_v4, zone_v6);
+        tokio::spawn(async move {
+            let state = match resolver
+                .lookup_for_client(client, &name, RecordType::TXT)
+                .await
+            {
+                Ok(lookup) => {
+                    let asns = lookup
+                        .answers()
+                        .iter()
+                        .find_map(|r| match &r.data {
+                            RData::TXT(txt) => {
+                                let text: String = txt
+                                    .txt_data
+                                    .iter()
+                                    .map(|s| String::from_utf8_lossy(s).into_owned())
+                                    .collect();
+                                Some(daygle_dns_policy::residential::parse_cymru_txt(&text))
+                            }
+                            _ => None,
+                        })
+                        .unwrap_or_default();
+                    OriginState::Known(asns, Instant::now() + ORIGIN_TTL)
+                }
+                // An address the zone does not cover (NXDOMAIN) is known to
+                // have no origin; other failures are retried.
+                Err(e) if is_nxdomain(&e) => {
+                    OriginState::Known(Vec::new(), Instant::now() + ORIGIN_TTL)
+                }
+                Err(_) => OriginState::Known(Vec::new(), Instant::now() + ORIGIN_RETRY),
+            };
+            this.addresses
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(ip, state);
+        });
+        None
+    }
+}
+
+fn is_nxdomain(error: &daygle_dns_core::DaygleError) -> bool {
+    matches!(
+        error,
+        daygle_dns_core::DaygleError::Resolution {
+            response_code: Some(code),
+            ..
+        } if *code == u16::from(hickory_proto::op::ResponseCode::NXDomain)
+    )
+}
+
+/// The public addresses among `answers`' A and AAAA records (at most
+/// `limit`), for checks that look their networks up.
+pub fn public_addresses(answers: &[Record], limit: usize) -> Vec<IpAddr> {
+    answers
+        .iter()
+        .filter_map(|record| match &record.data {
+            RData::A(a) => Some(IpAddr::V4(a.0)),
+            RData::AAAA(a) => Some(IpAddr::V6(a.0)),
+            _ => None,
+        })
+        .filter(|ip| !deny_networks().iter().any(|net| net.contains(ip)))
+        .take(limit)
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
