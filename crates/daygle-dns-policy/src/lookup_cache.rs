@@ -89,9 +89,21 @@ where
             }
         };
         // `changed` returns an error once the sender is dropped: the lookup
-        // has finished (or panicked).
-        let _ = tokio::time::timeout(wait, pending.changed()).await;
-        let entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+        // has finished (or panicked), while a timeout means it is still
+        // running and will fill the cache on its own.
+        let finished = tokio::time::timeout(wait, pending.changed()).await.is_ok();
+        let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+        if finished
+            && matches!(entries.get(&key), Some(Entry::Pending(rx)) if rx.same_channel(&pending))
+        {
+            // The lookup task ended without recording a value (it panicked, or
+            // the runtime dropped it): drop the placeholder so the next query
+            // starts a fresh lookup instead of waiting on a sender that is
+            // gone and being answered "unknown" forever. Only the placeholder
+            // of the lookup waited on: a newer lookup for the same key (begun
+            // after the cache was cleared at capacity) is still running.
+            entries.remove(&key);
+        }
         match entries.get(&key) {
             Some(Entry::Known(value, _)) => Some(value.clone()),
             _ => None,
@@ -131,6 +143,74 @@ mod tests {
         // Cached now.
         assert_eq!(cache.get("k", wait, lookup(calls.clone())).await, Some(7));
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn a_lookup_that_never_records_a_value_is_retried() {
+        let cache = Arc::new(LookupCache::<&str, u32>::new(10));
+        // The lookup task dies without storing a value (a panic inside it is
+        // what a failing RDAP/network-type lookup amounts to).
+        let failing = async { panic!("lookup failed") };
+        assert_eq!(cache.get("k", Duration::from_secs(1), failing).await, None);
+        // The next query starts a fresh lookup rather than waiting on the
+        // dead one for the rest of the process's life.
+        let ok = async { (5u32, Duration::from_secs(60)) };
+        assert_eq!(cache.get("k", Duration::from_secs(1), ok).await, Some(5));
+    }
+
+    #[tokio::test]
+    async fn a_dead_lookup_leaves_a_newer_one_for_the_same_key_alone() {
+        // Capacity 1, so a query for another key clears the pending one.
+        let cache = Arc::new(LookupCache::<&str, u32>::new(1));
+        let wait = Duration::from_secs(5);
+        let settle = || tokio::time::sleep(Duration::from_millis(20));
+
+        // An old lookup for "k" that will die without storing a value.
+        let (fail_tx, fail_rx) = tokio::sync::oneshot::channel::<()>();
+        let old = tokio::spawn({
+            let cache = Arc::clone(&cache);
+            async move {
+                let dies = async move {
+                    let _ = fail_rx.await;
+                    panic!("lookup failed")
+                };
+                cache.get("k", wait, dies).await
+            }
+        });
+        settle().await;
+        // At capacity: this clears the old lookup's placeholder.
+        let never = std::future::pending::<(u32, Duration)>();
+        let _ = cache.get("j", Duration::from_millis(1), never).await;
+        // A newer lookup for "k" starts and is still running.
+        let (ok_tx, ok_rx) = tokio::sync::oneshot::channel::<()>();
+        let newer = tokio::spawn({
+            let cache = Arc::clone(&cache);
+            async move {
+                let ok = async move {
+                    let _ = ok_rx.await;
+                    (7u32, Duration::from_secs(60))
+                };
+                cache.get("k", wait, ok).await
+            }
+        });
+        settle().await;
+
+        // The old lookup dies; its waiter must not drop the newer placeholder.
+        fail_tx.send(()).unwrap();
+        assert_eq!(old.await.unwrap(), None);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counted = {
+            let calls = Arc::clone(&calls);
+            async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                (0u32, Duration::from_secs(60))
+            }
+        };
+        let _ = cache.get("k", Duration::from_millis(1), counted).await;
+        assert_eq!(calls.load(Ordering::SeqCst), 0, "joined the newer lookup");
+
+        ok_tx.send(()).unwrap();
+        assert_eq!(newer.await.unwrap(), Some(7));
     }
 
     #[tokio::test]

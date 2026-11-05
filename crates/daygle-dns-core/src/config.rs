@@ -1358,11 +1358,6 @@ impl AiSettings {
             .iter()
             .any(|c| c.eq_ignore_ascii_case(category))
     }
-
-    /// Whether this verdict would auto-block in enforce mode.
-    pub fn would_block(&self, category: &str, confidence: f32) -> bool {
-        self.is_auto_block_category(category) && confidence >= self.block_threshold
-    }
 }
 
 /// The runtime-tunable subset of the configuration that lives in the

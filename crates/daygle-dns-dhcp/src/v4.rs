@@ -5,7 +5,7 @@
 use std::net::{IpAddr, Ipv4Addr};
 
 use daygle_dns_core::dhcp::{custom_option_bytes, normalize_mac, DhcpScope};
-use dhcproto::v4::{DhcpOption, Flags, Message, MessageType, Opcode, OptionCode, UnknownOption};
+use dhcproto::v4::{DhcpOption, Message, MessageType, Opcode, OptionCode, UnknownOption};
 
 use crate::leases::{self, Leases, BOUND, DECLINED, OFFERED, RELEASED};
 
@@ -355,11 +355,6 @@ pub fn destination(request: &Message, reply: &Message) -> Destination {
         return Destination::Unicast(request.ciaddr());
     }
     Destination::Broadcast
-}
-
-/// Set the broadcast flag (for building test requests).
-pub fn broadcast_flags() -> Flags {
-    Flags::default().set_broadcast()
 }
 
 #[cfg(test)]

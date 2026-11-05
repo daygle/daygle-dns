@@ -684,7 +684,6 @@ dependencies = [
  "parking_lot 0.13.0",
  "rand 0.10.3",
  "reqwest",
- "rustls",
  "rustls-pki-types",
  "serde",
  "serde_json",
@@ -773,7 +772,6 @@ name = "daygle-dns-dot"
 version = "1.0.0"
 dependencies = [
  "daygle-dns-core",
- "hickory-net",
  "hickory-proto",
  "hickory-server",
  "rcgen",
@@ -781,9 +779,7 @@ dependencies = [
  "rustls-pki-types",
  "tempfile",
  "tokio",
- "tokio-rustls",
  "tracing",
- "webpki-roots",
  "x509-parser",
 ]
 
@@ -805,11 +801,9 @@ dependencies = [
  "daygle-dns-core",
  "daygle-dns-policy",
  "fasttext",
- "ndarray",
  "ort",
  "parking_lot 0.13.0",
  "rusqlite",
- "serde",
  "serde_json",
  "tempfile",
  "tokenizers",

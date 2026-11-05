@@ -345,14 +345,6 @@ impl Scanner {
         Ok(eligible)
     }
 
-    /// The domain → category map published for category blocking: fresh
-    /// content verdicts, relabelled by any operator override, minus domains
-    /// an allow override exempts. A relabel also stands on its own, so an
-    /// operator can categorize a domain the model has not got to yet.
-    pub fn eligible_categories(&self, now: i64) -> Result<CategorySnapshot> {
-        self.categories_with(now, &self.store.allow_overrides()?)
-    }
-
     fn categories_with(&self, now: i64, overrides: &ExemptionSnapshot) -> Result<CategorySnapshot> {
         let relabels = self.store.category_overrides()?;
         let mut snapshot = CategorySnapshot::new();

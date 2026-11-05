@@ -24,11 +24,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use base64::Engine as _;
 
 use daygle_dns_core::config::TsigKeyConfig;
-use hickory_proto::op::{Message, OpCode};
+use hickory_proto::op::Message;
 use hickory_proto::rr::rdata::tsig::{
-    make_tsig_record, message_tbs, signed_bitmessage_to_buf, TsigAlgorithm, TsigError, TSIG,
+    make_tsig_record, message_tbs, signed_bitmessage_to_buf, TsigAlgorithm, TSIG,
 };
-use hickory_proto::rr::{Name, Record, RecordType};
+use hickory_proto::rr::{Name, Record};
 use hickory_proto::rr::{TSigResponseContext, TSigner};
 use hickory_proto::serialize::binary::BinEncodable;
 
@@ -174,18 +174,6 @@ pub enum TsigFailure {
     BadTime,
     /// The wire message is malformed (no TSIG where one was claimed, etc.).
     Malformed,
-}
-
-impl TsigFailure {
-    /// The TSIG error code to report (RFC 8945 §3.3).
-    pub fn tsig_error(self) -> Option<TsigError> {
-        match self {
-            TsigFailure::UnknownKey => Some(TsigError::BadKey),
-            TsigFailure::BadSignature => Some(TsigError::BadSig),
-            TsigFailure::BadTime => Some(TsigError::BadTime),
-            TsigFailure::Malformed => None,
-        }
-    }
 }
 
 /// Verify the TSIG on an inbound request given its raw wire bytes.
@@ -517,20 +505,10 @@ pub fn response_context_for(key: &TsigKey) -> hickory_proto::rr::TSigResponseCon
     hickory_proto::rr::TSigResponseContext::new(0, now, key.tsigner(), Vec::new(), None)
 }
 
-/// True when `rtype` is a zone transfer type.
-pub fn is_transfer_type(rtype: RecordType) -> bool {
-    rtype == RecordType::AXFR || rtype == RecordType::IXFR
-}
-
-/// Whether this opcode is one Daygle authenticates with TSIG.
-pub fn is_tsig_opcode(op: OpCode) -> bool {
-    matches!(op, OpCode::Query | OpCode::Update)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hickory_proto::op::{MessageType, Query};
+    use hickory_proto::op::{MessageType, OpCode, Query};
     use hickory_proto::rr::RecordType;
 
     fn test_key() -> TsigKey {

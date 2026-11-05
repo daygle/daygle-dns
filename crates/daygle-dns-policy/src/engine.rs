@@ -209,10 +209,6 @@ impl PolicyEngine {
         self.allowlist = Some(std::sync::Arc::new(allowlist));
     }
 
-    pub fn allowlist_len(&self) -> usize {
-        self.allowlist.as_ref().map(|l| l.len()).unwrap_or(0)
-    }
-
     /// Whether a domain matches an explicitly trusted entry.
     pub fn is_allowlisted(&self, domain: &str) -> bool {
         self.allowlist.as_ref().is_some_and(|l| l.contains(domain))
@@ -234,11 +230,6 @@ impl PolicyEngine {
     /// none are configured or fetched yet).
     pub fn remote_blocklist_len(&self) -> usize {
         self.remote_blocklist.as_ref().map(|l| l.len()).unwrap_or(0)
-    }
-
-    /// The current remote blocklist, for comparison on refresh.
-    pub fn remote_blocklist_snapshot(&self) -> Option<std::sync::Arc<Blocklist>> {
-        self.remote_blocklist.clone()
     }
 
     /// Enable or disable the AAAA filter. When enabled, AAAA queries return an
@@ -340,18 +331,6 @@ impl PolicyEngine {
     ) {
         self.remote_blocklist = remote;
         self.dot_blocklist = dot;
-    }
-
-    /// The current DoT-scoped remote blocklist, for comparison on refresh
-    /// and for carrying over a policy-engine rebuild.
-    pub fn dot_blocklist_snapshot(&self) -> Option<std::sync::Arc<Blocklist>> {
-        self.dot_blocklist.clone()
-    }
-
-    /// The number of domains currently blocked by DoT-scoped sources (0 when
-    /// none are configured or fetched yet).
-    pub fn dot_blocklist_len(&self) -> usize {
-        self.dot_blocklist.as_ref().map(|l| l.len()).unwrap_or(0)
     }
 
     /// Whether the AAAA filter would suppress a query for `query_name` of the

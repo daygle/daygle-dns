@@ -152,21 +152,6 @@ CREATE TABLE IF NOT EXISTS split_horizon_entries (
 
 CREATE INDEX IF NOT EXISTS idx_split_horizon_domain ON split_horizon_entries(domain);
 
-CREATE TABLE IF NOT EXISTS tsig_keys (
-    name       TEXT PRIMARY KEY,
-    algorithm  TEXT NOT NULL,
-    secret     TEXT NOT NULL,
-    created_at TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS stub_zones (
-    name         TEXT PRIMARY KEY,
-    nss          TEXT NOT NULL DEFAULT '[]',
-    refresh_secs INTEGER NOT NULL DEFAULT 3600,
-    enabled      INTEGER NOT NULL DEFAULT 1,
-    last_refresh TEXT
-);
-
 CREATE TABLE IF NOT EXISTS blocking_groups (
     id          TEXT PRIMARY KEY,
     name        TEXT NOT NULL UNIQUE,
@@ -377,6 +362,7 @@ impl ZoneStore {
         migrate_console_user_profile(&conn)?;
         migrate_blocking_group_lists(&conn)?;
         migrate_blocking_group_timestamps(&conn)?;
+        drop_retired_tables(&conn)?;
         // SQLite ships with foreign-key enforcement off (per connection), so
         // the schema's `ON DELETE CASCADE` never fired and deleting a zone
         // left its records, DNSSEC private keys and secondary state behind.
@@ -648,75 +634,6 @@ impl ZoneStore {
             params![zone_id, Utc::now().to_rfc3339()],
         )?;
         Ok(())
-    }
-
-    /// Remove secondary metadata (the zone itself is kept).
-    pub fn unset_secondary(&self, zone_id: &str) -> Result<()> {
-        let conn = self.lock_conn()?;
-        conn.execute("DELETE FROM secondary_zones WHERE zone_id = ?1", [zone_id])?;
-        Ok(())
-    }
-
-    // ---- Stub zones -------------------------------------------------------
-
-    /// Insert or update a stub zone. `nss` may be empty while the
-    /// nameservers are still being learned.
-    pub fn set_stub(
-        &self,
-        name: &str,
-        nss: &[String],
-        refresh_secs: u64,
-        enabled: bool,
-    ) -> Result<()> {
-        let nss = serde_json::to_string(nss)
-            .map_err(|e| DaygleError::Database(format!("encode nss: {e}")))?;
-        let conn = self.lock_conn()?;
-        conn.execute(
-            "INSERT INTO stub_zones (name, nss, refresh_secs, enabled, last_refresh)
-             VALUES (?1, ?2, ?3, ?4, NULL)
-             ON CONFLICT(name) DO UPDATE SET nss = ?2, refresh_secs = ?3, enabled = ?4",
-            params![name, nss, refresh_secs as i64, enabled as i64],
-        )?;
-        Ok(())
-    }
-
-    /// All stub zones with their metadata.
-    pub fn list_stubs(&self) -> Result<Vec<crate::model::StubZone>> {
-        let conn = self.lock_conn()?;
-        let mut stmt = conn.prepare(
-            "SELECT name, nss, refresh_secs, enabled, last_refresh
-             FROM stub_zones ORDER BY name",
-        )?;
-        let rows = stmt.query_map([], |row| {
-            let nss_json: String = row.get(1)?;
-            Ok(crate::model::StubZone {
-                name: row.get(0)?,
-                nss: serde_json::from_str(&nss_json).unwrap_or_default(),
-                refresh_secs: row.get::<_, i64>(2)? as u64,
-                enabled: row.get::<_, i64>(3)? != 0,
-                last_refresh: row.get(4)?,
-            })
-        })?;
-        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
-    }
-
-    /// Record a successful NS refresh for a stub zone.
-    pub fn touch_stub(&self, name: &str, nss: &[String]) -> Result<()> {
-        let nss = serde_json::to_string(nss)
-            .map_err(|e| DaygleError::Database(format!("encode nss: {e}")))?;
-        let conn = self.lock_conn()?;
-        conn.execute(
-            "UPDATE stub_zones SET nss = ?2, last_refresh = ?3 WHERE name = ?1",
-            params![name, nss, Utc::now().to_rfc3339()],
-        )?;
-        Ok(())
-    }
-
-    /// Remove a stub zone entirely (stub rows are standalone; nothing else
-    /// references them).
-    pub fn unset_stub(&self, name: &str) -> Result<bool> {
-        let conn = self.lock_conn()?;
-        Ok(conn.execute("DELETE FROM stub_zones WHERE name = ?1", [name])? > 0)
     }
 
     // ---- Advanced blocking groups ----------------------------------------
@@ -1572,44 +1489,6 @@ impl ZoneStore {
             params![rows[swap_idx].0, rows[idx].1],
         )?;
         Ok(MoveResult::Moved)
-    }
-
-    // ---- TSIG keys (RFC 8945) -------------------------------------------
-
-    /// List all stored TSIG keys, oldest first.
-    pub fn list_tsig_keys(&self) -> Result<Vec<crate::model::TsigKeyRecord>> {
-        let conn = self.lock_conn()?;
-        let mut stmt = conn.prepare(
-            "SELECT name, algorithm, secret, created_at FROM tsig_keys ORDER BY created_at",
-        )?;
-        let rows = stmt.query_map([], |row| {
-            Ok(crate::model::TsigKeyRecord {
-                name: row.get(0)?,
-                algorithm: row.get(1)?,
-                secret: row.get(2)?,
-                created_at: row.get(3)?,
-            })
-        })?;
-        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
-    }
-
-    /// Store or replace a TSIG key.
-    pub fn store_tsig_key(&self, name: &str, algorithm: &str, secret_b64: &str) -> Result<()> {
-        let conn = self.lock_conn()?;
-        conn.execute(
-            "INSERT INTO tsig_keys (name, algorithm, secret, created_at)
-             VALUES (?1, ?2, ?3, ?4)
-             ON CONFLICT(name) DO UPDATE SET algorithm = ?2, secret = ?3",
-            params![name, algorithm, secret_b64, Utc::now().to_rfc3339()],
-        )?;
-        Ok(())
-    }
-
-    /// Delete a TSIG key.
-    pub fn delete_tsig_key(&self, name: &str) -> Result<bool> {
-        let conn = self.lock_conn()?;
-        let changed = conn.execute("DELETE FROM tsig_keys WHERE name = ?1", [name])?;
-        Ok(changed > 0)
     }
 
     // ---- Health checks ---------------------------------------------------
@@ -3133,20 +3012,6 @@ impl ZoneStore {
         .map(|e| e.map(|e| e.trim().to_string()))
         .map_err(Into::into)
     }
-
-    /// The username of the first enabled admin, or `None` (used to guard
-    /// against demoting/disabling/deleting the last admin).
-    pub fn first_enabled_admin(&self) -> Result<Option<String>> {
-        let conn = self.lock_conn()?;
-        conn.query_row(
-            "SELECT username FROM console_users
-             WHERE role = 'admin' AND enabled = 1 ORDER BY created_at, username LIMIT 1",
-            [],
-            |r| r.get(0),
-        )
-        .optional()
-        .map_err(Into::into)
-    }
 }
 
 fn validate_username(username: &str) -> Result<()> {
@@ -4661,6 +4526,18 @@ fn migrate_dnssec_key_retirement(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// Drop tables earlier versions created but nothing reads any more:
+/// `tsig_keys` (TSIG keys live in `authoritative.tsig_keys` in the config; the
+/// table only ever held unused copies of the shared secrets) and
+/// `stub_zones` (stub zones live in `authoritative.stub_zones`).
+fn drop_retired_tables(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "DROP TABLE IF EXISTS tsig_keys;
+         DROP TABLE IF EXISTS stub_zones;",
+    )?;
+    Ok(())
+}
+
 /// Add zone enablement and modification metadata to older databases.
 fn migrate_zone_metadata(conn: &Connection) -> Result<()> {
     for (column, definition) in [
@@ -5415,6 +5292,36 @@ mod tests {
     /// A database written before the per-group override kept "AI blocking
     /// off" in `ai_blocking`: that becomes record-only, so an upgrade never
     /// starts auto-blocking for clients an operator had excluded.
+    #[test]
+    fn retired_tables_are_dropped_on_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("retired.db");
+        let path = db.to_string_lossy().to_string();
+        drop(ZoneStore::open(&path).unwrap());
+        // Recreate the tables the way older versions left them, with a row.
+        {
+            let conn = rusqlite::Connection::open(&db).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE tsig_keys (name TEXT PRIMARY KEY, algorithm TEXT NOT NULL,
+                     secret TEXT NOT NULL, created_at TEXT NOT NULL);
+                 INSERT INTO tsig_keys VALUES ('k.', 'hmac-sha256', 'c2VjcmV0', 'now');
+                 CREATE TABLE stub_zones (name TEXT PRIMARY KEY);",
+            )
+            .unwrap();
+        }
+        drop(ZoneStore::open(&path).unwrap());
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        let left: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE type = 'table' AND name IN ('tsig_keys', 'stub_zones')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(left, 0);
+    }
+
     #[test]
     fn legacy_ai_blocking_flag_migrates_to_record_only() {
         use daygle_dns_core::blocking::BlockingGroupInput;
