@@ -283,11 +283,21 @@ pub async fn blockable_services() -> Response {
 
 /// `GET /api/policy/security` - the security categories a filtering group
 /// can block.
-pub async fn security_categories() -> Response {
-    Json(serde_json::json!({
-        "categories": daygle_dns_policy::security::SECURITY_CATEGORIES
-    }))
-    .into_response()
+pub async fn security_categories(State(state): State<AppState>) -> Response {
+    // Each feed-backed category's download state, so the console can say
+    // when a list has not been downloaded yet or failed to update.
+    let status = state.advanced_blocking.load().lists().feeds().status();
+    let categories: Vec<serde_json::Value> = daygle_dns_policy::security::SECURITY_CATEGORIES
+        .iter()
+        .map(|c| {
+            let mut value = serde_json::json!(c);
+            if c.feed.is_some() {
+                value["feed_status"] = serde_json::json!(status.get(c.id));
+            }
+            value
+        })
+        .collect();
+    Json(serde_json::json!({ "categories": categories })).into_response()
 }
 
 /// `GET /api/rpz` - each response policy zone's state.
@@ -3218,6 +3228,11 @@ pub async fn upsert_blocking_group(
     // Security categories likewise, by canonical id, once each.
     let mut security: Vec<String> = Vec::new();
     for id in &input.blocked_security {
+        // Categories retired in later versions are dropped, so a group that
+        // still names one can be saved.
+        if daygle_dns_policy::security::is_retired(id) {
+            continue;
+        }
         let Some(category) = daygle_dns_policy::security::find(id) else {
             return error_response(
                 StatusCode::BAD_REQUEST,
@@ -3683,17 +3698,8 @@ async fn explain_blocking_as(state: AppState, input: ExplainInput) -> Response {
     }
 
     // The verdict, decided as the server decides it.
-    let group_allow = groups.category_allow(client, &domain, listener);
-    let decision = policy
-        .evaluate_allowing(
-            client,
-            &domain,
-            &qtype,
-            listener,
-            group_allow.as_ref().map(|(g, c)| (g.as_str(), *c)),
-        )
-        .await;
-    let allowlisted = policy.is_allowlisted(&domain) || group_allow.is_some();
+    let decision = policy.evaluate_on(client, &domain, &qtype, listener).await;
+    let allowlisted = policy.is_allowlisted(&domain);
     let verdict = if decision.action != Action::Allow {
         Some((
             decision.source,

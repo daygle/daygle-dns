@@ -1587,76 +1587,65 @@ group blocks: every domain the service uses, and its subdomains (`400` for
 an unknown id; ids are stored in their canonical form). `GET
 /api/policy/services` returns the catalog: `{"services": [{"id", "name",
 "category", "domains"}]}`. The group's `allow` list still wins.
-`blocked_security` lists security categories (by id, e.g.
-`["dynamic_dns", "free_hosting"]`) whose built-in lists the group blocks:
-`free_hosting`, `dynamic_dns`, `tunneling`, `data_drop`,
-`decentralized_gateways`, `crypto_mining` and `high_risk_tlds`, plus three
-detectors that judge a name instead of listing it: `idn_homographs`
-(internationalized names that mix alphabets, or spell a whole label in
-another alphabet's Latin look-alikes outside that alphabet's own TLDs),
-`dga_domains` (registered labels of 10 or more letters whose letter pairs
-are far less likely than in real domain names, as malware's domain
-generation algorithms make them) and `parked_domains` (domains whose name
-servers belong to a parking service; the name servers are looked up in the
-background the first time a registered domain is seen and remembered for a
-day, so that first query is answered), `typosquatting` (registered labels
-one typo away from a brand phishing often targets, imitating it with
-look-alike characters such as `paypa1`, or pairing it with a phishing word
-such as `paypal-login`; the brands' own names under any TLD are not
-matched) and `newly_registered` (domains registered less than 30 days ago;
-the registration date is looked up over RDAP in the background the first
-time a registered domain is seen, at most four lookups at a time, and
-remembered for a week, so that first query is answered; the RDAP server of
-each TLD comes from `policy.rdap_bootstrap`, IANA's bootstrap file by
-default, and TLDs without one are never blocked. Each lookup tells the
-registry the domain name, not who asked) and `google_safe_browsing` (host
-names on Google Safe Browsing's malware, phishing, unwanted-software and
-harmful-app URL lists for any platform, using the Update API v4: the lists
-are kept locally as hash prefixes, updated at most every 30 minutes, and
-only a matching 4-byte prefix is ever sent to Google to fetch full hashes,
-which are cached for the time Google gives; each name is checked as
-`host/` for itself and up to four parent domains, so page-level entries
-are not matched; needs `policy.safe_browsing_key`, and Google allows the
-API for non-commercial use only) and `residential_hosting` (names whose
-public addresses, up to four, all belong to networks PeeringDB lists as
-`Cable/DSL/ISP`; each address's origin ASN comes from a TXT lookup in
-Team Cymru's IP-to-ASN zones, `policy.ip_asn_zone_v4`/`ip_asn_zone_v6`,
-through the server's own resolver, and each network's type from
-`policy.peeringdb_url`; both are looked up in the background and
-remembered, a day for addresses and a week for networks, so the first
-queries of a name are answered; names and CNAME targets of CDNs that put
-caches inside ISPs (Google, Netflix, Meta, Akamai, Apple, CloudFront,
-Steam, Microsoft, Twitch, Ookla) are never judged, and services really run
-from a home connection need Custom Allow), and the privacy category
-`disguised_trackers` (answers whose CNAME chain leads to a tracking or ad
-company's infrastructure under a different registered domain from the
-query, as CNAME cloaking does: `metrics.shop.example` to
+`blocked_security` lists security and privacy categories (by id, e.g.
+`["dynamic_dns", "native_apple"]`). Every category is either a maintained
+public list or an exact check; none is a hand-written list or a guess.
+
+List categories block what their list names. The server downloads each
+list once a group uses the category, refreshes it every 12 hours (an hour
+after a failure, keeping the last good copy), and until the first download
+succeeds the category blocks nothing:
+
+| id | List |
+|---|---|
+| `dynamic_dns` | HaGeZi DynDNS (the services' own websites included) |
+| `decentralized_gateways` | IPFS's public gateway list |
+| `crypto_mining` | The Block List Project's crypto list |
+| `high_risk_tlds` | HaGeZi Most Abused TLDs, with its allowlist of reputable sites |
+| `native_apple`, `native_samsung`, `native_xiaomi`, `native_huawei`, `native_windows` (Windows and Office), `native_amazon`, `native_roku`, `native_lg`, `native_vivo`, `native_oppo` (OPPO, Realme and OnePlus), `native_tiktok` | HaGeZi's Native Tracker list for that vendor (privacy) |
+
+`policy.feed_mirror` downloads every list from a mirror instead (a base
+URL; each list's URL without its scheme is appended to it).
+
+Checks decided after resolution: `newly_registered` (domains registered
+less than 30 days ago; the registration date is looked up over RDAP the
+first time a registered domain is seen, at most four lookups at a time,
+and remembered for a week; that first query waits for it, up to 2
+seconds, and queries for the same domain meanwhile share the lookup; a
+lookup slower than that is answered as usual and judged from the next
+query on; the RDAP server of each TLD comes from `policy.rdap_bootstrap`,
+IANA's bootstrap file by default, and TLDs without one are never blocked.
+Each lookup tells the registry the domain name, not who asked),
+`google_safe_browsing` (host names on Google Safe Browsing's malware,
+phishing, unwanted-software and harmful-app URL lists for any platform,
+using the Update API v4: the lists are kept locally as hash prefixes,
+updated at most every 30 minutes, and only a matching 4-byte prefix is
+ever sent to Google to fetch full hashes, which are cached for the time
+Google gives; each name is checked as `host/` for itself and up to four
+parent domains, so page-level entries are not matched; needs
+`policy.safe_browsing_key`, and Google allows the API for non-commercial
+use only) and the
+privacy category `disguised_trackers` (answers whose CNAME chain leads to
+a tracking or ad company's infrastructure under a different registered
+domain from the query, as CNAME cloaking does: `metrics.shop.example` to
 `shop.eulerian.net`; the companies' CNAME targets are the `tracker` and
-`ad` entries of AdGuard's cname-trackers catalogue, MIT-licensed, bundled
-and refreshed with `scripts/update-cname-trackers.sh`; blocks are logged
-with `source` `privacy`) and `allow_tracking_links`, which allows rather
-than blocks: the click-redirect services of email platforms (Mailchimp,
-SendGrid, Amazon SES, HubSpot, Klaviyo, Mailjet, Postmark, ...), search
-ad clicks (`googleadservices.com`) and affiliate networks (CJ, Awin,
-Rakuten, Skimlinks, Impact, ...) are let through for the group's
-clients like the allowlist lets names through: after denied networks,
-ahead of every blocklist, per-client rule, group block, response policy
-zone, CNAME inspection and answer filter, and the native tracking
-categories `native_apple`, `native_samsung`, `native_xiaomi`,
-`native_huawei`, `native_windows`, `native_amazon`, `native_roku`,
-`native_sonos`, `native_lg` and `native_vizio`, each blocking a short,
-conservative list of that vendor's telemetry, usage-analytics and
-system-ad endpoints (never ones that also serve updates or sign-in;
-blocks are logged with `source` `privacy`) (`400` for an unknown id).
+`ad` entries of AdGuard's cname-trackers catalogue, downloaded like the
+lists above).
+
+Blocks by privacy categories are logged with `source` `privacy`, others
+with `security`. An unknown id is refused with `400`. Ids of retired
+categories (`free_hosting`, `tunneling`, `data_drop`, `parked_domains`,
+`allow_tracking_links`, `idn_homographs`, `dga_domains`, `typosquatting`,
+`native_sonos`, `native_vizio`, `residential_hosting`) are dropped when a group is saved and
+ignored until then.
 `GET /api/policy/security` returns the catalog:
-`{"categories": [{"id", "name", "description", "section", "detector", "entries"}]}`,
+`{"categories": [{"id", "name", "description", "section", "detector", "feed", "feed_status"}]}`,
 where `section` is `security` or `privacy` (where the console lists it),
-`detector` is `homograph`, `dga`, `parked`, `typosquat`,
-`newly_registered`, `safe_browsing`, `residential_hosting`,
-`cname_tracker`, `allow` (the category's entries are allowed, not
-blocked) or `null`, and `entries`
-use the blocklist syntax (`*.suffix` covers subdomains only, `@@name` is an
-exception such as a provider's own website; empty for a detector).
+`detector` is `newly_registered`, `safe_browsing`,
+`cname_tracker` or `null`, `feed` is the list (`{"source", "url",
+"format", "allow_url"}`) or `null`, and `feed_status` (for categories
+with a list) is `null` until a download has been tried, then
+`{"entries", "updated_at", "error"}`.
 `blocked_tlds` lists top-level domains whose every name the group blocks
 (e.g. `["zip", "mov"]`; `.ZIP`, `*.zip` and Unicode TLDs are accepted and
 stored as lowercase punycode; `400` for anything that is not a single

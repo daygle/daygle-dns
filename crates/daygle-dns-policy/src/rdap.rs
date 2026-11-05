@@ -1,9 +1,10 @@
 //! Registration dates of domains, looked up over RDAP (RFC 9082/9083), for
 //! the Newly Registered Domains category.
 //!
-//! The query path never waits on the network: the first time a registered
-//! domain is seen, [`RegistrationDates::check`] starts a background lookup
-//! and answers "unknown"; later queries get the remembered date. The RDAP
+//! The first query for a registered domain waits for its lookup (up to
+//! [`LOOKUP_WAIT`]; queries for the same domain meanwhile share it), and
+//! later queries get the remembered date. A lookup slower than that is
+//! answered as usual and judged from the next query on. The RDAP
 //! server of each TLD comes from IANA's bootstrap file (RFC 9224), fetched
 //! once a day. TLDs without an RDAP server (some country codes) are never
 //! judged.
@@ -12,7 +13,7 @@
 //! who asked), which is why the category is opt-in per filtering group.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
@@ -35,16 +36,11 @@ const BOOTSTRAP_TTL: Duration = Duration::from_secs(24 * 3600);
 /// Most domains remembered; past it the expired ones are dropped, and all
 /// of them if none has expired.
 const CAP: usize = 50_000;
+/// How long a query waits for its domain's registration date.
+pub const LOOKUP_WAIT: Duration = Duration::from_secs(2);
 /// Most RDAP lookups running at once, so a burst of new names cannot flood
 /// the registries (which rate-limit) or this server.
 const CONCURRENT: usize = 4;
-
-#[derive(Debug, Clone)]
-enum State {
-    Pending,
-    /// The registration date (when the registry gave one), valid until.
-    Known(Option<DateTime<Utc>>, Instant),
-}
 
 /// TLD -> RDAP base URL, from the bootstrap file.
 type Bootstrap = HashMap<String, String>;
@@ -54,7 +50,8 @@ pub struct RegistrationDates {
     client: reqwest::Client,
     bootstrap_url: String,
     bootstrap: tokio::sync::Mutex<Option<(Instant, Arc<Bootstrap>)>>,
-    domains: Mutex<HashMap<String, State>>,
+    /// Registration dates (when the registry gave one) by domain.
+    domains: Arc<crate::lookup_cache::LookupCache<String, Option<DateTime<Utc>>>>,
     permits: Semaphore,
 }
 
@@ -85,7 +82,7 @@ impl RegistrationDates {
             client,
             bootstrap_url: bootstrap_url.to_string(),
             bootstrap: tokio::sync::Mutex::new(None),
-            domains: Mutex::new(HashMap::new()),
+            domains: Arc::new(crate::lookup_cache::LookupCache::new(CAP)),
             permits: Semaphore::new(CONCURRENT),
         }
     }
@@ -96,36 +93,19 @@ impl RegistrationDates {
     }
 
     /// When `domain` (a registered domain, lowercase ASCII) was registered,
-    /// when known. When nothing current is known, starts a background lookup
-    /// and returns `None`, so this query is answered as usual.
-    pub fn check(self: &Arc<Self>, domain: &str) -> Option<DateTime<Utc>> {
-        let now = Instant::now();
-        {
-            let mut domains = self.domains.lock().unwrap_or_else(|e| e.into_inner());
-            match domains.get(domain) {
-                Some(State::Pending) => return None,
-                Some(State::Known(date, until)) if *until > now => return *date,
-                _ => {}
-            }
-            if domains.len() >= CAP {
-                domains.retain(|_, s| matches!(s, State::Known(_, until) if *until > now));
-                if domains.len() >= CAP {
-                    domains.clear();
-                }
-            }
-            domains.insert(domain.to_string(), State::Pending);
-        }
+    /// when known: from the cache, or looked up now and waited for up to
+    /// [`LOOKUP_WAIT`]. `None` when the registry gives no date, the TLD has
+    /// no RDAP server, or the lookup is still running.
+    pub async fn registration_date(self: &Arc<Self>, domain: &str) -> Option<DateTime<Utc>> {
         let this = Arc::clone(self);
-        let domain = domain.to_string();
-        tokio::spawn(async move {
-            let date = this.look_up(&domain).await;
-            let ttl = if date.is_some() { DATE_TTL } else { RETRY };
-            this.domains
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .insert(domain, State::Known(date, Instant::now() + ttl));
-        });
-        None
+        let key = domain.to_string();
+        self.domains
+            .get(key.clone(), LOOKUP_WAIT, async move {
+                let date = this.look_up(&key).await;
+                (date, if date.is_some() { DATE_TTL } else { RETRY })
+            })
+            .await
+            .flatten()
     }
 
     /// Whether a domain registered at `date` is newly registered now.

@@ -26,7 +26,8 @@ use daygle_dns_core::config::{normalize_domains, AiMode};
 use daygle_dns_core::schedule::{self, CompiledWindow, WeekTime};
 
 use crate::engine::{source, Check};
-use crate::security::Detector;
+use crate::feeds::FeedLists;
+use crate::security::{Detector, SecurityCategory};
 use crate::{Action, Blocklist, Decision, GroupBlocklists};
 
 /// Client-list keywords that match by listener instead of by address.
@@ -88,10 +89,10 @@ struct CompiledGroup {
     schedule: Vec<CompiledWindow>,
     /// Blocked services: (display name, their domains and subdomains).
     services: Vec<(&'static str, Blocklist)>,
-    /// Blocked security categories: (display name, detector, their
-    /// entries). Parked domains are judged by the dispatcher after
-    /// resolution and never match here.
-    security: Vec<(&'static str, Option<Detector>, Blocklist)>,
+    /// Blocked security and privacy categories. List categories are looked
+    /// up in their downloaded feed ([`crate::feeds`]); detectors are judged
+    /// by the dispatcher after resolution.
+    security: Vec<&'static SecurityCategory>,
     /// Blocked top-level domains (`*.tld` entries).
     tlds: Blocklist,
     /// Block answers with local network addresses for public names.
@@ -129,17 +130,16 @@ impl CompiledGroup {
             && (self.schedule.is_empty() || schedule::active(&self.schedule, now.get()))
     }
 
-    /// The security category that blocks `qname` by name, with what the
-    /// detector found when one decided it.
-    fn security_match(&self, qname: &str) -> Option<(&'static str, Option<String>)> {
-        self.security.iter().find_map(|(name, detector, entries)| {
-            security_check(*detector, entries, qname).map(|why| (*name, why))
+    /// The list category whose downloaded feed lists `qname`, if any.
+    fn security_match(&self, qname: &str, feeds: &FeedLists) -> Option<&'static SecurityCategory> {
+        self.security.iter().copied().find(|c| {
+            c.detector.is_none() && feeds.get(c.id).is_some_and(|list| list.contains(qname))
         })
     }
 
     /// Whether the group blocks with `detector`.
     fn uses(&self, detector: Detector) -> bool {
-        self.security.iter().any(|(_, d, _)| *d == Some(detector))
+        self.security.iter().any(|c| c.detector == Some(detector))
     }
 
     fn allows(&self, qname: &str) -> bool {
@@ -266,17 +266,10 @@ impl AdvancedBlocking {
                     .iter()
                     .filter_map(|id| {
                         let found = crate::security::find(id);
-                        if found.is_none() {
+                        if found.is_none() && !crate::security::is_retired(id) {
                             warn!(group = %g.name, category = %id, "skipping unknown security category");
                         }
                         found
-                    })
-                    .map(|c| {
-                        (
-                            c.name,
-                            c.detector,
-                            Blocklist::from_lines(c.entries.iter().copied()),
-                        )
                     })
                     .collect(),
                 tlds: Blocklist::from_set(
@@ -399,26 +392,19 @@ impl AdvancedBlocking {
             })
     }
 
-    /// The group (and its allow category) that lets `qname` through for
-    /// `client` on `listener` ahead of every blocklist: the first enabled
-    /// group covering the client now with an allow category (Allow
-    /// Tracking Links) listing the name.
-    pub fn category_allow(
-        &self,
-        client: IpAddr,
-        qname: &str,
-        listener: Option<&str>,
-    ) -> Option<(String, &'static str)> {
-        let mut now = self.clock();
-        self.groups
+    /// The ids of the feed-backed categories some enabled group uses, so
+    /// the feed loop downloads only those.
+    pub fn feed_categories(&self) -> Vec<String> {
+        let mut ids: Vec<String> = self
+            .groups
             .iter()
-            .filter(|g| g.applies(client, listener, &mut now))
-            .find_map(|g| {
-                g.security
-                    .iter()
-                    .find(|(_, d, entries)| *d == Some(Detector::Allow) && entries.contains(qname))
-                    .map(|(name, _, _)| (g.name.clone(), *name))
-            })
+            .flat_map(|g| g.security.iter())
+            .filter(|c| c.feed.is_some())
+            .map(|c| c.id.to_string())
+            .collect();
+        ids.sort();
+        ids.dedup();
+        ids
     }
 
     /// The groups whose response filters apply to an answer for `qname`
@@ -446,17 +432,11 @@ impl AdvancedBlocking {
             if group.limit_payloads && filters.payloads.is_none() {
                 filters.payloads = Some(group.name.as_str());
             }
-            if filters.parked.is_none() && group.uses(Detector::Parked) {
-                filters.parked = Some(group.name.as_str());
-            }
             if filters.newly_registered.is_none() && group.uses(Detector::NewlyRegistered) {
                 filters.newly_registered = Some(group.name.as_str());
             }
             if filters.safe_browsing.is_none() && group.uses(Detector::SafeBrowsing) {
                 filters.safe_browsing = Some(group.name.as_str());
-            }
-            if filters.residential.is_none() && group.uses(Detector::ResidentialHosting) {
-                filters.residential = Some(group.name.as_str());
             }
             if filters.cname_trackers.is_none() && group.uses(Detector::CnameTracker) {
                 filters.cname_trackers = Some(group.name.as_str());
@@ -509,15 +489,14 @@ impl AdvancedBlocking {
                     source::SERVICE,
                     service.to_string(),
                 ))
-            } else if let Some((category, why)) = group.security_match(qname) {
+            } else if let Some(category) = group.security_match(qname, self.lists.feeds()) {
                 Some((
                     format!(
-                        "'{qname}' blocked as {category}{} by group '{}'",
-                        why.map(|w| format!(" ({w})")).unwrap_or_default(),
-                        group.name
+                        "'{qname}' blocked as {} by group '{}'",
+                        category.name, group.name
                     ),
-                    category_source(category),
-                    category.to_string(),
+                    category_source(category.name),
+                    category.name.to_string(),
                 ))
             } else if let Some(entry) = group.tlds.matching_entry(qname) {
                 Some((
@@ -625,43 +604,42 @@ impl AdvancedBlocking {
                     });
                 }
             }
-            for (category, detector, entries) in &group.security {
-                if *detector == Some(Detector::Allow) {
-                    if let Some(entry) = entries.matching_entry(qname) {
-                        checks.push(Check {
-                            matched: Some(category.to_string()),
-                            ..in_group(
-                                "allow",
-                                source::PRIVACY,
-                                format!(
-                                    "{category} (entry '{entry}'), turned on by group '{}': no blocklist blocks it",
-                                    group.name
-                                ),
-                            )
-                        });
-                    }
-                } else if detector.is_some_and(Detector::after_resolution) {
+            for category in &group.security {
+                let name = category.name;
+                if category.detector.is_some() {
                     checks.push(in_group(
                         "none",
-                        source::SECURITY,
+                        category_source(name),
                         format!(
-                            "{category}: group '{}' checks the domain once it resolves",
+                            "{name}: group '{}' checks the domain once it resolves",
                             group.name
                         ),
                     ));
-                } else if let Some(why) = security_check(*detector, entries, qname) {
-                    checks.push(Check {
-                        matched: Some(category.to_string()),
-                        ..in_group(
-                            "block",
-                            category_source(category),
-                            format!(
-                                "{category}{}, blocked by group '{}'",
-                                why.map(|w| format!(" ({w})")).unwrap_or_default(),
-                                group.name
-                            ),
-                        )
-                    });
+                    continue;
+                }
+                match self.lists.feeds().get(category.id) {
+                    None => checks.push(in_group(
+                        "none",
+                        category_source(name),
+                        format!(
+                            "{name}: its list has not been downloaded yet, so it blocks nothing"
+                        ),
+                    )),
+                    Some(list) => {
+                        if let Some(entry) = list.matching_entry(qname) {
+                            checks.push(Check {
+                                matched: Some(name.to_string()),
+                                ..in_group(
+                                    "block",
+                                    category_source(name),
+                                    format!(
+                                        "{name} (entry '{entry}'), blocked by group '{}'",
+                                        group.name
+                                    ),
+                                )
+                            });
+                        }
+                    }
                 }
             }
             if let Some(entry) = group.tlds.matching_entry(qname) {
@@ -716,42 +694,12 @@ pub struct ResponseFilters<'a> {
     pub local_addresses: Option<&'a str>,
     /// Block answers with oversized payloads.
     pub payloads: Option<&'a str>,
-    /// Block parked domains (judged by their name servers).
-    pub parked: Option<&'a str>,
     /// Block newly registered domains (judged by their registration date).
     pub newly_registered: Option<&'a str>,
     /// Block names on Google Safe Browsing's lists.
     pub safe_browsing: Option<&'a str>,
-    /// Block names hosted only on consumer ISP networks.
-    pub residential: Option<&'a str>,
     /// Block answers that cloak a third-party tracker behind a CNAME.
     pub cname_trackers: Option<&'a str>,
-}
-
-/// Whether one security category blocks `qname` by name: `Some(None)` for
-/// a list match, `Some(Some(why))` when a detector decided, `None` when it
-/// does not block it. Parked domains are never decided here.
-fn security_check(
-    detector: Option<Detector>,
-    entries: &Blocklist,
-    qname: &str,
-) -> Option<Option<String>> {
-    match detector {
-        None => entries.contains(qname).then_some(None),
-        Some(Detector::Homograph) => crate::detect::homograph(qname).map(Some),
-        Some(Detector::Dga) => {
-            crate::detect::is_dga(qname).then(|| Some("looks generated by malware".to_string()))
-        }
-        Some(Detector::Typosquat) => crate::detect::typosquat(qname).map(Some),
-        Some(
-            Detector::Parked
-            | Detector::NewlyRegistered
-            | Detector::SafeBrowsing
-            | Detector::ResidentialHosting
-            | Detector::CnameTracker
-            | Detector::Allow,
-        ) => None,
-    }
 }
 
 /// The block source of the category named `name`: `privacy` for the
@@ -1009,19 +957,48 @@ mod tests {
     #[test]
     fn security_categories_and_tlds_block_with_their_own_source() {
         let mut g = group("secure");
-        g.blocked_security = vec!["dynamic_dns".to_string(), "unknown".to_string()];
+        g.blocked_security = vec![
+            "dynamic_dns".to_string(),
+            "native_apple".to_string(),
+            "unknown".to_string(),
+            "dga_domains".to_string(),
+        ];
         g.blocked_tlds = vec![".ZIP".to_string(), "not.valid".to_string()];
         g.allow = vec!["home.duckdns.org".to_string()];
-        let ab = AdvancedBlocking::build(&[g], Arc::default());
+        let lists = Arc::new(GroupBlocklists::default());
+        let ab = AdvancedBlocking::build(&[g], Arc::clone(&lists));
+        assert_eq!(ab.feed_categories(), vec!["dynamic_dns", "native_apple"]);
+
+        // Nothing is blocked by a list that has not been downloaded.
+        assert!(ab
+            .evaluate(ip("1.2.3.4"), "phish.duckdns.org", None)
+            .is_none());
+        let checks = ab.explain(ip("1.2.3.4"), "phish.duckdns.org", None);
+        assert!(
+            checks
+                .iter()
+                .any(|c| c.detail.contains("not been downloaded")),
+            "{checks:?}"
+        );
+
+        lists.feeds().set(
+            "dynamic_dns",
+            Blocklist::from_lines(["duckdns.org", "*.duckdns.org"]),
+        );
+        lists.feeds().set(
+            "native_apple",
+            Blocklist::from_lines(["metrics.icloud.com"]),
+        );
         let d = ab
             .evaluate(ip("1.2.3.4"), "phish.duckdns.org", None)
             .unwrap();
         assert!(d.reason.contains("Dynamic DNS"), "{}", d.reason);
         assert_eq!(d.source, source::SECURITY);
-        // The provider's own site, and the group's allow list, stay open.
-        assert!(ab
-            .evaluate(ip("1.2.3.4"), "www.duckdns.org", None)
-            .is_none());
+        let d = ab
+            .evaluate(ip("1.2.3.4"), "metrics.icloud.com", None)
+            .unwrap();
+        assert_eq!(d.source, source::PRIVACY);
+        // The group's allow list still wins.
         assert!(ab
             .evaluate(ip("1.2.3.4"), "home.duckdns.org", None)
             .is_none());
@@ -1059,33 +1036,6 @@ mod tests {
             ab.response_filters(ip("10.0.0.1"), "x.plex.direct", None)
                 .local_addresses,
             Some("everyone")
-        );
-    }
-
-    #[test]
-    fn detector_categories_block_by_name() {
-        let mut g = group("secure");
-        g.blocked_security = vec![
-            "idn_homographs".to_string(),
-            "dga_domains".to_string(),
-            "parked_domains".to_string(),
-        ];
-        let ab = AdvancedBlocking::build(&[g], Arc::default());
-        let homograph = idna::domain_to_ascii("pаypal.com").unwrap();
-        let d = ab.evaluate(ip("1.2.3.4"), &homograph, None).unwrap();
-        assert!(d.reason.contains("IDN Homographs"), "{}", d.reason);
-        let d = ab
-            .evaluate(ip("1.2.3.4"), "lqomwlpfnvbibkf.com", None)
-            .unwrap();
-        assert_eq!(d.matched.as_deref(), Some("DGA Domains"));
-        assert!(ab
-            .evaluate(ip("1.2.3.4"), "stackoverflow.com", None)
-            .is_none());
-        // Parked domains are left to the dispatcher.
-        assert_eq!(
-            ab.response_filters(ip("1.2.3.4"), "example.com", None)
-                .parked,
-            Some("secure")
         );
     }
 

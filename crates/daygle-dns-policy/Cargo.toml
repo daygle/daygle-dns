@@ -11,7 +11,7 @@ daygle-dns-core = { path = "../daygle-dns-core" }
 arc-swap.workspace = true
 ipnet.workspace = true
 regex.workspace = true
-idna.workspace = true
+url.workspace = true
 chrono.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

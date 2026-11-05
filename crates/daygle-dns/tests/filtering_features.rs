@@ -79,6 +79,14 @@ async fn cname_targets_are_inspected() {
 /// A server forwarding to an upstream that hosts `google.com`, with
 /// `www.google.com` and the forced Safe Search address in it.
 async fn search_server(dir: &tempfile::TempDir) -> daygle_dns::BoundServer {
+    search_server_with(dir, |_| {}).await
+}
+
+/// [`search_server`], with `adjust` applied to its configuration first.
+async fn search_server_with(
+    dir: &tempfile::TempDir,
+    adjust: impl FnOnce(&mut daygle_dns_core::config::DaygleConfig),
+) -> daygle_dns::BoundServer {
     let upstream = spawn_upstream_with(
         &dir.path().join("upstream.db"),
         "google.com",
@@ -93,6 +101,7 @@ async fn search_server(dir: &tempfile::TempDir) -> daygle_dns::BoundServer {
     config.recursive.use_system_config = false;
     config.recursive.upstreams = vec![upstream.to_string()];
     config.recursive.dnssec_validate = false;
+    adjust(&mut config);
     spawn(config).await
 }
 
@@ -284,7 +293,11 @@ async fn groups_block_services() {
 #[tokio::test]
 async fn groups_block_security_categories_and_tlds() {
     let dir = tempfile::tempdir().unwrap();
-    let server = search_server(&dir).await;
+    let mirror = spawn_feed_mirror().await;
+    let server = search_server_with(&dir, |config| {
+        config.policy.feed_mirror = format!("http://{mirror}");
+    })
+    .await;
     let udp = server.udp_addr.unwrap();
     let base = format!("http://{}/api", server.api_addr);
     let client = reqwest::Client::new();
@@ -319,7 +332,8 @@ async fn groups_block_security_categories_and_tlds() {
         .post(format!("{base}/policy/blocking"))
         .json(&serde_json::json!({
             "name": "secure",
-            "blocked_security": ["Dynamic_DNS", "dynamic_dns", "tunneling"],
+            // `tunneling` was retired: it is dropped, not refused.
+            "blocked_security": ["Dynamic_DNS", "dynamic_dns", "tunneling", "high_risk_tlds"],
             "blocked_tlds": [".ZIP", "*.mov", "zip"],
         }))
         .send()
@@ -329,19 +343,45 @@ async fn groups_block_security_categories_and_tlds() {
     let group: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(
         group["blocked_security"],
-        serde_json::json!(["dynamic_dns", "tunneling"])
+        serde_json::json!(["dynamic_dns", "high_risk_tlds"])
     );
     assert_eq!(group["blocked_tlds"], serde_json::json!(["zip", "mov"]));
 
-    for name in [
-        "phish.duckdns.org.",
-        "abc123.trycloudflare.com.",
-        "update.zip.",
-        "a.b.mov.",
-    ] {
-        let reply = udp_query(udp, name, RecordType::A).await;
-        assert_eq!(reply.response_code, ResponseCode::NXDomain, "{name}");
+    // The lists are downloaded once a group uses them.
+    for name in ["phish.duckdns.org.", "bad.top.", "update.zip.", "a.b.mov."] {
+        wait_for(udp, name, |r| r.response_code == ResponseCode::NXDomain).await;
     }
+    // The maintainer's allowlist is honoured.
+    let explain: serde_json::Value = client
+        .get(format!(
+            "{base}/policy/explain?domain=good.top&client=127.0.0.1"
+        ))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_ne!(explain["verdict"]["blocked"], true, "{explain}");
+    // The console sees the download.
+    let catalog: serde_json::Value = client
+        .get(format!("{base}/policy/security"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let ddns = catalog["categories"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["id"] == "dynamic_dns")
+        .unwrap();
+    assert!(
+        ddns["feed_status"]["entries"].as_u64().unwrap() > 0,
+        "{ddns}"
+    );
     // Other names are untouched.
     let reply = udp_query(udp, "www.google.com.", RecordType::A).await;
     assert_eq!(first_answer(&reply).as_deref(), Some("192.0.2.80"));
@@ -585,68 +625,18 @@ async fn global_rebinding_protection_applies_when_forwarding() {
     shutdown(server).await;
 }
 
-/// The detector categories: IDN homographs and DGA names are blocked by
-/// name, and a parked domain once its name servers have been looked up.
-#[tokio::test]
-async fn groups_block_homographs_dga_and_parked_domains() {
-    let dir = tempfile::tempdir().unwrap();
-    let upstream = spawn_upstream_with(
-        &dir.path().join("upstream.db"),
-        "parked.test",
-        &[
-            ("@", "NS", "ns1.sedoparking.com."),
-            ("www", "A", "198.51.100.20"),
-        ],
-    )
-    .await;
-    let mut config = base_config(&dir.path().join("daygle-dns.db"));
-    config.recursive.enabled = true;
-    config.recursive.use_system_config = false;
-    config.recursive.upstreams = vec![upstream.to_string()];
-    config.recursive.dnssec_validate = false;
-    let server = spawn(config).await;
-    let udp = server.udp_addr.unwrap();
-    let base = format!("http://{}/api", server.api_addr);
-    let client = reqwest::Client::new();
-
-    let resp = client
-        .post(format!("{base}/policy/blocking"))
-        .json(&serde_json::json!({
-            "name": "secure",
-            "blocked_security": ["idn_homographs", "dga_domains", "parked_domains"],
-        }))
-        .send()
-        .await
-        .unwrap();
-    assert!(resp.status().is_success(), "{}", resp.text().await.unwrap());
-
-    // `pаypal.com` with a Cyrillic 'а'.
-    for name in ["xn--pypal-4ve.com.", "lqomwlpfnvbibkf.com."] {
-        let reply = udp_query(udp, name, RecordType::A).await;
-        assert_eq!(reply.response_code, ResponseCode::NXDomain, "{name}");
-    }
-
-    // The first query of a parked domain gets through and starts the name
-    // server lookup; once that has finished, the domain is blocked.
-    let reply = udp_query(udp, "www.parked.test.", RecordType::A).await;
-    assert_eq!(first_answer(&reply).as_deref(), Some("198.51.100.20"));
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    loop {
-        let reply = udp_query(udp, "www.parked.test.", RecordType::A).await;
-        if reply.response_code == ResponseCode::NoError && reply.answers.is_empty() {
-            break;
-        }
-        assert!(std::time::Instant::now() < deadline, "{reply:?}");
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    }
-
-    shutdown(server).await;
-}
-
 /// A minimal HTTP/1.1 server answering every request with the JSON
 /// `respond` returns for its path (query string included).
 async fn spawn_json_server(
     respond: impl Fn(std::net::SocketAddr, &str) -> serde_json::Value + Send + Sync + 'static,
+) -> std::net::SocketAddr {
+    spawn_http_server(move |addr, path| respond(addr, path).to_string()).await
+}
+
+/// A minimal HTTP/1.1 server answering every request with the body
+/// `respond` returns for its path (query string included).
+async fn spawn_http_server(
+    respond: impl Fn(std::net::SocketAddr, &str) -> String + Send + Sync + 'static,
 ) -> std::net::SocketAddr {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -688,9 +678,9 @@ async fn spawn_json_server(
                 }
                 let text = String::from_utf8_lossy(&request);
                 let path = text.split_whitespace().nth(1).unwrap_or("/").to_string();
-                let body = respond(addr, &path).to_string();
+                let body = respond(addr, &path);
                 let response = format!(
-                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    "HTTP/1.1 200 OK\r\ncontent-type: text/plain\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
                     body.len()
                 );
                 let _ = stream.write_all(response.as_bytes()).await;
@@ -724,10 +714,10 @@ async fn spawn_rdap() -> std::net::SocketAddr {
     .await
 }
 
-/// Typosquats are blocked by name; a newly registered domain once its
-/// registration date has been looked up over RDAP, while an old one stays.
+/// A newly registered domain is blocked once its registration date has
+/// been looked up over RDAP, while an old one stays.
 #[tokio::test]
-async fn groups_block_typosquats_and_newly_registered_domains() {
+async fn groups_block_newly_registered_domains() {
     let dir = tempfile::tempdir().unwrap();
     let rdap = spawn_rdap().await;
     let upstream = spawn_upstream_with(
@@ -753,32 +743,18 @@ async fn groups_block_typosquats_and_newly_registered_domains() {
         .post(format!("{base}/policy/blocking"))
         .json(&serde_json::json!({
             "name": "secure",
-            "blocked_security": ["typosquatting", "newly_registered"],
+            "blocked_security": ["newly_registered"],
         }))
         .send()
         .await
         .unwrap();
     assert!(resp.status().is_success(), "{}", resp.text().await.unwrap());
 
-    for name in ["paypa1.com.", "paypal-login.net."] {
-        let reply = udp_query(udp, name, RecordType::A).await;
-        assert_eq!(reply.response_code, ResponseCode::NXDomain, "{name}");
-    }
-
-    // First queries get through and start the RDAP lookups.
-    for name in ["www.new.co.zz.", "www.old.co.zz."] {
-        let reply = udp_query(udp, name, RecordType::A).await;
-        assert!(first_answer(&reply).is_some(), "{name}: {reply:?}");
-    }
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    loop {
-        let reply = udp_query(udp, "www.new.co.zz.", RecordType::A).await;
-        if reply.response_code == ResponseCode::NoError && reply.answers.is_empty() {
-            break;
-        }
-        assert!(std::time::Instant::now() < deadline, "{reply:?}");
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    }
+    // The very first query waits for the RDAP lookup and is blocked.
+    let reply = udp_query(udp, "www.new.co.zz.", RecordType::A).await;
+    assert_eq!(reply.response_code, ResponseCode::NoError);
+    assert!(reply.answers.is_empty(), "{reply:?}");
+    // An old domain resolves, on its first query too.
     let reply = udp_query(udp, "www.old.co.zz.", RecordType::A).await;
     assert_eq!(first_answer(&reply).as_deref(), Some("198.51.100.31"));
 
@@ -905,89 +881,12 @@ async fn groups_block_google_safe_browsing_listings() {
     shutdown(server).await;
 }
 
-/// A name whose address is on a consumer ISP's network is blocked once
-/// the address's network (from an IP-to-ASN zone) and that network's type
-/// (from PeeringDB) are known; a data-centre name is not.
-#[tokio::test]
-async fn groups_block_residential_hosting() {
-    let dir = tempfile::tempdir().unwrap();
-    let peeringdb = spawn_json_server(|_, path| {
-        let kind = if path.ends_with("asn=64500") {
-            "Cable/DSL/ISP"
-        } else {
-            "Content"
-        };
-        serde_json::json!({"data": [{"info_type": kind, "info_types": [kind]}]})
-    })
-    .await;
-    let upstream = spawn_upstream_with(
-        &dir.path().join("upstream.db"),
-        "co.zz",
-        &[
-            ("home", "A", "198.51.100.50"),
-            ("dc", "A", "198.51.100.60"),
-            (
-                "50.100.51.198.origin",
-                "TXT",
-                "64500 | 198.51.100.0/24 | ZZ",
-            ),
-            (
-                "60.100.51.198.origin",
-                "TXT",
-                "64501 | 198.51.100.0/24 | ZZ",
-            ),
-        ],
-    )
-    .await;
-    let mut config = base_config(&dir.path().join("daygle-dns.db"));
-    config.recursive.enabled = true;
-    config.recursive.use_system_config = false;
-    config.recursive.upstreams = vec![upstream.to_string()];
-    config.recursive.dnssec_validate = false;
-    config.policy.peeringdb_url = format!("http://{peeringdb}");
-    config.policy.ip_asn_zone_v4 = "origin.co.zz".to_string();
-    let server = spawn(config).await;
-    let udp = server.udp_addr.unwrap();
-    let base = format!("http://{}/api", server.api_addr);
-
-    let resp = reqwest::Client::new()
-        .post(format!("{base}/policy/blocking"))
-        .json(&serde_json::json!({
-            "name": "secure",
-            "blocked_security": ["residential_hosting"],
-        }))
-        .send()
-        .await
-        .unwrap();
-    assert!(resp.status().is_success(), "{}", resp.text().await.unwrap());
-
-    // The first answers get through while the lookups run.
-    let reply = udp_query(udp, "home.co.zz.", RecordType::A).await;
-    assert_eq!(first_answer(&reply).as_deref(), Some("198.51.100.50"));
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    loop {
-        let reply = udp_query(udp, "home.co.zz.", RecordType::A).await;
-        if reply.response_code == ResponseCode::NoError && reply.answers.is_empty() {
-            break;
-        }
-        assert!(std::time::Instant::now() < deadline, "{reply:?}");
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    }
-    // A data-centre address stays reachable once it is known too.
-    for _ in 0..20 {
-        let reply = udp_query(udp, "dc.co.zz.", RecordType::A).await;
-        assert_eq!(first_answer(&reply).as_deref(), Some("198.51.100.60"));
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    }
-
-    shutdown(server).await;
-}
-
 /// A site subdomain that CNAMEs to a tracking company is blocked as a
 /// disguised third-party tracker; a CNAME within the site is not.
 #[tokio::test]
 async fn groups_block_disguised_third_party_trackers() {
     let dir = tempfile::tempdir().unwrap();
+    let mirror = spawn_feed_mirror().await;
     let upstream = spawn_upstream_zones(
         &dir.path().join("upstream.db"),
         &[
@@ -1008,6 +907,7 @@ async fn groups_block_disguised_third_party_trackers() {
     config.recursive.use_system_config = false;
     config.recursive.upstreams = vec![upstream.to_string()];
     config.recursive.dnssec_validate = false;
+    config.policy.feed_mirror = format!("http://{mirror}");
     let server = spawn(config).await;
     let udp = server.udp_addr.unwrap();
     let base = format!("http://{}/api", server.api_addr);
@@ -1031,9 +931,10 @@ async fn groups_block_disguised_third_party_trackers() {
         .unwrap();
     assert!(resp.status().is_success(), "{}", resp.text().await.unwrap());
 
-    let reply = udp_query(udp, "metrics.co.zz.", RecordType::A).await;
-    assert_eq!(reply.response_code, ResponseCode::NoError);
-    assert!(reply.answers.is_empty(), "{reply:?}");
+    wait_for(udp, "metrics.co.zz.", |r| {
+        r.response_code == ResponseCode::NoError && r.answers.is_empty()
+    })
+    .await;
     let reply = udp_query(udp, "www.co.zz.", RecordType::A).await;
     assert!(
         reply
@@ -1046,85 +947,16 @@ async fn groups_block_disguised_third_party_trackers() {
     shutdown(server).await;
 }
 
-/// Allow Tracking Links lets a group's clients through to link-redirect
-/// services that a server-wide blocklist blocks; other blocked names stay
-/// blocked, and Domain Check agrees.
-#[tokio::test]
-async fn groups_allow_tracking_links_past_blocklists() {
-    let dir = tempfile::tempdir().unwrap();
-    let upstream = spawn_upstream_zones(
-        &dir.path().join("upstream.db"),
-        &[(
-            "list-manage.com",
-            &[
-                ("abc.us1", "A", "198.51.100.80"),
-                ("ads", "A", "198.51.100.81"),
-            ],
-        )],
-    )
-    .await;
-    let mut config = base_config(&dir.path().join("daygle-dns.db"));
-    config.recursive.enabled = true;
-    config.recursive.use_system_config = false;
-    config.recursive.upstreams = vec![upstream.to_string()];
-    config.recursive.dnssec_validate = false;
-    config.policy.blocklist = vec![
-        "*.list-manage.com".to_string(),
-        "tracker.example".to_string(),
-    ];
-    let server = spawn(config).await;
-    let udp = server.udp_addr.unwrap();
-    let base = format!("http://{}/api", server.api_addr);
-    let client = reqwest::Client::new();
-
-    let reply = udp_query(udp, "abc.us1.list-manage.com.", RecordType::A).await;
-    assert_eq!(reply.response_code, ResponseCode::NXDomain);
-
-    let resp = client
-        .post(format!("{base}/policy/blocking"))
-        .json(&serde_json::json!({
-            "name": "links",
-            "blocked_security": ["allow_tracking_links"],
-        }))
-        .send()
-        .await
-        .unwrap();
-    assert!(resp.status().is_success(), "{}", resp.text().await.unwrap());
-
-    let reply = udp_query(udp, "abc.us1.list-manage.com.", RecordType::A).await;
-    assert_eq!(
-        first_answer(&reply).as_deref(),
-        Some("198.51.100.80"),
-        "{reply:?}"
-    );
-    let reply = udp_query(udp, "tracker.example.", RecordType::A).await;
-    assert_eq!(reply.response_code, ResponseCode::NXDomain);
-
-    let explain: serde_json::Value = client
-        .get(format!(
-            "{base}/policy/explain?domain=abc.us1.list-manage.com&client=127.0.0.1"
-        ))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    assert!(
-        explain.to_string().contains("Allow Tracking Links"),
-        "{explain}"
-    );
-    assert_ne!(explain["verdict"]["blocked"], true, "{explain}");
-
-    shutdown(server).await;
-}
-
 /// A native tracking vendor blocks that vendor's telemetry names with the
 /// privacy source, and only for the group that ticks it.
 #[tokio::test]
 async fn groups_block_native_tracking() {
     let dir = tempfile::tempdir().unwrap();
-    let server = search_server(&dir).await;
+    let mirror = spawn_feed_mirror().await;
+    let server = search_server_with(&dir, |config| {
+        config.policy.feed_mirror = format!("http://{mirror}");
+    })
+    .await;
     let udp = server.udp_addr.unwrap();
     let base = format!("http://{}/api", server.api_addr);
     let client = reqwest::Client::new();
@@ -1141,8 +973,7 @@ async fn groups_block_native_tracking() {
     assert!(resp.status().is_success(), "{}", resp.text().await.unwrap());
 
     for name in ["v10.events.data.microsoft.com.", "metrics.icloud.com."] {
-        let reply = udp_query(udp, name, RecordType::A).await;
-        assert_eq!(reply.response_code, ResponseCode::NXDomain, "{name}");
+        wait_for(udp, name, |r| r.response_code == ResponseCode::NXDomain).await;
     }
     let reply = udp_query(udp, "www.google.com.", RecordType::A).await;
     assert_eq!(first_answer(&reply).as_deref(), Some("192.0.2.80"));
@@ -1159,9 +990,56 @@ async fn groups_block_native_tracking() {
         .unwrap();
     assert_eq!(explain["verdict"]["source"], "privacy", "{explain}");
     assert!(
-        explain.to_string().contains("Native Tracking: Windows"),
+        explain
+            .to_string()
+            .contains("Native Tracking: Windows & Office"),
         "{explain}"
     );
 
     shutdown(server).await;
+}
+
+/// A server standing in for the categories' list hosts, through
+/// `policy.feed_mirror`: HaGeZi's DynDNS, abused TLDs (with its allowlist)
+/// and Apple and Windows native tracker lists, and AdGuard's cname-trackers
+/// catalogue. Use `format!("http://{addr}")` as the mirror.
+async fn spawn_feed_mirror() -> std::net::SocketAddr {
+    spawn_http_server(|_, path| {
+        let hagezi = "/raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/";
+        match path.strip_prefix(hagezi) {
+            Some("dyndns-onlydomains.txt") => "# HaGeZi\nduckdns.org\n".to_string(),
+            Some("spam-tlds-onlydomains.txt") => "top\n".to_string(),
+            Some("spam-tlds-allow-onlydomains.txt") => "good.top\n".to_string(),
+            Some("native.apple-onlydomains.txt") => "metrics.icloud.com\n".to_string(),
+            Some("native.winoffice-onlydomains.txt") => "events.data.microsoft.com\n".to_string(),
+            _ if path.ends_with("/cname-trackers/master/script/src/cloaked-trackers.json") => {
+                serde_json::json!([
+                    {"company_name": "Eulerian", "type": "tracker", "domains": ["eulerian.net"]},
+                    {"company_name": "Pardot", "type": "clickthrough", "domains": ["go.pardot.com"]}
+                ])
+                .to_string()
+            }
+            _ => String::new(),
+        }
+    })
+    .await
+}
+
+/// Wait (up to 20 s, long enough for the feed loop to notice a new
+/// category and download it) until `name` gets the response `blocked`
+/// accepts.
+async fn wait_for(
+    udp: std::net::SocketAddr,
+    name: &str,
+    blocked: impl Fn(&hickory_proto::op::Message) -> bool,
+) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    loop {
+        let reply = udp_query(udp, name, RecordType::A).await;
+        if blocked(&reply) {
+            return;
+        }
+        assert!(std::time::Instant::now() < deadline, "{name}: {reply:?}");
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
 }

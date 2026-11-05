@@ -146,16 +146,10 @@ pub struct DnsDispatcher {
     config: Option<Arc<ArcSwap<daygle_dns_core::config::DaygleConfig>>>,
     /// DNS accounts the encrypted listeners recognise (`[accounts]`).
     accounts: Arc<daygle_dns_policy::identity::AccountDirectory>,
-    /// Which registered domains are parked, for the Parked Domains category.
-    parked: Arc<crate::response_filter::ParkedDomains>,
     /// Registration dates, for the Newly Registered Domains category.
     registrations: Arc<daygle_dns_policy::rdap::RegistrationDates>,
     /// Google Safe Browsing lists, for the Google Safe Browsing category.
     safe_browsing: Arc<daygle_dns_policy::safe_browsing::SafeBrowsing>,
-    /// Origin networks of answer addresses, for Residential Hosting.
-    ip_origins: Arc<crate::response_filter::IpOrigins>,
-    /// Which networks are consumer ISPs, for Residential Hosting.
-    network_types: Arc<daygle_dns_policy::residential::NetworkTypes>,
 }
 
 impl DnsDispatcher {
@@ -224,13 +218,10 @@ impl DnsDispatcher {
             log_export: None,
             config: None,
             accounts: Arc::default(),
-            parked: Arc::default(),
             registrations: Arc::default(),
             safe_browsing: Arc::new(daygle_dns_policy::safe_browsing::SafeBrowsing::new(
                 Arc::new(|| (String::new(), String::new())),
             )),
-            ip_origins: Arc::default(),
-            network_types: Arc::default(),
         }
     }
 
@@ -346,12 +337,6 @@ impl DnsDispatcher {
         if bootstrap != self.registrations.bootstrap_url() {
             self.registrations =
                 Arc::new(daygle_dns_policy::rdap::RegistrationDates::new(&bootstrap));
-        }
-        let peeringdb = config.load().policy.peeringdb_url.clone();
-        if peeringdb.trim_end_matches('/') != self.network_types.base_url() {
-            self.network_types = Arc::new(daygle_dns_policy::residential::NetworkTypes::new(
-                &peeringdb,
-            ));
         }
         let settings = Arc::clone(&config);
         self.safe_browsing = Arc::new(daygle_dns_policy::safe_browsing::SafeBrowsing::new(
@@ -1121,23 +1106,8 @@ impl RequestHandler for DnsDispatcher {
             hickory_server::net::xfer::Protocol::Quic => Some("doq"),
             _ => None,
         };
-        // A filtering group's allow category (Allow Tracking Links) lets the
-        // name through like the allowlist: ahead of every blocklist, and
-        // trusted by the checks below that the allowlist exempts.
-        let group_allow = self
-            .advanced_blocking
-            .load()
-            .category_allow(client, &qname, listener);
-        let trusted = policy.is_allowlisted(&qname) || group_allow.is_some();
-        let decision = policy
-            .evaluate_allowing(
-                client,
-                &qname,
-                &rtype,
-                listener,
-                group_allow.as_ref().map(|(g, c)| (g.as_str(), *c)),
-            )
-            .await;
+        let trusted = policy.is_allowlisted(&qname);
+        let decision = policy.evaluate_on(client, &qname, &rtype, listener).await;
         match &decision.action {
             Action::Allow => {}
             Action::Refused => {
@@ -1891,8 +1861,9 @@ impl RequestHandler for DnsDispatcher {
                 // and conditional forwarders and stub zones (the operator's
                 // own infrastructure), are trusted.
                 if !trusted && !resolver.is_zone_routed(&qname) {
-                    let mut blocked =
-                        self.filter_response(&resolver, client, &qname, listener, lookup.answers());
+                    let mut blocked = self
+                        .filter_response(client, &qname, listener, lookup.answers())
+                        .await;
                     if blocked.is_none() {
                         blocked = self.safe_browsing_block(client, &qname, listener).await;
                     }
@@ -2487,9 +2458,8 @@ impl DnsDispatcher {
     /// local network address for a public name (Settings -> Recursion's
     /// rebinding protection, or a filtering group's switch), or a payload
     /// over the limits (a filtering group's switch).
-    fn filter_response(
+    async fn filter_response(
         &self,
-        resolver: &Arc<RecursiveResolver>,
         client: IpAddr,
         qname: &str,
         listener: Option<&'static str>,
@@ -2531,20 +2501,6 @@ impl DnsDispatcher {
                 ));
             }
         }
-        if let Some(group) = filters.parked {
-            if let Some(domain) = daygle_dns_policy::detect::registered_domain(qname) {
-                if let Some(ns) = self.parked.check(resolver, client, domain) {
-                    return Some(block_reason(
-                        source::SECURITY,
-                        Some(group.to_string()),
-                        Some("Parked Domains".to_string()),
-                        format!(
-                            "'{domain}' is parked (name server {ns}), blocked as Parked Domains by group '{group}'"
-                        ),
-                    ));
-                }
-            }
-        }
         if let Some(group) = filters.cname_trackers {
             let targets: Vec<String> = answers
                 .iter()
@@ -2559,28 +2515,27 @@ impl DnsDispatcher {
                     _ => None,
                 })
                 .collect();
-            if let Some((target, company)) = daygle_dns_policy::cname_trackers::disguised_tracker(
-                qname,
-                targets.iter().map(String::as_str),
-            ) {
+            let trackers = groups.lists().feeds().get("disguised_trackers");
+            if let Some(target) = trackers.and_then(|trackers| {
+                daygle_dns_policy::cname_trackers::disguised_tracker(
+                    qname,
+                    targets.iter().map(String::as_str),
+                    &trackers,
+                )
+            }) {
                 return Some(block_reason(
                     source::PRIVACY,
                     Some(group.to_string()),
                     Some("Disguised Third-Party Trackers".to_string()),
                     format!(
-                        "'{qname}' is a disguised {company} tracker (CNAME to {target}), blocked by group '{group}'"
+                        "'{qname}' is a disguised third-party tracker (CNAME to {target}), blocked by group '{group}'"
                     ),
                 ));
             }
         }
-        if let Some(group) = filters.residential {
-            if let Some(block) = self.residential_block(resolver, client, qname, answers, group) {
-                return Some(block);
-            }
-        }
         if let Some(group) = filters.newly_registered {
             if let Some(domain) = daygle_dns_policy::detect::registered_domain(qname) {
-                if let Some(date) = self.registrations.check(domain) {
+                if let Some(date) = self.registrations.registration_date(domain).await {
                     if daygle_dns_policy::rdap::RegistrationDates::is_new(date) {
                         return Some(block_reason(
                             source::SECURITY,
@@ -2596,90 +2551,6 @@ impl DnsDispatcher {
             }
         }
         None
-    }
-
-    /// Why an answer for `qname` is blocked as Residential Hosting for
-    /// filtering group `group`: every public address in it (up to four) is
-    /// announced by a network PeeringDB lists as a consumer ISP. Unknown
-    /// addresses and networks are looked up in the background and let
-    /// through meanwhile; names (or CNAME targets) of CDNs with caches
-    /// inside ISPs, and local names, are never judged.
-    fn residential_block(
-        &self,
-        resolver: &Arc<RecursiveResolver>,
-        client: IpAddr,
-        qname: &str,
-        answers: &[Record],
-        group: &str,
-    ) -> Option<BlockReason> {
-        use daygle_dns_policy::residential::is_embedded_cdn;
-        if crate::response_filter::is_local_name(qname) || is_embedded_cdn(qname) {
-            return None;
-        }
-        let through_cdn = answers.iter().any(|r| match &r.data {
-            RData::CNAME(target) => is_embedded_cdn(
-                &target
-                    .0
-                    .to_ascii()
-                    .trim_end_matches('.')
-                    .to_ascii_lowercase(),
-            ),
-            _ => false,
-        });
-        if through_cdn {
-            return None;
-        }
-        let ips = crate::response_filter::public_addresses(answers, 4);
-        if ips.is_empty() {
-            return None;
-        }
-        let (zone_v4, zone_v6) = self.config.as_ref().map_or_else(
-            || {
-                (
-                    daygle_dns_policy::residential::DEFAULT_ASN_ZONE_V4.to_string(),
-                    daygle_dns_policy::residential::DEFAULT_ASN_ZONE_V6.to_string(),
-                )
-            },
-            |c| {
-                let c = c.load();
-                (
-                    c.policy.ip_asn_zone_v4.clone(),
-                    c.policy.ip_asn_zone_v6.clone(),
-                )
-            },
-        );
-        // Every address is looked at (no early exit), so all their lookups
-        // start together and a multi-address answer is judged as soon as
-        // they are all known.
-        let mut all_residential = true;
-        let mut example = None;
-        for ip in ips {
-            let residential = self
-                .ip_origins
-                .check(resolver, client, ip, &zone_v4, &zone_v6)
-                .and_then(|asns| {
-                    asns.into_iter()
-                        .find(|asn| self.network_types.check(*asn) == Some(true))
-                });
-            match residential {
-                Some(asn) => {
-                    example.get_or_insert((ip, asn));
-                }
-                None => all_residential = false,
-            }
-        }
-        if !all_residential {
-            return None;
-        }
-        let (ip, asn) = example?;
-        Some(block_reason(
-            source::SECURITY,
-            Some(group.to_string()),
-            Some("Residential Hosting".to_string()),
-            format!(
-                "'{qname}' is hosted on home internet connections ({ip}, AS{asn}), blocked as Residential Hosting by group '{group}'"
-            ),
-        ))
     }
 
     /// Why `qname` must not reach `client` because it is on Google Safe

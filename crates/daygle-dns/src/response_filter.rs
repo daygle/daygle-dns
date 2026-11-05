@@ -9,19 +9,12 @@
 //!   NULL records. Everyday use needs neither NULL records nor more than a
 //!   few hundred bytes of TXT data in one answer (SPF, DKIM and verification
 //!   strings), so an answer over those limits is blocked.
-//! - **Parked domains**: a domain whose name servers belong to a parking
-//!   service. The name servers are looked up in the background the first
-//!   time a domain is seen and remembered for a day, so the query path never
-//!   waits for them (and the first query of a domain is not blocked).
 
-use std::collections::HashMap;
 use std::net::IpAddr;
-use std::sync::{Arc, Mutex, OnceLock};
-use std::time::{Duration, Instant};
+use std::sync::OnceLock;
 
 use daygle_dns_core::config::REBINDING_DENY_NETWORKS;
-use daygle_dns_recursive::RecursiveResolver;
-use hickory_proto::rr::{RData, Record, RecordType};
+use hickory_proto::rr::{RData, Record};
 use ipnet::IpNet;
 
 /// Most TXT data (the bytes of every string of every TXT record) one answer
@@ -101,212 +94,6 @@ pub fn oversized_payload(answers: &[Record]) -> Option<String> {
     (txt > TXT_LIMIT).then(|| format!("{txt} bytes of TXT data"))
 }
 
-/// How long a domain's parked verdict is remembered.
-const PARKED_TTL: Duration = Duration::from_secs(24 * 3600);
-/// How long a failed name-server lookup waits before it is tried again.
-const PARKED_RETRY: Duration = Duration::from_secs(3600);
-/// Most domains remembered; past it the expired ones are dropped, and all of
-/// them if none has expired.
-const PARKED_CAP: usize = 50_000;
-
-#[derive(Debug, Clone)]
-enum ParkedState {
-    /// A lookup is running.
-    Pending,
-    /// Parked with this name server, or not parked (`None`), until then.
-    Known(Option<String>, Instant),
-}
-
-/// The parked verdicts of registered domains, filled in the background.
-#[derive(Debug, Default)]
-pub struct ParkedDomains {
-    domains: Mutex<HashMap<String, ParkedState>>,
-}
-
-impl ParkedDomains {
-    /// The parking name server of `domain` when it is known to be parked.
-    /// When nothing current is known, starts a background lookup of its name
-    /// servers with `resolver` (as `client` would see them) and returns
-    /// `None`, so this query is answered as usual.
-    pub fn check(
-        self: &Arc<Self>,
-        resolver: &Arc<RecursiveResolver>,
-        client: IpAddr,
-        domain: &str,
-    ) -> Option<String> {
-        let now = Instant::now();
-        {
-            let mut domains = self.domains.lock().unwrap_or_else(|e| e.into_inner());
-            match domains.get(domain) {
-                Some(ParkedState::Pending) => return None,
-                Some(ParkedState::Known(ns, until)) if *until > now => return ns.clone(),
-                _ => {}
-            }
-            if domains.len() >= PARKED_CAP {
-                domains.retain(
-                    |_, state| matches!(state, ParkedState::Known(_, until) if *until > now),
-                );
-                if domains.len() >= PARKED_CAP {
-                    domains.clear();
-                }
-            }
-            domains.insert(domain.to_string(), ParkedState::Pending);
-        }
-        let this = Arc::clone(self);
-        let resolver = Arc::clone(resolver);
-        let domain = domain.to_string();
-        tokio::spawn(async move {
-            let state = match resolver
-                .lookup_for_client(client, &domain, RecordType::NS)
-                .await
-            {
-                Ok(lookup) => {
-                    let parked = lookup.answers().iter().find_map(|r| match &r.data {
-                        RData::NS(ns) => {
-                            let ns = ns.0.to_ascii().trim_end_matches('.').to_ascii_lowercase();
-                            daygle_dns_policy::security::is_parking_name_server(&ns).then_some(ns)
-                        }
-                        _ => None,
-                    });
-                    ParkedState::Known(parked, Instant::now() + PARKED_TTL)
-                }
-                Err(_) => ParkedState::Known(None, Instant::now() + PARKED_RETRY),
-            };
-            this.domains
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .insert(domain, state);
-        });
-        None
-    }
-
-    /// Record `domain`'s verdict directly (tests).
-    #[cfg(test)]
-    fn set(&self, domain: &str, ns: Option<&str>) {
-        self.domains.lock().unwrap().insert(
-            domain.to_string(),
-            ParkedState::Known(ns.map(str::to_string), Instant::now() + PARKED_TTL),
-        );
-    }
-}
-
-/// How long an address's origin networks are remembered.
-const ORIGIN_TTL: Duration = Duration::from_secs(24 * 3600);
-/// How long a failed origin lookup waits before it is tried again.
-const ORIGIN_RETRY: Duration = Duration::from_secs(3600);
-
-#[derive(Debug, Clone)]
-enum OriginState {
-    Pending,
-    Known(Vec<u32>, Instant),
-}
-
-/// The origin networks (ASNs) of public addresses, from an IP-to-ASN DNS
-/// zone (Team Cymru's), filled in the background, for the Residential
-/// Hosting category.
-#[derive(Debug, Default)]
-pub struct IpOrigins {
-    addresses: Mutex<HashMap<IpAddr, OriginState>>,
-}
-
-impl IpOrigins {
-    /// The ASNs announcing `ip`, when known (empty when the zone has none).
-    /// When nothing current is known, starts a background lookup of the TXT
-    /// record for `ip` under `zone_v4`/`zone_v6` with `resolver` and returns
-    /// `None`.
-    pub fn check(
-        self: &Arc<Self>,
-        resolver: &Arc<RecursiveResolver>,
-        client: IpAddr,
-        ip: IpAddr,
-        zone_v4: &str,
-        zone_v6: &str,
-    ) -> Option<Vec<u32>> {
-        let now = Instant::now();
-        {
-            let mut addresses = self.addresses.lock().unwrap_or_else(|e| e.into_inner());
-            match addresses.get(&ip) {
-                Some(OriginState::Pending) => return None,
-                Some(OriginState::Known(asns, until)) if *until > now => return Some(asns.clone()),
-                _ => {}
-            }
-            if addresses.len() >= PARKED_CAP {
-                addresses.retain(
-                    |_, state| matches!(state, OriginState::Known(_, until) if *until > now),
-                );
-                if addresses.len() >= PARKED_CAP {
-                    addresses.clear();
-                }
-            }
-            addresses.insert(ip, OriginState::Pending);
-        }
-        let this = Arc::clone(self);
-        let resolver = Arc::clone(resolver);
-        let name = daygle_dns_policy::residential::cymru_name(ip, zone_v4, zone_v6);
-        tokio::spawn(async move {
-            let state = match resolver
-                .lookup_for_client(client, &name, RecordType::TXT)
-                .await
-            {
-                Ok(lookup) => {
-                    let asns = lookup
-                        .answers()
-                        .iter()
-                        .find_map(|r| match &r.data {
-                            RData::TXT(txt) => {
-                                let text: String = txt
-                                    .txt_data
-                                    .iter()
-                                    .map(|s| String::from_utf8_lossy(s).into_owned())
-                                    .collect();
-                                Some(daygle_dns_policy::residential::parse_cymru_txt(&text))
-                            }
-                            _ => None,
-                        })
-                        .unwrap_or_default();
-                    OriginState::Known(asns, Instant::now() + ORIGIN_TTL)
-                }
-                // An address the zone does not cover (NXDOMAIN) is known to
-                // have no origin; other failures are retried.
-                Err(e) if is_nxdomain(&e) => {
-                    OriginState::Known(Vec::new(), Instant::now() + ORIGIN_TTL)
-                }
-                Err(_) => OriginState::Known(Vec::new(), Instant::now() + ORIGIN_RETRY),
-            };
-            this.addresses
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .insert(ip, state);
-        });
-        None
-    }
-}
-
-fn is_nxdomain(error: &daygle_dns_core::DaygleError) -> bool {
-    matches!(
-        error,
-        daygle_dns_core::DaygleError::Resolution {
-            response_code: Some(code),
-            ..
-        } if *code == u16::from(hickory_proto::op::ResponseCode::NXDomain)
-    )
-}
-
-/// The public addresses among `answers`' A and AAAA records (at most
-/// `limit`), for checks that look their networks up.
-pub fn public_addresses(answers: &[Record], limit: usize) -> Vec<IpAddr> {
-    answers
-        .iter()
-        .filter_map(|record| match &record.data {
-            RData::A(a) => Some(IpAddr::V4(a.0)),
-            RData::AAAA(a) => Some(IpAddr::V6(a.0)),
-            _ => None,
-        })
-        .filter(|ip| !deny_networks().iter().any(|net| net.contains(ip)))
-        .take(limit)
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -353,22 +140,6 @@ mod tests {
             assert_eq!(is_local_name(name), !name.contains('.'), "{name}");
         }
         assert!(!is_local_name("myfritz.box.example"));
-    }
-
-    #[test]
-    fn remembered_verdicts_are_served() {
-        let parked = Arc::new(ParkedDomains::default());
-        parked.set("parked.test", Some("ns1.sedoparking.com"));
-        parked.set("site.test", None);
-        let map = parked.domains.lock().unwrap();
-        assert!(matches!(
-            map.get("parked.test"),
-            Some(ParkedState::Known(Some(_), _))
-        ));
-        assert!(matches!(
-            map.get("site.test"),
-            Some(ParkedState::Known(None, _))
-        ));
     }
 
     #[test]

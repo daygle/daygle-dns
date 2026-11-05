@@ -610,6 +610,18 @@ pub async fn bind_with(
         ai.set_client_groups(advanced_blocking.clone());
     }
 
+    // The security and privacy categories' maintained lists, downloaded for
+    // the categories some group uses and refreshed in the background.
+    {
+        let groups = advanced_blocking.clone();
+        let config = config_swap.clone();
+        tokio::spawn(daygle_dns_policy::feeds::run(
+            group_blocklists.feeds().clone(),
+            move || groups.load().feed_categories(),
+            move || config.load().policy.feed_mirror.clone(),
+        ));
+    }
+
     // Persistent query logging (daily JSON-lines files), when enabled.
     let query_logger = if config.logging.query_log_enabled {
         Some(Arc::new(daygle_dns_core::QueryLogger::new(

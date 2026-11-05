@@ -164,11 +164,21 @@
     return ids.map((id) => securityCategories.find((c) => c.id === id)?.name || id).join(', ');
   }
 
-  // A category's entries for its tooltip: what it blocks, then what it keeps.
-  function describeEntries(entries) {
-    const blocked = entries.filter((e) => !e.startsWith('@@'));
-    const kept = entries.filter((e) => e.startsWith('@@')).map((e) => e.slice(2));
-    return blocked.join(', ') + (kept.length ? `\n\nNot blocked: ${kept.join(', ')}` : '');
+  // Where a category's list comes from and how its download stands, for
+  // its tooltip and status line ('' for categories without a list).
+  function feedSummary(c) {
+    if (!c.feed) return '';
+    const s = c.feed_status;
+    let state;
+    if (s?.updated_at) {
+      state = `${s.entries.toLocaleString()} entries, updated ${formatDateTime(s.updated_at)}`;
+      if (s.error) state += ` (last update failed: ${s.error})`;
+    } else if (s?.error) {
+      state = `Not downloaded yet: ${s.error}`;
+    } else {
+      state = 'Downloaded once a group uses it';
+    }
+    return `List: ${c.feed.source}. ${state}.`;
   }
 
   function serviceNames(ids) {
@@ -516,11 +526,12 @@
       <div class="section-title">Security</div>
       <div class="security-list">
         {#each securityCategories.filter((c) => c.section !== 'privacy') as c (c.id)}
-          <label class="security" title={describeEntries(c.entries)}>
+          <label class="security" title={c.feed?.url || ''}>
             <input type="checkbox" checked={edit.blocked_security.includes(c.id)} onchange={() => toggleSecurity(c.id)} />
             <span>
               <strong>{c.name}</strong>
               <span class="muted">{c.description}</span>
+              {#if c.feed}<span class="muted feed">{feedSummary(c)}</span>{/if}
             </span>
           </label>
         {/each}
@@ -551,18 +562,20 @@
       <p class="muted help">
         Blocks every domain under these top-level domains, one per line or
         separated by commas. Custom Allow below still takes precedence over
-        both the security categories and blocked TLDs (hover a category to see
-        its list).
+        both the security categories and blocked TLDs. Each list-based
+        category uses a maintained public list, downloaded and refreshed by the
+        server every 12 hours once a group uses it.
       </p>
 
       <div class="section-title">Privacy</div>
       <div class="security-list">
         {#each securityCategories.filter((c) => c.section === 'privacy' && !c.id.startsWith('native_')) as c (c.id)}
-          <label class="security" title={describeEntries(c.entries)}>
+          <label class="security" title={c.feed?.url || ''}>
             <input type="checkbox" checked={edit.blocked_security.includes(c.id)} onchange={() => toggleSecurity(c.id)} />
             <span>
               <strong>{c.name}</strong>
               <span class="muted">{c.description}</span>
+              {#if c.feed}<span class="muted feed">{feedSummary(c)}</span>{/if}
             </span>
           </label>
         {/each}
@@ -571,16 +584,16 @@
       <div class="service-category">Native Tracking</div>
       <div class="services">
         {#each securityCategories.filter((c) => c.id.startsWith('native_')) as c (c.id)}
-          <label class="service" class:on={edit.blocked_security.includes(c.id)} title={`${c.description}\n\n${describeEntries(c.entries)}`}>
+          <label class="service" class:on={edit.blocked_security.includes(c.id)} title={`${c.description}\n\n${feedSummary(c)}`}>
             <input type="checkbox" checked={edit.blocked_security.includes(c.id)} onchange={() => toggleSecurity(c.id)} />{c.name.replace(/^Native Tracking: /, '')}
           </label>
         {/each}
       </div>
       <p class="muted help">
-        Blocks the telemetry, usage analytics and system ads that devices and
-        operating systems send by themselves (hover a vendor to see its list).
-        The lists are kept short on purpose: anything that also serves
-        updates, sign-in or the device's main features is left out.
+        Blocks the telemetry, usage analytics and system ads that devices,
+        operating systems and apps send by themselves, using HaGeZi's
+        maintained Native Tracker lists (hover a vendor for its list's
+        status).
       </p>
 
       <div class="section-title">Blocked Services</div>
@@ -745,6 +758,7 @@
   .security input { margin-top: 3px; width: auto; }
   .security > span { display: flex; flex-direction: column; gap: 2px; font-size: 0.85rem; }
   .security .muted { font-size: 0.8rem; }
+  .security .feed { font-style: italic; }
   .service-category { font-size: 0.78rem; color: var(--muted); margin: 8px 0 4px; }
   .services { display: flex; flex-wrap: wrap; gap: 6px; }
   .service { flex-direction: row; align-items: center; gap: 0; padding: 5px 10px; border: 1px solid var(--border); border-radius: 999px; cursor: pointer; color: var(--text); font-size: 0.82rem; }
