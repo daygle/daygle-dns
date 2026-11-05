@@ -4899,6 +4899,13 @@ pub struct PolicySettings {
     pub safe_browsing_key: String,
     /// The Safe Browsing API's base URL.
     pub safe_browsing_url: String,
+    /// PeeringDB's base URL, where the Residential Hosting category looks
+    /// up which networks are consumer ISPs. Read at startup.
+    pub peeringdb_url: String,
+    /// The IP-to-ASN DNS zones (Team Cymru's) the Residential Hosting
+    /// category finds an address's network in, for IPv4 and IPv6.
+    pub ip_asn_zone_v4: String,
+    pub ip_asn_zone_v6: String,
 }
 
 impl Default for PolicySettings {
@@ -4920,6 +4927,9 @@ impl Default for PolicySettings {
             rdap_bootstrap: "https://data.iana.org/rdap/dns.json".to_string(),
             safe_browsing_key: String::new(),
             safe_browsing_url: "https://safebrowsing.googleapis.com".to_string(),
+            peeringdb_url: "https://www.peeringdb.com".to_string(),
+            ip_asn_zone_v4: "origin.asn.cymru.com".to_string(),
+            ip_asn_zone_v6: "origin6.asn.cymru.com".to_string(),
         }
     }
 }

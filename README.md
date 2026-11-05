@@ -74,7 +74,9 @@ Daygle DNS combines, in a single process:
   typosquats of well-known brands (`paypa1.com`, `paypal-login.com`) and
   domains registered in the last 30 days (looked up over RDAP), and
   sites on Google Safe Browsing's lists (with your own API key; the lists
-  are kept locally, so Google never sees your queries or address); any
+  are kept locally, so Google never sees your queries or address), and
+  names hosted only on home internet connections (via Team Cymru's
+  IP-to-ASN service and PeeringDB); any
   TLD can be blocked by name; answers that give a
   public name a local network address (DNS rebinding) or carry an
   oversized payload (NULL records, large TXT data) are blocked.
