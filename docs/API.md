@@ -1641,7 +1641,13 @@ ad clicks (`googleadservices.com`) and affiliate networks (CJ, Awin,
 Rakuten, Skimlinks, Impact, ...) are let through for the group's
 clients like the allowlist lets names through: after denied networks,
 ahead of every blocklist, per-client rule, group block, response policy
-zone, CNAME inspection and answer filter (`400` for an unknown id).
+zone, CNAME inspection and answer filter, and the native tracking
+categories `native_apple`, `native_samsung`, `native_xiaomi`,
+`native_huawei`, `native_windows`, `native_amazon`, `native_roku`,
+`native_sonos`, `native_lg` and `native_vizio`, each blocking a short,
+conservative list of that vendor's telemetry, usage-analytics and
+system-ad endpoints (never ones that also serve updates or sign-in;
+blocks are logged with `source` `privacy`) (`400` for an unknown id).
 `GET /api/policy/security` returns the catalog:
 `{"categories": [{"id", "name", "description", "section", "detector", "entries"}]}`,
 where `section` is `security` or `privacy` (where the console lists it),

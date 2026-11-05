@@ -557,7 +557,7 @@
 
       <div class="section-title">Privacy</div>
       <div class="security-list">
-        {#each securityCategories.filter((c) => c.section === 'privacy') as c (c.id)}
+        {#each securityCategories.filter((c) => c.section === 'privacy' && !c.id.startsWith('native_')) as c (c.id)}
           <label class="security" title={describeEntries(c.entries)}>
             <input type="checkbox" checked={edit.blocked_security.includes(c.id)} onchange={() => toggleSecurity(c.id)} />
             <span>
@@ -567,6 +567,21 @@
           </label>
         {/each}
       </div>
+
+      <div class="service-category">Native Tracking</div>
+      <div class="services">
+        {#each securityCategories.filter((c) => c.id.startsWith('native_')) as c (c.id)}
+          <label class="service" class:on={edit.blocked_security.includes(c.id)} title={`${c.description}\n\n${describeEntries(c.entries)}`}>
+            <input type="checkbox" checked={edit.blocked_security.includes(c.id)} onchange={() => toggleSecurity(c.id)} />{c.name.replace(/^Native Tracking: /, '')}
+          </label>
+        {/each}
+      </div>
+      <p class="muted help">
+        Blocks the telemetry, usage analytics and system ads that devices and
+        operating systems send by themselves (hover a vendor to see its list).
+        The lists are kept short on purpose: anything that also serves
+        updates, sign-in or the device's main features is left out.
+      </p>
 
       <div class="section-title">Blocked Services</div>
       {#each serviceCategories as category (category)}
