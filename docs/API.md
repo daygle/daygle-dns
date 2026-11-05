@@ -1595,10 +1595,21 @@ are far less likely than in real domain names, as malware's domain
 generation algorithms make them) and `parked_domains` (domains whose name
 servers belong to a parking service; the name servers are looked up in the
 background the first time a registered domain is seen and remembered for a
-day, so that first query is answered) (`400` for an unknown id).
+day, so that first query is answered), `typosquatting` (registered labels
+one typo away from a brand phishing often targets, imitating it with
+look-alike characters such as `paypa1`, or pairing it with a phishing word
+such as `paypal-login`; the brands' own names under any TLD are not
+matched) and `newly_registered` (domains registered less than 30 days ago;
+the registration date is looked up over RDAP in the background the first
+time a registered domain is seen, at most four lookups at a time, and
+remembered for a week, so that first query is answered; the RDAP server of
+each TLD comes from `policy.rdap_bootstrap`, IANA's bootstrap file by
+default, and TLDs without one are never blocked. Each lookup tells the
+registry the domain name, not who asked) (`400` for an unknown id).
 `GET /api/policy/security` returns the catalog:
 `{"categories": [{"id", "name", "description", "detector", "entries"}]}`,
-where `detector` is `homograph`, `dga`, `parked` or `null`, and `entries`
+where `detector` is `homograph`, `dga`, `parked`, `typosquat`,
+`newly_registered` or `null`, and `entries`
 use the blocklist syntax (`*.suffix` covers subdomains only, `@@name` is an
 exception such as a provider's own website; empty for a detector).
 `blocked_tlds` lists top-level domains whose every name the group blocks

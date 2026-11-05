@@ -642,3 +642,108 @@ async fn groups_block_homographs_dga_and_parked_domains() {
 
     shutdown(server).await;
 }
+
+/// A minimal HTTP server standing in for IANA's RDAP bootstrap file and a
+/// registry's RDAP service: `new.co.zz` was registered three days ago,
+/// `old.co.zz` in 2001.
+async fn spawn_rdap() -> std::net::SocketAddr {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                return;
+            };
+            tokio::spawn(async move {
+                let mut buf = vec![0u8; 4096];
+                let n = stream.read(&mut buf).await.unwrap_or(0);
+                let request = String::from_utf8_lossy(&buf[..n]);
+                let path = request.split_whitespace().nth(1).unwrap_or("/").to_string();
+                let body = if path == "/dns.json" {
+                    serde_json::json!({
+                        "version": "1.0",
+                        "services": [[["zz"], [format!("http://{addr}/rdap/")]]]
+                    })
+                } else if path.ends_with("/domain/new.co.zz") {
+                    let date = chrono::Utc::now() - chrono::Duration::days(3);
+                    serde_json::json!({"events": [
+                        {"eventAction": "registration", "eventDate": date.to_rfc3339()}
+                    ]})
+                } else {
+                    serde_json::json!({"events": [
+                        {"eventAction": "registration", "eventDate": "2001-01-01T00:00:00Z"}
+                    ]})
+                };
+                let body = body.to_string();
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/rdap+json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(response.as_bytes()).await;
+            });
+        }
+    });
+    addr
+}
+
+/// Typosquats are blocked by name; a newly registered domain once its
+/// registration date has been looked up over RDAP, while an old one stays.
+#[tokio::test]
+async fn groups_block_typosquats_and_newly_registered_domains() {
+    let dir = tempfile::tempdir().unwrap();
+    let rdap = spawn_rdap().await;
+    let upstream = spawn_upstream_with(
+        &dir.path().join("upstream.db"),
+        "co.zz",
+        &[
+            ("www.new", "A", "198.51.100.30"),
+            ("www.old", "A", "198.51.100.31"),
+        ],
+    )
+    .await;
+    let mut config = base_config(&dir.path().join("daygle-dns.db"));
+    config.recursive.enabled = true;
+    config.recursive.use_system_config = false;
+    config.recursive.upstreams = vec![upstream.to_string()];
+    config.recursive.dnssec_validate = false;
+    config.policy.rdap_bootstrap = format!("http://{rdap}/dns.json");
+    let server = spawn(config).await;
+    let udp = server.udp_addr.unwrap();
+    let base = format!("http://{}/api", server.api_addr);
+
+    let resp = reqwest::Client::new()
+        .post(format!("{base}/policy/blocking"))
+        .json(&serde_json::json!({
+            "name": "secure",
+            "blocked_security": ["typosquatting", "newly_registered"],
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_success(), "{}", resp.text().await.unwrap());
+
+    for name in ["paypa1.com.", "paypal-login.net."] {
+        let reply = udp_query(udp, name, RecordType::A).await;
+        assert_eq!(reply.response_code, ResponseCode::NXDomain, "{name}");
+    }
+
+    // First queries get through and start the RDAP lookups.
+    for name in ["www.new.co.zz.", "www.old.co.zz."] {
+        let reply = udp_query(udp, name, RecordType::A).await;
+        assert!(first_answer(&reply).is_some(), "{name}: {reply:?}");
+    }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let reply = udp_query(udp, "www.new.co.zz.", RecordType::A).await;
+        if reply.response_code == ResponseCode::NoError && reply.answers.is_empty() {
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "{reply:?}");
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    let reply = udp_query(udp, "www.old.co.zz.", RecordType::A).await;
+    assert_eq!(first_answer(&reply).as_deref(), Some("198.51.100.31"));
+
+    shutdown(server).await;
+}

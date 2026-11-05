@@ -148,6 +148,8 @@ pub struct DnsDispatcher {
     accounts: Arc<daygle_dns_policy::identity::AccountDirectory>,
     /// Which registered domains are parked, for the Parked Domains category.
     parked: Arc<crate::response_filter::ParkedDomains>,
+    /// Registration dates, for the Newly Registered Domains category.
+    registrations: Arc<daygle_dns_policy::rdap::RegistrationDates>,
 }
 
 impl DnsDispatcher {
@@ -217,6 +219,7 @@ impl DnsDispatcher {
             config: None,
             accounts: Arc::default(),
             parked: Arc::default(),
+            registrations: Arc::default(),
         }
     }
 
@@ -328,6 +331,11 @@ impl DnsDispatcher {
         mut self,
         config: Arc<ArcSwap<daygle_dns_core::config::DaygleConfig>>,
     ) -> Self {
+        let bootstrap = config.load().policy.rdap_bootstrap.clone();
+        if bootstrap != self.registrations.bootstrap_url() {
+            self.registrations =
+                Arc::new(daygle_dns_policy::rdap::RegistrationDates::new(&bootstrap));
+        }
         self.config = Some(config);
         self
     }
@@ -2488,6 +2496,23 @@ impl DnsDispatcher {
                             "'{domain}' is parked (name server {ns}), blocked as Parked Domains by group '{group}'"
                         ),
                     ));
+                }
+            }
+        }
+        if let Some(group) = filters.newly_registered {
+            if let Some(domain) = daygle_dns_policy::detect::registered_domain(qname) {
+                if let Some(date) = self.registrations.check(domain) {
+                    if daygle_dns_policy::rdap::RegistrationDates::is_new(date) {
+                        return Some(block_reason(
+                            source::SECURITY,
+                            Some(group.to_string()),
+                            Some("Newly Registered Domains".to_string()),
+                            format!(
+                                "'{domain}' was registered on {}, blocked as Newly Registered Domains by group '{group}'",
+                                date.format("%Y-%m-%d")
+                            ),
+                        ));
+                    }
                 }
             }
         }
