@@ -2251,6 +2251,9 @@ pub struct PolicyUpdate {
     pub safe_search: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub youtube_restricted: Option<bool>,
+    /// Google Safe Browsing API key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub safe_browsing_key: Option<String>,
     /// The remote blocklist sources (Filtering -> Blocklists).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blocklist_sources: Option<Vec<BlocklistSourceConfig>>,
@@ -2532,6 +2535,9 @@ impl RuntimeSettings {
             }
             if let Some(v) = p.youtube_restricted {
                 config.policy.youtube_restricted = v;
+            }
+            if let Some(v) = &p.safe_browsing_key {
+                config.policy.safe_browsing_key = v.trim().to_string();
             }
             // Captured on every save but never applied: a console-made
             // client deny/allow list reverted to the config file's at the
@@ -2815,6 +2821,7 @@ impl RuntimeSettings {
                 cname_inspection: Some(config.policy.cname_inspection),
                 safe_search: Some(config.policy.safe_search),
                 youtube_restricted: Some(config.policy.youtube_restricted),
+                safe_browsing_key: Some(config.policy.safe_browsing_key.clone()),
                 blocklist_sources: Some(config.policy.blocklist_sources.clone()),
             }),
             authoritative: Some(AuthoritativeUpdate {
@@ -4886,6 +4893,12 @@ pub struct PolicySettings {
     /// The RDAP bootstrap file (RFC 9224) the Newly Registered Domains
     /// category finds each TLD's RDAP server in. Read at startup.
     pub rdap_bootstrap: String,
+    /// Google Safe Browsing API key for the Google Safe Browsing security
+    /// category; empty leaves the category matching nothing. The Safe
+    /// Browsing APIs are for non-commercial use only.
+    pub safe_browsing_key: String,
+    /// The Safe Browsing API's base URL.
+    pub safe_browsing_url: String,
 }
 
 impl Default for PolicySettings {
@@ -4905,6 +4918,8 @@ impl Default for PolicySettings {
             safe_search: false,
             youtube_restricted: false,
             rdap_bootstrap: "https://data.iana.org/rdap/dns.json".to_string(),
+            safe_browsing_key: String::new(),
+            safe_browsing_url: "https://safebrowsing.googleapis.com".to_string(),
         }
     }
 }

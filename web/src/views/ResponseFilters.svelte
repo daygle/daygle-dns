@@ -9,6 +9,8 @@
   let safeBusy = $state(false);
   let blockPage = $state({ enabled: false, ipv4: '', ipv6: '', listen: '0.0.0.0', port: 80, message: '' });
   let blockPageBusy = $state(false);
+  let safeBrowsingKey = $state('');
+  let safeBrowsingBusy = $state(false);
   let filterAaaa = $state(false);
   let filterAaaaExcept = $state('');
   let busy = $state(false);
@@ -23,6 +25,8 @@
       safeSearch = !!cfg?.policy?.safe_search;
       youtubeRestricted = !!cfg?.policy?.youtube_restricted;
       blockPage = { ...blockPage, ...(cfg?.block_page || {}) };
+      // '[redacted]' when a key is stored: saving it back keeps that key.
+      safeBrowsingKey = cfg?.policy?.safe_browsing_key || '';
       filterAaaa = !!cfg?.policy?.filter_aaaa;
       // Load the saved exceptions: Save sends the whole list, so starting
       // empty would erase them on the next save.
@@ -91,6 +95,23 @@
       error = formatApiError(e);
     } finally {
       blockPageBusy = false;
+    }
+  }
+
+  async function saveSafeBrowsing() {
+    safeBrowsingBusy = true;
+    error = null;
+    notice = null;
+    try {
+      await api.updateSettings({ policy: { safe_browsing_key: safeBrowsingKey.trim() } });
+      notice = safeBrowsingKey.trim()
+        ? 'Safe Browsing key saved. The lists download in the background.'
+        : 'Safe Browsing key removed.';
+      await load();
+    } catch (e) {
+      error = formatApiError(e);
+    } finally {
+      safeBrowsingBusy = false;
     }
   }
 
@@ -167,6 +188,27 @@
     </p>
     <div class="row">
       <button onclick={saveSafeSearch} disabled={safeBusy}>{safeBusy ? 'Saving...' : 'Save'}</button>
+    </div>
+  </div>
+
+  <div class="card" style="margin-bottom: 14px">
+    <h3 style="margin: 0 0 10px">Google Safe Browsing</h3>
+    <label class="stacked">
+      <span>API Key</span>
+      <input type="password" autocomplete="off" bind:value={safeBrowsingKey} placeholder="Not set" />
+    </label>
+    <p class="muted help" style="margin: 10px 0">
+      Lets filtering groups block malware and phishing sites on Google Safe
+      Browsing's lists: tick Google Safe Browsing under a group's Security
+      section in Clients → Filtering Groups. The lists are downloaded to this
+      server and updated every half hour or so; Google is asked only when a
+      name's hash matches a listed prefix, and then only for that short
+      prefix, never with your address. Create a key with the Safe Browsing
+      API enabled in the Google Cloud console. Google allows the API for
+      non-commercial use only.
+    </p>
+    <div class="row">
+      <button onclick={saveSafeBrowsing} disabled={safeBrowsingBusy}>{safeBrowsingBusy ? 'Saving...' : 'Save'}</button>
     </div>
   </div>
 

@@ -643,41 +643,54 @@ async fn groups_block_homographs_dga_and_parked_domains() {
     shutdown(server).await;
 }
 
-/// A minimal HTTP server standing in for IANA's RDAP bootstrap file and a
-/// registry's RDAP service: `new.co.zz` was registered three days ago,
-/// `old.co.zz` in 2001.
-async fn spawn_rdap() -> std::net::SocketAddr {
+/// A minimal HTTP/1.1 server answering every request with the JSON
+/// `respond` returns for its path (query string included).
+async fn spawn_json_server(
+    respond: impl Fn(std::net::SocketAddr, &str) -> serde_json::Value + Send + Sync + 'static,
+) -> std::net::SocketAddr {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
+    let respond = std::sync::Arc::new(respond);
     tokio::spawn(async move {
         loop {
             let Ok((mut stream, _)) = listener.accept().await else {
                 return;
             };
+            let respond = std::sync::Arc::clone(&respond);
             tokio::spawn(async move {
-                let mut buf = vec![0u8; 4096];
-                let n = stream.read(&mut buf).await.unwrap_or(0);
-                let request = String::from_utf8_lossy(&buf[..n]);
-                let path = request.split_whitespace().nth(1).unwrap_or("/").to_string();
-                let body = if path == "/dns.json" {
-                    serde_json::json!({
-                        "version": "1.0",
-                        "services": [[["zz"], [format!("http://{addr}/rdap/")]]]
-                    })
-                } else if path.ends_with("/domain/new.co.zz") {
-                    let date = chrono::Utc::now() - chrono::Duration::days(3);
-                    serde_json::json!({"events": [
-                        {"eventAction": "registration", "eventDate": date.to_rfc3339()}
-                    ]})
-                } else {
-                    serde_json::json!({"events": [
-                        {"eventAction": "registration", "eventDate": "2001-01-01T00:00:00Z"}
-                    ]})
-                };
-                let body = body.to_string();
+                // Read the headers and any body, so closing the connection
+                // never resets it under the client.
+                let mut request = Vec::new();
+                let mut buf = [0u8; 4096];
+                loop {
+                    let Ok(n) = stream.read(&mut buf).await else {
+                        return;
+                    };
+                    if n == 0 {
+                        return;
+                    }
+                    request.extend_from_slice(&buf[..n]);
+                    let text = String::from_utf8_lossy(&request);
+                    if let Some(end) = text.find("\r\n\r\n") {
+                        let length = text[..end]
+                            .lines()
+                            .find_map(|l| {
+                                l.to_ascii_lowercase()
+                                    .strip_prefix("content-length:")
+                                    .and_then(|v| v.trim().parse::<usize>().ok())
+                            })
+                            .unwrap_or(0);
+                        if request.len() >= end + 4 + length {
+                            break;
+                        }
+                    }
+                }
+                let text = String::from_utf8_lossy(&request);
+                let path = text.split_whitespace().nth(1).unwrap_or("/").to_string();
+                let body = respond(addr, &path).to_string();
                 let response = format!(
-                    "HTTP/1.1 200 OK\r\ncontent-type: application/rdap+json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
                     body.len()
                 );
                 let _ = stream.write_all(response.as_bytes()).await;
@@ -685,6 +698,30 @@ async fn spawn_rdap() -> std::net::SocketAddr {
         }
     });
     addr
+}
+
+/// A server standing in for IANA's RDAP bootstrap file and a registry's
+/// RDAP service: `new.co.zz` was registered three days ago, `old.co.zz` in
+/// 2001.
+async fn spawn_rdap() -> std::net::SocketAddr {
+    spawn_json_server(|addr, path| {
+        if path == "/dns.json" {
+            serde_json::json!({
+                "version": "1.0",
+                "services": [[["zz"], [format!("http://{addr}/rdap/")]]]
+            })
+        } else if path.ends_with("/domain/new.co.zz") {
+            let date = chrono::Utc::now() - chrono::Duration::days(3);
+            serde_json::json!({"events": [
+                {"eventAction": "registration", "eventDate": date.to_rfc3339()}
+            ]})
+        } else {
+            serde_json::json!({"events": [
+                {"eventAction": "registration", "eventDate": "2001-01-01T00:00:00Z"}
+            ]})
+        }
+    })
+    .await
 }
 
 /// Typosquats are blocked by name; a newly registered domain once its
@@ -744,6 +781,126 @@ async fn groups_block_typosquats_and_newly_registered_domains() {
     }
     let reply = udp_query(udp, "www.old.co.zz.", RecordType::A).await;
     assert_eq!(first_answer(&reply).as_deref(), Some("198.51.100.31"));
+
+    shutdown(server).await;
+}
+
+/// A server standing in for the Safe Browsing API: `evil.co.zz` is on the
+/// SOCIAL_ENGINEERING list, the MALWARE list is empty.
+async fn spawn_safe_browsing() -> std::net::SocketAddr {
+    use base64::Engine as _;
+    use sha2::Digest as _;
+    let b64 = base64::engine::general_purpose::STANDARD;
+    let full = sha2::Sha256::digest(b"evil.co.zz/");
+    let prefix = full[..4].to_vec();
+    spawn_json_server(move |_, path| {
+        assert!(path.contains("key=test-key"), "{path}");
+        if path.starts_with("/v4/threatLists") {
+            serde_json::json!({"threatLists": [
+                {"threatType": "MALWARE", "platformType": "ANY_PLATFORM", "threatEntryType": "URL"},
+                {"threatType": "SOCIAL_ENGINEERING", "platformType": "ANY_PLATFORM", "threatEntryType": "URL"}
+            ]})
+        } else if path.starts_with("/v4/threatListUpdates:fetch") {
+            let list = |threat: &str, prefixes: &[u8]| {
+                serde_json::json!({
+                    "threatType": threat,
+                    "platformType": "ANY_PLATFORM",
+                    "threatEntryType": "URL",
+                    "responseType": "FULL_UPDATE",
+                    "additions": [{"compressionType": "RAW", "rawHashes": {
+                        "prefixSize": 4, "rawHashes": b64.encode(prefixes)
+                    }}],
+                    "newClientState": "c3RhdGU=",
+                    "checksum": {"sha256": b64.encode(sha2::Sha256::digest(prefixes))}
+                })
+            };
+            serde_json::json!({
+                "listUpdateResponses": [list("MALWARE", &[]), list("SOCIAL_ENGINEERING", &prefix)],
+                "minimumWaitDuration": "1800s"
+            })
+        } else {
+            serde_json::json!({
+                "matches": [{
+                    "threatType": "SOCIAL_ENGINEERING",
+                    "platformType": "ANY_PLATFORM",
+                    "threatEntryType": "URL",
+                    "threat": {"hash": b64.encode(full)},
+                    "cacheDuration": "300s"
+                }],
+                "negativeCacheDuration": "300s"
+            })
+        }
+    })
+    .await
+}
+
+/// A name on Google Safe Browsing's lists is blocked once the lists have
+/// been downloaded; other names are not, and the key is never echoed back.
+#[tokio::test]
+async fn groups_block_google_safe_browsing_listings() {
+    let dir = tempfile::tempdir().unwrap();
+    let safe_browsing = spawn_safe_browsing().await;
+    let upstream = spawn_upstream_with(
+        &dir.path().join("upstream.db"),
+        "co.zz",
+        &[
+            ("evil", "A", "198.51.100.40"),
+            ("www.fine", "A", "198.51.100.41"),
+        ],
+    )
+    .await;
+    let mut config = base_config(&dir.path().join("daygle-dns.db"));
+    config.recursive.enabled = true;
+    config.recursive.use_system_config = false;
+    config.recursive.upstreams = vec![upstream.to_string()];
+    config.recursive.dnssec_validate = false;
+    config.policy.safe_browsing_key = "test-key".to_string();
+    config.policy.safe_browsing_url = format!("http://{safe_browsing}");
+    let server = spawn(config).await;
+    let udp = server.udp_addr.unwrap();
+    let base = format!("http://{}/api", server.api_addr);
+    let client = reqwest::Client::new();
+
+    let config: serde_json::Value = client
+        .get(format!("{base}/config"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(config["policy"]["safe_browsing_key"], "[redacted]");
+    // Saving the placeholder back keeps the stored key.
+    let resp = client
+        .put(format!("{base}/config"))
+        .json(&serde_json::json!({ "policy": { "safe_browsing_key": "[redacted]" } }))
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_success(), "{}", resp.text().await.unwrap());
+
+    let resp = client
+        .post(format!("{base}/policy/blocking"))
+        .json(&serde_json::json!({
+            "name": "secure",
+            "blocked_security": ["google_safe_browsing"],
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_success(), "{}", resp.text().await.unwrap());
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let reply = udp_query(udp, "evil.co.zz.", RecordType::A).await;
+        if reply.response_code == ResponseCode::NoError && reply.answers.is_empty() {
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "{reply:?}");
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    let reply = udp_query(udp, "www.fine.co.zz.", RecordType::A).await;
+    assert_eq!(first_answer(&reply).as_deref(), Some("198.51.100.41"));
 
     shutdown(server).await;
 }

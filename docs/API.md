@@ -429,7 +429,10 @@ a recursive answer whose CNAME chain reaches a blocked name is blocked
 too, unless the queried name is allowlisted; `safe_search` and
 `youtube_restricted`, default off: answer Google, Bing and DuckDuckGo with
 their forced Safe Search addresses, and YouTube with Restricted Mode, for
-every client - see Safe Search below), and `authoritative`
+every client - see Safe Search below; `safe_browsing_key`, the Google Safe
+Browsing API key the `google_safe_browsing` security category uses, which
+reads back as `[redacted]` when set and keeps the stored key when
+`[redacted]` is sent), and `authoritative`
 (default_record_ttl/default_primary_ns/default_admin_mailbox/axfr_enabled/axfr_networks/
 allow_dynamic_updates/update_networks/notify_enabled/notify_targets/
 notify_listen_enabled/stub_zones/catalog_zone/catalog_consumers/empty_zones
@@ -1605,11 +1608,19 @@ time a registered domain is seen, at most four lookups at a time, and
 remembered for a week, so that first query is answered; the RDAP server of
 each TLD comes from `policy.rdap_bootstrap`, IANA's bootstrap file by
 default, and TLDs without one are never blocked. Each lookup tells the
-registry the domain name, not who asked) (`400` for an unknown id).
+registry the domain name, not who asked) and `google_safe_browsing` (host
+names on Google Safe Browsing's malware, phishing, unwanted-software and
+harmful-app URL lists for any platform, using the Update API v4: the lists
+are kept locally as hash prefixes, updated at most every 30 minutes, and
+only a matching 4-byte prefix is ever sent to Google to fetch full hashes,
+which are cached for the time Google gives; each name is checked as
+`host/` for itself and up to four parent domains, so page-level entries
+are not matched; needs `policy.safe_browsing_key`, and Google allows the
+API for non-commercial use only) (`400` for an unknown id).
 `GET /api/policy/security` returns the catalog:
 `{"categories": [{"id", "name", "description", "detector", "entries"}]}`,
 where `detector` is `homograph`, `dga`, `parked`, `typosquat`,
-`newly_registered` or `null`, and `entries`
+`newly_registered`, `safe_browsing` or `null`, and `entries`
 use the blocklist syntax (`*.suffix` covers subdomains only, `@@name` is an
 exception such as a provider's own website; empty for a detector).
 `blocked_tlds` lists top-level domains whose every name the group blocks
