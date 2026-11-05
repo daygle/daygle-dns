@@ -516,7 +516,7 @@ impl AdvancedBlocking {
                         why.map(|w| format!(" ({w})")).unwrap_or_default(),
                         group.name
                     ),
-                    source::SECURITY,
+                    category_source(category),
                     category.to_string(),
                 ))
             } else if let Some(entry) = group.tlds.matching_entry(qname) {
@@ -654,7 +654,7 @@ impl AdvancedBlocking {
                         matched: Some(category.to_string()),
                         ..in_group(
                             "block",
-                            source::SECURITY,
+                            category_source(category),
                             format!(
                                 "{category}{}, blocked by group '{}'",
                                 why.map(|w| format!(" ({w})")).unwrap_or_default(),
@@ -751,6 +751,19 @@ fn security_check(
             | Detector::CnameTracker
             | Detector::Allow,
         ) => None,
+    }
+}
+
+/// The block source of the category named `name`: `privacy` for the
+/// console's privacy categories (native tracking), `security` otherwise.
+fn category_source(name: &str) -> &'static str {
+    let privacy = crate::security::SECURITY_CATEGORIES
+        .iter()
+        .any(|c| c.name == name && c.section == crate::security::Section::Privacy);
+    if privacy {
+        source::PRIVACY
+    } else {
+        source::SECURITY
     }
 }
 

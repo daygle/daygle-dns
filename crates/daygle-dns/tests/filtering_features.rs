@@ -1118,3 +1118,50 @@ async fn groups_allow_tracking_links_past_blocklists() {
 
     shutdown(server).await;
 }
+
+/// A native tracking vendor blocks that vendor's telemetry names with the
+/// privacy source, and only for the group that ticks it.
+#[tokio::test]
+async fn groups_block_native_tracking() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = search_server(&dir).await;
+    let udp = server.udp_addr.unwrap();
+    let base = format!("http://{}/api", server.api_addr);
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .post(format!("{base}/policy/blocking"))
+        .json(&serde_json::json!({
+            "name": "private",
+            "blocked_security": ["native_windows", "native_apple"],
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_success(), "{}", resp.text().await.unwrap());
+
+    for name in ["v10.events.data.microsoft.com.", "metrics.icloud.com."] {
+        let reply = udp_query(udp, name, RecordType::A).await;
+        assert_eq!(reply.response_code, ResponseCode::NXDomain, "{name}");
+    }
+    let reply = udp_query(udp, "www.google.com.", RecordType::A).await;
+    assert_eq!(first_answer(&reply).as_deref(), Some("192.0.2.80"));
+
+    let explain: serde_json::Value = client
+        .get(format!(
+            "{base}/policy/explain?domain=v10.events.data.microsoft.com&client=127.0.0.1"
+        ))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(explain["verdict"]["source"], "privacy", "{explain}");
+    assert!(
+        explain.to_string().contains("Native Tracking: Windows"),
+        "{explain}"
+    );
+
+    shutdown(server).await;
+}
