@@ -24,6 +24,7 @@ pub mod detect;
 mod engine;
 pub mod feeds;
 pub mod identity;
+pub mod lookup_cache;
 mod plugin;
 pub mod rdap;
 pub mod residential;

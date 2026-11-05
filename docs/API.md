@@ -1608,10 +1608,12 @@ succeeds the category blocks nothing:
 URL; each list's URL without its scheme is appended to it).
 
 Checks decided after resolution: `newly_registered` (domains registered
-less than 30 days ago; the registration date is looked up over RDAP in
-the background the first time a registered domain is seen, at most four
-lookups at a time, and remembered for a week, so that first query is
-answered; the RDAP server of each TLD comes from `policy.rdap_bootstrap`,
+less than 30 days ago; the registration date is looked up over RDAP the
+first time a registered domain is seen, at most four lookups at a time,
+and remembered for a week; that first query waits for it, up to 2
+seconds, and queries for the same domain meanwhile share the lookup; a
+lookup slower than that is answered as usual and judged from the next
+query on; the RDAP server of each TLD comes from `policy.rdap_bootstrap`,
 IANA's bootstrap file by default, and TLDs without one are never blocked.
 Each lookup tells the registry the domain name, not who asked),
 `google_safe_browsing` (host names on Google Safe Browsing's malware,
@@ -1627,8 +1629,10 @@ four, all belong to networks PeeringDB lists as `Cable/DSL/ISP`; each
 address's origin ASN comes from a TXT lookup in Team Cymru's IP-to-ASN
 zones, `policy.ip_asn_zone_v4`/`ip_asn_zone_v6`, through the server's
 own resolver, and each network's type from `policy.peeringdb_url`; both
-are looked up in the background and remembered, a day for addresses and
-a week for networks, so the first queries of a name are answered; names
+are remembered, a day for addresses and a week for networks, and the
+first query that needs them waits for the lookups, up to 2 seconds in
+all (lookups slower than that finish in the background for the next
+query); names
 and CNAME targets of CDNs that put caches inside ISPs are never judged,
 and services really run from a home connection need Custom Allow) and the
 privacy category `disguised_trackers` (answers whose CNAME chain leads to

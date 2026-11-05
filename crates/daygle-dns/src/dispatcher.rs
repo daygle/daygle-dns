@@ -1873,8 +1873,9 @@ impl RequestHandler for DnsDispatcher {
                 // and conditional forwarders and stub zones (the operator's
                 // own infrastructure), are trusted.
                 if !trusted && !resolver.is_zone_routed(&qname) {
-                    let mut blocked =
-                        self.filter_response(&resolver, client, &qname, listener, lookup.answers());
+                    let mut blocked = self
+                        .filter_response(&resolver, client, &qname, listener, lookup.answers())
+                        .await;
                     if blocked.is_none() {
                         blocked = self.safe_browsing_block(client, &qname, listener).await;
                     }
@@ -2469,7 +2470,7 @@ impl DnsDispatcher {
     /// local network address for a public name (Settings -> Recursion's
     /// rebinding protection, or a filtering group's switch), or a payload
     /// over the limits (a filtering group's switch).
-    fn filter_response(
+    async fn filter_response(
         &self,
         resolver: &Arc<RecursiveResolver>,
         client: IpAddr,
@@ -2546,13 +2547,16 @@ impl DnsDispatcher {
             }
         }
         if let Some(group) = filters.residential {
-            if let Some(block) = self.residential_block(resolver, client, qname, answers, group) {
+            if let Some(block) = self
+                .residential_block(resolver, client, qname, answers, group)
+                .await
+            {
                 return Some(block);
             }
         }
         if let Some(group) = filters.newly_registered {
             if let Some(domain) = daygle_dns_policy::detect::registered_domain(qname) {
-                if let Some(date) = self.registrations.check(domain) {
+                if let Some(date) = self.registrations.registration_date(domain).await {
                     if daygle_dns_policy::rdap::RegistrationDates::is_new(date) {
                         return Some(block_reason(
                             source::SECURITY,
@@ -2573,10 +2577,10 @@ impl DnsDispatcher {
     /// Why an answer for `qname` is blocked as Residential Hosting for
     /// filtering group `group`: every public address in it (up to four) is
     /// announced by a network PeeringDB lists as a consumer ISP. Unknown
-    /// addresses and networks are looked up in the background and let
-    /// through meanwhile; names (or CNAME targets) of CDNs with caches
-    /// inside ISPs, and local names, are never judged.
-    fn residential_block(
+    /// addresses and networks are looked up and waited for (up to
+    /// `residential::LOOKUP_WAIT` in all); names (or CNAME targets) of CDNs
+    /// with caches inside ISPs, and local names, are never judged.
+    async fn residential_block(
         &self,
         resolver: &Arc<RecursiveResolver>,
         client: IpAddr,
@@ -2620,19 +2624,41 @@ impl DnsDispatcher {
                 )
             },
         );
-        // Every address is looked at (no early exit), so all their lookups
-        // start together and a multi-address answer is judged as soon as
-        // they are all known.
+        // The first query for these addresses waits for their lookups, up
+        // to LOOKUP_WAIT in all: every lookup is started at once (a zero
+        // wait only starts it), then each is waited for in the time left.
+        let deadline = tokio::time::Instant::now() + daygle_dns_policy::residential::LOOKUP_WAIT;
+        let left = || deadline.saturating_duration_since(tokio::time::Instant::now());
+        for ip in &ips {
+            let _ = self
+                .ip_origins
+                .origins(resolver, client, *ip, &zone_v4, &zone_v6, Duration::ZERO)
+                .await;
+        }
+        let mut origins = Vec::new();
+        for ip in ips {
+            let asns = self
+                .ip_origins
+                .origins(resolver, client, ip, &zone_v4, &zone_v6, left())
+                .await;
+            origins.push((ip, asns));
+        }
+        for asn in origins.iter().flat_map(|(_, asns)| asns.iter().flatten()) {
+            let _ = self
+                .network_types
+                .is_residential(*asn, Duration::ZERO)
+                .await;
+        }
         let mut all_residential = true;
         let mut example = None;
-        for ip in ips {
-            let residential = self
-                .ip_origins
-                .check(resolver, client, ip, &zone_v4, &zone_v6)
-                .and_then(|asns| {
-                    asns.into_iter()
-                        .find(|asn| self.network_types.check(*asn) == Some(true))
-                });
+        for (ip, asns) in origins {
+            let mut residential = None;
+            for asn in asns.unwrap_or_default() {
+                if self.network_types.is_residential(asn, left()).await == Some(true) {
+                    residential = Some(asn);
+                    break;
+                }
+            }
             match residential {
                 Some(asn) => {
                     example.get_or_insert((ip, asn));

@@ -10,10 +10,9 @@
 //!   few hundred bytes of TXT data in one answer (SPF, DKIM and verification
 //!   strings), so an answer over those limits is blocked.
 
-use std::collections::HashMap;
 use std::net::IpAddr;
-use std::sync::{Arc, Mutex, OnceLock};
-use std::time::{Duration, Instant};
+use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 
 use daygle_dns_core::config::REBINDING_DENY_NETWORKS;
 use daygle_dns_recursive::RecursiveResolver;
@@ -106,90 +105,69 @@ const ORIGIN_TTL: Duration = Duration::from_secs(24 * 3600);
 /// How long a failed origin lookup waits before it is tried again.
 const ORIGIN_RETRY: Duration = Duration::from_secs(3600);
 
-#[derive(Debug, Clone)]
-enum OriginState {
-    Pending,
-    Known(Vec<u32>, Instant),
+/// The origin networks (ASNs) of public addresses, from an IP-to-ASN DNS
+/// zone (Team Cymru's), for the Residential Hosting category.
+#[derive(Debug)]
+pub struct IpOrigins {
+    addresses: Arc<daygle_dns_policy::lookup_cache::LookupCache<IpAddr, Vec<u32>>>,
 }
 
-/// The origin networks (ASNs) of public addresses, from an IP-to-ASN DNS
-/// zone (Team Cymru's), filled in the background, for the Residential
-/// Hosting category.
-#[derive(Debug, Default)]
-pub struct IpOrigins {
-    addresses: Mutex<HashMap<IpAddr, OriginState>>,
+impl Default for IpOrigins {
+    fn default() -> Self {
+        Self {
+            addresses: Arc::new(daygle_dns_policy::lookup_cache::LookupCache::new(CACHE_CAP)),
+        }
+    }
 }
 
 impl IpOrigins {
-    /// The ASNs announcing `ip`, when known (empty when the zone has none).
-    /// When nothing current is known, starts a background lookup of the TXT
-    /// record for `ip` under `zone_v4`/`zone_v6` with `resolver` and returns
-    /// `None`.
-    pub fn check(
-        self: &Arc<Self>,
+    /// The ASNs announcing `ip` (empty when the zone has none): from the
+    /// cache, or looked up now (the TXT record for `ip` under
+    /// `zone_v4`/`zone_v6`, with `resolver`) and waited for up to `wait`.
+    /// `None` while the lookup is still running.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn origins(
+        &self,
         resolver: &Arc<RecursiveResolver>,
         client: IpAddr,
         ip: IpAddr,
         zone_v4: &str,
         zone_v6: &str,
+        wait: Duration,
     ) -> Option<Vec<u32>> {
-        let now = Instant::now();
-        {
-            let mut addresses = self.addresses.lock().unwrap_or_else(|e| e.into_inner());
-            match addresses.get(&ip) {
-                Some(OriginState::Pending) => return None,
-                Some(OriginState::Known(asns, until)) if *until > now => return Some(asns.clone()),
-                _ => {}
-            }
-            if addresses.len() >= CACHE_CAP {
-                addresses.retain(
-                    |_, state| matches!(state, OriginState::Known(_, until) if *until > now),
-                );
-                if addresses.len() >= CACHE_CAP {
-                    addresses.clear();
-                }
-            }
-            addresses.insert(ip, OriginState::Pending);
-        }
-        let this = Arc::clone(self);
         let resolver = Arc::clone(resolver);
         let name = daygle_dns_policy::residential::cymru_name(ip, zone_v4, zone_v6);
-        tokio::spawn(async move {
-            let state = match resolver
-                .lookup_for_client(client, &name, RecordType::TXT)
-                .await
-            {
-                Ok(lookup) => {
-                    let asns = lookup
-                        .answers()
-                        .iter()
-                        .find_map(|r| match &r.data {
-                            RData::TXT(txt) => {
-                                let text: String = txt
-                                    .txt_data
-                                    .iter()
-                                    .map(|s| String::from_utf8_lossy(s).into_owned())
-                                    .collect();
-                                Some(daygle_dns_policy::residential::parse_cymru_txt(&text))
-                            }
-                            _ => None,
-                        })
-                        .unwrap_or_default();
-                    OriginState::Known(asns, Instant::now() + ORIGIN_TTL)
+        self.addresses
+            .get(ip, wait, async move {
+                match resolver
+                    .lookup_for_client(client, &name, RecordType::TXT)
+                    .await
+                {
+                    Ok(lookup) => {
+                        let asns = lookup
+                            .answers()
+                            .iter()
+                            .find_map(|r| match &r.data {
+                                RData::TXT(txt) => {
+                                    let text: String = txt
+                                        .txt_data
+                                        .iter()
+                                        .map(|s| String::from_utf8_lossy(s).into_owned())
+                                        .collect();
+                                    Some(daygle_dns_policy::residential::parse_cymru_txt(&text))
+                                }
+                                _ => None,
+                            })
+                            .unwrap_or_default();
+                        (asns, ORIGIN_TTL)
+                    }
+                    // An address the zone does not cover (NXDOMAIN) is known
+                    // to have no origin; other failures are retried.
+                    Err(e) if is_nxdomain(&e) => (Vec::new(), ORIGIN_TTL),
+                    Err(_) => (Vec::new(), ORIGIN_RETRY),
                 }
-                // An address the zone does not cover (NXDOMAIN) is known to
-                // have no origin; other failures are retried.
-                Err(e) if is_nxdomain(&e) => {
-                    OriginState::Known(Vec::new(), Instant::now() + ORIGIN_TTL)
-                }
-                Err(_) => OriginState::Known(Vec::new(), Instant::now() + ORIGIN_RETRY),
-            };
-            this.addresses
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .insert(ip, state);
-        });
-        None
+            })
+            .await
     }
 }
 

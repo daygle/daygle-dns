@@ -187,9 +187,9 @@ pub const SECURITY_CATEGORIES: &[SecurityCategory] = &[
         name: "Newly Registered Domains",
         description:
             "Domains registered less than 30 days ago, which threat actors favour for new \
-            campaigns. Registration dates are looked up over RDAP the first time a domain is \
-            seen (so that first visit is not blocked), which tells the domain's registry the \
-            name, though not who asked; TLDs without RDAP are never blocked.",
+            campaigns. A domain's registration date is looked up over RDAP the first time it is \
+            seen, and that query waits for it (up to 2 seconds); this tells the domain's \
+            registry the name, though not who asked. TLDs without RDAP are never blocked.",
         section: Section::Security,
         detector: Some(Detector::NewlyRegistered),
         feed: None,
@@ -213,9 +213,9 @@ pub const SECURITY_CATEGORIES: &[SecurityCategory] = &[
         description:
             "Names whose addresses all belong to home internet providers rather than data \
             centres, as botnet command servers and phishing proxies on compromised routers do. \
-            Networks are identified with Team Cymru's IP-to-ASN service and PeeringDB, looked up \
-            in the background (so the first visits are not blocked); CDN caches inside ISPs are \
-            not affected. Services run from a home connection, including your ISP's own portal \
+            Networks are identified with Team Cymru's IP-to-ASN service and PeeringDB the first \
+            time an address is seen, and that query waits for them (up to 2 seconds); CDN \
+            caches inside ISPs are not affected. Services run from a home connection, including your ISP's own portal \
             and your own home server, are blocked: allow them under Custom Allow.",
         section: Section::Security,
         detector: Some(Detector::ResidentialHosting),

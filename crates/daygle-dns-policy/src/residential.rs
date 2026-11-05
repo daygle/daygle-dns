@@ -8,18 +8,18 @@
 //! DNS service, which the dispatcher queries through its own resolver
 //! ([`cymru_name`], [`parse_cymru_txt`]). Whether a network serves homes
 //! comes from the network's own PeeringDB record: `Cable/DSL/ISP` networks
-//! are consumer access providers ([`NetworkTypes`]). Both are looked up in
-//! the background and remembered, so the query path never waits; the first
-//! queries for a name are not judged.
+//! are consumer access providers ([`NetworkTypes`]). Both are remembered;
+//! the first query for a name waits for any lookups it needs (up to
+//! [`LOOKUP_WAIT`] in all, shared with concurrent queries), and lookups
+//! slower than that finish in the background for the next query.
 //!
 //! Large CDNs place cache servers inside consumer ISPs (Google Global Cache,
 //! Netflix Open Connect, Meta, Akamai, ...), numbered from the ISP's
 //! addresses, so their names are never judged ([`is_embedded_cdn`]).
 
-use std::collections::HashMap;
 use std::net::IpAddr;
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::sync::Arc;
+use std::time::Duration;
 
 use tokio::sync::Semaphore;
 use tracing::debug;
@@ -40,6 +40,8 @@ const TYPE_TTL: Duration = Duration::from_secs(7 * 24 * 3600);
 const RETRY: Duration = Duration::from_secs(3600);
 /// Most networks remembered.
 const CAP: usize = 50_000;
+/// How long a query waits, in all, for the lookups its answer needs.
+pub const LOOKUP_WAIT: Duration = Duration::from_secs(2);
 /// PeeringDB lookups running at once.
 const CONCURRENT: usize = 2;
 
@@ -117,18 +119,13 @@ pub fn parse_cymru_txt(txt: &str) -> Vec<u32> {
         .collect()
 }
 
-#[derive(Debug, Clone, Copy)]
-enum State {
-    Pending,
-    Known(Option<bool>, Instant),
-}
-
 /// Which networks (ASNs) are consumer access providers, from PeeringDB,
 /// filled in the background.
 pub struct NetworkTypes {
     client: reqwest::Client,
     base_url: String,
-    networks: Mutex<HashMap<u32, State>>,
+    /// Whether each network is residential (`None` after a failed lookup).
+    networks: Arc<crate::lookup_cache::LookupCache<u32, Option<bool>>>,
     permits: Semaphore,
 }
 
@@ -157,7 +154,7 @@ impl NetworkTypes {
         Self {
             client,
             base_url: base_url.trim_end_matches('/').to_string(),
-            networks: Mutex::new(HashMap::new()),
+            networks: Arc::new(crate::lookup_cache::LookupCache::new(CAP)),
             permits: Semaphore::new(CONCURRENT),
         }
     }
@@ -167,39 +164,19 @@ impl NetworkTypes {
         &self.base_url
     }
 
-    /// Whether network `asn` is a consumer access provider, when known
-    /// (`Some(false)` too for networks PeeringDB does not list). When
-    /// nothing current is known, starts a background lookup and returns
-    /// `None`.
-    pub fn check(self: &Arc<Self>, asn: u32) -> Option<bool> {
-        let now = Instant::now();
-        {
-            let mut networks = self.networks.lock().unwrap_or_else(|e| e.into_inner());
-            match networks.get(&asn) {
-                Some(State::Pending) => return None,
-                Some(State::Known(kind, until)) if *until > now => {
-                    return Some(kind.unwrap_or(false))
-                }
-                _ => {}
-            }
-            if networks.len() >= CAP {
-                networks.retain(|_, s| matches!(s, State::Known(_, until) if *until > now));
-                if networks.len() >= CAP {
-                    networks.clear();
-                }
-            }
-            networks.insert(asn, State::Pending);
-        }
+    /// Whether network `asn` is a consumer access provider (`false` too
+    /// for networks PeeringDB does not list): from the cache, or looked up
+    /// now and waited for up to `wait`. `None` when the lookup failed or is
+    /// still running.
+    pub async fn is_residential(self: &Arc<Self>, asn: u32, wait: Duration) -> Option<bool> {
         let this = Arc::clone(self);
-        tokio::spawn(async move {
-            let kind = this.look_up(asn).await;
-            let ttl = if kind.is_some() { TYPE_TTL } else { RETRY };
-            this.networks
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .insert(asn, State::Known(kind, Instant::now() + ttl));
-        });
-        None
+        self.networks
+            .get(asn, wait, async move {
+                let kind = this.look_up(asn).await;
+                (kind, if kind.is_some() { TYPE_TTL } else { RETRY })
+            })
+            .await
+            .flatten()
     }
 
     /// `Some(residential)` for a network PeeringDB answered about (`false`

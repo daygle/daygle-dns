@@ -750,20 +750,11 @@ async fn groups_block_newly_registered_domains() {
         .unwrap();
     assert!(resp.status().is_success(), "{}", resp.text().await.unwrap());
 
-    // First queries get through and start the RDAP lookups.
-    for name in ["www.new.co.zz.", "www.old.co.zz."] {
-        let reply = udp_query(udp, name, RecordType::A).await;
-        assert!(first_answer(&reply).is_some(), "{name}: {reply:?}");
-    }
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    loop {
-        let reply = udp_query(udp, "www.new.co.zz.", RecordType::A).await;
-        if reply.response_code == ResponseCode::NoError && reply.answers.is_empty() {
-            break;
-        }
-        assert!(std::time::Instant::now() < deadline, "{reply:?}");
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    }
+    // The very first query waits for the RDAP lookup and is blocked.
+    let reply = udp_query(udp, "www.new.co.zz.", RecordType::A).await;
+    assert_eq!(reply.response_code, ResponseCode::NoError);
+    assert!(reply.answers.is_empty(), "{reply:?}");
+    // An old domain resolves, on its first query too.
     let reply = udp_query(udp, "www.old.co.zz.", RecordType::A).await;
     assert_eq!(first_answer(&reply).as_deref(), Some("198.51.100.31"));
 
@@ -946,19 +937,12 @@ async fn groups_block_residential_hosting() {
         .unwrap();
     assert!(resp.status().is_success(), "{}", resp.text().await.unwrap());
 
-    // The first answers get through while the lookups run.
+    // The very first query waits for the address and network lookups and
+    // is blocked.
     let reply = udp_query(udp, "home.co.zz.", RecordType::A).await;
-    assert_eq!(first_answer(&reply).as_deref(), Some("198.51.100.50"));
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    loop {
-        let reply = udp_query(udp, "home.co.zz.", RecordType::A).await;
-        if reply.response_code == ResponseCode::NoError && reply.answers.is_empty() {
-            break;
-        }
-        assert!(std::time::Instant::now() < deadline, "{reply:?}");
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    }
-    // A data-centre address stays reachable once it is known too.
+    assert_eq!(reply.response_code, ResponseCode::NoError);
+    assert!(reply.answers.is_empty(), "{reply:?}");
+    // A data-centre address stays reachable, from its first query on.
     for _ in 0..20 {
         let reply = udp_query(udp, "dc.co.zz.", RecordType::A).await;
         assert_eq!(first_answer(&reply).as_deref(), Some("198.51.100.60"));
