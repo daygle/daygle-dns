@@ -2529,6 +2529,34 @@ impl DnsDispatcher {
                 }
             }
         }
+        if let Some(group) = filters.cname_trackers {
+            let targets: Vec<String> = answers
+                .iter()
+                .filter_map(|r| match &r.data {
+                    RData::CNAME(target) => Some(
+                        target
+                            .0
+                            .to_ascii()
+                            .trim_end_matches('.')
+                            .to_ascii_lowercase(),
+                    ),
+                    _ => None,
+                })
+                .collect();
+            if let Some((target, company)) = daygle_dns_policy::cname_trackers::disguised_tracker(
+                qname,
+                targets.iter().map(String::as_str),
+            ) {
+                return Some(block_reason(
+                    source::PRIVACY,
+                    Some(group.to_string()),
+                    Some("Disguised Third-Party Trackers".to_string()),
+                    format!(
+                        "'{qname}' is a disguised {company} tracker (CNAME to {target}), blocked by group '{group}'"
+                    ),
+                ));
+            }
+        }
         if let Some(group) = filters.residential {
             if let Some(block) = self.residential_block(resolver, client, qname, answers, group) {
                 return Some(block);

@@ -222,30 +222,41 @@ pub async fn spawn_upstream_with(
     zone_name: &str,
     records: &[(&str, &str, &str)],
 ) -> SocketAddr {
+    spawn_upstream_zones(db, &[(zone_name, records)]).await
+}
+
+/// A zone name and its records as `(name, type, content)`.
+pub type UpstreamZone<'a> = (&'a str, &'a [(&'a str, &'a str, &'a str)]);
+
+/// An upstream authoritative for several zones.
+#[allow(dead_code)]
+pub async fn spawn_upstream_zones(db: &Path, zones: &[UpstreamZone<'_>]) -> SocketAddr {
     let store = ZoneStore::open(&db.to_string_lossy()).unwrap();
     let catalog = Arc::new(AuthorityCatalog::new(store, AuthoritativeSettings::default()).unwrap());
-    let zone = catalog
-        .store()
-        .create_zone(&ZoneInput {
-            name: zone_name.to_string(),
-            ..Default::default()
-        })
-        .unwrap();
-    for (name, rtype, content) in records {
-        catalog
+    for (zone_name, records) in zones {
+        let zone = catalog
             .store()
-            .upsert_record(
-                &zone.id,
-                &RecordInput {
-                    name: name.to_string(),
-                    rtype: rtype.to_string(),
-                    content: content.to_string(),
-                    ttl: 300,
-                    priority: 0,
-                    disabled: false,
-                },
-            )
+            .create_zone(&ZoneInput {
+                name: zone_name.to_string(),
+                ..Default::default()
+            })
             .unwrap();
+        for (name, rtype, content) in records.iter() {
+            catalog
+                .store()
+                .upsert_record(
+                    &zone.id,
+                    &RecordInput {
+                        name: name.to_string(),
+                        rtype: rtype.to_string(),
+                        content: content.to_string(),
+                        ttl: 300,
+                        priority: 0,
+                        disabled: false,
+                    },
+                )
+                .unwrap();
+        }
     }
     catalog.reload().unwrap();
 

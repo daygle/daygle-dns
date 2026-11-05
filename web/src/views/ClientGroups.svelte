@@ -515,7 +515,7 @@
 
       <div class="section-title">Security</div>
       <div class="security-list">
-        {#each securityCategories as c (c.id)}
+        {#each securityCategories.filter((c) => c.section !== 'privacy') as c (c.id)}
           <label class="security" title={describeEntries(c.entries)}>
             <input type="checkbox" checked={edit.blocked_security.includes(c.id)} onchange={() => toggleSecurity(c.id)} />
             <span>
@@ -554,6 +554,19 @@
         both the security categories and blocked TLDs (hover a category to see
         its list).
       </p>
+
+      <div class="section-title">Privacy</div>
+      <div class="security-list">
+        {#each securityCategories.filter((c) => c.section === 'privacy') as c (c.id)}
+          <label class="security" title={describeEntries(c.entries)}>
+            <input type="checkbox" checked={edit.blocked_security.includes(c.id)} onchange={() => toggleSecurity(c.id)} />
+            <span>
+              <strong>{c.name}</strong>
+              <span class="muted">{c.description}</span>
+            </span>
+          </label>
+        {/each}
+      </div>
 
       <div class="section-title">Blocked Services</div>
       {#each serviceCategories as category (category)}

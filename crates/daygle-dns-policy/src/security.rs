@@ -21,12 +21,24 @@ pub struct SecurityCategory {
     pub name: &'static str,
     /// What the category blocks and what it leaves alone, for the console.
     pub description: &'static str,
+    /// The console section the category is listed in.
+    pub section: Section,
     /// The detector that decides membership, for categories judged by
     /// examining the name or its answer instead of a list.
     pub detector: Option<Detector>,
     /// Blocklist entries (`*.suffix`, exact names, `@@` exceptions); empty
     /// for a detector.
     pub entries: &'static [&'static str],
+}
+
+/// Where the console lists a category.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Section {
+    /// Threats: malware, phishing and their infrastructure.
+    Security,
+    /// Tracking.
+    Privacy,
 }
 
 /// A category decided by examining a name rather than by a list.
@@ -52,6 +64,9 @@ pub enum Detector {
     /// Names whose addresses all belong to consumer ISPs
     /// ([`crate::residential`]), checked after resolution.
     ResidentialHosting,
+    /// Answers whose CNAME chain leads to a third-party tracker
+    /// ([`crate::cname_trackers`]), checked after resolution.
+    CnameTracker,
 }
 
 impl Detector {
@@ -60,7 +75,11 @@ impl Detector {
     pub fn after_resolution(self) -> bool {
         matches!(
             self,
-            Self::Parked | Self::NewlyRegistered | Self::SafeBrowsing | Self::ResidentialHosting
+            Self::Parked
+                | Self::NewlyRegistered
+                | Self::SafeBrowsing
+                | Self::ResidentialHosting
+                | Self::CnameTracker
         )
     }
 }
@@ -73,6 +92,7 @@ pub const SECURITY_CATEGORIES: &[SecurityCategory] = &[
         description: "Default subdomains handed out by free web hosts and site builders \
             (*.pages.dev, *.vercel.app, *.netlify.app, ...), heavily abused for phishing. \
             Sites on these hosts that use their own domain name are not affected.",
+        section: Section::Security,
         detector: None,
         entries: &[
             "*.pages.dev",
@@ -108,6 +128,7 @@ pub const SECURITY_CATEGORIES: &[SecurityCategory] = &[
             FreeDNS, ...), which need no identity check and are common in phishing. The \
             services' own websites and update APIs stay reachable; allow your own DDNS \
             hostname under Custom Allow if you use one.",
+        section: Section::Security,
         detector: None,
         entries: &[
             // DuckDNS
@@ -192,6 +213,7 @@ pub const SECURITY_CATEGORIES: &[SecurityCategory] = &[
             internet (ngrok, Cloudflare quick tunnels, localtunnel, ...), used to host \
             phishing pages behind random subdomains. Named Cloudflare Tunnels on your own \
             domain are not affected.",
+        section: Section::Security,
         detector: None,
         entries: &[
             "*.ngrok.io",
@@ -218,6 +240,7 @@ pub const SECURITY_CATEGORIES: &[SecurityCategory] = &[
         description: "Paste sites, anonymous file drops, webhook and request catchers and \
             out-of-band DNS loggers, used to stage payloads and collect stolen data. This \
             blocks legitimate use of these services too.",
+        section: Section::Security,
         detector: None,
         entries: &[
             // Paste sites
@@ -297,6 +320,7 @@ pub const SECURITY_CATEGORIES: &[SecurityCategory] = &[
         name: "Decentralized Web Gateways",
         description: "Public gateways that serve IPFS and ENS content to ordinary browsers, \
             used to host phishing pages that cannot be taken down.",
+        section: Section::Security,
         detector: None,
         entries: &[
             "ipfs.io",
@@ -329,6 +353,7 @@ pub const SECURITY_CATEGORIES: &[SecurityCategory] = &[
         name: "Cryptocurrency Mining",
         description: "In-browser miners and mining pools, so a compromised device or page \
             cannot mine cryptocurrency (cryptojacking). This also stops intentional mining.",
+        section: Section::Security,
         detector: None,
         entries: &[
             // In-browser miners
@@ -394,6 +419,7 @@ pub const SECURITY_CATEGORIES: &[SecurityCategory] = &[
             reports (.zip, .mov, .top, .cfd, .sbs, the former Freenom TLDs, ...). The list \
             is curated and updated with each release; allow a site you need under Custom \
             Allow.",
+        section: Section::Security,
         detector: None,
         entries: &[
             "*.zip",
@@ -431,6 +457,7 @@ pub const SECURITY_CATEGORIES: &[SecurityCategory] = &[
         description: "Internationalized names that imitate a familiar one with look-alike \
             letters from another alphabet (a Cyrillic 'а' in pаypal.com). Genuine names in \
             other languages, such as bücher.de or яндекс.рф, are not affected.",
+        section: Section::Security,
         detector: Some(Detector::Homograph),
         entries: &[],
     },
@@ -440,6 +467,7 @@ pub const SECURITY_CATEGORIES: &[SecurityCategory] = &[
         description: "Random-looking names that malware generates to find its command-and-control \
             servers (xjkqpwzvbnmtrd.com). Judged by how unlike real names the letters are; a \
             rare genuine site may be caught, so allow it under Custom Allow.",
+        section: Section::Security,
         detector: Some(Detector::Dga),
         entries: &[],
     },
@@ -450,6 +478,7 @@ pub const SECURITY_CATEGORIES: &[SecurityCategory] = &[
             "Domains served by parking services (Sedo, Bodis, ParkingCrew, ...) that show \
             ads and redirects instead of a site. The name servers are looked up the first time \
             a domain is seen, so that first visit is not blocked.",
+        section: Section::Security,
         detector: Some(Detector::Parked),
         entries: &[],
     },
@@ -461,6 +490,7 @@ pub const SECURITY_CATEGORIES: &[SecurityCategory] = &[
             delivery companies, ...) with a typo (gooogle.com), look-alike characters \
             (paypa1.com) or a phishing word (paypal-login.com). The brands' own sites are \
             not affected.",
+        section: Section::Security,
         detector: Some(Detector::Typosquat),
         entries: &[],
     },
@@ -472,6 +502,7 @@ pub const SECURITY_CATEGORIES: &[SecurityCategory] = &[
             campaigns. Registration dates are looked up over RDAP the first time a domain is \
             seen (so that first visit is not blocked), which tells the domain's registry the \
             name, though not who asked; TLDs without RDAP are never blocked.",
+        section: Section::Security,
         detector: Some(Detector::NewlyRegistered),
         entries: &[],
     },
@@ -484,6 +515,7 @@ pub const SECURITY_CATEGORIES: &[SecurityCategory] = &[
             only for a hash prefix shared with many names, never with your address. Needs a \
             Safe Browsing API key under Filtering → Response Filters (the API is for \
             non-commercial use only). Lists of single pages on a site cannot be checked by DNS.",
+        section: Section::Security,
         detector: Some(Detector::SafeBrowsing),
         entries: &[],
     },
@@ -497,7 +529,19 @@ pub const SECURITY_CATEGORIES: &[SecurityCategory] = &[
             in the background (so the first visits are not blocked); CDN caches inside ISPs are \
             not affected. Services run from a home connection, including your ISP's own portal \
             and your own home server, are blocked: allow them under Custom Allow.",
+        section: Section::Security,
         detector: Some(Detector::ResidentialHosting),
+        entries: &[],
+    },
+    SecurityCategory {
+        id: "disguised_trackers",
+        name: "Disguised Third-Party Trackers",
+        description: "Trackers and ad servers hidden behind a site's own subdomain with a CNAME \
+            (metrics.shop.example pointing to a tracking company), which lets them read the \
+            site's cookies and slip past browsers' third-party protections. Uses AdGuard's \
+            catalogue of tracking companies' CNAME targets.",
+        section: Section::Privacy,
+        detector: Some(Detector::CnameTracker),
         entries: &[],
     },
 ];

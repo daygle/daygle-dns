@@ -436,6 +436,9 @@ impl AdvancedBlocking {
             if filters.residential.is_none() && group.uses(Detector::ResidentialHosting) {
                 filters.residential = Some(group.name.as_str());
             }
+            if filters.cname_trackers.is_none() && group.uses(Detector::CnameTracker) {
+                filters.cname_trackers = Some(group.name.as_str());
+            }
         }
         filters
     }
@@ -685,6 +688,8 @@ pub struct ResponseFilters<'a> {
     pub safe_browsing: Option<&'a str>,
     /// Block names hosted only on consumer ISP networks.
     pub residential: Option<&'a str>,
+    /// Block answers that cloak a third-party tracker behind a CNAME.
+    pub cname_trackers: Option<&'a str>,
 }
 
 /// Whether one security category blocks `qname` by name: `Some(None)` for
@@ -706,7 +711,8 @@ fn security_check(
             Detector::Parked
             | Detector::NewlyRegistered
             | Detector::SafeBrowsing
-            | Detector::ResidentialHosting,
+            | Detector::ResidentialHosting
+            | Detector::CnameTracker,
         ) => None,
     }
 }

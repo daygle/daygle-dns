@@ -982,3 +982,66 @@ async fn groups_block_residential_hosting() {
 
     shutdown(server).await;
 }
+
+/// A site subdomain that CNAMEs to a tracking company is blocked as a
+/// disguised third-party tracker; a CNAME within the site is not.
+#[tokio::test]
+async fn groups_block_disguised_third_party_trackers() {
+    let dir = tempfile::tempdir().unwrap();
+    let upstream = spawn_upstream_zones(
+        &dir.path().join("upstream.db"),
+        &[
+            (
+                "co.zz",
+                &[
+                    ("metrics", "CNAME", "shop.eulerian.net."),
+                    ("www", "CNAME", "web.co.zz."),
+                    ("web", "A", "198.51.100.70"),
+                ],
+            ),
+            ("eulerian.net", &[("shop", "A", "198.51.100.71")]),
+        ],
+    )
+    .await;
+    let mut config = base_config(&dir.path().join("daygle-dns.db"));
+    config.recursive.enabled = true;
+    config.recursive.use_system_config = false;
+    config.recursive.upstreams = vec![upstream.to_string()];
+    config.recursive.dnssec_validate = false;
+    let server = spawn(config).await;
+    let udp = server.udp_addr.unwrap();
+    let base = format!("http://{}/api", server.api_addr);
+
+    // Without the category the CNAME comes through.
+    let reply = udp_query(udp, "metrics.co.zz.", RecordType::A).await;
+    assert_eq!(
+        first_answer(&reply).as_deref(),
+        Some("shop.eulerian.net."),
+        "{reply:?}"
+    );
+
+    let resp = reqwest::Client::new()
+        .post(format!("{base}/policy/blocking"))
+        .json(&serde_json::json!({
+            "name": "private",
+            "blocked_security": ["disguised_trackers"],
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_success(), "{}", resp.text().await.unwrap());
+
+    let reply = udp_query(udp, "metrics.co.zz.", RecordType::A).await;
+    assert_eq!(reply.response_code, ResponseCode::NoError);
+    assert!(reply.answers.is_empty(), "{reply:?}");
+    let reply = udp_query(udp, "www.co.zz.", RecordType::A).await;
+    assert!(
+        reply
+            .answers
+            .iter()
+            .any(|r| r.data.to_string() == "198.51.100.70"),
+        "{reply:?}"
+    );
+
+    shutdown(server).await;
+}
