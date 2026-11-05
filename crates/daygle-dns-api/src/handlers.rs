@@ -4123,7 +4123,12 @@ pub async fn auth_login(
     // Constant-ish response time: verify against a dummy hash when the user
     // does not exist (or is disabled, which is not disclosed) so timing
     // cannot enumerate accounts.
-    let dummy_hash = "pbkdf2-sha256$210000$AAAAAAAAAAAAAAAAAAAAAA==$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+    // Same iteration count as a freshly hashed password, so a missing user
+    // costs as much as a real one.
+    let dummy_hash = format!(
+        "pbkdf2-sha256${}$AAAAAAAAAAAAAAAAAAAAAA==$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+        daygle_dns_core::auth::DEFAULT_PBKDF2_ITERATIONS
+    );
     let stored_hash = match user.as_ref() {
         Some(u) if u.enabled => Some(u.password_hash.clone()),
         _ => None,
@@ -4141,7 +4146,7 @@ pub async fn auth_login(
     let ok = run_password_job(move || match stored_hash {
         Some(hash) => daygle_dns_core::auth::verify_password(&password, &hash),
         None => {
-            let _ = daygle_dns_core::auth::verify_password(&password, dummy_hash);
+            let _ = daygle_dns_core::auth::verify_password(&password, &dummy_hash);
             false
         }
     })
