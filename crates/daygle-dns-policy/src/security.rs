@@ -84,14 +84,6 @@ pub enum Detector {
     CnameTracker,
 }
 
-impl Detector {
-    /// Whether the dispatcher decides it after resolution (every detector
-    /// does: they need the answer or a lookup).
-    pub fn after_resolution(self) -> bool {
-        true
-    }
-}
-
 /// Category ids that existed in earlier versions and were retired (they
 /// were heuristics, or hand-written lists without a maintained source).
 /// Groups that still name them keep working: the ids are dropped when the

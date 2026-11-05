@@ -8,17 +8,20 @@
 //! pbkdf2-sha256$<iterations>$<salt-base64>$<hash-base64>
 //! ```
 //!
-//! The default iteration count (210_000, in line with OWASP 2023 guidance for
-//! PBKDF2-HMAC-SHA256) is used when generating new hashes. Verification
-//! accepts any iteration count recorded in the stored hash, so admins can
-//! raise the count in future without breaking existing accounts.
+//! The default iteration count (210_000) is used when generating new hashes.
+//! That is below OWASP's current recommendation for PBKDF2-HMAC-SHA256
+//! (600_000), a deliberate trade-off for console logins on low-power hosts;
+//! verification accepts any iteration count recorded in the stored hash, so
+//! raising the constant re-hashes new and changed passwords only and never
+//! invalidates existing accounts.
 
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
 use hmac::{Hmac, KeyInit, Mac};
 use sha2::Sha256;
 
-/// PBKDF2 iteration count used when generating new password hashes.
+/// PBKDF2 iteration count used when generating new password hashes (see the
+/// module docs for why this is below OWASP's 600_000 recommendation).
 pub const DEFAULT_PBKDF2_ITERATIONS: u32 = 210_000;
 /// Salt length in bytes.
 const SALT_LEN: usize = 16;

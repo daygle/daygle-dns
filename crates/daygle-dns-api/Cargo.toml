@@ -32,7 +32,6 @@ serde_json.workspace = true
 chrono.workspace = true
 sha2.workspace = true
 instant-acme.workspace = true
-rustls.workspace = true
 rustls-pki-types.workspace = true
 tracing.workspace = true
 lettre.workspace = true

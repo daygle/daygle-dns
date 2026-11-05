@@ -89,9 +89,17 @@ where
             }
         };
         // `changed` returns an error once the sender is dropped: the lookup
-        // has finished (or panicked).
-        let _ = tokio::time::timeout(wait, pending.changed()).await;
-        let entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+        // has finished (or panicked), while a timeout means it is still
+        // running and will fill the cache on its own.
+        let finished = tokio::time::timeout(wait, pending.changed()).await.is_ok();
+        let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+        if finished && matches!(entries.get(&key), Some(Entry::Pending(_))) {
+            // The lookup task ended without recording a value (it panicked, or
+            // the runtime dropped it): drop the placeholder so the next query
+            // starts a fresh lookup instead of waiting on a sender that is
+            // gone and being answered "unknown" forever.
+            entries.remove(&key);
+        }
         match entries.get(&key) {
             Some(Entry::Known(value, _)) => Some(value.clone()),
             _ => None,
@@ -131,6 +139,19 @@ mod tests {
         // Cached now.
         assert_eq!(cache.get("k", wait, lookup(calls.clone())).await, Some(7));
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn a_lookup_that_never_records_a_value_is_retried() {
+        let cache = Arc::new(LookupCache::<&str, u32>::new(10));
+        // The lookup task dies without storing a value (a panic inside it is
+        // what a failing RDAP/network-type lookup amounts to).
+        let failing = async { panic!("lookup failed") };
+        assert_eq!(cache.get("k", Duration::from_secs(1), failing).await, None);
+        // The next query starts a fresh lookup rather than waiting on the
+        // dead one for the rest of the process's life.
+        let ok = async { (5u32, Duration::from_secs(60)) };
+        assert_eq!(cache.get("k", Duration::from_secs(1), ok).await, Some(5));
     }
 
     #[tokio::test]

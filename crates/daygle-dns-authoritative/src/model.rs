@@ -76,21 +76,6 @@ pub struct SigningKeyRecord {
     pub retired_at: Option<String>,
 }
 
-/// A TSIG shared secret key (RFC 8945) stored in SQLite for API visibility.
-/// Runtime signing uses [`crate::tsig::TsigKey`]; this row is the persisted
-/// copy so keys survive restarts and can be inspected via the API.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct TsigKeyRecord {
-    /// Key name in DNS name syntax (e.g. `daygle-transfer.`).
-    pub name: String,
-    /// HMAC algorithm name (e.g. `hmac-sha256`).
-    pub algorithm: String,
-    /// Shared secret, base64-encoded.
-    pub secret: String,
-    /// RFC 3339 creation timestamp.
-    pub created_at: String,
-}
-
 impl SigningKeyRecord {
     /// True when the key is in the `active` state.
     pub fn is_active(&self) -> bool {
@@ -216,45 +201,6 @@ pub struct SecondaryZone {
     pub refresh_secs: u64,
     /// RFC 3339 timestamp of the last successful transfer, if any.
     pub last_transfer: Option<String>,
-}
-
-/// Stub-zone metadata: which nameservers a zone's queries are forwarded to
-/// (learned from the zone's own NS records) and when they were last verified.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct StubZone {
-    /// The zone apex this stub covers.
-    pub name: String,
-    /// Nameservers of the zone (IPs or hostnames).
-    pub nss: Vec<String>,
-    /// Refresh interval in seconds.
-    pub refresh_secs: u64,
-    /// Whether the stub is active.
-    pub enabled: bool,
-    /// RFC 3339 timestamp of the last successful NS refresh, if any.
-    pub last_refresh: Option<String>,
-}
-
-/// Payload to create or update a stub zone (matched by zone name).
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct StubZoneInput {
-    /// Zone apex the stub covers, e.g. `branch.example.com`.
-    pub name: String,
-    /// Nameservers (IPs or hostnames). Empty when they should be learned
-    /// automatically from the zone's SOA/NS.
-    #[serde(default)]
-    pub nss: Vec<String>,
-    #[serde(default = "default_stub_refresh")]
-    pub refresh_secs: u64,
-    #[serde(default = "default_true")]
-    pub enabled: bool,
-}
-
-fn default_stub_refresh() -> u64 {
-    3600
-}
-
-fn default_true() -> bool {
-    true
 }
 
 /// A named client network group used by split-horizon views, e.g.

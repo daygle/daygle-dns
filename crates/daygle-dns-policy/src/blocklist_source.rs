@@ -9,7 +9,8 @@
 //! where the client groups that select them look them up. Sources are
 //! refreshed on their
 //! `refresh_secs` schedule; the refresh loop lives in `daygle` and calls
-//! [`BlocklistSourceManager::refresh_all`].
+//! [`BlocklistSourceManager::refresh_due`] on each tick
+//! ([`BlocklistSourceManager::refresh_all`] is the console's force-refresh).
 
 use std::collections::{BTreeSet, HashMap};
 use std::sync::{Arc, Mutex, RwLock};
@@ -58,7 +59,7 @@ impl GroupBlocklists {
 
     /// The current lists (cheap: one `Arc` clone).
     pub fn snapshot(&self) -> Arc<HashMap<String, Arc<Blocklist>>> {
-        self.lists.read().unwrap().clone()
+        read_guard(&self.lists).clone()
     }
 
     /// The compiled list for the source called `name` (any case), if it is
@@ -68,14 +69,14 @@ impl GroupBlocklists {
     }
 
     pub(crate) fn set(&self, lists: HashMap<String, Arc<Blocklist>>) {
-        *self.lists.write().unwrap() = Arc::new(lists);
+        *write_guard(&self.lists) = Arc::new(lists);
     }
 
     /// Every source merged into the everyone list (or, with `dot`, the DoT
     /// listener's list) that lists `domain`, with the entry that lists it:
     /// `(source name, entry)`, in source order.
     pub fn sources_listing(&self, domain: &str, dot: bool) -> Vec<(String, String)> {
-        let merged = self.merged_sources.read().unwrap().clone();
+        let merged = read_guard(&self.merged_sources).clone();
         let sources = if dot { &merged.dot } else { &merged.everyone };
         sources
             .iter()
@@ -86,7 +87,7 @@ impl GroupBlocklists {
     }
 
     fn set_merged_sources(&self, merged: MergedSources) {
-        *self.merged_sources.write().unwrap() = Arc::new(merged);
+        *write_guard(&self.merged_sources) = Arc::new(merged);
     }
 }
 
@@ -114,6 +115,28 @@ pub struct SourceStatus {
     pub cached_domains: Arc<BTreeSet<String>>,
     /// Human-readable error from the last failed fetch, if any.
     pub last_error: Option<String>,
+}
+
+/// Lock a mutex, recovering from poisoning.
+///
+/// Every lock in this module guards a snapshot of plain data (the source list,
+/// the per-source status, the compiled lists), so a poisoned lock means some
+/// unrelated thread panicked while holding it, not that the data is unusable.
+/// Propagating the poison would turn that one panic into a permanent one: the
+/// refresh loop and the source status endpoint would panic on every later
+/// call, so blocklist refreshes and `GET /api/policy/blocklist/sources` would
+/// never work again until a restart. Recover the guard instead, matching the
+/// rest of the codebase.
+fn lock_guard<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+fn read_guard<T>(lock: &RwLock<T>) -> std::sync::RwLockReadGuard<'_, T> {
+    lock.read().unwrap_or_else(|e| e.into_inner())
+}
+
+fn write_guard<T>(lock: &RwLock<T>) -> std::sync::RwLockWriteGuard<'_, T> {
+    lock.write().unwrap_or_else(|e| e.into_inner())
 }
 
 /// Whether the status row `st` still describes `source`. The source list can
@@ -205,18 +228,18 @@ impl BlocklistSourceManager {
     /// The merged domain set of the sources scoped to the DoT listener
     /// (`None` when no `dot`-scoped source contributes domains).
     pub fn dot_blocklist(&self) -> Option<Arc<Blocklist>> {
-        self.dot_list.read().unwrap().clone()
+        read_guard(&self.dot_list).clone()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.sources.lock().unwrap().is_empty()
+        lock_guard(&self.sources).is_empty()
     }
 
     /// The currently configured sources (a clone). Callers that run a refresh
     /// in the background compare this before and after the fetch so a stale
     /// result never overwrites a newer source list.
     pub fn sources(&self) -> Vec<BlocklistSourceConfig> {
-        self.sources.lock().unwrap().clone()
+        lock_guard(&self.sources).clone()
     }
 
     /// Replace the configured sources at runtime. The per-source status is
@@ -229,14 +252,14 @@ impl BlocklistSourceManager {
     /// are marked stale. This
     /// avoids a thundering-herd refetch on every source edit.
     pub fn set_sources(&self, sources: Vec<BlocklistSourceConfig>) {
-        let mut guard = self.sources.lock().unwrap();
+        let mut guard = lock_guard(&self.sources);
         if *guard == sources {
             return;
         }
         // Carry forward `last_fetch`, `last_fetch_at`, `domains`, and
         // `last_error` for sources
         // whose identity is unchanged. The (name, url) tuple is the identity.
-        let prev_status = self.status.lock().unwrap();
+        let prev_status = lock_guard(&self.status);
         let prev_index: std::collections::HashMap<(String, String), SourceStatus> = prev_status
             .iter()
             .map(|s| ((s.name.clone(), s.url.clone()), s.clone()))
@@ -278,7 +301,7 @@ impl BlocklistSourceManager {
             })
             .collect();
         *guard = sources;
-        *self.status.lock().unwrap() = status;
+        *lock_guard(&self.status) = status;
         // Wake the refresh loop. `notify_waiters` only wakes tasks currently
         // parked on `notified()`; to wake one that may be mid-sleep we use
         // `notify_one` (which is sufficient because there's a single refresh
@@ -302,9 +325,7 @@ impl BlocklistSourceManager {
     /// The smallest refresh interval among enabled sources (used to pace the
     /// refresh loop); 24 h when there are no sources.
     pub fn min_refresh(&self) -> Duration {
-        self.sources
-            .lock()
-            .unwrap()
+        lock_guard(&self.sources)
             .iter()
             .filter(|s| s.enabled)
             .map(|s| Duration::from_secs(s.refresh_secs))
@@ -314,7 +335,7 @@ impl BlocklistSourceManager {
 
     /// The list of configured sources (for the API status endpoint).
     pub fn status(&self) -> Vec<SourceStatus> {
-        self.status.lock().unwrap().clone()
+        lock_guard(&self.status).clone()
     }
 
     /// Fetch every enabled source whose refresh interval has elapsed since
@@ -332,7 +353,7 @@ impl BlocklistSourceManager {
         // Snapshot the list so the fetch cycle never holds the source lock
         // across network I/O, and so a concurrent `set_sources` cannot make
         // the loop read a half-replaced list.
-        let sources = self.sources.lock().unwrap().clone();
+        let sources = lock_guard(&self.sources).clone();
         let now = Instant::now();
         let mut merged: BTreeSet<String> = BTreeSet::new();
 
@@ -343,7 +364,7 @@ impl BlocklistSourceManager {
             // The list may have been replaced (and shortened) since the
             // snapshot was taken, so never index the status table blindly.
             let last_fetch = {
-                let status = self.status.lock().unwrap();
+                let status = lock_guard(&self.status);
                 match status.get(i) {
                     Some(st) if describes(st, source) => st.last_fetch,
                     _ => continue,
@@ -368,7 +389,7 @@ impl BlocklistSourceManager {
                         // The source list may have been replaced while this
                         // fetch was in flight; only record results against a
                         // status row that still describes this source.
-                        let mut status = self.status.lock().unwrap();
+                        let mut status = lock_guard(&self.status);
                         if let Some(st) = status.get_mut(i) {
                             if describes(st, source) {
                                 st.last_fetch = Some(now);
@@ -393,7 +414,7 @@ impl BlocklistSourceManager {
                             source.name, source.url
                         ),
                     );
-                    let mut status = self.status.lock().unwrap();
+                    let mut status = lock_guard(&self.status);
                     if let Some(st) = status.get_mut(i) {
                         if describes(st, source) {
                             st.last_error = Some(e.to_string());
@@ -412,7 +433,7 @@ impl BlocklistSourceManager {
         let mut dot_merged: BTreeSet<String> = BTreeSet::new();
         let mut merged_sources = MergedSources::default();
         {
-            let status = self.status.lock().unwrap();
+            let status = lock_guard(&self.status);
             for (i, source) in sources.iter().enumerate() {
                 if !source.enabled {
                     continue;
@@ -446,7 +467,7 @@ impl BlocklistSourceManager {
 
         // Publish the DoT-scoped merge the same way: an emptied or disabled
         // source stops blocking on the listener immediately.
-        *self.dot_list.write().unwrap() =
+        *write_guard(&self.dot_list) =
             (!dot_merged.is_empty()).then(|| Arc::new(Blocklist::from_set(dot_merged)));
 
         // Always hand back the current effective set (possibly empty): a
@@ -459,7 +480,7 @@ impl BlocklistSourceManager {
     /// Compile the group-scoped sources (reusing the compiled form of any
     /// whose domain set is unchanged) and publish them.
     fn publish_group_lists(&self, sets: Vec<(String, Arc<BTreeSet<String>>)>) {
-        let mut compiled = self.compiled.lock().unwrap();
+        let mut compiled = lock_guard(&self.compiled);
         let mut next = HashMap::with_capacity(sets.len());
         for (name, domains) in sets {
             let list = match compiled.get(&name) {
@@ -483,7 +504,7 @@ impl BlocklistSourceManager {
         // Only the schedule marker is cleared: `last_fetch_at` keeps the
         // wall-clock time of the last success until a refresh replaces it.
         {
-            let mut status = self.status.lock().unwrap();
+            let mut status = lock_guard(&self.status);
             for st in status.iter_mut() {
                 st.last_fetch = None;
             }
@@ -922,6 +943,34 @@ fn parse_rpz(text: &str) -> BTreeSet<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A panic in an unrelated thread that happened to hold one of these
+    /// locks must not make the manager (and its status endpoint) panic for
+    /// the rest of the process's life.
+    #[test]
+    fn poisoned_locks_are_recovered() {
+        let lists = Arc::new(GroupBlocklists::default());
+        let manager =
+            Arc::new(BlocklistSourceManager::new(Vec::new(), Arc::clone(&lists)).unwrap());
+        {
+            let lists = Arc::clone(&lists);
+            let manager = Arc::clone(&manager);
+            let _ = std::thread::spawn(move || {
+                let _lists = lists.lists.write().unwrap();
+                let _status = manager.status.lock().unwrap();
+                panic!("simulated panic while holding the locks");
+            })
+            .join();
+        }
+
+        // Every accessor still works after the poisoning.
+        assert!(lists.snapshot().is_empty());
+        lists.set(HashMap::new());
+        assert!(lists.get("anything").is_none());
+        assert!(manager.status().is_empty());
+        assert!(manager.sources().is_empty());
+        assert_eq!(manager.min_refresh(), Duration::from_secs(86400));
+    }
 
     #[test]
     fn parses_domain_format() {
