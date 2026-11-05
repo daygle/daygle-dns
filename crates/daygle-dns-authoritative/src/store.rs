@@ -362,6 +362,7 @@ impl ZoneStore {
         migrate_console_user_profile(&conn)?;
         migrate_blocking_group_lists(&conn)?;
         migrate_blocking_group_timestamps(&conn)?;
+        drop_retired_tables(&conn)?;
         // SQLite ships with foreign-key enforcement off (per connection), so
         // the schema's `ON DELETE CASCADE` never fired and deleting a zone
         // left its records, DNSSEC private keys and secondary state behind.
@@ -4525,6 +4526,18 @@ fn migrate_dnssec_key_retirement(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// Drop tables earlier versions created but nothing reads any more:
+/// `tsig_keys` (TSIG keys live in `authoritative.tsig_keys` in the config; the
+/// table only ever held unused copies of the shared secrets) and
+/// `stub_zones` (stub zones live in `authoritative.stub_zones`).
+fn drop_retired_tables(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "DROP TABLE IF EXISTS tsig_keys;
+         DROP TABLE IF EXISTS stub_zones;",
+    )?;
+    Ok(())
+}
+
 /// Add zone enablement and modification metadata to older databases.
 fn migrate_zone_metadata(conn: &Connection) -> Result<()> {
     for (column, definition) in [
@@ -5279,6 +5292,36 @@ mod tests {
     /// A database written before the per-group override kept "AI blocking
     /// off" in `ai_blocking`: that becomes record-only, so an upgrade never
     /// starts auto-blocking for clients an operator had excluded.
+    #[test]
+    fn retired_tables_are_dropped_on_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("retired.db");
+        let path = db.to_string_lossy().to_string();
+        drop(ZoneStore::open(&path).unwrap());
+        // Recreate the tables the way older versions left them, with a row.
+        {
+            let conn = rusqlite::Connection::open(&db).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE tsig_keys (name TEXT PRIMARY KEY, algorithm TEXT NOT NULL,
+                     secret TEXT NOT NULL, created_at TEXT NOT NULL);
+                 INSERT INTO tsig_keys VALUES ('k.', 'hmac-sha256', 'c2VjcmV0', 'now');
+                 CREATE TABLE stub_zones (name TEXT PRIMARY KEY);",
+            )
+            .unwrap();
+        }
+        drop(ZoneStore::open(&path).unwrap());
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        let left: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE type = 'table' AND name IN ('tsig_keys', 'stub_zones')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(left, 0);
+    }
+
     #[test]
     fn legacy_ai_blocking_flag_migrates_to_record_only() {
         use daygle_dns_core::blocking::BlockingGroupInput;

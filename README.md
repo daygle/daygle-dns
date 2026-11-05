@@ -302,7 +302,7 @@ port = 5380
 # hash first with:  daygle-dns hash-password 'your-password'
 # [[api.users]]
 # username = "admin"
-# password_hash = "pbkdf2-sha256$210000$...$..."
+# password_hash = "pbkdf2-sha256$600000$...$..."
 # role = "admin"
 
 [authoritative]
