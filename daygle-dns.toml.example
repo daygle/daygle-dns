@@ -440,6 +440,10 @@ filter_aaaa_except = []
 # peeringdb_url = "https://www.peeringdb.com"
 # ip_asn_zone_v4 = "origin.asn.cymru.com"
 # ip_asn_zone_v6 = "origin6.asn.cymru.com"
+# Download the security and privacy categories' maintained lists from a
+# mirror instead of their own hosts (each list's URL without its scheme is
+# appended to this base URL). Empty fetches them directly.
+# feed_mirror = ""
 
 # Entries may name a [[networks]] network as well as an address.
 denied_networks = []

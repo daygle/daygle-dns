@@ -37,6 +37,8 @@ const MAX_BODY_BYTES: usize = 64 * 1024 * 1024;
 pub struct GroupBlocklists {
     lists: RwLock<Arc<HashMap<String, Arc<Blocklist>>>>,
     merged_sources: RwLock<Arc<MergedSources>>,
+    /// The security and privacy categories' maintained lists.
+    feeds: Arc<crate::feeds::FeedLists>,
 }
 
 /// The entries of the sources merged into the engine's lists, by source
@@ -48,6 +50,12 @@ struct MergedSources {
 }
 
 impl GroupBlocklists {
+    /// The security and privacy categories' maintained lists, filled by
+    /// [`crate::feeds::run`].
+    pub fn feeds(&self) -> &Arc<crate::feeds::FeedLists> {
+        &self.feeds
+    }
+
     /// The current lists (cheap: one `Arc` clone).
     pub fn snapshot(&self) -> Arc<HashMap<String, Arc<Blocklist>>> {
         self.lists.read().unwrap().clone()

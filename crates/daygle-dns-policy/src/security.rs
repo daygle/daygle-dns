@@ -1,18 +1,14 @@
-//! Security categories: kinds of infrastructure that attackers favour
-//! (free hosting subdomains, dynamic DNS hostnames, tunnels, paste and
-//! webhook drops, IPFS gateways, mining pools, high-risk TLDs), each a
-//! built-in list a filtering group can block with one tick.
-//!
-//! Entries use the blocklist syntax ([`crate::Blocklist`]): `*.example.com`
-//! blocks the subdomains of `example.com` but not the name itself, an exact
-//! name blocks only that name, and `@@name` is an exception that is never
-//! blocked by the category (a provider's own website or update API).
+//! Security and privacy categories a filtering group can block with one
+//! tick. Each is either an exact check the server performs itself (a
+//! [`Detector`]) or a maintained public list ([`Feed`]) the server
+//! downloads and refreshes on a schedule ([`crate::feeds`]); none is a
+//! hand-written list or a guess.
 //!
 //! Also here: the per-group TLD block list, which turns `zip` into `*.zip`.
 
 use serde::Serialize;
 
-/// One security category.
+/// One security or privacy category.
 #[derive(Debug, Clone, Copy, Serialize)]
 pub struct SecurityCategory {
     /// Stable identifier stored in a group's `blocked_security`.
@@ -23,12 +19,43 @@ pub struct SecurityCategory {
     pub description: &'static str,
     /// The console section the category is listed in.
     pub section: Section,
-    /// The detector that decides membership, for categories judged by
-    /// examining the name or its answer instead of a list.
+    /// The check that decides membership, for categories judged by
+    /// examining the answer or looking the domain up.
     pub detector: Option<Detector>,
-    /// Blocklist entries (`*.suffix`, exact names, `@@` exceptions); empty
-    /// for a detector.
-    pub entries: &'static [&'static str],
+    /// The maintained list the category blocks (or, with a detector, the
+    /// data the detector uses).
+    pub feed: Option<Feed>,
+}
+
+/// A maintained public list a category is built from.
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct Feed {
+    /// Who maintains it, for the console.
+    pub source: &'static str,
+    /// Where it is downloaded from.
+    pub url: &'static str,
+    /// How it is written.
+    pub format: FeedFormat,
+    /// A list of names the maintainer says to let through despite the
+    /// main list (reputable sites under an abused TLD), in the same format.
+    pub allow_url: Option<&'static str>,
+}
+
+/// How a feed is written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FeedFormat {
+    /// One name per line, each covering its subdomains (HaGeZi's wildcard
+    /// "onlydomains" lists; a bare TLD covers the whole TLD).
+    Wildcard,
+    /// One name per line, each covering only itself.
+    Domains,
+    /// AdGuard's cname-trackers catalogue (JSON): the `tracker` and `ad`
+    /// companies' CNAME targets, each covering its subdomains.
+    AdguardCnameTrackers,
+    /// IPFS's public gateway list (JSON array of gateway URLs): each
+    /// gateway's host and its subdomains.
+    IpfsGateways,
 }
 
 /// Where the console lists a category.
@@ -41,20 +68,10 @@ pub enum Section {
     Privacy,
 }
 
-/// A category decided by examining a name rather than by a list.
+/// A category decided by a check rather than by a list alone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Detector {
-    /// Internationalized names imitating Latin ones ([`crate::detect`]).
-    Homograph,
-    /// Names made up by malware's domain generation algorithms.
-    Dga,
-    /// Domains whose name servers belong to a parking service; decided once
-    /// the name servers are known, after resolution.
-    Parked,
-    /// Names imitating a well-known brand with a typo, look-alike
-    /// characters or a phishing word ([`crate::detect::typosquat`]).
-    Typosquat,
     /// Domains registered less than 30 days ago; decided once the
     /// registration date is known ([`crate::rdap`]), after resolution.
     NewlyRegistered,
@@ -64,438 +81,106 @@ pub enum Detector {
     /// Names whose addresses all belong to consumer ISPs
     /// ([`crate::residential`]), checked after resolution.
     ResidentialHosting,
-    /// Answers whose CNAME chain leads to a third-party tracker
-    /// ([`crate::cname_trackers`]), checked after resolution.
+    /// Answers whose CNAME chain leads to a third-party tracker on the
+    /// category's feed ([`crate::cname_trackers`]), checked after
+    /// resolution.
     CnameTracker,
-    /// Not a block: the category's entries are let through for the group's
-    /// clients, ahead of every blocklist (Allow Tracking Links).
-    Allow,
 }
 
 impl Detector {
-    /// Whether the dispatcher decides it after resolution, from data it
-    /// looks up in the background, rather than the engine from the name.
+    /// Whether the dispatcher decides it after resolution (every detector
+    /// does: they need the answer or a lookup).
     pub fn after_resolution(self) -> bool {
-        matches!(
-            self,
-            Self::Parked
-                | Self::NewlyRegistered
-                | Self::SafeBrowsing
-                | Self::ResidentialHosting
-                | Self::CnameTracker
-        )
+        true
     }
 }
 
-/// Every known security category.
+/// Category ids that existed in earlier versions and were retired (they
+/// were heuristics, or hand-written lists without a maintained source).
+/// Groups that still name them keep working: the ids are dropped when the
+/// group is saved and ignored until then.
+pub const RETIRED: &[&str] = &[
+    "free_hosting",
+    "tunneling",
+    "data_drop",
+    "parked_domains",
+    "allow_tracking_links",
+    "idn_homographs",
+    "dga_domains",
+    "typosquatting",
+    "native_sonos",
+    "native_vizio",
+];
+
+/// Whether `id` names a retired category.
+pub fn is_retired(id: &str) -> bool {
+    RETIRED.iter().any(|r| r.eq_ignore_ascii_case(id.trim()))
+}
+
+/// Every known category.
 pub const SECURITY_CATEGORIES: &[SecurityCategory] = &[
-    SecurityCategory {
-        id: "free_hosting",
-        name: "Free Hosting Domains",
-        description: "Default subdomains handed out by free web hosts and site builders \
-            (*.pages.dev, *.vercel.app, *.netlify.app, ...), heavily abused for phishing. \
-            Sites on these hosts that use their own domain name are not affected.",
-        section: Section::Security,
-        detector: None,
-        entries: &[
-            "*.pages.dev",
-            "*.vercel.app",
-            "*.netlify.app",
-            "*.github.io",
-            "*.gitlab.io",
-            "*.web.app",
-            "*.firebaseapp.com",
-            "*.glitch.me",
-            "*.onrender.com",
-            "*.replit.app",
-            "*.repl.co",
-            "*.workers.dev",
-            "*.surge.sh",
-            "*.000webhostapp.com",
-            "*.weebly.com",
-            "*.wixsite.com",
-            "*.webflow.io",
-            "*.framer.website",
-            "*.carrd.co",
-            "*.square.site",
-            "*.godaddysites.com",
-            "@@www.weebly.com",
-            "@@www.000webhostapp.com",
-            "@@www.carrd.co",
-        ],
-    },
     SecurityCategory {
         id: "dynamic_dns",
         name: "Dynamic DNS Hostnames",
-        description: "Hostnames from free dynamic DNS services (DuckDNS, No-IP, Dynu, \
-            FreeDNS, ...), which need no identity check and are common in phishing. The \
-            services' own websites and update APIs stay reachable; allow your own DDNS \
-            hostname under Custom Allow if you use one.",
+        description:
+            "Dynamic DNS services, whose free hostnames need no identity check and are heavily \
+            used in phishing. Their own websites are blocked too; if you use one, allow your \
+            hostname and the provider's update address under Custom Allow.",
         section: Section::Security,
         detector: None,
-        entries: &[
-            // DuckDNS
-            "*.duckdns.org",
-            "@@www.duckdns.org",
-            // No-IP
-            "*.ddns.net",
-            "*.hopto.org",
-            "*.zapto.org",
-            "*.sytes.net",
-            "*.servebeer.com",
-            "*.serveftp.com",
-            "*.servehttp.com",
-            "*.myftp.biz",
-            "*.myftp.org",
-            "*.redirectme.net",
-            "*.bounceme.net",
-            "*.no-ip.biz",
-            "*.no-ip.info",
-            "*.no-ip.org",
-            "*.ddnsking.com",
-            "*.3utilities.com",
-            // Dynu
-            "*.dynu.net",
-            "*.ddnsfree.com",
-            "*.freeddns.org",
-            "*.mywire.org",
-            "*.webredirect.org",
-            "*.ddnsgeek.com",
-            "*.giize.com",
-            "*.gleeze.com",
-            "*.kozow.com",
-            "*.loseyourip.com",
-            "*.ooguy.com",
-            "*.theworkpc.com",
-            "*.camdvr.org",
-            "*.accesscam.org",
-            // FreeDNS (afraid.org)
-            "*.afraid.org",
-            "*.mooo.com",
-            "*.us.to",
-            "*.chickenkiller.com",
-            "*.crabdance.com",
-            "*.strangled.net",
-            "*.ignorelist.com",
-            "*.jumpingcrab.com",
-            "*.twilightparadox.com",
-            "@@www.afraid.org",
-            "@@freedns.afraid.org",
-            "@@sync.afraid.org",
-            // Dyn
-            "*.dyndns.org",
-            "*.dyndns.biz",
-            "*.homeip.net",
-            "*.dnsalias.com",
-            "*.dnsalias.net",
-            "*.dnsalias.org",
-            "@@www.dyndns.org",
-            "@@members.dyndns.org",
-            "@@checkip.dyndns.org",
-            // dynv6, deSEC, YDNS, nsupdate.info, dnsHome, spDYN
-            "*.dynv6.net",
-            "*.dedyn.io",
-            "@@update.dedyn.io",
-            "@@update6.dedyn.io",
-            "*.ydns.eu",
-            "*.nsupdate.info",
-            "@@www.nsupdate.info",
-            "@@ipv4.nsupdate.info",
-            "@@ipv6.nsupdate.info",
-            "*.dnshome.de",
-            "@@www.dnshome.de",
-            "*.spdns.de",
-            "@@www.spdns.de",
-            "@@update.spdns.de",
-        ],
-    },
-    SecurityCategory {
-        id: "tunneling",
-        name: "Tunneling Endpoints",
-        description: "Public endpoints of services that expose a local port to the \
-            internet (ngrok, Cloudflare quick tunnels, localtunnel, ...), used to host \
-            phishing pages behind random subdomains. Named Cloudflare Tunnels on your own \
-            domain are not affected.",
-        section: Section::Security,
-        detector: None,
-        entries: &[
-            "*.ngrok.io",
-            "*.ngrok.app",
-            "*.ngrok.dev",
-            "*.ngrok-free.app",
-            "*.ngrok-free.dev",
-            "*.trycloudflare.com",
-            "*.loca.lt",
-            "serveo.net",
-            "*.serveo.net",
-            "*.lhr.life",
-            "*.pinggy.link",
-            "*.loclx.io",
-            "*.tunnelto.dev",
-            "*.share.zrok.io",
-            "*.devtunnels.ms",
-            "*.sharedwithexpose.com",
-        ],
-    },
-    SecurityCategory {
-        id: "data_drop",
-        name: "Data Drop Services",
-        description: "Paste sites, anonymous file drops, webhook and request catchers and \
-            out-of-band DNS loggers, used to stage payloads and collect stolen data. This \
-            blocks legitimate use of these services too.",
-        section: Section::Security,
-        detector: None,
-        entries: &[
-            // Paste sites
-            "pastebin.com",
-            "*.pastebin.com",
-            "paste.ee",
-            "*.paste.ee",
-            "hastebin.com",
-            "*.hastebin.com",
-            "rentry.co",
-            "*.rentry.co",
-            "rentry.org",
-            "*.rentry.org",
-            "controlc.com",
-            "*.controlc.com",
-            "justpaste.it",
-            "*.justpaste.it",
-            "privatebin.net",
-            "*.privatebin.net",
-            "dpaste.org",
-            "*.dpaste.org",
-            "dpaste.com",
-            "*.dpaste.com",
-            "paste.rs",
-            "termbin.com",
-            "*.termbin.com",
-            // File drops
-            "transfer.sh",
-            "*.transfer.sh",
-            "file.io",
-            "*.file.io",
-            "0x0.st",
-            "temp.sh",
-            "tmpfiles.org",
-            "*.tmpfiles.org",
-            "catbox.moe",
-            "*.catbox.moe",
-            "gofile.io",
-            "*.gofile.io",
-            "pixeldrain.com",
-            "*.pixeldrain.com",
-            // JSON stores
-            "jsonbin.io",
-            "*.jsonbin.io",
-            "npoint.io",
-            "*.npoint.io",
-            // Webhook and request catchers
-            "webhook.site",
-            "*.webhook.site",
-            "requestbin.com",
-            "*.requestbin.com",
-            "*.m.pipedream.net",
-            "beeceptor.com",
-            "*.beeceptor.com",
-            "requestcatcher.com",
-            "*.requestcatcher.com",
-            "hookbin.com",
-            "*.hookbin.com",
-            // Out-of-band interaction and DNS loggers
-            "*.interact.sh",
-            "*.oast.pro",
-            "*.oast.live",
-            "*.oast.site",
-            "*.oast.online",
-            "*.oast.fun",
-            "*.oast.me",
-            "*.oastify.com",
-            "*.burpcollaborator.net",
-            "*.dnslog.cn",
-            "*.ceye.io",
-            "canarytokens.com",
-            "*.canarytokens.com",
-        ],
+        feed: Some(Feed {
+            source: "HaGeZi DynDNS",
+            url: "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/dyndns-onlydomains.txt",
+            format: FeedFormat::Wildcard,
+            allow_url: None,
+        }),
     },
     SecurityCategory {
         id: "decentralized_gateways",
         name: "Decentralized Web Gateways",
-        description: "Public gateways that serve IPFS and ENS content to ordinary browsers, \
-            used to host phishing pages that cannot be taken down.",
+        description:
+            "Public gateways that serve IPFS content to ordinary browsers, used to host \
+            phishing pages that cannot be taken down.",
         section: Section::Security,
         detector: None,
-        entries: &[
-            "ipfs.io",
-            "*.ipfs.io",
-            "dweb.link",
-            "*.dweb.link",
-            "cf-ipfs.com",
-            "*.cf-ipfs.com",
-            "cloudflare-ipfs.com",
-            "*.cloudflare-ipfs.com",
-            "w3s.link",
-            "*.w3s.link",
-            "nftstorage.link",
-            "*.nftstorage.link",
-            "*.mypinata.cloud",
-            "gateway.pinata.cloud",
-            "4everland.link",
-            "*.4everland.link",
-            "infura-ipfs.io",
-            "*.infura-ipfs.io",
-            "*.on.fleek.co",
-            "eth.limo",
-            "*.eth.limo",
-            "eth.link",
-            "*.eth.link",
-        ],
+        feed: Some(Feed {
+            source: "IPFS public gateway list",
+            url: "https://raw.githubusercontent.com/ipfs/public-gateway-checker/main/gateways.json",
+            format: FeedFormat::IpfsGateways,
+            allow_url: None,
+        }),
     },
     SecurityCategory {
         id: "crypto_mining",
         name: "Cryptocurrency Mining",
-        description: "In-browser miners and mining pools, so a compromised device or page \
-            cannot mine cryptocurrency (cryptojacking). This also stops intentional mining.",
+        description:
+            "In-browser miners and mining pools, so a compromised device or page cannot mine \
+            cryptocurrency (cryptojacking). This also stops intentional mining.",
         section: Section::Security,
         detector: None,
-        entries: &[
-            // In-browser miners
-            "coinhive.com",
-            "*.coinhive.com",
-            "coin-hive.com",
-            "*.coin-hive.com",
-            "authedmine.com",
-            "*.authedmine.com",
-            "crypto-loot.com",
-            "*.crypto-loot.com",
-            "cryptoloot.pro",
-            "*.cryptoloot.pro",
-            "webmine.cz",
-            "*.webmine.cz",
-            "webminepool.com",
-            "*.webminepool.com",
-            "minero.cc",
-            "*.minero.cc",
-            "coinimp.com",
-            "*.coinimp.com",
-            "jsecoin.com",
-            "*.jsecoin.com",
-            "monerominer.rocks",
-            "*.monerominer.rocks",
-            "ppoi.org",
-            "*.ppoi.org",
-            // Mining pools
-            "supportxmr.com",
-            "*.supportxmr.com",
-            "minexmr.com",
-            "*.minexmr.com",
-            "moneroocean.stream",
-            "*.moneroocean.stream",
-            "nanopool.org",
-            "*.nanopool.org",
-            "2miners.com",
-            "*.2miners.com",
-            "f2pool.com",
-            "*.f2pool.com",
-            "hashvault.pro",
-            "*.hashvault.pro",
-            "xmrpool.eu",
-            "*.xmrpool.eu",
-            "c3pool.com",
-            "*.c3pool.com",
-            "herominers.com",
-            "*.herominers.com",
-            "unmineable.com",
-            "*.unmineable.com",
-            "minergate.com",
-            "*.minergate.com",
-            "nicehash.com",
-            "*.nicehash.com",
-            "antpool.com",
-            "*.antpool.com",
-        ],
+        feed: Some(Feed {
+            source: "The Block List Project (Crypto)",
+            url: "https://raw.githubusercontent.com/blocklistproject/Lists/master/alt-version/crypto-nl.txt",
+            format: FeedFormat::Domains,
+            allow_url: None,
+        }),
     },
     SecurityCategory {
         id: "high_risk_tlds",
         name: "High-Risk TLDs",
-        description: "Top-level domains dominated by abuse in published phishing and spam \
-            reports (.zip, .mov, .top, .cfd, .sbs, the former Freenom TLDs, ...). The list \
-            is curated and updated with each release; allow a site you need under Custom \
-            Allow.",
+        description:
+            "Top-level domains dominated by spam, scams and phishing (from Cloudflare Radar, \
+            Netcraft and Spamhaus data). This blocks whole TLDs, so some legitimate sites are \
+            caught; reputable ones on the maintainer's allowlist stay reachable, and you can \
+            allow others under Custom Allow.",
         section: Section::Security,
         detector: None,
-        entries: &[
-            "*.zip",
-            "*.mov",
-            "*.top",
-            "*.cfd",
-            "*.sbs",
-            "*.bond",
-            "*.icu",
-            "*.cyou",
-            "*.rest",
-            "*.buzz",
-            "*.quest",
-            "*.monster",
-            "*.cam",
-            "*.lol",
-            "*.mom",
-            "*.boats",
-            "*.autos",
-            "*.yachts",
-            "*.hair",
-            "*.beauty",
-            "*.makeup",
-            "*.skin",
-            "*.tk",
-            "*.ml",
-            "*.ga",
-            "*.cf",
-            "*.gq",
-        ],
-    },
-    SecurityCategory {
-        id: "idn_homographs",
-        name: "IDN Homographs",
-        description: "Internationalized names that imitate a familiar one with look-alike \
-            letters from another alphabet (a Cyrillic 'а' in pаypal.com). Genuine names in \
-            other languages, such as bücher.de or яндекс.рф, are not affected.",
-        section: Section::Security,
-        detector: Some(Detector::Homograph),
-        entries: &[],
-    },
-    SecurityCategory {
-        id: "dga_domains",
-        name: "DGA Domains",
-        description: "Random-looking names that malware generates to find its command-and-control \
-            servers (xjkqpwzvbnmtrd.com). Judged by how unlike real names the letters are; a \
-            rare genuine site may be caught, so allow it under Custom Allow.",
-        section: Section::Security,
-        detector: Some(Detector::Dga),
-        entries: &[],
-    },
-    SecurityCategory {
-        id: "parked_domains",
-        name: "Parked Domains",
-        description:
-            "Domains served by parking services (Sedo, Bodis, ParkingCrew, ...) that show \
-            ads and redirects instead of a site. The name servers are looked up the first time \
-            a domain is seen, so that first visit is not blocked.",
-        section: Section::Security,
-        detector: Some(Detector::Parked),
-        entries: &[],
-    },
-    SecurityCategory {
-        id: "typosquatting",
-        name: "Typosquatting",
-        description:
-            "Names that imitate a brand phishing often targets (PayPal, Apple, Microsoft, banks, \
-            delivery companies, ...) with a typo (gooogle.com), look-alike characters \
-            (paypa1.com) or a phishing word (paypal-login.com). The brands' own sites are \
-            not affected.",
-        section: Section::Security,
-        detector: Some(Detector::Typosquat),
-        entries: &[],
+        feed: Some(Feed {
+            source: "HaGeZi Most Abused TLDs",
+            url: "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/spam-tlds-onlydomains.txt",
+            format: FeedFormat::Wildcard,
+            allow_url: Some("https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/spam-tlds-allow-onlydomains.txt"),
+        }),
     },
     SecurityCategory {
         id: "newly_registered",
@@ -507,7 +192,7 @@ pub const SECURITY_CATEGORIES: &[SecurityCategory] = &[
             name, though not who asked; TLDs without RDAP are never blocked.",
         section: Section::Security,
         detector: Some(Detector::NewlyRegistered),
-        entries: &[],
+        feed: None,
     },
     SecurityCategory {
         id: "google_safe_browsing",
@@ -520,7 +205,7 @@ pub const SECURITY_CATEGORIES: &[SecurityCategory] = &[
             non-commercial use only). Lists of single pages on a site cannot be checked by DNS.",
         section: Section::Security,
         detector: Some(Detector::SafeBrowsing),
-        entries: &[],
+        feed: None,
     },
     SecurityCategory {
         id: "residential_hosting",
@@ -534,7 +219,7 @@ pub const SECURITY_CATEGORIES: &[SecurityCategory] = &[
             and your own home server, are blocked: allow them under Custom Allow.",
         section: Section::Security,
         detector: Some(Detector::ResidentialHosting),
-        entries: &[],
+        feed: None,
     },
     SecurityCategory {
         id: "disguised_trackers",
@@ -545,146 +230,51 @@ pub const SECURITY_CATEGORIES: &[SecurityCategory] = &[
             catalogue of tracking companies' CNAME targets.",
         section: Section::Privacy,
         detector: Some(Detector::CnameTracker),
-        entries: &[],
+        feed: Some(Feed {
+            source: "AdGuard cname-trackers",
+            url: "https://raw.githubusercontent.com/AdguardTeam/cname-trackers/master/script/src/cloaked-trackers.json",
+            format: FeedFormat::AdguardCnameTrackers,
+            allow_url: None,
+        }),
     },
     SecurityCategory {
-        id: "allow_tracking_links",
-        name: "Allow Tracking Links",
-        description:
-            "Lets through the redirect services that links in emails, search ads and deal or \
-            affiliate sites pass through (Mailchimp, SendGrid, HubSpot, Klaviyo, Google Shopping \
-            ads, CJ, Awin, Rakuten, Skimlinks, ...), even when a blocklist blocks them, so \
-            clicking such a link works. They are only reached when a link is clicked. Unlike \
-            NextDNS, this cannot hide your address from the tracking service.",
-        section: Section::Privacy,
-        detector: Some(Detector::Allow),
-        entries: &[
-            // Email and marketing platforms' click tracking
-            "list-manage.com",
-            "*.list-manage.com",
-            "mandrillapp.com",
-            "*.mandrillapp.com",
-            "ct.sendgrid.net",
-            "*.ct.sendgrid.net",
-            "*.awstrack.me",
-            "hubspotlinks.com",
-            "*.hubspotlinks.com",
-            "klclick.com",
-            "*.klclick.com",
-            "klclick1.com",
-            "*.klclick1.com",
-            "klclick2.com",
-            "*.klclick2.com",
-            "klclick3.com",
-            "*.klclick3.com",
-            "mjt.lu",
-            "*.mjt.lu",
-            "rs6.net",
-            "*.rs6.net",
-            "*.pstmrk.it",
-            "cl.exct.net",
-            "*.cl.exct.net",
-            "click.exacttarget.com",
-            "links.iterable.com",
-            "track.customer.io",
-            "e.customeriomail.com",
-            "go.pardot.com",
-            // Search and shopping ad clicks
-            "googleadservices.com",
-            "*.googleadservices.com",
-            "clickserve.dartsearch.net",
-            // Affiliate networks and deal links
-            "anrdoezrs.net",
-            "*.anrdoezrs.net",
-            "dpbolvw.net",
-            "*.dpbolvw.net",
-            "jdoqocy.com",
-            "*.jdoqocy.com",
-            "kqzyfj.com",
-            "*.kqzyfj.com",
-            "tkqlhce.com",
-            "*.tkqlhce.com",
-            "awin1.com",
-            "*.awin1.com",
-            "click.linksynergy.com",
-            "go.skimresources.com",
-            "redirect.viglink.com",
-            "shareasale.com",
-            "*.shareasale.com",
-            "prf.hn",
-            "*.prf.hn",
-            "pjtra.com",
-            "*.pjtra.com",
-            "pntrs.com",
-            "*.pntrs.com",
-            "*.sjv.io",
-            "*.pxf.io",
-            "*.7eer.net",
-            "s.click.aliexpress.com",
-            "amzn.to",
-        ],
-    },    SecurityCategory {
         id: "native_apple",
         name: "Native Tracking: Apple",
-        description: "Analytics, diagnostics and Apple Search Ads attribution from iPhones, iPads and Macs.",
+        description: "Analytics, diagnostics and ad attribution that iPhones, iPads and Macs send by themselves.",
         section: Section::Privacy,
         detector: None,
-        entries: &[
-            "metrics.icloud.com",
-            "metrics.mzstatic.com",
-            "xp.apple.com",
-            "iadsdk.apple.com",
-            "api-adservices.apple.com",
-            "books-analytics-events.apple.com",
-            "weather-analytics-events.apple.com",
-            "notes-analytics-events.apple.com",
-            "stocks-analytics-events.apple.com",
-            "news-events.apple.com",
-        ],
+        feed: Some(Feed {
+            source: "HaGeZi Native Tracker (Apple)",
+            url: "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/native.apple-onlydomains.txt",
+            format: FeedFormat::Wildcard,
+            allow_url: None,
+        }),
     },
     SecurityCategory {
         id: "native_samsung",
         name: "Native Tracking: Samsung",
-        description: "Ads, usage analytics and smart-TV content recognition (ACR) from Samsung phones and TVs.",
+        description: "Ads, usage analytics and smart-TV content recognition from Samsung phones and TVs.",
         section: Section::Privacy,
         detector: None,
-        entries: &[
-            "samsungads.com",
-            "*.samsungads.com",
-            "samsungadhub.com",
-            "*.samsungadhub.com",
-            "samsungacr.com",
-            "*.samsungacr.com",
-            "smetrics.samsung.com",
-            "nmetrics.samsung.com",
-            "samsung-com.112.2o7.net",
-            "analytics.samsungknox.com",
-            "gpm.samsungqbe.com",
-        ],
+        feed: Some(Feed {
+            source: "HaGeZi Native Tracker (Samsung)",
+            url: "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/native.samsung-onlydomains.txt",
+            format: FeedFormat::Wildcard,
+            allow_url: None,
+        }),
     },
     SecurityCategory {
         id: "native_xiaomi",
         name: "Native Tracking: Xiaomi",
-        description: "MIUI and HyperOS usage statistics and system ads from Xiaomi, Redmi and POCO devices.",
+        description: "Usage statistics and system ads from Xiaomi, Redmi and POCO devices.",
         section: Section::Privacy,
         detector: None,
-        entries: &[
-            "tracking.miui.com",
-            "tracking.intl.miui.com",
-            "tracking.india.miui.com",
-            "tracking.rus.miui.com",
-            "data.mistat.xiaomi.com",
-            "data.mistat.intl.xiaomi.com",
-            "data.mistat.india.xiaomi.com",
-            "data.mistat.rus.xiaomi.com",
-            "ad.xiaomi.com",
-            "ad.intl.xiaomi.com",
-            "api.ad.xiaomi.com",
-            "globalapi.ad.xiaomi.com",
-            "sdkconfig.ad.xiaomi.com",
-            "sdkconfig.ad.intl.xiaomi.com",
-            "ad.mi.com",
-        ],
+        feed: Some(Feed {
+            source: "HaGeZi Native Tracker (Xiaomi)",
+            url: "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/native.xiaomi-onlydomains.txt",
+            format: FeedFormat::Wildcard,
+            allow_url: None,
+        }),
     },
     SecurityCategory {
         id: "native_huawei",
@@ -692,51 +282,38 @@ pub const SECURITY_CATEGORIES: &[SecurityCategory] = &[
         description: "Usage metrics and log uploads from Huawei and Honor devices.",
         section: Section::Privacy,
         detector: None,
-        entries: &[
-            "metrics.data.hicloud.com",
-            "metrics1.data.hicloud.com",
-            "metrics2.data.hicloud.com",
-            "metrics3.data.hicloud.com",
-            "metrics4.data.hicloud.com",
-            "metrics5.data.hicloud.com",
-            "metrics-dra.dt.hicloud.com",
-            "logservice.hicloud.com",
-            "logservice1.hicloud.com",
-        ],
+        feed: Some(Feed {
+            source: "HaGeZi Native Tracker (Huawei)",
+            url: "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/native.huawei-onlydomains.txt",
+            format: FeedFormat::Wildcard,
+            allow_url: None,
+        }),
     },
     SecurityCategory {
         id: "native_windows",
-        name: "Native Tracking: Windows",
-        description: "Windows diagnostic data (telemetry) and error reporting. Windows Update and sign-in are not affected.",
+        name: "Native Tracking: Windows & Office",
+        description: "Windows and Office diagnostic data (telemetry) and error reporting.",
         section: Section::Privacy,
         detector: None,
-        entries: &[
-            "*.events.data.microsoft.com",
-            "vortex.data.microsoft.com",
-            "vortex-win.data.microsoft.com",
-            "settings-win.data.microsoft.com",
-            "telemetry.microsoft.com",
-            "*.telemetry.microsoft.com",
-        ],
+        feed: Some(Feed {
+            source: "HaGeZi Native Tracker (Windows & Office)",
+            url: "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/native.winoffice-onlydomains.txt",
+            format: FeedFormat::Wildcard,
+            allow_url: None,
+        }),
     },
     SecurityCategory {
         id: "native_amazon",
-        name: "Native Tracking: Amazon Alexa & Fire TV",
-        description: "Device metrics and usage logs from Echo, Fire TV and Kindle devices. Alexa itself keeps working.",
+        name: "Native Tracking: Amazon",
+        description: "Device metrics and usage logs from Echo, Fire TV and Kindle devices.",
         section: Section::Privacy,
         detector: None,
-        entries: &[
-            "device-metrics-us.amazon.com",
-            "device-metrics-us-2.amazon.com",
-            "unagi.amazon.com",
-            "unagi-na.amazon.com",
-            "unagi-eu.amazon.com",
-            "unagi-fe.amazon.com",
-            "fls-na.amazon.com",
-            "fls-eu.amazon.com",
-            "fls-fe.amazon.com",
-            "mads-eu.amazon.com",
-        ],
+        feed: Some(Feed {
+            source: "HaGeZi Native Tracker (Amazon)",
+            url: "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/native.amazon-onlydomains.txt",
+            format: FeedFormat::Wildcard,
+            allow_url: None,
+        }),
     },
     SecurityCategory {
         id: "native_roku",
@@ -744,78 +321,66 @@ pub const SECURITY_CATEGORIES: &[SecurityCategory] = &[
         description: "Usage logs and ads from Roku players and TVs.",
         section: Section::Privacy,
         detector: None,
-        entries: &[
-            "logs.roku.com",
-            "*.logs.roku.com",
-            "ads.roku.com",
-            "*.ads.roku.com",
-        ],
-    },
-    SecurityCategory {
-        id: "native_sonos",
-        name: "Native Tracking: Sonos",
-        description: "Usage metrics from Sonos speakers and apps.",
-        section: Section::Privacy,
-        detector: None,
-        entries: &[
-            "msmetrics.ws.sonos.com",
-        ],
+        feed: Some(Feed {
+            source: "HaGeZi Native Tracker (Roku)",
+            url: "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/native.roku-onlydomains.txt",
+            format: FeedFormat::Wildcard,
+            allow_url: None,
+        }),
     },
     SecurityCategory {
         id: "native_lg",
-        name: "Native Tracking: LG webOS TVs",
+        name: "Native Tracking: LG webOS",
         description: "Ads and viewing data from LG smart TVs.",
         section: Section::Privacy,
         detector: None,
-        entries: &[
-            "lgsmartad.com",
-            "*.lgsmartad.com",
-            "ad.lgappstv.com",
-            "lgad.cjpowercast.com",
-            "ngfts.lge.com",
-        ],
+        feed: Some(Feed {
+            source: "HaGeZi Native Tracker (LG webOS)",
+            url: "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/native.lgwebos-onlydomains.txt",
+            format: FeedFormat::Wildcard,
+            allow_url: None,
+        }),
     },
     SecurityCategory {
-        id: "native_vizio",
-        name: "Native Tracking: Vizio TVs",
-        description: "Viewing data (Inscape content recognition) from Vizio smart TVs.",
+        id: "native_vivo",
+        name: "Native Tracking: Vivo",
+        description: "Usage analytics and system ads from Vivo phones.",
         section: Section::Privacy,
         detector: None,
-        entries: &[
-            "tvinteractive.tv",
-            "*.tvinteractive.tv",
-        ],
+        feed: Some(Feed {
+            source: "HaGeZi Native Tracker (Vivo)",
+            url: "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/native.vivo-onlydomains.txt",
+            format: FeedFormat::Wildcard,
+            allow_url: None,
+        }),
+    },
+    SecurityCategory {
+        id: "native_oppo",
+        name: "Native Tracking: OPPO & Realme",
+        description: "Usage analytics and system ads from OPPO, Realme and OnePlus (ColorOS) phones.",
+        section: Section::Privacy,
+        detector: None,
+        feed: Some(Feed {
+            source: "HaGeZi Native Tracker (OPPO & Realme)",
+            url: "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/native.oppo-realme-onlydomains.txt",
+            format: FeedFormat::Wildcard,
+            allow_url: None,
+        }),
+    },
+    SecurityCategory {
+        id: "native_tiktok",
+        name: "Native Tracking: TikTok",
+        description: "Analytics and tracking built into the TikTok app.",
+        section: Section::Privacy,
+        detector: None,
+        feed: Some(Feed {
+            source: "HaGeZi Native Tracker (TikTok)",
+            url: "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/native.tiktok-onlydomains.txt",
+            format: FeedFormat::Wildcard,
+            allow_url: None,
+        }),
     },
 ];
-
-/// Name-server suffixes of domain parking services: a domain whose name
-/// servers are under one of these is parked.
-pub const PARKING_NAME_SERVERS: &[&str] = &[
-    "sedoparking.com",
-    "bodis.com",
-    "parkingcrew.net",
-    "above.com",
-    "parklogic.com",
-    "fabulous.com",
-    "cashparking.com",
-    "hugedomainsdns.com",
-    "dan.com",
-    "undeveloped.com",
-    "afternic.com",
-    "namedrive.com",
-    "voodoo.com",
-];
-
-/// Whether a name server (lowercase, no trailing dot) belongs to a parking
-/// service.
-pub fn is_parking_name_server(ns: &str) -> bool {
-    PARKING_NAME_SERVERS.iter().any(|suffix| {
-        ns == *suffix
-            || ns
-                .strip_suffix(suffix)
-                .is_some_and(|rest| rest.ends_with('.'))
-    })
-}
 
 /// The security category with id `id` (any case).
 pub fn find(id: &str) -> Option<&'static SecurityCategory> {
@@ -849,32 +414,21 @@ pub fn normalize_tld(raw: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Blocklist;
 
     #[test]
-    fn ids_are_unique_and_entries_valid() {
+    fn ids_are_unique_and_every_category_is_backed() {
         let mut ids = std::collections::HashSet::new();
         for category in SECURITY_CATEGORIES {
             assert!(ids.insert(category.id), "duplicate id {}", category.id);
-            assert_eq!(
-                category.entries.is_empty(),
-                category.detector.is_some_and(|d| d != Detector::Allow),
+            assert!(!is_retired(category.id), "{} is retired", category.id);
+            // Every category is an exact check or a maintained list.
+            assert!(
+                category.detector.is_some() || category.feed.is_some(),
                 "{}",
                 category.id
             );
-            let mut seen = std::collections::HashSet::new();
-            for entry in category.entries {
-                assert!(seen.insert(entry), "{}: duplicate {entry}", category.id);
-                let pattern = entry.strip_prefix("@@").unwrap_or(entry);
-                if category.id == "high_risk_tlds" {
-                    let tld = pattern
-                        .strip_prefix("*.")
-                        .expect("TLD entries are wildcards");
-                    assert_eq!(normalize_tld(tld).as_deref(), Some(tld));
-                } else {
-                    daygle_dns_core::config::validate_domain_pattern(pattern)
-                        .unwrap_or_else(|e| panic!("{}: {entry}: {e}", category.id));
-                }
+            if let Some(feed) = category.feed {
+                assert!(feed.url.starts_with("https://"), "{}", category.id);
             }
         }
         assert_eq!(
@@ -882,25 +436,7 @@ mod tests {
             Some("Dynamic DNS Hostnames")
         );
         assert!(find("nope").is_none());
-    }
-
-    #[test]
-    fn exceptions_keep_provider_sites_reachable() {
-        let ddns = find("dynamic_dns").unwrap();
-        let list = Blocklist::from_lines(ddns.entries.iter().copied());
-        assert!(list.contains("phish.duckdns.org"));
-        assert!(!list.contains("duckdns.org"));
-        assert!(!list.contains("www.duckdns.org"));
-        assert!(!list.contains("freedns.afraid.org"));
-        assert!(list.contains("evil.mooo.com"));
-    }
-
-    #[test]
-    fn parking_name_servers() {
-        assert!(is_parking_name_server("ns1.sedoparking.com"));
-        assert!(is_parking_name_server("ns2.bodis.com"));
-        assert!(!is_parking_name_server("ns1.notbodis.com"));
-        assert!(!is_parking_name_server("ns1.example.com"));
+        assert!(is_retired("DGA_domains"));
     }
 
     #[test]

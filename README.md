@@ -66,25 +66,18 @@ Daygle DNS combines, in a single process:
 - **Blocked services**: block TikTok, YouTube, Roblox, Discord, ChatGPT and
   30-odd other apps for a filtering group with one tick each, or block a
   whole AI content category (gambling, adult, ads, ...) for that group.
-- **Security protections** for a filtering group, as NextDNS offers them:
-  one tick blocks free hosting subdomains, dynamic DNS hostnames, tunneling
-  endpoints, data drop services, IPFS gateways, cryptocurrency mining or
-  high-risk TLDs, and detectors block IDN homographs (`pаypal.com` with a
-  Cyrillic 'а'), malware's generated (DGA) names, parked domains,
-  typosquats of well-known brands (`paypa1.com`, `paypal-login.com`) and
-  domains registered in the last 30 days (looked up over RDAP), and
-  sites on Google Safe Browsing's lists (with your own API key; the lists
-  are kept locally, so Google never sees your queries or address), and
-  names hosted only on home internet connections (via Team Cymru's
-  IP-to-ASN service and PeeringDB); a privacy option blocks disguised
-  third-party trackers hidden behind a site's own subdomain with a CNAME
-  (AdGuard's cname-trackers catalogue), and another lets the redirect
-  links in emails, search ads and deal sites through blocklists, and
-  native tracking options block the telemetry of Apple, Samsung, Xiaomi,
-  Huawei, Windows, Amazon, Roku, Sonos, LG and Vizio devices; any
-  TLD can be blocked by name; answers that give a
-  public name a local network address (DNS rebinding) or carry an
-  oversized payload (NULL records, large TXT data) are blocked.
+- **Security and privacy protections** for a filtering group, as NextDNS
+  offers them, each backed by a maintained public list the server keeps
+  up to date (dynamic DNS hostnames, IPFS gateways, cryptocurrency mining,
+  high-risk TLDs, disguised CNAME trackers, and native tracking for Apple,
+  Samsung, Xiaomi, Huawei, Windows, Amazon, Roku, LG, Vivo, OPPO and
+  TikTok) or by an exact check: domains registered in the last 30 days
+  (RDAP), Google Safe Browsing (with your own API key; the lists are kept
+  locally, so Google never sees your queries or address) and names hosted
+  only on home internet connections (Team Cymru and PeeringDB). Any TLD
+  can be blocked by name, and answers that give a public name a local
+  network address (DNS rebinding) or carry an oversized payload are
+  blocked.
 - **Per-client rules** on the console's Clients page: **filtering groups**
   (extra allow/block rules, blocklists and AI auto-blocking for a set of
   clients) and **resolution policies** (forward some clients to their own

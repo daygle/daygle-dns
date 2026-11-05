@@ -4906,6 +4906,10 @@ pub struct PolicySettings {
     /// category finds an address's network in, for IPv4 and IPv6.
     pub ip_asn_zone_v4: String,
     pub ip_asn_zone_v6: String,
+    /// A base URL to download the security and privacy categories' lists
+    /// from instead of their own hosts (a local mirror): each list's URL,
+    /// without its scheme, is appended to it. Empty fetches them directly.
+    pub feed_mirror: String,
 }
 
 impl Default for PolicySettings {
@@ -4930,6 +4934,7 @@ impl Default for PolicySettings {
             peeringdb_url: "https://www.peeringdb.com".to_string(),
             ip_asn_zone_v4: "origin.asn.cymru.com".to_string(),
             ip_asn_zone_v6: "origin6.asn.cymru.com".to_string(),
+            feed_mirror: String::new(),
         }
     }
 }

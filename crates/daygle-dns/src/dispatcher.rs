@@ -146,8 +146,6 @@ pub struct DnsDispatcher {
     config: Option<Arc<ArcSwap<daygle_dns_core::config::DaygleConfig>>>,
     /// DNS accounts the encrypted listeners recognise (`[accounts]`).
     accounts: Arc<daygle_dns_policy::identity::AccountDirectory>,
-    /// Which registered domains are parked, for the Parked Domains category.
-    parked: Arc<crate::response_filter::ParkedDomains>,
     /// Registration dates, for the Newly Registered Domains category.
     registrations: Arc<daygle_dns_policy::rdap::RegistrationDates>,
     /// Google Safe Browsing lists, for the Google Safe Browsing category.
@@ -224,7 +222,6 @@ impl DnsDispatcher {
             log_export: None,
             config: None,
             accounts: Arc::default(),
-            parked: Arc::default(),
             registrations: Arc::default(),
             safe_browsing: Arc::new(daygle_dns_policy::safe_browsing::SafeBrowsing::new(
                 Arc::new(|| (String::new(), String::new())),
@@ -1121,23 +1118,8 @@ impl RequestHandler for DnsDispatcher {
             hickory_server::net::xfer::Protocol::Quic => Some("doq"),
             _ => None,
         };
-        // A filtering group's allow category (Allow Tracking Links) lets the
-        // name through like the allowlist: ahead of every blocklist, and
-        // trusted by the checks below that the allowlist exempts.
-        let group_allow = self
-            .advanced_blocking
-            .load()
-            .category_allow(client, &qname, listener);
-        let trusted = policy.is_allowlisted(&qname) || group_allow.is_some();
-        let decision = policy
-            .evaluate_allowing(
-                client,
-                &qname,
-                &rtype,
-                listener,
-                group_allow.as_ref().map(|(g, c)| (g.as_str(), *c)),
-            )
-            .await;
+        let trusted = policy.is_allowlisted(&qname);
+        let decision = policy.evaluate_on(client, &qname, &rtype, listener).await;
         match &decision.action {
             Action::Allow => {}
             Action::Refused => {
@@ -2531,20 +2513,6 @@ impl DnsDispatcher {
                 ));
             }
         }
-        if let Some(group) = filters.parked {
-            if let Some(domain) = daygle_dns_policy::detect::registered_domain(qname) {
-                if let Some(ns) = self.parked.check(resolver, client, domain) {
-                    return Some(block_reason(
-                        source::SECURITY,
-                        Some(group.to_string()),
-                        Some("Parked Domains".to_string()),
-                        format!(
-                            "'{domain}' is parked (name server {ns}), blocked as Parked Domains by group '{group}'"
-                        ),
-                    ));
-                }
-            }
-        }
         if let Some(group) = filters.cname_trackers {
             let targets: Vec<String> = answers
                 .iter()
@@ -2559,16 +2527,20 @@ impl DnsDispatcher {
                     _ => None,
                 })
                 .collect();
-            if let Some((target, company)) = daygle_dns_policy::cname_trackers::disguised_tracker(
-                qname,
-                targets.iter().map(String::as_str),
-            ) {
+            let trackers = groups.lists().feeds().get("disguised_trackers");
+            if let Some(target) = trackers.and_then(|trackers| {
+                daygle_dns_policy::cname_trackers::disguised_tracker(
+                    qname,
+                    targets.iter().map(String::as_str),
+                    &trackers,
+                )
+            }) {
                 return Some(block_reason(
                     source::PRIVACY,
                     Some(group.to_string()),
                     Some("Disguised Third-Party Trackers".to_string()),
                     format!(
-                        "'{qname}' is a disguised {company} tracker (CNAME to {target}), blocked by group '{group}'"
+                        "'{qname}' is a disguised third-party tracker (CNAME to {target}), blocked by group '{group}'"
                     ),
                 ));
             }

@@ -9,10 +9,6 @@
 //!   NULL records. Everyday use needs neither NULL records nor more than a
 //!   few hundred bytes of TXT data in one answer (SPF, DKIM and verification
 //!   strings), so an answer over those limits is blocked.
-//! - **Parked domains**: a domain whose name servers belong to a parking
-//!   service. The name servers are looked up in the background the first
-//!   time a domain is seen and remembered for a day, so the query path never
-//!   waits for them (and the first query of a domain is not blocked).
 
 use std::collections::HashMap;
 use std::net::IpAddr;
@@ -101,94 +97,9 @@ pub fn oversized_payload(answers: &[Record]) -> Option<String> {
     (txt > TXT_LIMIT).then(|| format!("{txt} bytes of TXT data"))
 }
 
-/// How long a domain's parked verdict is remembered.
-const PARKED_TTL: Duration = Duration::from_secs(24 * 3600);
-/// How long a failed name-server lookup waits before it is tried again.
-const PARKED_RETRY: Duration = Duration::from_secs(3600);
-/// Most domains remembered; past it the expired ones are dropped, and all of
-/// them if none has expired.
-const PARKED_CAP: usize = 50_000;
-
-#[derive(Debug, Clone)]
-enum ParkedState {
-    /// A lookup is running.
-    Pending,
-    /// Parked with this name server, or not parked (`None`), until then.
-    Known(Option<String>, Instant),
-}
-
-/// The parked verdicts of registered domains, filled in the background.
-#[derive(Debug, Default)]
-pub struct ParkedDomains {
-    domains: Mutex<HashMap<String, ParkedState>>,
-}
-
-impl ParkedDomains {
-    /// The parking name server of `domain` when it is known to be parked.
-    /// When nothing current is known, starts a background lookup of its name
-    /// servers with `resolver` (as `client` would see them) and returns
-    /// `None`, so this query is answered as usual.
-    pub fn check(
-        self: &Arc<Self>,
-        resolver: &Arc<RecursiveResolver>,
-        client: IpAddr,
-        domain: &str,
-    ) -> Option<String> {
-        let now = Instant::now();
-        {
-            let mut domains = self.domains.lock().unwrap_or_else(|e| e.into_inner());
-            match domains.get(domain) {
-                Some(ParkedState::Pending) => return None,
-                Some(ParkedState::Known(ns, until)) if *until > now => return ns.clone(),
-                _ => {}
-            }
-            if domains.len() >= PARKED_CAP {
-                domains.retain(
-                    |_, state| matches!(state, ParkedState::Known(_, until) if *until > now),
-                );
-                if domains.len() >= PARKED_CAP {
-                    domains.clear();
-                }
-            }
-            domains.insert(domain.to_string(), ParkedState::Pending);
-        }
-        let this = Arc::clone(self);
-        let resolver = Arc::clone(resolver);
-        let domain = domain.to_string();
-        tokio::spawn(async move {
-            let state = match resolver
-                .lookup_for_client(client, &domain, RecordType::NS)
-                .await
-            {
-                Ok(lookup) => {
-                    let parked = lookup.answers().iter().find_map(|r| match &r.data {
-                        RData::NS(ns) => {
-                            let ns = ns.0.to_ascii().trim_end_matches('.').to_ascii_lowercase();
-                            daygle_dns_policy::security::is_parking_name_server(&ns).then_some(ns)
-                        }
-                        _ => None,
-                    });
-                    ParkedState::Known(parked, Instant::now() + PARKED_TTL)
-                }
-                Err(_) => ParkedState::Known(None, Instant::now() + PARKED_RETRY),
-            };
-            this.domains
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .insert(domain, state);
-        });
-        None
-    }
-
-    /// Record `domain`'s verdict directly (tests).
-    #[cfg(test)]
-    fn set(&self, domain: &str, ns: Option<&str>) {
-        self.domains.lock().unwrap().insert(
-            domain.to_string(),
-            ParkedState::Known(ns.map(str::to_string), Instant::now() + PARKED_TTL),
-        );
-    }
-}
+/// Most addresses remembered; past it the expired ones are dropped, and all
+/// of them if none has expired.
+const CACHE_CAP: usize = 50_000;
 
 /// How long an address's origin networks are remembered.
 const ORIGIN_TTL: Duration = Duration::from_secs(24 * 3600);
@@ -230,11 +141,11 @@ impl IpOrigins {
                 Some(OriginState::Known(asns, until)) if *until > now => return Some(asns.clone()),
                 _ => {}
             }
-            if addresses.len() >= PARKED_CAP {
+            if addresses.len() >= CACHE_CAP {
                 addresses.retain(
                     |_, state| matches!(state, OriginState::Known(_, until) if *until > now),
                 );
-                if addresses.len() >= PARKED_CAP {
+                if addresses.len() >= CACHE_CAP {
                     addresses.clear();
                 }
             }
@@ -353,22 +264,6 @@ mod tests {
             assert_eq!(is_local_name(name), !name.contains('.'), "{name}");
         }
         assert!(!is_local_name("myfritz.box.example"));
-    }
-
-    #[test]
-    fn remembered_verdicts_are_served() {
-        let parked = Arc::new(ParkedDomains::default());
-        parked.set("parked.test", Some("ns1.sedoparking.com"));
-        parked.set("site.test", None);
-        let map = parked.domains.lock().unwrap();
-        assert!(matches!(
-            map.get("parked.test"),
-            Some(ParkedState::Known(Some(_), _))
-        ));
-        assert!(matches!(
-            map.get("site.test"),
-            Some(ParkedState::Known(None, _))
-        ));
     }
 
     #[test]

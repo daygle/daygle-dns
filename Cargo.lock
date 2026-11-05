@@ -827,7 +827,6 @@ dependencies = [
  "base64 0.23.1",
  "chrono",
  "daygle-dns-core",
- "idna",
  "ipnet",
  "regex",
  "reqwest",
@@ -836,6 +835,7 @@ dependencies = [
  "sha2",
  "tokio",
  "tracing",
+ "url",
 ]
 
 [[package]]
