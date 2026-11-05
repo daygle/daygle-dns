@@ -1045,3 +1045,76 @@ async fn groups_block_disguised_third_party_trackers() {
 
     shutdown(server).await;
 }
+
+/// Allow Tracking Links lets a group's clients through to link-redirect
+/// services that a server-wide blocklist blocks; other blocked names stay
+/// blocked, and Domain Check agrees.
+#[tokio::test]
+async fn groups_allow_tracking_links_past_blocklists() {
+    let dir = tempfile::tempdir().unwrap();
+    let upstream = spawn_upstream_zones(
+        &dir.path().join("upstream.db"),
+        &[(
+            "list-manage.com",
+            &[
+                ("abc.us1", "A", "198.51.100.80"),
+                ("ads", "A", "198.51.100.81"),
+            ],
+        )],
+    )
+    .await;
+    let mut config = base_config(&dir.path().join("daygle-dns.db"));
+    config.recursive.enabled = true;
+    config.recursive.use_system_config = false;
+    config.recursive.upstreams = vec![upstream.to_string()];
+    config.recursive.dnssec_validate = false;
+    config.policy.blocklist = vec![
+        "*.list-manage.com".to_string(),
+        "tracker.example".to_string(),
+    ];
+    let server = spawn(config).await;
+    let udp = server.udp_addr.unwrap();
+    let base = format!("http://{}/api", server.api_addr);
+    let client = reqwest::Client::new();
+
+    let reply = udp_query(udp, "abc.us1.list-manage.com.", RecordType::A).await;
+    assert_eq!(reply.response_code, ResponseCode::NXDomain);
+
+    let resp = client
+        .post(format!("{base}/policy/blocking"))
+        .json(&serde_json::json!({
+            "name": "links",
+            "blocked_security": ["allow_tracking_links"],
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_success(), "{}", resp.text().await.unwrap());
+
+    let reply = udp_query(udp, "abc.us1.list-manage.com.", RecordType::A).await;
+    assert_eq!(
+        first_answer(&reply).as_deref(),
+        Some("198.51.100.80"),
+        "{reply:?}"
+    );
+    let reply = udp_query(udp, "tracker.example.", RecordType::A).await;
+    assert_eq!(reply.response_code, ResponseCode::NXDomain);
+
+    let explain: serde_json::Value = client
+        .get(format!(
+            "{base}/policy/explain?domain=abc.us1.list-manage.com&client=127.0.0.1"
+        ))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        explain.to_string().contains("Allow Tracking Links"),
+        "{explain}"
+    );
+    assert_ne!(explain["verdict"]["blocked"], true, "{explain}");
+
+    shutdown(server).await;
+}

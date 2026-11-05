@@ -1634,13 +1634,21 @@ query, as CNAME cloaking does: `metrics.shop.example` to
 `shop.eulerian.net`; the companies' CNAME targets are the `tracker` and
 `ad` entries of AdGuard's cname-trackers catalogue, MIT-licensed, bundled
 and refreshed with `scripts/update-cname-trackers.sh`; blocks are logged
-with `source` `privacy`) (`400` for an unknown id).
+with `source` `privacy`) and `allow_tracking_links`, which allows rather
+than blocks: the click-redirect services of email platforms (Mailchimp,
+SendGrid, Amazon SES, HubSpot, Klaviyo, Mailjet, Postmark, ...), search
+ad clicks (`googleadservices.com`) and affiliate networks (CJ, Awin,
+Rakuten, Skimlinks, Impact, ...) are let through for the group's
+clients like the allowlist lets names through: after denied networks,
+ahead of every blocklist, per-client rule, group block, response policy
+zone, CNAME inspection and answer filter (`400` for an unknown id).
 `GET /api/policy/security` returns the catalog:
 `{"categories": [{"id", "name", "description", "section", "detector", "entries"}]}`,
 where `section` is `security` or `privacy` (where the console lists it),
 `detector` is `homograph`, `dga`, `parked`, `typosquat`,
 `newly_registered`, `safe_browsing`, `residential_hosting`,
-`cname_tracker` or `null`, and `entries`
+`cname_tracker`, `allow` (the category's entries are allowed, not
+blocked) or `null`, and `entries`
 use the blocklist syntax (`*.suffix` covers subdomains only, `@@name` is an
 exception such as a provider's own website; empty for a detector).
 `blocked_tlds` lists top-level domains whose every name the group blocks

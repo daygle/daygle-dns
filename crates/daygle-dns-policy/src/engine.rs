@@ -412,10 +412,26 @@ impl PolicyEngine {
         record_type: &str,
         listener: Option<&'static str>,
     ) -> Decision {
+        self.evaluate_allowing(client, query_name, record_type, listener, None)
+            .await
+    }
+
+    /// [`Self::evaluate_on`], with `group_allow` (a filtering group and its
+    /// allow category, e.g. Allow Tracking Links) letting the name through
+    /// like the allowlist does: after the client ACLs, ahead of every
+    /// blocklist, rule and plugin.
+    pub async fn evaluate_allowing(
+        &self,
+        client: IpAddr,
+        query_name: &str,
+        record_type: &str,
+        listener: Option<&'static str>,
+        group_allow: Option<(&str, &str)>,
+    ) -> Decision {
         if !self.enabled {
             return Decision::allow();
         }
-        self.evaluate_with(client, query_name, record_type, listener)
+        self.evaluate_with(client, query_name, record_type, listener, group_allow)
             .await
     }
 
@@ -425,6 +441,7 @@ impl PolicyEngine {
         query_name: &str,
         record_type: &str,
         listener: Option<&'static str>,
+        group_allow: Option<(&str, &str)>,
     ) -> Decision {
         let dot_listener = listener == Some("dot");
         // 1. ACLs.
@@ -448,6 +465,14 @@ impl PolicyEngine {
                 )
                 .with_source(source::ALLOWLIST, Some(entry));
             }
+        }
+        if let Some((group, category)) = group_allow {
+            return Decision::new(
+                format!("'{query_name}' is let through by {category} of group '{group}'"),
+                Action::Allow,
+            )
+            .with_group(group.to_string())
+            .with_source(source::PRIVACY, Some(category.to_string()));
         }
 
         // 3. Blocklists (static config + remote sources).

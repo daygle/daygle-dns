@@ -78,7 +78,8 @@ Daygle DNS combines, in a single process:
   names hosted only on home internet connections (via Team Cymru's
   IP-to-ASN service and PeeringDB); a privacy option blocks disguised
   third-party trackers hidden behind a site's own subdomain with a CNAME
-  (AdGuard's cname-trackers catalogue); any
+  (AdGuard's cname-trackers catalogue), and another lets the redirect
+  links in emails, search ads and deal sites through blocklists; any
   TLD can be blocked by name; answers that give a
   public name a local network address (DNS rebinding) or carry an
   oversized payload (NULL records, large TXT data) are blocked.

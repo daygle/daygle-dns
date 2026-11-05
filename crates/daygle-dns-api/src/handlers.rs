@@ -3683,8 +3683,17 @@ async fn explain_blocking_as(state: AppState, input: ExplainInput) -> Response {
     }
 
     // The verdict, decided as the server decides it.
-    let decision = policy.evaluate_on(client, &domain, &qtype, listener).await;
-    let allowlisted = policy.is_allowlisted(&domain);
+    let group_allow = groups.category_allow(client, &domain, listener);
+    let decision = policy
+        .evaluate_allowing(
+            client,
+            &domain,
+            &qtype,
+            listener,
+            group_allow.as_ref().map(|(g, c)| (g.as_str(), *c)),
+        )
+        .await;
+    let allowlisted = policy.is_allowlisted(&domain) || group_allow.is_some();
     let verdict = if decision.action != Action::Allow {
         Some((
             decision.source,
