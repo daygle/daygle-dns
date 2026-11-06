@@ -76,20 +76,25 @@ fn reserved_for_other(scope: &DhcpScope, ip: Ipv4Addr, mac: &str) -> bool {
 }
 
 /// Whether `ip` may be handed to `client` (identified by `id` and `mac`).
+///
+/// [`choose`] calls this for every address of the range until one fits, so
+/// the cheap checks (arithmetic, one lease lookup) come first and the scans
+/// of the reservation list run only for an address that passed them.
 fn usable(ctx: &Context<'_>, leases: &Leases, ip: Ipv4Addr, id: &str, mac: &str) -> bool {
-    let in_range = ctx
-        .scope
-        .range()
-        .is_some_and(|(start, end)| (u32::from(start)..=u32::from(end)).contains(&u32::from(ip)));
-    let reserved_here = reservation(ctx.scope, mac).is_some_and(|(r, _)| r == ip);
-    (in_range || reserved_here)
-        && ctx.net.contains(&ip)
+    let in_range = || {
+        ctx.scope.range().is_some_and(|(start, end)| {
+            (u32::from(start)..=u32::from(end)).contains(&u32::from(ip))
+        })
+    };
+    let reserved_here = || reservation(ctx.scope, mac).is_some_and(|(r, _)| r == ip);
+    ctx.net.contains(&ip)
         && ip != ctx.net.network()
         && ip != ctx.net.broadcast()
         && ip != ctx.server_ip
+        && leases.free_for(&IpAddr::V4(ip), id, ctx.now)
+        && (in_range() || reserved_here())
         && ctx.scope.router.trim().parse::<Ipv4Addr>().ok() != Some(ip)
         && !reserved_for_other(ctx.scope, ip, mac)
-        && leases.free_for(&IpAddr::V4(ip), id, ctx.now)
 }
 
 /// The address to offer: the client's reservation, its current lease, the

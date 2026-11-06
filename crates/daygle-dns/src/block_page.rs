@@ -128,11 +128,14 @@ async fn page(
     let reason = (!host.is_empty())
         .then(|| state.log.reason(peer.ip(), &host))
         .flatten();
+    // Recover a poisoned lock as `apply` does: otherwise one panic while
+    // the settings were held would drop the custom message for good.
     let message = state
         .settings
         .lock()
-        .map(|s| s.message.clone())
-        .unwrap_or_default();
+        .unwrap_or_else(|e| e.into_inner())
+        .message
+        .clone();
     let html = render(&host, reason.as_deref(), &message);
     (
         StatusCode::FORBIDDEN,

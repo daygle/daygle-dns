@@ -376,7 +376,8 @@ pub struct LoginThrottle {
 impl LoginThrottle {
     pub const MAX_FAILURES: u32 = 10;
     pub const WINDOW: Duration = Duration::from_secs(300);
-    /// Bound on tracked addresses; expired entries are dropped past it.
+    /// Bound on tracked addresses: past it, expired entries are dropped,
+    /// and if none have expired the oldest one makes room.
     const MAX_TRACKED: usize = 10_000;
 
     /// Seconds until `ip` may try again, or `None` when it is not throttled.
@@ -391,8 +392,21 @@ impl LoginThrottle {
     /// Record a failed attempt from `ip`.
     pub fn record_failure(&self, ip: std::net::IpAddr) {
         let mut failures = self.failures.lock();
-        if failures.len() >= Self::MAX_TRACKED {
+        if failures.len() >= Self::MAX_TRACKED && !failures.contains_key(&ip) {
             failures.retain(|_, (_, since)| since.elapsed() < Self::WINDOW);
+            // Still full (a guess spread over more live addresses than the
+            // cap): evict the entry whose window started first rather than
+            // growing without bound. New addresses keep being counted; the
+            // evicted one is the closest to lapsing anyway.
+            if failures.len() >= Self::MAX_TRACKED {
+                if let Some(oldest) = failures
+                    .iter()
+                    .min_by_key(|(_, (_, since))| *since)
+                    .map(|(ip, _)| *ip)
+                {
+                    failures.remove(&oldest);
+                }
+            }
         }
         let entry = failures.entry(ip).or_insert((0, Instant::now()));
         if entry.1.elapsed() >= Self::WINDOW {
@@ -942,28 +956,41 @@ async fn require_auth(
     let static_token = config.api.api_token.trim().to_string();
     let auth_required = config.api.auth_required;
     drop(config);
+
+    let (bearer, from_cookie) = presented_token(req.headers());
+    // A static api_token always authorizes (backwards compatible). It is
+    // a bearer credential only, never a cookie.
+    let static_token_ok = !from_cookie
+        && !static_token.is_empty()
+        && daygle_dns_core::auth::constant_time_eq(bearer.as_bytes(), static_token.as_bytes());
+
     // Console accounts live in the database; config-file `[[api.users]]`
-    // entries are only a seed imported at startup. A failed read counts as
-    // "configured" so a database error can never open the API.
-    let users_configured = state
-        .catalog
-        .store()
-        .count_console_users()
-        .map_or(true, |n| n > 0);
+    // entries are only a seed imported at startup. Counting them, and
+    // resolving a personal API token (database reads plus a write), are
+    // blocking SQLite calls behind the store's shared connection lock, so
+    // they run on the blocking pool rather than stalling an async worker -
+    // every API request passes through here. A failed read (or a panicked
+    // task) counts as "configured" with no session, so a database error can
+    // never open the API.
+    let (users_configured, session) = {
+        let store = state.catalog.store().clone();
+        let sessions = state.sessions.clone();
+        tokio::task::spawn_blocking(move || {
+            let users_configured = store.count_console_users().map_or(true, |n| n > 0);
+            let session = (users_configured && !static_token_ok)
+                .then(|| sessions.authenticate(&bearer))
+                .flatten();
+            (users_configured, session)
+        })
+        .await
+        .unwrap_or((true, None))
+    };
 
     if !users_configured && static_token.is_empty() && !auth_required {
         // Auth explicitly disabled (`api.auth_required = false`): open access.
         return next.run(req).await;
     }
-
-    let (bearer, from_cookie) = presented_token(req.headers());
-
-    // A static api_token always authorizes (backwards compatible). It is
-    // a bearer credential only, never a cookie.
-    if !from_cookie
-        && !static_token.is_empty()
-        && daygle_dns_core::auth::constant_time_eq(bearer.as_bytes(), static_token.as_bytes())
-    {
+    if static_token_ok {
         return next.run(req).await;
     }
     let privileged_read = is_privileged_read(path);
@@ -971,7 +998,7 @@ async fn require_auth(
     // When users are configured, a valid login session is required for every
     // method. In legacy token-only mode, GETs stay open.
     if users_configured {
-        if let Some(session) = state.sessions.authenticate(&bearer) {
+        if let Some(session) = session {
             // A change sent with only the session cookie must come from the
             // console itself (see [`CONSOLE_HEADER`]).
             let changes = !matches!(
@@ -1116,5 +1143,29 @@ mod forwarded_tests {
             forwarded_client_ip(ip("10.0.0.1"), &only_proxies, trusted),
             None
         );
+    }
+}
+
+#[cfg(test)]
+mod throttle_tests {
+    use super::LoginThrottle;
+    use std::net::{IpAddr, Ipv4Addr};
+
+    #[test]
+    fn the_tracked_set_stays_bounded_and_keeps_counting_new_addresses() {
+        let throttle = LoginThrottle::default();
+        let addr = |i: u32| IpAddr::V4(Ipv4Addr::from(0x0a00_0000 + i));
+        let over = LoginThrottle::MAX_TRACKED as u32 + 50;
+        for i in 0..over {
+            throttle.record_failure(addr(i));
+        }
+        assert_eq!(throttle.failures.lock().len(), LoginThrottle::MAX_TRACKED);
+        // The newest address is still tracked and still throttled once it
+        // reaches the limit.
+        let newest = addr(over - 1);
+        for _ in 1..LoginThrottle::MAX_FAILURES {
+            throttle.record_failure(newest);
+        }
+        assert!(throttle.retry_after(newest).is_some());
     }
 }

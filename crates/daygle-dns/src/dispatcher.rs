@@ -2187,7 +2187,10 @@ impl DnsDispatcher {
                     return false;
                 }
                 let suffix_start = qname.len() - zone.len();
-                if !qname[suffix_start..].eq_ignore_ascii_case(zone) {
+                // Compared as bytes: slicing the `str` would panic on the
+                // query path if the offset fell inside a multi-byte
+                // character of `qname`.
+                if !qname.as_bytes()[suffix_start..].eq_ignore_ascii_case(zone.as_bytes()) {
                     return false;
                 }
                 // Either the qname is the zone itself, or the zone is a

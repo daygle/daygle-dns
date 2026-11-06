@@ -107,16 +107,21 @@ fn reserved_for_other(scope: &Dhcp6Scope, ip: Ipv6Addr, duid: &str) -> bool {
     })
 }
 
+/// Whether `ip` may be handed to the client. Cheap checks first: the
+/// address scan calls this up to [`PROBES`] times per request, and the
+/// reservation list is only searched for an address that passed them.
 fn usable(ctx: &Context<'_>, leases: &Leases, ip: Ipv6Addr, duid: &str, id: &str) -> bool {
-    let in_range = ctx.scope.range().is_some_and(|(start, end)| {
-        (u128::from(start)..=u128::from(end)).contains(&u128::from(ip))
-    });
-    let reserved_here = reservation(ctx.scope, duid).is_some_and(|(r, _)| r == ip);
-    (in_range || reserved_here)
-        && ctx.net.contains(&ip)
+    let in_range = || {
+        ctx.scope.range().is_some_and(|(start, end)| {
+            (u128::from(start)..=u128::from(end)).contains(&u128::from(ip))
+        })
+    };
+    let reserved_here = || reservation(ctx.scope, duid).is_some_and(|(r, _)| r == ip);
+    ctx.net.contains(&ip)
         && Some(ip) != ctx.dns_default
-        && !reserved_for_other(ctx.scope, ip, duid)
         && leases.free_for(&IpAddr::V6(ip), id, ctx.now)
+        && (in_range() || reserved_here())
+        && !reserved_for_other(ctx.scope, ip, duid)
 }
 
 /// A stable starting point in the range for `id`, so a client tends to get
@@ -158,7 +163,10 @@ fn choose(
     }
     let (start, end) = ctx.scope.range()?;
     let (start, end) = (u128::from(start), u128::from(end));
-    let size = end - start + 1;
+    // Checked: a range that starts after it ends (never saved through the
+    // API, but possible in a hand-edited config) offers nothing rather than
+    // underflowing, and the whole address space cannot overflow the count.
+    let size = end.checked_sub(start)?.saturating_add(1);
     let base = spread(id) % size;
     (0..size.min(PROBES))
         .map(|i| Ipv6Addr::from(start + (base + i) % size))
