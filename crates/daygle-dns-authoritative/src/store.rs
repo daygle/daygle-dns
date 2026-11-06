@@ -2482,6 +2482,14 @@ const API_TOKEN_COLUMNS: &str =
 impl ZoneStore {
     pub fn put_session(&self, session: &StoredSession) -> Result<()> {
         let conn = self.lock_conn()?;
+        // Expired sessions are otherwise only deleted by `load_sessions` at
+        // startup, so a server that stays up for months kept one row per
+        // login for ever. Clearing them here bounds the table at the live
+        // sessions.
+        conn.execute(
+            "DELETE FROM console_sessions WHERE expires_at <= ?1",
+            [chrono::Utc::now().timestamp()],
+        )?;
         conn.execute(
             "INSERT OR REPLACE INTO console_sessions (token_hash, username, role, expires_at)
              VALUES (?1, ?2, ?3, ?4)",
@@ -4792,6 +4800,44 @@ mod tests {
 
     fn store() -> ZoneStore {
         ZoneStore::open(":memory:").unwrap()
+    }
+
+    fn session(token_hash: &str, expires_at: i64) -> StoredSession {
+        StoredSession {
+            token_hash: token_hash.to_string(),
+            username: "admin".to_string(),
+            role: Role::Admin,
+            expires_at,
+        }
+    }
+
+    #[test]
+    fn saving_a_session_drops_expired_rows() {
+        // A file-backed store so a second connection can count the rows.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("zones.db");
+        let path = path.to_str().unwrap();
+        let s = ZoneStore::open(path).unwrap();
+        s.create_console_user(
+            "admin",
+            &ConsoleUserInput {
+                enabled: true,
+                ..ConsoleUserInput::default()
+            },
+        )
+        .unwrap();
+        let now = chrono::Utc::now().timestamp();
+        s.put_session(&session("stale", now - 60)).unwrap();
+        s.put_session(&session("live", now + 3600)).unwrap();
+        let stale: i64 = rusqlite::Connection::open(path)
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM console_sessions WHERE token_hash = 'stale'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(stale, 0, "the expired row must be pruned when saving");
     }
 
     #[test]

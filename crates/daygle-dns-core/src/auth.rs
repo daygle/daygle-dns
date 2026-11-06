@@ -120,10 +120,17 @@ fn pbkdf2_sha256(password: &[u8], salt: &[u8], iterations: u32, dk_len: usize) -
 /// database cannot be used to sign in.
 pub fn hash_token(token: &str) -> String {
     use sha2::Digest as _;
-    Sha256::digest(token.as_bytes())
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
+    // Runs for every authenticated API request (twice: the session lookup and
+    // the API-token lookup), so encode into one pre-sized string instead of
+    // allocating a `String` per byte.
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let digest = Sha256::digest(token.as_bytes());
+    let mut out = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        out.push(char::from(HEX[usize::from(byte >> 4)]));
+        out.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    out
 }
 
 /// Constant-time byte comparison (the length itself is not secret).

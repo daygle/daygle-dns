@@ -184,7 +184,12 @@ fn cpu() -> Value {
             if d_total == 0 {
                 None
             } else {
-                round_percent(Some((d_total - d_idle) as f64), d_total as f64)
+                // The two deltas come from separate kernel counters: a CPU
+                // hot-remove between samples (or a torn /proc/stat read) can
+                // make the idle delta exceed the total delta. A plain
+                // subtraction panics in a debug build and wraps to a huge
+                // percentage in a release build.
+                round_percent(Some(d_total.saturating_sub(d_idle) as f64), d_total as f64)
             }
         }
         (Some(_), None) => None,

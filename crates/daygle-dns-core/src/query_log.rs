@@ -203,7 +203,13 @@ fn sweep_old_logs(dir: &Path, retention_days: u32) {
     if retention_days == 0 {
         return;
     }
-    let cutoff = Utc::now().num_days_from_ce() - i32::try_from(retention_days).unwrap_or(i32::MAX);
+    // `retention_days` comes from the settings as a u32. Converting it with
+    // `unwrap_or(i32::MAX)` and then subtracting overflows `i32` for any value
+    // past `i32::MAX`, which panics in a debug build and wraps to a cutoff far
+    // in the future in a release build (deleting today's log). Saturating the
+    // subtraction keeps both cases at "keep everything".
+    let keep_days = i32::try_from(retention_days).unwrap_or(i32::MAX);
+    let cutoff = Utc::now().num_days_from_ce().saturating_sub(keep_days);
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
@@ -304,6 +310,19 @@ mod tests {
             !dir.path().join(old_name).exists(),
             "old file must be swept"
         );
+    }
+
+    #[test]
+    fn a_retention_past_the_date_range_keeps_files() {
+        // A hand-edited setting past i32::MAX used to overflow the cutoff
+        // subtraction: a panic in a debug build, and a wrapped (future)
+        // cutoff that deleted the current log in a release build.
+        let dir = tempfile::tempdir().unwrap();
+        let today = Utc::now().format("%Y-%m-%d").to_string();
+        let name = format!("queries-{today}.log");
+        std::fs::write(dir.path().join(&name), b"{}\n").unwrap();
+        sweep_old_logs(dir.path(), u32::MAX);
+        assert!(dir.path().join(name).exists(), "today's log must survive");
     }
 
     #[test]
