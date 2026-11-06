@@ -133,6 +133,8 @@ sub-minute misattribution versus losing whole buckets.
 
 ### M-3 API-token authentication blocks the async runtime on SQLite
 
+> **Fixed in the 2026-11-06 follow-up audit** (see the end of this file).
+
 **Where** `crates/daygle-dns-api/src/lib.rs` — `SessionStore::authenticate`,
 called from the `require_auth` middleware for every request.
 
@@ -223,6 +225,8 @@ cookie, no `Access-Control-Allow-Credentials`, bounded allowance).
 **Risk/trade-off** None; comment-only.
 
 ### L-3 `LoginThrottle` can exceed its own tracking cap
+
+> **Fixed in the 2026-11-06 follow-up audit** (see the end of this file).
 
 **Where** `crates/daygle-dns-api/src/lib.rs` — `LoginThrottle::record_failure`.
 
@@ -384,3 +388,44 @@ asserting a future-stamped bucket does not produce a second bucket and that
   change, not a micro-optimisation.
 - **No dependency or lockfile changes**, so builds stay reproducible at the
   versions the project pins.
+
+---
+
+## Follow-up audit — 2026-11-06
+
+Whole-workspace pass on top of the review above. Tooling: `cargo clippy
+--locked --workspace --all-targets --no-default-features -- -D warnings`
+(clean; the default `verifier-onnx` feature could not be built here because
+the ONNX Runtime binary download was blocked by the sandbox network), a
+dependency-usage scan of every crate manifest (no unused dependencies), a
+scan for public functions with no callers (none), and `npm audit` on the
+console (two low-severity advisories in the build-time `deepmerge` chain of
+`@sveltejs/vite-plugin-svelte`, no fix available upstream; not shipped in the
+bundle).
+
+| ID | Severity | Where | Issue | Change |
+|----|----------|-------|-------|--------|
+| F-1 | Medium (perf) | `daygle-dns-api/src/lib.rs` `require_auth` | Every API request ran `count_console_users` and, for `dgl_` tokens, three more SQLite calls on a tokio worker behind the store's single connection mutex (M-3). | The database work runs in `spawn_blocking`; a panicked task fails closed (users "configured", no session). Behaviour is otherwise unchanged. |
+| F-2 | Low (security) | `daygle-dns-api/src/lib.rs` `LoginThrottle` | Map grew past `MAX_TRACKED` when no entry had expired (L-3). | When still full after the sweep, the entry whose window started first is evicted; new addresses keep being counted. Unit test added. |
+| F-3 | Low (memory DoS) | `daygle-dns-policy/src/feeds.rs` `fetch` | Category feeds buffered the whole body before the 32 MiB check, so a mirror without (or lying about) `Content-Length` could make the server hold an unbounded download. | Reject on advertised length, then stream chunks and stop at the cap (same approach as `blocklist_source.rs`). |
+| F-4 | Low (perf) | `daygle-dns-dhcp/src/v4.rs`, `v6.rs` `usable` | The address scan evaluated the reservation-list searches (string normalisation per reservation) before the cheap lease lookup, for every address of the range, under the DHCP state lock: O(range × reservations) per DISCOVER on a busy pool. | Cheap checks first; reservation searches are lazy and only run for a free, in-subnet address. Same result set. |
+| F-5 | Low (bug) | `daygle-dns-dhcp/src/v6.rs` `choose` | `end - start + 1` underflowed for a range that starts after it ends (hand-edited config) and overflowed for the whole address space. | Checked arithmetic: such a range offers nothing. |
+| F-6 | Low (bug) | `daygle-dns-dhcp/src/service.rs` | `port + 1` for the DHCPv4 client port overflowed at 65535 (panic in debug, port 0 in release). | `saturating_add(1)` (67 still maps to 68). |
+| F-7 | Low (robustness) | `daygle-dns/src/dispatcher.rs` `empty_zone_covering` | `str` slicing at a computed offset on the query path would panic if it fell inside a multi-byte character. | Compare bytes (`[u8]::eq_ignore_ascii_case`). |
+| F-8 | Low (robustness) | `daygle-dns/src/block_page.rs` `page` | A poisoned settings lock silently dropped the custom block message for the process lifetime, unlike `apply`, which recovers. | Recover the guard the same way. |
+| F-9 | Low (hardening) | `install.sh` | The rustup bootstrap fetched with plain `curl -fsSL`. | `--proto '=https' --tlsv1.2`, as rustup recommends (curl path and the printed hint). |
+
+Reviewed and deliberately left unchanged:
+
+- The login response still returns the session token in its JSON body.
+  `docs/API.md` documents it as the bearer credential for scripts, so
+  removing it would break clients; the console itself never stores it.
+- Duplicate crate versions (`base64`, `parking_lot`, `tower-http`, `nom`,
+  `syn`, `getrandom`) all come from transitive dependencies (reqwest,
+  hickory, rusqlite); unifying them needs upstream releases, not a local edit.
+- `GET /api/backup` reads the finished backup into memory before sending it;
+  streaming it needs the scratch file kept alive for the response's lifetime
+  (and `tokio-util`'s `io` feature) — recorded as a follow-up.
+- Most console handlers still call SQLite directly on async workers. F-1
+  covers the one path every request takes; moving the rest is a larger,
+  mechanical change best done handler by handler.

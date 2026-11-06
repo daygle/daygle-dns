@@ -210,7 +210,7 @@ install_dns_tools() {
 install_rust() {
     log "Installing Rust via rustup (minimal profile)..."
     if have_cmd curl; then
-        curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal || return 1
+        curl --proto '=https' --tlsv1.2 -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal || return 1
     elif have_cmd wget; then
         wget -qO- https://sh.rustup.rs | sh -s -- -y --profile minimal || return 1
     else
@@ -440,7 +440,7 @@ if need_cargo; then
             'error: cargo was not found. Daygle is built from source and requires Rust.' \
             'Install the minimal Rust toolchain non-interactively:' \
             '' \
-            '    curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal' \
+            "    curl --proto '=https' --tlsv1.2 -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal" \
             '' \
             'Then open a new shell (or run: source "$HOME/.cargo/env") and re-run the installer.' \
             'See https://rustup.rs for other installation options.' >&2

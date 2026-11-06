@@ -183,14 +183,27 @@ async fn download(
 }
 
 async fn fetch(client: &reqwest::Client, url: &str) -> Result<String, String> {
-    let response = client.get(url).send().await.map_err(|e| e.to_string())?;
+    let mut response = client.get(url).send().await.map_err(|e| e.to_string())?;
     let status = response.status();
     if !status.is_success() {
         return Err(format!("{url} answered {status}"));
     }
-    let body = response.bytes().await.map_err(|e| e.to_string())?;
-    if body.len() > MAX_BYTES {
-        return Err(format!("{url} is larger than {MAX_BYTES} bytes"));
+    let too_large = || format!("{url} is larger than {MAX_BYTES} bytes");
+    if response
+        .content_length()
+        .is_some_and(|len| len > MAX_BYTES as u64)
+    {
+        return Err(too_large());
+    }
+    // Read chunk by chunk and stop at the cap: buffering the whole body
+    // first let a mirror that omits (or lies about) Content-Length make the
+    // server hold an unbounded download in memory before it was refused.
+    let mut body: Vec<u8> = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(|e| e.to_string())? {
+        if body.len() + chunk.len() > MAX_BYTES {
+            return Err(too_large());
+        }
+        body.extend_from_slice(&chunk);
     }
     Ok(String::from_utf8_lossy(&body).into_owned())
 }

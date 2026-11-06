@@ -324,7 +324,10 @@ impl DhcpService {
         };
         let service = self.clone();
         let token = token.clone();
-        let client_port = if port == 67 { 68 } else { port + 1 };
+        // Clients listen one port above the server (68 for 67); saturate so
+        // a server on 65535 cannot overflow (a panic in debug builds, port 0
+        // in release).
+        let client_port = port.saturating_add(1);
         tokio::spawn(async move {
             let mut buf = vec![0u8; 4096];
             loop {
