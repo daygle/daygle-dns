@@ -115,16 +115,24 @@ fn pbkdf2_sha256(password: &[u8], salt: &[u8], iterations: u32, dk_len: usize) -
     out
 }
 
-/// How a login session or API token is stored: its SHA-256, hex. The
-/// tokens are long random strings, so a fast hash is enough and a stolen
-/// database cannot be used to sign in.
+/// How a login session or API token is stored: a deterministic
+/// PBKDF2-HMAC-SHA256 digest, hex-encoded, so verification remains a
+/// hash-and-lookup operation while making offline guessing more expensive.
 pub fn hash_token(token: &str) -> String {
-    use sha2::Digest as _;
+    // Domain-separation salt for token hashing. This is not secret; it ensures
+    // token hashing stays distinct from any other PBKDF2 use in this module.
+    const TOKEN_SALT: &[u8] = b"daygle-dns token hash v1";
     // Runs for every authenticated API request (twice: the session lookup and
     // the API-token lookup), so encode into one pre-sized string instead of
     // allocating a `String` per byte.
     const HEX: &[u8; 16] = b"0123456789abcdef";
-    let digest = Sha256::digest(token.as_bytes());
+
+    let digest = pbkdf2_sha256(
+        token.as_bytes(),
+        TOKEN_SALT,
+        DEFAULT_PBKDF2_ITERATIONS,
+        KEY_LEN,
+    );
     let mut out = String::with_capacity(digest.len() * 2);
     for byte in digest {
         out.push(char::from(HEX[usize::from(byte >> 4)]));
