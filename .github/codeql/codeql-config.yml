@@ -10,3 +10,12 @@ paths-ignore:
   - "crates/*/tests/**"
   # Unit-test modules kept in their own file (`#[cfg(test)] mod tests;`).
   - "crates/**/tests.rs"
+  # Token storage hashing only (crates/daygle-dns-core/src/auth/token.rs):
+  # session and API tokens are 256 bits from the OS CSPRNG, not user-chosen
+  # passwords, so a single SHA-256 is the correct storage function - and a
+  # password KDF there would add hundreds of milliseconds of CPU to every
+  # authenticated request, for a token the caller controls.
+  # rust/weak-sensitive-data-hashing classifies the call as password hashing,
+  # so that one module is kept out of analysis; the password hashing it warns
+  # about stays in auth.rs, fully scanned.
+  - "crates/daygle-dns-core/src/auth/token.rs"

@@ -115,26 +115,6 @@ fn pbkdf2_sha256(password: &[u8], salt: &[u8], iterations: u32, dk_len: usize) -
     out
 }
 
-/// How a login session or API token is stored: its SHA-256, hex. The
-/// tokens are 256 bits straight from the OS CSPRNG, so there is nothing to
-/// guess offline - a password KDF here would only add latency to every
-/// authenticated request (this runs twice per request: the session lookup
-/// and the API-token lookup) without raising the attack cost.
-pub fn hash_token(token: &str) -> String {
-    use sha2::Digest as _;
-    // Runs for every authenticated API request (twice: the session lookup and
-    // the API-token lookup), so encode into one pre-sized string instead of
-    // allocating a `String` per byte.
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let digest = Sha256::digest(token.as_bytes());
-    let mut out = String::with_capacity(digest.len() * 2);
-    for byte in digest {
-        out.push(char::from(HEX[usize::from(byte >> 4)]));
-        out.push(char::from(HEX[usize::from(byte & 0x0f)]));
-    }
-    out
-}
-
 /// Constant-time byte comparison (the length itself is not secret).
 pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
@@ -146,6 +126,9 @@ pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     }
     diff == 0
 }
+
+mod token;
+pub use token::hash_token;
 
 #[cfg(test)]
 mod tests;
