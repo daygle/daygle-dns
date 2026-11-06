@@ -2106,10 +2106,10 @@ async fn display_defaults_and_personal_preferences() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 400);
-    // The colour theme defaults to dark.
+    // The colour theme defaults to light.
     assert_eq!(
         me(viewer.clone()).await["display_defaults"]["theme"],
-        json!("dark")
+        json!("light")
     );
     let resp = put(json!({ "display": {
         "time_zone": "Australia/Sydney",

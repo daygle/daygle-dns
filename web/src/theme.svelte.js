@@ -27,7 +27,7 @@ export function previewTheme(theme) {
 
 /** The saved theme (`system`, `light` or `dark`): the user's, else the server default. */
 function savedTheme() {
-  return display.mine?.theme || display.defaults.theme || 'dark';
+  return display.mine?.theme || display.defaults.theme || 'light';
 }
 
 const lightQuery = typeof window !== 'undefined' && window.matchMedia
@@ -38,7 +38,7 @@ lightQuery?.addEventListener?.('change', (e) => (deviceLight = e.matches));
 
 function resolve(theme) {
   if (theme === 'system') return deviceLight ? 'light' : 'dark';
-  return theme === 'light' ? 'light' : 'dark';
+  return theme === 'dark' ? 'dark' : 'light';
 }
 
 $effect.root(() => {

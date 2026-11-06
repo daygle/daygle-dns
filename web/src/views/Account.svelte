@@ -159,7 +159,7 @@
       <label>
         <span>Theme</span>
         <select bind:value={prefsDraft.theme}>
-          <option value="">Server Default ({THEME_OPTIONS.find(([v]) => v === display.defaults.theme)?.[1] || 'Dark'})</option>
+          <option value="">Server Default ({THEME_OPTIONS.find(([v]) => v === display.defaults.theme)?.[1] || 'Light'})</option>
           {#each THEME_OPTIONS as [value, label]}<option value={value}>{label}</option>{/each}
         </select>
       </label>

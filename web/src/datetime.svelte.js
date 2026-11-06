@@ -16,7 +16,7 @@
 
 import { api } from './api.js';
 
-const SYSTEM = { time_zone: 'system', date_format: 'system', time_format: 'system', theme: 'dark' };
+const SYSTEM = { time_zone: 'system', date_format: 'system', time_format: 'system', theme: 'light' };
 const UNSET = { time_zone: '', date_format: '', time_format: '', theme: '' };
 
 // Older consoles kept a per-browser choice here; it is moved onto the
