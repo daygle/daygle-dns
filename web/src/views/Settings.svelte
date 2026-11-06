@@ -101,7 +101,7 @@
   }
 
   // Server-wide date, time and theme display defaults (saved with the page).
-  let display_ = $state({ time_zone: 'system', date_format: 'system', time_format: 'system', theme: 'dark' });
+  let display_ = $state({ time_zone: 'system', date_format: 'system', time_format: 'system', theme: 'light' });
   // How the web console is served (Settings -> General). `http_port` 0 in
   // the stored settings means the config file's api.port; the form shows
   // the real number.
@@ -314,7 +314,7 @@
         doq = {};
         api_ = {};
         ai_ = {};
-        display_ = { time_zone: 'system', date_format: 'system', time_format: 'system', theme: 'dark' };
+        display_ = { time_zone: 'system', date_format: 'system', time_format: 'system', theme: 'light' };
         aiCategoriesText = '';
         aiBackendCategories = [];
         upstreamText = '';
@@ -341,7 +341,7 @@
       dohNetworks = [...(config.doh?.allowed_networks || [])];
       doqNetworks = [...(config.doq?.allowed_networks || [])];
       api_ = { ...config.api };
-      display_ = { time_zone: 'system', date_format: 'system', time_format: 'system', theme: 'dark', ...config.display };
+      display_ = { time_zone: 'system', date_format: 'system', time_format: 'system', theme: 'light', ...config.display };
       web_ = {
         http_enabled: true, https_enabled: false, https_port: 5443, https_certificate: '', redirect_http: false,
         ...config.web,

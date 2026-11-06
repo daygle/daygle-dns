@@ -1184,7 +1184,7 @@ impl Default for DisplaySettings {
             time_zone: "system".to_string(),
             date_format: "system".to_string(),
             time_format: "system".to_string(),
-            theme: "dark".to_string(),
+            theme: "light".to_string(),
         }
     }
 }
