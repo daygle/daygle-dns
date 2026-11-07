@@ -7188,7 +7188,7 @@ fn serve_gui(path: &str) -> Response {
 /// overlay ([`daygle_dns_core::config::RuntimeSettings`]), which is applied
 /// over the config file on every boot. A section the overlay does not
 /// capture applies to the running server and then reverts to the config
-/// file's values at the next restart or update — exactly what happened to
+/// file's values at the next restart or update - exactly what happened to
 /// the `[logging]` and `[api]` sections before the overlay learned them.
 #[cfg(test)]
 mod settings_persistence_tests {
@@ -7229,7 +7229,7 @@ mod settings_persistence_tests {
     ];
 
     /// Overlay fields the settings API does not accept: they are saved
-    /// through their own endpoints, which capture the overlay there —
+    /// through their own endpoints, which capture the overlay there -
     /// `networks` from the Settings → Networks page (networks.rs).
     const OVERLAY_ONLY_SECTIONS: &[&str] = &["networks"];
 
