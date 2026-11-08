@@ -68,7 +68,7 @@ async fn slow_http2_handshake_and_body_have_deadlines() {
 
     let tls = doh_tls(addr, &cert).await;
     let (mut sender, connection) = h2::client::handshake(tls).await.unwrap();
-    let driver = tokio::spawn(async move { connection.await });
+    let driver = tokio::spawn(connection);
     let request = http::Request::builder()
         .method("POST")
         .uri("https://daygle.test/dns-query")
