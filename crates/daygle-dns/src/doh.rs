@@ -214,10 +214,14 @@ impl Connection {
         // The name the device asked for, for DNS accounts
         // (`<client id>.<accounts.domain>`).
         let server_name: Option<Arc<str>> = tls.get_ref().1.server_name().map(Arc::from);
-        let mut h2 = match h2::server::handshake(tls).await {
-            Ok(h2) => h2,
-            Err(e) => {
+        let mut h2 = match tokio::time::timeout(idle, h2::server::handshake(tls)).await {
+            Ok(Ok(h2)) => h2,
+            Ok(Err(e)) => {
                 debug!(%client, %e, "DoH HTTP/2 handshake failed");
+                return;
+            }
+            Err(_) => {
+                debug!(%client, "DoH HTTP/2 handshake timed out");
                 return;
             }
         };
@@ -419,21 +423,22 @@ fn decode_dns_param(value: &str) -> Result<Vec<u8>, String> {
 
 /// Read the POST body, bounded by `timeout` and [`MAX_MESSAGE_LEN`].
 async fn fetch_body(body: &mut RecvStream, timeout: Duration) -> Result<Vec<u8>, String> {
-    let mut out = Vec::new();
-    while let Some(chunk) = tokio::time::timeout(timeout, body.data())
-        .await
-        .map_err(|_| "the POST body took too long to arrive".to_string())?
-    {
-        let chunk = chunk.map_err(|e| format!("POST body error: {e}"))?;
-        out.extend_from_slice(&chunk);
-        if out.len() > MAX_MESSAGE_LEN {
-            return Err("the POST body is too large".to_string());
+    tokio::time::timeout(timeout, async {
+        let mut out = Vec::new();
+        while let Some(chunk) = body.data().await {
+            let chunk = chunk.map_err(|e| format!("POST body error: {e}"))?;
+            if chunk.len() > MAX_MESSAGE_LEN - out.len() {
+                return Err("the POST body is too large".to_string());
+            }
+            out.extend_from_slice(&chunk);
+            if body.is_end_stream() {
+                break;
+            }
         }
-        if body.is_end_stream() {
-            break;
-        }
-    }
-    Ok(out)
+        Ok(out)
+    })
+    .await
+    .map_err(|_| "the POST body took too long to arrive".to_string())?
 }
 
 /// Send a bare HTTP status with no body, and return the detail for the

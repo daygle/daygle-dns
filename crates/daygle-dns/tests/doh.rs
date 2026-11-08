@@ -10,6 +10,100 @@ use daygle_dns_authoritative::model::{RecordInput, ZoneInput};
 use hickory_proto::op::{Message, MessageType, OpCode, Query, ResponseCode};
 use hickory_proto::rr::{Name, RecordType};
 
+async fn doh_tls(
+    addr: std::net::SocketAddr,
+    cert: &std::path::Path,
+) -> tokio_rustls::client::TlsStream<tokio::net::TcpStream> {
+    use rustls::pki_types::pem::PemObject;
+    let mut roots = rustls::RootCertStore::empty();
+    for cert in rustls::pki_types::CertificateDer::pem_file_iter(cert).unwrap() {
+        roots.add(cert.unwrap()).unwrap();
+    }
+    let mut config = rustls::ClientConfig::builder_with_provider(Arc::new(
+        rustls::crypto::ring::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .unwrap()
+    .with_root_certificates(roots)
+    .with_no_client_auth();
+    config.alpn_protocols = vec![b"h2".to_vec()];
+    tokio_rustls::TlsConnector::from(Arc::new(config))
+        .connect(
+            rustls::pki_types::ServerName::try_from("daygle.test").unwrap(),
+            tokio::net::TcpStream::connect(addr).await.unwrap(),
+        )
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn slow_http2_handshake_and_body_have_deadlines() {
+    use std::time::Duration;
+    use tokio::io::AsyncReadExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let cert = dir.path().join("server.crt");
+    let mut config = base_config(&dir.path().join("daygle-dns.db"));
+    config.doh.enabled = true;
+    config.doh.self_signed = true;
+    config.doh.cert_path = cert.to_string_lossy().to_string();
+    config.doh.key_path = dir.path().join("server.key").to_string_lossy().to_string();
+    config.doh.server_name = "daygle.test".to_string();
+    config.doh.handshake_timeout_secs = 1;
+    let server = spawn(config).await;
+    let addr = server.doh_addr.unwrap();
+
+    let mut silent = doh_tls(addr, &cert).await;
+    let closed = tokio::time::timeout(Duration::from_secs(4), async {
+        let mut buf = [0u8; 256];
+        loop {
+            match silent.read(&mut buf).await {
+                Ok(0) | Err(_) => break,
+                Ok(_) => continue,
+            }
+        }
+    })
+    .await;
+    assert!(closed.is_ok(), "HTTP/2 handshake was not timed out");
+
+    let tls = doh_tls(addr, &cert).await;
+    let (mut sender, connection) = h2::client::handshake(tls).await.unwrap();
+    let driver = tokio::spawn(async move { connection.await });
+    let request = http::Request::builder()
+        .method("POST")
+        .uri("https://daygle.test/dns-query")
+        .header("content-type", "application/dns-message")
+        .body(())
+        .unwrap();
+    let (response, mut body) = sender.send_request(request, false).unwrap();
+    body.send_data(bytes::Bytes::from_static(b"a"), false)
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    // Keep the connection's separate idle timer from closing it before the
+    // slow stream's own body deadline can send an error response.
+    let keepalive = http::Request::builder()
+        .method("GET")
+        .uri("https://daygle.test/dns-query")
+        .body(())
+        .unwrap();
+    let (keepalive_response, _) = sender.send_request(keepalive, true).unwrap();
+    assert_eq!(
+        keepalive_response.await.unwrap().status(),
+        http::StatusCode::BAD_REQUEST
+    );
+    body.send_data(bytes::Bytes::from_static(b"b"), false)
+        .unwrap();
+    let response = tokio::time::timeout(Duration::from_millis(700), response)
+        .await
+        .expect("slow POST outlived its total deadline")
+        .unwrap();
+    assert_eq!(response.status(), http::StatusCode::BAD_REQUEST);
+    drop(body);
+    drop(sender);
+    driver.abort();
+    shutdown(server).await;
+}
+
 #[tokio::test]
 async fn serves_queries_over_doh() {
     let dir = tempfile::tempdir().unwrap();
