@@ -54,6 +54,7 @@ default = ["verifier-onnx"]
 verifier-onnx = ["daygle-dns-api/verifier-onnx", "daygle-dns-ml/verifier-onnx"]
 
 [dev-dependencies]
+rusqlite.workspace = true
 sha2.workspace = true
 tempfile.workspace = true
 chrono.workspace = true

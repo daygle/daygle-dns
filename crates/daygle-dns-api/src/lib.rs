@@ -300,30 +300,40 @@ impl SessionStore {
     }
 
     /// Remove a session (logout). Returns whether it existed.
-    pub fn revoke(&self, token: &str) -> bool {
+    pub fn revoke(&self, token: &str) -> daygle_dns_core::Result<bool> {
         let hash = daygle_dns_core::auth::hash_token(token);
-        self.persist("delete", |store| store.delete_session(&hash));
-        self.sessions.lock().remove(&hash).is_some()
+        if let Some(store) = &self.store {
+            store.delete_session(&hash)?;
+        }
+        Ok(self.sessions.lock().remove(&hash).is_some())
     }
 
     /// Drop every session belonging to `username` (used when an account is
     /// disabled, deleted, or its password/role changes).
-    pub fn revoke_user(&self, username: &str) {
-        self.persist("delete", |store| store.delete_user_sessions(username, None));
+    pub fn revoke_user(&self, username: &str) -> daygle_dns_core::Result<()> {
+        if let Some(store) = &self.store {
+            store.delete_user_sessions(username, None)?;
+        }
         self.sessions.lock().retain(|_, s| s.username != username);
+        Ok(())
     }
 
     /// Like [`revoke_user`], but keeps `keep_token` alive - used by the
     /// self-service password change so the current device stays signed in
     /// while every other session is signed out.
-    pub fn revoke_user_except(&self, username: &str, keep_token: &str) {
+    pub fn revoke_user_except(
+        &self,
+        username: &str,
+        keep_token: &str,
+    ) -> daygle_dns_core::Result<()> {
         let keep = daygle_dns_core::auth::hash_token(keep_token);
-        self.persist("delete", |store| {
-            store.delete_user_sessions(username, Some(&keep))
-        });
+        if let Some(store) = &self.store {
+            store.delete_user_sessions(username, Some(&keep))?;
+        }
         self.sessions
             .lock()
             .retain(|hash, s| s.username != username || *hash == keep);
+        Ok(())
     }
 }
 
@@ -1158,7 +1168,7 @@ mod credential_tests {
         });
         sessions.invalidate_login_attempts();
         db.set_console_user_enabled("alice", false).unwrap();
-        sessions.revoke_user("alice");
+        sessions.revoke_user("alice").unwrap();
         db.set_console_user_enabled("alice", true).unwrap();
         drop(guard);
         assert!(!waiter.await.unwrap());

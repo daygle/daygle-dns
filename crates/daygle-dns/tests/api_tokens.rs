@@ -88,6 +88,99 @@ async fn revoked_session_cannot_create_api_token() {
 }
 
 #[tokio::test]
+async fn database_failure_does_not_claim_logout_or_password_change_succeeded() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("daygle-dns.db");
+    let mut cfg = base_config(&db);
+    cfg.api.auth_required = true;
+    let server = spawn(cfg).await;
+    let client = reqwest::Client::new();
+    let api = format!("http://{}/api", server.api_addr);
+    let created: Value = client
+        .post(format!("{api}/auth/setup"))
+        .json(&json!({ "username": "admin", "password": "first-run-secret" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let token = created["token"].as_str().unwrap();
+    let other: Value = client
+        .post(format!("{api}/auth/login"))
+        .json(&json!({ "username": "admin", "password": "first-run-secret" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let other = other["token"].as_str().unwrap();
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    conn.execute_batch(
+        "CREATE TRIGGER fail_session_delete BEFORE DELETE ON console_sessions
+         BEGIN SELECT RAISE(FAIL, 'simulated session deletion failure'); END;",
+    )
+    .unwrap();
+
+    assert_eq!(
+        client
+            .post(format!("{api}/auth/logout"))
+            .bearer_auth(token)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        500
+    );
+    assert_eq!(status(&client, &api, token).await, 200);
+    assert_eq!(
+        client
+            .post(format!("{api}/auth/password"))
+            .bearer_auth(token)
+            .json(
+                &json!({ "current_password": "first-run-secret", "new_password": "new-password" })
+            )
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        500
+    );
+    let user = server
+        .catalog
+        .store()
+        .get_console_user("admin")
+        .unwrap()
+        .unwrap();
+    assert!(daygle_dns_core::auth::verify_password(
+        "first-run-secret",
+        &user.password_hash
+    ));
+    assert!(!daygle_dns_core::auth::verify_password(
+        "new-password",
+        &user.password_hash
+    ));
+    assert_eq!(status(&client, &api, other).await, 200);
+
+    conn.execute_batch("DROP TRIGGER fail_session_delete")
+        .unwrap();
+    assert_eq!(
+        client
+            .post(format!("{api}/auth/logout"))
+            .bearer_auth(token)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        204
+    );
+    assert_eq!(status(&client, &api, token).await, 401);
+    drop(conn);
+    shutdown(server).await;
+}
+
+#[tokio::test]
 async fn sessions_persist_and_api_tokens_work() {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("daygle-dns.db");

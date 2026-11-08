@@ -4285,7 +4285,9 @@ pub async fn auth_logout(
 ) -> Response {
     let _credential = state.sessions.credential_write.lock().await;
     let token = bearer_token(&headers).unwrap_or_default();
-    state.sessions.revoke(&token);
+    if let Err(e) = state.sessions.revoke(&token) {
+        return map_err(e);
+    }
     with_session_cookie(
         StatusCode::NO_CONTENT.into_response(),
         None,
@@ -4515,11 +4517,14 @@ pub async fn auth_change_password(
     }
 
     let new_hash = hash_password(&input.new_password).await;
+    // Revoke first: a database failure must not leave old sessions valid
+    // after the password has changed, including after a restart.
+    if let Err(e) = state.sessions.revoke_user_except(&session.username, &token) {
+        return map_err(e);
+    }
     if let Err(e) = store.set_console_user_password(&session.username, &new_hash) {
         return map_err(e);
     }
-    // Other devices are signed out; this session survives.
-    state.sessions.revoke_user_except(&session.username, &token);
     state.logs.push(
         daygle_dns_core::LogLevel::Info,
         "api",
@@ -4838,12 +4843,15 @@ pub async fn two_factor_enable(
         );
     };
     let (codes, hashes) = daygle_dns_core::totp::generate_recovery_codes();
+    // Revoke other sessions before enabling two-factor, so a failed database
+    // write cannot leave a password-only session alive after a restart.
+    let token = bearer_token(&headers).unwrap_or_default();
+    if let Err(e) = state.sessions.revoke_user_except(&user.username, &token) {
+        return map_err(e);
+    }
     if let Err(e) = store.enable_two_factor(&user.username, step, &hashes) {
         return map_err(e);
     }
-    // Other devices must sign in again, now with a code.
-    let token = bearer_token(&headers).unwrap_or_default();
-    state.sessions.revoke_user_except(&user.username, &token);
     state.logs.info(
         "api",
         format!("user '{}' turned on two-factor login", user.username),
@@ -5074,10 +5082,18 @@ pub async fn reset_user_two_factor(
         }
         Err(e) => return map_err(e),
     }
+    let was_on = match store.get_two_factor(&username) {
+        Ok(t) => t.is_some_and(|t| !t.secret.is_empty()),
+        Err(e) => return map_err(e),
+    };
+    if was_on {
+        if let Err(e) = state.sessions.revoke_user(&username) {
+            return map_err(e);
+        }
+    }
     match store.disable_two_factor(&username) {
         Ok(was_on) => {
             if was_on {
-                state.sessions.revoke_user(&username);
                 state.logs.push(
                     daygle_dns_core::LogLevel::Warn,
                     "api",
@@ -5413,24 +5429,27 @@ pub async fn update_user(
         }
     }
 
+    // Revocation must reach disk before any credential or permission change.
+    if input.password.is_some() || new_role.is_some() || input.enabled.is_some() {
+        if let Err(e) = state.sessions.revoke_user(&username) {
+            return map_err(e);
+        }
+    }
     if let Some(password) = &input.password {
         let password_hash = hash_password(password).await;
         if let Err(e) = store.set_console_user_password(&username, &password_hash) {
             return map_err(e);
         }
-        state.sessions.revoke_user(&username);
     }
     if let Some(role) = new_role {
         if let Err(e) = store.set_console_user_role(&username, role) {
             return map_err(e);
         }
-        state.sessions.revoke_user(&username);
     }
     if let Some(enabled) = input.enabled {
         if let Err(e) = store.set_console_user_enabled(&username, enabled) {
             return map_err(e);
         }
-        state.sessions.revoke_user(&username);
     }
     if input.first_name.is_some() || input.last_name.is_some() || input.email.is_some() {
         let first = input.first_name.as_deref().map(str::trim);
@@ -5463,6 +5482,9 @@ pub async fn delete_user(State(state): State<AppState>, Path(username): Path<Str
     if let Err(resp) = last_admin_guard(store, &username) {
         return resp;
     }
+    if let Err(e) = state.sessions.revoke_user(&username) {
+        return map_err(e);
+    }
     let deleted = match store.delete_console_user(&username) {
         Ok(d) => d,
         Err(e) => return map_err(e),
@@ -5470,7 +5492,6 @@ pub async fn delete_user(State(state): State<AppState>, Path(username): Path<Str
     if !deleted {
         return error_response(StatusCode::NOT_FOUND, "user not found");
     }
-    state.sessions.revoke_user(&username);
     state.logs.push(
         daygle_dns_core::LogLevel::Info,
         "api",

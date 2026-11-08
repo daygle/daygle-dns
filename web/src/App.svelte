@@ -92,6 +92,7 @@ import { loadDisplayPreferences } from './datetime.svelte.js';
   let authed = $state(user !== null);
   // Shown only before the first admin account exists (auth setup).
   let needsSetup = $state(false);
+  let logoutError = $state('');
   // Viewer accounts are read-only: they never see the write-only views.
   const isViewer = $derived(user?.role === 'viewer');
 
@@ -154,9 +155,14 @@ import { loadDisplayPreferences } from './datetime.svelte.js';
   }
 
   async function handleLogout() {
-    await api.logout();
-    user = null;
-    authed = false;
+    logoutError = '';
+    try {
+      await api.logout();
+      user = null;
+      authed = false;
+    } catch (e) {
+      logoutError = `Sign out failed: ${e.message || e}. Please try again.`;
+    }
   }
 
   // Load the date/time display settings once the console is usable.
@@ -291,6 +297,7 @@ import { loadDisplayPreferences } from './datetime.svelte.js';
               <div class="user-role" class:admin={!isViewer}>{isViewer ? 'Read-Only' : 'Administrator'}</div>
             </div>
           </div>
+          {#if logoutError}<div role="alert">{logoutError}</div>{/if}
           <div class="user-actions">
             <button class="secondary" class:current={view === 'account'} onclick={openAccount} title="Your preferences, password, two-factor login and API tokens">Account</button>
             <button class="secondary" onclick={handleLogout} title="End this session">Sign Out</button>

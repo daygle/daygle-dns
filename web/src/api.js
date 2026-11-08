@@ -143,7 +143,7 @@ export const api = {
   resetUserTwoFactor: (username) =>
     request('DELETE', `/users/${encodeURIComponent(username)}/two-factor`),
   logout: async () => {
-    try { await request('POST', '/auth/logout', {}); } catch (_) { /* ignore */ }
+    await request('POST', '/auth/logout', {});
     localStorage.removeItem(USER_KEY);
   },
   clearLocalSession: () => {
