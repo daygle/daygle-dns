@@ -52,7 +52,7 @@ where
 
     /// The cached value for `key`, or the result of `lookup` (which yields
     /// the value and how long to keep it), waited for at most `wait`.
-    /// `None` only when the lookup is still running after `wait`.
+    /// `None` when the lookup times out, fails, or is evicted before completing.
     pub async fn get(
         self: &Arc<Self>,
         key: K,
@@ -76,12 +76,17 @@ where
                     entries.insert(key.clone(), Entry::Pending(rx.clone()));
                     let this = Arc::clone(self);
                     let key = key.clone();
+                    let owner = rx.clone();
                     tokio::spawn(async move {
                         let (value, ttl) = lookup.await;
-                        this.entries
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner())
-                            .insert(key, Entry::Known(value, Instant::now() + ttl));
+                        let mut entries = this.entries.lock().unwrap_or_else(|e| e.into_inner());
+                        // An eviction or explicit insert may have replaced this lookup.
+                        // Only its own placeholder may be filled.
+                        if matches!(entries.get(&key), Some(Entry::Pending(rx)) if rx.same_channel(&owner))
+                        {
+                            entries.insert(key, Entry::Known(value, Instant::now() + ttl));
+                        }
+                        drop(entries);
                         drop(tx);
                     });
                     rx
@@ -211,6 +216,81 @@ mod tests {
 
         ok_tx.send(()).unwrap();
         assert_eq!(newer.await.unwrap(), Some(7));
+    }
+
+    #[tokio::test]
+    async fn evicted_lookup_cannot_overwrite_newer_value_or_exceed_capacity() {
+        let cache = Arc::new(LookupCache::<&str, u32>::new(1));
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (finish_tx, finish_rx) = tokio::sync::oneshot::channel();
+        let old = tokio::spawn({
+            let cache = Arc::clone(&cache);
+            async move {
+                cache
+                    .get("k", Duration::from_secs(5), async move {
+                        started_tx.send(()).unwrap();
+                        finish_rx.await.unwrap();
+                        (1, Duration::from_secs(60))
+                    })
+                    .await
+            }
+        });
+        started_rx.await.unwrap();
+        // Evict the old placeholder, then populate the same key with a newer value.
+        assert_eq!(
+            cache
+                .get("other", Duration::from_secs(1), async {
+                    (2, Duration::from_secs(60))
+                })
+                .await,
+            Some(2)
+        );
+        assert_eq!(
+            cache
+                .get("k", Duration::from_secs(1), async {
+                    (3, Duration::from_secs(60))
+                })
+                .await,
+            Some(3)
+        );
+        finish_tx.send(()).unwrap();
+        assert_eq!(old.await.unwrap(), Some(3));
+        let entries = cache.entries.lock().unwrap();
+        assert_eq!(entries.len(), 1);
+        assert!(matches!(entries.get("k"), Some(Entry::Known(3, _))));
+    }
+
+    #[tokio::test]
+    async fn evicted_lookup_cannot_reinsert_its_key() {
+        let cache = Arc::new(LookupCache::<&str, u32>::new(1));
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (finish_tx, finish_rx) = tokio::sync::oneshot::channel();
+        let old = tokio::spawn({
+            let cache = Arc::clone(&cache);
+            async move {
+                cache
+                    .get("old", Duration::from_secs(5), async move {
+                        started_tx.send(()).unwrap();
+                        finish_rx.await.unwrap();
+                        (1, Duration::from_secs(60))
+                    })
+                    .await
+            }
+        });
+        started_rx.await.unwrap();
+        assert_eq!(
+            cache
+                .get("new", Duration::from_secs(1), async {
+                    (2, Duration::from_secs(60))
+                })
+                .await,
+            Some(2)
+        );
+        finish_tx.send(()).unwrap();
+        assert_eq!(old.await.unwrap(), None);
+        let entries = cache.entries.lock().unwrap();
+        assert_eq!(entries.len(), 1);
+        assert!(matches!(entries.get("new"), Some(Entry::Known(2, _))));
     }
 
     #[tokio::test]

@@ -81,7 +81,7 @@ fn parse_hash(stored: &str) -> Option<(u32, Vec<u8>, Vec<u8>)> {
     }
     let salt = BASE64.decode(parts[2]).ok()?;
     let hash = BASE64.decode(parts[3]).ok()?;
-    if salt.len() < 8 || hash.is_empty() {
+    if salt.len() < 8 || hash.len() != KEY_LEN {
         return None;
     }
     Some((iterations, salt, hash))

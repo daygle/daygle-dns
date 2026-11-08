@@ -58,4 +58,13 @@ fn rejects_malformed() {
     assert!(!is_valid_password_hash("plain"));
     assert!(!is_valid_password_hash("pbkdf2-sha256$x$y$z"));
     assert!(!is_valid_password_hash("pbkdf2-sha256$1$!!!$!!!"));
+    for len in [1, 31, 33, 64] {
+        let hash = format!(
+            "pbkdf2-sha256$1${}${}",
+            BASE64.encode([0u8; 16]),
+            BASE64.encode(vec![0u8; len])
+        );
+        assert!(!is_valid_password_hash(&hash));
+        assert!(!verify_password("password", &hash));
+    }
 }

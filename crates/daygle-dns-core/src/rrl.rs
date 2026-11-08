@@ -178,6 +178,9 @@ impl ResponseRateLimiter {
                 limited: 0,
             }),
         };
+        // Requests sample time before acquiring the lock and can arrive out of
+        // order. Never move the account clock backwards and mint credit twice.
+        let now = now.max(account.last);
         let earned = now.duration_since(account.last).as_secs_f64() * rate;
         account.last = now;
         account.balance = (account.balance + earned).min(rate) - 1.0;
@@ -286,6 +289,20 @@ mod tests {
         assert_eq!(at(1.0 + 4.0), Verdict::Drop);
         // ...and 2 s after that the remaining debt is paid off.
         assert_eq!(at(1.0 + 6.1), Verdict::Send);
+    }
+
+    #[test]
+    fn out_of_order_timestamps_do_not_create_extra_credit() {
+        let rrl = limiter(2, 0);
+        let t = Instant::now();
+        let check = |at| rrl.check_at(ip("192.0.2.1"), ResponseClass::Error, "", at);
+        assert_eq!(check(t), Verdict::Send);
+        assert_eq!(check(t), Verdict::Send);
+        assert_eq!(check(t + Duration::from_secs(1)), Verdict::Send);
+        assert_eq!(check(t + Duration::from_secs(1)), Verdict::Send);
+        // An earlier timestamp must not rewind the account's clock.
+        assert_eq!(check(t), Verdict::Drop);
+        assert_eq!(check(t + Duration::from_secs(1)), Verdict::Drop);
     }
 
     #[test]
