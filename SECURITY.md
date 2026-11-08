@@ -140,9 +140,6 @@ way not described here, report it privately using the channel above.
   `spawn_blocking`, but the remaining handlers are being converted one at a
   time; under load they can queue behind the store's single connection
   mutex.
-- **PROXY v1 headers may mislabel the address family.** `PROXY TCP4
-  <ipv6-address>` is accepted and the address is used as given. Only a
-  trusted proxy's header is read either way.
 - **Console build-time advisories.** `npm audit` reports two low-severity
   advisories in the `deepmerge` chain of `@sveltejs/vite-plugin-svelte`,
   with no upstream fix available; they are not shipped in the bundle.

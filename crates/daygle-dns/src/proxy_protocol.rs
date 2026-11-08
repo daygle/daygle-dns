@@ -71,10 +71,17 @@ fn parse_v1(line: &str) -> std::io::Result<Option<SocketAddr>> {
     }
     match parts.next() {
         Some("UNKNOWN") => Ok(None),
-        Some("TCP4" | "TCP6") => {
+        Some(family @ ("TCP4" | "TCP6")) => {
             let src: IpAddr = parts.next().and_then(|a| a.parse().ok()).ok_or_else(bad)?;
-            let _dst: IpAddr = parts.next().and_then(|a| a.parse().ok()).ok_or_else(bad)?;
+            let dst: IpAddr = parts.next().and_then(|a| a.parse().ok()).ok_or_else(bad)?;
             let port: u16 = parts.next().and_then(|p| p.parse().ok()).ok_or_else(bad)?;
+            let _: u16 = parts.next().and_then(|p| p.parse().ok()).ok_or_else(bad)?;
+            if parts.next().is_some()
+                || (family == "TCP4" && (!src.is_ipv4() || !dst.is_ipv4()))
+                || (family == "TCP6" && (!src.is_ipv6() || !dst.is_ipv6()))
+            {
+                return Err(bad());
+            }
             Ok(Some(SocketAddr::new(src, port)))
         }
         _ => Err(bad()),
@@ -89,8 +96,8 @@ fn parse_v2(command: u8, family: u8, body: &[u8]) -> std::io::Result<Option<Sock
     if command != 1 {
         return Err(std::io::Error::other("unknown PROXY v2 command"));
     }
-    match family >> 4 {
-        1 => {
+    match family {
+        0x11 => {
             let b = body.get(..12).ok_or_else(short)?;
             let ip = Ipv4Addr::new(b[0], b[1], b[2], b[3]);
             Ok(Some(SocketAddr::new(
@@ -98,7 +105,7 @@ fn parse_v2(command: u8, family: u8, body: &[u8]) -> std::io::Result<Option<Sock
                 u16::from_be_bytes([b[8], b[9]]),
             )))
         }
-        2 => {
+        0x21 => {
             let b = body.get(..36).ok_or_else(short)?;
             let ip = Ipv6Addr::from(<[u8; 16]>::try_from(&b[..16]).expect("16 bytes"));
             Ok(Some(SocketAddr::new(
@@ -106,6 +113,8 @@ fn parse_v2(command: u8, family: u8, body: &[u8]) -> std::io::Result<Option<Sock
                 u16::from_be_bytes([b[32], b[33]]),
             )))
         }
+        // Only TCP listeners use this parser; datagram or unspecified
+        // addresses cannot name the peer of a stream connection.
         _ => Ok(None),
     }
 }
@@ -274,6 +283,20 @@ mod tests {
         );
         assert_eq!(parse_v1("PROXY UNKNOWN").unwrap(), None);
         assert!(parse_v1("PROXY TCP4 not-an-address 198.51.100.2 1 2").is_err());
+        for malformed in [
+            "PROXY TCP4 192.0.2.1 198.51.100.2 1",
+            "PROXY TCP4 192.0.2.1 198.51.100.2 1 nope",
+            "PROXY TCP4 192.0.2.1 198.51.100.2 1 2 extra",
+            "PROXY TCP4 2001:db8::1 198.51.100.2 1 2",
+            "PROXY TCP4 192.0.2.1 2001:db8::2 1 2",
+            "PROXY TCP6 192.0.2.1 2001:db8::2 1 2",
+        ] {
+            assert!(parse_v1(malformed).is_err(), "accepted {malformed}");
+        }
+        assert_eq!(
+            parse_v1("PROXY TCP6 2001:db8::1 2001:db8::2 12345 443").unwrap(),
+            Some("[2001:db8::1]:12345".parse().unwrap())
+        );
 
         // v2: `parse_v2` takes the version byte's low nibble (the command),
         // so 0x21 reads as PROXY (1) and 0x20 as LOCAL (0), as `read_header`
@@ -288,6 +311,9 @@ mod tests {
         // LOCAL carries no address.
         assert_eq!(parse_v2(0x20 & 0x0f, 0x00, &[]).unwrap(), None);
         assert!(parse_v2(0x21 & 0x0f, 0x11, &[0u8; 4]).is_err());
+        // A UDP address in a TCP connection cannot identify its peer.
+        assert_eq!(parse_v2(1, 0x12, &body).unwrap(), None);
+        assert_eq!(parse_v2(1, 0x22, &[0; 36]).unwrap(), None);
         // An unknown command is an error, not a silent "no address".
         assert!(parse_v2(2, 0x11, &body).is_err());
     }

@@ -99,6 +99,20 @@ async fn trusted_proxies_name_the_client() {
     let msg = ask(tcp, &v2(0, [0, 0, 0, 0])).await.expect("answer");
     assert_eq!(first_answer(&msg), None);
 
+    // Invalid v1 metadata is rejected, rather than used to attribute a client.
+    for header in [
+        &b"PROXY TCP4 203.0.113.7 127.0.0.1 40000\r\n"[..],
+        &b"PROXY TCP6 203.0.113.7 ::1 40000 53\r\n"[..],
+        &b"PROXY TCP4 203.0.113.7 127.0.0.1 40000 53 extra\r\n"[..],
+    ] {
+        assert!(ask(tcp, header).await.is_none());
+    }
+    // A v2 datagram address does not name a TCP client.
+    let mut datagram = v2(1, [203, 0, 113, 7]);
+    datagram[13] = 0x12;
+    let msg = ask(tcp, &datagram).await.expect("answer");
+    assert_eq!(first_answer(&msg), None);
+
     // A trusted address that sends no header is not served.
     assert!(ask(tcp, b"").await.is_none());
 
