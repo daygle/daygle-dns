@@ -18,6 +18,76 @@ async fn status(client: &reqwest::Client, api: &str, token: &str) -> u16 {
 }
 
 #[tokio::test]
+async fn revoked_session_cannot_create_api_token() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut cfg = base_config(&dir.path().join("daygle-dns.db"));
+    cfg.api.auth_required = true;
+    let server = spawn(cfg).await;
+    let client = reqwest::Client::new();
+    let api = format!("http://{}/api", server.api_addr);
+    let setup: Value = client
+        .post(format!("{api}/auth/setup"))
+        .json(&json!({ "username": "admin", "password": "first-run-secret" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let admin = setup["token"].as_str().unwrap();
+    assert_eq!(
+        client
+            .post(format!("{api}/users"))
+            .bearer_auth(admin)
+            .json(&json!({ "username": "viewer", "password": "viewer-password", "role": "viewer" }))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        200
+    );
+    let login: Value = client
+        .post(format!("{api}/auth/login"))
+        .json(&json!({ "username": "viewer", "password": "viewer-password" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let session = login["token"].as_str().unwrap();
+    assert_eq!(
+        client
+            .patch(format!("{api}/users/viewer"))
+            .bearer_auth(admin)
+            .json(&json!({ "enabled": false }))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        200
+    );
+    assert_eq!(
+        client
+            .post(format!("{api}/auth/tokens"))
+            .bearer_auth(session)
+            .json(&json!({ "name": "late" }))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        401
+    );
+    assert!(server
+        .catalog
+        .store()
+        .list_api_tokens("viewer")
+        .unwrap()
+        .is_empty());
+    shutdown(server).await;
+}
+
+#[tokio::test]
 async fn sessions_persist_and_api_tokens_work() {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("daygle-dns.db");

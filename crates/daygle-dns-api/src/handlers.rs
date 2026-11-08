@@ -4283,6 +4283,7 @@ pub async fn auth_logout(
     secure: Option<axum::Extension<crate::SecureTransport>>,
     headers: axum::http::HeaderMap,
 ) -> Response {
+    let _credential = state.sessions.credential_write.lock().await;
     let token = bearer_token(&headers).unwrap_or_default();
     state.sessions.revoke(&token);
     with_session_cookie(
@@ -4969,6 +4970,7 @@ pub async fn create_api_token(
     headers: axum::http::HeaderMap,
     axum::Json(input): axum::Json<ApiTokenInput>,
 ) -> Response {
+    let _credential = state.sessions.credential_write.lock().await;
     let user = match session_user(&state, &headers) {
         Ok(u) => u,
         Err(r) => return r,
