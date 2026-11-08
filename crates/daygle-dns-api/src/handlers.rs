@@ -4111,6 +4111,10 @@ pub async fn auth_login(
     if input.username.len() > 256 || input.password.len() > MAX_PASSWORD_LEN {
         return error_response(StatusCode::UNAUTHORIZED, "invalid username or password");
     }
+    let revision = state
+        .sessions
+        .credential_revision
+        .load(std::sync::atomic::Ordering::SeqCst);
     let user = match state
         .catalog
         .store()
@@ -4178,6 +4182,23 @@ pub async fn auth_login(
         return error_response(StatusCode::UNAUTHORIZED, "invalid username or password");
     }
     let user = user.expect("checked above");
+    // Credential changes may wait for password-work slots, so release ours
+    // before acquiring the credential lock.
+    drop(_permit);
+    let _credential = state.sessions.credential_write.lock().await;
+    if let Some(resp) = throttled(&state) {
+        return resp;
+    }
+    match state
+        .sessions
+        .login_snapshot_valid(revision, &user, state.catalog.store())
+    {
+        Ok(true) => {}
+        Ok(false) => {
+            return error_response(StatusCode::UNAUTHORIZED, "invalid username or password")
+        }
+        Err(e) => return map_err(e),
+    }
 
     // Two-factor login: the password was right, now the code. A wrong code
     // counts as a failed login, and the throttle is only cleared once both
@@ -4449,6 +4470,8 @@ pub async fn auth_change_password(
     headers: axum::http::HeaderMap,
     axum::Json(input): axum::Json<ChangePasswordInput>,
 ) -> Response {
+    let _credential = state.sessions.credential_write.lock().await;
+    state.sessions.invalidate_login_attempts();
     let token = bearer_token(&headers).unwrap_or_default();
     let session = match state.sessions.verify(&token) {
         Some(s) => s,
@@ -4753,6 +4776,8 @@ pub async fn two_factor_setup(
     headers: axum::http::HeaderMap,
     axum::Json(input): axum::Json<PasswordInput>,
 ) -> Response {
+    let _credential = state.sessions.credential_write.lock().await;
+    state.sessions.invalidate_login_attempts();
     let user = match session_user(&state, &headers) {
         Ok(u) => u,
         Err(r) => return r,
@@ -4791,6 +4816,8 @@ pub async fn two_factor_enable(
     headers: axum::http::HeaderMap,
     axum::Json(input): axum::Json<CodeInput>,
 ) -> Response {
+    let _credential = state.sessions.credential_write.lock().await;
+    state.sessions.invalidate_login_attempts();
     let user = match session_user(&state, &headers) {
         Ok(u) => u,
         Err(r) => return r,
@@ -4831,6 +4858,8 @@ pub async fn two_factor_new_recovery_codes(
     headers: axum::http::HeaderMap,
     axum::Json(input): axum::Json<PasswordInput>,
 ) -> Response {
+    let _credential = state.sessions.credential_write.lock().await;
+    state.sessions.invalidate_login_attempts();
     let user = match session_user(&state, &headers) {
         Ok(u) => u,
         Err(r) => return r,
@@ -4873,6 +4902,8 @@ pub async fn two_factor_disable(
     headers: axum::http::HeaderMap,
     axum::Json(input): axum::Json<PasswordInput>,
 ) -> Response {
+    let _credential = state.sessions.credential_write.lock().await;
+    state.sessions.invalidate_login_attempts();
     let user = match session_user(&state, &headers) {
         Ok(u) => u,
         Err(r) => return r,
@@ -5028,6 +5059,8 @@ pub async fn reset_user_two_factor(
     State(state): State<AppState>,
     Path(username): Path<String>,
 ) -> Response {
+    let _credential = state.sessions.credential_write.lock().await;
+    state.sessions.invalidate_login_attempts();
     let store = state.catalog.store();
     match store.get_console_user(&username) {
         Ok(Some(_)) => {}
@@ -5137,6 +5170,7 @@ pub async fn auth_setup(
     // each create an admin.
     static SETUP_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
     let _setup = SETUP_LOCK.lock().await;
+    let _credential = state.sessions.credential_write.lock().await;
     let config = state.config.load_full();
     let existing = match state.catalog.store().list_console_users() {
         Ok(users) => users,
@@ -5168,6 +5202,7 @@ pub async fn auth_setup(
     }
 
     let password_hash = hash_password(&input.password).await;
+    state.sessions.invalidate_login_attempts();
     if let Err(e) = state.catalog.store().create_console_user(
         &username,
         &daygle_dns_authoritative::ConsoleUserInput {
@@ -5279,6 +5314,8 @@ pub async fn create_user(
     State(state): State<AppState>,
     axum::Json(input): axum::Json<CreateUserInput>,
 ) -> Response {
+    let _credential = state.sessions.credential_write.lock().await;
+    state.sessions.invalidate_login_attempts();
     let username = input.username.trim().to_string();
     if let Some(resp) = validate_username_password(&username, &input.password) {
         return resp;
@@ -5340,6 +5377,8 @@ pub async fn update_user(
     Path(username): Path<String>,
     axum::Json(input): axum::Json<UpdateUserInput>,
 ) -> Response {
+    let _credential = state.sessions.credential_write.lock().await;
+    state.sessions.invalidate_login_attempts();
     let username = username.trim().to_string();
     let store = state.catalog.store();
     let existing = match store.get_console_user(&username) {
@@ -5377,16 +5416,19 @@ pub async fn update_user(
         if let Err(e) = store.set_console_user_password(&username, &password_hash) {
             return map_err(e);
         }
+        state.sessions.revoke_user(&username);
     }
     if let Some(role) = new_role {
         if let Err(e) = store.set_console_user_role(&username, role) {
             return map_err(e);
         }
+        state.sessions.revoke_user(&username);
     }
     if let Some(enabled) = input.enabled {
         if let Err(e) = store.set_console_user_enabled(&username, enabled) {
             return map_err(e);
         }
+        state.sessions.revoke_user(&username);
     }
     if input.first_name.is_some() || input.last_name.is_some() || input.email.is_some() {
         let first = input.first_name.as_deref().map(str::trim);
@@ -5397,11 +5439,6 @@ pub async fn update_user(
         }
     }
 
-    // The stored credentials/permissions changed: kill the account's live
-    // sessions so the change takes effect immediately.
-    if input.password.is_some() || new_role.is_some() || input.enabled.is_some() {
-        state.sessions.revoke_user(&username);
-    }
     let user = match store.get_console_user(&username) {
         Ok(u) => u.expect("existence checked above"),
         Err(e) => return map_err(e),
@@ -5417,6 +5454,8 @@ pub async fn update_user(
 /// `DELETE /api/users/{username}` - remove a console account. The last
 /// enabled admin cannot be deleted.
 pub async fn delete_user(State(state): State<AppState>, Path(username): Path<String>) -> Response {
+    let _credential = state.sessions.credential_write.lock().await;
+    state.sessions.invalidate_login_attempts();
     let username = username.trim().to_string();
     let store = state.catalog.store();
     if let Err(resp) = last_admin_guard(store, &username) {

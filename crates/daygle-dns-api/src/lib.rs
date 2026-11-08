@@ -128,6 +128,9 @@ pub struct Session {
 #[derive(Default)]
 pub struct SessionStore {
     sessions: Mutex<HashMap<String, Session>>,
+    /// Serializes credential changes with the final stage of session issuance.
+    credential_write: tokio::sync::Mutex<()>,
+    credential_revision: std::sync::atomic::AtomicU64,
     store: Option<daygle_dns_authoritative::ZoneStore>,
 }
 
@@ -142,6 +145,38 @@ fn from_unix(secs: i64) -> SystemTime {
 }
 
 impl SessionStore {
+    /// Invalidate password checks started before a credential mutation.
+    /// The caller holds `credential_write` until the mutation is complete.
+    fn invalidate_login_attempts(&self) {
+        self.credential_revision
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Revalidate the account after password verification while holding
+    /// `credential_write`, before checking two-factor and issuing a session.
+    fn login_snapshot_valid(
+        &self,
+        revision: u64,
+        user: &daygle_dns_authoritative::store::ConsoleUser,
+        store: &daygle_dns_authoritative::ZoneStore,
+    ) -> daygle_dns_core::Result<bool> {
+        if revision
+            != self
+                .credential_revision
+                .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Ok(false);
+        }
+        Ok(store
+            .get_console_user(&user.username)?
+            .is_some_and(|current| {
+                current.enabled
+                    && current.password_hash == user.password_hash
+                    && current.role == user.role
+                    && current.created_at == user.created_at
+            }))
+    }
+
     /// A store whose sessions live in the database too: the unexpired ones
     /// saved by an earlier run are loaded.
     pub fn with_store(store: daygle_dns_authoritative::ZoneStore) -> Self {
@@ -167,6 +202,8 @@ impl SessionStore {
             .collect();
         Self {
             sessions: Mutex::new(sessions),
+            credential_write: tokio::sync::Mutex::new(()),
+            credential_revision: std::sync::atomic::AtomicU64::new(0),
             store: Some(store),
         }
     }
@@ -1079,6 +1116,55 @@ async fn require_auth(
     }
 
     (StatusCode::UNAUTHORIZED, "missing or invalid bearer token").into_response()
+}
+
+#[cfg(test)]
+mod credential_tests {
+    use super::*;
+    use daygle_dns_authoritative::ConsoleUserInput;
+    use daygle_dns_core::config::Role;
+    use std::sync::atomic::Ordering;
+
+    #[tokio::test]
+    async fn credential_change_invalidates_in_flight_login_snapshot() {
+        let db = daygle_dns_authoritative::ZoneStore::open(":memory:").unwrap();
+        db.create_console_user(
+            "alice",
+            &ConsoleUserInput {
+                password_hash: "hash".into(),
+                role: Role::Viewer,
+                enabled: true,
+                ..ConsoleUserInput::default()
+            },
+        )
+        .unwrap();
+        let sessions = Arc::new(SessionStore::with_store(db.clone()));
+        let user = db.get_console_user("alice").unwrap().unwrap();
+        let revision = sessions.credential_revision.load(Ordering::SeqCst);
+        let token = sessions.create("alice", Role::Viewer, Duration::from_secs(60));
+        assert!(sessions.login_snapshot_valid(revision, &user, &db).unwrap());
+
+        // A login has verified its password and is waiting for a concurrent
+        // mutation to finish. Even a reverted change invalidates its snapshot.
+        let guard = sessions.credential_write.lock().await;
+        let waiter = tokio::spawn({
+            let sessions = Arc::clone(&sessions);
+            let user = user.clone();
+            let db = db.clone();
+            async move {
+                let _guard = sessions.credential_write.lock().await;
+                sessions.login_snapshot_valid(revision, &user, &db).unwrap()
+            }
+        });
+        sessions.invalidate_login_attempts();
+        db.set_console_user_enabled("alice", false).unwrap();
+        sessions.revoke_user("alice");
+        db.set_console_user_enabled("alice", true).unwrap();
+        drop(guard);
+        assert!(!waiter.await.unwrap());
+        assert!(sessions.verify(&token).is_none());
+        assert!(SessionStore::with_store(db).verify(&token).is_none());
+    }
 }
 
 #[cfg(test)]
