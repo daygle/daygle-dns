@@ -2797,15 +2797,7 @@ impl ZoneStore {
         let conn = self.lock_conn()?;
         conn.execute(
             "INSERT INTO console_users (username, password_hash, role, enabled, first_name, last_name, email, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
-             ON CONFLICT(username) DO UPDATE SET
-                password_hash = excluded.password_hash,
-                role = excluded.role,
-                enabled = excluded.enabled,
-                first_name = excluded.first_name,
-                last_name = excluded.last_name,
-                email = excluded.email,
-                created_at = excluded.created_at",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 user.username,
                 user.password_hash,
@@ -2816,7 +2808,15 @@ impl ZoneStore {
                 user.email,
                 user.created_at
             ],
-        )?;
+        )
+        .map_err(|e| match e {
+            rusqlite::Error::SqliteFailure(ref failure, _)
+                if failure.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_PRIMARYKEY =>
+            {
+                DaygleError::AlreadyExists(format!("user '{username}'"))
+            }
+            other => other.into(),
+        })?;
         Ok(user)
     }
 
@@ -6575,6 +6575,25 @@ mod tests {
             email: String::new(),
             password_hash: "not-a-real-hash".to_string(),
         }
+    }
+
+    #[test]
+    fn duplicate_console_user_does_not_replace_existing_account() {
+        let s = store();
+        let original = s
+            .create_console_user("alice", &console_viewer("alice"))
+            .unwrap();
+        let replacement = ConsoleUserInput {
+            password_hash: "different-hash".to_string(),
+            ..console_admin("alice")
+        };
+        assert!(matches!(
+            s.create_console_user("alice", &replacement),
+            Err(DaygleError::AlreadyExists(_))
+        ));
+        let saved = s.get_console_user("alice").unwrap().unwrap();
+        assert_eq!(saved.password_hash, original.password_hash);
+        assert_eq!(saved.role, Role::Viewer);
     }
 
     /// The last-enabled-admin store methods used to self-deadlock: they called
