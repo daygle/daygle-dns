@@ -243,21 +243,30 @@ impl SessionStore {
                 expires_at: unix(session.expires_at),
             })
         });
-        self.sessions.lock().insert(hash, session);
+        let mut sessions = self.sessions.lock();
+        prune_expired(&mut sessions);
+        sessions.insert(hash, session);
         token
     }
 
     /// Return the login session for a token if it exists and is unexpired.
-    /// Expired sessions are pruned lazily on access.
+    /// An expired session found here is dropped; the rest are pruned when a
+    /// new one is created, so this per-request lookup stays O(1) instead of
+    /// scanning every session on every authenticated request.
     pub fn verify(&self, token: &str) -> Option<Session> {
         if token.is_empty() {
             return None;
         }
+        let hash = daygle_dns_core::auth::hash_token(token);
         let mut sessions = self.sessions.lock();
-        prune_expired(&mut sessions);
-        sessions
-            .get(&daygle_dns_core::auth::hash_token(token))
-            .cloned()
+        match sessions.get(&hash) {
+            Some(session) if session.expires_at > SystemTime::now() => Some(session.clone()),
+            Some(_) => {
+                sessions.remove(&hash);
+                None
+            }
+            None => None,
+        }
     }
 
     /// Who presents `token`: a login session, or else a personal API token
@@ -399,10 +408,20 @@ pub fn session_cookie(token: Option<&str>, max_age_secs: u64, secure: bool) -> S
 
 /// A new personal API token (256 random bits).
 pub fn new_api_token() -> String {
-    let random: String = (0..32)
-        .map(|_| format!("{:02x}", rand::random::<u8>()))
-        .collect();
-    format!("{API_TOKEN_PREFIX}{random}")
+    format!("{API_TOKEN_PREFIX}{}", random_hex::<32>())
+}
+
+/// `N` random bytes (rand's thread-local CSPRNG, seeded from the OS) as
+/// lowercase hex.
+fn random_hex<const N: usize>() -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let bytes: [u8; N] = rand::random();
+    let mut out = String::with_capacity(N * 2);
+    for byte in bytes {
+        out.push(char::from(HEX[usize::from(byte >> 4)]));
+        out.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    out
 }
 
 fn prune_expired(sessions: &mut HashMap<String, Session>) {
@@ -455,7 +474,7 @@ impl LoginThrottle {
                 }
             }
         }
-        let entry = failures.entry(ip).or_insert((0, Instant::now()));
+        let entry = failures.entry(ip).or_insert_with(|| (0, Instant::now()));
         if entry.1.elapsed() >= Self::WINDOW {
             *entry = (0, Instant::now());
         }
@@ -468,12 +487,11 @@ impl LoginThrottle {
     }
 }
 
-/// Generate a 128-bit random hex token (from OS entropy via rand's
-/// thread-local generator; collision probability is negligible).
+/// A new login-session token: 256 random bits as hex, matching the
+/// strength `daygle_dns_core::auth::hash_token` documents for the tokens it
+/// stores (sessions were 128 bits before; both lengths verify the same way).
 fn new_token() -> String {
-    (0..16)
-        .map(|_| format!("{:02x}", rand::random::<u8>()))
-        .collect()
+    random_hex::<32>()
 }
 
 /// Callback that applies a saved configuration to server-side state.
@@ -549,7 +567,6 @@ pub struct AppState {
     pub accounts: Arc<daygle_dns_policy::identity::AccountDirectory>,
 }
 
-/// Build the API router (REST endpoints plus the embedded GUI).
 /// Moves the web console's listeners to new [`WebSettings`]: binds new
 /// ports and loads the certificate first, and on any failure changes
 /// nothing and returns the reason.
@@ -564,6 +581,7 @@ pub type WebApplyFn = Arc<
         + Sync,
 >;
 
+/// Build the API router (REST endpoints plus the embedded GUI).
 pub fn router(state: AppState) -> Router {
     let api = Router::new()
         .route("/status", get(handlers::status))
@@ -809,7 +827,7 @@ pub fn router(state: AppState) -> Router {
         state.clone(),
         forwarded_client,
     ))
-    .layer(cors_layer(state.config.clone()))
+    .layer(cors_layer(state.config))
     .layer(middleware::map_response(security_headers))
 }
 

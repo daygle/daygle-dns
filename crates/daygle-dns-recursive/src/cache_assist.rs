@@ -546,15 +546,11 @@ impl CacheAssistant {
         );
         Some(Lookup::new_with_deadline(
             snapshot.query.clone(),
-            snapshot
-                .answers
-                .iter()
-                .map(|r| {
-                    let mut rec = r.clone();
-                    rec.ttl = ttl;
-                    rec
-                })
-                .collect::<Vec<_>>(),
+            snapshot.answers.iter().map(|r| {
+                let mut rec = r.clone();
+                rec.ttl = ttl;
+                rec
+            }),
             snapshot.valid_until,
         ))
     }

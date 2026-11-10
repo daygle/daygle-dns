@@ -2479,11 +2479,10 @@ impl DnsDispatcher {
         {
             if let Some(ip) = crate::response_filter::local_address(answers) {
                 let group = filters.local_addresses.map(str::to_string);
-                let by = group
-                    .as_ref()
-                    .map_or("rebinding protection".to_string(), |g| {
-                        format!("group '{g}'")
-                    });
+                let by = group.as_ref().map_or_else(
+                    || "rebinding protection".to_string(),
+                    |g| format!("group '{g}'"),
+                );
                 return Some(block_reason(
                     source::LOCAL_ADDRESS,
                     group,
@@ -3067,7 +3066,7 @@ impl DnsDispatcher {
             records
                 .into_iter()
                 .filter(|r| r.record_type() == rtype)
-                .map(|r| (r.ttl.min(ttl), r.data.clone()))
+                .map(|r| (r.ttl.min(ttl), r.data))
                 .collect()
         };
         let hosted = Name::from_utf8(&target)

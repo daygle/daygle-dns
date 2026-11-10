@@ -445,7 +445,7 @@ fn check_update_service() -> Option<PreflightCheck> {
             ok: false,
             message: "The systemd update service is not provisioned (daygle-dns-update.path is missing).".to_string(),
             fix: Some("Run the installer - it provisions the systemd path unit whose root oneshot performs the privileged apply step (no sudo required).".to_string()),
-            fix_commands: Some(vec![install_command.clone()]),
+            fix_commands: Some(vec![install_command]),
         });
     }
 

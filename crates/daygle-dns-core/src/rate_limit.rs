@@ -124,6 +124,10 @@ impl RateLimiter {
     }
 
     fn check_client_scaled(&self, client: IpAddr, factor: u32) -> bool {
+        // An IPv4-mapped IPv6 source (a dual-stack socket) must count as its
+        // IPv4 address: masked to the IPv6 prefix below, every IPv4 client
+        // would share the single `::ffff:0:0` bucket.
+        let client = client.to_canonical();
         let mut inner = self.inner.lock();
         if !inner.enabled {
             return true;
@@ -221,7 +225,7 @@ fn check_bucket(
     window: Duration,
     limit: u32,
 ) -> bool {
-    let bucket = entry.or_insert(Bucket {
+    let bucket = entry.or_insert_with(|| Bucket {
         window_start: Instant::now(),
         count: 0,
     });
@@ -278,6 +282,22 @@ mod tests {
             exempt_loopback: true,
             client_ipv6_prefix: 56,
         }
+    }
+
+    #[test]
+    fn ipv4_mapped_clients_get_their_own_ipv4_bucket() {
+        // Limit 3 per client (see `settings`).
+        let limiter = RateLimiter::new(&settings(true));
+        let a: IpAddr = "::ffff:192.0.2.7".parse().unwrap();
+        let b: IpAddr = "::ffff:198.51.100.9".parse().unwrap();
+        for _ in 0..3 {
+            assert!(limiter.check_client(a));
+        }
+        assert!(!limiter.check_client(a));
+        // The same client seen as plain IPv4 shares the mapped bucket...
+        assert!(!limiter.check_client("192.0.2.7".parse().unwrap()));
+        // ...and an unrelated IPv4 client is not swept into it.
+        assert!(limiter.check_client(b));
     }
 
     #[test]

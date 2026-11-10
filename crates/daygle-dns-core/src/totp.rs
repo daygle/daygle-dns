@@ -9,7 +9,6 @@
 use data_encoding::BASE32_NOPAD;
 use hmac::{Hmac, KeyInit, Mac};
 use sha1::Sha1;
-use sha2::{Digest, Sha256};
 
 use crate::auth::constant_time_eq;
 
@@ -98,13 +97,19 @@ pub fn code_for(secret: &str, unix_secs: u64) -> Option<String> {
 /// their hashes for storage.
 pub fn generate_recovery_codes() -> (Vec<String>, Vec<String>) {
     const ALPHABET: &[u8] = b"abcdefghjkmnpqrstuvwxyz23456789";
+    // Bytes at or above the largest multiple of the alphabet size are
+    // redrawn, so every character is equally likely (a plain `% 31` favours
+    // the first 8 letters).
+    const LIMIT: u8 = (256 / ALPHABET.len() * ALPHABET.len()) as u8;
+    let random_char = || loop {
+        let [b] = random_bytes::<1>();
+        if b < LIMIT {
+            return ALPHABET[usize::from(b) % ALPHABET.len()] as char;
+        }
+    };
     let codes: Vec<String> = (0..RECOVERY_CODES)
         .map(|_| {
-            let bytes = random_bytes::<8>();
-            let chars: String = bytes
-                .iter()
-                .map(|b| ALPHABET[*b as usize % ALPHABET.len()] as char)
-                .collect();
+            let chars: String = (0..8).map(|_| random_char()).collect();
             format!("{}-{}", &chars[..4], &chars[4..])
         })
         .collect();
@@ -121,14 +126,17 @@ pub fn hash_recovery_code(code: &str) -> String {
         .filter(|c| c.is_ascii_alphanumeric())
         .map(|c| c.to_ascii_lowercase())
         .collect();
-    let digest = Sha256::digest(normalized.as_bytes());
-    digest.iter().map(|b| format!("{b:02x}")).collect()
+    // Same storage encoding as session tokens: SHA-256, lowercase hex.
+    crate::auth::hash_token(&normalized)
 }
 
-/// Whether `code` looks like a recovery code rather than a 6-digit one.
+/// Whether `code` looks like a recovery code (8 characters) rather than a
+/// 6-digit authenticator code. The length alone tells them apart: requiring
+/// a letter as well would turn away the rare recovery code drawn entirely
+/// from the alphabet's digits, sending it to the TOTP check, which can never
+/// accept 8 digits.
 pub fn is_recovery_code(code: &str) -> bool {
     code.chars().filter(|c| c.is_ascii_alphanumeric()).count() == 8
-        && code.chars().any(|c| c.is_ascii_alphabetic())
 }
 
 #[cfg(test)]
@@ -183,6 +191,14 @@ mod tests {
             hashes[0]
         );
         assert!(!is_recovery_code("123456"));
+        assert!(!is_recovery_code("123 456"));
+        // A code that happens to hold only digits is still a recovery code.
+        assert!(is_recovery_code("2345-6789"));
+        // The storage hash is the token hash of the normalized code.
+        assert_eq!(
+            hash_recovery_code("ABCD-2345"),
+            crate::auth::hash_token("abcd2345")
+        );
         assert!(otpauth_uri("Daygle DNS", "glen", "ABC")
             .starts_with("otpauth://totp/Daygle+DNS:glen?secret=ABC&issuer=Daygle+DNS"));
     }

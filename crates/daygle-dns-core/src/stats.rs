@@ -12,6 +12,7 @@
 //! so memory stays flat regardless of traffic.
 
 use std::collections::HashMap;
+use std::hash::Hash;
 use std::net::IpAddr;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -100,7 +101,10 @@ pub struct TopEntry {
 
 struct Inner {
     buckets: Mutex<Vec<Bucket>>,
-    clients: Mutex<HashMap<String, u64>>,
+    /// Keyed by address, not its text: formatting the address for every
+    /// query was a heap allocation on the DNS hot path. Rendered to text
+    /// only when the dashboard reads the table.
+    clients: Mutex<HashMap<IpAddr, u64>>,
     domains: Mutex<HashMap<String, u64>>,
     blocked_domains: Mutex<HashMap<String, u64>>,
 }
@@ -155,7 +159,7 @@ impl QueryStats {
                 .count(outcome);
         }
 
-        bump(&self.inner.clients, &client.to_string());
+        bump(&self.inner.clients, &client);
         bump(&self.inner.domains, qname);
         if matches!(outcome, Outcome::Blocked) {
             bump(&self.inner.blocked_domains, qname);
@@ -220,7 +224,11 @@ fn epoch_minutes() -> u64 {
         .unwrap_or(0)
 }
 
-fn bump(map: &Mutex<HashMap<String, u64>>, key: &str) {
+fn bump<K, Q>(map: &Mutex<HashMap<K, u64>>, key: &Q)
+where
+    K: std::borrow::Borrow<Q> + Hash + Eq + Ord,
+    Q: ToOwned<Owned = K> + Hash + Eq + ?Sized,
+{
     let mut m = map.lock();
     // Hot path: an already-tracked key needs no owned-key allocation.
     if let Some(count) = m.get_mut(key) {
@@ -230,15 +238,15 @@ fn bump(map: &Mutex<HashMap<String, u64>>, key: &str) {
     if m.len() >= MAX_TOP_ENTRIES {
         prune(&mut m);
     }
-    m.insert(key.to_string(), 1);
+    m.insert(key.to_owned(), 1);
 }
 
-fn top(map: &Mutex<HashMap<String, u64>>, n: usize) -> Vec<TopEntry> {
+fn top<K: ToString>(map: &Mutex<HashMap<K, u64>>, n: usize) -> Vec<TopEntry> {
     let m = map.lock();
     let mut rows: Vec<TopEntry> = m
         .iter()
         .map(|(k, c)| TopEntry {
-            key: k.clone(),
+            key: k.to_string(),
             count: *c,
         })
         .collect();
@@ -249,13 +257,10 @@ fn top(map: &Mutex<HashMap<String, u64>>, n: usize) -> Vec<TopEntry> {
 
 /// Keep only the [`TOP_KEEP`] highest-count keys (deterministic tiebreak by
 /// key) so the map stays bounded without losing the hot entries.
-fn prune(map: &mut HashMap<String, u64>) {
-    let mut rows: Vec<(String, u64)> = map.iter().map(|(k, c)| (k.clone(), *c)).collect();
+fn prune<K: Hash + Eq + Ord>(map: &mut HashMap<K, u64>) {
+    let mut rows: Vec<(K, u64)> = map.drain().collect();
     rows.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
-    map.clear();
-    for (k, c) in rows.into_iter().take(TOP_KEEP) {
-        map.insert(k, c);
-    }
+    map.extend(rows.into_iter().take(TOP_KEEP));
 }
 
 #[cfg(test)]

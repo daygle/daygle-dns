@@ -277,7 +277,7 @@ pub fn sign_response(
     // Append the TSIG record to the response wire form. Re-encoding through
     // Message would drop the signature, so emit the body and the TSIG record
     // with the additional-count patched in the header.
-    let mut out = body.clone();
+    let mut out = body;
     let tsig_bytes = tsig
         .to_bytes()
         .map_err(|e| format!("tsig record encoding failed: {e}"))?;

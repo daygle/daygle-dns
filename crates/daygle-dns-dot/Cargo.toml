@@ -8,7 +8,6 @@ description = "DNS over TLS (DoT) using rustls"
 
 [dependencies]
 daygle-dns-core = { path = "../daygle-dns-core" }
-hickory-proto.workspace = true
 hickory-server.workspace = true
 tokio.workspace = true
 rustls.workspace = true

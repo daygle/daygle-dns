@@ -303,7 +303,7 @@ fn main() {
         )
         .init();
 
-    let config_path = args.config.clone();
+    let config_path = args.config;
     if let Err(e) = run(config, config_path) {
         eprintln!("daygle-dns: fatal error: {e}");
         std::process::exit(1);

@@ -26,7 +26,7 @@ fn variants(domain: &str) -> Vec<String> {
     if !domain.starts_with("www.") {
         out.insert(format!("www.{plain}"));
     }
-    out.insert(plain.to_string());
+    out.insert(plain.clone());
     // Hyphen-joined: matches how a browser strips dots, e.g. www-example-com.
     out.insert(plain.replace('.', "-"));
     // Space-joined tokens: matches heuristic-style label splitting.
