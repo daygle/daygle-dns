@@ -304,8 +304,9 @@ Opt-in via `[ai] enabled = true`; the DNS hot path nevers runs a model.
 
 - **Login.** `api.users` accounts are verified with PBKDF2-HMAC-SHA256
   (`daygle-dns-core/src/auth.rs`); generate hashes with
-  `daygle-dns hash-password`. Successful logins mint a 128-bit random session
-  token held in memory with a TTL (`api.session_ttl_secs`); the token is the
+  `daygle-dns hash-password`. Successful logins mint a 256-bit random session
+  token with a TTL (`api.session_ttl_secs`), kept in memory and saved to the
+  database as its SHA-256 (so sessions survive a restart); the token is the
   API bearer credential. Failed logins are logged; a dummy-hash verification
   keeps the response time constant so usernames cannot be enumerated.
 - **Roles.** Sessions carry the account's role. `viewer` sessions may read

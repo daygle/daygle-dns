@@ -647,7 +647,7 @@ impl LocalRoot {
                     MessageType::Response,
                     query.metadata.op_code,
                 );
-                response.queries = query.queries.clone();
+                response.queries = query.queries;
                 response.metadata.response_code = ResponseCode::ServFail;
                 response
             }

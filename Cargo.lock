@@ -773,7 +773,6 @@ name = "daygle-dns-dot"
 version = "1.0.0"
 dependencies = [
  "daygle-dns-core",
- "hickory-proto",
  "hickory-server",
  "rcgen",
  "rustls",

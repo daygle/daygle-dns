@@ -50,20 +50,6 @@ export function duration(secs) {
   return `${secs} Second${secs === 1 ? '' : 's'}`;
 }
 
-// What someone typed or pasted as a domain to exempt ("https://WWW.Example.com/x",
-// "*.example.com.", "example.com:443") as the bare name the server expects,
-// or null when it is not a valid domain name.
-export function cleanDomain(input) {
-  let d = (input || '').trim().toLowerCase();
-  d = d.replace(/^[a-z][a-z0-9+.-]*:\/\//, ''); // scheme
-  d = d.split(/[/?#]/)[0]; // path, query, fragment
-  d = d.replace(/:\d+$/, ''); // port
-  d = d.replace(/^\*\./, '').replace(/\.+$/, '');
-  const label = /^[a-z0-9_]([a-z0-9_-]{0,61}[a-z0-9_])?$/;
-  if (!d || d.length > 253 || !d.split('.').every((l) => label.test(l))) return null;
-  return d;
-}
-
 // Scanner row statuses as the console names them.
 export const STATUS_LABELS = {
   pending: 'Waiting',

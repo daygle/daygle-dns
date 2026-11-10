@@ -54,20 +54,13 @@ default = ["verifier-onnx"]
 verifier-onnx = ["daygle-dns-api/verifier-onnx", "daygle-dns-ml/verifier-onnx"]
 
 [dev-dependencies]
+# Normal dependencies above are available to tests too; only test-only
+# crates are listed here.
 rusqlite.workspace = true
 sha2.workspace = true
 tempfile.workspace = true
-chrono.workspace = true
 toml.workspace = true
-rustls.workspace = true
-tokio-rustls.workspace = true
 rustls-pki-types.workspace = true
-tokio.workspace = true
-hickory-proto.workspace = true
-hickory-server.workspace = true
-daygle-dns-core = { path = "../daygle-dns-core" }
-daygle-dns-authoritative = { path = "../daygle-dns-authoritative" }
-daygle-dns-policy = { path = "../daygle-dns-policy" }
 reqwest.workspace = true
 serde_json.workspace = true
 rcgen.workspace = true

@@ -130,7 +130,7 @@ impl AiEngine {
             settings_swap.clone(),
             snapshot.clone(),
             categories.clone(),
-            logs.clone(),
+            logs,
         );
         let plugin = plugin::AiBlockPlugin::new(
             snapshot.clone(),

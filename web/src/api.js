@@ -82,10 +82,6 @@ export function formatApiError(e) {
   }
 }
 
-export function configOk(cfg) {
-  return cfg != null && typeof cfg === 'object';
-}
-
 // Render a seconds count as a compact duration (e.g. 7325 -> "2h 2m 5s",
 // 65 -> "1m 5s", 3600 -> "1h"). Days are included once the server has been
 // up for more than a day.

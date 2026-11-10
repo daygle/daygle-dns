@@ -259,17 +259,33 @@ fn file_tail(path: &Path, max: usize) -> String {
 /// (Rust, a C compiler) are installed by the installer itself when missing,
 /// so they are deliberately not gates.
 fn tools_present() -> bool {
-    let have = |tool: &str| {
-        std::process::Command::new("sh")
-            .arg("-c")
-            .arg(format!("command -v {tool}"))
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false)
-    };
+    let have = |tool: &str| on_path(tool, std::env::var_os("PATH").as_deref());
     have("sh") && (have("curl") || have("wget") || have("git"))
+}
+
+/// Whether an executable file named `tool` is in one of `path`'s
+/// directories. Searched directly rather than through `sh -c "command -v
+/// ..."`: no shell, so no command string is ever built from a name (and
+/// checking for `sh` no longer needs `sh` itself).
+fn on_path(tool: &str, path: Option<&std::ffi::OsStr>) -> bool {
+    let Some(path) = path else {
+        return false;
+    };
+    std::env::split_paths(path).any(|dir| {
+        let candidate = dir.join(tool);
+        let Ok(meta) = std::fs::metadata(&candidate) else {
+            return false;
+        };
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            meta.is_file() && meta.permissions().mode() & 0o111 != 0
+        }
+        #[cfg(not(unix))]
+        {
+            meta.is_file()
+        }
+    })
 }
 
 /// Whether the updater helper process `pid` is still alive.
@@ -445,7 +461,7 @@ fn check_update_service() -> Option<PreflightCheck> {
             ok: false,
             message: "The systemd update service is not provisioned (daygle-dns-update.path is missing).".to_string(),
             fix: Some("Run the installer - it provisions the systemd path unit whose root oneshot performs the privileged apply step (no sudo required).".to_string()),
-            fix_commands: Some(vec![install_command.clone()]),
+            fix_commands: Some(vec![install_command]),
         });
     }
 
@@ -2307,6 +2323,25 @@ mod tests {
                 .unwrap_or_else(|e| panic!("{script}: {e}: {json} (sh stderr: {stderr})"));
             assert_eq!(st.message, "[x]  building", "{script}");
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tools_are_found_on_path_only_when_executable() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("daygle-on-path-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let tool = dir.join("fetcher");
+        std::fs::write(&tool, "#!/bin/sh\n").unwrap();
+        let path =
+            std::env::join_paths(["/nonexistent-daygle-dir".as_ref(), dir.as_path()]).unwrap();
+        std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(!on_path("fetcher", Some(&path)), "not executable");
+        std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(on_path("fetcher", Some(&path)));
+        assert!(!on_path("missing", Some(&path)));
+        assert!(!on_path("fetcher", None));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
