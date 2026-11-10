@@ -12,7 +12,8 @@
 //! PBKDF2-HMAC-SHA256) is used when generating new hashes. Verification
 //! accepts any iteration count recorded in the stored hash, so existing hashes
 //! made with a lower count (earlier versions used 210_000) keep working; they
-//! pick up the new count when the password is next changed.
+//! are re-hashed at the new count on the account's next successful console
+//! login (see [`needs_rehash`]), or when the password is changed.
 
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
@@ -63,6 +64,14 @@ pub fn verify_password(password: &str, stored: &str) -> bool {
     };
     let actual = pbkdf2_sha256(password.as_bytes(), &salt, iterations, expected.len());
     constant_time_eq(&actual, &expected)
+}
+
+/// Whether `stored` was made with fewer PBKDF2 iterations than
+/// [`DEFAULT_PBKDF2_ITERATIONS`], so it should be replaced with a fresh hash
+/// the next time the password is known (a successful login). A hash that
+/// does not parse is left alone: it cannot verify a login anyway.
+pub fn needs_rehash(stored: &str) -> bool {
+    parse_hash(stored).is_some_and(|(iterations, _, _)| iterations < DEFAULT_PBKDF2_ITERATIONS)
 }
 
 /// Whether `stored` looks like a well-formed hash of this module's format.
