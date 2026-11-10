@@ -142,11 +142,21 @@ async fn page(
         [
             (header::CONTENT_TYPE, "text/html; charset=utf-8"),
             (header::CACHE_CONTROL, "no-store"),
+            // The page is self-contained: no script, no outside resources,
+            // and it is never framed (as for the console's own headers).
+            (header::CONTENT_SECURITY_POLICY, BLOCK_PAGE_CSP),
+            (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+            (header::X_FRAME_OPTIONS, "DENY"),
+            (header::REFERRER_POLICY, "no-referrer"),
         ],
         html,
     )
         .into_response()
 }
+
+/// Only the page's own inline `<style>` is allowed to apply.
+const BLOCK_PAGE_CSP: &str =
+    "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 
 /// `example.com:8080` -> `example.com`; `[2001:db8::1]:80` -> `2001:db8::1`.
 fn strip_port(host: &str) -> &str {
