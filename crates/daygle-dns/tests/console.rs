@@ -104,6 +104,40 @@ fn api_url(addr: std::net::SocketAddr, path: &str) -> String {
 
 /// Probe a free TCP port (bind + drop). Used so the settings test's config
 /// passes full validation, mirroring a production-loaded config.
+/// An account whose hash predates today's PBKDF2 iteration count is
+/// re-hashed at the default on its next successful login, without signing
+/// out its sessions; a wrong password leaves the hash alone.
+#[tokio::test]
+async fn login_upgrades_a_weak_password_hash() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = spawn_with_roles(&dir).await; // 100-iteration hashes
+    let store = server.catalog.store();
+    let stored = |name: &str| store.get_console_user(name).unwrap().unwrap().password_hash;
+    let before = stored("auditor");
+    assert!(daygle_dns_core::auth::needs_rehash(&before));
+
+    assert_eq!(login_status(server.api_addr, "auditor", "wrong").await, 401);
+    assert_eq!(stored("auditor"), before, "a failed login must not rehash");
+
+    let (token, _) = login(server.api_addr, "auditor", "watch").await;
+    let after = stored("auditor");
+    assert_ne!(after, before);
+    assert!(!daygle_dns_core::auth::needs_rehash(&after));
+    assert!(daygle_dns_core::auth::verify_password("watch", &after));
+
+    // The session from that login is still good, and the password still works.
+    let resp = reqwest::Client::new()
+        .get(api_url(server.api_addr, "/api/status"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    assert_eq!(login_status(server.api_addr, "auditor", "watch").await, 200);
+    // Other accounts are untouched until they sign in themselves.
+    assert!(daygle_dns_core::auth::needs_rehash(&stored("admin")));
+}
+
 #[tokio::test]
 async fn console_users_live_in_the_database() {
     let dir = tempfile::tempdir().unwrap();

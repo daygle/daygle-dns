@@ -4147,11 +4147,20 @@ pub async fn auth_login(
         return resp;
     }
     let password = input.password.clone();
-    let ok = run_password_job(move || match stored_hash {
-        Some(hash) => daygle_dns_core::auth::verify_password(&password, &hash),
+    // A hash made with fewer iterations than today's default (an account
+    // from an earlier version) is re-hashed while the password is in hand,
+    // in the same job and under the same slot: the new hash is only written
+    // once the whole login succeeds, below.
+    let (ok, upgraded_hash) = run_password_job(move || match stored_hash {
+        Some(hash) => {
+            let ok = daygle_dns_core::auth::verify_password(&password, &hash);
+            let upgraded = (ok && daygle_dns_core::auth::needs_rehash(&hash))
+                .then(|| daygle_dns_core::auth::hash_password(&password));
+            (ok, upgraded)
+        }
         None => {
             let _ = daygle_dns_core::auth::verify_password(&password, &dummy_hash);
-            false
+            (false, None)
         }
     })
     .await;
@@ -4218,6 +4227,31 @@ pub async fn auth_login(
     }
     if let Some(ip) = client_ip {
         state.login_throttle.clear(ip);
+    }
+    if let Some(new_hash) = upgraded_hash {
+        // Still under `credential_write`, and conditional on the hash this
+        // login verified: a concurrent password change is never undone. A
+        // failure only leaves the old (still valid) hash in place.
+        match state.catalog.store().upgrade_console_user_password(
+            &user.username,
+            &user.password_hash,
+            &new_hash,
+        ) {
+            Ok(true) => state.logs.push(
+                daygle_dns_core::LogLevel::Info,
+                "api",
+                format!(
+                    "upgraded the password hash of user '{}' to {} PBKDF2 iterations",
+                    user.username,
+                    daygle_dns_core::auth::DEFAULT_PBKDF2_ITERATIONS
+                ),
+            ),
+            Ok(false) => {}
+            Err(e) => tracing::warn!(
+                "cannot upgrade the password hash of user '{}': {e}",
+                user.username
+            ),
+        }
     }
     if let Err(e) = state
         .catalog

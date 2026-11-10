@@ -2875,6 +2875,26 @@ impl ZoneStore {
         Ok(())
     }
 
+    /// Replace a console account's password hash with a stronger hash of
+    /// the same password, but only if `old_hash` is still the stored one:
+    /// a password change that lands first is never overwritten. Returns
+    /// whether the hash was replaced. Sessions are deliberately left alone
+    /// (the password did not change).
+    pub fn upgrade_console_user_password(
+        &self,
+        username: &str,
+        old_hash: &str,
+        new_hash: &str,
+    ) -> Result<bool> {
+        let conn = self.lock_conn()?;
+        let n = conn.execute(
+            "UPDATE console_users SET password_hash = ?3
+             WHERE username = ?1 AND password_hash = ?2",
+            params![username, old_hash, new_hash],
+        )?;
+        Ok(n > 0)
+    }
+
     /// Update a console account's profile fields (first name, last name,
     /// email). Pass `None` to leave a field unchanged.
     pub fn set_console_user_profile(
@@ -5477,6 +5497,32 @@ mod tests {
             .collect();
         assert_eq!(names, vec!["B", "Kids"]);
         assert!(!s.move_blocking_group("nope", 1).unwrap());
+    }
+
+    #[test]
+    fn password_upgrade_only_replaces_the_hash_it_was_given() {
+        let s = store();
+        s.create_console_user("alice", &console_admin("alice"))
+            .unwrap();
+        let old = s.get_console_user("alice").unwrap().unwrap().password_hash;
+        // A password change landed first: the stale upgrade must not undo it.
+        s.set_console_user_password("alice", "changed").unwrap();
+        assert!(!s
+            .upgrade_console_user_password("alice", &old, "stronger")
+            .unwrap());
+        assert_eq!(
+            s.get_console_user("alice").unwrap().unwrap().password_hash,
+            "changed"
+        );
+        // Against the current hash it goes through.
+        assert!(s
+            .upgrade_console_user_password("alice", "changed", "stronger")
+            .unwrap());
+        assert_eq!(
+            s.get_console_user("alice").unwrap().unwrap().password_hash,
+            "stronger"
+        );
+        assert!(!s.upgrade_console_user_password("nobody", "x", "y").unwrap());
     }
 
     #[test]

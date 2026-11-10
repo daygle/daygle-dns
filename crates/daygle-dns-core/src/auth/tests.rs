@@ -68,3 +68,18 @@ fn rejects_malformed() {
         assert!(!verify_password("password", &hash));
     }
 }
+
+#[test]
+fn only_weaker_hashes_need_a_rehash() {
+    assert!(needs_rehash(&hash_password_with("pw", 1_000)));
+    assert!(needs_rehash(&hash_password_with(
+        "pw",
+        DEFAULT_PBKDF2_ITERATIONS - 1
+    )));
+    assert!(!needs_rehash(&hash_password_with(
+        "pw",
+        DEFAULT_PBKDF2_ITERATIONS
+    )));
+    // Garbage cannot verify a login, so there is nothing to upgrade.
+    assert!(!needs_rehash("not a hash"));
+}
