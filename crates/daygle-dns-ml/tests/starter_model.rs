@@ -92,6 +92,13 @@ fn infrastructure_hosts_have_their_own_categories() {
         ("www.codebuff.com", "ai"),
         ("web.whatsapp.com", "messaging"),
         ("au.nordvpn.com", "vpn-proxy"),
+        // Ways around the filter, and ways malware arrives.
+        ("dns.quad9.net", "dns-bypass"),
+        ("mozilla.cloudflare-dns.com", "dns-bypass"),
+        ("myhome.duckdns.org", "dynamic-dns"),
+        ("camera.ddns.net", "dynamic-dns"),
+        ("pastebin.com", "file-sharing"),
+        ("bit.ly", "url-shortener"),
     ] {
         assert_eq!(label(&backend, domain), want, "{domain}");
     }
@@ -106,6 +113,8 @@ fn new_categories_leave_the_others_alone() {
         ("keylogger-download-pro.info", "malware"),
         ("www.reuters.com", "news"),
         ("github.com", "developer"),
+        ("api.github.com", "developer"),
+        ("collector.github.com", "developer"),
         ("aws.amazon.com", "cloud"),
         ("www.netflix.com", "streaming"),
         ("paypal-secure-login-verify.xyz", "phishing"),

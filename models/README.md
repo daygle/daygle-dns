@@ -32,7 +32,9 @@ then run side by side.
   - **policy-blockable content** (never a threat; a client group can block
     the category): `adult`, `gambling`, `piracy`, `dating`, `telemetry`
     (diagnostics and usage reporting), `remote-access` (remote management
-    and remote desktop) and `vpn-proxy` (VPNs, proxies and anonymizers).
+    and remote desktop), `vpn-proxy` (VPNs, proxies and anonymizers),
+    `dns-bypass` (public DNS and DNS-over-HTTPS providers), `dynamic-dns`,
+    `file-sharing` (file hosts and paste sites) and `url-shortener`.
   - **neutral content** (categorization only): `news`, `shopping`,
     `finance`, `crypto`, `gaming`, `streaming`, `social`, `search`,
     `education`, `developer`, `cloud`, `health`, `travel`, `food`,

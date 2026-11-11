@@ -121,6 +121,10 @@ fn main() {
         ("chatgpt.com", "ai"),
         ("web.whatsapp.com", "messaging"),
         ("nordvpn.com", "vpn-proxy"),
+        ("dns.quad9.net", "dns-bypass"),
+        ("myhome.duckdns.org", "dynamic-dns"),
+        ("pastebin.com", "file-sharing"),
+        ("bit.ly", "url-shortener"),
     ];
     let mut failures = 0;
     for (probe, want) in probes {
