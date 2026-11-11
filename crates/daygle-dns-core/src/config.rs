@@ -1455,6 +1455,8 @@ pub struct RecursiveUpdate {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dnssec_validate: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub dnssec_reject_bogus: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub prefetch_enabled: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prefetch_ttl_fraction_pct: Option<u32>,
@@ -2371,6 +2373,9 @@ impl RuntimeSettings {
             if let Some(v) = r.dnssec_validate {
                 config.recursive.dnssec_validate = v;
             }
+            if let Some(v) = r.dnssec_reject_bogus {
+                config.recursive.dnssec_reject_bogus = v;
+            }
             if let Some(v) = r.prefetch_enabled {
                 config.recursive.prefetch_enabled = v;
             }
@@ -2735,6 +2740,7 @@ impl RuntimeSettings {
                 cache_size: Some(config.recursive.cache_size),
                 upstreams: Some(config.recursive.upstreams.clone()),
                 dnssec_validate: Some(config.recursive.dnssec_validate),
+                dnssec_reject_bogus: Some(config.recursive.dnssec_reject_bogus),
                 prefetch_enabled: Some(config.recursive.prefetch_enabled),
                 prefetch_ttl_fraction_pct: Some(config.recursive.prefetch_ttl_fraction_pct),
                 prefetch_min_queries: Some(config.recursive.prefetch_min_queries),
@@ -3950,6 +3956,11 @@ pub struct RecursiveSettings {
     pub attempts: usize,
     /// Validate DNSSEC responses (sets AD and rejects bogus chains).
     pub dnssec_validate: bool,
+    /// With `dnssec_validate`: answer SERVFAIL when an answer fails
+    /// validation (RFC 4035 section 5.5) instead of handing it to the
+    /// client unvalidated. On by default; turning it off keeps validation
+    /// for the AD bit only, for a name the validator wrongly fails.
+    pub dnssec_reject_bogus: bool,
     /// Lower bound, in seconds, applied to cached *positive* TTLs.
     /// A record whose authoritative TTL is below this is kept in cache for at
     /// least this long so very-short-TTL answers are not churned out of the
@@ -4325,6 +4336,7 @@ impl Default for RecursiveSettings {
             timeout_secs: 5,
             attempts: 3,
             dnssec_validate: true,
+            dnssec_reject_bogus: true,
             min_cache_ttl: 0,
             negative_cache_ttl: 3600,
             max_cache_ttl: 0,
@@ -5291,6 +5303,7 @@ mod tests {
         r.cache_size += 1;
         r.upstreams = vec![s("192.0.2.53")];
         r.dnssec_validate = !r.dnssec_validate;
+        r.dnssec_reject_bogus = !r.dnssec_reject_bogus;
         r.prefetch_enabled = !r.prefetch_enabled;
         r.prefetch_ttl_fraction_pct += 1;
         r.prefetch_min_queries += 1;

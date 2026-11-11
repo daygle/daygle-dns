@@ -407,7 +407,7 @@ PUT /api/config
 Editable groups: `server` (listen/ipv6_only/port/udp_enabled/tcp_enabled/proxy_protocol,
 and the stored, console-edited `client_timeout_ms` (1000-10000, applied live),
 `tcp_timeout_ms` and `dns_cookies`), `recursive`
-(enabled/mode/upstreams/use_system_config/dnssec_validate/cache_size/
+(enabled/mode/upstreams/use_system_config/dnssec_validate/dnssec_reject_bogus/cache_size/
 min_cache_ttl/max_cache_ttl/negative_cache_ttl/failure_cache_ttl/
 prefetch_* (including prefetch_window_secs)/serve_stale_secs/max_concurrent_lookups/
 timeout_secs (per nameserver, 1-300)/conditional_zones/recursion_access/recursion_networks/root_hints/
