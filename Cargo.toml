@@ -23,6 +23,7 @@ authors = ["Daygle DNS contributors"]
 
 [workspace.dependencies]
 # Hickory DNS (the rebranded continuation of trust-dns)
+futures-util = { version = "0.3", default-features = false }
 hickory-proto = { version = "0.26", features = ["dnssec-ring"] }
 hickory-server = { version = "0.26", features = [
     "dnssec-ring",

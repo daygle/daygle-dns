@@ -16,9 +16,10 @@ use std::time::{Duration, Instant};
 use daygle_dns_core::config::{IpVersions, RecursiveSettings};
 use daygle_dns_core::error::{DaygleError, Result};
 use daygle_dns_core::Metrics;
-use hickory_proto::op::{Query, ResponseCode};
+use futures_util::stream::{BoxStream, StreamExt};
+use hickory_proto::op::{Message, Query, ResponseCode};
 use hickory_proto::rr::rdata::opt::{ClientSubnet, EdnsOption};
-use hickory_proto::rr::{Name, RecordType};
+use hickory_proto::rr::{Name, RData, Record, RecordType};
 use hickory_resolver::config::{
     ConnectionConfig, OpportunisticEncryption, OpportunisticEncryptionConfig, ProtocolConfig,
     ResolverOpts,
@@ -26,8 +27,8 @@ use hickory_resolver::config::{
 use hickory_resolver::lookup::Lookup;
 use hickory_resolver::net::runtime::TokioRuntimeProvider;
 use hickory_resolver::net::xfer::DnsHandle;
-use hickory_resolver::net::NetError;
-use hickory_resolver::proto::op::DnsRequest;
+use hickory_resolver::net::{DnsError, NetError};
+use hickory_resolver::proto::op::{DnsRequest, DnsResponse};
 use hickory_resolver::recursor::{
     DnssecConfig, DnssecPolicy, QNameMinimization, Recursor, RecursorError, RecursorOptions,
 };
@@ -83,6 +84,9 @@ pub struct UpstreamConnections {
     /// (forwarding only: walking the hierarchy would hand the client's
     /// network to every root and TLD server).
     client_subnet: bool,
+    /// Read a referral's glue as the answer to a query for it (see
+    /// [`glue_as_answer`]). Recursive mode only.
+    glue_answers: bool,
 }
 
 impl UpstreamConnections {
@@ -147,10 +151,11 @@ pub async fn track_upstream<F: Future>(lookup: F) -> (F::Output, bool) {
 pub struct TrackedConn<C> {
     conn: C,
     client_subnet: bool,
+    glue_answers: bool,
 }
 
 impl<C: DnsHandle> DnsHandle for TrackedConn<C> {
-    type Response = C::Response;
+    type Response = BoxStream<'static, std::result::Result<DnsResponse, NetError>>;
     type Runtime = C::Runtime;
 
     fn is_verifying_dnssec(&self) -> bool {
@@ -178,8 +183,52 @@ impl<C: DnsHandle> DnsHandle for TrackedConn<C> {
                 }
             }
         }
-        self.conn.send(request)
+        if !self.glue_answers {
+            return self.conn.send(request).boxed();
+        }
+        let query = request.queries.first().cloned();
+        self.conn
+            .send(request)
+            .map(move |response| match (response, &query) {
+                (Ok(response), Some(query)) => Ok(glue_as_answer(query, response)),
+                (response, _) => response,
+            })
+            .boxed()
     }
+}
+
+/// A referral that carries the address asked for as glue, turned into an
+/// answer with that address.
+///
+/// The recursor asks a zone's parent for the address of a name server that
+/// lies inside the zone when it has the zone's NS records without their
+/// glue: after the zone's own NS answer (often sent without addresses)
+/// replaced the parent's referral in its cache and the zone's name servers
+/// were dropped from the name server cache. The parent replies with the
+/// referral again, the address in the additional section, where the recursor
+/// does not look - so the zone, and every zone served from it, failed with
+/// "no glue found for any nameservers" until the cached answer expired.
+fn glue_as_answer(query: &Query, response: DnsResponse) -> DnsResponse {
+    let is_glue = |r: &Record| r.record_type() == query.query_type() && r.name == *query.name();
+    let referral = matches!(query.query_type(), RecordType::A | RecordType::AAAA)
+        && response.response_code == ResponseCode::NoError
+        && !response.authoritative
+        && response.answers.is_empty()
+        && response
+            .authorities
+            .iter()
+            .any(|r| r.record_type() == RecordType::NS && r.name.zone_of(query.name()))
+        && response.additionals.iter().any(is_glue);
+    if !referral {
+        return response;
+    }
+    let mut message = response.clone().into_message();
+    let (glue, rest) = std::mem::take(&mut message.additionals)
+        .into_iter()
+        .partition(is_glue);
+    message.answers = glue;
+    message.additionals = rest;
+    DnsResponse::from_message(message).unwrap_or(response)
 }
 
 type TokioConn = <TokioRuntimeProvider as ConnectionProvider>::Conn;
@@ -227,10 +276,12 @@ impl ConnectionProvider for UpstreamConnections {
             None => self.runtime.new_connection(ip, config, cx)?,
         };
         let client_subnet = self.client_subnet;
+        let glue_answers = self.glue_answers;
         Ok(Box::pin(async move {
             connecting.await.map(|conn| TrackedConn {
                 conn,
                 client_subnet,
+                glue_answers,
             })
         }))
     }
@@ -310,6 +361,7 @@ pub fn build(
     let mut connections = UpstreamConnections {
         local_root,
         metrics: Some(metrics),
+        glue_answers: true,
         ..UpstreamConnections::default()
     };
     if let Some(port) = settings.test_outbound_port {
@@ -337,6 +389,22 @@ pub fn build(
         .map_err(|e| DaygleError::Config(format!("cannot build recursive resolver: {e}")))
 }
 
+/// How many CNAMEs [`follow_cnames`] follows before giving up.
+const MAX_CNAME_HOPS: usize = 16;
+
+/// One query to the recursor, sorted by what the rest of the crate does
+/// with it.
+enum Resolved {
+    /// Records for the question.
+    Answer(Message),
+    /// NXDOMAIN, NODATA or an upstream error code, with the SOA it came with.
+    Negative(DaygleError, Option<Record>),
+    /// A negative answer whose DNSSEC denial did not validate.
+    Unproven(DaygleError),
+    /// Transport failure, timeout or a resolution limit.
+    Failed(DaygleError),
+}
+
 /// Resolve `name`/`record_type` iteratively and convert the answer to a
 /// [`Lookup`]. NXDOMAIN, NODATA and upstream error codes come back as
 /// [`DaygleError::Resolution`] with their response code (NODATA as
@@ -349,43 +417,140 @@ pub async fn lookup(
 ) -> Result<Lookup> {
     let mut name = name;
     name.set_fqdn(true);
-    let query = Query::query(name, record_type);
-    match recursor.resolve(query.clone(), Instant::now(), false).await {
+    let query = Query::query(name.clone(), record_type);
+    match resolve_one(recursor, query.clone()).await {
+        Resolved::Answer(message) => Ok(to_lookup(query, message.answers.clone(), &message)),
+        Resolved::Negative(e, soa) => {
+            crate::note_negative_soa(soa);
+            Err(e)
+        }
+        // The recursor follows CNAMEs itself and, when the chain ends in a
+        // negative answer, validates the last zone's denial (its SOA and
+        // NSEC records) against the name that was asked. With the target in
+        // another, signed zone that never matches, so "no such record" for a
+        // name such as `www.shop.example -> shop.cdn.example` read as bogus
+        // and became SERVFAIL. Following the chain one name at a time has
+        // each denial validated against the name it is about.
+        Resolved::Unproven(e)
+            if !matches!(
+                record_type,
+                RecordType::CNAME | RecordType::ANY | RecordType::DS
+            ) =>
+        {
+            follow_cnames(|q| resolve_one(recursor, q), name, record_type, e).await
+        }
+        Resolved::Unproven(e) | Resolved::Failed(e) => Err(e),
+    }
+}
+
+async fn resolve_one(recursor: &DaygleRecursor, query: Query) -> Resolved {
+    match recursor.resolve(query, Instant::now(), false).await {
         Ok(message) => match message.metadata.response_code {
-            ResponseCode::NoError if !message.answers.is_empty() => {
-                let ttl = message.answers.iter().map(|r| r.ttl).min().unwrap_or(0);
-                let mut lookup = Lookup::new_with_deadline(
-                    query,
-                    message.answers.iter().cloned(),
-                    Instant::now() + Duration::from_secs(u64::from(ttl)),
-                );
-                lookup.extend_authorities(message.authorities.iter().cloned());
-                lookup.extend_additionals(message.additionals.iter().cloned());
-                Ok(lookup)
-            }
+            ResponseCode::NoError if !message.answers.is_empty() => Resolved::Answer(message),
             code => {
-                crate::note_negative_soa(
-                    message
-                        .authorities
-                        .iter()
-                        .find(|r| r.record_type() == RecordType::SOA)
-                        .cloned(),
-                );
-                Err(if code == ResponseCode::NoError {
+                let soa = message
+                    .authorities
+                    .iter()
+                    .find(|r| r.record_type() == RecordType::SOA)
+                    .cloned();
+                let e = if code == ResponseCode::NoError {
                     negative(ResponseCode::NoError, "no records")
                 } else {
                     negative(code, "negative response")
-                })
+                };
+                Resolved::Negative(e, soa)
             }
         },
+        // A negative answer the validator could neither prove nor disprove
+        // (NSEC3 with more hash iterations than it will compute, RFC 9276):
+        // an unsigned answer, not a failure.
+        Err(RecursorError::Net(NetError::Dns(DnsError::Nsec {
+            response, proof, ..
+        }))) if proof.is_insecure() => {
+            let soa = response
+                .soa()
+                .map(|soa| soa.to_owned().into_record_of_rdata());
+            Resolved::Negative(negative(response.response_code, "unsigned denial"), soa)
+        }
         Err(e) => {
-            crate::note_negative_soa(recursor_error_soa(&e));
-            Err(DaygleError::Resolution {
+            let error = DaygleError::Resolution {
                 message: e.to_string(),
                 response_code: recursor_error_code(&e),
-            })
+            };
+            if recursor_error_code(&e).is_some() {
+                Resolved::Negative(error, recursor_error_soa(&e))
+            } else if matches!(e, RecursorError::Net(NetError::Dns(DnsError::Nsec { .. }))) {
+                Resolved::Unproven(error)
+            } else {
+                Resolved::Failed(error)
+            }
         }
     }
+}
+
+/// Walk the CNAME chain from `name` one name at a time, asking for
+/// `record_type` at each target, until one answers (positively or
+/// negatively). Every step is a query of its own, so it is validated on its
+/// own. `unproven` is the failure that led here: it stands when `name` is
+/// not a CNAME after all, or the chain loops or runs too long.
+async fn follow_cnames<F, Fut>(
+    resolve: F,
+    name: Name,
+    record_type: RecordType,
+    unproven: DaygleError,
+) -> Result<Lookup>
+where
+    F: Fn(Query) -> Fut,
+    Fut: Future<Output = Resolved>,
+{
+    let query = Query::query(name.clone(), record_type);
+    let mut chain: Vec<Record> = Vec::new();
+    let mut current = name;
+    for _ in 0..MAX_CNAME_HOPS {
+        let Resolved::Answer(message) =
+            resolve(Query::query(current.clone(), RecordType::CNAME)).await
+        else {
+            return Err(unproven);
+        };
+        let Some((record, target)) = message.answers.iter().find_map(|r| match &r.data {
+            RData::CNAME(cname) if r.name == current => Some((r, cname.0.clone())),
+            _ => None,
+        }) else {
+            return Err(unproven);
+        };
+        if target == query.name || chain.iter().any(|seen| seen.name == target) {
+            return Err(unproven);
+        }
+        chain.push(record.clone());
+        current = target;
+        match resolve(Query::query(current.clone(), record_type)).await {
+            Resolved::Answer(message) => {
+                chain.extend(message.answers.iter().cloned());
+                return Ok(to_lookup(query, chain, &message));
+            }
+            Resolved::Negative(e, soa) => {
+                crate::note_negative_soa(soa);
+                return Err(e);
+            }
+            // The target is itself a CNAME into yet another zone.
+            Resolved::Unproven(_) => continue,
+            Resolved::Failed(e) => return Err(e),
+        }
+    }
+    Err(unproven)
+}
+
+/// A [`Lookup`] of `answers`, with the other sections of `message`.
+fn to_lookup(query: Query, answers: Vec<Record>, message: &Message) -> Lookup {
+    let ttl = answers.iter().map(|r| r.ttl).min().unwrap_or(0);
+    let mut lookup = Lookup::new_with_deadline(
+        query,
+        answers,
+        Instant::now() + Duration::from_secs(u64::from(ttl)),
+    );
+    lookup.extend_authorities(message.authorities.iter().cloned());
+    lookup.extend_additionals(message.additionals.iter().cloned());
+    lookup
 }
 
 fn negative(code: ResponseCode, message: &str) -> DaygleError {
@@ -441,3 +606,112 @@ pub struct RecursorSlot {
 /// recursor has no cache-clear call), and so does the local root zone
 /// starting or stopping being served (the root hints are fixed at build).
 pub type SharedRecursor = Arc<arc_swap::ArcSwap<RecursorSlot>>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hickory_proto::rr::rdata::{A, CNAME};
+    use std::net::Ipv4Addr;
+
+    fn name(n: &str) -> Name {
+        Name::from_ascii(n).unwrap()
+    }
+
+    fn cname(owner: &str, target: &str) -> Record {
+        Record::from_rdata(name(owner), 300, RData::CNAME(CNAME(name(target))))
+    }
+
+    fn answer(records: Vec<Record>) -> Resolved {
+        let mut message = Message::query();
+        message.add_answers(records);
+        Resolved::Answer(message)
+    }
+
+    fn failure(message: &str, code: Option<ResponseCode>) -> DaygleError {
+        DaygleError::Resolution {
+            message: message.to_string(),
+            response_code: code.map(Into::into),
+        }
+    }
+
+    /// `www.shop.test -> shop.host.test -> shop.cdn.test`, where a query
+    /// through a CNAME into the next zone fails validation, as the
+    /// recursor's own chain following does for a signed target zone.
+    async fn zones(query: Query) -> Resolved {
+        let owner = query.name().to_ascii();
+        match (owner.as_str(), query.query_type()) {
+            ("www.shop.test.", RecordType::CNAME) => {
+                answer(vec![cname("www.shop.test.", "shop.host.test.")])
+            }
+            ("shop.host.test.", RecordType::CNAME) => {
+                answer(vec![cname("shop.host.test.", "shop.cdn.test.")])
+            }
+            ("shop.host.test.", _) => Resolved::Unproven(failure("unproven", None)),
+            ("shop.cdn.test.", RecordType::A) => answer(vec![Record::from_rdata(
+                name("shop.cdn.test."),
+                60,
+                RData::A(A(Ipv4Addr::new(192, 0, 2, 7))),
+            )]),
+            ("shop.cdn.test.", RecordType::HTTPS) => {
+                Resolved::Negative(failure("no records", Some(ResponseCode::NoError)), None)
+            }
+            ("loop.test.", RecordType::CNAME) => answer(vec![cname("loop.test.", "pool.test.")]),
+            ("pool.test.", RecordType::CNAME) => answer(vec![cname("pool.test.", "loop.test.")]),
+            ("pool.test.", _) => Resolved::Unproven(failure("unproven", None)),
+            ("down.test.", RecordType::CNAME) => answer(vec![cname("down.test.", "gone.test.")]),
+            ("gone.test.", _) => Resolved::Failed(failure("timed out", None)),
+            _ => Resolved::Negative(failure("no records", Some(ResponseCode::NoError)), None),
+        }
+    }
+
+    fn code(result: Result<Lookup>) -> (String, Option<u16>) {
+        match result {
+            Err(DaygleError::Resolution {
+                message,
+                response_code,
+            }) => (message, response_code),
+            other => panic!("expected a resolution error, got {other:?}"),
+        }
+    }
+
+    async fn follow(owner: &str, record_type: RecordType) -> Result<Lookup> {
+        follow_cnames(zones, name(owner), record_type, failure("bogus", None)).await
+    }
+
+    #[tokio::test]
+    async fn a_chain_ending_in_no_data_is_no_data() {
+        let result = follow("www.shop.test.", RecordType::HTTPS).await;
+        assert_eq!(
+            code(result),
+            ("no records".to_string(), Some(ResponseCode::NoError.into()))
+        );
+    }
+
+    #[tokio::test]
+    async fn a_chain_ending_in_records_answers_with_the_chain_in_order() {
+        let lookup = follow("www.shop.test.", RecordType::A).await.unwrap();
+        let owners: Vec<String> = lookup.answers().iter().map(|r| r.name.to_ascii()).collect();
+        assert_eq!(
+            owners,
+            ["www.shop.test.", "shop.host.test.", "shop.cdn.test."]
+        );
+    }
+
+    #[tokio::test]
+    async fn the_first_failure_stands_without_a_cname_to_follow() {
+        let result = follow("shop.cdn.test.", RecordType::HTTPS).await;
+        assert_eq!(code(result), ("bogus".to_string(), None));
+    }
+
+    #[tokio::test]
+    async fn a_cname_loop_keeps_the_first_failure() {
+        let result = follow("loop.test.", RecordType::A).await;
+        assert_eq!(code(result), ("bogus".to_string(), None));
+    }
+
+    #[tokio::test]
+    async fn a_failure_at_the_target_is_reported_as_it_is() {
+        let result = follow("down.test.", RecordType::A).await;
+        assert_eq!(code(result), ("timed out".to_string(), None));
+    }
+}
