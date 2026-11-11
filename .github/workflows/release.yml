@@ -14,8 +14,11 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # Primary, guaranteed artifact: glibc build for distro-managed x86_64 hosts
-  # (Debian, Ubuntu, Fedora, Arch - exactly what install.sh targets).
+  # The one binary published: a glibc build for distro-managed x86_64 hosts
+  # (Debian, Ubuntu, Fedora, Arch). Nothing downloads it automatically -
+  # install.sh and the console's updater build from source on the host - so
+  # it is a ready-made download and the check that the tagged source builds
+  # and reports the tagged version. Other platforms build from source.
   build-glibc-x86_64:
     name: Build linux-x86_64
     runs-on: ubuntu-latest
@@ -61,200 +64,6 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: daygle-dns-linux-x86_64
-          path: stage/*
-          if-no-files-found: error
-
-  # Best-effort extras: published only when they build. The updater falls
-  # back to a source build when no asset matches the host architecture.
-  build-musl-x86_64:
-    name: Build linux-x86_64-musl
-    runs-on: ubuntu-latest
-    continue-on-error: true
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Set version from release tag
-        # Rewrite Cargo.toml + Cargo.lock from the pushed tag (v1.2.7 -> 1.2.7)
-        # and propagate it to web/package*.json, so the built binary, the API
-        # and the dashboard all report the tagged version.
-        run: node scripts/set-version.mjs
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: x86_64-unknown-linux-musl
-
-      - name: Install musl toolchain
-        run: sudo apt-get update && sudo apt-get install -y musl-tools perl
-
-      - name: Cache cargo builds
-        uses: Swatinem/rust-cache@v2
-
-      - name: Build static binary
-        env:
-          # Fully static: runs on any Linux regardless of glibc version.
-          # --no-default-features excludes the MiniLM/ONNX verifier: prebuilt
-          # ONNX Runtime binaries are glibc-based and do not link statically
-          # into a musl binary. Those builds run the fastText/heuristic
-          # backends; ai.verifier_model_path is ignored.
-          RUSTFLAGS: -C target-feature=+crt-static
-        run: cargo build --locked --release -p daygle-dns --no-default-features --target x86_64-unknown-linux-musl
-
-      - name: Stage artifact
-        run: |
-          mkdir -p stage
-          cp target/x86_64-unknown-linux-musl/release/daygle-dns stage/daygle-dns-linux-x86_64-musl
-          strip stage/daygle-dns-linux-x86_64-musl || true
-
-      - name: Checksum
-        working-directory: stage
-        run: sha256sum daygle-dns-linux-x86_64-musl > daygle-dns-linux-x86_64-musl.sha256
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v7
-        with:
-          name: daygle-dns-linux-x86_64-musl
-          path: stage/*
-          if-no-files-found: error
-
-  # Native arm64 build (free hosted runner for public repos). Avoids
-  # cross-compilation entirely: cross 0.2's images ship an old glibc that
-  # cannot link modern Rust std (undefined reference to `getrandom`).
-  build-aarch64:
-    name: Build linux-aarch64
-    runs-on: ubuntu-24.04-arm
-    continue-on-error: true
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Set version from release tag
-        # Rewrite Cargo.toml + Cargo.lock from the pushed tag (v1.2.7 -> 1.2.7)
-        # and propagate it to web/package*.json, so the built binary, the API
-        # and the dashboard all report the tagged version.
-        run: node scripts/set-version.mjs
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo builds
-        uses: Swatinem/rust-cache@v2
-
-      - name: Build release binary
-        run: cargo build --locked --release -p daygle-dns
-
-      - name: Smoke test
-        run: ./target/release/daygle-dns --version
-
-      - name: Stage artifact
-        run: |
-          mkdir -p stage
-          cp target/release/daygle-dns stage/daygle-dns-linux-aarch64
-          strip stage/daygle-dns-linux-aarch64 || true
-
-      - name: Checksum
-        working-directory: stage
-        run: sha256sum daygle-dns-linux-aarch64 > daygle-dns-linux-aarch64.sha256
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v7
-        with:
-          name: daygle-dns-linux-aarch64
-          path: stage/*
-          if-no-files-found: error
-
-  # Best-effort desktop-platform builds. The server itself is portable
-  # (cfg-guarded where it matters); only the in-place updater is Linux-only,
-  # so these are "download and run" binaries with no auto-update path.
-  build-windows-x86_64:
-    name: Build windows-x86_64
-    runs-on: windows-latest
-    continue-on-error: true
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Set version from release tag
-        # Rewrite Cargo.toml + Cargo.lock from the pushed tag (v1.2.7 -> 1.2.7)
-        # and propagate it to web/package*.json, so the built binary, the API
-        # and the dashboard all report the tagged version.
-        run: node scripts/set-version.mjs
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo builds
-        uses: Swatinem/rust-cache@v2
-
-      - name: Build release binary
-        run: cargo build --locked --release -p daygle-dns
-
-      - name: Smoke test
-        shell: bash
-        run: ./target/release/daygle-dns.exe --version
-
-      - name: Stage artifact
-        shell: bash
-        run: |
-          mkdir -p stage
-          cp target/release/daygle-dns.exe stage/daygle-dns-windows-x86_64.exe
-
-      - name: Checksum
-        shell: bash
-        working-directory: stage
-        run: sha256sum daygle-dns-windows-x86_64.exe > daygle-dns-windows-x86_64.exe.sha256
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v7
-        with:
-          name: daygle-dns-windows-x86_64
-          path: stage/*
-          if-no-files-found: error
-
-  build-darwin-aarch64:
-    name: Build darwin-aarch64
-    runs-on: macos-latest
-    continue-on-error: true
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Set version from release tag
-        # Rewrite Cargo.toml + Cargo.lock from the pushed tag (v1.2.7 -> 1.2.7)
-        # and propagate it to web/package*.json, so the built binary, the API
-        # and the dashboard all report the tagged version.
-        run: node scripts/set-version.mjs
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo builds
-        uses: Swatinem/rust-cache@v2
-
-      - name: Build release binary
-        # --no-default-features excludes the MiniLM/ONNX verifier: the
-        # prebuilt ONNX Runtime static lib carries CoreML objects compiled
-        # against a newer macOS SDK than the runner's 11.0 deployment
-        # target (___isPlatformVersionAtLeast fails to link). Desktop
-        # builds are best-effort convenience; those binaries run the
-        # fastText/heuristic backends only.
-        run: cargo build --locked --release -p daygle-dns --no-default-features
-
-      - name: Smoke test
-        run: ./target/release/daygle-dns --version
-
-      # Arm64 macOS binaries get an ad-hoc signature from the linker, so the
-      # binary runs without a codesigning step. Notarization is out of scope.
-      - name: Stage artifact
-        run: |
-          mkdir -p stage
-          cp target/release/daygle-dns stage/daygle-dns-darwin-aarch64
-
-      - name: Checksum
-        working-directory: stage
-        run: shasum -a 256 daygle-dns-darwin-aarch64 > daygle-dns-darwin-aarch64.sha256
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v7
-        with:
-          name: daygle-dns-darwin-aarch64
           path: stage/*
           if-no-files-found: error
 
@@ -313,19 +122,9 @@ jobs:
 
   publish:
     name: Publish GitHub release
-    # Every build job must be in `needs` so its artifacts finish uploading
-    # before the release is created; only the glibc job gates success, so a
-    # best-effort platform failure never blocks the release.
-    needs:
-      [
-        build-glibc-x86_64,
-        build-musl-x86_64,
-        build-aarch64,
-        build-windows-x86_64,
-        build-darwin-aarch64,
-        build-models-bundle,
-      ]
-    if: always() && needs.build-glibc-x86_64.result == 'success'
+    # Both jobs must be in `needs` so their artifacts finish uploading before
+    # the release is created.
+    needs: [build-glibc-x86_64, build-models-bundle]
     runs-on: ubuntu-latest
     steps:
       - name: Download artifacts
