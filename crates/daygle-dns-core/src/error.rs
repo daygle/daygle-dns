@@ -47,6 +47,12 @@ pub enum DaygleError {
         response_code: Option<u16>,
     },
 
+    /// An answer failed DNSSEC validation (and `dnssec_reject_bogus` is on).
+    /// Never served from a stale copy: the zone is reachable, its data is
+    /// not to be trusted.
+    #[error("DNSSEC validation failed: {0}")]
+    Dnssec(String),
+
     /// A zone/record was not found.
     #[error("not found: {0}")]
     NotFound(String),
@@ -111,7 +117,7 @@ impl DaygleError {
             DaygleError::InvalidPolicy(_) => DaygleErrorKind::InvalidPolicy,
             DaygleError::Refused(_) => DaygleErrorKind::Refused,
             DaygleError::Proto(_) => DaygleErrorKind::Proto,
-            DaygleError::Resolution { .. } => DaygleErrorKind::Resolution,
+            DaygleError::Resolution { .. } | DaygleError::Dnssec(_) => DaygleErrorKind::Resolution,
             DaygleError::NotFound(_) => DaygleErrorKind::NotFound,
             DaygleError::AlreadyExists(_) => DaygleErrorKind::AlreadyExists,
             DaygleError::Database(_) => DaygleErrorKind::Database,

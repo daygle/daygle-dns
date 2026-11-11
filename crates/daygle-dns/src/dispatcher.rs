@@ -2082,7 +2082,10 @@ impl Ede {
 fn failure_ede(error: &DaygleError) -> Ede {
     let message = error.to_string();
     let lower = message.to_ascii_lowercase();
-    if lower.contains("dnssec") || lower.contains("bogus") {
+    if matches!(error, DaygleError::Dnssec(_)) {
+        // Says which record failed.
+        Ede::new(ede::DNSSEC_BOGUS, message)
+    } else if lower.contains("dnssec") || lower.contains("bogus") {
         Ede::new(ede::DNSSEC_BOGUS, "DNSSEC validation failed")
     } else {
         Ede::new(ede::NO_REACHABLE_AUTHORITY, message)
@@ -3611,6 +3614,15 @@ mod tests {
         let timeout = failure_ede(&failure("no answer within the client timeout of 2000 ms"));
         assert_eq!(timeout.code, ede::NO_REACHABLE_AUTHORITY);
         assert!(timeout.text.contains("client timeout"));
+    }
+
+    #[test]
+    fn a_refused_bogus_answer_names_the_record() {
+        let e = failure_ede(&DaygleError::Dnssec(
+            "signed.example. A is not validly signed".to_string(),
+        ));
+        assert_eq!(e.code, ede::DNSSEC_BOGUS);
+        assert!(e.text.contains("signed.example. A"), "{}", e.text);
     }
 
     #[test]

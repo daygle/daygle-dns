@@ -983,7 +983,7 @@ impl Inner {
         // again here (acyclic => provably `Send`).
         // Refreshes send no client subnet: they keep the shared cache.
         let (route, _, _) = self.route(&name, self.policy_for_scope(key.scope), false);
-        match route.lookup(name, record_type).await {
+        match reject_bogus(&self.settings, route.lookup(name, record_type).await) {
             Ok(lookup) => {
                 self.cache_assist.on_success(&key, &lookup);
             }
@@ -1023,6 +1023,7 @@ impl Inner {
         let started = Instant::now();
         let (result, sent_upstream) =
             recursor::track_upstream(route.lookup(name, record_type)).await;
+        let result = reject_bogus(&inner.settings, result);
         if kind != RouteKind::LocalRoot {
             r.observe_latency(started.elapsed());
             // Answered without a query leaving the server: a cache hit
@@ -1067,6 +1068,30 @@ impl Inner {
             // double-count every failed lookup.
             Err(e) => Err(e),
         }
+    }
+}
+
+/// Turn an answer that failed DNSSEC validation into an error
+/// (`dnssec_validate` with `dnssec_reject_bogus`), so it is neither served
+/// nor kept for serve-stale and prefetch. The validator marks such records
+/// and hands them back; refusing them is left to the server (RFC 4035
+/// section 5.5).
+fn reject_bogus(settings: &RecursiveSettings, result: Result<Lookup>) -> Result<Lookup> {
+    if !(settings.dnssec_validate && settings.dnssec_reject_bogus) {
+        return result;
+    }
+    let lookup = result?;
+    let bogus = lookup
+        .answers()
+        .iter()
+        .find(|r| r.proof == hickory_proto::dnssec::Proof::Bogus);
+    match bogus {
+        Some(record) => Err(DaygleError::Dnssec(format!(
+            "{} {} is not validly signed",
+            record.name,
+            record.record_type()
+        ))),
+        None => Ok(lookup),
     }
 }
 
@@ -1311,6 +1336,58 @@ mod tests {
         let ns = parse_upstreams(&["tls://1.1.1.1:853@cloudflare-dns.com".to_string()]).unwrap();
         assert_eq!(ns.len(), 1);
         assert_eq!(ns[0].ip, "1.1.1.1".parse::<std::net::IpAddr>().unwrap());
+    }
+
+    /// An A answer for `signed.example.`, marked as the validator leaves it.
+    fn answer_with(proof: hickory_proto::dnssec::Proof) -> Result<Lookup> {
+        let name = Name::from_ascii("signed.example.").unwrap();
+        let mut record = hickory_proto::rr::Record::from_rdata(
+            name.clone(),
+            300,
+            hickory_proto::rr::RData::A(std::net::Ipv4Addr::new(192, 0, 2, 1).into()),
+        );
+        record.proof = proof;
+        Ok(Lookup::new_with_deadline(
+            Query::query(name, RecordType::A),
+            [record],
+            Instant::now() + Duration::from_secs(300),
+        ))
+    }
+
+    #[test]
+    fn an_answer_that_failed_validation_is_refused() {
+        use hickory_proto::dnssec::Proof;
+        let settings = RecursiveSettings::default();
+        assert!(settings.dnssec_validate && settings.dnssec_reject_bogus);
+
+        let refused = reject_bogus(&settings, answer_with(Proof::Bogus)).unwrap_err();
+        assert!(matches!(refused, DaygleError::Dnssec(_)), "{refused}");
+        assert!(
+            refused.to_string().contains("signed.example. A"),
+            "{refused}"
+        );
+        // Signed and valid, unsigned, and not checked all pass.
+        for proof in [Proof::Secure, Proof::Insecure, Proof::Indeterminate] {
+            assert!(
+                reject_bogus(&settings, answer_with(proof)).is_ok(),
+                "{proof}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejecting_can_be_turned_off_and_follows_validation() {
+        use hickory_proto::dnssec::Proof;
+        let lenient = RecursiveSettings {
+            dnssec_reject_bogus: false,
+            ..RecursiveSettings::default()
+        };
+        assert!(reject_bogus(&lenient, answer_with(Proof::Bogus)).is_ok());
+        let unvalidated = RecursiveSettings {
+            dnssec_validate: false,
+            ..RecursiveSettings::default()
+        };
+        assert!(reject_bogus(&unvalidated, answer_with(Proof::Bogus)).is_ok());
     }
 
     #[test]

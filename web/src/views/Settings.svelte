@@ -454,7 +454,7 @@
       rootHintsText = (r.root_hints || []).join('\n');
       recursive = {
         ...recursive,
-        ...pick(r, ['enabled', 'dnssec_validate', 'case_randomization', 'rebinding_protection',
+        ...pick(r, ['enabled', 'dnssec_validate', 'dnssec_reject_bogus', 'case_randomization', 'rebinding_protection',
           'opportunistic_encryption', 'use_system_config', 'timeout_secs']),
         // An unset mode means: forwarding when upstreams exist, else recursive.
         mode: r.mode || (parseUpstreams(upstreamText).length ? 'forwarding' : 'recursive'),
@@ -569,6 +569,7 @@
         min_cache_ttl: Number(recursive.min_cache_ttl),
         negative_cache_ttl: Number(recursive.negative_cache_ttl),
         dnssec_validate: !!recursive.dnssec_validate,
+        dnssec_reject_bogus: !!recursive.dnssec_reject_bogus,
         prefetch_enabled: !!recursive.prefetch_enabled,
         prefetch_ttl_fraction_pct: Number(recursive.prefetch_ttl_fraction_pct),
         prefetch_min_queries: Number(recursive.prefetch_min_queries),
@@ -952,9 +953,15 @@
       </label>
       <label class="check"><input type="checkbox" bind:checked={recursive.enabled} /> <span>Recursion Enabled</span></label>
       <label class="check"><input type="checkbox" bind:checked={recursive.dnssec_validate} disabled={!recursive.enabled} /> <span>DNSSEC Validation</span></label>
+      <label class="check"><input type="checkbox" bind:checked={recursive.dnssec_reject_bogus} disabled={!recursive.enabled || !recursive.dnssec_validate} /> <span>Reject Answers That Fail Validation</span></label>
       <label class="check"><input type="checkbox" bind:checked={recursive.rebinding_protection} disabled={!recursive.enabled} /> <span>DNS Rebinding Protection</span></label>
     </div>
     {#if recursive.enabled}
+      <p class="muted help">
+        With DNSSEC validation, an answer that fails it is refused (SERVFAIL)
+        rather than passed on unchecked. Turn that off only to reach a name
+        the validator wrongly fails.
+      </p>
       <p class="muted help">
         Rebinding protection blocks answers that give a public name a private,
         loopback or link-local address, for every client and in both modes (a

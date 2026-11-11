@@ -5740,6 +5740,7 @@ pub struct RecursiveUpdate {
     pub cache_size: Option<usize>,
     pub upstreams: Option<Vec<String>>,
     pub dnssec_validate: Option<bool>,
+    pub dnssec_reject_bogus: Option<bool>,
     pub prefetch_enabled: Option<bool>,
     pub prefetch_ttl_fraction_pct: Option<u32>,
     pub prefetch_min_queries: Option<u32>,
@@ -5940,6 +5941,9 @@ pub async fn update_settings(
         }
         if let Some(v) = r.dnssec_validate {
             config.recursive.dnssec_validate = v;
+        }
+        if let Some(v) = r.dnssec_reject_bogus {
+            config.recursive.dnssec_reject_bogus = v;
         }
         if let Some(v) = r.prefetch_enabled {
             config.recursive.prefetch_enabled = v;
