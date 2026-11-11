@@ -31,14 +31,17 @@ then run side by side.
     mode): `malware`, `phishing`, `scam`.
   - **policy-blockable content** (never a threat; a client group can block
     the category): `adult`, `gambling`, `piracy`, `dating`, `telemetry`
-    (diagnostics and usage reporting).
+    (diagnostics and usage reporting), `remote-access` (remote management
+    and remote desktop) and `vpn-proxy` (VPNs, proxies and anonymizers).
   - **neutral content** (categorization only): `news`, `shopping`,
     `finance`, `crypto`, `gaming`, `streaming`, `social`, `search`,
     `education`, `developer`, `cloud`, `health`, `travel`, `food`,
     `sports`, `government`, `jobs`, `real-estate`, `auto`, `ads`,
-    `business` (work and productivity services), `email`, `cdn` and
+    `business` (work and productivity services), `email`, `cdn`,
     `system` (operating system and software updates, connectivity checks,
-    certificate and time services).
+    certificate and time services), `iot` (smart-home and camera
+    services), `security` (security vendors and tools), `ai` (assistants
+    and coding tools) and `messaging` (chat and calls).
 
   Which labels count as harm is config (`ai.auto_block_categories`, default
   `["malware", "phishing", "scam"]`); which categories a client group

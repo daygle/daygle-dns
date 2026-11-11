@@ -82,6 +82,16 @@ fn infrastructure_hosts_have_their_own_categories() {
         ("cityofmelbourne-my.sharepoint.com", "business"),
         ("dualstack.n.sni.us-eu.fastly.net", "cdn"),
         ("smtp.gmail.com", "email"),
+        // Devices, tools and services with nowhere to go before: a camera
+        // app and a patch management agent were guessed as phishing.
+        ("security-app.eufylife.com", "iot"),
+        ("api.eufylife.com", "iot"),
+        ("server.au.action1.com", "remote-access"),
+        ("labs.sophos.com", "security"),
+        ("api.openai.com", "ai"),
+        ("www.codebuff.com", "ai"),
+        ("web.whatsapp.com", "messaging"),
+        ("au.nordvpn.com", "vpn-proxy"),
     ] {
         assert_eq!(label(&backend, domain), want, "{domain}");
     }
@@ -98,6 +108,12 @@ fn new_categories_leave_the_others_alone() {
         ("github.com", "developer"),
         ("aws.amazon.com", "cloud"),
         ("www.netflix.com", "streaming"),
+        ("paypal-secure-login-verify.xyz", "phishing"),
+        ("secure-account-login-verify.com", "phishing"),
+        ("free-bitcoin-doubler.win", "scam"),
+        ("www.facebook.com", "social"),
+        ("download.windowsupdate.com", "system"),
+        ("security.ubuntu.com", "system"),
     ] {
         assert_eq!(label(&backend, domain), want, "{domain}");
     }

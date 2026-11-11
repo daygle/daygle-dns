@@ -115,6 +115,12 @@ fn main() {
         ("contoso.sharepoint.com", "business"),
         ("d111111abcdef8.cloudfront.net", "cdn"),
         ("mail.proton.me", "email"),
+        ("security-app.eufylife.com", "iot"),
+        ("labs.sophos.com", "security"),
+        ("server.au.action1.com", "remote-access"),
+        ("chatgpt.com", "ai"),
+        ("web.whatsapp.com", "messaging"),
+        ("nordvpn.com", "vpn-proxy"),
     ];
     let mut failures = 0;
     for (probe, want) in probes {
