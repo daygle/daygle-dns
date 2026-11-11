@@ -378,6 +378,15 @@ impl AdvancedBlocking {
             })
     }
 
+    /// Whether some enabled group blocks the AI category `category`.
+    pub fn blocks_category(&self, category: &str) -> bool {
+        self.groups.iter().any(|g| {
+            g.blocked_categories
+                .iter()
+                .any(|c| c.eq_ignore_ascii_case(category))
+        })
+    }
+
     /// The Safe Search and YouTube Restricted Mode switches of the first
     /// enabled group `client` on `listener` belongs to (both off for clients
     /// in no group), with that group's name.

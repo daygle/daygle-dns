@@ -57,6 +57,77 @@ fn bundled_starter_model_loads_and_classifies() {
     assert_eq!(news.severity, Severity::Info);
 }
 
+fn label(backend: &FastTextBackend, domain: &str) -> String {
+    backend
+        .classify(&ClassificationInput::domain_only(domain))
+        .map(|v| v.category)
+        .unwrap_or_default()
+}
+
+/// Update, telemetry, work, CDN and mail hosts have categories of their
+/// own. Update hosts share "download" and "update" with the malware
+/// examples: they were labelled malware, and a group blocking that category
+/// then blocked Windows Update.
+#[test]
+fn infrastructure_hosts_have_their_own_categories() {
+    let backend = FastTextBackend::load(STARTER_MODEL).expect("starter model loads");
+    for (domain, want) in [
+        ("download.windowsupdate.com", "system"),
+        ("au.download.windowsupdate.com", "system"),
+        ("2.au.download.windowsupdate.com", "system"),
+        ("4.au.download.windowsupdate.com", "system"),
+        ("c.pki.goog", "system"),
+        ("mobile.events.data.microsoft.com", "telemetry"),
+        ("incoming.telemetry.mozilla.org", "telemetry"),
+        ("cityofmelbourne-my.sharepoint.com", "business"),
+        ("dualstack.n.sni.us-eu.fastly.net", "cdn"),
+        ("smtp.gmail.com", "email"),
+        // Devices, tools and services with nowhere to go before: a camera
+        // app and a patch management agent were guessed as phishing.
+        ("security-app.eufylife.com", "iot"),
+        ("api.eufylife.com", "iot"),
+        ("server.au.action1.com", "remote-access"),
+        ("labs.sophos.com", "security"),
+        ("api.openai.com", "ai"),
+        ("www.codebuff.com", "ai"),
+        ("web.whatsapp.com", "messaging"),
+        ("au.nordvpn.com", "vpn-proxy"),
+        // Ways around the filter, and ways malware arrives.
+        ("dns.quad9.net", "dns-bypass"),
+        ("mozilla.cloudflare-dns.com", "dns-bypass"),
+        ("myhome.duckdns.org", "dynamic-dns"),
+        ("camera.ddns.net", "dynamic-dns"),
+        ("pastebin.com", "file-sharing"),
+        ("bit.ly", "url-shortener"),
+    ] {
+        assert_eq!(label(&backend, domain), want, "{domain}");
+    }
+}
+
+/// The new categories do not swallow what the model already told apart.
+#[test]
+fn new_categories_leave_the_others_alone() {
+    let backend = FastTextBackend::load(STARTER_MODEL).expect("starter model loads");
+    for (domain, want) in [
+        ("trojan-bin-update.click", "malware"),
+        ("keylogger-download-pro.info", "malware"),
+        ("www.reuters.com", "news"),
+        ("github.com", "developer"),
+        ("api.github.com", "developer"),
+        ("collector.github.com", "developer"),
+        ("aws.amazon.com", "cloud"),
+        ("www.netflix.com", "streaming"),
+        ("paypal-secure-login-verify.xyz", "phishing"),
+        ("secure-account-login-verify.com", "phishing"),
+        ("free-bitcoin-doubler.win", "scam"),
+        ("www.facebook.com", "social"),
+        ("download.windowsupdate.com", "system"),
+        ("security.ubuntu.com", "system"),
+    ] {
+        assert_eq!(label(&backend, domain), want, "{domain}");
+    }
+}
+
 #[test]
 fn engine_tolerates_missing_model_file_falls_back_to_heuristic() {
     let dir = TempDir::new().unwrap();

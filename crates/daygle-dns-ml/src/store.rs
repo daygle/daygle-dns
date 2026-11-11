@@ -42,6 +42,9 @@ pub struct VerdictFilter<'a> {
     /// `exempt` or `not_exempt`.
     pub exemption: Option<&'a str>,
     pub search: Option<&'a str>,
+    /// Whose category the domain carries: `set` (the operator relabelled
+    /// it) or `scanner`.
+    pub label: Option<&'a str>,
     /// `content` or `threat`. `None` keeps the list's own default: the
     /// verdict list shows the categorization channel, the threat list the
     /// threat channel.
@@ -705,6 +708,7 @@ impl AiStore {
         let severity = filter.severity.unwrap_or("").trim().to_ascii_lowercase();
         let exemption = filter.exemption.unwrap_or("").trim().to_ascii_lowercase();
         let search = contains_pattern(filter.search);
+        let label = filter.label.unwrap_or("").trim().to_ascii_lowercase();
         // Each list shows its own channel: the verdict list the
         // categorizer's labels, the threat list the threat detector's.
         let channel = filter
@@ -724,7 +728,11 @@ impl AiStore {
                 OR (?5 = 'not_exempt' AND NOT EXISTS (
                 SELECT 1 FROM ai_overrides o WHERE o.domain = v.domain AND o.action = 'allow')))
             AND v.domain LIKE ?6 ESCAPE '\\'
-            AND v.channel = ?7";
+            AND v.channel = ?7
+            AND (?8 = '' OR (?8 = 'set' AND EXISTS (
+                SELECT 1 FROM ai_category_overrides c WHERE c.domain = v.domain))
+                OR (?8 = 'scanner' AND NOT EXISTS (
+                SELECT 1 FROM ai_category_overrides c WHERE c.domain = v.domain)))";
         let params = params![
             threats_only,
             status,
@@ -732,7 +740,8 @@ impl AiStore {
             severity,
             exemption,
             search,
-            channel
+            channel,
+            label
         ];
         let total: i64 = conn.query_row(
             &format!("SELECT COUNT(*) FROM ai_verdicts v WHERE {filter}"),

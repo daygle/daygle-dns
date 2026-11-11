@@ -1458,7 +1458,7 @@ the URL fetched fine but the content does not parse as (or does not match)
 
 ```
 GET  /api/ai/status
-GET  /api/ai/verdicts?status=classified&category=phish&severity=threat&exemption=not_exempt&q=example&page=1&per_page=50
+GET  /api/ai/verdicts?status=classified&category=phish&severity=threat&exemption=not_exempt&label=set&q=example&page=1&per_page=50
 GET  /api/ai/threats?category=phish&severity=threat&exemption=not_exempt&q=example&page=1&per_page=50
 GET  /api/ai/overrides
 POST /api/ai/override          {"domain": "x.example", "action": "allow|clear|category|clear_category", "category": "gambling", "reason": "..."}
@@ -1517,7 +1517,10 @@ highest confidence first, with optional category substring `category`, severity
 also carries `blocked`, whether the domain is in the *current* block
 snapshot - actually auto-blocked in enforce mode (in train mode the snapshot
 is empty, so every row is `false`). The console's AI → Threats tab renders
-this list.
+this list. `category_blocked` says whether a filtering group blocks the
+category the domain carries (blocked for that group's clients in either
+mode); a threat label counts as such a category only at or above
+`ai.block_threshold`.
 
 Model files are managed over the API too: `GET /api/ai/model-status` reports
 the models directory, each installed model file (presence, size, sha256) and

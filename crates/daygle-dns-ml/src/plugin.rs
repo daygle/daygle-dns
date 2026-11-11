@@ -7,7 +7,9 @@
 //!   domain (or a parent domain) is labelled with a category one of the
 //!   client's groups blocks. This is the operator's rule, not the model's
 //!   decision, so it applies in both modes; `ai.mode` only governs
-//!   auto-blocking of detected threats.
+//!   auto-blocking of detected threats. A threat label (malware, phishing,
+//!   scam) is in that snapshot only for a threat verdict at or above
+//!   `ai.block_threshold`, never on the categorizer's guess.
 //!
 //! Placement in the engine's evaluation order does the safety work:
 //!

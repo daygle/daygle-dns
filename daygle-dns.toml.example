@@ -98,9 +98,9 @@ timeout_secs = 5
 attempts = 3
 dnssec_validate = true
 # With dnssec_validate: answer SERVFAIL when an answer fails validation
-# (RFC 4035), instead of handing it to the client unvalidated. Turn off only
-# to get at a name the validator wrongly fails.
-# dnssec_reject_bogus = true
+# (RFC 4035), instead of handing it to the client unvalidated. Off by
+# default: a name the validator wrongly fails stops resolving.
+# dnssec_reject_bogus = false
 min_cache_ttl = 0
 negative_cache_ttl = 3600
 # Cache: positive and negative answers are retained in memory up to this many entries.

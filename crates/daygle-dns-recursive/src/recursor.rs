@@ -17,6 +17,7 @@ use daygle_dns_core::config::{IpVersions, RecursiveSettings};
 use daygle_dns_core::error::{DaygleError, Result};
 use daygle_dns_core::Metrics;
 use futures_util::stream::{BoxStream, StreamExt};
+use hickory_proto::dnssec::Proof;
 use hickory_proto::op::{Message, Query, ResponseCode};
 use hickory_proto::rr::rdata::opt::{ClientSubnet, EdnsOption};
 use hickory_proto::rr::{Name, RData, Record, RecordType};
@@ -418,8 +419,13 @@ pub async fn lookup(
     let mut name = name;
     name.set_fqdn(true);
     let query = Query::query(name.clone(), record_type);
-    match resolve_one(recursor, query.clone()).await {
-        Resolved::Answer(message) => Ok(to_lookup(query, message.answers.clone(), &message)),
+    let resolve = |q| resolve_one(recursor, q);
+    match resolve(query.clone()).await {
+        Resolved::Answer(message) => {
+            let mut answers = message.answers.clone();
+            clear_false_bogus(&resolve, &mut answers).await;
+            Ok(to_lookup(query, answers, &message))
+        }
         Resolved::Negative(e, soa) => {
             crate::note_negative_soa(soa);
             Err(e)
@@ -437,7 +443,7 @@ pub async fn lookup(
                 RecordType::CNAME | RecordType::ANY | RecordType::DS
             ) =>
         {
-            follow_cnames(|q| resolve_one(recursor, q), name, record_type, e).await
+            follow_cnames(resolve, name, record_type, e).await
         }
         Resolved::Unproven(e) | Resolved::Failed(e) => Err(e),
     }
@@ -526,6 +532,7 @@ where
         match resolve(Query::query(current.clone(), record_type)).await {
             Resolved::Answer(message) => {
                 chain.extend(message.answers.iter().cloned());
+                clear_false_bogus(&resolve, &mut chain).await;
                 return Ok(to_lookup(query, chain, &message));
             }
             Resolved::Negative(e, soa) => {
@@ -538,6 +545,70 @@ where
         }
     }
     Err(unproven)
+}
+
+/// Take the bogus mark off answer records that lie in a zone the validator
+/// itself proves unsigned.
+///
+/// To tell an unsigned zone from one stripped of its signatures the
+/// validator asks the zone's parent for its DS record. Servers that hold
+/// both a zone and a zone delegated from it (`google.com` and
+/// `l.google.com`, say) answer that from the delegated zone, with its own
+/// SOA, which sends the validator round in a circle: it gives up and marks
+/// everything in the delegated zone bogus. With bogus answers refused, that
+/// took out every name there.
+///
+/// A zone under an unsigned zone has no chain of trust to be bogus against.
+/// So for each bogus owner name the SOA of every enclosing name is asked
+/// for, from the top down, and the mark comes off when the validator proves
+/// one of them insecure. A name under a signed zone finds none and stays
+/// bogus, forged SOA answers included: those are bogus themselves.
+async fn clear_false_bogus<F, Fut>(resolve: &F, answers: &mut [Record])
+where
+    F: Fn(Query) -> Fut,
+    Fut: Future<Output = Resolved>,
+{
+    let mut unsigned: Vec<(Name, bool)> = Vec::new();
+    for record in answers.iter_mut() {
+        if record.proof != Proof::Bogus {
+            continue;
+        }
+        let known = unsigned.iter().find(|(name, _)| *name == record.name);
+        let clear = match known {
+            Some((_, clear)) => *clear,
+            None => {
+                let clear = in_unsigned_zone(resolve, &record.name).await;
+                unsigned.push((record.name.clone(), clear));
+                clear
+            }
+        };
+        if clear {
+            record.proof = Proof::Insecure;
+        }
+    }
+}
+
+/// Whether `owner` is at or under a zone whose SOA the validator marks
+/// insecure (provably unsigned).
+async fn in_unsigned_zone<F, Fut>(resolve: &F, owner: &Name) -> bool
+where
+    F: Fn(Query) -> Fut,
+    Fut: Future<Output = Resolved>,
+{
+    for labels in 1..=owner.num_labels() {
+        let apex = owner.trim_to(usize::from(labels));
+        let Resolved::Answer(message) = resolve(Query::query(apex.clone(), RecordType::SOA)).await
+        else {
+            continue;
+        };
+        let insecure = message.answers.iter().any(|r| {
+            r.record_type() == RecordType::SOA && r.name == apex && r.proof == Proof::Insecure
+        });
+        if insecure {
+            return true;
+        }
+    }
+    false
 }
 
 /// A [`Lookup`] of `answers`, with the other sections of `message`.
@@ -676,6 +747,74 @@ mod tests {
 
     async fn follow(owner: &str, record_type: RecordType) -> Result<Lookup> {
         follow_cnames(zones, name(owner), record_type, failure("bogus", None)).await
+    }
+
+    fn soa(zone: &str, proof: Proof) -> Resolved {
+        let mut record = Record::from_rdata(
+            name(zone),
+            300,
+            RData::SOA(hickory_proto::rr::rdata::SOA::new(
+                name("ns.test."),
+                name("hostmaster.test."),
+                1,
+                3600,
+                600,
+                86400,
+                60,
+            )),
+        );
+        record.proof = proof;
+        answer(vec![record])
+    }
+
+    /// `test.` and `signed.test.` are signed; `plain.test.` is not, and its
+    /// delegated `l.plain.test.` cannot be proven either way. An SOA forged
+    /// under the signed zone comes back bogus.
+    async fn apexes(query: Query) -> Resolved {
+        assert_eq!(query.query_type(), RecordType::SOA);
+        match query.name().to_ascii().as_str() {
+            "test." | "signed.test." => soa(&query.name().to_ascii(), Proof::Secure),
+            "plain.test." => soa("plain.test.", Proof::Insecure),
+            "l.plain.test." | "forged.signed.test." => soa(&query.name().to_ascii(), Proof::Bogus),
+            _ => Resolved::Negative(failure("no records", Some(ResponseCode::NoError)), None),
+        }
+    }
+
+    fn bogus_a(owner: &str) -> Record {
+        let mut record =
+            Record::from_rdata(name(owner), 60, RData::A(A(Ipv4Addr::new(192, 0, 2, 7))));
+        record.proof = Proof::Bogus;
+        record
+    }
+
+    #[tokio::test]
+    async fn a_bogus_mark_under_an_unsigned_zone_comes_off() {
+        let mut answers = vec![
+            bogus_a("clients.l.plain.test."),
+            bogus_a("clients.l.plain.test."),
+        ];
+        clear_false_bogus(&apexes, &mut answers).await;
+        assert!(answers.iter().all(|r| r.proof == Proof::Insecure));
+    }
+
+    #[tokio::test]
+    async fn a_bogus_mark_under_a_signed_zone_stays() {
+        let mut answers = vec![
+            bogus_a("www.signed.test."),
+            bogus_a("www.forged.signed.test."),
+            bogus_a("www.nowhere."),
+        ];
+        clear_false_bogus(&apexes, &mut answers).await;
+        assert!(answers.iter().all(|r| r.proof == Proof::Bogus));
+    }
+
+    #[tokio::test]
+    async fn records_that_are_not_bogus_are_left_alone() {
+        let mut secure = bogus_a("www.plain.test.");
+        secure.proof = Proof::Secure;
+        let mut answers = vec![secure];
+        clear_false_bogus(&apexes, &mut answers).await;
+        assert_eq!(answers[0].proof, Proof::Secure);
     }
 
     #[tokio::test]

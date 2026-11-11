@@ -345,19 +345,50 @@ impl Scanner {
         Ok(eligible)
     }
 
-    fn categories_with(&self, now: i64, overrides: &ExemptionSnapshot) -> Result<CategorySnapshot> {
+    /// Domain -> category, for per-group category blocking.
+    ///
+    /// A threat label (`ai.auto_block_categories`: malware, phishing, scam)
+    /// gets here only on the threat channel's terms - a verdict at or above
+    /// `block_threshold` that the verifier did not dispute - whatever the
+    /// mode: blocking a category is the operator's rule. The categorizer's
+    /// own guess at such a label is left out: it has only the low
+    /// categorization floor to clear, and a group blocking "malware" then
+    /// blocked Windows Update on a 77% guess. A label the operator set by
+    /// hand stands.
+    fn categories_with(
+        &self,
+        cfg: &AiSettings,
+        now: i64,
+        overrides: &ExemptionSnapshot,
+    ) -> Result<CategorySnapshot> {
         let relabels = self.store.category_overrides()?;
         let mut snapshot = CategorySnapshot::new();
         for (domain, category, expires_at) in self.store.fresh_categories(now)? {
             if exempt(&domain, overrides) {
                 continue;
             }
-            let category = relabels.get(&domain).cloned().unwrap_or(category);
+            let category = match relabels.get(&domain) {
+                Some(relabel) => relabel.clone(),
+                None if cfg.is_auto_block_category(&category) => continue,
+                None => category,
+            };
             snapshot.insert(
                 domain,
                 ActiveCategory {
                     category,
                     expires_at,
+                },
+            );
+        }
+        for (domain, block) in self.blocks_with(cfg, now, overrides)? {
+            if relabels.contains_key(&domain) {
+                continue;
+            }
+            snapshot.insert(
+                domain,
+                ActiveCategory {
+                    category: block.category,
+                    expires_at: block.expires_at,
                 },
             );
         }
@@ -398,7 +429,7 @@ impl Scanner {
         // below must not keep the new exemptions from the plugin.
         let overrides = Arc::new(overrides);
         self.exemptions.store(overrides.clone());
-        match self.categories_with(now, &overrides) {
+        match self.categories_with(cfg, now, &overrides) {
             Ok(categories) => self.categories.store(Arc::new(categories)),
             Err(e) => self.log_warn(format!("AI category snapshot refresh failed: {e}")),
         }

@@ -30,11 +30,20 @@ then run side by side.
   - **harm** (feeds the Threats list, blockable by the scanner in enforce
     mode): `malware`, `phishing`, `scam`.
   - **policy-blockable content** (never a threat; a client group can block
-    the category): `adult`, `gambling`, `piracy`, `dating`.
+    the category): `adult`, `gambling`, `piracy`, `dating`, `telemetry`
+    (diagnostics and usage reporting), `remote-access` (remote management
+    and remote desktop), `vpn-proxy` (VPNs, proxies and anonymizers),
+    `dns-bypass` (public DNS and DNS-over-HTTPS providers), `dynamic-dns`,
+    `file-sharing` (file hosts and paste sites) and `url-shortener`.
   - **neutral content** (categorization only): `news`, `shopping`,
     `finance`, `crypto`, `gaming`, `streaming`, `social`, `search`,
     `education`, `developer`, `cloud`, `health`, `travel`, `food`,
-    `sports`, `government`, `jobs`, `real-estate`, `auto`, `ads`.
+    `sports`, `government`, `jobs`, `real-estate`, `auto`, `ads`,
+    `business` (work and productivity services), `email`, `cdn`,
+    `system` (operating system and software updates, connectivity checks,
+    certificate and time services), `iot` (smart-home and camera
+    services), `security` (security vendors and tools), `ai` (assistants
+    and coding tools) and `messaging` (chat and calls).
 
   Which labels count as harm is config (`ai.auto_block_categories`, default
   `["malware", "phishing", "scam"]`); which categories a client group

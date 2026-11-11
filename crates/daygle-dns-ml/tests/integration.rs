@@ -952,6 +952,70 @@ fn content_labels_feed_the_category_snapshot_only() {
     );
 }
 
+/// A threat label is a category a group can block only on the threat
+/// channel's terms: a verdict at or above the block threshold, in either
+/// mode. The categorizer's own guess at the label does not count - a group
+/// blocking "malware" blocked Windows Update on a 77% guess.
+#[test]
+fn threat_labels_reach_the_category_snapshot_on_threat_terms_only() {
+    let dir = TempDir::new().unwrap();
+    let ai = engine(&dir, settings(AiMode::Train));
+    let save = |channel, domain: &str, severity: &str, confidence| {
+        ai.store.observe(domain).unwrap();
+        ai.store
+            .save_verdict(
+                channel,
+                domain,
+                "malware",
+                severity,
+                "classified",
+                confidence,
+                "fasttext",
+                "said malware",
+                3600,
+            )
+            .unwrap();
+    };
+    // Guessed malware by both passes, below the threshold.
+    save(Channel::Content, "download.update.example", "info", 0.77);
+    save(Channel::Threat, "download.update.example", "threat", 0.77);
+    // A threat at the threshold, and one the verifier disputed.
+    save(Channel::Threat, "dropper.example", "threat", 0.995);
+    save(Channel::Threat, "disputed.example", "disputed", 0.995);
+    ai.refresh_snapshot_now();
+
+    let categories = ai.category_snapshot().load();
+    assert!(
+        !categories.contains_key("download.update.example"),
+        "a low-confidence malware guess is not a blockable category"
+    );
+    assert_eq!(
+        categories
+            .get("dropper.example")
+            .map(|c| c.category.as_str()),
+        Some("malware"),
+        "a threat at the threshold is, also in train mode"
+    );
+    assert!(!categories.contains_key("disputed.example"));
+    assert!(
+        ai.snapshot().load().is_empty(),
+        "train mode still auto-blocks nothing"
+    );
+    drop(categories);
+
+    // The operator's own label stands, whatever the confidence.
+    ai.set_category_override("download.update.example", "malware")
+        .unwrap();
+    assert_eq!(
+        ai.category_snapshot()
+            .load()
+            .get("download.update.example")
+            .map(|c| c.category.clone())
+            .as_deref(),
+        Some("malware")
+    );
+}
+
 /// An operator relabel wins over the model, survives re-classification and is
 /// what the console and category blocking see.
 #[test]
@@ -1018,6 +1082,58 @@ fn category_override_relabels_and_survives_rescans() {
             .unwrap()
             .category_overridden
     );
+}
+
+/// The list can show only the domains the operator relabelled, or only the
+/// ones still carrying the scanner's label.
+#[test]
+fn the_verdict_list_filters_on_who_set_the_category() {
+    let dir = TempDir::new().unwrap();
+    let ai = engine(&dir, settings(AiMode::Train));
+    for domain in ["mine.example", "scanners.example"] {
+        ai.store.observe(domain).unwrap();
+        ai.store
+            .save_verdict(
+                Channel::Content,
+                domain,
+                "news",
+                "info",
+                "classified",
+                0.9,
+                "fasttext",
+                "model said news",
+                3600,
+            )
+            .unwrap();
+    }
+    ai.set_category_override("mine.example", "cloud").unwrap();
+
+    let listed = |label| {
+        let (rows, total) = ai
+            .store
+            .list_verdicts_filtered(
+                &daygle_dns_ml::store::VerdictFilter {
+                    label,
+                    ..Default::default()
+                },
+                daygle_dns_ml::store::VerdictPage {
+                    limit: 10,
+                    offset: 0,
+                },
+            )
+            .unwrap();
+        assert_eq!(total as usize, rows.len());
+        let mut domains: Vec<String> = rows.into_iter().map(|r| r.domain).collect();
+        domains.sort();
+        domains
+    };
+    assert_eq!(listed(Some("set")), ["mine.example"]);
+    assert_eq!(listed(Some("scanner")), ["scanners.example"]);
+    assert_eq!(listed(None), ["mine.example", "scanners.example"]);
+
+    // Reset: the domain goes back to the scanner's list.
+    assert!(ai.clear_category_override("mine.example").unwrap());
+    assert!(listed(Some("set")).is_empty());
 }
 
 /// A relabel stands on its own: an operator can categorize a domain the model

@@ -3958,8 +3958,10 @@ pub struct RecursiveSettings {
     pub dnssec_validate: bool,
     /// With `dnssec_validate`: answer SERVFAIL when an answer fails
     /// validation (RFC 4035 section 5.5) instead of handing it to the
-    /// client unvalidated. On by default; turning it off keeps validation
-    /// for the AD bit only, for a name the validator wrongly fails.
+    /// client unvalidated. Off by default: the validator has marked names
+    /// in unsigned zones bogus (see `clear_false_bogus` in the recursive
+    /// crate), and a wrong mark then takes the name out. Off keeps
+    /// validation for the AD bit only.
     pub dnssec_reject_bogus: bool,
     /// Lower bound, in seconds, applied to cached *positive* TTLs.
     /// A record whose authoritative TTL is below this is kept in cache for at
@@ -4336,7 +4338,7 @@ impl Default for RecursiveSettings {
             timeout_secs: 5,
             attempts: 3,
             dnssec_validate: true,
-            dnssec_reject_bogus: true,
+            dnssec_reject_bogus: false,
             min_cache_ttl: 0,
             negative_cache_ttl: 3600,
             max_cache_ttl: 0,

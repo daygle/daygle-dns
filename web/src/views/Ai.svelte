@@ -22,7 +22,7 @@
       id: 'classifications',
       label: 'Classifications',
       tagline:
-        'Every domain the scanner has categorized from your DNS traffic, most recently classified first. Pick a different category to relabel a domain yourself: your label survives re-scans and is what category blocking matches.',
+        'Every domain the scanner has categorized from your DNS traffic, most recently classified first. Pick a different category to relabel a domain yourself: your label survives re-scans and is what category blocking matches. The undo button beside a label you set gives the domain back to the scanner.',
     },
     {
       id: 'threats',

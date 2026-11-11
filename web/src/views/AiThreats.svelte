@@ -243,6 +243,8 @@
                 <span class="pill" title="The verifier disagreed with this threat detection: the domain is never auto-blocked">Disputed</span>
               {:else if r.blocked}
                 <span class="pill err" title="In the current block snapshot: auto-blocked in enforce mode">Auto-Blocked</span>
+              {:else if r.category_blocked}
+                <span class="pill err" title="A filtering group blocks this category: blocked for that group's clients, in either mode">Blocked by Category</span>
               {:else if r.overridden}
                 <span class="pill ok tag" title="Exempt: the operator's allow override vetoed blocking for this domain">Exempt</span>
               {:else}
