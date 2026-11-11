@@ -610,6 +610,12 @@ time_format = "system"
 [updates]
 enabled = true
 check_interval_secs = 3600
+# Install a changed AI models bundle (the classifier, verifier and bundled
+# daygle-starter.bin) when a release ships one, through the same verified,
+# rollback-protected path as the AI page's button. Compared by content hash,
+# so unchanged models cause no run; each real install restarts the service.
+# Enabled by default so model fixes reach installs that never visit the page.
+auto_refresh_models = true
 # Automatically install stable binary releases at this hour (0-23) in the
 # display time zone. This restarts the DNS service; disabled by default.
 auto_install = false

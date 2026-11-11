@@ -1091,10 +1091,12 @@ pub struct UpdateCheckSettings {
     /// installed, download and install it automatically at the check
     /// cadence (the same verified checksum + rollback-protected apply path
     /// the console's "Update AI Models" button uses; each install restarts
-    /// the service, a brief DNS pause). Default off: automatic model
-    /// writes and restarts are an explicit operator choice, compared here
-    /// by content hashes - a release that ships unchanged models causes
-    /// no run.
+    /// the service, a brief DNS pause). Default on: the classifier and
+    /// verifier files, including the bundled `daygle-starter.bin`, keep pace
+    /// with the release that ships them, so a fix or retrained model reaches
+    /// every install without an operator pressing the button. The comparison
+    /// is by content hash, so a release that ships unchanged models causes
+    /// no run and no restart.
     #[serde(default)]
     pub auto_refresh_models: bool,
     /// Automatically install stable binary releases at `auto_install_hour`.
@@ -1115,7 +1117,7 @@ impl Default for UpdateCheckSettings {
             // unauthenticated budget, and a fresh release is still noticed
             // within an hour of publication.
             check_interval_secs: 3600,
-            auto_refresh_models: false,
+            auto_refresh_models: true,
             auto_install: false,
             auto_install_hour: 3,
         }
@@ -5643,6 +5645,7 @@ mod tests {
         let cfg = DaygleConfig::parse("").unwrap();
         assert!(cfg.updates.enabled);
         assert_eq!(cfg.updates.check_interval_secs, 3600);
+        assert!(cfg.updates.auto_refresh_models);
         assert!(!cfg.updates.auto_install);
         assert_eq!(cfg.updates.auto_install_hour, 3);
         // Explicitly parsed section; unknown keys rejected.

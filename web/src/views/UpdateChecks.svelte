@@ -90,8 +90,8 @@
       refused: GitHub's unauthenticated API allows 60 requests per hour per
       address, shared with everything else using this network. Turning checks
       off removes the banner; Update Now and the manual update command still
-      work. Keeping AI models up to date installs a new model bundle when
-      a check finds one, which restarts the service. Automatic stable-release
+      work. Keeping AI models up to date (on by default) installs a new model
+      bundle when a check finds one, which restarts the service. Automatic stable-release
       installation is off by default; when enabled, the server checks for a
       stable release during the selected hour. The release is compiled before
       the binary swap, so DNS interruption is limited to installation and the

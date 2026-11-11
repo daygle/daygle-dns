@@ -339,8 +339,8 @@
       The bundled classifier and verifier files. Updating downloads the
       models bundle from the latest GitHub release, verifies it, installs the
       files and restarts the service (a brief DNS pause) with automatic
-      rollback on failure. To install new model bundles automatically, turn
-      on Keep AI Models up to Date on the Update page.
+      rollback on failure. New model bundles install automatically while
+      Keep AI Models up to Date is on (the default) on the Update page.
     </p>
     {#if modelsError}
       <p style="color: var(--danger)">{modelsError}</p>
