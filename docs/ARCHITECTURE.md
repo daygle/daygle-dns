@@ -191,7 +191,10 @@ same path for per-source status.
   Hickory validates the chain and sets the AD bit; bogus chains fail the query
   with SERVFAIL and extended error 6 naming the record. The validator only
   marks a positive answer that fails; the resolver refuses it
-  (`recursive.dnssec_reject_bogus`, on by default - off serves it unvalidated).
+  (`recursive.dnssec_reject_bogus`; off by default, which serves it
+  unvalidated). A bogus mark on a name under a zone the validator proves
+  unsigned is taken off first: servers holding both a zone and a zone
+  delegated from it answer the validator's DS question from the wrong side.
 - **Signing** (authoritative path) is per-zone: `POST /api/zones/:id/sign`
   generates an ECDSA P-256 key (stored as PKCS#8 in SQLite) and signs the zone
   with NSEC non-existence proofs on the next catalog reload. Signatures are

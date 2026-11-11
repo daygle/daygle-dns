@@ -1357,8 +1357,11 @@ mod tests {
     #[test]
     fn an_answer_that_failed_validation_is_refused() {
         use hickory_proto::dnssec::Proof;
-        let settings = RecursiveSettings::default();
-        assert!(settings.dnssec_validate && settings.dnssec_reject_bogus);
+        let settings = RecursiveSettings {
+            dnssec_reject_bogus: true,
+            ..RecursiveSettings::default()
+        };
+        assert!(settings.dnssec_validate);
 
         let refused = reject_bogus(&settings, answer_with(Proof::Bogus)).unwrap_err();
         assert!(matches!(refused, DaygleError::Dnssec(_)), "{refused}");
@@ -1378,13 +1381,13 @@ mod tests {
     #[test]
     fn rejecting_can_be_turned_off_and_follows_validation() {
         use hickory_proto::dnssec::Proof;
-        let lenient = RecursiveSettings {
-            dnssec_reject_bogus: false,
-            ..RecursiveSettings::default()
-        };
+        // Off unless asked for.
+        let lenient = RecursiveSettings::default();
+        assert!(!lenient.dnssec_reject_bogus);
         assert!(reject_bogus(&lenient, answer_with(Proof::Bogus)).is_ok());
         let unvalidated = RecursiveSettings {
             dnssec_validate: false,
+            dnssec_reject_bogus: true,
             ..RecursiveSettings::default()
         };
         assert!(reject_bogus(&unvalidated, answer_with(Proof::Bogus)).is_ok());

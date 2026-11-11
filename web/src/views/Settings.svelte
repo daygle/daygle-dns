@@ -958,9 +958,10 @@
     </div>
     {#if recursive.enabled}
       <p class="muted help">
-        With DNSSEC validation, an answer that fails it is refused (SERVFAIL)
-        rather than passed on unchecked. Turn that off only to reach a name
-        the validator wrongly fails.
+        With DNSSEC validation, rejecting refuses an answer that fails it
+        (SERVFAIL) rather than passing it on unchecked. A name the validator
+        wrongly fails then stops resolving, so it is off unless you turn it
+        on.
       </p>
       <p class="muted help">
         Rebinding protection blocks answers that give a public name a private,
