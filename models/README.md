@@ -69,10 +69,10 @@ transformation (model int8 ONNX + full BERT tokenizer pipeline shipped as
   `starter-training.txt` - the centroid file must be regenerated whenever
   the dataset's categories change.
 - **Build note**: compiled and loaded via the `ort` crate (ONNX Runtime,
-  feature `daygle-dns-ml/verifier-onnx`, on by default). Static musl
-  release binaries build with `--no-default-features` because the prebuilt
-  ONNX Runtime binaries are glibc-based; those builds run fastText/heuristic
-  only, `verifier_model_path` is ignored there.
+  feature `daygle-dns-ml/verifier-onnx`, on by default). A static musl
+  build needs `--no-default-features` because the prebuilt ONNX Runtime
+  binaries are glibc-based; such a build runs fastText/heuristic only and
+  ignores `verifier_model_path`.
 
 ## Regenerating
 
