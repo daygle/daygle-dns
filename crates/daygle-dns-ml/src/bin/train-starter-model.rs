@@ -89,8 +89,8 @@ fn main() {
     let model = fasttext::FastText::train(args).expect("fastText training failed");
     model.save_model(&output_path).expect("save model");
 
-    // Round-trip check: the four menace-theater domains below must land in
-    // their trained categories or the committed artifact is useless.
+    // Round-trip check: the probes below must land in their trained
+    // categories or the committed artifact is useless.
     let reload = fasttext::FastText::load_model(&output_path).expect("reload trained model");
     // One probe per tier: harm, policy-blockable content, and plain content.
     let probes = [
@@ -106,6 +106,15 @@ fn main() {
         ("nfl.com", "sports"),
         ("gov.uk", "government"),
         ("ethereum.org", "crypto"),
+        // Infrastructure a network asks for on its own. The update hosts
+        // share "download" and "update" with the malware examples and must
+        // not land there.
+        ("download.windowsupdate.com", "system"),
+        ("3.au.download.windowsupdate.com", "system"),
+        ("incoming.telemetry.mozilla.org", "telemetry"),
+        ("contoso.sharepoint.com", "business"),
+        ("d111111abcdef8.cloudfront.net", "cdn"),
+        ("mail.proton.me", "email"),
     ];
     let mut failures = 0;
     for (probe, want) in probes {

@@ -1517,7 +1517,10 @@ highest confidence first, with optional category substring `category`, severity
 also carries `blocked`, whether the domain is in the *current* block
 snapshot - actually auto-blocked in enforce mode (in train mode the snapshot
 is empty, so every row is `false`). The console's AI → Threats tab renders
-this list.
+this list. `category_blocked` says whether a filtering group blocks the
+category the domain carries (blocked for that group's clients in either
+mode); a threat label counts as such a category only at or above
+`ai.block_threshold`.
 
 Model files are managed over the API too: `GET /api/ai/model-status` reports
 the models directory, each installed model file (presence, size, sha256) and

@@ -1501,7 +1501,9 @@ pub async fn ai_verdicts(
 /// highest confidence first. Each row carries `blocked`: whether the domain
 /// is in the *current* block snapshot, i.e. actually auto-blocked in
 /// enforce mode (an empty snapshot in train mode therefore reports every
-/// row as not blocked).
+/// row as not blocked), and `category_blocked`: whether a filtering group
+/// blocks the category the domain carries, so it is blocked for that
+/// group's clients in either mode.
 pub async fn ai_threats(
     State(state): State<AppState>,
     Query(query): Query<AiThreatsQuery>,
@@ -1532,6 +1534,9 @@ pub async fn ai_threats(
     match listed {
         Ok((rows, total)) => {
             let snapshot = ai.snapshot().load();
+            let categories = ai.category_snapshot();
+            let categories = categories.load();
+            let groups = state.advanced_blocking.load();
             (StatusCode::OK,
                 axum::Json(serde_json::json!({
                     "entries": rows.iter().map(|r| serde_json::json!({
@@ -1546,6 +1551,9 @@ pub async fn ai_threats(
                         "observations": r.observations,
                         "overridden": r.overridden,
                         "blocked": snapshot.contains_key(&r.domain),
+                        "category_blocked": categories
+                            .get(&r.domain)
+                            .is_some_and(|c| groups.blocks_category(&c.category)),
                         "classified_at": chrono::DateTime::<chrono::Utc>::from_timestamp(r.classified_at, 0)
                             .map(|t| t.to_rfc3339()),
                         "expires_at": chrono::DateTime::<chrono::Utc>::from_timestamp(r.expires_at, 0)
