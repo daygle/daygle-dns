@@ -1240,6 +1240,9 @@ pub struct AiVerdictsQuery {
     severity: Option<String>,
     /// Optional exemption filter (`exempt`, `not_exempt`).
     exemption: Option<String>,
+    /// Optional label filter: `set` (categories the operator set) or
+    /// `scanner` (the scanner's own).
+    label: Option<String>,
     /// Optional channel filter (`content`, `threat`); defaults to `content`,
     /// the categorization channel. The threat channel has its own endpoint.
     channel: Option<String>,
@@ -1458,6 +1461,7 @@ pub async fn ai_verdicts(
                 severity: query.severity.as_deref(),
                 exemption: query.exemption.as_deref(),
                 search: query.q.as_deref(),
+                label: query.label.as_deref(),
                 channel: query.channel.as_deref(),
             };
             ai.store.list_verdicts_filtered(&filter, page_bounds)

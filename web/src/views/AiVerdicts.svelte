@@ -31,6 +31,12 @@
     { value: 'not_exempt', label: 'Not Exempt' },
   ];
 
+  const LABEL_FILTERS = [
+    { value: '', label: 'All Labels' },
+    { value: 'set', label: 'Set By You' },
+    { value: 'scanner', label: "Scanner's Label" },
+  ];
+
   let rows = $state([]);
   let total = $state(0);
   let page = $state(1); // 1-based; mirrors the server's clamped parameter
@@ -38,6 +44,7 @@
   let categoryFilter = $state('');
   let categories = $state([]);
   let exemptionFilter = $state('');
+  let labelFilter = $state('');
   let search = $state('');
   let loading = $state(true);
   let error = $state(null);
@@ -63,6 +70,7 @@
     if (statusFilter) params.set('status', statusFilter);
     if (categoryFilter.trim()) params.set('category', categoryFilter.trim());
     if (exemptionFilter) params.set('exemption', exemptionFilter);
+    if (labelFilter) params.set('label', labelFilter);
     if (search.trim()) params.set('q', search.trim());
     params.set('page', String(page));
     params.set('per_page', String(PER_PAGE));
@@ -210,6 +218,7 @@
     statusFilter;
     categoryFilter;
     exemptionFilter;
+    labelFilter;
     search;
     clearTimeout(searchTimer);
     // The first load runs at once; only later changes wait for a pause.
@@ -263,6 +272,11 @@
             <option value={f.value}>{f.label}</option>
           {/each}
         </select>
+        <select bind:value={labelFilter} aria-label="Filter by who set the category" style="min-width: 150px">
+          {#each LABEL_FILTERS as f (f.label)}
+            <option value={f.value}>{f.label}</option>
+          {/each}
+        </select>
         <button class="secondary" onclick={load}>Reload</button>
         <ColumnPicker table="ai-verdicts" columns={COLUMNS} />
       </div>
@@ -298,12 +312,15 @@
                     title={r.category_overridden ? "Your label overrides the scanner's" : "The scanner's label"}
                     onchange={(e) => setCategory(r, e.currentTarget.value, e.currentTarget)}
                   >
-                    <option value="">-</option>
+                    <option value="">{r.category_overridden ? "Scanner's Label" : '-'}</option>
                     {#each rowCategories(r) as category (category)}
                       <option value={category}>{titleCase(category)}</option>
                     {/each}
                   </select>
-                  {#if r.category_overridden}<span class="pill ok tag" title="You set this category; the scanner keeps classifying the domain">Set By You</span>{/if}
+                  {#if r.category_overridden}
+                    <span class="pill ok tag" title="You set this category; the scanner keeps classifying the domain">Set By You</span>
+                    <IconButton icon="undo" label="Reset: use the scanner's category again" disabled={savingCategory.has(r.domain)} onclick={() => setCategory(r, '', null)} />
+                  {/if}
                 </div>
               {:else if r.category}
                 {titleCase(r.category)}

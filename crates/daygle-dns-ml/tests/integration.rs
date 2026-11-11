@@ -1084,6 +1084,58 @@ fn category_override_relabels_and_survives_rescans() {
     );
 }
 
+/// The list can show only the domains the operator relabelled, or only the
+/// ones still carrying the scanner's label.
+#[test]
+fn the_verdict_list_filters_on_who_set_the_category() {
+    let dir = TempDir::new().unwrap();
+    let ai = engine(&dir, settings(AiMode::Train));
+    for domain in ["mine.example", "scanners.example"] {
+        ai.store.observe(domain).unwrap();
+        ai.store
+            .save_verdict(
+                Channel::Content,
+                domain,
+                "news",
+                "info",
+                "classified",
+                0.9,
+                "fasttext",
+                "model said news",
+                3600,
+            )
+            .unwrap();
+    }
+    ai.set_category_override("mine.example", "cloud").unwrap();
+
+    let listed = |label| {
+        let (rows, total) = ai
+            .store
+            .list_verdicts_filtered(
+                &daygle_dns_ml::store::VerdictFilter {
+                    label,
+                    ..Default::default()
+                },
+                daygle_dns_ml::store::VerdictPage {
+                    limit: 10,
+                    offset: 0,
+                },
+            )
+            .unwrap();
+        assert_eq!(total as usize, rows.len());
+        let mut domains: Vec<String> = rows.into_iter().map(|r| r.domain).collect();
+        domains.sort();
+        domains
+    };
+    assert_eq!(listed(Some("set")), ["mine.example"]);
+    assert_eq!(listed(Some("scanner")), ["scanners.example"]);
+    assert_eq!(listed(None), ["mine.example", "scanners.example"]);
+
+    // Reset: the domain goes back to the scanner's list.
+    assert!(ai.clear_category_override("mine.example").unwrap());
+    assert!(listed(Some("set")).is_empty());
+}
+
 /// A relabel stands on its own: an operator can categorize a domain the model
 /// has not classified yet, and that label is blockable straight away.
 #[test]

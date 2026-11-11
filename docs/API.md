@@ -1458,7 +1458,7 @@ the URL fetched fine but the content does not parse as (or does not match)
 
 ```
 GET  /api/ai/status
-GET  /api/ai/verdicts?status=classified&category=phish&severity=threat&exemption=not_exempt&q=example&page=1&per_page=50
+GET  /api/ai/verdicts?status=classified&category=phish&severity=threat&exemption=not_exempt&label=set&q=example&page=1&per_page=50
 GET  /api/ai/threats?category=phish&severity=threat&exemption=not_exempt&q=example&page=1&per_page=50
 GET  /api/ai/overrides
 POST /api/ai/override          {"domain": "x.example", "action": "allow|clear|category|clear_category", "category": "gambling", "reason": "..."}
