@@ -838,6 +838,7 @@ version = "1.0.0"
 dependencies = [
  "arc-swap",
  "daygle-dns-core",
+ "futures-util",
  "hickory-proto",
  "hickory-resolver",
  "ipnet",

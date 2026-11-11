@@ -16,6 +16,7 @@ use std::time::{Duration, Instant};
 use daygle_dns_core::config::{IpVersions, RecursiveSettings};
 use daygle_dns_core::error::{DaygleError, Result};
 use daygle_dns_core::Metrics;
+use futures_util::stream::{BoxStream, StreamExt};
 use hickory_proto::op::{Message, Query, ResponseCode};
 use hickory_proto::rr::rdata::opt::{ClientSubnet, EdnsOption};
 use hickory_proto::rr::{Name, RData, Record, RecordType};
@@ -27,7 +28,7 @@ use hickory_resolver::lookup::Lookup;
 use hickory_resolver::net::runtime::TokioRuntimeProvider;
 use hickory_resolver::net::xfer::DnsHandle;
 use hickory_resolver::net::{DnsError, NetError};
-use hickory_resolver::proto::op::DnsRequest;
+use hickory_resolver::proto::op::{DnsRequest, DnsResponse};
 use hickory_resolver::recursor::{
     DnssecConfig, DnssecPolicy, QNameMinimization, Recursor, RecursorError, RecursorOptions,
 };
@@ -83,6 +84,9 @@ pub struct UpstreamConnections {
     /// (forwarding only: walking the hierarchy would hand the client's
     /// network to every root and TLD server).
     client_subnet: bool,
+    /// Read a referral's glue as the answer to a query for it (see
+    /// [`glue_as_answer`]). Recursive mode only.
+    glue_answers: bool,
 }
 
 impl UpstreamConnections {
@@ -147,10 +151,11 @@ pub async fn track_upstream<F: Future>(lookup: F) -> (F::Output, bool) {
 pub struct TrackedConn<C> {
     conn: C,
     client_subnet: bool,
+    glue_answers: bool,
 }
 
 impl<C: DnsHandle> DnsHandle for TrackedConn<C> {
-    type Response = C::Response;
+    type Response = BoxStream<'static, std::result::Result<DnsResponse, NetError>>;
     type Runtime = C::Runtime;
 
     fn is_verifying_dnssec(&self) -> bool {
@@ -178,8 +183,52 @@ impl<C: DnsHandle> DnsHandle for TrackedConn<C> {
                 }
             }
         }
-        self.conn.send(request)
+        if !self.glue_answers {
+            return self.conn.send(request).boxed();
+        }
+        let query = request.queries.first().cloned();
+        self.conn
+            .send(request)
+            .map(move |response| match (response, &query) {
+                (Ok(response), Some(query)) => Ok(glue_as_answer(query, response)),
+                (response, _) => response,
+            })
+            .boxed()
     }
+}
+
+/// A referral that carries the address asked for as glue, turned into an
+/// answer with that address.
+///
+/// The recursor asks a zone's parent for the address of a name server that
+/// lies inside the zone when it has the zone's NS records without their
+/// glue: after the zone's own NS answer (often sent without addresses)
+/// replaced the parent's referral in its cache and the zone's name servers
+/// were dropped from the name server cache. The parent replies with the
+/// referral again, the address in the additional section, where the recursor
+/// does not look - so the zone, and every zone served from it, failed with
+/// "no glue found for any nameservers" until the cached answer expired.
+fn glue_as_answer(query: &Query, response: DnsResponse) -> DnsResponse {
+    let is_glue = |r: &Record| r.record_type() == query.query_type() && r.name == *query.name();
+    let referral = matches!(query.query_type(), RecordType::A | RecordType::AAAA)
+        && response.response_code == ResponseCode::NoError
+        && !response.authoritative
+        && response.answers.is_empty()
+        && response
+            .authorities
+            .iter()
+            .any(|r| r.record_type() == RecordType::NS && r.name.zone_of(query.name()))
+        && response.additionals.iter().any(is_glue);
+    if !referral {
+        return response;
+    }
+    let mut message = response.clone().into_message();
+    let (glue, rest) = std::mem::take(&mut message.additionals)
+        .into_iter()
+        .partition(is_glue);
+    message.answers = glue;
+    message.additionals = rest;
+    DnsResponse::from_message(message).unwrap_or(response)
 }
 
 type TokioConn = <TokioRuntimeProvider as ConnectionProvider>::Conn;
@@ -227,10 +276,12 @@ impl ConnectionProvider for UpstreamConnections {
             None => self.runtime.new_connection(ip, config, cx)?,
         };
         let client_subnet = self.client_subnet;
+        let glue_answers = self.glue_answers;
         Ok(Box::pin(async move {
             connecting.await.map(|conn| TrackedConn {
                 conn,
                 client_subnet,
+                glue_answers,
             })
         }))
     }
@@ -310,6 +361,7 @@ pub fn build(
     let mut connections = UpstreamConnections {
         local_root,
         metrics: Some(metrics),
+        glue_answers: true,
         ..UpstreamConnections::default()
     };
     if let Some(port) = settings.test_outbound_port {
