@@ -65,11 +65,9 @@ root_fetch() { # url dest
 }
 
 # This step runs as root, but $DIR (and everything under $UPDATES_DIR) is
-# writable by the unprivileged service account. Root therefore never opens
-# (reads, writes or appends to) a path in those directories: progress and
-# log output are written to a root-private scratch dir and only *renamed*
-# into $DIR, and the staged binary is copied out before it is verified, so a
-# symlink or a file swapped in mid-run cannot redirect a root write or slip
+# writable by the unprivileged service account. Staging and progress file
+# operations run with that account's privileges; private copies are made
+# before verification. Swapping a path cannot redirect a root write or slip
 # an unverified binary past the checksum.
 PRIV="$(mktemp -d)"
 trap 'rm -rf "$PRIV"' EXIT HUP INT TERM
@@ -84,11 +82,34 @@ if [ -L "$DIR" ] || [ ! -d "$DIR" ]; then
   PUBLISH=0
 fi
 
-# Rename a finished root-private file into the workspace.
+# Never access service-writable paths with root privileges: even a checked
+# directory can be replaced with a symlink before the next operation.
+as_service() {
+  if [ "$(id -un)" = "$SERVICE_USER" ]; then
+    "$@"
+  elif command -v runuser >/dev/null 2>&1; then
+    runuser -u "$SERVICE_USER" -- "$@"
+  elif command -v sudo >/dev/null 2>&1; then
+    sudo -H -u "$SERVICE_USER" -- "$@"
+  else
+    return 1
+  fi
+}
+
+# Publish through the service account, which can access the destination but
+# cannot redirect root into writing to a privileged path.
 publish() { # private-file name
   [ "$PUBLISH" -eq 1 ] || return 0
-  chmod 0644 "$1" 2>/dev/null || true
-  mv -f "$1" "$DIR/$2" 2>/dev/null || true
+  as_service sh -c '
+    set -eu
+    dir=$1
+    name=$2
+    tmp=$(mktemp "$dir/.daygle-update.XXXXXXXX")
+    trap '\''rm -f "$tmp"'\'' EXIT HUP INT TERM
+    cat > "$tmp"
+    chmod 0644 "$tmp"
+    mv -fT -- "$tmp" "$dir/$name"
+  ' sh "$DIR" "$2" < "$1" 2>/dev/null || true
 }
 
 log() {
@@ -138,7 +159,7 @@ last_log_error_from_file() {
 # accepted from the (service-writable) file.
 CONFIG_FILE="${MODELS_DIR%/*}/daygle-dns.toml"
 api_setting() { # key
-  awk -v key="$1" '
+  as_service awk -v key="$1" '
     /^\[api\][[:space:]]*$/ { in_api = 1; next }
     /^\[/ { in_api = 0 }
     in_api {
@@ -205,31 +226,38 @@ file_sha() {
 
 # Nothing pending: the marker's own rename/removal events can re-trigger this
 # unit; a run without a request is a clean no-op.
-if [ ! -f "$REQ" ]; then
+if ! as_service test -f "$REQ"; then
   exit 0
 fi
 
-# Consume the marker before doing anything so a crash mid-apply cannot make
-# the watcher re-fire it endlessly.
-mv -f "$REQ" "$REQ.processing"
+# Consume the marker as the service user: its parent directory is writable
+# and can be swapped after any check.
+as_service mv -fT -- "$REQ" "$REQ.processing" || exit 1
 
 MANIFEST="$STAGING/apply.json"
 STAGED_BIN="$STAGING/apply.bin"
 # Verify and install a root-private copy, never the service-writable file.
 BIN="$PRIV/apply.bin"
 
-if [ ! -f "$MANIFEST" ] || [ ! -f "$STAGED_BIN" ] || [ -L "$STAGED_BIN" ] \
-   || ! cp "$STAGED_BIN" "$BIN"; then
+if ! as_service test -f "$MANIFEST" || ! as_service test -f "$STAGED_BIN" \
+   || as_service test -L "$STAGED_BIN" \
+   || ! as_service cat -- "$STAGED_BIN" > "$BIN"; then
   log "request present but staged manifest/binary missing"
-  rm -f "$REQ.processing"
+  as_service rm -f -- "$REQ.processing"
   fail "the update was requested but its staged manifest or binary is missing. Re-run the update from the console; if it persists, re-run the installer."
   exit 1
 fi
 
-VERSION="$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$MANIFEST" | head -n 1)"
-SHA256="$(sed -n 's/.*"sha256"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$MANIFEST" | head -n 1)"
-KIND="$(sed -n 's/.*"kind"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$MANIFEST" | head -n 1)"
-if [ "$KIND" = install ] && grep -q '"automatic"[[:space:]]*:[[:space:]]*true' "$MANIFEST"; then
+if ! as_service cat -- "$MANIFEST" > "$PRIV/apply.json"; then
+  log "cannot read staged manifest"
+  as_service rm -f -- "$REQ.processing"
+  fail "the staged manifest could not be read. Re-run the update from the console."
+  exit 1
+fi
+VERSION="$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$PRIV/apply.json" | head -n 1)"
+SHA256="$(sed -n 's/.*"sha256"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$PRIV/apply.json" | head -n 1)"
+KIND="$(sed -n 's/.*"kind"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$PRIV/apply.json" | head -n 1)"
+if [ "$KIND" = install ] && grep -q '"automatic"[[:space:]]*:[[:space:]]*true' "$PRIV/apply.json"; then
   AUTOMATIC=true
 fi
 BAD=""
@@ -255,7 +283,7 @@ if [ -z "$BAD" ] && [ "${#SHA256}" -ne 64 ]; then
 fi
 if [ -n "$BAD" ]; then
   log "rejecting update: $BAD"
-  rm -f "$REQ.processing"
+  as_service rm -f -- "$REQ.processing"
   fail "the staged update was rejected (${BAD}). Re-run the update from the console."
   exit 1
 fi
@@ -263,7 +291,7 @@ fi
 ACTUAL="$( (sha256sum "$BIN" 2>/dev/null || shasum -a 256 "$BIN" 2>/dev/null) | cut -d' ' -f1 | tr -d '[:space:]')"
 if [ -z "$ACTUAL" ] || [ "$ACTUAL" != "$SHA256" ]; then
   log "rejecting update: sha256 mismatch (expected $SHA256)"
-  rm -f "$REQ.processing"
+  as_service rm -f -- "$REQ.processing"
   fail "the staged binary failed checksum verification - refusing to install it. Re-run the update from the console."
   exit 1
 fi
@@ -296,8 +324,16 @@ if [ "$KIND" = "install" ]; then
     :
   else
     log "cannot fetch the canonical installer from $INSTALLER_URL"
-    rm -f "$REQ.processing"
+    as_service rm -f -- "$REQ.processing"
     fail "the update service could not download the canonical installer ($INSTALLER_URL). Check this host's network access to GitHub and retry."
+    exit 1
+  fi
+  # Older installers access service-owned paths as root. Do not run one
+  # until the canonical installer explicitly supports the safe update mode.
+  if ! grep -qxF '# DAYGLE_DNS_GUI_UPDATE_SAFE_V1' "$PRIV/install.sh"; then
+    log "canonical installer lacks the safe GUI update contract"
+    as_service rm -f -- "$REQ.processing"
+    fail "the canonical installer does not support safe GUI updates yet; update manually on a trusted host."
     exit 1
   fi
   chmod 0700 "$PRIV/install.sh"
@@ -387,12 +423,12 @@ if [ "$KIND" = "install" ]; then
     # and healthy, as with every other apply kind.
     state restarting "Installer finished - checking the restarted service..."
     if health_check; then
-      rm -f "$REQ.processing" "$MANIFEST" "$STAGED_BIN"
+      as_service rm -f -- "$REQ.processing" "$MANIFEST" "$STAGED_BIN"
       log "installer completed v${VERSION} and health check passed"
       state done "Full update installed by the canonical installer and verified successfully (v${VERSION})."
       exit 0
     fi
-    rm -f "$REQ.processing" "$MANIFEST" "$STAGED_BIN"
+    as_service rm -f -- "$REQ.processing" "$MANIFEST" "$STAGED_BIN"
     log "health check failed after installing v${VERSION}"
     if rollback_binary; then
       if health_check; then
@@ -417,7 +453,7 @@ if [ "$KIND" = "install" ]; then
   # The installer failed. If it got as far as replacing the binary, put the
   # previous one back; either way make sure the service is running.
   STOP="$(last_log_error_from_file "$LOG")"
-  rm -f "$REQ.processing" "$MANIFEST" "$STAGED_BIN"
+  as_service rm -f -- "$REQ.processing" "$MANIFEST" "$STAGED_BIN"
   if rollback_binary; then
     if health_check; then
       WHAT="the previous version was restored and passed its health check"
@@ -442,6 +478,34 @@ if [ "$KIND" = "install" ]; then
   exit 1
 fi
 
+# ---- model file operations ---------------------------------------------
+# The model directory belongs to the service account. It can replace paths
+# (including symlinks) while an update is in progress.
+model_write() { # source name: read the private source before dropping privileges
+  as_service sh -c '
+    set -eu
+    dir=$1
+    name=$2
+    tmp=$(mktemp "$dir/.daygle-model.XXXXXXXX")
+    trap '\''rm -f "$tmp"'\'' EXIT HUP INT TERM
+    cat > "$tmp"
+    chmod 0644 "$tmp"
+    mv -fT -- "$tmp" "$dir/$name"
+  ' sh "$MODELS_DIR" "$2" < "$1"
+}
+
+restore_models() {
+  restored=0
+  for f in $VALID; do
+    if [ -f "$PRIV/model-backup/$f" ]; then
+      model_write "$PRIV/model-backup/$f" "$f" || restored=1
+    else
+      as_service rm -f -- "$MODELS_DIR/$f" || restored=1
+    fi
+  done
+  [ "$restored" -eq 0 ]
+}
+
 # ---- models-only update ------------------------------------------------
 # The staged file is a tar.gz bundle containing manifest.json + whitelisted
 # model files. Install them INTO $MODELS_DIR, chmod/chown for the service
@@ -461,7 +525,7 @@ if [ "$KIND" = "models" ]; then
   fi
   if [ -z "$WANT_BUNDLE" ] || [ "$WANT_BUNDLE" != "$(printf '%s' "$ACTUAL" | tr 'A-F' 'a-f')" ]; then
     log "rejecting models bundle: it does not match the checksum published for v${VERSION}"
-    rm -f "$REQ.processing"
+    as_service rm -f -- "$REQ.processing"
     fail "the staged AI models bundle does not match the checksum published with release v${VERSION} (or it could not be fetched) - refusing to install it."
     exit 1
   fi
@@ -471,7 +535,7 @@ if [ "$KIND" = "models" ]; then
   # --no-same-owner: root must not recreate archive-chosen ownership.
   if ! tar --no-same-owner -xzf "$BIN" -C "$WORK"; then
     log "tar extraction failed for the models bundle"
-    rm -f "$REQ.processing"
+    as_service rm -f -- "$REQ.processing"
     fail "the staged AI models bundle could not be extracted. Re-run the model update from the console."
     exit 1
   fi
@@ -479,7 +543,7 @@ if [ "$KIND" = "models" ]; then
   INNER="$WORK/manifest.json"
   if [ ! -f "$INNER" ] || [ -L "$INNER" ]; then
     log "models bundle is missing its manifest.json"
-    rm -f "$REQ.processing"
+    as_service rm -f -- "$REQ.processing"
     fail "the staged AI models bundle is missing its internal manifest. Re-run the model update from the console."
     exit 1
   fi
@@ -492,7 +556,7 @@ if [ "$KIND" = "models" ]; then
   done
   if [ -z "$VALID" ]; then
     log "models manifest lists no whitelisted files"
-    rm -f "$REQ.processing"
+    as_service rm -f -- "$REQ.processing"
     fail "the models bundle manifest lists no installed model files. Re-run the model update from the console."
     exit 1
   fi
@@ -513,38 +577,51 @@ if [ "$KIND" = "models" ]; then
   done
   if [ -n "$FAILED" ]; then
     log "rejecting models bundle; failed:${FAILED}"
-    rm -f "$REQ.processing"
+    as_service rm -f -- "$REQ.processing"
     fail "the staged AI models bundle failed file validation:${FAILED}. Re-run the model update from the console."
     exit 1
   fi
 
-  # Back up whatever is currently installed (best effort), install the
-  # verified files atomically (temp name + rename), hand them to the
-  # service account.
+  # Back up before changing anything. Read through the service account so a
+  # symlink cannot make root disclose a file that account cannot read.
   for f in $VALID; do
-    if [ -f "$MODELS_DIR/$f" ]; then cp -f "$MODELS_DIR/$f" "$PRIV/model-backup/$f" 2>/dev/null || true; fi
-    install -m 0644 "$WORK/$f" "$MODELS_DIR/.new-$f" 2>>"$LOG" || { FAILED="$FAILED $f"; continue; }
-    mv -f "$MODELS_DIR/.new-$f" "$MODELS_DIR/$f"
+    if as_service test -e "$MODELS_DIR/$f" || as_service test -L "$MODELS_DIR/$f"; then
+      if ! as_service cat -- "$MODELS_DIR/$f" > "$PRIV/model-backup/$f"; then
+        log "cannot back up model $f"
+        as_service rm -f -- "$REQ.processing"
+        fail "the existing AI model $f could not be backed up; no models were changed."
+        exit 1
+      fi
+    fi
+  done
+  for f in $VALID; do
+    if ! model_write "$WORK/$f" "$f" 2>>"$LOG"; then
+      FAILED="$FAILED $f"
+      break
+    fi
   done
   if [ -n "$FAILED" ]; then
     log "install failed for:${FAILED}"
-    rm -f "$REQ.processing"
-    fail "installing the AI model files failed (${FAILED}). Please check the disk and retry."
+    as_service rm -f -- "$REQ.processing"
+    if restore_models; then
+      fail "installing the AI model files failed (${FAILED}); the previous files were restored."
+    else
+      fail "installing the AI model files failed (${FAILED}), and some previous files could not be restored. Check apply.log and restore from backup."
+    fi
     exit 1
   fi
-  for f in $VALID; do
-    chown "$SERVICE_USER":"$SERVICE_USER" "$MODELS_DIR/$f" 2>/dev/null || true
-  done
 
   state restarting "Restarting the service to load the new AI models..."
   if ! systemctl restart daygle-dns; then
     log "systemctl restart daygle-dns failed after model install"
-    for f in $VALID; do
-      if [ -f "$PRIV/model-backup/$f" ]; then cp -f "$PRIV/model-backup/$f" "$MODELS_DIR/$f" 2>/dev/null || true; fi
-    done
+    if restore_models; then
+      WHAT="the previous model files were restored"
+    else
+      WHAT="some previous model files could not be restored; restore them from backup"
+    fi
     systemctl restart daygle-dns 2>>"$LOG" || true
-    rm -f "$REQ.processing"
-    fail "the new AI models were installed but the service restart failed; the previous model files were restored."
+    as_service rm -f -- "$REQ.processing"
+    fail "the new AI models were installed but the service restart failed; ${WHAT}."
     exit 1
   fi
 
@@ -552,7 +629,7 @@ if [ "$KIND" = "models" ]; then
   HEALTHY=0
   if health_check; then HEALTHY=1; fi
 
-  rm -f "$REQ.processing" "$MANIFEST" "$STAGED_BIN"
+  as_service rm -f -- "$REQ.processing" "$MANIFEST" "$STAGED_BIN"
   if [ "$HEALTHY" -eq 1 ]; then
     log "applied models bundle v${VERSION} and health check passed"
     state done "AI model files updated and verified successfully (v${VERSION})."
@@ -561,12 +638,14 @@ if [ "$KIND" = "models" ]; then
 
   log "health check failed after model update - rolling back"
   state rolling_back "Model update failed - rolling back the AI model files..."
-  for f in $VALID; do
-    if [ -f "$PRIV/model-backup/$f" ]; then cp -f "$PRIV/model-backup/$f" "$MODELS_DIR/$f" 2>/dev/null || true; fi
-  done
+  if restore_models; then
+    WHAT="the previous model files were restored"
+  else
+    WHAT="some previous model files could not be restored; restore them from backup"
+  fi
   systemctl restart daygle-dns 2>>"$LOG" || true
-  rm -f "$REQ.processing"
-  fail "Model update failed - successfully rolled back the AI model files. Release v${VERSION} did not pass its health check."
+  as_service rm -f -- "$REQ.processing"
+  fail "Model update failed: ${WHAT}. Release v${VERSION} did not pass its health check."
   exit 1
 fi
 

@@ -286,6 +286,24 @@ pub fn handle(ctx: &Context<'_>, request: &Message, leases: &mut Leases) -> Opti
                 .unwrap_or_else(|| hostname(request));
             let expires = ctx.now + i64::from(ctx.scope.lease_secs);
             let address = IpAddr::V4(ip);
+            // Once the client accepts a different address, retire any older
+            // lease or offer for this identity so its DNS records are removed.
+            let old_addresses: Vec<_> = leases
+                .all()
+                .filter(|l| {
+                    l.scope == scope_name
+                        && l.client_id == id
+                        && l.address != address
+                        && matches!(l.state.as_str(), OFFERED | BOUND)
+                })
+                .map(|l| l.address)
+                .collect();
+            for old in old_addresses {
+                leases.update(&old, |l| {
+                    l.state = RELEASED.to_string();
+                    l.expires = ctx.now;
+                });
+            }
             let renewal = leases
                 .get(&address)
                 .is_some_and(|l| l.client_id == id && l.state == BOUND && l.hostname == name);
@@ -486,6 +504,40 @@ mod tests {
         ));
         let nak = handle(&ctx, &req, &mut leases).unwrap();
         assert!(nak.opts().has_msg_type(MessageType::Nak));
+    }
+
+    #[test]
+    fn accepting_a_new_reservation_retires_the_previous_lease() {
+        let mut scope = scope();
+        scope.reservations.clear();
+        let mut leases = Leases::default();
+        let mut initial = request(MessageType::Request, 0x99);
+        let old: Ipv4Addr = "192.168.1.100".parse().unwrap();
+        initial
+            .opts_mut()
+            .insert(DhcpOption::RequestedIpAddress(old));
+        handle(&ctx(&scope), &initial, &mut leases).unwrap();
+
+        scope.reservations = vec![DhcpReservation {
+            client: "02:00:00:00:00:99".to_string(),
+            address: "192.168.1.50".to_string(),
+            hostname: "printer".to_string(),
+            description: String::new(),
+        }];
+        let offer = handle(
+            &ctx(&scope),
+            &request(MessageType::Discover, 0x99),
+            &mut leases,
+        );
+        let reserved = yiaddr_of(&offer);
+        assert_eq!(leases.get(&IpAddr::V4(old)).unwrap().state, BOUND);
+        let mut accepting = request(MessageType::Request, 0x99);
+        accepting
+            .opts_mut()
+            .insert(DhcpOption::RequestedIpAddress(reserved));
+        handle(&ctx(&scope), &accepting, &mut leases).unwrap();
+        assert_eq!(leases.get(&IpAddr::V4(old)).unwrap().state, RELEASED);
+        assert_eq!(leases.get(&IpAddr::V4(reserved)).unwrap().state, BOUND);
     }
 
     #[test]

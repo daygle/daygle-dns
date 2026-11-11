@@ -184,6 +184,118 @@ async fn update_prerequisite_failures_return_rcodes() {
 }
 
 #[tokio::test]
+async fn value_dependent_prerequisites_match_the_whole_rrset() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = spawn(config_with_updates(&dir.path().join("daygle-dns.db"))).await;
+    setup_zone(&server, "exact.test").await;
+    let udp = server.udp_addr.unwrap();
+    let name = "box.exact.test.";
+    let one = add_a_record(name, [192, 0, 2, 10], 0);
+    let two = add_a_record(name, [192, 0, 2, 11], 0);
+    let seed = update_message("exact.test.", vec![], vec![one.clone(), two.clone()]);
+    assert_eq!(
+        udp_send(udp, &seed).await.response_code,
+        ResponseCode::NoError
+    );
+
+    let guarded = |prereqs| {
+        update_message(
+            "exact.test.",
+            prereqs,
+            vec![add_a_record("new.exact.test.", [192, 0, 2, 12], 60)],
+        )
+    };
+    assert_eq!(
+        udp_send(udp, &guarded(vec![one.clone()]))
+            .await
+            .response_code,
+        ResponseCode::NXRRSet
+    );
+    assert_eq!(
+        udp_query(udp, "new.exact.test.", RecordType::A)
+            .await
+            .response_code,
+        ResponseCode::NXDomain
+    );
+    assert_eq!(
+        udp_send(udp, &guarded(vec![two, one])).await.response_code,
+        ResponseCode::NoError
+    );
+    shutdown(server).await;
+}
+
+#[tokio::test]
+async fn value_dependent_prerequisites_compare_dns_names_case_insensitively() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = spawn(config_with_updates(&dir.path().join("daygle-dns.db"))).await;
+    let zone_id = setup_zone(&server, "case.test").await;
+    server
+        .catalog
+        .store()
+        .upsert_record(
+            &zone_id,
+            &RecordInput {
+                name: "alias.case.test".to_string(),
+                rtype: "CNAME".to_string(),
+                content: "Target.Case.Test.".to_string(),
+                ttl: 300,
+                priority: 0,
+                disabled: false,
+            },
+        )
+        .unwrap();
+    server.catalog.reload().unwrap();
+    let prereq = Record::from_rdata(
+        Name::from_utf8("alias.case.test.").unwrap(),
+        0,
+        RData::try_from_str(RecordType::CNAME, "target.case.test.").unwrap(),
+    );
+    let msg = update_message(
+        "case.test.",
+        vec![prereq],
+        vec![add_a_record("new.case.test.", [192, 0, 2, 12], 60)],
+    );
+    assert_eq!(
+        udp_send(server.udp_addr.unwrap(), &msg).await.response_code,
+        ResponseCode::NoError
+    );
+    shutdown(server).await;
+}
+
+#[tokio::test]
+async fn malformed_update_prerequisite_and_delete_are_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = spawn(config_with_updates(&dir.path().join("daygle-dns.db"))).await;
+    setup_zone(&server, "malformed.test").await;
+    let udp = server.udp_addr.unwrap();
+    let mut prerequisite = prereq_name_not_in_use("box.malformed.test.");
+    prerequisite.ttl = 1;
+    let msg = update_message(
+        "malformed.test.",
+        vec![prerequisite],
+        vec![add_a_record("box.malformed.test.", [192, 0, 2, 10], 60)],
+    );
+    assert_eq!(
+        udp_send(udp, &msg).await.response_code,
+        ResponseCode::FormErr
+    );
+    let mut deletion = delete_rrset("box.malformed.test.", RecordType::A);
+    deletion.ttl = 1;
+    let msg = update_message("malformed.test.", vec![], vec![deletion]);
+    assert_eq!(
+        udp_send(udp, &msg).await.response_code,
+        ResponseCode::FormErr
+    );
+    assert_eq!(
+        udp_query(udp, "box.malformed.test.", RecordType::A)
+            .await
+            .response_code,
+        ResponseCode::NXDomain
+    );
+    shutdown(server).await;
+}
+
+#[tokio::test]
 async fn update_delete_rrset_and_persistence_across_restart() {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("daygle-dns.db");

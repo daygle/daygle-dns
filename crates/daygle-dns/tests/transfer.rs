@@ -456,6 +456,35 @@ async fn signed_zone_larger_than_a_message_replicates_over_tsig() {
         "denial proof from the master's NSEC chain"
     );
 
+    // A subsequent refresh must also work when its serial decision is made
+    // by signed IXFR rather than the ordinary unsigned SOA query.
+    store
+        .upsert_record(
+            &zone.id,
+            &RecordInput {
+                name: "added".to_string(),
+                rtype: "A".to_string(),
+                content: "192.0.2.77".to_string(),
+                ttl: 300,
+                priority: 0,
+                disabled: false,
+            },
+        )
+        .unwrap();
+    store.bump_serial(&zone.id).unwrap();
+    master.catalog.reload().unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let mut refreshed = false;
+    while std::time::Instant::now() < deadline {
+        let reply = udp_query(secondary_udp, "added.big.test.", RecordType::A).await;
+        if first_answer(&reply).as_deref() == Some("192.0.2.77") {
+            refreshed = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    assert!(refreshed, "signed secondary did not refresh");
+
     shutdown(secondary).await;
     shutdown(master).await;
 }

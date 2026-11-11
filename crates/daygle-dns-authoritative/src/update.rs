@@ -245,6 +245,7 @@ pub async fn handle_update_with_notify<R: ResponseHandler>(
     };
 
     // -- Prerequisites (RFC 2136 §2.4) ------------------------------------
+    let mut checked_rrsets = std::collections::HashSet::new();
     for prereq in update.prerequisites() {
         let name = lower_name(&prereq.name.to_ascii());
         if !name_in_zone(&name, &zone.name) {
@@ -256,7 +257,14 @@ pub async fn handle_update_with_notify<R: ResponseHandler>(
             )
             .await;
         }
-        if let Err(code) = check_prerequisite(&zone, &records, prereq, &name) {
+        if let Err(code) = check_prerequisite(
+            &zone,
+            &records,
+            update.prerequisites(),
+            prereq,
+            &name,
+            &mut checked_rrsets,
+        ) {
             debug!(
                 zone = %zone.name,
                 prereq = %name,
@@ -363,12 +371,20 @@ pub async fn handle_update_with_notify<R: ResponseHandler>(
 fn check_prerequisite(
     zone: &Zone,
     records: &[DbRecord],
+    prerequisites: &[Record],
     prereq: &Record,
     name: &str,
+    checked_rrsets: &mut std::collections::HashSet<(String, RecordType)>,
 ) -> std::result::Result<(), ResponseCode> {
     let rtype = prereq.record_type();
+    if prereq.ttl != 0 || rtype == RecordType::ZERO {
+        return Err(ResponseCode::FormErr);
+    }
     match prereq.dns_class {
         DNSClass::NONE => {
+            if !matches!(&prereq.data, RData::Update0(_)) {
+                return Err(ResponseCode::FormErr);
+            }
             if rtype == RecordType::ANY {
                 if name_has_records(zone, records, name) {
                     Err(ResponseCode::YXDomain)
@@ -382,6 +398,9 @@ fn check_prerequisite(
             }
         }
         DNSClass::ANY => {
+            if !matches!(&prereq.data, RData::Update0(_)) {
+                return Err(ResponseCode::FormErr);
+            }
             if rtype == RecordType::ANY {
                 if name_has_records(zone, records, name) {
                     Ok(())
@@ -395,13 +414,44 @@ fn check_prerequisite(
             }
         }
         DNSClass::IN => {
-            if rtype == RecordType::ANY {
-                if name_has_records(zone, records, name) {
-                    Ok(())
-                } else {
-                    Err(ResponseCode::NXDomain)
-                }
-            } else if rdata_matches(zone, records, name, rtype, &prereq.data) {
+            if rtype == RecordType::ANY || matches!(&prereq.data, RData::Update0(_)) {
+                return Err(ResponseCode::FormErr);
+            }
+            // Check each distinct RRset once, even when the request includes
+            // many records in it. Every record is still validated above.
+            if !checked_rrsets.insert((name.to_string(), rtype)) {
+                return Ok(());
+            }
+            // RFC 2136 requires the entire RRset to match, not merely that
+            // each supplied value is present in a possibly larger set.
+            let expected: std::collections::HashSet<RData> = prerequisites
+                .iter()
+                .filter(|p| {
+                    p.dns_class == DNSClass::IN
+                        && p.record_type() == rtype
+                        && lower_name(&p.name.to_ascii()) == name
+                })
+                .map(|p| p.data.clone())
+                .collect();
+            // Compare DNS values rather than presentation strings: embedded
+            // domain names are case-insensitive, while TXT bytes are not.
+            let actual: std::collections::HashSet<RData> = if name == zone.name
+                && rtype == RecordType::SOA
+            {
+                [RData::try_from_str(rtype, &synthesized_soa_content(zone))
+                    .map_err(|_| ResponseCode::ServFail)?]
+                .into_iter()
+                .collect()
+            } else {
+                records
+                    .iter()
+                    .filter(|r| !r.disabled && r.name == name && r.rtype == rtype.to_string())
+                    .map(|r| {
+                        RData::try_from_str(rtype, &r.content).map_err(|_| ResponseCode::ServFail)
+                    })
+                    .collect::<std::result::Result<_, _>>()?
+            };
+            if !actual.is_empty() && actual == expected {
                 Ok(())
             } else {
                 Err(ResponseCode::NXRRSet)
@@ -426,7 +476,10 @@ fn build_update(
     let rtype = record.record_type();
     match record.dns_class {
         DNSClass::IN => {
-            if rtype == RecordType::ANY || rtype == RecordType::ZERO {
+            if rtype == RecordType::ANY
+                || rtype == RecordType::ZERO
+                || matches!(&record.data, RData::Update0(_))
+            {
                 return Err(ResponseCode::FormErr);
             }
             if rtype == RecordType::SOA && name == zone.name {
@@ -463,6 +516,14 @@ fn build_update(
             Ok(())
         }
         DNSClass::ANY | DNSClass::NONE => {
+            if record.ttl != 0
+                || rtype == RecordType::ZERO
+                || (record.dns_class == DNSClass::ANY && !matches!(&record.data, RData::Update0(_)))
+                || (record.dns_class == DNSClass::NONE
+                    && (rtype == RecordType::ANY || matches!(&record.data, RData::Update0(_))))
+            {
+                return Err(ResponseCode::FormErr);
+            }
             if rtype == RecordType::ANY {
                 plan.deletes.push(DeleteSpec {
                     name: name.to_string(),
@@ -537,22 +598,6 @@ fn rrset_exists(zone: &Zone, records: &[DbRecord], name: &str, rtype: RecordType
     records
         .iter()
         .any(|r| !r.disabled && r.name == name && r.rtype == rtype.to_string())
-}
-
-fn rdata_matches(
-    zone: &Zone,
-    records: &[DbRecord],
-    name: &str,
-    rtype: RecordType,
-    rdata: &RData,
-) -> bool {
-    let content = rdata_to_content(rtype, rdata);
-    if name == zone.name && rtype == RecordType::SOA {
-        return content == synthesized_soa_content(zone);
-    }
-    records.iter().any(|r| {
-        !r.disabled && r.name == name && r.rtype == rtype.to_string() && r.content == content
-    })
 }
 
 fn synthesized_soa_content(zone: &Zone) -> String {

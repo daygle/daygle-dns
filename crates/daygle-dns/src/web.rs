@@ -15,6 +15,7 @@ use std::time::Duration;
 use arc_swap::{ArcSwap, ArcSwapOption};
 use axum::extract::{Request, State};
 use axum::http::header::HOST;
+use axum::http::StatusCode;
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::serve::ListenerExt;
@@ -325,7 +326,9 @@ async fn redirect_to_https(
     // host name or address goes into it, so a crafted header cannot turn
     // the redirect into one to another path or scheme.
     if !is_plain_host(host) {
-        return next.run(req).await;
+        // Never serve the console over HTTP when HTTPS redirection is enabled.
+        // A missing or malformed Host cannot produce a safe redirect target.
+        return StatusCode::BAD_REQUEST.into_response();
     }
     let port = if s.https_port == 443 {
         String::new()

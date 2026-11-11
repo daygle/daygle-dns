@@ -1,4 +1,5 @@
 #!/usr/bin/env sh
+# DAYGLE_DNS_GUI_UPDATE_SAFE_V1
 # Daygle DNS - one-line installer.
 #
 # Usage:
@@ -230,9 +231,16 @@ install_rust() {
 # own root systemd unit, so the service account never gains any other rights.
 install_update_service() {
     run_as_root install -d "$PRIV_LIB_DIR" || return 1
-    run_as_root install -d "$DATA_DIR/updates" "$DATA_DIR/updates/staging" || return 1
-    run_as_root chown "$SERVICE_USER":"$SERVICE_USER" "$DATA_DIR/updates" "$DATA_DIR/updates/staging" || return 1
-    run_as_root chmod 0770 "$DATA_DIR/updates" "$DATA_DIR/updates/staging" || return 1
+    if [ "${DAYGLE_DNS_GUI_UPDATE:-}" = "1" ]; then
+        # DATA_DIR is writable by the service; it can replace any child with
+        # a symlink at any time. Operate there only with its own privileges.
+        run_as_service mkdir -p "$DATA_DIR/updates/staging" || return 1
+        run_as_service chmod 0770 "$DATA_DIR/updates" "$DATA_DIR/updates/staging" || return 1
+    else
+        run_as_root install -d "$DATA_DIR/updates" "$DATA_DIR/updates/staging" || return 1
+        run_as_root chown "$SERVICE_USER":"$SERVICE_USER" "$DATA_DIR/updates" "$DATA_DIR/updates/staging" || return 1
+        run_as_root chmod 0770 "$DATA_DIR/updates" "$DATA_DIR/updates/staging" || return 1
+    fi
     # Install the apply step from the checkout (single source of truth) and
     # bake in the concrete binary/updates paths.
     run_as_root install -m 0700 "$SRC_DIR/crates/daygle-dns-api/src/update-apply.sh" "$APPLY_HELPER" || return 1
@@ -566,6 +574,12 @@ rm -f "$PREFIX/bin/daygle-dns.new"
 install -m 0755 target/release/daygle-dns "$PREFIX/bin/daygle-dns.new"
 mv -f "$PREFIX/bin/daygle-dns.new" "$PREFIX/bin/daygle-dns"
 
+# An existing service owns these directories and may replace any child
+# path with a symlink. GUI updates must not touch them with root privileges.
+# Their configuration and model data already exist and remain unchanged.
+if [ "${DAYGLE_DNS_GUI_UPDATE:-}" = "1" ]; then
+    log "Update run: leaving configuration and model files untouched."
+else
 log "Installing configuration to $CONFIG_DIR..."
 install -d "$CONFIG_DIR" "$CONFIG_DIR/zones" "$CONFIG_DIR/certs" "$DATA_DIR"
 if [ ! -f "$CONFIG_DIR/daygle-dns.toml" ]; then
@@ -627,6 +641,8 @@ else
     fi
 fi
 
+fi # non-GUI configuration and model installation
+
 # ---- systemd unit (Linux with systemd only) -----------------------------
 if [ -d /etc/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
     log "Installing systemd unit..."
@@ -677,11 +693,11 @@ EOF
             log "Removed the stale capabilities drop-in (the service unit now grants only CAP_NET_BIND_SERVICE)."
         fi
     fi
-    chown -R "$SERVICE_USER":"$SERVICE_USER" "$CONFIG_DIR" "$DATA_DIR"
-    # The config can hold the API token and TSIG secrets, and the data dir
-    # the database with every private key: keep other local accounts out of
-    # both (existing installs included, whose files were created 0644).
-    chmod 0750 "$CONFIG_DIR" "$DATA_DIR"
+    if [ "${DAYGLE_DNS_GUI_UPDATE:-}" != "1" ]; then
+        chown -R "$SERVICE_USER":"$SERVICE_USER" "$CONFIG_DIR" "$DATA_DIR"
+        # Config and data may contain secrets; keep other local users out.
+        chmod 0750 "$CONFIG_DIR" "$DATA_DIR"
+    fi
     # A GUI-driven update leaves the host's resolver setup alone.
     if [ "${DAYGLE_DNS_GUI_UPDATE:-}" != "1" ]; then
         free_dns_port || true

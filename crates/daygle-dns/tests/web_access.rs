@@ -102,6 +102,15 @@ async fn console_moves_between_http_and_https() {
         format!("https://dns.example.test:{https_port}/api/status?x=1").as_str()
     );
 
+    // A malformed Host must not bypass the redirect and reach the HTTP API.
+    let resp = client
+        .get(format!("{http}/api/status"))
+        .header("host", "user@invalid.example")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+
     // Changes that would cut the console off, or cannot work, are refused
     // and change nothing.
     let resp = put_web(

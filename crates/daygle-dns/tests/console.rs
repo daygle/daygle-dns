@@ -396,6 +396,7 @@ async fn first_run_setup_creates_admin_and_locks_the_console() {
     // Everything is locked, and 401 bodies point the GUI at setup.
     let resp = reqwest::get(format!("{base}/api/status")).await.unwrap();
     assert_eq!(resp.status(), 401);
+    assert_eq!(resp.headers()["cache-control"], "no-store");
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(body["login"], json!(true));
     assert_eq!(body["setup"], json!(true));
@@ -438,6 +439,7 @@ async fn first_run_setup_creates_admin_and_locks_the_console() {
         "setup body: {}",
         resp.text().await.unwrap_or_default()
     );
+    assert_eq!(resp.headers()["cache-control"], "no-store");
     let created: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(created["username"], json!("admin"));
     assert_eq!(created["role"], json!("admin"));
@@ -451,6 +453,7 @@ async fn first_run_setup_creates_admin_and_locks_the_console() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 200);
+    assert_eq!(resp.headers()["cache-control"], "no-store");
     let resp = client
         .post(format!("{base}/api/zones"))
         .bearer_auth(&token)

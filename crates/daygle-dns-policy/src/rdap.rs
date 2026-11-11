@@ -95,12 +95,19 @@ impl RegistrationDates {
     /// When `domain` (a registered domain, lowercase ASCII) was registered,
     /// when known: from the cache, or looked up now and waited for up to
     /// [`LOOKUP_WAIT`]. `None` when the registry gives no date, the TLD has
-    /// no RDAP server, or the lookup is still running.
+    /// no RDAP server, the lookup is still running, or all lookup slots are
+    /// busy. Saturated lookups are retried on a later query.
     pub async fn registration_date(self: &Arc<Self>, domain: &str) -> Option<DateTime<Utc>> {
         let this = Arc::clone(self);
         let key = domain.to_string();
         self.domains
             .get(key.clone(), LOOKUP_WAIT, async move {
+                // Do not queue an unbounded number of tasks behind the four
+                // running lookups during a flood of distinct domain names.
+                let Ok(_permit) = this.permits.try_acquire() else {
+                    // Saturation is temporary, not a failed registry lookup.
+                    return (None, Duration::ZERO);
+                };
                 let date = this.look_up(&key).await;
                 (date, if date.is_some() { DATE_TTL } else { RETRY })
             })
@@ -117,7 +124,6 @@ impl RegistrationDates {
     }
 
     async fn look_up(&self, domain: &str) -> Option<DateTime<Utc>> {
-        let _permit = self.permits.acquire().await.ok()?;
         let bootstrap = self.bootstrap().await?;
         let tld = domain.rsplit('.').next()?;
         let base = bootstrap.get(tld)?;
@@ -217,6 +223,32 @@ fn registration_date(body: &serde_json::Value) -> Option<DateTime<Utc>> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[tokio::test]
+    async fn saturated_lookups_do_not_queue_or_cache_a_failure() {
+        let dates = Arc::new(RegistrationDates::default());
+        let _permits = dates.permits.acquire_many(CONCURRENT as u32).await.unwrap();
+        let result = tokio::time::timeout(
+            Duration::from_secs(1),
+            dates.registration_date("example.com"),
+        )
+        .await;
+        assert_eq!(result.unwrap(), None);
+
+        // The temporary saturation must not cache a failure for six hours.
+        let expected = Utc::now();
+        assert_eq!(
+            dates
+                .domains
+                .get(
+                    "example.com".to_string(),
+                    Duration::from_secs(1),
+                    async move { (Some(expected), DATE_TTL) }
+                )
+                .await,
+            Some(Some(expected))
+        );
+    }
 
     #[test]
     fn bootstrap_maps_tlds_to_https_servers() {

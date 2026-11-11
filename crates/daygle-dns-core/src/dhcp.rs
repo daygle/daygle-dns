@@ -376,12 +376,17 @@ impl Dhcp6Scope {
                     .to_string(),
             );
         }
+        let mut clients = std::collections::HashSet::new();
+        let mut addresses = std::collections::HashSet::new();
         for r in &self.reservations {
-            normalize_duid(&r.client)
+            let duid = normalize_duid(&r.client)
                 .ok_or_else(|| format!("'{}' is not a DUID (hex)", r.client.trim()))?;
             let ip = parse_v6(&r.address, "reservation")?;
             if !net.contains(&ip) {
                 return Err(format!("the reserved address {ip} is not in {net}"));
+            }
+            if !clients.insert(duid.clone()) || !addresses.insert(ip) {
+                return Err(format!("{duid} or {ip} is reserved twice"));
             }
         }
         Ok(())
@@ -533,6 +538,25 @@ mod tests {
         };
         assert!(s.check().is_ok());
         assert!(!s.stateless());
+        let reservation = DhcpReservation {
+            client: "00:01:aa:bb".to_string(),
+            address: "fd00:1::100".to_string(),
+            ..Default::default()
+        };
+        s.reservations.push(reservation.clone());
+        s.reservations.push(DhcpReservation {
+            client: "0001AABB".to_string(),
+            address: "fd00:1::101".to_string(),
+            ..Default::default()
+        });
+        assert!(s.check().unwrap_err().contains("twice"));
+        s.reservations[1] = DhcpReservation {
+            client: "0001aacc".to_string(),
+            address: "fd00:1:0:0::100".to_string(),
+            ..Default::default()
+        };
+        assert!(s.check().unwrap_err().contains("twice"));
+        s.reservations.clear();
         s.range_start.clear();
         s.range_end.clear();
         assert!(s.check().is_ok());

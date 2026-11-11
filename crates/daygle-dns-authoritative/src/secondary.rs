@@ -189,12 +189,36 @@ impl SecondaryRefresher {
             ),
         };
 
+        let full = !self.store_has_transferred(&zone.id)?
+            || zone_has_no_data(&self.store, &zone.id)?
+            || self.store.transfer_data(&zone.id)?.is_none();
         let mut last_error: Option<DaygleError> = None;
         for master in &config.masters {
             let addr = daygle_dns_core::config::parse_master_addr(master)
                 .map_err(|e| DaygleError::Config(format!("bad master '{master}': {e}")))?;
-            // The serial check is a hint and goes unsigned (masters do not
-            // all sign ordinary answers); the transfer itself is signed.
+            // Never let an unsigned SOA suppress a TSIG-protected refresh.
+            // Some primaries do not sign ordinary SOA queries, so use signed
+            // IXFR directly for the authenticated serial check instead.
+            if tsig.is_some() {
+                match self
+                    .transfer_from(
+                        addr,
+                        &zone_name,
+                        zone.serial,
+                        (!full).then_some(zone.serial),
+                        tsig.as_ref(),
+                        &zone.id,
+                    )
+                    .await
+                {
+                    Ok(changed) => return Ok(changed),
+                    Err(e) => {
+                        warn!(zone = %zone.name, %master, error = %e, "signed transfer failed");
+                        last_error = Some(e);
+                        continue;
+                    }
+                }
+            }
             match self.client.query_soa(addr, &zone_name).await {
                 Ok(Some(soa)) => {
                     let master_serial = match &soa.data {
@@ -207,22 +231,26 @@ impl SecondaryRefresher {
                     // always pulled, even when the default serial matches.
                     // A copy kept before transfers were stored verbatim is
                     // pulled once more, so it is served as the master signed it.
-                    let full = !self.store_has_transferred(&zone.id)?
-                        || zone_has_no_data(&self.store, &zone.id)?
-                        || self.store.transfer_data(&zone.id)?.is_none();
                     if !full && !serial_newer(master_serial, current_serial) {
                         return Ok(false);
                     }
-                    return self
+                    match self
                         .transfer_from(
                             addr,
                             &zone_name,
                             master_serial,
                             (!full).then_some(current_serial),
-                            tsig.as_ref(),
+                            None,
                             &zone.id,
                         )
-                        .await;
+                        .await
+                    {
+                        Ok(changed) => return Ok(changed),
+                        Err(e) => {
+                            warn!(zone = %zone.name, %master, error = %e, "transfer failed");
+                            last_error = Some(e);
+                        }
+                    }
                 }
                 Ok(None) => {
                     warn!(zone = %zone.name, %master, "master returned no SOA");

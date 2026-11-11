@@ -1908,6 +1908,12 @@ mod tests {
             apply.contains("DAYGLE_DNS_GUI_UPDATE"),
             "update-apply.sh must set DAYGLE_DNS_GUI_UPDATE for installer runs"
         );
+        // A root updater must refuse older installers that do not protect
+        // paths writable by the service account.
+        assert!(apply.contains("# DAYGLE_DNS_GUI_UPDATE_SAFE_V1"));
+        assert!(installer
+            .lines()
+            .any(|line| line == "# DAYGLE_DNS_GUI_UPDATE_SAFE_V1"));
         // install.sh: the guard flag exists and skips the listener/accounts
         // section.
         assert!(
@@ -2289,6 +2295,111 @@ mod tests {
             br#"{"phase":"building","pid":3,"started_at":"","message":"m","exit_code":0}"#.to_vec();
         assert_eq!(parse_state(&bytes).phase, "building");
         assert_eq!(parse_state(b"not json").phase, "");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn model_rollback_replaces_symlinks_and_removes_new_files() {
+        use std::os::unix::fs::symlink;
+        let dir =
+            std::env::temp_dir().join(format!("daygle-model-rollback-{}", std::process::id()));
+        let models = dir.join("models");
+        let private = dir.join("private");
+        std::fs::create_dir_all(&models).unwrap();
+        std::fs::create_dir_all(private.join("model-backup")).unwrap();
+        let target = dir.join("target");
+        std::fs::write(&target, "untouched").unwrap();
+        symlink(&target, models.join("old.bin")).unwrap();
+        std::fs::write(models.join("new.bin"), "new model").unwrap();
+        std::fs::write(private.join("model-backup/old.bin"), "old model").unwrap();
+
+        let script = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/update-apply.sh"),
+        )
+        .unwrap();
+        let extract = |start: &str, end: &str| {
+            let begin = script.find(start).unwrap();
+            let finish = begin + script[begin..].find(end).unwrap();
+            &script[begin..finish]
+        };
+        let user = std::process::Command::new("id")
+            .arg("-un")
+            .output()
+            .unwrap();
+        let program = format!(
+            "set -eu\nSERVICE_USER=$1\nMODELS_DIR=$2\nPRIV=$3\nVALID='old.bin new.bin'\n{}\n{}\nrestore_models\n",
+            extract("as_service() {", "\n# Publish through"),
+            extract("model_write() {", "\n# ---- models-only update"),
+        );
+        let output = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(program)
+            .arg("sh")
+            .arg(String::from_utf8(user.stdout).unwrap().trim())
+            .arg(&models)
+            .arg(&private)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "untouched");
+        assert_eq!(
+            std::fs::read_to_string(models.join("old.bin")).unwrap(),
+            "old model"
+        );
+        assert!(!models.join("new.bin").exists());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn gui_installer_leaves_service_owned_configuration_untouched() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+        let dir =
+            std::env::temp_dir().join(format!("daygle-installer-symlinks-{}", std::process::id()));
+        let config = dir.join("config");
+        let target = dir.join("target");
+        std::fs::create_dir_all(&config).unwrap();
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o700)).unwrap();
+        symlink(&target, config.join("zones")).unwrap();
+        let blocklist_target = dir.join("blocklist-target");
+        symlink(&blocklist_target, config.join("blocklist.txt")).unwrap();
+
+        let installer = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../install.sh"),
+        )
+        .unwrap();
+        let start = installer
+            .find("# An existing service owns these directories")
+            .unwrap();
+        let end = installer.find("# ---- systemd unit").unwrap();
+        let program = format!(
+            "set -eu\nDAYGLE_DNS_GUI_UPDATE=1\nCONFIG_DIR=$1\nDATA_DIR=$2\nlog() {{ :; }}\n{}",
+            &installer[start..end],
+        );
+        let output = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(program)
+            .arg("sh")
+            .arg(&config)
+            .arg(dir.join("data"))
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            std::fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        assert!(!blocklist_target.exists());
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

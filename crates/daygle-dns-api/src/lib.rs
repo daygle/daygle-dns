@@ -805,6 +805,7 @@ pub fn router(state: AppState) -> Router {
         // Inside the authorization layer: refused requests are not recorded.
         .layer(middleware::from_fn_with_state(state.clone(), audit::audit))
         .layer(middleware::from_fn_with_state(state.clone(), require_auth))
+        .layer(middleware::map_response(api_no_store))
         .with_state(state.clone());
 
     // ACME HTTP-01 challenge answers: open, outside the API, on every
@@ -944,6 +945,16 @@ fn cors_layer(config: Arc<ArcSwap<DaygleConfig>>) -> tower_http::cors::CorsLayer
 const CONTENT_SECURITY_POLICY: &str = "default-src 'self'; script-src 'self'; \
     style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; \
     object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'";
+
+/// API responses can contain credentials or private configuration, including
+/// errors and unauthenticated login responses. Do not allow caches to retain them.
+async fn api_no_store(mut response: Response) -> Response {
+    response.headers_mut().insert(
+        axum::http::header::CACHE_CONTROL,
+        axum::http::HeaderValue::from_static("no-store"),
+    );
+    response
+}
 
 /// Baseline hardening headers for the console and API: forbid framing
 /// (clickjacking) and MIME sniffing, keep URLs out of cross-site referrers,

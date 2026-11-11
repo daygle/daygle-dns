@@ -110,7 +110,7 @@ where
             entries.remove(&key);
         }
         match entries.get(&key) {
-            Some(Entry::Known(value, _)) => Some(value.clone()),
+            Some(Entry::Known(value, until)) if *until > Instant::now() => Some(value.clone()),
             _ => None,
         }
     }
@@ -128,6 +128,25 @@ where
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[tokio::test]
+    async fn immediately_expired_results_are_not_returned() {
+        let cache = Arc::new(LookupCache::<&str, u32>::new(10));
+        assert_eq!(
+            cache
+                .get("k", Duration::from_secs(1), async { (1, Duration::ZERO) })
+                .await,
+            None
+        );
+        assert_eq!(
+            cache
+                .get("k", Duration::from_secs(1), async {
+                    (2, Duration::from_secs(60))
+                })
+                .await,
+            Some(2)
+        );
+    }
 
     #[tokio::test]
     async fn first_query_waits_and_concurrent_ones_share_the_lookup() {

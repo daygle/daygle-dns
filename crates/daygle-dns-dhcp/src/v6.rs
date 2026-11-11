@@ -273,12 +273,20 @@ fn assign(
         let chosen = choose(ctx, leases, duid, &id, i == 0, &asked);
         if let Some(ip) = chosen {
             let address = IpAddr::V6(ip);
-            // An older lease of this association on another address goes.
-            if let Some(old) = leases
-                .of_client(scope_name, &id, ctx.now)
-                .map(|l| l.address)
-            {
-                if old != address {
+            // Advertising a new address must not revoke a bound lease until
+            // the client actually accepts it (or uses Rapid Commit).
+            if bind {
+                let old_addresses: Vec<_> = leases
+                    .all()
+                    .filter(|l| {
+                        l.scope == scope_name
+                            && l.client_id == id
+                            && l.address != address
+                            && matches!(l.state.as_str(), OFFERED | BOUND)
+                    })
+                    .map(|l| l.address)
+                    .collect();
+                for old in old_addresses {
                     leases.update(&old, |l| {
                         l.state = RELEASED.to_string();
                         l.expires = ctx.now;
@@ -550,6 +558,45 @@ mod tests {
         )
         .unwrap();
         assert_eq!(address(&rep), None);
+    }
+
+    #[test]
+    fn advertising_a_new_reservation_preserves_the_existing_lease_until_bound() {
+        let client = [0, 1, 0, 1, 0xaa, 0xbb];
+        let reservation = scope().reservations;
+        let mut scope = scope();
+        scope.reservations.clear();
+        let mut leases = Leases::default();
+        let old = address(
+            &handle(
+                &ctx(&scope),
+                &request(MessageType::Request, &client, 7, Some(SERVER)),
+                &mut leases,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        scope.reservations = reservation;
+        let reserved: Ipv6Addr = "fd00:1::50".parse().unwrap();
+        let offer = handle(
+            &ctx(&scope),
+            &request(MessageType::Solicit, &client, 7, None),
+            &mut leases,
+        )
+        .unwrap();
+        assert_eq!(address(&offer), Some(reserved));
+        assert_eq!(leases.get(&IpAddr::V6(old)).unwrap().state, BOUND);
+        assert!(!leases.free_for(&IpAddr::V6(old), "other", 1_000));
+
+        handle(
+            &ctx(&scope),
+            &request(MessageType::Request, &client, 7, Some(SERVER)),
+            &mut leases,
+        )
+        .unwrap();
+        assert_eq!(leases.get(&IpAddr::V6(old)).unwrap().state, RELEASED);
+        assert_eq!(leases.get(&IpAddr::V6(reserved)).unwrap().state, BOUND);
     }
 
     #[test]

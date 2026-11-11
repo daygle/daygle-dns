@@ -673,8 +673,8 @@ pub fn domain_count(domains: &BTreeSet<String>, format: BlocklistFormat) -> usiz
         BlocklistFormat::Adblock => domains
             .iter()
             .filter(|d| {
-                !d.starts_with(crate::blocklist::EXCEPTION_PREFIX)
-                    && !(d.starts_with("*.") && domains.contains(&d[2..]))
+                !(d.starts_with(crate::blocklist::EXCEPTION_PREFIX)
+                    || d.starts_with("*.") && domains.contains(&d[2..]))
             })
             .count(),
         _ => domains.len(),

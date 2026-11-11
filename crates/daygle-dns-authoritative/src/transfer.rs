@@ -59,7 +59,7 @@ impl XfrClient {
         let records = self.request(master, &msg, 1, tsig, true).await?;
         Ok(records
             .iter()
-            .find(|r| r.record_type() == RecordType::SOA)
+            .find(|r| r.record_type() == RecordType::SOA && r.name == *zone)
             .cloned())
     }
 
@@ -80,8 +80,11 @@ impl XfrClient {
         tsig: Option<&TsigKey>,
     ) -> Result<Vec<Record>> {
         let msg = build_query(zone, RecordType::AXFR);
-        self.request(master, &msg, u16::MAX as usize, tsig, false)
-            .await
+        let records = self
+            .request(master, &msg, u16::MAX as usize, tsig, false)
+            .await?;
+        validate_axfr(zone, &records)?;
+        Ok(records)
     }
 
     /// Synchronize `zone` from `master`, preferring IXFR from
@@ -114,6 +117,13 @@ impl XfrClient {
             // A lone SOA no newer than ours: nothing to do. A lone newer SOA
             // means "too big for IXFR here, use AXFR" (RFC 1995 §4).
             [serial] if answers.len() == 1 => {
+                if answers[0].name != *zone
+                    || answers[0].dns_class != hickory_proto::rr::DNSClass::IN
+                {
+                    return Err(DaygleError::Proto(
+                        "IXFR SOA does not match the requested zone".to_string(),
+                    ));
+                }
                 if crate::secondary::serial_newer(*serial, current_serial) {
                     self.axfr_signed(master, zone, tsig).await.map(Some)
                 } else {
@@ -121,7 +131,10 @@ impl XfrClient {
                 }
             }
             // A full transfer: SOA opens and closes, records in between.
-            [_, _] => Ok(Some(answers)),
+            [_, _] => {
+                validate_axfr(zone, &answers)?;
+                Ok(Some(answers))
+            }
             // Incremental deltas we do not apply: fall back to AXFR.
             _ => {
                 debug!(%zone, %master, "IXFR returned an incremental response; falling back to AXFR");
@@ -189,6 +202,15 @@ impl XfrClient {
                 verifier.verify(&raw).map_err(|e| {
                     DaygleError::Proto(format!("TSIG check of the reply from {master} failed: {e}"))
                 })?;
+            }
+            if message.metadata.message_type != MessageType::Response
+                || message.metadata.op_code != query.metadata.op_code
+                || message.metadata.id != query.metadata.id
+                || (!message.queries.is_empty() && message.queries != query.queries)
+            {
+                return Err(DaygleError::Proto(format!(
+                    "response from {master} does not match the query"
+                )));
             }
             if message.metadata.response_code != hickory_proto::op::ResponseCode::NoError {
                 return Err(DaygleError::Proto(format!(
@@ -261,6 +283,26 @@ impl XfrClient {
     }
 }
 
+/// Reject incomplete or out-of-zone AXFR data before any caller applies it.
+fn validate_axfr(zone: &Name, records: &[Record]) -> Result<()> {
+    let valid = records.len() >= 2
+        && records.first().is_some_and(|first| {
+            first.name == *zone
+                && matches!(&first.data, RData::SOA(_))
+                && records
+                    .last()
+                    .is_some_and(|last| last.name == first.name && last.data == first.data)
+        })
+        && records.iter().all(|record| {
+            record.dns_class == hickory_proto::rr::DNSClass::IN && zone.zone_of(&record.name)
+        });
+    if valid {
+        Ok(())
+    } else {
+        Err(DaygleError::Proto(format!("invalid AXFR for zone {zone}")))
+    }
+}
+
 /// Build a synthetic SOA record carrying `serial` (for the IXFR authority
 /// section). The names are placeholders; only the serial is consulted.
 fn soa_record(zone: &Name, serial: u32) -> Record {
@@ -285,6 +327,60 @@ fn build_query(zone: &Name, rtype: RecordType) -> Message {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn axfr_requires_matching_zone_and_soa_data() {
+        let zone: Name = "example.com.".parse().unwrap();
+        let soa = soa_record(&zone, 7);
+        let a = Record::from_rdata(
+            Name::from_ascii("www.example.com.").unwrap(),
+            60,
+            RData::A(hickory_proto::rr::rdata::A::new(192, 0, 2, 1)),
+        );
+        assert!(validate_axfr(&zone, &[soa.clone(), a.clone(), soa.clone()]).is_ok());
+        let foreign =
+            Record::from_rdata(Name::from_ascii("other.test.").unwrap(), 60, a.data.clone());
+        assert!(validate_axfr(&zone, &[soa.clone(), foreign, soa.clone()]).is_err());
+        let wrong_zone: Name = "other.test.".parse().unwrap();
+        let other_soa = soa_record(&wrong_zone, 7);
+        assert!(validate_axfr(&zone, &[other_soa.clone(), other_soa]).is_err());
+        let mut changed = soa.clone();
+        if let RData::SOA(ref mut data) = changed.data {
+            data.minimum += 1;
+        }
+        assert!(validate_axfr(&zone, &[soa.clone(), changed]).is_err());
+        assert!(validate_axfr(&zone, &[soa]).is_err());
+    }
+
+    #[tokio::test]
+    async fn rejects_a_response_with_the_wrong_transaction_id() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut len = [0u8; 2];
+            stream.read_exact(&mut len).await.unwrap();
+            let mut body = vec![0; u16::from_be_bytes(len) as usize];
+            stream.read_exact(&mut body).await.unwrap();
+            let query = Message::from_vec(&body).unwrap();
+            let mut response = Message::new(
+                query.metadata.id.wrapping_add(1),
+                MessageType::Response,
+                OpCode::Query,
+            );
+            response.add_query(query.queries[0].clone());
+            response.add_answer(soa_record(query.queries[0].name(), 1));
+            let wire = response.to_vec().unwrap();
+            stream
+                .write_all(&(wire.len() as u16).to_be_bytes())
+                .await
+                .unwrap();
+            stream.write_all(&wire).await.unwrap();
+        });
+        let zone = Name::from_ascii("example.com.").unwrap();
+        assert!(XfrClient::default().query_soa(addr, &zone).await.is_err());
+        server.await.unwrap();
+    }
 
     #[test]
     fn ixfr_query_includes_serial_in_authority() {
