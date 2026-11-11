@@ -409,6 +409,17 @@ async fn resolve_one(recursor: &DaygleRecursor, query: Query) -> Resolved {
                 Resolved::Negative(e, soa)
             }
         },
+        // A negative answer the validator could neither prove nor disprove
+        // (NSEC3 with more hash iterations than it will compute, RFC 9276):
+        // an unsigned answer, not a failure.
+        Err(RecursorError::Net(NetError::Dns(DnsError::Nsec {
+            response, proof, ..
+        }))) if proof.is_insecure() => {
+            let soa = response
+                .soa()
+                .map(|soa| soa.to_owned().into_record_of_rdata());
+            Resolved::Negative(negative(response.response_code, "unsigned denial"), soa)
+        }
         Err(e) => {
             let error = DaygleError::Resolution {
                 message: e.to_string(),
