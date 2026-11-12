@@ -48,9 +48,9 @@ siphasher.workspace = true
 
 [features]
 default = ["verifier-onnx"]
-# Builds with --no-default-features (the static musl release job) exclude
-# the ONNX Runtime dependency: prebuilt ORT binaries are glibc-based, so
-# those binaries run the fastText/heuristic backends only.
+# Builds with --no-default-features (a static musl build) exclude the ONNX
+# Runtime dependency: prebuilt ORT binaries are glibc-based, so those
+# binaries run the fastText/heuristic backends only.
 verifier-onnx = ["daygle-dns-api/verifier-onnx", "daygle-dns-ml/verifier-onnx"]
 
 [dev-dependencies]

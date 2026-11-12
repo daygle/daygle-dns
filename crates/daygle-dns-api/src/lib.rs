@@ -1,4 +1,4 @@
-//! # daygle-api
+//! # daygle-dns-api
 //!
 //! HTTP REST API and embedded GUI serving for Daygle DNS, built on
 //! [`axum`]/[`tower`].

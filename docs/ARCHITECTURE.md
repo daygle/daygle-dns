@@ -1,6 +1,6 @@
 # Daygle DNS architecture
 
-Daygle DNS is a Cargo workspace of eight crates. One binary (`daygle-dns`) composes
+Daygle DNS is a Cargo workspace of ten crates. One binary (`daygle-dns`) composes
 them into a single process that serves plaintext DNS, DNS over TLS,
 DNS over HTTPS, DNS over QUIC, and an HTTP API/GUI.
 
@@ -48,16 +48,23 @@ DNS over HTTPS, DNS over QUIC, and an HTTP API/GUI.
   and a TLS 1.3 + `doq`-ALPN setup for DoQ (RFC 9250) - and generates
   self-signed certificates when configured.
 - **`daygle-dns-api`** serves the REST API and the embedded GUI, including
-  console login (PBKDF2 password verification + in-memory session tokens,
-  `admin`/`viewer` roles enforced in the auth middleware) and the dashboard
+  console login (PBKDF2 password verification + session tokens kept in
+  memory and, hashed, in the database; `admin`/`viewer` roles enforced in
+  the auth middleware) and the dashboard
   statistics endpoint backed by `daygle-dns-core`'s bounded `QueryStats`.
 - **`daygle-dns-gui`** embeds the compiled Svelte bundle via `rust-embed`.
-- **`daygle-dns`** (binary) binds the UDP/TCP/DoH listeners onto one
-  Hickory `Server` driven by `DnsDispatcher`, and serves DoT and DoQ with its
-  own listeners (`dot.rs`, `doq.rs`) that feed the same dispatcher: DoT
-  answers the queries of one connection concurrently and out of order
-  (RFC 7766), pads answers to padded queries (RFC 8467) and caps connections
-  per client.
+- **`daygle-dns-ml`** is the AI scanner: a background classifier over the
+  domains seen in the query log (see "AI scanner" below).
+- **`daygle-dns-dhcp`** is the DHCPv4/DHCPv6 server (Linux only), which
+  registers its leases by name in a hosted zone.
+- **`daygle-dns`** (binary) binds the UDP/TCP (and DoH over HTTP/3)
+  listeners onto one Hickory `Server` driven by `DnsDispatcher`, and serves
+  DoT, DoH and DoQ
+  with its own listeners (`dot.rs`, `doh.rs`, `doq.rs`) that feed the same
+  dispatcher: DoT answers the queries of one connection concurrently and out
+  of order (RFC 7766), pads answers to padded queries (RFC 8467) and caps
+  connections per client; DoH caps connections the same way and bounds the
+  concurrent streams of each.
 
 ## Query flow
 
@@ -75,7 +82,7 @@ listener:
 1. **Policy.** The query name/type and the client IP are passed to the policy
    engine. `Block` → NXDOMAIN, `Refused` → REFUSED, `Redirect(ip)` → a
    synthesized A/AAAA answer.
-1. **Split horizon.** For A/AAAA/MX/TXT/CNAME/SRV (and ANY) queries, the
+2. **Split horizon.** For A/AAAA/MX/TXT/CNAME/SRV (and ANY) queries, the
    client IP is looked up in the split-horizon index. The first entry whose
    domain matches and whose networks contain the client wins; a matching
    entry synthesizes records of the queried type (TTL from the entry) instead
@@ -83,7 +90,7 @@ listener:
    and an entry with nothing for the queried type falls through - so an
    internal `10.x` view can sit behind a public fallback, and a TXT-only
    entry never swallows A queries.
-2. **Authoritative.** If the query name falls inside a hosted zone
+3. **Authoritative.** If the query name falls inside a hosted zone
    (`Catalog::find`), the Hickory catalog answers. Signed zones carry DNSSEC
    signatures and NSEC proofs. A few answers are made by the dispatcher
    first, from indexes the catalog rebuilds with the zones: ALIAS records
@@ -92,7 +99,7 @@ listener:
    AUTOPTR records (a PTR made from the address when the name has none).
    Zone aliases are served as zones of their own, built from the aliased
    zone's records with the owner names moved into the alias.
-3. **RFC 6303 empty zones.** When the query name falls in one of
+4. **RFC 6303 empty zones.** When the query name falls in one of
    `authoritative.empty_zones` (by default the RFC 6303 reverse zones for
    private, loopback, ULA, link-local and documentation address space) and
    no hosted zone covers it, the dispatcher answers authoritatively
@@ -100,12 +107,15 @@ listener:
    NXDOMAIN carrying the empty zone's SOA (RFC 2308), and every answer
    carries the AA bit. This keeps reverse lookups for never-routable
    address space from leaking to public upstreams.
-4. **Zone transfers.** AXFR/IXFR queries are intercepted before the normal
+5. **Zone transfers.** AXFR/IXFR queries are intercepted before the normal
    lookup path (`DnsDispatcher::handle_transfer`). Transfers are gated by
    `authoritative.axfr_enabled` and the `axfr_networks` client allow-list, and
    answered with the full zone record set (`SOA, records..., SOA` per RFC 5936;
-   IXFR always gets a full transfer, which RFC 1995 permits).
-5. **Recursive.** Otherwise the query goes to `daygle-dns-recursive`; the
+   IXFR always gets a full transfer, which RFC 1995 permits). The zone only
+   goes out over a connection: a UDP source address is not proven, so AXFR
+   over UDP is refused and IXFR over UDP gets the current SOA alone, which
+   sends the client to TCP.
+6. **Recursive.** Otherwise the query goes to `daygle-dns-recursive`; the
    `RecursiveResolver` routes by name - the most specific configured
    conditional zone (longest label-aligned suffix) is resolved by its own
    dedicated resolver/upstreams, everything else by the default ones. The
@@ -113,7 +123,7 @@ listener:
    upstream's RCODE and the AD bit when DNSSEC validation succeeded.
    Negative answers (NXDOMAIN/NODATA) carry their response code through the
    error type so they are returned as-is instead of SERVFAIL.
-5. **Dynamic updates.** RFC 2136 `UPDATE` messages are handled by
+7. **Dynamic updates.** RFC 2136 `UPDATE` messages are handled by
    `daygle-dns-authoritative`'s update handler (`handle_update`), not the
    catalog. It validates the zone section, checks prerequisites (NXDOMAIN /
    NXRRSet / YXDomain / YXRRSet), builds an atomic add/delete plan, writes it
@@ -167,10 +177,10 @@ stops the current sockets and rebinds new ones, self-healing back to the last
 good configuration if a bind fails. Reload can also be triggered on demand via
 `POST /api/config` or `BoundServer::reload()`.
 
-The DoH listener (hickory's h2 server) serves POST requests carrying
-`application/dns-message` bodies at the configured `endpoint` (default
-`/dns-query`); GET requests are not implemented by Hickory 0.26, so clients
-must use POST.
+The DoH listener (`doh.rs`, built on `h2` directly) serves both RFC 8484
+methods at the configured `endpoint` (default `/dns-query`): POST requests
+carrying an `application/dns-message` body, and GET requests carrying the
+message as a base64url `dns` parameter.
 
 ### Remote blocklist sources
 
@@ -180,7 +190,7 @@ cap, redirects, 30 s timeout) and parses the body in its declared format
 (`domains`, `hosts`, `adblock`, or `rpz`). A background task in `daygle-dns` polls on the
 smallest configured refresh interval and, when a source is due, swaps the
 merged remote blocklist into the shared `PolicyEngine` via
-`set_remote_blocklist` - the static blocklist from config/files is never
+`set_source_lists` - the static blocklist from config/files is never
 discarded, and a failed/empty fetch leaves the previous domains in place.
 `POST /api/policy/blocklist/sources` forces an immediate refresh; `GET` the
 same path for per-source status.
