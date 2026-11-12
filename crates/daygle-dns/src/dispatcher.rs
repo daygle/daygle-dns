@@ -919,6 +919,26 @@ impl RequestHandler for DnsDispatcher {
     async fn handle_request<R: ResponseHandler, T: Time>(
         &self,
         request: &Request,
+        response_handle: R,
+    ) -> ResponseInfo {
+        // Hickory's HTTP/3 listener encodes the message itself, so a padding
+        // request is honoured by re-emitting the answer before it is sent.
+        if crate::h3_padding::wants_padding(request) {
+            return self
+                .dispatch(
+                    request,
+                    crate::h3_padding::H3PadResponder::new(response_handle),
+                )
+                .await;
+        }
+        self.dispatch(request, response_handle).await
+    }
+}
+
+impl DnsDispatcher {
+    async fn dispatch<R: ResponseHandler>(
+        &self,
+        request: &Request,
         mut response_handle: R,
     ) -> ResponseInfo {
         let started = Instant::now();

@@ -10,6 +10,7 @@ pub mod dispatcher;
 mod doh;
 mod doq;
 mod dot;
+mod h3_padding;
 mod net;
 pub mod proxy_protocol;
 pub mod query_db_log;
