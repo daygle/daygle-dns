@@ -342,6 +342,16 @@
       rollback on failure. New model bundles install automatically while
       Keep AI Models up to Date is on (the default) on the Update page.
     </p>
+    {#if models?.bundle}
+      <p class="muted" style="margin: 0 0 10px">
+        Models bundle <code>v{models.bundle.version}</code>{#if models.bundle.installed_at}, installed {formatDateTime(models.bundle.installed_at)}{/if}
+      </p>
+    {:else if models?.models_dir}
+      <p class="muted" style="margin: 0 0 10px">
+        These files carry no recorded release (they were installed before
+        versions were tracked); the next models update records it.
+      </p>
+    {/if}
     {#if modelsError}
       <p style="color: var(--danger)">{modelsError}</p>
     {:else if models}

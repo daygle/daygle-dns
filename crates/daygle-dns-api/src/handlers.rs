@@ -1957,18 +1957,22 @@ pub async fn update_preflight(State(state): State<AppState>) -> Response {
 }
 
 /// `GET /api/ai/model-status` - the installed AI model files (present, size,
-/// sha256), for the console's AI page. Shares the update run state so an
-/// in-flight model update can be followed from there too.
+/// sha256), for the console's AI page, plus the release their bundle came
+/// from (`bundle`, absent when the install predates the marker). Shares the
+/// update run state so an in-flight model update can be followed from there
+/// too.
 pub async fn ai_model_status(State(state): State<AppState>) -> Response {
     let config_dir = config_dir(&state);
-    let (dir, files, update_state) = run_blocking(move || {
+    let (dir, files, bundle, update_state) = run_blocking(move || {
         let (dir, files) = crate::update::model_status(config_dir.as_deref());
-        (dir, files, crate::update::read_state())
+        let bundle = crate::update::model_bundle_info(config_dir.as_deref());
+        (dir, files, bundle, crate::update::read_state())
     })
     .await;
     Json(serde_json::json!({
         "models_dir": dir.as_ref().map(|d| d.display().to_string()),
         "files": files,
+        "bundle": bundle,
         "state": update_state,
     }))
     .into_response()

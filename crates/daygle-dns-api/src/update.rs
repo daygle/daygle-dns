@@ -1323,6 +1323,14 @@ pub const MODEL_FILES: &[&str] = &[
     "minilm-centroids.json",
 ];
 
+/// Flat marker in the models directory naming the release whose models
+/// bundle is installed. Written by `install.sh` on a fresh install and by
+/// the root apply step once a models update passes its health check, so a
+/// rolled-back run keeps the previous value. Neither the fastText `.bin`
+/// nor the ONNX files store a version of their own, so this marker is the
+/// only way to tell which release the installed files came from.
+pub const MODEL_VERSION_FILE: &str = "bundle-version";
+
 /// Where the installed models live: `<config dir>/models`. The install
 /// convention is `/etc/daygle-dns`.
 pub fn models_dir(config_dir: Option<&Path>) -> Option<std::path::PathBuf> {
@@ -1398,6 +1406,50 @@ pub fn model_status(config_dir: Option<&Path>) -> (Option<std::path::PathBuf>, V
         })
         .collect();
     (dir, files)
+}
+
+/// Which release's models bundle is installed, for `GET /api/ai/model-status`.
+#[derive(Debug, Clone, Serialize)]
+pub struct ModelBundleInfo {
+    /// Release version, e.g. `"1.0.4"` (no `v` prefix).
+    pub version: String,
+    /// When the marker was written, i.e. when those files were installed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub installed_at: Option<String>,
+}
+
+/// Read the installed models bundle's provenance marker. `None` when the
+/// models directory or marker is absent, or the marker holds something that
+/// is not a plain version: installs that predate the marker report no
+/// version rather than a guess.
+pub fn model_bundle_info(config_dir: Option<&Path>) -> Option<ModelBundleInfo> {
+    let path = models_dir(config_dir)?.join(MODEL_VERSION_FILE);
+    let version = parse_bundle_version(&std::fs::read_to_string(path.as_path()).ok()?)?;
+    let installed_at = std::fs::metadata(&path)
+        .and_then(|meta| meta.modified())
+        .ok()
+        .map(|time| chrono::DateTime::<chrono::Utc>::from(time).to_rfc3339());
+    Some(ModelBundleInfo {
+        version,
+        installed_at,
+    })
+}
+
+/// Accept only a plain release version (`1.0.4`, `1.0.4-rc1`, `1.0.4+abc`):
+/// digits first, then alphanumerics, dots, hyphens and build metadata. The
+/// marker is a one-line text file written by shell and the console renders
+/// what it holds, so an empty, oversized or free-form marker is ignored.
+fn parse_bundle_version(text: &str) -> Option<String> {
+    let version = text.trim();
+    if version.is_empty() || version.len() > 32 {
+        return None;
+    }
+    let mut chars = version.chars();
+    chars.next()?.is_ascii_digit().then_some(())?;
+    version
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '+')
+        .then(|| version.to_string())
 }
 
 // ---- AI models auto-refresh (opt-in) ------------------------------------
@@ -1827,6 +1879,23 @@ fn spawn(
 mod tests {
     use super::*;
     use std::sync::Mutex;
+
+    #[test]
+    fn bundle_version_marker_parses() {
+        // Written by install.sh and update-apply.sh, one version per line.
+        assert_eq!(parse_bundle_version("1.0.4\n").as_deref(), Some("1.0.4"));
+        assert_eq!(parse_bundle_version("  2.3.0 ").as_deref(), Some("2.3.0"));
+        assert_eq!(
+            parse_bundle_version("1.0.4-rc1").as_deref(),
+            Some("1.0.4-rc1")
+        );
+        // A stray, truncated or hostile marker is ignored, not displayed.
+        assert!(parse_bundle_version("").is_none());
+        assert!(parse_bundle_version("   ").is_none());
+        assert!(parse_bundle_version("v1.0.4").is_none());
+        assert!(parse_bundle_version("1.0.4\rn -rf /").is_none());
+        assert!(parse_bundle_version(&"1".repeat(40)).is_none());
+    }
 
     /// The model-file whitelist must stay in lockstep between the compiled
     /// list (used by /api/ai/model-status), the embedded apply script (which

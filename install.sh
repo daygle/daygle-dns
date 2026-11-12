@@ -605,6 +605,12 @@ if [ "${DAYGLE_DNS_AI:-}" != "0" ]; then
             chown "$SERVICE_USER":"$SERVICE_USER" \
                 "$CONFIG_DIR/models/daygle-starter.bin" 2>/dev/null || true
             log "Installed bundled AI starter model to $CONFIG_DIR/models/daygle-starter.bin"
+            # Record the release these files came from: fastText and ONNX
+            # carry no version of their own and the console's AI page shows
+            # this. An upgrade keeps any existing model files (and their
+            # marker) untouched, so this only runs on a fresh model install.
+            printf '%s\n' "$RELEASE_VERSION" > "$CONFIG_DIR/models/bundle-version"
+            chown "$SERVICE_USER":"$SERVICE_USER" "$CONFIG_DIR/models/bundle-version" 2>/dev/null || true
         fi
         # MiniLM/ONNX verifier artifacts: model, tokenizer, centroid refs.
         for f in all-MiniLM-L6-v2-int8.onnx minilm-tokenizer.json minilm-centroids.json; do

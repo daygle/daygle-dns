@@ -1524,11 +1524,15 @@ mode); a threat label counts as such a category only at or above
 
 Model files are managed over the API too: `GET /api/ai/model-status` reports
 the models directory, each installed model file (presence, size, sha256) and
-the shared update state (so an in-flight update can be followed from there);
-`POST /api/ai/update-models` starts a models-only update - download the
-models bundle from the latest release and hand it to the privileged apply
-service, which installs the files and restarts the server. A `202` only
-means the update began; poll `GET /api/ai/model-status` until `done`/`error`.
+the shared update state (so an in-flight update can be followed from there).
+`bundle` names the release whose models bundle is installed
+(`{version, installed_at}`, the time the files were written); it is absent on
+installs that predate the marker, and the console's AI page shows it above
+the file table. `POST /api/ai/update-models` starts a models-only update -
+download the models bundle from the latest release and hand it to the
+privileged apply service, which installs the files and restarts the server.
+A `202` only means the update began; poll `GET /api/ai/model-status` until
+`done`/`error`.
 
 `POST /api/ai/override` with `action: "allow"` exempts a domain and its
 subdomains from AI blocking; `clear` removes the exemption (`404` when there

@@ -55,6 +55,17 @@ then run side by side.
   enforce-mode verdicts like any other automation: watch the verdict log,
   allowlist generously.
 
+## bundle-version
+
+The installed models directory carries a one-line `bundle-version` marker
+naming the release whose bundle the files came from. `install.sh` writes it
+when it installs the bundled models on a fresh install, and the update apply
+step writes it after a models update passes its health check (so a
+rolled-back run keeps the previous value, which still describes the restored
+files). Neither the fastText `.bin` nor the ONNX files store a version of
+their own, so this marker is what the console's AI page shows. Installs that
+predate the marker report no version until their next models update.
+
 ## all-MiniLM-L6-v2-int8.onnx (verifier)
 
 An int8-quantized ONNX export of [`all-MiniLM-L6-v2`](https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2)

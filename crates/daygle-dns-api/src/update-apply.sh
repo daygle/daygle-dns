@@ -45,6 +45,9 @@ DIR="${DAYGLE_DNS_UPDATE_DIR:-/tmp/daygle-dns-update}"
 # (mirrors update.rs MODEL_FILES). Nothing in a manifest or a bundle ever
 # selects another path.
 MODEL_WHITELIST="daygle-starter.bin all-MiniLM-L6-v2-int8.onnx minilm-tokenizer.json minilm-centroids.json"
+# Flat marker recording which release the installed model files came from
+# (mirrors update.rs MODEL_VERSION_FILE); the console's AI page shows it.
+MODEL_VERSION_FILE="bundle-version"
 
 # Canonical sources, fixed here (the same ones install.sh itself uses): root
 # never takes a URL, or content it runs, from the service-writable dirs.
@@ -631,6 +634,13 @@ if [ "$KIND" = "models" ]; then
 
   as_service rm -f -- "$REQ.processing" "$MANIFEST" "$STAGED_BIN"
   if [ "$HEALTHY" -eq 1 ]; then
+    # Record the release these files came from: neither fastText nor ONNX
+    # stores a version. Only after the health check, so a rolled-back run
+    # keeps the previous marker, which still describes the restored files.
+    if printf '%s\n' "$VERSION" > "$WORK/$MODEL_VERSION_FILE" 2>>"$LOG"; then
+      model_write "$WORK/$MODEL_VERSION_FILE" "$MODEL_VERSION_FILE" 2>>"$LOG" \
+        || log "applied the model files but could not record their bundle version"
+    fi
     log "applied models bundle v${VERSION} and health check passed"
     state done "AI model files updated and verified successfully (v${VERSION})."
     exit 0
