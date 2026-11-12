@@ -4764,15 +4764,22 @@ async fn confirm_password(
     if let Some(resp) = throttled_response(state, client_ip) {
         return Err(resp);
     }
-    let ok = if password.len() > MAX_PASSWORD_LEN {
-        false
+    // Hold the slot until a failed check has been recorded, just as login
+    // does, so queued checks cannot pass the throttle before earlier failures
+    // are counted.
+    let _permit = if password.len() <= MAX_PASSWORD_LEN {
+        Some(password_permit().await)
     } else {
-        let _permit = password_permit().await;
-        if let Some(resp) = throttled_response(state, client_ip) {
-            return Err(resp);
-        }
+        None
+    };
+    if let Some(resp) = throttled_response(state, client_ip) {
+        return Err(resp);
+    }
+    let ok = if _permit.is_some() {
         let (password, hash) = (password.to_string(), user.password_hash.clone());
         run_password_job(move || daygle_dns_core::auth::verify_password(&password, &hash)).await
+    } else {
+        false
     };
     if !ok {
         if let Some(ip) = client_ip {
