@@ -242,54 +242,6 @@ fn peek_tsig_key_name(raw: &[u8]) -> Option<Name> {
     message.signature().map(|tsig| tsig.name.clone())
 }
 
-/// Sign a response message with `key`, chaining the request MAC per
-/// RFC 8945 §5.4.2 so the client can authenticate the server and detect
-/// replay of an older request.
-///
-/// `response` is the finished response message (id, flags, sections set);
-/// the returned bytes are the wire form with the TSIG record appended.
-pub fn sign_response(
-    response: &Message,
-    key: &TsigKey,
-    request_mac: &[u8],
-) -> Result<Vec<u8>, String> {
-    let signer = key.tsigner();
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let context = TSigResponseContext::new(
-        response.metadata.id,
-        now,
-        signer,
-        request_mac.to_vec(),
-        None,
-    );
-
-    // Encode the unsigned response body first, then sign it in context.
-    let body = response
-        .to_bytes()
-        .map_err(|e| format!("tsig response encoding failed: {e}"))?;
-    let tsig = context
-        .sign(&body)
-        .map_err(|e| format!("tsig response signing failed: {e}"))?;
-
-    // Append the TSIG record to the response wire form. Re-encoding through
-    // Message would drop the signature, so emit the body and the TSIG record
-    // with the additional-count patched in the header.
-    let mut out = body;
-    let tsig_bytes = tsig
-        .to_bytes()
-        .map_err(|e| format!("tsig record encoding failed: {e}"))?;
-    out.extend_from_slice(&tsig_bytes);
-    // Patch the additional record count (header bytes 10-11) by one.
-    let additionals = u16::from_be_bytes([out[10], out[11]])
-        .checked_add(1)
-        .ok_or_else(|| "tsig response has no room for another additional record".to_string())?;
-    out[10..12].copy_from_slice(&additionals.to_be_bytes());
-    Ok(out)
-}
-
 /// Sign a client request (used by the secondary-side transfer client).
 /// Returns the wire bytes of `message` with its TSIG record appended.
 pub fn sign_request(message: &Message, key: &TsigKey) -> Result<Vec<u8>, String> {
@@ -464,26 +416,6 @@ impl ResponseVerifier {
     }
 }
 
-/// Verify a TSIG-signed response from a master, chaining the request MAC.
-/// `request_mac` is the MAC of our signed request. Also enforces the
-/// response timestamp window.
-pub fn verify_response(raw: &[u8], key: &TsigKey, request_mac: &[u8]) -> Result<(), String> {
-    let signer = key.tsigner();
-    let (_, time, window) = signer
-        .verify_message_byte(raw, Some(request_mac), true)
-        .map_err(|e| format!("tsig response verification failed: {e}"))?;
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    if !window.contains(&now) {
-        return Err(format!(
-            "tsig response time {time} outside accepted window (now {now})"
-        ));
-    }
-    Ok(())
-}
-
 /// Short label for test failure messages.
 #[cfg(test)]
 fn failure_label(outcome: &TsigVerifyOutcome) -> &'static str {
@@ -492,17 +424,6 @@ fn failure_label(outcome: &TsigVerifyOutcome) -> &'static str {
         TsigVerifyOutcome::Invalid(_) => "invalid",
         TsigVerifyOutcome::Unsigned => "unsigned",
     }
-}
-
-/// Build a fresh response-signing context for `key` without a prior request
-/// MAC (used when a valid request verification did not yield a context, e.g.
-/// for tests or unsigned-refusal replies).
-pub fn response_context_for(key: &TsigKey) -> hickory_proto::rr::TSigResponseContext {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    hickory_proto::rr::TSigResponseContext::new(0, now, key.tsigner(), Vec::new(), None)
 }
 
 #[cfg(test)]
@@ -699,48 +620,6 @@ mod tests {
             verify_request(&ring, &plain, 1234),
             TsigVerifyOutcome::Unsigned
         ));
-    }
-
-    #[test]
-    fn response_sign_verify_roundtrip() {
-        let key = test_key();
-        let query = test_query();
-        let wire = sign_request(&query, &key).unwrap();
-
-        // Extract the request MAC as a verifier would.
-        let ring = TsigKeyRing::from_configs(&[TsigKeyConfig {
-            name: "test-key.".to_string(),
-            algorithm: "hmac-sha256".to_string(),
-            secret: base64::engine::general_purpose::STANDARD.encode(b"0123456789abcdef"),
-        }])
-        .unwrap();
-        let request_mac = match verify_request(&ring, &wire, 1234) {
-            TsigVerifyOutcome::Valid { request_mac, .. } => request_mac,
-            other => panic!("expected valid, got {}", failure_label(&other)),
-        };
-
-        // Build a response and sign it with the request MAC chained.
-        let mut response = Message::new(1234, MessageType::Response, OpCode::Query);
-        response.add_query(Query::query(
-            Name::from_ascii("example.com.").unwrap(),
-            RecordType::AXFR,
-        ));
-        let response_bytes = sign_response(&response, &key, &request_mac).unwrap();
-
-        // The client side verifies with the same request MAC.
-        verify_response(&response_bytes, &key, &request_mac).unwrap();
-    }
-
-    #[test]
-    fn response_with_wrong_request_mac_fails() {
-        let key = test_key();
-        let mut response = Message::new(1234, MessageType::Response, OpCode::Query);
-        response.add_query(Query::query(
-            Name::from_ascii("example.com.").unwrap(),
-            RecordType::AXFR,
-        ));
-        let response_bytes = sign_response(&response, &key, b"correct-mac").unwrap();
-        assert!(verify_response(&response_bytes, &key, b"wrong-mac").is_err());
     }
 
     #[test]

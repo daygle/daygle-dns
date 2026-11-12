@@ -177,7 +177,10 @@ pub fn spawn_front(
             let (stream, peer) = match accepted {
                 Ok(s) => s,
                 Err(e) => {
+                    // Out of file descriptors and the like: back off instead
+                    // of spinning on a failing accept.
                     debug!("PROXY front accept failed: {e}");
+                    tokio::time::sleep(Duration::from_millis(100)).await;
                     continue;
                 }
             };

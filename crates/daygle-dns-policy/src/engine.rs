@@ -219,13 +219,6 @@ impl PolicyEngine {
         self.blocklist = Some(std::sync::Arc::new(blocklist));
     }
 
-    /// Replace the remote blocklist (from URL sources). The static blocklist
-    /// from configuration is left untouched, so refreshing sources never
-    /// discards user-configured entries.
-    pub fn set_remote_blocklist(&mut self, blocklist: Blocklist) {
-        self.remote_blocklist = Some(std::sync::Arc::new(blocklist));
-    }
-
     /// The number of domains currently blocked by remote sources (0 when
     /// none are configured or fetched yet).
     pub fn remote_blocklist_len(&self) -> usize {
@@ -267,12 +260,6 @@ impl PolicyEngine {
     pub fn set_filter_aaaa(&mut self, enabled: bool, bypass: Option<Blocklist>) {
         self.filter_aaaa = enabled;
         self.filter_aaaa_bypass = bypass.map(std::sync::Arc::new);
-    }
-
-    /// Replace the DoT-scoped remote blocklist. Kept separate from the
-    /// server-wide sets so the source refresher can swap it independently.
-    pub fn set_dot_blocklist(&mut self, blocklist: Blocklist) {
-        self.dot_blocklist = Some(std::sync::Arc::new(blocklist));
     }
 
     /// Share what `other` holds that is not built from the configuration:
@@ -323,7 +310,10 @@ impl PolicyEngine {
         }
     }
 
-    /// Replace both source-owned sets (`None` clears one).
+    /// Replace both source-owned sets: the remote blocklist (from URL
+    /// sources) and its DoT-scoped counterpart (`None` clears one). The
+    /// static blocklist from configuration is left untouched, so refreshing
+    /// sources never discards user-configured entries.
     pub fn set_source_lists(
         &mut self,
         remote: Option<std::sync::Arc<Blocklist>>,
@@ -773,7 +763,10 @@ mod tests {
     #[tokio::test]
     async fn dot_scoped_blocklist_applies_only_to_dot_clients() {
         let mut e = PolicyEngine::new(true);
-        e.set_dot_blocklist(Blocklist::from_lines(["public-ads.test"]));
+        e.set_source_lists(
+            None,
+            Some(Blocklist::from_lines(["public-ads.test"]).into()),
+        );
 
         // A query on the DoT listener is blocked...
         assert_eq!(
@@ -795,7 +788,10 @@ mod tests {
     async fn dot_scoped_blocklist_never_overrides_shared_policy() {
         let mut e = PolicyEngine::new(true);
         e.set_allowlist(Blocklist::from_lines(["*.trusted.test"]));
-        e.set_dot_blocklist(Blocklist::from_lines(["trusted.test", "blocked.test"]));
+        e.set_source_lists(
+            None,
+            Some(Blocklist::from_lines(["trusted.test", "blocked.test"]).into()),
+        );
 
         // The operator allowlist still wins on the DoT listener...
         assert_eq!(
@@ -899,7 +895,7 @@ mod tests {
             "*.trusted.test",
         ]));
         e.set_blocklist(Blocklist::from_lines(["safe.example.com", "blocked.test"]));
-        e.set_remote_blocklist(Blocklist::from_lines(["remote.test"]));
+        e.set_source_lists(Some(Blocklist::from_lines(["remote.test"]).into()), None);
 
         assert_eq!(
             e.evaluate(ip("8.8.8.8"), "safe.example.com", "A")

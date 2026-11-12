@@ -651,16 +651,29 @@ impl DnsDispatcher {
     /// requires. IXFR is answered with a full transfer, which RFC 1995 always
     /// permits (a server may answer IXFR with the full zone when it does not
     /// implement incremental deltas).
+    ///
+    /// A transfer needs a connection. Over UDP the source address is not
+    /// proven, so a forged query would aim the whole zone, in as many
+    /// datagrams as it takes, at someone else, whatever `axfr_networks`
+    /// says. AXFR is not defined over UDP (RFC 5936 §4.2) and is refused;
+    /// IXFR is (RFC 1995 §2) and gets the zone's current SOA alone, which
+    /// tells the client its serial is behind and to come back over TCP.
     async fn handle_transfer<R: ResponseHandler>(
         &self,
         request: &Request,
         qname: &str,
+        qtype: RecordType,
         client: IpAddr,
         mut response_handle: R,
     ) -> ResponseInfo {
         let settings = self.catalog.settings();
         if !settings.axfr_enabled || !transfer_client_allowed(&settings.axfr_networks, client) {
             debug!(query = %qname, %client, "zone transfer refused by policy");
+            return send_error(&mut response_handle, request, ResponseCode::Refused, None).await;
+        }
+        let datagram = request.protocol() == hickory_server::net::xfer::Protocol::Udp;
+        if datagram && qtype != RecordType::IXFR {
+            debug!(query = %qname, %client, "zone transfer over UDP refused");
             return send_error(&mut response_handle, request, ResponseCode::Refused, None).await;
         }
 
@@ -678,29 +691,41 @@ impl DnsDispatcher {
                         key,
                         response_context,
                         ..
-                    } if key.name == required.name => {
-                        Some((key, Some(response_context)))
-                    }
+                    } if key.name == required.name => Some((key, response_context)),
                     daygle_dns_authoritative::tsig::TsigVerifyOutcome::Valid { .. } => {
                         debug!(query = %qname, %client, "zone transfer signed with wrong TSIG key");
-                        return send_error(&mut response_handle, request, ResponseCode::Refused, None).await;
+                        return send_error(
+                            &mut response_handle,
+                            request,
+                            ResponseCode::Refused,
+                            None,
+                        )
+                        .await;
                     }
                     daygle_dns_authoritative::tsig::TsigVerifyOutcome::Invalid(failure) => {
                         debug!(query = %qname, %client, ?failure, "zone transfer TSIG verification failed");
-                        return send_error(&mut response_handle, request, ResponseCode::Refused, None).await;
+                        return send_error(
+                            &mut response_handle,
+                            request,
+                            ResponseCode::Refused,
+                            None,
+                        )
+                        .await;
                     }
                     daygle_dns_authoritative::tsig::TsigVerifyOutcome::Unsigned => {
                         debug!(query = %qname, %client, "zone transfer requires TSIG");
-                        return send_error(&mut response_handle, request, ResponseCode::Refused, None).await;
+                        return send_error(
+                            &mut response_handle,
+                            request,
+                            ResponseCode::Refused,
+                            None,
+                        )
+                        .await;
                     }
                 }
             }
             None => None,
-        }
-        .map(|(key, context)| {
-            let context = context.unwrap_or_else(|| daygle_dns_authoritative::tsig::response_context_for(&key));
-            (key, context)
-        });
+        };
 
         match self.catalog.transfer_records(qname) {
             Ok(Some((soa, records))) => {
@@ -711,10 +736,16 @@ impl DnsDispatcher {
                 metadata.recursion_available = false;
 
                 // RFC 5936: the answer must begin and end with the zone SOA.
-                let mut answers = Vec::with_capacity(records.len() + 2);
-                answers.push(soa.clone());
-                answers.extend(records);
-                answers.push(soa);
+                // Over UDP (IXFR only, see above) it is the SOA alone.
+                let answers = if datagram {
+                    vec![soa]
+                } else {
+                    let mut answers = Vec::with_capacity(records.len() + 2);
+                    answers.push(soa.clone());
+                    answers.extend(records);
+                    answers.push(soa);
+                    answers
+                };
 
                 // A DNS message holds at most 64 KiB, so a larger zone goes
                 // out as several messages (RFC 5936 §2.2). Each TSIG-signed
@@ -1424,7 +1455,13 @@ impl RequestHandler for DnsDispatcher {
         // valid per RFC 1995.
         if rtype_is_transfer(&rtype) {
             return self
-                .handle_transfer(request, &qname, client, response_handle)
+                .handle_transfer(
+                    request,
+                    &qname,
+                    info.query.query_type(),
+                    client,
+                    response_handle,
+                )
                 .await;
         }
 

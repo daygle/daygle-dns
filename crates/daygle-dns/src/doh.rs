@@ -56,6 +56,17 @@ const PROXY_HEADER_TIMEOUT: Duration = Duration::from_secs(5);
 /// so the message envelope itself is bounded by this).
 const MAX_MESSAGE_LEN: usize = u16::MAX as usize;
 
+/// Requests of one connection answered at the same time. The client is
+/// told the limit (HTTP/2 `SETTINGS_MAX_CONCURRENT_STREAMS`) and queues
+/// behind it; without one a single connection could open any number of
+/// streams, each holding a task, whatever `doh.max_connections` says.
+const MAX_CONCURRENT_STREAMS: u32 = 100;
+
+/// Largest header block of one request. A GET carries the whole message in
+/// its path (base64url, a third larger than [`MAX_MESSAGE_LEN`]); h2's own
+/// default is 16 MiB.
+const MAX_HEADER_LIST_SIZE: u32 = 128 * 1024;
+
 /// The `application/dns-message` media type (RFC 8484 §2.1).
 const MIME_APPLICATION_DNS: &str = "application/dns-message";
 
@@ -214,7 +225,11 @@ impl Connection {
         // The name the device asked for, for DNS accounts
         // (`<client id>.<accounts.domain>`).
         let server_name: Option<Arc<str>> = tls.get_ref().1.server_name().map(Arc::from);
-        let mut h2 = match tokio::time::timeout(idle, h2::server::handshake(tls)).await {
+        let handshake = h2::server::Builder::new()
+            .max_concurrent_streams(MAX_CONCURRENT_STREAMS)
+            .max_header_list_size(MAX_HEADER_LIST_SIZE)
+            .handshake::<_, Bytes>(tls);
+        let mut h2 = match tokio::time::timeout(idle, handshake).await {
             Ok(Ok(h2)) => h2,
             Ok(Err(e)) => {
                 debug!(%client, %e, "DoH HTTP/2 handshake failed");
@@ -225,22 +240,33 @@ impl Connection {
                 return;
             }
         };
+        // A stream the client resets no longer counts against the HTTP/2
+        // limit while its lookup is still running here, so the requests in
+        // flight are counted too: a client opening and resetting streams
+        // in a loop is refused past the limit instead of piling up tasks.
+        let in_flight = Arc::new(Semaphore::new(MAX_CONCURRENT_STREAMS as usize));
         loop {
             let accept = tokio::select! {
                 _ = self.shutdown.cancelled() => return,
                 accept = tokio::time::timeout(idle, h2.accept()) => accept,
             };
-            let Ok(Some(Ok((request, respond)))) = accept else {
+            let Ok(Some(Ok((request, mut respond)))) = accept else {
                 // Idle past the timeout, connection closed, or a request
                 // error: drop. DoH connection churn is routine, so failures
                 // here are debug-only (like Hickory's listener).
                 return;
+            };
+            let Ok(permit) = in_flight.clone().try_acquire_owned() else {
+                debug!(%client, "DoH request refused: too many in flight on this connection");
+                respond.send_reset(h2::Reason::REFUSED_STREAM);
+                continue;
             };
             let handler = self.handler.clone();
             let endpoint = self.options.endpoint.clone();
             let session = self.session.clone();
             let server_name = server_name.clone();
             tokio::spawn(async move {
+                let _permit = permit;
                 let target = Target {
                     endpoint: &endpoint,
                     server_name: server_name.as_deref(),

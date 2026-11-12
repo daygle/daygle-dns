@@ -96,8 +96,8 @@ reqwest = { version = "0.13", default-features = false, features = ["rustls", "h
 # AI subsystem: pure-Rust fastText inference (supervised text classification)
 fasttext = "0.8"
 # AI verifier: all-MiniLM-L6-v2 embeddings via ONNX Runtime (feature-gated:
-# daygle-dns-ml/verifier-onnx, default on; excluded from the static musl
-# release build because the prebuilt ONNX Runtime binaries are glibc-based).
+# daygle-dns-ml/verifier-onnx, default on; a static musl build leaves it
+# out because the prebuilt ONNX Runtime binaries are glibc-based).
 ort = { version = "2.0.0-rc.15", default-features = false, features = ["std", "download-binaries", "copy-dylibs", "ndarray", "tls-rustls"] }
 tokenizers = { version = "0.23", default-features = false, features = ["fancy-regex"] }
 
