@@ -485,7 +485,7 @@ pub(crate) fn error_message(id: u16, code: ResponseCode) -> Vec<u8> {
 /// multiple of [`PADDING_BLOCK`] octets. Unchanged when it has no OPT
 /// record, is TSIG-signed (padding would break the signature), cannot be
 /// re-read, or would outgrow a DNS message.
-fn pad_response(bytes: Vec<u8>) -> Vec<u8> {
+pub(crate) fn pad_response(bytes: Vec<u8>) -> Vec<u8> {
     let Ok(mut message) = Message::from_vec(&bytes) else {
         return bytes;
     };
@@ -635,6 +635,26 @@ mod tests {
             .is_some());
         // Padding an already padded answer keeps it one block.
         assert_eq!(pad_response(padded).len(), PADDING_BLOCK);
+    }
+
+    #[test]
+    fn leaves_tsig_signed_responses_unchanged() {
+        let mut message = Message::from_vec(&response_with_edns()).unwrap();
+        message.signature = Some(Box::new(Record::from_rdata(
+            Name::from_ascii("key.example.").unwrap(),
+            0,
+            hickory_proto::rr::rdata::TSIG::new(
+                hickory_proto::rr::rdata::tsig::TsigAlgorithm::HmacSha256,
+                1,
+                300,
+                vec![1; 32],
+                7,
+                None,
+                Vec::new(),
+            ),
+        )));
+        let bytes = message.to_vec().unwrap();
+        assert_eq!(pad_response(bytes.clone()), bytes);
     }
 
     #[test]

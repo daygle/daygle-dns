@@ -445,6 +445,108 @@ async fn open_unsigned_update_is_refused() {
     shutdown(server).await;
 }
 
+/// Authenticated UPDATE replies must carry a valid request-chained TSIG,
+/// including error replies and EDNS cookie options.
+#[tokio::test]
+async fn signed_updates_authenticate_success_and_error_replies() {
+    use daygle_dns_authoritative::tsig::{sign_request_with_mac, ResponseVerifier, TsigKey};
+    use hickory_proto::op::Edns;
+    use hickory_proto::rr::rdata::opt::{EdnsCode, EdnsOption};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = config_with_updates(&dir.path().join("daygle-dns.db"));
+    config.authoritative.update_networks.clear();
+    let key_config = daygle_dns_core::config::TsigKeyConfig {
+        name: "update-key".into(),
+        algorithm: "hmac-sha256".into(),
+        secret: "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=".into(),
+    };
+    config.authoritative.tsig_keys = vec![key_config.clone()];
+    config.authoritative.tsig_update_zones = vec!["signed.test=update-key".into()];
+    let server = spawn(config).await;
+    setup_zone(&server, "signed.test").await;
+    let udp = server.udp_addr.unwrap();
+    let key = TsigKey::from_config(&key_config).unwrap();
+
+    let mut msg = update_message(
+        "signed.test.",
+        vec![prereq_name_not_in_use("host.signed.test.")],
+        vec![add_a_record("host.signed.test.", [192, 0, 2, 12], 60)],
+    );
+    let mut edns = Edns::new();
+    edns.set_max_payload(1232);
+    edns.options_mut()
+        .insert(EdnsOption::Unknown(u16::from(EdnsCode::Cookie), vec![1; 8]));
+    msg.set_edns(edns);
+    let (wire, request_mac) = sign_request_with_mac(&msg, &key).unwrap();
+    let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let mut buf = vec![0; 4096];
+
+    // First request applies; the duplicate fails its prerequisite. Both
+    // outcomes must be signed, with a server cookie included in the MAC.
+    for expected in [ResponseCode::NoError, ResponseCode::YXDomain] {
+        socket.send_to(&wire, udp).await.unwrap();
+        let (n, _) = tokio::time::timeout(Duration::from_secs(5), socket.recv_from(&mut buf))
+            .await
+            .unwrap()
+            .unwrap();
+        let mut verifier = ResponseVerifier::new(key.clone(), request_mac.clone());
+        verifier.verify(&buf[..n]).expect("valid TSIG reply");
+        verifier.finish().unwrap();
+        let mut tampered = buf[..n].to_vec();
+        tampered[3] ^= 1;
+        assert!(ResponseVerifier::new(key.clone(), request_mac.clone())
+            .verify(&tampered)
+            .is_err());
+        let response = Message::from_vec(&buf[..n]).unwrap();
+        assert_eq!(response.response_code, expected);
+        match response
+            .edns
+            .as_ref()
+            .and_then(|e| e.option(EdnsCode::Cookie))
+        {
+            Some(EdnsOption::Unknown(_, cookie)) => assert_eq!(cookie.len(), 24),
+            other => panic!("missing server cookie: {other:?}"),
+        }
+    }
+
+    // TCP uses the same request-chained signature.
+    let mut stream = tokio::net::TcpStream::connect(server.tcp_addr.unwrap())
+        .await
+        .unwrap();
+    stream
+        .write_all(&(wire.len() as u16).to_be_bytes())
+        .await
+        .unwrap();
+    stream.write_all(&wire).await.unwrap();
+    let mut len = [0u8; 2];
+    tokio::time::timeout(Duration::from_secs(5), stream.read_exact(&mut len))
+        .await
+        .unwrap()
+        .unwrap();
+    let mut body = vec![0; u16::from_be_bytes(len) as usize];
+    tokio::time::timeout(Duration::from_secs(5), stream.read_exact(&mut body))
+        .await
+        .unwrap()
+        .unwrap();
+    let mut verifier = ResponseVerifier::new(key.clone(), request_mac.clone());
+    verifier.verify(&body).expect("valid TCP TSIG reply");
+    verifier.finish().unwrap();
+    assert_eq!(
+        Message::from_vec(&body).unwrap().response_code,
+        ResponseCode::YXDomain
+    );
+    drop(stream);
+
+    // An unsigned update cannot change a TSIG-protected zone.
+    assert_eq!(
+        udp_send(udp, &msg).await.response_code,
+        ResponseCode::Refused
+    );
+    shutdown(server).await;
+}
+
 #[tokio::test]
 async fn update_refused_when_disabled() {
     let dir = tempfile::tempdir().unwrap();

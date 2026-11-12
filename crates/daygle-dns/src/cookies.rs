@@ -158,12 +158,49 @@ where
 pub struct CookieResponder<R> {
     inner: R,
     reply: Option<Vec<u8>>,
+    keepalive: Option<u16>,
 }
 
 impl<R> CookieResponder<R> {
-    pub fn new(inner: R, reply: Option<Vec<u8>>) -> Self {
-        Self { inner, reply }
+    pub fn new(inner: R, reply: Option<Vec<u8>>, keepalive: Option<u16>) -> Self {
+        Self {
+            inner,
+            reply,
+            keepalive,
+        }
     }
+}
+
+/// Prepare an OPT record with the response cookie before signing a message.
+pub fn response_edns(
+    edns: Option<&Edns>,
+    cookie: Option<&[u8]>,
+    keepalive: Option<u16>,
+) -> Option<Edns> {
+    edns.map(|edns| {
+        let mut edns = edns.clone();
+        if cookie.is_some() {
+            edns.options_mut()
+                .as_mut()
+                .retain(|(code, _)| *code != EdnsCode::Cookie);
+        }
+        if let Some(cookie) = cookie {
+            edns.options_mut().insert(EdnsOption::Unknown(
+                u16::from(EdnsCode::Cookie),
+                cookie.to_vec(),
+            ));
+        }
+        edns.options_mut()
+            .as_mut()
+            .retain(|(code, _)| *code != EdnsCode::Keepalive);
+        if let Some(timeout) = keepalive {
+            edns.options_mut().insert(EdnsOption::Unknown(
+                u16::from(EdnsCode::Keepalive),
+                timeout.to_be_bytes().to_vec(),
+            ));
+        }
+        edns
+    })
 }
 
 #[async_trait::async_trait]
@@ -181,22 +218,8 @@ impl<R: ResponseHandler> ResponseHandler for CookieResponder<R> {
     ) -> Result<ResponseInfo, NetError> {
         // Only responses that carry an OPT record (the client sent EDNS,
         // which it must to send a cookie) get one.
-        let edns = match (&self.reply, response.edns()) {
-            (Some(reply), Some(edns)) => {
-                let mut edns = edns.clone();
-                // Replace any cookie already there (the catalog echoes the
-                // request's options).
-                edns.options_mut()
-                    .as_mut()
-                    .retain(|(code, _)| *code != EdnsCode::Cookie);
-                edns.options_mut().insert(EdnsOption::Unknown(
-                    u16::from(EdnsCode::Cookie),
-                    reply.clone(),
-                ));
-                Some(edns)
-            }
-            _ => None,
-        };
+        let edns = response_edns(response.edns(), self.reply.as_deref(), self.keepalive);
+        let edns = edns.filter(|_| self.reply.is_some() || self.keepalive.is_some());
         match &edns {
             Some(edns) => self.inner.send_response(with_edns(response, edns)).await,
             None => self.inner.send_response(response).await,
@@ -213,6 +236,37 @@ mod tests {
         edns.options_mut()
             .insert(EdnsOption::Unknown(u16::from(EdnsCode::Cookie), data));
         edns
+    }
+
+    #[test]
+    fn response_edns_replaces_keepalive_and_cookie_options() {
+        let mut request = Edns::new();
+        request.options_mut().insert(EdnsOption::Unknown(
+            u16::from(EdnsCode::Keepalive),
+            Vec::new(),
+        ));
+        request
+            .options_mut()
+            .insert(EdnsOption::Unknown(u16::from(EdnsCode::Cookie), vec![1; 8]));
+
+        let response = response_edns(Some(&request), Some(&[2; 24]), Some(30)).unwrap();
+        assert_eq!(
+            response.option(EdnsCode::Keepalive),
+            Some(&EdnsOption::Unknown(
+                u16::from(EdnsCode::Keepalive),
+                30u16.to_be_bytes().to_vec(),
+            ))
+        );
+        assert_eq!(
+            response.option(EdnsCode::Cookie),
+            Some(&EdnsOption::Unknown(
+                u16::from(EdnsCode::Cookie),
+                vec![2; 24],
+            ))
+        );
+
+        let without_keepalive = response_edns(Some(&request), None, None).unwrap();
+        assert!(without_keepalive.option(EdnsCode::Keepalive).is_none());
     }
 
     #[test]

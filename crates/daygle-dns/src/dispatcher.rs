@@ -17,8 +17,10 @@ use daygle_dns_policy::{source, Action, AdvancedBlocking, PolicyEngine};
 use daygle_dns_recursive::RecursiveResolver;
 use hickory_proto::dnssec::Proof;
 use hickory_proto::op::{MessageType, OpCode, ResponseCode};
+use hickory_proto::rr::rdata::opt::{EdnsCode, EdnsOption};
 use hickory_proto::rr::{Name, RData, Record, RecordType};
 use hickory_server::net::runtime::Time;
+use hickory_server::net::xfer::Protocol;
 use hickory_server::server::{Request, RequestHandler, ResponseHandler, ResponseInfo};
 use hickory_server::zone_handler::MessageResponseBuilder;
 use tracing::{debug, warn};
@@ -128,6 +130,8 @@ pub struct DnsDispatcher {
     /// Default 2000 ms; the live config's value wins when there is one (see
     /// [`Self::client_timeout`]).
     client_timeout: Duration,
+    /// The configured TCP connection idle timeout, advertised by RFC 7828.
+    tcp_idle_timeout: Duration,
     /// Global cap for recursive lookups, including work outliving client timeouts.
     recursive_admission: Arc<RecursiveAdmission>,
     /// DNS cookies (RFC 7873, `server.dns_cookies`).
@@ -209,6 +213,7 @@ impl DnsDispatcher {
             query_db_logger: None,
             record_use_cache: Arc::default(),
             client_timeout: Duration::from_millis(2000),
+            tcp_idle_timeout: Duration::from_secs(30),
             recursive_admission: Arc::new(RecursiveAdmission::new(256)),
             cookies: Arc::new(crate::cookies::Cookies::new(true)),
             rrl: Arc::default(),
@@ -295,6 +300,20 @@ impl DnsDispatcher {
         self
     }
 
+    /// Advertise the configured TCP connection idle timeout in EDNS TCP Keepalive.
+    pub fn with_tcp_idle_timeout(mut self, timeout: Duration) -> Self {
+        self.tcp_idle_timeout = timeout;
+        self
+    }
+
+    fn tcp_idle_timeout(&self) -> Duration {
+        self.config
+            .as_ref()
+            .map_or(self.tcp_idle_timeout, |config| {
+                Duration::from_millis(config.load().server.tcp_timeout_ms)
+            })
+    }
+
     /// The Client Timeout in effect: the live config's, so a console change
     /// applies at once, else the one this dispatcher was built with.
     fn client_timeout(&self) -> Duration {
@@ -311,6 +330,19 @@ impl DnsDispatcher {
 
     fn try_recursive_permit(&self) -> Option<RecursivePermit> {
         self.recursive_admission.try_acquire()
+    }
+
+    fn keepalive_timeout(&self, request: &Request) -> Option<u16> {
+        let timeout = match request.protocol() {
+            Protocol::Tls => self
+                .config
+                .as_ref()
+                .map_or(self.tcp_idle_timeout, |config| {
+                    Duration::from_secs(config.load().dot.handshake_timeout_secs)
+                }),
+            _ => self.tcp_idle_timeout(),
+        };
+        requested_keepalive_timeout(request, timeout)
     }
 
     /// Send query lines to syslog (when its settings ask for them).
@@ -979,8 +1011,7 @@ impl RequestHandler for DnsDispatcher {
             &self.rrl,
             &self.metrics,
         );
-        let mut response_handle =
-            crate::cookies::CookieResponder::new(response_handle, cookie_reply);
+        let keepalive = self.keepalive_timeout(request);
         let admitted = if cookie_ok {
             self.rate_limiter.check_verified_client(client)
         } else {
@@ -997,6 +1028,11 @@ impl RequestHandler for DnsDispatcher {
                 Outcome::RateLimited,
                 Some("SERVFAIL"),
                 started,
+            );
+            let mut response_handle = crate::cookies::CookieResponder::new(
+                response_handle,
+                cookie_reply.clone(),
+                keepalive,
             );
             return send_error(
                 &mut response_handle,
@@ -1020,12 +1056,19 @@ impl RequestHandler for DnsDispatcher {
         // paths. Branch on OpCode first and only call request_info() once for
         // ordinary queries; this avoids parsing the request up to 3x per query.
         if request.metadata.op_code == OpCode::Update {
-            let edns = request.edns.as_ref();
+            // Prepare the cookie before TSIG signing. The remaining RRL
+            // wrapper either sends these bytes unchanged, drops them, or
+            // replaces them with an unsigned truncated response.
+            let edns = crate::cookies::response_edns(
+                request.edns.as_ref(),
+                cookie_reply.as_deref(),
+                keepalive,
+            );
             return daygle_dns_authoritative::handle_update_with_notify(
                 &self.catalog,
                 request,
                 client,
-                edns,
+                edns.as_ref(),
                 response_handle,
                 // Secondaries are notified of every zone change from the
                 // catalog's change feed (see `daygle_dns::run`).
@@ -1033,6 +1076,8 @@ impl RequestHandler for DnsDispatcher {
             )
             .await;
         }
+        let mut response_handle =
+            crate::cookies::CookieResponder::new(response_handle, cookie_reply.clone(), keepalive);
         if request.metadata.op_code == OpCode::Notify {
             return match &self.notify.inbound {
                 Some(inbound) => inbound.handle_from(request, client, response_handle).await,
@@ -1078,6 +1123,11 @@ impl RequestHandler for DnsDispatcher {
                 Outcome::RateLimited,
                 Some("SERVFAIL"),
                 started,
+            );
+            let mut response_handle = crate::cookies::CookieResponder::new(
+                response_handle,
+                cookie_reply.clone(),
+                keepalive,
             );
             return send_error(
                 &mut response_handle,
@@ -2127,6 +2177,20 @@ fn failure_ede(error: &DaygleError) -> Ede {
     } else {
         Ede::new(ede::NO_REACHABLE_AUTHORITY, message)
     }
+}
+
+fn requested_keepalive_timeout(request: &Request, timeout: Duration) -> Option<u16> {
+    if (request.signature.is_some() && request.metadata.op_code != OpCode::Update)
+        || !matches!(request.protocol(), Protocol::Tcp | Protocol::Tls)
+    {
+        return None;
+    }
+    let requested = request.edns.as_ref()?.option(EdnsCode::Keepalive)?;
+    if !matches!(requested, EdnsOption::Unknown(_, data) if data.is_empty()) {
+        return None;
+    }
+    let units = timeout.as_millis().div_ceil(100);
+    Some(units.clamp(1, u16::MAX as u128) as u16)
 }
 
 /// Largest UDP response offered in our OPT record (the DNS Flag Day 2020
@@ -3548,6 +3612,38 @@ mod tests {
     /// The order Daygle sent for www.nab.com.au (addresses first, then the
     /// chain backwards) comes out as the chain from the query name, which
     /// is what Android's resolver needs to find the addresses.
+    #[test]
+    fn tcp_keepalive_requires_an_empty_option_on_stream_transports() {
+        use hickory_proto::op::{Edns, Message, Query};
+        use hickory_proto::rr::rdata::opt::{EdnsCode, EdnsOption};
+
+        let request = |protocol, option: Option<Vec<u8>>| {
+            let mut message = Message::new(1, MessageType::Query, OpCode::Query);
+            message.add_query(Query::query(Name::root(), RecordType::A));
+            if let Some(data) = option {
+                let mut edns = Edns::new();
+                edns.options_mut()
+                    .insert(EdnsOption::Unknown(u16::from(EdnsCode::Keepalive), data));
+                message.edns = Some(edns);
+            }
+            Request::from_bytes(
+                message.to_vec().unwrap(),
+                "192.0.2.1:53000".parse().unwrap(),
+                protocol,
+            )
+            .unwrap()
+        };
+        let timeout = Duration::from_millis(1201);
+        let tcp = request(Protocol::Tcp, Some(Vec::new()));
+        assert_eq!(requested_keepalive_timeout(&tcp, timeout), Some(13));
+        let udp = request(Protocol::Udp, Some(Vec::new()));
+        assert_eq!(requested_keepalive_timeout(&udp, timeout), None);
+        let nonempty = request(Protocol::Tcp, Some(vec![1]));
+        assert_eq!(requested_keepalive_timeout(&nonempty, timeout), None);
+        let absent = request(Protocol::Tcp, None);
+        assert_eq!(requested_keepalive_timeout(&absent, timeout), None);
+    }
+
     #[test]
     fn answers_are_put_in_cname_chain_order() {
         use hickory_proto::rr::rdata::{A, CNAME};

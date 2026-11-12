@@ -29,6 +29,7 @@ use bytes::Bytes;
 use h2::server::SendResponse;
 use h2::RecvStream;
 use hickory_proto::op::MessageType;
+use hickory_proto::rr::rdata::opt::EdnsCode;
 use hickory_proto::rr::Record;
 use hickory_proto::serialize::binary::{BinDecodable, BinDecoder, BinEncoder};
 use hickory_server::net::runtime::TokioTime;
@@ -44,7 +45,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error};
 
 use crate::dispatcher::DnsDispatcher;
-use crate::dot::{error_message, per_client_limit, ClientSlots};
+use crate::dot::{error_message, pad_response, per_client_limit, ClientSlots};
 use crate::tls_diag::{SessionLog, HTTPS};
 
 /// How long a trusted load balancer has to send its PROXY header (the DoT
@@ -401,7 +402,11 @@ async fn answer(
     if request.metadata.message_type != MessageType::Query {
         return Ok(());
     }
-    let responder = H2Responder::new(respond);
+    let pad = request
+        .edns
+        .as_ref()
+        .is_some_and(|edns| edns.option(EdnsCode::Padding).is_some());
+    let responder = H2Responder::new(respond, pad);
     daygle_dns_policy::identity::scope(
         identity,
         handler.handle_request::<_, TokioTime>(&request, responder),
@@ -512,16 +517,19 @@ fn reject(
 #[derive(Clone)]
 struct H2Responder {
     respond: Arc<std::sync::Mutex<SendResponse<Bytes>>>,
+    pad: bool,
 }
 
 impl H2Responder {
-    fn new(respond: SendResponse<Bytes>) -> Self {
+    fn new(respond: SendResponse<Bytes>, pad: bool) -> Self {
         Self {
             respond: Arc::new(std::sync::Mutex::new(respond)),
+            pad,
         }
     }
 
     async fn send(&self, bytes: Vec<u8>) -> Result<(), NetError> {
+        let bytes = if self.pad { pad_response(bytes) } else { bytes };
         let response = Response::builder()
             .status(StatusCode::OK)
             .header(http::header::CONTENT_TYPE, MIME_APPLICATION_DNS)

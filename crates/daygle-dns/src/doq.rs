@@ -16,6 +16,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use daygle_dns_core::error::DaygleError;
 use hickory_proto::op::{Header, HeaderCounts, MessageType, Metadata, OpCode, ResponseCode};
+use hickory_proto::rr::rdata::opt::EdnsCode;
 use hickory_proto::rr::Record;
 use hickory_proto::serialize::binary::{BinDecodable, BinDecoder, BinEncodable, BinEncoder};
 use hickory_server::net::runtime::TokioTime;
@@ -30,6 +31,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error};
 
 use crate::dispatcher::DnsDispatcher;
+use crate::dot::pad_response;
 use crate::tls_diag::{SessionLog, QUIC};
 
 /// Largest message the 2-octet length prefix can describe (RFC 1035 §4.2.2).
@@ -259,8 +261,6 @@ async fn handle_stream(
         return Ok(());
     };
 
-    let responder = DoqResponseHandle::new(send_stream, recv_stream);
-
     // Recover the Message ID from the header so a FORMERR answer (or a
     // protocol-error abort) can still be correlated by the client.
     let id_hint = {
@@ -276,7 +276,9 @@ async fn handle_stream(
             // Coalesced: a client looping malformed requests must not flood
             // the warn log.
             session.record(QUIC, Some(src.ip()), &format!("malformed request: {e}"));
-            responder.formerr(id_hint).await;
+            DoqResponseHandle::new(send_stream, recv_stream, false)
+                .formerr(id_hint)
+                .await;
             return Ok(());
         }
     };
@@ -284,6 +286,12 @@ async fn handle_stream(
     // RFC 9250 §4.2.1: response messages are discarded (they cannot be
     // answered) and the DoQ Message ID is always 0, so a non-zero ID is a
     // protocol violation.
+    let pad = request
+        .edns
+        .as_ref()
+        .is_some_and(|edns| edns.option(EdnsCode::Padding).is_some());
+    let responder = DoqResponseHandle::new(send_stream, recv_stream, pad);
+
     if request.metadata.message_type != MessageType::Query {
         debug!(%src, "ignoring non-query message over DoQ");
         return Ok(());
@@ -308,13 +316,15 @@ async fn handle_stream(
 struct DoqResponseHandle {
     send: Arc<Mutex<Option<quinn::SendStream>>>,
     recv: Arc<Mutex<Option<quinn::RecvStream>>>,
+    pad: bool,
 }
 
 impl DoqResponseHandle {
-    fn new(send: quinn::SendStream, recv: quinn::RecvStream) -> Self {
+    fn new(send: quinn::SendStream, recv: quinn::RecvStream, pad: bool) -> Self {
         Self {
             send: Arc::new(Mutex::new(Some(send))),
             recv: Arc::new(Mutex::new(Some(recv))),
+            pad,
         }
     }
 
@@ -396,6 +406,7 @@ impl ResponseHandler for DoqResponseHandle {
             encoder.set_max_size(u16::MAX);
             match response.destructive_emit(&mut encoder) {
                 Ok(info) => {
+                    let bytes = if self.pad { pad_response(bytes) } else { bytes };
                     self.write_framed(&bytes).await?;
                     return Ok(info);
                 }
