@@ -104,6 +104,48 @@ async fn slow_http2_handshake_and_body_have_deadlines() {
     shutdown(server).await;
 }
 
+/// A connection is told how many requests it may have open at once: without
+/// a limit one connection could hold any number of streams (and the task
+/// behind each), whatever `doh.max_connections` says.
+#[tokio::test]
+async fn a_connection_is_limited_in_concurrent_streams() {
+    let dir = tempfile::tempdir().unwrap();
+    let cert = dir.path().join("server.crt");
+    let mut config = base_config(&dir.path().join("daygle-dns.db"));
+    config.doh.enabled = true;
+    config.doh.self_signed = true;
+    config.doh.cert_path = cert.to_string_lossy().to_string();
+    config.doh.key_path = dir.path().join("server.key").to_string_lossy().to_string();
+    config.doh.server_name = "daygle.test".to_string();
+    let server = spawn(config).await;
+
+    let tls = doh_tls(server.doh_addr.unwrap(), &cert).await;
+    // The client starts out assuming another limit, so the one it ends up
+    // with is the server's.
+    let (mut sender, connection) = h2::client::Builder::new()
+        .initial_max_send_streams(1000)
+        .handshake::<_, bytes::Bytes>(tls)
+        .await
+        .unwrap();
+    let driver = tokio::spawn(connection);
+    // One round trip, so the server's SETTINGS frame has been read.
+    let request = http::Request::builder()
+        .method("GET")
+        .uri("https://daygle.test/dns-query")
+        .body(())
+        .unwrap();
+    let (response, _) = sender.send_request(request, true).unwrap();
+    assert_eq!(
+        response.await.unwrap().status(),
+        http::StatusCode::BAD_REQUEST
+    );
+    assert_eq!(sender.current_max_send_streams(), 100);
+
+    drop(sender);
+    driver.abort();
+    shutdown(server).await;
+}
+
 #[tokio::test]
 async fn serves_queries_over_doh() {
     let dir = tempfile::tempdir().unwrap();

@@ -134,6 +134,34 @@ async fn ixfr_returns_full_zone() {
     shutdown(server).await;
 }
 
+/// A UDP query's source address is not proven, so the zone never goes out
+/// over UDP (a forged query would aim it at someone else): AXFR is refused,
+/// and IXFR gets the current SOA alone, which sends the client to TCP.
+#[tokio::test]
+async fn transfers_over_udp_never_carry_the_zone() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("daygle-dns.db");
+    let server = spawn(config_with_axfr(&db, true, vec![])).await;
+    seed_zone(&server, "udp.test").await;
+
+    let udp = server.udp_addr.expect("UDP enabled");
+    let resp = udp_query(udp, "udp.test.", RecordType::AXFR).await;
+    assert_eq!(resp.response_code, ResponseCode::Refused);
+    assert!(resp.answers.is_empty());
+
+    let resp = udp_query(udp, "udp.test.", RecordType::IXFR).await;
+    assert_eq!(resp.response_code, ResponseCode::NoError);
+    assert_eq!(resp.answers.len(), 1, "the SOA alone: {:?}", resp.answers);
+    assert_eq!(resp.answers[0].record_type(), RecordType::SOA);
+
+    // The same server still transfers the zone over TCP.
+    let tcp = server.tcp_addr.expect("TCP enabled");
+    let resp = tcp_transfer_query(tcp, "udp.test.", RecordType::AXFR).await;
+    assert!(resp.answers.len() >= 3);
+
+    shutdown(server).await;
+}
+
 #[tokio::test]
 async fn axfr_refused_when_disabled() {
     let dir = tempfile::tempdir().unwrap();

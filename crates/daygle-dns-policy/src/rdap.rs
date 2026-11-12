@@ -41,6 +41,10 @@ pub const LOOKUP_WAIT: Duration = Duration::from_secs(2);
 /// Most RDAP lookups running at once, so a burst of new names cannot flood
 /// the registries (which rate-limit) or this server.
 const CONCURRENT: usize = 4;
+/// Most of an RDAP answer (or of the bootstrap file) that is read. Domain
+/// objects are a few kilobytes and the bootstrap file some tens: a server
+/// sending more is not answering the question.
+const MAX_BODY_BYTES: usize = 4 * 1024 * 1024;
 
 /// TLD -> RDAP base URL, from the bootstrap file.
 type Bootstrap = HashMap<String, String>;
@@ -124,6 +128,10 @@ impl RegistrationDates {
     }
 
     async fn look_up(&self, domain: &str) -> Option<DateTime<Utc>> {
+        // The name comes from a client's query and goes into a URL.
+        if !is_host_name(domain) {
+            return None;
+        }
         let bootstrap = self.bootstrap().await?;
         let tld = domain.rsplit('.').next()?;
         let base = bootstrap.get(tld)?;
@@ -139,8 +147,7 @@ impl RegistrationDates {
                 return None;
             }
         };
-        let body: serde_json::Value = response.json().await.ok()?;
-        registration_date(&body)
+        registration_date(&read_json(response).await?)
     }
 
     /// The bootstrap table, fetched when missing or a day old. A failed
@@ -153,18 +160,15 @@ impl RegistrationDates {
             }
         }
         let fetched = async {
-            let body: serde_json::Value = self
+            let response = self
                 .client
                 .get(&self.bootstrap_url)
                 .send()
                 .await
                 .ok()?
                 .error_for_status()
-                .ok()?
-                .json()
-                .await
                 .ok()?;
-            parse_bootstrap(&body)
+            parse_bootstrap(&read_json(response).await?)
         }
         .await;
         match fetched {
@@ -179,6 +183,43 @@ impl RegistrationDates {
             }
         }
     }
+}
+
+/// Whether `domain` is made of host name labels only (letters, digits and
+/// inner hyphens). A query name can hold any byte, and Hickory writes the
+/// unusual ones with a backslash, which a URL parser reads as `/`: a name
+/// with `/`, `?` or `#` in a label would otherwise pick the path, query or
+/// fragment of the request sent to the registry.
+fn is_host_name(domain: &str) -> bool {
+    domain.len() <= 253
+        && domain.split('.').all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && label
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+        })
+}
+
+/// The JSON body of `response`, read up to [`MAX_BODY_BYTES`]. `None` when
+/// it is larger, cut short or not JSON.
+async fn read_json(mut response: reqwest::Response) -> Option<serde_json::Value> {
+    if response
+        .content_length()
+        .is_some_and(|len| len > MAX_BODY_BYTES as u64)
+    {
+        return None;
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await.ok()? {
+        if body.len() + chunk.len() > MAX_BODY_BYTES {
+            return None;
+        }
+        body.extend_from_slice(&chunk);
+    }
+    serde_json::from_slice(&body).ok()
 }
 
 /// The TLD -> base URL table of an RDAP bootstrap file (RFC 9224):
@@ -248,6 +289,23 @@ mod tests {
                 .await,
             Some(Some(expected))
         );
+    }
+
+    #[test]
+    fn only_host_names_are_looked_up() {
+        assert!(is_host_name("example.com"));
+        assert!(is_host_name("xn--bcher-kva.example"));
+        assert!(is_host_name("a-1.co.uk"));
+        // As Hickory writes labels holding `/`, `?`, `#` or a dot.
+        assert!(!is_host_name("a\\/..\\/ip\\/192.0.2.1.com"));
+        assert!(!is_host_name("a\\?x=1.com"));
+        assert!(!is_host_name("a\\#b.com"));
+        assert!(!is_host_name("a\\.b.com"));
+        assert!(!is_host_name("under_score.com"));
+        assert!(!is_host_name("-lead.com"));
+        assert!(!is_host_name("trail-.com"));
+        assert!(!is_host_name("double..com"));
+        assert!(!is_host_name(""));
     }
 
     #[test]
