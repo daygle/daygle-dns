@@ -1035,7 +1035,7 @@ impl RequestHandler for DnsDispatcher {
         }
         if request.metadata.op_code == OpCode::Notify {
             return match &self.notify.inbound {
-                Some(inbound) => inbound.handle(request, response_handle).await,
+                Some(inbound) => inbound.handle_from(request, client, response_handle).await,
                 // No inbound NOTIFY configured: NOTIMP, per RFC 1996 §3.9.
                 None => send_error(&mut response_handle, request, ResponseCode::NotImp, None).await,
             };

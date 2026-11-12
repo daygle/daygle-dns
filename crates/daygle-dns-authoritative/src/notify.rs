@@ -163,6 +163,18 @@ impl NotifyInbound {
     pub async fn handle<R: ResponseHandler>(
         &self,
         request: &Request,
+        response_handle: R,
+    ) -> ResponseInfo {
+        self.handle_from(request, request.src().ip(), response_handle)
+            .await
+    }
+
+    /// Handle a NOTIFY using its verified client address, which may differ
+    /// from the transport peer when a trusted proxy fronts the listener.
+    pub async fn handle_from<R: ResponseHandler>(
+        &self,
+        request: &Request,
+        client: std::net::IpAddr,
         mut response_handle: R,
     ) -> ResponseInfo {
         let Some(query) = request.queries.queries().first() else {
@@ -183,7 +195,7 @@ impl NotifyInbound {
         // ASCII form: hosted zone names are stored in punycode, and
         // `to_string()` renders `xn--` labels as Unicode.
         let zone = normalize(query.name().to_ascii());
-        let src_ip = request.src().ip().to_canonical();
+        let src_ip = client.to_canonical();
         let from_master = |masters: &[String]| {
             masters.iter().any(|m| {
                 daygle_dns_core::config::parse_master_addr(m)

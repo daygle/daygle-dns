@@ -180,6 +180,62 @@ async fn notify_unknown_zone_or_non_master_is_notimp() {
     shutdown(master).await;
 }
 
+/// A PROXY front must not make every sender appear to be the loopback master.
+#[tokio::test]
+async fn notify_uses_the_client_named_by_a_trusted_proxy() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = base_config(&dir.path().join("secondary.db"));
+    config.server.proxy_protocol = vec!["127.0.0.0/8".to_string()];
+    config.authoritative.secondary_zones = vec![
+        secondary_config("proxy-notify.test", "127.0.0.1:9"),
+        secondary_config("remote-master.test", "203.0.113.7:9"),
+    ];
+    config.authoritative.notify_listen_enabled = true;
+    let server = spawn(config).await;
+    let tcp = server.tcp_addr.unwrap();
+
+    async fn notify_from(tcp: std::net::SocketAddr, zone: &str, client: &str) -> Message {
+        let mut stream = tokio::net::TcpStream::connect(tcp).await.unwrap();
+        let header = format!("PROXY TCP4 {client} 127.0.0.1 40000 53\r\n");
+        let query = notify_message(zone, 2).to_vec().unwrap();
+        stream.write_all(header.as_bytes()).await.unwrap();
+        stream
+            .write_all(&(query.len() as u16).to_be_bytes())
+            .await
+            .unwrap();
+        stream.write_all(&query).await.unwrap();
+        let mut len = [0u8; 2];
+        tokio::time::timeout(Duration::from_secs(5), stream.read_exact(&mut len))
+            .await
+            .expect("NOTIFY response timed out")
+            .unwrap();
+        let mut body = vec![0; u16::from_be_bytes(len) as usize];
+        tokio::time::timeout(Duration::from_secs(5), stream.read_exact(&mut body))
+            .await
+            .expect("NOTIFY body timed out")
+            .unwrap();
+        Message::from_vec(&body).unwrap()
+    }
+
+    // The proxy itself is on the master's address, but this sender is not.
+    assert_eq!(
+        notify_from(tcp, "proxy-notify.test.", "203.0.113.7")
+            .await
+            .response_code,
+        ResponseCode::NotImp
+    );
+    // A remote master is accepted even though the transport is bridged.
+    assert_eq!(
+        notify_from(tcp, "remote-master.test.", "203.0.113.7")
+            .await
+            .response_code,
+        ResponseCode::NoError
+    );
+    shutdown(server).await;
+}
+
 /// A NOTIFY from the master triggers an immediate IXFR pull; with a 3600 s
 /// refresh interval only the NOTIFY can cause the transfer in this window.
 #[tokio::test]

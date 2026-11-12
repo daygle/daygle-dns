@@ -378,6 +378,9 @@ impl ResponseVerifier {
                 record.name
             ));
         }
+        if tsig.algorithm != self.key.algorithm {
+            return Err("response TSIG algorithm does not match the configured key".to_string());
+        }
         if let Some(error) = &tsig.error {
             return Err(format!("the server reported TSIG error {error:?}"));
         }
@@ -494,6 +497,16 @@ mod tests {
         let second_body = message(2);
         let second_tsig = sign_subsequent(&key, &first_tsig.data.mac, &second_body, 1234).unwrap();
         let second = append(&second_body, &second_tsig);
+        // Later-message MACs cover the message and TSIG timers, but not the
+        // declared algorithm. Reject a changed declaration even when the
+        // MAC itself still verifies under the configured key.
+        let mut wrong_algorithm = second_tsig.clone();
+        wrong_algorithm.data.algorithm = TsigAlgorithm::HmacSha512;
+        let wrong_algorithm = append(&second_body, &wrong_algorithm);
+        let mut verifier = ResponseVerifier::new(key.clone(), request_mac.clone());
+        verifier.verify(&first).unwrap();
+        assert!(verifier.verify(&wrong_algorithm).is_err());
+
         let third = message(3);
         let fourth_body = message(4);
         // The fourth message's MAC also covers the unsigned third.

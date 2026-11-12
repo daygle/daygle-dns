@@ -778,6 +778,81 @@ async fn repeated_failed_logins_are_throttled_per_client() {
     shutdown(server).await;
 }
 
+/// Password confirmation and login share the same per-client throttle and
+/// the same four password-work slots, even when they arrive together.
+#[tokio::test]
+async fn concurrent_login_and_password_confirmation_are_throttled() {
+    const CONCURRENT: usize = 20;
+    const PASSWORD_SLOTS: usize = 4;
+
+    let dir = tempfile::tempdir().unwrap();
+    let server = spawn_with_roles(&dir).await;
+    let client = reqwest::Client::new();
+    let base = api_url(server.api_addr, "");
+    let (token, _) = login(server.api_addr, "admin", "secret").await;
+
+    // Leave one failure before the limit. Include a password confirmation,
+    // proving that its failure is counted together with login failures.
+    for _ in 2..daygle_dns_api::LoginThrottle::MAX_FAILURES {
+        assert_eq!(login_status(server.api_addr, "admin", "wrong").await, 401);
+    }
+    let confirmation = client
+        .post(format!("{base}/api/auth/password"))
+        .bearer_auth(&token)
+        .json(&json!({ "current_password": "wrong", "new_password": "new-secret-pw" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(confirmation.status(), 401);
+
+    let start = Arc::new(tokio::sync::Barrier::new(CONCURRENT + 1));
+    let mut tasks = tokio::task::JoinSet::new();
+    for i in 0..CONCURRENT {
+        let client = client.clone();
+        let base = base.clone();
+        let token = token.clone();
+        let start = start.clone();
+        tasks.spawn(async move {
+            start.wait().await;
+            let request = if i == 0 {
+                client
+                    .post(format!("{base}/api/auth/password"))
+                    .bearer_auth(token)
+                    .json(&json!({ "current_password": "wrong", "new_password": "new-secret-pw" }))
+            } else {
+                client
+                    .post(format!("{base}/api/auth/login"))
+                    .json(&json!({ "username": "admin", "password": "wrong" }))
+            };
+            (i == 0, request.send().await.unwrap().status())
+        });
+    }
+    start.wait().await;
+
+    let mut failures = 0;
+    let mut throttled = 0;
+    let mut saw_confirmation = false;
+    while let Some(result) = tasks.join_next().await {
+        let (confirmation, status) = result.unwrap();
+        saw_confirmation |= confirmation;
+        match status.as_u16() {
+            401 => failures += 1,
+            429 => throttled += 1,
+            other => panic!("unexpected status {other} (confirmation: {confirmation})"),
+        }
+    }
+    assert!(saw_confirmation);
+    assert!(
+        failures > 0 && failures <= PASSWORD_SLOTS,
+        "{failures} failed checks"
+    );
+    assert_eq!(failures + throttled, CONCURRENT);
+    assert!(throttled > 0);
+    assert_eq!(login_status(server.api_addr, "admin", "secret").await, 429);
+
+    shutdown(server).await;
+}
+
 /// The console's session rides in an HttpOnly, SameSite cookie; changes
 /// made with only the cookie need the console's own request header (CSRF),
 /// and signing out clears the cookie and ends the session.
