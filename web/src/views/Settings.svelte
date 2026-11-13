@@ -6,7 +6,6 @@
   import { icons } from '../icons.svelte.js';
   import { display, setDisplayDefaults, timeZoneOptions, DATE_FORMAT_OPTIONS, TIME_FORMAT_OPTIONS, previewDateTime, formatDateTime } from '../datetime.svelte.js';
   import { THEME_OPTIONS } from '../theme.svelte.js';
-  import { duration } from '../aiLabels.js';
 
   let config = $state(null);
   let notice = $state(null);
@@ -93,12 +92,6 @@
   // The saved form, to tell whether anything has changed since.
   let savedBody = $state('');
   const dirty = $derived(config != null && savedBody !== '' && JSON.stringify(buildBody()) !== savedBody);
-
-  // "3600" -> "1 Hour", shown beside seconds fields.
-  function hint(secs) {
-    const n = Number(secs);
-    return Number.isInteger(n) && n > 0 ? duration(n) : '';
-  }
 
   // Server-wide date, time and theme display defaults (saved with the page).
   let display_ = $state({ time_zone: 'system', date_format: 'system', time_format: 'system', theme: 'light' });
@@ -1121,10 +1114,10 @@
   <div class="card" style="margin-bottom: 14px">
     <h3 style="margin: 0 0 10px">Cache Lifetimes</h3>
     <div class="recursive-cache-grid">
-      <label><span>Minimum Cache TTL (Seconds)</span><span class="hint">{hint(recursive.min_cache_ttl)}</span><input type="number" min="0" bind:value={recursive.min_cache_ttl} /></label>
-      <label><span>Negative Cache TTL (Seconds)</span><span class="hint">{hint(recursive.negative_cache_ttl)}</span><input type="number" min="0" bind:value={recursive.negative_cache_ttl} /></label>
-      <label><span>Maximum Cache TTL (Seconds)</span><span class="hint">{hint(recursive.max_cache_ttl)}</span><input type="number" min="0" bind:value={recursive.max_cache_ttl} /></label>
-      <label><span>Failure Cache TTL (Seconds)</span><span class="hint">{hint(recursive.failure_cache_ttl)}</span><input type="number" min="0" bind:value={recursive.failure_cache_ttl} /></label>
+      <label><span>Minimum Cache TTL (Seconds)</span><input type="number" min="0" bind:value={recursive.min_cache_ttl} /></label>
+      <label><span>Negative Cache TTL (Seconds)</span><input type="number" min="0" bind:value={recursive.negative_cache_ttl} /></label>
+      <label><span>Maximum Cache TTL (Seconds)</span><input type="number" min="0" bind:value={recursive.max_cache_ttl} /></label>
+      <label><span>Failure Cache TTL (Seconds)</span><input type="number" min="0" bind:value={recursive.failure_cache_ttl} /></label>
       <label><span>Cache Size (Entries)</span><input type="number" min="0" bind:value={recursive.cache_size} /></label>
       <label><span>Maximum Concurrent Lookups</span><input type="number" min="1" max="65536" bind:value={recursive.max_concurrent_lookups} /></label>
     </div>
@@ -1142,8 +1135,8 @@
       <label class="check"><input type="checkbox" bind:checked={recursive.prefetch_enabled} /> <span>Refresh Popular Names Early</span></label>
       <label><span>Refresh When TTL Left Is Below (%)</span><input type="number" min="1" max="99" bind:value={recursive.prefetch_ttl_fraction_pct} disabled={!recursive.prefetch_enabled} /></label>
       <label><span>Refresh Names Queried At Least (Times)</span><input type="number" min="1" bind:value={recursive.prefetch_min_queries} disabled={!recursive.prefetch_enabled} /></label>
-      <label><span>Counted Over (Seconds)</span><span class="hint">{hint(recursive.prefetch_window_secs)}</span><input type="number" min="1" bind:value={recursive.prefetch_window_secs} disabled={!recursive.prefetch_enabled} /></label>
-      <label><span>Serve-Stale Window (Seconds)</span><span class="hint">{hint(recursive.serve_stale_secs)}</span><input type="number" min="0" bind:value={recursive.serve_stale_secs} /></label>
+      <label><span>Counted Over (Seconds)</span><input type="number" min="1" bind:value={recursive.prefetch_window_secs} disabled={!recursive.prefetch_enabled} /></label>
+      <label><span>Serve-Stale Window (Seconds)</span><input type="number" min="0" bind:value={recursive.serve_stale_secs} /></label>
       <label><span>Client Timeout (Milliseconds)</span><input type="number" min="1000" max="10000" step="100" bind:value={server.client_timeout_ms} /></label>
     </div>
     <p class="muted help">
@@ -1162,7 +1155,7 @@
   <div class="card" style="margin-bottom: 14px">
     <h3 style="margin: 0 0 10px">Zone Defaults</h3>
     <div class="form-grid top">
-      <label><span>Default Record TTL (Seconds)</span><span class="hint">{hint(authoritative.default_record_ttl)}</span><input type="number" min="1" bind:value={authoritative.default_record_ttl} /></label>
+      <label><span>Default Record TTL (Seconds)</span><input type="number" min="1" bind:value={authoritative.default_record_ttl} /></label>
       <label><span>DNS Server Domain</span><input placeholder={detectedName ? `This server: ${detectedName}` : 'ns1.example.com.'} bind:value={authoritative.default_primary_ns} /></label>
       <label><span>Default Administrator Email</span><input placeholder={adminEmail ? `First administrator: ${adminEmail}` : 'hostmaster@example.com'} bind:value={authoritative.default_admin_mailbox} /></label>
     </div>
@@ -1183,7 +1176,7 @@
       <label><span>Roll Keys After (Days, 0 = Never)</span><input type="number" min="0" bind:value={authoritative.dnssec_rollover_days} disabled={!authoritative.dnssec_enabled} /></label>
       <label><span>Old and New Key Overlap (Days)</span><input type="number" min="1" bind:value={authoritative.dnssec_rollover_overlap_days} disabled={!authoritative.dnssec_enabled} /></label>
       <label><span>Keep Retired Key Published (Days)</span><input type="number" min="1" bind:value={authoritative.dnssec_rollover_retire_days} disabled={!authoritative.dnssec_enabled} /></label>
-      <label><span>Check Every (Seconds)</span><span class="hint">{hint(authoritative.dnssec_maintenance_secs)}</span><input type="number" min="60" bind:value={authoritative.dnssec_maintenance_secs} disabled={!authoritative.dnssec_enabled} /></label>
+      <label><span>Check Every (Seconds)</span><input type="number" min="60" bind:value={authoritative.dnssec_maintenance_secs} disabled={!authoritative.dnssec_enabled} /></label>
     </div>
     <p class="muted help">
       Signatures last for the validity period and are renewed automatically at
@@ -1881,7 +1874,7 @@
     align-items: start;
   }
   /* Two lines for every label, so the inputs line up whether or not a
-     label wraps or a duration hint follows the field. */
+     label wraps. */
   .recursive-cache-grid label:not(.check) > span:first-child { min-height: 2.6em; display: flex; align-items: flex-end; }
   .recursive-cache-grid label.check { padding-top: 2.6em; }
   label { display: flex; flex-direction: column; gap: 4px; font-size: 0.85rem; }
@@ -1920,7 +1913,6 @@
     .access-row { grid-template-columns: 1fr 1fr; }
   }
   /* Below the field, so it never collides with a label that wraps. */
-  .hint { order: 3; font-size: 0.72rem; color: var(--muted); min-height: 1em; }
   .facts { width: auto; }
   .facts th { text-align: left; padding-right: 24px; color: var(--muted); font-weight: 500; }
 </style>
