@@ -1522,6 +1522,8 @@ pub struct ServerRuntimeUpdate {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tcp_timeout_ms: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub tcp_max_connections: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub dns_cookies: Option<bool>,
 }
 
@@ -2727,6 +2729,9 @@ impl RuntimeSettings {
             if let Some(v) = sv.tcp_timeout_ms {
                 config.server.tcp_timeout_ms = v;
             }
+            if let Some(v) = sv.tcp_max_connections {
+                config.server.tcp_max_connections = v;
+            }
             if let Some(v) = sv.dns_cookies {
                 config.server.dns_cookies = v;
             }
@@ -3001,6 +3006,7 @@ impl RuntimeSettings {
             server: Some(ServerRuntimeUpdate {
                 client_timeout_ms: Some(config.server.client_timeout_ms),
                 tcp_timeout_ms: Some(config.server.tcp_timeout_ms),
+                tcp_max_connections: Some(config.server.tcp_max_connections),
                 dns_cookies: Some(config.server.dns_cookies),
             }),
             rate_limit: Some(config.rate_limit.clone()),
@@ -3272,12 +3278,12 @@ impl DaygleConfig {
                 return Err(DaygleError::Config(format!("{name} must not be 0")));
             }
         }
-        if !(1..=65_536).contains(&self.server.proxy_protocol_max_connections) {
-            return Err(DaygleError::Config(
-                "server.proxy_protocol_max_connections must be in 1..=65536".to_string(),
-            ));
-        }
         for (name, value, enabled) in [
+            (
+                "server.tcp_max_connections",
+                self.server.tcp_max_connections,
+                self.server.tcp_enabled,
+            ),
             (
                 "dot.max_connections",
                 self.dot.max_connections,
@@ -4103,7 +4109,9 @@ pub struct ServerSettings {
     /// header, and the client it names is treated as the real client.
     /// Empty (the default) turns it off.
     pub proxy_protocol: Vec<String>,
-    /// Maximum active connections admitted by each PROXY-protocol TCP front.
+    /// No longer used: the listeners read PROXY headers themselves, within
+    /// their own connection limits. Still accepted so config files that set
+    /// it keep loading.
     pub proxy_protocol_max_connections: usize,
     /// UDP/TCP port (default 53).
     pub port: u16,
@@ -4111,9 +4119,17 @@ pub struct ServerSettings {
     pub udp_enabled: bool,
     /// Serve plaintext TCP.
     pub tcp_enabled: bool,
-    /// TCP idle timeout in milliseconds.
+    /// TCP idle timeout in milliseconds: an open plain-TCP connection is
+    /// closed once this long passes without a query (advertised to clients
+    /// in EDNS TCP Keepalive, RFC 7828).
     pub tcp_timeout_ms: u64,
-    /// Outbound response buffer size (bytes).
+    /// Plain-TCP connections served at once (1..=65536, default 1024). One
+    /// client (an IPv4 address or an IPv6 /64) may hold an eighth of them,
+    /// at least 4; private and loopback clients are not capped per client.
+    pub tcp_max_connections: usize,
+    /// No longer used (it sized the per-connection answer queue of the TCP
+    /// listener this server used to run on). Still accepted so config files
+    /// that set it keep loading.
     pub response_buffer_size: usize,
     /// Client Timeout (milliseconds): how long the server waits for an answer
     /// before replying SERVFAIL. Applied to the recursive path; valid range
@@ -4147,6 +4163,7 @@ impl Default for ServerSettings {
             udp_enabled: true,
             tcp_enabled: true,
             tcp_timeout_ms: 5000,
+            tcp_max_connections: 1024,
             response_buffer_size: 4096,
             client_timeout_ms: 2000,
             udp_send_buffer_kb: 2048,
@@ -5786,6 +5803,7 @@ mod tests {
         });
         c.server.client_timeout_ms += 1;
         c.server.tcp_timeout_ms += 1;
+        c.server.tcp_max_connections += 1;
         c.server.dns_cookies = !c.server.dns_cookies;
         c.api.gui_enabled = !c.api.gui_enabled;
         c.api.cors_origins.push(s("https://console.example.com"));

@@ -1,67 +1,16 @@
 //! PROXY protocol (HAProxy, versions 1 and 2) on the TCP, DoT and DoH
 //! listeners, so a load balancer in front of the server can pass on each
 //! client's real address (`server.proxy_protocol` lists the trusted
-//! proxies).
-//!
-//! TCP-based listeners are fronted by a small proxy which can read the PROXY
-//! header and splice the remaining stream to a hidden loopback listener.
+//! proxies). Each listener reads the header itself, before anything else on
+//! a connection from a trusted proxy, and serves the connection as the
+//! client it names.
 
-use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
-use std::sync::{Arc, OnceLock, RwLock};
-use std::time::Duration;
 
 use tokio::io::AsyncReadExt;
-use tokio::net::{TcpListener, TcpSocket, TcpStream};
-use tokio_util::sync::CancellationToken;
-use tracing::debug;
 
-const HEADER_TIMEOUT: Duration = Duration::from_secs(5);
 const V2_SIGNATURE: [u8; 12] = *b"\r\n\r\n\0\r\nQUIT\n";
 const V1_MAX: usize = 107;
-
-fn table() -> &'static RwLock<HashMap<SocketAddr, SocketAddr>> {
-    static TABLE: OnceLock<RwLock<HashMap<SocketAddr, SocketAddr>>> = OnceLock::new();
-    TABLE.get_or_init(Default::default)
-}
-
-/// The table, ignoring lock poisoning: the map is a peer mapping, so a panic
-/// in an unrelated thread that happened to hold the lock (which poisons it)
-/// must not turn every later query into a panic. `real_client` runs on the
-/// DNS query path, so an `expect` here would take the whole server down.
-fn read_table() -> std::sync::RwLockReadGuard<'static, HashMap<SocketAddr, SocketAddr>> {
-    table().read().unwrap_or_else(|e| e.into_inner())
-}
-
-fn write_table() -> std::sync::RwLockWriteGuard<'static, HashMap<SocketAddr, SocketAddr>> {
-    table().write().unwrap_or_else(|e| e.into_inner())
-}
-
-/// Register the peer on a loopback backend connection against its public
-/// client's address. Used when a transparent listener bridge is necessary.
-pub fn register_client(local: SocketAddr, client: SocketAddr) {
-    write_table().insert(local, client);
-}
-
-/// Remove a bridge's peer mapping when the bridged connection finishes.
-pub fn unregister_client(local: SocketAddr) {
-    write_table().remove(&local);
-}
-
-/// The real client behind `src` when it is a connection from a front; else src.
-pub fn real_client(src: SocketAddr) -> SocketAddr {
-    let table = read_table();
-    let mut current = src;
-    // Listener admission and PROXY protocol can form multiple trusted local
-    // bridge hops. Resolve them all to the original remote peer/client.
-    for _ in 0..8 {
-        match table.get(&current).copied() {
-            Some(mapped) if mapped != current => current = mapped,
-            _ => break,
-        }
-    }
-    current
-}
 
 fn parse_v1(line: &str) -> std::io::Result<Option<SocketAddr>> {
     let bad = || std::io::Error::other(format!("bad PROXY v1 header '{line}'"));
@@ -156,161 +105,9 @@ pub async fn read_header<S: tokio::io::AsyncRead + Unpin>(
     parse_v2(head[0] & 0x0f, head[1], &body)
 }
 
-/// Accept public TCP sessions, validate optional PROXY headers and forward to
-/// a hidden listener. Concurrent sessions are hard-capped by `max_connections`.
-pub fn spawn_front(
-    public: TcpListener,
-    backend: SocketAddr,
-    trusted: Arc<Vec<ipnet::IpNet>>,
-    max_connections: usize,
-    shutdown: CancellationToken,
-) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
-        let permits = Arc::new(tokio::sync::Semaphore::new(max_connections));
-        let mut tasks = tokio::task::JoinSet::new();
-        loop {
-            let accepted = tokio::select! {
-                _ = shutdown.cancelled() => return,
-                Some(_) = tasks.join_next(), if !tasks.is_empty() => continue,
-                accepted = public.accept(), if permits.available_permits() > 0 => accepted,
-            };
-            let (stream, peer) = match accepted {
-                Ok(s) => s,
-                Err(e) => {
-                    // Out of file descriptors and the like: back off instead
-                    // of spinning on a failing accept.
-                    debug!("PROXY front accept failed: {e}");
-                    tokio::time::sleep(Duration::from_millis(100)).await;
-                    continue;
-                }
-            };
-            let Ok(permit) = permits.clone().try_acquire_owned() else {
-                drop(stream);
-                continue;
-            };
-            let trusted = trusted.clone();
-            let shutdown = shutdown.clone();
-            tasks.spawn(async move {
-                let _permit = permit;
-                if let Err(e) = splice(stream, peer, backend, &trusted, shutdown).await {
-                    debug!(%peer, "PROXY front connection ended: {e}");
-                }
-            });
-        }
-    })
-}
-
-async fn splice(
-    mut stream: TcpStream,
-    peer: SocketAddr,
-    backend: SocketAddr,
-    trusted: &[ipnet::IpNet],
-    shutdown: CancellationToken,
-) -> std::io::Result<()> {
-    let peer_ip = peer.ip().to_canonical();
-    let client = if trusted.iter().any(|n| n.contains(&peer_ip)) {
-        tokio::time::timeout(HEADER_TIMEOUT, read_header(&mut stream))
-            .await
-            .map_err(|_| std::io::Error::other("no PROXY header in time"))??
-            .unwrap_or(peer)
-    } else {
-        peer
-    };
-    // Bind the backend socket and register its local address before
-    // connecting: once connected, the listener may accept and look up the
-    // peer immediately.
-    let socket = match backend {
-        SocketAddr::V4(_) => TcpSocket::new_v4()?,
-        SocketAddr::V6(_) => TcpSocket::new_v6()?,
-    };
-    socket.bind(SocketAddr::new(backend.ip(), 0))?;
-    let _mapping = Registration::new(socket.local_addr()?, client);
-    let mut inner = socket.connect(backend).await?;
-    tokio::select! {
-        _ = shutdown.cancelled() => Ok(()),
-        copied = tokio::io::copy_bidirectional(&mut stream, &mut inner) => copied.map(|_| ()),
-    }
-}
-
-/// A peer mapping that is removed when dropped - including when the task
-/// holding it is aborted (the front's `JoinSet` aborts its connections when
-/// the listener shuts down). Otherwise a stale entry would outlive the
-/// connection, and a later loopback connection that happened to reuse the
-/// same ephemeral port would be attributed to the old client.
-struct Registration(SocketAddr);
-
-impl Registration {
-    fn new(local: SocketAddr, client: SocketAddr) -> Self {
-        register_client(local, client);
-        Self(local)
-    }
-}
-
-impl Drop for Registration {
-    fn drop(&mut self) {
-        unregister_client(self.0);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// A panic while another thread held the peer table's write lock poisons
-    /// it. The table is consulted for every DNS query (`real_client`), so
-    /// panicking on the poisoned lock would panic every later query - a
-    /// whole-server outage from one unrelated panic.
-    #[test]
-    fn a_poisoned_table_lock_does_not_break_client_lookup() {
-        let poisoned = std::panic::catch_unwind(|| {
-            let _guard = table().write().unwrap();
-            panic!("panic while holding the peer table lock");
-        });
-        assert!(poisoned.is_err());
-        assert!(
-            table().read().is_err(),
-            "the lock must really be poisoned for this test to prove anything"
-        );
-
-        let local: SocketAddr = "127.0.0.1:53001".parse().unwrap();
-        let client: SocketAddr = "192.0.2.9:1234".parse().unwrap();
-        register_client(local, client);
-        assert_eq!(real_client(local), client);
-        unregister_client(local);
-        assert_eq!(real_client(local), local);
-    }
-
-    #[test]
-    fn chained_bridges_resolve_to_the_original_client() {
-        let inner: SocketAddr = "127.0.0.1:53101".parse().unwrap();
-        let outer: SocketAddr = "127.0.0.1:53102".parse().unwrap();
-        let client: SocketAddr = "198.51.100.7:4444".parse().unwrap();
-        register_client(inner, client);
-        register_client(outer, inner);
-        assert_eq!(real_client(outer), client);
-        unregister_client(inner);
-        unregister_client(outer);
-        assert_eq!(real_client(outer), outer);
-    }
-
-    /// A connection task aborted mid-connect (the front shutting down) must
-    /// not leave its mapping behind.
-    #[tokio::test]
-    async fn an_aborted_connection_removes_its_mapping() {
-        let local: SocketAddr = "127.0.0.1:53201".parse().unwrap();
-        let client: SocketAddr = "203.0.113.4:999".parse().unwrap();
-        let task = tokio::spawn(async move {
-            let _mapping = Registration::new(local, client);
-            std::future::pending::<()>().await;
-        });
-        while real_client(local) == local {
-            tokio::task::yield_now().await;
-        }
-        assert_eq!(real_client(local), client);
-        task.abort();
-        let _ = task.await;
-        assert_eq!(real_client(local), local);
-    }
 
     #[test]
     fn proxy_headers_parse_v1_and_v2() {

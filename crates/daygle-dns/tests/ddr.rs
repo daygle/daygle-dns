@@ -81,6 +81,46 @@ async fn encrypted_listeners_are_advertised() {
     let records = svcb(&udp_query(udp, "_dns.resolver.arpa.", RecordType::SVCB).await);
     assert_eq!(records.len(), 1, "{records:?}");
 
+    let put = |body: serde_json::Value| {
+        let url = format!("http://{}/api/config", server.api_addr);
+        async move {
+            let resp = reqwest::Client::new()
+                .put(url)
+                .json(&body)
+                .send()
+                .await
+                .unwrap();
+            assert!(resp.status().is_success(), "{}", resp.text().await.unwrap());
+        }
+    };
+
+    // The targets are derived once per configuration: a new name applies
+    // to the very next query, by `_dns.resolver.arpa` and by name.
+    put(serde_json::json!({ "ddr": { "enabled": true, "name": "other.daygle.test" } })).await;
+    let records = svcb(&udp_query(udp, "_dns.resolver.arpa.", RecordType::SVCB).await);
+    assert!(
+        records.iter().all(|r| r.contains("other.daygle.test.")),
+        "{records:?}"
+    );
+    assert_eq!(
+        svcb(&udp_query(udp, "_dns.other.daygle.test.", RecordType::SVCB).await).len(),
+        1
+    );
+
+    // With DNS accounts required, a device that switched over would carry
+    // no account and be refused: nothing is advertised.
+    put(serde_json::json!({
+        "accounts": { "domain": "dns.daygle.test", "require": true }
+    }))
+    .await;
+    let reply = udp_query(udp, "_dns.resolver.arpa.", RecordType::SVCB).await;
+    assert!(reply.answers.is_empty() && reply.response_code == ResponseCode::NoError);
+    put(serde_json::json!({ "accounts": { "domain": "dns.daygle.test", "require": false } })).await;
+    assert_eq!(
+        svcb(&udp_query(udp, "_dns.resolver.arpa.", RecordType::SVCB).await).len(),
+        1
+    );
+
     // Off: nothing is advertised.
     let resp = reqwest::Client::new()
         .put(format!("http://{}/api/config", server.api_addr))

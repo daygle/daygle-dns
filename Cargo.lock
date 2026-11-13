@@ -644,6 +644,7 @@ dependencies = [
  "hickory-server",
  "http",
  "ipnet",
+ "nix",
  "quinn",
  "rcgen",
  "reqwest",

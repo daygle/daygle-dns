@@ -1,25 +1,29 @@
-//! # DNS over TLS (RFC 7858) listener
+//! # DNS over TLS (RFC 7858) and plain DNS over TCP listeners
 //!
-//! Built directly on `tokio-rustls` rather than Hickory's TLS listener, which
-//! answers the queries of one connection strictly one after another: a
-//! client that pipelines queries over its connection - Android's Private DNS
-//! does - waited for every slow recursive lookup ahead of a cached answer.
-//! Here, on each connection:
+//! Both are served here, on `tokio-rustls` for DoT, rather than by
+//! Hickory's listeners, which answer the queries of one connection strictly
+//! one after another: a client that pipelines queries over its connection -
+//! Android's Private DNS does, as do resolvers forwarding over TCP - waited
+//! for every slow recursive lookup ahead of a cached answer. Hickory's TCP
+//! listener also admitted any number of connections. Here, on each
+//! connection:
 //!
 //! - queries are answered **concurrently** (up to [`MAX_IN_FLIGHT`] at a
 //!   time) and **out of order** as each completes (RFC 7766 §6.2.1.1; the
 //!   client matches answers by message ID), with back-pressure: past the
 //!   limit the connection reads at most one more message and then waits,
 //!   framing no further query until one of the running ones finishes;
-//! - responses are padded to [`PADDING_BLOCK`] octets when the query was
+//! - DoT responses are padded to [`PADDING_BLOCK`] octets when the query was
 //!   padded (RFC 8467), so their size says little about the name asked;
 //! - `dot.handshake_timeout_secs` bounds the TLS handshake, and
-//!   `dot.idle_timeout_secs` the read inactivity of an established session
-//!   (advertised to clients in EDNS TCP Keepalive, RFC 7828); an idle
-//!   session closes once its last answer is written.
+//!   `dot.idle_timeout_secs` (`server.tcp_timeout_ms` for plain TCP) the
+//!   read inactivity of an established session (advertised to clients in
+//!   EDNS TCP Keepalive, RFC 7828); an idle session closes once its last
+//!   answer is written.
 //!
 //! Admission is part of the listener (no loopback bridge): at most
-//! `dot.max_connections` sessions, handshakes included, and at most an
+//! `dot.max_connections` (`server.tcp_max_connections`) sessions,
+//! handshakes included, and at most an
 //! eighth of them from one public client (an IPv4 address or an IPv6 /64),
 //! so a single address cannot take every slot of a public listener. Private
 //! and loopback addresses are not capped: a load balancer that does not
@@ -47,7 +51,7 @@ use hickory_server::net::xfer::Protocol;
 use hickory_server::net::NetError;
 use hickory_server::server::{Request, RequestHandler, ResponseHandler, ResponseInfo};
 use hickory_server::zone_handler::MessageResponse;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, Semaphore};
 use tokio::task::JoinSet;
@@ -56,7 +60,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error};
 
 use crate::dispatcher::DnsDispatcher;
-use crate::tls_diag::{SessionLog, TLS};
+use crate::tls_diag::{SessionLog, TCP, TLS};
 
 /// Queries of one connection answered at the same time. Past it the
 /// connection is not read until one finishes (TCP back-pressure).
@@ -93,6 +97,29 @@ pub struct DotOptions {
     pub proxy_trusted: Option<Arc<Vec<ipnet::IpNet>>>,
 }
 
+/// The transport a listener serves: what requests are tagged with and
+/// where its session failures are logged.
+#[derive(Clone, Copy)]
+struct Transport {
+    protocol: Protocol,
+    /// Server Log component (the query log's protocol value).
+    tag: &'static str,
+    /// For debug lines.
+    label: &'static str,
+}
+
+const DOT: Transport = Transport {
+    protocol: Protocol::Tls,
+    tag: TLS,
+    label: "DoT",
+};
+
+const PLAIN_TCP: Transport = Transport {
+    protocol: Protocol::Tcp,
+    tag: TCP,
+    label: "TCP",
+};
+
 /// Serve DoT on `listener` until `shutdown` is cancelled.
 pub async fn serve_dot(
     listener: TcpListener,
@@ -102,7 +129,36 @@ pub async fn serve_dot(
     shutdown: CancellationToken,
     options: DotOptions,
 ) {
-    let acceptor = TlsAcceptor::from(tls);
+    let acceptor = Some(TlsAcceptor::from(tls));
+    serve(listener, acceptor, DOT, handler, session, shutdown, options).await;
+}
+
+/// Serve plain DNS over TCP on `listener` until `shutdown` is cancelled
+/// (`options.timeout`, the handshake timeout, does not apply).
+pub async fn serve_tcp(
+    listener: TcpListener,
+    handler: DnsDispatcher,
+    session: Arc<SessionLog>,
+    shutdown: CancellationToken,
+    options: DotOptions,
+) {
+    serve(
+        listener, None, PLAIN_TCP, handler, session, shutdown, options,
+    )
+    .await;
+}
+
+/// Accept connections (TLS ones when there is an `acceptor`) and serve each.
+async fn serve(
+    listener: TcpListener,
+    acceptor: Option<TlsAcceptor>,
+    transport: Transport,
+    handler: DnsDispatcher,
+    session: Arc<SessionLog>,
+    shutdown: CancellationToken,
+    options: DotOptions,
+) {
+    let label = transport.label;
     let sessions = Arc::new(Semaphore::new(options.max_connections));
     let clients = Arc::new(ClientSlots::new(per_client_limit(options.max_connections)));
     let mut connections = JoinSet::new();
@@ -117,18 +173,19 @@ pub async fn serve_dot(
                 Err(error) => {
                     // Out of file descriptors and the like: back off instead
                     // of spinning on a failing accept.
-                    debug!(%error, "DoT accept failed");
+                    debug!(%error, "{label} accept failed");
                     tokio::time::sleep(Duration::from_millis(100)).await;
                     continue;
                 }
             },
         };
         let Ok(permit) = sessions.clone().try_acquire_owned() else {
-            debug!(%peer, "DoT connection refused: listener at max_connections");
+            debug!(%peer, "{label} connection refused: listener at max_connections");
             continue;
         };
         let connection = Connection {
             acceptor: acceptor.clone(),
+            transport,
             handler: handler.clone(),
             session: session.clone(),
             clients: clients.clone(),
@@ -230,7 +287,9 @@ impl Drop for ClientSlot {
 
 /// What one accepted connection needs.
 struct Connection {
-    acceptor: TlsAcceptor,
+    /// `None` for plain TCP.
+    acceptor: Option<TlsAcceptor>,
+    transport: Transport,
     handler: DnsDispatcher,
     session: Arc<SessionLog>,
     clients: Arc<ClientSlots>,
@@ -243,6 +302,7 @@ impl Connection {
         // Answers are small and latency-bound: do not wait to coalesce.
         let _ = stream.set_nodelay(true);
         let peer_ip = peer.ip().to_canonical();
+        let tag = self.transport.tag;
 
         let client = match &self.options.proxy_trusted {
             Some(trusted) if trusted.iter().any(|net| net.contains(&peer_ip)) => {
@@ -255,12 +315,12 @@ impl Connection {
                     Ok(Ok(client)) => client.unwrap_or(peer),
                     Ok(Err(e)) => {
                         self.session
-                            .record(TLS, Some(peer_ip), &format!("bad PROXY header: {e}"));
+                            .record(tag, Some(peer_ip), &format!("bad PROXY header: {e}"));
                         return;
                     }
                     Err(_) => {
                         self.session
-                            .record(TLS, Some(peer_ip), "no PROXY header in time");
+                            .record(tag, Some(peer_ip), "no PROXY header in time");
                         return;
                     }
                 }
@@ -271,46 +331,50 @@ impl Connection {
 
         let Some(_slot) = self.clients.acquire(client.ip()) else {
             self.session.record(
-                TLS,
+                tag,
                 Some(client.ip()),
                 "connection refused: too many connections from this client",
             );
             return;
         };
 
-        let tls =
-            match tokio::time::timeout(self.options.timeout, self.acceptor.accept(stream)).await {
-                Ok(Ok(tls)) => tls,
-                // Connected and closed (or reset) without a word: a load
-                // balancer's or monitor's TCP check, or a port scan - not a
-                // failed client. (A client rejecting the certificate sends an
-                // alert, logged below.)
-                Ok(Err(e))
-                    if matches!(
-                        e.kind(),
-                        std::io::ErrorKind::UnexpectedEof
-                            | std::io::ErrorKind::ConnectionReset
-                            | std::io::ErrorKind::ConnectionAborted
-                            | std::io::ErrorKind::BrokenPipe
-                    ) =>
-                {
-                    debug!(%client, "DoT connection closed before the TLS handshake");
-                    return;
-                }
-                Ok(Err(e)) => {
-                    self.session.record(
-                        TLS,
-                        Some(client.ip()),
-                        &format!("TLS handshake failed: {e}"),
-                    );
-                    return;
-                }
-                Err(_) => {
-                    self.session
-                        .record(TLS, Some(client.ip()), "TLS handshake timed out");
-                    return;
-                }
-            };
+        let Some(acceptor) = self.acceptor.clone() else {
+            // Plain TCP: no handshake, and no server name to read an account
+            // from.
+            return self.serve(stream, client, None).await;
+        };
+        let tls = match tokio::time::timeout(self.options.timeout, acceptor.accept(stream)).await {
+            Ok(Ok(tls)) => tls,
+            // Connected and closed (or reset) without a word: a load
+            // balancer's or monitor's TCP check, or a port scan - not a
+            // failed client. (A client rejecting the certificate sends an
+            // alert, logged below.)
+            Ok(Err(e))
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::UnexpectedEof
+                        | std::io::ErrorKind::ConnectionReset
+                        | std::io::ErrorKind::ConnectionAborted
+                        | std::io::ErrorKind::BrokenPipe
+                ) =>
+            {
+                debug!(%client, "DoT connection closed before the TLS handshake");
+                return;
+            }
+            Ok(Err(e)) => {
+                self.session.record(
+                    TLS,
+                    Some(client.ip()),
+                    &format!("TLS handshake failed: {e}"),
+                );
+                return;
+            }
+            Err(_) => {
+                self.session
+                    .record(TLS, Some(client.ip()), "TLS handshake timed out");
+                return;
+            }
+        };
         // The name the device asked for, for DNS accounts
         // (`<client id>.<accounts.domain>`). It is resolved against the
         // live account list for every query, so disabling, deleting,
@@ -322,13 +386,12 @@ impl Connection {
 
     /// Read framed queries until the client closes, goes idle, sends
     /// garbage or the listener stops; answer each concurrently.
-    async fn serve(
-        self,
-        tls: tokio_rustls::server::TlsStream<TcpStream>,
-        client: SocketAddr,
-        server_name: Option<Arc<str>>,
-    ) {
-        let (mut reader, mut writer) = tokio::io::split(tls);
+    async fn serve<S>(self, stream: S, client: SocketAddr, server_name: Option<Arc<str>>)
+    where
+        S: AsyncRead + AsyncWrite + Send + 'static,
+    {
+        let label = self.transport.label;
+        let (mut reader, mut writer) = tokio::io::split(stream);
         let (tx, mut rx) = mpsc::channel::<Vec<u8>>(WRITE_QUEUE);
 
         let idle = self.options.idle;
@@ -386,7 +449,7 @@ impl Connection {
             let len = u16::from_be_bytes(len_buf) as usize;
             if len < 12 {
                 // Not even a DNS header: the stream is out of step.
-                debug!(%client, len, "DoT: malformed frame length, closing");
+                debug!(%client, len, "{label}: malformed frame length, closing");
                 break;
             }
             let mut body = vec![0u8; len];
@@ -406,12 +469,13 @@ impl Connection {
             let session = self.session.clone();
             let tx = tx.clone();
             let server_name = server_name.clone();
+            let transport = self.transport;
             queries.spawn(async move {
                 let _permit = permit;
                 let identity = handler.accounts().identify(server_name.as_deref(), None);
                 daygle_dns_policy::identity::scope(
                     identity,
-                    answer(body, client, handler, &session, tx),
+                    answer(body, client, handler, &session, tx, transport),
                 )
                 .await;
             });
@@ -437,16 +501,21 @@ async fn answer(
     handler: DnsDispatcher,
     session: &SessionLog,
     tx: mpsc::Sender<Vec<u8>>,
+    transport: Transport,
 ) {
     let id_hint = Header::read(&mut BinDecoder::new(&body))
         .map(|h| h.metadata.id)
         .unwrap_or(0);
-    let request = match Request::from_bytes(body, client, Protocol::Tls) {
+    let request = match Request::from_bytes(body, client, transport.protocol) {
         Ok(request) => request,
         Err(e) => {
             // Coalesced: a client looping malformed queries must not flood
             // the log.
-            session.record(TLS, Some(client.ip()), &format!("malformed request: {e}"));
+            session.record(
+                transport.tag,
+                Some(client.ip()),
+                &format!("malformed request: {e}"),
+            );
             if let Some(frame) = frame(&error_message(id_hint, ResponseCode::FormErr)) {
                 let _ = tx.send(frame).await;
             }
@@ -457,10 +526,12 @@ async fn answer(
     if request.metadata.message_type != MessageType::Query {
         return;
     }
-    let pad = request
-        .edns
-        .as_ref()
-        .is_some_and(|edns| edns.option(EdnsCode::Padding).is_some());
+    // Padding only hides sizes on an encrypted transport (RFC 8467).
+    let pad = transport.protocol == Protocol::Tls
+        && request
+            .edns
+            .as_ref()
+            .is_some_and(|edns| edns.option(EdnsCode::Padding).is_some());
     let responder = DotResponder { tx, pad };
     handler
         .handle_request::<_, TokioTime>(&request, responder)
@@ -650,11 +721,11 @@ struct DotResponder {
 impl DotResponder {
     async fn send(&self, bytes: Vec<u8>) -> Result<(), NetError> {
         let bytes = if self.pad { pad_response(bytes) } else { bytes };
-        let framed = frame(&bytes).ok_or(NetError::Message("DoT message exceeds 65535 bytes"))?;
+        let framed = frame(&bytes).ok_or(NetError::Message("DNS message exceeds 65535 bytes"))?;
         self.tx
             .send(framed)
             .await
-            .map_err(|_| NetError::Message("DoT connection closed"))
+            .map_err(|_| NetError::Message("connection closed"))
     }
 }
 
@@ -681,7 +752,7 @@ impl ResponseHandler for DotResponder {
                     self.send(bytes).await?;
                     return Ok(info);
                 }
-                Err(error) => error!(%error, "error encoding DoT response"),
+                Err(error) => error!(%error, "error encoding a TCP or DoT response"),
             }
         }
         // Like Hickory's own listeners: a bare SERVFAIL, so the client gets

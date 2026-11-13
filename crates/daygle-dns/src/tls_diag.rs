@@ -20,9 +20,7 @@
 //!   Entries carry the same protocol values the query log records (`tls`,
 //!   `https`, `quic`) as their console Server Log component, so the two logs
 //!   correlate, and they feed syslog when it is enabled.
-//!   A client address behind a listener's admission bridge is translated to
-//!   the real peer with [`crate::proxy_protocol::real_client`], like the
-//!   query log does. The DoT and DoQ listeners (`dot`, `doq`) record their
+//!   The DoT and DoQ listeners (`dot`, `doq`) record their
 //!   failures here directly, with the client address.
 //! - **Hickory bridge** ([`hickory_bridge`]): Hickory's DoH listener logs
 //!   handshake failures at `debug` and request rejections at `warn`, but
@@ -47,8 +45,10 @@ use tracing::{Event, Subscriber};
 use tracing_subscriber::layer::{Context, Layer};
 use tracing_subscriber::registry::LookupSpan;
 
-/// The protocol tags used for encrypted-DNS diagnostics - exactly the values
-/// the query log records, so failures and served queries correlate.
+/// The protocol tags used for session diagnostics - exactly the values the
+/// query log records, so failures and served queries correlate. (Plain TCP
+/// shares the DoT listener, so its refusals are recorded the same way.)
+pub const TCP: &str = "tcp";
 pub const TLS: &str = "tls";
 pub const HTTPS: &str = "https";
 pub const QUIC: &str = "quic";
@@ -232,12 +232,9 @@ impl SessionLog {
         }
     }
 
-    /// Record one session event for the accepted peer `peer` of a TCP-based
-    /// listener, resolving the admission bridge's loopback address back to
-    /// the client that actually connected.
+    /// Record one session event for the accepted peer `peer`.
     pub fn record_peer(&self, protocol: &'static str, peer: Option<SocketAddr>, reason: &str) {
-        let client = peer.map(|addr| crate::proxy_protocol::real_client(addr).ip());
-        self.record(protocol, client, reason);
+        self.record(protocol, peer.map(|addr| addr.ip()), reason);
     }
 }
 
@@ -374,6 +371,70 @@ pub fn report_account_coverage(
     );
     tracing::warn!("{message}");
     session.logs().warn(protocol, message);
+}
+
+/// Whether a certificate's subject alternative names include an IP address.
+fn names_an_address(names: &[String]) -> bool {
+    names.iter().any(|name| name.parse::<IpAddr>().is_ok())
+}
+
+/// Explain at listener start why Automatic Discovery (DDR, RFC 9462) may do
+/// nothing for some devices, when it is on:
+///
+/// - with `accounts.require` nothing is advertised (a device that switched
+///   over would carry no account and be refused);
+/// - Windows and Apple devices switch only by *verified* discovery
+///   (RFC 9462 §4.2), which needs the listener's certificate to name the IP
+///   address they use for plain DNS. A certificate for a host name alone
+///   (what an ACME CA usually issues) is only good for Android's
+///   opportunistic discovery on a private network.
+pub fn report_ddr_readiness(config: &daygle_dns_core::config::DaygleConfig, session: &SessionLog) {
+    if !config.ddr.enabled {
+        return;
+    }
+    let listeners = [
+        ("DoH", config.doh.enabled, &config.doh.cert_path),
+        ("DoT", config.dot.enabled, &config.dot.cert_path),
+        ("DoQ", config.doq.enabled, &config.doq.cert_path),
+    ];
+    if !listeners.iter().any(|(_, enabled, _)| *enabled) {
+        return;
+    }
+    let emit = |message: String| {
+        tracing::info!("{message}");
+        session.logs().info(TLS, message);
+    };
+    if config.accounts.require && !config.accounts.normalized_domain().is_empty() {
+        emit(
+            "Automatic Discovery (DDR) advertises no encrypted listener while DNS accounts are \
+             required: a device that switched over by itself would carry no account and be \
+             refused. Set devices up with their account host name instead."
+                .to_string(),
+        );
+        return;
+    }
+    let without_address: Vec<&str> = listeners
+        .iter()
+        .filter(|(_, enabled, _)| *enabled)
+        .filter(|(_, _, cert_path)| {
+            std::fs::read_to_string(cert_path)
+                .ok()
+                .and_then(|pem| daygle_dns_dot::describe_certificate(&pem).ok())
+                .is_some_and(|info| !names_an_address(&info.names))
+        })
+        .map(|(label, _, _)| *label)
+        .collect();
+    if without_address.is_empty() {
+        return;
+    }
+    emit(format!(
+        "Automatic Discovery (DDR): the {} certificate names no IP address, so Windows and \
+         Apple devices will not switch to encrypted DNS by themselves - they verify that the \
+         certificate also names the address they use for plain DNS (RFC 9462). Android can \
+         still switch on a private network. To cover the others, use a certificate that \
+         includes this server's IP address.",
+        without_address.join(", ")
+    ));
 }
 
 fn who(client: Option<IpAddr>) -> String {
@@ -888,23 +949,6 @@ mod tests {
     }
 
     #[test]
-    fn attributes_failures_to_the_client_behind_the_admission_bridge() {
-        let logs = store();
-        let session = SessionLog::with_interval(logs.clone(), Duration::from_secs(60));
-        // The admitted connection reaches hickory from a loopback backend;
-        // the bridge maps that local address back to the real peer.
-        let backend: SocketAddr = "127.0.0.1:41234".parse().unwrap();
-        let client: SocketAddr = "198.51.100.20:5555".parse().unwrap();
-        crate::proxy_protocol::register_client(backend, client);
-        session.record_peer(TLS, Some(backend), "connection reset");
-        crate::proxy_protocol::unregister_client(backend);
-        let entries = warns(&logs, TLS);
-        assert_eq!(entries.len(), 1, "{entries:?}");
-        assert!(entries[0].contains("198.51.100.20"), "{entries:?}");
-        assert!(!entries[0].contains("127.0.0.1"), "{entries:?}");
-    }
-
-    #[test]
     fn bounds_the_number_of_tracked_clients() {
         let logs = store();
         let session = SessionLog::with_interval(logs.clone(), Duration::from_secs(60));
@@ -954,6 +998,59 @@ mod tests {
         let entries = warns(&logs, TLS);
         assert_eq!(entries.len(), 1, "{entries:?}");
         assert!(entries[0].contains("*.dns.example.com"), "{entries:?}");
+    }
+
+    #[test]
+    fn ddr_readiness_names_listeners_whose_certificate_has_no_address() {
+        assert!(names_an_address(&[
+            "dns.example.com".into(),
+            "192.0.2.53".into()
+        ]));
+        assert!(names_an_address(&["2001:db8::53".into()]));
+        assert!(!names_an_address(&[
+            "dns.example.com".into(),
+            "localhost".into()
+        ]));
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("server.crt");
+        let (cert, _) = daygle_dns_dot::generate_self_signed_pem("dns.example.com").unwrap();
+        std::fs::write(&path, cert).unwrap();
+        let mut config = daygle_dns_core::config::DaygleConfig::default();
+        config.dot.enabled = true;
+        config.dot.cert_path = path.to_string_lossy().to_string();
+
+        let infos = |logs: &LogStore| -> Vec<String> {
+            logs.entries()
+                .into_iter()
+                .filter(|e| e.level == LogLevel::Info && e.component == TLS)
+                .map(|e| e.message)
+                .collect()
+        };
+        let logs = store();
+        report_ddr_readiness(&config, &SessionLog::new(logs.clone()));
+        let lines = infos(&logs);
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(
+            lines[0].contains("DoT certificate names no IP address"),
+            "{lines:?}"
+        );
+
+        // Accounts required: the one thing to say is that nothing is
+        // advertised.
+        config.accounts.domain = "dns.example.com".to_string();
+        config.accounts.require = true;
+        let logs = store();
+        report_ddr_readiness(&config, &SessionLog::new(logs.clone()));
+        let lines = infos(&logs);
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(lines[0].contains("accounts are"), "{lines:?}");
+
+        // DDR off: nothing.
+        config.ddr.enabled = false;
+        let logs = store();
+        report_ddr_readiness(&config, &SessionLog::new(logs.clone()));
+        assert!(infos(&logs).is_empty());
     }
 
     #[test]

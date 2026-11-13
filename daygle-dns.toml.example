@@ -18,8 +18,9 @@ listen = "0.0.0.0"
 # back, and ones whose server cookie checks out (so cannot be spoofing their
 # address) get ten times the per-client rate limit.
 # dns_cookies = true
-# dns_cookies, tcp_timeout_ms and client_timeout_ms are also on the console's
-# Settings page: once saved there, the database copy wins over this file.
+# dns_cookies, tcp_timeout_ms, tcp_max_connections and client_timeout_ms are
+# also on the console's Settings page: once saved there, the database copy
+# wins over this file.
 #
 # PROXY protocol (HAProxy v1/v2) for load balancers in front of the TCP, DoT
 # and DoH listeners: connections from these networks must start with a PROXY
@@ -30,7 +31,10 @@ port = 53
 udp_enabled = true
 tcp_enabled = true
 tcp_timeout_ms = 5000
-response_buffer_size = 4096
+# Plain-TCP connections served at once; one public client (an IPv4 address
+# or an IPv6 /64) may hold an eighth of them. Queries on one connection are
+# answered concurrently.
+tcp_max_connections = 1024
 # Watch this file and apply policy/upstream/listener edits without restarting.
 # (listener settings and other bootstrap options stay file-owned)
 reload_enabled = true

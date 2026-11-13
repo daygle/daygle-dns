@@ -5803,6 +5803,8 @@ pub struct ServerUpdate {
     pub client_timeout_ms: Option<u64>,
     /// Plain-TCP idle timeout. Rebinds the listeners.
     pub tcp_timeout_ms: Option<u64>,
+    /// Plain-TCP connections served at once. Rebinds the listeners.
+    pub tcp_max_connections: Option<usize>,
     /// DNS cookies (RFC 7873). Rebinds the listeners.
     pub dns_cookies: Option<bool>,
 }
@@ -5998,6 +6000,10 @@ pub async fn update_settings(
         }
         if let Some(v) = s.tcp_timeout_ms {
             config.server.tcp_timeout_ms = v;
+            listeners_affected = true;
+        }
+        if let Some(v) = s.tcp_max_connections {
+            config.server.tcp_max_connections = v;
             listeners_affected = true;
         }
         if let Some(v) = s.dns_cookies {
