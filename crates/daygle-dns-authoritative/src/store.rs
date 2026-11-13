@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use chrono::{Timelike, Utc};
@@ -26,6 +27,16 @@ pub const MAX_RECORD_WEIGHT: u32 = 10_000;
 /// Every zone paired with its records and signing keys, as consumed by the
 /// catalog builder.
 pub type CatalogData = Vec<(Zone, Vec<Record>, Vec<SigningKeyRecord>)>;
+
+/// One step of a zone's change journal: the records removed and added
+/// between two consecutive SOA serials, for IXFR (RFC 1995).
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ZoneDelta {
+    pub from_serial: u32,
+    pub to_serial: u32,
+    pub deleted: Vec<Record>,
+    pub added: Vec<Record>,
+}
 
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS zones (
@@ -122,6 +133,19 @@ CREATE TABLE IF NOT EXISTS zone_dnssec (
 CREATE TABLE IF NOT EXISTS zone_transfers (
     zone_id  TEXT PRIMARY KEY REFERENCES zones(id) ON DELETE CASCADE,
     records  BLOB NOT NULL
+);
+
+-- Recent zone changes, so IXFR can answer with real difference sequences
+-- (RFC 1995) instead of the whole zone. Deleted and added records are JSON
+-- arrays of record rows; the newest configured number of changes are kept.
+CREATE TABLE IF NOT EXISTS zone_changes (
+    zone_id     TEXT NOT NULL REFERENCES zones(id) ON DELETE CASCADE,
+    from_serial INTEGER NOT NULL,
+    to_serial   INTEGER NOT NULL,
+    deleted     TEXT NOT NULL,
+    added       TEXT NOT NULL,
+    created_at  TEXT NOT NULL,
+    PRIMARY KEY (zone_id, to_serial)
 );
 
 CREATE TABLE IF NOT EXISTS secondary_zones (
@@ -302,6 +326,7 @@ CREATE TABLE IF NOT EXISTS device_names (
 #[derive(Clone)]
 pub struct ZoneStore {
     conn: Arc<Mutex<Connection>>,
+    journal_depth: Arc<AtomicUsize>,
 }
 
 impl std::fmt::Debug for ZoneStore {
@@ -328,9 +353,41 @@ impl ZoneStore {
         };
         let store = Self {
             conn: Arc::new(Mutex::new(conn)),
+            journal_depth: Arc::new(AtomicUsize::new(64)),
         };
         store.init()?;
         Ok(store)
+    }
+
+    /// Set the number of recent serial transitions retained for IXFR and
+    /// immediately prune older entries. Config validation bounds this to
+    /// 1..=4096.
+    pub fn set_ixfr_journal_depth(&self, depth: usize) -> Result<()> {
+        if !(1..=4096).contains(&depth) {
+            return Err(DaygleError::Config(
+                "IXFR journal depth must be between 1 and 4096".to_string(),
+            ));
+        }
+        let conn = self.lock_conn()?;
+        let mut stmt = conn.prepare("SELECT id FROM zones")?;
+        let zones = stmt
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        drop(stmt);
+        for zone_id in zones {
+            conn.execute(
+                "DELETE FROM zone_changes WHERE zone_id = ?1 AND rowid NOT IN (
+                     SELECT rowid FROM zone_changes WHERE zone_id = ?1
+                     ORDER BY rowid DESC LIMIT ?2)",
+                params![zone_id, depth as i64],
+            )?;
+        }
+        self.journal_depth.store(depth, Ordering::Release);
+        Ok(())
+    }
+
+    fn ixfr_journal_depth(&self) -> usize {
+        self.journal_depth.load(Ordering::Acquire)
     }
 
     /// Lock the internal SQLite connection. Converts mutex-poison into
@@ -523,8 +580,13 @@ impl ZoneStore {
 
     /// Update the SOA serial (and refresh/retry timers if provided).
     pub fn bump_serial(&self, id: &str) -> Result<u32> {
-        let conn = self.lock_conn()?;
-        bump_serial_in(&conn, id)
+        let mut conn = self.lock_conn()?;
+        let tx = conn.transaction()?;
+        let before = journal_snapshot(&tx, id)?;
+        let serial = bump_serial_in(&tx, id)?;
+        journal_commit(&tx, id, before, self.ixfr_journal_depth())?;
+        tx.commit()?;
+        Ok(serial)
     }
 
     /// Replace the SOA metadata (mname, rname, serial, and timers) of a zone
@@ -947,8 +1009,10 @@ impl ZoneStore {
             .ok_or_else(|| DaygleError::NotFound(format!("zone {zone_id}")))?;
         let mut conn = self.lock_conn()?;
         let tx = conn.transaction()?;
+        let before = journal_snapshot(&tx, zone_id)?;
         let record = insert_record_in_tx(&tx, zone_id, &zone.name, input)?;
         bump_serial_in(&tx, zone_id)?;
+        journal_commit(&tx, zone_id, before, self.ixfr_journal_depth())?;
         tx.commit()?;
         Ok(record)
     }
@@ -973,11 +1037,13 @@ impl ZoneStore {
         if was_disabled == disabled {
             return Ok(true);
         }
+        let before = journal_snapshot(&tx, &zone_id)?;
         tx.execute(
             "UPDATE records SET disabled = ?2, last_modified_at = ?3 WHERE id = ?1",
             params![id, disabled as i64, Utc::now().to_rfc3339()],
         )?;
         bump_serial_in(&tx, &zone_id)?;
+        journal_commit(&tx, &zone_id, before, self.ixfr_journal_depth())?;
         tx.commit()?;
         Ok(true)
     }
@@ -1007,8 +1073,10 @@ impl ZoneStore {
         let Some(zone_id) = zone_id else {
             return Ok(false);
         };
+        let before = journal_snapshot(&tx, &zone_id)?;
         tx.execute("DELETE FROM records WHERE id = ?1", [id])?;
         bump_serial_in(&tx, &zone_id)?;
+        journal_commit(&tx, &zone_id, before, self.ixfr_journal_depth())?;
         tx.commit()?;
         Ok(true)
     }
@@ -1039,6 +1107,7 @@ impl ZoneStore {
         let Some((disabled, last_used_at)) = prior else {
             return Ok(None);
         };
+        let before = journal_snapshot(&tx, zone_id)?;
         tx.execute("DELETE FROM records WHERE id = ?1", [record_id])?;
         let input = RecordInput {
             disabled,
@@ -1054,6 +1123,7 @@ impl ZoneStore {
         record.last_modified_at = last_modified_at;
         record.last_used_at = last_used_at;
         bump_serial_in(&tx, zone_id)?;
+        journal_commit(&tx, zone_id, before, self.ixfr_journal_depth())?;
         tx.commit()?;
         Ok(Some(record))
     }
@@ -1070,6 +1140,7 @@ impl ZoneStore {
             .ok_or_else(|| DaygleError::NotFound(format!("zone {zone_id}")))?;
         let mut conn = self.lock_conn()?;
         let tx = conn.transaction()?;
+        let before = journal_snapshot(&tx, zone_id)?;
 
         for del in &update.deletes {
             let name = normalize_fqdn(&del.name);
@@ -1126,8 +1197,61 @@ impl ZoneStore {
             }
         }
 
+        journal_commit(&tx, zone_id, before, self.ixfr_journal_depth())?;
         tx.commit()?;
         Ok(())
+    }
+
+    /// The contiguous change history from `from_serial` to the zone's
+    /// current serial, oldest first.
+    ///
+    /// Empty when the journal no longer starts at `from_serial` (the caller
+    /// then answers with a full zone, which RFC 1995 §4 always permits).
+    pub fn zone_deltas(&self, zone_id: &str, from_serial: u32) -> Result<Vec<ZoneDelta>> {
+        let conn = self.lock_conn()?;
+        let current: u32 = conn
+            .query_row("SELECT serial FROM zones WHERE id = ?1", [zone_id], |r| {
+                r.get(0)
+            })
+            .optional()?
+            .ok_or_else(|| DaygleError::NotFound(format!("zone {zone_id}")))?;
+        let mut stmt = conn.prepare(
+            "SELECT from_serial, to_serial, deleted, added FROM zone_changes
+             WHERE zone_id = ?1 ORDER BY rowid",
+        )?;
+        let rows = stmt.query_map([zone_id], |row| {
+            Ok((
+                row.get::<_, u32>(0)?,
+                row.get::<_, u32>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })?;
+        let mut deltas = Vec::new();
+        let mut expected = from_serial;
+        for row in rows {
+            let (from, to, deleted, added) = row?;
+            if from != expected {
+                continue;
+            }
+            let (Ok(deleted), Ok(added)) = (
+                serde_json::from_str::<Vec<Record>>(&deleted),
+                serde_json::from_str::<Vec<Record>>(&added),
+            ) else {
+                return Ok(Vec::new());
+            };
+            deltas.push(ZoneDelta {
+                from_serial: from,
+                to_serial: to,
+                deleted,
+                added,
+            });
+            expected = to;
+        }
+        if expected != current {
+            return Ok(Vec::new());
+        }
+        Ok(deltas)
     }
 
     /// The records a secondary zone's master last transferred, as stored
@@ -4097,6 +4221,108 @@ fn render_zone_file(zone: &Zone, records: &[Record]) -> String {
     out
 }
 
+/// Identity of a record for the change journal: the fields a transfer
+/// carries. Disabled records are never served, so they are not journaled.
+type JournalKey = (String, String, String, u32);
+
+fn journal_key(record: &Record) -> JournalKey {
+    (
+        record.name.trim_end_matches('.').to_ascii_lowercase(),
+        record.rtype.to_ascii_uppercase(),
+        record.content.trim().to_string(),
+        record.ttl,
+    )
+}
+
+/// The zone's serial and served records, as a change journal needs them.
+fn journal_snapshot(conn: &Connection, zone_id: &str) -> Result<(u32, Vec<Record>)> {
+    let serial: u32 = conn
+        .query_row("SELECT serial FROM zones WHERE id = ?1", [zone_id], |r| {
+            r.get(0)
+        })
+        .optional()?
+        .ok_or_else(|| DaygleError::NotFound(format!("zone {zone_id}")))?;
+    let mut stmt = conn.prepare(
+        "SELECT id, zone_id, name, rtype, content, ttl, priority, disabled,
+                last_modified_at, last_used_at
+         FROM records WHERE zone_id = ?1 AND disabled = 0",
+    )?;
+    let rows = stmt.query_map([zone_id], row_to_record)?;
+    let mut records = Vec::new();
+    for row in rows {
+        let record = row?;
+        // ALIAS and AUTOPTR are answered by the dispatcher, never served as
+        // records, so a transfer does not carry them either.
+        if record.rtype == "ALIAS" || record.rtype == "AUTOPTR" {
+            continue;
+        }
+        records.push(record);
+    }
+    Ok((serial, records))
+}
+
+/// Record one journal entry when a mutation advanced the zone's serial.
+fn journal_commit(
+    conn: &Connection,
+    zone_id: &str,
+    before: (u32, Vec<Record>),
+    depth: usize,
+) -> Result<()> {
+    let (from_serial, before_records) = before;
+    let (to_serial, after_records) = journal_snapshot(conn, zone_id)?;
+    if to_serial == from_serial {
+        return Ok(());
+    }
+    let mut counts: std::collections::HashMap<JournalKey, (i64, Record)> =
+        std::collections::HashMap::new();
+    for record in &before_records {
+        counts
+            .entry(journal_key(record))
+            .or_insert((0, record.clone()))
+            .0 -= 1;
+    }
+    for record in &after_records {
+        counts
+            .entry(journal_key(record))
+            .or_insert((0, record.clone()))
+            .0 += 1;
+    }
+    let mut deleted = Vec::new();
+    let mut added = Vec::new();
+    for (count, record) in counts.into_values() {
+        if count < 0 {
+            deleted.extend(std::iter::repeat_n(record, (-count) as usize));
+        } else if count > 0 {
+            added.extend(std::iter::repeat_n(record, count as usize));
+        }
+    }
+    // A serial bump with no record change is still journaled (with empty
+    // lists): dropping it would leave a hole that forces every later IXFR
+    // client back to a full transfer.
+    conn.execute(
+        "INSERT OR REPLACE INTO zone_changes
+             (zone_id, from_serial, to_serial, deleted, added, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![
+            zone_id,
+            from_serial,
+            to_serial,
+            serde_json::to_string(&deleted)
+                .map_err(|e| DaygleError::Internal(format!("journal encode: {e}")))?,
+            serde_json::to_string(&added)
+                .map_err(|e| DaygleError::Internal(format!("journal encode: {e}")))?,
+            Utc::now().to_rfc3339(),
+        ],
+    )?;
+    conn.execute(
+        "DELETE FROM zone_changes WHERE zone_id = ?1 AND rowid NOT IN (
+             SELECT rowid FROM zone_changes WHERE zone_id = ?1
+             ORDER BY rowid DESC LIMIT ?2)",
+        params![zone_id, depth as i64],
+    )?;
+    Ok(())
+}
+
 fn bump_serial_in(conn: &Connection, zone_id: &str) -> Result<u32> {
     let current: u32 = conn
         .query_row("SELECT serial FROM zones WHERE id = ?1", [zone_id], |r| {
@@ -5712,6 +5938,101 @@ mod tests {
         // Deleting a non-existent record neither succeeds nor bumps the serial.
         assert!(!s.delete_record("does-not-exist").unwrap());
         assert_eq!(s.get_zone(&zone.id).unwrap().unwrap().serial, 12);
+    }
+
+    #[test]
+    fn zone_changes_replay_contiguously_from_a_serial() {
+        let s = store();
+        let zone = s
+            .create_zone(&ZoneInput {
+                name: "example.com".to_string(),
+                serial: Some(10),
+                ..zone_input_defaults()
+            })
+            .unwrap();
+        let input = |content: &str| RecordInput {
+            name: "www".to_string(),
+            rtype: "A".to_string(),
+            content: content.to_string(),
+            ttl: 300,
+            priority: 0,
+            disabled: false,
+        };
+        let record = s.upsert_record(&zone.id, &input("192.0.2.1")).unwrap();
+        s.replace_record(&zone.id, &record.id, &input("192.0.2.2"))
+            .unwrap();
+        s.delete_record(&record.id).unwrap();
+
+        let deltas = s.zone_deltas(&zone.id, 10).unwrap();
+        assert_eq!(deltas.len(), 3, "{deltas:?}");
+        assert_eq!((deltas[0].from_serial, deltas[0].to_serial), (10, 11));
+        assert_eq!(deltas[2].to_serial, 13);
+        assert!(deltas[0]
+            .added
+            .iter()
+            .any(|record| record.content == "192.0.2.1"));
+        assert!(deltas[1]
+            .deleted
+            .iter()
+            .any(|record| record.content == "192.0.2.1"));
+        assert!(deltas[1]
+            .added
+            .iter()
+            .any(|record| record.content == "192.0.2.2"));
+        assert!(deltas[2]
+            .deleted
+            .iter()
+            .any(|record| record.content == "192.0.2.2"));
+
+        // A serial bump with no record change leaves an empty difference
+        // sequence, so clients can still walk the history.
+        let serial = s.bump_serial(&zone.id).unwrap();
+        assert_eq!(serial, 14);
+        let deltas = s.zone_deltas(&zone.id, 13).unwrap();
+        assert_eq!(deltas.len(), 1);
+        assert_eq!(deltas[0].to_serial, 14);
+        assert!(deltas[0].deleted.is_empty() && deltas[0].added.is_empty());
+
+        // A current client needs nothing; one older than the journal gets a
+        // full transfer (empty history).
+        assert!(s.zone_deltas(&zone.id, 14).unwrap().is_empty());
+        assert!(s.zone_deltas(&zone.id, 9).unwrap().is_empty());
+    }
+
+    #[test]
+    fn ixfr_journal_depth_prunes_and_applies_to_future_changes() {
+        let s = store();
+        let zone = s
+            .create_zone(&ZoneInput {
+                name: "depth.example".to_string(),
+                serial: Some(10),
+                ..zone_input_defaults()
+            })
+            .unwrap();
+        let input = |host: &str, ip: &str| RecordInput {
+            name: host.to_string(),
+            rtype: "A".to_string(),
+            content: ip.to_string(),
+            ttl: 300,
+            priority: 0,
+            disabled: false,
+        };
+        s.upsert_record(&zone.id, &input("a", "192.0.2.1")).unwrap();
+        s.upsert_record(&zone.id, &input("b", "192.0.2.2")).unwrap();
+        s.upsert_record(&zone.id, &input("c", "192.0.2.3")).unwrap();
+
+        s.set_ixfr_journal_depth(2).unwrap();
+        assert!(s.zone_deltas(&zone.id, 10).unwrap().is_empty());
+        let deltas = s.zone_deltas(&zone.id, 11).unwrap();
+        assert_eq!(deltas.len(), 2);
+        assert_eq!(deltas.last().unwrap().to_serial, 13);
+
+        s.upsert_record(&zone.id, &input("d", "192.0.2.4")).unwrap();
+        let deltas = s.zone_deltas(&zone.id, 12).unwrap();
+        assert_eq!(deltas.len(), 2);
+        assert_eq!(deltas.last().unwrap().to_serial, 14);
+        assert!(s.set_ixfr_journal_depth(0).is_err());
+        assert!(s.set_ixfr_journal_depth(4097).is_err());
     }
 
     #[test]

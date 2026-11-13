@@ -101,6 +101,14 @@ dnssec_validate = true
 # (RFC 4035), instead of handing it to the client unvalidated. Off by
 # default: a name the validator wrongly fails stops resolving.
 # dnssec_reject_bogus = false
+# Aggressive use of the validated cache (RFC 8198): a validated NSEC
+# record proves a whole range of names absent, so NXDOMAIN and NODATA
+# answers for names inside it are synthesized locally, with the SOA and
+# the NSEC proofs, without asking the authoritative servers again.
+# Requires dnssec_validate. Zones signed with NSEC3 are not synthesized
+# and are resolved as usual. Settable in Settings -> Recursive as
+# aggressive_nsec.
+# aggressive_nsec = false
 min_cache_ttl = 0
 negative_cache_ttl = 3600
 # Cache: positive and negative answers are retained in memory up to this many entries.
@@ -199,12 +207,24 @@ dnssec_rollover_retire_days = 14
 # How often the maintenance task checks signatures and key ages.
 dnssec_maintenance_secs = 3600
 
-# Serve AXFR/IXFR zone transfers (RFC 5936) for hosted zones.
+# Serve AXFR/IXFR zone transfers (RFC 5936/1995) for hosted zones.
+# IXFR keeps this many recent serial transitions per zone (1..=4096); older
+# clients fall back to AXFR. Default: 64.
+ixfr_journal_depth = 64
+# Maximum changed records in one IXFR response before falling back to AXFR
+# (0..=1000000; 0 always uses AXFR). Default: 10000.
+ixfr_max_records = 10000
 # axfr_networks limits which clients may transfer (empty = anyone),
 # e.g. ["10.0.0.0/8", "192.168.0.0/16"].
 axfr_enabled = false
 # Entries may name a [[networks]] network as well as an address.
 axfr_networks = []
+# PEM certificates trusted, in addition to the public roots, for zone
+# transfers over TLS (XoT, RFC 9103) to masters given as tls://IP[:port][#name]
+# in [[authoritative.secondary_zones]]. Use this for a private CA. Empty
+# trusts the public roots only. Applied live; a file that does not load is
+# refused when saved.
+xot_ca_certs = []
 
 # Accept RFC 2136 dynamic updates (UPDATE messages) for primary zones.
 # Changes are written through to SQLite and go live immediately. Off by
@@ -218,7 +238,12 @@ update_networks = []
 
 # Secondary zones: replicated from a master via AXFR/IXFR. The zone's
 # records and SOA are re-pulled from the first reachable master on
-# refresh_secs. Master entries accept IP, IP:port, or [IPv6]:port.
+# refresh_secs. Master entries accept IP, IP:port, or [IPv6]:port for plain
+# TCP. Prefix an entry with tls:// (or xot://) for zone transfers over TLS
+# (RFC 9103): the port defaults to 853 and the certificate is verified
+# against the address, or against a name given after '#' -
+# e.g. "tls://198.51.100.10:853#ns1.example.com". The receiving side needs
+# [dot] enabled: the DoT listener also answers the "xot" ALPN.
 #
 # [[authoritative.secondary_zones]]
 # name = "internal.example.com"
@@ -493,6 +518,26 @@ ring_buffer = 2000
 query_db_enabled = true
 query_db_max_rows = 200000
 query_db_retention_days = 0
+
+# ── dnstap: stream every client query and response to a collector ───────
+#
+# dnstap (https://dnstap.info) is the standard passive-DNS observability
+# format: each event is a dnstap.Message protobuf carrying the verbatim
+# wire-format query or response, sent over Frame Streams to a collector
+# such as dnstap-ldns, fstrm_capture, dnstap-receiver or DNS-collector.
+# CLIENT_RESPONSE carries the bytes the client actually receives (cookies,
+# rate limiting and all). Events are queued in memory (8192); when the
+# queue is full, or the collector is unreachable, events are dropped -
+# never a query: dnstap never slows resolution down. The collector is
+# (re)connected in the background, applying live. Settable in
+# Settings -> dnstap.
+#
+# [dnstap]
+# enabled = true
+# server = "tcp://127.0.0.1:6000"   # or a bare "127.0.0.1:6000", or
+#                                    # "unix:/run/dnstap.sock" on Unix
+# identity = "daygle-dns"           # empty: this host's name
+# version = ""                      # empty: this build's version
 
 # ── AI scanner: CPU-only background classification of observed domains ─────
 #

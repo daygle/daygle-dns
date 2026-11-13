@@ -263,6 +263,17 @@ pub fn load_tls_config_versions(
     alpn: &[u8],
     versions: &[&'static rustls::SupportedProtocolVersion],
 ) -> Result<rustls::ServerConfig> {
+    load_tls_config_alpns(cert_path, key_path, &[alpn], versions)
+}
+
+/// Like [`load_tls_config_versions`], offering several ALPN protocols on one
+/// listener (the DoT listener also serves zone transfers over TLS, RFC 9103).
+pub fn load_tls_config_alpns(
+    cert_path: &str,
+    key_path: &str,
+    alpns: &[&[u8]],
+    versions: &[&'static rustls::SupportedProtocolVersion],
+) -> Result<rustls::ServerConfig> {
     let certs = read_certs(cert_path)?;
     let key = read_key(key_path)?;
 
@@ -279,7 +290,7 @@ pub fn load_tls_config_versions(
         .with_single_cert(certs, key)
         .map_err(|e| DaygleError::Tls(format!("invalid TLS material: {e}")))?;
 
-    config.alpn_protocols = vec![alpn.to_vec()];
+    config.alpn_protocols = alpns.iter().map(|p| p.to_vec()).collect();
     config.session_storage = rustls::server::ServerSessionMemoryCache::new(SESSION_CACHE_SIZE);
     Ok(config)
 }

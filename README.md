@@ -23,8 +23,11 @@ Daygle DNS combines, in a single process:
   (`ip-192-168-1-47.home.arpa`), so reverse lookups never come back empty.
 - **Zone aliases**: serve a zone under other names too (`example.net` and
   `example.org` answering like `example.com`).
-- **Zone transfers**: serve **AXFR/IXFR** (RFC 5936, with per-network ACLs)
-  and replicate **secondary zones** from remote masters on a refresh interval.
+- **Zone transfers**: serve **AXFR** and real **IXFR** (RFC 5936, RFC 1995,
+  with per-network ACLs) - a change journal lets an up-to-date secondary pull
+  only the records that changed - and replicate **secondary zones** from
+  remote masters on a refresh interval, optionally over TLS (**XoT**,
+  RFC 9103).
 - **Catalog zones (RFC 9432)**: publish a catalog of your zones so
   secondaries provision themselves, and follow other servers' catalogs to
   add and remove secondary zones automatically.
@@ -87,6 +90,9 @@ Daygle DNS combines, in a single process:
   answers (A, AAAA, MX, TXT, CNAME, SRV), everyone else gets the public view.
 - **Recursive resolution** (root → TLD → authoritative) with **caching**,
   **negative caching**, **retries**, **timeouts**, and **DNSSEC validation**,
+  plus **aggressive NSEC caching (RFC 8198)**: validated NSEC proofs answer
+  NXDOMAIN/NODATA for whole ranges of names locally, without another trip
+  to the authoritative servers,
 - **DNS64 (RFC 6147)** for IPv6-only networks behind NAT64: IPv4-only names
   get AAAA answers inside the gateway's prefix.
 - **EDNS Client Subnet (RFC 7871)** to forwarding upstreams, so CDNs answer
@@ -142,6 +148,10 @@ Daygle DNS combines, in a single process:
 - **Query export** over HTTP(S): every query as JSON (NDJSON or an array),
   batched to a log collector such as Vector, Fluent Bit, Logstash or Splunk
   HEC, with an optional Authorization header.
+- **dnstap**: every client query and the exact response bytes it produced,
+  streamed as dnstap events over Frame Streams to a collector (TCP or a
+  Unix socket), through a bounded queue that drops rather than ever
+  slowing a query.
 - An **audit log** of every change and sign-in, with who, how and from where.
 - **Prometheus metrics** at `/api/metrics/prometheus`.
 - A **searchable query log**: every served query is recorded into SQLite

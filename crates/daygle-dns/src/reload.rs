@@ -68,18 +68,39 @@ pub struct Shared {
     /// TSIG key ring (RFC 8945) for transfer/update authentication, built
     /// once at startup and reused verbatim by every listener rebuild.
     pub tsig_keys: Arc<daygle_dns_authoritative::tsig::TsigKeyRing>,
+    /// Secondary-zone refresher: shared so the XoT trust anchors can be
+    /// reloaded without a restart. `None` in tests.
+    pub secondary_refresher: Option<Arc<daygle_dns_authoritative::SecondaryRefresher>>,
     /// The local root zone (RFC 8806), handed to every resolver rebuild.
     pub local_root: Arc<daygle_dns_authoritative::LocalRoot>,
     /// Remote logging (syslog); `None` in tests.
     pub syslog: Option<Arc<crate::syslog::SyslogSender>>,
     /// Query export to an HTTP endpoint; `None` in tests.
     pub log_export: Option<Arc<daygle_dns_api::log_export::LogExporter>>,
+    /// dnstap events to a collector; `None` in tests.
+    pub dnstap: Option<Arc<daygle_dns_api::dnstap::DnstapSender>>,
     /// Held while the configuration is read, changed and published (console
     /// saves and config-file reloads), so two changes landing together
     /// cannot overwrite each other.
     pub config_write: Arc<tokio::sync::Mutex<()>>,
     /// DNS accounts the encrypted listeners recognise (`[accounts]`).
     pub accounts: Arc<daygle_dns_policy::identity::AccountDirectory>,
+}
+
+impl Shared {
+    /// Reload the XoT trust anchors from `config`. A file that does not load
+    /// is logged and the previous anchors stay in use.
+    pub fn apply_xot_ca_certs(&self, config: &DaygleConfig) {
+        let Some(refresher) = &self.secondary_refresher else {
+            return;
+        };
+        if let Err(e) = refresher.set_xot_ca_certs(&config.authoritative.xot_ca_certs) {
+            warn!(
+                error = %e,
+                "cannot load the XoT CA certificates; XoT masters keep the previous trust anchors"
+            );
+        }
+    }
 }
 
 /// The currently bound DNS listener addresses.
@@ -149,6 +170,11 @@ pub fn apply_config(shared: &Shared, new: Arc<DaygleConfig>) -> bool {
         }
     }
 
+    // XoT trust anchors for secondary transfers from TLS masters.
+    if old_r.authoritative.xot_ca_certs != new_r.authoritative.xot_ca_certs {
+        shared.apply_xot_ca_certs(&new_r);
+    }
+
     // The published catalog zone (consumed catalogs are read live).
     if old.authoritative.catalog_zone != new.authoritative.catalog_zone {
         match shared
@@ -201,9 +227,22 @@ pub fn apply_config(shared: &Shared, new: Arc<DaygleConfig>) -> bool {
         }
     }
 
+    // IXFR history and transfer thresholds can be updated without rebuilding
+    // the catalog.
+    let (old_gates, new_gates) = (&old_r.authoritative, &new_r.authoritative);
+    if old_gates.ixfr_journal_depth != new_gates.ixfr_journal_depth
+        || old_gates.ixfr_max_records != new_gates.ixfr_max_records
+    {
+        if let Err(e) = shared
+            .catalog
+            .update_ixfr_settings(new_gates.ixfr_journal_depth, new_gates.ixfr_max_records)
+        {
+            warn!(error = %e, "cannot apply IXFR journal settings");
+        }
+    }
+
     // Zone-transfer and dynamic-update gates: read per request, so a changed
     // list (or a changed network it names) applies at once.
-    let (old_gates, new_gates) = (&old_r.authoritative, &new_r.authoritative);
     if old_gates.axfr_enabled != new_gates.axfr_enabled
         || old_gates.axfr_networks != new_gates.axfr_networks
         || old_gates.allow_dynamic_updates != new_gates.allow_dynamic_updates
@@ -470,12 +509,14 @@ mod tests {
             stats: Arc::new(daygle_dns_core::stats::QueryStats::new()),
             notify_hooks: Default::default(),
             tsig_keys: Arc::new(Default::default()),
+            secondary_refresher: None,
             local_root: Arc::new(daygle_dns_authoritative::LocalRoot::new(
                 Default::default(),
                 None,
             )),
             syslog: None,
             log_export: None,
+            dnstap: None,
             config_write: Arc::default(),
             accounts: Arc::default(),
         }

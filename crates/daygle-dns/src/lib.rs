@@ -368,11 +368,18 @@ pub async fn bind_with(
     // refresher is shared with the NOTIFY listener so inbound NOTIFYs can
     // trigger immediate refreshes (RFC 1996).
     let refresher = {
+        let client = daygle_dns_authoritative::XfrClient::default();
+        if let Err(e) = client.set_xot_ca_certs(&config.authoritative.xot_ca_certs) {
+            warn!(
+                error = %e,
+                "cannot load the XoT CA certificates; XoT masters trust the public roots only"
+            );
+        }
         let refresher = Arc::new(daygle_dns_authoritative::SecondaryRefresher::new(
             store.clone(),
             catalog.clone(),
             config.authoritative.secondary_zones.clone(),
-            daygle_dns_authoritative::XfrClient::default(),
+            client,
         ));
         tokio::spawn({
             let refresher = refresher.clone();
@@ -668,6 +675,10 @@ pub async fn bind_with(
         logs.clone(),
         shutdown.clone(),
     );
+    // dnstap: every query and its answer, streamed to a collector when
+    // `[dnstap]` is on (settings are read per event, so a console change
+    // applies at once).
+    let dnstap = daygle_dns_api::dnstap::DnstapSender::start(config_swap.clone(), shutdown.clone());
     // Encrypted-DNS session diagnostics: certificate lifecycle reports and
     // coalesced handshake/connection failure warnings for DoT/DoH/DoQ.
     // Registered before any listener binds, so the hickory bridge in the
@@ -707,9 +718,11 @@ pub async fn bind_with(
         stats: stats.clone(),
         notify_hooks: notify_hooks.clone(),
         tsig_keys: tsig_keys.clone(),
+        secondary_refresher: refresher.clone(),
         local_root: local_root.clone(),
         syslog: Some(syslog),
         log_export: Some(log_export),
+        dnstap: Some(dnstap),
         config_write: Arc::default(),
         accounts: accounts.clone(),
     });
@@ -830,6 +843,7 @@ pub async fn bind_with(
                 if let Some(page) = &shared.block_page {
                     page.apply(&config.block_page);
                 }
+                shared.apply_xot_ca_certs(config);
             })
         }),
         web_apply: Some(web_apply),
@@ -1083,6 +1097,7 @@ fn build_dispatcher(shared: &Shared, config: &DaygleConfig) -> DnsDispatcher {
     .with_config(shared.config.clone())
     .with_syslog(shared.syslog.clone())
     .with_log_export(shared.log_export.clone())
+    .with_dnstap(shared.dnstap.clone())
     .with_advanced_blocking(shared.advanced_blocking.clone())
     .with_query_logger(shared.query_logger.clone())
     .with_query_db_logger(shared.query_db_logger.clone())

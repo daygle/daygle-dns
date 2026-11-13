@@ -69,6 +69,12 @@ impl SecondaryRefresher {
         }
     }
 
+    /// Trust these PEM certificates for XoT masters, replacing any previous
+    /// extra anchors.
+    pub fn set_xot_ca_certs(&self, paths: &[String]) -> Result<()> {
+        self.client.set_xot_ca_certs(paths)
+    }
+
     /// Add or replace a secondary zone configuration and wake the refresh loop.
     pub fn set_zone(&self, config: SecondaryZoneConfig) {
         let mut zones = self.zones.write().expect("secondary zone lock poisoned");
@@ -194,7 +200,7 @@ impl SecondaryRefresher {
             || self.store.transfer_data(&zone.id)?.is_none();
         let mut last_error: Option<DaygleError> = None;
         for master in &config.masters {
-            let addr = daygle_dns_core::config::parse_master_addr(master)
+            let addr = daygle_dns_core::config::parse_transfer_master(master)
                 .map_err(|e| DaygleError::Config(format!("bad master '{master}': {e}")))?;
             // Never let an unsigned SOA suppress a TSIG-protected refresh.
             // Some primaries do not sign ordinary SOA queries, so use signed
@@ -202,7 +208,7 @@ impl SecondaryRefresher {
             if tsig.is_some() {
                 match self
                     .transfer_from(
-                        addr,
+                        &addr,
                         &zone_name,
                         zone.serial,
                         (!full).then_some(zone.serial),
@@ -219,7 +225,7 @@ impl SecondaryRefresher {
                     }
                 }
             }
-            match self.client.query_soa(addr, &zone_name).await {
+            match self.client.query_soa(&addr, &zone_name).await {
                 Ok(Some(soa)) => {
                     let master_serial = match &soa.data {
                         RData::SOA(soa) => soa.serial,
@@ -236,7 +242,7 @@ impl SecondaryRefresher {
                     }
                     match self
                         .transfer_from(
-                            addr,
+                            &addr,
                             &zone_name,
                             master_serial,
                             (!full).then_some(current_serial),
@@ -274,7 +280,7 @@ impl SecondaryRefresher {
     /// which may report no change), else in full (AXFR).
     async fn transfer_from(
         &self,
-        master: std::net::SocketAddr,
+        master: &daygle_dns_core::config::TransferMaster,
         zone_name: &Name,
         master_serial: u32,
         current_serial: Option<u32>,
@@ -282,16 +288,13 @@ impl SecondaryRefresher {
         zone_id: &str,
     ) -> Result<bool> {
         let records = match current_serial {
-            Some(serial) => {
-                match self
-                    .client
-                    .ixfr_or_axfr(master, zone_name, serial, tsig)
-                    .await?
-                {
-                    Some(records) => records,
-                    None => return Ok(false),
+            Some(serial) => match self.client.ixfr(master, zone_name, serial, tsig).await? {
+                crate::transfer::Ixfr::UpToDate => return Ok(false),
+                crate::transfer::Ixfr::Full(records) => records,
+                crate::transfer::Ixfr::Delta(deltas) => {
+                    self.apply_ixfr_delta(zone_name, &deltas)?
                 }
-            }
+            },
             None => self.client.axfr_signed(master, zone_name, tsig).await?,
         };
         // A transfer opens and closes with the SOA. Anything else (an empty
@@ -337,6 +340,38 @@ impl SecondaryRefresher {
         self.catalog.reload()?;
         info!(zone = %zone_name, records = inputs.len(), "secondary zone transferred from {master}");
         Ok(true)
+    }
+
+    /// Apply difference sequences to the copy served now, returning the zone
+    /// as a full transfer would carry it (SOA first and last) so the existing
+    /// apply path stores it unchanged.
+    fn apply_ixfr_delta(
+        &self,
+        zone_name: &Name,
+        deltas: &[crate::transfer::IxfrDelta],
+    ) -> Result<Vec<Record>> {
+        let zone_key = zone_name
+            .to_ascii()
+            .trim_end_matches('.')
+            .to_ascii_lowercase();
+        let Some((_soa, mut records)) = self.catalog.transfer_records(&zone_key)? else {
+            return Err(DaygleError::NotFound(format!("zone {zone_name}")));
+        };
+        for delta in deltas {
+            let deleted: std::collections::HashSet<_> =
+                delta.deleted.iter().map(record_key).collect();
+            records.retain(|record| !deleted.contains(&record_key(record)));
+            records.extend(delta.added.iter().cloned());
+        }
+        let last = deltas
+            .last()
+            .ok_or_else(|| DaygleError::Proto("empty IXFR difference".to_string()))?;
+        let soa = last.new_soa.clone();
+        let mut full = Vec::with_capacity(records.len() + 2);
+        full.push(soa.clone());
+        full.extend(records);
+        full.push(soa);
+        Ok(full)
     }
 
     /// Ensure the zone row exists in the store and is marked secondary.
@@ -425,6 +460,20 @@ impl SecondaryRefresher {
 /// SOA fields extracted from a transferred zone: `(mname, rname, serial,
 /// refresh, retry, expire, minimum)`.
 type SoaFields = (String, String, u32, u32, u32, u32, u32);
+
+/// Identity of a record for matching an IXFR deletion.
+fn record_key(record: &Record) -> (String, String, String, u32) {
+    (
+        record
+            .name
+            .to_ascii()
+            .trim_end_matches('.')
+            .to_ascii_lowercase(),
+        record.record_type().to_string(),
+        record.data.to_string(),
+        record.ttl,
+    )
+}
 
 fn records_to_inputs(zone: &Name, records: &[Record]) -> (Option<SoaFields>, Vec<RecordInput>) {
     let mut soa = None;

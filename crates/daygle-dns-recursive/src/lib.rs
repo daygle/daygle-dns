@@ -23,6 +23,7 @@
 //!   to the zone's own nameservers (bare-IP NS entries; hostname NSs are
 //!   resolved through the system resolver once at build time).
 
+mod aggressive;
 mod cache_assist;
 mod cache_persist;
 pub mod recursor;
@@ -69,18 +70,76 @@ tokio::task_local! {
     static NEGATIVE_SOA: std::cell::RefCell<Option<hickory_proto::rr::Record>>;
 }
 
-/// Run a lookup and report the SOA of its negative answer, if it was one,
-/// so the response can carry it in the authority section: without it a
-/// client cannot cache the negative answer (RFC 2308) and asks again.
-pub async fn track_negative_soa<F: std::future::Future>(
-    lookup: F,
-) -> (F::Output, Option<hickory_proto::rr::Record>) {
-    NEGATIVE_SOA
-        .scope(std::cell::RefCell::new(None), async {
+tokio::task_local! {
+    /// The NSEC proofs of a denial synthesized from cached proofs
+    /// (RFC 8198), for the authority section of the answer: a stub that
+    /// validates needs them, and they are what makes it authenticated.
+    static NEGATIVE_PROOFS: std::cell::RefCell<Vec<hickory_proto::rr::Record>>;
+}
+
+tokio::task_local! {
+    /// Whether the current lookup's denial came from a still-live validated
+    /// NSEC proof (RFC 8198), rather than an error worth putting in the
+    /// separate failure cache.
+    static AGGRESSIVE_SYNTHESIZED: std::cell::Cell<bool>;
+}
+
+/// Mark the current lookup's denial as a synthesized, proof-lifetime-bound
+/// answer; never extend it with the separate failure-cache timeout.
+pub(crate) fn note_aggressive_synthesis() {
+    let _ = AGGRESSIVE_SYNTHESIZED.try_with(|synthesized| synthesized.set(true));
+}
+
+/// Run a lookup and report whether it was answered from aggressive NSEC
+/// proof synthesis.
+async fn track_aggressive_synthesis<F: std::future::Future>(lookup: F) -> (F::Output, bool) {
+    AGGRESSIVE_SYNTHESIZED
+        .scope(std::cell::Cell::new(false), async {
             let output = lookup.await;
-            (output, NEGATIVE_SOA.with(|soa| soa.borrow_mut().take()))
+            (output, AGGRESSIVE_SYNTHESIZED.with(std::cell::Cell::get))
         })
         .await
+}
+
+/// The authority section of a negative answer: the zone's SOA, plus the
+/// NSEC proofs when the denial was synthesized from cached proofs.
+pub struct NegativeAnswer {
+    /// The SOA, whose (reduced) TTL bounds how long the client may cache
+    /// the denial (RFC 2308).
+    pub soa: hickory_proto::rr::Record,
+    /// The validated NSEC records proving the denial, when there are any.
+    pub proofs: Vec<hickory_proto::rr::Record>,
+}
+
+/// Run a lookup and report the authority section of its negative answer, if
+/// it was one, so the response can carry it: without the SOA a client
+/// cannot cache the negative answer (RFC 2308) and asks again, and without
+/// the proofs a validating stub cannot authenticate it (RFC 8198).
+pub async fn track_negative_soa<F: std::future::Future>(
+    lookup: F,
+) -> (F::Output, Option<NegativeAnswer>) {
+    NEGATIVE_PROOFS
+        .scope(std::cell::RefCell::new(Vec::new()), async {
+            NEGATIVE_SOA
+                .scope(std::cell::RefCell::new(None), async {
+                    let output = lookup.await;
+                    let soa = NEGATIVE_SOA.with(|soa| soa.borrow_mut().take());
+                    let proofs =
+                        NEGATIVE_PROOFS.with(|proofs| std::mem::take(&mut *proofs.borrow_mut()));
+                    let answer = soa.map(|soa| NegativeAnswer { soa, proofs });
+                    (output, answer)
+                })
+                .await
+        })
+        .await
+}
+
+/// Record the NSEC proofs of a synthesized negative answer for
+/// [`track_negative_soa`].
+pub(crate) fn note_negative_proofs(proofs: Vec<hickory_proto::rr::Record>) {
+    let _ = NEGATIVE_PROOFS.try_with(|slot| {
+        slot.borrow_mut().extend(proofs);
+    });
 }
 
 /// Record the SOA of a negative answer for [`track_negative_soa`]. Its TTL
@@ -281,7 +340,7 @@ const SCOPE_POLICY: u16 = 2;
 /// held across the lookup.
 enum Route {
     Forward(Box<ForwardResolver>),
-    Recursive(Arc<recursor::DaygleRecursor>),
+    Recursive(Arc<recursor::RecursorSlot>),
     /// Forwarding mode with a local root zone: the top-level domain does
     /// not exist, so the name cannot either.
     NoSuchTld,
@@ -303,7 +362,7 @@ impl Route {
                     response_code: negative_response_code(&e),
                 }
             }),
-            Route::Recursive(recursor) => recursor::lookup(&recursor, name, record_type).await,
+            Route::Recursive(slot) => recursor::lookup(&slot, name, record_type).await,
             Route::NoSuchTld => Err(DaygleError::Resolution {
                 message: "top-level domain not in the root zone".to_string(),
                 response_code: Some(hickory_proto::op::ResponseCode::NXDomain.into()),
@@ -362,10 +421,11 @@ impl RecursiveResolver {
         let recursor = if needs_recursor {
             let addr = local_root.as_ref().and_then(|v| v.serving_addr());
             Some(Arc::new(arc_swap::ArcSwap::from_pointee(
-                recursor::RecursorSlot {
-                    recursor: Arc::new(recursor::build(settings, addr, metrics.clone())?),
-                    local_root: addr,
-                },
+                recursor::RecursorSlot::new(
+                    recursor::build(settings, addr, metrics.clone())?,
+                    addr,
+                    settings,
+                ),
             )))
         } else {
             None
@@ -836,7 +896,7 @@ impl Inner {
                 }
             }
         }
-        Route::Recursive(shared.load().recursor.clone())
+        Route::Recursive(shared.load_full())
     }
 
     /// Build a fresh recursor (empty caches) for the current local root
@@ -844,10 +904,11 @@ impl Inner {
     fn rebuild_recursor(&self, shared: &recursor::SharedRecursor) -> Result<()> {
         let addr = self.local_root.as_ref().and_then(|v| v.serving_addr());
         let recursor = recursor::build(&self.settings, addr, self.metrics.clone())?;
-        shared.store(Arc::new(recursor::RecursorSlot {
-            recursor: Arc::new(recursor),
-            local_root: addr,
-        }));
+        shared.store(Arc::new(recursor::RecursorSlot::new(
+            recursor,
+            addr,
+            &self.settings,
+        )));
         Ok(())
     }
 
@@ -918,7 +979,7 @@ impl Inner {
             }
         }
 
-        match Self::resolve(
+        let (result, aggressive_synthesized) = Self::resolve(
             Arc::clone(&inner),
             route,
             kind,
@@ -927,8 +988,8 @@ impl Inner {
             record_type,
             shared,
         )
-        .await
-        {
+        .await;
+        match result {
             Ok(lookup) => Ok(lookup),
             Err(e @ DaygleError::Resolution { response_code, .. }) => {
                 // True transport/timeout failures (no response code) may be
@@ -948,7 +1009,13 @@ impl Inner {
                 } else if let Some(code) = response_code {
                     // Negative answers (NXDOMAIN/NODATA etc.) and upstream error
                     // codes: cache the failure for next time (when enabled).
-                    if shared && inner.cache_assist.failure_cache_ttl() > 0 {
+                    // RFC 8198 answers are bounded by each proof's remaining
+                    // TTL; do not extend an authenticated denial past it with
+                    // this separate failure-cache timer.
+                    if shared
+                        && !aggressive_synthesized
+                        && inner.cache_assist.failure_cache_ttl() > 0
+                    {
                         let until = Instant::now()
                             + Duration::from_secs(inner.cache_assist.failure_cache_ttl() as u64);
                         let query = Query::query(
@@ -1009,7 +1076,7 @@ impl Inner {
         name: Name,
         record_type: RecordType,
         shared: bool,
-    ) -> Result<Lookup> {
+    ) -> (Result<Lookup>, bool) {
         debug!(query = %name, rtype = ?record_type, route = ?kind, "lookup routing");
         let r = &inner.metrics.resolver;
         inner.metrics.inc(match kind {
@@ -1021,8 +1088,9 @@ impl Inner {
             RouteKind::LocalRoot => &r.route_local_root,
         });
         let started = Instant::now();
-        let (result, sent_upstream) =
-            recursor::track_upstream(route.lookup(name, record_type)).await;
+        let ((result, sent_upstream), aggressive_synthesized) =
+            track_aggressive_synthesis(recursor::track_upstream(route.lookup(name, record_type)))
+                .await;
         let result = reject_bogus(&inner.settings, result);
         if kind != RouteKind::LocalRoot {
             r.observe_latency(started.elapsed());
@@ -1059,14 +1127,14 @@ impl Inner {
                     route = ?kind,
                     "resolved"
                 );
-                Ok(lookup)
+                (Ok(lookup), aggressive_synthesized)
             }
             // Not counted in `metrics.errors` here: the dispatcher owns that
             // counter for client-visible failures (this path also runs for
             // prefetch refreshes and serve-stale fallbacks, which are not
             // client query errors), so counting in both places would
             // double-count every failed lookup.
-            Err(e) => Err(e),
+            Err(e) => (Err(e), aggressive_synthesized),
         }
     }
 }

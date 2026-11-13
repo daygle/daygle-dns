@@ -40,6 +40,13 @@ DNS over HTTPS, DNS over QUIC, and an HTTP API/GUI.
 - **`daygle-dns-recursive`** wraps `hickory_resolver::TokioResolver`, configuring
   cache size, per-server timeouts, attempts, and DNSSEC validation. Negative
   caching is Hickory's built-in behavior, bounded by `negative_cache_ttl`.
+  With `aggressive_nsec` on (and validation), validated NSEC records are
+  also kept in a bounded proof cache (`aggressive.rs`): a name a cached NSEC
+  proves absent is answered NXDOMAIN, and an existing name without the
+  asked type NODATA, synthesized locally with the SOA and the NSEC proofs
+  (RFC 8198). Only `Proof::Secure` records are used, each proof expires
+  with the earliest of the negative TTL, its own TTL and its signature's
+  expiration, and NSEC3 zones are left to normal resolution.
   Conditional forwarding zones each get their own resolver built from the
   zone's dedicated upstreams; routing happens at lookup time by longest
   label-aligned suffix match.
@@ -64,7 +71,11 @@ DNS over HTTPS, DNS over QUIC, and an HTTP API/GUI.
   dispatcher: DoT answers the queries of one connection concurrently and out
   of order (RFC 7766), pads answers to padded queries (RFC 8467) and caps
   connections per client; DoH caps connections the same way and bounds the
-  concurrent streams of each.
+  concurrent streams of each. When `[dnstap]` is on, the dispatcher wraps
+  the transport's response handler (`dnstap.rs`) so every query and the
+  exact response bytes it produced are streamed as dnstap events over
+  Frame Streams to a collector, through a bounded queue that drops rather
+  than ever slowing a query.
 
 ## Query flow
 
@@ -109,12 +120,29 @@ listener:
    address space from leaking to public upstreams.
 5. **Zone transfers.** AXFR/IXFR queries are intercepted before the normal
    lookup path (`DnsDispatcher::handle_transfer`). Transfers are gated by
-   `authoritative.axfr_enabled` and the `axfr_networks` client allow-list, and
-   answered with the full zone record set (`SOA, records..., SOA` per RFC 5936;
-   IXFR always gets a full transfer, which RFC 1995 permits). The zone only
-   goes out over a connection: a UDP source address is not proven, so AXFR
-   over UDP is refused and IXFR over UDP gets the current SOA alone, which
-   sends the client to TCP.
+   `authoritative.axfr_enabled` and the `axfr_networks` client allow-list.
+   AXFR is answered with the full zone record set (`SOA, records..., SOA` per
+   RFC 5936). IXFR is answered incrementally: every write that bumps a zone's
+   serial also records the served records it added and removed in that zone's
+   change journal (`zone_changes`, the newest 64 changes), and a client whose
+   serial the journal still reaches gets RFC 1995 difference sequences -
+   `SOA(current)`, then `SOA(old) deletions SOA(new) additions` per step, then
+   the current SOA again. A client already at the current serial gets the lone
+   SOA; when the journal cannot reach the client's serial, or the answer would
+   carry more than 10 000 changed records, the full zone is sent instead
+   (always valid per RFC 1995 §4-5). Zones served verbatim from a transfer
+   (signed zones and secondaries) keep no journal and answer in full. The zone
+   only goes out over a connection: a UDP source address is not proven, so
+   AXFR over UDP is refused and IXFR over UDP gets the current SOA alone, which
+   sends the client to TCP. Transfers also run over TLS (XoT, RFC 9103): the
+   DoT listener advertises both the `dot` and `xot` ALPN protocols and serves
+   transfers on either, behind the same ACL and TSIG gates. A secondary names
+   a TLS master as `tls://IP[:port][#name]` (port 853) and the client verifies
+   the master's certificate against `name` - or the address when no name is
+   given - against the public roots plus the PEM trust anchors listed in
+   `authoritative.xot_ca_certs` (for a private CA; loaded when the setting is
+   saved and swapped into the running transfer client, so no restart is
+   needed).
 6. **Recursive.** Otherwise the query goes to `daygle-dns-recursive`; the
    `RecursiveResolver` routes by name - the most specific configured
    conditional zone (longest label-aligned suffix) is resolved by its own
@@ -148,10 +176,14 @@ listener:
   index on the same `reload()`, so DNS and API views stay in sync.
 - Secondary zones are driven by `daygle-dns-authoritative`'s `SecondaryRefresher`,
   which compares each zone's SOA serial against its master on a refresh
-  interval and runs a full AXFR/IXFR pull when the master is newer (or the
-  local zone has never been transferred). Transferred records replace the
-  stored set via `ZoneStore::replace_records`, and the catalog is reloaded so
-  updates are served immediately. Secondary zones are served read-only: the
+  interval and pulls when the master is newer (or the local zone has never
+  been transferred). An IXFR that comes back as difference sequences is
+  applied to the copy served now - deletions matched by name, type, content
+  and TTL, then additions - and the result goes through the same
+  `ZoneStore::replace_records` path as a full transfer; a master that answers
+  with the whole zone (or a serial the journal no longer covers) takes that
+  same path directly. The catalog is reloaded so updates are served
+  immediately. Secondary zones are served read-only: the
   Hickory catalog marks them `ZoneType::Secondary`.
 - NOTIFY (RFC 1996) closes the loop in both directions. Outbound: the
   `NotifySender` sends a NOTIFY (OpCode 4, QTYPE SOA, UDP) to each configured

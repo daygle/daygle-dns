@@ -668,6 +668,7 @@ name = "daygle-dns-api"
 version = "1.0.0"
 dependencies = [
  "arc-swap",
+ "async-trait",
  "axum",
  "chrono",
  "daygle-dns-authoritative",
@@ -679,6 +680,7 @@ dependencies = [
  "daygle-dns-policy",
  "daygle-dns-recursive",
  "hickory-proto",
+ "hickory-server",
  "instant-acme",
  "lettre",
  "nix",
@@ -712,15 +714,18 @@ dependencies = [
  "rand 0.10.3",
  "reqwest",
  "rusqlite",
+ "rustls",
  "rustls-pki-types",
  "serde",
  "serde_json",
  "sha2",
  "tempfile",
  "tokio",
+ "tokio-rustls",
  "tokio-util",
  "tracing",
  "uuid",
+ "webpki-roots",
 ]
 
 [[package]]

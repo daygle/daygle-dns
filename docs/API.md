@@ -407,7 +407,7 @@ PUT /api/config
 Editable groups: `server` (listen/ipv6_only/port/udp_enabled/tcp_enabled/proxy_protocol,
 and the stored, console-edited `client_timeout_ms` (1000-10000, applied live),
 `tcp_timeout_ms` and `dns_cookies`), `recursive`
-(enabled/mode/upstreams/use_system_config/dnssec_validate/dnssec_reject_bogus/cache_size/
+(enabled/mode/upstreams/use_system_config/dnssec_validate/dnssec_reject_bogus/aggressive_nsec/cache_size/
 min_cache_ttl/max_cache_ttl/negative_cache_ttl/failure_cache_ttl/
 prefetch_* (including prefetch_window_secs)/serve_stale_secs/max_concurrent_lookups/
 timeout_secs (per nameserver, 1-300)/conditional_zones/recursion_access/recursion_networks/root_hints/
@@ -435,7 +435,7 @@ Browsing API key the `google_safe_browsing` security category uses, which
 reads back as `[redacted]` when set and keeps the stored key when
 `[redacted]` is sent), and `authoritative`
 (default_record_ttl/default_primary_ns/default_admin_mailbox/axfr_enabled/axfr_networks/
-allow_dynamic_updates/update_networks/notify_enabled/notify_targets/
+xot_ca_certs/ixfr_journal_depth/ixfr_max_records/allow_dynamic_updates/update_networks/notify_enabled/notify_targets/
 notify_listen_enabled/stub_zones/catalog_zone/catalog_consumers/empty_zones
 (below), and the
 DNSSEC timing dnssec_enabled/dnssec_sig_validity_days/dnssec_rollover_days/
@@ -613,6 +613,31 @@ settings, or with `{"log_export": {...}}` from the body (unsaved form
 values), whether or not export is enabled. It answers `{"sent": true}`,
 `400` for invalid settings, or `502` with why the endpoint refused it.
 
+`dnstap` (`{enabled, server, identity, version}`, replaced whole)
+streams every client query and response to a dnstap collector as
+`dnstap.Message` protobuf events (CLIENT_QUERY and CLIENT_RESPONSE,
+with the verbatim wire-format message) over a Frame Streams connection:
+`server` is `tcp://host:port`, a bare `host:port`, or
+`unix:/path/to/socket` on Unix. `identity` (default: this host's name)
+and `version` (default: this build's version) label every event.
+Events are queued (8192) and sent in the background; a full queue or an
+unreachable collector drops them, never a query. Applied live.
+
+```
+POST /api/dnstap/test
+```
+
+Connects to the collector, completes the Frame Streams handshake and sends
+one sample `CLIENT_QUERY` event for `test.daygle-dns.invalid`, so a
+collector can be checked before its settings are saved - or a saved one
+afterwards. The body may carry `{"dnstap": {...}}` (the unsaved form
+values); omitted, the saved settings are used, and `enabled` is ignored so
+a disabled stream is still testable. It answers `{"sent": true}`, `400`
+for settings that name no usable collector, or `502` with the reason (the
+collector unreachable, or refusing the handshake's content type). Unlike
+the background sender it waits for the result, so a slow collector makes
+the request wait up to 10 seconds.
+
 `dns64` (`{enabled, prefix, clients}`, replaced whole) turns on DNS64
 (RFC 6147) for IPv6-only networks behind NAT64: when a recursive AAAA query
 finds no IPv6 address (NODATA, or only `::ffff:` mapped addresses), the
@@ -768,12 +793,17 @@ POST /api/zones/import
 }
 ```
 
-Zone transfers (AXFR/IXFR, RFC 5936) are served over the plaintext TCP
-listener - not over HTTP - gated by `authoritative.axfr_enabled` and the
-`axfr_networks` client allow-list in `daygle-dns.toml`. Secondary zones (zones
-replicated from remote masters on a refresh interval) are also configured in
-`daygle-dns.toml` under `[[authoritative.secondary_zones]]`; each replicated zone
-appears in `GET /api/zones` like any other zone, but is served read-only.
+Zone transfers (AXFR/IXFR, RFC 5936/1995) are served over the plaintext TCP
+and DoT listeners - not over HTTP - gated by `authoritative.axfr_enabled` and
+the `axfr_networks` client allow-list in `daygle-dns.toml`. The DoT listener
+also answers the `xot` ALPN (zone transfers over TLS, RFC 9103), so the same
+transfers work encrypted. Secondary zones (zones replicated from remote
+masters on a refresh interval) are also configured in `daygle-dns.toml` under
+`[[authoritative.secondary_zones]]`; each replicated zone appears in
+`GET /api/zones` like any other zone, but is served read-only. A master entry
+prefixed `tls://` (or `xot://`) is pulled over XoT; its certificate is
+verified against the public roots plus any PEM files listed in
+`authoritative.xot_ca_certs` (a private CA, settable through this endpoint). The same settings also accept `ixfr_journal_depth` (1..=4096; default 64 retained serial transitions) and `ixfr_max_records` (0..=1,000,000; default 10,000 changed records before AXFR fallback; zero always falls back).
 
 RFC 2136 dynamic updates are also a DNS-protocol feature (over UDP/TCP/DoT,
 not HTTP): `UPDATE` messages for hosted primary zones are applied atomically

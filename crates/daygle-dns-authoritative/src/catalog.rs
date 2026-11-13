@@ -294,6 +294,7 @@ fn pick_weighted(choices: &[(Record, u32)]) -> Option<&Record> {
 impl AuthorityCatalog {
     /// Build a catalog from the store without any DNSSEC signing.
     pub fn new(store: ZoneStore, settings: AuthoritativeSettings) -> Result<Self> {
+        store.set_ixfr_journal_depth(settings.ixfr_journal_depth)?;
         let built = build_catalog(&store, &settings, false, &Default::default())?;
         let networks = daygle_dns_core::config::builtin_networks();
         let split_horizon = Arc::new(build_split_horizon(&store, &networks)?);
@@ -385,6 +386,24 @@ impl AuthorityCatalog {
     ///
     /// DNSSEC signing parameters are swapped separately, by
     /// [`Self::update_dnssec_settings`].
+    /// Update the IXFR journal retention and response ceiling immediately.
+    /// Reducing retention prunes older history from every zone.
+    pub fn update_ixfr_settings(&self, depth: usize, max_records: usize) -> Result<()> {
+        if max_records > 1_000_000 {
+            return Err(DaygleError::Config(
+                "IXFR record ceiling must be between 0 and 1000000".to_string(),
+            ));
+        }
+        self.store.set_ixfr_journal_depth(depth)?;
+        self.settings.rcu(|s| {
+            let mut s = AuthoritativeSettings::clone(s);
+            s.ixfr_journal_depth = depth;
+            s.ixfr_max_records = max_records;
+            s
+        });
+        Ok(())
+    }
+
     pub fn update_gate_settings(
         &self,
         axfr_enabled: bool,
@@ -671,6 +690,65 @@ impl AuthorityCatalog {
     pub fn unsign_zone(&self, zone_id: &str) -> Result<()> {
         self.store.delete_signing_key(zone_id)?;
         self.reload()
+    }
+
+    /// The RFC 1995 difference sequences that bring a client at
+    /// `client_serial` up to the zone's current version, or `None` when the
+    /// caller must send the full zone instead.
+    ///
+    /// `None` also covers zones whose transfer is not built from stored
+    /// records (signed zones and secondaries kept exactly as their master
+    /// sent them), where a record-level history would not describe what is
+    /// served.
+    ///
+    /// A client already at (or ahead of) the current serial gets the current
+    /// SOA alone, which is how RFC 1995 §4 says there is nothing to send.
+    pub fn transfer_delta(
+        &self,
+        zone_name: &str,
+        client_serial: u32,
+    ) -> Result<Option<Vec<Record>>> {
+        if self
+            .transfer_sets
+            .load()
+            .get(&zone_key(zone_name))
+            .is_some()
+        {
+            return Ok(None);
+        }
+        let Some(zone) = self.store.find_zone_by_name(zone_name)? else {
+            return Ok(None);
+        };
+        if !zone.enabled {
+            return Ok(None);
+        }
+        if !crate::secondary::serial_newer(zone.serial, client_serial) {
+            return Ok(Some(vec![soa_record(&zone, zone.serial)?]));
+        }
+        let deltas = self.store.zone_deltas(&zone.id, client_serial)?;
+        if deltas.is_empty() {
+            return Ok(None);
+        }
+        let changed: usize = deltas
+            .iter()
+            .map(|delta| delta.deleted.len() + delta.added.len())
+            .sum();
+        // Past this point the whole zone is the smaller answer (RFC 1995 §5).
+        let max_records = self.settings.load().ixfr_max_records;
+        if max_records == 0 || changed > max_records {
+            return Ok(None);
+        }
+
+        let mut answers = Vec::with_capacity(changed + deltas.len() * 2 + 2);
+        answers.push(soa_record(&zone, zone.serial)?);
+        for delta in &deltas {
+            answers.push(soa_record(&zone, delta.from_serial)?);
+            answers.extend(delta.deleted.iter().filter_map(delta_record));
+            answers.push(soa_record(&zone, delta.to_serial)?);
+            answers.extend(delta.added.iter().filter_map(delta_record));
+        }
+        answers.push(soa_record(&zone, zone.serial)?);
+        Ok(Some(answers))
     }
 
     /// Build the record list for a zone transfer (AXFR/IXFR response): the
@@ -1367,6 +1445,38 @@ fn fqdn_name(name: &str) -> Result<Name> {
         .map_err(|e| DaygleError::InvalidRecord(format!("name '{name}': {e}")))
 }
 
+/// The zone's SOA with `serial` substituted, as served in transfers.
+fn soa_record(zone: &crate::model::Zone, serial: u32) -> Result<Record> {
+    let rdata = RData::try_from_str(
+        RecordType::SOA,
+        &format!(
+            "{} {} {} {} {} {} {}",
+            zone.primary_ns,
+            zone.admin_mailbox,
+            serial,
+            zone.refresh,
+            zone.retry,
+            zone.expire,
+            zone.minimum,
+        ),
+    )
+    .map_err(|e| DaygleError::InvalidRecord(format!("SOA for {}: {e}", zone.name)))?;
+    Ok(Record::from_rdata(
+        fqdn_name(&zone.name)?,
+        zone.minimum.max(300),
+        rdata,
+    ))
+}
+
+/// A journalled record as it goes on the wire; records the zone never serves
+/// are left out.
+fn delta_record(record: &DbRecord) -> Option<Record> {
+    if record.disabled || record.rtype == "ALIAS" || record.rtype == "AUTOPTR" {
+        return None;
+    }
+    record_to_hickory(record).ok()
+}
+
 /// Convert a database record into a Hickory record.
 fn record_to_hickory(record: &DbRecord) -> Result<Record> {
     let name = fqdn_name(&record.name)?;
@@ -1578,6 +1688,52 @@ mod tests {
             )
             .unwrap();
         AuthorityCatalog::new(store, settings).unwrap()
+    }
+
+    #[test]
+    fn ixfr_max_records_selects_delta_or_full_transfer() {
+        let catalog = catalog();
+        let store = catalog.store();
+        let zone = store.find_zone_by_name("example.com").unwrap().unwrap();
+        let before = zone.serial;
+        let record = store
+            .list_records(&zone.id)
+            .unwrap()
+            .into_iter()
+            .find(|record| record.rtype == "A")
+            .unwrap();
+        store
+            .replace_record(
+                &zone.id,
+                &record.id,
+                &RecordInput {
+                    name: "www".to_string(),
+                    rtype: "A".to_string(),
+                    content: "192.0.2.11".to_string(),
+                    ttl: 300,
+                    priority: 0,
+                    disabled: false,
+                },
+            )
+            .unwrap();
+        catalog.reload().unwrap();
+
+        // Replacing one value changes two records (delete + add).
+        catalog.update_ixfr_settings(64, 2).unwrap();
+        assert!(catalog
+            .transfer_delta("example.com", before)
+            .unwrap()
+            .is_some());
+        catalog.update_ixfr_settings(64, 1).unwrap();
+        assert!(catalog
+            .transfer_delta("example.com", before)
+            .unwrap()
+            .is_none());
+        catalog.update_ixfr_settings(64, 0).unwrap();
+        assert!(catalog
+            .transfer_delta("example.com", before)
+            .unwrap()
+            .is_none());
     }
 
     #[test]

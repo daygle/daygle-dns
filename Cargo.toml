@@ -50,6 +50,7 @@ tokio-rustls = "0.26"
 rustls = "0.23"
 quinn = "0.11"
 rustls-pki-types = "1"
+webpki-roots = "1"
 rcgen = "0.14"
 instant-acme = { version = "0.8", default-features = false, features = ["ring", "hyper-rustls", "rcgen"] }
 async-trait = "0.1"

@@ -264,6 +264,8 @@ export const api = {
   // Query log size: { rows, oldest, database_bytes }.
   queryLogStats: () => request('GET', '/querylogs/stats'),
   testLogExport: (log_export) => request('POST', '/log-export/test', { log_export }),
+  // Connects to the dnstap collector, handshakes and sends one sample event.
+  testDnstap: (dnstap) => request('POST', '/dnstap/test', { dnstap }),
   rpzStatus: () => request('GET', '/rpz'),
   dhcp: () => request('GET', '/dhcp'),
   devices: (hours) => request('GET', `/devices?hours=${hours}`),

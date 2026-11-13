@@ -35,6 +35,7 @@ use hickory_resolver::recursor::{
 };
 use hickory_resolver::{ConnectionProvider, PoolContext, TtlConfig};
 use ipnet::{IpNet, Ipv4Net, Ipv6Net};
+use tracing::debug;
 
 /// The IANA root servers (a.root-servers.net .. m.root-servers.net), IPv4
 /// and IPv6. The recursor primes the current list from these on start-up, so
@@ -411,15 +412,29 @@ enum Resolved {
 /// [`DaygleError::Resolution`] with their response code (NODATA as
 /// `NoError`), matching the forwarding path; transport failures carry no
 /// code so serve-stale can cover them.
-pub async fn lookup(
-    recursor: &DaygleRecursor,
-    name: Name,
-    record_type: RecordType,
-) -> Result<Lookup> {
+pub async fn lookup(slot: &RecursorSlot, name: Name, record_type: RecordType) -> Result<Lookup> {
     let mut name = name;
     name.set_fqdn(true);
     let query = Query::query(name.clone(), record_type);
-    let resolve = |q| resolve_one(recursor, q);
+    // RFC 8198: a validated NSEC already in the cache can prove the answer
+    // without a query leaving the server.
+    if let Some(aggressive) = slot.aggressive.as_deref() {
+        if let Some(proved) = aggressive.synthesize(&query) {
+            crate::note_negative_proofs(proved.proofs.clone());
+            crate::note_negative_soa(Some(proved.soa));
+            crate::note_aggressive_synthesis();
+            debug!(
+                query = %query.name(),
+                rtype = ?record_type,
+                code = ?proved.code,
+                "negative answer synthesized from cached NSEC proofs"
+            );
+            return Err(negative(proved.code, "proved by a cached NSEC record"));
+        }
+    }
+    let recursor = slot.recursor.as_ref();
+    let aggressive = slot.aggressive.as_deref();
+    let resolve = |q| resolve_one(recursor, aggressive, q);
     match resolve(query.clone()).await {
         Resolved::Answer(message) => {
             let mut answers = message.answers.clone();
@@ -449,7 +464,11 @@ pub async fn lookup(
     }
 }
 
-async fn resolve_one(recursor: &DaygleRecursor, query: Query) -> Resolved {
+async fn resolve_one(
+    recursor: &DaygleRecursor,
+    aggressive: Option<&crate::aggressive::AggressiveNsec>,
+    query: Query,
+) -> Resolved {
     match recursor.resolve(query, Instant::now(), false).await {
         Ok(message) => match message.metadata.response_code {
             ResponseCode::NoError if !message.answers.is_empty() => Resolved::Answer(message),
@@ -459,6 +478,9 @@ async fn resolve_one(recursor: &DaygleRecursor, query: Query) -> Resolved {
                     .iter()
                     .find(|r| r.record_type() == RecordType::SOA)
                     .cloned();
+                if let (Some(cache), Some(soa)) = (aggressive, &soa) {
+                    cache.insert(soa, &message.authorities);
+                }
                 let e = if code == ResponseCode::NoError {
                     negative(ResponseCode::NoError, "no records")
                 } else {
@@ -479,6 +501,9 @@ async fn resolve_one(recursor: &DaygleRecursor, query: Query) -> Resolved {
             Resolved::Negative(negative(response.response_code, "unsigned denial"), soa)
         }
         Err(e) => {
+            if let Some(cache) = aggressive {
+                harvest(cache, &e);
+            }
             let error = DaygleError::Resolution {
                 message: e.to_string(),
                 response_code: recursor_error_code(&e),
@@ -631,6 +656,25 @@ fn negative(code: ResponseCode, message: &str) -> DaygleError {
     }
 }
 
+/// Keep the validated NSEC records of a negative recursor answer
+/// (RFC 8198), so later queries they cover are answered from the cache.
+fn harvest(cache: &crate::aggressive::AggressiveNsec, e: &RecursorError) {
+    let RecursorError::Net(NetError::Dns(DnsError::NoRecordsFound(no_records))) = e else {
+        return;
+    };
+    let Some(soa) = no_records
+        .soa
+        .as_ref()
+        .map(|soa| soa.as_ref().clone().into_record_of_rdata())
+    else {
+        return;
+    };
+    let Some(authorities) = no_records.authorities.as_deref() else {
+        return;
+    };
+    cache.insert(&soa, authorities);
+}
+
 /// The SOA a negative recursor answer came with.
 fn recursor_error_soa(e: &RecursorError) -> Option<hickory_proto::rr::Record> {
     match e {
@@ -671,6 +715,31 @@ fn ttl_config(settings: &RecursiveSettings) -> TtlConfig {
 pub struct RecursorSlot {
     pub recursor: Arc<DaygleRecursor>,
     pub local_root: Option<SocketAddr>,
+    /// Cached, validated NSEC proofs (RFC 8198), when
+    /// `recursive.aggressive_nsec` is on and DNSSEC validation is too.
+    pub aggressive: Option<Arc<crate::aggressive::AggressiveNsec>>,
+}
+
+impl RecursorSlot {
+    /// A slot for a freshly built recursor, with the aggressive proof cache
+    /// its settings ask for. The cache is per recursor, so flushing the
+    /// cache (which rebuilds the recursor) clears the proofs as well.
+    pub fn new(
+        recursor: DaygleRecursor,
+        local_root: Option<SocketAddr>,
+        settings: &RecursiveSettings,
+    ) -> Self {
+        let aggressive = (settings.aggressive_nsec && settings.dnssec_validate).then(|| {
+            Arc::new(crate::aggressive::AggressiveNsec::new(
+                settings.max_cache_ttl,
+            ))
+        });
+        Self {
+            recursor: Arc::new(recursor),
+            local_root,
+            aggressive,
+        }
+    }
 }
 
 /// A shared, rebuildable recursor: flushing the cache rebuilds it (the

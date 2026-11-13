@@ -53,7 +53,7 @@ pub use split_horizon::{SplitHorizonIndex, SplitHorizonMatch};
 pub use store::{
     ConsoleUser, ConsoleUserInput, QueryLogFilter, QueryLogRow, TlsCertificate, ZoneStore,
 };
-pub use transfer::XfrClient;
+pub use transfer::{load_xot_ca_certs, Ixfr, IxfrDelta, XfrClient};
 pub use tsig::{TsigKey, TsigKeyRing};
 pub use update::{handle_update, handle_update_with_notify};
 

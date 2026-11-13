@@ -146,6 +146,8 @@ pub struct DnsDispatcher {
     syslog: Option<Arc<crate::syslog::SyslogSender>>,
     /// Query export to an HTTP endpoint (`[log_export]`).
     log_export: Option<Arc<daygle_dns_api::log_export::LogExporter>>,
+    /// dnstap events to a collector (`[dnstap]`).
+    dnstap: Option<Arc<daygle_dns_api::dnstap::DnstapSender>>,
     /// The live config, for settings read per query (`[dns64]`).
     config: Option<Arc<ArcSwap<daygle_dns_core::config::DaygleConfig>>>,
     /// DNS accounts the encrypted listeners recognise (`[accounts]`).
@@ -221,6 +223,7 @@ impl DnsDispatcher {
             block_log: Arc::default(),
             syslog: None,
             log_export: None,
+            dnstap: None,
             config: None,
             accounts: Arc::default(),
             registrations: Arc::default(),
@@ -348,6 +351,16 @@ impl DnsDispatcher {
     /// Send query lines to syslog (when its settings ask for them).
     pub fn with_syslog(mut self, syslog: Option<Arc<crate::syslog::SyslogSender>>) -> Self {
         self.syslog = syslog;
+        self
+    }
+
+    /// Send query/response events to a dnstap collector (when its settings
+    /// ask for it).
+    pub fn with_dnstap(
+        mut self,
+        dnstap: Option<Arc<daygle_dns_api::dnstap::DnstapSender>>,
+    ) -> Self {
+        self.dnstap = dnstap;
         self
     }
 
@@ -759,14 +772,27 @@ impl DnsDispatcher {
             None => None,
         };
 
+        // IXFR (RFC 1995 §4): when the client states its serial in the
+        // authority section and the change journal still reaches back to it,
+        // the difference sequences are a smaller answer than the whole zone.
+        if !datagram && qtype == RecordType::IXFR {
+            if let Some(serial) = ixfr_client_serial(request) {
+                match self.catalog.transfer_delta(qname, serial) {
+                    Ok(Some(answers)) => {
+                        return self
+                            .send_transfer(request, qname, answers, tsig, response_handle)
+                            .await;
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        warn!(query = %qname, error = %e, "IXFR journal lookup failed");
+                    }
+                }
+            }
+        }
+
         match self.catalog.transfer_records(qname) {
             Ok(Some((soa, records))) => {
-                let mut metadata = request.metadata;
-                metadata.message_type = MessageType::Response;
-                metadata.response_code = ResponseCode::NoError;
-                metadata.authoritative = true;
-                metadata.recursion_available = false;
-
                 // RFC 5936: the answer must begin and end with the zone SOA.
                 // Over UDP (IXFR only, see above) it is the SOA alone.
                 let answers = if datagram {
@@ -778,85 +804,8 @@ impl DnsDispatcher {
                     answers.push(soa);
                     answers
                 };
-
-                // A DNS message holds at most 64 KiB, so a larger zone goes
-                // out as several messages (RFC 5936 §2.2). Each TSIG-signed
-                // message chains from the MAC of the one before.
-                let (tsig_key, mut first_context) = match tsig {
-                    Some((key, context)) => (Some(key), Some(context)),
-                    None => (None, None),
-                };
-                let mut previous_mac: Option<Vec<u8>> = None;
-                let mut info = None;
-                for chunk in transfer_chunks(&answers) {
-                    let mut response = MessageResponseBuilder::from_message_request(request).build(
-                        metadata,
-                        chunk.iter(),
-                        std::iter::empty(),
-                        std::iter::empty(),
-                        std::iter::empty(),
-                    );
-                    if let Some(key) = &tsig_key {
-                        let mut tbs_buf = Vec::with_capacity(16 * 1024);
-                        let mut encoder =
-                            hickory_proto::serialize::binary::BinEncoder::new(&mut tbs_buf);
-                        let tbs_response = MessageResponseBuilder::from_message_request(request)
-                            .build(
-                                metadata,
-                                chunk.iter(),
-                                std::iter::empty(),
-                                std::iter::empty(),
-                                std::iter::empty(),
-                            );
-                        if let Err(e) = tbs_response.destructive_emit(&mut encoder) {
-                            warn!(query = %qname, error = %e, "failed to encode signed transfer");
-                            return send_error(
-                                &mut response_handle,
-                                request,
-                                ResponseCode::ServFail,
-                                None,
-                            )
-                            .await;
-                        }
-                        let signature = match (&previous_mac, first_context.take()) {
-                            (None, Some(context)) => {
-                                context.sign(&tbs_buf).map_err(|e| e.to_string())
-                            }
-                            _ => daygle_dns_authoritative::tsig::sign_subsequent(
-                                key,
-                                previous_mac.as_deref().unwrap_or_default(),
-                                &tbs_buf,
-                                request.metadata.id,
-                            ),
-                        };
-                        match signature {
-                            Ok(signature) => {
-                                previous_mac = Some(signature.data.mac.clone());
-                                response.set_signature(signature);
-                            }
-                            Err(e) => {
-                                warn!(query = %qname, error = %e, "failed to sign zone transfer");
-                                return send_error(
-                                    &mut response_handle,
-                                    request,
-                                    ResponseCode::ServFail,
-                                    None,
-                                )
-                                .await;
-                            }
-                        }
-                    }
-                    match response_handle.send_response(response).await {
-                        Ok(sent) => {
-                            info.get_or_insert(sent);
-                        }
-                        Err(e) => {
-                            warn!("failed to send zone transfer: {e}");
-                            return fallback_response();
-                        }
-                    }
-                }
-                info.unwrap_or_else(fallback_response)
+                self.send_transfer(request, qname, answers, tsig, response_handle)
+                    .await
             }
             Ok(None) => {
                 debug!(query = %qname, "zone transfer for unknown zone");
@@ -869,6 +818,110 @@ impl DnsDispatcher {
             }
         }
     }
+
+    /// Send a zone transfer's answers, one DNS message per chunk.
+    ///
+    /// Each TSIG-signed message chains from the MAC of the one before
+    /// (RFC 8945), starting from the request's MAC.
+    async fn send_transfer<R: ResponseHandler>(
+        &self,
+        request: &Request,
+        qname: &str,
+        answers: Vec<Record>,
+        tsig: Option<(
+            daygle_dns_authoritative::tsig::TsigKey,
+            hickory_proto::rr::TSigResponseContext,
+        )>,
+        mut response_handle: R,
+    ) -> ResponseInfo {
+        let mut metadata = request.metadata;
+        metadata.message_type = MessageType::Response;
+        metadata.response_code = ResponseCode::NoError;
+        metadata.authoritative = true;
+        metadata.recursion_available = false;
+
+        // A DNS message holds at most 64 KiB, so a larger zone goes out as
+        // several messages (RFC 5936 §2.2). Each TSIG-signed message chains
+        // from the MAC of the one before.
+        let (tsig_key, mut first_context) = match tsig {
+            Some((key, context)) => (Some(key), Some(context)),
+            None => (None, None),
+        };
+        let mut previous_mac: Option<Vec<u8>> = None;
+        let mut info = None;
+        for chunk in transfer_chunks(&answers) {
+            let mut response = MessageResponseBuilder::from_message_request(request).build(
+                metadata,
+                chunk.iter(),
+                std::iter::empty(),
+                std::iter::empty(),
+                std::iter::empty(),
+            );
+            if let Some(key) = &tsig_key {
+                let mut tbs_buf = Vec::with_capacity(16 * 1024);
+                let mut encoder = hickory_proto::serialize::binary::BinEncoder::new(&mut tbs_buf);
+                let tbs_response = MessageResponseBuilder::from_message_request(request).build(
+                    metadata,
+                    chunk.iter(),
+                    std::iter::empty(),
+                    std::iter::empty(),
+                    std::iter::empty(),
+                );
+                if let Err(e) = tbs_response.destructive_emit(&mut encoder) {
+                    warn!(query = %qname, error = %e, "failed to encode signed transfer");
+                    return send_error(&mut response_handle, request, ResponseCode::ServFail, None)
+                        .await;
+                }
+                let signature = match (&previous_mac, first_context.take()) {
+                    (None, Some(context)) => context.sign(&tbs_buf).map_err(|e| e.to_string()),
+                    _ => daygle_dns_authoritative::tsig::sign_subsequent(
+                        key,
+                        previous_mac.as_deref().unwrap_or_default(),
+                        &tbs_buf,
+                        request.metadata.id,
+                    ),
+                };
+                match signature {
+                    Ok(signature) => {
+                        previous_mac = Some(signature.data.mac.clone());
+                        response.set_signature(signature);
+                    }
+                    Err(e) => {
+                        warn!(query = %qname, error = %e, "failed to sign zone transfer");
+                        return send_error(
+                            &mut response_handle,
+                            request,
+                            ResponseCode::ServFail,
+                            None,
+                        )
+                        .await;
+                    }
+                }
+            }
+            match response_handle.send_response(response).await {
+                Ok(sent) => {
+                    info.get_or_insert(sent);
+                }
+                Err(e) => {
+                    warn!("failed to send zone transfer: {e}");
+                    return fallback_response();
+                }
+            }
+        }
+        info.unwrap_or_else(fallback_response)
+    }
+}
+
+/// The serial an IXFR client says it has, from the SOA in the authority
+/// section (RFC 1995 §3).
+fn ixfr_client_serial(request: &Request) -> Option<u32> {
+    request
+        .authorities
+        .iter()
+        .find_map(|record| match &record.data {
+            hickory_proto::rr::RData::SOA(soa) => Some(soa.serial),
+            _ => None,
+        })
 }
 
 /// Split a zone transfer's answers into groups that each fit one DNS
@@ -917,6 +970,36 @@ fn transfer_client_allowed(networks: &[String], client: IpAddr) -> bool {
 #[async_trait]
 impl RequestHandler for DnsDispatcher {
     async fn handle_request<R: ResponseHandler, T: Time>(
+        &self,
+        request: &Request,
+        response_handle: R,
+    ) -> ResponseInfo {
+        // dnstap sits closest to the transport, so its CLIENT_RESPONSE event
+        // carries the bytes the client actually receives: cookies, rate
+        // limiting, truncation and all. A TSIG-signed answer cannot be
+        // re-encoded to be observed, so such queries are not wrapped.
+        if let Some(dnstap) = &self.dnstap {
+            if dnstap.enabled()
+                && request.signature.is_none()
+                && request.metadata.op_code == OpCode::Query
+                && !request.queries.is_empty()
+            {
+                let handle = daygle_dns_api::dnstap::DnstapResponder::new(
+                    response_handle,
+                    request,
+                    dnstap.clone(),
+                    crate::proxy_protocol::real_client(request.src()),
+                );
+                return self.dispatch_wrapped(request, handle).await;
+            }
+        }
+        self.dispatch_wrapped(request, response_handle).await
+    }
+}
+
+impl DnsDispatcher {
+    /// Dispatch through any listener-specific response rewriting.
+    async fn dispatch_wrapped<R: ResponseHandler>(
         &self,
         request: &Request,
         response_handle: R,
@@ -1774,12 +1857,13 @@ impl DnsDispatcher {
                 .await
             })
         };
-        // The SOA of a negative answer, for its authority section.
-        let mut negative_soa = None;
+        // The authority section of a negative answer (SOA, plus the NSEC
+        // proofs of an RFC 8198 synthesis), for its response.
+        let mut negative_answer = None;
         let client_timeout = self.client_timeout();
         let lookup = match tokio::time::timeout(client_timeout, lookup_task).await {
-            Ok(Ok(((result, stale), soa))) => {
-                negative_soa = soa;
+            Ok(Ok(((result, stale), answer))) => {
+                negative_answer = answer;
                 result.map(|lookup| (lookup, stale))
             }
             Ok(Err(e)) => Err(DaygleError::Resolution {
@@ -2134,8 +2218,15 @@ impl DnsDispatcher {
                     started,
                 );
                 if negative {
-                    if let Some(soa) = negative_soa {
-                        return send_negative(&mut response_handle, request, code, soa).await;
+                    if let Some(answer) = negative_answer {
+                        return send_negative(
+                            &mut response_handle,
+                            request,
+                            code,
+                            answer.soa,
+                            &answer.proofs,
+                        )
+                        .await;
                     }
                 }
                 let why = if code == ResponseCode::ServFail {
@@ -3364,18 +3455,25 @@ fn order_cname_chain(qname: &Name, records: Vec<Record>) -> Vec<Record> {
 
 /// Send a negative recursive answer (NXDOMAIN or NODATA) with the zone's
 /// SOA in the authority section, so the client can cache it for the SOA's
-/// TTL (RFC 2308) instead of asking again at once.
+/// TTL (RFC 2308) instead of asking again at once. When the denial was
+/// synthesized from validated NSEC proofs (RFC 8198), the proofs go with
+/// it and the answer is authenticated (AD), for a client that asked for
+/// that (RFC 6840 section 5.8).
 async fn send_negative<R: ResponseHandler>(
     handle: &mut R,
     request: &Request,
     code: ResponseCode,
     soa: Record,
+    proofs: &[Record],
 ) -> ResponseInfo {
     let mut metadata = request.metadata;
     metadata.message_type = MessageType::Response;
     metadata.response_code = code;
     metadata.recursion_available = true;
-    metadata.authentic_data = false;
+    metadata.authentic_data = !proofs.is_empty()
+        && proofs.iter().all(|r| r.proof == Proof::Secure)
+        && (request.metadata.authentic_data
+            || request.edns.as_ref().is_some_and(|e| e.flags().dnssec_ok));
     let edns = response_edns(request, None);
     let mut builder = MessageResponseBuilder::from_message_request(request);
     if let Some(edns) = &edns {
@@ -3384,7 +3482,7 @@ async fn send_negative<R: ResponseHandler>(
     let response = builder.build(
         metadata,
         std::iter::empty(),
-        std::iter::once(&soa),
+        std::iter::once(&soa).chain(proofs.iter()),
         std::iter::empty(),
         std::iter::empty(),
     );

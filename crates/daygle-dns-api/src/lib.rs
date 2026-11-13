@@ -80,6 +80,7 @@ pub mod alerts;
 mod audit;
 pub mod cloudflare;
 pub mod devices;
+pub mod dnstap;
 mod handlers;
 pub mod host_stats;
 pub mod log_export;
@@ -752,6 +753,7 @@ pub fn router(state: AppState) -> Router {
         .route("/alerts/test", post(handlers::test_alert))
         .route("/log-export", get(handlers::log_export_status))
         .route("/log-export/test", post(handlers::test_log_export))
+        .route("/dnstap/test", post(handlers::test_dnstap))
         .route("/reports", get(handlers::report))
         .route("/reports/send", post(handlers::send_report))
         .route("/policy/services", get(handlers::blockable_services))

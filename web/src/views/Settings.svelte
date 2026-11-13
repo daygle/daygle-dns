@@ -116,6 +116,11 @@
   let exportStatus = $state(null);
   let exportTest = $state(null);
   let exportTesting = $state(false);
+  // dnstap: every query and its response, streamed to a collector.
+  const DNSTAP_DEFAULTS = { enabled: false, server: '', identity: '', version: '' };
+  let dnstap_ = $state({ ...DNSTAP_DEFAULTS });
+  let dnstapTest = $state(null);
+  let dnstapTesting = $state(false);
   // Query log storage and retention (Logging tab), and how big it is now.
   const LOGGING_DEFAULTS = {
     query_db_enabled: true,
@@ -162,6 +167,29 @@
       exportTest = { ok: false, msg: formatApiError(e) };
     } finally {
       exportTesting = false;
+    }
+  }
+  function dnstapBody() {
+    return {
+      enabled: !!dnstap_.enabled,
+      server: (dnstap_.server || '').trim(),
+      identity: (dnstap_.identity || '').trim(),
+      version: (dnstap_.version || '').trim(),
+    };
+  }
+
+  // Connects, completes the Frame Streams handshake and sends one sample
+  // event, so a collector can be checked before the form is saved.
+  async function testDnstap() {
+    dnstapTesting = true;
+    dnstapTest = null;
+    try {
+      await api.testDnstap(dnstapBody());
+      dnstapTest = { ok: true, msg: 'Collector accepted the sample event.' };
+    } catch (e) {
+      dnstapTest = { ok: false, msg: formatApiError(e) };
+    } finally {
+      dnstapTesting = false;
     }
   }
   const ALERT_DEFAULTS = {
@@ -349,6 +377,7 @@
       };
       syslog_ = { enabled: false, server: '', facility: 'daemon', level: 'info', queries: false, ...config.syslog };
       export_ = { ...EXPORT_DEFAULTS, ...config.log_export };
+      dnstap_ = { ...DNSTAP_DEFAULTS, ...config.dnstap };
       logging_ = Object.fromEntries(
         Object.entries(LOGGING_DEFAULTS).map(([k, v]) => [k, config.logging?.[k] ?? v]),
       );
@@ -677,6 +706,7 @@
         queries: !!syslog_.queries,
       },
       log_export: exportBody(),
+      dnstap: dnstapBody(),
       logging: {
         query_db_enabled: !!logging_.query_db_enabled,
         query_db_max_rows: Number(logging_.query_db_max_rows) || 0,
@@ -1588,6 +1618,40 @@
       (leave it as is to keep it). A batch the endpoint does not accept is
       retried twice, then dropped; Send Test Query uses the settings on this
       page, saved or not.
+    </p>
+  </div>
+  <div class="card" style="margin-bottom: 14px">
+    <h3 style="margin: 0 0 10px">dnstap</h3>
+    <div class="form-grid">
+      <label class="check"><input type="checkbox" bind:checked={dnstap_.enabled} /> <span>Stream Every Query and Response to a dnstap Collector</span></label>
+      <label>
+        <span>Collector</span>
+        <input placeholder="tcp://127.0.0.1:6000" bind:value={dnstap_.server} spellcheck="false" />
+      </label>
+      <label>
+        <span>Identity</span>
+        <input placeholder="This host's name" bind:value={dnstap_.identity} spellcheck="false" />
+      </label>
+      <label>
+        <span>Version</span>
+        <input placeholder="This build's version" bind:value={dnstap_.version} spellcheck="false" />
+      </label>
+    </div>
+    <div class="row" style="margin-top: 14px; gap: 10px; flex-wrap: wrap; align-items: center">
+      <button class="secondary" onclick={testDnstap} disabled={dnstapTesting || !(dnstap_.server || '').trim()}>{dnstapTesting ? 'Connecting...' : 'Send Test Event'}</button>
+      {#if dnstapTest}<span style="color: {dnstapTest.ok ? 'var(--ok)' : 'var(--danger)'}">{dnstapTest.msg}</span>{/if}
+    </div>
+    <p class="muted help">
+      Every client query and the exact response sent back are streamed as
+      dnstap events (<code>dnstap.Message</code> protobufs) over Frame Streams
+      to a collector such as dnstap-ldns, fstrm_capture, dnstap-receiver or
+      DNS-collector - <code>tcp://host:port</code>, a bare
+      <code>host:port</code>, or <code>unix:/path/to/socket</code> on Unix.
+      Events are queued in memory (8192) and dropped rather than ever delaying
+      a query, so a collector that stops reading loses events, not answers.
+      Send Test Event connects, completes the handshake and sends one sample
+      query, using the settings on this page, saved or not, and reports why
+      it failed.
     </p>
   </div>
   {:else if tab === 'rate-limiting'}

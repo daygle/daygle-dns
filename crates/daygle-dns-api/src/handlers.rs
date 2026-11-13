@@ -553,6 +553,47 @@ pub async fn log_export_status(State(state): State<AppState>) -> Response {
     Json(status).into_response()
 }
 
+/// Body of `POST /api/dnstap/test`: the settings to try (as on the form,
+/// saved or not); omitted, the saved ones.
+#[derive(Deserialize, Default)]
+pub struct DnstapTestInput {
+    #[serde(default)]
+    pub dnstap: Option<daygle_dns_core::config::DnstapSettings>,
+}
+
+/// The form's whitespace-trimmed dnstap settings.
+fn normalize_dnstap(
+    dnstap: &daygle_dns_core::config::DnstapSettings,
+) -> daygle_dns_core::config::DnstapSettings {
+    daygle_dns_core::config::DnstapSettings {
+        server: dnstap.server.trim().to_string(),
+        identity: dnstap.identity.trim().to_string(),
+        version: dnstap.version.trim().to_string(),
+        ..dnstap.clone()
+    }
+}
+
+/// `POST /api/dnstap/test` - connect to the collector, complete the Frame
+/// Streams handshake and send one sample event, so a collector can be
+/// checked before its settings are saved (or a saved one afterwards).
+/// `enabled` is ignored: a disabled stream is still testable.
+pub async fn test_dnstap(
+    State(state): State<AppState>,
+    body: Option<Json<DnstapTestInput>>,
+) -> Response {
+    let settings = match body.and_then(|Json(b)| b.dnstap) {
+        Some(input) => normalize_dnstap(&input),
+        None => state.config.load().dnstap.clone(),
+    };
+    if let Err(msg) = settings.check() {
+        return error_response(StatusCode::BAD_REQUEST, format!("dnstap: {msg}"));
+    }
+    match crate::dnstap::send_test_event(&settings).await {
+        Ok(()) => Json(serde_json::json!({ "sent": true })).into_response(),
+        Err(e) => error_response(StatusCode::BAD_GATEWAY, format!("dnstap: {e}")),
+    }
+}
+
 fn config_response(config: &daygle_dns_core::config::DaygleConfig) -> Response {
     match redacted_config_json(config) {
         Ok(value) => Json(value).into_response(),
@@ -2290,7 +2331,7 @@ pub async fn create_zone(
             );
         }
         for master in &input.masters {
-            if let Err(e) = daygle_dns_core::config::parse_master_addr(master) {
+            if let Err(e) = daygle_dns_core::config::parse_transfer_master(master) {
                 return error_response(
                     StatusCode::BAD_REQUEST,
                     format!("invalid secondary master '{master}': {e}"),
@@ -5585,6 +5626,8 @@ pub struct SettingsUpdate {
     /// Replaces the whole `[log_export]` section; an `authorization` of
     /// `[redacted]` keeps the stored one.
     pub log_export: Option<daygle_dns_core::config::LogExportSettings>,
+    /// Replaces the whole `[dnstap]` section.
+    pub dnstap: Option<daygle_dns_core::config::DnstapSettings>,
     /// Replaces the whole `[rrl]` section (response rate limiting).
     pub rrl: Option<daygle_dns_core::config::RrlSettings>,
     /// Replaces the whole `[rate_limit]` section (per-client and per-domain
@@ -5664,6 +5707,14 @@ pub struct AuthoritativeUpdate {
     pub default_admin_mailbox: Option<String>,
     pub axfr_enabled: Option<bool>,
     pub axfr_networks: Option<Vec<String>>,
+    /// PEM certificate files trusted for XoT masters, in addition to the
+    /// public roots. Replaces the whole list; an empty list trusts the public
+    /// roots only.
+    pub xot_ca_certs: Option<Vec<String>>,
+    /// Recent serial transitions retained per zone (1..=4096).
+    pub ixfr_journal_depth: Option<usize>,
+    /// Changed-record threshold before IXFR falls back to AXFR (0..=1,000,000).
+    pub ixfr_max_records: Option<usize>,
     pub allow_dynamic_updates: Option<bool>,
     pub update_networks: Option<Vec<String>>,
     pub notify_enabled: Option<bool>,
@@ -5764,6 +5815,7 @@ pub struct RecursiveUpdate {
     pub upstreams: Option<Vec<String>>,
     pub dnssec_validate: Option<bool>,
     pub dnssec_reject_bogus: Option<bool>,
+    pub aggressive_nsec: Option<bool>,
     pub prefetch_enabled: Option<bool>,
     pub prefetch_ttl_fraction_pct: Option<u32>,
     pub prefetch_min_queries: Option<u32>,
@@ -5967,6 +6019,9 @@ pub async fn update_settings(
         }
         if let Some(v) = r.dnssec_reject_bogus {
             config.recursive.dnssec_reject_bogus = v;
+        }
+        if let Some(v) = r.aggressive_nsec {
+            config.recursive.aggressive_nsec = v;
         }
         if let Some(v) = r.prefetch_enabled {
             config.recursive.prefetch_enabled = v;
@@ -6382,6 +6437,13 @@ pub async fn update_settings(
         }
         config.log_export = export;
     }
+    if let Some(dnstap) = &update.dnstap {
+        let dnstap = normalize_dnstap(dnstap);
+        if let Err(msg) = dnstap.check() {
+            return error_response(StatusCode::BAD_REQUEST, format!("dnstap: {msg}"));
+        }
+        config.dnstap = dnstap;
+    }
     if let Some(updates) = &update.updates {
         config.updates = updates.clone();
     }
@@ -6484,6 +6546,22 @@ pub async fn update_settings(
         }
         if let Some(v) = &a.axfr_networks {
             config.authoritative.axfr_networks = normalize_policy_networks(v);
+            authoritative_changed = true;
+        }
+        if let Some(v) = &a.xot_ca_certs {
+            config.authoritative.xot_ca_certs = v
+                .iter()
+                .map(|path| path.trim().to_string())
+                .filter(|path| !path.is_empty())
+                .collect();
+            authoritative_changed = true;
+        }
+        if let Some(v) = a.ixfr_journal_depth {
+            config.authoritative.ixfr_journal_depth = v;
+            authoritative_changed = true;
+        }
+        if let Some(v) = a.ixfr_max_records {
+            config.authoritative.ixfr_max_records = v;
             authoritative_changed = true;
         }
         if let Some(v) = a.allow_dynamic_updates {
@@ -6660,6 +6738,18 @@ pub async fn update_settings(
     if let Err(response) = validate_config_update(&state, &old_config, &config, "settings") {
         return response;
     }
+    // XoT trust anchors must load now: a typo would otherwise surface only as
+    // a failed transfer long after the save. Applied live after the save.
+    if old_config.authoritative.xot_ca_certs != config.authoritative.xot_ca_certs {
+        if let Err(e) =
+            daygle_dns_authoritative::load_xot_ca_certs(&config.authoritative.xot_ca_certs)
+        {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                format!("authoritative.xot_ca_certs: {e}"),
+            );
+        }
+    }
     // Outbound IP Versions must leave every forwarder list someone to ask.
     if config.recursive != old_config.recursive {
         if let Err(e) = check_outbound_servers(&config.recursive) {
@@ -6784,6 +6874,18 @@ pub async fn update_settings(
                 "api",
                 format!("cannot re-sign zones after a DNSSEC change: {e}"),
             );
+        }
+    }
+    if old_config.authoritative.ixfr_journal_depth != config.authoritative.ixfr_journal_depth
+        || old_config.authoritative.ixfr_max_records != config.authoritative.ixfr_max_records
+    {
+        if let Err(e) = state.catalog.update_ixfr_settings(
+            config.authoritative.ixfr_journal_depth,
+            config.authoritative.ixfr_max_records,
+        ) {
+            state
+                .logs
+                .warn("api", format!("cannot apply IXFR settings: {e}"));
         }
     }
     if authoritative_changed {
@@ -7337,6 +7439,7 @@ mod settings_persistence_tests {
         "logging",
         "syslog",
         "log_export",
+        "dnstap",
         "rrl",
         "rate_limit",
         "rpz",

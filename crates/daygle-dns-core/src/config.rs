@@ -48,6 +48,8 @@ pub struct DaygleConfig {
     pub syslog: SyslogSettings,
     /// Sending every query, as JSON, to an HTTP endpoint (a log collector).
     pub log_export: LogExportSettings,
+    /// Sending query/response events to a dnstap collector (Frame Streams).
+    pub dnstap: DnstapSettings,
     /// DNS64 (RFC 6147): AAAA answers made from A records for IPv6-only
     /// clients behind NAT64.
     pub dns64: Dns64Settings,
@@ -913,6 +915,92 @@ impl Default for LogExportSettings {
     }
 }
 
+/// dnstap: every client query and its response as dnstap `Message` events,
+/// streamed to a collector with Frame Streams. Collectors such as
+/// `dnstap-ldns`, `fstrm_capture`, dnstap-receiver and DNS-collector read this
+/// format; it carries the wire-format messages, so a collector decodes them
+/// without a packet capture. Edited in Settings -> Logging and stored in the
+/// database.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct DnstapSettings {
+    pub enabled: bool,
+    /// Collector endpoint: `tcp://host:port`, a bare `host:port`, or
+    /// `unix:/path/to/socket` for a Unix domain socket.
+    pub server: String,
+    /// Identity sent with every event (empty: this host's name).
+    pub identity: String,
+    /// Version string sent with every event (empty: this build's version).
+    pub version: String,
+}
+
+/// Where dnstap events go, parsed from [`DnstapSettings::server`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DnstapTarget {
+    /// A TCP collector at `host:port`.
+    Tcp { host: String, port: u16 },
+    /// A Unix domain socket at `path`.
+    Unix { path: String },
+}
+
+impl DnstapSettings {
+    /// The parsed collector endpoint, if `server` names one.
+    pub fn target(&self) -> std::result::Result<Option<DnstapTarget>, String> {
+        let server = self.server.trim();
+        if server.is_empty() {
+            return Ok(None);
+        }
+        if let Some(path) = server
+            .strip_prefix("unix://")
+            .or_else(|| server.strip_prefix("unix:"))
+        {
+            let path = path.trim();
+            if path.is_empty() {
+                return Err(format!("'{server}' names no Unix socket path"));
+            }
+            return Ok(Some(DnstapTarget::Unix {
+                path: path.to_string(),
+            }));
+        }
+        let host_port = server
+            .strip_prefix("tcp://")
+            .unwrap_or(server)
+            .trim_end_matches('/');
+        let (host, port) = host_port
+            .rsplit_once(':')
+            .ok_or_else(|| format!("'{server}' is not host:port or unix:/path"))?;
+        let host = host.trim_start_matches('[').trim_end_matches(']');
+        if host.is_empty() {
+            return Err(format!("'{server}' names no collector host"));
+        }
+        let port: u16 = port
+            .parse()
+            .map_err(|_| format!("'{server}' has an invalid port"))?;
+        if port == 0 {
+            return Err(format!("'{server}' has an invalid port"));
+        }
+        Ok(Some(DnstapTarget::Tcp {
+            host: host.to_string(),
+            port,
+        }))
+    }
+
+    /// Problems that stop the settings being used.
+    pub fn check(&self) -> std::result::Result<(), String> {
+        let target = self.target()?;
+        if self.enabled && target.is_none() {
+            return Err("server must name a collector when dnstap is enabled".to_string());
+        }
+        if self.identity.contains(['\r', '\n']) || self.version.contains(['\r', '\n']) {
+            return Err("identity and version must be one line".to_string());
+        }
+        if self.identity.len() > 255 || self.version.len() > 255 {
+            return Err("identity and version must be at most 255 bytes".to_string());
+        }
+        Ok(())
+    }
+}
+
 impl LogExportSettings {
     /// Whether batches are sent as a JSON array (else NDJSON).
     pub fn json_array(&self) -> bool {
@@ -1375,6 +1463,8 @@ pub struct RuntimeSettings {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub log_export: Option<LogExportSettings>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dnstap: Option<DnstapSettings>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub updates: Option<UpdateCheckSettings>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dns64: Option<Dns64Settings>,
@@ -1458,6 +1548,8 @@ pub struct RecursiveUpdate {
     pub dnssec_validate: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dnssec_reject_bogus: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub aggressive_nsec: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prefetch_enabled: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2042,6 +2134,16 @@ pub struct AuthoritativeUpdate {
     pub axfr_enabled: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub axfr_networks: Option<Vec<String>>,
+    /// Extra XoT trust anchors (the whole list).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub xot_ca_certs: Option<Vec<String>>,
+    /// IXFR history entries retained per zone (1..=4096).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ixfr_journal_depth: Option<usize>,
+    /// Maximum changed records in an IXFR response before falling back to
+    /// AXFR (0..=1,000,000; zero always falls back).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ixfr_max_records: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub allow_dynamic_updates: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2343,6 +2445,7 @@ impl RuntimeSettings {
             && self.web.is_none()
             && self.syslog.is_none()
             && self.log_export.is_none()
+            && self.dnstap.is_none()
             && self.updates.is_none()
             && self.dns64.is_none()
             && self.ecs.is_none()
@@ -2377,6 +2480,9 @@ impl RuntimeSettings {
             }
             if let Some(v) = r.dnssec_reject_bogus {
                 config.recursive.dnssec_reject_bogus = v;
+            }
+            if let Some(v) = r.aggressive_nsec {
+                config.recursive.aggressive_nsec = v;
             }
             if let Some(v) = r.prefetch_enabled {
                 config.recursive.prefetch_enabled = v;
@@ -2583,6 +2689,9 @@ impl RuntimeSettings {
         if let Some(e) = &self.log_export {
             config.log_export = e.clone();
         }
+        if let Some(d) = &self.dnstap {
+            config.dnstap = d.clone();
+        }
         if let Some(a) = &self.alerts {
             config.alerts = a.clone();
         }
@@ -2679,6 +2788,16 @@ impl RuntimeSettings {
                 config.authoritative.axfr_networks =
                     AuthoritativeUpdate::normalize_networks(v.clone());
             }
+            if let Some(v) = &a.xot_ca_certs {
+                config.authoritative.xot_ca_certs =
+                    AuthoritativeUpdate::normalize_networks(v.clone());
+            }
+            if let Some(v) = a.ixfr_journal_depth {
+                config.authoritative.ixfr_journal_depth = v;
+            }
+            if let Some(v) = a.ixfr_max_records {
+                config.authoritative.ixfr_max_records = v;
+            }
             if let Some(v) = a.allow_dynamic_updates {
                 config.authoritative.allow_dynamic_updates = v;
             }
@@ -2743,6 +2862,7 @@ impl RuntimeSettings {
                 upstreams: Some(config.recursive.upstreams.clone()),
                 dnssec_validate: Some(config.recursive.dnssec_validate),
                 dnssec_reject_bogus: Some(config.recursive.dnssec_reject_bogus),
+                aggressive_nsec: Some(config.recursive.aggressive_nsec),
                 prefetch_enabled: Some(config.recursive.prefetch_enabled),
                 prefetch_ttl_fraction_pct: Some(config.recursive.prefetch_ttl_fraction_pct),
                 prefetch_min_queries: Some(config.recursive.prefetch_min_queries),
@@ -2833,6 +2953,9 @@ impl RuntimeSettings {
                 default_primary_ns: Some(config.authoritative.default_primary_ns.clone()),
                 axfr_enabled: Some(config.authoritative.axfr_enabled),
                 axfr_networks: Some(config.authoritative.axfr_networks.clone()),
+                xot_ca_certs: Some(config.authoritative.xot_ca_certs.clone()),
+                ixfr_journal_depth: Some(config.authoritative.ixfr_journal_depth),
+                ixfr_max_records: Some(config.authoritative.ixfr_max_records),
                 allow_dynamic_updates: Some(config.authoritative.allow_dynamic_updates),
                 update_networks: Some(config.authoritative.update_networks.clone()),
                 notify_enabled: Some(config.authoritative.notify_enabled),
@@ -2859,6 +2982,7 @@ impl RuntimeSettings {
             updates: Some(config.updates.clone()),
             syslog: Some(config.syslog.clone()),
             log_export: Some(config.log_export.clone()),
+            dnstap: Some(config.dnstap.clone()),
             dns64: Some(config.dns64.clone()),
             ecs: Some(config.ecs.clone()),
             networks: Some(config.networks.clone()),
@@ -3594,6 +3718,23 @@ impl DaygleConfig {
                 )));
             }
         }
+        if !(1..=4096).contains(&self.authoritative.ixfr_journal_depth) {
+            return Err(DaygleError::Config(
+                "authoritative.ixfr_journal_depth must be between 1 and 4096".to_string(),
+            ));
+        }
+        if self.authoritative.ixfr_max_records > 1_000_000 {
+            return Err(DaygleError::Config(
+                "authoritative.ixfr_max_records must be between 0 and 1000000".to_string(),
+            ));
+        }
+        for path in &self.authoritative.xot_ca_certs {
+            if path.trim().is_empty() {
+                return Err(DaygleError::Config(
+                    "authoritative.xot_ca_certs contains an empty path".to_string(),
+                ));
+            }
+        }
         for zone in &self.authoritative.secondary_zones {
             if zone.name.trim().is_empty() {
                 return Err(DaygleError::Config(
@@ -3607,7 +3748,7 @@ impl DaygleConfig {
                 )));
             }
             for master in &zone.masters {
-                parse_master_addr(master).map_err(|e| {
+                parse_transfer_master(master).map_err(|e| {
                     DaygleError::Config(format!(
                         "secondary zone '{}' has invalid master '{master}': {e}",
                         zone.name
@@ -3801,6 +3942,9 @@ impl DaygleConfig {
         self.log_export
             .check()
             .map_err(|e| DaygleError::Config(format!("log_export: {e}")))?;
+        self.dnstap
+            .check()
+            .map_err(|e| DaygleError::Config(format!("dnstap: {e}")))?;
         self.alerts
             .check()
             .map_err(|e| DaygleError::Config(format!("alerts: {e}")))?;
@@ -3855,6 +3999,71 @@ pub fn parse_master_addr(entry: &str) -> std::result::Result<std::net::SocketAdd
     entry
         .parse::<std::net::SocketAddr>()
         .map_err(|e| format!("cannot parse as IP[:port]: {e}"))
+}
+
+/// A zone-transfer master: plain TCP, or TLS when the entry asks for it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TransferMaster {
+    pub addr: std::net::SocketAddr,
+    /// The name the master's certificate is checked against, when the entry
+    /// asks for TLS.
+    pub tls_name: Option<String>,
+}
+
+impl std::fmt::Display for TransferMaster {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.tls_name {
+            Some(name) => write!(f, "tls://{}#{name}", self.addr),
+            None => write!(f, "{}", self.addr),
+        }
+    }
+}
+
+/// Parse a zone-transfer master entry.
+///
+/// `IP[:port]` is plain TCP (port 53). `tls://IP[:port][#name]` and
+/// `xot://IP[:port][#name]` are zone transfers over TLS (RFC 9103), port
+/// 853; the certificate is verified against `name`, or against the address
+/// itself when no name is given.
+pub fn parse_transfer_master(entry: &str) -> std::result::Result<TransferMaster, String> {
+    let entry = entry.trim();
+    let (tls, rest) = match entry
+        .strip_prefix("tls://")
+        .or_else(|| entry.strip_prefix("xot://"))
+    {
+        Some(rest) => (true, rest),
+        None => (false, entry),
+    };
+    let (host, name) = match rest.split_once('#') {
+        Some((host, name)) => {
+            if !tls {
+                return Err("a name after '#' needs a tls:// or xot:// master".to_string());
+            }
+            let name = name.trim();
+            if name.is_empty() {
+                return Err("the name after '#' is empty".to_string());
+            }
+            (host, Some(name.to_string()))
+        }
+        None => (rest, None),
+    };
+    let addr = if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        std::net::SocketAddr::new(ip, if tls { 853 } else { 53 })
+    } else {
+        host.parse::<std::net::SocketAddr>()
+            .map_err(|e| format!("cannot parse as IP[:port]: {e}"))?
+    };
+    if !tls {
+        return Ok(TransferMaster {
+            addr,
+            tls_name: None,
+        });
+    }
+    let tls_name = name.unwrap_or_else(|| addr.ip().to_string());
+    Ok(TransferMaster {
+        addr,
+        tls_name: Some(tls_name),
+    })
 }
 
 /// Core UDP/TCP DNS listener settings.
@@ -3965,6 +4174,13 @@ pub struct RecursiveSettings {
     /// crate), and a wrong mark then takes the name out. Off keeps
     /// validation for the AD bit only.
     pub dnssec_reject_bogus: bool,
+    /// Aggressive use of DNSSEC-validated cache (RFC 8198): answer a name
+    /// that a cached, validated NSEC record already proves does not exist
+    /// (NXDOMAIN) or has no records of the asked type (NODATA), instead of
+    /// asking the authoritative servers again. Requires `dnssec_validate`;
+    /// zones signed with NSEC3 are not synthesized (RFC 8198 section 5.2)
+    /// and resolve as usual.
+    pub aggressive_nsec: bool,
     /// Lower bound, in seconds, applied to cached *positive* TTLs.
     /// A record whose authoritative TTL is below this is kept in cache for at
     /// least this long so very-short-TTL answers are not churned out of the
@@ -4341,6 +4557,7 @@ impl Default for RecursiveSettings {
             attempts: 3,
             dnssec_validate: true,
             dnssec_reject_bogus: false,
+            aggressive_nsec: false,
             min_cache_ttl: 0,
             negative_cache_ttl: 3600,
             max_cache_ttl: 0,
@@ -4420,6 +4637,17 @@ pub struct AuthoritativeSettings {
     /// How often (seconds) the DNSSEC maintenance task checks signature age
     /// and key rollover state.
     pub dnssec_maintenance_secs: u64,
+    /// PEM certificate files trusted, in addition to the public roots, when
+    /// a secondary zone transfers over TLS (XoT, RFC 9103). Empty trusts the
+    /// public roots only, which is enough for a master with a public
+    /// certificate.
+    pub xot_ca_certs: Vec<String>,
+    /// Number of recent changes retained per zone for incremental IXFR.
+    /// Values are 1..=4096; the default keeps the newest 64 changes.
+    pub ixfr_journal_depth: usize,
+    /// Maximum number of changed records sent in an IXFR response before
+    /// falling back to AXFR. Zero always falls back; default is 10,000.
+    pub ixfr_max_records: usize,
     /// Serve AXFR/IXFR zone transfers for hosted zones.
     pub axfr_enabled: bool,
     /// Client networks allowed to request zone transfers. When empty, any
@@ -4490,6 +4718,9 @@ impl Default for AuthoritativeSettings {
             dnssec_rollover_overlap_days: 30,
             dnssec_rollover_retire_days: 14,
             dnssec_maintenance_secs: 3600,
+            xot_ca_certs: vec![],
+            ixfr_journal_depth: 64,
+            ixfr_max_records: 10_000,
             axfr_enabled: false,
             axfr_networks: vec![],
             allow_dynamic_updates: false,
@@ -5546,6 +5777,8 @@ mod tests {
         a.dnssec_rollover_overlap_days += 1;
         a.dnssec_rollover_retire_days += 1;
         a.dnssec_maintenance_secs += 1;
+        a.ixfr_journal_depth = 123;
+        a.ixfr_max_records = 456;
         let stored = serde_json::to_string(&RuntimeSettings::capture(&c)).unwrap();
         let overlay: RuntimeSettings = serde_json::from_str(&stored).unwrap();
         let mut restored = DaygleConfig::default();
@@ -6961,6 +7194,82 @@ masters = ["not-an-addr"]
             parse_master_addr("[2001:db8::1]:5353").unwrap(),
             "[2001:db8::1]:5353".parse().unwrap()
         );
+    }
+
+    #[test]
+    fn tls_master_entries_parse() {
+        let master = parse_transfer_master("tls://192.0.2.1").unwrap();
+        assert_eq!(master.addr, "192.0.2.1:853".parse().unwrap());
+        assert_eq!(master.tls_name.as_deref(), Some("192.0.2.1"));
+        let master = parse_transfer_master("xot://[2001:db8::1]:8853#ns1.example.com").unwrap();
+        assert_eq!(master.addr, "[2001:db8::1]:8853".parse().unwrap());
+        assert_eq!(master.tls_name.as_deref(), Some("ns1.example.com"));
+        assert!(parse_transfer_master("192.0.2.1#ns1.example.com").is_err());
+        // Plain masters stay plain.
+        assert_eq!(parse_transfer_master("192.0.2.1").unwrap().tls_name, None);
+    }
+
+    #[test]
+    fn config_accepts_tls_masters() {
+        let text = r#"
+[[authoritative.secondary_zones]]
+name = "example.com"
+masters = ["tls://192.0.2.1:853#ns1.example.com"]
+"#;
+        let cfg = DaygleConfig::parse(text).unwrap();
+        assert_eq!(
+            cfg.authoritative.secondary_zones[0].masters,
+            vec!["tls://192.0.2.1:853#ns1.example.com".to_string()]
+        );
+    }
+
+    #[test]
+    fn xot_ca_certs_parse_and_reject_blanks() {
+        let text = r#"
+[authoritative]
+xot_ca_certs = ["/etc/ssl/private-ca.pem"]
+"#;
+        let cfg = DaygleConfig::parse(text).unwrap();
+        assert_eq!(
+            cfg.authoritative.xot_ca_certs,
+            vec!["/etc/ssl/private-ca.pem".to_string()]
+        );
+
+        let text = r#"
+[authoritative]
+xot_ca_certs = ["  "]
+"#;
+        assert!(DaygleConfig::parse(text).is_err());
+    }
+
+    #[test]
+    fn ixfr_limits_parse_validate_and_default() {
+        let defaults = DaygleConfig::default().authoritative;
+        assert_eq!(defaults.ixfr_journal_depth, 64);
+        assert_eq!(defaults.ixfr_max_records, 10_000);
+
+        let cfg = DaygleConfig::parse(
+            r#"
+[authoritative]
+ixfr_journal_depth = 256
+ixfr_max_records = 0
+"#,
+        )
+        .unwrap();
+        assert_eq!(cfg.authoritative.ixfr_journal_depth, 256);
+        assert_eq!(cfg.authoritative.ixfr_max_records, 0);
+
+        for (depth, ceiling) in [(0, 1), (4097, 1), (64, 1_000_001)] {
+            let cfg = DaygleConfig {
+                authoritative: AuthoritativeSettings {
+                    ixfr_journal_depth: depth,
+                    ixfr_max_records: ceiling,
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            assert!(cfg.validate().is_err(), "accepted {depth} / {ceiling}");
+        }
     }
 
     #[test]

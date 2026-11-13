@@ -134,6 +134,267 @@ async fn ixfr_returns_full_zone() {
     shutdown(server).await;
 }
 
+/// Send an IXFR query whose authority section carries `serial` (the client's
+/// current copy) and collect every answer record, across messages.
+async fn tcp_ixfr_query(
+    addr: std::net::SocketAddr,
+    name: &str,
+    serial: u32,
+) -> Vec<hickory_proto::rr::Record> {
+    use hickory_proto::rr::{rdata::SOA, RData, Record};
+
+    let zone = Name::from_utf8(name).expect("valid name");
+    let mut msg = Message::new(0x4444, MessageType::Query, OpCode::Query);
+    msg.add_query(Query::query(zone.clone(), RecordType::IXFR));
+    let soa = SOA::new(zone.clone(), zone.clone(), serial, 3600, 600, 86400, 3600);
+    msg.add_authority(Record::from_rdata(zone, 3600, RData::SOA(soa)));
+    let bytes = msg.to_vec().expect("encode query");
+    let mut stream = tokio::net::TcpStream::connect(addr)
+        .await
+        .expect("connect TCP");
+    let mut framed = Vec::with_capacity(bytes.len() + 2);
+    framed.extend_from_slice(&(bytes.len() as u16).to_be_bytes());
+    framed.extend_from_slice(&bytes);
+    stream.write_all(&framed).await.expect("write query");
+
+    let mut records: Vec<Record> = Vec::new();
+    loop {
+        let read = tokio::time::timeout(Duration::from_secs(5), async {
+            let mut len_buf = [0u8; 2];
+            stream.read_exact(&mut len_buf).await?;
+            let len = u16::from_be_bytes(len_buf) as usize;
+            let mut body = vec![0u8; len];
+            stream.read_exact(&mut body).await?;
+            Ok::<_, std::io::Error>(body)
+        })
+        .await;
+        let Ok(Ok(body)) = read else { break };
+        let resp = Message::from_vec(&body).expect("decode response");
+        assert_eq!(resp.response_code, ResponseCode::NoError);
+        let opening = resp.answers.first().cloned();
+        // The answer ends with a copy of its opening SOA (full transfer) or
+        // is a lone SOA (already current / ask for AXFR).
+        let done = resp.answers.len() == 1
+            || opening.is_some_and(|first| {
+                first.record_type() == RecordType::SOA
+                    && resp
+                        .answers
+                        .last()
+                        .is_some_and(|last| last.data == first.data)
+            });
+        records.extend(resp.answers);
+        if done {
+            break;
+        }
+    }
+    records
+}
+
+/// IXFR for a client whose serial the journal still covers: the master
+/// answers with difference sequences (RFC 1995 §4) instead of the full zone.
+#[tokio::test]
+async fn ixfr_serves_deltas_to_a_current_client() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("daygle-dns.db");
+    let server = spawn(config_with_axfr(&db, true, vec![])).await;
+    let zone_id = seed_zone(&server, "inc.test").await;
+
+    let store = server.catalog.store();
+    let before = store.get_zone(&zone_id).unwrap().unwrap().serial;
+    let record = store
+        .list_records(&zone_id)
+        .unwrap()
+        .into_iter()
+        .find(|record| record.rtype == "A")
+        .expect("seeded A record");
+    store
+        .replace_record(
+            &zone_id,
+            &record.id,
+            &RecordInput {
+                name: "www".to_string(),
+                rtype: "A".to_string(),
+                content: "192.0.2.99".to_string(),
+                ttl: 300,
+                priority: 0,
+                disabled: false,
+            },
+        )
+        .unwrap();
+    server.catalog.reload().unwrap();
+    let after = store.get_zone(&zone_id).unwrap().unwrap().serial;
+    assert_eq!(after, before + 1, "the change must bump the serial");
+
+    let tcp = server.tcp_addr.expect("TCP enabled");
+    let answers = tcp_ixfr_query(tcp, "inc.test.", before).await;
+    let serials: Vec<u32> = answers
+        .iter()
+        .filter_map(|record| match &record.data {
+            hickory_proto::rr::RData::SOA(soa) => Some(soa.serial),
+            _ => None,
+        })
+        .collect();
+    // Current SOA, then SOA(old) deletions SOA(new) additions, then the
+    // current SOA again.
+    assert_eq!(serials, vec![after, before, after, after], "{answers:?}");
+    let data: Vec<String> = answers.iter().map(|r| r.data.to_string()).collect();
+    assert!(
+        data.iter().any(|d| d == "192.0.2.10"),
+        "the old address must be a deletion: {data:?}"
+    );
+    assert!(
+        data.iter().any(|d| d == "192.0.2.99"),
+        "the new address must be an addition: {data:?}"
+    );
+
+    // A client already at the current serial gets the lone SOA.
+    assert_eq!(tcp_ixfr_query(tcp, "inc.test.", after).await.len(), 1);
+
+    // A serial the journal no longer reaches falls back to the full zone.
+    let full = tcp_ixfr_query(tcp, "inc.test.", before.wrapping_sub(100)).await;
+    assert!(full.len() > 4, "expected a full transfer, got {full:?}");
+    assert_eq!(full.first().unwrap().record_type(), RecordType::SOA);
+    assert_eq!(full.last().unwrap().record_type(), RecordType::SOA);
+
+    shutdown(server).await;
+}
+
+/// Fetch a whole zone over DNS-over-TLS with the `xot` ALPN (RFC 9103),
+/// trusting the listener's certificate from `cert_path`.
+async fn xot_axfr(
+    addr: std::net::SocketAddr,
+    server_name: &str,
+    cert_path: &std::path::Path,
+    zone: &str,
+) -> Vec<hickory_proto::rr::Record> {
+    use rustls::pki_types::pem::PemObject;
+    use std::sync::Arc;
+
+    let tcp = tokio::net::TcpStream::connect(addr)
+        .await
+        .expect("connect XoT");
+    let mut roots = rustls::RootCertStore::empty();
+    for cert in
+        rustls::pki_types::CertificateDer::<'_>::pem_file_iter(cert_path).expect("open cert file")
+    {
+        roots.add(cert.expect("parse cert")).expect("add root");
+    }
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let mut config = rustls::ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .expect("tls versions")
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    config.alpn_protocols = vec![b"xot".to_vec()];
+    let name = rustls::pki_types::ServerName::try_from(server_name.to_string())
+        .expect("server name")
+        .to_owned();
+    let mut stream = tokio_rustls::TlsConnector::from(Arc::new(config))
+        .connect(name, tcp)
+        .await
+        .expect("xot handshake");
+
+    let mut msg = Message::new(0x5555, MessageType::Query, OpCode::Query);
+    msg.add_query(Query::query(
+        Name::from_utf8(zone).expect("valid name"),
+        RecordType::AXFR,
+    ));
+    let bytes = msg.to_vec().expect("encode query");
+    let mut framed = Vec::with_capacity(bytes.len() + 2);
+    framed.extend_from_slice(&(bytes.len() as u16).to_be_bytes());
+    framed.extend_from_slice(&bytes);
+    stream.write_all(&framed).await.expect("write query");
+
+    let mut records = Vec::new();
+    loop {
+        let read = tokio::time::timeout(Duration::from_secs(5), async {
+            let mut len_buf = [0u8; 2];
+            stream.read_exact(&mut len_buf).await?;
+            let len = u16::from_be_bytes(len_buf) as usize;
+            let mut body = vec![0u8; len];
+            stream.read_exact(&mut body).await?;
+            Ok::<_, std::io::Error>(body)
+        })
+        .await;
+        let Ok(Ok(body)) = read else { break };
+        let resp = Message::from_vec(&body).expect("decode response");
+        assert_eq!(resp.response_code, ResponseCode::NoError);
+        let opening = resp.answers.first().cloned();
+        let done = opening.is_some_and(|first| {
+            first.record_type() == RecordType::SOA
+                && resp
+                    .answers
+                    .last()
+                    .is_some_and(|last| last.data == first.data)
+        });
+        records.extend(resp.answers);
+        if done {
+            break;
+        }
+    }
+    records
+}
+
+/// XoT (RFC 9103): the DoT listener also answers transfers on the `xot`
+/// ALPN, and the transfer client refuses an unverified master certificate.
+#[tokio::test]
+async fn xot_serves_transfers_over_tls() {
+    let dir = tempfile::tempdir().unwrap();
+    let cert = dir.path().join("server.crt");
+    let mut config = config_with_axfr(&dir.path().join("xot.db"), true, vec![]);
+    config.dot.enabled = true;
+    config.dot.self_signed = true;
+    config.dot.cert_path = cert.to_string_lossy().to_string();
+    config.dot.key_path = dir.path().join("server.key").to_string_lossy().to_string();
+    config.dot.server_name = "daygle.test".to_string();
+
+    let server = spawn(config).await;
+    seed_zone(&server, "xot.test").await;
+    let dot = server.dot_addr.expect("DoT is enabled");
+
+    let answers = xot_axfr(dot, "daygle.test", &cert, "xot.test.").await;
+    assert_eq!(answers.first().unwrap().record_type(), RecordType::SOA);
+    assert_eq!(answers.last().unwrap().record_type(), RecordType::SOA);
+    assert!(
+        answers.iter().any(|r| r.data.to_string() == "192.0.2.10"),
+        "the zone's A record must arrive over XoT: {answers:?}"
+    );
+
+    // A self-signed master certificate is not in the public roots, so the
+    // transfer client fails the handshake instead of leaking the zone.
+    let master =
+        daygle_dns_core::config::parse_transfer_master(&format!("tls://{dot}#daygle.test"))
+            .unwrap();
+    let err = XfrClient::new(Duration::from_secs(5))
+        .axfr(&master, &Name::from_utf8("xot.test.").unwrap())
+        .await
+        .expect_err("an untrusted master certificate must be rejected");
+    assert!(format!("{err}").contains("TLS"), "{err}");
+
+    // Trusting the listener's certificate as an extra anchor (a private CA
+    // for an internal master) makes the same transfer succeed.
+    let trusted = XfrClient::default();
+    trusted
+        .set_xot_ca_certs(&[cert.to_string_lossy().to_string()])
+        .expect("the master's certificate loads as a trust anchor");
+    let records = trusted
+        .axfr(&master, &Name::from_utf8("xot.test.").unwrap())
+        .await
+        .expect("a trusted XoT master transfers");
+    assert!(
+        records.iter().any(|r| r.data.to_string() == "192.0.2.10"),
+        "the zone must arrive from the trusted master: {records:?}"
+    );
+
+    // A bad anchor file is reported where it is set, not at transfer time.
+    let err = trusted
+        .set_xot_ca_certs(&["/nonexistent/xot-ca.pem".to_string()])
+        .expect_err("a missing CA file must be rejected");
+    assert!(format!("{err}").contains("XoT CA"), "{err}");
+
+    shutdown(server).await;
+}
+
 /// A UDP query's source address is not proven, so the zone never goes out
 /// over UDP (a forged query would aim it at someone else): AXFR is refused,
 /// and IXFR gets the current SOA alone, which sends the client to TCP.
@@ -588,19 +849,17 @@ async fn lone_soa_ixfr_replies_are_followed_correctly() {
     let zone: Name = "script.test.".parse().unwrap();
     let client = XfrClient::new(Duration::from_secs(5));
 
-    let records = client
-        .ixfr_or_axfr(master, &zone, 1, None)
-        .await
-        .unwrap()
-        .expect("a newer serial means a transfer");
+    let records = match client.ixfr(master, &zone, 1, None).await.unwrap() {
+        daygle_dns_authoritative::Ixfr::Full(records) => records,
+        other => panic!("a newer serial means a full transfer, got {other:?}"),
+    };
     assert_eq!(records.len(), 3, "{records:?}");
     assert!(records.iter().any(|r| r.data.to_string() == "192.0.2.7"));
 
-    assert!(client
-        .ixfr_or_axfr(master, &zone, 5, None)
-        .await
-        .unwrap()
-        .is_none());
+    assert_eq!(
+        client.ixfr(master, &zone, 5, None).await.unwrap(),
+        daygle_dns_authoritative::Ixfr::UpToDate
+    );
 
     // A secondary of this master fills the zone on its first refresh.
     let dir = tempfile::tempdir().unwrap();

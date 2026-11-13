@@ -18,8 +18,8 @@ mod cert;
 
 pub use cert::{
     crypto_provider, describe_certificate, ensure_certificate, ensure_certificate_paths,
-    generate_self_signed, generate_self_signed_pem, load_tls_config, load_tls_config_versions,
-    tls_config_from_pem, validate_pem_pair, CertificateInfo,
+    generate_self_signed, generate_self_signed_pem, load_tls_config, load_tls_config_alpns,
+    load_tls_config_versions, tls_config_from_pem, validate_pem_pair, CertificateInfo,
 };
 
 use std::sync::Arc;
@@ -39,12 +39,22 @@ pub const DOH_ALPN: &[u8] = b"h2";
 pub const DOQ_ALPN: &[u8] = b"doq";
 /// The ALPN protocol identifier for HTTP/3 (DoH over QUIC).
 pub const DOH3_ALPN: &[u8] = b"h3";
+/// The ALPN protocol identifier for zone transfers over TLS (XoT, RFC 9103).
+pub const XOT_ALPN: &[u8] = b"xot";
 
 /// Build the TLS configuration described by `settings`, generating a
 /// self-signed certificate when requested and none is present.
 pub fn build_tls_config(settings: &DotSettings) -> Result<Arc<ServerConfig>> {
     ensure_certificate(settings)?;
-    load_tls_config(&settings.cert_path, &settings.key_path, DOT_ALPN).map(Arc::new)
+    // RFC 9103: zone transfers over TLS use the "xot" ALPN on the same
+    // listener as DoT, so both are offered here.
+    load_tls_config_alpns(
+        &settings.cert_path,
+        &settings.key_path,
+        &[DOT_ALPN, XOT_ALPN],
+        rustls::DEFAULT_VERSIONS,
+    )
+    .map(Arc::new)
 }
 
 /// Build the DoH TLS configuration (h2 ALPN) from `settings`, generating a
