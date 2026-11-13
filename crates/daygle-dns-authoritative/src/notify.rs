@@ -196,10 +196,13 @@ impl NotifyInbound {
         // `to_string()` renders `xn--` labels as Unicode.
         let zone = normalize(query.name().to_ascii());
         let src_ip = client.to_canonical();
+        // Secondary masters may be XoT entries (`tls://IP[:port][#name]`),
+        // so parse them the way the transfer path does; plain `IP[:port]`
+        // entries (catalog consumers included) parse the same either way.
         let from_master = |masters: &[String]| {
             masters.iter().any(|m| {
-                daygle_dns_core::config::parse_master_addr(m)
-                    .map(|addr| addr.ip() == src_ip)
+                daygle_dns_core::config::parse_transfer_master(m)
+                    .map(|master| master.addr.ip().to_canonical() == src_ip)
                     .unwrap_or(false)
             })
         };

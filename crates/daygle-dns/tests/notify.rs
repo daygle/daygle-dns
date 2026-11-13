@@ -180,6 +180,29 @@ async fn notify_unknown_zone_or_non_master_is_notimp() {
     shutdown(master).await;
 }
 
+/// A zone transferred over TLS (a `tls://` master) still accepts NOTIFY from
+/// that master's address.
+#[tokio::test]
+async fn notify_from_a_tls_master_is_accepted() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = base_config(&dir.path().join("secondary.db"));
+    config.authoritative.secondary_zones = vec![
+        secondary_config("xot-notify.test", "tls://127.0.0.1:9#ns1.xot-notify.test"),
+        secondary_config("xot-elsewhere.test", "tls://192.0.2.1:853"),
+    ];
+    config.authoritative.notify_listen_enabled = true;
+    let secondary = spawn(config).await;
+    let udp = secondary.udp_addr.expect("secondary UDP enabled");
+
+    let reply = udp_send(udp, &notify_message("xot-notify.test.", 5)).await;
+    assert_eq!(reply.response_code, ResponseCode::NoError);
+    // A TLS master elsewhere does not make every sender a master.
+    let reply = udp_send(udp, &notify_message("xot-elsewhere.test.", 5)).await;
+    assert_eq!(reply.response_code, ResponseCode::NotImp);
+
+    shutdown(secondary).await;
+}
+
 /// A PROXY front must not make every sender appear to be the loopback master.
 #[tokio::test]
 async fn notify_uses_the_client_named_by_a_trusted_proxy() {

@@ -3727,9 +3727,8 @@ fn fallback_response() -> ResponseInfo {
 mod tests {
     use super::*;
 
-    /// The order Daygle sent for www.nab.com.au (addresses first, then the
-    /// chain backwards) comes out as the chain from the query name, which
-    /// is what Android's resolver needs to find the addresses.
+    /// EDNS TCP Keepalive (RFC 7828) is answered only for an empty option
+    /// on a stream transport.
     #[test]
     fn tcp_keepalive_requires_an_empty_option_on_stream_transports() {
         use hickory_proto::op::{Edns, Message, Query};
@@ -3762,6 +3761,9 @@ mod tests {
         assert_eq!(requested_keepalive_timeout(&absent, timeout), None);
     }
 
+    /// The order Daygle sent for www.nab.com.au (addresses first, then the
+    /// chain backwards) comes out as the chain from the query name, which
+    /// is what Android's resolver needs to find the addresses.
     #[test]
     fn answers_are_put_in_cname_chain_order() {
         use hickory_proto::rr::rdata::{A, CNAME};
