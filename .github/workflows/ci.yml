@@ -111,3 +111,83 @@ jobs:
 
       - name: Run tests
         run: cargo test --locked --workspace
+
+  # The Rust tests hold the OpenAPI path table against the router, but they
+  # cannot tell a valid OpenAPI document from an invalid one. Build the
+  # server, fetch the document it actually serves and check it against the
+  # 3.1 schema, so a schema mistake fails here instead of reaching a client
+  # generator.
+  openapi:
+    name: OpenAPI document
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo builds
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build the server
+        run: cargo build --locked -p daygle-dns
+
+      # A throwaway instance: no DNS listeners, no recursion, no update
+      # checks, auth off, and its database in the runner's temp dir.
+      - name: Serve the document
+        run: |
+          set -eu
+          config="$RUNNER_TEMP/openapi-ci.toml"
+          cat > "$config" <<EOF
+          [server]
+          listen = "127.0.0.1"
+          port = 0
+          udp_enabled = false
+          tcp_enabled = false
+          reload_enabled = false
+
+          [api]
+          listen = "127.0.0.1"
+          port = 53800
+          auth_required = false
+          gui_enabled = false
+
+          [authoritative]
+          database = "$RUNNER_TEMP/openapi-ci.db"
+
+          [recursive]
+          enabled = false
+
+          [updates]
+          enabled = false
+
+          [ai]
+          enabled = false
+          EOF
+          ./target/debug/daygle-dns --config "$config" > "$RUNNER_TEMP/server.log" 2>&1 &
+          echo $! > "$RUNNER_TEMP/server.pid"
+          for attempt in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:53800/api/openapi.json -o "$RUNNER_TEMP/openapi.json"; then
+              echo "served the document after $attempt attempt(s)"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::the server never answered GET /api/openapi.json"
+          cat "$RUNNER_TEMP/server.log"
+          exit 1
+
+      - name: Validate the document
+        run: |
+          set -eu
+          # A venv: Ubuntu's system Python refuses a global install.
+          python3 -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/python" -m pip install --quiet --disable-pip-version-check openapi-spec-validator
+          "$RUNNER_TEMP/venv/bin/python" -m openapi_spec_validator --schema 3.1 --validation-errors all "$RUNNER_TEMP/openapi.json"
+
+      - name: Stop the server
+        if: always()
+        run: |
+          if [ -f "$RUNNER_TEMP/server.pid" ]; then
+            kill "$(cat "$RUNNER_TEMP/server.pid")" || true
+          fi
