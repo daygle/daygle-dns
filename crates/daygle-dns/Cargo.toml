@@ -46,6 +46,11 @@ chrono.workspace = true
 getrandom.workspace = true
 siphasher.workspace = true
 
+# Plain-UDP replies are sent from the address each query arrived on
+# (IP_PKTINFO / IPV6_PKTINFO): see src/udp.rs.
+[target.'cfg(target_os = "linux")'.dependencies]
+nix.workspace = true
+
 [features]
 default = ["verifier-onnx"]
 # Builds with --no-default-features (a static musl build) exclude the ONNX

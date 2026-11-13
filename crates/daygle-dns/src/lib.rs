@@ -19,6 +19,8 @@ mod response_filter;
 pub mod rrl;
 pub mod syslog;
 pub mod tls_diag;
+#[cfg(target_os = "linux")]
+mod udp;
 pub mod web;
 
 use std::path::PathBuf;
@@ -1346,8 +1348,8 @@ async fn bind_listeners_inner(
         ipv6_only,
     )?;
 
-    // PROXY protocol: TCP-based listeners are fronted (see
-    // `proxy_protocol`), and Hickory serves a hidden loopback listener.
+    // PROXY protocol: the TCP, DoT and DoH listeners read a trusted load
+    // balancer's header themselves (see `proxy_protocol`).
     let proxy_protocol = config.with_networks_resolved().server.proxy_protocol;
     let proxy_trusted: Option<Arc<Vec<ipnet::IpNet>>> = (!proxy_protocol.is_empty()).then(|| {
         Arc::new(
@@ -1357,25 +1359,6 @@ async fn bind_listeners_inner(
                 .collect(),
         )
     });
-    let token = server.shutdown_token().clone();
-    let serve = |public: tokio::net::TcpListener,
-                 connection_limit: Option<usize>|
-     -> Result<tokio::net::TcpListener> {
-        let Some(trusted) = &proxy_trusted else {
-            return Ok(public);
-        };
-        let hidden = net::bind_tcp(([127, 0, 0, 1], 0).into(), false)?;
-        let max_connections =
-            connection_limit.unwrap_or(config.server.proxy_protocol_max_connections);
-        let _front = proxy_protocol::spawn_front(
-            public,
-            hidden.local_addr()?,
-            trusted.clone(),
-            max_connections,
-            token.clone(),
-        );
-        Ok(hidden)
-    };
 
     // `addrs` records the first address of each listener.
     if config.server.udp_enabled {
@@ -1400,6 +1383,18 @@ async fn bind_listeners_inner(
             let socket = tokio::net::UdpSocket::from_std(std_socket)?;
             let bound = socket.local_addr()?;
             addrs.udp.get_or_insert(bound);
+            // Linux: answered by our own listener, from the address each
+            // query was sent to (see `udp`). Elsewhere, by Hickory's.
+            #[cfg(target_os = "linux")]
+            {
+                udp::enable_destination_info(&socket)?;
+                native_tasks.push(tokio::spawn(udp::serve_udp(
+                    socket,
+                    dispatcher.clone(),
+                    server.shutdown_token().clone(),
+                )));
+            }
+            #[cfg(not(target_os = "linux"))]
             server.register_socket(socket);
             info!(
                 addr = %bound,
@@ -1414,12 +1409,26 @@ async fn bind_listeners_inner(
             let listener = net::bind_tcp(addr, v6_only)?;
             let bound = listener.local_addr()?;
             addrs.tcp.get_or_insert(bound);
-            server.register_listener(
-                serve(listener, None)?,
-                Duration::from_millis(config.server.tcp_timeout_ms),
-                config.server.response_buffer_size,
+            // Served like DoT, without TLS: queries of one connection are
+            // answered concurrently, and connections are admitted up to
+            // `server.tcp_max_connections`.
+            native_tasks.push(tokio::spawn(crate::dot::serve_tcp(
+                listener,
+                dispatcher.clone(),
+                session.clone(),
+                server.shutdown_token().clone(),
+                crate::dot::DotOptions {
+                    max_connections: config.server.tcp_max_connections,
+                    timeout: Duration::ZERO,
+                    idle: Duration::from_millis(config.server.tcp_timeout_ms),
+                    proxy_trusted: proxy_trusted.clone(),
+                },
+            )));
+            info!(
+                addr = %bound,
+                max_connections = config.server.tcp_max_connections,
+                "plaintext TCP DNS listening"
             );
-            info!(addr = %bound, "plaintext TCP DNS listening");
         }
     }
 

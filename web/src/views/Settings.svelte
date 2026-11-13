@@ -471,7 +471,7 @@
     const r = d.recursive;
     if (tab === 'general') {
       display_ = { time_zone: 'system', date_format: 'system', time_format: 'system', ...d.display };
-      server = { ...server, ...pick(d.server, ['tcp_timeout_ms', 'dns_cookies']) };
+      server = { ...server, ...pick(d.server, ['tcp_timeout_ms', 'tcp_max_connections', 'dns_cookies']) };
     } else if (tab === 'recursive') {
       rootHintsText = (r.root_hints || []).join('\n');
       recursive = {
@@ -606,6 +606,7 @@
       server: {
         client_timeout_ms: Number(server.client_timeout_ms),
         tcp_timeout_ms: Number(server.tcp_timeout_ms),
+        tcp_max_connections: Number(server.tcp_max_connections),
         dns_cookies: !!server.dns_cookies,
       },
       rate_limit: {
@@ -917,14 +918,18 @@
     </p>
     <div class="form-grid" style="margin-top: 12px">
       <label><span>TCP Idle Timeout (Milliseconds)</span><input type="number" min="100" max="3600000" step="100" bind:value={server.tcp_timeout_ms} /></label>
+      <label><span>TCP Maximum Connections</span><input type="number" min="1" max="65536" bind:value={server.tcp_max_connections} /></label>
       <label class="check"><input type="checkbox" bind:checked={server.dns_cookies} /> <span>DNS Cookies (RFC 7873)</span></label>
     </div>
     <p class="muted help">
       TCP Idle Timeout is how long a plain DNS-over-TCP connection may sit
-      unused before it is closed. DNS cookies let clients prove they really
+      unused before it is closed. TCP Maximum Connections caps the plain TCP
+      connections served at once; one public client may hold an eighth of
+      them (private and loopback clients are not capped individually), and
+      the queries of one connection are answered concurrently. DNS cookies let clients prove they really
       own their address, which protects against spoofed queries; clients that
       send a valid cookie are never response-rate-limited and get ten times
-      the per-client query limit (Rate Limiting tab). Changing either
+      the per-client query limit (Rate Limiting tab). Changing any of these
       restarts the DNS listeners for a moment.
     </p>
   </div>

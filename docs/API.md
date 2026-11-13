@@ -494,7 +494,7 @@ PUT /api/config
 
 Editable groups: `server` (listen/ipv6_only/port/udp_enabled/tcp_enabled/proxy_protocol,
 and the stored, console-edited `client_timeout_ms` (1000-10000, applied live),
-`tcp_timeout_ms` and `dns_cookies`), `recursive`
+`tcp_timeout_ms`, `tcp_max_connections` (1-65536) and `dns_cookies`), `recursive`
 (enabled/mode/upstreams/use_system_config/dnssec_validate/dnssec_reject_bogus/aggressive_nsec/cache_size/
 min_cache_ttl/max_cache_ttl/negative_cache_ttl/failure_cache_ttl/
 prefetch_* (including prefetch_window_secs)/serve_stale_secs/max_concurrent_lookups/
@@ -534,7 +534,7 @@ client_window_secs/domain_max_queries/domain_window_secs/exempt_loopback/
 client_ipv6_prefix, applied live). Runtime groups (`recursive`, `dot`, `doh`, `doq`,
 `policy`, `authoritative`, `ai`, `display`, `alerts`, `rrl`, `rate_limit`, `rpz`)
 are stored in the database and survive restarts and config-file edits, as
-are `server.client_timeout_ms`/`tcp_timeout_ms`/`dns_cookies`; the rest of
+are `server.client_timeout_ms`/`tcp_timeout_ms`/`tcp_max_connections`/`dns_cookies`; the rest of
 `server.*` and `api.*` stay config-file-owned so a broken listener can always
 be fixed by editing the file. Those are applied to the running server when
 sent in a `PUT` but not stored, so they revert at the next restart; the

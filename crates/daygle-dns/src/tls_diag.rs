@@ -20,9 +20,7 @@
 //!   Entries carry the same protocol values the query log records (`tls`,
 //!   `https`, `quic`) as their console Server Log component, so the two logs
 //!   correlate, and they feed syslog when it is enabled.
-//!   A client address behind a listener's admission bridge is translated to
-//!   the real peer with [`crate::proxy_protocol::real_client`], like the
-//!   query log does. The DoT and DoQ listeners (`dot`, `doq`) record their
+//!   The DoT and DoQ listeners (`dot`, `doq`) record their
 //!   failures here directly, with the client address.
 //! - **Hickory bridge** ([`hickory_bridge`]): Hickory's DoH listener logs
 //!   handshake failures at `debug` and request rejections at `warn`, but
@@ -47,8 +45,10 @@ use tracing::{Event, Subscriber};
 use tracing_subscriber::layer::{Context, Layer};
 use tracing_subscriber::registry::LookupSpan;
 
-/// The protocol tags used for encrypted-DNS diagnostics - exactly the values
-/// the query log records, so failures and served queries correlate.
+/// The protocol tags used for session diagnostics - exactly the values the
+/// query log records, so failures and served queries correlate. (Plain TCP
+/// shares the DoT listener, so its refusals are recorded the same way.)
+pub const TCP: &str = "tcp";
 pub const TLS: &str = "tls";
 pub const HTTPS: &str = "https";
 pub const QUIC: &str = "quic";
@@ -232,12 +232,9 @@ impl SessionLog {
         }
     }
 
-    /// Record one session event for the accepted peer `peer` of a TCP-based
-    /// listener, resolving the admission bridge's loopback address back to
-    /// the client that actually connected.
+    /// Record one session event for the accepted peer `peer`.
     pub fn record_peer(&self, protocol: &'static str, peer: Option<SocketAddr>, reason: &str) {
-        let client = peer.map(|addr| crate::proxy_protocol::real_client(addr).ip());
-        self.record(protocol, client, reason);
+        self.record(protocol, peer.map(|addr| addr.ip()), reason);
     }
 }
 
@@ -885,23 +882,6 @@ mod tests {
         );
         let chain = format!("{}{}", leaf.pem(), ca_cert.pem());
         assert_eq!(public_cert_problem(&chain), None);
-    }
-
-    #[test]
-    fn attributes_failures_to_the_client_behind_the_admission_bridge() {
-        let logs = store();
-        let session = SessionLog::with_interval(logs.clone(), Duration::from_secs(60));
-        // The admitted connection reaches hickory from a loopback backend;
-        // the bridge maps that local address back to the real peer.
-        let backend: SocketAddr = "127.0.0.1:41234".parse().unwrap();
-        let client: SocketAddr = "198.51.100.20:5555".parse().unwrap();
-        crate::proxy_protocol::register_client(backend, client);
-        session.record_peer(TLS, Some(backend), "connection reset");
-        crate::proxy_protocol::unregister_client(backend);
-        let entries = warns(&logs, TLS);
-        assert_eq!(entries.len(), 1, "{entries:?}");
-        assert!(entries[0].contains("198.51.100.20"), "{entries:?}");
-        assert!(!entries[0].contains("127.0.0.1"), "{entries:?}");
     }
 
     #[test]

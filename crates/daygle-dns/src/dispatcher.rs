@@ -986,7 +986,7 @@ impl RequestHandler for DnsDispatcher {
                     response_handle,
                     request,
                     dnstap.clone(),
-                    crate::proxy_protocol::real_client(request.src()),
+                    request.src(),
                 );
                 return self.dispatch_wrapped(request, handle).await;
             }
@@ -1033,11 +1033,9 @@ impl DnsDispatcher {
         // IPv4-mapped IPv6 sources (an IPv4 client on a dual-stack `::`
         // listener) are canonicalized to plain IPv4 so IPv4 ACLs, rate
         // limits, split-horizon networks and transfer allow-lists match them.
-        // Behind a PROXY protocol or bounded listener front, the original
-        // remote address is restored through the bridge peer mapping.
-        let client = crate::proxy_protocol::real_client(request.src())
-            .ip()
-            .to_canonical();
+        // Behind a trusted load balancer, the listener has already put the
+        // client its PROXY header names in the request.
+        let client = request.src().ip().to_canonical();
         let protocol = protocol_label(request.protocol());
 
         // Enforce encrypted-listener ACLs before opcode-specific handlers.
