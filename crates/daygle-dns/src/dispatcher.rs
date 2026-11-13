@@ -2874,8 +2874,9 @@ impl DnsDispatcher {
     }
 
     /// The enabled encrypted listeners and the name each is reached by:
-    /// `ddr.name`, else the name its certificate was made for. Derived once
-    /// per configuration (see [`DdrTargets`]).
+    /// `ddr.name`, else a name its certificate covers (see
+    /// [`crate::tls_diag::ddr_target_name`]). Derived once per configuration
+    /// (see [`DdrTargets`]).
     fn ddr_targets(
         &self,
         config: &Arc<daygle_dns_core::config::DaygleConfig>,
@@ -2897,45 +2898,60 @@ impl DnsDispatcher {
         &self,
         config: &daygle_dns_core::config::DaygleConfig,
     ) -> Vec<(&'static str, String)> {
-        let name_of = |certificate: &str, server_name: &str| -> String {
-            let fixed = config.ddr.name.trim().trim_end_matches('.');
+        let fixed = config.ddr.name.trim().trim_end_matches('.');
+        let name_of = |certificate: &str, cert_path: &str, server_name: &str| -> Option<String> {
             if !fixed.is_empty() {
-                return fixed.to_ascii_lowercase();
+                return Some(fixed.to_ascii_lowercase());
             }
-            let stored = (!certificate.trim().is_empty())
-                .then(|| {
-                    self.catalog
-                        .store()
-                        .get_tls_certificate(certificate.trim())
-                        .ok()
-                        .flatten()
-                })
-                .flatten()
-                .map(|c| c.server_name);
-            stored
-                .unwrap_or_else(|| server_name.to_string())
-                .trim()
-                .trim_end_matches('.')
-                .to_ascii_lowercase()
+            // The certificate the listener presents: a console-managed one
+            // by name, else its file.
+            let (stored_name, pem) = if certificate.trim().is_empty() {
+                (None, std::fs::read_to_string(cert_path).ok())
+            } else {
+                match self.catalog.store().get_tls_certificate(certificate.trim()) {
+                    Ok(Some(cert)) => (Some(cert.server_name), Some(cert.cert_pem)),
+                    _ => (None, None),
+                }
+            };
+            let names = pem
+                .and_then(|pem| daygle_dns_dot::describe_certificate(&pem).ok())
+                .map(|info| info.names)
+                .unwrap_or_default();
+            crate::tls_diag::ddr_target_name(stored_name.as_deref(), &names, server_name)
         };
         let mut out = Vec::new();
-        if config.doh.enabled {
-            out.push((
+        for (kind, enabled, certificate, cert_path, server_name) in [
+            (
                 "doh",
-                name_of(&config.doh.certificate, &config.doh.server_name),
-            ));
-        }
-        if config.dot.enabled {
-            out.push((
+                config.doh.enabled,
+                &config.doh.certificate,
+                &config.doh.cert_path,
+                &config.doh.server_name,
+            ),
+            (
                 "dot",
-                name_of(&config.dot.certificate, &config.dot.server_name),
-            ));
-        }
-        if config.doq.enabled {
-            out.push((
+                config.dot.enabled,
+                &config.dot.certificate,
+                &config.dot.cert_path,
+                &config.dot.server_name,
+            ),
+            (
                 "doq",
-                name_of(&config.doq.certificate, &config.doq.server_name),
-            ));
+                config.doq.enabled,
+                &config.doq.certificate,
+                &config.doq.cert_path,
+                &config.doq.server_name,
+            ),
+        ] {
+            if !enabled {
+                continue;
+            }
+            // A listener with no name its certificate covers cannot be
+            // verified by any device: not advertised (the listener start
+            // explains why, see `tls_diag::report_ddr_readiness`).
+            if let Some(name) = name_of(certificate, cert_path, server_name) {
+                out.push((kind, name));
+            }
         }
         out
     }

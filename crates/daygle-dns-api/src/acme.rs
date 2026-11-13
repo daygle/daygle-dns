@@ -43,8 +43,15 @@ pub const LETS_ENCRYPT_STAGING: &str = "https://acme-staging-v02.api.letsencrypt
 
 /// Renew this many days before a certificate expires, unless set.
 const DEFAULT_RENEW_DAYS: u32 = 30;
-/// How often certificates are checked for renewal.
+/// The longest wait between renewal checks; the loop wakes sooner when a
+/// certificate falls due before then.
 const CHECK_EVERY: Duration = Duration::from_secs(12 * 3600);
+/// The shortest wait between renewal checks.
+const MIN_CHECK: Duration = Duration::from_secs(5 * 60);
+/// After a failed request, try again this soon: CAs limit failed
+/// validations (Let's Encrypt allows five an hour for a name), and a
+/// certificate inside its renewal window should not wait half a day.
+const RETRY_AFTER_FAILURE: Duration = Duration::from_secs(3600);
 /// How long the CA gets to validate the challenges and issue.
 const ORDER_TIMEOUT: Duration = Duration::from_secs(180);
 /// How long a TXT record added at Cloudflare gets to reach all of its name
@@ -286,7 +293,14 @@ async fn issue_locked(state: &AppState, name: &str) -> Result<(), String> {
         state,
         TlsCertificate {
             name: name.to_string(),
-            server_name: cert.domains[0].clone(),
+            // A name devices can connect to (DDR advertises it): the first
+            // that is not a wildcard, when there is one.
+            server_name: cert
+                .domains
+                .iter()
+                .find(|d| !d.starts_with("*."))
+                .unwrap_or(&cert.domains[0])
+                .clone(),
             cert_pem,
             key_pem,
             created_at: chrono::Utc::now().to_rfc3339(),
@@ -394,6 +408,14 @@ async fn prove_control(
             challenges.http_tokens.push(challenge.token.clone());
         }
         ready_names.push(domain);
+    }
+    // Serve every TXT record added here with one catalog rebuild, rather
+    // than one per name.
+    if !challenges.txt_records.is_empty() {
+        state
+            .catalog
+            .reload()
+            .map_err(|e| format!("cannot serve the challenge TXT records: {e}"))?;
     }
     if !challenges.cloudflare_records.is_empty() {
         tokio::time::sleep(CLOUDFLARE_PROPAGATION).await;
@@ -542,7 +564,8 @@ async fn cname_target(state: &AppState, name: &str) -> Result<Option<String>, St
 
 /// Put the DNS-01 TXT record for `domain` in the zone this server hosts
 /// for `_acme-challenge.<domain>`, or for the name a CNAME there delegates
-/// to. Returns the record's id, for removal.
+/// to. Returns the record's id, for removal. The caller reloads the catalog
+/// once every record is in.
 async fn add_txt_record(state: &AppState, domain: &str, value: &str) -> Result<String, String> {
     let challenge = format!(
         "_acme-challenge.{}",
@@ -589,10 +612,6 @@ async fn add_txt_record(state: &AppState, domain: &str, value: &str) -> Result<S
             },
         )
         .map_err(|e| format!("cannot add the TXT record for {domain}: {e}"))?;
-    state
-        .catalog
-        .reload()
-        .map_err(|e| format!("cannot serve the TXT record for {domain}: {e}"))?;
     Ok(record.id)
 }
 
@@ -660,81 +679,161 @@ async fn account(state: &AppState, settings: &AcmeSettings) -> Result<Account, S
     Ok(account)
 }
 
-/// Whether `cert` should be (re)issued now: never issued, or within the
-/// renewal window of its expiry.
-fn due(state: &AppState, cert: &AcmeCertificate, renew_days: u32) -> bool {
-    let issued = state
+/// When `cert` is due to be (re)issued (UNIX seconds): at once when it was
+/// never issued, else at [`daygle_dns_dot::renewal_due_at`].
+fn due_at(state: &AppState, cert: &AcmeCertificate, renew_days: u32) -> i64 {
+    state
         .catalog
         .store()
         .get_tls_certificate(&cert.name)
         .ok()
         .flatten()
-        .and_then(|c| daygle_dns_dot::describe_certificate(&c.cert_pem).ok());
-    match issued {
-        None => true,
-        Some(info) => info.not_after - now() < i64::from(renew_days) * 86_400,
-    }
+        .and_then(|c| daygle_dns_dot::describe_certificate(&c.cert_pem).ok())
+        .map_or(i64::MIN, |info| {
+            daygle_dns_dot::renewal_due_at(info.not_before, info.not_after, renew_days)
+        })
 }
 
-/// Request every ACME certificate that is missing or due for renewal.
-pub async fn renew_due(state: &AppState) {
+/// Request every ACME certificate that is missing or due for renewal, and
+/// return how long to wait before the next check: until the next
+/// certificate falls due, [`RETRY_AFTER_FAILURE`] after a failed one, and
+/// within [`MIN_CHECK`]..=[`CHECK_EVERY`].
+pub async fn renew_due(state: &AppState) -> Duration {
     let settings = settings(state);
     if !settings.agree_terms {
-        return;
+        return CHECK_EVERY;
     }
     let certs = match state.catalog.store().list_acme_certificates() {
         Ok(certs) => certs,
         Err(e) => {
             tracing::warn!("cannot list ACME certificates: {e}");
-            return;
+            return CHECK_EVERY;
         }
     };
+    let renew_days = settings.renew_days();
+    let retry = now() + RETRY_AFTER_FAILURE.as_secs() as i64;
+    let mut next = now() + CHECK_EVERY.as_secs() as i64;
     for cert in certs {
-        if due(state, &cert, settings.renew_days()) {
-            let _ = issue(state, &cert.name).await;
+        let mut at = due_at(state, &cert, renew_days);
+        if now() >= at {
+            at = match issue(state, &cert.name).await {
+                // Due again only at the new certificate's own renewal time
+                // (never "now", which would reissue in a loop).
+                Ok(()) => Some(due_at(state, &cert, renew_days))
+                    .filter(|at| *at > now())
+                    .unwrap_or(retry),
+                Err(_) => retry,
+            };
         }
+        next = next.min(at);
     }
+    let wait = u64::try_from(next - now()).unwrap_or(0);
+    Duration::from_secs(wait).clamp(MIN_CHECK, CHECK_EVERY)
 }
 
 /// How close to its expiry a certificate raises an alert.
 const EXPIRY_ALERT_DAYS: i64 = 14;
 
-/// Raise an alert for every console-managed certificate that expires within
-/// [`EXPIRY_ALERT_DAYS`] (or already has).
+/// How a certificate expiring at `not_after` is described in an alert, or
+/// `None` while it has longer than [`EXPIRY_ALERT_DAYS`] left.
+fn expiry_wording(not_after: i64, now: i64) -> Option<String> {
+    let days = (not_after - now).div_euclid(86_400);
+    if days >= EXPIRY_ALERT_DAYS {
+        return None;
+    }
+    Some(if days < 0 {
+        "has expired".to_string()
+    } else if days == 0 {
+        "expires today".to_string()
+    } else {
+        format!("expires in {days} day{}", if days == 1 { "" } else { "s" })
+    })
+}
+
+/// Raise an alert for every certificate the server uses that expires within
+/// [`EXPIRY_ALERT_DAYS`] (or already has): the console-managed ones, and
+/// the files the encrypted listeners load directly (renewed by something
+/// else, such as certbot, which can fail unseen). A certificate with time
+/// left clears its alert, so its next expiry is reported at once.
 fn alert_expiring_certificates(state: &AppState) {
-    let Ok(certs) = state.catalog.store().list_tls_certificates() else {
-        return;
-    };
-    for cert in certs {
-        let Ok(info) = daygle_dns_dot::describe_certificate(&cert.cert_pem) else {
-            continue;
-        };
-        let days = (info.not_after - now()).div_euclid(86_400);
-        if days >= EXPIRY_ALERT_DAYS {
-            continue;
-        }
-        let when = if days < 0 {
-            "has expired".to_string()
-        } else if days == 0 {
-            "expires today".to_string()
-        } else {
-            format!("expires in {days} day{}", if days == 1 { "" } else { "s" })
-        };
+    let alert = |key: String, title: String, message: String| {
         daygle_dns_core::alerts::raise(
             daygle_dns_core::alerts::AlertKind::CertificateExpiry,
-            format!("cert-expiry:{}", cert.name),
-            format!("Certificate '{}' {when}", cert.name),
-            format!(
-                "The certificate '{}' ({}) {when}. Renew or replace it under \
-                 Certificates; clients refuse an expired certificate.",
-                cert.name, cert.server_name
-            ),
+            key,
+            title,
+            message,
         );
+    };
+    if let Ok(certs) = state.catalog.store().list_tls_certificates() {
+        for cert in certs {
+            let Ok(info) = daygle_dns_dot::describe_certificate(&cert.cert_pem) else {
+                continue;
+            };
+            let key = format!("cert-expiry:{}", cert.name);
+            match expiry_wording(info.not_after, now()) {
+                None => daygle_dns_core::alerts::resolve(&key),
+                Some(when) => alert(
+                    key,
+                    format!("Certificate '{}' {when}", cert.name),
+                    format!(
+                        "The certificate '{}' ({}) {when}. Renew or replace it under \
+                         Certificates; clients refuse an expired certificate.",
+                        cert.name, cert.server_name
+                    ),
+                ),
+            }
+        }
+    }
+    let config = state.config.load_full();
+    let mut seen = HashSet::new();
+    for (label, enabled, certificate, cert_path) in [
+        (
+            "DoT",
+            config.dot.enabled,
+            &config.dot.certificate,
+            &config.dot.cert_path,
+        ),
+        (
+            "DoH",
+            config.doh.enabled,
+            &config.doh.certificate,
+            &config.doh.cert_path,
+        ),
+        (
+            "DoQ",
+            config.doq.enabled,
+            &config.doq.certificate,
+            &config.doq.cert_path,
+        ),
+    ] {
+        // A console-managed certificate is covered above.
+        if !enabled || !certificate.trim().is_empty() || !seen.insert(cert_path.clone()) {
+            continue;
+        }
+        let Some(info) = std::fs::read_to_string(cert_path)
+            .ok()
+            .and_then(|pem| daygle_dns_dot::describe_certificate(&pem).ok())
+        else {
+            continue;
+        };
+        let key = format!("cert-expiry:file:{cert_path}");
+        match expiry_wording(info.not_after, now()) {
+            None => daygle_dns_core::alerts::resolve(&key),
+            Some(when) => alert(
+                key,
+                format!("The {label} certificate {when}"),
+                format!(
+                    "The certificate file {cert_path} ({}) used by {label} {when}. Renew or \
+                     replace it; clients refuse an expired certificate.",
+                    info.names.join(", ")
+                ),
+            ),
+        }
     }
 }
 
-/// Renew certificates in the background: shortly after start, then twice a
-/// day.
+/// Renew certificates in the background: shortly after start, then when
+/// the next one falls due (at least every [`CHECK_EVERY`]).
 pub async fn run_renewals(state: AppState, shutdown: CancellationToken) {
     let mut wait = Duration::from_secs(60);
     loop {
@@ -742,9 +841,8 @@ pub async fn run_renewals(state: AppState, shutdown: CancellationToken) {
             _ = shutdown.cancelled() => return,
             _ = tokio::time::sleep(wait) => {}
         }
-        renew_due(&state).await;
+        wait = renew_due(&state).await;
         alert_expiring_certificates(&state);
-        wait = CHECK_EVERY;
     }
 }
 
@@ -781,6 +879,30 @@ mod tests {
             assert!(check_domains(&list(&[bad]), "http").is_err(), "{bad}");
         }
         assert!(check_domains(&list(&["", " "]), "http").is_err());
+    }
+
+    #[test]
+    fn expiry_alerts_start_two_weeks_out() {
+        let now = 1_700_000_000;
+        let day = 86_400;
+        assert_eq!(expiry_wording(now + 30 * day, now), None);
+        assert_eq!(expiry_wording(now + 14 * day, now), None);
+        assert_eq!(
+            expiry_wording(now + 13 * day + 5, now).as_deref(),
+            Some("expires in 13 days")
+        );
+        assert_eq!(
+            expiry_wording(now + day, now).as_deref(),
+            Some("expires in 1 day")
+        );
+        assert_eq!(
+            expiry_wording(now + 60, now).as_deref(),
+            Some("expires today")
+        );
+        assert_eq!(
+            expiry_wording(now - 60, now).as_deref(),
+            Some("has expired")
+        );
     }
 
     #[test]
