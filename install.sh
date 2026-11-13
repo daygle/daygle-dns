@@ -459,7 +459,7 @@ fi
 if [ "$INSTALL_MODE" = "upgrade" ]; then
     log "Existing Daygle DNS installation detected - upgrading in place."
     if [ -x "$PREFIX/bin/daygle-dns" ]; then
-        INSTALLED_VERSION="$($PREFIX/bin/daygle-dns --version 2>/dev/null || true)"
+        INSTALLED_VERSION="$("$PREFIX/bin/daygle-dns" --version 2>/dev/null || true)"
         [ -n "$INSTALLED_VERSION" ] && log "Installed version: $INSTALLED_VERSION"
     fi
     log "Existing configuration, zones, certificates, and database will be preserved."
@@ -926,7 +926,10 @@ if [ "${DAYGLE_DNS_GUI_UPDATE:-}" != "1" ]; then
         log "                Open it to create the admin account."
     fi
 
-    DNS_HOST="${LAN_IP:-<this server's address>}"
+    # The fallback text has an apostrophe, which bash (outside POSIX mode)
+    # misparses inside a quoted ${var:-word}; keep it in its own string.
+    DNS_HOST=$LAN_IP
+    [ -n "$DNS_HOST" ] || DNS_HOST="<this server's address>"
     if [ "$DNS_PORT" = "53" ]; then
         log "  DNS server:   $DNS_HOST (set it as the DNS server on your router or devices)"
     else

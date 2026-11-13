@@ -438,7 +438,10 @@ fn prune_expired(sessions: &mut HashMap<String, Session>) {
 /// [`LoginThrottle::MAX_FAILURES`] failures inside [`LoginThrottle::WINDOW`],
 /// further attempts from that address are refused until the window lapses.
 /// Keyed by address rather than username so a guesser cannot lock a real
-/// admin out of their own account.
+/// admin out of their own account. IPv6 clients are counted per `/64`
+/// ([`LoginThrottle::IPV6_PREFIX`]): one site is routed a whole `/64`, so a
+/// per-address count would let a guesser rotate through 2^64 addresses and
+/// never be throttled.
 #[derive(Default)]
 pub struct LoginThrottle {
     failures: Mutex<HashMap<std::net::IpAddr, (u32, Instant)>>,
@@ -450,9 +453,25 @@ impl LoginThrottle {
     /// Bound on tracked addresses: past it, expired entries are dropped,
     /// and if none have expired the oldest one makes room.
     const MAX_TRACKED: usize = 10_000;
+    /// IPv6 addresses are counted by this prefix (the usual size of one
+    /// site's network).
+    pub const IPV6_PREFIX: u8 = 64;
+
+    /// The address `ip`'s failures are counted under: IPv4 (and IPv4-mapped
+    /// IPv6) as is, IPv6 by its [`Self::IPV6_PREFIX`] network.
+    fn key(ip: std::net::IpAddr) -> std::net::IpAddr {
+        match ip.to_canonical() {
+            std::net::IpAddr::V6(v6) => {
+                let mask = u128::MAX << (128 - u32::from(Self::IPV6_PREFIX));
+                std::net::IpAddr::V6((u128::from(v6) & mask).into())
+            }
+            v4 => v4,
+        }
+    }
 
     /// Seconds until `ip` may try again, or `None` when it is not throttled.
     pub fn retry_after(&self, ip: std::net::IpAddr) -> Option<u64> {
+        let ip = Self::key(ip);
         let failures = self.failures.lock();
         let (count, since) = failures.get(&ip)?;
         let elapsed = since.elapsed();
@@ -462,6 +481,7 @@ impl LoginThrottle {
 
     /// Record a failed attempt from `ip`.
     pub fn record_failure(&self, ip: std::net::IpAddr) {
+        let ip = Self::key(ip);
         let mut failures = self.failures.lock();
         if failures.len() >= Self::MAX_TRACKED && !failures.contains_key(&ip) {
             failures.retain(|_, (_, since)| since.elapsed() < Self::WINDOW);
@@ -488,7 +508,7 @@ impl LoginThrottle {
 
     /// Forget `ip`'s failures (after a successful login).
     pub fn clear(&self, ip: std::net::IpAddr) {
-        self.failures.lock().remove(&ip);
+        self.failures.lock().remove(&Self::key(ip));
     }
 }
 
@@ -1283,7 +1303,7 @@ mod forwarded_tests {
 #[cfg(test)]
 mod throttle_tests {
     use super::LoginThrottle;
-    use std::net::{IpAddr, Ipv4Addr};
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
     #[test]
     fn the_tracked_set_stays_bounded_and_keeps_counting_new_addresses() {
@@ -1301,5 +1321,30 @@ mod throttle_tests {
             throttle.record_failure(newest);
         }
         assert!(throttle.retry_after(newest).is_some());
+    }
+
+    /// Rotating through the addresses of one IPv6 `/64` does not reset the
+    /// count; another `/64` is counted on its own.
+    #[test]
+    fn ipv6_failures_are_counted_per_64() {
+        let throttle = LoginThrottle::default();
+        let host = |i: u16| -> IpAddr { Ipv6Addr::new(0x2001, 0xdb8, 0, 1, 0, 0, 0, i).into() };
+        for i in 0..LoginThrottle::MAX_FAILURES {
+            throttle.record_failure(host(u16::try_from(i).unwrap()));
+        }
+        assert!(throttle.retry_after(host(0xffff)).is_some());
+        let other: IpAddr = Ipv6Addr::new(0x2001, 0xdb8, 0, 2, 0, 0, 0, 1).into();
+        assert!(throttle.retry_after(other).is_none());
+        // A success from any address in the /64 clears it.
+        throttle.clear(host(7));
+        assert!(throttle.retry_after(host(0)).is_none());
+        // IPv4-mapped addresses are counted as the IPv4 address.
+        let v4: IpAddr = Ipv4Addr::new(192, 0, 2, 1).into();
+        for _ in 0..LoginThrottle::MAX_FAILURES {
+            throttle.record_failure(v4);
+        }
+        assert!(throttle
+            .retry_after(Ipv4Addr::new(192, 0, 2, 1).to_ipv6_mapped().into())
+            .is_some());
     }
 }

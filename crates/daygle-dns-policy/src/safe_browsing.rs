@@ -27,9 +27,6 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use tracing::{info, warn};
 
-/// The Safe Browsing API.
-pub const DEFAULT_URL: &str = "https://safebrowsing.googleapis.com";
-
 /// The threat types checked, where Google offers them as URL lists for any
 /// platform.
 const THREAT_TYPES: &[&str] = &[

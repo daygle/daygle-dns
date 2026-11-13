@@ -51,9 +51,7 @@ impl Asset {
 /// Any other file (e.g. an un-hashed asset at the dist root) cannot be
 /// proven stable across rebuilds, so it falls back to `no-cache`.
 pub fn cache_control(served_path: &str) -> &'static str {
-    if served_path == "index.html" {
-        "no-cache"
-    } else if served_path.starts_with("assets/") {
+    if served_path.starts_with("assets/") {
         "public, max-age=31536000, immutable"
     } else {
         "no-cache"

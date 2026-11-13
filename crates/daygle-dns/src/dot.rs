@@ -69,6 +69,10 @@ pub const PADDING_BLOCK: usize = 468;
 /// Encoded answers queued for one connection's writer.
 const WRITE_QUEUE: usize = MAX_IN_FLIGHT * 2;
 
+/// Queued answers are gathered into one write up to about this many octets:
+/// the largest TLS record's plaintext, beyond which rustls splits it anyway.
+const WRITE_BATCH: usize = 16 * 1024;
+
 /// How long a trusted load balancer has to send its PROXY header.
 const PROXY_HEADER_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -335,21 +339,24 @@ impl Connection {
         let closed = CancellationToken::new();
 
         // One writer per connection: answers arrive in completion order and
-        // are written whole. Whatever is queued is written before a flush,
-        // so a burst of answers shares TLS records.
+        // are written whole. Whatever is already queued is gathered into one
+        // write: tokio-rustls seals and sends a TLS record on every write
+        // call, so writing frames one by one cost a record, a `send` and
+        // (with TCP_NODELAY) a segment per answer of a burst.
         let write = {
             let on_exit = closed.clone().drop_guard();
             tokio::spawn(async move {
                 let _on_exit = on_exit;
                 let bounded = |result: Result<std::io::Result<()>, _>| matches!(result, Ok(Ok(())));
-                while let Some(frame) = rx.recv().await {
-                    if !bounded(tokio::time::timeout(idle, writer.write_all(&frame)).await) {
-                        return;
-                    }
-                    while let Ok(frame) = rx.try_recv() {
-                        if !bounded(tokio::time::timeout(idle, writer.write_all(&frame)).await) {
-                            return;
+                while let Some(mut batch) = rx.recv().await {
+                    while batch.len() < WRITE_BATCH {
+                        match rx.try_recv() {
+                            Ok(frame) => batch.extend_from_slice(&frame),
+                            Err(_) => break,
                         }
+                    }
+                    if !bounded(tokio::time::timeout(idle, writer.write_all(&batch)).await) {
+                        return;
                     }
                     if !bounded(tokio::time::timeout(idle, writer.flush()).await) {
                         return;
@@ -488,7 +495,121 @@ pub(crate) fn error_message(id: u16, code: ResponseCode) -> Vec<u8> {
 /// multiple of [`PADDING_BLOCK`] octets. Unchanged when it has no OPT
 /// record, is TSIG-signed (padding would break the signature), cannot be
 /// re-read, or would outgrow a DNS message.
+///
+/// Every answer to a padded query comes through here (most DoT, DoH and
+/// DoQ clients pad), so the usual shape is handled in place: see
+/// [`pad_in_place`]. Anything else is decoded and re-encoded.
 pub(crate) fn pad_response(bytes: Vec<u8>) -> Vec<u8> {
+    match pad_in_place(bytes) {
+        Ok(padded) => padded,
+        Err(bytes) => pad_by_reencoding(bytes),
+    }
+}
+
+/// EDNS option code of Padding (RFC 7830).
+const PADDING_OPTION: u16 = 12;
+/// Record type of OPT (RFC 6891).
+const OPT_TYPE: u16 = 41;
+
+/// Pad without decoding: when the OPT record is the message's last record
+/// (as the encoder writes an unsigned message: a TSIG or SIG(0) would follow
+/// it) and carries no Padding yet, the option is appended to the end of the
+/// buffer and the OPT record's length adjusted. `Err` hands the message back
+/// unchanged for any other shape, or anything that does not walk cleanly.
+fn pad_in_place(mut bytes: Vec<u8>) -> Result<Vec<u8>, Vec<u8>> {
+    let Some((rdlen_at, rdata_at)) = last_record_if_opt(&bytes) else {
+        return Err(bytes);
+    };
+    if opt_has_padding(&bytes[rdata_at..]) {
+        return Err(bytes);
+    }
+    let len = bytes.len() + 4;
+    let pad = (PADDING_BLOCK - len % PADDING_BLOCK) % PADDING_BLOCK;
+    if len + pad > MAX_MESSAGE_LEN {
+        return Ok(bytes);
+    }
+    let rdlen = bytes.len() - rdata_at + 4 + pad;
+    let Ok(rdlen) = u16::try_from(rdlen) else {
+        return Err(bytes);
+    };
+    bytes[rdlen_at..rdlen_at + 2].copy_from_slice(&rdlen.to_be_bytes());
+    bytes.reserve_exact(4 + pad);
+    bytes.extend_from_slice(&PADDING_OPTION.to_be_bytes());
+    bytes.extend_from_slice(&(pad as u16).to_be_bytes());
+    bytes.resize(bytes.len() + pad, 0);
+    Ok(bytes)
+}
+
+/// Where the RDLENGTH field and the RDATA of the message's last record
+/// start, when that record is an OPT record ending exactly at the end of
+/// the message. `None` for any other shape or a malformed message.
+fn last_record_if_opt(bytes: &[u8]) -> Option<(usize, usize)> {
+    let count = |at: usize| -> Option<usize> {
+        Some(usize::from(u16::from_be_bytes(
+            bytes.get(at..at + 2)?.try_into().ok()?,
+        )))
+    };
+    let questions = count(4)?;
+    let records = count(6)? + count(8)? + count(10)?;
+    let mut at = 12;
+    for _ in 0..questions {
+        at = skip_name(bytes, at)? + 4;
+    }
+    let mut last = None;
+    for _ in 0..records {
+        at = skip_name(bytes, at)?;
+        let rtype = count(at)?;
+        let rdlen_at = at + 8;
+        let rdata_at = rdlen_at + 2;
+        at = rdata_at + count(rdlen_at)?;
+        last = Some((rtype, rdlen_at, rdata_at));
+    }
+    match last {
+        Some((rtype, rdlen_at, rdata_at))
+            if rtype == usize::from(OPT_TYPE) && at == bytes.len() =>
+        {
+            Some((rdlen_at, rdata_at))
+        }
+        _ => None,
+    }
+}
+
+/// The offset just past the (possibly compressed) name at `at`.
+fn skip_name(bytes: &[u8], mut at: usize) -> Option<usize> {
+    loop {
+        let len = *bytes.get(at)?;
+        match len >> 6 {
+            0 if len == 0 => return Some(at + 1),
+            0 => at += 1 + usize::from(len),
+            // A compression pointer ends the name.
+            0b11 => return (at + 2 <= bytes.len()).then_some(at + 2),
+            _ => return None,
+        }
+    }
+}
+
+/// Whether OPT RDATA `options` already holds a Padding option (or does not
+/// walk cleanly, which the slow path then sorts out).
+fn opt_has_padding(mut options: &[u8]) -> bool {
+    while !options.is_empty() {
+        let Some(header) = options.get(..4) else {
+            return true;
+        };
+        let code = u16::from_be_bytes([header[0], header[1]]);
+        let len = usize::from(u16::from_be_bytes([header[2], header[3]]));
+        if code == PADDING_OPTION {
+            return true;
+        }
+        let Some(rest) = options.get(4 + len..) else {
+            return true;
+        };
+        options = rest;
+    }
+    false
+}
+
+/// The general path: decode, replace any Padding option, re-encode.
+fn pad_by_reencoding(bytes: Vec<u8>) -> Vec<u8> {
     let Ok(mut message) = Message::from_vec(&bytes) else {
         return bytes;
     };
@@ -638,6 +759,88 @@ mod tests {
             .is_some());
         // Padding an already padded answer keeps it one block.
         assert_eq!(pad_response(padded).len(), PADDING_BLOCK);
+    }
+
+    /// A response with answers (compressed names), an authority, an extra
+    /// additional record and EDNS options before the padding.
+    fn rich_response() -> Vec<u8> {
+        use hickory_proto::rr::rdata::{A, NS};
+        use hickory_proto::rr::RData;
+        let name = Name::from_ascii("www.example.com.").unwrap();
+        let zone = Name::from_ascii("example.com.").unwrap();
+        let ns = Name::from_ascii("ns1.example.com.").unwrap();
+        let mut message = Message::new(11, MessageType::Response, OpCode::Query);
+        message.add_query(Query::query(name.clone(), RecordType::A));
+        for last in 1..=3 {
+            message.add_answer(Record::from_rdata(
+                name.clone(),
+                300,
+                RData::A(A::new(192, 0, 2, last)),
+            ));
+        }
+        message.add_authority(Record::from_rdata(zone, 300, RData::NS(NS(ns.clone()))));
+        message.add_additional(Record::from_rdata(ns, 300, RData::A(A::new(192, 0, 2, 53))));
+        let mut edns = Edns::new();
+        edns.options_mut().insert(EdnsOption::Unknown(
+            u16::from(EdnsCode::Cookie),
+            vec![7; 24],
+        ));
+        message.edns = Some(edns);
+        message.to_vec().unwrap()
+    }
+
+    #[test]
+    fn pads_in_place_exactly_as_reencoding_would() {
+        for bytes in [response_with_edns(), rich_response()] {
+            let fast = pad_in_place(bytes.clone()).expect("the usual shape is padded in place");
+            assert_eq!(fast.len() % PADDING_BLOCK, 0, "{} octets", fast.len());
+            let slow = pad_by_reencoding(bytes.clone());
+            assert_eq!(fast.len(), slow.len());
+            // Same message apart from where the encoder put things.
+            let (fast, slow) = (
+                Message::from_vec(&fast).unwrap(),
+                Message::from_vec(&slow).unwrap(),
+            );
+            assert_eq!(fast, slow);
+            assert_eq!(fast, {
+                let mut original = Message::from_vec(&bytes).unwrap();
+                let padding = slow
+                    .edns
+                    .as_ref()
+                    .unwrap()
+                    .option(EdnsCode::Padding)
+                    .cloned();
+                original
+                    .edns
+                    .as_mut()
+                    .unwrap()
+                    .options_mut()
+                    .insert(padding.unwrap());
+                original
+            });
+        }
+    }
+
+    #[test]
+    fn falls_back_for_other_shapes() {
+        // No OPT record.
+        let mut message = Message::new(9, MessageType::Response, OpCode::Query);
+        message.add_query(Query::query(
+            Name::from_ascii("example.com.").unwrap(),
+            RecordType::A,
+        ));
+        assert!(pad_in_place(message.to_vec().unwrap()).is_err());
+        // Already padded: the slow path replaces the option.
+        let padded = pad_response(response_with_edns());
+        assert!(pad_in_place(padded.clone()).is_err());
+        assert_eq!(pad_response(padded).len(), PADDING_BLOCK);
+        // Truncated or garbage input is handed back untouched.
+        let bytes = rich_response();
+        for cut in [0, 5, 12, 20, bytes.len() - 1] {
+            let short = bytes[..cut].to_vec();
+            assert_eq!(pad_response(short.clone()), short, "cut at {cut}");
+        }
+        assert_eq!(pad_response(vec![0xff; 40]), vec![0xff; 40]);
     }
 
     #[test]

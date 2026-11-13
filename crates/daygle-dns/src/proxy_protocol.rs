@@ -217,24 +217,39 @@ async fn splice(
         peer
     };
     // Bind the backend socket and register its local address before
-    // connecting (as `connection_admission::bridge` does): once connected,
-    // the listener may accept and look up the peer immediately.
+    // connecting: once connected, the listener may accept and look up the
+    // peer immediately.
     let socket = match backend {
         SocketAddr::V4(_) => TcpSocket::new_v4()?,
         SocketAddr::V6(_) => TcpSocket::new_v6()?,
     };
     socket.bind(SocketAddr::new(backend.ip(), 0))?;
-    let local = socket.local_addr()?;
-    register_client(local, client);
-    let result = match socket.connect(backend).await {
-        Ok(mut inner) => tokio::select! {
-            _ = shutdown.cancelled() => Ok(()),
-            copied = tokio::io::copy_bidirectional(&mut stream, &mut inner) => copied.map(|_| ()),
-        },
-        Err(e) => Err(e),
-    };
-    unregister_client(local);
-    result
+    let _mapping = Registration::new(socket.local_addr()?, client);
+    let mut inner = socket.connect(backend).await?;
+    tokio::select! {
+        _ = shutdown.cancelled() => Ok(()),
+        copied = tokio::io::copy_bidirectional(&mut stream, &mut inner) => copied.map(|_| ()),
+    }
+}
+
+/// A peer mapping that is removed when dropped - including when the task
+/// holding it is aborted (the front's `JoinSet` aborts its connections when
+/// the listener shuts down). Otherwise a stale entry would outlive the
+/// connection, and a later loopback connection that happened to reuse the
+/// same ephemeral port would be attributed to the old client.
+struct Registration(SocketAddr);
+
+impl Registration {
+    fn new(local: SocketAddr, client: SocketAddr) -> Self {
+        register_client(local, client);
+        Self(local)
+    }
+}
+
+impl Drop for Registration {
+    fn drop(&mut self) {
+        unregister_client(self.0);
+    }
 }
 
 #[cfg(test)]
@@ -276,6 +291,25 @@ mod tests {
         unregister_client(inner);
         unregister_client(outer);
         assert_eq!(real_client(outer), outer);
+    }
+
+    /// A connection task aborted mid-connect (the front shutting down) must
+    /// not leave its mapping behind.
+    #[tokio::test]
+    async fn an_aborted_connection_removes_its_mapping() {
+        let local: SocketAddr = "127.0.0.1:53201".parse().unwrap();
+        let client: SocketAddr = "203.0.113.4:999".parse().unwrap();
+        let task = tokio::spawn(async move {
+            let _mapping = Registration::new(local, client);
+            std::future::pending::<()>().await;
+        });
+        while real_client(local) == local {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(real_client(local), client);
+        task.abort();
+        let _ = task.await;
+        assert_eq!(real_client(local), local);
     }
 
     #[test]

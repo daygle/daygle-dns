@@ -2122,10 +2122,6 @@ async fn update_endpoints_report_state_and_gate_start() {
     shutdown(server).await;
 }
 
-// Keep unused helpers referenced.
-#[allow(unused_imports)]
-use common as _;
-
 #[tokio::test]
 async fn redirect_answers_nodata_for_types_the_target_cannot_serve() {
     let dir = tempfile::tempdir().unwrap();
