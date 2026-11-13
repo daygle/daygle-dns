@@ -296,7 +296,11 @@ impl PolicyEngine {
     /// source that lists it.
     fn source_block(&self, domain: &str, dot: bool) -> Decision {
         let scope = if dot { " (DoT)" } else { "" };
-        match self.sources_listing(domain, dot).into_iter().next() {
+        let first = self
+            .source_lists
+            .as_ref()
+            .and_then(|l| l.first_source_listing(domain, dot));
+        match first {
             Some((name, entry)) => Decision::new(
                 format!("'{domain}' is on the blocklist source '{name}'{scope} (entry '{entry}')"),
                 Action::Block,

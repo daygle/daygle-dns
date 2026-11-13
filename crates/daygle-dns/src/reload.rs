@@ -513,9 +513,10 @@ fn tls_file_signature(config: &DaygleConfig) -> TlsFileSignature {
 
 /// Spawn the remote blocklist source refresher.
 ///
-/// Polls the sources on the smallest configured refresh interval and, when
-/// anything is due, swaps the merged remote blocklist into the shared policy
-/// engine without touching the static (config + files) blocklist.
+/// Wakes when the next source is due (or a failed one is to be retried, see
+/// [`BlocklistSourceManager::next_refresh_in`]) and swaps the merged remote
+/// blocklist into the shared policy engine without touching the static
+/// (config + files) blocklist.
 ///
 /// Returns the [`BlocklistSourceManager`] so the API can expose source status
 /// and trigger manual refreshes.
@@ -542,9 +543,9 @@ pub fn spawn_blocklist_refresh(
     tokio::spawn(async move {
         loop {
             // First cycle runs immediately (fetch on startup). Afterwards the
-            // loop sleeps the smallest configured refresh interval, but wakes
-            // immediately when the console replaces the source list, so a
-            // changed schedule takes effect without waiting out the old one.
+            // loop sleeps until the next source is due - or a failed one is
+            // retried - but wakes immediately when the console replaces the
+            // source list, so a changed schedule applies at once.
             // The notify future is armed before the snapshot so a change
             // landing anywhere in the cycle is either seen by the snapshot
             // or completes this future.
@@ -559,11 +560,7 @@ pub fn spawn_blocklist_refresh(
                     let domains = list.len();
                     let dot = refresh_manager.dot_blocklist();
                     let dot_domains = dot.as_ref().map_or(0, |d| d.len());
-                    if daygle_dns_policy::publish_source_lists(
-                        &shared.policy,
-                        Some(Arc::new(list)),
-                        dot,
-                    ) {
+                    if daygle_dns_policy::publish_source_lists(&shared.policy, Some(list), dot) {
                         info!(domains, dot_domains, "remote blocklists refreshed");
                     }
                 }
@@ -577,7 +574,7 @@ pub fn spawn_blocklist_refresh(
             if refresh_manager.sources() != expected || refresh_manager.take_change() {
                 continue;
             }
-            let period = refresh_manager.min_refresh();
+            let period = refresh_manager.next_refresh_in();
             tokio::select! {
                 _ = shutdown.cancelled() => return,
                 _ = changed => {}

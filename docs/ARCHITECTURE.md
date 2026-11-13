@@ -218,12 +218,16 @@ message as a base64url `dns` parameter.
 
 `daygle-dns-policy`'s `BlocklistSourceManager` fetches each configured
 `[[policy.blocklist_sources]]` URL over HTTP(S) (reqwest/rustls, 64 MiB body
-cap, redirects, 30 s timeout) and parses the body in its declared format
-(`domains`, `hosts`, `adblock`, or `rpz`). A background task in `daygle-dns` polls on the
-smallest configured refresh interval and, when a source is due, swaps the
-merged remote blocklist into the shared `PolicyEngine` via
-`set_source_lists` - the static blocklist from config/files is never
-discarded, and a failed/empty fetch leaves the previous domains in place.
+cap, redirects, a 30 s idle-read timeout within 5 minutes overall), up to
+four at a time, and parses the body in its declared format (`domains`,
+`wildcard`, `hosts`, `adblock`, or `rpz`), keeping only entries that are
+host names. A background task in `daygle-dns` wakes when the next source is
+due - each on its own `refresh_secs`, never more often than every 5
+minutes - and swaps the merged remote blocklist into the shared
+`PolicyEngine` via `set_source_lists`. The static blocklist from
+config/files is never discarded, and a failed fetch leaves the previous
+domains in place and is retried after 5 minutes rather than a whole
+interval later. While no source changed, the same merged list is reused.
 `POST /api/policy/blocklist/sources` forces an immediate refresh; `GET` the
 same path for per-source status.
 
