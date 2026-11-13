@@ -73,6 +73,9 @@
 //! The [`AppState`] holds the effective configuration and the recursive
 //! resolver in `ArcSwap` containers so the live-reload machinery can publish
 //! new values without locking or restarting.
+// The OpenAPI document (openapi.rs) is one large `json!` literal, whose
+// expansion is deeper than the default recursion limit allows.
+#![recursion_limit = "512"]
 
 pub mod accounts;
 pub mod acme;
@@ -85,6 +88,7 @@ mod handlers;
 pub mod host_stats;
 pub mod log_export;
 mod networks;
+pub mod openapi;
 pub mod reports;
 pub mod reverse;
 mod update;
@@ -586,6 +590,9 @@ pub type WebApplyFn = Arc<
 pub fn router(state: AppState) -> Router {
     let api = Router::new()
         .route("/status", get(handlers::status))
+        // The published schema for this router; the table it is built from is
+        // checked against these `.route(...)` calls by tests in that module.
+        .route("/openapi.json", get(openapi::serve))
         .route("/health", get(handlers::health))
         .route("/host-stats", get(handlers::host_stats))
         .route("/metrics", get(handlers::metrics))
