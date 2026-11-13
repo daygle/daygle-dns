@@ -501,7 +501,7 @@
       server = { ...server, client_timeout_ms: d.server.client_timeout_ms };
     } else if (tab === 'listeners') {
       ddr_ = { ...ddr_, enabled: d.ddr.enabled };
-      dot = { ...dot, ...pick(d.dot, ['enabled', 'port', 'handshake_timeout_secs', 'max_connections']) };
+      dot = { ...dot, ...pick(d.dot, ['enabled', 'port', 'handshake_timeout_secs', 'idle_timeout_secs', 'max_connections']) };
       doh = { ...doh, ...pick(d.doh, ['enabled', 'port', 'handshake_timeout_secs', 'max_connections', 'endpoint', 'http3']) };
       doq = { ...doq, ...pick(d.doq, ['enabled', 'port', 'max_connections', 'max_concurrent_streams', 'idle_timeout_secs']) };
     } else if (tab === 'zones') {
@@ -633,6 +633,7 @@
         key_path: dot.key_path || '',
         certificate: dot.certificate || '',
         handshake_timeout_secs: Number(dot.handshake_timeout_secs),
+        idle_timeout_secs: Number(dot.idle_timeout_secs),
         max_connections: Number(dot.max_connections),
         allowed_networks: [...dotNetworks],
       },
@@ -1304,7 +1305,8 @@
     <div class="form-grid">
       <label class="check"><input type="checkbox" bind:checked={dot.enabled} /> <span>Enabled</span></label>
       <label><span>Port</span><input type="number" bind:value={dot.port} /></label>
-      <label><span>Handshake Timeout (Seconds)</span><input type="number" min="1" bind:value={dot.handshake_timeout_secs} /></label>
+      <label><span>Handshake Timeout (Seconds)</span><input type="number" min="1" max="600" bind:value={dot.handshake_timeout_secs} /></label>
+      <label><span>Session Idle Timeout (Seconds)</span><input type="number" min="1" max="3600" bind:value={dot.idle_timeout_secs} /></label>
       <label><span>Maximum Connections</span><input type="number" min="1" max="65536" bind:value={dot.max_connections} /></label>
       <label>
         <span>Certificate</span>
@@ -1331,7 +1333,10 @@
       Clients connect to port {dot.port || 853} (the standard port is 853).
       Clients outside these networks get REFUSED on this listener; clients
       inside it may use recursion here even when Recursion Access (Clients →
-      Access) is set to Private Networks Only.
+      Access) is set to Private Networks Only. An established session is
+      closed after the idle timeout; responses tell clients that timeout in
+      EDNS keepalive, so a longer value keeps devices from reconnecting (and
+      handshaking again) after every quiet moment.
     </p>
   </div>
   <div class="card" style="margin-bottom: 14px">
@@ -1339,7 +1344,7 @@
     <div class="form-grid">
       <label class="check"><input type="checkbox" bind:checked={doh.enabled} /> <span>Enabled</span></label>
       <label><span>Port</span><input type="number" bind:value={doh.port} /></label>
-      <label><span>Handshake Timeout (Seconds)</span><input type="number" min="1" bind:value={doh.handshake_timeout_secs} /></label>
+      <label><span>Handshake Timeout (Seconds)</span><input type="number" min="1" max="600" bind:value={doh.handshake_timeout_secs} /></label>
       <label><span>Maximum Connections</span><input type="number" min="1" max="65536" bind:value={doh.max_connections} /></label>
       <label>
         <span>Certificate</span>

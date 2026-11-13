@@ -348,6 +348,9 @@ dnssec_validate = true
 enabled = false
 port = 853
 self_signed = true
+# handshake_timeout_secs = 20   # TLS handshake bound
+# idle_timeout_secs = 120       # read-inactivity timeout of a session,
+#                               # advertised to clients in EDNS keepalive
 # Clients outside these networks get REFUSED on the DoT listener; clients
 # inside it may recurse there even when recursion_access is private_networks.
 # Empty (default) serves everyone. Addresses, CIDRs or Settings->Network names.

@@ -290,14 +290,14 @@ pub fn report_dot_readiness(config: &daygle_dns_core::config::DaygleConfig, sess
     let recursion_restricted =
         config.recursive.enabled && config.recursive.recursion_access != RecursionAccess::Allow;
     if allowed.is_empty() && recursion_restricted {
-        session.logs().info(
-            TLS,
-            "DoT answers every client, but recursion only for clients recursion_access \
+        let message = "DoT answers every client, but recursion only for clients recursion_access \
              allows: others get REFUSED for names this server does not host (Android Private \
              DNS then reports the server as unreachable). To offer DoT as a public resolver, \
-             list its clients in dot.allowed_networks (0.0.0.0/0 and ::/0 for everyone)."
-                .to_string(),
-        );
+             list its clients in dot.allowed_networks (0.0.0.0/0 and ::/0 for everyone).";
+        // Both sinks, like every other encrypted-DNS diagnostic: the Server
+        // Log (and syslog) for the console, tracing for a headless start.
+        tracing::info!("{message}");
+        session.logs().info(TLS, message.to_string());
     }
     // Public resolver: every client listed, or none listed while recursion
     // is open to all.

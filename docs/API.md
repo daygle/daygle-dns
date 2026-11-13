@@ -399,12 +399,15 @@ reloaded` line after a rebuild, and coalesced `session failure` warnings for
 failed handshakes, dropped connections and rejected DoH requests - at most
 one warning per client per protocol per minute, with the client address and
 the reason. Addresses name the real client (behind a PROXY-protocol load
-balancer too); a DoT session closed for read inactivity past its handshake
-timeout (also the session's read timeout) is normal keep-alive expiry and is
-not logged as a failure. DoT also warns at start when a listener open to
-every client has a certificate public clients such as Android Private DNS
-refuse (self-signed, or without its intermediates), and notes when clients
-outside `recursion_access` would be refused recursion on it.
+balancer too); a DoT session closed for read inactivity past
+`dot.idle_timeout_secs` is normal keep-alive expiry and is not logged as a
+failure. Renewing a listener's certificate file in place (certbot, acme.sh,
+a deployment tool) is picked up without a restart: the file watcher rebinds
+the DoT/DoH/DoQ listeners when a configured certificate or key changes.
+DoT also warns at start when a listener open to every client has a
+certificate public clients such as Android Private DNS refuse (self-signed,
+or without its intermediates), and notes when clients outside
+`recursion_access` would be refused recursion on it.
 
 ### Query logs
 
@@ -499,8 +502,8 @@ timeout_secs (per nameserver, 1-300)/conditional_zones/recursion_access/recursio
 case_randomization/rebinding_protection/local_root/opportunistic_encryption/
 outbound_ip_versions/client_policies), `dot`,
 `doh`, `doq` (enabled/port/self_signed/server_name/cert_path/key_path/
-certificate/max_connections [+ `dot`/`doh` handshake_timeout_secs, `doh.endpoint`,
-`doq.idle_timeout_secs`/`doq.max_concurrent_streams`]
+certificate/max_connections [+ `dot`/`doh` handshake_timeout_secs,
+`dot`/`doq` idle_timeout_secs, `doh.endpoint`, `doq.max_concurrent_streams`]
 /allowed_networks; `doh.http3`, default off, also serves DoH over HTTP/3 (QUIC)
 on UDP at the same addresses and port number, with the same certificate,
 endpoint and allowed networks - for clients configured for HTTP/3 DoH and

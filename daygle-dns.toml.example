@@ -309,9 +309,15 @@ port = 853
 # still follows recursion_access. For public recursion only on DoT, use
 # ["0.0.0.0/0", "::/0"] here and keep plaintext recursion restricted.
 # allowed_networks = ["192.168.0.0/16", "LAN"]
-# How long a client may take to complete the TLS handshake (also the DoT
-# connection's read-inactivity timeout; seconds, 1..=600; default 20).
+# How long a client may take to complete the TLS handshake (seconds,
+# 1..=600; default 20).
 # handshake_timeout_secs = 20
+# Read-inactivity timeout of an established session: an idle connection is
+# closed after this long, and responses advertise it in EDNS TCP Keepalive
+# (seconds, 1..=3600; default 120). Keep it well above the handshake timeout
+# so clients such as Android Private DNS reuse their connection instead of
+# handshaking again after every quiet moment.
+# idle_timeout_secs = 120
 # Bound active DoT sessions, including TLS handshakes; excess connections
 # close. One client (IPv4 address or IPv6 /64) may hold an eighth of them.
 # max_connections = 1024

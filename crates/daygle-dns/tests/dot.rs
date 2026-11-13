@@ -475,14 +475,17 @@ async fn one_client_cannot_take_every_connection() {
     shutdown(server).await;
 }
 
-/// An idle session closes after the handshake timeout, which doubles as
-/// the read-inactivity timeout.
+/// An established session closes after `dot.idle_timeout_secs`, which is
+/// independent of the handshake timeout (that one only bounds the
+/// handshake: with 5 s here, a listener using it as the idle timeout would
+/// keep the session past the 5 s the test waits).
 #[tokio::test]
 async fn idle_sessions_close_after_the_timeout() {
     use tokio::io::AsyncReadExt as _;
     let dir = tempfile::tempdir().unwrap();
     let mut config = dot_config(dir.path());
-    config.dot.handshake_timeout_secs = 1;
+    config.dot.handshake_timeout_secs = 5;
+    config.dot.idle_timeout_secs = 1;
     let server = spawn(config).await;
     let cert = dir.path().join("server.crt");
     let mut stream = dot_connect(server.dot_addr.unwrap(), &cert).await;
@@ -493,6 +496,34 @@ async fn idle_sessions_close_after_the_timeout() {
         .expect("the idle session is closed");
     assert!(matches!(read, Ok(0) | Err(_)), "{read:?}");
     assert!(started.elapsed() >= std::time::Duration::from_millis(900));
+    shutdown(server).await;
+}
+
+/// A session outlives the TLS handshake timeout: that setting only bounds
+/// the handshake, while `dot.idle_timeout_secs` governs an established
+/// session. A client that used to be forced into a new handshake (about a
+/// millisecond of TLS work) after every 20 s of quiet keeps its session.
+#[tokio::test]
+async fn established_sessions_outlive_the_handshake_timeout() {
+    use tokio::io::AsyncWriteExt as _;
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = dot_config(dir.path());
+    config.dot.handshake_timeout_secs = 1;
+    config.dot.idle_timeout_secs = 10;
+    let server = spawn(config).await;
+    seed_fast_zone(&server).await;
+    let cert = dir.path().join("server.crt");
+    let mut stream = dot_connect(server.dot_addr.unwrap(), &cert).await;
+
+    // Twice the handshake timeout, well inside the idle timeout.
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    stream
+        .write_all(&framed(&query_message("www.fast.test.", RecordType::A)))
+        .await
+        .expect("the session is still open");
+    let (answer, _) = read_answer(&mut stream).await;
+    assert_eq!(first_answer(&answer).as_deref(), Some("192.0.2.10"));
+
     shutdown(server).await;
 }
 
@@ -566,7 +597,9 @@ async fn a_client_that_never_reads_does_not_hold_its_slot() {
     let dir = tempfile::tempdir().unwrap();
     let mut config = dot_config(dir.path());
     config.dot.max_connections = 8; // 4 per public client
-    config.dot.handshake_timeout_secs = 1;
+                                    // The writes to a client that stopped reading time out after the
+                                    // session's idle timeout (1 s here).
+    config.dot.idle_timeout_secs = 1;
     config.server.proxy_protocol = vec!["127.0.0.1".to_string()];
     let server = spawn(config).await;
     // Large answers fill the socket buffers quickly.

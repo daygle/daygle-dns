@@ -2276,7 +2276,8 @@ pub struct ListenerUpdate {
     pub key_path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub certificate: Option<String>,
-    /// DoQ-only: QUIC connection idle timeout in seconds. Ignored for DoT.
+    /// Idle timeout in seconds: the QUIC connection idle timeout for DoQ,
+    /// the read-inactivity timeout of an established session for DoT.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub idle_timeout_secs: Option<u64>,
     /// DoT-only: TLS handshake timeout in seconds. Ignored for DoQ (QUIC
@@ -2541,6 +2542,9 @@ impl RuntimeSettings {
             }
             if let Some(v) = d.handshake_timeout_secs {
                 config.dot.handshake_timeout_secs = v;
+            }
+            if let Some(v) = d.idle_timeout_secs {
+                config.dot.idle_timeout_secs = v;
             }
             if let Some(v) = d.max_connections {
                 config.dot.max_connections = v;
@@ -2898,7 +2902,7 @@ impl RuntimeSettings {
                 key_path: Some(config.dot.key_path.clone()),
                 certificate: (!config.dot.certificate.is_empty())
                     .then(|| config.dot.certificate.clone()),
-                idle_timeout_secs: None,
+                idle_timeout_secs: Some(config.dot.idle_timeout_secs),
                 handshake_timeout_secs: Some(config.dot.handshake_timeout_secs),
                 max_connections: Some(config.dot.max_connections),
                 max_concurrent_streams: None,
@@ -3317,23 +3321,36 @@ impl DaygleConfig {
         // drops every connection and an over-large one pins connections for
         // minutes. Same validation style as doq.idle_timeout_secs above:
         // only *enabled* listeners need a concrete value.
-        for (name, secs, enabled) in [
+        // `default` is each listener's own default, which differs (20 s for
+        // DoT, 10 s for DoH): the message must not name the other one.
+        for (name, secs, enabled, default) in [
             (
                 "dot.handshake_timeout_secs",
                 self.dot.handshake_timeout_secs,
                 self.dot.enabled,
+                20,
             ),
             (
                 "doh.handshake_timeout_secs",
                 self.doh.handshake_timeout_secs,
                 self.doh.enabled,
+                10,
             ),
         ] {
             if enabled && !(1..=600).contains(&secs) {
                 return Err(DaygleError::Config(format!(
-                    "{name} must be in 1..=600 (default 10)"
+                    "{name} must be in 1..=600 (default {default})"
                 )));
             }
+        }
+        // The read-inactivity timeout of an established DoT session: long
+        // enough that a client holding one connection open is not forced
+        // into a new handshake every few seconds, short enough that a
+        // vanished client's slot comes back.
+        if self.dot.enabled && !(1..=3600).contains(&self.dot.idle_timeout_secs) {
+            return Err(DaygleError::Config(
+                "dot.idle_timeout_secs must be in 1..=3600 (default 120)".to_string(),
+            ));
         }
         if !(1000..=10_000).contains(&self.server.client_timeout_ms) {
             return Err(DaygleError::Config(
@@ -4853,14 +4870,23 @@ pub struct DotSettings {
     /// (an IPv4 address or IPv6 /64) may hold an eighth of them, at least 4.
     pub max_connections: usize,
     /// TLS handshake timeout in seconds: how long a client may take to
-    /// complete the TLS handshake before the connection is dropped. It is
-    /// also the read-inactivity timeout of an established DoT session, so an
-    /// idle keep-alive connection is closed once it expires (1..=600,
-    /// default 20).
+    /// complete the TLS handshake before the connection is dropped
+    /// (1..=600, default 20).
     pub handshake_timeout_secs: u64,
+    /// Read-inactivity timeout of an established DoT session, in seconds:
+    /// the session is closed once that long passes without a query, and
+    /// responses advertise it to clients in EDNS TCP Keepalive (RFC 7828).
+    /// Kept apart from the handshake timeout so a client that holds a
+    /// connection open (Android Private DNS and other stub resolvers do)
+    /// is not made to handshake again every few seconds
+    /// (1..=3600, default 120).
+    pub idle_timeout_secs: u64,
     /// Client networks allowed to use this listener (addresses or network
-    /// names). Empty means everyone; clients outside the list get REFUSED
-    /// and, on this listener only, are treated as allowed for recursion.
+    /// names). Empty means everyone. A client outside the list gets REFUSED
+    /// on this listener; one inside it may also recurse here whatever
+    /// `recursive.recursion_access` says (a client policy of `refuse` still
+    /// wins), so remote encrypted clients can recurse without opening
+    /// plain-DNS recursion.
     pub allowed_networks: Vec<String>,
 }
 
@@ -4877,6 +4903,7 @@ impl Default for DotSettings {
             certificate: String::new(),
             max_connections: 1024,
             handshake_timeout_secs: 20,
+            idle_timeout_secs: 120,
             allowed_networks: vec![],
         }
     }
@@ -4914,8 +4941,11 @@ pub struct DohSettings {
     /// Maximum active TCP connections including TLS handshakes.
     pub max_connections: usize,
     /// Client networks allowed to use this listener (addresses or network
-    /// names). Empty means everyone; clients outside the list get REFUSED
-    /// and, on this listener only, are treated as allowed for recursion.
+    /// names). Empty means everyone. A client outside the list gets REFUSED
+    /// on this listener; one inside it may also recurse here whatever
+    /// `recursive.recursion_access` says (a client policy of `refuse` still
+    /// wins), so remote encrypted clients can recurse without opening
+    /// plain-DNS recursion.
     pub allowed_networks: Vec<String>,
     /// Also serve DoH over HTTP/3 (QUIC, UDP) on the same addresses and
     /// port, with the same certificate, endpoint and allowed networks.
@@ -5070,8 +5100,11 @@ pub struct DoqSettings {
     #[serde(default)]
     pub certificate: String,
     /// Client networks allowed to use this listener (addresses or network
-    /// names). Empty means everyone; clients outside the list get REFUSED
-    /// and, on this listener only, are treated as allowed for recursion.
+    /// names). Empty means everyone. A client outside the list gets REFUSED
+    /// on this listener; one inside it may also recurse here whatever
+    /// `recursive.recursion_access` says (a client policy of `refuse` still
+    /// wins), so remote encrypted clients can recurse without opening
+    /// plain-DNS recursion.
     pub allowed_networks: Vec<String>,
 }
 
@@ -6739,6 +6772,12 @@ handshake_timeout_secs = 60
         // can take longer than 10 s to finish the handshake.
         assert_eq!(DaygleConfig::default().dot.handshake_timeout_secs, 20);
         assert_eq!(DaygleConfig::default().doh.handshake_timeout_secs, 10);
+        // The session idle timeout is its own setting, above the handshake
+        // timeout: a client holding a connection open must not be
+        // re-handshaken after every short quiet period.
+        assert_eq!(DaygleConfig::default().dot.idle_timeout_secs, 120);
+        assert!(DaygleConfig::parse("[dot]\nenabled = true\nidle_timeout_secs = 0\n").is_err());
+        assert!(DaygleConfig::parse("[dot]\nenabled = true\nidle_timeout_secs = 3601\n").is_err());
 
         // Out-of-range values are rejected for enabled listeners (same
         // validation style as doq.idle_timeout_secs).

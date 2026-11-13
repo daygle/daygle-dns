@@ -23,7 +23,9 @@ pub fn ensure_certificate(settings: &DotSettings) -> Result<()> {
 
 /// Ensure the given certificate/key exist, generating a self-signed pair when
 /// `self_signed` is enabled. Shared by DoT and DoH (both may reuse the same
-/// certificate files).
+/// certificate files). A pair with only one half present is reported as an
+/// error rather than completed: writing the generator's output over the file
+/// that exists could destroy a certificate the operator installed.
 pub fn ensure_certificate_paths(
     cert_path: &str,
     key_path: &str,
@@ -33,8 +35,26 @@ pub fn ensure_certificate_paths(
     let have_cert = Path::new(cert_path).exists();
     let have_key = Path::new(key_path).exists();
 
-    if have_cert && have_key {
-        return Ok(());
+    match (have_cert, have_key) {
+        (true, true) => return Ok(()),
+        // Only one half present: generating a pair here would overwrite the
+        // file that exists, which may be a CA-issued certificate and its
+        // only copy (a mistyped key_path must not destroy it). Name the
+        // missing file and let the operator fix the path or remove the
+        // other half deliberately.
+        (true, false) => {
+            return Err(DaygleError::Tls(format!(
+                "certificate '{cert_path}' is present but its key '{key_path}' is missing; \
+                 fix key_path, or remove the certificate so a self-signed pair is generated"
+            )))
+        }
+        (false, true) => {
+            return Err(DaygleError::Tls(format!(
+                "key '{key_path}' is present but its certificate '{cert_path}' is missing; \
+                 fix cert_path, or remove the key so a self-signed pair is generated"
+            )))
+        }
+        (false, false) => {}
     }
     if !self_signed {
         return Err(DaygleError::Tls(format!(
@@ -60,8 +80,8 @@ pub fn generate_self_signed_pem(server_name: &str) -> Result<(String, String)> {
 pub fn generate_self_signed(cert_path: &str, key_path: &str, server_name: &str) -> Result<()> {
     let (cert_pem, key_pem) = generate_self_signed_pem(server_name)?;
 
-    write_if_parent_exists(cert_path, cert_pem.as_bytes(), false)?;
-    write_if_parent_exists(key_path, key_pem.as_bytes(), true)?;
+    write_pem_file(cert_path, cert_pem.as_bytes(), false)?;
+    write_pem_file(key_path, key_pem.as_bytes(), true)?;
     info!("generated self-signed certificate for '{server_name}' at '{cert_path}'");
     Ok(())
 }
@@ -213,7 +233,10 @@ pub fn crypto_provider() -> Option<Arc<rustls::crypto::CryptoProvider>> {
     }
 }
 
-fn write_if_parent_exists(path: &str, bytes: &[u8], private: bool) -> Result<()> {
+/// Write a PEM file, creating its directory first; a private key is created
+/// owner-only (`0600`) and an existing file's mode is tightened before the
+/// new bytes are written.
+fn write_pem_file(path: &str, bytes: &[u8], private: bool) -> Result<()> {
     if let Some(parent) = Path::new(path).parent() {
         if !parent.as_os_str().is_empty() {
             fs::create_dir_all(parent).map_err(DaygleError::Io)?;
@@ -372,6 +395,43 @@ mod tests {
             fs::metadata(key).unwrap().permissions().mode() & 0o777,
             0o600
         );
+    }
+
+    /// A half-present pair is never "completed" by generating a new
+    /// certificate: that would overwrite the file that does exist.
+    #[test]
+    fn does_not_overwrite_the_half_of_a_pair_that_exists() {
+        let dir = tempdir().unwrap();
+        let cert = dir.path().join("server.crt");
+        let key = dir.path().join("server.key");
+        fs::write(&cert, b"a CA-issued certificate the operator must not lose").unwrap();
+
+        let error = ensure_certificate_paths(
+            cert.to_str().unwrap(),
+            key.to_str().unwrap(),
+            true,
+            "daygle.test",
+        )
+        .unwrap_err();
+        let text = error.to_string();
+        assert!(text.contains("key"), "{text}");
+        assert!(!key.exists(), "a key was generated anyway");
+        assert_eq!(
+            fs::read(&cert).unwrap(),
+            b"a CA-issued certificate the operator must not lose"
+        );
+
+        // The mirror case: a stray key does not overwrite itself either.
+        let key_only = dir.path().join("only.key");
+        fs::write(&key_only, b"stray key").unwrap();
+        assert!(ensure_certificate_paths(
+            dir.path().join("absent.crt").to_str().unwrap(),
+            key_only.to_str().unwrap(),
+            true,
+            "daygle.test",
+        )
+        .is_err());
+        assert_eq!(fs::read(&key_only).unwrap(), b"stray key");
     }
 
     #[test]

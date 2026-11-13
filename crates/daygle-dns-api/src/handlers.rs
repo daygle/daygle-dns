@@ -5890,7 +5890,8 @@ pub struct ListenerUpdate {
     pub handshake_timeout_secs: Option<u64>,
     pub max_connections: Option<usize>,
     pub max_concurrent_streams: Option<usize>,
-    /// QUIC idle timeout (DoQ only).
+    /// Idle timeout in seconds: the QUIC connection idle timeout for DoQ,
+    /// the read-inactivity timeout of an established session for DoT.
     pub idle_timeout_secs: Option<u64>,
     /// Client networks allowed to use this listener (addresses or network
     /// names); empty or absent means everyone.
@@ -6125,6 +6126,10 @@ pub async fn update_settings(
         }
         if let Some(v) = d.handshake_timeout_secs {
             config.dot.handshake_timeout_secs = v;
+            listeners_affected = true;
+        }
+        if let Some(v) = d.idle_timeout_secs {
+            config.dot.idle_timeout_secs = v;
             listeners_affected = true;
         }
         if let Some(v) = d.max_connections {

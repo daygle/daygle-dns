@@ -312,6 +312,9 @@ pub fn spawn_watcher(
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut last_mtime = last_modified(&path);
+        // The TLS files of the enabled encrypted listeners, as the initial
+        // bind left them (the watcher starts after that bind).
+        let mut last_tls = tls_file_signature(&shared.config.load_full());
         let mut ticker = tokio::time::interval(interval);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
@@ -320,6 +323,28 @@ pub fn spawn_watcher(
                 _ = shutdown.cancelled() => break,
                 _ = ticker.tick() => {}
                 _ = notified(notify.as_deref()) => {}
+            }
+
+            // A certificate renewed in place (certbot, acme.sh, or a
+            // deployment tool writing the configured paths) changes here
+            // without any configuration change: rebind so the running
+            // listeners present the new pair instead of the old one until
+            // the next restart.
+            let tls = tls_file_signature(&shared.config.load_full());
+            if tls != last_tls {
+                last_tls = tls;
+                info!("certificate files changed; rebinding the encrypted listeners");
+                shared.logs.info(
+                    "tls",
+                    "certificate files changed on disk: reloading the DoT/DoH/DoQ listeners",
+                );
+                if reload_tx
+                    .send(ReloadCommand::Rebuild { ack: None })
+                    .await
+                    .is_err()
+                {
+                    warn!("DNS supervisor is gone; cannot apply the certificate change");
+                }
             }
 
             let mtime = last_modified(&path);
@@ -358,6 +383,8 @@ pub fn spawn_watcher(
             };
 
             let changed = apply_config(&shared, Arc::new(new));
+            // The new configuration may name other certificate files.
+            last_tls = tls_file_signature(&shared.config.load_full());
             if changed
                 && reload_tx
                     .send(ReloadCommand::Rebuild { ack: None })
@@ -382,6 +409,44 @@ async fn notified(notify: Option<&tokio::sync::Notify>) {
 
 fn last_modified(path: &Path) -> Option<std::time::SystemTime> {
     std::fs::metadata(path).and_then(|m| m.modified()).ok()
+}
+
+/// Size and modification time of each enabled encrypted listener's
+/// certificate and key, keyed by path. The watcher rebinds when this changes,
+/// which is how an in-place certificate renewal reaches DoT, DoH and DoQ.
+type TlsFileStamp = (u64, Option<std::time::SystemTime>);
+type TlsFileSignature = Vec<(String, Option<TlsFileStamp>)>;
+
+fn tls_file_signature(config: &DaygleConfig) -> TlsFileSignature {
+    let mut files = Vec::new();
+    for (enabled, cert_path, key_path) in [
+        (
+            config.dot.enabled,
+            &config.dot.cert_path,
+            &config.dot.key_path,
+        ),
+        (
+            config.doh.enabled,
+            &config.doh.cert_path,
+            &config.doh.key_path,
+        ),
+        (
+            config.doq.enabled,
+            &config.doq.cert_path,
+            &config.doq.key_path,
+        ),
+    ] {
+        if !enabled {
+            continue;
+        }
+        for path in [cert_path, key_path] {
+            let stamp = std::fs::metadata(path)
+                .ok()
+                .map(|meta| (meta.len(), meta.modified().ok()));
+            files.push((path.clone(), stamp));
+        }
+    }
+    files
 }
 
 /// Spawn the remote blocklist source refresher.
@@ -547,5 +612,40 @@ mod tests {
     fn identical_config_is_a_noop() {
         let s = shared(base());
         assert!(!apply_config(&s, Arc::new(base())));
+    }
+
+    /// The watcher rebinds when this signature changes, which is how an
+    /// in-place certificate renewal reaches the encrypted listeners.
+    #[test]
+    fn certificate_signature_follows_the_enabled_listeners() {
+        let dir = tempfile::tempdir().unwrap();
+        let cert = dir.path().join("a.crt");
+        let key = dir.path().join("a.key");
+        std::fs::write(&cert, b"one").unwrap();
+        std::fs::write(&key, b"two").unwrap();
+
+        let mut config = base();
+        // No encrypted listener enabled: nothing is watched.
+        assert!(tls_file_signature(&config).is_empty());
+
+        config.dot.enabled = true;
+        config.dot.cert_path = cert.to_string_lossy().into_owned();
+        config.dot.key_path = key.to_string_lossy().into_owned();
+        let before = tls_file_signature(&config);
+        assert_eq!(before.len(), 2);
+        assert!(before.iter().any(|(path, _)| path == &config.dot.cert_path));
+        assert_eq!(
+            before,
+            tls_file_signature(&config),
+            "stable while the files are"
+        );
+
+        // A renewal rewrites the certificate: the signature must change so
+        // the listeners are rebound onto the new pair.
+        std::fs::write(&cert, b"renewed certificate, a little longer").unwrap();
+        assert_ne!(before, tls_file_signature(&config));
+
+        config.dot.enabled = false;
+        assert!(tls_file_signature(&config).is_empty());
     }
 }

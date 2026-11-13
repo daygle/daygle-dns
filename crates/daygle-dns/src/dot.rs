@@ -9,11 +9,13 @@
 //! - queries are answered **concurrently** (up to [`MAX_IN_FLIGHT`] at a
 //!   time) and **out of order** as each completes (RFC 7766 §6.2.1.1; the
 //!   client matches answers by message ID), with back-pressure: past the
-//!   limit the connection is simply not read until a query finishes;
+//!   limit the connection reads at most one more message and then waits,
+//!   framing no further query until one of the running ones finishes;
 //! - responses are padded to [`PADDING_BLOCK`] octets when the query was
 //!   padded (RFC 8467), so their size says little about the name asked;
-//! - `dot.handshake_timeout_secs` bounds the TLS handshake and is also the
-//!   read-inactivity timeout of an established session, as before; an idle
+//! - `dot.handshake_timeout_secs` bounds the TLS handshake, and
+//!   `dot.idle_timeout_secs` the read inactivity of an established session
+//!   (advertised to clients in EDNS TCP Keepalive, RFC 7828); an idle
 //!   session closes once its last answer is written.
 //!
 //! Admission is part of the listener (no loopback bridge): at most
@@ -79,9 +81,10 @@ const MAX_MESSAGE_LEN: usize = u16::MAX as usize;
 pub struct DotOptions {
     /// Sessions served at once, TLS handshakes included.
     pub max_connections: usize,
-    /// The TLS handshake timeout, which is also the session's
-    /// read-inactivity timeout.
+    /// The TLS handshake timeout.
     pub timeout: Duration,
+    /// The read-inactivity timeout of an established session.
+    pub idle: Duration,
     /// Load balancers whose PROXY header names the real client.
     pub proxy_trusted: Option<Arc<Vec<ipnet::IpNet>>>,
 }
@@ -324,7 +327,7 @@ impl Connection {
         let (mut reader, mut writer) = tokio::io::split(tls);
         let (tx, mut rx) = mpsc::channel::<Vec<u8>>(WRITE_QUEUE);
 
-        let idle = self.options.timeout;
+        let idle = self.options.idle;
         // Cancelled when the writer stops: the client is gone, or it stopped
         // reading its answers (each write may block at most `idle`). Without
         // this, a client that never read filled the queue, every in-flight

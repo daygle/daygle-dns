@@ -341,7 +341,9 @@ impl DnsDispatcher {
                 .config
                 .as_ref()
                 .map_or(self.tcp_idle_timeout, |config| {
-                    Duration::from_secs(config.load().dot.handshake_timeout_secs)
+                    // The session's own read-inactivity timeout, which is
+                    // what the listener enforces (RFC 7828 keepalive).
+                    Duration::from_secs(config.load().dot.idle_timeout_secs)
                 }),
             _ => self.tcp_idle_timeout(),
         };

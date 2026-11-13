@@ -1436,6 +1436,7 @@ async fn bind_listeners_inner(
         let options = crate::dot::DotOptions {
             max_connections: config.dot.max_connections,
             timeout: Duration::from_secs(config.dot.handshake_timeout_secs),
+            idle: Duration::from_secs(config.dot.idle_timeout_secs),
             proxy_trusted: proxy_trusted.clone(),
         };
         for (addr, v6_only) in listen_addrs("dot", &config.dot.listen, config.dot.port, ipv6_only)?
@@ -1451,7 +1452,13 @@ async fn bind_listeners_inner(
                 server.shutdown_token().clone(),
                 options.clone(),
             )));
-            info!(addr = %bound, max_connections = config.dot.max_connections, "DNS over TLS listening");
+            info!(
+                addr = %bound,
+                max_connections = config.dot.max_connections,
+                handshake_timeout_s = config.dot.handshake_timeout_secs,
+                idle_timeout_s = config.dot.idle_timeout_secs,
+                "DNS over TLS listening"
+            );
         }
         tls_diag::report_dot_readiness(&config, session);
     }
