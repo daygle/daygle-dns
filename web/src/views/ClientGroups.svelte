@@ -395,11 +395,13 @@
     </div>
   {/if}
   <p class="muted help">
-    Groups covering the client are checked top to bottom. The first one that
-    lists the domain decides: if it is on Custom Allow, it is never blocked
-    (later groups are skipped); if it is on Custom Block or one of the group's
-    subscribed Blocklists, it is blocked with that group's response. Otherwise the next group is
-    checked. A group with no client networks covers every client. AI
+    Groups are checked top to bottom and the first one covering the client
+    applies to it alone; groups below it are not used for that client. In
+    that group, a domain on Custom Allow is never blocked, and one on Custom
+    Block or one of the group's subscribed Blocklists is blocked with the
+    group's response. To exempt a device from a broader group (one device on
+    a LAN), give it a group of its own above the broader one. A group with
+    no client networks covers every client. AI
     auto-blocking, Safe Search and YouTube Restricted Mode follow the first
     group covering the client: a group can turn AI auto-blocking off, or Safe
     Search on, for its clients.

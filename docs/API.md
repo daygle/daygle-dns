@@ -1779,9 +1779,9 @@ record, more than 1024 bytes of TXT data in total, or more than 255 bytes
 in one record of a type the server does not know - the ways DNS delivers
 commands and files to malware. Both block resolved answers only (not your
 own zones, conditional forwarders or stub zones) with an empty `NOERROR`
-answer and EDE 15, and the first group covering the client that turns one
-on is named in the block reason; a group whose `allow` list lets the name
-through stops later groups from filtering it.
+answer and EDE 15, and the group deciding for the client (the first
+covering it) is named in the block reason; when its `allow` list lets the
+name through, nothing is filtered.
 `blocked_categories` lists AI content categories (lowercase labels, e.g.
 `["gambling", "ads"]`; the model's own labels as reported by
 `GET /api/ai/status`'s `backend_categories`) whose domains the group
@@ -1808,7 +1808,12 @@ field existed read `null` until their next edit.
 `DELETE /api/policy/blocking/{id}` removes a group.
 `POST /api/policy/blocking/{id}/move` with `{"direction": "up"}` or
 `{"direction": "down"}` swaps the group with its neighbour and returns the
-reordered list. Groups are evaluated in this order.
+reordered list. Groups are evaluated in this order, and only the first
+enabled group covering a client (inside its schedule) applies to it: its
+allow and block rules, blocklists, services, categories and response
+filters decide alone, and groups below it are not consulted. To exempt a
+device from a broader group (one device on a LAN), give it a group of its
+own above the broader one.
 `POST /api/policy/blocking/test` accepts an optional `"listener"` of
 `"doT"` / `"doH"` / `"doq"` (case-insensitive, omitted or `null` for plain
 DNS) so a group's listener entries can be tested.
@@ -1832,8 +1837,8 @@ unless `listener` is `dot`, `doh` or `doq`. It answers:
   what each does with the domain, without stopping at the first that
   decides: denied networks, Custom Allow, Custom Block, each subscribed
   feed in Blocklists that lists it, per-client rules, Filter AAAA, the AI scanner,
-  then each filtering group covering the device (including groups outside
-  their schedule, as `off`), response policy zones and Safe Search. Each is
+  then the filtering group deciding for the device (the first covering it;
+  groups above it that are outside their schedule are listed as `off`), response policy zones and Safe Search. Each is
   `{"source", "result", "detail", "matched", "group", "action"}`, with
   `result` one of `block`, `allow`, `rewrite`, `none` or `off`.
 - `recent`: the latest blocks of exactly this domain in the query log (any

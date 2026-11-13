@@ -1641,11 +1641,24 @@ fn import_zone_files(
             }
             Err(e) => return Err(e),
         };
-        catalog.store().replace_records(&zone.id, &records)?;
+        // A changed file must change the serial (and the IXFR journal), or
+        // secondaries would never pick the new records up.
+        let changed = catalog
+            .store()
+            .replace_records_bumping_serial(&zone.id, &records)?;
         logs.push(
             LogLevel::Info,
             "authoritative",
-            format!("imported zone '{}' ({} records)", zone.name, records.len()),
+            format!(
+                "imported zone '{}' ({} records{})",
+                zone.name,
+                records.len(),
+                if changed {
+                    ", serial bumped"
+                } else {
+                    ", unchanged"
+                }
+            ),
         );
     }
     catalog.reload()

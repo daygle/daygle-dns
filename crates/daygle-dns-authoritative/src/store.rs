@@ -1297,6 +1297,45 @@ impl ZoneStore {
         Ok(())
     }
 
+    /// Like [`Self::replace_records`] for a primary zone whose data comes
+    /// from outside (a zone file re-read at start-up): when the served
+    /// records actually change, the serial is bumped and the change is
+    /// journalled, so secondaries notice it and IXFR carries it. Unchanged
+    /// data leaves the serial alone. Returns whether anything changed.
+    pub fn replace_records_bumping_serial(
+        &self,
+        zone_id: &str,
+        records: &[RecordInput],
+    ) -> Result<bool> {
+        let zone = self
+            .get_zone(zone_id)?
+            .ok_or_else(|| DaygleError::NotFound(format!("zone {zone_id}")))?;
+        let mut conn = self.lock_conn()?;
+        let tx = conn.transaction()?;
+        let before = journal_snapshot(&tx, zone_id)?;
+        tx.execute("DELETE FROM records WHERE zone_id = ?1", [zone_id])?;
+        for record in records {
+            insert_record_in_tx(&tx, zone_id, &zone.name, record)?;
+        }
+        let (_, after) = journal_snapshot(&tx, zone_id)?;
+        let served = |records: &[Record]| {
+            let mut keys: Vec<JournalKey> = records.iter().map(journal_key).collect();
+            keys.sort();
+            keys
+        };
+        let changed = served(&before.1) != served(&after);
+        if changed {
+            bump_serial_in(&tx, zone_id)?;
+            journal_commit(&tx, zone_id, before, self.ixfr_journal_depth())?;
+        }
+        tx.execute(
+            "UPDATE zones SET last_modified_at = ?2 WHERE id = ?1",
+            params![zone_id, Utc::now().to_rfc3339()],
+        )?;
+        tx.commit()?;
+        Ok(changed)
+    }
+
     pub fn count_zones(&self) -> Result<u64> {
         let conn = self.lock_conn()?;
         Ok(conn.query_row("SELECT COUNT(*) FROM zones", [], |r| {
@@ -5997,6 +6036,47 @@ mod tests {
         // full transfer (empty history).
         assert!(s.zone_deltas(&zone.id, 14).unwrap().is_empty());
         assert!(s.zone_deltas(&zone.id, 9).unwrap().is_empty());
+    }
+
+    #[test]
+    fn reimported_records_bump_the_serial_only_when_they_change() {
+        let s = store();
+        let zone = s
+            .create_zone(&ZoneInput {
+                name: "import.example".to_string(),
+                serial: Some(10),
+                ..zone_input_defaults()
+            })
+            .unwrap();
+        let input = |ip: &str| RecordInput {
+            name: "www".to_string(),
+            rtype: "A".to_string(),
+            content: ip.to_string(),
+            ttl: 300,
+            priority: 0,
+            disabled: false,
+        };
+        let serial = |s: &ZoneStore| s.get_zone(&zone.id).unwrap().unwrap().serial;
+
+        assert!(s
+            .replace_records_bumping_serial(&zone.id, &[input("192.0.2.1")])
+            .unwrap());
+        assert_eq!(serial(&s), 11);
+        // The same file again: nothing served changes, so neither does the serial.
+        assert!(!s
+            .replace_records_bumping_serial(&zone.id, &[input("192.0.2.1")])
+            .unwrap());
+        assert_eq!(serial(&s), 11);
+        // A changed file bumps the serial and journals the difference, so a
+        // secondary at the old serial receives it by IXFR.
+        assert!(s
+            .replace_records_bumping_serial(&zone.id, &[input("192.0.2.2")])
+            .unwrap());
+        assert_eq!(serial(&s), 12);
+        let deltas = s.zone_deltas(&zone.id, 11).unwrap();
+        assert_eq!(deltas.len(), 1);
+        assert!(deltas[0].deleted.iter().any(|r| r.content == "192.0.2.1"));
+        assert!(deltas[0].added.iter().any(|r| r.content == "192.0.2.2"));
     }
 
     #[test]
