@@ -21,6 +21,55 @@ use daygle_dns_core::blocking::{BlockingGroup, BlockingGroupInput};
 use daygle_dns_core::config::{AiMode, DisplaySettings, Role};
 use daygle_dns_core::error::{DaygleError, Result};
 
+/// How a record that breaks the zone's rules is handled when it is added:
+/// a second SOA, or data next to a CNAME (RFC 1034 §3.6.2, RFC 2181 §10.1:
+/// a CNAME's owner has no other data, and at most one CNAME).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AddMode {
+    /// Refuse it, saying why: someone is adding it (the console, a zone
+    /// import) and should know.
+    Strict,
+    /// Leave it out: RFC 2136 says an update ignores such records, and data
+    /// from elsewhere (a master's transfer, a zone file read at start-up)
+    /// should not be lost whole because of one record.
+    Lenient,
+}
+
+/// What adding one record did.
+enum Added {
+    /// Stored.
+    Inserted(Record),
+    /// An identical enabled record was already there (adding is idempotent,
+    /// as RFC 2136 §3.4.2.2 requires of updates); nothing changed.
+    Exists(Record),
+    /// Left out under [`AddMode::Lenient`].
+    Skipped,
+}
+
+/// Record data of type `rtype` in canonical wire form (RFC 4034 §6.2: the
+/// names in it lowercased), which is what is served; `None` when it does not
+/// parse.
+fn canonical_rdata(rtype: &str, content: &str) -> Option<Vec<u8>> {
+    use hickory_proto::serialize::binary::{BinEncodable, BinEncoder};
+    let rr_type: RecordType = rtype.parse().ok()?;
+    let rdata = RData::try_from_str(rr_type, content.trim()).ok()?;
+    let mut bytes = Vec::new();
+    let mut encoder = BinEncoder::new(&mut bytes);
+    encoder.set_canonical_form(true);
+    rdata.emit(&mut encoder).ok()?;
+    Some(bytes)
+}
+
+/// Whether two stored contents of type `rtype` are the same record data:
+/// `2001:DB8::1` and `2001:db8::1`, or a name with and without its root dot.
+/// Compared as text when either does not parse.
+pub(crate) fn same_rdata(rtype: &str, a: &str, b: &str) -> bool {
+    match (canonical_rdata(rtype, a), canonical_rdata(rtype, b)) {
+        (Some(a), Some(b)) => a == b,
+        _ => a.trim() == b.trim(),
+    }
+}
+
 /// The highest load-balancing weight a record can have.
 pub const MAX_RECORD_WEIGHT: u32 = 10_000;
 
@@ -558,7 +607,7 @@ impl ZoneStore {
             priority: 0,
             disabled: false,
         };
-        insert_record_in_tx(&tx, &zone.id, &zone.name, &ns_record)?;
+        insert_record_in_tx(&tx, &zone.id, &zone.name, &ns_record, AddMode::Strict)?;
         let last_modified_at = Utc::now().to_rfc3339();
         tx.execute(
             "UPDATE zones SET last_modified_at = ?2 WHERE id = ?1",
@@ -942,10 +991,10 @@ impl ZoneStore {
     /// List records for a zone.
     pub fn list_records(&self, zone_id: &str) -> Result<Vec<Record>> {
         let conn = self.lock_conn()?;
-        let mut stmt = conn.prepare(
-            "SELECT id, zone_id, name, rtype, content, ttl, priority, disabled, last_modified_at, last_used_at
-             FROM records WHERE zone_id = ?1 ORDER BY name, rtype",
-        )?;
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {RECORD_COLUMNS}
+             FROM records WHERE zone_id = ?1 ORDER BY name, rtype"
+        ))?;
         let rows = stmt.query_map([zone_id], row_to_record)?;
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
@@ -953,10 +1002,10 @@ impl ZoneStore {
     /// All records across all zones (used to rebuild the in-memory catalog).
     pub fn list_all_records(&self) -> Result<Vec<Record>> {
         let conn = self.lock_conn()?;
-        let mut stmt = conn.prepare(
-            "SELECT id, zone_id, name, rtype, content, ttl, priority, disabled, last_modified_at, last_used_at
-             FROM records ORDER BY zone_id, name, rtype",
-        )?;
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {RECORD_COLUMNS}
+             FROM records ORDER BY zone_id, name, rtype"
+        ))?;
         let rows = stmt.query_map([], row_to_record)?;
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
@@ -964,8 +1013,7 @@ impl ZoneStore {
     pub fn get_record(&self, id: &str) -> Result<Option<Record>> {
         let conn = self.lock_conn()?;
         conn.query_row(
-            "SELECT id, zone_id, name, rtype, content, ttl, priority, disabled, last_modified_at, last_used_at
-             FROM records WHERE id = ?1",
+            &format!("SELECT {RECORD_COLUMNS} FROM records WHERE id = ?1"),
             [id],
             row_to_record,
         )
@@ -1000,9 +1048,10 @@ impl ZoneStore {
         )?)
     }
 
-    /// Insert or update a record, returning the stored record. The zone serial
-    /// is bumped in the same transaction so secondaries and IXFR/AXFR clients
-    /// detect the change.
+    /// Add a record, returning the stored record. The zone serial is bumped
+    /// in the same transaction so secondaries and IXFR/AXFR clients detect
+    /// the change. Adding a record identical to an enabled one returns that
+    /// one and changes nothing (re-registering a name is harmless).
     pub fn upsert_record(&self, zone_id: &str, input: &RecordInput) -> Result<Record> {
         let zone = self
             .get_zone(zone_id)?
@@ -1010,7 +1059,15 @@ impl ZoneStore {
         let mut conn = self.lock_conn()?;
         let tx = conn.transaction()?;
         let before = journal_snapshot(&tx, zone_id)?;
-        let record = insert_record_in_tx(&tx, zone_id, &zone.name, input)?;
+        let record = match insert_record_in_tx(&tx, zone_id, &zone.name, input, AddMode::Strict)? {
+            Added::Inserted(record) => record,
+            Added::Exists(record) => return Ok(record),
+            Added::Skipped => {
+                return Err(DaygleError::Internal(
+                    "a strict add left the record out".to_string(),
+                ))
+            }
+        };
         bump_serial_in(&tx, zone_id)?;
         journal_commit(&tx, zone_id, before, self.ixfr_journal_depth())?;
         tx.commit()?;
@@ -1036,6 +1093,21 @@ impl ZoneStore {
         };
         if was_disabled == disabled {
             return Ok(true);
+        }
+        // Enabling puts it in service: the CNAME rules a new record meets
+        // apply (a disabled record is a staging copy, free to conflict).
+        if !disabled {
+            let (name, rtype, zone_name): (String, String, String) = tx.query_row(
+                "SELECT r.name, r.rtype, z.name FROM records r JOIN zones z ON z.id = r.zone_id
+                 WHERE r.id = ?1",
+                [id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )?;
+            if !matches!(rtype.as_str(), "ALIAS" | "AUTOPTR") {
+                if let Some(conflict) = cname_conflict(&tx, &zone_id, &zone_name, &name, &rtype)? {
+                    return Err(DaygleError::InvalidRecord(conflict));
+                }
+            }
         }
         let before = journal_snapshot(&tx, &zone_id)?;
         tx.execute(
@@ -1113,7 +1185,21 @@ impl ZoneStore {
             disabled,
             ..input.clone()
         };
-        let mut record = insert_record_in_tx(&tx, zone_id, &zone.name, &input)?;
+        let mut record =
+            match insert_record_in_tx(&tx, zone_id, &zone.name, &input, AddMode::Strict)? {
+                Added::Inserted(record) => record,
+                // Edited into a copy of another record: two would be one.
+                Added::Exists(_) => {
+                    return Err(DaygleError::InvalidRecord(
+                        "an identical record already exists".to_string(),
+                    ))
+                }
+                Added::Skipped => {
+                    return Err(DaygleError::Internal(
+                        "a strict add left the record out".to_string(),
+                    ))
+                }
+            };
         let last_modified_at = Utc::now().to_rfc3339();
         tx.execute(
             "UPDATE records SET id = ?1, last_modified_at = ?3, last_used_at = ?4 WHERE id = ?2",
@@ -1144,25 +1230,47 @@ impl ZoneStore {
 
         for del in &update.deletes {
             let name = normalize_fqdn(&del.name);
-            let mut sql = "DELETE FROM records WHERE zone_id = ?1 AND name = ?2".to_string();
-            let mut values: Vec<Box<dyn rusqlite::ToSql>> =
-                vec![Box::new(zone_id.to_string()), Box::new(name)];
-            if let Some(rtype) = &del.rtype {
-                sql.push_str(" AND rtype = ?");
-                values.push(Box::new(rtype.to_ascii_uppercase()));
+            match (&del.rtype, &del.content) {
+                // One RR: matched by what its data means, not how it is
+                // written (a record typed into the console as `2001:DB8::1`
+                // or with a relative-looking name is the RR an update names
+                // in canonical form).
+                (Some(rtype), Some(content)) => {
+                    let rtype = rtype.to_ascii_uppercase();
+                    let matching: Vec<String> = {
+                        let mut stmt = tx.prepare(
+                            "SELECT id, content FROM records
+                             WHERE zone_id = ?1 AND name = ?2 AND rtype = ?3",
+                        )?;
+                        let rows = stmt.query_map(params![zone_id, name, rtype], |row| {
+                            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                        })?;
+                        rows.filter_map(std::result::Result::ok)
+                            .filter(|(_, stored)| same_rdata(&rtype, stored, content))
+                            .map(|(id, _)| id)
+                            .collect()
+                    };
+                    for id in matching {
+                        tx.execute("DELETE FROM records WHERE id = ?1", [id])?;
+                    }
+                }
+                (Some(rtype), None) => {
+                    tx.execute(
+                        "DELETE FROM records WHERE zone_id = ?1 AND name = ?2 AND rtype = ?3",
+                        params![zone_id, name, rtype.to_ascii_uppercase()],
+                    )?;
+                }
+                (None, _) => {
+                    tx.execute(
+                        "DELETE FROM records WHERE zone_id = ?1 AND name = ?2",
+                        params![zone_id, name],
+                    )?;
+                }
             }
-            if let Some(content) = &del.content {
-                sql.push_str(" AND content = ?");
-                values.push(Box::new(content.clone()));
-            }
-            let mut stmt = tx.prepare(&sql)?;
-            stmt.execute(rusqlite::params_from_iter(
-                values.iter().map(|v| v.as_ref()),
-            ))?;
         }
 
         for add in &update.adds {
-            insert_record_in_tx(&tx, zone_id, &zone.name, add)?;
+            insert_record_in_tx(&tx, zone_id, &zone.name, add, AddMode::Lenient)?;
         }
 
         match &update.soa {
@@ -1279,7 +1387,14 @@ impl ZoneStore {
     }
 
     /// Bulk import: replace all records of a zone (keeping the zone row).
-    pub fn replace_records(&self, zone_id: &str, records: &[RecordInput]) -> Result<()> {
+    /// Identical records are stored once; `mode` decides whether a record
+    /// that breaks the zone's rules fails the import or is left out.
+    pub fn replace_records(
+        &self,
+        zone_id: &str,
+        records: &[RecordInput],
+        mode: AddMode,
+    ) -> Result<()> {
         let zone = self
             .get_zone(zone_id)?
             .ok_or_else(|| DaygleError::NotFound(format!("zone {zone_id}")))?;
@@ -1287,7 +1402,7 @@ impl ZoneStore {
         let tx = conn.transaction()?;
         tx.execute("DELETE FROM records WHERE zone_id = ?1", [zone_id])?;
         for record in records {
-            insert_record_in_tx(&tx, zone_id, &zone.name, record)?;
+            insert_record_in_tx(&tx, zone_id, &zone.name, record, mode)?;
         }
         tx.execute(
             "UPDATE zones SET last_modified_at = ?2 WHERE id = ?1",
@@ -1315,7 +1430,7 @@ impl ZoneStore {
         let before = journal_snapshot(&tx, zone_id)?;
         tx.execute("DELETE FROM records WHERE zone_id = ?1", [zone_id])?;
         for record in records {
-            insert_record_in_tx(&tx, zone_id, &zone.name, record)?;
+            insert_record_in_tx(&tx, zone_id, &zone.name, record, AddMode::Lenient)?;
         }
         let (_, after) = journal_snapshot(&tx, zone_id)?;
         let served = |records: &[Record]| {
@@ -2091,6 +2206,10 @@ fn row_to_zone(row: &rusqlite::Row<'_>) -> rusqlite::Result<Zone> {
         last_modified_at: row.get(11)?,
     })
 }
+
+/// The columns [`row_to_record`] reads, in its order.
+const RECORD_COLUMNS: &str =
+    "id, zone_id, name, rtype, content, ttl, priority, disabled, last_modified_at, last_used_at";
 
 fn row_to_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<Record> {
     Ok(Record {
@@ -4244,6 +4363,12 @@ fn render_zone_file(zone: &Zone, records: &[Record]) -> String {
     ));
 
     for record in records {
+        // The SOA is written above from the zone's settings; a stored SOA
+        // row (zones imported before such rows were refused) would make a
+        // second one, and the file could not be imported again.
+        if record.rtype == "SOA" {
+            continue;
+        }
         let name = format!("{}.", record.name.trim_end_matches('.'));
         let line = format!(
             "{} {} IN {} {}\n",
@@ -4281,11 +4406,9 @@ fn journal_snapshot(conn: &Connection, zone_id: &str) -> Result<(u32, Vec<Record
         })
         .optional()?
         .ok_or_else(|| DaygleError::NotFound(format!("zone {zone_id}")))?;
-    let mut stmt = conn.prepare(
-        "SELECT id, zone_id, name, rtype, content, ttl, priority, disabled,
-                last_modified_at, last_used_at
-         FROM records WHERE zone_id = ?1 AND disabled = 0",
-    )?;
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {RECORD_COLUMNS} FROM records WHERE zone_id = ?1 AND disabled = 0"
+    ))?;
     let rows = stmt.query_map([zone_id], row_to_record)?;
     let mut records = Vec::new();
     for row in rows {
@@ -4377,17 +4500,41 @@ fn bump_serial_in(conn: &Connection, zone_id: &str) -> Result<u32> {
     Ok(next)
 }
 
+/// The largest TTL a record may carry (RFC 2181 §8: larger values are
+/// treated as 0 by resolvers, which is surely not what was meant).
+const MAX_TTL: u32 = i32::MAX as u32;
+
+/// Validate one record and store it unless it is already there or breaks the
+/// zone's rules (see [`AddMode`]).
 fn insert_record_in_tx(
     tx: &rusqlite::Transaction<'_>,
     zone_id: &str,
     zone_name: &str,
     input: &RecordInput,
-) -> Result<Record> {
+    mode: AddMode,
+) -> Result<Added> {
     let rtype = input.rtype.to_ascii_uppercase();
     if !crate::model::KNOWN_RECORD_TYPES.contains(&rtype.as_str()) {
         return Err(DaygleError::InvalidRecord(format!(
             "unsupported record type '{}'",
             input.rtype
+        )));
+    }
+    // The zone's SOA is made from its settings; a stored one would join it
+    // in the served SOA set (which holds one, and keeps the higher serial).
+    if rtype == "SOA" {
+        return match mode {
+            AddMode::Strict => Err(DaygleError::InvalidRecord(
+                "the zone's SOA comes from its SOA settings; it cannot be added as a record"
+                    .to_string(),
+            )),
+            AddMode::Lenient => Ok(Added::Skipped),
+        };
+    }
+    if input.ttl > MAX_TTL {
+        return Err(DaygleError::InvalidRecord(format!(
+            "TTL {} is over the largest allowed, {MAX_TTL} (RFC 2181)",
+            input.ttl
         )));
     }
 
@@ -4408,6 +4555,20 @@ fn insert_record_in_tx(
         RData::try_from_str(rr_type, &content).map_err(|e| {
             DaygleError::InvalidRecord(format!("invalid {rtype} record '{content}': {e}"))
         })?;
+        if !input.disabled {
+            if let Some(existing) = identical_record(tx, zone_id, &name, &rtype, &content)? {
+                return Ok(Added::Exists(existing));
+            }
+            if let Some(conflict) = cname_conflict(tx, zone_id, zone_name, &name, &rtype)? {
+                return match mode {
+                    AddMode::Strict => Err(DaygleError::InvalidRecord(conflict)),
+                    AddMode::Lenient => {
+                        tracing::debug!(zone = zone_name, "record left out: {conflict}");
+                        Ok(Added::Skipped)
+                    }
+                };
+            }
+        }
         if matches!(rtype.as_str(), "A" | "AAAA" | "CNAME") && !input.disabled {
             let alias: i64 = tx.query_row(
                 "SELECT COUNT(*) FROM records
@@ -4451,7 +4612,75 @@ fn insert_record_in_tx(
             record.last_used_at.as_deref(),
         ],
     )?;
-    Ok(record)
+    Ok(Added::Inserted(record))
+}
+
+/// The enabled record at `name` of type `rtype` whose data means the same as
+/// `content` (see [`same_rdata`]), if there is one.
+fn identical_record(
+    tx: &rusqlite::Transaction<'_>,
+    zone_id: &str,
+    name: &str,
+    rtype: &str,
+    content: &str,
+) -> Result<Option<Record>> {
+    let mut stmt = tx.prepare(&format!(
+        "SELECT {RECORD_COLUMNS} FROM records
+         WHERE zone_id = ?1 AND name = ?2 AND rtype = ?3 AND disabled = 0"
+    ))?;
+    let rows = stmt.query_map(params![zone_id, name, rtype], row_to_record)?;
+    for row in rows {
+        let record = row?;
+        if same_rdata(rtype, &record.content, content) {
+            return Ok(Some(record));
+        }
+    }
+    Ok(None)
+}
+
+/// Why an enabled `rtype` record at `name` cannot sit beside the zone's
+/// other enabled records (RFC 1034 §3.6.2, RFC 2181 §10.1): a CNAME's owner
+/// has no other data - so no CNAME at the apex, which has SOA and NS - and at
+/// most one CNAME. ALIAS and AUTOPTR are checked on their own.
+fn cname_conflict(
+    tx: &rusqlite::Transaction<'_>,
+    zone_id: &str,
+    zone_name: &str,
+    name: &str,
+    rtype: &str,
+) -> Result<Option<String>> {
+    if rtype == "CNAME" {
+        if name == zone_name {
+            return Ok(Some(format!(
+                "{name} is the zone apex, which holds the SOA and NS records: a CNAME cannot be there"
+            )));
+        }
+        let other: Option<String> = tx
+            .query_row(
+                "SELECT rtype FROM records
+                 WHERE zone_id = ?1 AND name = ?2 AND disabled = 0 LIMIT 1",
+                params![zone_id, name],
+                |r| r.get(0),
+            )
+            .optional()?;
+        return Ok(other.map(|other| {
+            if other == "CNAME" {
+                format!("{name} already has a CNAME record: a name has at most one")
+            } else {
+                format!("{name} has {other} records: a CNAME cannot sit beside other records")
+            }
+        }));
+    }
+    let cname: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM records
+         WHERE zone_id = ?1 AND name = ?2 AND rtype = 'CNAME' AND disabled = 0",
+        params![zone_id, name],
+        |r| r.get(0),
+    )?;
+    Ok(
+        (cname > 0)
+            .then(|| format!("{name} has a CNAME record: no other record can sit beside it")),
+    )
 }
 
 /// Check an ALIAS record (a name whose A and AAAA answers are looked up from
@@ -7129,5 +7358,242 @@ mod tests {
         s.create_console_user("auditor", &console_viewer("auditor"))
             .unwrap();
         assert!(s.clone().delete_console_user("auditor").unwrap());
+    }
+
+    fn rec(name: &str, rtype: &str, content: &str) -> RecordInput {
+        RecordInput {
+            name: name.to_string(),
+            rtype: rtype.to_string(),
+            content: content.to_string(),
+            ttl: 300,
+            priority: 0,
+            disabled: false,
+        }
+    }
+
+    fn zone_in(s: &ZoneStore, name: &str) -> Zone {
+        s.create_zone(&ZoneInput {
+            name: name.to_string(),
+            ..Default::default()
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn record_data_is_compared_by_meaning() {
+        assert!(same_rdata("AAAA", "2001:DB8::1", "2001:db8:0:0:0:0:0:1"));
+        assert!(same_rdata(
+            "CNAME",
+            "Target.Example.com",
+            "target.example.com."
+        ));
+        assert!(same_rdata(
+            "MX",
+            "10 mail.example.com",
+            "10 MAIL.example.com."
+        ));
+        assert!(!same_rdata(
+            "MX",
+            "10 mail.example.com.",
+            "20 mail.example.com."
+        ));
+        // TXT is case-sensitive.
+        assert!(!same_rdata("TXT", "\"Hello\"", "\"hello\""));
+        assert!(same_rdata("TXT", "\"v=spf1 -all\"", "\"v=spf1 -all\""));
+    }
+
+    /// Adding a record that is already there (in any spelling) changes
+    /// nothing: no second row, no serial bump.
+    #[test]
+    fn adding_an_existing_record_is_idempotent() {
+        let s = store();
+        let zone = zone_in(&s, "dup.test");
+        let first = s
+            .upsert_record(&zone.id, &rec("www", "AAAA", "2001:db8::1"))
+            .unwrap();
+        let serial = s.get_zone(&zone.id).unwrap().unwrap().serial;
+        let again = s
+            .upsert_record(&zone.id, &rec("www.dup.test.", "AAAA", "2001:DB8::1"))
+            .unwrap();
+        assert_eq!(again.id, first.id);
+        assert_eq!(s.get_zone(&zone.id).unwrap().unwrap().serial, serial);
+        let aaaa = |s: &ZoneStore| {
+            s.list_records(&zone.id)
+                .unwrap()
+                .iter()
+                .filter(|r| r.rtype == "AAAA")
+                .count()
+        };
+        assert_eq!(aaaa(&s), 1);
+        // A zone file listing a record twice stores it once.
+        s.replace_records(
+            &zone.id,
+            &[rec("a", "A", "192.0.2.1"), rec("a", "A", "192.0.2.1")],
+            AddMode::Strict,
+        )
+        .unwrap();
+        assert_eq!(s.list_records(&zone.id).unwrap().len(), 1);
+    }
+
+    /// RFC 1034 §3.6.2 / RFC 2181 §10.1: a CNAME's owner has nothing else.
+    #[test]
+    fn cname_rules_are_enforced() {
+        let s = store();
+        let zone = zone_in(&s, "cname.test");
+        let err = |input: RecordInput| s.upsert_record(&zone.id, &input).unwrap_err().to_string();
+        assert!(err(rec("@", "CNAME", "elsewhere.test.")).contains("apex"));
+        s.upsert_record(&zone.id, &rec("www", "A", "192.0.2.1"))
+            .unwrap();
+        assert!(err(rec("www", "CNAME", "elsewhere.test.")).contains("A records"));
+        s.upsert_record(&zone.id, &rec("alias", "CNAME", "one.test."))
+            .unwrap();
+        assert!(err(rec("alias", "CNAME", "two.test.")).contains("at most one"));
+        assert!(err(rec("alias", "TXT", "\"x\"")).contains("CNAME"));
+        // The same CNAME again is not a conflict, just already there.
+        s.upsert_record(&zone.id, &rec("alias", "CNAME", "ONE.test"))
+            .unwrap();
+        // A disabled record is staging, not served: it is allowed.
+        let mut staged = rec("www", "CNAME", "staged.test.");
+        staged.disabled = true;
+        s.upsert_record(&zone.id, &staged).unwrap();
+
+        // A dynamic update leaves a conflicting record out, as RFC 2136 says.
+        s.apply_dynamic_updates(
+            &zone.id,
+            &DynamicUpdate {
+                adds: vec![
+                    rec("alias.cname.test.", "A", "192.0.2.9"),
+                    rec("new.cname.test.", "A", "192.0.2.10"),
+                ],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let names: Vec<String> = s
+            .list_records(&zone.id)
+            .unwrap()
+            .into_iter()
+            .filter(|r| r.rtype == "A")
+            .map(|r| r.name)
+            .collect();
+        assert!(names.contains(&"new.cname.test".to_string()), "{names:?}");
+        assert!(
+            !names.contains(&"alias.cname.test".to_string()),
+            "{names:?}"
+        );
+    }
+
+    /// Enabling a staged record meets the same CNAME rules as adding one.
+    #[test]
+    fn enabling_a_record_checks_cname_rules() {
+        let s = store();
+        let zone = zone_in(&s, "stage.test");
+        s.upsert_record(&zone.id, &rec("www", "A", "192.0.2.1"))
+            .unwrap();
+        let mut staged = rec("www", "CNAME", "elsewhere.test.");
+        staged.disabled = true;
+        let staged = s.upsert_record(&zone.id, &staged).unwrap();
+        let err = s.set_record_disabled(&staged.id, false).unwrap_err();
+        assert!(err.to_string().contains("CNAME"), "{err}");
+        assert!(s.get_record(&staged.id).unwrap().unwrap().disabled);
+    }
+
+    /// The zone's SOA comes from its settings; one cannot be added as a
+    /// record (served, it could replace the real one).
+    #[test]
+    fn soa_records_and_oversized_ttls_are_refused() {
+        let s = store();
+        let zone = zone_in(&s, "soa.test");
+        let soa = rec(
+            "@",
+            "SOA",
+            "ns1.soa.test. admin.soa.test. 99 3600 600 86400 300",
+        );
+        assert!(s
+            .upsert_record(&zone.id, &soa)
+            .unwrap_err()
+            .to_string()
+            .contains("SOA"));
+        // Lenient (a master's transfer): left out, the rest kept.
+        s.replace_records(
+            &zone.id,
+            &[soa, rec("a", "A", "192.0.2.1")],
+            AddMode::Lenient,
+        )
+        .unwrap();
+        let records = s.list_records(&zone.id).unwrap();
+        assert!(records.iter().all(|r| r.rtype != "SOA"), "{records:?}");
+        assert_eq!(records.len(), 1);
+        let mut long = rec("b", "A", "192.0.2.2");
+        long.ttl = u32::MAX;
+        assert!(s
+            .upsert_record(&zone.id, &long)
+            .unwrap_err()
+            .to_string()
+            .contains("TTL"));
+    }
+
+    /// An update deleting one RR finds it however the console spelled it.
+    #[test]
+    fn dynamic_update_deletes_match_record_data_not_spelling() {
+        let s = store();
+        let zone = zone_in(&s, "del.test");
+        s.upsert_record(&zone.id, &rec("host", "AAAA", "2001:DB8::1"))
+            .unwrap();
+        s.upsert_record(&zone.id, &rec("host", "AAAA", "2001:db8::2"))
+            .unwrap();
+        s.upsert_record(&zone.id, &rec("mail", "MX", "10 Mx.Del.test"))
+            .unwrap();
+        s.apply_dynamic_updates(
+            &zone.id,
+            &DynamicUpdate {
+                deletes: vec![
+                    crate::model::DeleteSpec {
+                        name: "host.del.test".to_string(),
+                        rtype: Some("AAAA".to_string()),
+                        content: Some("2001:db8::1".to_string()),
+                    },
+                    crate::model::DeleteSpec {
+                        name: "mail.del.test".to_string(),
+                        rtype: Some("MX".to_string()),
+                        content: Some("10 mx.del.test.".to_string()),
+                    },
+                ],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let left: Vec<(String, String)> = s
+            .list_records(&zone.id)
+            .unwrap()
+            .into_iter()
+            .filter(|r| r.rtype != "NS")
+            .map(|r| (r.name, r.content))
+            .collect();
+        assert_eq!(
+            left,
+            vec![("host.del.test".to_string(), "2001:db8::2".to_string())]
+        );
+    }
+
+    /// A stored SOA row (zones imported before such rows were refused) is
+    /// not written to the exported file, which has the zone's SOA once.
+    #[test]
+    fn exports_carry_one_soa() {
+        let s = store();
+        let zone = zone_in(&s, "legacy.test");
+        s.with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO records (id, zone_id, name, rtype, content, ttl, priority, disabled, last_modified_at)
+                 VALUES ('legacy-soa', ?1, 'legacy.test', 'SOA',
+                         'ns.other. admin.other. 4000000000 1 1 1 1', 300, 0, 0, '')",
+                [&zone.id],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        let file = s.export_zone_file(&zone.id).unwrap();
+        assert_eq!(file.matches(" SOA ").count(), 1, "{file}");
+        assert!(!file.contains("4000000000"));
     }
 }

@@ -235,3 +235,50 @@ async fn serves_wildcard_records() {
 
     shutdown(server).await;
 }
+
+/// `POST /api/zones/import` takes the zone file's SOA as the zone's SOA
+/// settings, as creating a zone from a file does, and does not keep it as a
+/// record (served beside the zone's own, the higher serial would win).
+#[tokio::test]
+async fn importing_a_zone_file_takes_its_soa() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = spawn(config_with_zone(&dir.path().join("daygle-dns.db"), None)).await;
+    let text = "$ORIGIN imported.test.\n\
+                @ 3600 IN SOA ns1.imported.test. hostmaster.imported.test. 2024010101 7200 900 1209600 600\n\
+                @ 3600 IN NS ns1.imported.test.\n\
+                www 300 IN A 192.0.2.80\n";
+    let resp = reqwest::Client::new()
+        .post(format!("http://{}/api/zones/import", server.api_addr))
+        .json(&serde_json::json!({ "name": "imported.test", "text": text }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 201, "{}", resp.text().await.unwrap());
+
+    let zone = server
+        .catalog
+        .store()
+        .find_zone_by_name("imported.test")
+        .unwrap()
+        .unwrap();
+    assert_eq!(zone.serial, 2024010101);
+    assert_eq!(zone.primary_ns.trim_end_matches('.'), "ns1.imported.test");
+    assert_eq!(zone.minimum, 600);
+    let records = server.catalog.store().list_records(&zone.id).unwrap();
+    assert!(records.iter().all(|r| r.rtype != "SOA"), "{records:?}");
+
+    let reply = udp_query(server.udp_addr.unwrap(), "imported.test.", RecordType::SOA).await;
+    assert_eq!(reply.response_code, ResponseCode::NoError);
+    let soa: Vec<_> = reply
+        .answers
+        .iter()
+        .filter(|r| r.record_type() == RecordType::SOA)
+        .collect();
+    assert_eq!(soa.len(), 1);
+    assert!(
+        soa[0].data.to_string().contains("2024010101"),
+        "{}",
+        soa[0].data
+    );
+    shutdown(server).await;
+}

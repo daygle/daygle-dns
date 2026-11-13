@@ -88,6 +88,73 @@ pub struct AuthorityCatalog {
     /// Dynamic updates run one at a time (RFC 2136 §3.7): prerequisites are
     /// checked against the zone as it will be when the update applies.
     pub(crate) update_lock: tokio::sync::Mutex<()>,
+    /// Signed zones as last built, by zone id (see [`SignedZone`]). Only
+    /// touched under `reload_lock`.
+    signed_zones: Mutex<HashMap<String, SignedZone>>,
+}
+
+/// A zone as last signed. Signing is most of what a reload costs (one
+/// signature per RRset and key: about 50 µs each), and every reload - a
+/// record edited anywhere, a health check flipping - rebuilds every zone.
+/// So a signed zone is reused while nothing it is made from changed
+/// ([`signed_fingerprint`]) and its signatures are younger than a quarter of
+/// their validity. The DNSSEC maintenance reload, every half validity, then
+/// always re-signs: served signatures are never older than without reuse.
+#[derive(Clone)]
+struct SignedZone {
+    fingerprint: u64,
+    signed_at: std::time::Instant,
+    handler: Arc<dyn ZoneHandler>,
+    served: Arc<ServedRecords>,
+}
+
+/// A signed zone is reused while its signatures are younger than this share
+/// of their validity.
+const SIGNED_REUSE_DIVISOR: u32 = 4;
+
+/// Everything [`signed_zone`] makes a zone from: its SOA settings, the
+/// records it serves (after failover), its active and retired keys, its
+/// denial proofs (NSEC or NSEC3) and the signature validity.
+fn signed_fingerprint(
+    zone: &crate::model::Zone,
+    records: &[DbRecord],
+    active: &[&SigningKeyRecord],
+    retired: &[&SigningKeyRecord],
+    nsec3: bool,
+    validity: Duration,
+) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    (
+        &zone.name,
+        zone.serial,
+        &zone.primary_ns,
+        &zone.admin_mailbox,
+        zone.refresh,
+        zone.retry,
+        zone.expire,
+        zone.minimum,
+    )
+        .hash(&mut hasher);
+    records.len().hash(&mut hasher);
+    for record in records {
+        (
+            &record.name,
+            &record.rtype,
+            &record.content,
+            record.ttl,
+            record.disabled,
+        )
+            .hash(&mut hasher);
+    }
+    for keys in [active, retired] {
+        keys.len().hash(&mut hasher);
+        for key in keys {
+            (&key.id, key.algorithm, &key.key_der, &key.state).hash(&mut hasher);
+        }
+    }
+    (nsec3, validity).hash(&mut hasher);
+    hasher.finish()
 }
 
 /// A zone's served records, with their signatures.
@@ -295,7 +362,13 @@ impl AuthorityCatalog {
     /// Build a catalog from the store without any DNSSEC signing.
     pub fn new(store: ZoneStore, settings: AuthoritativeSettings) -> Result<Self> {
         store.set_ixfr_journal_depth(settings.ixfr_journal_depth)?;
-        let built = build_catalog(&store, &settings, false, &Default::default())?;
+        let built = build_catalog(
+            &store,
+            &settings,
+            false,
+            &Default::default(),
+            &mut HashMap::new(),
+        )?;
         let networks = daygle_dns_core::config::builtin_networks();
         let split_horizon = Arc::new(build_split_horizon(&store, &networks)?);
         Ok(Self {
@@ -315,6 +388,7 @@ impl AuthorityCatalog {
             changed_zones: Mutex::new(BTreeSet::new()),
             zones_changed: Arc::new(tokio::sync::Notify::new()),
             update_lock: tokio::sync::Mutex::new(()),
+            signed_zones: Mutex::default(),
         })
     }
 
@@ -503,12 +577,15 @@ impl AuthorityCatalog {
     pub fn reload(&self) -> Result<()> {
         let _reload = self.reload_lock.lock().unwrap_or_else(|e| e.into_inner());
         let settings = self.settings.load_full();
+        let mut signed_zones = self.signed_zones.lock().unwrap_or_else(|e| e.into_inner());
         let built = build_catalog(
             &self.store,
             &settings,
             settings.dnssec_enabled,
             &self.unhealthy.load(),
+            &mut signed_zones,
         )?;
+        drop(signed_zones);
         self.catalog.store(Arc::new(built.catalog));
         self.transfer_sets.store(Arc::new(built.transfer_sets));
         self.aliases.store(Arc::new(built.aliases));
@@ -842,7 +919,10 @@ fn build_catalog(
     settings: &AuthoritativeSettings,
     sign_zones: bool,
     unhealthy: &std::collections::HashSet<String>,
+    signed_zones: &mut HashMap<String, SignedZone>,
 ) -> Result<Built> {
+    // Kept only for zones still signed in this build.
+    let previous = std::mem::take(signed_zones);
     let mut catalog = Catalog::new();
     let weights = store.list_record_weights()?;
     let mut zone_aliases: HashMap<String, Vec<String>> = HashMap::new();
@@ -936,51 +1016,76 @@ fn build_catalog(
         // is what makes pre-publish/double-sign rollover work: validators
         // can pick either key while both are published.
         let active: Vec<&SigningKeyRecord> = keys.iter().filter(|k| k.is_active()).collect();
-        let signers: Vec<DnssecSigner> = if sign_zones {
-            active
-                .iter()
-                .filter_map(|key| {
-                    build_signer(origin.clone(), key.algorithm, &key.key_der, sig_validity)
-                        .map_err(|e| warn!("cannot reconstruct signing key for {}: {e}", zone.name))
-                        .ok()
-                })
-                .collect()
-        } else {
-            Vec::new()
-        };
-
-        let handler = if signers.is_empty() {
-            None
-        } else {
+        let signed = if sign_zones && !active.is_empty() {
             let retired: Vec<&SigningKeyRecord> = keys.iter().filter(|k| k.is_retired()).collect();
-            match signed_zone(store, &zone, &records, &origin, signers, &active, &retired) {
-                Ok(mut handler) => {
-                    transfer_sets.insert(
-                        zone_key(&zone.name),
-                        Arc::new(handler.records_get_mut().clone()),
-                    );
-                    Some(handler)
-                }
-                Err(e) => {
-                    warn!(zone = %zone.name, error = %e, "failed to sign zone; serving it unsigned");
-                    None
+            let nsec3 = store.zone_nsec3(&zone.id).unwrap_or(false);
+            let fingerprint =
+                signed_fingerprint(&zone, &records, &active, &retired, nsec3, sig_validity);
+            let fresh = previous.get(&zone.id).filter(|cached| {
+                cached.fingerprint == fingerprint
+                    && cached.signed_at.elapsed() < sig_validity / SIGNED_REUSE_DIVISOR
+            });
+            match fresh {
+                Some(cached) => Some(cached.clone()),
+                None => {
+                    let signers: Vec<DnssecSigner> = active
+                        .iter()
+                        .filter_map(|key| {
+                            build_signer(origin.clone(), key.algorithm, &key.key_der, sig_validity)
+                                .map_err(|e| {
+                                    warn!("cannot reconstruct signing key for {}: {e}", zone.name)
+                                })
+                                .ok()
+                        })
+                        .collect();
+                    if signers.is_empty() {
+                        None
+                    } else {
+                        match signed_zone(
+                            store, &zone, &records, &origin, signers, &active, &retired,
+                        ) {
+                            Ok(mut handler) => Some(SignedZone {
+                                fingerprint,
+                                signed_at: std::time::Instant::now(),
+                                served: Arc::new(handler.records_get_mut().clone()),
+                                handler: Arc::new(handler),
+                            }),
+                            Err(e) => {
+                                warn!(zone = %zone.name, error = %e, "failed to sign zone; serving it unsigned");
+                                None
+                            }
+                        }
+                    }
                 }
             }
+        } else {
+            None
         };
-        let signed = handler.is_some();
-        let handler = match handler {
-            Some(handler) => handler,
-            None => ZoneData::new(
-                origin.clone(),
-                zone_rrsets(&zone, &records)?,
-                ZoneType::Primary,
-                AxfrPolicy::Deny,
-                None,
-            )
-            .map_err(DaygleError::InvalidRecord)?,
+        let handler: Arc<dyn ZoneHandler> = match &signed {
+            Some(zone_signed) => {
+                transfer_sets.insert(zone_key(&zone.name), zone_signed.served.clone());
+                zone_signed.handler.clone()
+            }
+            None => Arc::new(
+                ZoneData::new(
+                    origin.clone(),
+                    zone_rrsets(&zone, &records)?,
+                    ZoneType::Primary,
+                    AxfrPolicy::Deny,
+                    None,
+                )
+                .map_err(DaygleError::InvalidRecord)?,
+            ),
+        };
+        let signed = match signed {
+            Some(zone_signed) => {
+                signed_zones.insert(zone.id.clone(), zone_signed);
+                true
+            }
+            None => false,
         };
         serials.insert(zone_key(&zone.name), zone.serial);
-        catalog.upsert(lower, vec![Arc::new(handler) as Arc<dyn ZoneHandler>]);
+        catalog.upsert(lower, vec![handler]);
         for alias in zone_aliases.get(&zone.id).into_iter().flatten() {
             let renamed = alias_records(&zone_key(&zone.name), alias, &records);
             alias_zones.push((zone.clone(), alias.clone(), renamed));
@@ -1426,9 +1531,7 @@ fn zone_rrsets(
 
     // Insert every enabled record.
     for record in records {
-        // ALIAS and AUTOPTR are answered by the dispatcher, not served as
-        // records.
-        if record.disabled || record.rtype == "ALIAS" || record.rtype == "AUTOPTR" {
+        if !served_as_record(record) {
             continue;
         }
         match record_to_hickory(record) {
@@ -1471,10 +1574,19 @@ fn soa_record(zone: &crate::model::Zone, serial: u32) -> Result<Record> {
 /// A journalled record as it goes on the wire; records the zone never serves
 /// are left out.
 fn delta_record(record: &DbRecord) -> Option<Record> {
-    if record.disabled || record.rtype == "ALIAS" || record.rtype == "AUTOPTR" {
-        return None;
-    }
-    record_to_hickory(record).ok()
+    served_as_record(record)
+        .then(|| record_to_hickory(record).ok())
+        .flatten()
+}
+
+/// Whether a stored record goes into the zone as a record. Not when it is
+/// disabled; not ALIAS or AUTOPTR, which the dispatcher answers itself; and
+/// not a stored SOA row (zones imported before such rows were refused): the
+/// zone's SOA is made from its settings, and a second one would join it in
+/// the SOA set - which holds one, keeping the higher serial - or turn up in
+/// the middle of an IXFR.
+fn served_as_record(record: &DbRecord) -> bool {
+    !record.disabled && !matches!(record.rtype.as_str(), "ALIAS" | "AUTOPTR" | "SOA")
 }
 
 /// Convert a database record into a Hickory record.
@@ -1929,6 +2041,105 @@ mod tests {
             let behind = now - inception;
             assert!((3590..=3700).contains(&behind), "inception {behind}s back");
         }
+    }
+
+    /// A stored SOA row (zones imported before such rows were refused)
+    /// must not join the SOA the zone serves: the SOA set holds one and
+    /// keeps the higher serial, so it could replace the real one.
+    #[test]
+    fn a_stored_soa_row_is_not_served() {
+        let store = ZoneStore::open(":memory:").unwrap();
+        let zone = store
+            .create_zone(&ZoneInput {
+                name: "legacy.test".into(),
+                ..Default::default()
+            })
+            .unwrap();
+        let stored = DbRecord {
+            id: "legacy-soa".into(),
+            zone_id: zone.id.clone(),
+            name: "legacy.test".into(),
+            rtype: "SOA".into(),
+            content: "ns.other. admin.other. 4000000000 1 1 1 1".into(),
+            ttl: 300,
+            priority: 0,
+            disabled: false,
+            last_modified_at: String::new(),
+            last_used_at: None,
+        };
+        let map = zone_rrsets(&zone, std::slice::from_ref(&stored)).unwrap();
+        let soa: Vec<_> = map
+            .values()
+            .filter(|set| set.record_type() == RecordType::SOA)
+            .flat_map(|set| set.records_without_rrsigs())
+            .collect();
+        assert_eq!(soa.len(), 1);
+        match &soa[0].data {
+            RData::SOA(rdata) => assert_eq!(rdata.serial, zone.serial),
+            other => panic!("not an SOA: {other:?}"),
+        }
+        assert!(delta_record(&stored).is_none(), "nor carried in an IXFR");
+    }
+
+    /// A signed zone is signed again only when something it is made from
+    /// changed, or its signatures have aged past a quarter of their life.
+    #[test]
+    fn signed_zones_are_reused_until_they_change_or_age() {
+        let store = ZoneStore::open(":memory:").unwrap();
+        let settings = AuthoritativeSettings {
+            dnssec_enabled: true,
+            ..AuthoritativeSettings::default()
+        };
+        let catalog = AuthorityCatalog::new(store, settings.clone()).unwrap();
+        let zone = catalog
+            .store()
+            .create_zone(&ZoneInput {
+                name: "signed.test".into(),
+                ..Default::default()
+            })
+            .unwrap();
+        catalog.sign_zone(&zone.id).unwrap();
+        let signed_at =
+            |catalog: &AuthorityCatalog| catalog.signed_zones.lock().unwrap()[&zone.id].signed_at;
+        let first = signed_at(&catalog);
+        catalog.reload().unwrap();
+        assert_eq!(signed_at(&catalog), first, "nothing changed: reused");
+
+        catalog
+            .store()
+            .upsert_record(
+                &zone.id,
+                &RecordInput {
+                    name: "www".into(),
+                    rtype: "A".into(),
+                    content: "192.0.2.1".into(),
+                    ttl: 300,
+                    priority: 0,
+                    disabled: false,
+                },
+            )
+            .unwrap();
+        catalog.reload().unwrap();
+        let edited = signed_at(&catalog);
+        assert_ne!(edited, first, "a record changed: signed again");
+
+        // Signatures past a quarter of their validity are renewed.
+        let quarter = sig_duration(&settings) / SIGNED_REUSE_DIVISOR;
+        catalog
+            .signed_zones
+            .lock()
+            .unwrap()
+            .get_mut(&zone.id)
+            .unwrap()
+            .signed_at = std::time::Instant::now()
+            .checked_sub(quarter + Duration::from_secs(1))
+            .unwrap();
+        catalog.reload().unwrap();
+        assert!(signed_at(&catalog).elapsed() < Duration::from_secs(60));
+
+        // Unsigned: nothing kept.
+        catalog.unsign_zone(&zone.id).unwrap();
+        assert!(catalog.signed_zones.lock().unwrap().is_empty());
     }
 
     #[test]

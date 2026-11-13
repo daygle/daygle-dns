@@ -672,7 +672,13 @@ async fn signed_zone_larger_than_a_message_replicates_over_tsig() {
             disabled: false,
         })
         .collect();
-    store.replace_records(&zone.id, &records).unwrap();
+    store
+        .replace_records(
+            &zone.id,
+            &records,
+            daygle_dns_authoritative::store::AddMode::Strict,
+        )
+        .unwrap();
     master.catalog.sign_zone(&zone.id).unwrap();
     let serial = store.get_zone(&zone.id).unwrap().unwrap().serial;
     let master_tcp = master.tcp_addr.unwrap();

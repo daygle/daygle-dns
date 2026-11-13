@@ -613,7 +613,10 @@ fn would_remove_last_apex_ns(zone: &Zone, records: &[DbRecord], plan: &DynamicUp
             None => remaining = 0,
             Some("NS") => {
                 if let Some(content) = &del.content {
-                    if apex_ns.iter().any(|r| &r.content == content) {
+                    if apex_ns
+                        .iter()
+                        .any(|r| crate::store::same_rdata("NS", &r.content, content))
+                    {
                         // saturating: duplicate delete specs for the same NS
                         // must not underflow (which would wrap and bypass the
                         // last-NS guard in release builds).
