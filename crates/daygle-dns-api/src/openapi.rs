@@ -410,6 +410,62 @@ fn diagnostics_schemas() -> Value {
                     "description": "Entry bundle hash, so an open console can reload after an update."
                 }
             }
+        },
+        "Status": {
+            "type": "object",
+            "description": "What the dashboard shows: counts, which listeners are on, whether \
+                setup is pending, and the cached release data behind the update banner.",
+            "required": [
+                "version", "uptime_secs", "zones", "records", "recursion",
+                "resolution_mode", "recursion_access", "local_root", "dnssec",
+                "dot_enabled", "doh_enabled", "doq_enabled", "users_configured",
+                "setup_pending", "api_enabled", "update_available", "latest_release",
+                "blocklist_sources", "remote_blocklist_domains"
+            ],
+            "properties": {
+                "version": { "type": "string" },
+                "uptime_secs": { "type": "integer" },
+                "zones": { "type": "integer" },
+                "records": { "type": "integer" },
+                "recursion": { "type": "boolean", "description": "Whether a resolver is loaded." },
+                "resolution_mode": {
+                    "type": ["string", "null"],
+                    "enum": ["recursive", "forwarding", null],
+                    "description": "Null while recursion is turned off."
+                },
+                "recursion_access": {
+                    "type": "string",
+                    "enum": ["allow", "private_networks", "custom", "deny"],
+                    "description": "Which clients may use recursion."
+                },
+                "local_root": {
+                    "type": "boolean",
+                    "description": "Whether a verified local root zone (RFC 8806) is serving."
+                },
+                "dnssec": { "type": "boolean", "description": "Whether DNSSEC validation is on." },
+                "dot_enabled": { "type": "boolean" },
+                "doh_enabled": { "type": "boolean" },
+                "doq_enabled": { "type": "boolean" },
+                "users_configured": { "type": "boolean" },
+                "setup_pending": {
+                    "type": "boolean",
+                    "description": "No console account exists yet, so the one-time setup is due."
+                },
+                "api_enabled": { "type": "boolean" },
+                "update_available": {
+                    "type": ["boolean", "null"],
+                    "description": "Null on hosts that cannot self-update or when checks are off."
+                },
+                "latest_release": {
+                    "type": ["string", "null"],
+                    "description": "The cached latest release, e.g. `1.0.2`."
+                },
+                "blocklist_sources": { "type": "integer", "description": "Configured sources." },
+                "remote_blocklist_domains": {
+                    "type": "integer",
+                    "description": "Domains the fetched blocklists hold."
+                }
+            }
         }
     })
 }
@@ -5163,7 +5219,10 @@ fn diagnostics_operation(path: &str, method: &str) -> Option<Value> {
         })),
         ("get", "/status") => Some(json!({
             "responses": {
-                "200": empty_response("Zone, record and query counts plus build information."),
+                "200": json_response(
+                    "Counts, listener state, setup state and the cached release data.",
+                    schema_ref("Status"),
+                ),
                 "500": json!({
                     "description": "The counts could not be read.",
                     "content": { "application/json": { "schema": schema_ref("Error") } }

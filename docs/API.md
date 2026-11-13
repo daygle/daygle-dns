@@ -82,9 +82,10 @@ below carry full JSON Schemas:
   document itself.
 
 Every path and method is therefore in the document, and the groups above name
-their request and response bodies in full. Operations that accept or return
-nothing (`204`, a `202` that only starts work) say so instead of leaving the
-reader to guess.
+their request and response bodies in full. The two counters not worth pinning
+down (`/metrics`, `/host-stats`) are declared as free-form JSON rather than a
+blank response, and operations with no body at all (`204`, a `202` that only
+starts work) say so instead of leaving the reader to guess.
 
 ## Authentication
 
