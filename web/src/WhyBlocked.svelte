@@ -9,10 +9,53 @@
   // every check in the order a query meets them, and the latest logged
   // blocks of the domain. `auto` runs it as soon as it opens (from a query
   // log row).
-  let { domain = '', client = '', qtype = 'A', listener = '', auto = false } = $props();
+  // `block` and `protocol` describe the logged query being explained, when
+  // there is one: a refusal at the listener (listener access, DNS accounts)
+  // happens before any domain check, so it is explained here instead of
+  // being run through checks that never applied to it.
+  let { domain = '', client = '', qtype = 'A', listener = '', block = null, protocol = '', auto = false } = $props();
+
+  // The query log's transport names, as the form's "Asked Over" values.
+  const LISTENER_OF_PROTOCOL = { tls: 'dot', https: 'doh', h3: 'doh', quic: 'doq' };
+  const PROTOCOL_NAMES = { tls: 'DNS over TLS', https: 'DNS over HTTPS', h3: 'DNS over HTTPS', quic: 'DNS over QUIC' };
+  // Placeholders logged before refusals kept the name asked for.
+  const PLACEHOLDERS = ['(account-required)', '(listener-denied)'];
+
+  // Why the logged query was refused at the listener, or null when the
+  // domain checks below apply to it.
+  const refusal = untrack(() => {
+    if (block?.source !== 'listener') return null;
+    const over = PROTOCOL_NAMES[protocol] || 'an encrypted listener';
+    const reason = block.reason || '';
+    if (/client is not allowed/.test(reason)) {
+      return {
+        title: 'Refused at the listener: device not allowed',
+        text: `The device connected over ${over} from an address that is not in that listener's allowed networks, so the server refused the connection's queries before looking at the domain. The domain checks below never ran for it.`,
+        fix: 'Add the device\'s network to the listener\'s allowed networks in Settings, or have the device use plain DNS.',
+      };
+    }
+    if (/unknown or disabled/.test(reason)) {
+      return {
+        title: 'Refused at the listener: unknown DNS account',
+        text: `The device connected over ${over} as a client ID that names no enabled DNS account, and this server requires one, so its queries were refused before the domain was looked at. The domain checks below never ran for it.`,
+        fix: 'Check the client ID in the device\'s DNS setting, or enable its account under DNS Accounts.',
+      };
+    }
+    return {
+      title: 'Refused at the listener: no DNS account',
+      text: `The device connected over ${over} without naming a DNS account, and "Require an account" is on, so its queries were refused before the domain was looked at. The domain checks below never ran for it.`,
+      fix: 'Android and Wear OS do this on their own: with Private DNS on "Automatic" they try DNS over TLS on every network without a server name, then fall back to plain DNS when refused, so the device still resolves (and is still filtered). Each device has its own Private DNS setting; a watch does not use the phone\'s. To stop these, set the device\'s Private DNS to <client id>.<account domain>, turn its Private DNS off, or turn off "Require an account".',
+    };
+  });
+  const placeholder = untrack(() => PLACEHOLDERS.includes(domain));
 
   // The form starts from the props, then is the user's to edit.
-  let form = $state(untrack(() => ({ domain, client, qtype: qtype || 'A', listener })));
+  let form = $state(untrack(() => ({
+    domain: placeholder ? '' : domain,
+    client,
+    qtype: qtype || 'A',
+    listener: listener || LISTENER_OF_PROTOCOL[protocol] || '',
+  })));
   let result = $state(null);
   let error = $state(null);
   let busy = $state(false);
@@ -58,9 +101,24 @@
   }
 
   $effect(() => {
-    if (auto) run();
+    // A listener refusal is explained above the form; running the domain
+    // checks on open would only report "Not Blocked" for a query that was.
+    if (auto && !untrack(() => refusal)) run();
   });
 </script>
+
+{#if refusal}
+  <div class="verdict blocked refusal">
+    <span class="pill err">Refused</span>
+    <strong>{refusal.title}</strong>
+    <p>{refusal.text}</p>
+    <p class="muted">{refusal.fix}</p>
+    <p class="muted small">
+      {#if placeholder}This entry was logged before refusals kept the name the device asked for.{/if}
+      To see how the server would treat a domain once the device gets through, enter it and press Check.
+    </p>
+  </div>
+{/if}
 
 <form class="ask" onsubmit={(e) => { e.preventDefault(); run(); }}>
   <label>Domain <input placeholder="ads.example.com" bind:value={form.domain} spellcheck="false" /></label>
@@ -158,6 +216,7 @@
   .verdict { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 10px 12px; border: 1px solid var(--ok); border-radius: 8px; margin-bottom: 14px; }
   .verdict.blocked { border-color: var(--danger); }
   .verdict .small { flex-basis: 100%; }
+  .refusal p { flex-basis: 100%; margin: 0; }
   .small { font-size: 0.8rem; }
   h4 { margin: 14px 0 8px; }
   tr.decides td { background: color-mix(in srgb, var(--danger) 10%, transparent); }

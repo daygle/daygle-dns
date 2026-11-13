@@ -1051,10 +1051,11 @@ impl DnsDispatcher {
         if matches!(listener_allowed, Some(false)) {
             debug!(%client, protocol, "client not allowed on this listener");
             self.metrics.inc(&self.metrics.blocked);
+            let (qname, qtype) = logged_question(request, "(listener-denied)");
             self.observe_blocked(
                 client,
-                "(listener-denied)",
-                "",
+                &qname,
+                &qtype,
                 protocol,
                 Some("REFUSED"),
                 started,
@@ -2561,10 +2562,11 @@ impl DnsDispatcher {
         };
         debug!(%client, protocol, ?identity, "query refused: no DNS account");
         self.metrics.inc(&self.metrics.blocked);
+        let (qname, qtype) = logged_question(request, "(account-required)");
         self.observe_blocked(
             client,
-            "(account-required)",
-            "",
+            &qname,
+            &qtype,
             protocol,
             Some("REFUSED"),
             started,
@@ -3511,6 +3513,25 @@ fn rcode_label(code: ResponseCode) -> String {
 }
 
 /// Transport label for a query, recorded in the SQLite query log.
+/// The name and type a query asked about, for logging a refusal made before
+/// the question is otherwise parsed (listener access, DNS accounts), in the
+/// same lowercase ASCII form the rest of the log uses. `fallback` (with no
+/// type) stands in when the request carries no readable question.
+fn logged_question(request: &Request, fallback: &str) -> (String, String) {
+    match request.request_info() {
+        Ok(info) => {
+            let name = info
+                .query
+                .name()
+                .to_ascii()
+                .trim_end_matches('.')
+                .to_ascii_lowercase();
+            (name, info.query.query_type().to_string())
+        }
+        Err(_) => (fallback.to_string(), String::new()),
+    }
+}
+
 fn protocol_label(protocol: hickory_server::net::xfer::Protocol) -> &'static str {
     use hickory_server::net::xfer::Protocol as P;
     match protocol {

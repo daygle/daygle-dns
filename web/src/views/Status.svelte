@@ -31,7 +31,7 @@
       );
       const entry = (data.entries || [])[0];
       why = entry
-        ? { qname: entry.qname, client: entry.client, qtype: entry.qtype, ts: entry.ts, block: entry.block }
+        ? { qname: entry.qname, client: entry.client, qtype: entry.qtype, ts: entry.ts, block: entry.block, protocol: entry.protocol }
         : { qname: row.key, client: '', qtype: 'A', ts: null, block: null, note: 'No blocked query for this domain in the kept query log.' };
     } catch (e) {
       why = { qname: row.key, client: '', qtype: 'A', ts: null, block: null, note: formatApiError(e) };
@@ -504,7 +504,7 @@
         <p class="muted" style="margin-top: 0">{why.note}</p>
       {/if}
       <p class="muted help" style="margin-top: 0">How the server treats it now:</p>
-      <WhyBlocked domain={why.qname} client={why.client} qtype={why.qtype} auto={Boolean(why.client)} />
+      <WhyBlocked domain={why.qname} client={why.client} qtype={why.qtype} block={why.block} protocol={why.protocol} auto={Boolean(why.client)} />
     </div>
   </div>
 {/if}

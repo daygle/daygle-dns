@@ -291,5 +291,39 @@ async fn accounts_are_recognised_filtered_logged_and_required() {
     let plain = udp_query(server.udp_addr.unwrap(), "games.test.", RecordType::A).await;
     assert_eq!(first_answer(&plain).as_deref(), Some("192.0.2.80"));
 
+    // A refusal is logged under the name and type the device asked for, not
+    // a placeholder, so the log shows what the device was trying to reach.
+    let mut refused = Vec::new();
+    for _ in 0..100 {
+        let logged = api(
+            &server,
+            "GET",
+            "/querylogs?outcome=blocked&qname=games.test",
+            Value::Null,
+        )
+        .await;
+        refused = logged["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|e| e["block"]["source"] == "listener")
+            .cloned()
+            .collect();
+        if !refused.is_empty() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert!(
+        !refused.is_empty(),
+        "no account refusal logged for games.test"
+    );
+    assert!(
+        refused
+            .iter()
+            .all(|e| e["qname"] == "games.test" && e["qtype"] == "A" && e["protocol"] == "tls"),
+        "{refused:?}"
+    );
+
     shutdown(server).await;
 }
