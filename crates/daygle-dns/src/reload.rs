@@ -330,20 +330,47 @@ pub fn spawn_watcher(
             // without any configuration change: rebind so the running
             // listeners present the new pair instead of the old one until
             // the next restart.
-            let tls = tls_file_signature(&shared.config.load_full());
+            //
+            // The new files are checked first. A rebind stops every listener,
+            // plain DNS included, and a pair that does not load (a key that
+            // does not match, a half-written file, a missing half) would fail
+            // the restore of the previous listeners too, since those read the
+            // same paths: DNS would stay down until the files changed again.
+            // A pair that does not load is reported and the running
+            // listeners keep the material they have; the next change to the
+            // files is checked again.
+            let config = shared.config.load_full();
+            let tls = tls_file_signature(&config);
             if tls != last_tls {
                 last_tls = tls;
-                info!("certificate files changed; rebinding the encrypted listeners");
-                shared.logs.info(
-                    "tls",
-                    "certificate files changed on disk: reloading the DoT/DoH/DoQ listeners",
-                );
-                if reload_tx
-                    .send(ReloadCommand::Rebuild { ack: None })
-                    .await
-                    .is_err()
-                {
-                    warn!("DNS supervisor is gone; cannot apply the certificate change");
+                match tls_files_usable(&config) {
+                    Ok(()) => {
+                        info!("certificate files changed; rebinding the encrypted listeners");
+                        shared.logs.info(
+                            "tls",
+                            "certificate files changed on disk: reloading the DoT/DoH/DoQ listeners",
+                        );
+                        if reload_tx
+                            .send(ReloadCommand::Rebuild { ack: None })
+                            .await
+                            .is_err()
+                        {
+                            warn!("DNS supervisor is gone; cannot apply the certificate change");
+                        }
+                    }
+                    Err(e) => {
+                        warn!(
+                            error = %e,
+                            "certificate files changed but do not load; keeping the listeners as they are"
+                        );
+                        shared.logs.warn(
+                            "tls",
+                            format!(
+                                "certificate files changed on disk but do not load ({e}); the \
+                                 listeners keep the previous certificate until the files are fixed"
+                            ),
+                        );
+                    }
                 }
             }
 
@@ -417,33 +444,68 @@ fn last_modified(path: &Path) -> Option<std::time::SystemTime> {
 type TlsFileStamp = (u64, Option<std::time::SystemTime>);
 type TlsFileSignature = Vec<(String, Option<TlsFileStamp>)>;
 
-fn tls_file_signature(config: &DaygleConfig) -> TlsFileSignature {
-    let mut files = Vec::new();
-    for (enabled, cert_path, key_path) in [
+/// The certificate and key files the enabled encrypted listeners read, with
+/// whether each may generate a self-signed pair. A listener that names a
+/// stored certificate (`certificate`) is left out: that pair is written
+/// out from the database at bind time, so its configured paths are not
+/// what it serves, and changing a stored certificate rebinds by itself.
+fn tls_files(config: &DaygleConfig) -> Vec<(&str, &str, bool)> {
+    [
         (
             config.dot.enabled,
+            &config.dot.certificate,
             &config.dot.cert_path,
             &config.dot.key_path,
+            config.dot.self_signed,
         ),
         (
             config.doh.enabled,
+            &config.doh.certificate,
             &config.doh.cert_path,
             &config.doh.key_path,
+            config.doh.self_signed,
         ),
         (
             config.doq.enabled,
+            &config.doq.certificate,
             &config.doq.cert_path,
             &config.doq.key_path,
+            config.doq.self_signed,
         ),
-    ] {
-        if !enabled {
-            continue;
+    ]
+    .into_iter()
+    .filter(|(enabled, certificate, ..)| *enabled && certificate.trim().is_empty())
+    .map(|(_, _, cert, key, self_signed)| (cert.as_str(), key.as_str(), self_signed))
+    .collect()
+}
+
+/// Whether a rebind would load every enabled listener's certificate and key:
+/// both files present and a matching pair, or both absent where a
+/// self-signed pair will be generated.
+fn tls_files_usable(config: &DaygleConfig) -> std::result::Result<(), String> {
+    for (cert, key, self_signed) in tls_files(config) {
+        let present = (Path::new(cert).exists(), Path::new(key).exists());
+        match present {
+            (false, false) if self_signed => continue,
+            (true, true) => {
+                daygle_dns_dot::load_tls_config(cert, key, daygle_dns_dot::DOT_ALPN)
+                    .map_err(|e| format!("'{cert}' / '{key}': {e}"))?;
+            }
+            (false, _) => return Err(format!("certificate '{cert}' is missing")),
+            (true, false) => return Err(format!("key '{key}' is missing")),
         }
+    }
+    Ok(())
+}
+
+fn tls_file_signature(config: &DaygleConfig) -> TlsFileSignature {
+    let mut files = Vec::new();
+    for (cert_path, key_path, _) in tls_files(config) {
         for path in [cert_path, key_path] {
             let stamp = std::fs::metadata(path)
                 .ok()
                 .map(|meta| (meta.len(), meta.modified().ok()));
-            files.push((path.clone(), stamp));
+            files.push((path.to_string(), stamp));
         }
     }
     files
@@ -646,6 +708,44 @@ mod tests {
         assert_ne!(before, tls_file_signature(&config));
 
         config.dot.enabled = false;
+        assert!(tls_file_signature(&config).is_empty());
+    }
+
+    /// A rebind is only asked for when the new files would load: a pair
+    /// that does not would take every listener down, plain DNS included.
+    #[test]
+    fn certificate_files_are_checked_before_a_rebind() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = |name: &str| dir.path().join(name).to_string_lossy().into_owned();
+        daygle_dns_dot::generate_self_signed(&path("a.crt"), &path("a.key"), "a.test").unwrap();
+        daygle_dns_dot::generate_self_signed(&path("b.crt"), &path("b.key"), "b.test").unwrap();
+
+        let mut config = base();
+        config.dot.enabled = true;
+        config.dot.self_signed = true;
+        config.dot.cert_path = path("a.crt");
+        config.dot.key_path = path("a.key");
+        assert_eq!(tls_files_usable(&config), Ok(()));
+
+        // Another certificate's key: the pair does not match.
+        config.dot.key_path = path("b.key");
+        assert!(tls_files_usable(&config).is_err());
+
+        // Half a pair is never usable, even with self-signed generation on.
+        config.dot.key_path = path("missing.key");
+        assert!(tls_files_usable(&config).is_err());
+
+        // Both halves missing: a self-signed pair will be generated...
+        config.dot.cert_path = path("missing.crt");
+        assert_eq!(tls_files_usable(&config), Ok(()));
+        // ...but not without self-signed generation.
+        config.dot.self_signed = false;
+        assert!(tls_files_usable(&config).is_err());
+
+        // A listener serving a stored certificate is neither watched nor
+        // checked: its configured paths are not what it serves.
+        config.dot.certificate = "stored".to_string();
+        assert_eq!(tls_files_usable(&config), Ok(()));
         assert!(tls_file_signature(&config).is_empty());
     }
 }
