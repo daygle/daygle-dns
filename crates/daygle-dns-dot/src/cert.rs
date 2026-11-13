@@ -102,6 +102,20 @@ pub struct CertificateInfo {
     pub names: Vec<String>,
 }
 
+/// When a certificate valid from `not_before` to `not_after` (UNIX seconds)
+/// is due for renewal: `renew_days` before it expires, but never earlier
+/// than two thirds of the way through its life. A Let's Encrypt 90-day
+/// certificate with the default 30 days is renewed at day 60 either way; a
+/// short-lived one (a private CA's day-long certificates, a CA's
+/// short-lived profile) is renewed partway through its life instead of at
+/// every check, which a fixed window would demand from the day it is
+/// issued.
+pub fn renewal_due_at(not_before: i64, not_after: i64, renew_days: u32) -> i64 {
+    let lifetime = (not_after - not_before).max(0);
+    let window = (i64::from(renew_days) * 86_400).min(lifetime / 3);
+    not_after - window
+}
+
 /// Read the leaf certificate of a PEM chain for display.
 pub fn describe_certificate(cert_pem: &str) -> Result<CertificateInfo> {
     use x509_parser::extensions::GeneralName;
@@ -341,6 +355,21 @@ fn read_key(path: &str) -> Result<PrivateKeyDer<'static>> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn renewal_is_due_a_window_before_expiry_capped_at_a_third_of_the_life() {
+        let day = 86_400;
+        // 90 days, 30-day window: day 60.
+        assert_eq!(renewal_due_at(0, 90 * day, 30), 60 * day);
+        // 397 days: 30 days before expiry.
+        assert_eq!(renewal_due_at(0, 397 * day, 30), 367 * day);
+        // A day-long certificate: two thirds of the way, not at once.
+        assert_eq!(renewal_due_at(0, day, 30), day - day / 3);
+        // 6 days: day 4.
+        assert_eq!(renewal_due_at(0, 6 * day, 30), 4 * day);
+        // Nonsense validity (after before before): due at expiry.
+        assert_eq!(renewal_due_at(day, 0, 30), 0);
+    }
 
     #[test]
     fn describes_a_generated_certificate() {

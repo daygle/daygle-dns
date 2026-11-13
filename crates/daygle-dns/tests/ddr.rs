@@ -134,3 +134,52 @@ async fn encrypted_listeners_are_advertised() {
 
     shutdown(server).await;
 }
+
+/// A wildcard-only certificate (`*.dns.daygle.test`, as an ACME DNS-01
+/// order makes) covers no single host name: its stored server name is the
+/// wildcard itself, which no device can connect to. Nothing is advertised
+/// for that listener until the DDR name names a host under the wildcard.
+#[tokio::test]
+async fn a_wildcard_only_certificate_needs_a_ddr_name() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("daygle-dns.db");
+    let (cert_pem, key_pem) =
+        daygle_dns_dot::generate_self_signed_pem("*.dns.daygle.test").unwrap();
+    daygle_dns_authoritative::ZoneStore::open(&db.to_string_lossy())
+        .unwrap()
+        .put_tls_certificate(&daygle_dns_authoritative::TlsCertificate {
+            name: "wildcard".to_string(),
+            server_name: "*.dns.daygle.test".to_string(),
+            cert_pem,
+            key_pem,
+            created_at: chrono::Utc::now().to_rfc3339(),
+        })
+        .unwrap();
+    let mut config = base_config(&db);
+    config.dot.enabled = true;
+    config.dot.port = 0;
+    config.dot.certificate = "wildcard".to_string();
+    config.dot.server_name = "dns.daygle.test".to_string();
+    let server = spawn(config).await;
+    let udp = server.udp_addr.unwrap();
+
+    let reply = udp_query(udp, "_dns.resolver.arpa.", RecordType::SVCB).await;
+    assert!(svcb(&reply).is_empty(), "{:?}", svcb(&reply));
+    let warned = server.logs.entries().into_iter().any(|e| {
+        e.message.contains("does not advertise DoT") && e.message.contains("DDR server name")
+    });
+    assert!(warned, "the listener start explains why");
+
+    let resp = reqwest::Client::new()
+        .put(format!("http://{}/api/config", server.api_addr))
+        .json(&serde_json::json!({ "ddr": { "enabled": true, "name": "ddr.dns.daygle.test" } }))
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_success(), "{}", resp.text().await.unwrap());
+    let records = svcb(&udp_query(udp, "_dns.resolver.arpa.", RecordType::SVCB).await);
+    assert_eq!(records.len(), 1, "{records:?}");
+    assert!(records[0].contains("ddr.dns.daygle.test."), "{records:?}");
+
+    shutdown(server).await;
+}

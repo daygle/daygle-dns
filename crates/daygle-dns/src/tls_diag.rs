@@ -378,6 +378,49 @@ fn names_an_address(names: &[String]) -> bool {
     names.iter().any(|name| name.parse::<IpAddr>().is_ok())
 }
 
+/// Whether a certificate with subject alternative names `names` is valid
+/// for the host name `host` (lowercase): listed as is, or under a wildcard,
+/// which stands for exactly one label.
+pub(crate) fn certificate_covers(names: &[String], host: &str) -> bool {
+    names.iter().any(|name| {
+        let name = name.trim().trim_end_matches('.').to_ascii_lowercase();
+        match name.strip_prefix("*.") {
+            Some(base) => host
+                .split_once('.')
+                .is_some_and(|(label, rest)| !label.is_empty() && rest == base),
+            None => name == host,
+        }
+    })
+}
+
+/// The host name DDR advertises for a listener, when `ddr.name` is not set:
+/// the stored certificate's server name, else the first host name the
+/// certificate lists, else the listener's configured server name - the
+/// first that is a concrete host name (not a wildcard, an address or
+/// `localhost`) the certificate covers. A device must connect to that name
+/// and verify the certificate for it, so `None` (nothing qualifies, as with
+/// a wildcard-only certificate) means the listener is not advertised.
+/// With the certificate unreadable (`names` empty) the names are not
+/// checked against it.
+pub(crate) fn ddr_target_name(
+    stored: Option<&str>,
+    names: &[String],
+    configured: &str,
+) -> Option<String> {
+    let usable = |name: &str| -> Option<String> {
+        let name = name.trim().trim_end_matches('.').to_ascii_lowercase();
+        let concrete = !name.is_empty()
+            && !name.contains('*')
+            && name != "localhost"
+            && name.parse::<IpAddr>().is_err();
+        (concrete && (names.is_empty() || certificate_covers(names, &name))).then_some(name)
+    };
+    stored
+        .and_then(usable)
+        .or_else(|| names.iter().find_map(|name| usable(name)))
+        .or_else(|| usable(configured))
+}
+
 /// Explain at listener start why Automatic Discovery (DDR, RFC 9462) may do
 /// nothing for some devices, when it is on:
 ///
@@ -388,7 +431,11 @@ fn names_an_address(names: &[String]) -> bool {
 ///   address they use for plain DNS. A certificate for a host name alone
 ///   (what an ACME CA usually issues) is only good for Android's
 ///   opportunistic discovery on a private network.
-pub fn report_ddr_readiness(config: &daygle_dns_core::config::DaygleConfig, session: &SessionLog) {
+pub fn report_ddr_readiness(
+    config: &daygle_dns_core::config::DaygleConfig,
+    store: &daygle_dns_authoritative::ZoneStore,
+    session: &SessionLog,
+) {
     if !config.ddr.enabled {
         return;
     }
@@ -412,6 +459,59 @@ pub fn report_ddr_readiness(config: &daygle_dns_core::config::DaygleConfig, sess
                 .to_string(),
         );
         return;
+    }
+    // Without `ddr.name`, each listener is advertised by a name its
+    // certificate covers; one with none (a wildcard-only certificate, say)
+    // is left out.
+    if config.ddr.name.trim().is_empty() {
+        let unnamed: Vec<&str> = [
+            (
+                "DoH",
+                config.doh.enabled,
+                &config.doh.certificate,
+                &config.doh.cert_path,
+                &config.doh.server_name,
+            ),
+            (
+                "DoT",
+                config.dot.enabled,
+                &config.dot.certificate,
+                &config.dot.cert_path,
+                &config.dot.server_name,
+            ),
+            (
+                "DoQ",
+                config.doq.enabled,
+                &config.doq.certificate,
+                &config.doq.cert_path,
+                &config.doq.server_name,
+            ),
+        ]
+        .into_iter()
+        .filter(|(_, enabled, _, _, _)| *enabled)
+        .filter(|(_, _, certificate, cert_path, server_name)| {
+            let stored = (!certificate.trim().is_empty())
+                .then(|| store.get_tls_certificate(certificate.trim()).ok().flatten())
+                .flatten()
+                .map(|cert| cert.server_name);
+            let names = std::fs::read_to_string(cert_path)
+                .ok()
+                .and_then(|pem| daygle_dns_dot::describe_certificate(&pem).ok())
+                .map(|info| info.names)
+                .unwrap_or_default();
+            ddr_target_name(stored.as_deref(), &names, server_name).is_none()
+        })
+        .map(|(label, ..)| label)
+        .collect();
+        if !unnamed.is_empty() {
+            emit(format!(
+                "Automatic Discovery (DDR) does not advertise {}: its certificate covers no \
+                 single host name to give devices (a wildcard certificate covers names under \
+                 it, not one in particular). Set the DDR server name to a name the certificate \
+                 covers and that resolves to this server.",
+                unnamed.join(", ")
+            ));
+        }
     }
     let without_address: Vec<&str> = listeners
         .iter()
@@ -485,14 +585,15 @@ pub enum CertHealth {
     Valid,
 }
 
-/// Classify a certificate against the renewal window (whole days, floored).
-pub fn cert_health(not_after: i64, now: i64, renew_days: u32) -> CertHealth {
+/// Classify a certificate against its renewal time (whole days, floored):
+/// see [`daygle_dns_dot::renewal_due_at`], which ACME renewal uses too.
+pub fn cert_health(not_before: i64, not_after: i64, now: i64, renew_days: u32) -> CertHealth {
     let remaining = not_after - now;
     if remaining < 0 {
         CertHealth::Expired {
             days_ago: remaining.unsigned_abs() / 86_400,
         }
-    } else if remaining < i64::from(renew_days) * 86_400 {
+    } else if now >= daygle_dns_dot::renewal_due_at(not_before, not_after, renew_days) {
         CertHealth::RenewSoon {
             days_left: (remaining / 86_400) as u64,
         }
@@ -565,7 +666,7 @@ pub fn report_certificate(
     } else {
         format!("subject '{}' ({})", info.subject, info.names.join(", "))
     };
-    let health = cert_health(info.not_after, now, renew_days);
+    let health = cert_health(info.not_before, info.not_after, now, renew_days);
     let (level, message) = match health {
         CertHealth::Valid => (
             LogLevel::Info,
@@ -1001,6 +1102,48 @@ mod tests {
     }
 
     #[test]
+    fn ddr_targets_are_names_the_certificate_covers() {
+        let names = |list: &[&str]| list.iter().map(|n| n.to_string()).collect::<Vec<_>>();
+        let wildcard = names(&["*.dns.example.com"]);
+        assert!(certificate_covers(&wildcard, "a.dns.example.com"));
+        assert!(!certificate_covers(&wildcard, "dns.example.com"));
+        assert!(!certificate_covers(&wildcard, "a.b.dns.example.com"));
+
+        // The stored name first, when the certificate covers it.
+        let both = names(&["dns.example.com", "*.dns.example.com"]);
+        assert_eq!(
+            ddr_target_name(Some("DoT.Dns.Example.com."), &both, "x"),
+            Some("dot.dns.example.com".into())
+        );
+        // A wildcard or empty stored name: the certificate's first host name.
+        for stored in ["*.dns.example.com", "", " "] {
+            assert_eq!(
+                ddr_target_name(Some(stored), &both, "daygle.local"),
+                Some("dns.example.com".into()),
+                "{stored:?}"
+            );
+        }
+        // A wildcard-only certificate covers no particular name: the
+        // configured name only if it is under the wildcard, else nothing.
+        assert_eq!(
+            ddr_target_name(Some("*.dns.example.com"), &wildcard, "dns.example.com"),
+            None
+        );
+        assert_eq!(
+            ddr_target_name(None, &wildcard, "ddr.dns.example.com"),
+            Some("ddr.dns.example.com".into())
+        );
+        // Addresses and localhost are never advertised.
+        let self_signed = names(&["192.0.2.53", "localhost"]);
+        assert_eq!(ddr_target_name(None, &self_signed, "localhost"), None);
+        // An unreadable certificate: the stored or configured name as is.
+        assert_eq!(
+            ddr_target_name(None, &[], "dns.example.com"),
+            Some("dns.example.com".into())
+        );
+    }
+
+    #[test]
     fn ddr_readiness_names_listeners_whose_certificate_has_no_address() {
         assert!(names_an_address(&[
             "dns.example.com".into(),
@@ -1019,6 +1162,7 @@ mod tests {
         let mut config = daygle_dns_core::config::DaygleConfig::default();
         config.dot.enabled = true;
         config.dot.cert_path = path.to_string_lossy().to_string();
+        let db = daygle_dns_authoritative::ZoneStore::open(":memory:").unwrap();
 
         let infos = |logs: &LogStore| -> Vec<String> {
             logs.entries()
@@ -1028,7 +1172,7 @@ mod tests {
                 .collect()
         };
         let logs = store();
-        report_ddr_readiness(&config, &SessionLog::new(logs.clone()));
+        report_ddr_readiness(&config, &db, &SessionLog::new(logs.clone()));
         let lines = infos(&logs);
         assert_eq!(lines.len(), 1, "{lines:?}");
         assert!(
@@ -1041,7 +1185,7 @@ mod tests {
         config.accounts.domain = "dns.example.com".to_string();
         config.accounts.require = true;
         let logs = store();
-        report_ddr_readiness(&config, &SessionLog::new(logs.clone()));
+        report_ddr_readiness(&config, &db, &SessionLog::new(logs.clone()));
         let lines = infos(&logs);
         assert_eq!(lines.len(), 1, "{lines:?}");
         assert!(lines[0].contains("accounts are"), "{lines:?}");
@@ -1049,24 +1193,38 @@ mod tests {
         // DDR off: nothing.
         config.ddr.enabled = false;
         let logs = store();
-        report_ddr_readiness(&config, &SessionLog::new(logs.clone()));
+        report_ddr_readiness(&config, &db, &SessionLog::new(logs.clone()));
         assert!(infos(&logs).is_empty());
     }
 
     #[test]
     fn classifies_certificate_expiry() {
         let now = 1_700_000_000;
-        assert_eq!(cert_health(now + 90 * 86_400, now, 30), CertHealth::Valid);
         assert_eq!(
-            cert_health(now + 10 * 86_400, now, 30),
-            CertHealth::RenewSoon { days_left: 10 }
+            cert_health(now - 86_400, now + 90 * 86_400, now, 30),
+            CertHealth::Valid
         );
         assert_eq!(
-            cert_health(now - 3 * 86_400 - 1, now, 30),
+            cert_health(now - 80 * 86_400, now + 10 * 86_400, now, 30),
+            CertHealth::RenewSoon { days_left: 10 }
+        );
+        // A day-long certificate issued an hour ago is not due yet (a
+        // fixed 30-day window would flag it for its whole life)...
+        assert_eq!(
+            cert_health(now - 3_600, now + 23 * 3_600, now, 30),
+            CertHealth::Valid
+        );
+        // ...until two thirds of the way through.
+        assert_eq!(
+            cert_health(now - 17 * 3_600, now + 7 * 3_600, now, 30),
+            CertHealth::RenewSoon { days_left: 0 }
+        );
+        assert_eq!(
+            cert_health(now - 93 * 86_400, now - 3 * 86_400 - 1, now, 30),
             CertHealth::Expired { days_ago: 3 }
         );
         assert_eq!(
-            cert_health(now - 3 * 86_400 - 90_000, now, 30),
+            cert_health(now - 93 * 86_400, now - 3 * 86_400 - 90_000, now, 30),
             CertHealth::Expired { days_ago: 4 }
         );
     }
