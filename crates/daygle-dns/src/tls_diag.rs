@@ -327,6 +327,55 @@ pub fn report_dot_readiness(config: &daygle_dns_core::config::DaygleConfig, sess
     session.logs().warn(TLS, message);
 }
 
+/// Whether a certificate with subject alternative names `names` verifies
+/// for account host names (`<client id>.<domain>`): it needs the wildcard
+/// `*.<domain>` (`domain` lowercase). A wildcard covers exactly one label,
+/// so `*.example.com` does not cover `id.dns.example.com`.
+fn covers_account_names(names: &[String], domain: &str) -> bool {
+    let wanted = format!("*.{domain}");
+    names.iter().any(|name| {
+        name.trim()
+            .trim_end_matches('.')
+            .eq_ignore_ascii_case(&wanted)
+    })
+}
+
+/// Warn at listener start when DNS accounts are on but the certificate of
+/// a listener that recognises them by TLS server name (DoT, DoQ) does not
+/// cover `*.<accounts.domain>`: every device set up with its account host
+/// name would fail certificate verification, while the bare server name
+/// keeps working - an easy failure to misread. (DoH reads the client ID
+/// from the URL path, so needs no wildcard.)
+pub fn report_account_coverage(
+    config: &daygle_dns_core::config::DaygleConfig,
+    protocol: &'static str,
+    label: &str,
+    cert_path: &str,
+    session: &SessionLog,
+) {
+    let domain = config.accounts.normalized_domain();
+    if domain.is_empty() {
+        return;
+    }
+    let Ok(pem) = std::fs::read_to_string(cert_path) else {
+        return;
+    };
+    let Ok(info) = daygle_dns_dot::describe_certificate(&pem) else {
+        return;
+    };
+    if covers_account_names(&info.names, &domain) {
+        return;
+    }
+    let message = format!(
+        "DNS accounts connect as <client id>.{domain}, but the {label} certificate does not \
+         cover *.{domain}: devices using an account host name will fail certificate \
+         verification. Issue a certificate for *.{domain} on the Certificates page (ACME with \
+         a DNS challenge) and use it for {label}"
+    );
+    tracing::warn!("{message}");
+    session.logs().warn(protocol, message);
+}
+
 fn who(client: Option<IpAddr>) -> String {
     client.map_or_else(|| "unknown client".to_string(), |c| c.to_string())
 }
@@ -865,6 +914,46 @@ mod tests {
         }
         let tracked = session.inner.lock().unwrap().len();
         assert!(tracked <= 6, "tracked {tracked} clients");
+    }
+
+    #[test]
+    fn account_host_names_need_the_exact_wildcard() {
+        let names = |list: &[&str]| list.iter().map(|n| n.to_string()).collect::<Vec<_>>();
+        let domain = "dns.example.com";
+        assert!(covers_account_names(
+            &names(&["dns.example.com", "*.dns.example.com"]),
+            domain
+        ));
+        assert!(covers_account_names(
+            &names(&["*.DNS.Example.com."]),
+            domain
+        ));
+        // The bare name, or a wildcard one level up, does not cover them.
+        assert!(!covers_account_names(&names(&["dns.example.com"]), domain));
+        assert!(!covers_account_names(&names(&["*.example.com"]), domain));
+        assert!(!covers_account_names(&names(&[]), domain));
+    }
+
+    #[test]
+    fn warns_when_the_certificate_misses_account_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("server.crt");
+        let (cert, _) = daygle_dns_dot::generate_self_signed_pem("dns.example.com").unwrap();
+        std::fs::write(&path, cert).unwrap();
+        let path = path.to_string_lossy().to_string();
+        let mut config = daygle_dns_core::config::DaygleConfig::default();
+
+        // Accounts off: nothing to say.
+        let logs = store();
+        let session = SessionLog::new(logs.clone());
+        report_account_coverage(&config, TLS, "DoT", &path, &session);
+        assert!(warns(&logs, TLS).is_empty());
+
+        config.accounts.domain = "DNS.example.com".to_string();
+        report_account_coverage(&config, TLS, "DoT", &path, &session);
+        let entries = warns(&logs, TLS);
+        assert_eq!(entries.len(), 1, "{entries:?}");
+        assert!(entries[0].contains("*.dns.example.com"), "{entries:?}");
     }
 
     #[test]

@@ -25,7 +25,16 @@ use crate::AppState;
 
 /// Load the enabled accounts into `directory` (at start-up and after every
 /// change).
+///
+/// Serialised: reading the list and publishing it is not atomic, so two
+/// changes saved together could otherwise publish in the wrong order, the
+/// older list last - and an account just disabled (say its client ID
+/// leaked) would keep working until the next change. Under the lock each
+/// read follows the previous publish, so the last list published is the
+/// newest.
 pub fn load(store: &ZoneStore, directory: &AccountDirectory) {
+    static LOADING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _loading = LOADING.lock().unwrap_or_else(|e| e.into_inner());
     match store.list_dns_accounts() {
         Ok(accounts) => directory.set_accounts(
             accounts

@@ -10,9 +10,10 @@
 
 use std::collections::HashMap;
 use std::future::Future;
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::{Arc, Weak};
 
-use arc_swap::ArcSwap;
+use arc_swap::{ArcSwap, ArcSwapOption};
 
 /// What a query's connection said about its account.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -73,18 +74,38 @@ struct Settings {
     require: bool,
 }
 
+/// [`Settings`] derived from one configuration, kept until the live
+/// configuration is replaced. The `Weak` is only compared by address: it
+/// keeps that allocation from being reused (so a new configuration can
+/// never be mistaken for the cached one) without keeping it alive.
+struct CachedSettings {
+    config: Weak<daygle_dns_core::config::DaygleConfig>,
+    settings: Settings,
+}
+
+/// The enabled accounts, replaced as a whole whenever one changes.
+#[derive(Default)]
+struct Accounts {
+    /// Client ID -> name.
+    by_client_id: HashMap<String, Arc<str>>,
+    /// Name -> the minute it was last noted as seen. Atomics, so noting a
+    /// sighting on the query path takes no lock.
+    seen: HashMap<Arc<str>, AtomicI64>,
+}
+
 /// The accounts the listeners recognise, by client ID. The account list is
 /// replaced whenever an account changes; the settings are read from the live
 /// configuration when there is one (so a console save or config reload
 /// applies at once), else from [`Self::set_settings`].
+///
+/// Every encrypted query consults it, so the query path neither allocates
+/// for the settings (they are derived once per configuration) nor locks.
 #[derive(Default)]
 pub struct AccountDirectory {
     config: Option<Arc<ArcSwap<daygle_dns_core::config::DaygleConfig>>>,
     settings: ArcSwap<Settings>,
-    /// Enabled accounts: client ID -> name.
-    accounts: ArcSwap<HashMap<String, Arc<str>>>,
-    /// The minute each account was last noted as seen.
-    seen: Mutex<HashMap<Arc<str>, i64>>,
+    cached: ArcSwapOption<CachedSettings>,
+    accounts: ArcSwap<Accounts>,
 }
 
 impl AccountDirectory {
@@ -100,17 +121,29 @@ impl AccountDirectory {
         }
     }
 
-    fn settings(&self) -> Arc<Settings> {
-        match &self.config {
-            Some(config) => {
-                let accounts = &config.load().accounts;
-                Arc::new(Settings {
-                    domain: accounts.normalized_domain(),
-                    require: accounts.require,
-                })
+    /// Run `f` with the settings in force.
+    fn with_settings<R>(&self, f: impl FnOnce(&Settings) -> R) -> R {
+        let Some(config) = &self.config else {
+            return f(&self.settings.load());
+        };
+        let current = config.load();
+        if let Some(cached) = &*self.cached.load() {
+            if std::ptr::eq(cached.config.as_ptr(), Arc::as_ptr(&current)) {
+                return f(&cached.settings);
             }
-            None => self.settings.load_full(),
         }
+        // The configuration changed (or this is the first query): derive
+        // the settings once for it.
+        let fresh = CachedSettings {
+            config: Arc::downgrade(&current),
+            settings: Settings {
+                domain: current.accounts.normalized_domain(),
+                require: current.accounts.require,
+            },
+        };
+        let result = f(&fresh.settings);
+        self.cached.store(Some(Arc::new(fresh)));
+        result
     }
 
     /// Use these settings (`domain` empty turns recognition off) when there
@@ -124,68 +157,74 @@ impl AccountDirectory {
 
     /// Recognise these accounts: `(client id, name, enabled)`.
     pub fn set_accounts<'a>(&self, accounts: impl IntoIterator<Item = (&'a str, &'a str, bool)>) {
-        let map = accounts
-            .into_iter()
-            .filter(|(_, _, enabled)| *enabled)
-            .map(|(id, name, _)| (id.to_ascii_lowercase(), Arc::from(name)))
-            .collect();
-        self.accounts.store(Arc::new(map));
-        self.seen.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        let mut next = Accounts::default();
+        for (id, name, enabled) in accounts {
+            if !enabled {
+                continue;
+            }
+            let name: Arc<str> = Arc::from(name);
+            next.seen.insert(name.clone(), AtomicI64::new(i64::MIN));
+            next.by_client_id.insert(id.to_ascii_lowercase(), name);
+        }
+        self.accounts.store(Arc::new(next));
     }
 
     /// Whether account recognition is on.
     pub fn enabled(&self) -> bool {
-        !self.settings().domain.is_empty()
+        self.with_settings(|s| !s.domain.is_empty())
     }
 
     /// Whether encrypted queries must name a known account.
     pub fn required(&self) -> bool {
-        let settings = self.settings();
-        settings.require && !settings.domain.is_empty()
+        self.with_settings(|s| s.require && !s.domain.is_empty())
     }
 
     /// Who a connection is: from the client ID in the DoH path when there
     /// is one, else from the TLS server name (`<client id>.<domain>`).
     pub fn identify(&self, server_name: Option<&str>, path_id: Option<&str>) -> Identity {
-        let settings = self.settings();
-        if settings.domain.is_empty() {
-            return Identity::Anonymous;
-        }
-        let client_id = match path_id {
-            Some(id) => id.trim().to_ascii_lowercase(),
-            None => {
-                let Some(name) = server_name else {
-                    return Identity::Anonymous;
-                };
-                let name = name.trim().trim_end_matches('.').to_ascii_lowercase();
-                match name.strip_suffix(&settings.domain) {
-                    Some(prefix) if prefix.ends_with('.') => prefix[..prefix.len() - 1].to_string(),
-                    // The bare server name, or another name entirely.
-                    _ => return Identity::Anonymous,
-                }
+        let client_id = self.with_settings(|settings| {
+            if settings.domain.is_empty() {
+                return None;
             }
-        };
-        if client_id.is_empty() {
+            let id = match path_id {
+                Some(id) => id.trim(),
+                None => client_id_in(server_name?, &settings.domain)?,
+            };
+            (!id.is_empty()).then(|| id.to_ascii_lowercase())
+        });
+        let Some(client_id) = client_id else {
             return Identity::Anonymous;
-        }
-        match self.accounts.load().get(&client_id) {
+        };
+        match self.accounts.load().by_client_id.get(&client_id) {
             Some(name) => Identity::Account(name.clone()),
             None => Identity::Unknown(Arc::from(client_id)),
         }
     }
 
     /// Whether `account` is seen for the first time this minute `minute`
-    /// (so its "last seen" time is worth writing).
+    /// (so its "last seen" time is worth writing). Exactly one caller wins
+    /// each minute, however many queries race for it.
     pub fn first_sighting(&self, account: &Arc<str>, minute: i64) -> bool {
-        let mut seen = self.seen.lock().unwrap_or_else(|e| e.into_inner());
-        match seen.get(account) {
-            Some(last) if *last >= minute => false,
-            _ => {
-                seen.insert(account.clone(), minute);
-                true
-            }
-        }
+        self.accounts
+            .load()
+            .seen
+            .get(account)
+            .is_some_and(|last| last.fetch_max(minute, Ordering::Relaxed) < minute)
     }
+}
+
+/// The client ID in `server_name` (`<client id>.<domain>`, any case, an
+/// optional trailing dot), as given; `None` for the bare domain or another
+/// name. `domain` is already lowercase. Compared in place rather than by
+/// lowercasing the whole name: this runs for every encrypted query.
+fn client_id_in<'a>(server_name: &'a str, domain: &str) -> Option<&'a str> {
+    let name = server_name.trim().trim_end_matches('.');
+    let split = name.len().checked_sub(domain.len())?;
+    let (prefix, suffix) = (name.get(..split)?, name.get(split..)?);
+    if !suffix.eq_ignore_ascii_case(domain) {
+        return None;
+    }
+    prefix.strip_suffix('.')
 }
 
 #[cfg(test)]
@@ -274,6 +313,73 @@ mod tests {
         assert!(d.first_sighting(&laptop, 100));
         assert!(!d.first_sighting(&laptop, 100));
         assert!(d.first_sighting(&laptop, 101));
+        // An account no longer in the list (renamed or deleted since the
+        // query started) is not noted.
+        assert!(!d.first_sighting(&Arc::from("Gone"), 102));
+        // Replacing the list starts the count again.
+        d.set_accounts([("laptop1", "Laptop", true)]);
+        assert!(d.first_sighting(&laptop, 101));
+    }
+
+    #[test]
+    fn client_ids_need_a_label_before_the_domain() {
+        let d = directory();
+        for name in [
+            "",
+            ".",
+            "dns.example.com",
+            ".dns.example.com",
+            "example.com",
+            "é",
+        ] {
+            assert!(
+                matches!(
+                    d.identify(Some(name), None),
+                    Identity::Anonymous | Identity::Unknown(_)
+                ),
+                "{name:?}"
+            );
+        }
+        assert_eq!(
+            d.identify(Some(".dns.example.com"), None),
+            Identity::Anonymous
+        );
+        // Non-ASCII before the domain cannot split a character.
+        assert_eq!(
+            d.identify(Some("é.dns.example.com"), None),
+            Identity::Unknown(Arc::from("é"))
+        );
+        assert_eq!(
+            d.identify(Some("a.b.dns.example.com"), None),
+            Identity::Unknown(Arc::from("a.b"))
+        );
+    }
+
+    #[test]
+    fn a_new_configuration_is_picked_up_after_being_cached() {
+        let config = Arc::new(ArcSwap::from_pointee(
+            daygle_dns_core::config::DaygleConfig::default(),
+        ));
+        let d = AccountDirectory::with_config(config.clone());
+        d.set_accounts([("laptop1", "Laptop", true)]);
+        for domain in ["one.example", "two.example", ""] {
+            let mut next = daygle_dns_core::config::DaygleConfig::default();
+            next.accounts.domain = domain.into();
+            config.store(Arc::new(next));
+            // Twice: the first call fills the cache, the second reads it.
+            for _ in 0..2 {
+                let expected = if domain.is_empty() {
+                    Identity::Anonymous
+                } else {
+                    Identity::Account(Arc::from("Laptop"))
+                };
+                assert_eq!(
+                    d.identify(Some(&format!("laptop1.{domain}")), None),
+                    expected,
+                    "{domain}"
+                );
+            }
+        }
     }
 
     #[tokio::test]

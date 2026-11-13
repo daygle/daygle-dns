@@ -1386,7 +1386,7 @@
       <label><span>Port</span><input type="number" bind:value={doq.port} /></label>
       <label><span>Maximum Connections</span><input type="number" min="1" max="65536" bind:value={doq.max_connections} /></label>
       <label><span>Concurrent DNS Streams per Connection</span><input type="number" min="1" max="65536" bind:value={doq.max_concurrent_streams} /></label>
-      <label><span>Idle Timeout (Seconds)</span><span class="hint">{hint(doq.idle_timeout_secs)}</span><input type="number" min="30" bind:value={doq.idle_timeout_secs} /></label>
+      <label><span>Idle Timeout (Seconds)</span><input type="number" min="30" bind:value={doq.idle_timeout_secs} /></label>
       <label>
         <span>Certificate</span>
         <select bind:value={doqCertMode} onchange={(e) => applyCertMode(doq, e.currentTarget.value)}>

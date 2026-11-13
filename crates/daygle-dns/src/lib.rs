@@ -1461,6 +1461,13 @@ async fn bind_listeners_inner(
             );
         }
         tls_diag::report_dot_readiness(&config, session);
+        tls_diag::report_account_coverage(
+            &config,
+            tls_diag::TLS,
+            "DoT",
+            &config.dot.cert_path,
+            session,
+        );
     }
 
     if config.doh.enabled {
@@ -1527,6 +1534,13 @@ async fn bind_listeners_inner(
             cert_name(&config.doq.certificate, &config.doq.cert_path),
             &config.doq.cert_path,
             renew_days,
+            session,
+        );
+        tls_diag::report_account_coverage(
+            &config,
+            tls_diag::QUIC,
+            "DoQ",
+            &config.doq.cert_path,
             session,
         );
         for (addr, v6_only) in listen_addrs("doq", &config.doq.listen, config.doq.port, ipv6_only)?

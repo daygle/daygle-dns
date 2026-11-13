@@ -2537,13 +2537,15 @@ impl DnsDispatcher {
         use hickory_server::net::xfer::Protocol as P;
         let identity = daygle_dns_policy::identity::current();
         if let Identity::Account(name) = &identity {
-            let minute = chrono::Utc::now().timestamp().div_euclid(60);
-            if self.accounts.first_sighting(name, minute)
+            let now = chrono::Utc::now();
+            if self
+                .accounts
+                .first_sighting(name, now.timestamp().div_euclid(60))
                 && tokio::runtime::Handle::try_current().is_ok()
             {
                 let store = self.catalog.store_handle();
                 let name = name.to_string();
-                let when = chrono::Utc::now().to_rfc3339();
+                let when = now.to_rfc3339();
                 tokio::task::spawn_blocking(move || store.touch_dns_account(&name, &when));
             }
             return None;
