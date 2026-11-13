@@ -80,7 +80,7 @@ async fn two_factor_login_end_to_end() {
     assert!(setup["uri"]
         .as_str()
         .unwrap()
-        .starts_with("otpauth://totp/Daygle+DNS:admin?"));
+        .starts_with("otpauth://totp/Daygle%20DNS:admin?"));
     // Not on yet: the password alone still signs in.
     assert_eq!(login(&client, &api, "").await.0, 200);
     let resp = post("/auth/two-factor/enable", json!({ "code": "000000" }))

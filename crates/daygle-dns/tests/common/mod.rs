@@ -229,7 +229,6 @@ pub async fn spawn_upstream_with(
 pub type UpstreamZone<'a> = (&'a str, &'a [(&'a str, &'a str, &'a str)]);
 
 /// An upstream authoritative for several zones.
-#[allow(dead_code)]
 pub async fn spawn_upstream_zones(db: &Path, zones: &[UpstreamZone<'_>]) -> SocketAddr {
     let store = ZoneStore::open(&db.to_string_lossy()).unwrap();
     let catalog = Arc::new(AuthorityCatalog::new(store, AuthoritativeSettings::default()).unwrap());

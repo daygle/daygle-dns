@@ -35,11 +35,21 @@ pub fn generate_secret() -> String {
 
 /// The `otpauth://` URI an authenticator app reads from a QR code.
 pub fn otpauth_uri(issuer: &str, account: &str, secret: &str) -> String {
-    let issuer = url::form_urlencoded::byte_serialize(issuer.as_bytes()).collect::<String>();
-    let account = url::form_urlencoded::byte_serialize(account.as_bytes()).collect::<String>();
+    let issuer = uri_encode(issuer);
+    let account = uri_encode(account);
     format!(
         "otpauth://totp/{issuer}:{account}?secret={secret}&issuer={issuer}&algorithm=SHA1&digits={DIGITS}&period={STEP_SECS}"
     )
+}
+
+/// Percent-encode for the Key URI format, which wants RFC 3986 encoding:
+/// spaces as `%20`. Form encoding writes them as `+`, which several
+/// authenticator apps show literally ("Daygle+DNS"). It escapes a literal
+/// `+` as `%2B`, so every `+` it emits stands for a space.
+fn uri_encode(text: &str) -> String {
+    url::form_urlencoded::byte_serialize(text.as_bytes())
+        .collect::<String>()
+        .replace('+', "%20")
 }
 
 /// The code for `step` (HOTP, RFC 4226).
@@ -200,6 +210,7 @@ mod tests {
             crate::auth::hash_token("abcd2345")
         );
         assert!(otpauth_uri("Daygle DNS", "glen", "ABC")
-            .starts_with("otpauth://totp/Daygle+DNS:glen?secret=ABC&issuer=Daygle+DNS"));
+            .starts_with("otpauth://totp/Daygle%20DNS:glen?secret=ABC&issuer=Daygle%20DNS"));
+        assert!(otpauth_uri("a+b c", "x", "S").starts_with("otpauth://totp/a%2Bb%20c:x?"));
     }
 }

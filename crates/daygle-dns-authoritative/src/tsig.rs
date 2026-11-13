@@ -209,7 +209,7 @@ pub fn verify_request(key_ring: &TsigKeyRing, raw: &[u8], request_id: u16) -> Ts
     };
     let signer = key.tsigner();
 
-    let (_, time, window) = match signer.verify_message_byte(raw, None, true) {
+    let (_, _, window) = match signer.verify_message_byte(raw, None, true) {
         Ok(result) => result,
         Err(_) => {
             return TsigVerifyOutcome::Invalid(TsigFailure::BadSignature);
@@ -218,7 +218,6 @@ pub fn verify_request(key_ring: &TsigKeyRing, raw: &[u8], request_id: u16) -> Ts
     if !window.contains(&now) {
         return TsigVerifyOutcome::Invalid(TsigFailure::BadTime);
     }
-    let _ = time;
 
     // Rebuild the request MAC and response context from the wire record.
     let (_, tsig_rr) = match signed_bitmessage_to_buf(raw, None, true) {

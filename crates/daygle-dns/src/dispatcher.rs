@@ -303,12 +303,8 @@ impl DnsDispatcher {
         self
     }
 
-    /// Advertise the configured TCP connection idle timeout in EDNS TCP Keepalive.
-    pub fn with_tcp_idle_timeout(mut self, timeout: Duration) -> Self {
-        self.tcp_idle_timeout = timeout;
-        self
-    }
-
+    /// The TCP idle timeout advertised in EDNS TCP Keepalive: the live
+    /// config's, else the default this dispatcher was built with.
     fn tcp_idle_timeout(&self) -> Duration {
         self.config
             .as_ref()

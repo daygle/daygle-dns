@@ -428,7 +428,7 @@ if [ "$KIND" = "install" ]; then
     if health_check; then
       as_service rm -f -- "$REQ.processing" "$MANIFEST" "$STAGED_BIN"
       log "installer completed v${VERSION} and health check passed"
-      state done "Full update installed by the canonical installer and verified successfully (v${VERSION})."
+      state "done" "Full update installed by the canonical installer and verified successfully (v${VERSION})."
       exit 0
     fi
     as_service rm -f -- "$REQ.processing" "$MANIFEST" "$STAGED_BIN"
@@ -642,7 +642,7 @@ if [ "$KIND" = "models" ]; then
         || log "applied the model files but could not record their bundle version"
     fi
     log "applied models bundle v${VERSION} and health check passed"
-    state done "AI model files updated and verified successfully (v${VERSION})."
+    state "done" "AI model files updated and verified successfully (v${VERSION})."
     exit 0
   fi
 
