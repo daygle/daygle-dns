@@ -675,7 +675,27 @@
 {/if}
 
 <style>
-  .pill.account { margin-left: 6px; cursor: pointer; border: none; font: inherit; font-size: 0.75rem; }
+  /* The DNS account a query came in on: a clickable, accent-tinted pill.
+     Its colours are set here because the global button rule would make
+     the text white on the pill's light background. */
+  .pill.account {
+    margin-left: 6px;
+    padding: 2px 9px;
+    cursor: pointer;
+    font: inherit;
+    font-size: 0.78rem;
+    font-weight: 600;
+    line-height: 1.4;
+    color: var(--accent);
+    background: var(--panel-2);
+    background: color-mix(in srgb, var(--accent) 14%, transparent);
+    border: 1px solid var(--accent);
+  }
+  .pill.account:hover,
+  .pill.account:focus-visible {
+    color: #fff;
+    background: var(--accent);
+  }
   .small { font-size: 0.78rem; margin-top: 2px; }
   .reason { max-width: 340px; }
   .why { margin-left: 6px; padding: 0; line-height: 0; vertical-align: middle; }
