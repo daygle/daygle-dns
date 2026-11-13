@@ -669,7 +669,7 @@
         <p style="margin-top: 0">At {formatDateTime(why.ts)}: {why.block.reason}.</p>
       {/if}
       <p class="muted help" style="margin-top: 0">How the server treats it now:</p>
-      <WhyBlocked domain={why.qname} client={why.client} qtype={why.qtype} auto={true} />
+      <WhyBlocked domain={why.qname} client={why.client} qtype={why.qtype} block={why.block} protocol={why.protocol} auto={true} />
     </div>
   </div>
 {/if}
