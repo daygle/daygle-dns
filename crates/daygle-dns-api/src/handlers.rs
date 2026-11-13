@@ -859,8 +859,14 @@ pub struct BlocklistSourcesInput {
 /// blocklist right away, matching a fresh install with no sources.
 pub async fn replace_blocklist_sources(
     State(state): State<AppState>,
-    Json(input): Json<BlocklistSourcesInput>,
+    Json(mut input): Json<BlocklistSourcesInput>,
 ) -> Response {
+    // Stored as checked: a name or URL with stray spaces would otherwise be
+    // saved with them (names are how filtering groups refer to sources).
+    for source in &mut input.sources {
+        source.name = source.name.trim().to_string();
+        source.url = source.url.trim().to_string();
+    }
     let _config_write = state.config_write.lock().await;
     let Some(manager) = &state.blocklist_sources else {
         return error_response(
@@ -1138,7 +1144,7 @@ pub async fn refresh_blocklist_sources(State(state): State<AppState>) -> Respons
             // cycle, which may be hours away.
             daygle_dns_policy::publish_source_lists(
                 &state.policy,
-                Some(Arc::new(list)),
+                Some(list),
                 manager.dot_blocklist(),
             );
             let total = state.policy.load_full().remote_blocklist_len();

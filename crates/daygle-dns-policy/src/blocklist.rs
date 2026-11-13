@@ -55,15 +55,21 @@ fn parent_match<'a>(suffixes: &HashSet<String>, domain: &'a str) -> Option<&'a s
 /// it) that lists `domain`: the name itself, or the nearest `*.parent`
 /// wildcard. Exceptions are not considered; this says which entry a block
 /// came from, after the merged list has decided it is blocked.
+///
+/// It runs for every query a remote list blocks (to name the source), so the
+/// wildcard candidates share one buffer instead of allocating per label.
 pub fn entry_for(entries: &BTreeSet<String>, domain: &str) -> Option<String> {
     if entries.contains(domain) {
         return Some(domain.to_string());
     }
+    let mut wildcard = String::with_capacity(domain.len() + 2);
     let mut rest = domain;
     while let Some((_, parent)) = rest.split_once('.') {
         rest = parent;
-        let wildcard = format!("*.{rest}");
-        if entries.contains(&wildcard) {
+        wildcard.clear();
+        wildcard.push_str("*.");
+        wildcard.push_str(rest);
+        if entries.contains(wildcard.as_str()) {
             return Some(wildcard);
         }
     }
@@ -79,21 +85,39 @@ impl Blocklist {
     pub fn from_set(entries: BTreeSet<String>) -> Self {
         let mut list = Blocklist::new();
         for entry in entries {
-            let (exception, entry) = match entry.strip_prefix(EXCEPTION_PREFIX) {
-                Some(rest) => (true, rest.to_string()),
-                None => (false, entry),
-            };
-            let (exact, suffixes) = if exception {
-                (&mut list.except_exact, &mut list.except_suffixes)
-            } else {
-                (&mut list.exact, &mut list.suffixes)
-            };
-            match entry.strip_prefix("*.") {
-                Some(suffix) => suffixes.insert(suffix.to_string()),
-                None => exact.insert(entry),
-            };
+            list.insert(entry);
         }
         list
+    }
+
+    /// Build one blocklist from several sets of already-normalized domain
+    /// patterns (one per source), entries in more than one counted once.
+    /// Straight into the lookup sets: merging into an ordered set first
+    /// copied every entry twice.
+    pub fn from_sets<'a>(sets: impl IntoIterator<Item = &'a BTreeSet<String>>) -> Self {
+        let mut list = Blocklist::new();
+        for entry in sets.into_iter().flatten() {
+            list.insert(entry.clone());
+        }
+        list
+    }
+
+    /// Add one normalized pattern: a name, `*.suffix`, or either as an
+    /// `@@` exception.
+    fn insert(&mut self, entry: String) {
+        let (exception, entry) = match entry.strip_prefix(EXCEPTION_PREFIX) {
+            Some(rest) => (true, rest.to_string()),
+            None => (false, entry),
+        };
+        let (exact, suffixes) = if exception {
+            (&mut self.except_exact, &mut self.except_suffixes)
+        } else {
+            (&mut self.exact, &mut self.suffixes)
+        };
+        match entry.strip_prefix("*.") {
+            Some(suffix) => suffixes.insert(suffix.to_string()),
+            None => exact.insert(entry),
+        };
     }
 
     /// Build a blocklist from raw (possibly mixed-case, possibly dotted) lines.
@@ -175,6 +199,21 @@ mod tests {
             Some("*.tracker.test")
         );
         assert_eq!(entry_for(&entries, "tracker.test"), None);
+    }
+
+    #[test]
+    fn merging_sets_matches_merging_their_entries() {
+        let set =
+            |items: &[&str]| -> BTreeSet<String> { items.iter().map(|s| s.to_string()).collect() };
+        let a = set(&["ads.test", "*.track.test", "@@ok.track.test"]);
+        let b = set(&["ads.test", "more.test"]);
+        let merged = Blocklist::from_sets([&a, &b]);
+        let mut all = a.clone();
+        all.extend(b.iter().cloned());
+        assert_eq!(merged, Blocklist::from_set(all));
+        assert_eq!(merged.len(), 3);
+        assert!(!merged.contains("ok.track.test"));
+        assert_eq!(Blocklist::from_sets([]), Blocklist::new());
     }
 
     #[test]

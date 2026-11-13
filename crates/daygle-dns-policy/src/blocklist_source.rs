@@ -7,9 +7,11 @@
 //! hands it to the policy engine as the *remote* blocklist. Sources scoped to
 //! client groups are compiled one by one into [`GroupBlocklists`] instead,
 //! where the client groups that select them look them up. Sources are
-//! refreshed on their
-//! `refresh_secs` schedule; the refresh loop lives in `daygle` and calls
-//! [`BlocklistSourceManager::refresh_due`] on each tick
+//! refreshed on their `refresh_secs` schedule (never more often than
+//! [`MIN_REFRESH`]), and a failed download is retried after
+//! [`RETRY_AFTER_FAILURE`]. The refresh loop lives in the `daygle-dns` crate
+//! (`reload.rs`): it calls [`BlocklistSourceManager::refresh_due`] and then
+//! sleeps [`BlocklistSourceManager::next_refresh_in`]
 //! ([`BlocklistSourceManager::refresh_all`] is the console's force-refresh).
 
 use std::collections::{BTreeSet, HashMap};
@@ -25,6 +27,42 @@ use crate::Blocklist;
 
 /// Fetch limits: allow large hosts and adblock lists while bounding memory use.
 const MAX_BODY_BYTES: usize = 64 * 1024 * 1024;
+
+/// The shortest refresh interval honoured, whatever `refresh_secs` says: a
+/// list host must not be asked for its list every few seconds.
+pub const MIN_REFRESH: Duration = Duration::from_secs(5 * 60);
+
+/// After a failed download, try again this soon (or at the source's own
+/// interval, if shorter) rather than a whole interval later: downloads are
+/// held in memory only, so a server started before its network was up, or
+/// a list host that was briefly down, would otherwise block nothing from
+/// that source for up to a day.
+pub const RETRY_AFTER_FAILURE: Duration = Duration::from_secs(5 * 60);
+
+/// How many sources are downloaded at once.
+const PARALLEL_FETCHES: usize = 4;
+
+/// How long the refresh loop sleeps with no enabled source (a change wakes
+/// it sooner).
+const IDLE_REFRESH: Duration = Duration::from_secs(24 * 3600);
+
+/// A source's refresh interval, with the [`MIN_REFRESH`] floor.
+fn interval(source: &BlocklistSourceConfig) -> Duration {
+    Duration::from_secs(source.refresh_secs).max(MIN_REFRESH)
+}
+
+/// When `source`, whose status is `st`, is next due for a download: at once
+/// when never fetched, an interval after its last success, and
+/// [`RETRY_AFTER_FAILURE`] after a failed attempt.
+fn due_at(st: &SourceStatus, source: &BlocklistSourceConfig, now: Instant) -> Instant {
+    let scheduled = st.last_fetch.map_or(now, |last| last + interval(source));
+    match (&st.last_error, st.last_attempt) {
+        (Some(_), Some(attempt)) => {
+            scheduled.max(attempt + RETRY_AFTER_FAILURE.min(interval(source)))
+        }
+        _ => scheduled,
+    }
+}
 
 /// The enabled sources scoped to client groups, each compiled on its own and
 /// keyed by lower-cased source name. Shared between the refresh loop, which
@@ -86,6 +124,16 @@ impl GroupBlocklists {
             .collect()
     }
 
+    /// The first source [`Self::sources_listing`] would name. This runs for
+    /// every query a remote list blocks, so it stops at the first match.
+    pub fn first_source_listing(&self, domain: &str, dot: bool) -> Option<(String, String)> {
+        let merged = read_guard(&self.merged_sources).clone();
+        let sources = if dot { &merged.dot } else { &merged.everyone };
+        sources.iter().find_map(|(name, entries)| {
+            crate::blocklist::entry_for(entries, domain).map(|entry| (name.clone(), entry))
+        })
+    }
+
     fn set_merged_sources(&self, merged: MergedSources) {
         *write_guard(&self.merged_sources) = Arc::new(merged);
     }
@@ -102,6 +150,9 @@ pub struct SourceStatus {
     pub scope: BlocklistScope,
     /// When the source was last fetched successfully.
     pub last_fetch: Option<Instant>,
+    /// When a download of it was last attempted, successful or not (paces
+    /// the retry after a failure).
+    pub last_attempt: Option<Instant>,
     /// The same event as wall-clock time: `last_fetch` only yields a
     /// relative age (and dies with the process), so this is what lets the
     /// console show an absolute "Last Updated" date and time.
@@ -150,12 +201,45 @@ fn describes(st: &SourceStatus, source: &BlocklistSourceConfig) -> bool {
 /// A group-scoped source's domain set and the list compiled from it.
 type CompiledSource = (Arc<BTreeSet<String>>, Arc<Blocklist>);
 
+/// A merged list and the per-source sets it was built from.
+type MergedList = (Vec<Arc<BTreeSet<String>>>, Arc<Blocklist>);
+
+/// The merged list of `parts`: the cached one while they are the very same
+/// sets (nothing refetched or changed since), else built afresh. An
+/// unchanged list is then the same `Arc`, which the policy engine compares
+/// by pointer instead of entry by entry.
+fn merged_list(
+    cache: &mut Option<MergedList>,
+    parts: Vec<Arc<BTreeSet<String>>>,
+) -> Arc<Blocklist> {
+    if let Some((built_from, list)) = cache.as_ref() {
+        if built_from.len() == parts.len()
+            && built_from
+                .iter()
+                .zip(&parts)
+                .all(|(a, b)| Arc::ptr_eq(a, b))
+        {
+            return list.clone();
+        }
+    }
+    let list = Arc::new(Blocklist::from_sets(parts.iter().map(|p| p.as_ref())));
+    *cache = Some((parts, list.clone()));
+    list
+}
+
+/// The merged lists last published, by audience.
+#[derive(Default)]
+struct MergedCache {
+    everyone: Option<MergedList>,
+    dot: Option<MergedList>,
+}
+
 /// Fetches and parses remote blocklist sources and merges their domains.
 pub struct BlocklistSourceManager {
     /// The configured sources. Held behind a mutex so the console can add,
-    /// edit and remove sources at runtime (the list is persisted to the
-    /// config file by the API layer) without rebuilding the manager or
-    /// restarting the refresh loop.
+    /// edit and remove sources at runtime (the API layer stores the list in
+    /// the database) without rebuilding the manager or restarting the
+    /// refresh loop.
     sources: Mutex<Vec<BlocklistSourceConfig>>,
     client: reqwest::Client,
     status: Mutex<Vec<SourceStatus>>,
@@ -176,18 +260,28 @@ pub struct BlocklistSourceManager {
     /// published by every refresh cycle (`None` when none contribute).
     /// Read by the refresh loop to swap into the policy engine's DoT set.
     dot_list: RwLock<Option<Arc<Blocklist>>>,
+    /// The merged lists last built, reused while their sources are unchanged.
+    merged: Mutex<MergedCache>,
+    /// Held for a whole refresh cycle: the background loop and a forced
+    /// refresh from the console would otherwise download the same lists at
+    /// once, and the later to finish could record the older copy.
+    cycle: tokio::sync::Mutex<()>,
 }
 
 impl BlocklistSourceManager {
     /// Build a manager for `sources` that publishes group-scoped sources to
     /// `group_lists`. The client follows redirects, enforces TLS (rustls) and
-    /// caps response size.
+    /// caps response size. A download may take a few minutes as long as data
+    /// keeps arriving (big lists over a slow link), but a server that stops
+    /// sending is given up on after 30 s.
     pub fn new(
         sources: Vec<BlocklistSourceConfig>,
         group_lists: Arc<GroupBlocklists>,
     ) -> Result<Self> {
         let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(30))
+            .connect_timeout(Duration::from_secs(15))
+            .read_timeout(Duration::from_secs(30))
+            .timeout(Duration::from_secs(300))
             .user_agent(concat!("daygle-dns/", env!("CARGO_PKG_VERSION")))
             .redirect(reqwest::redirect::Policy::limited(5))
             .build()
@@ -202,6 +296,7 @@ impl BlocklistSourceManager {
                 refresh_secs: s.refresh_secs,
                 scope: s.scope,
                 last_fetch: None,
+                last_attempt: None,
                 last_fetch_at: None,
                 domains: 0,
                 cached_domains: Arc::default(),
@@ -217,6 +312,8 @@ impl BlocklistSourceManager {
             group_lists,
             compiled: Mutex::default(),
             dot_list: RwLock::new(None),
+            merged: Mutex::default(),
+            cycle: tokio::sync::Mutex::new(()),
         })
     }
 
@@ -247,18 +344,15 @@ impl BlocklistSourceManager {
     /// starts from "not fetched yet". An identical list is a no-op that keeps
     /// the current status and already-fetched domains.
     ///
-    /// Sources that already had a successful fetch keep their `last_fetch`
-    /// and `last_fetch_at` timestamps; only newly-added or changed entries
-    /// are marked stale. This
-    /// avoids a thundering-herd refetch on every source edit.
+    /// A source whose name, URL and format are unchanged keeps what it
+    /// downloaded and when (its domains depend on nothing else): editing its
+    /// interval, scope or enabled flag neither discards the list nor forces
+    /// a download. Only new or re-pointed sources start from "not fetched".
     pub fn set_sources(&self, sources: Vec<BlocklistSourceConfig>) {
         let mut guard = lock_guard(&self.sources);
         if *guard == sources {
             return;
         }
-        // Carry forward `last_fetch`, `last_fetch_at`, `domains`, and
-        // `last_error` for sources
-        // whose identity is unchanged. The (name, url) tuple is the identity.
         let prev_status = lock_guard(&self.status);
         let prev_index: std::collections::HashMap<(String, String), SourceStatus> = prev_status
             .iter()
@@ -278,24 +372,19 @@ impl BlocklistSourceManager {
                     refresh_secs: s.refresh_secs,
                     scope: s.scope,
                     last_fetch: None,
+                    last_attempt: None,
                     last_fetch_at: None,
                     domains: 0,
                     cached_domains: Arc::default(),
                     last_error: None,
                 };
-                if let Some(prev) = carried {
-                    // Only carry forward state if the entry is otherwise
-                    // identical (format, refresh interval, enabled flag).
-                    if prev.format == new.format
-                        && prev.refresh_secs == new.refresh_secs
-                        && prev.enabled == new.enabled
-                    {
-                        new.last_fetch = prev.last_fetch;
-                        new.last_fetch_at = prev.last_fetch_at;
-                        new.domains = prev.domains;
-                        new.cached_domains = prev.cached_domains.clone();
-                        new.last_error = prev.last_error.clone();
-                    }
+                if let Some(prev) = carried.filter(|prev| prev.format == new.format) {
+                    new.last_fetch = prev.last_fetch;
+                    new.last_attempt = prev.last_attempt;
+                    new.last_fetch_at = prev.last_fetch_at;
+                    new.domains = prev.domains;
+                    new.cached_domains = prev.cached_domains.clone();
+                    new.last_error = prev.last_error.clone();
                 }
                 new
             })
@@ -322,15 +411,23 @@ impl BlocklistSourceManager {
         &self.changed
     }
 
-    /// The smallest refresh interval among enabled sources (used to pace the
-    /// refresh loop); 24 h when there are no sources.
-    pub fn min_refresh(&self) -> Duration {
-        lock_guard(&self.sources)
+    /// How long the refresh loop may sleep: until the next enabled source
+    /// is due (see [`due_at`]), at least a second, and [`IDLE_REFRESH`] with
+    /// none.
+    pub fn next_refresh_in(&self) -> Duration {
+        let sources = lock_guard(&self.sources).clone();
+        let status = lock_guard(&self.status);
+        let now = Instant::now();
+        sources
             .iter()
-            .filter(|s| s.enabled)
-            .map(|s| Duration::from_secs(s.refresh_secs))
+            .enumerate()
+            .filter(|(_, source)| source.enabled)
+            .filter_map(|(i, source)| {
+                let st = status.get(i).filter(|st| describes(st, source))?;
+                Some(due_at(st, source, now).saturating_duration_since(now))
+            })
             .min()
-            .unwrap_or(Duration::from_secs(86400))
+            .map_or(IDLE_REFRESH, |wait| wait.max(Duration::from_secs(1)))
     }
 
     /// The list of configured sources (for the API status endpoint).
@@ -338,89 +435,67 @@ impl BlocklistSourceManager {
         lock_guard(&self.status).clone()
     }
 
-    /// Fetch every enabled source whose refresh interval has elapsed since
-    /// its last successful fetch, publish the group-scoped sources and return
-    /// the merged remote blocklist of the sources that apply to everyone.
+    /// Fetch every enabled source that is due (see [`due_at`]), publish the
+    /// group-scoped sources and return the merged remote blocklist of the
+    /// sources that apply to everyone.
     ///
-    /// A source that fails is logged and skipped; its previously cached
-    /// domains are kept so a transient error never blanks the list.
+    /// Due sources are downloaded [`PARALLEL_FETCHES`] at a time. A source
+    /// that fails is logged, raises an alert and is retried after
+    /// [`RETRY_AFTER_FAILURE`]; its previously downloaded domains are kept,
+    /// so a transient error never blanks the list.
     ///
-    /// The returned set always reflects the *current* enabled sources: fetched
-    /// results are merged with the per-source caches, so removing or disabling
-    /// a source is reflected immediately even when no source was due for a
-    /// refetch. Empty when no source contributes domains.
-    pub async fn refresh_due(&self) -> Result<Blocklist> {
+    /// The returned list always reflects the *current* enabled sources:
+    /// fetched results are merged with the per-source caches, so removing or
+    /// disabling a source is reflected immediately even when no source was
+    /// due. While nothing changed it is the very list returned last time.
+    pub async fn refresh_due(&self) -> Result<Arc<Blocklist>> {
+        let _cycle = self.cycle.lock().await;
         // Snapshot the list so the fetch cycle never holds the source lock
         // across network I/O, and so a concurrent `set_sources` cannot make
         // the loop read a half-replaced list.
         let sources = lock_guard(&self.sources).clone();
         let now = Instant::now();
-        let mut merged: BTreeSet<String> = BTreeSet::new();
 
-        for (i, source) in sources.iter().enumerate() {
-            if !source.enabled {
-                continue;
-            }
-            // The list may have been replaced (and shortened) since the
-            // snapshot was taken, so never index the status table blindly.
-            let last_fetch = {
-                let status = lock_guard(&self.status);
-                match status.get(i) {
-                    Some(st) if describes(st, source) => st.last_fetch,
-                    _ => continue,
-                }
-            };
-            let due = match last_fetch {
-                Some(last) => now.duration_since(last) >= Duration::from_secs(source.refresh_secs),
-                None => true, // never fetched: fetch on startup
-            };
-            if !due {
-                continue;
-            }
+        // The list may have been replaced (and shortened) since the snapshot
+        // was taken, so never index the status table blindly.
+        let due: Vec<(usize, BlocklistSourceConfig)> = {
+            let status = lock_guard(&self.status);
+            sources
+                .iter()
+                .enumerate()
+                .filter(|(_, source)| source.enabled)
+                .filter(|(i, source)| {
+                    status
+                        .get(*i)
+                        .is_some_and(|st| describes(st, source) && due_at(st, source, now) <= now)
+                })
+                .map(|(i, source)| (i, source.clone()))
+                .collect()
+        };
 
-            match self.fetch(source).await {
-                Ok(domains) => {
-                    tracing::info!(
-                        source = %source.name,
-                        domains = domains.len(),
-                        "blocklist source refreshed"
-                    );
-                    {
-                        // The source list may have been replaced while this
-                        // fetch was in flight; only record results against a
-                        // status row that still describes this source.
-                        let mut status = lock_guard(&self.status);
-                        if let Some(st) = status.get_mut(i) {
-                            if describes(st, source) {
-                                st.last_fetch = Some(now);
-                                st.last_fetch_at = Some(SystemTime::now());
-                                st.domains = domain_count(&domains, source.format);
-                                st.cached_domains = Arc::new(domains);
-                                st.last_error = None;
-                            }
-                        }
-                    }
-                    daygle_dns_core::alerts::resolve(&format!("blocklist:{}", source.name));
-                }
-                Err(e) => {
-                    tracing::warn!(source = %source.name, error = %e, "blocklist source fetch failed");
-                    daygle_dns_core::alerts::raise(
-                        daygle_dns_core::alerts::AlertKind::BlocklistFailure,
-                        format!("blocklist:{}", source.name),
-                        format!("Blocklist '{}' cannot be downloaded", source.name),
-                        format!(
-                            "Downloading the blocklist '{}' from {} failed: {e}. The last \
-                             downloaded copy (if any) stays in use.",
-                            source.name, source.url
-                        ),
-                    );
-                    let mut status = lock_guard(&self.status);
-                    if let Some(st) = status.get_mut(i) {
-                        if describes(st, source) {
-                            st.last_error = Some(e.to_string());
-                        }
-                    }
-                }
+        let permits = Arc::new(tokio::sync::Semaphore::new(PARALLEL_FETCHES));
+        let mut downloads = tokio::task::JoinSet::new();
+        let mut by_task = HashMap::new();
+        for (i, source) in due {
+            let client = self.client.clone();
+            let permits = permits.clone();
+            let task_source = source.clone();
+            let handle = downloads.spawn(async move {
+                let _permit = permits.acquire_owned().await;
+                fetch_source(&client, &task_source).await
+            });
+            by_task.insert(handle.id(), (i, source));
+        }
+        while let Some(joined) = downloads.join_next_with_id().await {
+            let (id, result) = match joined {
+                Ok((id, result)) => (id, result),
+                Err(e) => (
+                    e.id(),
+                    Err(DaygleError::Proto(format!("the download task failed: {e}"))),
+                ),
+            };
+            if let Some((i, source)) = by_task.remove(&id) {
+                self.record(i, &source, now, result);
             }
         }
 
@@ -430,7 +505,8 @@ impl BlocklistSourceManager {
         // Group-scoped sources are compiled one by one instead, and
         // DoT-scoped sources are merged into their own listener-scoped set.
         let mut group_sets: Vec<(String, Arc<BTreeSet<String>>)> = Vec::new();
-        let mut dot_merged: BTreeSet<String> = BTreeSet::new();
+        let mut everyone_parts = Vec::new();
+        let mut dot_parts = Vec::new();
         let mut merged_sources = MergedSources::default();
         {
             let status = lock_guard(&self.status);
@@ -438,26 +514,21 @@ impl BlocklistSourceManager {
                 if !source.enabled {
                     continue;
                 }
-                if let Some(st) = status.get(i) {
-                    if describes(st, source) {
-                        match source.scope {
-                            BlocklistScope::Everyone => {
-                                merged.extend(st.cached_domains.iter().cloned());
-                                merged_sources
-                                    .everyone
-                                    .push((source.name.clone(), st.cached_domains.clone()));
-                            }
-                            BlocklistScope::Groups => group_sets.push((
-                                source.name.to_ascii_lowercase(),
-                                st.cached_domains.clone(),
-                            )),
-                            BlocklistScope::Dot => {
-                                dot_merged.extend(st.cached_domains.iter().cloned());
-                                merged_sources
-                                    .dot
-                                    .push((source.name.clone(), st.cached_domains.clone()));
-                            }
-                        }
+                let Some(st) = status.get(i).filter(|st| describes(st, source)) else {
+                    continue;
+                };
+                let domains = st.cached_domains.clone();
+                match source.scope {
+                    BlocklistScope::Everyone => {
+                        everyone_parts.push(domains.clone());
+                        merged_sources.everyone.push((source.name.clone(), domains));
+                    }
+                    BlocklistScope::Groups => {
+                        group_sets.push((source.name.to_ascii_lowercase(), domains))
+                    }
+                    BlocklistScope::Dot => {
+                        dot_parts.push(domains.clone());
+                        merged_sources.dot.push((source.name.clone(), domains));
                     }
                 }
             }
@@ -465,16 +536,71 @@ impl BlocklistSourceManager {
         self.publish_group_lists(group_sets);
         self.group_lists.set_merged_sources(merged_sources);
 
-        // Publish the DoT-scoped merge the same way: an emptied or disabled
-        // source stops blocking on the listener immediately.
-        *write_guard(&self.dot_list) =
-            (!dot_merged.is_empty()).then(|| Arc::new(Blocklist::from_set(dot_merged)));
+        let (everyone, dot) = {
+            let mut cache = lock_guard(&self.merged);
+            let dot = (!dot_parts.iter().all(|p| p.is_empty()))
+                .then(|| merged_list(&mut cache.dot, dot_parts));
+            (merged_list(&mut cache.everyone, everyone_parts), dot)
+        };
+        // An emptied or disabled DoT-scoped source stops blocking on the
+        // listener immediately.
+        *write_guard(&self.dot_list) = dot;
 
-        // Always hand back the current effective set (possibly empty): a
+        // Always hand back the current effective list (possibly empty): a
         // source removed, disabled, or emptied on its last fetch must stop
-        // blocking immediately. Callers persist the engine only when the set
-        // actually differs, so an unchanged result is a no-op.
-        Ok(Blocklist::from_set(merged))
+        // blocking immediately.
+        Ok(everyone)
+    }
+
+    /// Record one download's outcome against its status row, if the row
+    /// still describes the source (the list may have been replaced while the
+    /// download was in flight).
+    fn record(
+        &self,
+        i: usize,
+        source: &BlocklistSourceConfig,
+        started: Instant,
+        result: Result<BTreeSet<String>>,
+    ) {
+        match &result {
+            Ok(domains) => {
+                tracing::info!(
+                    source = %source.name,
+                    domains = domains.len(),
+                    "blocklist source refreshed"
+                );
+                daygle_dns_core::alerts::resolve(&format!("blocklist:{}", source.name));
+            }
+            Err(e) => {
+                tracing::warn!(source = %source.name, error = %e, "blocklist source fetch failed");
+                daygle_dns_core::alerts::raise(
+                    daygle_dns_core::alerts::AlertKind::BlocklistFailure,
+                    format!("blocklist:{}", source.name),
+                    format!("Blocklist '{}' cannot be downloaded", source.name),
+                    format!(
+                        "Downloading the blocklist '{}' from {} failed: {e}. The last \
+                         downloaded copy (if any) stays in use; it is tried again in a few \
+                         minutes.",
+                        source.name, source.url
+                    ),
+                );
+            }
+        }
+        let mut status = lock_guard(&self.status);
+        let Some(st) = status.get_mut(i).filter(|st| describes(st, source)) else {
+            return;
+        };
+        st.last_attempt = Some(Instant::now());
+        match result {
+            Ok(domains) => {
+                st.last_fetch = Some(started);
+                st.last_fetch_at = Some(SystemTime::now());
+                st.domains = domain_count(&domains, source.format);
+                st.cached_domains = Arc::new(domains);
+                st.last_error = None;
+            }
+            Err(e) => st.last_error = Some(e.to_string()),
+        }
     }
 
     /// Compile the group-scoped sources (reusing the compiled form of any
@@ -485,7 +611,7 @@ impl BlocklistSourceManager {
         for (name, domains) in sets {
             let list = match compiled.get(&name) {
                 Some((built_from, list)) if Arc::ptr_eq(built_from, &domains) => list.clone(),
-                _ => Arc::new(Blocklist::from_set(domains.as_ref().clone())),
+                _ => Arc::new(Blocklist::from_sets([domains.as_ref()])),
             };
             next.insert(name, (domains, list));
         }
@@ -498,69 +624,80 @@ impl BlocklistSourceManager {
     }
 
     /// Force a refresh of every enabled source now (used by `POST
-    /// /api/policy/blocklist/refresh`).
-    pub async fn refresh_all(&self) -> Result<Blocklist> {
-        // Reset the per-source due-tracking so everything is considered due.
-        // Only the schedule marker is cleared: `last_fetch_at` keeps the
+    /// /api/policy/blocklist/sources`).
+    pub async fn refresh_all(&self) -> Result<Arc<Blocklist>> {
+        // Wait out a cycle already running, so its downloads are not
+        // repeated by this one only to race it.
+        let cycle = self.cycle.lock().await;
+        // Reset the per-source due-tracking (the retry pause after a failure
+        // included) so everything is due. `last_fetch_at` keeps the
         // wall-clock time of the last success until a refresh replaces it.
         {
             let mut status = lock_guard(&self.status);
             for st in status.iter_mut() {
                 st.last_fetch = None;
+                st.last_attempt = None;
             }
         }
+        drop(cycle);
         self.refresh_due().await
     }
 
-    /// Fetch and parse one source into its normalized domain set.
-    async fn fetch(&self, source: &BlocklistSourceConfig) -> Result<BTreeSet<String>> {
-        let text = self.fetch_text(&source.url).await?;
-        Ok(parse_blocklist(&text, source.format))
-    }
-
     /// Fetch the body at `url` over HTTP(S), enforcing the redirect limit,
-    /// the 30 s timeout and the size cap. Exposed so the API can validate a
+    /// the timeout and the size cap. Exposed so the API can validate a
     /// candidate source (probe + parse) without saving it first.
     pub async fn fetch_text(&self, url: &str) -> Result<String> {
-        let mut response = self
-            .client
-            .get(url)
-            .send()
-            .await
-            .map_err(|e| DaygleError::Proto(format!("GET {url}: {e}")))?;
-        if !response.status().is_success() {
+        fetch_text(&self.client, url).await
+    }
+}
+
+/// Fetch and parse one source into its normalized domain set.
+async fn fetch_source(
+    client: &reqwest::Client,
+    source: &BlocklistSourceConfig,
+) -> Result<BTreeSet<String>> {
+    let text = fetch_text(client, &source.url).await?;
+    Ok(parse_blocklist(&text, source.format))
+}
+
+/// Fetch the body at `url` with `client`, aborting past [`MAX_BODY_BYTES`].
+async fn fetch_text(client: &reqwest::Client, url: &str) -> Result<String> {
+    let mut response = client
+        .get(url)
+        .send()
+        .await
+        .map_err(|e| DaygleError::Proto(format!("GET {url}: {e}")))?;
+    if !response.status().is_success() {
+        return Err(DaygleError::Proto(format!(
+            "GET {url} returned {}",
+            response.status()
+        )));
+    }
+    // Reject over-large bodies up front when the server advertises a length.
+    if let Some(len) = response.content_length() {
+        if len > MAX_BODY_BYTES as u64 {
             return Err(DaygleError::Proto(format!(
-                "GET {url} returned {}",
-                response.status()
+                "blocklist {url} advertises {len} bytes, over the {MAX_BODY_BYTES} limit"
             )));
         }
-        // Reject over-large bodies up front when the server advertises a length.
-        if let Some(len) = response.content_length() {
-            if len > MAX_BODY_BYTES as u64 {
-                return Err(DaygleError::Proto(format!(
-                    "blocklist {url} advertises {len} bytes, over the {MAX_BODY_BYTES} limit"
-                )));
-            }
-        }
-        // Stream the body chunk by chunk, aborting as soon as the cap is
-        // exceeded so a server that lies about (or omits) Content-Length cannot
-        // force us to buffer an unbounded amount into memory.
-        let mut bytes: Vec<u8> = Vec::new();
-        while let Some(chunk) = response
-            .chunk()
-            .await
-            .map_err(|e| DaygleError::Proto(format!("read {url}: {e}")))?
-        {
-            if bytes.len() + chunk.len() > MAX_BODY_BYTES {
-                return Err(DaygleError::Proto(format!(
-                    "blocklist {url} exceeds {} bytes",
-                    MAX_BODY_BYTES
-                )));
-            }
-            bytes.extend_from_slice(&chunk);
-        }
-        Ok(String::from_utf8_lossy(&bytes).into_owned())
     }
+    // Stream the body chunk by chunk, aborting as soon as the cap is
+    // exceeded so a server that lies about (or omits) Content-Length cannot
+    // force us to buffer an unbounded amount into memory.
+    let mut bytes: Vec<u8> = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|e| DaygleError::Proto(format!("read {url}: {e}")))?
+    {
+        if bytes.len() + chunk.len() > MAX_BODY_BYTES {
+            return Err(DaygleError::Proto(format!(
+                "blocklist {url} exceeds {MAX_BODY_BYTES} bytes"
+            )));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
 /// Guess the wire format of a blocklist body from its content, for the
@@ -683,24 +820,19 @@ pub fn domain_count(domains: &BTreeSet<String>, format: BlocklistFormat) -> usiz
 
 /// Parse a blocklist body in the given format into normalized domain patterns
 /// (lowercase, no trailing dot, `*.` prefixes preserved for wildcards).
+///
+/// Whatever the format, only entries that can match a query name are kept
+/// (see [`plausible_entry`]).
 pub fn parse_blocklist(text: &str, format: BlocklistFormat) -> BTreeSet<String> {
     let mut out: BTreeSet<String> = BTreeSet::new();
     match format {
         BlocklistFormat::Domains => {
-            out.extend(normalize_domains(
-                text.lines()
-                    .map(str::trim)
-                    .filter(|l| !l.is_empty() && !l.starts_with('#') && !l.starts_with('!'))
-                    .map(|l| l.to_string()),
-            ));
+            out.extend(normalize_domains(list_names(text).map(str::to_string)));
         }
         BlocklistFormat::Wildcard => {
             // Each name stands for itself and every subdomain.
             for domain in normalize_domains(
-                text.lines()
-                    .map(str::trim)
-                    .filter(|l| !l.is_empty() && !l.starts_with('#') && !l.starts_with('!'))
-                    .map(|l| l.trim_start_matches("*.").to_string()),
+                list_names(text).map(|name| name.trim_start_matches("*.").to_string()),
             ) {
                 out.insert(format!("*.{domain}"));
                 out.insert(domain);
@@ -718,9 +850,10 @@ pub fn parse_blocklist(text: &str, format: BlocklistFormat) -> BTreeSet<String> 
                     .split_whitespace()
                     .skip(1)
                     .take_while(|field| !field.starts_with('#'))
-                    // Skip loopback/placeholder entries and bare labels
-                    // (localhost, broadcasthost): real entries are FQDNs.
-                    .filter(|host| host.contains('.') && !host.ends_with('.'))
+                    // Skip bare labels (localhost, broadcasthost): real
+                    // entries are FQDNs, with or without the root dot.
+                    // Addresses (`0.0.0.0 0.0.0.0`) are dropped below.
+                    .filter(|host| host.trim_end_matches('.').contains('.'))
                     .map(str::to_string);
                 out.extend(normalize_domains(hosts));
             }
@@ -734,7 +867,40 @@ pub fn parse_blocklist(text: &str, format: BlocklistFormat) -> BTreeSet<String> 
         }
         BlocklistFormat::Rpz => out = parse_rpz(text),
     }
+    out.retain(|entry| plausible_entry(entry));
     out
+}
+
+/// The name on each line of a plain list: the first word, without an
+/// inline comment (`tracker.example # added 2024`, `ads.example#note`).
+/// Comment and blank lines yield nothing.
+fn list_names(text: &str) -> impl Iterator<Item = &str> {
+    text.lines().filter_map(|line| {
+        let name = line.split_whitespace().next()?.split('#').next()?;
+        (!name.is_empty() && !name.starts_with('!')).then_some(name)
+    })
+}
+
+/// Whether a parsed entry can ever match a query name: a host name (letters,
+/// digits, hyphens, underscores; labels of 1 to 63 characters; 253 at
+/// most), optionally `*.`-wildcarded or `@@`-excepted, and not an IP
+/// address. Anything else - an address from a hosts line, a line the
+/// format's parser could not make sense of, text IDNA could not convert -
+/// would sit in memory, inflate the count and block nothing.
+pub(crate) fn plausible_entry(entry: &str) -> bool {
+    let entry = entry
+        .strip_prefix(crate::blocklist::EXCEPTION_PREFIX)
+        .unwrap_or(entry);
+    let name = entry.strip_prefix("*.").unwrap_or(entry);
+    !name.is_empty()
+        && name.len() <= 253
+        && name.parse::<std::net::IpAddr>().is_err()
+        && name.split('.').all(|label| {
+            (1..=63).contains(&label.len())
+                && label
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+        })
 }
 
 /// Modifiers that change what a DNS adblock rule means in ways a blocklist
@@ -969,7 +1135,7 @@ mod tests {
         assert!(lists.get("anything").is_none());
         assert!(manager.status().is_empty());
         assert!(manager.sources().is_empty());
-        assert_eq!(manager.min_refresh(), Duration::from_secs(86400));
+        assert_eq!(manager.next_refresh_in(), IDLE_REFRESH);
     }
 
     #[test]
@@ -1184,6 +1350,227 @@ ads.tracker.com.rpz.local. 300 IN CNAME .
             detect_blocklist_format_at("https://big.oisd.nl/domainswild", "*.example.com\n"),
             Some(BlocklistFormat::Domains)
         );
+    }
+
+    /// A local HTTP server answering every request with `status` and
+    /// `body`; the counter is the number of requests it got.
+    async fn list_server(
+        status: u16,
+        body: &'static str,
+    ) -> (String, Arc<std::sync::atomic::AtomicUsize>) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/list.txt", listener.local_addr().unwrap());
+        let hits = Arc::new(AtomicUsize::new(0));
+        let counter = hits.clone();
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                counter.fetch_add(1, Ordering::SeqCst);
+                tokio::spawn(async move {
+                    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                    let mut request = [0u8; 4096];
+                    let _ = stream.read(&mut request).await;
+                    let response = format!(
+                        "HTTP/1.1 {status} X\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = stream.write_all(response.as_bytes()).await;
+                    let _ = stream.shutdown().await;
+                });
+            }
+        });
+        (url, hits)
+    }
+
+    fn source(url: &str, refresh_secs: u64) -> BlocklistSourceConfig {
+        BlocklistSourceConfig {
+            name: "list".to_string(),
+            url: url.to_string(),
+            format: BlocklistFormat::Domains,
+            refresh_secs,
+            enabled: true,
+            scope: BlocklistScope::Everyone,
+        }
+    }
+
+    fn hits(counter: &std::sync::atomic::AtomicUsize) -> usize {
+        counter.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// A cycle with nothing due returns the very list it published last, so
+    /// publishing it costs a pointer comparison, not a rebuild and an
+    /// entry-by-entry one.
+    #[tokio::test]
+    async fn unchanged_cycles_reuse_the_published_list() {
+        let (url, counter) = list_server(200, "a.test\nb.test\n").await;
+        let m = BlocklistSourceManager::new(vec![source(&url, 3600)], Arc::default()).unwrap();
+        let first = m.refresh_due().await.unwrap();
+        assert_eq!(first.len(), 2);
+        let second = m.refresh_due().await.unwrap();
+        assert!(Arc::ptr_eq(&first, &second));
+        assert_eq!(hits(&counter), 1, "nothing was due the second time");
+        // The next download is an interval away.
+        let wait = m.next_refresh_in();
+        assert!(wait > Duration::from_secs(3590) && wait <= Duration::from_secs(3600));
+    }
+
+    /// A failed download is tried again within minutes, not a whole
+    /// (here daily) interval later, and not on every cycle before then.
+    #[tokio::test]
+    async fn a_failed_download_is_retried_within_minutes() {
+        let (url, counter) = list_server(503, "").await;
+        let m = BlocklistSourceManager::new(vec![source(&url, 86_400)], Arc::default()).unwrap();
+        assert!(m.refresh_due().await.unwrap().is_empty());
+        assert!(m.status()[0].last_error.is_some());
+        let wait = m.next_refresh_in();
+        assert!(
+            wait <= RETRY_AFTER_FAILURE && wait > RETRY_AFTER_FAILURE - Duration::from_secs(10),
+            "{wait:?}"
+        );
+        m.refresh_due().await.unwrap();
+        assert_eq!(hits(&counter), 1, "not retried before the pause is over");
+    }
+
+    /// A list host is never asked more often than every few minutes.
+    #[tokio::test]
+    async fn refreshes_are_never_more_frequent_than_the_floor() {
+        let (url, _) = list_server(200, "a.test\n").await;
+        let m = BlocklistSourceManager::new(vec![source(&url, 1)], Arc::default()).unwrap();
+        m.refresh_due().await.unwrap();
+        assert!(m.next_refresh_in() > MIN_REFRESH - Duration::from_secs(10));
+    }
+
+    /// Two cycles at once (the background loop and a console action)
+    /// download a due source once: the second waits for the first.
+    #[tokio::test]
+    async fn concurrent_cycles_download_once() {
+        let (url, counter) = list_server(200, "a.test\n").await;
+        let m = BlocklistSourceManager::new(vec![source(&url, 3600)], Arc::default()).unwrap();
+        let (a, b) = tokio::join!(m.refresh_due(), m.refresh_due());
+        assert_eq!((a.unwrap().len(), b.unwrap().len()), (1, 1));
+        assert_eq!(hits(&counter), 1);
+    }
+
+    /// Editing a source's interval or toggling it keeps what it downloaded:
+    /// its domains depend only on its URL and format.
+    #[tokio::test]
+    async fn editing_a_source_keeps_its_download() {
+        let (url, counter) = list_server(200, "a.test\nb.test\n").await;
+        let m = BlocklistSourceManager::new(vec![source(&url, 3600)], Arc::default()).unwrap();
+        m.refresh_due().await.unwrap();
+        m.set_sources(vec![source(&url, 7200)]);
+        assert_eq!(m.status()[0].domains, 2);
+        assert_eq!(m.refresh_due().await.unwrap().len(), 2);
+        let mut off = source(&url, 7200);
+        off.enabled = false;
+        m.set_sources(vec![off]);
+        assert!(
+            m.refresh_due().await.unwrap().is_empty(),
+            "a disabled source blocks nothing"
+        );
+        m.set_sources(vec![source(&url, 7200)]);
+        assert_eq!(m.refresh_due().await.unwrap().len(), 2);
+        assert_eq!(hits(&counter), 1, "no edit forced a download");
+        // A new URL is a new list.
+        m.set_sources(vec![source(&format!("{url}?v=2"), 7200)]);
+        assert_eq!(m.status()[0].domains, 0);
+    }
+
+    #[test]
+    fn plain_lists_drop_inline_comments_and_junk() {
+        let set = parse_blocklist(
+            "# header\n\
+             tracker.example # added 2024\n\
+             ads.example#note\n\
+             *.wild.example\n\
+             \tspaced.example   \n\
+             192.0.2.1\n\
+             bad name with spaces\n\
+             not_a|domain\n\
+             ! adblock-style comment\n",
+            BlocklistFormat::Domains,
+        );
+        let expected: BTreeSet<String> = [
+            "tracker.example",
+            "ads.example",
+            "*.wild.example",
+            "spaced.example",
+            "bad",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+        assert_eq!(set, expected);
+        let wild = parse_blocklist("ads.test # note\n", BlocklistFormat::Wildcard);
+        assert_eq!(wild.len(), 2);
+        assert!(wild.contains("*.ads.test"));
+    }
+
+    #[test]
+    fn hosts_files_keep_rooted_names_and_drop_addresses() {
+        let set = parse_blocklist(
+            "0.0.0.0 0.0.0.0\n\
+             0.0.0.0 rooted.example.\n\
+             127.0.0.1 localhost\n\
+             ::1 ip6-localhost ip6-loopback\n\
+             0.0.0.0 ads.example # tracker\n",
+            BlocklistFormat::Hosts,
+        );
+        let expected: BTreeSet<String> = ["rooted.example", "ads.example"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        assert_eq!(set, expected);
+    }
+
+    #[test]
+    fn only_plausible_names_are_kept() {
+        for ok in [
+            "example.com",
+            "*.example.com",
+            "@@cdn.example.com",
+            "@@*.example.com",
+            "_dmarc.example.com",
+            "xn--bcher-kva.de",
+            "zip",
+        ] {
+            assert!(plausible_entry(ok), "{ok}");
+        }
+        let long_label = format!("{}.com", "a".repeat(64));
+        for bad in [
+            "",
+            "*.",
+            "192.0.2.1",
+            "a..b",
+            ".example.com",
+            "has space.com",
+            "bücher.de",
+            "a|b.com",
+            long_label.as_str(),
+        ] {
+            assert!(!plausible_entry(bad), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn the_first_listing_source_is_named() {
+        let lists = GroupBlocklists::default();
+        let set = |items: &[&str]| Arc::new(items.iter().map(|s| s.to_string()).collect());
+        lists.set_merged_sources(MergedSources {
+            everyone: vec![
+                ("One".into(), set(&["other.test"])),
+                ("Two".into(), set(&["*.ads.test"])),
+                ("Three".into(), set(&["x.ads.test"])),
+            ],
+            dot: vec![],
+        });
+        assert_eq!(
+            lists.first_source_listing("x.ads.test", false),
+            Some(("Two".to_string(), "*.ads.test".to_string()))
+        );
+        assert_eq!(lists.sources_listing("x.ads.test", false).len(), 2);
+        assert_eq!(lists.first_source_listing("x.ads.test", true), None);
+        assert_eq!(lists.first_source_listing("nothing.test", false), None);
     }
 
     #[test]
