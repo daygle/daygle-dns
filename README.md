@@ -48,7 +48,9 @@ Daygle DNS combines, in a single process:
   it, and a network in use cannot be deleted.
 - **Encrypted DNS discovery (DDR, RFC 9462)**: devices that support it
   (Windows 11, Apple, Android) learn of the DoH, DoT and DoQ listeners and
-  switch to them by themselves.
+  switch to them by themselves. Windows and Apple devices only do so when
+  the listener's certificate also names the server's IP address; the server
+  says at start-up what stops discovery from working.
 - **Block page**: blocked sites can point at a page on this server that
   says what was blocked and why, instead of "site not found".
 - **Reports**: queries, blocks, the busiest devices and the most asked and
@@ -92,7 +94,7 @@ Daygle DNS combines, in a single process:
   **negative caching**, **retries**, **timeouts**, and **DNSSEC validation**,
   plus **aggressive NSEC caching (RFC 8198)**: validated NSEC proofs answer
   NXDOMAIN/NODATA for whole ranges of names locally, without another trip
-  to the authoritative servers,
+  to the authoritative servers.
 - **DNS64 (RFC 6147)** for IPv6-only networks behind NAT64: IPv4-only names
   get AAAA answers inside the gateway's prefix.
 - **EDNS Client Subnet (RFC 7871)** to forwarding upstreams, so CDNs answer
@@ -180,7 +182,7 @@ Daygle DNS combines, in a single process:
   `ai.threat_model_path` to give a channel its own model. Verdicts are
   visible via the REST API (`/api/ai/*`).
 - A **REST API** (tower/axum) for configuration, zone management, logs, and
-metrics.
+  metrics.
 - An embedded **Svelte** web GUI with **username/password login and roles**
   (`admin` = full access, `viewer` = read-only), optional **two-factor
   login** (authenticator app codes, recovery codes), sessions that survive
@@ -211,9 +213,14 @@ metrics.
 # One-line installer (Linux/macOS; auto-installs Rust, a C compiler, and git if missing)
 curl -fsSL https://raw.githubusercontent.com/daygle/daygle-dns/main/install.sh | sudo sh
 
-# ...or build and run directly from source
-cargo run --release -p daygle-dns -- --config daygle-dns.toml.example
+# ...or build and run directly from source (as root: the example config
+# listens on port 53 and keeps its database under /var/lib/daygle-dns)
+sudo cargo run --release -p daygle-dns -- --config daygle-dns.toml.example
 ```
+
+On Linux the installer sets the server up as a systemd service. Without
+systemd (macOS, for example) it builds and installs the binary and prints the
+command to start it yourself.
 
 The installer also drops the bundled AI starter model into
 `/etc/daygle-dns/models/` (or your `CONFIG_DIR/models`) and enables the AI
@@ -263,7 +270,7 @@ Test a query:
 
 ```bash
 dig @127.0.0.1 example.com A
-dig @127.0.0.1 -p 853 example.com A +tls   # DNS over TLS
+dig @127.0.0.1 -p 853 example.com A +tls   # DNS over TLS, once [dot] is enabled
 ```
 
 ## Workspace layout
@@ -274,12 +281,13 @@ dig @127.0.0.1 -p 853 example.com A +tls   # DNS over TLS
 | `daygle-dns-policy`         | Plugin-style policy engine (blocklists, ACLs, per-client rules) |
 | `daygle-dns-authoritative`  | SQLite zone storage, zone-file parser, Hickory catalog + DNSSEC signing |
 | `daygle-dns-recursive`      | Recursive resolver (caching, negative caching, retries, timeouts, DNSSEC) |
-| `daygle-dns-dot`            | DoT (RFC 7858) + DoH (RFC 8484) + DoQ (RFC 9250) TLS certificates |
+| `daygle-dns-dot`            | TLS certificates and configuration for DoT (RFC 7858), DoH (RFC 8484) and DoQ (RFC 9250) |
 | `daygle-dns-ml`            | AI domain scanner: verdict store, fastText/heuristic backends, AI policy plugin |
 | [`models/`](models/)                       | Bundled AI starter model + training data (used out of the box) |
 | `daygle-dns-api`           | REST API (axum) + embedded GUI serving |
 | `daygle-dns-gui`            | Embedded web GUI assets (Svelte build output) |
-| `daygle-dns`             | The server binary: UDP/TCP/DoT listeners + the combined dispatcher |
+| `daygle-dns-dhcp`           | DHCPv4 and DHCPv6 server with DNS registration of leases (Linux) |
+| `daygle-dns`             | The server binary: the UDP, TCP, DoT, DoH and DoQ listeners, the combined dispatcher, and the web console listeners |
 
 See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for how the pieces fit
 together and [`docs/API.md`](docs/API.md) for the REST API reference. The
@@ -292,10 +300,13 @@ cannot drift from the endpoints actually served.
 The server is configured via a TOML file (default
 `/etc/daygle-dns/daygle-dns.toml`) **and** a SQLite database. The TOML file
 is the bootstrap: it seeds runtime settings into the database on first boot,
-then the database is authoritative for recursive settings, policy
-(allowlist/blocklist), DoT/DoH/DoQ, and console accounts. Listener addresses,
-`[authoritative]`, and `[api]` remain file-owned so a broken config can always
-be fixed by hand.
+then the database is authoritative for everything the console edits -
+recursive settings, policy (allowlist, blocklist, blocklist sources), the
+DoT/DoH/DoQ settings, authoritative settings, AI, logging, alerts and
+the rest - and for console accounts. What a bad setting could lock you out
+with stays file-owned, so it can always be fixed by hand: the listen
+addresses, the plain-DNS port and transports, the database path, and the API
+listener and its token.
 A fully commented example lives in
 [`daygle-dns.toml.example`](daygle-dns.toml.example).
 The skeleton, with the live values that matter most:
@@ -370,8 +381,8 @@ port = 853
 self_signed = true
 # allowed_networks = ["192.168.0.0/16"]   # as [dot]: empty serves everyone
 
-# ── Policy: blocklist_sources are file-owned (via file watcher), ─────
-# allowlist/blocklist are DB-backed (GUI or PUT /api/config).
+# ── Policy: seeded like the rest; the console keeps the allowlist, ─────
+# blocklist and blocklist sources in the database from then on.
 [policy]
 # Fetch a remote blocklist (hosts file) every 12 hours.
 # [[policy.blocklist_sources]]
@@ -409,19 +420,22 @@ from masters - see [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for details.
 
 With `server.reload_enabled = true` (the default), Daygle DNS polls the config
 file (every `server.reload_interval_ms`, default 2000) and applies edits
-**without restarting** - the UDP/TCP listener settings update in place.
+**without restarting** - listener changes rebind the affected listeners in
+place. Settings the database holds (see [Configuration](#configuration)) keep
+their stored values; change those in the console or with `PUT /api/config`.
 A bad config is rejected and the previous configuration stays active. You
 can also trigger an immediate re-read with `POST /api/config` (see
 [`docs/API.md`](docs/API.md)).
 
 ## Building the web GUI
 
-The workspace compiles out of the box with a minimal fallback dashboard. To
-build the full Svelte GUI:
+The built GUI (`web/dist`) is committed and embedded in the binary, so the
+workspace compiles without Node. After changing anything under `web/src`,
+rebuild it and commit the result (CI fails when `web/dist` is stale):
 
 ```bash
 cd web
-npm install
+npm ci
 npm run build     # outputs to web/dist, embedded by daygle-dns-gui
 cargo build --release -p daygle-dns
 ```
@@ -436,7 +450,9 @@ This runs unit tests for configuration, policy, zone storage/parsing, upstream
 parsing, TLS certificates, and the GUI, plus integration tests that spin up a
 real server on ephemeral ports and exercise:
 
-- authoritative answers over **UDP** and **TCP**,
+- authoritative answers over **UDP** and **TCP**, and plain DNS behaviour on
+  both (replies from the address queried, truncation, pipelined TCP queries,
+  the TCP connection cap),
 - **split-horizon** synthetic answers per client network,
 - **policy** blocking and **remote blocklist sources**,
 - full **recursive** resolution through a local stub upstream (no internet
@@ -457,7 +473,10 @@ real server on ephemeral ports and exercise:
 - **DNS over TLS** and **DNS over HTTPS** against a self-signed certificate,
 - **DNS over QUIC** (RFC 9250) against the generated self-signed certificate,
 - **TSIG** covering HMAC-SHA256 request/response round-trips with
-  request-MAC chaining.
+  request-MAC chaining,
+- **encrypted DNS discovery** (DDR) records,
+- **ACME certificates** against Pebble, Let's Encrypt's test CA (run when
+  `PEBBLE` and `PEBBLE_DIR` are set; skipped otherwise).
 
 ## Upgrading
 
@@ -472,9 +491,14 @@ rebuilds the binary, replaces `/usr/local/bin/daygle-dns`, preserves
 curl -fsSL https://raw.githubusercontent.com/daygle/daygle-dns/main/install.sh | sudo sh
 ```
 
-The installer never overwrites an existing `/etc/daygle-dns/daygle-dns.toml`,
-and your zones, certificates, and SQLite database under `/var/lib/daygle-dns`
-are left untouched. Before upgrading, back up the database just in case:
+The installer never replaces an existing `/etc/daygle-dns/daygle-dns.toml`. It
+only edits it to rebind the API listener to `0.0.0.0` while it is still on
+`127.0.0.1`, to add an `[ai]` section (train mode) when there is none, and to
+add an admin account when you pass `DAYGLE_DNS_ADMIN_USER` and
+`DAYGLE_DNS_ADMIN_PASSWORD`. Your zones, certificates, and SQLite database
+under `/var/lib/daygle-dns` are left untouched. Before upgrading, back up the
+database just in case (or use `daygle-dns backup <file>`, which also
+covers settings, users and certificates):
 
 ```bash
 sudo cp /var/lib/daygle-dns/daygle.db /var/lib/daygle-dns/daygle.db.bak
