@@ -2,6 +2,90 @@
 
 Base path: `/api`. The web GUI is served at `/`.
 
+## OpenAPI description
+
+```
+GET /api/openapi.json
+```
+
+Serves an OpenAPI 3.1 document describing every path and method below, for
+generated clients, import into Postman or Insomnia, and editor completion.
+Like the rest of the API it needs a session or API token (`/health` is the
+exception).
+
+The document is not maintained by hand. Its path table lives next to the
+routes in `crates/daygle-dns-api/src/openapi.rs`, and tests there read
+`router()` out of the source and fail when the two disagree - a route
+without a table line, a table line without a route, or a path answering a
+different set of methods. Adding an endpoint therefore updates the schema or
+breaks the build; the schema cannot quietly fall behind, which is the fate
+of every hand-copied list. Summaries come from the handler names and
+operations are tagged by the console section they belong to.
+
+Request and response *bodies* are named for every operation, and the groups
+below carry full JSON Schemas:
+
+- **Zones** - `GET`/`POST /api/zones`, `GET /api/zones/defaults`,
+  `PUT /api/zones/{id}/enabled`, `PUT /api/zones/{id}/soa`,
+  `POST /api/zones/import`, `GET /api/zones/{id}/export`,
+  `POST /api/zones/{id}/sign` and `/unsign`, plus `/api/zone-aliases` and
+  `PUT /api/zones/{id}/aliases`.
+- **Records** - `GET`/`PUT /api/zones/{id}/records`, `PUT`/`DELETE`
+  `/api/zones/{id}/records/{rid}`, the `disabled`, `weight` and `health`
+  sub-resources, `GET /api/record-weights` and `GET /api/health-checks`,
+  including the `update_ptr` and `create_reverse_zone` query flags and the
+  PTR outcome they report.
+- **Settings** - `GET`/`PUT`/`POST /api/config` and `GET /api/config/defaults`,
+  with `Config` and `SettingsUpdate` naming every section (the `dnstap` and
+  `log_export` sections are typed in full; the others are described below).
+- **Authentication and users** - `/api/auth/login` (including the
+  `two_factor: true` refusal and the `Retry-After` throttle),
+  `/api/auth/logout`, `/api/auth/me`, the display-preference and
+  hidden-column endpoints, the self-service password change, the five
+  two-factor endpoints, the API-token trio, `/api/auth/setup`, and
+  `/api/users` (list, create, update, delete, reset two-factor).
+- **Policy** - the two catalogues (`/api/policy/services`,
+  `/api/policy/security`), the blocklist-source endpoints (list, replace,
+  forced refresh, and the validate probe with its query-parameter contract),
+  the blocking groups (list, upsert, move, delete), the blocking tester and
+  `/api/policy/explain` with its checks and verdict, plus `/api/rpz`,
+  `/api/rpz/test` and `/api/alerts/test`.
+- **AI scanner** - `/api/ai/status`, the paginated `/api/ai/verdicts` and
+  `/api/ai/threats` (with their filter parameters), the override endpoints,
+  `/api/ai/rescan`, and the model status and update pair.
+- **Resolver** - `/api/cache`, `/api/cache/clear`, `/api/cache/flush`,
+  `/api/resolver` and the local root zone's status and refresh.
+- **Certificates** - `/api/certificates` (list, create or upload, delete),
+  the ACME request and renew actions, and the `/api/acme` settings, including
+  the write-only API token that reads back as `[redacted]`.
+- **Split horizon and networks** - `/api/split-horizon`, its entries
+  (create, update, delete, move) and the older `/api/split-horizon/networks`
+  forms, plus `/api/networks` with the `used_by` list a `409` reports.
+- **DNS accounts, devices and DHCP** - `/api/accounts` (list, create,
+  update, new client ID, delete), `/api/devices` and `/api/devices/name`,
+  and `/api/dhcp` with its leases.
+- **Reports** - `GET /api/reports` with its `hours`/`client`/`top`
+  parameters and the full summary (`QueryLogReport`: totals, ranked lists,
+  timeline, latency buckets, new names and per-zone traffic), and
+  `POST /api/reports/send` with the `ReportSettings` it accepts.
+- **Backup and restore** - `/api/backup`, and `/api/backup/restore` (the
+  staged restore, staging a file, and cancelling one) with the `BackupInfo`
+  a backup reports about itself.
+- **Updates** - `/api/update`, `/update/status`, `/update/start`,
+  `/update/check`, `/update/dismiss` and `/update/preflight`, including the
+  `gates` that explain why a host cannot self-update and the `202` that only
+  means a run began.
+- **Audit** - `GET /api/audit` with its paging and filter parameters and the
+  `AuditEntry` shape.
+- **Diagnostics and sinks** - `/health`, `/status`, `/metrics/prometheus`,
+  `/log-export`, `/log-export/test`, `/dnstap/test`, `/backup` and this
+  document itself.
+
+Every path and method is therefore in the document, and the groups above name
+their request and response bodies in full. Operations that accept or return
+nothing (`204`, a `202` that only starts work) say so instead of leaving the
+reader to guess.
+
 ## Authentication
 
 Console authentication is **on by default** (`api.auth_required = true`): every

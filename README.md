@@ -282,7 +282,10 @@ dig @127.0.0.1 -p 853 example.com A +tls   # DNS over TLS
 | `daygle-dns`             | The server binary: UDP/TCP/DoT listeners + the combined dispatcher |
 
 See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for how the pieces fit
-together and [`docs/API.md`](docs/API.md) for the REST API reference.
+together and [`docs/API.md`](docs/API.md) for the REST API reference. The
+API also publishes an OpenAPI 3 description at `GET /api/openapi.json`,
+built from a route table the test suite holds against the router so it
+cannot drift from the endpoints actually served.
 
 ## Configuration
 
