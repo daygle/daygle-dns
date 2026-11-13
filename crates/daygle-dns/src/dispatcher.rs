@@ -156,6 +156,21 @@ pub struct DnsDispatcher {
     registrations: Arc<daygle_dns_policy::rdap::RegistrationDates>,
     /// Google Safe Browsing lists, for the Google Safe Browsing category.
     safe_browsing: Arc<daygle_dns_policy::safe_browsing::SafeBrowsing>,
+    /// The DDR targets derived from the live config (see
+    /// [`Self::ddr_targets`]), shared by every clone of this dispatcher.
+    ddr_targets: Arc<ArcSwapOption<DdrTargets>>,
+}
+
+/// The encrypted listeners DDR advertises and the name each is reached by,
+/// for one configuration. Deriving them reads stored certificates from the
+/// database, which must not happen per query: any query for a `_dns.` name
+/// asks for them. They change only with the configuration (the `Weak` is
+/// compared by address only, and keeps that allocation from being reused)
+/// or a certificate the listeners use, and storing one of those rebuilds
+/// the listeners and with them this dispatcher.
+struct DdrTargets {
+    config: std::sync::Weak<daygle_dns_core::config::DaygleConfig>,
+    targets: Arc<Vec<(&'static str, String)>>,
 }
 
 impl DnsDispatcher {
@@ -230,6 +245,7 @@ impl DnsDispatcher {
             safe_browsing: Arc::new(daygle_dns_policy::safe_browsing::SafeBrowsing::new(
                 Arc::new(|| (String::new(), String::new())),
             )),
+            ddr_targets: Arc::default(),
         }
     }
 
@@ -2841,7 +2857,7 @@ impl DnsDispatcher {
         let Some(name) = qname.strip_prefix("_dns.") else {
             return false;
         };
-        let Some(config) = self.config.as_ref().map(|c| c.load()) else {
+        let Some(config) = self.config.as_ref().map(|c| c.load_full()) else {
             return false;
         };
         if !config.ddr.enabled || name.ends_with(".resolver.arpa") || name == "resolver.arpa" {
@@ -2858,8 +2874,26 @@ impl DnsDispatcher {
     }
 
     /// The enabled encrypted listeners and the name each is reached by:
-    /// `ddr.name`, else the name its certificate was made for.
+    /// `ddr.name`, else the name its certificate was made for. Derived once
+    /// per configuration (see [`DdrTargets`]).
     fn ddr_targets(
+        &self,
+        config: &Arc<daygle_dns_core::config::DaygleConfig>,
+    ) -> Arc<Vec<(&'static str, String)>> {
+        if let Some(cached) = &*self.ddr_targets.load() {
+            if std::ptr::eq(cached.config.as_ptr(), Arc::as_ptr(config)) {
+                return cached.targets.clone();
+            }
+        }
+        let targets = Arc::new(self.derive_ddr_targets(config));
+        self.ddr_targets.store(Some(Arc::new(DdrTargets {
+            config: Arc::downgrade(config),
+            targets: targets.clone(),
+        })));
+        targets
+    }
+
+    fn derive_ddr_targets(
         &self,
         config: &daygle_dns_core::config::DaygleConfig,
     ) -> Vec<(&'static str, String)> {
@@ -2919,8 +2953,15 @@ impl DnsDispatcher {
         if !config.ddr.enabled {
             return Vec::new();
         }
+        // With accounts required, a device that switched over by discovery
+        // would connect under the bare server name - no account - and get
+        // REFUSED for every query: an answer, not a failed connection, so
+        // it would not fall back to plain DNS. Advertise nothing.
+        if self.accounts.required() {
+            return Vec::new();
+        }
         let mut records = Vec::new();
-        for (priority, (kind, target)) in (1u16..).zip(self.ddr_targets(&config)) {
+        for (priority, &(kind, ref target)) in (1u16..).zip(self.ddr_targets(&config).iter()) {
             let (protocol, listen, port, mut alpn) = match kind {
                 "doh" => (
                     P::Https,

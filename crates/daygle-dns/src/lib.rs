@@ -1581,6 +1581,7 @@ async fn bind_listeners_inner(
             );
         }
     }
+    tls_diag::report_ddr_readiness(&config, session);
 
     Ok(())
 }

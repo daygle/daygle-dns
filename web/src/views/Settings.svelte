@@ -1294,8 +1294,10 @@
       listeners it is allowed on. Most devices only switch when the
       listener's certificate is one they trust and it covers the address
       they use for this server, so a self-signed certificate is usually
-      ignored. The server name is the name devices connect to; leave it empty
-      to use each listener's own certificate name.
+      ignored. Nothing is advertised while DNS accounts are required, since a
+      device that switched by itself would carry no account and be refused.
+      The server name is the name devices connect to; leave it empty to use
+      each listener's own certificate name.
     </p>
   </div>
   <div class="card" style="margin-bottom: 14px">

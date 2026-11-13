@@ -373,6 +373,70 @@ pub fn report_account_coverage(
     session.logs().warn(protocol, message);
 }
 
+/// Whether a certificate's subject alternative names include an IP address.
+fn names_an_address(names: &[String]) -> bool {
+    names.iter().any(|name| name.parse::<IpAddr>().is_ok())
+}
+
+/// Explain at listener start why Automatic Discovery (DDR, RFC 9462) may do
+/// nothing for some devices, when it is on:
+///
+/// - with `accounts.require` nothing is advertised (a device that switched
+///   over would carry no account and be refused);
+/// - Windows and Apple devices switch only by *verified* discovery
+///   (RFC 9462 §4.2), which needs the listener's certificate to name the IP
+///   address they use for plain DNS. A certificate for a host name alone
+///   (what an ACME CA usually issues) is only good for Android's
+///   opportunistic discovery on a private network.
+pub fn report_ddr_readiness(config: &daygle_dns_core::config::DaygleConfig, session: &SessionLog) {
+    if !config.ddr.enabled {
+        return;
+    }
+    let listeners = [
+        ("DoH", config.doh.enabled, &config.doh.cert_path),
+        ("DoT", config.dot.enabled, &config.dot.cert_path),
+        ("DoQ", config.doq.enabled, &config.doq.cert_path),
+    ];
+    if !listeners.iter().any(|(_, enabled, _)| *enabled) {
+        return;
+    }
+    let emit = |message: String| {
+        tracing::info!("{message}");
+        session.logs().info(TLS, message);
+    };
+    if config.accounts.require && !config.accounts.normalized_domain().is_empty() {
+        emit(
+            "Automatic Discovery (DDR) advertises no encrypted listener while DNS accounts are \
+             required: a device that switched over by itself would carry no account and be \
+             refused. Set devices up with their account host name instead."
+                .to_string(),
+        );
+        return;
+    }
+    let without_address: Vec<&str> = listeners
+        .iter()
+        .filter(|(_, enabled, _)| *enabled)
+        .filter(|(_, _, cert_path)| {
+            std::fs::read_to_string(cert_path)
+                .ok()
+                .and_then(|pem| daygle_dns_dot::describe_certificate(&pem).ok())
+                .is_some_and(|info| !names_an_address(&info.names))
+        })
+        .map(|(label, _, _)| *label)
+        .collect();
+    if without_address.is_empty() {
+        return;
+    }
+    emit(format!(
+        "Automatic Discovery (DDR): the {} certificate names no IP address, so Windows and \
+         Apple devices will not switch to encrypted DNS by themselves - they verify that the \
+         certificate also names the address they use for plain DNS (RFC 9462). Android can \
+         still switch on a private network. To cover the others, use a certificate that \
+         includes this server's IP address.",
+        without_address.join(", ")
+    ));
+}
+
 fn who(client: Option<IpAddr>) -> String {
     client.map_or_else(|| "unknown client".to_string(), |c| c.to_string())
 }
@@ -934,6 +998,59 @@ mod tests {
         let entries = warns(&logs, TLS);
         assert_eq!(entries.len(), 1, "{entries:?}");
         assert!(entries[0].contains("*.dns.example.com"), "{entries:?}");
+    }
+
+    #[test]
+    fn ddr_readiness_names_listeners_whose_certificate_has_no_address() {
+        assert!(names_an_address(&[
+            "dns.example.com".into(),
+            "192.0.2.53".into()
+        ]));
+        assert!(names_an_address(&["2001:db8::53".into()]));
+        assert!(!names_an_address(&[
+            "dns.example.com".into(),
+            "localhost".into()
+        ]));
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("server.crt");
+        let (cert, _) = daygle_dns_dot::generate_self_signed_pem("dns.example.com").unwrap();
+        std::fs::write(&path, cert).unwrap();
+        let mut config = daygle_dns_core::config::DaygleConfig::default();
+        config.dot.enabled = true;
+        config.dot.cert_path = path.to_string_lossy().to_string();
+
+        let infos = |logs: &LogStore| -> Vec<String> {
+            logs.entries()
+                .into_iter()
+                .filter(|e| e.level == LogLevel::Info && e.component == TLS)
+                .map(|e| e.message)
+                .collect()
+        };
+        let logs = store();
+        report_ddr_readiness(&config, &SessionLog::new(logs.clone()));
+        let lines = infos(&logs);
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(
+            lines[0].contains("DoT certificate names no IP address"),
+            "{lines:?}"
+        );
+
+        // Accounts required: the one thing to say is that nothing is
+        // advertised.
+        config.accounts.domain = "dns.example.com".to_string();
+        config.accounts.require = true;
+        let logs = store();
+        report_ddr_readiness(&config, &SessionLog::new(logs.clone()));
+        let lines = infos(&logs);
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(lines[0].contains("accounts are"), "{lines:?}");
+
+        // DDR off: nothing.
+        config.ddr.enabled = false;
+        let logs = store();
+        report_ddr_readiness(&config, &SessionLog::new(logs.clone()));
+        assert!(infos(&logs).is_empty());
     }
 
     #[test]
