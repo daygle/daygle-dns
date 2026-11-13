@@ -416,10 +416,10 @@ impl AdvancedBlocking {
         ids
     }
 
-    /// The groups whose response filters apply to an answer for `qname`
-    /// sent to `client` on `listener`: like [`Self::evaluate`], groups are
-    /// taken in order and one whose allow rules let `qname` through stops
-    /// the rest, so an allowed name is never filtered by a later group.
+    /// The response filters that apply to an answer for `qname` sent to
+    /// `client` on `listener`: like [`Self::evaluate`], only the first
+    /// enabled group covering the client decides, and none apply when its
+    /// allow rules let `qname` through.
     pub fn response_filters(
         &self,
         client: IpAddr,
@@ -450,13 +450,19 @@ impl AdvancedBlocking {
             if filters.cname_trackers.is_none() && group.uses(Detector::CnameTracker) {
                 filters.cname_trackers = Some(group.name.as_str());
             }
+            // Only the first covering group decides.
+            break;
         }
         filters
     }
 
     /// Evaluate `qname` (already normalized: lowercase, no trailing dot) for
-    /// `client`. Returns `Some(Decision)` when a group blocks the query, or
-    /// `None` when it is explicitly allowed or matched by no group.
+    /// `client`. Only the first enabled group covering the client right now
+    /// decides, as it does for Safe Search and the AI mode: a client placed
+    /// in a group above a broader one (a device above its LAN) gets that
+    /// group's rules alone, never the broader group's as well. Returns
+    /// `Some(Decision)` when that group blocks the query, or `None` when it
+    /// allows the name, nothing in it matches, or no group covers the client.
     pub fn evaluate(
         &self,
         client: IpAddr,
@@ -470,8 +476,7 @@ impl AdvancedBlocking {
             if !group.applies(client, listener, &mut now) {
                 continue;
             }
-            // Whitelist wins: an allowed name is never blocked, and no later
-            // group gets to block it either.
+            // Whitelist wins: an allowed name is never blocked.
             if group.allows(qname) {
                 return None;
             }
@@ -536,21 +541,22 @@ impl AdvancedBlocking {
                         )
                     })
             };
-            if let Some((reason, kind, matched)) = found {
-                return Some(
-                    Decision::new(reason, group.action.clone())
-                        .with_group(group.name.clone())
-                        .with_source(kind, Some(matched)),
-                );
-            }
+            // The first covering group decides alone: later groups are not
+            // consulted, whether this one blocks the name or not.
+            return found.map(|(reason, kind, matched)| {
+                Decision::new(reason, group.action.clone())
+                    .with_group(group.name.clone())
+                    .with_source(kind, Some(matched))
+            });
         }
         None
     }
 
-    /// Every enabled group covering `client` on `listener`, in order, and
-    /// what each does with `qname`, without stopping at the first that
-    /// decides (a group that allows the name still stops later groups from
-    /// blocking it, as [`Self::evaluate`] does).
+    /// What the group deciding for `client` on `listener` does with
+    /// `qname`: every rule in it that matches, not only the first. Groups
+    /// above it that cover the client but are outside their schedule are
+    /// listed as off; groups below it are not consulted, as in
+    /// [`Self::evaluate`].
     pub fn explain(
         &self,
         client: IpAddr,
@@ -690,6 +696,8 @@ impl AdvancedBlocking {
                     ),
                 ));
             }
+            // The first covering group decides; later groups do not apply.
+            break;
         }
         checks
     }
@@ -1035,7 +1043,8 @@ mod tests {
         let ab = AdvancedBlocking::build(&[kids, everyone], Arc::default());
         let filters = ab.response_filters(ip("192.168.50.7"), "example.com", None);
         assert_eq!(filters.payloads, Some("kids"));
-        assert_eq!(filters.local_addresses, Some("everyone"));
+        // Only the first covering group decides: "everyone" is not consulted.
+        assert_eq!(filters.local_addresses, None);
         // An allowed name stops later groups too.
         assert_eq!(
             ab.response_filters(ip("192.168.50.7"), "x.plex.direct", None),
@@ -1046,6 +1055,41 @@ mod tests {
                 .local_addresses,
             Some("everyone")
         );
+    }
+
+    /// A device in its own group above its LAN's group follows its own group
+    /// only: the LAN group's blocks do not reach it.
+    #[test]
+    fn a_device_above_its_lan_group_is_not_blocked_by_the_lan_group() {
+        let mut device = group("renee");
+        device.clients = vec!["192.168.20.190/32".to_string()];
+        device.block = vec!["social.example".to_string()];
+        let mut lan = group("lan");
+        lan.clients = vec!["192.168.20.0/24".to_string()];
+        lan.block = vec!["ads.example".to_string()];
+        let ab = AdvancedBlocking::build(&[device, lan], Arc::default());
+
+        let renee = ip("192.168.20.190");
+        assert!(ab.evaluate(renee, "ads.example", None).is_none());
+        assert_eq!(
+            ab.evaluate(renee, "social.example", None)
+                .and_then(|d| d.group),
+            Some("renee".to_string())
+        );
+        // Explain shows only the deciding group.
+        let checks = ab.explain(renee, "ads.example", None);
+        assert!(checks
+            .iter()
+            .all(|c| c.group.as_deref() == Some("renee") && c.result != "block"));
+
+        // Everyone else on the LAN still gets the LAN group's blocks.
+        let other = ip("192.168.20.10");
+        assert_eq!(
+            ab.evaluate(other, "ads.example", None)
+                .and_then(|d| d.group),
+            Some("lan".to_string())
+        );
+        assert!(ab.evaluate(other, "social.example", None).is_none());
     }
 
     #[test]
