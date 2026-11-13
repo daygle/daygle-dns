@@ -618,7 +618,7 @@
           End a host name with a dot when it is a full name.
         </p>
         <div class="grid2" style="margin-top: 10px">
-          <label>TTL (Seconds) <span class="hint">{duration(Number(edit.ttl) || 0)}</span><input type="number" min="0" bind:value={edit.ttl} /></label>
+          <label>TTL (Seconds) <input type="number" min="0" bind:value={edit.ttl} /></label>
           {#if edit.rtype === 'A' || edit.rtype === 'AAAA'}
             <label>Failover Priority <span class="hint">0 = primary</span><input type="number" min="0" bind:value={edit.priority} /></label>
             <label>Load-Balancing Weight <span class="hint">0 = off</span><input type="number" min="0" max="10000" bind:value={edit.weight} /></label>
