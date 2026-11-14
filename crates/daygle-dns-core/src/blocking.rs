@@ -39,7 +39,9 @@ pub struct BlockingGroup {
     pub name: String,
     /// Whether the group is evaluated.
     pub enabled: bool,
-    /// Client networks (CIDR) this group applies to. Empty means every client.
+    /// Who the group applies to: networks (CIDR), addresses, network names,
+    /// the listener names `dot`/`doh`/`doq`, and `account:<name>` entries.
+    /// Empty means every client.
     pub clients: Vec<String>,
     /// Allowed domains (exact or `*.suffix`) - a whitelist that overrides the
     /// block rules for matching names.

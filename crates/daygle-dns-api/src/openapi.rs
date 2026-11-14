@@ -2382,12 +2382,14 @@ fn policy_schemas() -> Value {
                 "allow_regex": {
                     "type": "array",
                     "items": { "type": "string" },
-                    "description": "Regexes whose matches are never blocked."
+                    "description": "Regexes whose matches are never blocked, matched anywhere in the \
+                        name (unless anchored), ignoring case. Blank patterns are dropped."
                 },
                 "block_regex": {
                     "type": "array",
                     "items": { "type": "string" },
-                    "description": "Regexes whose matches are blocked."
+                    "description": "Regexes whose matches are blocked, matched anywhere in the \
+                        name (unless anchored), ignoring case. Blank patterns are dropped."
                 },
                 "blocklists": {
                     "type": "array",

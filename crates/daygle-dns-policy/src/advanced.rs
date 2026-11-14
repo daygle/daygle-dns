@@ -18,7 +18,7 @@ use std::net::IpAddr;
 use std::sync::Arc;
 
 use ipnet::IpNet;
-use regex::RegexSet;
+use regex::{RegexSet, RegexSetBuilder};
 use tracing::warn;
 
 use daygle_dns_core::blocking::{BlockResponse, BlockingGroup};
@@ -53,14 +53,18 @@ pub fn account_entry(entry: &str) -> Option<&str> {
 
 /// Whether `entry` names an encrypted listener in a client list.
 pub fn is_listener_keyword(entry: &str) -> bool {
-    LISTENER_KEYWORDS.contains(&entry.trim().to_ascii_lowercase().as_str())
+    listener_keyword(entry).is_some()
 }
 
 /// A single blocking group compiled for evaluation.
 struct CompiledGroup {
     name: String,
-    /// Client networks this group applies to; empty combined with
-    /// [`Self::listeners`] being empty means every client.
+    /// Whether the group's client list is empty, so it covers every
+    /// client. Decided from the list as stored, not from what compiled: a
+    /// group whose only entries are unusable (a network name no longer
+    /// configured) covers no one, never everyone.
+    everyone: bool,
+    /// Client networks this group applies to.
     clients: Vec<IpNet>,
     /// Encrypted listeners (lowercased `dot`/`doh`/`doq`) this group applies
     /// to, from the special client-list entries; empty means no listener
@@ -112,14 +116,19 @@ impl CompiledGroup {
     /// listener, or when it came from a listed DNS account (read from the
     /// query's [`identity`](crate::identity)).
     fn matches_client(&self, client: IpAddr, listener: Option<&str>) -> bool {
-        if self.clients.is_empty() && self.listeners.is_empty() && self.accounts.is_empty() {
+        if self.everyone {
             return true;
         }
         self.clients.iter().any(|net| net.contains(&client))
             || matches!(listener, Some(l) if self.listeners.contains(&l))
             || (!self.accounts.is_empty()
-                && crate::identity::current_account()
-                    .is_some_and(|account| self.accounts.contains(&account.to_lowercase())))
+                && crate::identity::current_account().is_some_and(|account| {
+                    // Unicode lowercase, as the entries were stored, without
+                    // allocating a lowered copy per group per query.
+                    self.accounts
+                        .iter()
+                        .any(|a| account.chars().flat_map(char::to_lowercase).eq(a.chars()))
+                }))
     }
 
     /// Whether the group covers this query now: the client matches and the
@@ -209,9 +218,20 @@ impl AdvancedBlocking {
                 .filter(|c| account_entry(c).is_none())
                 .cloned()
                 .partition(|c| !is_listener_keyword(c));
-            let listeners = networkless_listeners(&listener_entries, &g.name);
+            let listeners = listener_entries
+                .iter()
+                .filter_map(|e| listener_keyword(e))
+                .collect::<Vec<_>>();
             let clients = parse_networks(&networks, &g.name);
+            let everyone = g.clients.iter().all(|c| c.trim().is_empty());
+            if !everyone && clients.is_empty() && listeners.is_empty() && accounts.is_empty() {
+                warn!(
+                    group = %g.name,
+                    "no usable client entry; the group covers no client until its clients are fixed"
+                );
+            }
             compiled.push(CompiledGroup {
+                everyone,
                 listeners,
                 accounts,
                 clients,
@@ -426,34 +446,21 @@ impl AdvancedBlocking {
         qname: &str,
         listener: Option<&str>,
     ) -> ResponseFilters<'_> {
-        let mut filters = ResponseFilters::default();
-        let mut now = self.clock();
-        for group in &self.groups {
-            if !group.applies(client, listener, &mut now) {
-                continue;
-            }
-            if group.allows(qname) {
-                break;
-            }
-            if group.block_local_addresses && filters.local_addresses.is_none() {
-                filters.local_addresses = Some(group.name.as_str());
-            }
-            if group.limit_payloads && filters.payloads.is_none() {
-                filters.payloads = Some(group.name.as_str());
-            }
-            if filters.newly_registered.is_none() && group.uses(Detector::NewlyRegistered) {
-                filters.newly_registered = Some(group.name.as_str());
-            }
-            if filters.safe_browsing.is_none() && group.uses(Detector::SafeBrowsing) {
-                filters.safe_browsing = Some(group.name.as_str());
-            }
-            if filters.cname_trackers.is_none() && group.uses(Detector::CnameTracker) {
-                filters.cname_trackers = Some(group.name.as_str());
-            }
-            // Only the first covering group decides.
-            break;
+        let Some(group) = self
+            .first_group(client, listener)
+            .filter(|g| !g.allows(qname))
+        else {
+            return ResponseFilters::default();
+        };
+        let name = Some(group.name.as_str());
+        let on = |enabled: bool| if enabled { name } else { None };
+        ResponseFilters {
+            local_addresses: on(group.block_local_addresses),
+            payloads: on(group.limit_payloads),
+            newly_registered: on(group.uses(Detector::NewlyRegistered)),
+            safe_browsing: on(group.uses(Detector::SafeBrowsing)),
+            cname_trackers: on(group.uses(Detector::CnameTracker)),
         }
-        filters
     }
 
     /// Evaluate `qname` (already normalized: lowercase, no trailing dot) for
@@ -480,11 +487,13 @@ impl AdvancedBlocking {
             if group.allows(qname) {
                 return None;
             }
-            let service = group
-                .services
-                .iter()
-                .find(|(_, domains)| domains.contains(qname))
-                .map(|(name, _)| *name);
+            let service = || {
+                group
+                    .services
+                    .iter()
+                    .find(|(_, domains)| domains.contains(qname))
+                    .map(|(name, _)| *name)
+            };
             let found = if let Some(entry) = group.block_match(qname) {
                 Some((
                     format!(
@@ -494,7 +503,7 @@ impl AdvancedBlocking {
                     source::GROUP,
                     entry,
                 ))
-            } else if let Some(service) = service {
+            } else if let Some(service) = service() {
                 Some((
                     format!(
                         "'{qname}' blocked as part of {service} by group '{}'",
@@ -703,8 +712,8 @@ impl AdvancedBlocking {
     }
 }
 
-/// The response filters a query's groups turn on: each names the first
-/// group that asks for it, or `None` when no group does.
+/// The response filters the group deciding a query turns on: each names
+/// that group, or is `None` when it does not ask for the filter.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ResponseFilters<'a> {
     /// Block answers with local network addresses for public names.
@@ -737,22 +746,13 @@ fn tld_of(entry: &str) -> &str {
     entry.strip_prefix("*.").unwrap_or(entry)
 }
 
-/// Lowercase listener entries, dropping anything unexpected (already
-/// filtered at build time, so this never logs in practice).
-fn networkless_listeners(entries: &[String], group: &str) -> Vec<&'static str> {
-    entries
-        .iter()
-        .filter_map(|e| {
-            let lowered = e.trim().to_ascii_lowercase();
-            let found = LISTENER_KEYWORDS
-                .into_iter()
-                .find(|k| lowered.eq_ignore_ascii_case(k));
-            if found.is_none() {
-                warn!(group, entry = %e, "skipping unknown listener name");
-            }
-            found
-        })
-        .collect()
+/// The listener keyword (`dot`, `doh` or `doq`) a client-list entry names,
+/// in the static lowercase form queries are tagged with.
+pub fn listener_keyword(entry: &str) -> Option<&'static str> {
+    let entry = entry.trim();
+    LISTENER_KEYWORDS
+        .into_iter()
+        .find(|k| entry.eq_ignore_ascii_case(k))
 }
 
 /// Parse CIDR strings, logging and skipping any that are invalid.
@@ -775,12 +775,28 @@ fn parse_networks(cidrs: &[String], group: &str) -> Vec<IpNet> {
         .collect()
 }
 
+/// Build a [`RegexSet`] the way groups match: case-insensitively, since
+/// query names are lowercased before they are matched (a pattern written
+/// `Ads\.` would otherwise never match anything).
+fn regex_set<I, S>(patterns: I) -> std::result::Result<RegexSet, regex::Error>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    RegexSetBuilder::new(patterns)
+        .case_insensitive(true)
+        .build()
+}
+
 /// Compile a list of regex patterns into a [`RegexSet`], dropping (with a
-/// warning) any that do not compile.
+/// warning) any that do not compile on their own. Should the valid ones
+/// together exceed the size limit, the set keeps as many as fit, in order,
+/// rather than none: an empty set would silently turn every rule off.
 fn compile_regex(patterns: &[String], group: &str) -> RegexSet {
-    let valid: Vec<&String> = patterns
+    let valid: Vec<&str> = patterns
         .iter()
-        .filter(|p| match regex::Regex::new(p) {
+        .map(String::as_str)
+        .filter(|p| match regex_set([p]) {
             Ok(_) => true,
             Err(e) => {
                 warn!(group, pattern = %p, error = %e, "skipping invalid block/allow regex");
@@ -788,16 +804,42 @@ fn compile_regex(patterns: &[String], group: &str) -> RegexSet {
             }
         })
         .collect();
-    RegexSet::new(valid).unwrap_or_else(|_| RegexSet::empty())
+    if let Ok(set) = regex_set(&valid) {
+        return set;
+    }
+    // The longest prefix that fits (a prefix's size only grows with it).
+    let (mut fits, mut too_big) = (0, valid.len());
+    while too_big - fits > 1 {
+        let mid = (fits + too_big) / 2;
+        if regex_set(&valid[..mid]).is_ok() {
+            fits = mid;
+        } else {
+            too_big = mid;
+        }
+    }
+    warn!(
+        group,
+        dropped = valid.len() - fits,
+        "regex patterns exceed the size limit together; skipping the last ones"
+    );
+    regex_set(&valid[..fits]).unwrap_or_else(|_| RegexSet::empty())
 }
 
 /// Validate a single regex pattern, returning the compile error as a string.
-/// Used by the API to reject a bad pattern up front instead of silently
-/// dropping it at build time.
-pub fn validate_regex(pattern: &str) -> std::result::Result<(), String> {
-    regex::Regex::new(pattern)
-        .map(|_| ())
-        .map_err(|e| e.to_string())
+fn validate_regex(pattern: &str) -> std::result::Result<(), String> {
+    regex_set([pattern]).map(|_| ()).map_err(|e| e.to_string())
+}
+
+/// Validate a group's patterns of one kind (allow or block) together:
+/// each must compile, and they must fit in one set, as the group matches
+/// them. Returns the first error as a string.
+pub fn validate_regexes(patterns: &[String]) -> std::result::Result<(), String> {
+    for pattern in patterns {
+        validate_regex(pattern).map_err(|e| format!("invalid regex '{pattern}': {e}"))?;
+    }
+    regex_set(patterns).map(|_| ()).map_err(|e| {
+        format!("the patterns are too large to match together; use fewer or simpler ones ({e})")
+    })
 }
 
 /// Map a stored [`BlockResponse`] to the engine [`Action`] the dispatcher
@@ -1151,9 +1193,6 @@ mod tests {
         assert!(ab.evaluate(ip("10.0.0.1"), "games.test", None).is_none());
     }
 
-    /// `DoT` in a group's client list matches external DoT users only;
-    /// plain-DNS and other-listener clients are untouched, and a group
-    /// already network-scoped only also matches on the listed listener.
     #[tokio::test]
     async fn account_entries_scope_the_group_to_those_accounts() {
         use crate::identity::{scope, Identity};
@@ -1181,11 +1220,24 @@ mod tests {
             .await;
             assert!(miss.is_none());
         }
+        // Non-ASCII names match ignoring case too.
+        let mut g = group("unicode");
+        g.clients = vec!["account:ÄRGER".to_string()];
+        g.block = vec!["games.test".to_string()];
+        let ab = AdvancedBlocking::build(&[g], Arc::default());
+        let hit = scope(as_account("ärger"), async {
+            ab.evaluate(ip("203.0.113.7"), "games.test", None)
+        })
+        .await;
+        assert!(hit.is_some());
         assert_eq!(account_entry(" ACCOUNT:Kid "), Some("Kid"));
         assert_eq!(account_entry("account:"), None);
         assert_eq!(account_entry("192.168.1.0/24"), None);
     }
 
+    /// `DoT` in a group's client list matches external DoT users only;
+    /// plain-DNS and other-listener clients are untouched, and a group
+    /// already network-scoped only also matches on the listed listener.
     #[test]
     fn dot_listener_keyword_scopes_the_group_to_encrypted_clients() {
         let mut g = group("public");
@@ -1279,5 +1331,93 @@ mod tests {
         assert!(ab.evaluate(ip("10.1.1.1"), "ok.ads.test", None).is_none());
         // Clients outside the group are untouched.
         assert!(ab.evaluate(ip("192.168.1.1"), "x.ads.test", None).is_none());
+    }
+
+    /// A group whose client entries are all unusable (a network name that
+    /// is no longer configured) covers no one: it used to compile to an
+    /// empty client list and so cover every client.
+    #[test]
+    fn a_group_with_only_unusable_clients_covers_no_one() {
+        let mut stale = group("stale");
+        stale.clients = vec!["Removed Network".to_string()];
+        stale.block = vec!["games.test".to_string()];
+        stale.safe_search = true;
+        let mut everyone = group("everyone");
+        everyone.allow = vec!["games.test".to_string()];
+        let ab = AdvancedBlocking::build(&[stale.clone()], Arc::default());
+        assert!(ab.evaluate(ip("10.0.0.1"), "games.test", None).is_none());
+        assert_eq!(ab.safe_search(ip("10.0.0.1"), None), (false, false, None));
+        // The next group decides instead.
+        let ab = AdvancedBlocking::build(&[stale, everyone], Arc::default());
+        assert_eq!(ab.safe_search(ip("10.0.0.1"), None).2, Some("everyone"));
+        // An empty (or blank) list still means every client.
+        let mut all = group("all");
+        all.clients = vec!["  ".to_string()];
+        all.block = vec!["games.test".to_string()];
+        let ab = AdvancedBlocking::build(&[all], Arc::default());
+        assert!(ab.evaluate(ip("10.0.0.1"), "games.test", None).is_some());
+    }
+
+    /// Patterns match ignoring case, as query names arrive lowercased.
+    #[test]
+    fn regex_patterns_ignore_case() {
+        let mut g = group("g");
+        g.block_regex = vec![r"^Ads\d+\.".to_string()];
+        let ab = AdvancedBlocking::build(&[g], Arc::default());
+        let d = ab.evaluate(ip("10.0.0.1"), "ads12.example.com", None);
+        assert_eq!(d.and_then(|d| d.matched), Some(r"/^Ads\d+\./".to_string()));
+    }
+
+    /// Patterns that compile alone but not together keep the ones that
+    /// fit, instead of the whole set silently becoming empty.
+    #[test]
+    fn oversized_regex_sets_keep_what_fits() {
+        // Each pattern is large on its own (Unicode classes, repeated).
+        let big = |i: usize| format!(r"^p{i}\w{{40}}\w{{40}}\w{{40}}$");
+        let mut count = 1;
+        while regex_set((0..count).map(big)).is_ok() {
+            count *= 2;
+            assert!(count < 4096, "the size limit was never reached");
+        }
+        let patterns: Vec<String> = (0..count).map(big).collect();
+        assert!(patterns.iter().all(|p| validate_regex(p).is_ok()));
+        assert!(validate_regexes(&patterns)
+            .unwrap_err()
+            .contains("too large"));
+        let set = compile_regex(&patterns, "g");
+        assert!(!set.is_empty() && set.len() < patterns.len());
+        assert!(set.is_match(&format!("p0{}", "a".repeat(120))));
+    }
+
+    #[test]
+    fn response_filters_come_from_the_deciding_group_only() {
+        let mut kids = group("kids");
+        kids.clients = vec!["192.168.50.0/24".to_string()];
+        kids.limit_payloads = true;
+        kids.allow = vec!["ok.test".to_string()];
+        let mut everyone = group("everyone");
+        everyone.block_local_addresses = true;
+        everyone.limit_payloads = true;
+        let ab = AdvancedBlocking::build(&[kids, everyone], Arc::default());
+        assert_eq!(
+            ab.response_filters(ip("192.168.50.7"), "x.test", None),
+            ResponseFilters {
+                payloads: Some("kids"),
+                ..ResponseFilters::default()
+            }
+        );
+        // Allowed by the deciding group: no filter applies.
+        assert_eq!(
+            ab.response_filters(ip("192.168.50.7"), "ok.test", None),
+            ResponseFilters::default()
+        );
+        assert_eq!(
+            ab.response_filters(ip("10.0.0.1"), "x.test", None),
+            ResponseFilters {
+                local_addresses: Some("everyone"),
+                payloads: Some("everyone"),
+                ..ResponseFilters::default()
+            }
+        );
     }
 }

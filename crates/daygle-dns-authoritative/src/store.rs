@@ -752,14 +752,9 @@ impl ZoneStore {
     /// All Advanced Blocking groups, ordered by `position` then name.
     pub fn list_blocking_groups(&self) -> Result<Vec<BlockingGroup>> {
         let conn = self.lock_conn()?;
-        let mut stmt = conn.prepare(
-            "SELECT id, name, enabled, clients, allow, block, allow_regex, block_regex,
-                    response, position, blocklists, last_modified_at, ai_mode,
-                    safe_search, youtube_restricted, schedule, blocked_services,
-                    blocked_categories, blocked_security, blocked_tlds,
-                    block_local_addresses, limit_payloads
-             FROM blocking_groups ORDER BY position, name",
-        )?;
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {BLOCKING_GROUP_COLUMNS} FROM blocking_groups ORDER BY position, name"
+        ))?;
         let rows = stmt.query_map([], row_to_blocking_group)?;
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
@@ -769,12 +764,7 @@ impl ZoneStore {
         let conn = self.lock_conn()?;
         let group = conn
             .query_row(
-                "SELECT id, name, enabled, clients, allow, block, allow_regex, block_regex,
-                        response, position, blocklists, last_modified_at, ai_mode,
-                    safe_search, youtube_restricted, schedule, blocked_services,
-                    blocked_categories, blocked_security, blocked_tlds,
-                    block_local_addresses, limit_payloads
-                 FROM blocking_groups WHERE id = ?1",
+                &format!("SELECT {BLOCKING_GROUP_COLUMNS} FROM blocking_groups WHERE id = ?1"),
                 [id],
                 row_to_blocking_group,
             )
@@ -784,7 +774,9 @@ impl ZoneStore {
 
     /// Create a blocking group, or update one in place (its id and position
     /// are preserved): the group with `input.id` when given (which may rename
-    /// it), else the one with the same name.
+    /// it), else the one with the same name. Names are unique ignoring
+    /// (ASCII) case, as the console and the explanations tell groups apart
+    /// by name.
     pub fn upsert_blocking_group(&self, input: &BlockingGroupInput) -> Result<BlockingGroup> {
         let name = input.name.trim().to_string();
         if name.is_empty() {
@@ -809,9 +801,20 @@ impl ZoneStore {
         // Both branches below stamp the wall-clock time of this create/edit.
         let now = Utc::now().to_rfc3339();
         let conn = self.lock_conn()?;
-        if let Some(id) = &input.id {
+        let id = match &input.id {
+            Some(id) => Some(id.clone()),
+            None => conn
+                .query_row(
+                    "SELECT id FROM blocking_groups WHERE name = ?1 COLLATE NOCASE",
+                    [&name],
+                    |r| r.get::<_, String>(0),
+                )
+                .optional()?,
+        };
+        if let Some(id) = &id {
             let duplicate: bool = conn.query_row(
-                "SELECT EXISTS (SELECT 1 FROM blocking_groups WHERE name = ?1 AND id != ?2)",
+                "SELECT EXISTS (SELECT 1 FROM blocking_groups
+                                WHERE name = ?1 COLLATE NOCASE AND id != ?2)",
                 params![name, id],
                 |r| r.get(0),
             )?;
@@ -867,6 +870,7 @@ impl ZoneStore {
         }
         let id = Uuid::new_v4().to_string();
         // New rows land after every existing group; updates keep their spot.
+        // No group has this name (checked above, under the same lock).
         conn.execute(
             "INSERT INTO blocking_groups
                 (id, name, enabled, clients, allow, block, allow_regex, block_regex,
@@ -876,14 +880,7 @@ impl ZoneStore {
                  block_local_addresses, limit_payloads)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
                  (SELECT COALESCE(MAX(position), -1) + 1 FROM blocking_groups), ?11, ?12,
-                 ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)
-             ON CONFLICT(name) DO UPDATE SET
-                enabled = ?3, clients = ?4, allow = ?5, block = ?6,
-                allow_regex = ?7, block_regex = ?8, response = ?9, blocklists = ?10,
-                last_modified_at = ?11, ai_blocking = ?12, safe_search = ?13,
-                youtube_restricted = ?14, schedule = ?15, blocked_services = ?16,
-                blocked_categories = ?17, ai_mode = ?18, blocked_security = ?19,
-                blocked_tlds = ?20, block_local_addresses = ?21, limit_payloads = ?22",
+                 ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)",
             params![
                 id,
                 name,
@@ -910,12 +907,9 @@ impl ZoneStore {
             ],
         )?;
         drop(conn);
-        self.list_blocking_groups()?
-            .into_iter()
-            .find(|g| g.name == name)
-            .ok_or_else(|| {
-                DaygleError::Internal("blocking group vanished after upsert".to_string())
-            })
+        self.get_blocking_group(&id)?.ok_or_else(|| {
+            DaygleError::Internal("blocking group vanished after upsert".to_string())
+        })
     }
 
     /// The stored settings that name the network `name` (any case): split
@@ -1526,11 +1520,15 @@ impl ZoneStore {
     /// evaluation order. Returns false when the group does not exist; moving
     /// past either end is a no-op.
     pub fn move_blocking_group(&self, id: &str, delta: i64) -> Result<bool> {
-        let mut ids: Vec<String> = self
-            .list_blocking_groups()?
-            .into_iter()
-            .map(|g| g.id)
-            .collect();
+        // Read and renumber in one transaction, so two moves at once cannot
+        // interleave and write positions from a stale order.
+        let mut conn = self.lock_conn()?;
+        let tx = conn.transaction()?;
+        let mut ids: Vec<String> = {
+            let mut stmt = tx.prepare("SELECT id FROM blocking_groups ORDER BY position, name")?;
+            let rows = stmt.query_map([], |r| r.get(0))?;
+            rows.collect::<std::result::Result<_, _>>()?
+        };
         let Some(from) = ids.iter().position(|g| g == id) else {
             return Ok(false);
         };
@@ -1540,8 +1538,6 @@ impl ZoneStore {
         }
         ids.swap(from, to as usize);
         // Renumber everything, which also repairs duplicate positions.
-        let mut conn = self.lock_conn()?;
-        let tx = conn.transaction()?;
         for (position, group) in ids.iter().enumerate() {
             tx.execute(
                 "UPDATE blocking_groups SET position = ?2 WHERE id = ?1",
@@ -2267,6 +2263,12 @@ fn parse_ai_mode(value: Option<String>) -> Option<AiMode> {
         _ => None,
     }
 }
+
+/// The `blocking_groups` columns [`row_to_blocking_group`] reads, in order.
+const BLOCKING_GROUP_COLUMNS: &str = "id, name, enabled, clients, allow, block, allow_regex,
+    block_regex, response, position, blocklists, last_modified_at, ai_mode, safe_search,
+    youtube_restricted, schedule, blocked_services, blocked_categories, blocked_security,
+    blocked_tlds, block_local_addresses, limit_payloads";
 
 /// Build a [`BlockingGroup`] from a `blocking_groups` row. Malformed JSON
 /// list/response columns fall back to safe defaults rather than erroring.
@@ -5979,6 +5981,18 @@ mod tests {
         assert!(s
             .upsert_blocking_group(&input(Some("nope".into()), "C"))
             .is_err());
+        // Names are unique ignoring case: "kids" without an id updates
+        // "Kids" in place rather than adding a near-duplicate, and renaming
+        // B to "KIDS" is refused.
+        let same = s.upsert_blocking_group(&input(None, "kids")).unwrap();
+        assert_eq!(same.id, a.id);
+        assert_eq!(same.name, "kids");
+        assert_eq!(s.list_blocking_groups().unwrap().len(), 2);
+        assert!(s
+            .upsert_blocking_group(&input(Some(b.id.clone()), "KIDS"))
+            .is_err());
+        s.upsert_blocking_group(&input(Some(a.id.clone()), "Kids"))
+            .unwrap();
 
         // Reorder: B moves above Kids; moving past the top is a no-op.
         assert!(s.move_blocking_group(&b.id, -1).unwrap());
