@@ -341,7 +341,8 @@ impl Scanner {
                 self.store
                     .record_page_adjustment(domain, cfg.page_rule, *confidence, new)?;
             }
-            self.store.record_page_reading(domain, &note, changed)?;
+            self.store
+                .record_page_reading(domain, &note, changed, inspection.reading.as_ref())?;
             if changed.is_some() {
                 adjusted += 1;
             }

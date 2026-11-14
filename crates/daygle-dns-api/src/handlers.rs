@@ -1900,6 +1900,7 @@ pub async fn ai_explain(
                 .into_iter()
                 .find(|o| o.domain == domain);
             let relabel = ai.store.category_overrides()?.remove(&domain);
+            let page_reading = ai.store.page_reading(&domain)?;
             let page_adjustment = ai.store.page_adjustment(&domain)?;
             let blocks = ai.snapshot().load();
             let categories = ai.category_snapshot();
@@ -2023,6 +2024,12 @@ pub async fn ai_explain(
                         || settings.is_auto_block_category(&t.category),
                     "classified_at": stamp(t.classified_at),
                     "expires_at": stamp(t.expires_at),
+                })),
+                "page_reading": page_reading.map(|r| serde_json::json!({
+                    "category": r.category,
+                    "confidence": r.confidence,
+                    "cues": r.cues,
+                    "read_at": stamp(r.read_at),
                 })),
                 "page_adjustment": page_adjustment.map(|a| serde_json::json!({
                     "rule": a.rule.as_str(),

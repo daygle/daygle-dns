@@ -978,6 +978,7 @@ fn a_threat_candidate_is_offered_for_a_page_read_once() {
             "phishy.example",
             "page \"Sign in\" reads phishing (60%)",
             Some(0.8),
+            None,
         )
         .unwrap());
     assert!(
@@ -1182,6 +1183,14 @@ fn a_decide_reading_empties_the_block_snapshot() {
     assert_eq!(adjustment.rule, PageRule::Decide);
     assert!((adjustment.prior - 0.995).abs() < 1e-3);
     assert!((adjustment.confidence - 0.2).abs() < 1e-3);
+    let reading = ai
+        .store
+        .page_reading("phishy.example")
+        .unwrap()
+        .expect("what the page said is recorded too");
+    assert_eq!(reading.category, "shopping");
+    assert!((reading.confidence - 0.8).abs() < 1e-3);
+    assert_eq!(reading.cues, vec!["add to cart".to_string()]);
 }
 
 /// Corrections are held back from training in fifths, and the candidate is

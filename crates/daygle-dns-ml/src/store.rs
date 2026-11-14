@@ -33,6 +33,7 @@ use daygle_dns_core::error::{DaygleError, Result};
 use rusqlite::{params, Connection};
 
 use crate::backend::Channel;
+use crate::page::TextVerdict;
 
 /// Filters shared by the paginated verdict and threat lists.
 #[derive(Debug, Default)]
@@ -202,6 +203,24 @@ const PAGE_ADJUSTMENTS_TABLE: &str = "CREATE TABLE IF NOT EXISTS ai_page_adjustm
     adjusted_at      INTEGER NOT NULL
 )";
 
+/// What a page read said, independent of what the rule did with it: the
+/// category, how sure it was, and the phrases that matched.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PageReading {
+    pub category: String,
+    pub confidence: f32,
+    pub cues: Vec<String>,
+    pub read_at: i64,
+}
+
+const PAGE_READINGS_TABLE: &str = "CREATE TABLE IF NOT EXISTS ai_page_readings (
+    domain     TEXT PRIMARY KEY,
+    category   TEXT NOT NULL,
+    confidence REAL NOT NULL,
+    cues       TEXT NOT NULL DEFAULT '',
+    read_at    INTEGER NOT NULL
+)";
+
 /// The columns every verdict query returns, in [`VerdictRow`] order.
 const VERDICT_COLUMNS: &str = concat!(
     "v.domain, v.channel, ",
@@ -263,7 +282,7 @@ impl AiStore {
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.execute_batch(&format!(
             "{VERDICTS_TABLE};\n{OVERRIDES_TABLE};\n{CATEGORY_OVERRIDES_TABLE};\n\
-             {PAGE_ADJUSTMENTS_TABLE};"
+             {PAGE_ADJUSTMENTS_TABLE};\n{PAGE_READINGS_TABLE};"
         ))?;
         let has_column = |name: &str| -> Result<bool> {
             Ok(conn.query_row(
@@ -800,6 +819,7 @@ impl AiStore {
         domain: &str,
         note: &str,
         confidence: Option<f32>,
+        reading: Option<&TextVerdict>,
     ) -> Result<bool> {
         let conn = self.lock()?;
         let changed = conn.execute(
@@ -816,7 +836,54 @@ impl AiStore {
              WHERE domain = ?1 AND channel = 'threat'",
             params![domain, note, now_epoch(), confidence],
         )?;
+        if changed > 0 {
+            if let Some(reading) = reading {
+                // The reading behind the note, so the console can say why a
+                // page agreed or disagreed without parsing the evidence line.
+                conn.execute(
+                    "INSERT INTO ai_page_readings
+                         (domain, category, confidence, cues, read_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5)
+                     ON CONFLICT(domain) DO UPDATE SET
+                         category = ?2, confidence = ?3, cues = ?4, read_at = ?5",
+                    params![
+                        domain,
+                        reading.category,
+                        reading.confidence,
+                        reading.cues.join(", "),
+                        now_epoch()
+                    ],
+                )?;
+            }
+        }
         Ok(changed > 0)
+    }
+
+    /// What the page behind `domain` said on its current threat verdict, or
+    /// `None` when it has not been read since that verdict was made.
+    pub fn page_reading(&self, domain: &str) -> Result<Option<PageReading>> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(
+            "SELECT p.category, p.confidence, p.cues, p.read_at
+             FROM ai_page_readings p
+             JOIN ai_verdicts v ON v.domain = p.domain AND v.channel = 'threat'
+             WHERE p.domain = ?1 AND p.read_at >= v.classified_at",
+        )?;
+        let mut rows = stmt.query(params![domain])?;
+        let Some(row) = rows.next()? else {
+            return Ok(None);
+        };
+        let cues: String = row.get(2)?;
+        Ok(Some(PageReading {
+            category: row.get(0)?,
+            confidence: row.get::<_, f64>(1)? as f32,
+            cues: cues
+                .split(", ")
+                .filter(|cue| !cue.is_empty())
+                .map(str::to_string)
+                .collect(),
+            read_at: row.get(3)?,
+        }))
     }
 
     /// Record the page rule's decision beside the threat verdict. Read back by

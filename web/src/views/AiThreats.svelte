@@ -513,6 +513,11 @@
         <p class="muted small" style="margin: 0">
           {#if explainResult.threat}
             Threat label {titleCase(explainResult.threat.category)} at {percent(explainResult.threat.confidence)}{#if explainResult.threat.over_threshold}, at or above the threshold{:else}, below the threshold{/if}{#if explainResult.threat.severity === 'disputed'}, disputed by the verifier{/if}.
+            {#if explainResult.page_reading}
+              The page read as <strong>{titleCase(explainResult.page_reading.category)}</strong>
+              at {percent(explainResult.page_reading.confidence)}{#if explainResult.page_reading.cues.length}
+                ({explainResult.page_reading.cues.slice(0, 3).join(', ')}){/if}.
+            {/if}
             {#if explainResult.page_adjustment}
               The <strong>{pageRuleLabel(explainResult.page_adjustment.rule)}</strong> page rule
               {#if explainResult.page_adjustment.confidence < explainResult.page_adjustment.prior_confidence}

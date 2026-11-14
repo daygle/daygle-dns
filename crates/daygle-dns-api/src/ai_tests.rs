@@ -300,7 +300,16 @@ async fn threat_export_and_corrections_are_served_as_csv() {
         )
         .unwrap();
     ai.store
-        .record_page_reading("capped.example", "page reads shopping (80%)", Some(0.2))
+        .record_page_reading(
+            "capped.example",
+            "page reads shopping (80%)",
+            Some(0.2),
+            Some(&daygle_dns_ml::page::TextVerdict {
+                category: "shopping",
+                confidence: 0.8,
+                cues: vec!["add to cart"],
+            }),
+        )
         .unwrap();
     ai.store
         .record_page_adjustment("capped.example", PageRule::Decide, 0.995, 0.2)
@@ -313,6 +322,10 @@ async fn threat_export_and_corrections_are_served_as_csv() {
     assert!(
         explained["page_adjustment"].is_null(),
         "an untouched verdict has no page decision to report: {explained}"
+    );
+    assert!(
+        explained["page_reading"].is_null(),
+        "an unread page has no reading to report: {explained}"
     );
 
     let capped = json(state, "/api/ai/explain?domain=capped.example").await;
@@ -333,6 +346,13 @@ async fn threat_export_and_corrections_are_served_as_csv() {
         capped["page_adjustment"]
     );
     assert_eq!(capped["threat"]["over_threshold"], false);
+    assert_eq!(capped["page_reading"]["category"], "shopping");
+    assert!(
+        (capped["page_reading"]["confidence"].as_f64().unwrap() - 0.8).abs() < 1e-3,
+        "{}",
+        capped["page_reading"]
+    );
+    assert_eq!(capped["page_reading"]["cues"][0], "add to cart");
     let _ = std::fs::remove_dir_all(&dir);
 }
 

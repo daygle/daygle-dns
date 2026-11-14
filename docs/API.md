@@ -1739,9 +1739,11 @@ block snapshot is rebuilt in the same cycle, and the evidence line records
 "confidence now N% by ai.page_rule". All six page settings are reported by
 `GET /api/ai/status` and accepted by the settings update.
 
-`GET /api/ai/explain` reports the decision on `page_adjustment`:
-`{rule, prior_confidence, confidence, adjusted_at}`, or `null` when the rule
-left the verdict alone. It is only reported while it still describes the
+`GET /api/ai/explain` reports what the page said on `page_reading`
+(`{category, confidence, cues, read_at}`, or `null` when it has not been read
+since the current verdict) and the rule's decision on `page_adjustment`
+(`{rule, prior_confidence, confidence, adjusted_at}`, or `null` when the rule
+left the verdict alone). It is only reported while it still describes the
 current verdict; a reclassification newer than the decision clears it (the
 evidence line keeps the history).
 
