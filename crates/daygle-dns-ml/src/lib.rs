@@ -198,6 +198,20 @@ impl AiEngine {
         Ok(existed)
     }
 
+    /// Apply edited settings to the running engine: the scanner, the plugin
+    /// and the threat channel read them live, the snapshots are rebuilt
+    /// under the new rules and a scan is started. Returns whether the change
+    /// also needs a restart: the models, the verifier and the database are
+    /// loaded once, at startup.
+    pub fn apply_settings(&self, new: &AiSettings) -> bool {
+        let old = self.settings.load_full();
+        let restart = needs_restart(&old, new);
+        self.settings.store(Arc::new(new.clone()));
+        self.refresh_snapshot_now();
+        self.trigger_rescan();
+        restart
+    }
+
     /// Force a snapshot rebuild from the current store contents.
     pub fn refresh_snapshot_now(&self) {
         let cfg = self.settings.load().clone();
@@ -270,6 +284,18 @@ impl AiEngine {
     pub fn backend_categories(&self) -> Vec<String> {
         self.scanner.categories()
     }
+}
+
+/// Whether going from `old` to `new` changes what is loaded at startup:
+/// a model, the verifier (its files and threshold) or the database.
+fn needs_restart(old: &AiSettings, new: &AiSettings) -> bool {
+    old.model_path != new.model_path
+        || old.category_model_path != new.category_model_path
+        || old.threat_model_path != new.threat_model_path
+        || old.verifier_model_path != new.verifier_model_path
+        || old.verifier_reference_path != new.verifier_reference_path
+        || old.verifier_threshold != new.verifier_threshold
+        || old.database != new.database
 }
 
 /// Resolve a channel's model path: its own when configured, else the shared
@@ -395,4 +421,30 @@ pub fn build_ai_engine(
 /// A convenience error for callers that expect the engine to exist.
 pub fn ai_disabled_error() -> DaygleError {
     DaygleError::NotFound("AI subsystem is disabled for this server".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_load_time_settings_need_a_restart() {
+        let old = AiSettings::default();
+        let mut live = old.clone();
+        live.mode = daygle_dns_core::config::AiMode::Enforce;
+        live.block_threshold = 0.99;
+        live.auto_block_categories = vec!["scam".to_string()];
+        assert!(!needs_restart(&old, &live));
+        for change in [
+            |s: &mut AiSettings| s.threat_model_path = "/m/threat.bin".to_string(),
+            |s: &mut AiSettings| s.category_model_path = "/m/cat.bin".to_string(),
+            |s: &mut AiSettings| s.verifier_model_path = "/m/v.onnx".to_string(),
+            |s: &mut AiSettings| s.verifier_threshold += 0.1,
+            |s: &mut AiSettings| s.database = "/d/ai.db".to_string(),
+        ] {
+            let mut new = old.clone();
+            change(&mut new);
+            assert!(needs_restart(&old, &new));
+        }
+    }
 }

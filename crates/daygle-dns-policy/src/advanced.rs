@@ -384,18 +384,23 @@ impl AdvancedBlocking {
             })
     }
 
-    /// The AI content categories the first enabled group `client` on
-    /// `listener` belongs to blocks, plus that group's name. Clients in no
-    /// group block no categories; an empty slice means this group blocks none.
-    pub fn blocked_categories(
+    /// Everything the AI plugin needs from the group deciding for `client`
+    /// on `listener`, from one scan of the groups: the effective AI mode
+    /// (the group's override, else `default`), the AI categories it blocks,
+    /// and its allow rules. Clients in no group follow `default` and block
+    /// no categories.
+    pub fn ai_policy(
         &self,
         client: IpAddr,
         listener: Option<&str>,
-    ) -> (Option<&[String]>, Option<&str>) {
-        self.first_group(client, listener)
-            .map_or((None, None), |g| {
-                (Some(g.blocked_categories.as_slice()), Some(g.name.as_str()))
-            })
+        default: AiMode,
+    ) -> AiPolicy<'_> {
+        let group = self.first_group(client, listener);
+        AiPolicy {
+            mode: group.and_then(|g| g.ai_mode).unwrap_or(default),
+            blocked_categories: group.map_or(&[], |g| g.blocked_categories.as_slice()),
+            group,
+        }
     }
 
     /// Whether some enabled group blocks the AI category `category`.
@@ -709,6 +714,40 @@ impl AdvancedBlocking {
             break;
         }
         checks
+    }
+}
+
+/// The AI settings of the group deciding a query (see
+/// [`AdvancedBlocking::ai_policy`]).
+pub struct AiPolicy<'a> {
+    /// The AI enforcement mode for this client.
+    pub mode: AiMode,
+    /// The AI content categories the group blocks (none outside a group).
+    pub blocked_categories: &'a [String],
+    group: Option<&'a CompiledGroup>,
+}
+
+impl AiPolicy<'_> {
+    /// The policy of a client in no group: `mode`, no blocked categories,
+    /// no allow rules.
+    pub fn ungrouped(mode: AiMode) -> Self {
+        Self {
+            mode,
+            blocked_categories: &[],
+            group: None,
+        }
+    }
+
+    /// The deciding group's name, `None` when no group covers the client.
+    pub fn group(&self) -> Option<&str> {
+        self.group.map(|g| g.name.as_str())
+    }
+
+    /// Whether the group's allow rules (domains or patterns) let `qname`
+    /// through: such a name is never blocked for its clients, by the group
+    /// or by the AI.
+    pub fn allows(&self, qname: &str) -> bool {
+        self.group.is_some_and(|g| g.allows(qname))
     }
 }
 

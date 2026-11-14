@@ -36,7 +36,7 @@ pub mod services;
 pub use acl::Acl;
 pub use advanced::{
     account_entry, is_listener_keyword, listener_keyword, validate_regexes, AdvancedBlocking,
-    ResponseFilters, ACCOUNT_PREFIX, LISTENER_KEYWORDS,
+    AiPolicy, ResponseFilters, ACCOUNT_PREFIX, LISTENER_KEYWORDS,
 };
 pub use blocklist::Blocklist;
 pub use blocklist_source::{

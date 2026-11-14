@@ -34,6 +34,8 @@ pub struct Shared {
     pub policy: Arc<ArcSwap<PolicyEngine>>,
     /// Advanced Blocking groups (built from the store, swapped on CRUD).
     pub advanced_blocking: Arc<ArcSwap<AdvancedBlocking>>,
+    /// The AI scanner; `None` when `[ai]` was disabled at startup.
+    pub ai: Option<Arc<daygle_dns_ml::AiEngine>>,
     /// Persistent query logger; `None` unless `logging.query_log_enabled`.
     pub query_logger: Option<Arc<daygle_dns_core::QueryLogger>>,
     /// SQLite query-log sink feeding the console's Query Logs view; it skips
@@ -177,6 +179,17 @@ pub fn apply_config(shared: &Shared, new: Arc<DaygleConfig>) -> bool {
                     shared.advanced_blocking.load().lists(),
                 ))),
             Err(e) => warn!("cannot rebuild the filtering groups: {e}"),
+        }
+    }
+
+    // AI settings (mode, thresholds, categories, TTLs) apply live, as they
+    // do from the console; models and the database load at startup.
+    if old.ai != new.ai {
+        if let Some(ai) = &shared.ai {
+            if ai.apply_settings(&new.ai) {
+                warn!("AI model, verifier or database settings changed; restart to load them");
+            }
+            info!("AI settings reloaded");
         }
     }
 
@@ -622,6 +635,7 @@ mod tests {
             catalog,
             policy: Arc::new(ArcSwap::from_pointee(PolicyEngine::new(false))),
             advanced_blocking: Arc::new(ArcSwap::from_pointee(AdvancedBlocking::default())),
+            ai: None,
             query_logger: None,
             query_db_logger: None,
             resolver: Arc::new(ArcSwapOption::empty()),

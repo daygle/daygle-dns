@@ -696,6 +696,7 @@ pub async fn bind_with(
         catalog: catalog.clone(),
         policy: Arc::new(ArcSwap::from_pointee(policy)),
         advanced_blocking: advanced_blocking.clone(),
+        ai: ai_engine.clone(),
         query_logger: query_logger.clone(),
         query_db_logger: query_db_logger.clone(),
         resolver: Arc::new(arc_swap::ArcSwapOption::from(resolver.clone())),

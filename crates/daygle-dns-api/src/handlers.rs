@@ -6983,15 +6983,18 @@ pub async fn update_settings(
     if ai_changed {
         match &state.ai {
             Some(ai) => {
-                let backend_changed = old_config.ai.model_path != config.ai.model_path
-                    || old_config.ai.database != config.ai.database;
-                ai.settings.store(Arc::new(config.ai.clone()));
-                ai.refresh_snapshot_now();
-                ai.trigger_rescan();
-                if backend_changed {
+                // Rebuilding the snapshots reads SQLite: off the async workers.
+                let restart = run_blocking({
+                    let ai = ai.clone();
+                    let settings = config.ai.clone();
+                    move || ai.apply_settings(&settings)
+                })
+                .await;
+                if restart {
                     state.logs.warn(
                         "api",
-                        "AI model or database path changed; restart to switch backends".to_string(),
+                        "AI model, verifier or database settings changed; restart to load them"
+                            .to_string(),
                     );
                 }
             }
