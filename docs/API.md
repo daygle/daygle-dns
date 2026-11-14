@@ -1739,6 +1739,12 @@ block snapshot is rebuilt in the same cycle, and the evidence line records
 "confidence now N% by ai.page_rule". All six page settings are reported by
 `GET /api/ai/status` and accepted by the settings update.
 
+`GET /api/ai/explain` reports the decision on `page_adjustment`:
+`{rule, prior_confidence, confidence, adjusted_at}`, or `null` when the rule
+left the verdict alone. It is only reported while it still describes the
+current verdict; a reclassification newer than the decision clears it (the
+evidence line keeps the history).
+
 A `not_threat` domain never trains under the machine label the operator
 denied, whether or not negatives are learned: the flag only decides whether it
 also trains as `benign`. With `ai.learn_negatives` on, `not_threat`

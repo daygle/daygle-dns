@@ -1174,6 +1174,14 @@ fn a_decide_reading_empties_the_block_snapshot() {
         "the move is on the record: {}",
         threat.evidence
     );
+    let adjustment = ai
+        .store
+        .page_adjustment("phishy.example")
+        .unwrap()
+        .expect("the decision is recorded for the console");
+    assert_eq!(adjustment.rule, PageRule::Decide);
+    assert!((adjustment.prior - 0.995).abs() < 1e-3);
+    assert!((adjustment.confidence - 0.2).abs() < 1e-3);
 }
 
 /// Corrections are held back from training in fifths, and the candidate is

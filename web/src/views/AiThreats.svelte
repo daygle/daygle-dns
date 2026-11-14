@@ -3,6 +3,15 @@
   import { api, formatApiError, getStoredUser } from '../api.js';
   import { formatDate } from '../datetime.svelte.js';
   import { backendLabel, percent, titleCase } from '../aiLabels.js';
+
+  const PAGE_RULE_LABELS = {
+    evidence: 'Evidence only',
+    corroborate: 'Corroborate',
+    decide: 'Decide',
+  };
+  function pageRuleLabel(rule) {
+    return PAGE_RULE_LABELS[rule] || rule;
+  }
   import ColumnPicker from '../ColumnPicker.svelte';
   import { isHidden } from '../columns.svelte.js';
   import AiExemptionDialog from './AiExemptionDialog.svelte';
@@ -504,6 +513,17 @@
         <p class="muted small" style="margin: 0">
           {#if explainResult.threat}
             Threat label {titleCase(explainResult.threat.category)} at {percent(explainResult.threat.confidence)}{#if explainResult.threat.over_threshold}, at or above the threshold{:else}, below the threshold{/if}{#if explainResult.threat.severity === 'disputed'}, disputed by the verifier{/if}.
+            {#if explainResult.page_adjustment}
+              The <strong>{pageRuleLabel(explainResult.page_adjustment.rule)}</strong> page rule
+              {#if explainResult.page_adjustment.confidence < explainResult.page_adjustment.prior_confidence}
+                capped it from {percent(explainResult.page_adjustment.prior_confidence)}
+                to {percent(explainResult.page_adjustment.confidence)}
+              {:else}
+                raised it from {percent(explainResult.page_adjustment.prior_confidence)}
+                to {percent(explainResult.page_adjustment.confidence)}
+              {/if}
+              when the page behind it was read.
+            {/if}
           {:else}
             No threat verdict yet.
           {/if}

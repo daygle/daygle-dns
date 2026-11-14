@@ -1356,6 +1356,27 @@ pub enum PageRule {
     Decide,
 }
 
+impl PageRule {
+    /// Stable storage and JSON name.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Evidence => "evidence",
+            Self::Corroborate => "corroborate",
+            Self::Decide => "decide",
+        }
+    }
+
+    /// Parse the stored or JSON name.
+    pub fn parse(value: &str) -> Option<Self> {
+        Some(match value.trim().to_ascii_lowercase().as_str() {
+            "evidence" => Self::Evidence,
+            "corroborate" => Self::Corroborate,
+            "decide" => Self::Decide,
+            _ => return None,
+        })
+    }
+}
+
 /// AI scanner subsystem settings: a small CPU-only classifier runs in the
 /// background over domains observed in the query log and records verdicts
 /// (category, confidence, TTL). In `enforce` mode, fresh high-confidence

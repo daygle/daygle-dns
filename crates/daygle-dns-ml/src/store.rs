@@ -28,6 +28,7 @@
 
 use std::sync::{Arc, Mutex};
 
+use daygle_dns_core::config::PageRule;
 use daygle_dns_core::error::{DaygleError, Result};
 use rusqlite::{params, Connection};
 
@@ -181,6 +182,26 @@ const CATEGORY_OVERRIDES_TABLE: &str = "CREATE TABLE IF NOT EXISTS ai_category_o
     created_at INTEGER NOT NULL
 )";
 
+/// The page rule's decision on a threat verdict: which rule ran, what the
+/// confidence was before and after, and when. Kept beside the verdict (rather
+/// than in its row) so both channels keep one verdict schema, and read back for
+/// the console's explanation of why a verdict moved.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PageAdjustment {
+    pub rule: PageRule,
+    pub prior: f32,
+    pub confidence: f32,
+    pub adjusted_at: i64,
+}
+
+const PAGE_ADJUSTMENTS_TABLE: &str = "CREATE TABLE IF NOT EXISTS ai_page_adjustments (
+    domain           TEXT PRIMARY KEY,
+    rule             TEXT NOT NULL,
+    prior_confidence REAL NOT NULL,
+    confidence       REAL NOT NULL,
+    adjusted_at      INTEGER NOT NULL
+)";
+
 /// The columns every verdict query returns, in [`VerdictRow`] order.
 const VERDICT_COLUMNS: &str = concat!(
     "v.domain, v.channel, ",
@@ -241,7 +262,8 @@ impl AiStore {
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.execute_batch(&format!(
-            "{VERDICTS_TABLE};\n{OVERRIDES_TABLE};\n{CATEGORY_OVERRIDES_TABLE};"
+            "{VERDICTS_TABLE};\n{OVERRIDES_TABLE};\n{CATEGORY_OVERRIDES_TABLE};\n\
+             {PAGE_ADJUSTMENTS_TABLE};"
         ))?;
         let has_column = |name: &str| -> Result<bool> {
             Ok(conn.query_row(
@@ -795,6 +817,55 @@ impl AiStore {
             params![domain, note, now_epoch(), confidence],
         )?;
         Ok(changed > 0)
+    }
+
+    /// Record the page rule's decision beside the threat verdict. Read back by
+    /// `GET /api/ai/explain` so the console can show why a verdict moved,
+    /// without parsing the evidence line.
+    pub fn record_page_adjustment(
+        &self,
+        domain: &str,
+        rule: PageRule,
+        prior: f32,
+        confidence: f32,
+    ) -> Result<()> {
+        let conn = self.lock()?;
+        conn.execute(
+            "INSERT INTO ai_page_adjustments
+                 (domain, rule, prior_confidence, confidence, adjusted_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(domain) DO UPDATE SET
+                 rule = ?2, prior_confidence = ?3, confidence = ?4, adjusted_at = ?5",
+            params![domain, rule.as_str(), prior, confidence, now_epoch()],
+        )?;
+        Ok(())
+    }
+
+    /// The latest page-rule decision on `domain`'s current threat verdict, or
+    /// `None` when the rule has not moved it (or the verdict was classified
+    /// again since, which makes the old decision history).
+    pub fn page_adjustment(&self, domain: &str) -> Result<Option<PageAdjustment>> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(
+            "SELECT a.rule, a.prior_confidence, a.confidence, a.adjusted_at
+             FROM ai_page_adjustments a
+             JOIN ai_verdicts v ON v.domain = a.domain AND v.channel = 'threat'
+             WHERE a.domain = ?1 AND a.adjusted_at >= v.classified_at",
+        )?;
+        let mut rows = stmt.query(params![domain])?;
+        let Some(row) = rows.next()? else {
+            return Ok(None);
+        };
+        let rule: String = row.get(0)?;
+        let Some(rule) = PageRule::parse(&rule) else {
+            return Ok(None);
+        };
+        Ok(Some(PageAdjustment {
+            rule,
+            prior: row.get::<_, f64>(1)? as f32,
+            confidence: row.get::<_, f64>(2)? as f32,
+            adjusted_at: row.get(3)?,
+        }))
     }
 
     pub fn export_threats(

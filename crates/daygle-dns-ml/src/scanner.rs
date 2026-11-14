@@ -337,6 +337,10 @@ impl Scanner {
                 ),
                 None => inspection.note.clone(),
             };
+            if let Some(new) = changed {
+                self.store
+                    .record_page_adjustment(domain, cfg.page_rule, *confidence, new)?;
+            }
             self.store.record_page_reading(domain, &note, changed)?;
             if changed.is_some() {
                 adjusted += 1;

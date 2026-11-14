@@ -10,7 +10,7 @@ use std::sync::Arc;
 use axum::body::Body;
 use axum::http::{header, HeaderMap, Request, StatusCode};
 use daygle_dns_authoritative::ZoneStore;
-use daygle_dns_core::config::{AiMode, AiSettings};
+use daygle_dns_core::config::{AiMode, AiSettings, PageRule};
 use daygle_dns_core::logs::LogStore;
 use daygle_dns_ml::backend::Channel;
 use daygle_dns_ml::AiEngine;
@@ -212,7 +212,7 @@ async fn threat_export_and_corrections_are_served_as_csv() {
         )
         .unwrap();
 
-    let state = AppState::for_tests(Some(ai));
+    let state = AppState::for_tests(Some(ai.clone()));
     let (status, headers, body) = call(
         state.clone(),
         "GET",
@@ -283,10 +283,56 @@ async fn threat_export_and_corrections_are_served_as_csv() {
     assert_eq!(fields[3], "", "a relabel carries no reason");
     assert!(fields[4].contains('T'), "{}", fields[4]);
 
-    let explained = json(state, "/api/ai/explain?domain=evil.example").await;
+    // A verdict the page rule capped: the explain endpoint reports the
+    // decision and the confidence it started from.
+    ai.store.observe("capped.example").unwrap();
+    ai.store
+        .save_verdict(
+            Channel::Threat,
+            "capped.example",
+            "phishing",
+            "threat",
+            "classified",
+            0.995,
+            "fasttext",
+            "ev",
+            3_600,
+        )
+        .unwrap();
+    ai.store
+        .record_page_reading("capped.example", "page reads shopping (80%)", Some(0.2))
+        .unwrap();
+    ai.store
+        .record_page_adjustment("capped.example", PageRule::Decide, 0.995, 0.2)
+        .unwrap();
+
+    let explained = json(state.clone(), "/api/ai/explain?domain=evil.example").await;
     assert_eq!(explained["domain"], "evil.example");
     assert_eq!(explained["threat"]["category"], "phishing");
     assert_eq!(explained["threat"]["over_threshold"], true);
+    assert!(
+        explained["page_adjustment"].is_null(),
+        "an untouched verdict has no page decision to report: {explained}"
+    );
+
+    let capped = json(state, "/api/ai/explain?domain=capped.example").await;
+    assert_eq!(capped["page_adjustment"]["rule"], "decide");
+    assert!(
+        (capped["page_adjustment"]["prior_confidence"]
+            .as_f64()
+            .unwrap()
+            - 0.995)
+            .abs()
+            < 1e-3,
+        "{}",
+        capped["page_adjustment"]
+    );
+    assert!(
+        (capped["page_adjustment"]["confidence"].as_f64().unwrap() - 0.2).abs() < 1e-3,
+        "{}",
+        capped["page_adjustment"]
+    );
+    assert_eq!(capped["threat"]["over_threshold"], false);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -294,7 +340,7 @@ async fn threat_export_and_corrections_are_served_as_csv() {
 async fn retrain_and_rollback_explain_what_they_cannot_do() {
     let dir = scratch_dir("limits");
     let ai = engine(&dir);
-    let state = AppState::for_tests(Some(ai));
+    let state = AppState::for_tests(Some(ai.clone()));
 
     // Fewer than MIN_EXAMPLES: the retrain refuses rather than training on
     // nothing, and says so through the API.
@@ -316,7 +362,7 @@ async fn retrain_and_rollback_succeed_over_http() {
     for i in 0..240 {
         seed_content(&ai, i);
     }
-    let state = AppState::for_tests(Some(ai));
+    let state = AppState::for_tests(Some(ai.clone()));
     let (status, _, body) = call(state.clone(), "POST", "/api/ai/retrain", None).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     let retrained: serde_json::Value = serde_json::from_str(&body).unwrap();
