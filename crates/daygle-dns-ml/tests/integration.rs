@@ -1551,10 +1551,10 @@ fn negatives_hold_back_threat_verdicts_for_the_gate() {
     }
 
     let dataset = daygle_dns_ml::learn::collect_dataset(&ai.store, &cfg).unwrap();
-    assert_eq!(
-        dataset.threat_validation.len(),
-        2,
-        "every fifth of ten threat verdicts is held out"
+    assert!(
+        !dataset.threat_validation.is_empty() && dataset.threat_validation.len() <= 4,
+        "roughly a fifth of ten threat verdicts is held out: {}",
+        dataset.threat_validation.len()
     );
     for (_, domain) in &dataset.threat_validation {
         assert!(
@@ -1574,6 +1574,44 @@ fn negatives_hold_back_threat_verdicts_for_the_gate() {
             .iter()
             .all(|domain| dataset.pairs.iter().any(|(_, d)| d == domain)),
         "without negatives every threat verdict trains"
+    );
+}
+
+/// A corpus too small to hit the one-in-five sample still holds one threat
+/// verdict back, so the gate has something to test.
+#[test]
+fn a_small_corpus_still_holds_a_threat_verdict_for_the_gate() {
+    let dir = TempDir::new().unwrap();
+    let mut cfg = settings(AiMode::Train);
+    cfg.learn_negatives = true;
+    let ai = engine(&dir, cfg.clone());
+    for i in 0..3 {
+        let domain = format!("tiny-{i}.example");
+        ai.store.observe(&domain).unwrap();
+        ai.store
+            .save_verdict(
+                Channel::Threat,
+                &domain,
+                "phishing",
+                "threat",
+                "classified",
+                1.0,
+                "fasttext",
+                "ev",
+                3600,
+            )
+            .unwrap();
+    }
+    let dataset = daygle_dns_ml::learn::collect_dataset(&ai.store, &cfg).unwrap();
+    assert_eq!(
+        dataset.threat_validation.len(),
+        1,
+        "one verdict is held out even though three is below the sample size"
+    );
+    let (_, held) = &dataset.threat_validation[0];
+    assert!(
+        !dataset.pairs.iter().any(|(_, domain)| domain == held),
+        "{held} is both held out and trained on"
     );
 }
 
@@ -1654,7 +1692,7 @@ fn the_retrain_gate_refuses_a_model_that_swallows_threats_as_benign() {
         .expect_err("the benign class swallows held-out threats here")
         .to_string();
     assert!(
-        error.contains("held-out threat verdicts as benign"),
+        error.contains("held-out threat verdicts"),
         "the refusal names the gate: {error}"
     );
 }

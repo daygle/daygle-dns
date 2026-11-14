@@ -175,7 +175,7 @@ pub fn collect_dataset(store: &AiStore, settings: &AiSettings) -> Result<Dataset
     stats.negatives = negatives;
 
     let mut threat_validation: Vec<(String, String)> = Vec::new();
-    let mut threat_candidates = 0usize;
+    let mut deferred_threats: Vec<(String, String)> = Vec::new();
     for (channel, label, domain) in store.confident_verdicts(
         settings.category_confidence_floor,
         settings.block_threshold,
@@ -189,18 +189,40 @@ pub fn collect_dataset(store: &AiStore, settings: &AiSettings) -> Result<Dataset
         if label.is_empty() || corrected.contains(&domain) || !looks_like_domain(&domain) {
             continue;
         }
-        // With a benign class in the training set, every fifth threat verdict
-        // stays out of training so the gate can ask whether the class has
-        // started swallowing threats instead of only how accurate it is.
+        // With a benign class in the training set, a sample of threat
+        // verdicts stays out of training so the gate can ask whether the class
+        // has started swallowing threats instead of only how accurate it is.
+        // Deciding after the loop keeps the sample independent of confidence
+        // order and lets a small install still have one.
         if settings.learn_negatives && channel == "threat" {
-            threat_candidates += 1;
-            if threat_candidates.is_multiple_of(HOLDOUT_EVERY) {
-                threat_validation.push((label, domain));
-                continue;
-            }
+            deferred_threats.push((label, domain));
+            continue;
         }
         if push(&mut pairs, &mut labels, &mut seen, &label, &domain) {
             stats.verdicts += 1;
+        }
+    }
+
+    if settings.learn_negatives && !deferred_threats.is_empty() {
+        let mut held = vec![false; deferred_threats.len()];
+        let mut any = false;
+        for (index, (_, domain)) in deferred_threats.iter().enumerate() {
+            if holdout_domain(domain) {
+                held[index] = true;
+                any = true;
+            }
+        }
+        // A corpus too small to hit the sample still gets one held-out
+        // verdict: a gate with nothing to test cannot protect anything.
+        if !any {
+            held[0] = true;
+        }
+        for ((label, domain), is_held) in deferred_threats.into_iter().zip(held) {
+            if is_held {
+                threat_validation.push((label, domain));
+            } else if push(&mut pairs, &mut labels, &mut seen, &label, &domain) {
+                stats.verdicts += 1;
+            }
         }
     }
 
@@ -325,15 +347,34 @@ pub fn probe_accuracy(model: &Path, pairs: &[(String, String)]) -> Result<f32> {
     Ok(right as f32 / pairs.len() as f32)
 }
 
-/// Reject a candidate that reads held-out threats as `benign`. Any such
-/// reading is a detection the scanner would stop making, so the gate has no
-/// tolerance for it.
-fn refuse_swallowed_threats(held_out: usize, swallowed: usize) -> Result<()> {
-    if swallowed == 0 {
+/// Deterministic sample of threat verdicts for the gate: hash the name, so
+/// the held-out set spans the whole corpus instead of the most confident end.
+fn holdout_domain(domain: &str) -> bool {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in domain.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash.is_multiple_of(HOLDOUT_EVERY as u64)
+}
+
+/// Reject a candidate that stops reading a held-out threat as a threat - as
+/// `benign`, or as any label that would not block. Either way it is a
+/// detection the scanner would stop making, so the gate has no tolerance.
+fn refuse_lost_threats(checked: usize, benign: usize, downgraded: usize) -> Result<()> {
+    if benign + downgraded == 0 {
         return Ok(());
     }
+    let lost = benign + downgraded;
+    let detail = match (benign, downgraded) {
+        (0, downgraded) => format!("{downgraded} as a label that would not block"),
+        (benign, 0) => format!("{benign} as benign"),
+        (benign, downgraded) => {
+            format!("{benign} as benign and {downgraded} as a label that would not block")
+        }
+    };
     Err(DaygleError::Config(format!(
-        "the retrained model read {swallowed} of {held_out} held-out threat verdicts as benign, so the current model was kept; turn ai.learn_negatives off to retrain without the benign class"
+        "the retrained model read {lost} of {checked} held-out threat verdicts {detail}, so the current model was kept; turn ai.learn_negatives off to retrain without the benign class"
     )))
 }
 
@@ -466,20 +507,35 @@ impl Retrainer {
             validation_accuracy = Some(candidate);
         }
 
-        // The negative class gets its own gate: a candidate may not turn a
-        // held-out threat into `benign`, however well it scores overall.
+        // The negative class gets its own gate: however well the candidate
+        // scores overall, it may not stop reading a held-out threat as a
+        // threat. `benign` is one way; any non-blocking label is another.
         if !threat_validation.is_empty() {
-            let swallowed = match predict_all(&temp, &threat_validation) {
-                Ok(predicted) => predicted
-                    .iter()
-                    .filter(|label| label.as_str() == BENIGN_LABEL)
-                    .count(),
+            let predicted = match predict_all(&temp, &threat_validation) {
+                Ok(predicted) => predicted,
                 Err(e) => {
                     let _ = std::fs::remove_file(&temp);
                     return Err(e);
                 }
             };
-            if let Err(e) = refuse_swallowed_threats(threat_validation.len(), swallowed) {
+            let is_threat_label = |label: &str| {
+                settings.dedicated_threat_model() || settings.is_auto_block_category(label)
+            };
+            let (mut benign, mut downgraded, mut checked) = (0usize, 0usize, 0usize);
+            for ((label, _), got) in threat_validation.iter().zip(&predicted) {
+                // A verdict whose own label no longer blocks was not a threat
+                // to preserve; only the labels the channel would block count.
+                if !is_threat_label(label) {
+                    continue;
+                }
+                checked += 1;
+                if got == BENIGN_LABEL {
+                    benign += 1;
+                } else if !is_threat_label(got) {
+                    downgraded += 1;
+                }
+            }
+            if let Err(e) = refuse_lost_threats(checked, benign, downgraded) {
                 let _ = std::fs::remove_file(&temp);
                 return Err(e);
             }
@@ -617,5 +673,49 @@ impl Retrainer {
                 .push(LogLevel::Info, "ai", format!("AI retrain skipped: {e}"));
         }
         Some(outcome)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_gate_counts_both_ways_a_threat_stops_being_one() {
+        assert!(refuse_lost_threats(30, 0, 0).is_ok());
+
+        let benign = refuse_lost_threats(30, 2, 0).unwrap_err().to_string();
+        assert!(
+            benign.contains("2 of 30 held-out threat verdicts 2 as benign"),
+            "{benign}"
+        );
+
+        let downgraded = refuse_lost_threats(30, 0, 3).unwrap_err().to_string();
+        assert!(
+            downgraded
+                .contains("3 of 30 held-out threat verdicts 3 as a label that would not block"),
+            "{downgraded}"
+        );
+
+        let both = refuse_lost_threats(30, 1, 2).unwrap_err().to_string();
+        assert!(
+            both.contains("3 of 30 held-out threat verdicts 1 as benign and 2 as a label that would not block"),
+            "{both}"
+        );
+    }
+
+    #[test]
+    fn the_holdout_sample_is_stable_and_spread() {
+        assert_eq!(
+            holdout_domain("sneaky-1.example"),
+            holdout_domain("sneaky-1.example")
+        );
+        let selected = (0..1000)
+            .filter(|i| holdout_domain(&format!("host-{i}.example")))
+            .count();
+        assert!(
+            (120..280).contains(&selected),
+            "a fifth of names, evenly: {selected}"
+        );
     }
 }

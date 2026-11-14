@@ -1762,12 +1762,14 @@ deterministic synthetic corpus: with negatives drawn from flagged lookalikes,
 half its held-out threats read as `benign` and none did with negatives drawn
 from harmless sites; with a clean separation the class costs nothing.
 
-The retrain gate will not accept that cost. With `learn_negatives` on, every
-fifth confident threat verdict is held back from training, and a candidate
-that reads any of them as `benign` is refused however well it scores overall
-(the refusal names the count, and `threat_validation_examples` in the retrain
-response says how many were used). Turning `learn_negatives` off removes the
-benign class and with it this gate. Those are
+The retrain gate will not accept that cost. With `learn_negatives` on, a
+sample of threat verdicts (about one in five, chosen by a hash of the name so
+the sample is not just the most confident end, and at least one whenever there
+are any) is held back from training. A candidate that reads any of them as
+`benign`, or as any label that would not block, is refused however well it
+scores overall. The refusal names the counts, and
+`threat_validation_examples` in the retrain response says how many were used.
+Turning `learn_negatives` off removes the benign class and with it this gate. Those are
 corpus-specific bounds, not a promise about any network. `auto_retrain` says "do not block
 this" and so is not training data: a single-label classifier cannot express a
 negative. `GET /api/ai/status` reports `auto_retrain`,
