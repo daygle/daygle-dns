@@ -354,7 +354,9 @@ impl Scanner {
         // from an ordinary category, so it still gates blocking there.
         let labels_gate = !cfg.dedicated_threat_model();
         for (domain, category, expires_at) in self.store.fresh_blocked(now, cfg.block_threshold)? {
-            if (!labels_gate || cfg.is_auto_block_category(&category)) && !exempt(&domain, overrides) {
+            if (!labels_gate || cfg.is_auto_block_category(&category))
+                && !exempt(&domain, overrides)
+            {
                 eligible.insert(
                     domain,
                     ActiveBlock {

@@ -1617,10 +1617,7 @@ pub async fn ai_threats(
             let listed = ai.store.list_threats_filtered(&filter, page_bounds)?;
             // Rows the operator marked "not a threat" stay in the list for
             // audit, so the console needs the marks to label them.
-            Ok::<_, daygle_dns_core::error::DaygleError>((
-                listed,
-                ai.store.not_threat_overrides()?,
-            ))
+            Ok::<_, daygle_dns_core::error::DaygleError>((listed, ai.store.not_threat_overrides()?))
         }
     })
     .await;
@@ -1781,7 +1778,6 @@ pub async fn ai_override(
     }
 }
 
-
 /// `GET /api/ai/threats/export?format=csv|list` - the active threat list as a
 /// download: exactly the rows the block snapshot is built from. `list` is one
 /// domain per line, ready to use as a blocklist source; `csv` adds the label,
@@ -1809,7 +1805,10 @@ pub async fn ai_threats_export(
     let threshold = ai.settings.load_full().block_threshold;
     let exported = run_blocking({
         let ai = ai.clone();
-        move || ai.store.export_threats(chrono::Utc::now().timestamp(), threshold)
+        move || {
+            ai.store
+                .export_threats(chrono::Utc::now().timestamp(), threshold)
+        }
     })
     .await;
     let rows = match exported {

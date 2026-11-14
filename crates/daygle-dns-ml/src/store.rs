@@ -696,13 +696,16 @@ impl AiStore {
              LIMIT ?4",
         )?;
         let collected = stmt
-            .query_map(params![content_floor, threat_floor, now_epoch, limit], |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, String>(2)?,
-                ))
-            })?
+            .query_map(
+                params![content_floor, threat_floor, now_epoch, limit],
+                |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                    ))
+                },
+            )?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(collected)
     }

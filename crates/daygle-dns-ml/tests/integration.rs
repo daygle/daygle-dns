@@ -758,7 +758,7 @@ fn shared_classifier_keeps_the_label_list_as_the_filter() {
         )
         .unwrap();
     assert!(
-        ai.blockable_counts().unwrap().get("gambling").is_none(),
+        !ai.blockable_counts().unwrap().contains_key("gambling"),
         "an unlisted label must not block with the shared classifier"
     );
 }
@@ -788,13 +788,14 @@ fn training_data_prefers_corrections_and_skips_vetoed_domains() {
             )
             .unwrap();
     }
-    store.set_category_override("a.example", "shopping").unwrap();
+    store
+        .set_category_override("a.example", "shopping")
+        .unwrap();
     store
         .set_override("b.example", "not_threat", "not news")
         .unwrap();
 
-    let (pairs, stats) =
-        daygle_dns_ml::learn::collect(&store, &settings(AiMode::Train)).unwrap();
+    let (pairs, stats) = daygle_dns_ml::learn::collect(&store, &settings(AiMode::Train)).unwrap();
     assert_eq!(
         pairs,
         vec![("shopping".to_string(), "a.example".to_string())],
@@ -951,9 +952,11 @@ fn marking_a_threat_not_a_threat_stops_blocking_and_export() {
         .find(|c| c.domain == "casino-bonus.example" && c.action == "not_threat")
         .expect("the correction is recorded");
     assert_eq!(mark.reason, "not gambling");
-    assert!(corrections.iter().any(|c| c.domain == "casino-bonus.example"
-        && c.action == "category"
-        && c.category == "news"));
+    assert!(corrections
+        .iter()
+        .any(|c| c.domain == "casino-bonus.example"
+            && c.action == "category"
+            && c.category == "news"));
 
     assert!(ai.clear_override("casino-bonus.example").unwrap());
     assert!(ai.blockable_counts().unwrap().contains_key("gambling"));

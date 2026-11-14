@@ -48,6 +48,10 @@ const PATHS: &[(&str, &[Operation])] = &[
     ("/ai/status", &[("get", "Ai status")]),
     ("/ai/verdicts", &[("get", "Ai verdicts")]),
     ("/ai/threats", &[("get", "Ai threats")]),
+    ("/ai/threats/export", &[("get", "Ai threats export")]),
+    ("/ai/explain", &[("get", "Ai explain")]),
+    ("/ai/corrections", &[("get", "Ai corrections")]),
+    ("/ai/retrain", &[("post", "Ai retrain")]),
     ("/ai/override", &[("post", "Ai override")]),
     ("/ai/overrides", &[("get", "Ai overrides")]),
     ("/ai/rescan", &[("post", "Ai rescan")]),
@@ -3446,6 +3450,72 @@ fn ai_operation(path: &str, method: &str) -> Option<Value> {
                     schema_ref("AiRescan"),
                 ),
                 "404": ai_unavailable
+            }
+        })),
+        ("get", "/ai/threats/export") => Some(json!({
+            "parameters": json!([{
+                "name": "format",
+                "in": "query",
+                "required": false,
+                "schema": { "type": "string", "enum": ["csv", "list"] }
+            }]),
+            "responses": {
+                "200": json!({
+                    "description": "The active threat list, exactly the rows the block snapshot is built from: `list` is one domain per line, `csv` adds the label, confidence and re-check time.",
+                    "content": {
+                        "text/plain": { "schema": { "type": "string" } },
+                        "text/csv": { "schema": { "type": "string" } }
+                    }
+                }),
+                "400": json!({
+                    "description": "`format` is neither `csv` nor `list`.",
+                    "content": { "application/json": { "schema": error } }
+                }),
+                "404": ai_unavailable
+            }
+        })),
+        ("get", "/ai/explain") => Some(json!({
+            "parameters": json!([{
+                "name": "domain",
+                "in": "query",
+                "required": true,
+                "schema": { "type": "string" }
+            }]),
+            "responses": {
+                "200": json!({
+                    "description": "Why one domain is or is not blocked: both channels' verdicts, the operator's overrides, the label category blocking matches, the groups that block it, and plain-language reasons."
+                }),
+                "400": json!({
+                    "description": "`domain` is missing or not a classifiable name.",
+                    "content": { "application/json": { "schema": error } }
+                }),
+                "404": ai_unavailable
+            }
+        })),
+        ("get", "/ai/corrections") => Some(json!({
+            "parameters": json!([{
+                "name": "format",
+                "in": "query",
+                "required": false,
+                "schema": { "type": "string", "enum": ["csv"] }
+            }]),
+            "responses": {
+                "200": json!({
+                    "description": "Every operator correction (exemptions, not-a-threat marks and category relabels), newest first; `?format=csv` downloads it as training data."
+                }),
+                "404": ai_unavailable
+            }
+        })),
+        ("post", "/ai/retrain") => Some(json!({
+            "responses": {
+                "200": json!({
+                    "description": "Retrained from the scanner's confident verdicts and the operator's corrections, and loaded into the running scanner."
+                }),
+                "404": ai_unavailable,
+                "500": json!({
+                    "description": "Not enough training data, or the candidate did worse on held-out corrections than the model in use; the current model was kept.",
+                    "content": { "application/json": { "schema": error } }
+                })
             }
         })),
         ("get", "/ai/model-status") => Some(json!({

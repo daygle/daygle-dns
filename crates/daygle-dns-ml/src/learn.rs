@@ -434,10 +434,7 @@ impl Retrainer {
         let now = chrono::Utc::now().timestamp();
         let interval = settings.retrain_interval_secs.max(3_600) as i64;
         {
-            let mut last = self
-                .last_attempt
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
+            let mut last = self.last_attempt.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(at) = *last {
                 if now - at < interval {
                     return None;

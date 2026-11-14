@@ -42,9 +42,9 @@ pub mod backend;
 pub mod channel;
 pub mod fasttext_backend;
 pub mod heuristic;
+pub mod learn;
 pub mod plugin;
 pub mod scanner;
-pub mod learn;
 pub mod store;
 pub mod verify;
 
@@ -146,8 +146,7 @@ impl AiEngine {
         // threat detector side by side - or one model for both.
         let content_model_path =
             resolve_model_path(&settings.category_model_path, &shared_model_path);
-        let threat_model_path =
-            resolve_model_path(&settings.threat_model_path, &shared_model_path);
+        let threat_model_path = resolve_model_path(&settings.threat_model_path, &shared_model_path);
 
         let content: Box<dyn DomainClassifier + Send + Sync> =
             Box::new(channel::ChannelBackend::content(load_primary(
