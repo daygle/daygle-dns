@@ -84,6 +84,8 @@
 
 pub mod accounts;
 pub mod acme;
+#[cfg(test)]
+mod ai_tests;
 pub mod alerts;
 mod audit;
 pub mod cloudflare;
@@ -595,6 +597,59 @@ pub struct AppState {
     pub log_export: Option<Arc<log_export::LogExporter>>,
     /// DNS accounts the encrypted listeners recognise (shared with them).
     pub accounts: Arc<daygle_dns_policy::identity::AccountDirectory>,
+}
+
+#[cfg(test)]
+impl AppState {
+    /// The smallest state the router accepts, for endpoint tests: an
+    /// in-memory catalog, no listeners, no web server, no runtime hooks, and
+    /// an optional AI engine on a scratch database. `api.auth_required` is
+    /// off, so requests go through the real middleware without a token.
+    pub(crate) fn for_tests(ai: Option<Arc<daygle_dns_ml::AiEngine>>) -> AppState {
+        let store = daygle_dns_authoritative::ZoneStore::open(":memory:").unwrap();
+        let catalog = Arc::new(AuthorityCatalog::new(store.clone(), Default::default()).unwrap());
+        let mut config = DaygleConfig::default();
+        config.api.auth_required = false;
+        config.api.api_token = String::new();
+        let config = Arc::new(ArcSwap::from_pointee(config));
+        AppState {
+            catalog,
+            resolver: Arc::new(ArcSwapOption::empty()),
+            metrics: Arc::default(),
+            logs: Arc::new(LogStore::new(200)),
+            config: config.clone(),
+            policy: Arc::new(ArcSwap::from_pointee(daygle_dns_policy::PolicyEngine::new(
+                false,
+            ))),
+            advanced_blocking: Arc::new(ArcSwap::from_pointee(Default::default())),
+            secondary_refresher: None,
+            health: None,
+            local_root: Arc::new(daygle_dns_authoritative::LocalRoot::new(
+                Default::default(),
+                None,
+            )),
+            blocklist_sources: None,
+            started_at: Instant::now(),
+            config_path: None,
+            reload_notify: None,
+            sessions: Arc::new(SessionStore::with_store(store.clone())),
+            login_throttle: Arc::default(),
+            request_dns_rebuild: None,
+            config_write: Arc::default(),
+            apply_runtime: None,
+            web_apply: None,
+            stats: Arc::default(),
+            ai,
+            acme: Arc::default(),
+            rpz: None,
+            dhcp: None,
+            devices: Arc::default(),
+            log_export: None,
+            accounts: Arc::new(daygle_dns_policy::identity::AccountDirectory::with_config(
+                config,
+            )),
+        }
+    }
 }
 
 /// Moves the web console's listeners to new [`WebSettings`]: binds new
