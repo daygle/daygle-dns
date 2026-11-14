@@ -105,6 +105,22 @@
     };
   }
 
+  // A copy of a zone under a name of its own: the rules, feed URL or transfer
+  // source and policy come along. It is added below the original (zones are
+  // checked top to bottom) and starts disabled, so nothing changes until the
+  // copy is edited and enabled.
+  function duplicateZone(index) {
+    startEdit(index);
+    const z = zones[index];
+    edit = {
+      ...edit,
+      index: null,
+      name: `copy.${z.name}`,
+      enabled: false,
+      duplicateOf: z.name,
+    };
+  }
+
   function closeEdit() {
     if (!saving) edit = null;
   }
@@ -240,6 +256,7 @@
                       <IconButton icon="up" label="Move {z.name} up" onclick={() => move(i, -1)} disabled={i === 0 || saving} />
                       <IconButton icon="down" label="Move {z.name} down" onclick={() => move(i, 1)} disabled={i === zones.length - 1 || saving} />
                       <IconButton icon="edit" label="Edit" onclick={() => startEdit(i)} />
+                      <IconButton icon="duplicate" label="Duplicate" title="Duplicate: copy this zone's rules under a new name" onclick={() => duplicateZone(i)} />
                       <IconButton icon="delete" variant="danger" label="Delete {z.name}" onclick={() => removeZone(i)} />
                     </div>
                   </td>
@@ -298,10 +315,17 @@
   <div class="modal-backdrop" role="presentation" onclick={(e) => e.target === e.currentTarget && closeEdit()}>
     <div class="modal card" role="dialog" aria-modal="true" aria-labelledby="rpz-title">
       <div class="spread modal-title">
-        <h3 id="rpz-title" style="margin: 0">{edit.index === null ? 'Add Response Policy Zone' : `Edit Zone - ${zones[edit.index].name}`}</h3>
+        <h3 id="rpz-title" style="margin: 0">{edit.index === null ? edit.duplicateOf ? 'Duplicate Response Policy Zone' : 'Add Response Policy Zone' : `Edit Zone - ${zones[edit.index].name}`}</h3>
         <button class="secondary" style="padding: 2px 10px" onclick={closeEdit} aria-label="Close">✕</button>
       </div>
       {#if error}<p class="dialog-error">{error}</p>{/if}
+      {#if edit.duplicateOf}
+        <p class="muted help">
+          Copied from "{edit.duplicateOf}" under a new name, added below it
+          and disabled, so the original still decides first. Review the name,
+          source and policy, then enable it.
+        </p>
+      {/if}
       <div class="grid2">
         <label>Zone Name <input bind:value={edit.name} placeholder="rpz.example.com" spellcheck="false" /></label>
         <label>Rules From

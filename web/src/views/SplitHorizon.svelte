@@ -80,6 +80,14 @@
         };
   }
 
+  // A copy of an entry: the same answers, networks and TTL for another name.
+  // The domain is cleared because the name is what a second copy is for; the
+  // answers are the part worth not retyping.
+  function duplicateEntry(entry) {
+    startEdit(entry);
+    edit = { ...edit, id: null, domain: '', isNew: true, duplicateOf: entry.domain };
+  }
+
   function closeEdit() {
     if (!saving) edit = null;
   }
@@ -242,6 +250,7 @@
                     <IconButton icon="up" label="Move up (checked earlier)" onclick={() => moveEntry(entry, 'up')} disabled={!canMoveUp(entry)} />
                     <IconButton icon="down" label="Move down (checked later)" onclick={() => moveEntry(entry, 'down')} disabled={!canMoveDown(entry)} />
                     <IconButton icon="edit" label="Edit" onclick={() => startEdit(entry)} />
+                    <IconButton icon="duplicate" label="Duplicate" title="Duplicate: copy these answers to another name" onclick={() => duplicateEntry(entry)} />
                     <IconButton icon="delete" variant="danger" label="Delete entry" onclick={() => removeEntry(entry)} />
                   </div>
                 </td>
@@ -269,10 +278,16 @@
     <div class="modal card" role="dialog" aria-modal="true" aria-labelledby="entry-title">
       <form onsubmit={(e) => { e.preventDefault(); saveEntry(); }}>
         <div class="spread modal-title">
-          <h3 id="entry-title" style="margin: 0">{edit.isNew ? 'Add Entry' : `Edit Entry - ${edit.domain}`}</h3>
+          <h3 id="entry-title" style="margin: 0">{edit.isNew ? edit.duplicateOf ? 'Duplicate Entry' : 'Add Entry' : `Edit Entry - ${edit.domain}`}</h3>
           <button type="button" class="secondary" style="padding: 2px 10px" onclick={closeEdit} aria-label="Close">✕</button>
         </div>
         {#if dialogError}<p class="dialog-error">{dialogError}</p>{/if}
+        {#if edit.duplicateOf}
+          <p class="muted help">
+            Copied from "{edit.duplicateOf}" with its networks and answers;
+            give the name this entry should answer for.
+          </p>
+        {/if}
         <div class="grid2">
           <label>Domain <input placeholder="intranet.example.com or *.example.com" bind:value={edit.domain} /></label>
           <label>TTL (Seconds) <span class="hint">{duration(Number(edit.ttl) || 0)}</span><input type="number" min="0" bind:value={edit.ttl} /></label>

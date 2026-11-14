@@ -159,6 +159,22 @@
         };
   }
 
+  // A copy of a group: every rule, switch and response comes along, but not
+  // its clients. An empty client list covers every client, so the copy also
+  // starts disabled until its own clients are chosen and it is enabled.
+  function duplicateGroup(group) {
+    startEdit(group);
+    edit = {
+      ...edit,
+      id: null,
+      originalName: null,
+      name: `${group.name} copy`,
+      clients: [],
+      enabled: false,
+      duplicateOf: group.name,
+    };
+  }
+
   function toggleCategory(category) {
     edit.blocked_categories = edit.blocked_categories.includes(category)
       ? edit.blocked_categories.filter((c) => c !== category)
@@ -402,6 +418,7 @@
                   <IconButton icon="up" label="Move {g.name} up" onclick={() => move(g, 'up')} disabled={i === 0} />
                   <IconButton icon="down" label="Move {g.name} down" onclick={() => move(g, 'down')} disabled={i === groups.length - 1} />
                   <IconButton icon="edit" label="Edit" onclick={() => startEdit(g)} />
+                  <IconButton icon="duplicate" label="Duplicate" title="Duplicate: copy this group's rules without its clients" onclick={() => duplicateGroup(g)} />
                   <IconButton icon="delete" variant="danger" label="Delete {g.name}" onclick={() => removeGroup(g)} />
                 </div>
               </td>
@@ -480,11 +497,18 @@
   <div class="modal-backdrop" role="presentation" onclick={(e) => e.target === e.currentTarget && closeEdit()}>
     <div class="modal card" role="dialog" aria-modal="true" aria-labelledby="group-title">
       <div class="spread modal-title">
-        <h3 id="group-title" style="margin: 0">{edit.id ? `Edit Filtering Group - ${edit.originalName}` : 'Add Filtering Group'}</h3>
+        <h3 id="group-title" style="margin: 0">{edit.id ? `Edit Filtering Group - ${edit.originalName}` : edit.duplicateOf ? 'Duplicate Filtering Group' : 'Add Filtering Group'}</h3>
         <button class="secondary" style="padding: 2px 10px" onclick={closeEdit} aria-label="Close">✕</button>
       </div>
       {#if error}
         <p class="dialog-error">{error}</p>
+      {/if}
+      {#if edit.duplicateOf}
+        <p class="muted help">
+          Copied from "{edit.duplicateOf}" without its clients. It starts
+          disabled because a group with no clients covers every client:
+          choose this copy's clients, then enable it.
+        </p>
       {/if}
       <div class="grid2">
         <label>Name <input bind:value={edit.name} placeholder="Kids' Devices" /></label>

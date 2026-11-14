@@ -229,6 +229,32 @@
         };
   }
 
+  // Values an operator changes when repeating a row (another address for the
+  // same host, another target for the same alias). A duplicate starts with an
+  // empty value so the original's is not re-added out of habit; types whose
+  // value is the part being reused (a TXT verification string, an SRV target)
+  // keep theirs, since repeating it is the usual reason to duplicate.
+  const VALUE_IS_EDITED = ['A', 'AAAA', 'CNAME', 'ALIAS', 'MX', 'NS', 'PTR', 'HTTPS', 'SVCB'];
+
+  // Open the Add Record dialog from an existing row. The record's health
+  // check, weight and disabled state belong to it, not to the copy, so none
+  // of them come along. The PTR option starts off: the address usually
+  // changes, and the original's PTR record is not the copy's to rewrite.
+  function duplicateRecord(record) {
+    const name = relativeName(record.name);
+    startEdit(null);
+    edit = {
+      ...edit,
+      name,
+      rtype: record.rtype,
+      content: VALUE_IS_EDITED.includes(record.rtype) ? '' : record.content,
+      ttl: record.ttl,
+      priority: record.priority,
+      updatePtr: false,
+      duplicateOf: `${record.rtype} ${name}`,
+    };
+  }
+
   function closeEdit() {
     if (!saving) edit = null;
   }
@@ -532,6 +558,7 @@
                   {#if selected.zone_type !== 'secondary'}
                     <div class="row" style="gap: 6px; justify-content: flex-end; flex-wrap: nowrap">
                       <IconButton icon="edit" label="Edit" onclick={() => startEdit(record)} />
+                      <IconButton icon="duplicate" label="Duplicate" title="Duplicate: start a new record from this one" onclick={() => duplicateRecord(record)} />
                       {#if record.rtype === 'A' || record.rtype === 'AAAA'}
                         <IconButton icon="health" label="Health check: check this address and fail over when it is down" onclick={() => openHealth(record)} />
                       {/if}
@@ -566,10 +593,13 @@
     <div class="modal card" role="dialog" aria-modal="true" aria-labelledby="record-title">
       <form onsubmit={(e) => { e.preventDefault(); saveEdit(); }}>
         <div class="spread modal-title">
-          <h3 id="record-title" style="margin: 0">{edit.isNew ? `Add Record - ${selected.name}` : `Edit Record - ${selected.name}`}</h3>
+          <h3 id="record-title" style="margin: 0">{edit.isNew ? `${edit.duplicateOf ? 'Duplicate' : 'Add'} Record - ${selected.name}` : `Edit Record - ${selected.name}`}</h3>
           <button type="button" class="secondary" style="padding: 2px 10px" onclick={closeEdit} aria-label="Close">✕</button>
         </div>
         {#if dialogError}<p class="dialog-error">{dialogError}</p>{/if}
+        {#if edit.duplicateOf}
+          <p class="muted help">Copied from {edit.duplicateOf}; the original record is left untouched.</p>
+        {/if}
         <div class="grid2">
           <label>Name <input placeholder="www, or @ for {selected.name}" bind:value={edit.name} /></label>
           <label>Type<select bind:value={edit.rtype}>{#each TYPES as t (t)}<option value={t}>{t}</option>{/each}</select></label>

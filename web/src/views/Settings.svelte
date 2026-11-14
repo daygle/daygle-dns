@@ -1,6 +1,7 @@
 <script>
   import { untrack } from 'svelte';
   import { api, formatApiError } from '../api.js';
+  import { titleCase } from '../aiLabels.js';
   import PageHeader from '../PageHeader.svelte';
   import BackupRestore from './BackupRestore.svelte';
   import NetworkPicker from '../NetworkPicker.svelte';
@@ -826,10 +827,6 @@
   // 4.999999 -> 5 (unit conversions in the AI form).
   function round2(n) {
     return Math.round(Number(n || 0) * 100) / 100;
-  }
-
-  function titleCase(s) {
-    return s ? s.charAt(0).toUpperCase() + s.slice(1) : s;
   }
 </script>
 

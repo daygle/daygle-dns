@@ -16,14 +16,36 @@ export function backendLabel(name) {
     .join(' + ');
 }
 
-// "phishing" -> "Phishing", "real-estate" -> "Real Estate".
+// Category labels that are acronyms or have fixed casing, so they read
+// "AI" and "CDN" rather than "Ai" and "Cdn".
+const SPECIAL_CASE = {
+  ai: 'AI',
+  api: 'API',
+  c2: 'C2',
+  cdn: 'CDN',
+  dns: 'DNS',
+  iot: 'IoT',
+  p2p: 'P2P',
+  tld: 'TLD',
+  url: 'URL',
+  vpn: 'VPN',
+};
+
+// "phishing" -> "Phishing", "real-estate" -> "Real Estate", "ai" -> "AI".
 export function titleCase(s) {
   if (!s) return s;
   // Split on the separators category labels use, never on spaces: this also
   // runs over free-text evidence, where only the first letter should change.
   return String(s)
     .split(/[-_]/)
-    .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+    .map((w) => {
+      const word = w.toLowerCase();
+      if (SPECIAL_CASE[word]) return SPECIAL_CASE[word];
+      // Plural acronyms keep the acronym's casing: "tlds" -> "TLDs".
+      const singular = word.endsWith('s') ? SPECIAL_CASE[word.slice(0, -1)] : undefined;
+      if (singular) return `${singular}s`;
+      return w.charAt(0).toUpperCase() + w.slice(1);
+    })
     .join(' ');
 }
 

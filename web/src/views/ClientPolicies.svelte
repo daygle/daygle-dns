@@ -64,6 +64,23 @@
     };
   }
 
+  // A copy of a policy: the same action and upstreams without the clients (a
+  // network belongs to one policy), and a name of its own because the store
+  // looks policies up by name.
+  function openDuplicate(index) {
+    clearMessages();
+    const p = policies[index];
+    form = {
+      index: null,
+      name: `${p.name} copy`,
+      enabled: p.enabled,
+      clients: [],
+      action: p.action,
+      upstreamsText: p.upstreams.join('\n'),
+      duplicateOf: p.name,
+    };
+  }
+
   function close() {
     if (!saving) form = null;
   }
@@ -184,6 +201,7 @@
                   <IconButton icon="up" label="Move up" onclick={() => move(i, -1)} disabled={i === 0} />
                   <IconButton icon="down" label="Move down" onclick={() => move(i, 1)} disabled={i === policies.length - 1} />
                   <IconButton icon="edit" label="Edit" onclick={() => openEdit(i)} />
+                  <IconButton icon="duplicate" label="Duplicate" title="Duplicate: copy this policy without its clients" onclick={() => openDuplicate(i)} />
                   <IconButton icon="delete" variant="danger" label="Delete {p.name}" onclick={() => remove(i)} />
                 </div>
               </td>
@@ -211,10 +229,16 @@
   <div class="modal-backdrop" role="presentation" onclick={(e) => e.target === e.currentTarget && close()}>
     <div class="modal card" role="dialog" aria-modal="true" aria-labelledby="policy-title">
       <div class="spread modal-title">
-        <h3 id="policy-title" style="margin: 0">{form.index === null ? 'Add Resolution Policy' : `Edit Resolution Policy - ${policies[form.index].name}`}</h3>
+        <h3 id="policy-title" style="margin: 0">{form.index === null ? form.duplicateOf ? 'Duplicate Resolution Policy' : 'Add Resolution Policy' : `Edit Resolution Policy - ${policies[form.index].name}`}</h3>
         <button class="secondary" style="padding: 2px 10px" onclick={close} aria-label="Close">✕</button>
       </div>
       {#if dialogError}<p class="notice error">{dialogError}</p>{/if}
+      {#if form.duplicateOf}
+        <p class="muted help">
+          Copied from "{form.duplicateOf}" without its clients: pick the
+          networks or addresses this policy should cover.
+        </p>
+      {/if}
       <div class="grid2">
         <label>Name <input placeholder="Kids' Devices" bind:value={form.name} /></label>
         <label>Resolution
