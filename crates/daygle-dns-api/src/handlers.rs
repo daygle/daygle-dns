@@ -2416,7 +2416,11 @@ pub async fn create_zone(
         Err(e) => return map_err(e),
     };
     if let Some(records) = imported_records.as_deref() {
-        if let Err(e) = state.catalog.store().replace_records(&zone.id, records) {
+        if let Err(e) = state.catalog.store().replace_records(
+            &zone.id,
+            records,
+            daygle_dns_authoritative::store::AddMode::Strict,
+        ) {
             let _ = state.catalog.store().delete_zone(&zone.id);
             return map_err(e);
         }
@@ -2539,27 +2543,55 @@ pub async fn delete_zone(State(state): State<AppState>, Path(id): Path<String>) 
     }
 }
 
+/// `POST /api/zones/import` - create a primary zone from a zone file.
 pub async fn import_zone(
     State(state): State<AppState>,
     Json(input): Json<ImportRequest>,
 ) -> Response {
-    let zone_input = ZoneInput {
+    // Parse first: a file that does not parse leaves no zone behind.
+    let records = match daygle_dns_authoritative::parse::parse_zone_file(&input.text) {
+        Ok(records) => records,
+        Err(e) => return map_err(e),
+    };
+    // The file's SOA becomes the zone's SOA settings, as when a zone is
+    // created with a file: stored as a record it would have joined the SOA
+    // the zone serves, which holds one.
+    let soa = imported_soa(&records);
+    let records: Vec<RecordInput> = records
+        .into_iter()
+        .filter(|r| !r.rtype.eq_ignore_ascii_case("SOA"))
+        .collect();
+    let mut zone_input = ZoneInput {
         name: input.name.clone(),
         ..Default::default()
     };
-    let zone = match state.catalog.store().create_zone(&zone_input) {
-        Ok(z) => z,
+    match soa {
+        Some((primary_ns, admin_mailbox, serial, refresh, retry, expire, minimum)) => {
+            zone_input.primary_ns = Some(primary_ns);
+            zone_input.admin_mailbox = Some(admin_mailbox);
+            zone_input.serial = Some(serial);
+            zone_input.refresh = Some(refresh);
+            zone_input.retry = Some(retry);
+            zone_input.expire = Some(expire);
+            zone_input.minimum = Some(minimum);
+        }
+        None => {
+            let defaults = zone_defaults(&state);
+            zone_input.primary_ns = defaults.primary_ns;
+            zone_input.admin_mailbox = defaults.admin_mailbox;
+        }
+    }
+    let store = state.catalog.store();
+    let zone = match store.create_zone(&zone_input) {
+        Ok(zone) => zone,
         Err(e) => return map_err(e),
     };
-    let records = match daygle_dns_authoritative::parse::parse_zone_file(&input.text) {
-        Ok(r) => r,
-        Err(e) => {
-            let _ = state.catalog.store().delete_zone(&zone.id);
-            return map_err(e);
-        }
-    };
-    if let Err(e) = state.catalog.store().replace_records(&zone.id, &records) {
-        let _ = state.catalog.store().delete_zone(&zone.id);
+    if let Err(e) = store.replace_records(
+        &zone.id,
+        &records,
+        daygle_dns_authoritative::store::AddMode::Strict,
+    ) {
+        let _ = store.delete_zone(&zone.id);
         return map_err(e);
     }
     if let Err(e) = state.catalog.reload() {

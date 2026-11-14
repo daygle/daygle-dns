@@ -334,7 +334,10 @@ impl SecondaryRefresher {
             )?;
         }
 
-        self.store.replace_records(zone_id, &inputs)?;
+        // A master's data is stored as it came: a record it should not have
+        // (beside a CNAME, say) is left out rather than failing the transfer.
+        self.store
+            .replace_records(zone_id, &inputs, crate::store::AddMode::Lenient)?;
         self.store.set_transfer_data(zone_id, &wire)?;
         self.store.touch_secondary(zone_id)?;
         self.catalog.reload()?;
