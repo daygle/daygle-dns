@@ -1,11 +1,12 @@
 <script>
+  import { onMount } from 'svelte';
   import { deviceName, loadDeviceNames } from './devices.svelte.js';
 
   // A client shown by its device name (Clients -> Devices) and address.
   let { address } = $props();
   const name = $derived(deviceName(address));
 
-  $effect(() => {
+  onMount(() => {
     loadDeviceNames();
   });
 </script>

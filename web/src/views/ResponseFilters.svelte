@@ -1,4 +1,5 @@
 <script>
+  import { onMount } from 'svelte';
   import { api, formatApiError } from '../api.js';
 
   let loaded = $state(false);
@@ -134,7 +135,7 @@
     }
   }
 
-  $effect(() => {
+  onMount(() => {
     load();
   });
 </script>

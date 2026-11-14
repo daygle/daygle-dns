@@ -1,4 +1,5 @@
 <script>
+  import { onMount } from 'svelte';
   import IconButton from '../IconButton.svelte';
   import { api, formatApiError } from '../api.js';
   import NetworkPicker from '../NetworkPicker.svelte';
@@ -323,11 +324,11 @@
     return `${n} ${n === 1 ? word : plural}`;
   }
 
-  $effect(() => {
+  onMount(() => {
     loadDeviceNames();
   });
 
-  $effect(() => {
+  onMount(() => {
     load();
   });
 </script>

@@ -1,4 +1,5 @@
 <script>
+  import { onMount } from 'svelte';
   import { hiddenColumns, isHidden, loadColumns, setHidden } from './columns.svelte.js';
 
   // A "Columns" menu for a data table: tick the columns to show. `table`
@@ -11,7 +12,7 @@
 
   const hidden = $derived((hiddenColumns.map[table] || []).filter((k) => columns.some((c) => c.key === k)));
 
-  $effect(() => {
+  onMount(() => {
     loadColumns();
   });
 

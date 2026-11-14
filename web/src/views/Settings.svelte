@@ -1,4 +1,5 @@
 <script>
+  import { untrack } from 'svelte';
   import { api, formatApiError } from '../api.js';
   import PageHeader from '../PageHeader.svelte';
   import BackupRestore from './BackupRestore.svelte';
@@ -17,7 +18,7 @@
   // `initialTab` lets another page open a tab directly (the Cache page's
   // "Settings" button).
   let { initialTab = 'general' } = $props();
-  let tab = $state(initialTab);
+  let tab = $state(untrack(() => initialTab));
   const TABS = [
     ['general', 'General'],
     ['recursive', 'Resolver'],
@@ -748,9 +749,7 @@
         expire_check_secs: Math.round(Number(aiForm.expireMinutes) * 60),
         max_domains_per_scan: Number(ai_.max_domains_per_scan),
         auto_block_categories:
-          aiBackendCategories.length
-            ? aiBackendCategories.filter((c) => aiSelectedCategories().includes(c))
-            : (aiCategoriesText || '').split(',').map((c) => c.trim()).filter(Boolean),
+          aiSelectedCategories(),
         block_threshold: Number(aiForm.thresholdPct) / 100,
         confidence_floor: Number(aiForm.floorPct) / 100,
         category_ttl_secs: Math.round(Number(aiForm.categoryDays) * 86400),
@@ -810,6 +809,13 @@
       .map((c) => c.trim().toLowerCase())
       .filter(Boolean);
   }
+
+  // The categories to offer: the loaded model's, plus any already chosen
+  // that it does not list (another model, or set in the config file), so
+  // saving the page never drops them unseen and they can be unticked.
+  const aiCategoryChoices = $derived(
+    [...new Set([...aiBackendCategories, ...aiSelectedCategories()])].sort(),
+  );
 
   function toggleAiCategory(cat) {
     const sel = aiSelectedCategories();
@@ -1462,14 +1468,14 @@
       <span class="field-label">Auto-Block Categories</span>
       {#if aiBackendCategories.length}
         <div class="category-grid">
-          {#each aiBackendCategories as cat (cat)}
+          {#each aiCategoryChoices as cat (cat)}
             <label class="check">
               <input
                 type="checkbox"
                 checked={aiSelectedCategories().includes(cat)}
                 onchange={() => toggleAiCategory(cat)}
               />
-              <span>{titleCase(cat)}</span>
+              <span>{titleCase(cat)}{#if !aiBackendCategories.includes(cat)}<span class="muted"> (not in the loaded model)</span>{/if}</span>
             </label>
           {/each}
         </div>

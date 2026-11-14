@@ -1,4 +1,5 @@
 <script>
+  import { onMount } from 'svelte';
   import IconButton from '../IconButton.svelte';
   import { api, formatApiError } from '../api.js';
   import NetworkPicker from '../NetworkPicker.svelte';
@@ -146,7 +147,7 @@
     return p.action === 'recursive' ? 'Resolved from Root Servers' : 'Recursion Refused';
   }
 
-  $effect(() => {
+  onMount(() => {
     load();
   });
 </script>

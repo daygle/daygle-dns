@@ -1,4 +1,5 @@
 <script>
+  import { onMount } from 'svelte';
   import IconButton from '../IconButton.svelte';
   import { api, formatApiError } from '../api.js';
   import { formatDateTime } from '../datetime.svelte.js';
@@ -295,7 +296,7 @@
     return Number(n || 0).toLocaleString();
   }
 
-  $effect(() => {
+  onMount(() => {
     load();
   });
 </script>

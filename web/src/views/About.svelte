@@ -1,4 +1,5 @@
 <script>
+  import { onMount } from 'svelte';
   import { api, formatApiError } from '../api.js';
   import PageHeader from '../PageHeader.svelte';
   import { icons } from '../icons.svelte.js';
@@ -14,7 +15,7 @@
     }
   }
 
-  $effect(() => {
+  onMount(() => {
     loadStatus();
   });
 

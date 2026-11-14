@@ -89,7 +89,7 @@
   let device = $state(null);
   let deviceReport = $state(null);
   // The details card, for scrolling into view when Details is clicked.
-  let detailsCard;
+  let detailsCard = $state(null);
   // Bumped per request, like the Blocks by Device tab: clicking Details on
   // another device must not let the first answer land last.
   let deviceRequest = 0;

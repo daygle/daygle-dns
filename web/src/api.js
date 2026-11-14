@@ -25,6 +25,12 @@ export function getStoredUser() {
   }
 }
 
+// Forget the signed-in user drawn in the shell (the session itself is an
+// HttpOnly cookie the server ends).
+export function clearLocalSession() {
+  try { localStorage.removeItem(USER_KEY); } catch (_) { /* storage blocked */ }
+}
+
 let onUnauthorized = null;
 export function setUnauthorizedHandler(fn) {
   onUnauthorized = fn;
@@ -51,7 +57,9 @@ async function request(method, path, body, opts = {}) {
       needsLogin = res.status === 401 && data.login === true;
     } catch (_) { /* ignore */ }
     // Present errors sentence-cased: backend messages often start lowercase
-    // (e.g. "not found: zone ...", "failed to persist ...").
+    // (e.g. "not found: zone ...", "failed to persist ..."). A proxy can
+    // answer with a body whose `error` is not text.
+    detail = String(detail || `HTTP ${res.status}`);
     detail = detail.charAt(0).toUpperCase() + detail.slice(1);
     if (needsLogin && onUnauthorized && !opts.noLoginRedirect) {
       onUnauthorized();
@@ -139,11 +147,13 @@ export const api = {
   resetUserTwoFactor: (username) =>
     request('DELETE', `/users/${encodeURIComponent(username)}/two-factor`),
   logout: async () => {
-    await request('POST', '/auth/logout', {});
-    localStorage.removeItem(USER_KEY);
-  },
-  clearLocalSession: () => {
-    localStorage.removeItem(USER_KEY);
+    try {
+      await request('POST', '/auth/logout', {}, { noLoginRedirect: true });
+    } catch (e) {
+      // A session that already ended is signed out all the same.
+      if (!e.needsLogin) throw e;
+    }
+    clearLocalSession();
   },
   me: () => request('GET', '/auth/me'),
   savePreferences: (prefs) => request('PUT', '/auth/preferences', prefs),
@@ -195,29 +205,29 @@ export const api = {
   zones: () => request('GET', '/zones'),
   zoneDefaults: () => request('GET', '/zones/defaults'),
   createZone: (body) => request('POST', '/zones', body),
-  deleteZone: (id) => request('DELETE', `/zones/${id}`),
-  setZoneEnabled: (id, enabled) => request('PUT', `/zones/${id}/enabled`, { enabled }),
-  updateZoneSoa: (id, body) => request('PUT', `/zones/${id}/soa`, body),
-  records: (zoneId) => request('GET', `/zones/${zoneId}/records`),
+  deleteZone: (id) => request('DELETE', `/zones/${encodeURIComponent(id)}`),
+  setZoneEnabled: (id, enabled) => request('PUT', `/zones/${encodeURIComponent(id)}/enabled`, { enabled }),
+  updateZoneSoa: (id, body) => request('PUT', `/zones/${encodeURIComponent(id)}/soa`, body),
+  records: (zoneId) => request('GET', `/zones/${encodeURIComponent(zoneId)}/records`),
   // `query` (optional) is e.g. "update_ptr=true&create_reverse_zone=true".
   upsertRecord: (zoneId, body, query = '') =>
-    request('PUT', `/zones/${zoneId}/records${query ? `?${query}` : ''}`, body),
+    request('PUT', `/zones/${encodeURIComponent(zoneId)}/records${query ? `?${query}` : ''}`, body),
   replaceRecord: (zoneId, recordId, body, query = '') =>
-    request('PUT', `/zones/${zoneId}/records/${encodeURIComponent(recordId)}${query ? `?${query}` : ''}`, body),
+    request('PUT', `/zones/${encodeURIComponent(zoneId)}/records/${encodeURIComponent(recordId)}${query ? `?${query}` : ''}`, body),
   deleteRecord: (zoneId, recordId, query = '') =>
-    request('DELETE', `/zones/${zoneId}/records/${recordId}${query ? `?${query}` : ''}`),
+    request('DELETE', `/zones/${encodeURIComponent(zoneId)}/records/${recordId}${query ? `?${query}` : ''}`),
   setRecordDisabled: (zoneId, recordId, disabled, query = '') =>
-    request('PUT', `/zones/${zoneId}/records/${encodeURIComponent(recordId)}/disabled${query ? `?${query}` : ''}`, { disabled }),
+    request('PUT', `/zones/${encodeURIComponent(zoneId)}/records/${encodeURIComponent(recordId)}/disabled${query ? `?${query}` : ''}`, { disabled }),
   healthChecks: () => request('GET', '/health-checks'),
   recordWeights: () => request('GET', '/record-weights'),
   setRecordWeight: (zoneId, recordId, weight) =>
-    request('PUT', `/zones/${zoneId}/records/${encodeURIComponent(recordId)}/weight`, { weight }),
+    request('PUT', `/zones/${encodeURIComponent(zoneId)}/records/${encodeURIComponent(recordId)}/weight`, { weight }),
   zoneAliases: () => request('GET', '/zone-aliases'),
-  setZoneAliases: (zoneId, aliases) => request('PUT', `/zones/${zoneId}/aliases`, { aliases }),
+  setZoneAliases: (zoneId, aliases) => request('PUT', `/zones/${encodeURIComponent(zoneId)}/aliases`, { aliases }),
   setHealthCheck: (zoneId, recordId, body) =>
-    request('PUT', `/zones/${zoneId}/records/${encodeURIComponent(recordId)}/health`, body),
+    request('PUT', `/zones/${encodeURIComponent(zoneId)}/records/${encodeURIComponent(recordId)}/health`, body),
   deleteHealthCheck: (zoneId, recordId) =>
-    request('DELETE', `/zones/${zoneId}/records/${encodeURIComponent(recordId)}/health`),
+    request('DELETE', `/zones/${encodeURIComponent(zoneId)}/records/${encodeURIComponent(recordId)}/health`),
   downloadBackup: (queryLogs) =>
     request('GET', `/backup${queryLogs ? '?query_logs=true' : ''}`, undefined, { blob: true }),
   pendingRestore: () => request('GET', '/backup/restore'),
@@ -227,16 +237,15 @@ export const api = {
   saveAcmeSettings: (settings) => request('PUT', '/acme', settings),
   requestAcmeCertificate: (body) => request('POST', '/certificates/acme', body),
   renewCertificate: (name) => request('POST', `/certificates/${encodeURIComponent(name)}/renew`),
-  exportZone: (zoneId) => request('GET', `/zones/${zoneId}/export`, undefined, { text: true }),
-  signZone: (zoneId, body) => request('POST', `/zones/${zoneId}/sign`, body),
-  unsignZone: (zoneId) => request('POST', `/zones/${zoneId}/unsign`),
+  exportZone: (zoneId) => request('GET', `/zones/${encodeURIComponent(zoneId)}/export`, undefined, { text: true }),
+  signZone: (zoneId, body) => request('POST', `/zones/${encodeURIComponent(zoneId)}/sign`, body),
+  unsignZone: (zoneId) => request('POST', `/zones/${encodeURIComponent(zoneId)}/unsign`),
   cache: () => request('GET', '/cache'),
   clearCache: () => request('POST', '/cache/clear'),
   flushCacheName: (name, type) => request('POST', '/cache/flush', type ? { name, type } : { name }),
   localRoot: () => request('GET', '/local-root'),
   resolver: () => request('GET', '/resolver'),
   refreshLocalRoot: () => request('POST', '/local-root/refresh'),
-  importZone: (name, text) => request('POST', '/zones/import', { name, text }),
   blocklistSources: () => request('GET', '/policy/blocklist/sources'),
   refreshBlocklistSources: () => request('POST', '/policy/blocklist/sources'),
   replaceBlocklistSources: (sources, renames = {}) =>
@@ -257,8 +266,8 @@ export const api = {
   updatePreflight: () => request('GET', '/update/preflight'),
   blockingGroups: () => request('GET', '/policy/blocking'),
   saveBlockingGroup: (body) => request('POST', '/policy/blocking', body),
-  deleteBlockingGroup: (id) => request('DELETE', `/policy/blocking/${id}`),
-  moveBlockingGroup: (id, direction) => request('POST', `/policy/blocking/${id}/move`, { direction }),
+  deleteBlockingGroup: (id) => request('DELETE', `/policy/blocking/${encodeURIComponent(id)}`),
+  moveBlockingGroup: (id, direction) => request('POST', `/policy/blocking/${encodeURIComponent(id)}/move`, { direction }),
   testAlert: (alerts) => request('POST', '/alerts/test', { alerts }),
   logExportStatus: () => request('GET', '/log-export'),
   // Query log size: { rows, oldest, database_bytes }.
@@ -292,16 +301,13 @@ export const api = {
   saveNetwork: (body) => request('POST', '/networks', body),
   deleteNetwork: (name) => request('DELETE', `/networks/${encodeURIComponent(name)}`),
   splitHorizon: () => request('GET', '/split-horizon'),
-  saveSplitHorizonNetwork: (body) => request('POST', '/split-horizon/networks', body),
-  deleteSplitHorizonNetwork: (name) =>
-    request('DELETE', `/split-horizon/networks/${encodeURIComponent(name)}`),
   createSplitHorizonEntry: (body) => request('POST', '/split-horizon/entries', body),
   updateSplitHorizonEntry: (id, body) =>
-    request('PUT', `/split-horizon/entries/${id}`, body),
+    request('PUT', `/split-horizon/entries/${encodeURIComponent(id)}`, body),
   deleteSplitHorizonEntry: (id) =>
-    request('DELETE', `/split-horizon/entries/${id}`),
+    request('DELETE', `/split-horizon/entries/${encodeURIComponent(id)}`),
   moveSplitHorizonEntry: (id, direction) =>
-    request('POST', `/split-horizon/entries/${id}/move`, { direction }),
+    request('POST', `/split-horizon/entries/${encodeURIComponent(id)}/move`, { direction }),
   // ---- AI subsystem (404 = the [ai] section is disabled) ----
   aiStatus: () => request('GET', '/ai/status'),
   aiVerdicts: (qs) => request('GET', `/ai/verdicts${qs ? `?${qs}` : ''}`),

@@ -1,4 +1,5 @@
 <script>
+  import { onMount } from 'svelte';
   import IconButton from '../IconButton.svelte';
   import { api, formatApiError } from '../api.js';
   import { duration } from '../aiLabels.js';
@@ -154,7 +155,7 @@
     return i >= 0 && i < entries.length - 1 && entries[i + 1].domain === entry.domain;
   }
 
-  $effect(() => {
+  onMount(() => {
     load();
   });
 </script>

@@ -1,4 +1,5 @@
 <script>
+  import { onMount } from 'svelte';
   import IconButton from '../IconButton.svelte';
   import { api, formatApiError } from '../api.js';
 
@@ -81,7 +82,7 @@
     }
   }
 
-  $effect(() => {
+  onMount(() => {
     load();
   });
 </script>

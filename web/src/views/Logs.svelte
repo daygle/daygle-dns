@@ -39,7 +39,7 @@
   const showA = (key) => !isHidden('audit-log', key);
 
   // Device names for the Device column.
-  $effect(() => {
+  onMount(() => {
     loadDeviceNames();
   });
 
