@@ -1697,6 +1697,48 @@ fn the_retrain_gate_refuses_a_model_that_swallows_threats_as_benign() {
     );
 }
 
+/// A release model probe scores held-out threat verdicts with the channel's
+/// own blocking rule, so the update step can compare before and after.
+#[test]
+fn probing_a_model_scores_held_out_threats() {
+    let dir = TempDir::new().unwrap();
+    let cfg = settings(AiMode::Train);
+    let ai = engine(&dir, cfg.clone());
+    let mut pairs = Vec::new();
+    for i in 0..60 {
+        let domain = format!("probe-phish-{i}.example");
+        ai.store.observe(&domain).unwrap();
+        ai.store
+            .save_verdict(
+                Channel::Threat,
+                &domain,
+                "phishing",
+                "threat",
+                "classified",
+                1.0,
+                "fasttext",
+                "ev",
+                3600,
+            )
+            .unwrap();
+        pairs.push(("phishing".to_string(), domain));
+    }
+    let model = dir.path().join("probe.bin");
+    daygle_dns_ml::learn::train(&pairs, &model).unwrap();
+
+    let probe = daygle_dns_ml::learn::probe_threat_model(&ai.store, &cfg, &model).unwrap();
+    assert!(probe.checked > 0, "{probe:?}");
+    assert_eq!(
+        probe.lost(),
+        0,
+        "the model was trained on these names: {probe:?}"
+    );
+
+    let missing =
+        daygle_dns_ml::learn::probe_threat_model(&ai.store, &cfg, &dir.path().join("missing.bin"));
+    assert!(missing.is_err(), "a missing model is not silently a pass");
+}
+
 /// Corrections are held back from training in fifths, and the candidate is
 /// accepted when it does as well on them as the model in use.
 #[test]

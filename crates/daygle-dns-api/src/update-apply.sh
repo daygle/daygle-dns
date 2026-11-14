@@ -222,6 +222,20 @@ health_check() {
   return 1
 }
 
+MODEL_HEALTH_URL="http://$API_HOST:$API_PORT/api/ai/model-health"
+
+# Held-out threat verdicts the loaded model reads as non-threats, or empty when
+# the probe is unavailable (AI disabled, no model, an older binary). An
+# unavailable probe must never block an update.
+model_probe_lost() {
+  body="$(curl -fsS --max-time 10 "$MODEL_HEALTH_URL" 2>/dev/null)" || return 0
+  case "$body" in
+    *'"available":true'*) ;;
+    *) return 0 ;;
+  esac
+  printf '%s' "$body" | tr -d '[:space:]' | sed -n 's/.*"lost":\([0-9][0-9]*\).*/\1/p' | head -n 1
+}
+
 # Checksum of a file (empty when unreadable).
 file_sha() {
   (sha256sum "$1" 2>/dev/null || shasum -a 256 "$1" 2>/dev/null) | cut -d' ' -f1 | tr -d '[:space:]'
@@ -585,6 +599,10 @@ if [ "$KIND" = "models" ]; then
     exit 1
   fi
 
+  # How the models in use score on held-out threat verdicts, before this
+  # bundle replaces them. Empty when the probe is unavailable.
+  BASELINE_LOST="$(model_probe_lost)"
+
   # Back up before changing anything. Read through the service account so a
   # symlink cannot make root disclose a file that account cannot read.
   for f in $VALID; do
@@ -631,6 +649,24 @@ if [ "$KIND" = "models" ]; then
   # Health check: the service must come back and the API answer.
   HEALTHY=0
   if health_check; then HEALTHY=1; fi
+
+  # A bundle can be valid, signed and bootable and still lose detections.
+  # Compare the same held-out probe against the pre-install baseline and put
+  # the previous files back if the new models read more threats as non-threats.
+  NEW_LOST="$(model_probe_lost)"
+  if [ -n "$BASELINE_LOST" ] && [ -n "$NEW_LOST" ] && [ "$NEW_LOST" -gt "$BASELINE_LOST" ]; then
+    log "model probe regressed: ${BASELINE_LOST} held-out threat(s) lost before, ${NEW_LOST} after"
+    as_service rm -f -- "$REQ.processing" "$MANIFEST" "$STAGED_BIN"
+    state rolling_back "The new AI models lost held-out threats - restoring the previous files..."
+    if restore_models; then
+      WHAT="the previous model files were restored"
+    else
+      WHAT="some previous model files could not be restored; restore them from backup"
+    fi
+    systemctl restart daygle-dns 2>>"$LOG" || true
+    fail "The new AI models read ${NEW_LOST} held-out threat verdict(s) as non-threats, up from ${BASELINE_LOST}; ${WHAT}."
+    exit 1
+  fi
 
   as_service rm -f -- "$REQ.processing" "$MANIFEST" "$STAGED_BIN"
   if [ "$HEALTHY" -eq 1 ]; then

@@ -122,6 +122,24 @@ impl NegativeKind {
     }
 }
 
+/// How the retrain gate would have judged this candidate, when negatives are
+/// on and the dataset has a held-out threat sample to judge it on.
+struct GateResult {
+    checked: usize,
+    benign: usize,
+    downgraded: usize,
+}
+
+impl GateResult {
+    fn lost(&self) -> usize {
+        self.benign + self.downgraded
+    }
+
+    fn refuses(&self) -> bool {
+        self.lost() > 0
+    }
+}
+
 /// One model's results.
 struct Row {
     learn_negatives: bool,
@@ -132,6 +150,9 @@ struct Row {
     threats: [usize; 3],
     /// `[benign, threat label, ordinary]` on fresh harmless names.
     ordinary: [usize; 3],
+    /// What the retrain gate would do with a model trained only on the pairs
+    /// the gate leaves in training.
+    gate: Option<GateResult>,
 }
 
 fn main() {
@@ -303,6 +324,36 @@ fn measure(
         learn::train(&pairs, &model_path).map_err(|e| e.to_string())?;
         let model = FastTextBackend::load(&model_path).map_err(|e| e.to_string())?;
 
+        // The gate's own candidate: trained on what the gate leaves in
+        // training, then scored on the threat verdicts it held back. This is
+        // the decision the retrainer would make, not a rerun of the row above.
+        let gate = if learn_negatives {
+            let dataset = learn::collect_dataset(store, &settings).map_err(|e| e.to_string())?;
+            if dataset.threat_validation.is_empty() {
+                None
+            } else {
+                let gate_path = dir.join("gate.bin");
+                learn::train(&dataset.pairs, &gate_path).map_err(|e| e.to_string())?;
+                let gate_model = FastTextBackend::load(&gate_path).map_err(|e| e.to_string())?;
+                let mut benign = 0usize;
+                let mut downgraded = 0usize;
+                for (_, domain) in &dataset.threat_validation {
+                    match category(&gate_model, domain)?.as_deref() {
+                        Some(BENIGN_LABEL) => benign += 1,
+                        Some(label) if is_threat_label(label) => {}
+                        _ => downgraded += 1,
+                    }
+                }
+                Some(GateResult {
+                    checked: dataset.threat_validation.len(),
+                    benign,
+                    downgraded,
+                })
+            }
+        } else {
+            None
+        };
+
         let mut threats = [0usize; 3];
         for (_, domain) in held_out_threats {
             match reading(&model, domain)? {
@@ -327,6 +378,7 @@ fn measure(
             labels,
             threats,
             ordinary,
+            gate,
         });
     }
     Ok(rows)
@@ -359,12 +411,24 @@ fn category(model: &FastTextBackend, domain: &str) -> Result<Option<String>, Str
 
 fn report(rows: &[Row], held_out: usize, fresh: usize) {
     println!(
-        "{:<20} {:>6} {:>6} {:>9} {:>10} {:>7} {:>12}",
-        "learn_negatives", "pairs", "benign", "detected", "swallowed", "missed", "fresh benign"
+        "{:<20} {:>6} {:>6} {:>9} {:>10} {:>9} {:>7} {:>12}",
+        "learn_negatives",
+        "pairs",
+        "benign",
+        "detected",
+        "swallowed",
+        "gate",
+        "missed",
+        "fresh benign"
     );
     for row in rows {
+        let gate = match &row.gate {
+            Some(gate) if gate.refuses() => format!("refuse {}/{}", gate.lost(), gate.checked),
+            Some(gate) => format!("accept 0/{}", gate.checked),
+            None => "-".to_string(),
+        };
         println!(
-            "{:<20} {:>6} {:>6} {:>9} {:>10} {:>7} {:>12}",
+            "{:<20} {:>6} {:>6} {:>9} {:>10} {:>9} {:>7} {:>12}",
             if row.learn_negatives {
                 "on"
             } else {
@@ -374,8 +438,30 @@ fn report(rows: &[Row], held_out: usize, fresh: usize) {
             row.labels.get(BENIGN_LABEL).copied().unwrap_or(0),
             format!("{}/{}", row.threats[0], held_out),
             format!("{}/{}", row.threats[1], held_out),
+            gate,
             format!("{}/{}", row.threats[2], held_out),
             format!("{}/{}", row.ordinary[0], fresh),
+        );
+    }
+    for row in rows {
+        if let Some(gate) = &row.gate {
+            println!(
+                "   gate ({}): {} of {} held-out threat verdicts lost ({} benign, {} other); the gate would {} this candidate.",
+                if row.learn_negatives { "negatives on" } else { "baseline" },
+                gate.lost(),
+                gate.checked,
+                gate.benign,
+                gate.downgraded,
+                if gate.refuses() { "refuse" } else { "accept" }
+            );
+        }
+    }
+    let gated: Vec<&GateResult> = rows.iter().filter_map(|row| row.gate.as_ref()).collect();
+    if !gated.is_empty() {
+        let refused = gated.iter().filter(|gate| gate.refuses()).count();
+        println!(
+            "   gate summary: would refuse {refused} of {} candidate(s).",
+            gated.len()
         );
     }
     for row in rows {

@@ -57,6 +57,7 @@ const PATHS: &[(&str, &[Operation])] = &[
     ("/ai/overrides", &[("get", "Ai overrides")]),
     ("/ai/rescan", &[("post", "Ai rescan")]),
     ("/ai/model-status", &[("get", "Ai model status")]),
+    ("/ai/model-health", &[("get", "Ai model health")]),
     ("/ai/update-models", &[("post", "Ai update models")]),
     (
         "/config",
@@ -2892,6 +2893,26 @@ fn ai_schemas() -> Value {
                 }
             }
         },
+        "AiModelHealth": {
+            "type": "object",
+            "description": "How the loaded threat model reads the store's held-out threat \
+                verdicts. `lost` counts those it reads as benign or as a label that would \
+                not block.",
+            "required": ["available", "model"],
+            "properties": {
+                "available": { "type": "boolean" },
+                "model": { "type": "string" },
+                "checked": { "type": "integer" },
+                "lost": { "type": "integer" },
+                "benign": { "type": "integer" },
+                "downgraded": { "type": "integer" },
+                "skipped": { "type": "integer" },
+                "reason": {
+                    "type": "string",
+                    "description": "Present when `available` is false."
+                }
+            }
+        },
         "AiModelStatus": {
             "type": "object",
             "description": "The installed AI model files and the release their bundle came \
@@ -3536,6 +3557,16 @@ fn ai_operation(path: &str, method: &str) -> Option<Value> {
                 "200": json_response(
                     "The installed model files and the shared update state.",
                     schema_ref("AiModelStatus"),
+                )
+            }
+        })),
+        ("get", "/ai/model-health") => Some(json!({
+            "responses": {
+                "200": json_response(
+                    "The loaded threat model scored against held-out threat verdicts. \
+                        `available: false` means there was nothing to probe; the update \
+                        step then installs without gating.",
+                    schema_ref("AiModelHealth"),
                 )
             }
         })),

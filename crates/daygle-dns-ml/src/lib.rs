@@ -396,6 +396,17 @@ impl AiEngine {
         self.snapshot.clone()
     }
 
+    /// The model file the threat channel classifies with: the learned model
+    /// when one is active, otherwise the configured shared or dedicated model.
+    pub fn threat_model_path(&self) -> String {
+        let cfg = self.settings.load();
+        if cfg.dedicated_threat_model() {
+            cfg.threat_model_path.clone()
+        } else {
+            self.active_model.load_full().to_string()
+        }
+    }
+
     /// Snapshot accessor for the category snapshot (tests and diagnostics).
     pub fn category_snapshot(&self) -> Arc<ArcSwap<CategorySnapshot>> {
         self.categories.clone()

@@ -358,6 +358,97 @@ fn holdout_domain(domain: &str) -> bool {
     hash.is_multiple_of(HOLDOUT_EVERY as u64)
 }
 
+/// Most held-out threat verdicts one model probe scores. Bounded so the
+/// update health check stays fast on a large store.
+const MAX_PROBE: usize = 200;
+
+/// What probing a model against the store's held-out threats found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ThreatProbe {
+    pub checked: usize,
+    pub benign: usize,
+    pub downgraded: usize,
+    pub skipped: usize,
+}
+
+impl ThreatProbe {
+    /// Held-out threats the model no longer reads as threats.
+    pub fn lost(&self) -> usize {
+        self.benign + self.downgraded
+    }
+}
+
+/// Score `model` against a sample of the store's confident threat verdicts.
+/// Used before and after a release model bundle: a bundle that loses held-out
+/// threats is a regression, whatever its checksums say.
+pub fn probe_threat_model(
+    store: &AiStore,
+    settings: &AiSettings,
+    model: &Path,
+) -> Result<ThreatProbe> {
+    if !model.is_file() {
+        return Err(DaygleError::Config(format!(
+            "model file not found: {}",
+            model.display()
+        )));
+    }
+    let now = chrono::Utc::now().timestamp();
+    let mut all: Vec<(String, String)> = Vec::new();
+    for (channel, label, domain) in store.confident_verdicts(
+        settings.category_confidence_floor,
+        settings.block_threshold,
+        now,
+        MAX_VERDICTS,
+    )? {
+        if channel != "threat" {
+            continue;
+        }
+        let label = label.trim().to_ascii_lowercase();
+        let domain = domain.trim().trim_matches('.').to_ascii_lowercase();
+        if label.is_empty() || !looks_like_domain(&domain) {
+            continue;
+        }
+        all.push((label, domain));
+        if all.len() >= MAX_PROBE * HOLDOUT_EVERY {
+            break;
+        }
+    }
+    // The same spread sample the retrain gate uses; a small store still gets
+    // scored rather than skipped.
+    let mut sample: Vec<(String, String)> = all
+        .iter()
+        .filter(|(_, domain)| holdout_domain(domain))
+        .cloned()
+        .collect();
+    if sample.is_empty() {
+        sample = all.into_iter().take(MAX_PROBE).collect();
+    } else {
+        sample.truncate(MAX_PROBE);
+    }
+    let predicted = predict_all(model, &sample)?;
+    let is_threat =
+        |label: &str| settings.dedicated_threat_model() || settings.is_auto_block_category(label);
+    let (mut checked, mut benign, mut downgraded, mut skipped) = (0, 0, 0, 0);
+    for ((label, _), got) in sample.iter().zip(&predicted) {
+        if !is_threat(label) {
+            skipped += 1;
+            continue;
+        }
+        checked += 1;
+        if got == BENIGN_LABEL {
+            benign += 1;
+        } else if !is_threat(got) {
+            downgraded += 1;
+        }
+    }
+    Ok(ThreatProbe {
+        checked,
+        benign,
+        downgraded,
+        skipped,
+    })
+}
+
 /// Reject a candidate that stops reading a held-out threat as a threat - as
 /// `benign`, or as any label that would not block. Either way it is a
 /// detection the scanner would stop making, so the gate has no tolerance.

@@ -1587,6 +1587,7 @@ GET  /api/ai/overrides
 POST /api/ai/override          {"domain": "x.example", "action": "allow|not_threat|clear|category|clear_category", "category": "gambling", "reason": "..."}
 POST /api/ai/rescan
 GET  /api/ai/model-status
+GET  /api/ai/model-health
 POST /api/ai/update-models
 ```
 
@@ -1677,6 +1678,16 @@ download the models bundle from the latest release and hand it to the
 privileged apply service, which installs the files and restarts the server.
 A `202` only means the update began; poll `GET /api/ai/model-status` until
 `done`/`error`.
+
+`GET /api/ai/model-health` scores the loaded threat model against a sample of
+the store's held-out threat verdicts: `{available, model, checked, lost,
+benign, downgraded, skipped}`. `lost` counts verdicts the model reads as
+`benign` or as a label that would not block. It always answers `200`;
+`available: false` with a `reason` means there was no model or no verdicts to
+probe. The models-update apply step calls it before installing a bundle and
+again after the restart: if `lost` grew, the previous model files are restored,
+the service is restarted, and the update run records an `error` naming both
+counts. A probe that is unavailable never blocks an update.
 
 `POST /api/ai/override` with `action: "allow"` exempts a domain and its
 subdomains from AI blocking; `clear` removes the exemption (`404` when there
@@ -1769,7 +1780,13 @@ are any) is held back from training. A candidate that reads any of them as
 `benign`, or as any label that would not block, is refused however well it
 scores overall. The refusal names the counts, and
 `threat_validation_examples` in the retrain response says how many were used.
-Turning `learn_negatives` off removes the benign class and with it this gate. Those are
+Turning `learn_negatives` off removes the benign class and with it this gate.
+
+The evaluation prints the gate's decision beside the swallow numbers. It
+accepts both of its candidates: the sampled held-out verdicts share word stems
+with the training threats, so they keep reading as threats even where the
+swallowed 15 of 30 are unseen names. The gate protects verdicts the store
+knows, not every novel name a negative class may swallow. Those are
 corpus-specific bounds, not a promise about any network. `auto_retrain` says "do not block
 this" and so is not training data: a single-label classifier cannot express a
 negative. `GET /api/ai/status` reports `auto_retrain`,

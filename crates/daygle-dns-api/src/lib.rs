@@ -67,6 +67,7 @@
 //! | `POST`   | `/api/ai/override`                | allow-exempt or clear overrides for a domain |
 //! | `POST`   | `/api/ai/rescan`                  | wake the scanner for an immediate cycle |
 //! | `GET`    | `/api/ai/model-status`            | installed AI model files (size, sha256) + update-run state |
+//! | `GET`    | `/api/ai/model-health`            | loaded threat model scored on held-out threat verdicts |
 //! | `POST`   | `/api/ai/update-models`           | begin a models-only update from the latest release |
 //!
 //! Auth endpoints: `POST /api/auth/login`, `POST /api/auth/logout`,
@@ -696,6 +697,7 @@ pub fn router(state: AppState) -> Router {
         .route("/ai/overrides", get(handlers::ai_overrides))
         .route("/ai/rescan", post(handlers::ai_rescan))
         .route("/ai/model-status", get(handlers::ai_model_status))
+        .route("/ai/model-health", get(handlers::ai_model_health))
         .route("/ai/update-models", post(handlers::ai_update_models))
         .route(
             "/config",

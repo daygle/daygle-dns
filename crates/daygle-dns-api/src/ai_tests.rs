@@ -357,6 +357,27 @@ async fn threat_export_and_corrections_are_served_as_csv() {
 }
 
 #[tokio::test]
+async fn model_health_reports_whether_a_probe_was_possible() {
+    let dir = scratch_dir("model-health");
+    let ai = engine(&dir);
+    let state = AppState::for_tests(Some(ai));
+
+    let health = json(state, "/api/ai/model-health").await;
+    assert!(health["available"].is_boolean(), "{health}");
+    assert!(health["model"].is_string(), "{health}");
+    if health["available"] == true {
+        assert!(
+            health["lost"].as_u64().unwrap() <= health["checked"].as_u64().unwrap(),
+            "{health}"
+        );
+    } else {
+        assert!(health["reason"].is_string(), "{health}");
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
 async fn retrain_and_rollback_explain_what_they_cannot_do() {
     let dir = scratch_dir("limits");
     let ai = engine(&dir);

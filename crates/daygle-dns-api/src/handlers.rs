@@ -2495,6 +2495,50 @@ pub async fn ai_model_status(State(state): State<AppState>) -> Response {
     .into_response()
 }
 
+/// `GET /api/ai/model-health` - score the loaded threat model against
+/// held-out threat verdicts. The models-update apply step compares this before
+/// and after installing a bundle and restores the previous files when the
+/// bundle regresses. Always 200: `available` says whether a model could be
+/// probed, so an install on a store with no verdicts still proceeds.
+pub async fn ai_model_health(State(state): State<AppState>) -> Response {
+    let Some(ai) = ai_engine(&state) else {
+        return map_err(daygle_dns_ml::ai_disabled_error());
+    };
+    let settings = ai.settings.load_full();
+    let model = ai.threat_model_path();
+    let probed = run_blocking({
+        let ai = ai.clone();
+        let settings = settings.clone();
+        let model = model.clone();
+        move || {
+            daygle_dns_ml::learn::probe_threat_model(
+                &ai.store,
+                &settings,
+                std::path::Path::new(&model),
+            )
+        }
+    })
+    .await;
+    match probed {
+        Ok(probe) => Json(serde_json::json!({
+            "available": true,
+            "model": model,
+            "checked": probe.checked,
+            "lost": probe.lost(),
+            "benign": probe.benign,
+            "downgraded": probe.downgraded,
+            "skipped": probe.skipped,
+        }))
+        .into_response(),
+        Err(e) => Json(serde_json::json!({
+            "available": false,
+            "model": model,
+            "reason": e.to_string(),
+        }))
+        .into_response(),
+    }
+}
+
 /// `POST /api/ai/update-models` - begin a models-only update: download the
 /// `daygle-dns-models.tar.gz` bundle from the latest release and hand it to
 /// the privileged apply service, which installs the model files and restarts
