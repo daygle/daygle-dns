@@ -153,8 +153,8 @@ fn label_has_token(labels: &[&str], token: &str) -> bool {
 pub struct HeuristicBackend;
 
 impl DomainClassifier for HeuristicBackend {
-    fn name(&self) -> &str {
-        "heuristic"
+    fn name(&self) -> String {
+        "heuristic".to_string()
     }
 
     fn categories(&self) -> Vec<String> {

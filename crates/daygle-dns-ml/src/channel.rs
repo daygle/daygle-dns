@@ -10,13 +10,16 @@
 //! | Channel   | Verdict it reports                                      |
 //! |-----------|---------------------------------------------------------|
 //! | `Content` | whatever the categorizer said, always severity `Info`   |
-//! | `Threat`  | only the labels in `ai.auto_block_categories` (severity `Threat`), nothing otherwise |
+//! | `Threat`  | with the shared model, only the labels in `ai.auto_block_categories`; with a dedicated `ai.threat_model_path`, every label that model produces (severity `Threat` either way) |
 //!
 //! The threat channel reads its category list from the *live* settings, so
 //! editing `auto_block_categories` changes what the next scan treats as a
-//! threat without a restart. A content verdict is informational by
-//! construction: categorization never blocks, and only the threat channel
-//! feeds the block snapshot.
+//! threat without a restart. Detection and blocking are separate decisions:
+//! this wrapper decides what is *reported* as a threat, and the scanner's
+//! block snapshot applies `auto_block_categories`, `block_threshold`, the
+//! verifier verdict and the mode before anything blocks. A content verdict is
+//! informational by construction: categorization never blocks, and only the
+//! threat channel feeds the block snapshot.
 //!
 //! Composition order matters. The threat wrapper sits *inside* the verifier
 //! ([`crate::verify`]): it first decides "is this label a threat at all",
@@ -73,7 +76,7 @@ impl ChannelBackend {
 impl DomainClassifier for ChannelBackend {
     /// The underlying pipeline's name (`fasttext`, `heuristic`, ...): the
     /// verdict row records the channel separately from the model that ran.
-    fn name(&self) -> &str {
+    fn name(&self) -> String {
         self.inner.name()
     }
 
@@ -92,7 +95,14 @@ impl DomainClassifier for ChannelBackend {
                 // Settings are always present for this channel; no settings
                 // means no declared threats, which is the safe reading.
                 let settings = self.settings.as_ref()?.load();
-                if !settings.is_auto_block_category(&verdict.category) {
+                // A dedicated threat model is a detector in its own right: it
+                // reports every label it produces, and the block snapshot
+                // applies `auto_block_categories` later. With the shared
+                // classifier there is no second opinion to report, so the
+                // operator's list stays a filter and nothing else is a threat.
+                if !settings.dedicated_threat_model()
+                    && !settings.is_auto_block_category(&verdict.category)
+                {
                     return None;
                 }
                 Some(Verdict {
@@ -120,8 +130,8 @@ mod tests {
     struct Fixed(Option<Verdict>);
 
     impl DomainClassifier for Fixed {
-        fn name(&self) -> &str {
-            "fixed"
+        fn name(&self) -> String {
+            "fixed".to_string()
         }
         fn classify(&self, _input: &ClassificationInput) -> Option<Verdict> {
             self.0.clone()
@@ -199,6 +209,45 @@ mod tests {
         let backend = ChannelBackend::threat(
             Box::new(Fixed(Some(verdict("malware", 1.0, Severity::Threat)))),
             settings_with(&[]),
+        );
+        assert!(backend.classify(&input()).is_none());
+    }
+
+    fn dedicated_settings(declared: &[&str]) -> Arc<ArcSwap<AiSettings>> {
+        Arc::new(ArcSwap::from_pointee(AiSettings {
+            model_path: "/m/shared.bin".to_string(),
+            threat_model_path: "/m/threat.bin".to_string(),
+            auto_block_categories: declared.iter().map(|c| c.to_string()).collect(),
+            ..AiSettings::default()
+        }))
+    }
+
+    #[test]
+    fn dedicated_threat_model_reports_undeclared_labels() {
+        // The detector's own label is a finding even when the operator did
+        // not list it: this list now decides what blocks, not what is seen.
+        let backend = ChannelBackend::threat(
+            Box::new(Fixed(Some(verdict("malware", 0.8, Severity::Info)))),
+            dedicated_settings(&["phishing"]),
+        );
+        let v = backend.classify(&input()).unwrap();
+        assert_eq!(v.category, "malware");
+        assert_eq!(v.severity, Severity::Threat);
+    }
+
+    #[test]
+    fn naming_the_shared_model_is_not_a_dedicated_one() {
+        // Pointing threat_model_path at the shared file is the way to spell
+        // "no second model", so the label list keeps its filtering job.
+        let settings = Arc::new(ArcSwap::from_pointee(AiSettings {
+            model_path: "/m/shared.bin".to_string(),
+            threat_model_path: "/m/shared.bin".to_string(),
+            auto_block_categories: vec!["phishing".to_string()],
+            ..AiSettings::default()
+        }));
+        let backend = ChannelBackend::threat(
+            Box::new(Fixed(Some(verdict("news", 0.9, Severity::Info)))),
+            settings,
         );
         assert!(backend.classify(&input()).is_none());
     }

@@ -121,7 +121,9 @@ impl ClassificationInput {
 /// interior-mutated (`Arc` every `Send + Sync`).
 pub trait DomainClassifier: Send + Sync {
     /// Backend name recorded on verdicts (e.g. `fasttext`, `heuristic`).
-    fn name(&self) -> &str;
+    /// Owned, not borrowed: a reloadable backend composes it from whichever
+    /// classifier is currently installed.
+    fn name(&self) -> String;
     /// Category identifiers this backend can emit (e.g. `malware`), used for
     /// category pickers in the console. Empty means "unknown" (the picker
     /// then only shows configured categories).
@@ -133,8 +135,55 @@ pub trait DomainClassifier: Send + Sync {
     fn classify(&self, input: &ClassificationInput) -> Option<Verdict>;
 }
 
+/// A channel backend that can be replaced while the server is running: model
+/// maintenance installs a retrained classifier here, so no restart is needed.
+pub struct Reloadable {
+    inner: arc_swap::ArcSwap<Box<dyn DomainClassifier + Send + Sync>>,
+}
+
+impl Reloadable {
+    pub fn new(backend: Box<dyn DomainClassifier + Send + Sync>) -> std::sync::Arc<Self> {
+        std::sync::Arc::new(Self {
+            inner: arc_swap::ArcSwap::from_pointee(backend),
+        })
+    }
+
+    /// Install `backend` for every subsequent classification.
+    pub fn replace(&self, backend: Box<dyn DomainClassifier + Send + Sync>) {
+        self.inner.store(std::sync::Arc::new(backend));
+    }
+}
+
+impl DomainClassifier for Reloadable {
+    fn name(&self) -> String {
+        self.inner.load().name()
+    }
+
+    fn categories(&self) -> Vec<String> {
+        self.inner.load().categories()
+    }
+
+    fn classify(&self, input: &ClassificationInput) -> Option<Verdict> {
+        self.inner.load().classify(input)
+    }
+}
+
+impl<T: DomainClassifier + ?Sized> DomainClassifier for std::sync::Arc<T> {
+    fn name(&self) -> String {
+        (**self).name()
+    }
+
+    fn categories(&self) -> Vec<String> {
+        (**self).categories()
+    }
+
+    fn classify(&self, input: &ClassificationInput) -> Option<Verdict> {
+        (**self).classify(input)
+    }
+}
+
 impl<T: DomainClassifier + ?Sized> DomainClassifier for Box<T> {
-    fn name(&self) -> &str {
+    fn name(&self) -> String {
         (**self).name()
     }
 

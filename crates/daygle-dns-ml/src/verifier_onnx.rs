@@ -292,8 +292,8 @@ impl MiniLmVerifier {
 }
 
 impl DomainClassifier for MiniLmVerifier {
-    fn name(&self) -> &str {
-        "minilm-onnx"
+    fn name(&self) -> String {
+        "minilm-onnx".to_string()
     }
 
     fn classify(&self, input: &ClassificationInput) -> Option<Verdict> {

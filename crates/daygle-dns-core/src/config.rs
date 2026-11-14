@@ -1379,11 +1379,12 @@ pub struct AiSettings {
     /// Domains per scan cycle (older ones are picked up on later cycles).
     pub max_domains_per_scan: u32,
     /// The labels that make a domain a *threat* (lowercase, e.g. `malware`,
-    /// `phishing`, `scam`). The threat channel reports these and nothing else;
-    /// in `enforce` mode they auto-block above `block_threshold`. Ordinary
-    /// categories (news, gambling, ...) never appear here - blocking those is
-    /// a per-group `blocked_categories` policy in the console, not a config
-    /// decision.
+    /// `phishing`, `scam`). With the shared classifier the threat channel
+    /// reports these and nothing else; with a dedicated `threat_model_path` it
+    /// reports every label that model produces and they all block above
+    /// `block_threshold`, so this list only applies to the shared classifier. Ordinary categories (news, gambling, ...) never
+    /// appear here - blocking those is a per-group `blocked_categories` policy
+    /// in the console, not a config decision.
     pub auto_block_categories: Vec<String>,
     /// Minimum confidence for a threat-channel verdict to auto-block.
     pub block_threshold: f32,
@@ -1409,6 +1410,15 @@ pub struct AiSettings {
     pub verifier_reference_path: String,
     /// Minimum embedding cosine for the verifier to assert a category.
     pub verifier_threshold: f32,
+    /// Let the scanner retrain its classifier from what it has learned: your
+    /// category corrections plus its own confident verdicts. A successful
+    /// retrain is written beside `ai.db` as `learned.bin` and used from the
+    /// next start; delete that file to fall back to `model_path`. A retrain is
+    /// skipped while there is not enough material for it.
+    #[serde(default = "default_auto_retrain")]
+    pub auto_retrain: bool,
+    /// How often automatic maintenance may retrain, in seconds.
+    pub retrain_interval_secs: u64,
 }
 
 impl Default for AiSettings {
@@ -1437,8 +1447,16 @@ impl Default for AiSettings {
             verifier_model_path: String::new(),
             verifier_reference_path: String::new(),
             verifier_threshold: 0.35,
+            auto_retrain: true,
+            retrain_interval_secs: 86_400,
         }
     }
+}
+
+/// `auto_retrain` defaults on: installs that predate the field get the
+/// maintenance behaviour rather than silently keeping a frozen model.
+fn default_auto_retrain() -> bool {
+    true
 }
 
 impl AiSettings {
@@ -1447,6 +1465,16 @@ impl AiSettings {
         self.auto_block_categories
             .iter()
             .any(|c| c.eq_ignore_ascii_case(category))
+    }
+
+    /// Whether the threat channel runs a model of its own instead of the
+    /// shared one. A dedicated model reports every label it produces, so the
+    /// threat list records what was detected and `auto_block_categories`
+    /// decides only what may block. Naming the shared model explicitly is the
+    /// same as leaving the field empty: no second model, no change.
+    pub fn dedicated_threat_model(&self) -> bool {
+        let threat = self.threat_model_path.trim();
+        !threat.is_empty() && threat != self.model_path.trim()
     }
 }
 

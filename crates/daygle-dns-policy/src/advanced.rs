@@ -412,6 +412,20 @@ impl AdvancedBlocking {
         })
     }
 
+    /// The names of the enabled groups that block the AI category `category`,
+    /// in policy order: the console shows who a category block applies to.
+    pub fn groups_blocking_category(&self, category: &str) -> Vec<&str> {
+        self.groups
+            .iter()
+            .filter(|g| {
+                g.blocked_categories
+                    .iter()
+                    .any(|c| c.eq_ignore_ascii_case(category))
+            })
+            .map(|g| g.name.as_str())
+            .collect()
+    }
+
     /// The Safe Search and YouTube Restricted Mode switches of the first
     /// enabled group `client` on `listener` belongs to (both off for clients
     /// in no group), with that group's name.

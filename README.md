@@ -166,13 +166,23 @@ Daygle DNS combines, in a single process:
   the query log. It works in two independent channels, each with its own
   model, confidence floor and verdict TTL: **categorization** labels sites
   (news, shopping, adult, ...) and never blocks, while **threat detection**
-  looks only for the categories you list in `ai.auto_block_categories` and is
-  the only channel that can auto-block fresh high-confidence verdicts. The
+  is the only channel that can auto-block fresh high-confidence verdicts.
+  With the shared model it reports only the labels you list in
+  `ai.auto_block_categories`; with a dedicated `ai.threat_model_path` it
+  reports every label that model produces and blocks it above the threshold,
+  so that list only applies to the shared classifier. The
   two lists are separate on purpose: the AI → Classifications tab is the
   categorizer's growing list of visited domains (relabel any of them
   yourself), the AI → Threats tab is what the AI blocks, and blocking an
   ordinary category (gambling, ads, ...) is a per-filtering-group setting
-  rather than a scanner decision. On by
+  rather than a scanner decision. The threat list exports as a plain domain
+  list or CSV for use as a blocklist elsewhere, a domain can be marked
+  *not a threat* (its detection stops blocking but is kept for review), and
+  every operator correction is downloadable as training data. The scanner also
+  maintains its own model: with `ai.auto_retrain` on it periodically rebuilds
+  the classifier from your corrections and its confident verdicts, refuses a
+  candidate that does worse on held-out corrections than the model in use, and
+  loads an accepted one without a restart. On by
   default after an install in **train mode** (records verdicts, nothing
   blocks) - flip `ai.mode` to `enforce` in the config or GUI when you are
   happy with the verdict log. Operator allowlist always wins, and expired

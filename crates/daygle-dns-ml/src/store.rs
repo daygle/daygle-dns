@@ -106,6 +106,20 @@ pub struct NewVerdict {
     pub expires_after_secs: i64,
 }
 
+/// One operator correction: an exemption, a "not a threat" mark or a
+/// category relabel. Collected as training data for an offline model; the
+/// engine never learns from it at runtime.
+#[derive(Debug, Clone)]
+pub struct CorrectionRow {
+    pub domain: String,
+    /// `allow`, `not_threat` or `category`.
+    pub action: String,
+    /// The operator's label for a `category` correction, else empty.
+    pub category: String,
+    pub reason: String,
+    pub created_at: i64,
+}
+
 /// One operator override.
 #[derive(Debug, Clone)]
 pub struct OverrideRow {
@@ -515,9 +529,10 @@ impl AiStore {
 
     /// Fresh (non-expired) classified *threat-channel* verdicts at or above
     /// `threshold`, minus exact operator `allow` vetoes and threats the
-    /// verifier disputed. The block snapshot narrows these to the auto-block
-    /// categories and to domains no parent override exempts. Content-channel
-    /// rows are categorizations: they never reach the snapshot.
+    /// verifier disputed. The block snapshot narrows these to domains no
+    /// parent override exempts and, when the threat channel shares the
+    /// classifier, to the auto-block labels. Content-channel rows are
+    /// categorizations: they never reach the snapshot.
     pub fn fresh_blocked(
         &self,
         now_epoch: i64,
@@ -531,7 +546,8 @@ impl AiStore {
                AND confidence >= ?1 AND expires_at > ?2
                AND NOT EXISTS (
                    SELECT 1 FROM ai_overrides o
-                   WHERE o.domain = ai_verdicts.domain AND o.action = 'allow'
+                   WHERE o.domain = ai_verdicts.domain
+                     AND o.action IN ('allow', 'not_threat')
                )",
         )?;
         let collected = stmt
@@ -652,6 +668,130 @@ impl AiStore {
         let collected = stmt
             .query_map([], |r| r.get::<_, String>(0))?
             .collect::<std::result::Result<_, _>>()?;
+        Ok(collected)
+    }
+
+    /// Classified, unexpired verdicts confident enough to train on:
+    /// `(channel, category, domain)`, strongest first. Overrides are excluded -
+    /// an exempted or corrected domain is not evidence for the model.
+    pub fn confident_verdicts(
+        &self,
+        content_floor: f32,
+        threat_floor: f32,
+        now_epoch: i64,
+        limit: u32,
+    ) -> Result<Vec<(String, String, String)>> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(
+            "SELECT channel, category, domain FROM ai_verdicts v
+             WHERE status = 'classified' AND severity != 'disputed' AND category != ''
+               AND expires_at > ?3
+               AND confidence >= CASE channel WHEN 'threat' THEN ?2 ELSE ?1 END
+               AND NOT EXISTS (
+                   SELECT 1 FROM ai_overrides o
+                   WHERE o.domain = v.domain
+                     AND o.action IN ('allow', 'not_threat')
+               )
+             ORDER BY confidence DESC
+             LIMIT ?4",
+        )?;
+        let collected = stmt
+            .query_map(params![content_floor, threat_floor, now_epoch, limit], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                ))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(collected)
+    }
+
+    /// The domains the operator marked "not a threat": a correction, not an
+    /// exemption. The threat verdict stays stored for audit and retraining,
+    /// but it never blocks and is left out of the exported threat list.
+    pub fn not_threat_overrides(&self) -> Result<std::collections::HashSet<String>> {
+        let conn = self.lock()?;
+        let mut stmt =
+            conn.prepare("SELECT domain FROM ai_overrides WHERE action = 'not_threat'")?;
+        let collected = stmt
+            .query_map([], |r| r.get::<_, String>(0))?
+            .collect::<std::result::Result<_, _>>()?;
+        Ok(collected)
+    }
+
+    /// The threat list blocking is built from, with the confidence that
+    /// qualified it: fresh, undisputed, at or above `threshold`, and vetoed by
+    /// no override. Strongest first. Served for export so another resolver can
+    /// use the result as a blocklist.
+    pub fn export_threats(
+        &self,
+        now_epoch: i64,
+        threshold: f32,
+    ) -> Result<Vec<(String, String, f32, i64)>> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(
+            "SELECT domain, category, confidence, expires_at FROM ai_verdicts
+             WHERE channel = 'threat' AND status = 'classified'
+               AND severity != 'disputed'
+               AND confidence >= ?1 AND expires_at > ?2
+               AND NOT EXISTS (
+                   SELECT 1 FROM ai_overrides o
+                   WHERE o.domain = ai_verdicts.domain
+                     AND o.action IN ('allow', 'not_threat')
+               )
+             ORDER BY confidence DESC, domain",
+        )?;
+        let collected = stmt
+            .query_map(params![threshold, now_epoch], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, f64>(2)? as f32,
+                    r.get::<_, i64>(3)?,
+                ))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(collected)
+    }
+
+    /// Every verdict for one domain, both channels: what the console's
+    /// "explain this domain" view reads.
+    pub fn verdicts_for(&self, domain: &str) -> Result<Vec<VerdictRow>> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {VERDICT_COLUMNS} FROM ai_verdicts v WHERE v.domain = ?1
+             ORDER BY v.channel"
+        ))?;
+        let collected = stmt
+            .query_map(params![domain], verdict_row)?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(collected)
+    }
+
+    /// Every operator correction, newest first: exemptions, "not a threat"
+    /// marks and category relabels.
+    pub fn corrections(&self) -> Result<Vec<CorrectionRow>> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(
+            "SELECT domain, action, '' AS category, reason, created_at
+             FROM ai_overrides
+             UNION ALL
+             SELECT domain, 'category', category, '', created_at
+             FROM ai_category_overrides
+             ORDER BY created_at DESC, domain",
+        )?;
+        let collected = stmt
+            .query_map([], |r| {
+                Ok(CorrectionRow {
+                    domain: r.get(0)?,
+                    action: r.get(1)?,
+                    category: r.get(2)?,
+                    reason: r.get(3)?,
+                    created_at: r.get(4)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(collected)
     }
 

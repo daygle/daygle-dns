@@ -564,9 +564,12 @@ query_db_retention_days = 0
 #     is: news, shopping, gaming, ... Its verdicts never block by themselves;
 #     they are the labels Filtering → AI → Classifications lists, and an
 #     operator can relabel any domain there.
-#   - the THREAT channel (threat_model_path) looks only for the categories
-#     named in auto_block_categories, and is the only channel that can block
-#     on its own. Its verdicts are what Filtering → AI → Threats lists.
+#   - the THREAT channel (threat_model_path) is the only channel that can
+#     block on its own, and its verdicts are what Filtering → AI → Threats
+#     lists. With the shared model it reports only the categories named in
+#     auto_block_categories; with its own model everything it reports blocks
+#     above block_threshold, and auto_block_categories only applies to the
+#     shared classifier.
 # Each channel has its own confidence floor and its own verdict TTL, so a
 # floor or TTL tuned for one job does not distort the other.
 #
@@ -606,6 +609,16 @@ scan_interval_secs = 300
 expire_check_secs = 3600
 max_domains_per_scan = 5120
 auto_block_categories = ["malware", "phishing", "scam"]
+
+# The scanner maintains its own model. Every retrain_interval_secs it rebuilds
+# the classifier from your category corrections (AI -> Threats) plus its own
+# confident verdicts, and installs the result beside ai.db as learned.bin -
+# loaded into the running scanner immediately (and ahead of model_path from
+# then on, unless a channel names its own model). Delete learned.bin to fall
+# back. A retrain needs 200+ examples and must hold up on held-out
+# corrections.
+# auto_retrain = true
+# retrain_interval_secs = 86400
 block_threshold = 0.99
 confidence_floor = 0.2
 category_confidence_floor = 0.2

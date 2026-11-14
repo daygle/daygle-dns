@@ -1299,6 +1299,20 @@ pub struct AiVerdictsQuery {
     per_page: Option<u32>,
 }
 
+/// `GET /api/ai/threats/export` and `/api/ai/corrections` query params.
+#[derive(Debug, Default, serde::Deserialize)]
+pub struct AiExportQuery {
+    /// `csv` (the export's default) or `list` (threat export only).
+    format: Option<String>,
+}
+
+/// `GET /api/ai/explain` query params.
+#[derive(Debug, Default, serde::Deserialize)]
+pub struct AiExplainQuery {
+    /// The domain to explain, with or without a trailing dot.
+    domain: Option<String>,
+}
+
 /// `GET /api/ai/threats` query params.
 #[derive(Debug, Default, serde::Deserialize)]
 pub struct AiThreatsQuery {
@@ -1319,7 +1333,9 @@ pub struct AiThreatsQuery {
 pub struct AiOverrideBody {
     pub domain: String,
     /// `allow` installs an AI-exempt override; `clear` removes it.
-    /// `category` relabels the domain; `clear_category` drops the relabel.
+    /// `not_threat` records a correction that stops the domain's detection
+    /// blocking; `category` relabels the domain; `clear_category` drops the
+    /// relabel.
     pub action: String,
     /// The operator's label for `action = "category"`.
     #[serde(default)]
@@ -1471,6 +1487,22 @@ pub async fn ai_status(State(state): State<AppState>) -> Response {
         "threat_ttl_secs": settings.threat_ttl_secs,
         "block_threshold": settings.block_threshold,
         "auto_block_categories": settings.auto_block_categories,
+        // The configured model paths (empty falls back to `model_path`) and
+        // whether the threat channel runs a model of its own.
+        "model_path": settings.model_path,
+        "category_model_path": settings.category_model_path,
+        "threat_model_path": settings.threat_model_path,
+        "threat_model_dedicated": settings.dedicated_threat_model(),
+        // Self-maintained model: automatic retraining and what the last run
+        // achieved. The retrained file is used from the next start.
+        "auto_retrain": settings.auto_retrain,
+        "retrain_interval_secs": settings.retrain_interval_secs,
+        "learned_model": {
+            "path": ai.learned_model_path().display().to_string(),
+            "present": ai.learned_model_path().is_file(),
+            "active": ai.learned_model_active(),
+            "last": ai.learned_model_record(),
+        },
         "backend_categories": ai.backend_categories(),
         "status_counts": serde_json::Map::from_iter(
             statuses
@@ -1548,13 +1580,17 @@ pub async fn ai_verdicts(
 }
 
 /// `GET /api/ai/threats?q=&category=&severity=&exemption=&page=&per_page=` - paginated list of the
-/// scanner's classified threat verdicts (`threat` and `disputed` severity),
-/// highest confidence first. Each row carries `blocked`: whether the domain
-/// is in the *current* block snapshot, i.e. actually auto-blocked in
-/// enforce mode (an empty snapshot in train mode therefore reports every
-/// row as not blocked), and `category_blocked`: whether a filtering group
-/// blocks the category the domain carries, so it is blocked for that
-/// group's clients in either mode.
+/// scanner's *detected* threat verdicts (`threat` and `disputed` severity),
+/// highest confidence first: what the threat channel reported, not merely what
+/// blocks. A dedicated `ai.threat_model_path` reports every label its model
+/// produces; with the shared model only the labels in
+/// `ai.auto_block_categories` are reported. Each row carries `blocked`:
+/// whether the domain is in the *current* block snapshot - detected, in an
+/// auto-block label, at or above the block threshold, undisputed and not
+/// exempt, and only in enforce mode (an empty snapshot in train mode
+/// therefore reports every row as not blocked). `category_blocked`: whether a
+/// filtering group blocks the category the domain carries, so it is blocked
+/// for that group's clients in either mode.
 pub async fn ai_threats(
     State(state): State<AppState>,
     Query(query): Query<AiThreatsQuery>,
@@ -1578,12 +1614,18 @@ pub async fn ai_threats(
                 search: query.q.as_deref(),
                 ..Default::default()
             };
-            ai.store.list_threats_filtered(&filter, page_bounds)
+            let listed = ai.store.list_threats_filtered(&filter, page_bounds)?;
+            // Rows the operator marked "not a threat" stay in the list for
+            // audit, so the console needs the marks to label them.
+            Ok::<_, daygle_dns_core::error::DaygleError>((
+                listed,
+                ai.store.not_threat_overrides()?,
+            ))
         }
     })
     .await;
     match listed {
-        Ok((rows, total)) => {
+        Ok(((rows, total), not_threat)) => {
             let snapshot = ai.snapshot().load();
             let categories = ai.category_snapshot();
             let categories = categories.load();
@@ -1601,6 +1643,7 @@ pub async fn ai_threats(
                         "evidence": r.evidence,
                         "observations": r.observations,
                         "overridden": r.overridden,
+                        "not_threat": not_threat.contains(&r.domain),
                         "blocked": snapshot.contains_key(&r.domain),
                         "category_blocked": categories
                             .get(&r.domain)
@@ -1630,10 +1673,10 @@ pub async fn ai_override(
         return map_err(daygle_dns_ml::ai_disabled_error());
     };
     let domain = body.domain.trim().trim_matches('.').to_ascii_lowercase();
-    if body.action == "allow" && body.reason.trim().is_empty() {
+    if matches!(body.action.as_str(), "allow" | "not_threat") && body.reason.trim().is_empty() {
         return (
             StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": "a reason is required when adding an AI exemption"})),
+            Json(serde_json::json!({"error": "a reason is required for this AI override"})),
         )
             .into_response();
     }
@@ -1658,7 +1701,7 @@ pub async fn ai_override(
     let action = body.action.as_str();
     let category = body.category.trim().to_ascii_lowercase();
     match action {
-        "allow" | "clear" | "clear_category" => {}
+        "allow" | "not_threat" | "clear" | "clear_category" => {}
         "category" => {
             let known = ai.backend_categories();
             if !known.iter().any(|c| c.eq_ignore_ascii_case(&category)) {
@@ -1676,7 +1719,7 @@ pub async fn ai_override(
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({
                 "error": format!(
-                    "unknown action '{other}' (expected allow, clear, category or clear_category)"
+                    "unknown action '{other}' (expected allow, not_threat, clear, category or clear_category)"
                 )
             })),
         )
@@ -1692,6 +1735,7 @@ pub async fn ai_override(
         let category = category.clone();
         move || match action.as_str() {
             "allow" => ai.set_allow_override(&domain, &reason).map(|()| true),
+            "not_threat" => ai.set_not_threat_override(&domain, &reason).map(|()| true),
             "category" => ai.set_category_override(&domain, &category).map(|()| true),
             "clear_category" => ai.clear_category_override(&domain),
             _ => ai.clear_override(&domain),
@@ -1700,6 +1744,10 @@ pub async fn ai_override(
     .await;
     let (message, missing) = match action {
         "allow" => (format!("AI override: '{domain}' is now AI-exempt"), ""),
+        "not_threat" => (
+            format!("AI correction: '{domain}' is marked not a threat"),
+            "",
+        ),
         "category" => (
             format!("AI category override: '{domain}' is now '{category}'"),
             "",
@@ -1729,6 +1777,361 @@ pub async fn ai_override(
             Json(serde_json::json!({"error": missing})),
         )
             .into_response(),
+        Err(e) => map_err(e),
+    }
+}
+
+
+/// `GET /api/ai/threats/export?format=csv|list` - the active threat list as a
+/// download: exactly the rows the block snapshot is built from. `list` is one
+/// domain per line, ready to use as a blocklist source; `csv` adds the label,
+/// the confidence and the re-check time.
+pub async fn ai_threats_export(
+    State(state): State<AppState>,
+    Query(query): Query<AiExportQuery>,
+) -> Response {
+    let Some(ai) = ai_engine(&state) else {
+        return map_err(daygle_dns_ml::ai_disabled_error());
+    };
+    let format = query
+        .format
+        .as_deref()
+        .unwrap_or("csv")
+        .trim()
+        .to_ascii_lowercase();
+    if format != "csv" && format != "list" {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "format must be csv or list"})),
+        )
+            .into_response();
+    }
+    let threshold = ai.settings.load_full().block_threshold;
+    let exported = run_blocking({
+        let ai = ai.clone();
+        move || ai.store.export_threats(chrono::Utc::now().timestamp(), threshold)
+    })
+    .await;
+    let rows = match exported {
+        Ok(rows) => rows,
+        Err(e) => return map_err(e),
+    };
+    if format == "list" {
+        let mut body = String::with_capacity(rows.len() * 32);
+        for (domain, ..) in &rows {
+            body.push_str(domain);
+            body.push('\n');
+        }
+        let headers = [
+            (header::CONTENT_TYPE, "text/plain; charset=utf-8"),
+            (
+                header::CONTENT_DISPOSITION,
+                "attachment; filename=\"ai-threats.txt\"",
+            ),
+        ];
+        return (headers, body).into_response();
+    }
+    let mut csv = String::from("domain,category,confidence,expires_at\n");
+    for (domain, category, confidence, expires_at) in &rows {
+        let expires = chrono::DateTime::<chrono::Utc>::from_timestamp(*expires_at, 0)
+            .map(|t| t.to_rfc3339())
+            .unwrap_or_default();
+        csv.push_str(&format!(
+            "{},{},{:.3},{}\n",
+            csv_escape(domain),
+            csv_escape(category),
+            confidence,
+            csv_escape(&expires),
+        ));
+    }
+    let headers = [
+        (header::CONTENT_TYPE, "text/csv; charset=utf-8"),
+        (
+            header::CONTENT_DISPOSITION,
+            "attachment; filename=\"ai-threats.csv\"",
+        ),
+    ];
+    (headers, csv).into_response()
+}
+
+/// `GET /api/ai/explain?domain=` - why a domain is blocked, or why it is not:
+/// both channels' verdicts, the operator's overrides, the category blocking
+/// applies to and the groups that block it, with plain-language reasons.
+pub async fn ai_explain(
+    State(state): State<AppState>,
+    Query(query): Query<AiExplainQuery>,
+) -> Response {
+    let Some(ai) = ai_engine(&state) else {
+        return map_err(daygle_dns_ml::ai_disabled_error());
+    };
+    let domain = query
+        .domain
+        .as_deref()
+        .unwrap_or("")
+        .trim()
+        .trim_matches('.')
+        .to_ascii_lowercase();
+    if !daygle_dns_ml::scanner::looks_like_domain(&domain) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "enter a valid domain name, such as news.example.com"
+            })),
+        )
+            .into_response();
+    }
+    let settings = ai.settings.load_full();
+    let groups = state.advanced_blocking.load_full();
+    let explained = run_blocking({
+        let ai = ai.clone();
+        let domain = domain.clone();
+        move || -> daygle_dns_core::error::Result<serde_json::Value> {
+            let rows = ai.store.verdicts_for(&domain)?;
+            let override_row = ai
+                .store
+                .list_overrides()?
+                .into_iter()
+                .find(|o| o.domain == domain);
+            let relabel = ai.store.category_overrides()?.remove(&domain);
+            let blocks = ai.snapshot().load();
+            let categories = ai.category_snapshot();
+            let categories = categories.load();
+            let blocked_category = blocks.get(&domain).map(|b| b.category.clone());
+            let threat = rows.iter().find(|r| r.channel == "threat");
+            let content = rows.iter().find(|r| r.channel == "content");
+            let label = categories
+                .get(&domain)
+                .map(|c| c.category.clone())
+                .or_else(|| relabel.clone())
+                .or_else(|| content.map(|r| r.category.clone()));
+            let blocking_groups: Vec<String> = label
+                .as_deref()
+                .map(|label| {
+                    groups
+                        .groups_blocking_category(label)
+                        .into_iter()
+                        .map(str::to_string)
+                        .collect()
+                })
+                .unwrap_or_default();
+            let stamp = |epoch: i64| {
+                chrono::DateTime::<chrono::Utc>::from_timestamp(epoch, 0).map(|t| t.to_rfc3339())
+            };
+            let mode = match settings.mode {
+                daygle_dns_core::config::AiMode::Train => "train",
+                daygle_dns_core::config::AiMode::Enforce => "enforce",
+            };
+            let mut reasons: Vec<String> = Vec::new();
+            if let Some(category) = &blocked_category {
+                reasons.push(format!(
+                    "In the current AI block snapshot as '{category}' ({mode} mode): it is auto-blocked now."
+                ));
+            }
+            if let Some(o) = override_row.as_ref() {
+                match o.action.as_str() {
+                    "allow" => reasons.push(format!(
+                        "Exempt by you ({}): the AI never blocks it or its subdomains.",
+                        o.reason
+                    )),
+                    "not_threat" => reasons.push(format!(
+                        "Marked not a threat by you ({}): the detection is kept for audit but never blocks.",
+                        o.reason
+                    )),
+                    _ => {}
+                }
+            }
+            if let Some(relabel) = &relabel {
+                reasons.push(format!(
+                    "You relabelled it as '{relabel}', which is what category blocking matches."
+                ));
+            }
+            match threat {
+                Some(t) if t.severity == "disputed" => reasons.push(format!(
+                    "The verifier disputed this detection at {:.0}%, so it never blocks.",
+                    t.confidence * 100.0
+                )),
+                Some(t) => {
+                    if override_row.is_none() && blocked_category.is_none() {
+                        if t.confidence < settings.block_threshold {
+                            reasons.push(format!(
+                                "Its threat confidence, {:.0}%, is below the {:.0}% block threshold.",
+                                t.confidence * 100.0,
+                                settings.block_threshold * 100.0
+                            ));
+                        }
+                        if !settings.dedicated_threat_model()
+                            && !settings.is_auto_block_category(&t.category)
+                        {
+                            reasons.push(format!(
+                                "The label '{}' is not ticked in AI → Threats, so it cannot block.",
+                                t.category
+                            ));
+                        }
+                        if t.expires_at <= chrono::Utc::now().timestamp() {
+                            reasons.push(
+                                "The detection has expired: it blocks again only after a fresh scan."
+                                    .to_string(),
+                            );
+                        }
+                    }
+                }
+                None => reasons.push(
+                    "No threat verdict yet: the scanner classifies a domain after it is first queried."
+                        .to_string(),
+                ),
+            }
+            if !blocking_groups.is_empty() {
+                reasons.push(format!(
+                    "Filtering group(s) {} block the category '{}', so it is blocked for their clients in either mode.",
+                    blocking_groups.join(", "),
+                    label.clone().unwrap_or_default()
+                ));
+            }
+            Ok(serde_json::json!({
+                "domain": domain,
+                "mode": mode,
+                "block_threshold": settings.block_threshold,
+                "threat_model_dedicated": settings.dedicated_threat_model(),
+                "auto_block_categories": settings.auto_block_categories.clone(),
+                "blocked": blocked_category.is_some(),
+                "blocked_category": blocked_category,
+                "label": label,
+                "category_override": relabel,
+                "override": override_row.as_ref().map(|o| serde_json::json!({
+                    "action": o.action,
+                    "reason": o.reason,
+                    "created_at": stamp(o.created_at),
+                })),
+                "threat": threat.map(|t| serde_json::json!({
+                    "category": t.category,
+                    "severity": t.severity,
+                    "status": t.status,
+                    "confidence": t.confidence,
+                    "backend": t.backend,
+                    "evidence": t.evidence,
+                    "observations": t.observations,
+                    "over_threshold": t.confidence >= settings.block_threshold,
+                    "label_treated_as_threat": settings.dedicated_threat_model()
+                        || settings.is_auto_block_category(&t.category),
+                    "classified_at": stamp(t.classified_at),
+                    "expires_at": stamp(t.expires_at),
+                })),
+                "category": content.map(|c| serde_json::json!({
+                    "category": c.category,
+                    "status": c.status,
+                    "confidence": c.confidence,
+                    "backend": c.backend,
+                    "overridden": c.category_overridden,
+                    "classified_at": stamp(c.classified_at),
+                    "expires_at": stamp(c.expires_at),
+                })),
+                "category_blocking_groups": blocking_groups,
+                "reasons": reasons,
+            }))
+        }
+    })
+    .await;
+    match explained {
+        Ok(value) => Json(value).into_response(),
+        Err(e) => map_err(e),
+    }
+}
+
+/// `GET /api/ai/corrections?format=csv` - every operator correction (an
+/// exemption, a "not a threat" mark, a category relabel), newest first. JSON by
+/// default; `?format=csv` downloads it as training data for an offline model.
+pub async fn ai_corrections(
+    State(state): State<AppState>,
+    Query(query): Query<AiExportQuery>,
+) -> Response {
+    let Some(ai) = ai_engine(&state) else {
+        return map_err(daygle_dns_ml::ai_disabled_error());
+    };
+    let listed = run_blocking({
+        let ai = ai.clone();
+        move || ai.store.corrections()
+    })
+    .await;
+    let rows = match listed {
+        Ok(rows) => rows,
+        Err(e) => return map_err(e),
+    };
+    let csv_wanted = query
+        .format
+        .as_deref()
+        .is_some_and(|f| f.eq_ignore_ascii_case("csv"));
+    if csv_wanted {
+        let mut csv = String::from("domain,action,category,reason,created_at\n");
+        for r in &rows {
+            let created = chrono::DateTime::<chrono::Utc>::from_timestamp(r.created_at, 0)
+                .map(|t| t.to_rfc3339())
+                .unwrap_or_default();
+            csv.push_str(&format!(
+                "{},{},{},{},{}\n",
+                csv_escape(&r.domain),
+                csv_escape(&r.action),
+                csv_escape(&r.category),
+                csv_escape(&r.reason),
+                csv_escape(&created),
+            ));
+        }
+        let headers = [
+            (header::CONTENT_TYPE, "text/csv; charset=utf-8"),
+            (
+                header::CONTENT_DISPOSITION,
+                "attachment; filename=\"ai-corrections.csv\"",
+            ),
+        ];
+        return (headers, csv).into_response();
+    }
+    Json(serde_json::json!({
+        "corrections": rows.iter().map(|r| serde_json::json!({
+            "domain": r.domain,
+            "action": r.action,
+            "category": r.category,
+            "reason": r.reason,
+            "created_at": chrono::DateTime::<chrono::Utc>::from_timestamp(r.created_at, 0)
+                .map(|t| t.to_rfc3339()),
+        })).collect::<Vec<_>>(),
+        "total": rows.len(),
+    }))
+    .into_response()
+}
+
+/// `POST /api/ai/retrain` - retrain the classifier from the scanner's own
+/// confident verdicts plus the operator's corrections. The result is written
+/// beside `ai.db` as `learned.bin` and used from the next start; a retrain
+/// with too little data, or one whose model does not reproduce its own
+/// training set, leaves the current model in place.
+pub async fn ai_retrain(State(state): State<AppState>) -> Response {
+    let Some(ai) = ai_engine(&state) else {
+        return map_err(daygle_dns_ml::ai_disabled_error());
+    };
+    let outcome = run_blocking({
+        let ai = ai.clone();
+        move || ai.retrain_learned_model()
+    })
+    .await;
+    match outcome {
+        Ok(stats) => {
+            state.logs.push(
+                daygle_dns_core::LogLevel::Info,
+                "api",
+                format!(
+                    "AI model retrained from {} examples across {} labels",
+                    stats.examples, stats.labels
+                ),
+            );
+            Json(serde_json::json!({
+                "examples": stats.examples,
+                "labels": stats.labels,
+                "corrections": stats.corrections,
+                "verdicts": stats.verdicts,
+                "active": true,
+                "message": "Retrained and in use now.",
+            }))
+            .into_response()
+        }
         Err(e) => map_err(e),
     }
 }
@@ -5830,6 +6233,12 @@ pub struct AiUpdate {
     pub database: Option<String>,
     /// fastText model path; empty uses the built-in heuristic backend.
     pub model_path: Option<String>,
+    /// fastText model for content categorisation; empty uses `model_path`.
+    pub category_model_path: Option<String>,
+    /// fastText model for threat detection; empty uses `model_path`. A model
+    /// named here is a detector in its own right: every label it reports is a
+    /// threat.
+    pub threat_model_path: Option<String>,
     pub workers: Option<u32>,
     pub scan_interval_secs: Option<u64>,
     pub expire_check_secs: Option<u64>,
@@ -5839,6 +6248,9 @@ pub struct AiUpdate {
     pub confidence_floor: Option<f32>,
     pub category_ttl_secs: Option<u64>,
     pub threat_ttl_secs: Option<u64>,
+    /// Retrain the classifier from what the scanner has learned.
+    pub auto_retrain: Option<bool>,
+    pub retrain_interval_secs: Option<u64>,
 }
 
 /// listener-relevant `[server]` fields apply live; the rest are restarts.
@@ -6743,6 +7155,12 @@ pub async fn update_settings(
         if let Some(v) = &a.model_path {
             config.ai.model_path = v.trim().to_string();
         }
+        if let Some(v) = &a.category_model_path {
+            config.ai.category_model_path = v.trim().to_string();
+        }
+        if let Some(v) = &a.threat_model_path {
+            config.ai.threat_model_path = v.trim().to_string();
+        }
         if let Some(v) = a.workers {
             config.ai.workers = v;
         }
@@ -6770,6 +7188,12 @@ pub async fn update_settings(
         }
         if let Some(v) = a.threat_ttl_secs {
             config.ai.threat_ttl_secs = v;
+        }
+        if let Some(v) = a.auto_retrain {
+            config.ai.auto_retrain = v;
+        }
+        if let Some(v) = a.retrain_interval_secs {
+            config.ai.retrain_interval_secs = v.max(3_600);
         }
     }
 

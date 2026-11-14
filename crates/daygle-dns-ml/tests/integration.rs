@@ -688,6 +688,277 @@ fn auto_block_categories_decide_what_blocks() {
     assert!(snapshot.contains_key("bet-slip.example"));
 }
 
+/// A dedicated threat model is a detector in its own right: what it reports
+/// blocks without the operator listing the label, which is the whole point of
+/// giving the threat channel its own model.
+#[test]
+fn dedicated_threat_model_blocks_its_own_labels() {
+    let dir = TempDir::new().unwrap();
+    let ai = engine(
+        &dir,
+        AiSettings {
+            // No shared model on purpose: the missing file only degrades the
+            // channel to the heuristic rules, and the *configured* dedicated
+            // path is what moves the label list out of the block decision.
+            model_path: String::new(),
+            threat_model_path: "/nonexistent/threat.bin".to_string(),
+            auto_block_categories: vec!["phishing".to_string()],
+            block_threshold: 0.25,
+            ..settings(AiMode::Enforce)
+        },
+    );
+    ai.store.observe("casino-bonus.example").unwrap();
+    ai.store
+        .save_verdict(
+            Channel::Threat,
+            "casino-bonus.example",
+            "gambling",
+            "threat",
+            "classified",
+            0.8,
+            "heuristic",
+            "ev",
+            3600,
+        )
+        .unwrap();
+    let blockable = ai.blockable_counts().unwrap();
+    assert_eq!(
+        blockable.get("gambling"),
+        Some(&1),
+        "a dedicated model's label blocks without being listed: {blockable:?}"
+    );
+}
+
+/// Without a second model the label list is the only thing separating a threat
+/// from an ordinary category, so an unlisted label still blocks nothing.
+#[test]
+fn shared_classifier_keeps_the_label_list_as_the_filter() {
+    let dir = TempDir::new().unwrap();
+    let ai = engine(
+        &dir,
+        AiSettings {
+            model_path: String::new(),
+            auto_block_categories: vec!["phishing".to_string()],
+            block_threshold: 0.25,
+            ..settings(AiMode::Enforce)
+        },
+    );
+    ai.store.observe("casino-bonus.example").unwrap();
+    ai.store
+        .save_verdict(
+            Channel::Threat,
+            "casino-bonus.example",
+            "gambling",
+            "threat",
+            "classified",
+            0.8,
+            "heuristic",
+            "ev",
+            3600,
+        )
+        .unwrap();
+    assert!(
+        ai.blockable_counts().unwrap().get("gambling").is_none(),
+        "an unlisted label must not block with the shared classifier"
+    );
+}
+
+/// A correction is not an exemption: the detection is kept (so the mistake
+/// stays visible and the model can be retrained from it) but it stops
+/// blocking and leaves the exported list until the mark is cleared.
+/// Corrections outrank verdicts when building a training set, and a domain
+/// the operator vetoed is not evidence for the model.
+#[test]
+fn training_data_prefers_corrections_and_skips_vetoed_domains() {
+    let dir = TempDir::new().unwrap();
+    let store = tmp_store(&dir);
+    for domain in ["a.example", "b.example"] {
+        store.observe(domain).unwrap();
+        store
+            .save_verdict(
+                Channel::Content,
+                domain,
+                "news",
+                "info",
+                "classified",
+                0.95,
+                "fasttext",
+                "ev",
+                3600,
+            )
+            .unwrap();
+    }
+    store.set_category_override("a.example", "shopping").unwrap();
+    store
+        .set_override("b.example", "not_threat", "not news")
+        .unwrap();
+
+    let (pairs, stats) =
+        daygle_dns_ml::learn::collect(&store, &settings(AiMode::Train)).unwrap();
+    assert_eq!(
+        pairs,
+        vec![("shopping".to_string(), "a.example".to_string())],
+        "the relabel wins and the vetoed domain is not training data"
+    );
+    assert_eq!(stats.corrections, 1);
+    assert_eq!(stats.verdicts, 0);
+}
+
+/// A retrain with nothing to learn from is refused; once there is enough, it
+/// installs a model beside `ai.db` and records what it was built from.
+#[test]
+fn retraining_installs_a_learned_model_once_there_is_data() {
+    let dir = TempDir::new().unwrap();
+    let ai = engine(
+        &dir,
+        AiSettings {
+            block_threshold: 0.5,
+            ..settings(AiMode::Train)
+        },
+    );
+    let refused = ai.retrain_learned_model().unwrap_err().to_string();
+    assert!(refused.contains("not enough training data"), "{refused}");
+    assert!(!ai.learned_model_path().exists());
+
+    let labels = ["news", "shopping", "gambling"];
+    for i in 0..240 {
+        let domain = format!("site{i}.example");
+        ai.store.observe(&domain).unwrap();
+        ai.store
+            .save_verdict(
+                Channel::Content,
+                &domain,
+                labels[i % labels.len()],
+                "info",
+                "classified",
+                0.95,
+                "fasttext",
+                "ev",
+                3600,
+            )
+            .unwrap();
+    }
+
+    let stats = ai.retrain_learned_model().unwrap();
+    assert_eq!(stats.examples, 240);
+    assert_eq!(stats.labels, 3);
+    assert!(ai.learned_model_path().is_file());
+    let record = ai.learned_model_record().expect("the retrain is recorded");
+    assert_eq!(record["examples"], 240);
+    assert_eq!(record["labels"], 3);
+    // The new model is live: the content channel switched from the heuristic
+    // fallback to the trained fastText file, without a restart.
+    assert!(ai.learned_model_active());
+    assert_eq!(ai.content_backend_name(), "fasttext");
+}
+
+/// Corrections are held back from training in fifths, and the candidate is
+/// accepted when it does as well on them as the model in use.
+#[test]
+fn retraining_judges_itself_on_held_out_corrections() {
+    let dir = TempDir::new().unwrap();
+    let ai = engine(
+        &dir,
+        AiSettings {
+            block_threshold: 0.5,
+            ..settings(AiMode::Train)
+        },
+    );
+    let labels = ["news", "shopping", "gambling"];
+    for i in 0..240 {
+        let domain = format!("site{i}.example");
+        ai.store.observe(&domain).unwrap();
+        ai.store
+            .save_verdict(
+                Channel::Content,
+                &domain,
+                labels[i % labels.len()],
+                "info",
+                "classified",
+                0.95,
+                "fasttext",
+                "ev",
+                3600,
+            )
+            .unwrap();
+    }
+    for i in 0..10 {
+        ai.store
+            .set_category_override(&format!("site{i}.example"), labels[i % labels.len()])
+            .unwrap();
+    }
+
+    let stats = ai.retrain_learned_model().unwrap();
+    assert_eq!(stats.corrections, 8, "two of ten corrections are held out");
+    let record = ai.learned_model_record().unwrap();
+    assert_eq!(record["validation_examples"], 2);
+    assert!(
+        record["validation_accuracy"].as_f64().is_some(),
+        "the held-out score is recorded: {record}"
+    );
+}
+
+#[test]
+fn marking_a_threat_not_a_threat_stops_blocking_and_export() {
+    let dir = TempDir::new().unwrap();
+    let ai = engine(
+        &dir,
+        AiSettings {
+            auto_block_categories: vec!["gambling".to_string()],
+            block_threshold: 0.25,
+            ..settings(AiMode::Enforce)
+        },
+    );
+    ai.store.observe("casino-bonus.example").unwrap();
+    ai.store
+        .save_verdict(
+            Channel::Threat,
+            "casino-bonus.example",
+            "gambling",
+            "threat",
+            "classified",
+            0.9,
+            "heuristic",
+            "ev",
+            3600,
+        )
+        .unwrap();
+    let now = chrono::Utc::now().timestamp();
+    assert_eq!(ai.store.export_threats(now, 0.25).unwrap().len(), 1);
+    assert!(ai.blockable_counts().unwrap().contains_key("gambling"));
+
+    ai.set_not_threat_override("casino-bonus.example", "not gambling")
+        .unwrap();
+    assert!(ai.blockable_counts().unwrap().is_empty());
+    assert!(
+        ai.store.export_threats(now, 0.25).unwrap().is_empty(),
+        "a corrected detection must leave the exported threat list"
+    );
+    // The verdict itself survives, for audit and for the console (the other
+    // row is the categorizer's pending one).
+    let rows = ai.store.verdicts_for("casino-bonus.example").unwrap();
+    assert!(
+        rows.iter()
+            .any(|r| r.channel == "threat" && r.category == "gambling"),
+        "the corrected detection is kept: {rows:?}"
+    );
+    // The correction is training data, alongside a relabel.
+    ai.set_category_override("casino-bonus.example", "news")
+        .unwrap();
+    let corrections = ai.store.corrections().unwrap();
+    let mark = corrections
+        .iter()
+        .find(|c| c.domain == "casino-bonus.example" && c.action == "not_threat")
+        .expect("the correction is recorded");
+    assert_eq!(mark.reason, "not gambling");
+    assert!(corrections.iter().any(|c| c.domain == "casino-bonus.example"
+        && c.action == "category"
+        && c.category == "news"));
+
+    assert!(ai.clear_override("casino-bonus.example").unwrap());
+    assert!(ai.blockable_counts().unwrap().contains_key("gambling"));
+}
+
 #[test]
 fn verdict_list_searches_and_flags_exemptions() {
     let dir = TempDir::new().unwrap();
@@ -929,8 +1200,8 @@ fn a_panicking_worker_does_not_shift_verdicts() {
     use daygle_dns_ml::backend::{ClassificationInput, DomainClassifier, Severity, Verdict};
     struct PanicsOnOne;
     impl DomainClassifier for PanicsOnOne {
-        fn name(&self) -> &str {
-            "test"
+        fn name(&self) -> String {
+            "test".to_string()
         }
         fn classify(&self, input: &ClassificationInput) -> Option<Verdict> {
             if input.domain.starts_with("a-") {

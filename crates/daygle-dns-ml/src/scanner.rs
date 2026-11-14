@@ -84,6 +84,9 @@ pub struct Scanner {
     /// Set after the first snapshot is published: the blocks already in
     /// force at startup are not news.
     primed: std::sync::atomic::AtomicBool,
+    /// Model maintenance, set once by the engine: the scan loop asks it to
+    /// retrain when one is due.
+    retrainer: std::sync::OnceLock<Arc<crate::learn::Retrainer>>,
 }
 
 impl Scanner {
@@ -111,7 +114,14 @@ impl Scanner {
             last_expiry: AtomicI64::new(0),
             publishing: std::sync::Mutex::new(()),
             primed: std::sync::atomic::AtomicBool::new(false),
+            retrainer: std::sync::OnceLock::new(),
         })
+    }
+
+    /// Hand the scanner the model-maintenance job used for automatic
+    /// retraining (see [`crate::learn::Retrainer`]).
+    pub fn set_retrainer(&self, retrainer: Arc<crate::learn::Retrainer>) {
+        let _ = self.retrainer.set(retrainer);
     }
 
     fn log_info(&self, msg: String) {
@@ -297,12 +307,12 @@ impl Scanner {
     }
 
     /// The content-categorization pipeline actually running.
-    pub fn content_backend_name(&self) -> &str {
+    pub fn content_backend_name(&self) -> String {
         self.content.name()
     }
 
     /// The threat-detection pipeline actually running (verifier included).
-    pub fn threat_backend_name(&self) -> &str {
+    pub fn threat_backend_name(&self) -> String {
         self.threat.name()
     }
 
@@ -321,8 +331,10 @@ impl Scanner {
     }
 
     /// The domains that qualify for auto-blocking right now: fresh verdicts
-    /// at or above the block threshold, in an auto-block category, and not
-    /// exempted by an allow override on the domain or any parent domain.
+    /// at or above the block threshold, and not exempted by an allow override
+    /// on the domain or any parent domain. With the shared classifier they
+    /// must also carry an auto-block label; a dedicated threat model is a
+    /// detector in its own right, so everything it reports qualifies.
     /// In enforce mode these are blocked; in train mode they are what would
     /// be.
     pub fn eligible_blocks(&self, cfg: &AiSettings, now: i64) -> Result<BlockSnapshot> {
@@ -336,8 +348,13 @@ impl Scanner {
         overrides: &ExemptionSnapshot,
     ) -> Result<BlockSnapshot> {
         let mut eligible = BlockSnapshot::new();
+        // A dedicated threat model already decides what a threat is, so its
+        // detections block without a second label filter. With the shared
+        // classifier the label list is the only thing that separates a threat
+        // from an ordinary category, so it still gates blocking there.
+        let labels_gate = !cfg.dedicated_threat_model();
         for (domain, category, expires_at) in self.store.fresh_blocked(now, cfg.block_threshold)? {
-            if cfg.is_auto_block_category(&category) && !exempt(&domain, overrides) {
+            if (!labels_gate || cfg.is_auto_block_category(&category)) && !exempt(&domain, overrides) {
                 eligible.insert(
                     domain,
                     ActiveBlock {
@@ -529,7 +546,15 @@ impl Scanner {
             })
             .await;
             match result {
-                Ok(Ok(_)) => since_epoch = started,
+                Ok(Ok(_)) => {
+                    since_epoch = started;
+                    // Model maintenance runs after a successful cycle, on a
+                    // blocking thread, and never delays the next cycle.
+                    if let Some(retrainer) = self.retrainer.get().cloned() {
+                        let _ =
+                            tokio::task::spawn_blocking(move || retrainer.maybe_retrain()).await;
+                    }
+                }
                 // A failed cycle reads the same window again next time.
                 Ok(Err(e)) => self.log_warn(format!("AI cycle failed: {e}")),
                 Err(join_err) => self.log_warn(format!("AI cycle panicked: {join_err}")),

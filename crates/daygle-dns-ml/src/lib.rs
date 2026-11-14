@@ -44,6 +44,7 @@ pub mod fasttext_backend;
 pub mod heuristic;
 pub mod plugin;
 pub mod scanner;
+pub mod learn;
 pub mod store;
 pub mod verify;
 
@@ -73,6 +74,18 @@ pub struct AiEngine {
     categories: Arc<ArcSwap<CategorySnapshot>>,
     plugin: Arc<plugin::AiBlockPlugin>,
     query_store: Arc<daygle_dns_authoritative::ZoneStore>,
+    /// The classifier the scanner retrained for itself, beside `ai.db`.
+    learned: std::path::PathBuf,
+    /// Whether a retrained model is the one currently loaded (at startup or
+    /// after a live swap).
+    learned_active: std::sync::atomic::AtomicBool,
+    /// The model file the running classifier was loaded from: the baseline a
+    /// candidate retrain must match.
+    active_model: Arc<ArcSwap<String>>,
+    content_swap: Arc<backend::Reloadable>,
+    threat_swap: Arc<backend::Reloadable>,
+    logs: Arc<LogStore>,
+    retrainer: Arc<learn::Retrainer>,
 }
 
 impl AiEngine {
@@ -88,6 +101,40 @@ impl AiEngine {
     ) -> Result<Arc<Self>> {
         let database_path = database_path(settings, authoritative_database);
         let store = Arc::new(AiStore::open(&database_path)?);
+        // A model the scanner retrained for itself wins over the configured
+        // shared model while it is the newer artifact. A channel that names
+        // its own model still gets it, and deleting the file falls back to
+        // `ai.model_path`.
+        // ...but a model the operator configured more recently wins, so
+        // pointing `ai.model_path` at a new file is never silently ignored.
+        let learned_path = learn::learned_model_path(&database_path);
+        let configured = Path::new(settings.model_path.trim());
+        let learned_active = learned_path.is_file()
+            && match configured.metadata().and_then(|m| m.modified()) {
+                Ok(configured_at) => learned_path
+                    .metadata()
+                    .and_then(|m| m.modified())
+                    .map(|learned_at| learned_at >= configured_at)
+                    .unwrap_or(false),
+                // No configured model file (heuristic backend): the trained
+                // one is all there is.
+                Err(_) => true,
+            };
+        let shared_model_path = if learned_active {
+            learned_path.to_string_lossy().into_owned()
+        } else {
+            settings.model_path.clone()
+        };
+        if learned_active {
+            logs.push(
+                daygle_dns_core::LogLevel::Info,
+                "ai",
+                format!(
+                    "using the classifier the AI retrained for itself: {}",
+                    learned_path.display()
+                ),
+            );
+        }
         // Live settings, shared by the scanner, the plugin and the threat
         // channel's category list, so editing `auto_block_categories` takes
         // effect without a restart.
@@ -98,9 +145,9 @@ impl AiEngine {
         // deployment can run a wide categorizer and a narrow, high-precision
         // threat detector side by side - or one model for both.
         let content_model_path =
-            resolve_model_path(&settings.category_model_path, &settings.model_path);
+            resolve_model_path(&settings.category_model_path, &shared_model_path);
         let threat_model_path =
-            resolve_model_path(&settings.threat_model_path, &settings.model_path);
+            resolve_model_path(&settings.threat_model_path, &shared_model_path);
 
         let content: Box<dyn DomainClassifier + Send + Sync> =
             Box::new(channel::ChannelBackend::content(load_primary(
@@ -121,17 +168,37 @@ impl AiEngine {
         #[cfg(feature = "verifier-onnx")]
         let threat = wrap_verifier(threat, settings, &logs);
 
+        // The channels sit behind reloadable handles, so a retrain can be
+        // installed without a restart.
+        let active_model = Arc::new(ArcSwap::from_pointee(if learned_active {
+            learned_path.to_string_lossy().into_owned()
+        } else {
+            shared_model_path.clone()
+        }));
+        let content_swap = backend::Reloadable::new(content);
+        let threat_swap = backend::Reloadable::new(threat);
+        let engine_logs = logs.clone();
+
         let snapshot = Arc::new(ArcSwap::from_pointee(BlockSnapshot::new()));
         let categories = Arc::new(ArcSwap::from_pointee(CategorySnapshot::new()));
+        let retrainer = Arc::new(learn::Retrainer::new(
+            store.clone(),
+            settings_swap.clone(),
+            logs.clone(),
+            learned_path.clone(),
+            active_model.clone(),
+        ));
         let scanner = Scanner::new(
             store.clone(),
-            content,
-            threat,
+            Box::new(content_swap.clone()),
+            Box::new(threat_swap.clone()),
             settings_swap.clone(),
             snapshot.clone(),
             categories.clone(),
             logs,
         );
+        scanner.set_retrainer(retrainer.clone());
+
         let plugin = plugin::AiBlockPlugin::new(
             snapshot.clone(),
             categories.clone(),
@@ -146,6 +213,13 @@ impl AiEngine {
             categories,
             plugin,
             query_store,
+            learned: learned_path,
+            learned_active: std::sync::atomic::AtomicBool::new(learned_active),
+            active_model,
+            content_swap,
+            threat_swap,
+            logs: engine_logs,
+            retrainer,
         }))
     }
 
@@ -160,6 +234,67 @@ impl AiEngine {
         self.plugin.set_client_groups(groups);
     }
 
+    /// The model the scanner maintains for itself, beside `ai.db`.
+    pub fn learned_model_path(&self) -> &Path {
+        &self.learned
+    }
+
+    /// Whether a retrained model is the one currently loaded.
+    pub fn learned_model_active(&self) -> bool {
+        self.learned_active
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// What the last successful retrain achieved, as recorded beside the model.
+    pub fn learned_model_record(&self) -> Option<serde_json::Value> {
+        let raw = std::fs::read(learn::stats_path(&self.learned)).ok()?;
+        serde_json::from_slice(&raw).ok()
+    }
+
+    /// Retrain the classifier from the scanner's own confident verdicts and the
+    /// operator's corrections, judge it on held-out corrections, then load it
+    /// into the running channels.
+    pub fn retrain_learned_model(&self) -> Result<learn::TrainingStats> {
+        let stats = self.retrainer.retrain()?;
+        self.activate_retrained_model()?;
+        Ok(stats)
+    }
+
+    /// Load the model the retrainer just installed, without a restart. A
+    /// channel with its own configured model keeps it.
+    fn activate_retrained_model(&self) -> Result<()> {
+        let settings = self.settings.load_full();
+        let learned = self.learned.to_string_lossy().into_owned();
+        if settings.category_model_path.trim().is_empty() {
+            let content: Box<dyn DomainClassifier + Send + Sync> =
+                Box::new(channel::ChannelBackend::content(load_primary(
+                    &learned,
+                    Channel::Content,
+                    &self.logs,
+                )?));
+            self.content_swap.replace(content);
+        }
+        if settings.threat_model_path.trim().is_empty() {
+            let threat: Box<dyn DomainClassifier + Send + Sync> =
+                Box::new(channel::ChannelBackend::threat(
+                    load_primary(&learned, Channel::Threat, &self.logs)?,
+                    self.settings.clone(),
+                ));
+            #[cfg(feature = "verifier-onnx")]
+            let threat = wrap_verifier(threat, &settings, &self.logs);
+            self.threat_swap.replace(threat);
+        }
+        self.active_model.store(Arc::new(learned));
+        self.learned_active
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        self.logs.push(
+            daygle_dns_core::LogLevel::Info,
+            "ai",
+            "the retrained classifier is now in use",
+        );
+        Ok(())
+    }
+
     /// Kick the scanner for one immediate cycle (used by the rescan API).
     pub fn trigger_rescan(&self) {
         self.scanner.rescan_notify.notify_one();
@@ -168,6 +303,15 @@ impl AiEngine {
     /// Add an `allow` override and refresh the snapshots immediately.
     pub fn set_allow_override(&self, domain: &str, reason: &str) -> Result<()> {
         self.store.set_override(domain, "allow", reason)?;
+        self.refresh_snapshot_now();
+        Ok(())
+    }
+
+    /// Operator correction: `domain` is not a threat, whatever the model said.
+    /// The threat verdict is kept for audit and retraining, but it stops
+    /// blocking and leaves the exported threat list until the mark is cleared.
+    pub fn set_not_threat_override(&self, domain: &str, reason: &str) -> Result<()> {
+        self.store.set_override(domain, "not_threat", reason)?;
         self.refresh_snapshot_now();
         Ok(())
     }
@@ -255,12 +399,12 @@ impl AiEngine {
     }
 
     /// The content-categorization pipeline actually running.
-    pub fn content_backend_name(&self) -> &str {
+    pub fn content_backend_name(&self) -> String {
         self.scanner.content_backend_name()
     }
 
     /// The threat-detection pipeline actually running (verifier included).
-    pub fn threat_backend_name(&self) -> &str {
+    pub fn threat_backend_name(&self) -> String {
         self.scanner.threat_backend_name()
     }
 

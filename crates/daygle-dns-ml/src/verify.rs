@@ -86,8 +86,8 @@ where
     B: DomainClassifier,
     V: DomainClassifier,
 {
-    fn name(&self) -> &str {
-        &self.name
+    fn name(&self) -> String {
+        self.name.clone()
     }
 
     // The verifier never emits categories of its own; the primary backend's
@@ -114,7 +114,7 @@ where
                 // this stage feeds enforce mode.
                 Some(disputed(base, v))
             }
-            None => Some(annotated(base, self.verifier.name())),
+            None => Some(annotated(base, &self.verifier.name())),
         }
     }
 }
@@ -135,8 +135,8 @@ mod tests {
 
     struct Fixed(Option<Verdict>);
     impl DomainClassifier for Fixed {
-        fn name(&self) -> &str {
-            "fixed"
+        fn name(&self) -> String {
+            "fixed".to_string()
         }
         fn classify(&self, _input: &ClassificationInput) -> Option<Verdict> {
             self.0.clone()

@@ -59,6 +59,10 @@
 //! | `GET`    | `/api/ai/status`                  | AI scanner configuration and per-status counts |
 //! | `GET`    | `/api/ai/verdicts`                | paginated per-domain AI verdicts |
 //! | `GET`    | `/api/ai/threats`                 | paginated AI-detected threat domains |
+//! | `GET`    | `/api/ai/threats/export`          | the active threat list as a CSV or plain domain list |
+//! | `GET`    | `/api/ai/explain`                 | why one domain is or is not blocked |
+//! | `GET`    | `/api/ai/corrections`             | operator corrections, as training data |
+//! | `POST`   | `/api/ai/retrain`                 | retrain the classifier from its own verdicts and corrections |
 //! | `POST`   | `/api/ai/override`                | allow-exempt or clear overrides for a domain |
 //! | `POST`   | `/api/ai/rescan`                  | wake the scanner for an immediate cycle |
 //! | `GET`    | `/api/ai/model-status`            | installed AI model files (size, sha256) + update-run state |
@@ -627,6 +631,10 @@ pub fn router(state: AppState) -> Router {
         .route("/ai/status", get(handlers::ai_status))
         .route("/ai/verdicts", get(handlers::ai_verdicts))
         .route("/ai/threats", get(handlers::ai_threats))
+        .route("/ai/threats/export", get(handlers::ai_threats_export))
+        .route("/ai/explain", get(handlers::ai_explain))
+        .route("/ai/corrections", get(handlers::ai_corrections))
+        .route("/ai/retrain", post(handlers::ai_retrain))
         .route("/ai/override", post(handlers::ai_override))
         .route("/ai/overrides", get(handlers::ai_overrides))
         .route("/ai/rescan", post(handlers::ai_rescan))

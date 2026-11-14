@@ -62,8 +62,8 @@ impl FastTextBackend {
 }
 
 impl DomainClassifier for FastTextBackend {
-    fn name(&self) -> &str {
-        "fasttext"
+    fn name(&self) -> String {
+        "fasttext".to_string()
     }
 
     fn categories(&self) -> Vec<String> {

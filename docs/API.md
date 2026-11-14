@@ -1578,8 +1578,12 @@ the URL fetched fine but the content does not parse as (or does not match)
 GET  /api/ai/status
 GET  /api/ai/verdicts?status=classified&category=phish&severity=threat&exemption=not_exempt&label=set&q=example&page=1&per_page=50
 GET  /api/ai/threats?category=phish&severity=threat&exemption=not_exempt&q=example&page=1&per_page=50
+GET  /api/ai/threats/export?format=csv|list
+GET  /api/ai/explain?domain=x.example
+GET  /api/ai/corrections?format=csv
+POST /api/ai/retrain
 GET  /api/ai/overrides
-POST /api/ai/override          {"domain": "x.example", "action": "allow|clear|category|clear_category", "category": "gambling", "reason": "..."}
+POST /api/ai/override          {"domain": "x.example", "action": "allow|not_threat|clear|category|clear_category", "category": "gambling", "reason": "..."}
 POST /api/ai/rescan
 GET  /api/ai/model-status
 POST /api/ai/update-models
@@ -1587,9 +1591,13 @@ POST /api/ai/update-models
 
 Available when `[ai] enabled = true`. The scanner runs two independent
 channels: `content` categorizes sites (`news`, `shopping`, ...) and stores a
-label only, `threat` looks only for `ai.auto_block_categories` and is the
-only channel that can block on its own. Each channel has its own model,
-confidence floor and verdict TTL. Blocking a *content* category is an
+label only, `threat` reports detected threats and is the only channel that
+can block on its own. With the shared classifier `threat` reports only the
+labels in `ai.auto_block_categories`; with a dedicated
+`ai.threat_model_path` every label that model produces is a threat and blocks
+above `ai.block_threshold`, so `ai.auto_block_categories` only applies to the
+shared classifier. Each channel has its own model, confidence floor and
+verdict TTL. Blocking a *content* category is an
 operator rule on a client group (`blocked_categories`, see Advanced
 blocking) - the label comes from the scanner, the decision does not.
 
@@ -1603,9 +1611,11 @@ intervals, TTLs and thresholds (`confidence_floor` is the threat channel's,
 blocked in enforce mode, what would be blocked in train mode) and the
 current block-snapshot size.
 
-A domain qualifies for auto-blocking when its *threat-channel* verdict is in
-one of `ai.auto_block_categories` with a confidence at or above
-`ai.block_threshold`, and neither it nor a parent domain is exempt. A
+A domain qualifies for auto-blocking when its *threat-channel* verdict is at
+or above `ai.block_threshold`, neither it nor a parent domain is exempt, and
+- with the shared classifier - its label is one of `ai.auto_block_categories`.
+A dedicated `ai.threat_model_path` is a detector in its own right: everything
+it reports at or above the threshold qualifies, whatever the label. A
 content-channel verdict never qualifies, whatever it is called. A threat
 verdict the MiniLM verifier disagreed with (severity `disputed`, decided at
 `ai.verifier_threshold`) never qualifies.
@@ -1638,7 +1648,22 @@ is empty, so every row is `false`). The console's AI → Threats tab renders
 this list. `category_blocked` says whether a filtering group blocks the
 category the domain carries (blocked for that group's clients in either
 mode); a threat label counts as such a category only at or above
-`ai.block_threshold`.
+`ai.block_threshold`. `not_threat` marks rows the operator corrected: they
+stay in the list for audit but never block (see the override action below).
+
+`GET /api/ai/threats/export` downloads the *active* threat list - exactly the
+rows the block snapshot is built from (fresh, undisputed, at or above the
+threshold, not exempt and not corrected). `format=list` is one domain per
+line, ready to use as a blocklist source elsewhere; `format=csv` (the default)
+adds label, confidence and `expires_at`. The list is a snapshot of current
+detections: entries age out with the threat TTL and reappear only after a new
+scan, so re-fetch rather than treating one download as permanent.
+
+`GET /api/ai/explain?domain=` answers "why is this blocked?" for one domain:
+both channels' verdicts, your overrides, the label category blocking matches,
+the names of the filtering groups that block it, and a `reasons` list in plain
+language covering the threshold, the label gate, a disputed verification, an
+expired or missing verdict, and exemptions.
 
 Model files are managed over the API too: `GET /api/ai/model-status` reports
 the models directory, each installed model file (presence, size, sha256) and
@@ -1655,6 +1680,35 @@ A `202` only means the update began; poll `GET /api/ai/model-status` until
 `POST /api/ai/override` with `action: "allow"` exempts a domain and its
 subdomains from AI blocking; `clear` removes the exemption (`404` when there
 is none). `GET /api/ai/overrides` lists the exemptions, newest first.
+`action: "not_threat"` records a correction instead: the detection stops
+blocking and leaves the export, but the verdict is kept so the mistake stays
+visible, and `clear` (or the console's Restore) brings it back. Both `allow`
+and `not_threat` require a `reason`.
+
+`GET /api/ai/corrections` lists every operator correction - exemptions,
+`not_threat` marks and category relabels - newest first, as `domain`, `action`,
+`category`, `reason` and `created_at`. `?format=csv` downloads it for offline
+retraining.
+
+The scanner maintains its own model too. With `ai.auto_retrain` on (the
+default) it rebuilds the classifier no more often than
+`ai.retrain_interval_secs` from the data it has produced: operator category
+corrections first, then its own confident, unexpired, unvetoed verdicts.
+`POST /api/ai/retrain` runs the same job now. A retrain needs at least 200
+examples across two labels, and a candidate model must reproduce at least half
+of its own training set, or the current model is kept. The result is written
+beside `ai.db` as `learned.bin` (with `learned.json` recording the run), and
+loaded into the running channels immediately. It is preferred over
+`ai.model_path` from then on while it is the newer file, unless a channel names
+its own model; delete it (or install a newer configured model) to fall back.
+Judging: every fifth correction is held back from training, and a candidate is
+rejected when it scores below half of them or more than two points below the
+model in use on them. With no held-out corrections the older training-set check
+applies. `auto_retrain` says "do not block
+this" and so is not training data: a single-label classifier cannot express a
+negative. `GET /api/ai/status` reports `auto_retrain`,
+`retrain_interval_secs` and `learned_model` (`path`, `present`, `active` and
+the last run's stats).
 `action: "category"` relabels the domain with `category` (one of the
 labels reported in `backend_categories`; `400` otherwise, with the known
 list), and `clear_category` drops the relabel (`404` when there is none).
