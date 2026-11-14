@@ -44,3 +44,6 @@ url.workspace = true
 default = ["verifier-onnx"]
 # Forwarded: the MiniLM/ONNX verifier backend inside daygle-dns-ml.
 verifier-onnx = ["daygle-dns-ml/verifier-onnx"]
+
+[dev-dependencies]
+tempfile.workspace = true
