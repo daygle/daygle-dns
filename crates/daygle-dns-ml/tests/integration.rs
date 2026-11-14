@@ -1008,7 +1008,10 @@ fn a_threat_candidate_is_offered_for_a_page_read_once() {
 #[test]
 fn not_a_threat_corrections_are_learned_only_when_enabled() {
     let dir = TempDir::new().unwrap();
+    // A low threshold keeps the test about the override, not about whether a
+    // 1.0 verdict clears the block threshold.
     let mut cfg = settings(AiMode::Train);
+    cfg.block_threshold = 0.5;
     let ai = engine(&dir, cfg.clone());
     for i in 0..12 {
         let domain = format!("innocent{i}.example");
@@ -1020,7 +1023,7 @@ fn not_a_threat_corrections_are_learned_only_when_enabled() {
                 "phishing",
                 "threat",
                 "classified",
-                0.99,
+                1.0,
                 "fasttext",
                 "ev",
                 3600,
@@ -1030,6 +1033,22 @@ fn not_a_threat_corrections_are_learned_only_when_enabled() {
             .set_override(&domain, "not_threat", "looked fine")
             .unwrap();
     }
+    // A domain nobody corrected: proves threat verdicts do become training
+    // data, so the assertions below are not vacuous.
+    ai.store.observe("control.example").unwrap();
+    ai.store
+        .save_verdict(
+            Channel::Threat,
+            "control.example",
+            "phishing",
+            "threat",
+            "classified",
+            1.0,
+            "fasttext",
+            "ev",
+            3600,
+        )
+        .unwrap();
 
     let dataset = daygle_dns_ml::learn::collect_dataset(&ai.store, &cfg).unwrap();
     assert!(
@@ -1037,11 +1056,19 @@ fn not_a_threat_corrections_are_learned_only_when_enabled() {
         "off by default: a single-label model is not given a negative class"
     );
     assert!(
+        dataset
+            .pairs
+            .iter()
+            .any(|(label, domain)| label == "phishing" && domain == "control.example"),
+        "a threat verdict nobody corrected is training data: {dataset:?}",
+        dataset = dataset.pairs
+    );
+    assert!(
         !dataset
             .pairs
             .iter()
-            .any(|(label, domain)| label == "phishing" && domain.starts_with("innocent")),
-        "the machine label it was corrected away from is not training data"
+            .any(|(_, domain)| domain.starts_with("innocent")),
+        "a denied label is not training data under any label, with negatives off"
     );
 
     cfg.learn_negatives = true;
@@ -1051,6 +1078,13 @@ fn not_a_threat_corrections_are_learned_only_when_enabled() {
         .pairs
         .iter()
         .any(|(label, _)| label == daygle_dns_ml::learn::BENIGN_LABEL));
+    assert!(
+        !dataset
+            .pairs
+            .iter()
+            .any(|(label, domain)| label == "phishing" && domain.starts_with("innocent")),
+        "the denied label never comes back alongside the benign pair"
+    );
 }
 
 /// Corrections are held back from training in fifths, and the candidate is

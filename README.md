@@ -183,9 +183,10 @@ Daygle DNS combines, in a single process:
   the classifier from your corrections and its confident verdicts, refuses a
   candidate that does worse on held-out corrections than the model in use,
   loads an accepted one without a restart, and keeps the model it replaced so
-  one rollback is always available. `ai.learn_negatives` (off by default) also
-  trains "not a threat" corrections as a `benign` label, so a correction can
-  change the next model; the threat channel never reports that label as a
+  one rollback is always available. A domain marked "not a threat" never
+  trains under the label it was denied, whatever `ai.learn_negatives` says.
+  That flag (off by default) also trains those corrections as a `benign`
+  label, so a correction can change the next model; the threat channel never reports that label as a
   threat, but a negative class can over-generalise, which is why it is opt-in.
   `cargo run -p daygle-dns-ml --example negatives_eval` measures it: on a
   synthetic corpus where the negatives are domains the model had flagged, half

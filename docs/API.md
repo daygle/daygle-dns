@@ -1737,8 +1737,10 @@ block snapshot is rebuilt in the same cycle, and the evidence line records
 "confidence now N% by ai.page_rule". All six page settings are reported by
 `GET /api/ai/status` and accepted by the settings update.
 
-With `ai.learn_negatives` on, `not_threat` corrections are training data too:
-they become a `benign` label (reported as `negatives` in the retrain response
+A `not_threat` domain never trains under the machine label the operator
+denied, whether or not negatives are learned: the flag only decides whether it
+also trains as `benign`. With `ai.learn_negatives` on, `not_threat`
+corrections are training data too: they become a `benign` label (reported as `negatives` in the retrain response
 and in the model record). The threat channel never reports `benign` - even a
 dedicated threat model's `benign` verdict is dropped - and the auto-block label
 picker does not offer it. The trade-off is the usual one for a negative class

@@ -169,6 +169,10 @@ fn run() -> Result<(), String> {
         );
         report(&rows, held_out_threats.len(), fresh_ordinary.len());
         verdict(&rows, held_out_threats.len());
+        println!(
+            "   note: the baseline also trains without the marked domains' denied \
+             labels, so the only difference between the rows is the benign class."
+        );
         println!();
         let _ = std::fs::remove_dir_all(&dir);
     }

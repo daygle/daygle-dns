@@ -135,13 +135,17 @@ pub fn collect_dataset(store: &AiStore, settings: &AiSettings) -> Result<Dataset
                 corrected.insert(domain.clone());
                 corrections.push((label, domain));
             }
-            // "Not a threat" is a label of its own when the operator asked
-            // for negatives to be learned: the domain's machine label is
-            // dropped like any corrected domain's, and the pair trains
-            // `benign`.
-            "not_threat" if settings.learn_negatives => {
+            // The operator denied the machine label, so it must not train the
+            // model either - whether or not the negation itself is learned.
+            // (`confident_verdicts` already leaves overridden domains out;
+            // keeping the set here means that holds even if that changes.)
+            // When negatives are on, the denial is a label of its own and the
+            // pair trains `benign`.
+            "not_threat" => {
                 corrected.insert(domain.clone());
-                corrections.push((BENIGN_LABEL.to_string(), domain));
+                if settings.learn_negatives {
+                    corrections.push((BENIGN_LABEL.to_string(), domain));
+                }
             }
             _ => {}
         }
