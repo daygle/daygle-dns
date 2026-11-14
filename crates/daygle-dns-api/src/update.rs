@@ -2396,9 +2396,10 @@ mod tests {
             .output()
             .unwrap();
         let program = format!(
-            "set -eu\nSERVICE_USER=$1\nMODELS_DIR=$2\nPRIV=$3\nVALID='old.bin new.bin'\n{}\n{}\nrestore_models\n",
+            "set -eu\nSERVICE_USER=$1\nMODELS_DIR=$2\nPRIV=$3\nVALID='old.bin new.bin'\n{}\n{}\n{}\nrestore_models\n",
             extract("as_service() {", "\n# Publish through"),
             extract("model_write() {", "\n# ---- models-only update"),
+            extract("file_sha() {", "\n\n# Nothing pending"),
         );
         let output = std::process::Command::new("sh")
             .arg("-c")

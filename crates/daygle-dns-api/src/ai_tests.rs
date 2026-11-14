@@ -362,7 +362,7 @@ async fn model_health_reports_whether_a_probe_was_possible() {
     let ai = engine(&dir);
     let state = AppState::for_tests(Some(ai));
 
-    let health = json(state, "/api/ai/model-health").await;
+    let health = json(state.clone(), "/api/ai/model-health").await;
     assert!(health["available"].is_boolean(), "{health}");
     assert!(health["model"].is_string(), "{health}");
     if health["available"] == true {
@@ -370,9 +370,58 @@ async fn model_health_reports_whether_a_probe_was_possible() {
             health["lost"].as_u64().unwrap() <= health["checked"].as_u64().unwrap(),
             "{health}"
         );
+        assert!(
+            !health["sample"].as_array().unwrap().is_empty(),
+            "an available probe pins its names: {health}"
+        );
     } else {
         assert!(health["reason"].is_string(), "{health}");
     }
+
+    // A pinned probe round-trips: the same body can be posted back, and a
+    // unavailable model still answers 200 so the update step can skip gating.
+    let sample = health["sample"].clone();
+    let pinned = if sample.is_array() {
+        sample
+    } else {
+        serde_json::json!([{"label": "phishing", "domain": "pinned.example"}])
+    };
+    let (status, _, body) = call(
+        state.clone(),
+        "POST",
+        "/api/ai/model-health",
+        Some(serde_json::json!({ "sample": pinned })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let probed: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert!(probed["available"].is_boolean(), "{probed}");
+
+    let (status, _, _) = call(
+        state,
+        "POST",
+        "/api/ai/model-health",
+        Some(serde_json::json!({ "sample": [] })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "an empty sample is refused"
+    );
+
+    // Disabled AI is a 200 with nothing to probe, not a 404.
+    let (status, _, body) = call(
+        AppState::for_tests(None),
+        "GET",
+        "/api/ai/model-health",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let disabled: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(disabled["available"], false, "{disabled}");
+    assert!(disabled["reason"].is_string(), "{disabled}");
 
     let _ = std::fs::remove_dir_all(&dir);
 }

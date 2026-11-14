@@ -223,12 +223,25 @@ health_check() {
 }
 
 MODEL_HEALTH_URL="http://$API_HOST:$API_PORT/api/ai/model-health"
+MODEL_PROBE_FILE="$PRIV/model-probe.json"
 
-# Held-out threat names the loaded model reads as non-threats, or empty when
-# the probe is unavailable (AI disabled, no model, an older binary). An
-# unavailable probe must never block an update.
-model_probe_lost() {
-  body="$(curl -fsS --max-time 10 "$MODEL_HEALTH_URL" 2>/dev/null)" || return 0
+# The baseline probe is saved as the JSON the endpoint returned. Posting that
+# same body after the restart scores the new model on exactly the names the
+# old one saw, even if the scanner recorded more verdicts in between.
+model_probe_get() {
+  curl -fsS --max-time 10 "$MODEL_HEALTH_URL" 2>/dev/null
+}
+
+model_probe_post() { # baseline json file
+  curl -fsS --max-time 10 -X POST -H 'Content-Type: application/json' \
+    --data-binary @"$1" "$MODEL_HEALTH_URL" 2>/dev/null
+}
+
+# Held-out names the model reads as non-threats, or empty when the probe is
+# unavailable (AI disabled, no model, an older binary). An unavailable probe
+# must never block an update.
+model_probe_lost() { # response body
+  body="$1"
   case "$body" in
     *'"available":true'*) ;;
     *) return 0 ;;
@@ -516,6 +529,14 @@ restore_models() {
   for f in $VALID; do
     if [ -f "$PRIV/model-backup/$f" ]; then
       model_write "$PRIV/model-backup/$f" "$f" || restored=1
+      # A successful write is not proof of the old bytes: verify what is now
+      # in place against the backup before calling the rollback complete.
+      want="$(file_sha "$PRIV/model-backup/$f")"
+      got="$(file_sha "$MODELS_DIR/$f")"
+      if [ -z "$want" ] || [ "$want" != "$got" ]; then
+        log "restored model $f does not match its backup"
+        restored=1
+      fi
     else
       as_service rm -f -- "$MODELS_DIR/$f" || restored=1
     fi
@@ -601,7 +622,14 @@ if [ "$KIND" = "models" ]; then
 
   # How the models in use score on names from held-out threat families,
   # before this bundle replaces them. Empty when the probe is unavailable.
-  BASELINE_LOST="$(model_probe_lost)"
+  BASELINE_BODY="$(model_probe_get)" || BASELINE_BODY=""
+  BASELINE_LOST="$(model_probe_lost "$BASELINE_BODY")"
+  if [ -n "$BASELINE_LOST" ]; then
+    if ! printf '%s\n' "$BASELINE_BODY" > "$MODEL_PROBE_FILE" 2>>"$LOG"; then
+      log "cannot save the baseline model probe; the bundle will install without that comparison"
+      BASELINE_LOST=""
+    fi
+  fi
 
   # Back up before changing anything. Read through the service account so a
   # symlink cannot make root disclose a file that account cannot read.
@@ -653,7 +681,11 @@ if [ "$KIND" = "models" ]; then
   # A bundle can be valid, signed and bootable and still lose detections.
   # Compare the same held-out probe against the pre-install baseline and put
   # the previous files back if the new models read more threats as non-threats.
-  NEW_LOST="$(model_probe_lost)"
+  NEW_BODY=""
+  if [ -n "$BASELINE_LOST" ] && [ -f "$MODEL_PROBE_FILE" ]; then
+    NEW_BODY="$(model_probe_post "$MODEL_PROBE_FILE")" || NEW_BODY=""
+  fi
+  NEW_LOST="$(model_probe_lost "$NEW_BODY")"
   if [ -n "$BASELINE_LOST" ] && [ -n "$NEW_LOST" ] && [ "$NEW_LOST" -gt "$BASELINE_LOST" ]; then
     log "model probe regressed: ${BASELINE_LOST} held-out threat(s) lost before, ${NEW_LOST} after"
     as_service rm -f -- "$REQ.processing" "$MANIFEST" "$STAGED_BIN"

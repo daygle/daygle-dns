@@ -204,56 +204,45 @@ pub fn collect_dataset(store: &AiStore, settings: &AiSettings) -> Result<Dataset
     }
 
     if settings.learn_negatives && !deferred_threats.is_empty() {
-        // Hold out whole word families, not single verdicts. A held-out
-        // verdict that shares its words with a training name tests memory,
-        // not whether the benign class over-generalises.
-        let families: std::collections::BTreeSet<String> = deferred_threats
+        // Hold out whole word families, not single verdicts. Components are
+        // grouped by shared tokens, so a held-out family has no word in
+        // common with anything left in training.
+        let domains: Vec<String> = deferred_threats
             .iter()
-            .map(|(_, domain)| family_key(domain))
+            .map(|(_, domain)| domain.clone())
             .collect();
-        let mut selected: std::collections::BTreeSet<String> = families
-            .iter()
-            .filter(|family| hash_selected(family))
-            .cloned()
-            .collect();
-        // A corpus too small to hit the sample still gets one whole family,
-        // unless there is only one family to begin with: holding all of it
-        // would leave the candidate without a single threat example.
-        if selected.is_empty() && families.len() > 1 {
-            if let Some(first) = families.iter().next() {
-                selected.insert(first.clone());
+        let components = token_components(&domains);
+        let disjoint = components.len() > 1;
+        let selected = selected_components(&components);
+        let mut component_of = vec![String::new(); domains.len()];
+        for (key, members) in &components {
+            for index in members {
+                component_of[*index] = key.clone();
             }
         }
-        // Never hold out every family: the candidate needs at least one
-        // threat example to learn what a threat looks like.
-        if families.len() > 1 && selected.len() == families.len() {
-            if let Some(last) = selected.iter().next_back().cloned() {
-                selected.remove(&last);
-            }
-        }
-        let by_family = families.len() > 1;
         let mut held = vec![false; deferred_threats.len()];
         for (index, (_, domain)) in deferred_threats.iter().enumerate() {
-            held[index] = if by_family {
-                selected.contains(&family_key(domain))
+            held[index] = if disjoint {
+                selected.contains(&component_of[index])
             } else {
-                // One family: hold back names instead, so some threat still
-                // trains and the gate still has novel variants to test.
+                // One word component: no disjoint split exists, so hold back
+                // names and let the novel variant and the current-model
+                // comparison carry the check.
                 hash_selected(domain)
             };
         }
         if !held.iter().any(|held| *held) {
             held[0] = true;
         }
+        let mut held_pairs = Vec::new();
         for ((label, domain), is_held) in deferred_threats.into_iter().zip(held) {
             if is_held {
-                if threat_validation.len() < MAX_PROBE {
-                    threat_validation.push((label, domain));
-                }
+                held_pairs.push((label, domain));
             } else if push(&mut pairs, &mut labels, &mut seen, &label, &domain) {
                 stats.verdicts += 1;
             }
         }
+        threat_validation = spread_by_family(held_pairs, MAX_PROBE);
     }
 
     stats.examples = pairs.len();
@@ -377,22 +366,29 @@ pub fn probe_accuracy(model: &Path, pairs: &[(String, String)]) -> Result<f32> {
     Ok(right as f32 / pairs.len() as f32)
 }
 
-/// The word family a domain belongs to: the alphabetic words of its
-/// registrable label, sorted, so `secure-login-3` and `login-secure-9` are the
-/// same family while numbers and TLDs do not split or merge families.
-pub fn family_key(domain: &str) -> String {
-    let labels: Vec<&str> = domain
-        .trim()
-        .trim_matches('.')
-        .split('.')
-        .filter(|label| !label.is_empty())
-        .collect();
-    let label = if labels.len() >= 2 {
+/// The label that names a registered domain: the Public Suffix List decides
+/// where the suffix ends, so `shop.example.co.uk` is the `example` family and
+/// not the `co` one. Unknown suffixes (including the reserved `.example`
+/// used in tests) fall back to the label before the last one.
+fn registrable_label(domain: &str) -> &str {
+    let name = domain.trim().trim_matches('.');
+    if let Some(registrable) = psl::domain_str(name) {
+        return registrable
+            .split_once('.')
+            .map(|(label, _)| label)
+            .unwrap_or(registrable);
+    }
+    let labels: Vec<&str> = name.split('.').filter(|label| !label.is_empty()).collect();
+    if labels.len() >= 2 {
         labels[labels.len() - 2]
     } else {
         labels.first().copied().unwrap_or("")
-    };
-    let mut words: Vec<String> = label
+    }
+}
+
+/// The alphabetic words of a domain's registrable label.
+fn family_words(domain: &str) -> Vec<String> {
+    let mut words: Vec<String> = registrable_label(domain)
         .split(['-', '_'])
         .map(str::to_ascii_lowercase)
         .filter(|word| word.chars().any(|c| c.is_ascii_alphabetic()))
@@ -400,11 +396,18 @@ pub fn family_key(domain: &str) -> String {
         .collect();
     words.sort();
     words.dedup();
-    words.join("-")
+    words
 }
 
-/// Deterministic one-in-five sample of family keys. Hashing the family, not
-/// the name, is what keeps a whole family out of training.
+/// The word set of a domain's registrable label, used as a readable family
+/// name. Whole families are grouped by shared tokens below, so this is a
+/// label for reporting and sampling, not the selection key itself.
+pub fn family_key(domain: &str) -> String {
+    family_words(domain).join("-")
+}
+
+/// Deterministic one-in-five sample of keys. Hashing a component, not a
+/// single name, is what keeps a whole word family out of training.
 fn hash_selected(text: &str) -> bool {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     for byte in text.as_bytes() {
@@ -414,14 +417,126 @@ fn hash_selected(text: &str) -> bool {
     hash.is_multiple_of(HOLDOUT_EVERY as u64)
 }
 
-/// A held-out family's name with its words in an order the store never
-/// recorded, so the gate scores a novel name built from that family rather
-/// than the verdict it already knows.
+/// Group domains whose word sets share a token, transitively. Holding out a
+/// component therefore leaves no training name sharing a word with it.
+fn token_components(domains: &[String]) -> Vec<(String, Vec<usize>)> {
+    fn find(parent: &mut [usize], index: usize) -> usize {
+        let mut root = index;
+        while parent[root] != root {
+            root = parent[root];
+        }
+        let mut current = index;
+        while parent[current] != root {
+            let next = parent[current];
+            parent[current] = root;
+            current = next;
+        }
+        root
+    }
+
+    let mut parent: Vec<usize> = (0..domains.len()).collect();
+    let mut owner: BTreeMap<String, usize> = BTreeMap::new();
+    for (index, domain) in domains.iter().enumerate() {
+        for token in family_words(domain) {
+            match owner.get(&token).copied() {
+                Some(previous) => {
+                    let left = find(&mut parent, index);
+                    let right = find(&mut parent, previous);
+                    if left != right {
+                        parent[left] = right;
+                    }
+                }
+                None => {
+                    owner.insert(token, index);
+                }
+            }
+        }
+    }
+
+    let mut tokens: BTreeMap<usize, std::collections::BTreeSet<String>> = BTreeMap::new();
+    let mut members: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+    for (index, domain) in domains.iter().enumerate() {
+        let root = find(&mut parent, index);
+        tokens.entry(root).or_default().extend(family_words(domain));
+        members.entry(root).or_default().push(index);
+    }
+    let mut components: Vec<(String, Vec<usize>)> = members
+        .into_iter()
+        .map(|(root, members)| {
+            let words: Vec<String> = tokens
+                .remove(&root)
+                .unwrap_or_default()
+                .into_iter()
+                .collect();
+            (words.join("|"), members)
+        })
+        .collect();
+    components.sort_by(|left, right| left.0.cmp(&right.0));
+    components
+}
+
+/// Pick whole components; force one when the hash lands nowhere, and keep at
+/// least one for training. A corpus with a single component has no disjoint
+/// split, so the caller falls back to individual names.
+fn selected_components(components: &[(String, Vec<usize>)]) -> std::collections::BTreeSet<String> {
+    let mut selected: std::collections::BTreeSet<String> = components
+        .iter()
+        .filter(|(key, _)| hash_selected(key))
+        .map(|(key, _)| key.clone())
+        .collect();
+    if selected.is_empty() && components.len() > 1 {
+        if let Some((first, _)) = components.first() {
+            selected.insert(first.clone());
+        }
+    }
+    if components.len() > 1 && selected.len() == components.len() {
+        if let Some(last) = selected.iter().next_back().cloned() {
+            selected.remove(&last);
+        }
+    }
+    selected
+}
+
+/// At most `limit` names, taking one from each family in turn, so a large
+/// family cannot crowd the others out of a probe.
+fn spread_by_family(pairs: Vec<(String, String)>, limit: usize) -> Vec<(String, String)> {
+    let mut groups: BTreeMap<String, std::collections::VecDeque<(String, String)>> =
+        BTreeMap::new();
+    for pair in pairs {
+        groups
+            .entry(family_key(&pair.1))
+            .or_default()
+            .push_back(pair);
+    }
+    let mut out = Vec::new();
+    while out.len() < limit {
+        let mut moved = false;
+        for group in groups.values_mut() {
+            if let Some(pair) = group.pop_front() {
+                out.push(pair);
+                moved = true;
+                if out.len() >= limit {
+                    break;
+                }
+            }
+        }
+        if !moved {
+            break;
+        }
+    }
+    out
+}
+
+/// A held-out family's registrable label with its words reordered, so the
+/// probe scores a name whose word order the store never recorded. The suffix
+/// and any subdomain are preserved.
 pub fn held_out_variant(domain: &str) -> String {
-    let mut labels = domain.trim_matches('.').split('.');
-    let host = labels.next().unwrap_or(domain);
-    let rest: Vec<&str> = labels.collect();
-    let mut words: Vec<&str> = host
+    let name = domain.trim().trim_matches('.');
+    let label = registrable_label(name);
+    if label.is_empty() {
+        return name.to_string();
+    }
+    let mut words: Vec<&str> = label
         .split(['-', '_'])
         .filter(|word| !word.is_empty())
         .filter(|word| word.chars().any(|c| c.is_ascii_alphabetic()))
@@ -430,20 +545,18 @@ pub fn held_out_variant(domain: &str) -> String {
         words.reverse();
     }
     words.push("probe");
-    let mut variant = words.join("-");
-    if !rest.is_empty() {
-        variant.push('.');
-        variant.push_str(&rest.join("."));
+    let replacement = words.join("-");
+    match name.rfind(label) {
+        Some(at) if name.is_char_boundary(at + label.len()) => {
+            format!("{}{replacement}{}", &name[..at], &name[at + label.len()..])
+        }
+        _ => replacement,
     }
-    variant
 }
 
 /// Most held-out threat names one model probe scores. Bounded so the update
 /// health check stays fast on a large store.
-const MAX_PROBE: usize = 200;
-/// One family contributes at most this many names to a probe, so a single
-/// large family cannot crowd out the others.
-const MAX_PROBE_PER_FAMILY: usize = 20;
+pub const MAX_PROBE: usize = 200;
 
 /// What probing a model against the store's held-out threats found.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -452,6 +565,9 @@ pub struct ThreatProbe {
     pub benign: usize,
     pub downgraded: usize,
     pub skipped: usize,
+    /// The exact names scored, in order. An update saves these so the model
+    /// after a restart is judged on the same names as the model before it.
+    pub sample: Vec<(String, String)>,
 }
 
 impl ThreatProbe {
@@ -492,59 +608,56 @@ pub fn probe_threat_model(
             continue;
         }
         all.push((label, domain));
-        if all.len() >= MAX_PROBE * HOLDOUT_EVERY {
-            break;
+    }
+    // The same spread sample the retrain gate uses: whole token components,
+    // each scored on a word order that never appeared in the store. A store
+    // too small to hit the sample still gets scored rather than skipped.
+    let domains: Vec<String> = all.iter().map(|(_, domain)| domain.clone()).collect();
+    let components = token_components(&domains);
+    let disjoint = components.len() > 1;
+    let selected = selected_components(&components);
+    let mut component_of = vec![String::new(); domains.len()];
+    for (key, members) in &components {
+        for index in members {
+            component_of[*index] = key.clone();
         }
     }
-    // The same spread sample the retrain gate uses: whole families, each
-    // scored on a name order that never appeared in the store. A store too
-    // small to hit the sample still gets scored rather than skipped.
-    let families: std::collections::BTreeSet<String> =
-        all.iter().map(|(_, domain)| family_key(domain)).collect();
-    let by_family = families.len() > 1;
-    let mut selected: std::collections::BTreeSet<String> = families
-        .iter()
-        .filter(|family| hash_selected(family))
-        .cloned()
-        .collect();
-    if selected.is_empty() && by_family {
-        if let Some(first) = families.iter().next() {
-            selected.insert(first.clone());
-        }
-    }
-    if by_family && selected.len() == families.len() {
-        if let Some(last) = selected.iter().next_back().cloned() {
-            selected.remove(&last);
-        }
-    }
-    let mut sample: Vec<(String, String)> = Vec::new();
-    let mut per_family: BTreeMap<String, usize> = BTreeMap::new();
-    for (label, domain) in &all {
-        let family = family_key(domain);
-        let chosen = if by_family {
-            selected.contains(&family)
+    let mut held: Vec<(String, String)> = Vec::new();
+    for (index, (label, domain)) in all.iter().enumerate() {
+        let chosen = if disjoint {
+            selected.contains(&component_of[index])
         } else {
             hash_selected(domain)
         };
-        if !chosen {
-            continue;
-        }
-        let count = per_family.entry(family).or_insert(0);
-        if *count >= MAX_PROBE_PER_FAMILY {
-            continue;
-        }
-        *count += 1;
-        sample.push((label.clone(), held_out_variant(domain)));
-        if sample.len() >= MAX_PROBE {
-            break;
+        if chosen {
+            held.push((label.clone(), domain.clone()));
         }
     }
-    if sample.is_empty() {
-        for (label, domain) in all.iter().take(MAX_PROBE) {
-            sample.push((label.clone(), held_out_variant(domain)));
-        }
+    if held.is_empty() {
+        held = all.iter().take(MAX_PROBE).cloned().collect();
     }
-    let predicted = predict_all(model, &sample)?;
+    let sample: Vec<(String, String)> = spread_by_family(held, MAX_PROBE)
+        .into_iter()
+        .map(|(label, domain)| (label, held_out_variant(&domain)))
+        .collect();
+    probe_threat_names(settings, model, &sample)
+}
+
+/// Score exactly the supplied `(label, name)` pairs. The update apply step
+/// calls this with the baseline probe's names after the restart, so both
+/// models are compared on one pinned sample even if the store changed.
+pub fn probe_threat_names(
+    settings: &AiSettings,
+    model: &Path,
+    sample: &[(String, String)],
+) -> Result<ThreatProbe> {
+    if !model.is_file() {
+        return Err(DaygleError::Config(format!(
+            "model file not found: {}",
+            model.display()
+        )));
+    }
+    let predicted = predict_all(model, sample)?;
     let is_threat =
         |label: &str| settings.dedicated_threat_model() || settings.is_auto_block_category(label);
     let (mut checked, mut benign, mut downgraded, mut skipped) = (0, 0, 0, 0);
@@ -565,17 +678,23 @@ pub fn probe_threat_model(
         benign,
         downgraded,
         skipped,
+        sample: sample.to_vec(),
     })
 }
 
-/// Reject a candidate that stops reading a held-out threat as a threat - as
-/// `benign`, or as any label that would not block. Either way it is a
-/// detection the scanner would stop making, so the gate has no tolerance.
-fn refuse_lost_threats(checked: usize, benign: usize, downgraded: usize) -> Result<()> {
-    if benign + downgraded == 0 {
+/// Reject a candidate that stops reading more held-out threats as threats
+/// than the model in use does - as `benign`, or as any label that would not
+/// block. Either way it is a detection the scanner would stop making.
+fn refuse_lost_threats(
+    checked: usize,
+    benign: usize,
+    downgraded: usize,
+    baseline_lost: usize,
+) -> Result<()> {
+    let lost = benign + downgraded;
+    if lost <= baseline_lost {
         return Ok(());
     }
-    let lost = benign + downgraded;
     let detail = match (benign, downgraded) {
         (0, downgraded) => format!("{downgraded} as a label that would not block"),
         (benign, 0) => format!("{benign} as benign"),
@@ -584,7 +703,7 @@ fn refuse_lost_threats(checked: usize, benign: usize, downgraded: usize) -> Resu
         }
     };
     Err(DaygleError::Config(format!(
-        "the retrained model read {lost} of {checked} held-out threat names {detail}, so the current model was kept; turn ai.learn_negatives off to retrain without the benign class"
+        "the retrained model read {lost} of {checked} held-out threat names {detail} against {baseline_lost} for the model in use, so the current model was kept; turn ai.learn_negatives off to retrain without the benign class"
     )))
 }
 
@@ -736,7 +855,7 @@ impl Retrainer {
                 settings.dedicated_threat_model() || settings.is_auto_block_category(label)
             };
             let (mut benign, mut downgraded, mut checked) = (0usize, 0usize, 0usize);
-            for ((label, _), got) in threat_validation.iter().zip(&predicted) {
+            for ((label, _), got) in probe.iter().zip(&predicted) {
                 // A verdict whose own label no longer blocks was not a threat
                 // to preserve; only the labels the channel would block count.
                 if !is_threat_label(label) {
@@ -749,7 +868,25 @@ impl Retrainer {
                     downgraded += 1;
                 }
             }
-            if let Err(e) = refuse_lost_threats(checked, benign, downgraded) {
+            // The current model is judged on the same novel names, so a
+            // candidate is refused only for losing detections it would have
+            // kept, not for a family it was never given.
+            let current_path = self.current_model.load_full().to_string();
+            let baseline_lost = if current_path.trim().is_empty() {
+                0
+            } else {
+                match predict_all(Path::new(&current_path), &probe) {
+                    Ok(baseline) => baseline
+                        .iter()
+                        .zip(&probe)
+                        .filter(|(got, (label, _))| {
+                            is_threat_label(label) && *got != BENIGN_LABEL && !is_threat_label(got)
+                        })
+                        .count(),
+                    Err(_) => 0,
+                }
+            };
+            if let Err(e) = refuse_lost_threats(checked, benign, downgraded, baseline_lost) {
                 let _ = std::fs::remove_file(&temp);
                 return Err(e);
             }
@@ -896,21 +1033,25 @@ mod tests {
 
     #[test]
     fn the_gate_counts_both_ways_a_threat_stops_being_one() {
-        assert!(refuse_lost_threats(30, 0, 0).is_ok());
+        assert!(refuse_lost_threats(30, 0, 0, 0).is_ok());
+        assert!(
+            refuse_lost_threats(30, 2, 0, 2).is_ok(),
+            "the model in use loses the same names"
+        );
 
-        let benign = refuse_lost_threats(30, 2, 0).unwrap_err().to_string();
+        let benign = refuse_lost_threats(30, 2, 0, 0).unwrap_err().to_string();
         assert!(
             benign.contains("2 of 30 held-out threat names 2 as benign"),
             "{benign}"
         );
 
-        let downgraded = refuse_lost_threats(30, 0, 3).unwrap_err().to_string();
+        let downgraded = refuse_lost_threats(30, 0, 3, 1).unwrap_err().to_string();
         assert!(
             downgraded.contains("3 of 30 held-out threat names 3 as a label that would not block"),
             "{downgraded}"
         );
 
-        let both = refuse_lost_threats(30, 1, 2).unwrap_err().to_string();
+        let both = refuse_lost_threats(30, 1, 2, 0).unwrap_err().to_string();
         assert!(
             both.contains(
                 "3 of 30 held-out threat names 1 as benign and 2 as a label that would not block"
@@ -943,6 +1084,38 @@ mod tests {
         assert!(
             (120..280).contains(&selected),
             "a fifth of families, evenly: {selected}"
+        );
+    }
+
+    #[test]
+    fn registrable_labels_follow_the_public_suffix_list() {
+        assert_eq!(family_key("shop.example.co.uk"), "example");
+        assert_eq!(family_key("www.secure-login.com"), "login-secure");
+        assert_eq!(
+            held_out_variant("www.secure-login.com"),
+            "www.login-secure-probe.com"
+        );
+    }
+
+    #[test]
+    fn a_shared_word_makes_one_held_out_component() {
+        let domains: Vec<String> = [
+            "secure-login-1.example",
+            "login-secure-2.example",
+            "wallet-guide-1.example",
+        ]
+        .iter()
+        .map(|domain| domain.to_string())
+        .collect();
+        let components = token_components(&domains);
+        assert_eq!(components.len(), 2, "{components:?}");
+        assert_eq!(components[0].0, "guide|wallet");
+        assert_eq!(components[0].1, vec![2]);
+        assert_eq!(components[1].0, "login|secure");
+        assert_eq!(components[1].1, vec![0, 1]);
+        assert!(
+            selected_components(&components).len() == 1,
+            "one of two components is held out"
         );
     }
 }

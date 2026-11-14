@@ -1806,6 +1806,20 @@ fn probing_a_model_scores_held_out_threats() {
         0,
         "the model was trained on these names: {probe:?}"
     );
+    assert!(!probe.sample.is_empty(), "the probe pins its names");
+    let pinned = daygle_dns_ml::learn::probe_threat_names(&cfg, &model, &probe.sample).unwrap();
+    assert_eq!(pinned.checked, probe.checked);
+    assert_eq!(
+        pinned.lost(),
+        probe.lost(),
+        "the same sample scores the same"
+    );
+    for (_, domain) in &probe.sample {
+        assert!(
+            domain.contains("probe"),
+            "the probe scores a variant, not the recorded name: {domain}"
+        );
+    }
 
     let missing =
         daygle_dns_ml::learn::probe_threat_model(&ai.store, &cfg, &dir.path().join("missing.bin"));

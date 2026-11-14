@@ -2495,14 +2495,56 @@ pub async fn ai_model_status(State(state): State<AppState>) -> Response {
     .into_response()
 }
 
+/// One name in a pinned model-health probe.
+#[derive(Deserialize)]
+pub struct ModelHealthName {
+    label: String,
+    domain: String,
+}
+
+/// A pinned sample from an earlier `GET /api/ai/model-health`.
+#[derive(Deserialize)]
+pub struct ModelHealthRequest {
+    sample: Vec<ModelHealthName>,
+}
+
+fn model_health_response(model: &str, probe: daygle_dns_ml::learn::ThreatProbe) -> Response {
+    let sample: Vec<serde_json::Value> = probe
+        .sample
+        .iter()
+        .map(|(label, domain)| serde_json::json!({ "label": label, "domain": domain }))
+        .collect();
+    Json(serde_json::json!({
+        "available": true,
+        "model": model,
+        "checked": probe.checked,
+        "lost": probe.lost(),
+        "benign": probe.benign,
+        "downgraded": probe.downgraded,
+        "skipped": probe.skipped,
+        "sample": sample,
+    }))
+    .into_response()
+}
+
+fn model_health_unavailable(reason: impl Into<String>) -> Response {
+    Json(serde_json::json!({
+        "available": false,
+        "model": "",
+        "reason": reason.into(),
+    }))
+    .into_response()
+}
+
 /// `GET /api/ai/model-health` - score the loaded threat model against names
-/// built from held-out threat families. The models-update apply step compares this before
-/// and after installing a bundle and restores the previous files when the
-/// bundle regresses. Always 200: `available` says whether a model could be
-/// probed, so an install on a store with no verdicts still proceeds.
+/// built from held-out threat families. The models-update apply step compares
+/// this before and after installing a bundle and restores the previous files
+/// when the bundle regresses. It always answers 200, including when AI is
+/// disabled: `available` says whether a model could be probed, so an install
+/// on a store with no verdicts still proceeds.
 pub async fn ai_model_health(State(state): State<AppState>) -> Response {
     let Some(ai) = ai_engine(&state) else {
-        return map_err(daygle_dns_ml::ai_disabled_error());
+        return model_health_unavailable("the AI subsystem is disabled");
     };
     let settings = ai.settings.load_full();
     let model = ai.threat_model_path();
@@ -2520,22 +2562,59 @@ pub async fn ai_model_health(State(state): State<AppState>) -> Response {
     })
     .await;
     match probed {
-        Ok(probe) => Json(serde_json::json!({
-            "available": true,
-            "model": model,
-            "checked": probe.checked,
-            "lost": probe.lost(),
-            "benign": probe.benign,
-            "downgraded": probe.downgraded,
-            "skipped": probe.skipped,
-        }))
-        .into_response(),
-        Err(e) => Json(serde_json::json!({
-            "available": false,
-            "model": model,
-            "reason": e.to_string(),
-        }))
-        .into_response(),
+        Ok(probe) => model_health_response(&model, probe),
+        Err(e) => model_health_unavailable(e.to_string()),
+    }
+}
+
+/// `POST /api/ai/model-health` - score the loaded threat model on the exact
+/// names a baseline GET returned. Pinning the sample keeps a before/after
+/// comparison from drifting as the scanner records new verdicts.
+pub async fn ai_model_health_probe(
+    State(state): State<AppState>,
+    Json(request): Json<ModelHealthRequest>,
+) -> Response {
+    let Some(ai) = ai_engine(&state) else {
+        return model_health_unavailable("the AI subsystem is disabled");
+    };
+    if request.sample.is_empty() || request.sample.len() > daygle_dns_ml::learn::MAX_PROBE {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            format!(
+                "sample must hold between 1 and {} names",
+                daygle_dns_ml::learn::MAX_PROBE
+            ),
+        );
+    }
+    let mut sample: Vec<(String, String)> = Vec::with_capacity(request.sample.len());
+    for row in request.sample {
+        let label = row.label.trim().to_ascii_lowercase();
+        let domain = row.domain.trim().trim_matches('.').to_ascii_lowercase();
+        if label.is_empty() || !daygle_dns_ml::scanner::looks_like_domain(&domain) {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "every sample entry needs a label and a valid domain",
+            );
+        }
+        sample.push((label, domain));
+    }
+    let settings = ai.settings.load_full();
+    let model = ai.threat_model_path();
+    let probed = run_blocking({
+        let settings = settings.clone();
+        let model = model.clone();
+        move || {
+            daygle_dns_ml::learn::probe_threat_names(
+                &settings,
+                std::path::Path::new(&model),
+                &sample,
+            )
+        }
+    })
+    .await;
+    match probed {
+        Ok(probe) => model_health_response(&model, probe),
+        Err(e) => model_health_unavailable(e.to_string()),
     }
 }
 

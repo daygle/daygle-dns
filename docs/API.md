@@ -1681,13 +1681,21 @@ A `202` only means the update began; poll `GET /api/ai/model-status` until
 
 `GET /api/ai/model-health` scores the loaded threat model against names built
 from the store's held-out threat families: `{available, model, checked, lost,
-benign, downgraded, skipped}`. `lost` counts names the model reads as
-`benign` or as a label that would not block. It always answers `200`;
-`available: false` with a `reason` means there was no model or no verdicts to
-probe. The models-update apply step calls it before installing a bundle and
-again after the restart: if `lost` grew, the previous model files are restored,
-the service is restarted, and the update run records an `error` naming both
-counts. A probe that is unavailable never blocks an update.
+benign, downgraded, skipped, sample}`. `sample` is the exact list of `{label,
+domain}` names scored, with each name's word order changed so the store never
+recorded it. `lost` counts names the model reads as `benign` or as a label
+that would not block. The endpoint always answers `200`, including when AI is
+disabled; `available: false` with a `reason` means there was no model or no
+verdicts to probe. A loopback request may call it without a console session,
+which is how the root update service reaches it; remote requests still need
+one.
+
+`POST /api/ai/model-health` scores the loaded model on exactly the `sample`
+from an earlier GET, so a before/after comparison cannot drift as the scanner
+records new verdicts. The models-update apply step saves the baseline
+response, posts it back after the restart, and restores the previous files
+when `lost` grew. The service is restarted, and the run records an `error`
+naming both counts. A probe that is unavailable never blocks an update.
 
 `POST /api/ai/override` with `action: "allow"` exempts a domain and its
 subdomains from AI blocking; `clear` removes the exemption (`404` when there
@@ -1775,24 +1783,26 @@ from harmless sites; with a clean separation the class costs nothing.
 
 The retrain gate will not accept that cost. With `learn_negatives` on, whole
 word families are held back from training: about one in five, chosen by a hash
-of the family, where a family is the sorted words of the registrable label
-(`secure-login-3` and `login-secure-9` are one family). Every verdict of a
-selected family stays out, not just one copy of a name whose words still
-appear in training. The gate scores a name built from each held-out family
-with its words reordered and a `probe` suffix, so it tests a name the store
-never recorded. A candidate that reads any of them as `benign`, or as any
-label that would not block, is refused however well it scores overall. The
-refusal names the counts, and `threat_validation_examples` in the retrain
-response says how many were used. A corpus with only one family falls back to
-holding back individual names, so the candidate still trains on threat
-examples. Turning `learn_negatives` off removes the benign class and with it
-this gate.
+of the family. Families are connected components of shared words, not just
+equal word sets, so holding out `secure-login` also holds out `login-alert`
+instead of leaving a shared word in training. The registrable label comes from
+the Public Suffix List, so `shop.example.co.uk` belongs to the `example`
+family and not a `co` family. The gate scores each held-out family under a
+word order the store never recorded, with the suffix and any subdomain kept.
+It judges the candidate against the model in use on those same names: only
+losing more of them is a refusal, and the message names both counts.
+`threat_validation_examples` in the retrain response says how many names were
+used. A corpus whose threat names all share one word has no disjoint split;
+it falls back to holding back individual names, with the variant and the
+current-model comparison still applied. Turning `learn_negatives` off removes
+the benign class and with it this gate.
 
-The evaluation prints the gate's decision beside the swallow numbers. With
-family holdout it refuses both candidates: 18 of 18 and 12 of 12 held-out
-names read as non-threats, matching the 15 of 30 unseen threats the benign
-class swallows in the second scenario. Those are corpus-specific bounds, not
-a promise about any network. `auto_retrain` says "do not block
+The evaluation prints the gate's decision beside the swallow numbers and
+fails if the class swallows an unseen threat while the gate accepts the
+candidate. On its corpus it refuses both candidates: 12 of 12 and 8 of 8
+held-out names read as non-threats, matching the 15 of 30 unseen threats the
+benign class swallows in the second scenario. Those are corpus-specific
+bounds, not a promise about any network. `auto_retrain` says "do not block
 this" and so is not training data: a single-label classifier cannot express a
 negative. `GET /api/ai/status` reports `auto_retrain`,
 `retrain_interval_secs` and `learned_model` (`path`, `present`, `active` and

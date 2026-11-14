@@ -90,6 +90,8 @@ parking_lot = "0.13"
 rust-embed = "8"
 rand = "0.10"
 regex = "1"
+# Public Suffix List: registrable labels for model family holdout.
+psl = "2"
 tempfile = "3"
 url = "2"
 lettre = { version = "0.11", default-features = false, features = ["smtp-transport", "builder", "hostname", "tokio1-rustls", "rustls-tls"] }

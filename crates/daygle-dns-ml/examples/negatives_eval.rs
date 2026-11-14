@@ -178,6 +178,19 @@ fn run() -> Result<(), String> {
 
         let (store, held_out_threats, fresh_ordinary, marked) = seed(&dir, kind)?;
         let rows = measure(&store, &held_out_threats, &fresh_ordinary, &dir)?;
+        // A regression guard, not just a report: if the benign class swallows
+        // unseen threats and the gate would still accept the candidate, the
+        // evaluation itself fails.
+        for row in rows.iter().filter(|row| row.learn_negatives) {
+            if row.threats[1] > 0 && !row.gate.as_ref().is_some_and(|gate| gate.refuses()) {
+                return Err(format!(
+                    "{}: the model swallows {} of {} held-out threats but the gate accepted it",
+                    kind.title(),
+                    row.threats[1],
+                    held_out_threats.len()
+                ));
+            }
+        }
         println!(
             "   {} {} marked not-a-threat; {} threat domains never trained on; {} fresh harmless names",
             marked,

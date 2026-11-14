@@ -68,6 +68,7 @@
 //! | `POST`   | `/api/ai/rescan`                  | wake the scanner for an immediate cycle |
 //! | `GET`    | `/api/ai/model-status`            | installed AI model files (size, sha256) + update-run state |
 //! | `GET`    | `/api/ai/model-health`            | loaded threat model scored on held-out threat names |
+//! | `POST`   | `/api/ai/model-health`            | score the same pinned sample after a model change |
 //! | `POST`   | `/api/ai/update-models`           | begin a models-only update from the latest release |
 //!
 //! Auth endpoints: `POST /api/auth/login`, `POST /api/auth/logout`,
@@ -697,7 +698,10 @@ pub fn router(state: AppState) -> Router {
         .route("/ai/overrides", get(handlers::ai_overrides))
         .route("/ai/rescan", post(handlers::ai_rescan))
         .route("/ai/model-status", get(handlers::ai_model_status))
-        .route("/ai/model-health", get(handlers::ai_model_health))
+        .route(
+            "/ai/model-health",
+            get(handlers::ai_model_health).post(handlers::ai_model_health_probe),
+        )
         .route("/ai/update-models", post(handlers::ai_update_models))
         .route(
             "/config",
@@ -1114,13 +1118,25 @@ async fn require_auth(
     // Within the nested router axum strips the `/api` prefix, so match both
     // the full and stripped forms of the login paths.
     let path = req.uri().path();
+    let loopback_peer = req
+        .extensions()
+        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+        .is_some_and(|info| info.0.ip().is_loopback());
+    // A request a proxy forwarded is never the local update service, even if
+    // the proxy itself runs on loopback.
+    let forwarded = ["x-forwarded-for", "x-real-ip", "forwarded"]
+        .iter()
+        .any(|header| req.headers().contains_key(*header));
+    let local_model_probe = loopback_peer
+        && !forwarded
+        && (path == "/api/ai/model-health" || path == "/ai/model-health");
     let is_auth_path = path == "/api/auth/login"
         || path == "/auth/login"
         || path == "/api/auth/setup"
         || path == "/auth/setup"
         || path == "/api/health"
         || path == "/health";
-    if is_auth_path || req.method() == axum::http::Method::OPTIONS {
+    if is_auth_path || local_model_probe || req.method() == axum::http::Method::OPTIONS {
         return next.run(req).await;
     }
 

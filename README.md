@@ -191,14 +191,15 @@ Daygle DNS combines, in a single process:
   `cargo run -p daygle-dns-ml --example negatives_eval` measures it: on a
   synthetic corpus where the negatives are domains the model had flagged, half
   the held-out threats read as benign; where they are harmless sites, none
-  do. A retrain that reads any held-out threat as benign, or as any label that
-  would not block, is refused even when its overall score is fine. Whole word
-  families are held back for that check, and each is probed under a word order
-  the store never recorded, so a negative class that only swallows novel names
-  is caught. The same command runs the gate on a model trained the way the
-  retrainer trains one and prints whether it would refuse: it refuses both
-  candidates, 18 of 18 and 12 of 12 held-out names lost, including the
-  scenario where 15 of 30 unseen threats are swallowed.
+  do. A retrain that loses more held-out threats than the model in use is
+  refused even when its overall score is fine. Whole word families, grouped by
+  shared words, are held back for that check, and each is probed under a word
+  order the store never recorded, so a negative class that only swallows
+  novel names is caught. The same command runs the gate on a model trained the
+  way the retrainer trains one, prints whether it would refuse, and fails if a
+  swallowing candidate is accepted. It refuses both candidates, 12 of 12 and
+  8 of 8 held-out names lost, including the scenario where 15 of 30 unseen
+  threats are swallowed.
   `ai.fetch_pages` (also off by default) fetches the home page of each new
   threat candidate from the server, reads its title and text with a small cue
   classifier, and records the result with the verdict. `ai.page_rule` decides
@@ -212,8 +213,11 @@ Daygle DNS combines, in a single process:
   verdicts re-enter the scan queue. Point `ai.model_path` at your own
   supervised fastText `.bin` (or empty it for the zero-model heuristic
   backend) to replace the starter model, and `ai.category_model_path` /
-  `ai.threat_model_path` to give a channel its own model. Verdicts are
-  visible via the REST API (`/api/ai/*`).
+  `ai.threat_model_path` to give a channel its own model. A release model
+  bundle is probed on one pinned sample of held-out threat names before it is
+  installed and again after the restart; if it loses more of them than the
+  files it replaces, those files are restored and the update fails with both
+  counts. Verdicts are visible via the REST API (`/api/ai/*`).
 - A **REST API** (tower/axum) for configuration, zone management, logs, and
   metrics.
 - An embedded **Svelte** web GUI with **username/password login and roles**

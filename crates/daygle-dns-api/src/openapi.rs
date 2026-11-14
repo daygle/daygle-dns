@@ -57,7 +57,13 @@ const PATHS: &[(&str, &[Operation])] = &[
     ("/ai/overrides", &[("get", "Ai overrides")]),
     ("/ai/rescan", &[("post", "Ai rescan")]),
     ("/ai/model-status", &[("get", "Ai model status")]),
-    ("/ai/model-health", &[("get", "Ai model health")]),
+    (
+        "/ai/model-health",
+        &[
+            ("get", "Ai model health"),
+            ("post", "Ai model health probe"),
+        ],
+    ),
     ("/ai/update-models", &[("post", "Ai update models")]),
     (
         "/config",
@@ -2907,6 +2913,19 @@ fn ai_schemas() -> Value {
                 "benign": { "type": "integer" },
                 "downgraded": { "type": "integer" },
                 "skipped": { "type": "integer" },
+                "sample": {
+                    "type": "array",
+                    "description": "The exact label and name pairs scored; POST this \
+                        response back after a restart to score the same sample.",
+                    "items": {
+                        "type": "object",
+                        "required": ["label", "domain"],
+                        "properties": {
+                            "label": { "type": "string" },
+                            "domain": { "type": "string" }
+                        }
+                    }
+                },
                 "reason": {
                     "type": "string",
                     "description": "Present when `available` is false."
@@ -3564,10 +3583,42 @@ fn ai_operation(path: &str, method: &str) -> Option<Value> {
             "responses": {
                 "200": json_response(
                     "The loaded threat model scored against names built from held-out \
-                        threat families. `available: false` means there was nothing to \
-                        probe; the update step then installs without gating.",
+                        threat families, plus the sample used. `available: false` means \
+                        there was nothing to probe; the update step then installs \
+                        without gating.",
                     schema_ref("AiModelHealth"),
                 )
+            }
+        })),
+        ("post", "/ai/model-health") => Some(json!({
+            "requestBody": {
+                "required": true,
+                "content": { "application/json": { "schema": {
+                    "type": "object",
+                    "required": ["sample"],
+                    "properties": { "sample": {
+                        "type": "array",
+                        "maxItems": 200,
+                        "items": {
+                            "type": "object",
+                            "required": ["label", "domain"],
+                            "properties": {
+                                "label": { "type": "string" },
+                                "domain": { "type": "string" }
+                            }
+                        }
+                    } }
+                } } }
+            },
+            "responses": {
+                "200": json_response(
+                    "The loaded threat model scored on exactly the pinned names.",
+                    schema_ref("AiModelHealth"),
+                ),
+                "400": json!({
+                    "description": "The sample is empty, too large, or not a pair of label and domain.",
+                    "content": { "application/json": { "schema": error } }
+                })
             }
         })),
         ("post", "/ai/update-models") => Some(json!({
