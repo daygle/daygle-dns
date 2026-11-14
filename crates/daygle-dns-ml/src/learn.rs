@@ -9,9 +9,14 @@
 //! * confident, unexpired verdicts, which keep the model current with what the
 //!   network actually resolves.
 //!
-//! Corrections that say "do not block this" (`allow`, `not_threat`) are left
-//! out: a single-label classifier cannot express a negative, and inventing a
-//! "benign" label would make the threat channel report it as a threat.
+//! Corrections that say "do not block this" are normally left out: a
+//! single-label classifier cannot express a negative inside another label.
+//! With `ai.learn_negatives` on, `not_threat` corrections join the set as a
+//! [`BENIGN_LABEL`] class instead, so the model can stop repeating the
+//! mistake the operator corrected. The threat channel never reports
+//! `benign` as a threat ([`crate::channel::ChannelBackend`]), and the class is
+//! capped so it cannot come to dominate the corpus. `allow` corrections stay
+//! out: allowing a domain says "let it through", not "it is harmless".
 //!
 //! A candidate is judged before it can replace anything: every fifth correction
 //! is held back from training, and the candidate must not score worse on those
@@ -42,6 +47,12 @@ pub const MIN_LABELS: usize = 2;
 /// One label contributes at most this many examples, so a lopsided corpus
 /// cannot drown the others.
 const MAX_PER_LABEL: usize = 2_000;
+/// The label operator "not a threat" corrections train, when
+/// `ai.learn_negatives` is on.
+pub const BENIGN_LABEL: &str = "benign";
+/// Negative examples are capped separately and lower: a class of corrections
+/// that only says "not this" must not outweigh the labels it qualifies.
+const MAX_NEGATIVE_EXAMPLES: usize = 500;
 /// Verdicts read per retrain, strongest first.
 const MAX_VERDICTS: u32 = 20_000;
 /// A candidate must reproduce at least this share of whatever it is judged on.
@@ -62,6 +73,9 @@ pub struct TrainingStats {
     pub corrections: usize,
     /// Examples that came from the scanner's own confident verdicts.
     pub verdicts: usize,
+    /// `not_threat` corrections trained as [`BENIGN_LABEL`] (0 unless
+    /// `ai.learn_negatives` is on).
+    pub negatives: usize,
 }
 
 /// The training set plus the labels held back to judge the result.
@@ -113,22 +127,44 @@ pub fn collect_dataset(store: &AiStore, settings: &AiSettings) -> Result<Dataset
             .trim()
             .trim_matches('.')
             .to_ascii_lowercase();
-        if correction.action != "category" || label.is_empty() || !looks_like_domain(&domain) {
+        if !looks_like_domain(&domain) {
             continue;
         }
-        corrected.insert(domain.clone());
-        corrections.push((label, domain));
+        match correction.action.as_str() {
+            "category" if !label.is_empty() => {
+                corrected.insert(domain.clone());
+                corrections.push((label, domain));
+            }
+            // "Not a threat" is a label of its own when the operator asked
+            // for negatives to be learned: the domain's machine label is
+            // dropped like any corrected domain's, and the pair trains
+            // `benign`.
+            "not_threat" if settings.learn_negatives => {
+                corrected.insert(domain.clone());
+                corrections.push((BENIGN_LABEL.to_string(), domain));
+            }
+            _ => {}
+        }
     }
     let hold_out = corrections.len() >= HOLDOUT_EVERY;
+    let mut negatives = 0usize;
     for (index, (label, domain)) in corrections.into_iter().enumerate() {
         if hold_out && index % HOLDOUT_EVERY == HOLDOUT_EVERY - 1 {
             validation.push((label, domain));
             continue;
         }
+        if label == BENIGN_LABEL && negatives >= MAX_NEGATIVE_EXAMPLES {
+            continue;
+        }
         if push(&mut pairs, &mut labels, &mut seen, &label, &domain) {
-            stats.corrections += 1;
+            if label == BENIGN_LABEL {
+                negatives += 1;
+            } else {
+                stats.corrections += 1;
+            }
         }
     }
+    stats.negatives = negatives;
 
     for (_channel, label, domain) in store.confident_verdicts(
         settings.category_confidence_floor,
@@ -413,6 +449,7 @@ impl Retrainer {
             "labels": stats.labels,
             "corrections": stats.corrections,
             "verdicts": stats.verdicts,
+            "negatives": stats.negatives,
             "train_accuracy": (train_accuracy * 100.0).round() / 100.0,
             "validation_examples": validation.len(),
             "validation_accuracy": validation_accuracy

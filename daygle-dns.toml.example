@@ -619,6 +619,13 @@ auto_block_categories = ["malware", "phishing", "scam"]
 # corrections.
 # auto_retrain = true
 # retrain_interval_secs = 86400
+
+# Learn from "not a threat" corrections: a retrain trains them as a `benign`
+# label, so the model stops repeating a mistake you corrected. Off by default,
+# because a small single-label model can over-generalise a negative class and
+# then miss a threat it would have caught. The threat channel never reports
+# `benign` as a threat, and at most 500 negatives are used.
+# learn_negatives = false
 block_threshold = 0.99
 confidence_floor = 0.2
 category_confidence_floor = 0.2

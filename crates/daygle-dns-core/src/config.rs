@@ -1419,6 +1419,13 @@ pub struct AiSettings {
     pub auto_retrain: bool,
     /// How often automatic maintenance may retrain, in seconds.
     pub retrain_interval_secs: u64,
+    /// Learn from "not a threat" corrections: a retrain adds them to the
+    /// training set as a `benign` label, so the model can stop repeating the
+    /// mistake the operator corrected. Off by default, because a small
+    /// single-label model can over-generalise a negative class and miss a
+    /// threat it would otherwise have reported. The threat channel never
+    /// reports `benign` as a threat whatever the model says.
+    pub learn_negatives: bool,
 }
 
 impl Default for AiSettings {
@@ -1449,6 +1456,7 @@ impl Default for AiSettings {
             verifier_threshold: 0.35,
             auto_retrain: true,
             retrain_interval_secs: 86_400,
+            learn_negatives: false,
         }
     }
 }

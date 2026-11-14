@@ -923,6 +923,57 @@ fn a_retrain_keeps_one_model_to_roll_back_to() {
     assert_eq!(ai.learned_model_record().unwrap()["examples"], 243);
 }
 
+/// "Not a threat" corrections train a `benign` label only when
+/// `ai.learn_negatives` asks for it; the domain's machine label is dropped
+/// either way, so the model is not taught the very label the operator denied.
+#[test]
+fn not_a_threat_corrections_are_learned_only_when_enabled() {
+    let dir = TempDir::new().unwrap();
+    let mut cfg = settings(AiMode::Train);
+    let ai = engine(&dir, cfg.clone());
+    for i in 0..12 {
+        let domain = format!("innocent{i}.example");
+        ai.store.observe(&domain).unwrap();
+        ai.store
+            .save_verdict(
+                Channel::Threat,
+                &domain,
+                "phishing",
+                "threat",
+                "classified",
+                0.99,
+                "fasttext",
+                "ev",
+                3600,
+            )
+            .unwrap();
+        ai.store
+            .set_override(&domain, "not_threat", "looked fine")
+            .unwrap();
+    }
+
+    let dataset = daygle_dns_ml::learn::collect_dataset(&ai.store, &cfg).unwrap();
+    assert!(
+        !dataset.pairs.iter().any(|(label, _)| label == "benign"),
+        "off by default: a single-label model is not given a negative class"
+    );
+    assert!(
+        !dataset
+            .pairs
+            .iter()
+            .any(|(label, domain)| label == "phishing" && domain.starts_with("innocent")),
+        "the machine label it was corrected away from is not training data"
+    );
+
+    cfg.learn_negatives = true;
+    let dataset = daygle_dns_ml::learn::collect_dataset(&ai.store, &cfg).unwrap();
+    assert_eq!(dataset.stats.negatives, 10, "one in five is held back");
+    assert!(dataset
+        .pairs
+        .iter()
+        .any(|(label, _)| label == daygle_dns_ml::learn::BENIGN_LABEL));
+}
+
 /// Corrections are held back from training in fifths, and the candidate is
 /// accepted when it does as well on them as the model in use.
 #[test]

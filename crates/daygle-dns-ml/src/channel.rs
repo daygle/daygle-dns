@@ -33,6 +33,7 @@ use arc_swap::ArcSwap;
 use daygle_dns_core::config::AiSettings;
 
 use crate::backend::{Channel, ClassificationInput, DomainClassifier, Severity, Verdict};
+use crate::learn::BENIGN_LABEL;
 
 /// A classifier restricted to one channel.
 pub struct ChannelBackend {
@@ -81,7 +82,13 @@ impl DomainClassifier for ChannelBackend {
     }
 
     fn categories(&self) -> Vec<String> {
-        self.inner.categories()
+        let mut all = self.inner.categories();
+        // `benign` is a categorization label. It is never a threat, so the
+        // threat channel does not offer it to the auto-block list.
+        if self.channel == Channel::Threat {
+            all.retain(|label| label != BENIGN_LABEL);
+        }
+        all
     }
 
     fn classify(&self, input: &ClassificationInput) -> Option<Verdict> {
@@ -92,6 +99,12 @@ impl DomainClassifier for ChannelBackend {
                 ..verdict
             }),
             Channel::Threat => {
+                // "Not a threat" is the one negative the model can carry: a
+                // learned label, never a finding - not even from a dedicated
+                // threat model or an auto-block list that names it.
+                if verdict.category == BENIGN_LABEL {
+                    return None;
+                }
                 // Settings are always present for this channel; no settings
                 // means no declared threats, which is the safe reading.
                 let settings = self.settings.as_ref()?.load();
@@ -202,6 +215,46 @@ mod tests {
         }));
         let v = backend.classify(&input()).unwrap();
         assert_eq!(v.severity, Severity::Threat);
+    }
+
+    #[test]
+    fn the_threat_channel_never_reports_the_benign_label() {
+        // Learned from `not_threat` corrections, `benign` says "this is not a
+        // threat". Reporting it as one would turn the operator's correction
+        // into a block, and a dedicated threat model does not change that.
+        let backend = ChannelBackend::threat(
+            Box::new(Fixed(Some(verdict("benign", 0.99, Severity::Info)))),
+            dedicated_settings(&["benign"]),
+        );
+        assert!(backend.classify(&input()).is_none());
+
+        // The categorizer may still say it: it is an ordinary label there.
+        let content = ChannelBackend::content(Box::new(Fixed(Some(verdict(
+            "benign",
+            0.9,
+            Severity::Info,
+        )))));
+        assert_eq!(content.classify(&input()).unwrap().category, "benign");
+    }
+
+    #[test]
+    fn the_threat_channel_does_not_offer_benign_for_blocking() {
+        struct Labels;
+        impl DomainClassifier for Labels {
+            fn name(&self) -> String {
+                "labels".to_string()
+            }
+            fn categories(&self) -> Vec<String> {
+                vec!["benign".to_string(), "phishing".to_string()]
+            }
+            fn classify(&self, _input: &ClassificationInput) -> Option<Verdict> {
+                None
+            }
+        }
+        let threat = ChannelBackend::threat(Box::new(Labels), settings_with(&["phishing"]));
+        assert_eq!(threat.categories(), vec!["phishing".to_string()]);
+        let content = ChannelBackend::content(Box::new(Labels));
+        assert_eq!(content.categories().len(), 2);
     }
 
     #[test]

@@ -1712,7 +1712,15 @@ Each accepted retrain keeps the model it replaced as `learned.prev.bin`
 (`learned.prev.json` for its stats), and `POST /api/ai/rollback` puts it back in
 front of the scanner immediately. The model it replaces becomes the previous
 one, so a rollback can itself be undone. `GET /api/ai/status` reports
-`learned_model.previous`. `auto_retrain` says "do not block
+`learned_model.previous`.
+
+With `ai.learn_negatives` on, `not_threat` corrections are training data too:
+they become a `benign` label (reported as `negatives` in the retrain response
+and in the model record). The threat channel never reports `benign` - even a
+dedicated threat model's `benign` verdict is dropped - and the auto-block label
+picker does not offer it. The trade-off is the usual one for a negative class
+in a small single-label model: it can over-generalise and miss a threat, so it
+is off by default. `allow` corrections are not negatives and stay out. `auto_retrain` says "do not block
 this" and so is not training data: a single-label classifier cannot express a
 negative. `GET /api/ai/status` reports `auto_retrain`,
 `retrain_interval_secs` and `learned_model` (`path`, `present`, `active` and

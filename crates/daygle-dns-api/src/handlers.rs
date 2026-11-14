@@ -1497,6 +1497,7 @@ pub async fn ai_status(State(state): State<AppState>) -> Response {
         // achieved. The retrained file is used from the next start.
         "auto_retrain": settings.auto_retrain,
         "retrain_interval_secs": settings.retrain_interval_secs,
+        "learn_negatives": settings.learn_negatives,
         "learned_model": {
             "path": ai.learned_model_path().display().to_string(),
             "present": ai.learned_model_path().is_file(),
@@ -2161,6 +2162,7 @@ pub async fn ai_retrain(State(state): State<AppState>) -> Response {
                 "labels": stats.labels,
                 "corrections": stats.corrections,
                 "verdicts": stats.verdicts,
+                "negatives": stats.negatives,
                 "validation_examples": validation,
                 "active": true,
                 "message": if validation > 0 {
@@ -6290,6 +6292,7 @@ pub struct AiUpdate {
     /// Retrain the classifier from what the scanner has learned.
     pub auto_retrain: Option<bool>,
     pub retrain_interval_secs: Option<u64>,
+    pub learn_negatives: Option<bool>,
 }
 
 /// listener-relevant `[server]` fields apply live; the rest are restarts.
@@ -7233,6 +7236,9 @@ pub async fn update_settings(
         }
         if let Some(v) = a.retrain_interval_secs {
             config.ai.retrain_interval_secs = v.max(3_600);
+        }
+        if let Some(v) = a.learn_negatives {
+            config.ai.learn_negatives = v;
         }
     }
 

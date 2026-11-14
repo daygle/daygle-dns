@@ -177,6 +177,19 @@
     }
   }
 
+  async function setLearnNegatives(value) {
+    try {
+      await api.updateSettings({ ai: { learn_negatives: value } });
+      status = { ...status, learn_negatives: value };
+      notice = value
+        ? '\"Not a threat\" corrections will train a benign label. If the model starts missing threats, turn this off and restore the previous model.'
+        : '\"Not a threat\" corrections are no longer used as training data; they still stop a block.';
+    } catch (e) {
+      error = formatApiError(e);
+      await load(true);
+    }
+  }
+
   async function rollbackModel() {
     rollingBack = true;
     error = null;
@@ -198,7 +211,10 @@
     notice = null;
     try {
       const result = await api.aiRetrain();
-      notice = `Retrained from ${fmt(result.examples)} examples across ${fmt(result.labels)} labels (${fmt(result.corrections)} from your corrections). The new model is in use now.`;
+      const negatives = result.negatives
+        ? `, ${fmt(result.negatives)} from "not a threat" marks`
+        : '';
+      notice = `Retrained from ${fmt(result.examples)} examples across ${fmt(result.labels)} labels (${fmt(result.corrections)} from your corrections${negatives}). ${result.message || 'The new model is in use now.'}`;
       await load(true);
     } catch (e) {
       error = formatApiError(e);
@@ -417,6 +433,15 @@
           />
           <span>Retrain Automatically</span>
         </label>
+        <label class="row" style="gap: 6px; align-items: center; font-size: 0.85rem">
+          <input
+            type="checkbox"
+            style="width: auto"
+            checked={!!status.learn_negatives}
+            onchange={(event) => setLearnNegatives(event.currentTarget.checked)}
+          />
+          <span>Learn "Not a Threat"</span>
+        </label>
       {/if}
     </div>
     <p class="muted help" style="margin: 0 0 10px">
@@ -426,7 +451,11 @@
       actually visits. A retrain needs at least 200 examples, and a candidate
       must hold up on corrections it was not trained on before it replaces the
       model in use. Accepted models are loaded straight away; delete the file
-      to fall back to the configured model.
+      to fall back to the configured model. With Learn "Not a Threat" on, your
+      not-a-threat marks become a benign label too - useful when the model
+      keeps mislabelling the same harmless domain, but a negative class can
+      over-generalise, so watch for missed threats and restore the previous
+      model if you see them.
     </p>
     {#if status.learned_model}
       <p class="muted" style="margin: 0 0 10px; font-size: 0.85rem">
