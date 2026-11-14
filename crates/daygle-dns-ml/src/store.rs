@@ -179,6 +179,8 @@ const VERDICT_COLUMNS: &str = concat!(
     "v.backend, v.evidence, v.observations, v.classified_at, v.expires_at, ",
     "EXISTS (SELECT 1 FROM ai_overrides o ",
     "WHERE o.domain = v.domain AND o.action = 'allow'), ",
+    // Only a categorization carries the relabel (see above).
+    "v.channel = 'content' AND ",
     "EXISTS (SELECT 1 FROM ai_category_overrides c WHERE c.domain = v.domain)"
 );
 
@@ -498,6 +500,19 @@ impl AiStore {
         Ok(requeued)
     }
 
+    /// Whether verdicts expired by `until_epoch` are still waiting for
+    /// [`Self::expire_old`] (a backlog larger than one batch).
+    pub fn has_expired(&self, until_epoch: i64) -> Result<bool> {
+        let conn = self.lock()?;
+        Ok(conn.query_row(
+            "SELECT EXISTS (SELECT 1 FROM ai_verdicts
+                            WHERE status IN ('classified', 'skipped')
+                              AND expires_at > 0 AND expires_at <= ?1)",
+            params![until_epoch],
+            |r| r.get(0),
+        )?)
+    }
+
     /// Fresh (non-expired) classified *threat-channel* verdicts at or above
     /// `threshold`, minus exact operator `allow` vetoes and threats the
     /// verifier disputed. The block snapshot narrows these to the auto-block
@@ -517,8 +532,7 @@ impl AiStore {
                AND NOT EXISTS (
                    SELECT 1 FROM ai_overrides o
                    WHERE o.domain = ai_verdicts.domain AND o.action = 'allow'
-               )
-             ORDER BY expires_at",
+               )",
         )?;
         let collected = stmt
             .query_map(params![threshold, now_epoch], |r| {
@@ -729,10 +743,10 @@ impl AiStore {
                 SELECT 1 FROM ai_overrides o WHERE o.domain = v.domain AND o.action = 'allow')))
             AND v.domain LIKE ?6 ESCAPE '\\'
             AND v.channel = ?7
-            AND (?8 = '' OR (?8 = 'set' AND EXISTS (
+            AND (?8 = '' OR (?8 = 'set' AND v.channel = 'content' AND EXISTS (
                 SELECT 1 FROM ai_category_overrides c WHERE c.domain = v.domain))
-                OR (?8 = 'scanner' AND NOT EXISTS (
-                SELECT 1 FROM ai_category_overrides c WHERE c.domain = v.domain)))";
+                OR (?8 = 'scanner' AND NOT (v.channel = 'content' AND EXISTS (
+                SELECT 1 FROM ai_category_overrides c WHERE c.domain = v.domain))))";
         let params = params![
             threats_only,
             status,

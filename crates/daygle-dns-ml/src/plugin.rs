@@ -23,14 +23,20 @@
 //! Client groups can override the enforcement mode for their clients
 //! (`ai_mode`: inherit, enforce, record only): the first enabled group a
 //! client belongs to decides, and clients in no group follow `ai.mode`.
+//! That group's Custom Allow rules hold against both jobs: the groups are
+//! evaluated after the policy engine, so without this check a name the
+//! group allows could still be blocked by the AI for its clients.
 
+use std::borrow::Cow;
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use chrono::Utc;
 use daygle_dns_core::config::{AiMode, AiSettings};
-use daygle_dns_policy::{Action, AdvancedBlocking, Decision, PolicyContext, PolicyPlugin};
+use daygle_dns_policy::{
+    Action, AdvancedBlocking, AiPolicy, Decision, PolicyContext, PolicyPlugin,
+};
 
 use crate::scanner::{exempt, BlockSnapshot, CategorySnapshot, ExemptionSnapshot};
 
@@ -113,29 +119,34 @@ impl PolicyPlugin for AiBlockPlugin {
             return None; // scanner off: no verdicts to act on
         }
         let now = Utc::now().timestamp();
+        // Query names normally arrive normalized; only copy one that is not.
+        let trimmed = context.query_name.trim_end_matches('.');
+        let name: Cow<'_, str> = if trimmed.bytes().any(|b| b.is_ascii_uppercase()) {
+            Cow::Owned(trimmed.to_ascii_lowercase())
+        } else {
+            Cow::Borrowed(trimmed)
+        };
+        let name = name.as_ref();
+        // The group deciding for this client: its AI mode, the categories
+        // it blocks and its allow rules (one scan of the groups).
         let groups = self.groups.load();
-        let name = context
-            .query_name
-            .trim_end_matches('.')
-            .to_ascii_lowercase();
+        let groups = groups.as_deref().map(|groups| groups.load());
+        let policy = match &groups {
+            Some(groups) => groups.ai_policy(context.client, context.listener, settings.mode),
+            None => AiPolicy::ungrouped(settings.mode),
+        };
         // Checked only once something would block, so the common no-match
-        // query pays nothing for it.
-        let is_exempt = || exempt(&name, &self.exemptions.load());
+        // query pays nothing for them.
+        let is_exempt = || exempt(name, &self.exemptions.load()) || policy.allows(name);
 
         // 1. Detected threats: blocked where the effective mode is enforce.
         //    The global mode is the default; the first enabled group covering
         //    the client can replace it either way (enforce one group while
         //    the server records, or record for one while it enforces).
-        let mode = groups.as_deref().map_or(settings.mode, |groups| {
-            groups
-                .load()
-                .ai_mode(context.client, context.listener, settings.mode)
-                .0
-        });
-        if mode == AiMode::Enforce {
+        if policy.mode == AiMode::Enforce {
             let snapshot = self.snapshot.load();
             if let Some(block) =
-                suffix_match(&name, &snapshot, now, |b| b.expires_at).filter(|_| !is_exempt())
+                suffix_match(name, &snapshot, now, |b| b.expires_at).filter(|_| !is_exempt())
             {
                 return Some(
                     Decision::new(
@@ -152,18 +163,17 @@ impl PolicyPlugin for AiBlockPlugin {
         }
 
         // 2. Blocked categories (both modes: this is an operator policy).
-        let groups = groups.as_deref()?.load();
-        let (blocked, group_name) = groups.blocked_categories(context.client, context.listener);
-        let blocked = blocked?;
+        let blocked = policy.blocked_categories;
         if blocked.is_empty() {
             return None;
         }
         let categories = self.categories.load();
-        let labelled = suffix_match(&name, &categories, now, |c| c.expires_at)?;
+        let labelled = suffix_match(name, &categories, now, |c| c.expires_at)?;
         let category = labelled.category.as_str();
         if !blocked.iter().any(|c| c.eq_ignore_ascii_case(category)) || is_exempt() {
             return None;
         }
+        let group_name = policy.group();
         Some(
             Decision::new(
                 format!(
@@ -230,12 +240,21 @@ mod tests {
         categories: &[&str],
         ai_mode: Option<AiMode>,
     ) -> Arc<ArcSwap<AdvancedBlocking>> {
+        groups_allowing(categories, ai_mode, &[])
+    }
+
+    /// [`groups_blocking`] with Custom Allow entries.
+    fn groups_allowing(
+        categories: &[&str],
+        ai_mode: Option<AiMode>,
+        allow: &[&str],
+    ) -> Arc<ArcSwap<AdvancedBlocking>> {
         let group = daygle_dns_core::blocking::BlockingGroup {
             id: "g".to_string(),
             name: "kids".to_string(),
             enabled: true,
             clients: vec!["10.0.0.0/24".to_string()],
-            allow: vec![],
+            allow: allow.iter().map(|d| d.to_string()).collect(),
             block: vec![],
             allow_regex: vec![],
             block_regex: vec![],
@@ -478,5 +497,39 @@ mod tests {
         let mut outside = ctx("casino.example");
         outside.client = "192.0.2.1".parse().unwrap();
         assert!(p.evaluate(&outside).await.is_none());
+    }
+
+    /// A name the client's group allows is never blocked by the AI for its
+    /// clients, by category or as a detected threat; other clients and
+    /// other names are unaffected.
+    #[tokio::test]
+    async fn the_groups_allow_rules_hold_against_the_ai() {
+        let mut snapshot = BlockSnapshot::new();
+        snapshot.insert(
+            "bad.example.com".to_string(),
+            ActiveBlock {
+                category: "malware".to_string(),
+                expires_at: i64::MAX,
+            },
+        );
+        let p = plugin_with(
+            AiMode::Enforce,
+            snapshot,
+            category("casino.example", "gambling"),
+        );
+        p.set_client_groups(groups_allowing(
+            &["gambling"],
+            None,
+            &["*.casino.example", "bad.example.com"],
+        ));
+        assert!(p.evaluate(&ctx("www.casino.example")).await.is_none());
+        assert!(p.evaluate(&ctx("bad.example.com")).await.is_none());
+        // Not on the allow list: still blocked.
+        assert!(p.evaluate(&ctx("casino.example")).await.is_some());
+        assert!(p.evaluate(&ctx("www.bad.example.com")).await.is_some());
+        // Outside the group the allow list does not apply.
+        let mut outside = ctx("bad.example.com");
+        outside.client = "192.0.2.1".parse().unwrap();
+        assert!(p.evaluate(&outside).await.is_some());
     }
 }

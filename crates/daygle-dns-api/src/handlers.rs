@@ -3276,12 +3276,17 @@ pub(crate) fn rebuild_advanced_blocking(state: &AppState) {
 
 /// Reject invalid regex patterns before they reach the store, so a bad pattern
 /// is a clear 400 rather than a rule silently dropped at engine-build time.
+/// Blank lines are dropped first.
 fn validate_group_regexes(
-    input: &daygle_dns_core::blocking::BlockingGroupInput,
+    input: &mut daygle_dns_core::blocking::BlockingGroupInput,
 ) -> Result<(), String> {
-    for pattern in input.allow_regex.iter().chain(input.block_regex.iter()) {
-        daygle_dns_policy::validate_regex(pattern)
-            .map_err(|e| format!("invalid regex '{pattern}': {e}"))?;
+    for (kind, patterns) in [
+        ("allow", &mut input.allow_regex),
+        ("block", &mut input.block_regex),
+    ] {
+        patterns.retain(|p| !p.trim().is_empty());
+        daygle_dns_policy::validate_regexes(patterns)
+            .map_err(|e| format!("{kind} patterns: {e}"))?;
     }
     Ok(())
 }
@@ -3300,7 +3305,7 @@ pub async fn upsert_blocking_group(
     State(state): State<AppState>,
     Json(mut input): Json<daygle_dns_core::blocking::BlockingGroupInput>,
 ) -> Response {
-    if let Err(msg) = validate_group_regexes(&input) {
+    if let Err(msg) = validate_group_regexes(&mut input) {
         return error_response(StatusCode::BAD_REQUEST, msg);
     }
     if let Err(msg) = daygle_dns_core::schedule::validate(&input.schedule) {
@@ -3358,20 +3363,35 @@ pub async fn upsert_blocking_group(
     input.blocked_tlds = tlds;
     // Blocked AI categories: lower-cased, once each, and only labels the
     // loaded scanner can actually emit - a typo would otherwise be a rule
-    // that silently never matches.
+    // that silently never matches. Categories the group already blocks are
+    // kept as they are, so a group can still be edited while the scanner is
+    // off or after its model changed.
     let known_categories = ai_engine(&state)
         .map(|ai| ai.backend_categories())
         .unwrap_or_default();
+    let stored = match &input.id {
+        Some(id) => state.catalog.store().get_blocking_group(id),
+        None => state.catalog.store().list_blocking_groups().map(|groups| {
+            groups
+                .into_iter()
+                .find(|g| g.name.trim().eq_ignore_ascii_case(input.name.trim()))
+        }),
+    };
+    let stored_categories = match stored {
+        Ok(group) => group.map(|g| g.blocked_categories).unwrap_or_default(),
+        Err(e) => return map_err(e),
+    };
     let mut categories: Vec<String> = Vec::new();
     for raw in &input.blocked_categories {
         let category = raw.trim().to_ascii_lowercase();
         if category.is_empty() {
             continue;
         }
-        if !known_categories
+        let known = known_categories
             .iter()
-            .any(|known| known.eq_ignore_ascii_case(&category))
-        {
+            .chain(&stored_categories)
+            .any(|known| known.eq_ignore_ascii_case(&category));
+        if !known {
             return error_response(
                 StatusCode::BAD_REQUEST,
                 format!(
@@ -3398,8 +3418,12 @@ pub async fn upsert_blocking_group(
         Ok(accounts) => accounts,
         Err(e) => return map_err(e),
     };
-    let mut clients = Vec::new();
+    let mut clients: Vec<String> = Vec::new();
     for entry in &input.clients {
+        let entry = entry.trim();
+        if entry.is_empty() {
+            continue;
+        }
         if let Some(name) = daygle_dns_policy::account_entry(entry) {
             let Some(account) = accounts.iter().find(|a| a.name.eq_ignore_ascii_case(name)) else {
                 return error_response(
@@ -3407,24 +3431,24 @@ pub async fn upsert_blocking_group(
                     format!("there is no DNS account named '{name}'"),
                 );
             };
-            clients.push(format!(
-                "{}{}",
-                daygle_dns_policy::ACCOUNT_PREFIX,
-                account.name
-            ));
+            let entry = format!("{}{}", daygle_dns_policy::ACCOUNT_PREFIX, account.name);
+            if !clients.contains(&entry) {
+                clients.push(entry);
+            }
             continue;
         }
-        if !config.is_network_entry(entry.trim()) && !daygle_dns_policy::is_listener_keyword(entry)
-        {
+        if !config.is_network_entry(entry) && !daygle_dns_policy::is_listener_keyword(entry) {
             return error_response(
                 StatusCode::BAD_REQUEST,
                 format!(
-                    "'{}' is not a network, an address, a network name, a listener name (DoT, DoH, DoQ) or an account (account:<name>)",
-                    entry.trim()
+                    "'{entry}' is not a network, an address, a network name, a listener name (DoT, DoH, DoQ) or an account (account:<name>)"
                 ),
             );
         }
-        clients.push(entry.clone());
+        // Once each (names and listeners in any case).
+        if !clients.iter().any(|c| c.eq_ignore_ascii_case(entry)) {
+            clients.push(entry.to_string());
+        }
     }
     input.clients = clients;
     // Selected blocklists must name configured sources; store each under the
@@ -3584,13 +3608,7 @@ async fn test_blocking_as(state: AppState, input: BlockingTestInput) -> Response
     let listener = input
         .listener
         .as_deref()
-        .map(|l| l.trim().to_ascii_lowercase())
-        .filter(|l| daygle_dns_policy::advanced::LISTENER_KEYWORDS.contains(&l.as_str()))
-        .map(|l| match l.as_str() {
-            "dot" => "dot",
-            "doh" => "doh",
-            _ => "doq",
-        });
+        .and_then(daygle_dns_policy::listener_keyword);
     // The resolver skips client-group blocking for allowlisted names.
     let allowlisted = state.policy.load().is_allowlisted(&domain);
     let groups = state.advanced_blocking.load();
@@ -6965,15 +6983,18 @@ pub async fn update_settings(
     if ai_changed {
         match &state.ai {
             Some(ai) => {
-                let backend_changed = old_config.ai.model_path != config.ai.model_path
-                    || old_config.ai.database != config.ai.database;
-                ai.settings.store(Arc::new(config.ai.clone()));
-                ai.refresh_snapshot_now();
-                ai.trigger_rescan();
-                if backend_changed {
+                // Rebuilding the snapshots reads SQLite: off the async workers.
+                let restart = run_blocking({
+                    let ai = ai.clone();
+                    let settings = config.ai.clone();
+                    move || ai.apply_settings(&settings)
+                })
+                .await;
+                if restart {
                     state.logs.warn(
                         "api",
-                        "AI model or database path changed; restart to switch backends".to_string(),
+                        "AI model, verifier or database settings changed; restart to load them"
+                            .to_string(),
                     );
                 }
             }

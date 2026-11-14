@@ -88,6 +88,22 @@
       .filter(Boolean);
   }
 
+  // Split a regex textarea on newlines only: a comma is part of a pattern
+  // (`\d{1,3}`), not a separator.
+  function parseLines(text) {
+    return (text || '')
+      .split('\n')
+      .map((s) => s.trim())
+      .filter(Boolean);
+  }
+
+  // The categories to offer: the scanner's, plus any the group already
+  // blocks that the scanner no longer lists (AI off, or another model), so
+  // they can still be seen and unticked.
+  const categoryChoices = $derived(
+    [...new Set([...aiCategories, ...(edit?.blocked_categories || [])])].sort(),
+  );
+
   function startEdit(group) {
     notice = null;
     error = null;
@@ -229,8 +245,8 @@
       clients: [...edit.clients],
       allow: parseList(edit.allow),
       block: parseList(edit.block),
-      allow_regex: parseList(edit.allow_regex),
-      block_regex: parseList(edit.block_regex),
+      allow_regex: parseLines(edit.allow_regex),
+      block_regex: parseLines(edit.block_regex),
       blocklists: edit.blocklists,
       response,
       ai_mode: edit.ai_mode === 'inherit' ? null : edit.ai_mode,
@@ -618,9 +634,9 @@
       </p>
 
       <div class="section-title">Blocked Categories</div>
-      {#if aiCategories.length}
+      {#if categoryChoices.length}
         <div class="services">
-          {#each aiCategories as category (category)}
+          {#each categoryChoices as category (category)}
             <label class="service" class:on={edit.blocked_categories.includes(category)}>
               <input type="checkbox" checked={edit.blocked_categories.includes(category)} onchange={() => toggleCategory(category)} />{titleCase(category)}
             </label>
@@ -632,6 +648,10 @@
           only supplies the label: this rule applies in both Train and Enforce
           mode, and Custom Allow below still takes precedence. Categories come
           from the loaded model, so changing the model can change the list.
+          {#if !aiCategories.length}
+            The AI scanner is off, so these ticked categories block nothing
+            until it is turned back on.
+          {/if}
         </p>
       {:else}
         <p class="muted help">
@@ -707,7 +727,11 @@
         <label>Allow Regex <textarea rows="2" bind:value={edit.allow_regex} placeholder={'^cdn\\d+\\.'}></textarea></label>
         <label>Block Regex <textarea rows="2" bind:value={edit.block_regex} placeholder={'^ads?[0-9]*\\.'}></textarea></label>
       </div>
-      <p class="muted help">Regular expressions matched against the full domain name, one per line.</p>
+      <p class="muted help">
+        Regular expressions matched against the full domain name, one per
+        line, ignoring case. A pattern matches anywhere in the name unless
+        anchored with <code>^</code> and <code>$</code>.
+      </p>
 
       <div class="row actions">
         <button onclick={saveGroup} disabled={saving || !edit.name.trim()}>

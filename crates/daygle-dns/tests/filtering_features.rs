@@ -236,6 +236,87 @@ async fn group_schedules_are_validated_and_applied() {
     shutdown(server).await;
 }
 
+/// Saving a group normalizes its clients and patterns, checks the patterns
+/// as the group matches them, and keeps the AI categories it already
+/// blocks while the scanner is off.
+#[tokio::test]
+async fn group_input_is_normalized_and_kept_editable() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = search_server(&dir).await;
+    let udp = server.udp_addr.unwrap();
+    let base = format!("http://{}/api", server.api_addr);
+    let client = reqwest::Client::new();
+    let save = |body: serde_json::Value| {
+        client
+            .post(format!("{base}/policy/blocking"))
+            .json(&body)
+            .send()
+    };
+
+    // Clients are trimmed and listed once each; blank patterns are dropped
+    // (an empty pattern would match every name).
+    let resp = save(serde_json::json!({
+        "name": "lan",
+        "clients": [" 127.0.0.1 ", "127.0.0.1", " DoT", "dot", ""],
+        "block_regex": ["^www\\.goo{1,2}gle\\.", "  "],
+    }))
+    .await
+    .unwrap();
+    assert!(resp.status().is_success(), "{}", resp.text().await.unwrap());
+    let group: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(group["clients"], serde_json::json!(["127.0.0.1", "DoT"]));
+    assert_eq!(
+        group["block_regex"],
+        serde_json::json!(["^www\\.goo{1,2}gle\\."])
+    );
+    // The pattern with a comma blocks, ignoring case.
+    let reply = udp_query(udp, "WWW.Google.com.", RecordType::A).await;
+    assert_eq!(reply.response_code, ResponseCode::NXDomain);
+
+    // Patterns that only fail together are refused up front.
+    let big: Vec<String> = (0..4096)
+        .map(|i| format!("^p{i}\\w{{40}}\\w{{40}}\\w{{40}}$"))
+        .collect();
+    let resp = save(serde_json::json!({ "name": "big", "allow_regex": big }))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::BAD_REQUEST);
+    assert!(resp.text().await.unwrap().contains("too large"));
+
+    // The scanner is off here, so a new category is refused, but one the
+    // group already blocks (from when it was on) does not stop an edit.
+    let resp = save(serde_json::json!({ "name": "lan", "blocked_categories": ["gambling"] }))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::BAD_REQUEST);
+    let mut input = server
+        .catalog
+        .store()
+        .get_blocking_group(group["id"].as_str().unwrap())
+        .unwrap()
+        .unwrap()
+        .to_input();
+    input.blocked_categories = vec!["gambling".to_string()];
+    server
+        .catalog
+        .store()
+        .upsert_blocking_group(&input)
+        .unwrap();
+    let resp = save(serde_json::json!({
+        "id": group["id"],
+        "name": "LAN devices",
+        "clients": ["127.0.0.1"],
+        "blocked_categories": ["Gambling"],
+    }))
+    .await
+    .unwrap();
+    assert!(resp.status().is_success(), "{}", resp.text().await.unwrap());
+    let group: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(group["blocked_categories"], serde_json::json!(["gambling"]));
+
+    shutdown(server).await;
+}
+
 /// A group blocks a whole service (its domains and their subdomains) with
 /// one tick; an unknown service is refused.
 #[tokio::test]

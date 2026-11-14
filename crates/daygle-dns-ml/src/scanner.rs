@@ -140,10 +140,15 @@ impl Scanner {
         // 1. Expiry: stale verdicts re-enter pending.
         let last_expiry = self.last_expiry.load(Ordering::Relaxed);
         if now - last_expiry >= cfg.expire_check_secs as i64 {
-            self.last_expiry.store(now, Ordering::Relaxed);
             let expired = self.store.expire_old(now, cfg.max_domains_per_scan)?;
             if expired > 0 {
                 self.log_info(format!("AI re-queued {expired} expired verdict(s)"));
+            }
+            // A backlog larger than one batch carries on next cycle rather
+            // than an `expire_check_secs` later: an expired verdict blocks
+            // nothing until it is re-checked.
+            if !self.store.has_expired(now)? {
+                self.last_expiry.store(now, Ordering::Relaxed);
             }
         }
 
@@ -360,6 +365,7 @@ impl Scanner {
         cfg: &AiSettings,
         now: i64,
         overrides: &ExemptionSnapshot,
+        blocks: &BlockSnapshot,
     ) -> Result<CategorySnapshot> {
         let relabels = self.store.category_overrides()?;
         let mut snapshot = CategorySnapshot::new();
@@ -380,14 +386,14 @@ impl Scanner {
                 },
             );
         }
-        for (domain, block) in self.blocks_with(cfg, now, overrides)? {
-            if relabels.contains_key(&domain) {
+        for (domain, block) in blocks {
+            if relabels.contains_key(domain) {
                 continue;
             }
             snapshot.insert(
-                domain,
+                domain.clone(),
                 ActiveCategory {
-                    category: block.category,
+                    category: block.category.clone(),
                     expires_at: block.expires_at,
                 },
             );
@@ -429,20 +435,22 @@ impl Scanner {
         // below must not keep the new exemptions from the plugin.
         let overrides = Arc::new(overrides);
         self.exemptions.store(overrides.clone());
-        match self.categories_with(cfg, now, &overrides) {
+        // The eligible threats, read once: both snapshots are built from them.
+        let eligible = match self.blocks_with(cfg, now, &overrides) {
+            Ok(eligible) => eligible,
+            Err(e) => {
+                // Keep the previous snapshots rather than dropping every
+                // block over a transient store error.
+                self.log_warn(format!("AI snapshot refresh failed: {e}"));
+                return;
+            }
+        };
+        match self.categories_with(cfg, now, &overrides, &eligible) {
             Ok(categories) => self.categories.store(Arc::new(categories)),
             Err(e) => self.log_warn(format!("AI category snapshot refresh failed: {e}")),
         }
         let snapshot = if cfg.mode == AiMode::Enforce {
-            match self.blocks_with(cfg, now, &overrides) {
-                Ok(eligible) => eligible,
-                Err(e) => {
-                    // Keep the previous snapshot rather than dropping every
-                    // block over a transient store error.
-                    self.log_warn(format!("AI snapshot refresh failed: {e}"));
-                    return;
-                }
-            }
+            eligible
         } else {
             BlockSnapshot::new()
         };

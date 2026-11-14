@@ -34,6 +34,8 @@ pub struct Shared {
     pub policy: Arc<ArcSwap<PolicyEngine>>,
     /// Advanced Blocking groups (built from the store, swapped on CRUD).
     pub advanced_blocking: Arc<ArcSwap<AdvancedBlocking>>,
+    /// The AI scanner; `None` when `[ai]` was disabled at startup.
+    pub ai: Option<Arc<daygle_dns_ml::AiEngine>>,
     /// Persistent query logger; `None` unless `logging.query_log_enabled`.
     pub query_logger: Option<Arc<daygle_dns_core::QueryLogger>>,
     /// SQLite query-log sink feeding the console's Query Logs view; it skips
@@ -162,11 +164,32 @@ pub fn apply_config(shared: &Shared, new: Arc<DaygleConfig>) -> bool {
         }
     }
 
-    // Named networks (split horizon resolves them in its index).
+    // Named networks (split horizon resolves them in its index, and the
+    // filtering groups' client lists may name them).
     if old.networks != new.networks {
         match shared.catalog.set_networks(new.all_networks()) {
             Ok(()) => info!("networks reloaded"),
             Err(e) => warn!("cannot apply the networks: {e}"),
+        }
+        match shared.catalog.store().list_blocking_groups() {
+            Ok(groups) => shared
+                .advanced_blocking
+                .store(Arc::new(AdvancedBlocking::build(
+                    &new.resolve_blocking_groups(groups),
+                    shared.advanced_blocking.load().lists(),
+                ))),
+            Err(e) => warn!("cannot rebuild the filtering groups: {e}"),
+        }
+    }
+
+    // AI settings (mode, thresholds, categories, TTLs) apply live, as they
+    // do from the console; models and the database load at startup.
+    if old.ai != new.ai {
+        if let Some(ai) = &shared.ai {
+            if ai.apply_settings(&new.ai) {
+                warn!("AI model, verifier or database settings changed; restart to load them");
+            }
+            info!("AI settings reloaded");
         }
     }
 
@@ -612,6 +635,7 @@ mod tests {
             catalog,
             policy: Arc::new(ArcSwap::from_pointee(PolicyEngine::new(false))),
             advanced_blocking: Arc::new(ArcSwap::from_pointee(AdvancedBlocking::default())),
+            ai: None,
             query_logger: None,
             query_db_logger: None,
             resolver: Arc::new(ArcSwapOption::empty()),
@@ -665,6 +689,67 @@ mod tests {
             s.config.load_full().policy.blocklist,
             vec!["ads.example".to_string()]
         );
+    }
+
+    /// A filtering group that names a network follows that network's
+    /// addresses when the configuration is reloaded (not only when the
+    /// network is edited through the console).
+    #[test]
+    fn network_changes_reach_filtering_groups() {
+        use daygle_dns_core::blocking::BlockingGroup;
+        use daygle_dns_core::config::NamedNetwork;
+        let network = |cidr: &str| NamedNetwork {
+            name: "Kids".to_string(),
+            cidrs: vec![cidr.to_string()],
+            description: String::new(),
+        };
+        let mut cfg = base();
+        cfg.networks = vec![network("10.1.0.0/16")];
+        let s = shared(cfg.clone());
+        let group = BlockingGroup {
+            clients: vec!["Kids".to_string()],
+            block: vec!["games.test".to_string()],
+            ..s.catalog
+                .store()
+                .upsert_blocking_group(&daygle_dns_core::blocking::BlockingGroupInput {
+                    id: None,
+                    name: "kids".to_string(),
+                    enabled: true,
+                    clients: vec![],
+                    allow: vec![],
+                    block: vec![],
+                    allow_regex: vec![],
+                    block_regex: vec![],
+                    blocklists: vec![],
+                    response: Default::default(),
+                    ai_mode: None,
+                    safe_search: false,
+                    youtube_restricted: false,
+                    schedule: vec![],
+                    blocked_services: vec![],
+                    blocked_categories: vec![],
+                    blocked_security: vec![],
+                    blocked_tlds: vec![],
+                    block_local_addresses: false,
+                    limit_payloads: false,
+                })
+                .unwrap()
+        };
+        s.catalog
+            .store()
+            .upsert_blocking_group(&group.to_input())
+            .unwrap();
+        let blocked = |ip: &str| {
+            s.advanced_blocking
+                .load()
+                .evaluate(ip.parse().unwrap(), "games.test", None)
+                .is_some()
+        };
+        let mut next = cfg.clone();
+        next.networks = vec![network("10.2.0.0/16")];
+        apply_config(&s, Arc::new(next));
+        assert!(blocked("10.2.0.5"));
+        assert!(!blocked("10.1.0.5"));
     }
 
     #[test]

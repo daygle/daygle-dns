@@ -266,6 +266,78 @@ fn a_recreated_channel_row_still_bumps_the_surviving_one() {
     assert_eq!(row("content").status, "pending");
 }
 
+/// An expiry backlog larger than one batch is visible, so the scanner
+/// carries on with it next cycle instead of an `expire_check_secs` later.
+#[test]
+fn expiry_backlogs_are_reported() {
+    let dir = TempDir::new().unwrap();
+    let store = tmp_store(&dir);
+    for domain in ["a.example", "b.example"] {
+        store.observe(domain).unwrap();
+        store
+            .save_verdict(
+                Channel::Content,
+                domain,
+                "news",
+                "info",
+                "classified",
+                0.9,
+                "test",
+                "label",
+                1,
+            )
+            .unwrap();
+    }
+    let later = chrono::Utc::now().timestamp() + 10;
+    assert!(store.has_expired(later).unwrap());
+    store.expire_old(later, 1).unwrap();
+    assert!(
+        store.has_expired(later).unwrap(),
+        "one left for the next batch"
+    );
+    store.expire_old(later, 1).unwrap();
+    assert!(!store.has_expired(later).unwrap());
+}
+
+/// A relabel is a categorization: the threat channel's row keeps the
+/// model's label and is not reported as relabelled.
+#[test]
+fn relabels_mark_only_the_content_row() {
+    let dir = TempDir::new().unwrap();
+    let store = tmp_store(&dir);
+    store.observe("shop.example").unwrap();
+    store
+        .set_category_override("shop.example", "shopping")
+        .unwrap();
+    let (rows, _) = store.list_verdicts(None, None, 100, 0).unwrap();
+    for row in rows {
+        assert_eq!(
+            row.category_overridden,
+            row.channel == "content",
+            "{}",
+            row.channel
+        );
+    }
+    let only_set = |channel| {
+        store
+            .list_verdicts_filtered(
+                &daygle_dns_ml::store::VerdictFilter {
+                    label: Some("set"),
+                    channel: Some(channel),
+                    ..Default::default()
+                },
+                daygle_dns_ml::store::VerdictPage {
+                    limit: 100,
+                    offset: 0,
+                },
+            )
+            .unwrap()
+            .1
+    };
+    assert_eq!(only_set("content"), 1);
+    assert_eq!(only_set("threat"), 0);
+}
+
 #[test]
 fn allow_override_vetoes_block_snapshot() {
     let dir = TempDir::new().unwrap();
