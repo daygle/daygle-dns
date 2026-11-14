@@ -4,7 +4,7 @@
 
 use std::sync::Arc;
 
-use daygle_dns_core::config::{AiMode, AiSettings};
+use daygle_dns_core::config::{AiMode, AiSettings, PageRule};
 use daygle_dns_core::LogStore;
 use daygle_dns_ml::backend::Channel;
 use daygle_dns_ml::store::{AiStore, VerdictRow};
@@ -1084,6 +1084,95 @@ fn not_a_threat_corrections_are_learned_only_when_enabled() {
             .iter()
             .any(|(label, domain)| label == "phishing" && domain.starts_with("innocent")),
         "the denied label never comes back alongside the benign pair"
+    );
+}
+
+/// A page reader that answers from memory: the page stage can be driven
+/// without a network or a loopback exception.
+struct FixedReader;
+
+impl daygle_dns_ml::page::PageReader for FixedReader {
+    fn inspect(&self, domain: &str) -> daygle_dns_ml::page::Inspection {
+        daygle_dns_ml::page::Inspection {
+            note: format!("test page for {domain} reads shopping (80%)"),
+            reading: Some(daygle_dns_ml::page::TextVerdict {
+                category: "shopping",
+                confidence: 0.8,
+                cues: vec!["add to cart"],
+            }),
+        }
+    }
+}
+
+/// Through a scan cycle: a name alone blocks, then a `decide` reading of an
+/// ordinary page caps the confidence and empties the snapshot, with the move
+/// recorded on the verdict.
+#[test]
+fn a_decide_reading_empties_the_block_snapshot() {
+    let dir = TempDir::new().unwrap();
+    let zones = zone_store(&dir);
+    let ai = engine(
+        &dir,
+        AiSettings {
+            fetch_pages: false,
+            ..settings(AiMode::Enforce)
+        },
+    );
+    assert!(
+        ai.scanner.set_page_reader(Box::new(FixedReader)),
+        "one reader per scanner"
+    );
+    ai.store.observe("phishy.example").unwrap();
+    ai.store
+        .save_verdict(
+            Channel::Threat,
+            "phishy.example",
+            "phishing",
+            "threat",
+            "classified",
+            0.995,
+            "fasttext",
+            "ev",
+            3600,
+        )
+        .unwrap();
+
+    // The reading is off: the name alone is enough to block.
+    ai.scanner.run_cycle(0, zones.as_ref()).unwrap();
+    assert!(
+        ai.snapshot().load().contains_key("phishy.example"),
+        "the name alone blocks before the page is read: {:?}",
+        ai.snapshot().load().keys()
+    );
+
+    let mut decided = (*ai.settings.load_full()).clone();
+    decided.fetch_pages = true;
+    decided.page_rule = PageRule::Decide;
+    ai.apply_settings(&decided);
+
+    ai.scanner.run_cycle(0, zones.as_ref()).unwrap();
+    assert!(
+        ai.snapshot().load().is_empty(),
+        "a page reading shopping caps the verdict below the threshold: {:?}",
+        ai.snapshot().load().keys()
+    );
+
+    let (rows, _) = ai.store.list_verdicts(None, None, 16, 0).unwrap();
+    let threat = rows
+        .iter()
+        .find(|r| r.domain == "phishy.example" && r.channel == "threat")
+        .expect("the threat row survives the adjustment");
+    assert!(
+        (threat.confidence - 0.2).abs() < 1e-3,
+        "capped at 1 - 0.8: {}",
+        threat.confidence
+    );
+    assert!(
+        threat
+            .evidence
+            .contains("confidence now 20% by ai.page_rule"),
+        "the move is on the record: {}",
+        threat.evidence
     );
 }
 

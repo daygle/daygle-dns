@@ -643,6 +643,19 @@ pub struct Inspection {
     pub reading: Option<TextVerdict>,
 }
 
+/// What the scanner needs from a page read: the evidence line and the reading
+/// a rule may act on. [`PageFetcher`] is the live implementation; tests and
+/// callers that already hold readings can supply their own without a network.
+pub trait PageReader: Send + Sync {
+    fn inspect(&self, domain: &str) -> Inspection;
+}
+
+impl PageReader for PageFetcher {
+    fn inspect(&self, domain: &str) -> Inspection {
+        read_page(self, domain)
+    }
+}
+
 /// The confidence `page_rule` gives a threat verdict after reading its page,
 /// or `None` when the rule leaves it alone.
 ///
@@ -712,7 +725,7 @@ fn truncate(text: &str, limit: usize) -> String {
 }
 
 /// Fetch `domain` and classify what it says, in the shape the scanner records.
-pub fn inspect(fetcher: &PageFetcher, domain: &str) -> Inspection {
+pub fn read_page(fetcher: &PageFetcher, domain: &str) -> Inspection {
     let outcome = fetcher.fetch(domain);
     let reading = match &outcome {
         Ok(page) => classify_text(&page.title, &page.text),
@@ -839,12 +852,12 @@ mod tests {
     fn a_name_that_is_not_a_host_is_never_fetched() {
         // No network is touched: the name is refused before resolution.
         let fetcher = PageFetcher::new(Duration::from_secs(5), 64 * 1024);
-        let note = inspect(&fetcher, "under_score.example").note;
+        let note = read_page(&fetcher, "under_score.example").note;
         assert!(note.contains("not a fetchable host"), "{note}");
-        assert!(inspect(&fetcher, "127.0.0.1")
+        assert!(read_page(&fetcher, "127.0.0.1")
             .note
             .contains("not a fetchable host"));
-        assert!(inspect(&fetcher, "localhost")
+        assert!(read_page(&fetcher, "localhost")
             .note
             .contains("not a fetchable host"));
     }

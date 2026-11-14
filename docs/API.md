@@ -1728,8 +1728,10 @@ on each redirect.
 
 `ai.page_rule` decides whether a reading may move the verdict:
 `evidence` (default) records it only; `corroborate` lets agreement raise the
-threat confidence to the page's own score and ignores disagreement;
-`decide` also caps a verdict at `1 - page confidence` when the page reads as an
+threat confidence to the page's own score and ignores disagreement (agreement
+means the label is in `auto_block_categories`; a dedicated threat model's
+"every label is a threat" rule does not apply to page categories); `decide`
+also caps a verdict at `1 - page confidence` when the page reads as an
 ordinary category, which can drop it below `block_threshold` and stop a
 name-only block. A reading below `ai.page_confidence_floor` (0.6, clamped
 0.05-0.99) never counts. Adjusted confidences are stored on the verdict, the

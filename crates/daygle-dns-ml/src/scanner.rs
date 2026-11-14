@@ -87,6 +87,9 @@ pub struct Scanner {
     /// Model maintenance, set once by the engine: the scan loop asks it to
     /// retrain when one is due.
     retrainer: std::sync::OnceLock<Arc<crate::learn::Retrainer>>,
+    /// Page reader override, set once: tests supply readings without a
+    /// network. `None` fetches the live page with the settings' limits.
+    page_reader: std::sync::OnceLock<Box<dyn crate::page::PageReader>>,
 }
 
 impl Scanner {
@@ -115,7 +118,14 @@ impl Scanner {
             publishing: std::sync::Mutex::new(()),
             primed: std::sync::atomic::AtomicBool::new(false),
             retrainer: std::sync::OnceLock::new(),
+            page_reader: std::sync::OnceLock::new(),
         })
+    }
+
+    /// Replace the reader the page stage uses, e.g. with readings a test
+    /// already knows. Returns false if one was already installed.
+    pub fn set_page_reader(&self, reader: Box<dyn crate::page::PageReader>) -> bool {
+        self.page_reader.set(reader).is_ok()
     }
 
     /// Hand the scanner the model-maintenance job used for automatic
@@ -275,25 +285,27 @@ impl Scanner {
         if candidates.is_empty() {
             return Ok(0);
         }
-        let fetcher = crate::page::PageFetcher::new(
-            std::time::Duration::from_secs(cfg.page_fetch_timeout_secs.clamp(1, 30)),
-            cfg.page_fetch_max_bytes.clamp(16 * 1024, 2 * 1024 * 1024) as usize,
-        );
+        let live;
+        let reader: &dyn crate::page::PageReader = match self.page_reader.get() {
+            Some(reader) => reader.as_ref(),
+            None => {
+                live = crate::page::PageFetcher::new(
+                    std::time::Duration::from_secs(cfg.page_fetch_timeout_secs.clamp(1, 30)),
+                    cfg.page_fetch_max_bytes.clamp(16 * 1024, 2 * 1024 * 1024) as usize,
+                );
+                &live
+            }
+        };
         let workers = crate::page::workers().min(candidates.len());
         let chunk = candidates.len().div_ceil(workers);
         let readings: Vec<(String, f32, crate::page::Inspection)> = std::thread::scope(|scope| {
             let handles: Vec<_> = candidates
                 .chunks(chunk)
                 .map(|part| {
-                    let fetcher = fetcher.clone();
                     scope.spawn(move || {
                         part.iter()
                             .map(|(domain, confidence)| {
-                                (
-                                    domain.clone(),
-                                    *confidence,
-                                    crate::page::inspect(&fetcher, domain),
-                                )
+                                (domain.clone(), *confidence, reader.inspect(domain))
                             })
                             .collect::<Vec<_>>()
                     })
@@ -311,7 +323,10 @@ impl Scanner {
                 cfg.page_rule,
                 *confidence,
                 inspection.reading.as_ref(),
-                |label| cfg.dedicated_threat_model() || cfg.is_auto_block_category(label),
+                // Only the block list marks agreement: the page classifier
+                // emits content categories, so a dedicated threat model's
+                // "every label is a threat" rule does not apply to them.
+                |label| cfg.is_auto_block_category(label),
                 cfg.page_confidence_floor,
             );
             let note = match changed {
