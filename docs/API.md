@@ -1733,7 +1733,12 @@ and in the model record). The threat channel never reports `benign` - even a
 dedicated threat model's `benign` verdict is dropped - and the auto-block label
 picker does not offer it. The trade-off is the usual one for a negative class
 in a small single-label model: it can over-generalise and miss a threat, so it
-is off by default. `allow` corrections are not negatives and stay out. `auto_retrain` says "do not block
+is off by default. `allow` corrections are not negatives and stay out.
+`cargo run -p daygle-dns-ml --example negatives_eval` reports that cost on a
+deterministic synthetic corpus: with negatives drawn from flagged lookalikes,
+half its held-out threats read as `benign` and none did with negatives drawn
+from harmless sites; with a clean separation the class costs nothing. Those are
+corpus-specific bounds, not a promise about any network. `auto_retrain` says "do not block
 this" and so is not training data: a single-label classifier cannot express a
 negative. `GET /api/ai/status` reports `auto_retrain`,
 `retrain_interval_secs` and `learned_model` (`path`, `present`, `active` and

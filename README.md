@@ -187,6 +187,10 @@ Daygle DNS combines, in a single process:
   trains "not a threat" corrections as a `benign` label, so a correction can
   change the next model; the threat channel never reports that label as a
   threat, but a negative class can over-generalise, which is why it is opt-in.
+  `cargo run -p daygle-dns-ml --example negatives_eval` measures it: on a
+  synthetic corpus where the negatives are domains the model had flagged, half
+  the held-out threats read as benign; where they are harmless sites, none
+  do.
   `ai.fetch_pages` (also off by default) fetches the home page of each new
   threat candidate from the server, reads its title and text with a small cue
   classifier, and records the result with the verdict. It is evidence for the
