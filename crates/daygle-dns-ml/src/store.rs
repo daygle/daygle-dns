@@ -737,18 +737,19 @@ impl AiStore {
     /// qualified it: fresh, undisputed, at or above `threshold`, and vetoed by
     /// no override. Strongest first. Served for export so another resolver can
     /// use the result as a blocklist.
-    /// Threat verdicts worth reading a page for: classified, fresh, not
-    /// disputed, at or above `floor`, not exempted, and not already read for
-    /// this classification. Strongest first, capped at `limit`.
+    /// Threat verdicts worth reading a page for, with the confidence the
+    /// reading may adjust: classified, fresh, not disputed, at or above
+    /// `floor`, not exempted, and not already read for this classification.
+    /// Strongest first, capped at `limit`.
     pub fn page_fetch_candidates(
         &self,
         now_epoch: i64,
         floor: f32,
         limit: u32,
-    ) -> Result<Vec<String>> {
+    ) -> Result<Vec<(String, f32)>> {
         let conn = self.lock()?;
         let mut stmt = conn.prepare(
-            "SELECT domain FROM ai_verdicts
+            "SELECT domain, confidence FROM ai_verdicts
              WHERE channel = 'threat' AND status = 'classified'
                AND severity != 'disputed'
                AND confidence >= ?1 AND expires_at > ?2
@@ -763,15 +764,21 @@ impl AiStore {
         )?;
         let collected = stmt
             .query_map(params![floor, now_epoch, limit as i64], |r| {
-                r.get::<_, String>(0)
+                Ok((r.get::<_, String>(0)?, r.get::<_, f32>(1)?))
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(collected)
     }
 
-    /// Append what a page said to the domain's threat verdict, and mark it
-    /// read for this classification so the next cycle does not fetch it again.
-    pub fn append_page_evidence(&self, domain: &str, note: &str) -> Result<bool> {
+    /// Record what a page said on the domain's threat verdict, optionally
+    /// replacing its confidence (the page rule's decision), and mark it read
+    /// for this classification so the next cycle does not fetch it again.
+    pub fn record_page_reading(
+        &self,
+        domain: &str,
+        note: &str,
+        confidence: Option<f32>,
+    ) -> Result<bool> {
         let conn = self.lock()?;
         let changed = conn.execute(
             "UPDATE ai_verdicts
@@ -782,9 +789,10 @@ impl AiStore {
                      WHEN length(evidence) > 2000 THEN evidence
                      ELSE evidence || char(10) || ?2
                  END,
+                 confidence = COALESCE(?4, confidence),
                  page_fetched_at = ?3
              WHERE domain = ?1 AND channel = 'threat'",
-            params![domain, note, now_epoch()],
+            params![domain, note, now_epoch(), confidence],
         )?;
         Ok(changed > 0)
     }

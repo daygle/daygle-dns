@@ -1502,6 +1502,8 @@ pub async fn ai_status(State(state): State<AppState>) -> Response {
         "page_fetch_timeout_secs": settings.page_fetch_timeout_secs,
         "page_fetch_max_bytes": settings.page_fetch_max_bytes,
         "page_candidates_per_scan": settings.page_candidates_per_scan,
+        "page_rule": settings.page_rule,
+        "page_confidence_floor": settings.page_confidence_floor,
         "learned_model": {
             "path": ai.learned_model_path().display().to_string(),
             "present": ai.learned_model_path().is_file(),
@@ -6301,6 +6303,8 @@ pub struct AiUpdate {
     pub page_fetch_timeout_secs: Option<u64>,
     pub page_fetch_max_bytes: Option<u32>,
     pub page_candidates_per_scan: Option<u32>,
+    pub page_rule: Option<daygle_dns_core::config::PageRule>,
+    pub page_confidence_floor: Option<f32>,
 }
 
 /// listener-relevant `[server]` fields apply live; the rest are restarts.
@@ -7259,6 +7263,12 @@ pub async fn update_settings(
         }
         if let Some(v) = a.page_candidates_per_scan {
             config.ai.page_candidates_per_scan = v.clamp(1, 64);
+        }
+        if let Some(v) = a.page_rule {
+            config.ai.page_rule = v;
+        }
+        if let Some(v) = a.page_confidence_floor {
+            config.ai.page_confidence_floor = v.clamp(0.05, 0.99);
         }
     }
 

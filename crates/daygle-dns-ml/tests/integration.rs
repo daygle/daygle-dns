@@ -946,7 +946,7 @@ fn a_threat_candidate_is_offered_for_a_page_read_once() {
     let now = chrono::Utc::now().timestamp();
     assert_eq!(
         ai.store.page_fetch_candidates(now, 0.2, 16).unwrap(),
-        vec!["phishy.example".to_string()]
+        vec![("phishy.example".to_string(), 0.99)]
     );
 
     // An exempted domain is not fetched, whatever the model said.
@@ -969,12 +969,16 @@ fn a_threat_candidate_is_offered_for_a_page_read_once() {
         .unwrap();
     assert_eq!(
         ai.store.page_fetch_candidates(now, 0.2, 16).unwrap(),
-        vec!["phishy.example".to_string()]
+        vec![("phishy.example".to_string(), 0.99)]
     );
 
     assert!(ai
         .store
-        .append_page_evidence("phishy.example", "page \"Sign in\" reads phishing (60%)")
+        .record_page_reading(
+            "phishy.example",
+            "page \"Sign in\" reads phishing (60%)",
+            Some(0.8),
+        )
         .unwrap());
     assert!(
         ai.store
@@ -986,7 +990,10 @@ fn a_threat_candidate_is_offered_for_a_page_read_once() {
     let rows = ai.store.verdicts_for("phishy.example").unwrap();
     let threat = rows.iter().find(|r| r.channel == "threat").unwrap();
     assert_eq!(threat.category, "phishing");
-    assert_eq!(threat.confidence, 0.99);
+    assert_eq!(
+        threat.confidence, 0.8,
+        "the page rule's confidence is stored with the verdict"
+    );
     assert!(threat.evidence.contains("ev"), "{}", threat.evidence);
     assert!(
         threat.evidence.contains("reads phishing"),

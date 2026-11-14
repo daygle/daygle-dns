@@ -106,6 +106,12 @@ async fn status_reports_the_page_content_defaults_over_http() {
     assert_eq!(status["page_fetch_timeout_secs"], 5);
     assert_eq!(status["page_fetch_max_bytes"], 524_288);
     assert_eq!(status["page_candidates_per_scan"], 16);
+    assert_eq!(status["page_rule"], "evidence");
+    assert!(
+        (status["page_confidence_floor"].as_f64().unwrap() - 0.6).abs() < 1e-6,
+        "{}",
+        status["page_confidence_floor"]
+    );
     assert_eq!(status["learn_negatives"], false);
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -125,7 +131,9 @@ async fn page_content_settings_are_applied_and_clamped() {
                 "fetch_pages": true,
                 "page_fetch_timeout_secs": 240,
                 "page_fetch_max_bytes": 12,
-                "page_candidates_per_scan": 5_000
+                "page_candidates_per_scan": 5_000,
+                "page_rule": "decide",
+                "page_confidence_floor": 0.999
             }
         })),
     )
@@ -143,6 +151,12 @@ async fn page_content_settings_are_applied_and_clamped() {
         "clamped to its floor"
     );
     assert_eq!(applied.page_candidates_per_scan, 64);
+    assert_eq!(applied.page_rule, daygle_dns_core::config::PageRule::Decide);
+    assert!(
+        (applied.page_confidence_floor - 0.99).abs() < 1e-6,
+        "clamped to its maximum: {}",
+        applied.page_confidence_floor
+    );
     drop(applied);
 
     // And the status endpoint reports what the engine now runs with.
@@ -151,6 +165,12 @@ async fn page_content_settings_are_applied_and_clamped() {
     assert_eq!(reported["page_fetch_timeout_secs"], 30);
     assert_eq!(reported["page_fetch_max_bytes"], 16_384);
     assert_eq!(reported["page_candidates_per_scan"], 64);
+    assert_eq!(reported["page_rule"], "decide");
+    assert!(
+        (reported["page_confidence_floor"].as_f64().unwrap() - 0.99).abs() < 1e-6,
+        "{}",
+        reported["page_confidence_floor"]
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 

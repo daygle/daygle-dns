@@ -33,6 +33,7 @@ use std::io::Read;
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use std::time::Duration;
 
+use daygle_dns_core::config::PageRule;
 use reqwest::header::{ACCEPT, CONTENT_TYPE, LOCATION};
 use reqwest::redirect::Policy as RedirectPolicy;
 
@@ -634,6 +635,46 @@ fn collapse(text: &str) -> String {
     out.trim().to_string()
 }
 
+/// What one page read produced: the evidence line, and the reading the
+/// configured rule may act on.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Inspection {
+    pub note: String,
+    pub reading: Option<TextVerdict>,
+}
+
+/// The confidence `page_rule` gives a threat verdict after reading its page,
+/// or `None` when the rule leaves it alone.
+///
+/// The two directions are deliberately asymmetric: agreement can only raise a
+/// confidence (a corroborating page never makes a verdict more certain than
+/// the page itself), while disagreement caps it at `1 - confidence`, the
+/// page's own certainty that it is ordinary. Only `decide` may lower.
+pub fn adjust_confidence(
+    rule: PageRule,
+    base: f32,
+    reading: Option<&TextVerdict>,
+    mut is_threat_label: impl FnMut(&str) -> bool,
+    floor: f32,
+) -> Option<f32> {
+    if rule == PageRule::Evidence {
+        return None;
+    }
+    let reading = reading?;
+    if reading.confidence < floor.clamp(0.0, 1.0) {
+        return None;
+    }
+    if is_threat_label(reading.category) {
+        let raised = base.max(reading.confidence).min(1.0);
+        (raised > base + 0.001).then_some(raised)
+    } else if rule == PageRule::Decide {
+        let capped = base.min(1.0 - reading.confidence).max(0.0);
+        (capped < base - 0.001).then_some(capped)
+    } else {
+        None
+    }
+}
+
 /// A one-line note for the threat verdict's evidence: what the page said, or
 /// why it could not be read. Bounded, since evidence is shown in a table.
 pub fn evidence_note(outcome: &Result<PageContent, String>) -> String {
@@ -671,8 +712,16 @@ fn truncate(text: &str, limit: usize) -> String {
 }
 
 /// Fetch `domain` and classify what it says, in the shape the scanner records.
-pub fn inspect(fetcher: &PageFetcher, domain: &str) -> String {
-    evidence_note(&fetcher.fetch(domain))
+pub fn inspect(fetcher: &PageFetcher, domain: &str) -> Inspection {
+    let outcome = fetcher.fetch(domain);
+    let reading = match &outcome {
+        Ok(page) => classify_text(&page.title, &page.text),
+        Err(_) => None,
+    };
+    Inspection {
+        note: evidence_note(&outcome),
+        reading,
+    }
 }
 
 /// Workers used for a batch of candidates.
@@ -790,10 +839,82 @@ mod tests {
     fn a_name_that_is_not_a_host_is_never_fetched() {
         // No network is touched: the name is refused before resolution.
         let fetcher = PageFetcher::new(Duration::from_secs(5), 64 * 1024);
-        let note = inspect(&fetcher, "under_score.example");
+        let note = inspect(&fetcher, "under_score.example").note;
         assert!(note.contains("not a fetchable host"), "{note}");
-        assert!(inspect(&fetcher, "127.0.0.1").contains("not a fetchable host"));
-        assert!(inspect(&fetcher, "localhost").contains("not a fetchable host"));
+        assert!(inspect(&fetcher, "127.0.0.1")
+            .note
+            .contains("not a fetchable host"));
+        assert!(inspect(&fetcher, "localhost")
+            .note
+            .contains("not a fetchable host"));
+    }
+
+    fn reading(category: &'static str, confidence: f32) -> TextVerdict {
+        TextVerdict {
+            category,
+            confidence,
+            cues: vec![],
+        }
+    }
+
+    #[test]
+    fn the_page_rule_only_moves_confidence_when_asked() {
+        let threat = |label: &str| label == "phishing";
+        let agreeing = reading("phishing", 0.8);
+        let disagreeing = reading("shopping", 0.8);
+
+        // Evidence only: never touches a verdict, in either direction.
+        assert_eq!(
+            adjust_confidence(PageRule::Evidence, 0.4, Some(&agreeing), threat, 0.5),
+            None
+        );
+        assert_eq!(
+            adjust_confidence(PageRule::Evidence, 0.4, Some(&disagreeing), threat, 0.5),
+            None
+        );
+
+        // Corroborate: agreement raises, disagreement is ignored.
+        assert_eq!(
+            adjust_confidence(PageRule::Corroborate, 0.4, Some(&agreeing), threat, 0.5),
+            Some(0.8)
+        );
+        assert_eq!(
+            adjust_confidence(PageRule::Corroborate, 0.99, Some(&agreeing), threat, 0.5),
+            None,
+            "a reading below the current confidence raises nothing"
+        );
+        assert_eq!(
+            adjust_confidence(PageRule::Corroborate, 0.4, Some(&disagreeing), threat, 0.5),
+            None
+        );
+
+        // Decide: agreement raises, disagreement caps at 1 - confidence.
+        let capped = adjust_confidence(PageRule::Decide, 0.4, Some(&disagreeing), threat, 0.5)
+            .expect("a disagreeing page caps the verdict");
+        assert!(
+            (capped - 0.2).abs() < 1e-6,
+            "0.4 capped at 1 - 0.8, got {capped}"
+        );
+        assert_eq!(
+            adjust_confidence(PageRule::Decide, 0.4, Some(&agreeing), threat, 0.5),
+            Some(0.8)
+        );
+
+        // A reading below the floor is not a second opinion at all.
+        assert_eq!(
+            adjust_confidence(
+                PageRule::Decide,
+                0.4,
+                Some(&reading("shopping", 0.55)),
+                threat,
+                0.6
+            ),
+            None
+        );
+        assert_eq!(
+            adjust_confidence(PageRule::Decide, 0.4, None, threat, 0.6),
+            None
+        );
     }
 
     #[test]

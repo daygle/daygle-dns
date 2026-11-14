@@ -1720,12 +1720,22 @@ each new threat candidate - classified, fresh, not disputed, above
 classification - and appends one bounded evidence line to the threat verdict
 (`page "Title" reads phishing (60%: verify your account, ...)`, or why it could
 not be read). The verdict's category, confidence and blocking status are never
-changed: `page_fetch_max_bytes`, `page_fetch_timeout_secs` and
+changed by default: `page_fetch_max_bytes`, `page_fetch_timeout_secs` and
 `page_candidates_per_scan` bound the work, and the fetcher refuses non-HTML
 responses, IP-literal hosts, non-default ports, and any host that resolves to a
 private, loopback, link-local, CGNAT, multicast or reserved address, including
-on each redirect. All four settings are reported by `GET /api/ai/status` and
-accepted by the settings update.
+on each redirect.
+
+`ai.page_rule` decides whether a reading may move the verdict:
+`evidence` (default) records it only; `corroborate` lets agreement raise the
+threat confidence to the page's own score and ignores disagreement;
+`decide` also caps a verdict at `1 - page confidence` when the page reads as an
+ordinary category, which can drop it below `block_threshold` and stop a
+name-only block. A reading below `ai.page_confidence_floor` (0.6, clamped
+0.05-0.99) never counts. Adjusted confidences are stored on the verdict, the
+block snapshot is rebuilt in the same cycle, and the evidence line records
+"confidence now N% by ai.page_rule". All six page settings are reported by
+`GET /api/ai/status` and accepted by the settings update.
 
 With `ai.learn_negatives` on, `not_threat` corrections are training data too:
 they become a `benign` label (reported as `negatives` in the retrain response

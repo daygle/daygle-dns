@@ -203,6 +203,22 @@
     }
   }
 
+  async function setPageRule(value) {
+    try {
+      await api.updateSettings({ ai: { page_rule: value } });
+      status = { ...status, page_rule: value };
+      notice =
+        value === 'decide'
+          ? 'Page readings can now raise or cap a threat confidence, so a page that reads as ordinary can stop a name-only block.'
+          : value === 'corroborate'
+            ? 'Page readings can now raise a threat confidence, never lower it.'
+            : 'Page readings are recorded as evidence only; verdicts are unchanged.';
+    } catch (e) {
+      error = formatApiError(e);
+      await load(true);
+    }
+  }
+
   async function rollbackModel() {
     rollingBack = true;
     error = null;
@@ -520,14 +536,29 @@
           />
           <span>Read Pages for Threats</span>
         </label>
+        <label class="row" style="gap: 6px; align-items: center; font-size: 0.85rem">
+          <span>Reading rule</span>
+          <select
+            value={status.page_rule || 'evidence'}
+            onchange={(event) => setPageRule(event.currentTarget.value)}
+          >
+            <option value="evidence">Evidence only</option>
+            <option value="corroborate">Corroborate</option>
+            <option value="decide">Decide</option>
+          </select>
+        </label>
       {/if}
     </div>
     <p class="muted help" style="margin: 0 0 10px">
       When a domain is flagged as a threat, ask the site itself what it says:
       its home page is fetched from this server, its title and text read, and a
       one-line note added to the verdict's evidence (visible in Check a Domain).
-      It is a second opinion for you, not a blocking decision - nothing here
-      blocks or clears a domain. Fetching leaves this server, so it is off
+      With the default rule it is a second opinion for you and nothing more.
+      Evidence only records it; Corroborate lets an agreeing page raise the
+      threat confidence; Decide also caps it when the page reads as an ordinary
+      category, which can stop a name-only block. A reading below
+      {Math.round((status.page_confidence_floor ?? 0.6) * 100)}% confidence is
+      ignored by the rule. Fetching leaves this server, so it is off
       unless you turn it on; only threat candidates are read, at most
       {fmt(status.page_candidates_per_scan || 0)} per scan, {fmt(status.page_fetch_timeout_secs || 0)}s
       timeout each. Requests to private, loopback and link-local addresses are

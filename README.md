@@ -193,9 +193,11 @@ Daygle DNS combines, in a single process:
   do.
   `ai.fetch_pages` (also off by default) fetches the home page of each new
   threat candidate from the server, reads its title and text with a small cue
-  classifier, and records the result with the verdict. It is evidence for the
-  operator, not a blocking decision; private, loopback and link-local
-  addresses are refused and redirects are checked the same way. On by
+  classifier, and records the result with the verdict. `ai.page_rule` decides
+  what that reading may do: `evidence` (default) records it only,
+  `corroborate` lets an agreeing page raise the confidence, and `decide` also
+  caps it when the page reads as an ordinary category. Private, loopback and
+  link-local addresses are refused and redirects are checked the same way. On by
   default after an install in **train mode** (records verdicts, nothing
   blocks) - flip `ai.mode` to `enforce` in the config or GUI when you are
   happy with the verdict log. Operator allowlist always wins, and expired

@@ -261,8 +261,8 @@ impl Scanner {
     }
 
     /// Fetch and read the page behind each new threat candidate, recording
-    /// what it says as evidence. Never changes a verdict: the text classifier
-    /// is a second opinion for the operator, not a blocking decision.
+    /// what it says. `ai.page_rule` decides whether the reading may move the
+    /// verdict's confidence; with the default `evidence` it never does.
     fn page_stage(&self, cfg: &AiSettings, now: i64) -> Result<usize> {
         if !cfg.fetch_pages {
             return Ok(0);
@@ -281,14 +281,20 @@ impl Scanner {
         );
         let workers = crate::page::workers().min(candidates.len());
         let chunk = candidates.len().div_ceil(workers);
-        let notes: Vec<(String, String)> = std::thread::scope(|scope| {
+        let readings: Vec<(String, f32, crate::page::Inspection)> = std::thread::scope(|scope| {
             let handles: Vec<_> = candidates
                 .chunks(chunk)
                 .map(|part| {
                     let fetcher = fetcher.clone();
                     scope.spawn(move || {
                         part.iter()
-                            .map(|domain| (domain.clone(), crate::page::inspect(&fetcher, domain)))
+                            .map(|(domain, confidence)| {
+                                (
+                                    domain.clone(),
+                                    *confidence,
+                                    crate::page::inspect(&fetcher, domain),
+                                )
+                            })
                             .collect::<Vec<_>>()
                     })
                 })
@@ -299,9 +305,35 @@ impl Scanner {
                 .collect()
         });
         let mut recorded = 0usize;
-        for (domain, note) in &notes {
-            self.store.append_page_evidence(domain, note)?;
+        let mut adjusted = 0usize;
+        for (domain, confidence, inspection) in &readings {
+            let changed = crate::page::adjust_confidence(
+                cfg.page_rule,
+                *confidence,
+                inspection.reading.as_ref(),
+                |label| cfg.dedicated_threat_model() || cfg.is_auto_block_category(label),
+                cfg.page_confidence_floor,
+            );
+            let note = match changed {
+                Some(new) => format!(
+                    "{} - confidence now {:.0}% by ai.page_rule",
+                    inspection.note,
+                    new * 100.0
+                ),
+                None => inspection.note.clone(),
+            };
+            self.store.record_page_reading(domain, &note, changed)?;
+            if changed.is_some() {
+                adjusted += 1;
+            }
             recorded += 1;
+        }
+        if adjusted > 0 {
+            // A page decision moves what blocks and what the exports list.
+            self.refresh_snapshot(cfg, now);
+            self.log_info(format!(
+                "AI adjusted {adjusted} threat verdict(s) from their page content"
+            ));
         }
         Ok(recorded)
     }

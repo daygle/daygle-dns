@@ -1341,6 +1341,21 @@ pub enum AiMode {
     Enforce,
 }
 
+/// What the page-content reading may do to a threat verdict.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum PageRule {
+    /// Record the reading with the verdict; never change the verdict.
+    #[default]
+    Evidence,
+    /// Let a page that agrees raise the threat confidence. A page that
+    /// disagrees is recorded but ignored: this rule can only strengthen.
+    Corroborate,
+    /// A page that agrees raises the confidence; a page that reads as an
+    /// ordinary category caps it at the page's own certainty.
+    Decide,
+}
+
 /// AI scanner subsystem settings: a small CPU-only classifier runs in the
 /// background over domains observed in the query log and records verdicts
 /// (category, confidence, TTL). In `enforce` mode, fresh high-confidence
@@ -1438,6 +1453,13 @@ pub struct AiSettings {
     pub page_fetch_max_bytes: u32,
     /// Threat candidates whose page is read per scan cycle (1-64).
     pub page_candidates_per_scan: u32,
+    /// What a page reading may do to the threat verdict: `evidence` (note
+    /// only, the default), `corroborate` (agreement can raise confidence) or
+    /// `decide` (agreement raises, disagreement caps it).
+    pub page_rule: PageRule,
+    /// Minimum text-classifier confidence for a page reading to count toward
+    /// `page_rule` (0.05-0.99).
+    pub page_confidence_floor: f32,
 }
 
 impl Default for AiSettings {
@@ -1473,6 +1495,8 @@ impl Default for AiSettings {
             page_fetch_timeout_secs: 5,
             page_fetch_max_bytes: 512 * 1024,
             page_candidates_per_scan: 16,
+            page_rule: PageRule::Evidence,
+            page_confidence_floor: 0.6,
         }
     }
 }
