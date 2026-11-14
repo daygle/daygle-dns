@@ -209,7 +209,9 @@ previous release.
 
 ## What CI covers
 
-The two harnesses are ordinary integration tests:
+The two harnesses are ordinary integration tests. The dedicated `Shell
+scripts` CI job runs both of them, ShellCheck, and `sh -n` over every shipped
+script:
 
 | Test | What it proves |
 | --- | --- |

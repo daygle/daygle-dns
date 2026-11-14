@@ -89,6 +89,51 @@ jobs:
       - name: Lint
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
 
+  # The apply helpers run as root on real hosts, so a shell regression is a
+  # privilege-boundary bug, not just a failed update. ShellCheck and a POSIX
+  # parse check run next to the two harnesses that execute the scripts with
+  # stubbed systemctl/curl.
+  shell:
+    name: Shell scripts
+    runs-on: ubuntu-latest
+    env:
+      CARGO_PROFILE_DEV_DEBUG: "0"
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install ShellCheck
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+
+      # SC2016 is expected in the single-quoted sh -c and awk snippets: their
+      # variables belong to the child shell or awk, not to this script.
+      # install.sh also prints a literal source command for the operator.
+      - name: ShellCheck
+        run: >-
+          shellcheck --exclude=SC2016
+          install.sh
+          crates/daygle-dns-api/src/update.sh
+          crates/daygle-dns-api/src/update-apply.sh
+
+      - name: Parse the scripts as POSIX sh
+        run: |
+          set -eu
+          for script in install.sh crates/daygle-dns-api/src/update.sh crates/daygle-dns-api/src/update-apply.sh; do
+            sh -n "$script"
+            echo "sh -n $script: ok"
+          done
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo builds
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run the models apply harness
+        run: cargo test --locked -p daygle-dns-api --test models_update_apply
+
+      - name: Run the install apply harness
+        run: cargo test --locked -p daygle-dns-api --test install_update_apply
+
   # Unit and integration tests (integration tests spin up real servers on
   # ephemeral ports - no network access or services required).
   test:

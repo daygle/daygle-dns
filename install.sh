@@ -691,7 +691,7 @@ EOF
     # edits; drop-ins with other, deliberate settings are left untouched.
     DROP_DIR=/etc/systemd/system/daygle-dns.service.d
     if [ -f "$DROP_DIR/capabilities.conf" ]; then
-        if [ -z "$(grep -vE '^[[:space:]]*(#.*)?$' "$DROP_DIR/capabilities.conf" 2>/dev/null | grep -v '^CapabilityBoundingSet=')" ]; then
+        if ! grep -vE '^[[:space:]]*(#.*)?$' "$DROP_DIR/capabilities.conf" 2>/dev/null | grep -qv '^CapabilityBoundingSet='; then
             run_as_root rm -f "$DROP_DIR/capabilities.conf"
             if [ -z "$(ls -A "$DROP_DIR" 2>/dev/null)" ]; then
                 run_as_root rmdir "$DROP_DIR" 2>/dev/null || true
