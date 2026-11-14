@@ -1193,6 +1193,121 @@ fn a_decide_reading_empties_the_block_snapshot() {
     assert_eq!(reading.cues, vec!["add to cart".to_string()]);
 }
 
+/// A reader that agrees on one name and disagrees on another, so one cycle can
+/// show both directions of a rule.
+struct OneAgrees;
+
+impl daygle_dns_ml::page::PageReader for OneAgrees {
+    fn inspect(&self, domain: &str) -> daygle_dns_ml::page::Inspection {
+        let (category, confidence, cue) = if domain.starts_with("agree") {
+            ("phishing", 0.8, "verify your account")
+        } else {
+            ("shopping", 0.8, "add to cart")
+        };
+        daygle_dns_ml::page::Inspection {
+            note: format!("test page for {domain} reads {category} (80%)"),
+            reading: Some(daygle_dns_ml::page::TextVerdict {
+                category,
+                confidence,
+                cues: vec![cue],
+            }),
+        }
+    }
+}
+
+/// Corroborate is one-way: an agreeing page raises the confidence, a
+/// disagreeing one is recorded but leaves it where it was.
+#[test]
+fn a_corroborating_page_raises_and_a_disagreeing_one_does_not() {
+    let dir = TempDir::new().unwrap();
+    let zones = zone_store(&dir);
+    let ai = engine(
+        &dir,
+        AiSettings {
+            fetch_pages: true,
+            page_rule: PageRule::Corroborate,
+            ..settings(AiMode::Train)
+        },
+    );
+    assert!(
+        ai.scanner.set_page_reader(Box::new(OneAgrees)),
+        "one reader per scanner"
+    );
+    for domain in ["agree.example", "disagree.example"] {
+        ai.store.observe(domain).unwrap();
+        ai.store
+            .save_verdict(
+                Channel::Threat,
+                domain,
+                "phishing",
+                "threat",
+                "classified",
+                0.4,
+                "fasttext",
+                "ev",
+                3600,
+            )
+            .unwrap();
+    }
+
+    ai.scanner.run_cycle(0, zones.as_ref()).unwrap();
+
+    let (rows, _) = ai.store.list_verdicts(None, None, 16, 0).unwrap();
+    let confidence = |domain: &str| {
+        rows.iter()
+            .find(|r| r.domain == domain && r.channel == "threat")
+            .unwrap_or_else(|| panic!("no threat row for {domain}: {rows:?}"))
+            .confidence
+    };
+    assert!(
+        (confidence("agree.example") - 0.8).abs() < 1e-3,
+        "an agreeing page raises it to its own score: {}",
+        confidence("agree.example")
+    );
+    assert!(
+        (confidence("disagree.example") - 0.4).abs() < 1e-3,
+        "corroborate never lowers: {}",
+        confidence("disagree.example")
+    );
+
+    let agree = rows
+        .iter()
+        .find(|r| r.domain == "agree.example" && r.channel == "threat")
+        .unwrap();
+    assert!(
+        agree
+            .evidence
+            .contains("confidence now 80% by ai.page_rule"),
+        "the raise is on the record: {}",
+        agree.evidence
+    );
+    let disagree = rows
+        .iter()
+        .find(|r| r.domain == "disagree.example" && r.channel == "threat")
+        .unwrap();
+    assert!(
+        !disagree.evidence.contains("confidence now"),
+        "the disagreement is recorded without a confidence change: {}",
+        disagree.evidence
+    );
+    assert_eq!(
+        ai.store
+            .page_reading("disagree.example")
+            .unwrap()
+            .unwrap()
+            .category,
+        "shopping",
+        "what the page said is still recorded"
+    );
+    assert!(
+        ai.store
+            .page_adjustment("disagree.example")
+            .unwrap()
+            .is_none(),
+        "no adjustment is recorded when nothing moved"
+    );
+}
+
 /// Corrections are held back from training in fifths, and the candidate is
 /// accepted when it does as well on them as the model in use.
 #[test]
