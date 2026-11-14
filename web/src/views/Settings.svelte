@@ -1,7 +1,6 @@
 <script>
   import { untrack } from 'svelte';
   import { api, formatApiError } from '../api.js';
-  import { titleCase } from '../aiLabels.js';
   import PageHeader from '../PageHeader.svelte';
   import BackupRestore from './BackupRestore.svelte';
   import NetworkPicker from '../NetworkPicker.svelte';
@@ -63,7 +62,6 @@
   let aiCategoriesText = $state('');
   // The loaded backend's own category list (model labels / heuristic rules);
   // empty when unavailable, in which case the text field is the only UI.
-  let aiBackendCategories = $state([]);
   let upstreamText = $state('');
   // Root server addresses, one per line (empty: the built-in IANA roots).
   let rootHintsText = $state('');
@@ -339,7 +337,6 @@
         ai_ = {};
         display_ = { time_zone: 'system', date_format: 'system', time_format: 'system', theme: 'light' };
         aiCategoriesText = '';
-        aiBackendCategories = [];
         upstreamText = '';
         rootHintsText = '';
         rateLimit_ = {};
@@ -398,15 +395,12 @@
       aiCategoriesText = (config.ai?.auto_block_categories || []).join(', ');
       api
         .aiStatus()
-        .then((s) => {
-          aiBackendCategories = s?.backend_categories || [];
+        .then(() => {
           aiRunning = true;
         })
         .catch(() => {
           aiRunning = false;
         })
-        // The category picker changes how the form reads; it is still the
-        // saved state.
         .finally(() => {
           savedBody = JSON.stringify(buildBody());
         });
@@ -802,26 +796,13 @@
     return url('http', web.http_port);
   }
 
-  // Auto-block category picker: checked state lives in aiCategoriesText so
-  // both the picker and (fallback) text field share one source of truth.
+  // The labels treated as threats are edited on AI -> Threats; this form
+  // only carries the current value through so saving Settings never drops it.
   function aiSelectedCategories() {
     return (aiCategoriesText || '')
       .split(',')
       .map((c) => c.trim().toLowerCase())
       .filter(Boolean);
-  }
-
-  // The categories to offer: the loaded model's, plus any already chosen
-  // that it does not list (another model, or set in the config file), so
-  // saving the page never drops them unseen and they can be unticked.
-  const aiCategoryChoices = $derived(
-    [...new Set([...aiBackendCategories, ...aiSelectedCategories()])].sort(),
-  );
-
-  function toggleAiCategory(cat) {
-    const sel = aiSelectedCategories();
-    const next = sel.includes(cat) ? sel.filter((c) => c !== cat) : [...sel, cat];
-    aiCategoriesText = next.join(', ');
   }
 
   // 4.999999 -> 5 (unit conversions in the AI form).
@@ -1461,29 +1442,18 @@
       <label><span>Block Threshold (%)</span><input type="number" min="50" max="100" step="any" bind:value={aiForm.thresholdPct} /></label>
       <label><span>Confidence Floor (%)</span><input type="number" min="0" max="99" step="any" bind:value={aiForm.floorPct} /></label>
     </div>
-    <div class="stacked" style="margin-top: 12px">
-      <span class="field-label">Auto-Block Categories</span>
-      {#if aiBackendCategories.length}
-        <div class="category-grid">
-          {#each aiCategoryChoices as cat (cat)}
-            <label class="check">
-              <input
-                type="checkbox"
-                checked={aiSelectedCategories().includes(cat)}
-                onchange={() => toggleAiCategory(cat)}
-              />
-              <span>{titleCase(cat)}{#if !aiBackendCategories.includes(cat)}<span class="muted"> (not in the loaded model)</span>{/if}</span>
-            </label>
-          {/each}
-        </div>
-      {:else}
-        <input bind:value={aiCategoriesText} placeholder="malware, phishing (comma-separated)" />
-      {/if}
-    </div>
     <p class="muted help">
-      In Enforce mode a domain is blocked when a detected threat is in a
-      ticked category with a confidence at or above the block threshold (50 to
-      100%). Detections below the confidence floor are recorded as skipped.
+      Which labels count as threats is chosen on AI → Threats, next to the
+      list it produces. This page keeps the thresholds and lifetimes that
+      decide when a detected threat blocks.
+    </p>
+    <p class="muted help">
+      In Enforce mode a domain is blocked when a detected threat reaches the
+      block threshold (50 to 100%) and the verifier does not dispute it. With
+      the shared classifier it must also carry a label treated as a threat (set
+      on AI → Threats); a dedicated threat model reports its own threats, so
+      every label it produces blocks. Detections below the confidence floor are
+      recorded as skipped.
       Content classifications never auto-block on their own: blocking a
       category is a filtering-group rule.
     </p>

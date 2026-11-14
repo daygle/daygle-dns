@@ -315,7 +315,18 @@ export const api = {
   aiOverride: (domain, action, reason = '', category = '') =>
     request('POST', '/ai/override', { domain, action, reason, category }),
   aiOverrides: () => request('GET', '/ai/overrides'),
+  aiExplain: (domain) => request('GET', `/ai/explain?domain=${encodeURIComponent(domain)}`),
+  aiThreatsExport: (format) =>
+    request('GET', `/ai/threats/export?format=${encodeURIComponent(format)}`, undefined, { text: true }),
+  aiCorrections: (format) =>
+    request(
+      'GET',
+      `/ai/corrections${format ? `?format=${encodeURIComponent(format)}` : ''}`,
+      undefined,
+      format === 'csv' ? { text: true } : undefined,
+    ),
   aiRescan: () => request('POST', '/ai/rescan'),
+  aiRetrain: () => request('POST', '/ai/retrain'),
   aiModelStatus: () => request('GET', '/ai/model-status'),
   aiUpdateModels: () => request('POST', '/ai/update-models'),
 };

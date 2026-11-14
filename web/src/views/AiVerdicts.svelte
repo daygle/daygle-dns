@@ -281,6 +281,11 @@
         <ColumnPicker table="ai-verdicts" columns={COLUMNS} />
       </div>
     </div>
+    <p class="muted" style="margin: 0 0 10px">
+      Relabelling sets the domain's content category, which is what category
+      blocking matches. It does not make the domain a threat: threats are the
+      scanner's own detections, listed on the Threats tab.
+    </p>
     <div class="table-wrap">
     <table>
       <thead>

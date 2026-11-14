@@ -22,13 +22,13 @@
       id: 'classifications',
       label: 'Classifications',
       tagline:
-        'Every domain the scanner has categorized from your DNS traffic, most recently classified first. Pick a different category to relabel a domain yourself: your label survives re-scans and is what category blocking matches. The undo button beside a label you set gives the domain back to the scanner.',
+        'Every domain the scanner has categorized from your DNS traffic, most recently classified first. Pick a different category to relabel a domain yourself: your label survives re-scans and is what category blocking matches, and it is a content label only - threats are the scanner\'s own detections on the Threats tab. The undo button beside a label you set gives the domain back to the scanner.',
     },
     {
       id: 'threats',
       label: 'Threats',
       tagline:
-        "Domains the threat detector flagged, highest confidence first, each with its current block state. In Enforce mode this is the list the AI blocks for clients whose group allows it. Disputed threats (the verifier disagreed) are shown but never block.",
+        "Domains the threat detector flagged, highest confidence first, each with its current block state. With the shared classifier, which labels count as threats is chosen here; a dedicated threat model reports its own threats and blocks them above the threshold. Disputed threats are shown but never block.",
     },
     {
       id: 'exemptions',
@@ -51,7 +51,7 @@
 </div>
 
 {#if tab === 'scanner'}
-  <AiStatus {onOpenSettings} />
+  <AiStatus {onOpenSettings} onOpenThreats={() => (tab = 'threats')} />
 {:else if tab === 'threats'}
   <AiThreats />
 {:else if tab === 'exemptions'}

@@ -2,10 +2,11 @@
   import IconButton from '../IconButton.svelte';
   import { api, formatApiError, getStoredUser } from '../api.js';
   import { formatDate } from '../datetime.svelte.js';
-  import { percent, titleCase } from '../aiLabels.js';
+  import { backendLabel, percent, titleCase } from '../aiLabels.js';
   import ColumnPicker from '../ColumnPicker.svelte';
   import { isHidden } from '../columns.svelte.js';
   import AiExemptionDialog from './AiExemptionDialog.svelte';
+  import AiCorrectionDialog from './AiCorrectionDialog.svelte';
 
   const COLUMNS = [
     { key: 'domain', label: 'Domain', locked: true },
@@ -36,6 +37,31 @@
   let search = $state('');
   let categoryFilter = $state('');
   let categories = $state([]);
+  // The labels treated as threats (edited here) and the labels the loaded
+  // model can emit, for the "not in the loaded model" hint.
+  let threatLabels = $state([]);
+  let modelLabels = $state([]);
+  let savingLabels = $state(false);
+  let labelsNotice = $state(null);
+  let labelsError = $state(null);
+  // Text fallback: with the scanner off there is no model to list labels
+  // from, but the saved list can still be edited for when it is turned on.
+  let labelsText = $state('');
+  // "Not a threat" corrections, and the explain-this-domain panel.
+  let correctionDomain = $state(null);
+  let explainInput = $state('');
+  let explainResult = $state(null);
+  let explainError = $state(null);
+  let explaining = $state(false);
+  let exporting = $state('');
+  // The threat channel's own model, when it has one, against the shared one.
+  let threatModelPath = $state('');
+  let sharedModelPath = $state('');
+  let modelDedicated = $state(false);
+  let threatBackendName = $state('');
+  let savingModel = $state(false);
+  let modelNotice = $state(null);
+  let modelError = $state(null);
   let severityFilter = $state('');
   let exemptionFilter = $state('');
   let loading = $state(true);
@@ -51,9 +77,73 @@
   async function loadCategories() {
     try {
       const status = await api.aiStatus();
-      categories = [...new Set(status?.backend_categories || [])].sort();
+      modelLabels = [...new Set(status?.backend_categories || [])].sort();
+      threatLabels = [...(status?.auto_block_categories || [])];
+      labelsText = threatLabels.join(', ');
+      categories = modelLabels;
+      threatModelPath = status?.threat_model_path || '';
+      sharedModelPath = status?.model_path || '';
+      modelDedicated = !!status?.threat_model_dedicated;
+      threatBackendName = status?.threat_backend || status?.backend || '';
     } catch {
+      modelLabels = [];
       categories = [];
+      // 404: the scanner is off. The saved list still lives in the config.
+      try {
+        const config = await api.config();
+        threatLabels = [...(config?.ai?.auto_block_categories || [])];
+        labelsText = threatLabels.join(', ');
+        threatModelPath = config?.ai?.threat_model_path || '';
+        sharedModelPath = config?.ai?.model_path || '';
+        modelDedicated =
+          !!threatModelPath.trim() && threatModelPath.trim() !== sharedModelPath.trim();
+      } catch {
+        threatLabels = [];
+      }
+    }
+  }
+
+  // The model's labels plus any already chosen that it no longer lists, so a
+  // label set under another model can still be seen and unticked.
+  const labelChoices = $derived([...new Set([...modelLabels, ...threatLabels])].sort());
+
+  function toggleThreatLabel(label) {
+    threatLabels = threatLabels.includes(label)
+      ? threatLabels.filter((l) => l !== label)
+      : [...threatLabels, label];
+  }
+
+  async function saveThreatModel() {
+    savingModel = true;
+    modelNotice = null;
+    modelError = null;
+    try {
+      const path = threatModelPath.trim();
+      await api.updateSettings({ ai: { threat_model_path: path } });
+      modelDedicated = !!path && path !== sharedModelPath.trim();
+      modelNotice = path
+        ? 'Threat model saved. It is loaded at the next restart.'
+        : 'Threat model cleared: the threat channel goes back to the shared model at the next restart.';
+      await loadCategories();
+    } catch (e) {
+      modelError = formatApiError(e);
+    } finally {
+      savingModel = false;
+    }
+  }
+
+  async function saveThreatLabels(list = threatLabels) {
+    savingLabels = true;
+    labelsNotice = null;
+    labelsError = null;
+    try {
+      await api.updateSettings({ ai: { auto_block_categories: [...list] } });
+      labelsNotice = 'Threat labels saved and applied live.';
+      await Promise.all([loadCategories(), load()]);
+    } catch (e) {
+      labelsError = formatApiError(e);
+    } finally {
+      savingLabels = false;
     }
   }
 
@@ -132,6 +222,86 @@
     }
   }
 
+  async function exportThreats(format) {
+    exporting = format;
+    error = null;
+    notice = null;
+    try {
+      const text = await api.aiThreatsExport(format);
+      const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = format === 'list' ? 'ai-threats.txt' : 'ai-threats.csv';
+      a.click();
+      URL.revokeObjectURL(url);
+      notice = `Exported ${format === 'list' ? 'the plain domain list' : 'the CSV'} of active threats.`;
+    } catch (e) {
+      error = formatApiError(e);
+    } finally {
+      exporting = '';
+    }
+  }
+
+  async function exportCorrections() {
+    notice = null;
+    error = null;
+    try {
+      const text = await api.aiCorrections('csv');
+      const blob = new Blob([text], { type: 'text/csv;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'ai-corrections.csv';
+      a.click();
+      URL.revokeObjectURL(url);
+      notice = 'Exported every exemption, mislabelled mark and relabel as training data.';
+    } catch (e) {
+      error = formatApiError(e);
+    }
+  }
+
+  async function runExplain() {
+    const domain = explainInput.trim();
+    if (!domain) return;
+    explaining = true;
+    explainError = null;
+    explainResult = null;
+    try {
+      explainResult = await api.aiExplain(domain);
+    } catch (e) {
+      explainError = formatApiError(e);
+    } finally {
+      explaining = false;
+    }
+  }
+
+  async function applyCorrection(domain, reason, category) {
+    correctionDomain = null;
+    notice = null;
+    error = null;
+    try {
+      await api.aiOverride(domain, 'not_threat', reason);
+      if (category) await api.aiOverride(domain, 'category', '', category);
+      notice = `${domain} is marked not a threat${category ? ` and relabelled as '${titleCase(category)}'` : ''}. It no longer blocks or appears in the exported list; the detection stays visible until you restore it.`;
+      await load();
+    } catch (e) {
+      error = formatApiError(e);
+    }
+  }
+
+  async function restoreThreat(domain) {
+    notice = null;
+    error = null;
+    try {
+      await api.aiOverride(domain, 'clear');
+      notice = `${domain} is treated as a threat again.`;
+      await load();
+    } catch (e) {
+      error = formatApiError(e);
+    }
+  }
+
   function pages() {
     return Math.max(1, Math.ceil(total / PER_PAGE));
   }
@@ -176,6 +346,45 @@
   <div class="card" style="border-color: var(--danger); color: var(--danger); margin-bottom: 14px">{error}</div>
 {/if}
 
+{#if !loading}
+  <div class="card" style="margin-bottom: 14px">
+    <div class="spread" style="margin-bottom: 8px; gap: 10px; flex-wrap: wrap">
+      <h3 style="margin: 0">Threat Model</h3>
+      {#if isAdmin}
+        <button onclick={saveThreatModel} disabled={savingModel}>
+          {savingModel ? 'Saving...' : 'Save Model'}
+        </button>
+      {/if}
+    </div>
+    <p class="muted help" style="margin: 0 0 10px">
+      Leave the path empty to use the shared classifier, where the labels
+      below define what counts as a threat. Name a model here and the threat
+      channel detects on its own: every label it reports is a threat and blocks
+      in Enforce mode at or above the block threshold. A model change is loaded
+      at the next restart.
+    </p>
+    <div class="grid2">
+      <label>
+        Threat Model Path
+        <input bind:value={threatModelPath} placeholder="Empty: use the shared model" spellcheck="false" disabled={!isAdmin} />
+      </label>
+      <label>
+        Threat Channel
+        <span class="muted">
+          {backendLabel(threatBackendName)}
+          <span class="pill">{modelDedicated ? 'Own Model' : 'Shared Model'}</span>
+        </span>
+      </label>
+      <label>
+        Shared Model
+        <span class="muted"><code>{sharedModelPath || 'Built-in heuristic rules'}</code></span>
+      </label>
+    </div>
+    {#if modelNotice}<p class="muted" style="color: var(--ok); margin: 8px 0 0">{modelNotice}</p>{/if}
+    {#if modelError}<p class="dialog-error" style="margin: 8px 0 0">{modelError}</p>{/if}
+  </div>
+{/if}
+
 {#if loading}
   <div class="card">
     <p class="muted">Loading...</p>
@@ -189,6 +398,123 @@
     </p>
   </div>
 {:else}
+  <div class="card" style="margin-bottom: 14px">
+    <div class="spread" style="margin-bottom: 8px; gap: 10px; flex-wrap: wrap">
+      <h3 style="margin: 0">Labels Treated as Threats</h3>
+      {#if isAdmin && !modelDedicated}
+        <button onclick={saveThreatLabels} disabled={savingLabels}>
+          {savingLabels ? 'Saving...' : 'Save Labels'}
+        </button>
+      {/if}
+    </div>
+    {#if modelDedicated}
+      <p class="muted help" style="margin: 0 0 10px">
+        A dedicated threat model is in use, so it decides what a threat is:
+        every label it reports blocks in Enforce mode once its confidence
+        reaches the block threshold and the verifier does not dispute it. The
+        list below only applies when the threat channel goes back to the shared
+        model.
+      </p>
+    {:else}
+      <p class="muted help" style="margin: 0 0 10px">
+        The threat channel reports a domain only when its label is ticked here.
+        In Enforce mode a reported threat is auto-blocked when its confidence is
+        at or above the block threshold and the verifier does not dispute it; a
+        label that is not ticked never blocks. Name a threat model above to let
+        that model decide instead.
+      </p>
+    {/if}
+    {#if labelsNotice}<p class="muted" style="color: var(--ok); margin: 0 0 8px">{labelsNotice}</p>{/if}
+    {#if labelsError}<p class="dialog-error">{labelsError}</p>{/if}
+    {#if labelChoices.length}
+      <div class="labels">
+        {#each labelChoices as label (label)}
+          <label class="check">
+            <input
+              type="checkbox"
+              checked={threatLabels.includes(label)}
+              onchange={() => toggleThreatLabel(label)}
+              disabled={!isAdmin || modelDedicated}
+            />
+            <span>{titleCase(label)}{#if !modelLabels.includes(label)}<span class="muted"> (not in the loaded model)</span>{/if}</span>
+          </label>
+        {/each}
+      </div>
+    {:else}
+      <p class="muted" style="margin: 0">No labels to choose from: the scanner has no model loaded.</p>
+    {/if}
+  </div>
+
+  {#if isAdmin && disabled && !modelLabels.length}
+    <div class="card" style="margin-bottom: 14px">
+      <h3 style="margin: 0 0 8px">Labels Treated as Threats</h3>
+      <p class="muted help" style="margin: 0 0 8px">
+        No model is loaded, so there are no labels to tick. Type the labels
+        the threat channel should report, separated by commas; they take
+        effect when the scanner has a model again.
+      </p>
+      <div class="row" style="gap: 8px; flex-wrap: wrap">
+        <input bind:value={labelsText} placeholder="malware, phishing, scam" style="flex: 1; min-width: 200px" />
+        <button onclick={() => saveThreatLabels(labelsText.split(',').map((l) => l.trim().toLowerCase()).filter(Boolean))} disabled={savingLabels}>
+          {savingLabels ? 'Saving...' : 'Save Labels'}
+        </button>
+      </div>
+      {#if labelsNotice}<p class="muted" style="color: var(--ok); margin: 8px 0 0">{labelsNotice}</p>{/if}
+      {#if labelsError}<p class="dialog-error" style="margin: 8px 0 0">{labelsError}</p>{/if}
+    </div>
+  {/if}
+
+  <div class="card" style="margin-bottom: 14px">
+    <h3 style="margin: 0 0 8px">Check a Domain</h3>
+    <p class="muted help" style="margin: 0 0 10px">
+      Why is this domain blocked - or not? Both channels' verdicts, your
+      overrides, and which filtering groups block its category.
+    </p>
+    <div class="row" style="gap: 8px; flex-wrap: wrap">
+      <input
+        bind:value={explainInput}
+        placeholder="news.example.com"
+        spellcheck="false"
+        style="flex: 1; min-width: 220px"
+        onkeydown={(event) => event.key === 'Enter' && runExplain()}
+      />
+      <button onclick={runExplain} disabled={explaining || !explainInput.trim()}>
+        {explaining ? 'Checking...' : 'Explain'}
+      </button>
+    </div>
+    {#if explainError}<p class="dialog-error" style="margin: 8px 0 0">{explainError}</p>{/if}
+    {#if explainResult}
+      <div class="explain">
+        <div class="row" style="gap: 8px; flex-wrap: wrap">
+          <code>{explainResult.domain}</code>
+          {#if explainResult.blocked}
+            <span class="pill err">Blocked</span>
+          {:else}
+            <span class="pill">Not Blocked</span>
+          {/if}
+          <span class="muted small">
+            {explainResult.mode} mode, block threshold {percent(explainResult.block_threshold)}{#if explainResult.threat_model_dedicated}, own threat model{/if}
+          </span>
+        </div>
+        <ul>
+          {#each explainResult.reasons as reason (reason)}
+            <li>{reason}</li>
+          {/each}
+        </ul>
+        <p class="muted small" style="margin: 0">
+          {#if explainResult.threat}
+            Threat label {titleCase(explainResult.threat.category)} at {percent(explainResult.threat.confidence)}{#if explainResult.threat.over_threshold}, at or above the threshold{:else}, below the threshold{/if}{#if explainResult.threat.severity === 'disputed'}, disputed by the verifier{/if}.
+          {:else}
+            No threat verdict yet.
+          {/if}
+          {#if explainResult.category}
+            Category {titleCase(explainResult.category.category)} at {percent(explainResult.category.confidence)}.
+          {/if}
+        </p>
+      </div>
+    {/if}
+  </div>
+
   <div class="card">
     <div class="spread" style="margin-bottom: 10px; gap: 10px; flex-wrap: wrap">
       <h3 style="margin: 0">Detected Threats ({fmt(total)})</h3>
@@ -210,6 +536,15 @@
             <option value={f.value}>{f.label}</option>
           {/each}
         </select>
+        <button class="secondary" onclick={() => exportThreats('csv')} disabled={!!exporting}>
+          {exporting === 'csv' ? 'Exporting...' : 'Export CSV'}
+        </button>
+        <button class="secondary" onclick={() => exportThreats('list')} disabled={!!exporting}>
+          {exporting === 'list' ? 'Exporting...' : 'Domain List'}
+        </button>
+        <button class="secondary" title="Every exemption, mislabelled mark and relabel, for retraining a model offline" onclick={exportCorrections}>
+          Corrections CSV
+        </button>
         <button class="secondary" onclick={load}>Reload</button>
         <ColumnPicker table="ai-threats" columns={COLUMNS} />
       </div>
@@ -239,7 +574,9 @@
             {/if}
             {#if show('state')}
             <td>
-              {#if r.severity === 'disputed'}
+              {#if r.not_threat}
+                <span class="pill ok tag" title="You marked this domain as not a threat: the detection is kept for audit but never blocks">Mislabelled</span>
+              {:else if r.severity === 'disputed'}
                 <span class="pill" title="The verifier disagreed with this threat detection: the domain is never auto-blocked">Disputed</span>
               {:else if r.blocked}
                 <span class="pill err" title="In the current block snapshot: auto-blocked in enforce mode">Auto-Blocked</span>
@@ -262,10 +599,15 @@
             {#if show('re-check')}<td class="muted nowrap">{stamp(r.expires_at, formatDate)}</td>{/if}
             {#if isAdmin}
               <td class="num">
-                {#if r.overridden}
-                  <IconButton icon="disallow" label="Unexempt: let the AI block this domain again" onclick={() => setExempt(r.domain, false)} />
+                {#if r.not_threat}
+                  <button class="secondary" style="padding: 2px 8px; font-size: 0.75rem" title="Restore: treat this detection as a threat again" onclick={() => restoreThreat(r.domain)}>Restore</button>
                 {:else}
-                  <IconButton icon="allow" label="Exempt: never let the AI block this domain or its subdomains" onclick={() => setExempt(r.domain, true)} />
+                  {#if r.overridden}
+                    <IconButton icon="disallow" label="Unexempt: let the AI block this domain again" onclick={() => setExempt(r.domain, false)} />
+                  {:else}
+                    <IconButton icon="allow" label="Exempt: never let the AI block this domain or its subdomains" onclick={() => setExempt(r.domain, true)} />
+                  {/if}
+                  <button class="secondary" style="padding: 2px 8px; font-size: 0.75rem" title="Not a threat: record a correction that stops this detection blocking" onclick={() => (correctionDomain = r.domain)}>Mislabelled</button>
                 {/if}
               </td>
             {/if}
@@ -303,7 +645,28 @@
   />
 {/if}
 
+{#if correctionDomain}
+  <AiCorrectionDialog
+    domain={correctionDomain}
+    categories={categories}
+    onCancel={() => (correctionDomain = null)}
+    onConfirm={(reason, category) => applyCorrection(correctionDomain, reason, category)}
+  />
+{/if}
+
 <style>
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .grid2 label { display: flex; flex-direction: column; gap: 4px; font-size: 0.85rem; color: var(--muted); }
+  .explain { margin-top: 12px; }
+  .explain ul { margin: 8px 0; padding-left: 18px; font-size: 0.85rem; }
+  .explain li { margin: 2px 0; }
+  .explain .small { font-size: 0.78rem; }
+  .labels { display: flex; flex-wrap: wrap; gap: 6px 18px; }
+  .check { display: flex; align-items: center; gap: 6px; font-size: 0.85rem; }
+  .check input { width: auto; }
   .nowrap { white-space: nowrap; }
   .evidence { max-width: 200px; font-size: 0.78rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  @media (max-width: 640px) {
+    .grid2 { grid-template-columns: 1fr; }
+  }
 </style>

@@ -4,8 +4,9 @@
   import { formatDateTime } from '../datetime.svelte.js';
   import { backendLabel, duration, percent, titleCase } from '../aiLabels.js';
 
-  // `onOpenSettings(tab)` opens Settings on a tab; null for viewers.
-  let { onOpenSettings = null } = $props();
+  // `onOpenSettings(tab)` opens Settings on a tab and `onOpenThreats()` the
+  // AI page's Threats tab; both null for viewers.
+  let { onOpenSettings = null, onOpenThreats = null } = $props();
 
   let status = $state(null);
   // When the scanner is not running: whether Settings has it turned on
@@ -22,6 +23,7 @@
   let loading = $state(true);
   let error = $state(null);
   let notice = $state(null);
+  let retraining = $state(false);
 
   // Viewers are read-only; with sign-in off there is no stored user at all.
   const isAdmin = getStoredUser()?.role !== 'viewer';
@@ -161,6 +163,34 @@
     return status?.status_counts?.[key] ?? 0;
   }
 
+  async function setAutoRetrain(value) {
+    try {
+      await api.updateSettings({ ai: { auto_retrain: value } });
+      status = { ...status, auto_retrain: value };
+      notice = value
+        ? 'Automatic retraining is on: the scanner will rebuild its model from its own verdicts and your corrections.'
+        : 'Automatic retraining is off; the current model stays as it is.';
+    } catch (e) {
+      error = formatApiError(e);
+      await load(true);
+    }
+  }
+
+  async function retrain() {
+    retraining = true;
+    error = null;
+    notice = null;
+    try {
+      const result = await api.aiRetrain();
+      notice = `Retrained from ${fmt(result.examples)} examples across ${fmt(result.labels)} labels (${fmt(result.corrections)} from your corrections). The new model is in use now.`;
+      await load(true);
+    } catch (e) {
+      error = formatApiError(e);
+    } finally {
+      retraining = false;
+    }
+  }
+
   function fmt(n) {
     return Number(n || 0).toLocaleString();
   }
@@ -275,16 +305,30 @@
             </td>
           </tr>
           <tr><td class="muted">Classifier</td><td>{backendLabel(status.backend)}</td></tr>
+          <tr>
+            <td class="muted">Threat Channel</td>
+            <td>
+              {backendLabel(status.threat_backend)}
+              <span class="pill" title={status.threat_model_dedicated
+                ? 'The threat channel runs its own model: every label it reports is a threat'
+                : 'Both channels use the shared classifier, so the label list defines threats'}>
+                {status.threat_model_dedicated ? 'Own Model' : 'Shared Model'}
+              </span>
+            </td>
+          </tr>
           <tr><td class="muted">Scans</td><td>Every {duration(status.scan_interval_secs)} · {status.workers} Worker{status.workers === 1 ? '' : 's'}</td></tr>
           <tr><td class="muted">Block Threshold</td><td>{percent(status.block_threshold)} Confidence</td></tr>
           <tr>
-            <td class="muted">Auto-Block Categories</td>
+            <td class="muted">Labels Treated as Threats</td>
             <td>
               {#each status.auto_block_categories || [] as c (c)}
                 <span class="pill">{titleCase(c)}</span>{' '}
               {:else}
                 <span class="muted">None</span>
               {/each}
+              {#if onOpenThreats}
+                <button class="secondary" style="padding: 2px 8px; margin-left: 6px" onclick={onOpenThreats}>Change</button>
+              {/if}
             </td>
           </tr>
           <tr>
@@ -307,11 +351,22 @@
     </div>
 
     <div class="card">
-      <h3 style="margin: 0 0 4px">{enforcing && !switchedOff ? 'Auto-Blocked Domains' : 'Eligible for Auto-Blocking'}</h3>
+      <div class="spread" style="margin-bottom: 4px; gap: 8px; flex-wrap: wrap">
+        <h3 style="margin: 0">{enforcing && !switchedOff ? 'Auto-Blocked Domains' : 'Would Auto-Block'}</h3>
+        {#if onOpenThreats}
+          <button class="secondary" style="padding: 2px 8px" onclick={onOpenThreats}>View Threats</button>
+        {/if}
+      </div>
       <p class="muted small" style="margin: 0 0 10px">
-        Domains with a current threat in an auto-block category at or above
-        the block threshold, minus exempt domains and threats the verifier
-        disputed{enforcing && !switchedOff ? '' : ': what Enforce mode would block'}.
+        {#if status.threat_model_dedicated}
+          Detected threats at or above the block threshold, minus exempt
+          domains and threats the verifier disputed
+        {:else}
+          Detected threats whose label is treated as a threat and whose
+          confidence is at or above the block threshold, minus exempt domains
+          and threats the verifier disputed
+        {/if}
+        {enforcing && !switchedOff ? '.' : ': what Enforce mode would block.'}
       </p>
       {#if blockable.length}
         <table>
@@ -331,6 +386,62 @@
         <p class="muted">None.</p>
       {/if}
     </div>
+  </div>
+
+  <div class="card" style="margin-top: 14px">
+    <div class="spread" style="margin-bottom: 8px; gap: 10px; flex-wrap: wrap">
+      <h3 style="margin: 0">Model Maintenance</h3>
+      {#if isAdmin}
+        <label class="row" style="gap: 6px; align-items: center; font-size: 0.85rem">
+          <input
+            type="checkbox"
+            style="width: auto"
+            checked={!!status.auto_retrain}
+            onchange={(event) => setAutoRetrain(event.currentTarget.checked)}
+          />
+          <span>Retrain Automatically</span>
+        </label>
+      {/if}
+    </div>
+    <p class="muted help" style="margin: 0 0 10px">
+      The scanner rebuilds its classifier from what it has learned: your
+      category corrections and mislabelled marks on AI → Threats, plus its own
+      confident verdicts, so the model keeps up with the sites this network
+      actually visits. A retrain needs at least 200 examples, and a candidate
+      must hold up on corrections it was not trained on before it replaces the
+      model in use. Accepted models are loaded straight away; delete the file
+      to fall back to the configured model.
+    </p>
+    {#if status.learned_model}
+      <p class="muted" style="margin: 0 0 10px; font-size: 0.85rem">
+        {#if status.learned_model.present}
+          <code>{status.learned_model.path}</code>
+          {#if status.learned_model.last?.trained_at}
+            - retrained {formatDateTime(Date.parse(status.learned_model.last.trained_at))}
+          {/if}
+          {#if status.learned_model.last}
+            from {fmt(status.learned_model.last.examples)} examples across {fmt(status.learned_model.last.labels)} labels
+          {/if}
+          {#if status.learned_model.active}
+            <span class="pill ok">Active</span>
+          {:else}
+            <span class="pill">Not in Use</span>
+          {/if}
+        {:else}
+          No retrained model yet: the configured model is in use.
+        {/if}
+      </p>
+    {/if}
+    {#if isAdmin}
+      <div class="row" style="gap: 8px; flex-wrap: wrap">
+        <button class="secondary" onclick={retrain} disabled={retraining}>
+          {retraining ? 'Retraining...' : 'Retrain Now'}
+        </button>
+        <span class="muted" style="font-size: 0.8rem">
+          Runs at most every {duration(status.retrain_interval_secs)} when automatic retraining is on.
+        </span>
+      </div>
+    {/if}
   </div>
 
   <div class="card" style="margin-top: 14px">
