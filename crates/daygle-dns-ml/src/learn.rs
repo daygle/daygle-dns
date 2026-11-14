@@ -189,11 +189,11 @@ pub fn collect_dataset(store: &AiStore, settings: &AiSettings) -> Result<Dataset
         if label.is_empty() || corrected.contains(&domain) || !looks_like_domain(&domain) {
             continue;
         }
-        // With a benign class in the training set, a sample of threat
-        // verdicts stays out of training so the gate can ask whether the class
-        // has started swallowing threats instead of only how accurate it is.
-        // Deciding after the loop keeps the sample independent of confidence
-        // order and lets a small install still have one.
+        // With a benign class in the training set, whole word families stay
+        // out of training so the gate can ask whether the class has started
+        // swallowing threats instead of only how accurate it is. Deciding
+        // after the loop keeps the sample independent of confidence order and
+        // lets a small install still have one.
         if settings.learn_negatives && channel == "threat" {
             deferred_threats.push((label, domain));
             continue;
@@ -204,22 +204,52 @@ pub fn collect_dataset(store: &AiStore, settings: &AiSettings) -> Result<Dataset
     }
 
     if settings.learn_negatives && !deferred_threats.is_empty() {
-        let mut held = vec![false; deferred_threats.len()];
-        let mut any = false;
-        for (index, (_, domain)) in deferred_threats.iter().enumerate() {
-            if holdout_domain(domain) {
-                held[index] = true;
-                any = true;
+        // Hold out whole word families, not single verdicts. A held-out
+        // verdict that shares its words with a training name tests memory,
+        // not whether the benign class over-generalises.
+        let families: std::collections::BTreeSet<String> = deferred_threats
+            .iter()
+            .map(|(_, domain)| family_key(domain))
+            .collect();
+        let mut selected: std::collections::BTreeSet<String> = families
+            .iter()
+            .filter(|family| hash_selected(family))
+            .cloned()
+            .collect();
+        // A corpus too small to hit the sample still gets one whole family,
+        // unless there is only one family to begin with: holding all of it
+        // would leave the candidate without a single threat example.
+        if selected.is_empty() && families.len() > 1 {
+            if let Some(first) = families.iter().next() {
+                selected.insert(first.clone());
             }
         }
-        // A corpus too small to hit the sample still gets one held-out
-        // verdict: a gate with nothing to test cannot protect anything.
-        if !any {
+        // Never hold out every family: the candidate needs at least one
+        // threat example to learn what a threat looks like.
+        if families.len() > 1 && selected.len() == families.len() {
+            if let Some(last) = selected.iter().next_back().cloned() {
+                selected.remove(&last);
+            }
+        }
+        let by_family = families.len() > 1;
+        let mut held = vec![false; deferred_threats.len()];
+        for (index, (_, domain)) in deferred_threats.iter().enumerate() {
+            held[index] = if by_family {
+                selected.contains(&family_key(domain))
+            } else {
+                // One family: hold back names instead, so some threat still
+                // trains and the gate still has novel variants to test.
+                hash_selected(domain)
+            };
+        }
+        if !held.iter().any(|held| *held) {
             held[0] = true;
         }
         for ((label, domain), is_held) in deferred_threats.into_iter().zip(held) {
             if is_held {
-                threat_validation.push((label, domain));
+                if threat_validation.len() < MAX_PROBE {
+                    threat_validation.push((label, domain));
+                }
             } else if push(&mut pairs, &mut labels, &mut seen, &label, &domain) {
                 stats.verdicts += 1;
             }
@@ -347,20 +377,73 @@ pub fn probe_accuracy(model: &Path, pairs: &[(String, String)]) -> Result<f32> {
     Ok(right as f32 / pairs.len() as f32)
 }
 
-/// Deterministic sample of threat verdicts for the gate: hash the name, so
-/// the held-out set spans the whole corpus instead of the most confident end.
-fn holdout_domain(domain: &str) -> bool {
+/// The word family a domain belongs to: the alphabetic words of its
+/// registrable label, sorted, so `secure-login-3` and `login-secure-9` are the
+/// same family while numbers and TLDs do not split or merge families.
+pub fn family_key(domain: &str) -> String {
+    let labels: Vec<&str> = domain
+        .trim()
+        .trim_matches('.')
+        .split('.')
+        .filter(|label| !label.is_empty())
+        .collect();
+    let label = if labels.len() >= 2 {
+        labels[labels.len() - 2]
+    } else {
+        labels.first().copied().unwrap_or("")
+    };
+    let mut words: Vec<String> = label
+        .split(['-', '_'])
+        .map(str::to_ascii_lowercase)
+        .filter(|word| word.chars().any(|c| c.is_ascii_alphabetic()))
+        .filter(|word| word != "www")
+        .collect();
+    words.sort();
+    words.dedup();
+    words.join("-")
+}
+
+/// Deterministic one-in-five sample of family keys. Hashing the family, not
+/// the name, is what keeps a whole family out of training.
+fn hash_selected(text: &str) -> bool {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for byte in domain.as_bytes() {
+    for byte in text.as_bytes() {
         hash ^= u64::from(*byte);
         hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
     }
     hash.is_multiple_of(HOLDOUT_EVERY as u64)
 }
 
-/// Most held-out threat verdicts one model probe scores. Bounded so the
-/// update health check stays fast on a large store.
+/// A held-out family's name with its words in an order the store never
+/// recorded, so the gate scores a novel name built from that family rather
+/// than the verdict it already knows.
+pub fn held_out_variant(domain: &str) -> String {
+    let mut labels = domain.trim_matches('.').split('.');
+    let host = labels.next().unwrap_or(domain);
+    let rest: Vec<&str> = labels.collect();
+    let mut words: Vec<&str> = host
+        .split(['-', '_'])
+        .filter(|word| !word.is_empty())
+        .filter(|word| word.chars().any(|c| c.is_ascii_alphabetic()))
+        .collect();
+    if words.len() > 1 {
+        words.reverse();
+    }
+    words.push("probe");
+    let mut variant = words.join("-");
+    if !rest.is_empty() {
+        variant.push('.');
+        variant.push_str(&rest.join("."));
+    }
+    variant
+}
+
+/// Most held-out threat names one model probe scores. Bounded so the update
+/// health check stays fast on a large store.
 const MAX_PROBE: usize = 200;
+/// One family contributes at most this many names to a probe, so a single
+/// large family cannot crowd out the others.
+const MAX_PROBE_PER_FAMILY: usize = 20;
 
 /// What probing a model against the store's held-out threats found.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -378,8 +461,8 @@ impl ThreatProbe {
     }
 }
 
-/// Score `model` against a sample of the store's confident threat verdicts.
-/// Used before and after a release model bundle: a bundle that loses held-out
+/// Score `model` against names built from held-out threat families. Used
+/// before and after a release model bundle: a bundle that loses held-out
 /// threats is a regression, whatever its checksums say.
 pub fn probe_threat_model(
     store: &AiStore,
@@ -413,17 +496,53 @@ pub fn probe_threat_model(
             break;
         }
     }
-    // The same spread sample the retrain gate uses; a small store still gets
-    // scored rather than skipped.
-    let mut sample: Vec<(String, String)> = all
+    // The same spread sample the retrain gate uses: whole families, each
+    // scored on a name order that never appeared in the store. A store too
+    // small to hit the sample still gets scored rather than skipped.
+    let families: std::collections::BTreeSet<String> =
+        all.iter().map(|(_, domain)| family_key(domain)).collect();
+    let by_family = families.len() > 1;
+    let mut selected: std::collections::BTreeSet<String> = families
         .iter()
-        .filter(|(_, domain)| holdout_domain(domain))
+        .filter(|family| hash_selected(family))
         .cloned()
         .collect();
+    if selected.is_empty() && by_family {
+        if let Some(first) = families.iter().next() {
+            selected.insert(first.clone());
+        }
+    }
+    if by_family && selected.len() == families.len() {
+        if let Some(last) = selected.iter().next_back().cloned() {
+            selected.remove(&last);
+        }
+    }
+    let mut sample: Vec<(String, String)> = Vec::new();
+    let mut per_family: BTreeMap<String, usize> = BTreeMap::new();
+    for (label, domain) in &all {
+        let family = family_key(domain);
+        let chosen = if by_family {
+            selected.contains(&family)
+        } else {
+            hash_selected(domain)
+        };
+        if !chosen {
+            continue;
+        }
+        let count = per_family.entry(family).or_insert(0);
+        if *count >= MAX_PROBE_PER_FAMILY {
+            continue;
+        }
+        *count += 1;
+        sample.push((label.clone(), held_out_variant(domain)));
+        if sample.len() >= MAX_PROBE {
+            break;
+        }
+    }
     if sample.is_empty() {
-        sample = all.into_iter().take(MAX_PROBE).collect();
-    } else {
-        sample.truncate(MAX_PROBE);
+        for (label, domain) in all.iter().take(MAX_PROBE) {
+            sample.push((label.clone(), held_out_variant(domain)));
+        }
     }
     let predicted = predict_all(model, &sample)?;
     let is_threat =
@@ -465,7 +584,7 @@ fn refuse_lost_threats(checked: usize, benign: usize, downgraded: usize) -> Resu
         }
     };
     Err(DaygleError::Config(format!(
-        "the retrained model read {lost} of {checked} held-out threat verdicts {detail}, so the current model was kept; turn ai.learn_negatives off to retrain without the benign class"
+        "the retrained model read {lost} of {checked} held-out threat names {detail}, so the current model was kept; turn ai.learn_negatives off to retrain without the benign class"
     )))
 }
 
@@ -602,7 +721,11 @@ impl Retrainer {
         // scores overall, it may not stop reading a held-out threat as a
         // threat. `benign` is one way; any non-blocking label is another.
         if !threat_validation.is_empty() {
-            let predicted = match predict_all(&temp, &threat_validation) {
+            let probe: Vec<(String, String)> = threat_validation
+                .iter()
+                .map(|(label, domain)| (label.clone(), held_out_variant(domain)))
+                .collect();
+            let predicted = match predict_all(&temp, &probe) {
                 Ok(predicted) => predicted,
                 Err(e) => {
                     let _ = std::fs::remove_file(&temp);
@@ -777,36 +900,49 @@ mod tests {
 
         let benign = refuse_lost_threats(30, 2, 0).unwrap_err().to_string();
         assert!(
-            benign.contains("2 of 30 held-out threat verdicts 2 as benign"),
+            benign.contains("2 of 30 held-out threat names 2 as benign"),
             "{benign}"
         );
 
         let downgraded = refuse_lost_threats(30, 0, 3).unwrap_err().to_string();
         assert!(
-            downgraded
-                .contains("3 of 30 held-out threat verdicts 3 as a label that would not block"),
+            downgraded.contains("3 of 30 held-out threat names 3 as a label that would not block"),
             "{downgraded}"
         );
 
         let both = refuse_lost_threats(30, 1, 2).unwrap_err().to_string();
         assert!(
-            both.contains("3 of 30 held-out threat verdicts 1 as benign and 2 as a label that would not block"),
+            both.contains(
+                "3 of 30 held-out threat names 1 as benign and 2 as a label that would not block"
+            ),
             "{both}"
         );
     }
 
     #[test]
-    fn the_holdout_sample_is_stable_and_spread() {
+    fn the_holdout_sample_is_by_family_and_novel() {
         assert_eq!(
-            holdout_domain("sneaky-1.example"),
-            holdout_domain("sneaky-1.example")
+            family_key("secure-login-3.example"),
+            family_key("login-secure-9.example")
+        );
+        assert_eq!(family_key("secure-login-3.example"), "login-secure");
+        assert_ne!(family_key("secure-login-3.example"), "secure");
+        assert_eq!(
+            held_out_variant("secure-login-3.example"),
+            "login-secure-probe.example"
+        );
+        assert_eq!(held_out_variant("sneaky-1.example"), "sneaky-probe.example");
+        assert_eq!(
+            hash_selected(&family_key("secure-login-3.example")),
+            hash_selected(&family_key("login-secure-9.example")),
+            "a family is held out or trained as a whole"
         );
         let selected = (0..1000)
-            .filter(|i| holdout_domain(&format!("host-{i}.example")))
+            .filter(|i| hash_selected(&family_key(&format!("host-{i:x}a.example"))))
             .count();
         assert!(
             (120..280).contains(&selected),
-            "a fifth of names, evenly: {selected}"
+            "a fifth of families, evenly: {selected}"
         );
     }
 }

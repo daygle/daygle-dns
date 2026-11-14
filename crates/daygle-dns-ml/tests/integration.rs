@@ -1692,12 +1692,85 @@ fn the_retrain_gate_refuses_a_model_that_swallows_threats_as_benign() {
         .expect_err("the benign class swallows held-out threats here")
         .to_string();
     assert!(
-        error.contains("held-out threat verdicts"),
+        error.contains("held-out threat names"),
         "the refusal names the gate: {error}"
     );
 }
 
-/// A release model probe scores held-out threat verdicts with the channel's
+/// Whole word families are held back, not one copy of a name whose words
+/// still appear in training.
+#[test]
+fn negatives_hold_back_whole_word_families() {
+    let dir = TempDir::new().unwrap();
+    let mut cfg = settings(AiMode::Train);
+    cfg.learn_negatives = true;
+    let ai = engine(&dir, cfg.clone());
+    let families = [
+        "secure-login",
+        "wallet-connect",
+        "prize-claim",
+        "daily-news",
+        "gift-guide",
+        "api-reference",
+        "hotel-booking",
+        "travel-guide",
+        "support-thread",
+        "download-guide",
+    ];
+    for (index, family) in families.iter().enumerate() {
+        for n in 0..3 {
+            let domain = format!("{family}-{n}.example");
+            ai.store.observe(&domain).unwrap();
+            ai.store
+                .save_verdict(
+                    Channel::Threat,
+                    &domain,
+                    ["malware", "phishing", "scam"][index % 3],
+                    "threat",
+                    "classified",
+                    1.0,
+                    "fasttext",
+                    "ev",
+                    86_400,
+                )
+                .unwrap();
+        }
+    }
+
+    let dataset = daygle_dns_ml::learn::collect_dataset(&ai.store, &cfg).unwrap();
+    assert!(
+        !dataset.threat_validation.is_empty(),
+        "at least one family is held out"
+    );
+    let held: std::collections::BTreeSet<String> = dataset
+        .threat_validation
+        .iter()
+        .map(|(_, domain)| daygle_dns_ml::learn::family_key(domain))
+        .collect();
+    for family in &held {
+        let count = dataset
+            .threat_validation
+            .iter()
+            .filter(|(_, domain)| &daygle_dns_ml::learn::family_key(domain) == family)
+            .count();
+        assert_eq!(count, 3, "every verdict of {family} is held out");
+    }
+    for (_, domain) in &dataset.pairs {
+        assert!(
+            !held.contains(&daygle_dns_ml::learn::family_key(domain)),
+            "{domain} shares a held family with the gate"
+        );
+    }
+    for (_, domain) in &dataset.threat_validation {
+        let probe = daygle_dns_ml::learn::held_out_variant(domain);
+        assert!(
+            !dataset.pairs.iter().any(|(_, trained)| trained == &probe),
+            "the gate scores {probe}, which was never trained on"
+        );
+    }
+}
+
+/// A release model probe scores held-out threat names with the channel's
 /// own blocking rule, so the update step can compare before and after.
 #[test]
 fn probing_a_model_scores_held_out_threats() {

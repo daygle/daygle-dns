@@ -338,7 +338,8 @@ fn measure(
                 let mut benign = 0usize;
                 let mut downgraded = 0usize;
                 for (_, domain) in &dataset.threat_validation {
-                    match category(&gate_model, domain)?.as_deref() {
+                    let probe = learn::held_out_variant(domain);
+                    match category(&gate_model, &probe)?.as_deref() {
                         Some(BENIGN_LABEL) => benign += 1,
                         Some(label) if is_threat_label(label) => {}
                         _ => downgraded += 1,
@@ -446,7 +447,7 @@ fn report(rows: &[Row], held_out: usize, fresh: usize) {
     for row in rows {
         if let Some(gate) = &row.gate {
             println!(
-                "   gate ({}): {} of {} held-out threat verdicts lost ({} benign, {} other); the gate would {} this candidate.",
+                "   gate ({}): {} of {} held-out threat names lost ({} benign, {} other); the gate would {} this candidate.",
                 if row.learn_negatives { "negatives on" } else { "baseline" },
                 gate.lost(),
                 gate.checked,

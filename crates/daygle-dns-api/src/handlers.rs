@@ -2495,8 +2495,8 @@ pub async fn ai_model_status(State(state): State<AppState>) -> Response {
     .into_response()
 }
 
-/// `GET /api/ai/model-health` - score the loaded threat model against
-/// held-out threat verdicts. The models-update apply step compares this before
+/// `GET /api/ai/model-health` - score the loaded threat model against names
+/// built from held-out threat families. The models-update apply step compares this before
 /// and after installing a bundle and restores the previous files when the
 /// bundle regresses. Always 200: `available` says whether a model could be
 /// probed, so an install on a store with no verdicts still proceeds.

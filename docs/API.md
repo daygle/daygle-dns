@@ -1679,9 +1679,9 @@ privileged apply service, which installs the files and restarts the server.
 A `202` only means the update began; poll `GET /api/ai/model-status` until
 `done`/`error`.
 
-`GET /api/ai/model-health` scores the loaded threat model against a sample of
-the store's held-out threat verdicts: `{available, model, checked, lost,
-benign, downgraded, skipped}`. `lost` counts verdicts the model reads as
+`GET /api/ai/model-health` scores the loaded threat model against names built
+from the store's held-out threat families: `{available, model, checked, lost,
+benign, downgraded, skipped}`. `lost` counts names the model reads as
 `benign` or as a label that would not block. It always answers `200`;
 `available: false` with a `reason` means there was no model or no verdicts to
 probe. The models-update apply step calls it before installing a bundle and
@@ -1773,21 +1773,26 @@ deterministic synthetic corpus: with negatives drawn from flagged lookalikes,
 half its held-out threats read as `benign` and none did with negatives drawn
 from harmless sites; with a clean separation the class costs nothing.
 
-The retrain gate will not accept that cost. With `learn_negatives` on, a
-sample of threat verdicts (about one in five, chosen by a hash of the name so
-the sample is not just the most confident end, and at least one whenever there
-are any) is held back from training. A candidate that reads any of them as
-`benign`, or as any label that would not block, is refused however well it
-scores overall. The refusal names the counts, and
-`threat_validation_examples` in the retrain response says how many were used.
-Turning `learn_negatives` off removes the benign class and with it this gate.
+The retrain gate will not accept that cost. With `learn_negatives` on, whole
+word families are held back from training: about one in five, chosen by a hash
+of the family, where a family is the sorted words of the registrable label
+(`secure-login-3` and `login-secure-9` are one family). Every verdict of a
+selected family stays out, not just one copy of a name whose words still
+appear in training. The gate scores a name built from each held-out family
+with its words reordered and a `probe` suffix, so it tests a name the store
+never recorded. A candidate that reads any of them as `benign`, or as any
+label that would not block, is refused however well it scores overall. The
+refusal names the counts, and `threat_validation_examples` in the retrain
+response says how many were used. A corpus with only one family falls back to
+holding back individual names, so the candidate still trains on threat
+examples. Turning `learn_negatives` off removes the benign class and with it
+this gate.
 
-The evaluation prints the gate's decision beside the swallow numbers. It
-accepts both of its candidates: the sampled held-out verdicts share word stems
-with the training threats, so they keep reading as threats even where the
-swallowed 15 of 30 are unseen names. The gate protects verdicts the store
-knows, not every novel name a negative class may swallow. Those are
-corpus-specific bounds, not a promise about any network. `auto_retrain` says "do not block
+The evaluation prints the gate's decision beside the swallow numbers. With
+family holdout it refuses both candidates: 18 of 18 and 12 of 12 held-out
+names read as non-threats, matching the 15 of 30 unseen threats the benign
+class swallows in the second scenario. Those are corpus-specific bounds, not
+a promise about any network. `auto_retrain` says "do not block
 this" and so is not training data: a single-label classifier cannot express a
 negative. `GET /api/ai/status` reports `auto_retrain`,
 `retrain_interval_secs` and `learned_model` (`path`, `present`, `active` and

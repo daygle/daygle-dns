@@ -224,7 +224,7 @@ health_check() {
 
 MODEL_HEALTH_URL="http://$API_HOST:$API_PORT/api/ai/model-health"
 
-# Held-out threat verdicts the loaded model reads as non-threats, or empty when
+# Held-out threat names the loaded model reads as non-threats, or empty when
 # the probe is unavailable (AI disabled, no model, an older binary). An
 # unavailable probe must never block an update.
 model_probe_lost() {
@@ -599,8 +599,8 @@ if [ "$KIND" = "models" ]; then
     exit 1
   fi
 
-  # How the models in use score on held-out threat verdicts, before this
-  # bundle replaces them. Empty when the probe is unavailable.
+  # How the models in use score on names from held-out threat families,
+  # before this bundle replaces them. Empty when the probe is unavailable.
   BASELINE_LOST="$(model_probe_lost)"
 
   # Back up before changing anything. Read through the service account so a
@@ -664,7 +664,7 @@ if [ "$KIND" = "models" ]; then
       WHAT="some previous model files could not be restored; restore them from backup"
     fi
     systemctl restart daygle-dns 2>>"$LOG" || true
-    fail "The new AI models read ${NEW_LOST} held-out threat verdict(s) as non-threats, up from ${BASELINE_LOST}; ${WHAT}."
+    fail "The new AI models read ${NEW_LOST} held-out threat name(s) as non-threats, up from ${BASELINE_LOST}; ${WHAT}."
     exit 1
   fi
 

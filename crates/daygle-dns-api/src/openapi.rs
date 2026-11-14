@@ -2895,9 +2895,9 @@ fn ai_schemas() -> Value {
         },
         "AiModelHealth": {
             "type": "object",
-            "description": "How the loaded threat model reads the store's held-out threat \
-                verdicts. `lost` counts those it reads as benign or as a label that would \
-                not block.",
+            "description": "How the loaded threat model reads names built from the \
+                store's held-out threat families. `lost` counts those it reads as benign \
+                or as a label that would not block.",
             "required": ["available", "model"],
             "properties": {
                 "available": { "type": "boolean" },
@@ -3563,9 +3563,9 @@ fn ai_operation(path: &str, method: &str) -> Option<Value> {
         ("get", "/ai/model-health") => Some(json!({
             "responses": {
                 "200": json_response(
-                    "The loaded threat model scored against held-out threat verdicts. \
-                        `available: false` means there was nothing to probe; the update \
-                        step then installs without gating.",
+                    "The loaded threat model scored against names built from held-out \
+                        threat families. `available: false` means there was nothing to \
+                        probe; the update step then installs without gating.",
                     schema_ref("AiModelHealth"),
                 )
             }

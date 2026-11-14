@@ -192,12 +192,13 @@ Daygle DNS combines, in a single process:
   synthetic corpus where the negatives are domains the model had flagged, half
   the held-out threats read as benign; where they are harmless sites, none
   do. A retrain that reads any held-out threat as benign, or as any label that
-  would not block, is refused even when its overall score is fine. The same
-  command also runs the gate on a model trained the way the retrainer trains
-  one and prints whether it would refuse: on this synthetic corpus it accepts
-  both candidates, because the held-out verdicts share word stems with the
-  training threats while the swallowed names are unseen. The gate protects
-  known verdicts, not every unseen-name regression.
+  would not block, is refused even when its overall score is fine. Whole word
+  families are held back for that check, and each is probed under a word order
+  the store never recorded, so a negative class that only swallows novel names
+  is caught. The same command runs the gate on a model trained the way the
+  retrainer trains one and prints whether it would refuse: it refuses both
+  candidates, 18 of 18 and 12 of 12 held-out names lost, including the
+  scenario where 15 of 30 unseen threats are swallowed.
   `ai.fetch_pages` (also off by default) fetches the home page of each new
   threat candidate from the server, reads its title and text with a small cue
   classifier, and records the result with the verdict. `ai.page_rule` decides
