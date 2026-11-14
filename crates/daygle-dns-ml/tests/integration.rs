@@ -923,6 +923,78 @@ fn a_retrain_keeps_one_model_to_roll_back_to() {
     assert_eq!(ai.learned_model_record().unwrap()["examples"], 243);
 }
 
+/// A threat candidate is offered for a page read once, and what the page said
+/// lands on its evidence without touching the verdict itself.
+#[test]
+fn a_threat_candidate_is_offered_for_a_page_read_once() {
+    let dir = TempDir::new().unwrap();
+    let ai = engine(&dir, settings(AiMode::Train));
+    ai.store.observe("phishy.example").unwrap();
+    ai.store
+        .save_verdict(
+            Channel::Threat,
+            "phishy.example",
+            "phishing",
+            "threat",
+            "classified",
+            0.99,
+            "fasttext",
+            "ev",
+            3600,
+        )
+        .unwrap();
+    let now = chrono::Utc::now().timestamp();
+    assert_eq!(
+        ai.store.page_fetch_candidates(now, 0.2, 16).unwrap(),
+        vec!["phishy.example".to_string()]
+    );
+
+    // An exempted domain is not fetched, whatever the model said.
+    ai.store.observe("exempt.example").unwrap();
+    ai.store
+        .save_verdict(
+            Channel::Threat,
+            "exempt.example",
+            "phishing",
+            "threat",
+            "classified",
+            0.99,
+            "fasttext",
+            "ev",
+            3600,
+        )
+        .unwrap();
+    ai.store
+        .set_override("exempt.example", "not_threat", "")
+        .unwrap();
+    assert_eq!(
+        ai.store.page_fetch_candidates(now, 0.2, 16).unwrap(),
+        vec!["phishy.example".to_string()]
+    );
+
+    assert!(ai
+        .store
+        .append_page_evidence("phishy.example", "page \"Sign in\" reads phishing (60%)")
+        .unwrap());
+    assert!(
+        ai.store
+            .page_fetch_candidates(now, 0.2, 16)
+            .unwrap()
+            .is_empty(),
+        "a classification is not read twice"
+    );
+    let rows = ai.store.verdicts_for("phishy.example").unwrap();
+    let threat = rows.iter().find(|r| r.channel == "threat").unwrap();
+    assert_eq!(threat.category, "phishing");
+    assert_eq!(threat.confidence, 0.99);
+    assert!(threat.evidence.contains("ev"), "{}", threat.evidence);
+    assert!(
+        threat.evidence.contains("reads phishing"),
+        "{}",
+        threat.evidence
+    );
+}
+
 /// "Not a threat" corrections train a `benign` label only when
 /// `ai.learn_negatives` asks for it; the domain's machine label is dropped
 /// either way, so the model is not taught the very label the operator denied.

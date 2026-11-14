@@ -190,6 +190,19 @@
     }
   }
 
+  async function setFetchPages(value) {
+    try {
+      await api.updateSettings({ ai: { fetch_pages: value } });
+      status = { ...status, fetch_pages: value };
+      notice = value
+        ? 'Page reading is on: new threat candidates will have their home page fetched from this server and its text recorded with the verdict.'
+        : 'Page reading is off; threat verdicts keep the name-only evidence they already have.';
+    } catch (e) {
+      error = formatApiError(e);
+      await load(true);
+    }
+  }
+
   async function rollbackModel() {
     rollingBack = true;
     error = null;
@@ -492,6 +505,34 @@
         </span>
       </div>
     {/if}
+  </div>
+
+  <div class="card" style="margin-top: 14px">
+    <div class="spread" style="margin-bottom: 8px; gap: 10px; flex-wrap: wrap">
+      <h3 style="margin: 0">Page Content</h3>
+      {#if isAdmin}
+        <label class="row" style="gap: 6px; align-items: center; font-size: 0.85rem">
+          <input
+            type="checkbox"
+            style="width: auto"
+            checked={!!status.fetch_pages}
+            onchange={(event) => setFetchPages(event.currentTarget.checked)}
+          />
+          <span>Read Pages for Threats</span>
+        </label>
+      {/if}
+    </div>
+    <p class="muted help" style="margin: 0 0 10px">
+      When a domain is flagged as a threat, ask the site itself what it says:
+      its home page is fetched from this server, its title and text read, and a
+      one-line note added to the verdict's evidence (visible in Check a Domain).
+      It is a second opinion for you, not a blocking decision - nothing here
+      blocks or clears a domain. Fetching leaves this server, so it is off
+      unless you turn it on; only threat candidates are read, at most
+      {fmt(status.page_candidates_per_scan || 0)} per scan, {fmt(status.page_fetch_timeout_secs || 0)}s
+      timeout each. Requests to private, loopback and link-local addresses are
+      refused, including through redirects.
+    </p>
   </div>
 
   <div class="card" style="margin-top: 14px">

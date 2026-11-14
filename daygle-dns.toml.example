@@ -626,6 +626,16 @@ auto_block_categories = ["malware", "phishing", "scam"]
 # then miss a threat it would have caught. The threat channel never reports
 # `benign` as a threat, and at most 500 negatives are used.
 # learn_negatives = false
+
+# Page content: when a domain is flagged as a threat, fetch its home page from
+# this server and record what its text says next to the verdict. Off by
+# default - it makes outbound requests to the sites this network visits. Only
+# threat candidates are read; private, loopback and link-local addresses are
+# refused, redirects are re-checked the same way, and reads are bounded.
+# fetch_pages = false
+# page_fetch_timeout_secs = 5
+# page_fetch_max_bytes = 524288
+# page_candidates_per_scan = 16
 block_threshold = 0.99
 confidence_floor = 0.2
 category_confidence_floor = 0.2

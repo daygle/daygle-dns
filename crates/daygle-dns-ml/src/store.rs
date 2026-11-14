@@ -162,6 +162,7 @@ const VERDICTS_TABLE: &str = "CREATE TABLE IF NOT EXISTS ai_verdicts (
     classified_at INTEGER NOT NULL DEFAULT 0,
     expires_at    INTEGER NOT NULL DEFAULT 0,
     last_seen     INTEGER NOT NULL DEFAULT 0,
+    page_fetched_at INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (domain, channel)
 )";
 
@@ -259,6 +260,15 @@ impl AiStore {
             conn.execute(
                 "UPDATE ai_verdicts SET last_seen = ?1",
                 params![now_epoch()],
+            )?;
+        }
+        // When the page behind this threat verdict was last read. Rows from
+        // before the column read as "never", so each is read once more when
+        // page fetching is on.
+        if !has_column("page_fetched_at")? {
+            conn.execute(
+                "ALTER TABLE ai_verdicts ADD COLUMN page_fetched_at INTEGER NOT NULL DEFAULT 0",
+                [],
             )?;
         }
         // Threats the verifier disputed used to be stored as plain `info`
@@ -727,6 +737,58 @@ impl AiStore {
     /// qualified it: fresh, undisputed, at or above `threshold`, and vetoed by
     /// no override. Strongest first. Served for export so another resolver can
     /// use the result as a blocklist.
+    /// Threat verdicts worth reading a page for: classified, fresh, not
+    /// disputed, at or above `floor`, not exempted, and not already read for
+    /// this classification. Strongest first, capped at `limit`.
+    pub fn page_fetch_candidates(
+        &self,
+        now_epoch: i64,
+        floor: f32,
+        limit: u32,
+    ) -> Result<Vec<String>> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(
+            "SELECT domain FROM ai_verdicts
+             WHERE channel = 'threat' AND status = 'classified'
+               AND severity != 'disputed'
+               AND confidence >= ?1 AND expires_at > ?2
+               AND page_fetched_at < classified_at
+               AND NOT EXISTS (
+                   SELECT 1 FROM ai_overrides o
+                   WHERE o.domain = ai_verdicts.domain
+                     AND o.action IN ('allow', 'not_threat')
+               )
+             ORDER BY confidence DESC, domain
+             LIMIT ?3",
+        )?;
+        let collected = stmt
+            .query_map(params![floor, now_epoch, limit as i64], |r| {
+                r.get::<_, String>(0)
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(collected)
+    }
+
+    /// Append what a page said to the domain's threat verdict, and mark it
+    /// read for this classification so the next cycle does not fetch it again.
+    pub fn append_page_evidence(&self, domain: &str, note: &str) -> Result<bool> {
+        let conn = self.lock()?;
+        let changed = conn.execute(
+            "UPDATE ai_verdicts
+             SET evidence = CASE
+                     WHEN evidence = '' THEN ?2
+                     -- Bounded: a verdict reclassified for months must not
+                     -- grow a page note per scan without limit.
+                     WHEN length(evidence) > 2000 THEN evidence
+                     ELSE evidence || char(10) || ?2
+                 END,
+                 page_fetched_at = ?3
+             WHERE domain = ?1 AND channel = 'threat'",
+            params![domain, note, now_epoch()],
+        )?;
+        Ok(changed > 0)
+    }
+
     pub fn export_threats(
         &self,
         now_epoch: i64,

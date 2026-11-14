@@ -1714,6 +1714,19 @@ front of the scanner immediately. The model it replaces becomes the previous
 one, so a rollback can itself be undone. `GET /api/ai/status` reports
 `learned_model.previous`.
 
+`ai.fetch_pages` (off by default) makes the scan cycle fetch the home page of
+each new threat candidate - classified, fresh, not disputed, above
+`ai.confidence_floor`, not exempted, and not already read for this
+classification - and appends one bounded evidence line to the threat verdict
+(`page "Title" reads phishing (60%: verify your account, ...)`, or why it could
+not be read). The verdict's category, confidence and blocking status are never
+changed: `page_fetch_max_bytes`, `page_fetch_timeout_secs` and
+`page_candidates_per_scan` bound the work, and the fetcher refuses non-HTML
+responses, IP-literal hosts, non-default ports, and any host that resolves to a
+private, loopback, link-local, CGNAT, multicast or reserved address, including
+on each redirect. All four settings are reported by `GET /api/ai/status` and
+accepted by the settings update.
+
 With `ai.learn_negatives` on, `not_threat` corrections are training data too:
 they become a `benign` label (reported as `negatives` in the retrain response
 and in the model record). The threat channel never reports `benign` - even a

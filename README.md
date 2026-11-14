@@ -186,7 +186,12 @@ Daygle DNS combines, in a single process:
   one rollback is always available. `ai.learn_negatives` (off by default) also
   trains "not a threat" corrections as a `benign` label, so a correction can
   change the next model; the threat channel never reports that label as a
-  threat, but a negative class can over-generalise, which is why it is opt-in. On by
+  threat, but a negative class can over-generalise, which is why it is opt-in.
+  `ai.fetch_pages` (also off by default) fetches the home page of each new
+  threat candidate from the server, reads its title and text with a small cue
+  classifier, and records the result with the verdict. It is evidence for the
+  operator, not a blocking decision; private, loopback and link-local
+  addresses are refused and redirects are checked the same way. On by
   default after an install in **train mode** (records verdicts, nothing
   blocks) - flip `ai.mode` to `enforce` in the config or GUI when you are
   happy with the verdict log. Operator allowlist always wins, and expired

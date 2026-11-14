@@ -43,6 +43,7 @@ pub mod channel;
 pub mod fasttext_backend;
 pub mod heuristic;
 pub mod learn;
+pub mod page;
 pub mod plugin;
 pub mod scanner;
 pub mod store;

@@ -1426,6 +1426,18 @@ pub struct AiSettings {
     /// threat it would otherwise have reported. The threat channel never
     /// reports `benign` as a threat whatever the model says.
     pub learn_negatives: bool,
+    /// Read the page behind each threat candidate and record what its text
+    /// says next to the verdict. Off by default: it makes outbound requests
+    /// to the sites this network visits, from this server. See
+    /// `page_fetch_timeout_secs`, `page_fetch_max_bytes` and
+    /// `page_candidates_per_scan` for the limits.
+    pub fetch_pages: bool,
+    /// Timeout for one page fetch, in seconds (1-30).
+    pub page_fetch_timeout_secs: u64,
+    /// Bytes read from one page before the read stops (16 KiB - 2 MiB).
+    pub page_fetch_max_bytes: u32,
+    /// Threat candidates whose page is read per scan cycle (1-64).
+    pub page_candidates_per_scan: u32,
 }
 
 impl Default for AiSettings {
@@ -1457,6 +1469,10 @@ impl Default for AiSettings {
             auto_retrain: true,
             retrain_interval_secs: 86_400,
             learn_negatives: false,
+            fetch_pages: false,
+            page_fetch_timeout_secs: 5,
+            page_fetch_max_bytes: 512 * 1024,
+            page_candidates_per_scan: 16,
         }
     }
 }

@@ -1498,6 +1498,10 @@ pub async fn ai_status(State(state): State<AppState>) -> Response {
         "auto_retrain": settings.auto_retrain,
         "retrain_interval_secs": settings.retrain_interval_secs,
         "learn_negatives": settings.learn_negatives,
+        "fetch_pages": settings.fetch_pages,
+        "page_fetch_timeout_secs": settings.page_fetch_timeout_secs,
+        "page_fetch_max_bytes": settings.page_fetch_max_bytes,
+        "page_candidates_per_scan": settings.page_candidates_per_scan,
         "learned_model": {
             "path": ai.learned_model_path().display().to_string(),
             "present": ai.learned_model_path().is_file(),
@@ -6293,6 +6297,10 @@ pub struct AiUpdate {
     pub auto_retrain: Option<bool>,
     pub retrain_interval_secs: Option<u64>,
     pub learn_negatives: Option<bool>,
+    pub fetch_pages: Option<bool>,
+    pub page_fetch_timeout_secs: Option<u64>,
+    pub page_fetch_max_bytes: Option<u32>,
+    pub page_candidates_per_scan: Option<u32>,
 }
 
 /// listener-relevant `[server]` fields apply live; the rest are restarts.
@@ -7239,6 +7247,18 @@ pub async fn update_settings(
         }
         if let Some(v) = a.learn_negatives {
             config.ai.learn_negatives = v;
+        }
+        if let Some(v) = a.fetch_pages {
+            config.ai.fetch_pages = v;
+        }
+        if let Some(v) = a.page_fetch_timeout_secs {
+            config.ai.page_fetch_timeout_secs = v.clamp(1, 30);
+        }
+        if let Some(v) = a.page_fetch_max_bytes {
+            config.ai.page_fetch_max_bytes = v.clamp(16 * 1024, 2 * 1024 * 1024);
+        }
+        if let Some(v) = a.page_candidates_per_scan {
+            config.ai.page_candidates_per_scan = v.clamp(1, 64);
         }
     }
 

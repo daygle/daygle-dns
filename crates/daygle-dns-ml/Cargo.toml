@@ -22,6 +22,8 @@ arc-swap.workspace = true
 tokio = { version = "1", features = ["sync", "time", "rt", "macros"] }
 tokio-util.workspace = true
 fasttext.workspace = true
+# Page-content stage: outbound fetch of threat candidates (off by default).
+reqwest = { workspace = true, features = ["blocking"] }
 # MiniLM/ONNX verifier backend (feature-gated so static-musl builds can
 # exclude the ONNX Runtime dependency entirely).
 ort = { workspace = true, optional = true }

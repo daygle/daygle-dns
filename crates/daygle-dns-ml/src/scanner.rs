@@ -248,7 +248,62 @@ impl Scanner {
 
         // 4. Refresh the block snapshot.
         self.refresh_snapshot(&cfg, Utc::now().timestamp());
+
+        // 5. Page content: evidence for the domains just flagged. Only the
+        //    threat channel's candidates are read, and only when the operator
+        //    turned it on; a failure here never fails the cycle.
+        match self.page_stage(&cfg, Utc::now().timestamp()) {
+            Ok(0) => {}
+            Ok(read) => self.log_info(format!("AI read {read} page(s) behind threat candidates")),
+            Err(e) => self.log_warn(format!("AI page stage failed: {e}")),
+        }
         Ok(classified)
+    }
+
+    /// Fetch and read the page behind each new threat candidate, recording
+    /// what it says as evidence. Never changes a verdict: the text classifier
+    /// is a second opinion for the operator, not a blocking decision.
+    fn page_stage(&self, cfg: &AiSettings, now: i64) -> Result<usize> {
+        if !cfg.fetch_pages {
+            return Ok(0);
+        }
+        let candidates = self.store.page_fetch_candidates(
+            now,
+            cfg.confidence_floor,
+            cfg.page_candidates_per_scan.clamp(1, 64),
+        )?;
+        if candidates.is_empty() {
+            return Ok(0);
+        }
+        let fetcher = crate::page::PageFetcher::new(
+            std::time::Duration::from_secs(cfg.page_fetch_timeout_secs.clamp(1, 30)),
+            cfg.page_fetch_max_bytes.clamp(16 * 1024, 2 * 1024 * 1024) as usize,
+        );
+        let workers = crate::page::workers().min(candidates.len());
+        let chunk = candidates.len().div_ceil(workers);
+        let notes: Vec<(String, String)> = std::thread::scope(|scope| {
+            let handles: Vec<_> = candidates
+                .chunks(chunk)
+                .map(|part| {
+                    let fetcher = fetcher.clone();
+                    scope.spawn(move || {
+                        part.iter()
+                            .map(|domain| (domain.clone(), crate::page::inspect(&fetcher, domain)))
+                            .collect::<Vec<_>>()
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .flat_map(|handle| handle.join().unwrap_or_default())
+                .collect()
+        });
+        let mut recorded = 0usize;
+        for (domain, note) in &notes {
+            self.store.append_page_evidence(domain, note)?;
+            recorded += 1;
+        }
+        Ok(recorded)
     }
 
     /// Classify every pending `(domain, channel)` pair on up to `workers`

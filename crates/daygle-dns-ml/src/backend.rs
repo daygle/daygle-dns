@@ -101,10 +101,11 @@ pub struct Verdict {
 pub struct ClassificationInput {
     /// Observed query name (lowercase, no trailing dot).
     pub domain: String,
-    /// Page `<title>` when a page fetch ran (empty until the page-fetch
-    /// stage lands).
+    /// Page `<title>` when a page fetch ran. The page-content stage classifies
+    /// text separately and records it as evidence, so classifiers still see
+    /// only the name.
     pub title: String,
-    /// Extracted page text when a page fetch ran (empty until then).
+    /// Extracted page text when a page fetch ran; unused by the fallbacks.
     pub text: String,
 }
 
