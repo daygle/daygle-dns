@@ -547,7 +547,10 @@ console's updater downloads and verifies a release into
 swap, service restart, health-check, and rollback to a root systemd oneshot
 (`daygle-dns-update.service`, provisioned by the installer). No sudo or
 setuid for the service account. `GET /api/update/preflight` probes GitHub and
-the staging directory beforehand.
+the staging directory beforehand. See
+[`docs/UPDATE_ROLLBACK.md`](docs/UPDATE_ROLLBACK.md) for a disposable-VM
+runbook covering both rollback branches, with the exact phases, log lines and
+post-rollback checks.
 
 ### Source builds
 
