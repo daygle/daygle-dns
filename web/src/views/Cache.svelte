@@ -11,7 +11,10 @@
   let busy = $state(false);
   let error = $state(null);
   let notice = $state(null);
-  let inFlight = $state(false);
+  // Not reactive: `load` runs from the mount effect, and a reactive flag
+  // read there re-ran the effect after every response, polling the server
+  // back to back instead of every 10 s.
+  let inFlight = false;
   let flushName = $state('');
   let flushType = $state('');
 

@@ -1,4 +1,5 @@
 <script>
+  import { onMount } from 'svelte';
   import { api, formatApiError } from '../api.js';
   import NetworkPicker from '../NetworkPicker.svelte';
 
@@ -51,7 +52,7 @@
     }
   }
 
-  $effect(() => {
+  onMount(() => {
     load();
   });
 </script>

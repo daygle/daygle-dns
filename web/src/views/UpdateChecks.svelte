@@ -1,4 +1,5 @@
 <script>
+  import { onMount } from 'svelte';
   import { api, formatApiError } from '../api.js';
 
   // The `[updates]` settings: background release checks, automatic AI model
@@ -52,7 +53,7 @@
     }
   }
 
-  $effect(() => {
+  onMount(() => {
     load();
   });
 </script>

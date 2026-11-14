@@ -1,4 +1,5 @@
 <script>
+  import { onMount } from 'svelte';
   import IconButton from '../IconButton.svelte';
   import { api, formatApiError } from '../api.js';
   import { reverseZoneName } from '../reverseZone.js';
@@ -544,7 +545,7 @@
   // placeholders the SOA Primary Nameserver for new zones.
   let dnsServerDomain = $derived(zoneDefaults?.primary_ns || config?.authoritative?.default_primary_ns || '');
 
-  $effect(() => {
+  onMount(() => {
     loadZones();
     loadConfig();
     loadRootStatus();

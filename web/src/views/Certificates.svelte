@@ -1,4 +1,5 @@
 <script>
+  import { onMount } from 'svelte';
   import IconButton from '../IconButton.svelte';
   import { api, formatApiError, getStoredUser } from '../api.js';
   import PageHeader from '../PageHeader.svelte';
@@ -42,7 +43,7 @@
     }
   }
 
-  $effect(() => {
+  onMount(() => {
     load();
   });
 

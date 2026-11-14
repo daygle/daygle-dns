@@ -1,15 +1,15 @@
 <script>
   import { api } from '../api.js';
 
-  let username = '';
-  let password = '';
-  let confirm = '';
+  let username = $state('');
+  let password = $state('');
+  let confirmPassword = $state('');
   // Optional profile fields shown on the initial admin account.
-  let firstName = '';
-  let lastName = '';
-  let email = '';
-  let error = '';
-  let loading = false;
+  let firstName = $state('');
+  let lastName = $state('');
+  let email = $state('');
+  let error = $state('');
+  let loading = $state(false);
 
   async function submit() {
     error = '';
@@ -33,7 +33,7 @@
       error = 'Password must be at most 1024 characters.';
       return;
     }
-    if (password !== confirm) {
+    if (password !== confirmPassword) {
       error = 'Passwords do not match.';
       return;
     }
@@ -62,7 +62,7 @@
       Create the administrator account for this server. You can add more
       accounts later on the Users page.
     </p>
-    <form on:submit|preventDefault={submit} class="form">
+    <form onsubmit={(e) => { e.preventDefault(); submit(); }} class="form">
       <label for="username">Username</label>
       <!-- svelte-ignore a11y_autofocus -->
       <input id="username" type="text" bind:value={username} autocomplete="username" autofocus spellcheck="false" />
@@ -71,8 +71,8 @@
       <input id="password" type="password" bind:value={password} autocomplete="new-password" />
       <div class="hint">At least 8 characters.</div>
 
-      <label for="confirm">Confirm Password</label>
-      <input id="confirm" type="password" bind:value={confirm} autocomplete="new-password" />
+      <label for="confirmPassword">Confirm Password</label>
+      <input id="confirmPassword" type="password" bind:value={confirmPassword} autocomplete="new-password" />
 
       <label for="name">Name <span class="optional">(Optional)</span></label>
       <div class="pair">

@@ -1,4 +1,5 @@
 <script>
+  import { onMount } from 'svelte';
   import IconButton from '../IconButton.svelte';
   import PageHeader from '../PageHeader.svelte';
   import { icons } from '../icons.svelte.js';
@@ -292,7 +293,7 @@
     return i.addresses.filter((a) => !a.startsWith('fe80')).join(', ');
   }
 
-  $effect(() => {
+  onMount(() => {
     load();
   });
 </script>

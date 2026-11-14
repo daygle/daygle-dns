@@ -1,4 +1,5 @@
 <script>
+  import { untrack } from 'svelte';
   import PageHeader from '../PageHeader.svelte';
   import { icons } from '../icons.svelte.js';
   import Devices from './Devices.svelte';
@@ -52,7 +53,8 @@
     },
   ];
 
-  let tab = $state(TABS.some((t) => t.id === initialTab) ? initialTab : 'devices');
+  // The tab opened with (the page is re-created when another is asked for).
+  let tab = $state(untrack(() => (TABS.some((t) => t.id === initialTab) ? initialTab : 'devices')));
   const current = $derived(TABS.find((t) => t.id === tab));
 </script>
 

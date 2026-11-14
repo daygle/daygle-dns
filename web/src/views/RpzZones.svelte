@@ -1,4 +1,5 @@
 <script>
+  import { onMount } from 'svelte';
   import IconButton from '../IconButton.svelte';
   import { api, formatApiError, getStoredUser } from '../api.js';
   import { formatDateTime } from '../datetime.svelte.js';
@@ -175,7 +176,7 @@
     return POLICIES.find((p) => p.value === value)?.label || value;
   }
 
-  $effect(() => {
+  onMount(() => {
     load();
   });
 </script>

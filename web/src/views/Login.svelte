@@ -1,13 +1,13 @@
 <script>
   import { api } from '../api.js';
 
-  let username = '';
-  let password = '';
+  let username = $state('');
+  let password = $state('');
   // Second step for accounts with two-factor login.
-  let needCode = false;
-  let code = '';
-  let error = '';
-  let loading = false;
+  let needCode = $state(false);
+  let code = $state('');
+  let error = $state('');
+  let loading = $state(false);
 
   async function submit() {
     error = '';
@@ -53,7 +53,7 @@
   <section class="panel">
     <div class="brand"><span class="logo" aria-hidden="true">⬡</span> Daygle DNS</div>
     <h2>Sign In</h2>
-    <form on:submit|preventDefault={submit} class="form">
+    <form onsubmit={(e) => { e.preventDefault(); submit(); }} class="form">
       {#if needCode}
         <p class="hint">
           Enter the 6-digit code from your authenticator app for <strong>{username.trim()}</strong>.
@@ -76,7 +76,7 @@
 
       <button type="submit" disabled={loading}>{loading ? 'Signing In...' : needCode ? 'Verify' : 'Sign In'}</button>
       {#if needCode}
-        <button type="button" class="link" on:click={() => { needCode = false; code = ''; error = ''; password = ''; }}>Start Over</button>
+        <button type="button" class="link" onclick={() => { needCode = false; code = ''; error = ''; password = ''; }}>Start Over</button>
       {/if}
     </form>
   </section>

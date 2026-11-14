@@ -1,6 +1,6 @@
 <script>
-  import { onMount } from 'svelte';
-  import { api, setUnauthorizedHandler, getStoredUser } from './api.js';
+  import { untrack } from 'svelte';
+  import { api, setUnauthorizedHandler, getStoredUser, clearLocalSession } from './api.js';
   import Login from './views/Login.svelte';
   import Setup from './views/Setup.svelte';
   import Status from './views/Status.svelte';
@@ -21,7 +21,7 @@
   import Dhcp from './views/Dhcp.svelte';
   import { icons } from './icons.svelte.js';
   import { sidebar, setSidebar, isNarrow, toggleSidebar } from './nav.svelte.js';
-import { loadDisplayPreferences } from './datetime.svelte.js';
+  import { loadDisplayPreferences } from './datetime.svelte.js';
 
   let view = $state('status');
   // Settings tab to open on the next visit (set by cross-page links).
@@ -89,14 +89,18 @@ import { loadDisplayPreferences } from './datetime.svelte.js';
   // Console auth is on by default, so start at the login/setup screen unless
   // a stored session says otherwise; the effect below re-verifies it (and a
   // 401 with `login: true` still forces the login screen at any time).
-  let authed = $state(user !== null);
+  let authed = $state(untrack(() => user !== null));
   // Shown only before the first admin account exists (auth setup).
   let needsSetup = $state(false);
   let logoutError = $state('');
   // Viewer accounts are read-only: they never see the write-only views.
   const isViewer = $derived(user?.role === 'viewer');
 
+  // The session ended (expired, revoked or signed out elsewhere): forget the
+  // stored user too, so a reload starts at sign-in rather than drawing the
+  // shell for a session that no longer exists.
   setUnauthorizedHandler(() => {
+    clearLocalSession();
     authed = false;
   });
 
@@ -123,6 +127,7 @@ import { loadDisplayPreferences } from './datetime.svelte.js';
           // shell to the login screen rather than relying on a later 401
           // during page interaction.
           if (e && e.needsLogin) {
+            clearLocalSession();
             authed = false;
           }
         });
@@ -144,15 +149,6 @@ import { loadDisplayPreferences } from './datetime.svelte.js';
       cancelled = true;
     };
   });
-
-  function handleLogin() {
-    authed = true;
-    user = getStoredUser();
-    needsSetup = false;
-    if (isViewer && (view === 'zones' || view === 'filtering')) {
-      view = 'status';
-    }
-  }
 
   async function handleLogout() {
     logoutError = '';
@@ -221,7 +217,8 @@ import { loadDisplayPreferences } from './datetime.svelte.js';
   {#if needsSetup}
     <Setup />
   {:else}
-    <Login onLogin={handleLogin} />
+    <!-- Signing in reloads the page, which starts the console afresh. -->
+    <Login />
   {/if}
 {:else}
   {#if consoleOutdated}

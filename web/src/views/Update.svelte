@@ -2,7 +2,7 @@
   import { api, formatApiError, getStoredUser } from '../api.js';
   import PageHeader from '../PageHeader.svelte';
   import { icons } from '../icons.svelte.js';
-  import { onDestroy } from 'svelte';
+  import { onDestroy, onMount } from 'svelte';
   import { formatDateTime } from '../datetime.svelte.js';
   import { copyText } from '../clipboard.js';
   import UpdateChecks from './UpdateChecks.svelte';
@@ -165,7 +165,7 @@
     }
   }
 
-  $effect(() => {
+  onMount(() => {
     load();
   });
 
