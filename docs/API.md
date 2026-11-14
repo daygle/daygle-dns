@@ -1745,7 +1745,8 @@ since the current verdict) and the rule's decision on `page_adjustment`
 (`{rule, prior_confidence, confidence, adjusted_at}`, or `null` when the rule
 left the verdict alone). It is only reported while it still describes the
 current verdict; a reclassification newer than the decision clears it (the
-evidence line keeps the history).
+evidence line keeps the history), and both rows are dropped with the threat
+verdict when it expires.
 
 A `not_threat` domain never trains under the machine label the operator
 denied, whether or not negatives are learned: the flag only decides whether it
@@ -1759,7 +1760,14 @@ is off by default. `allow` corrections are not negatives and stay out.
 `cargo run -p daygle-dns-ml --example negatives_eval` reports that cost on a
 deterministic synthetic corpus: with negatives drawn from flagged lookalikes,
 half its held-out threats read as `benign` and none did with negatives drawn
-from harmless sites; with a clean separation the class costs nothing. Those are
+from harmless sites; with a clean separation the class costs nothing.
+
+The retrain gate will not accept that cost. With `learn_negatives` on, every
+fifth confident threat verdict is held back from training, and a candidate
+that reads any of them as `benign` is refused however well it scores overall
+(the refusal names the count, and `threat_validation_examples` in the retrain
+response says how many were used). Turning `learn_negatives` off removes the
+benign class and with it this gate. Those are
 corpus-specific bounds, not a promise about any network. `auto_retrain` says "do not block
 this" and so is not training data: a single-label classifier cannot express a
 negative. `GET /api/ai/status` reports `auto_retrain`,

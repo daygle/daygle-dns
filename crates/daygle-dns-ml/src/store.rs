@@ -561,6 +561,18 @@ impl AiStore {
                 )?;
             }
         }
+        // Page history belongs to the threat verdict it describes. Rows whose
+        // verdict has been dropped would otherwise accumulate once per domain
+        // ever read, long after the verdict itself is gone.
+        for table in ["ai_page_readings", "ai_page_adjustments"] {
+            tx.execute(
+                &format!(
+                    "DELETE FROM {table} WHERE domain NOT IN
+                         (SELECT domain FROM ai_verdicts WHERE channel = 'threat')"
+                ),
+                [],
+            )?;
+        }
         tx.commit()?;
         Ok(requeued)
     }

@@ -82,6 +82,10 @@ pub struct TrainingStats {
 pub struct Dataset {
     pub pairs: Vec<(String, String)>,
     pub validation: Vec<(String, String)>,
+    /// Threat verdicts held back from training when negatives are on. The
+    /// gate refuses a candidate that reads any of them as `benign`: a
+    /// negative class must not buy its accuracy with detections.
+    pub threat_validation: Vec<(String, String)>,
     pub stats: TrainingStats,
 }
 
@@ -170,7 +174,9 @@ pub fn collect_dataset(store: &AiStore, settings: &AiSettings) -> Result<Dataset
     }
     stats.negatives = negatives;
 
-    for (_channel, label, domain) in store.confident_verdicts(
+    let mut threat_validation: Vec<(String, String)> = Vec::new();
+    let mut threat_candidates = 0usize;
+    for (channel, label, domain) in store.confident_verdicts(
         settings.category_confidence_floor,
         settings.block_threshold,
         now,
@@ -183,6 +189,16 @@ pub fn collect_dataset(store: &AiStore, settings: &AiSettings) -> Result<Dataset
         if label.is_empty() || corrected.contains(&domain) || !looks_like_domain(&domain) {
             continue;
         }
+        // With a benign class in the training set, every fifth threat verdict
+        // stays out of training so the gate can ask whether the class has
+        // started swallowing threats instead of only how accurate it is.
+        if settings.learn_negatives && channel == "threat" {
+            threat_candidates += 1;
+            if threat_candidates.is_multiple_of(HOLDOUT_EVERY) {
+                threat_validation.push((label, domain));
+                continue;
+            }
+        }
         if push(&mut pairs, &mut labels, &mut seen, &label, &domain) {
             stats.verdicts += 1;
         }
@@ -193,6 +209,7 @@ pub fn collect_dataset(store: &AiStore, settings: &AiSettings) -> Result<Dataset
     Ok(Dataset {
         pairs,
         validation,
+        threat_validation,
         stats,
     })
 }
@@ -206,6 +223,7 @@ pub fn collect(
     let mut dataset = collect_dataset(store, settings)?;
     let mut pairs = std::mem::take(&mut dataset.pairs);
     pairs.extend(dataset.validation.iter().cloned());
+    pairs.extend(dataset.threat_validation.iter().cloned());
     Ok((pairs, dataset.stats))
 }
 
@@ -277,25 +295,46 @@ pub fn train(pairs: &[(String, String)], out: &Path) -> Result<()> {
     Ok(())
 }
 
+/// The top-1 label `model` gives each domain, in order.
+fn predict_all(model: &Path, pairs: &[(String, String)]) -> Result<Vec<String>> {
+    let trained = fasttext::FastText::load_model(model)
+        .map_err(|e| DaygleError::Config(format!("model reload failed: {e:?}")))?;
+    Ok(pairs
+        .iter()
+        .map(|(_, domain)| {
+            trained
+                .predict(domain, 1, 0.0)
+                .first()
+                .map(|p| p.label.trim_start_matches("__label__").to_ascii_lowercase())
+                .unwrap_or_default()
+        })
+        .collect())
+}
+
 /// How much of `pairs` a model at `model` gets right (top-1).
 pub fn probe_accuracy(model: &Path, pairs: &[(String, String)]) -> Result<f32> {
     if pairs.is_empty() {
         return Ok(0.0);
     }
-    let trained = fasttext::FastText::load_model(model)
-        .map_err(|e| DaygleError::Config(format!("model reload failed: {e:?}")))?;
-    let mut right = 0usize;
-    for (label, domain) in pairs {
-        let got = trained
-            .predict(domain, 1, 0.0)
-            .first()
-            .map(|p| p.label.trim_start_matches("__label__").to_ascii_lowercase())
-            .unwrap_or_default();
-        if &got == label {
-            right += 1;
-        }
-    }
+    let predicted = predict_all(model, pairs)?;
+    let right = predicted
+        .iter()
+        .zip(pairs)
+        .filter(|(got, (label, _))| *got == label)
+        .count();
     Ok(right as f32 / pairs.len() as f32)
+}
+
+/// Reject a candidate that reads held-out threats as `benign`. Any such
+/// reading is a detection the scanner would stop making, so the gate has no
+/// tolerance for it.
+fn refuse_swallowed_threats(held_out: usize, swallowed: usize) -> Result<()> {
+    if swallowed == 0 {
+        return Ok(());
+    }
+    Err(DaygleError::Config(format!(
+        "the retrained model read {swallowed} of {held_out} held-out threat verdicts as benign, so the current model was kept; turn ai.learn_negatives off to retrain without the benign class"
+    )))
 }
 
 /// Tokenization variants of one domain, matching how the scanner hands names
@@ -357,6 +396,7 @@ impl Retrainer {
         let Dataset {
             pairs,
             validation,
+            threat_validation,
             stats,
         } = collect_dataset(&self.store, &settings)?;
         if pairs.len() < MIN_EXAMPLES || stats.labels < MIN_LABELS {
@@ -425,6 +465,25 @@ impl Retrainer {
             }
             validation_accuracy = Some(candidate);
         }
+
+        // The negative class gets its own gate: a candidate may not turn a
+        // held-out threat into `benign`, however well it scores overall.
+        if !threat_validation.is_empty() {
+            let swallowed = match predict_all(&temp, &threat_validation) {
+                Ok(predicted) => predicted
+                    .iter()
+                    .filter(|label| label.as_str() == BENIGN_LABEL)
+                    .count(),
+                Err(e) => {
+                    let _ = std::fs::remove_file(&temp);
+                    return Err(e);
+                }
+            };
+            if let Err(e) = refuse_swallowed_threats(threat_validation.len(), swallowed) {
+                let _ = std::fs::remove_file(&temp);
+                return Err(e);
+            }
+        }
         // Rotate first, so a rollback always has somewhere to go. A failure
         // here restores the previous model rather than leaving none.
         let previous = previous_model_path(&self.learned);
@@ -458,6 +517,7 @@ impl Retrainer {
             "validation_examples": validation.len(),
             "validation_accuracy": validation_accuracy
                 .map(|a| (a * 100.0).round() / 100.0),
+            "threat_validation_examples": threat_validation.len(),
         });
         match serde_json::to_vec_pretty(&record) {
             Ok(bytes) => {

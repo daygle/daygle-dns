@@ -2177,6 +2177,11 @@ pub async fn ai_retrain(State(state): State<AppState>) -> Response {
                 .and_then(|r| r.get("validation_examples"))
                 .and_then(|v| v.as_u64())
                 .unwrap_or(0);
+            let threat_validation = record
+                .as_ref()
+                .and_then(|r| r.get("threat_validation_examples"))
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
             Json(serde_json::json!({
                 "examples": stats.examples,
                 "labels": stats.labels,
@@ -2184,6 +2189,7 @@ pub async fn ai_retrain(State(state): State<AppState>) -> Response {
                 "verdicts": stats.verdicts,
                 "negatives": stats.negatives,
                 "validation_examples": validation,
+                "threat_validation_examples": threat_validation,
                 "active": true,
                 "message": if validation > 0 {
                     "Retrained, judged on held-out corrections, and in use now."

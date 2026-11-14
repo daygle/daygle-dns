@@ -15,6 +15,15 @@ fn tmp_store(dir: &TempDir) -> Arc<AiStore> {
     Arc::new(AiStore::open(&dir.path().join("ai.db")).expect("AI store opens"))
 }
 
+/// fastText trains on two threads, and two retrains running at once make the
+/// small models nondeterministic enough to flip their hold-out scores. Tests
+/// that train take this lock so the suite does not race itself.
+static TRAIN_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn training_guard() -> std::sync::MutexGuard<'static, ()> {
+    TRAIN_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 fn settings(mode: AiMode) -> AiSettings {
     AiSettings {
         enabled: true,
@@ -809,6 +818,7 @@ fn training_data_prefers_corrections_and_skips_vetoed_domains() {
 /// installs a model beside `ai.db` and records what it was built from.
 #[test]
 fn retraining_installs_a_learned_model_once_there_is_data() {
+    let _train = training_guard();
     let dir = TempDir::new().unwrap();
     let ai = engine(
         &dir,
@@ -857,6 +867,7 @@ fn retraining_installs_a_learned_model_once_there_is_data() {
 /// two - live, and reversibly.
 #[test]
 fn a_retrain_keeps_one_model_to_roll_back_to() {
+    let _train = training_guard();
     let dir = TempDir::new().unwrap();
     let ai = engine(
         &dir,
@@ -1308,10 +1319,351 @@ fn a_corroborating_page_raises_and_a_disagreeing_one_does_not() {
     );
 }
 
+/// A reader whose readings sit below a strict floor: 0.5 agreement would
+/// raise a 0.4 verdict, 0.2 disagreement would cap it, and both are ignored.
+struct WeakReads;
+
+impl daygle_dns_ml::page::PageReader for WeakReads {
+    fn inspect(&self, domain: &str) -> daygle_dns_ml::page::Inspection {
+        let (category, confidence) = if domain.starts_with("agree") {
+            ("phishing", 0.5)
+        } else {
+            ("shopping", 0.2)
+        };
+        daygle_dns_ml::page::Inspection {
+            note: format!("test page for {domain} reads {category}"),
+            reading: Some(daygle_dns_ml::page::TextVerdict {
+                category,
+                confidence,
+                cues: vec![],
+            }),
+        }
+    }
+}
+
+/// The default rule records the reading only: agreement cannot raise the
+/// confidence and disagreement cannot lower it.
+#[test]
+fn an_evidence_reading_never_moves_confidence() {
+    let dir = TempDir::new().unwrap();
+    let zones = zone_store(&dir);
+    let ai = engine(
+        &dir,
+        AiSettings {
+            fetch_pages: true,
+            ..settings(AiMode::Train)
+        },
+    );
+    assert!(ai.scanner.set_page_reader(Box::new(OneAgrees)));
+    for domain in ["agree.example", "disagree.example"] {
+        ai.store.observe(domain).unwrap();
+        ai.store
+            .save_verdict(
+                Channel::Threat,
+                domain,
+                "phishing",
+                "threat",
+                "classified",
+                0.4,
+                "fasttext",
+                "ev",
+                3600,
+            )
+            .unwrap();
+    }
+
+    ai.scanner.run_cycle(0, zones.as_ref()).unwrap();
+
+    let (rows, _) = ai.store.list_verdicts(None, None, 16, 0).unwrap();
+    for domain in ["agree.example", "disagree.example"] {
+        let row = rows
+            .iter()
+            .find(|r| r.domain == domain && r.channel == "threat")
+            .unwrap_or_else(|| panic!("no threat row for {domain}: {rows:?}"));
+        assert!(
+            (row.confidence - 0.4).abs() < 1e-3,
+            "evidence left {domain} at {}",
+            row.confidence
+        );
+        assert!(!row.evidence.contains("confidence now"), "{}", row.evidence);
+        assert!(
+            ai.store.page_reading(domain).unwrap().is_some(),
+            "{domain}'s reading is still recorded"
+        );
+        assert!(ai.store.page_adjustment(domain).unwrap().is_none());
+    }
+}
+
+/// A reading below `page_confidence_floor` is not a second opinion, in either
+/// direction, even under `decide`.
+#[test]
+fn readings_below_the_floor_never_move_confidence() {
+    let dir = TempDir::new().unwrap();
+    let zones = zone_store(&dir);
+    let ai = engine(
+        &dir,
+        AiSettings {
+            fetch_pages: true,
+            page_rule: PageRule::Decide,
+            page_confidence_floor: 0.6,
+            ..settings(AiMode::Train)
+        },
+    );
+    assert!(ai.scanner.set_page_reader(Box::new(WeakReads)));
+    for domain in ["agree.example", "disagree.example"] {
+        ai.store.observe(domain).unwrap();
+        ai.store
+            .save_verdict(
+                Channel::Threat,
+                domain,
+                "phishing",
+                "threat",
+                "classified",
+                0.4,
+                "fasttext",
+                "ev",
+                3600,
+            )
+            .unwrap();
+    }
+
+    ai.scanner.run_cycle(0, zones.as_ref()).unwrap();
+
+    let (rows, _) = ai.store.list_verdicts(None, None, 16, 0).unwrap();
+    for domain in ["agree.example", "disagree.example"] {
+        let row = rows
+            .iter()
+            .find(|r| r.domain == domain && r.channel == "threat")
+            .unwrap_or_else(|| panic!("no threat row for {domain}: {rows:?}"));
+        assert!(
+            (row.confidence - 0.4).abs() < 1e-3,
+            "a weak reading moved {domain} to {}",
+            row.confidence
+        );
+        assert!(ai.store.page_adjustment(domain).unwrap().is_none());
+        assert!(ai.store.page_reading(domain).unwrap().is_some());
+    }
+}
+
+/// Page history does not outlive the verdict it describes: expiry drops the
+/// reading and the adjustment with the row.
+#[test]
+fn dropping_a_verdict_drops_its_page_history() {
+    let dir = TempDir::new().unwrap();
+    let ai = engine(&dir, settings(AiMode::Train));
+    ai.store.observe("short.example").unwrap();
+    ai.store
+        .save_verdict(
+            Channel::Threat,
+            "short.example",
+            "phishing",
+            "threat",
+            "classified",
+            0.9,
+            "fasttext",
+            "ev",
+            1,
+        )
+        .unwrap();
+    ai.store
+        .record_page_reading(
+            "short.example",
+            "page reads shopping (80%)",
+            Some(0.2),
+            Some(&daygle_dns_ml::page::TextVerdict {
+                category: "shopping",
+                confidence: 0.8,
+                cues: vec!["add to cart"],
+            }),
+        )
+        .unwrap();
+    ai.store
+        .record_page_adjustment("short.example", PageRule::Decide, 0.9, 0.2)
+        .unwrap();
+
+    let now = chrono::Utc::now().timestamp();
+    ai.store.expire_old(now + 5, 100).unwrap();
+
+    let conn = rusqlite::Connection::open(dir.path().join("ai.db")).unwrap();
+    for table in ["ai_page_readings", "ai_page_adjustments"] {
+        let count: i64 = conn
+            .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 0, "{table} kept a row for a dropped verdict");
+    }
+    // `observe` created a pending row for the content channel too; the threat
+    // verdict is the one whose page history this test is about.
+    let verdicts: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM ai_verdicts
+             WHERE domain = 'short.example' AND channel = 'threat'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(verdicts, 0, "the expired threat verdict itself is gone");
+}
+
+/// With negatives on, every fifth threat verdict is kept out of training so
+/// the gate can test the benign class against it.
+#[test]
+fn negatives_hold_back_threat_verdicts_for_the_gate() {
+    let dir = TempDir::new().unwrap();
+    let mut cfg = settings(AiMode::Train);
+    cfg.learn_negatives = true;
+    let ai = engine(&dir, cfg.clone());
+    let mut threats = Vec::new();
+    for i in 0..10 {
+        let domain = format!("threat-{i}.example");
+        ai.store.observe(&domain).unwrap();
+        ai.store
+            .save_verdict(
+                Channel::Threat,
+                &domain,
+                "phishing",
+                "threat",
+                "classified",
+                1.0,
+                "fasttext",
+                "ev",
+                3600,
+            )
+            .unwrap();
+        threats.push(domain);
+    }
+    for i in 0..5 {
+        let domain = format!("innocent-{i}.example");
+        ai.store.observe(&domain).unwrap();
+        ai.store
+            .save_verdict(
+                Channel::Threat,
+                &domain,
+                "phishing",
+                "threat",
+                "classified",
+                1.0,
+                "fasttext",
+                "ev",
+                3600,
+            )
+            .unwrap();
+        ai.store.set_override(&domain, "not_threat", "").unwrap();
+    }
+
+    let dataset = daygle_dns_ml::learn::collect_dataset(&ai.store, &cfg).unwrap();
+    assert_eq!(
+        dataset.threat_validation.len(),
+        2,
+        "every fifth of ten threat verdicts is held out"
+    );
+    for (_, domain) in &dataset.threat_validation {
+        assert!(
+            !dataset.pairs.iter().any(|(_, d)| d == domain),
+            "{domain} is both held out and trained on"
+        );
+    }
+
+    cfg.learn_negatives = false;
+    let dataset = daygle_dns_ml::learn::collect_dataset(&ai.store, &cfg).unwrap();
+    assert!(
+        dataset.threat_validation.is_empty(),
+        "without the benign class there is no gate to feed"
+    );
+    assert!(
+        threats
+            .iter()
+            .all(|domain| dataset.pairs.iter().any(|(_, d)| d == domain)),
+        "without negatives every threat verdict trains"
+    );
+}
+
+/// A candidate that reads held-out threats as benign is refused, even if it
+/// would otherwise pass the accuracy gate.
+#[test]
+fn the_retrain_gate_refuses_a_model_that_swallows_threats_as_benign() {
+    let _train = training_guard();
+    let dir = TempDir::new().unwrap();
+    let ai = engine(
+        &dir,
+        AiSettings {
+            learn_negatives: true,
+            ..settings(AiMode::Train)
+        },
+    );
+    // All threat names share one token on purpose: the benign class is trained
+    // on the same shape, so a candidate that has learned "benign" from these
+    // lookalikes starts applying it to the held-out threat verdicts too.
+    let threat_labels = ["malware", "phishing", "scam"];
+    let mut threats = Vec::new();
+    for i in 0..90 {
+        let domain = format!("sneaky-{i}.example");
+        ai.store.observe(&domain).unwrap();
+        ai.store
+            .save_verdict(
+                Channel::Threat,
+                &domain,
+                threat_labels[i % threat_labels.len()],
+                "threat",
+                "classified",
+                1.0,
+                "fasttext",
+                "ev",
+                86_400,
+            )
+            .unwrap();
+        threats.push(domain);
+    }
+    let ordinary = [
+        ("news", "daily-news"),
+        ("shopping", "gift-guide"),
+        ("docs", "wallet-guide"),
+        ("travel", "travel-guide"),
+        ("bank", "secure-mail"),
+        ("forum", "support-thread"),
+        ("software", "download-guide"),
+    ];
+    for i in 0..240 {
+        let (label, word) = ordinary[i % ordinary.len()];
+        let domain = format!("{word}-{}.example", i + 1);
+        ai.store.observe(&domain).unwrap();
+        ai.store
+            .save_verdict(
+                Channel::Content,
+                &domain,
+                label,
+                "info",
+                "classified",
+                0.95,
+                "fasttext",
+                "ev",
+                86_400,
+            )
+            .unwrap();
+    }
+    // Eight of every ten flagged threats are operator false-positive
+    // corrections, so the benign class is trained on names that look exactly
+    // like the held-out threat verdicts.
+    for (index, domain) in threats.iter().enumerate() {
+        if index % 10 < 8 {
+            ai.store.set_override(domain, "not_threat", "").unwrap();
+        }
+    }
+
+    let error = ai
+        .retrain_learned_model()
+        .expect_err("the benign class swallows held-out threats here")
+        .to_string();
+    assert!(
+        error.contains("held-out threat verdicts as benign"),
+        "the refusal names the gate: {error}"
+    );
+}
+
 /// Corrections are held back from training in fifths, and the candidate is
 /// accepted when it does as well on them as the model in use.
 #[test]
 fn retraining_judges_itself_on_held_out_corrections() {
+    let _train = training_guard();
     let dir = TempDir::new().unwrap();
     let ai = engine(
         &dir,
