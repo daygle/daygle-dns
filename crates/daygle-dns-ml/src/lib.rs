@@ -250,6 +250,18 @@ impl AiEngine {
         serde_json::from_slice(&raw).ok()
     }
 
+    /// Whether a retrain replaced a model that can still be restored.
+    pub fn learned_model_previous(&self) -> bool {
+        self.retrainer.has_previous()
+    }
+
+    /// Put the previous model back in front of the scanner, live. Reversible:
+    /// the model it replaces becomes the previous one.
+    pub fn rollback_learned_model(&self) -> Result<()> {
+        self.retrainer.rollback()?;
+        self.activate_retrained_model()
+    }
+
     /// Retrain the classifier from the scanner's own confident verdicts and the
     /// operator's corrections, judge it on held-out corrections, then load it
     /// into the running channels.

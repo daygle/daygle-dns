@@ -181,8 +181,9 @@ Daygle DNS combines, in a single process:
   every operator correction is downloadable as training data. The scanner also
   maintains its own model: with `ai.auto_retrain` on it periodically rebuilds
   the classifier from your corrections and its confident verdicts, refuses a
-  candidate that does worse on held-out corrections than the model in use, and
-  loads an accepted one without a restart. On by
+  candidate that does worse on held-out corrections than the model in use,
+  loads an accepted one without a restart, and keeps the model it replaced so
+  one rollback is always available. On by
   default after an install in **train mode** (records verdicts, nothing
   blocks) - flip `ai.mode` to `enforce` in the config or GUI when you are
   happy with the verdict log. Operator allowlist always wins, and expired

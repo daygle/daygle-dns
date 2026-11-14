@@ -1582,6 +1582,7 @@ GET  /api/ai/threats/export?format=csv|list
 GET  /api/ai/explain?domain=x.example
 GET  /api/ai/corrections?format=csv
 POST /api/ai/retrain
+POST /api/ai/rollback
 GET  /api/ai/overrides
 POST /api/ai/override          {"domain": "x.example", "action": "allow|not_threat|clear|category|clear_category", "category": "gambling", "reason": "..."}
 POST /api/ai/rescan
@@ -1703,8 +1704,15 @@ loaded into the running channels immediately. It is preferred over
 its own model; delete it (or install a newer configured model) to fall back.
 Judging: every fifth correction is held back from training, and a candidate is
 rejected when it scores below half of them or more than two points below the
-model in use on them. With no held-out corrections the older training-set check
-applies. `auto_retrain` says "do not block
+model in use on them. With fewer than five corrections nothing can be held
+back, so the older training-set check applies and the retrain response reports
+`validation_examples: 0` rather than claiming it was validated.
+
+Each accepted retrain keeps the model it replaced as `learned.prev.bin`
+(`learned.prev.json` for its stats), and `POST /api/ai/rollback` puts it back in
+front of the scanner immediately. The model it replaces becomes the previous
+one, so a rollback can itself be undone. `GET /api/ai/status` reports
+`learned_model.previous`. `auto_retrain` says "do not block
 this" and so is not training data: a single-label classifier cannot express a
 negative. `GET /api/ai/status` reports `auto_retrain`,
 `retrain_interval_secs` and `learned_model` (`path`, `present`, `active` and

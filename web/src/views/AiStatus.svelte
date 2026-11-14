@@ -24,6 +24,7 @@
   let error = $state(null);
   let notice = $state(null);
   let retraining = $state(false);
+  let rollingBack = $state(false);
 
   // Viewers are read-only; with sign-in off there is no stored user at all.
   const isAdmin = getStoredUser()?.role !== 'viewer';
@@ -173,6 +174,21 @@
     } catch (e) {
       error = formatApiError(e);
       await load(true);
+    }
+  }
+
+  async function rollbackModel() {
+    rollingBack = true;
+    error = null;
+    notice = null;
+    try {
+      const result = await api.aiRollback();
+      notice = result?.message || 'The previous model is in use again.';
+      await load(true);
+    } catch (e) {
+      error = formatApiError(e);
+    } finally {
+      rollingBack = false;
     }
   }
 
@@ -437,6 +453,11 @@
         <button class="secondary" onclick={retrain} disabled={retraining}>
           {retraining ? 'Retraining...' : 'Retrain Now'}
         </button>
+        {#if status.learned_model?.previous}
+          <button class="secondary" onclick={rollbackModel} disabled={rollingBack} title="Restore the classifier the last retrain replaced">
+            {rollingBack ? 'Restoring...' : 'Restore Previous Model'}
+          </button>
+        {/if}
         <span class="muted" style="font-size: 0.8rem">
           Runs at most every {duration(status.retrain_interval_secs)} when automatic retraining is on.
         </span>

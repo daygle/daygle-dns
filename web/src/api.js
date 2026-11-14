@@ -327,6 +327,7 @@ export const api = {
     ),
   aiRescan: () => request('POST', '/ai/rescan'),
   aiRetrain: () => request('POST', '/ai/retrain'),
+  aiRollback: () => request('POST', '/ai/rollback'),
   aiModelStatus: () => request('GET', '/ai/model-status'),
   aiUpdateModels: () => request('POST', '/ai/update-models'),
 };

@@ -1501,6 +1501,7 @@ pub async fn ai_status(State(state): State<AppState>) -> Response {
             "path": ai.learned_model_path().display().to_string(),
             "present": ai.learned_model_path().is_file(),
             "active": ai.learned_model_active(),
+            "previous": ai.learned_model_previous(),
             "last": ai.learned_model_record(),
         },
         "backend_categories": ai.backend_categories(),
@@ -2097,6 +2098,34 @@ pub async fn ai_corrections(
     .into_response()
 }
 
+/// `POST /api/ai/rollback` - restore the classifier the last retrain replaced,
+/// live. The model it replaces is kept, so a rollback can itself be undone.
+pub async fn ai_rollback(State(state): State<AppState>) -> Response {
+    let Some(ai) = ai_engine(&state) else {
+        return map_err(daygle_dns_ml::ai_disabled_error());
+    };
+    let outcome = run_blocking({
+        let ai = ai.clone();
+        move || ai.rollback_learned_model()
+    })
+    .await;
+    match outcome {
+        Ok(()) => {
+            state.logs.push(
+                daygle_dns_core::LogLevel::Info,
+                "api",
+                "restored the previous AI classifier",
+            );
+            Json(serde_json::json!({
+                "active": true,
+                "message": "The previous model is in use again.",
+            }))
+            .into_response()
+        }
+        Err(e) => map_err(e),
+    }
+}
+
 /// `POST /api/ai/retrain` - retrain the classifier from the scanner's own
 /// confident verdicts plus the operator's corrections. The result is written
 /// beside `ai.db` as `learned.bin` and used from the next start; a retrain
@@ -2121,13 +2150,24 @@ pub async fn ai_retrain(State(state): State<AppState>) -> Response {
                     stats.examples, stats.labels
                 ),
             );
+            let record = ai.learned_model_record();
+            let validation = record
+                .as_ref()
+                .and_then(|r| r.get("validation_examples"))
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
             Json(serde_json::json!({
                 "examples": stats.examples,
                 "labels": stats.labels,
                 "corrections": stats.corrections,
                 "verdicts": stats.verdicts,
+                "validation_examples": validation,
                 "active": true,
-                "message": "Retrained and in use now.",
+                "message": if validation > 0 {
+                    "Retrained, judged on held-out corrections, and in use now."
+                } else {
+                    "Retrained and in use now. There were too few corrections to hold any back, so it was only checked against its own training data."
+                },
             }))
             .into_response()
         }

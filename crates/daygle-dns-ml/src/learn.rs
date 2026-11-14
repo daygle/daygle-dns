@@ -82,6 +82,16 @@ pub fn stats_path(learned: &Path) -> PathBuf {
     learned.with_extension("json")
 }
 
+/// The model a retrain replaced. Kept so one bad-but-accepted model can be
+/// rolled back without losing the previous one.
+pub fn previous_model_path(learned: &Path) -> PathBuf {
+    learned.with_extension("prev.bin")
+}
+
+fn previous_stats_path(learned: &Path) -> PathBuf {
+    learned.with_extension("prev.json")
+}
+
 /// The training set and its held-out slice: corrections first, then confident
 /// verdicts.
 pub fn collect_dataset(store: &AiStore, settings: &AiSettings) -> Result<Dataset> {
@@ -375,7 +385,27 @@ impl Retrainer {
             }
             validation_accuracy = Some(candidate);
         }
-        std::fs::rename(&temp, &self.learned)?;
+        // Rotate first, so a rollback always has somewhere to go. A failure
+        // here restores the previous model rather than leaving none.
+        let previous = previous_model_path(&self.learned);
+        if self.learned.is_file() {
+            if let Err(e) = std::fs::rename(&self.learned, &previous) {
+                let _ = std::fs::remove_file(&temp);
+                return Err(DaygleError::Io(e));
+            }
+            let current_stats = stats_path(&self.learned);
+            if current_stats.is_file() {
+                let _ = std::fs::rename(&current_stats, previous_stats_path(&self.learned));
+            }
+        }
+        if let Err(e) = std::fs::rename(&temp, &self.learned) {
+            // Put the old model back: a retrain must never leave the scanner
+            // without the model it had.
+            if previous.is_file() {
+                let _ = std::fs::rename(&previous, &self.learned);
+            }
+            return Err(DaygleError::Io(e));
+        }
 
         let record = serde_json::json!({
             "trained_at": chrono::Utc::now().to_rfc3339(),
@@ -421,6 +451,42 @@ impl Retrainer {
             ),
         );
         Ok(stats)
+    }
+
+    /// Whether a previous model is kept and can be restored.
+    pub fn has_previous(&self) -> bool {
+        previous_model_path(&self.learned).is_file()
+    }
+
+    /// Swap the previous model back in for the current one. Both files are
+    /// kept, so this is itself reversible.
+    pub fn rollback(&self) -> Result<()> {
+        let previous = previous_model_path(&self.learned);
+        if !previous.is_file() {
+            return Err(DaygleError::Config(
+                "there is no previous model to restore".to_string(),
+            ));
+        }
+        let current = self.learned.with_extension("rolled-back.bin");
+        std::fs::rename(&self.learned, &current)?;
+        if let Err(e) = std::fs::rename(&previous, &self.learned) {
+            let _ = std::fs::rename(&current, &self.learned);
+            return Err(DaygleError::Io(e));
+        }
+        std::fs::rename(&current, &previous)?;
+        // Swap the stats with the model, so a second rollback restores the
+        // record that belongs to the model it restores.
+        let current_stats = stats_path(&self.learned);
+        let previous_stats = previous_stats_path(&self.learned);
+        if previous_stats.is_file() {
+            let staged = self.learned.with_extension("rolled-back.json");
+            let _ = std::fs::rename(&current_stats, &staged);
+            let _ = std::fs::rename(&previous_stats, &current_stats);
+            let _ = std::fs::rename(&staged, &previous_stats);
+        }
+        self.logs
+            .push(LogLevel::Info, "ai", "restored the previous classifier");
+        Ok(())
     }
 
     /// Retrain when automatic maintenance is on, the interval has passed and

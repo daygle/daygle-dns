@@ -52,6 +52,7 @@ const PATHS: &[(&str, &[Operation])] = &[
     ("/ai/explain", &[("get", "Ai explain")]),
     ("/ai/corrections", &[("get", "Ai corrections")]),
     ("/ai/retrain", &[("post", "Ai retrain")]),
+    ("/ai/rollback", &[("post", "Ai rollback")]),
     ("/ai/override", &[("post", "Ai override")]),
     ("/ai/overrides", &[("get", "Ai overrides")]),
     ("/ai/rescan", &[("post", "Ai rescan")]),
@@ -3514,6 +3515,18 @@ fn ai_operation(path: &str, method: &str) -> Option<Value> {
                 "404": ai_unavailable,
                 "500": json!({
                     "description": "Not enough training data, or the candidate did worse on held-out corrections than the model in use; the current model was kept.",
+                    "content": { "application/json": { "schema": error } }
+                })
+            }
+        })),
+        ("post", "/ai/rollback") => Some(json!({
+            "responses": {
+                "200": json!({
+                    "description": "The classifier the last retrain replaced is loaded again."
+                }),
+                "404": ai_unavailable,
+                "500": json!({
+                    "description": "No previous model is kept.",
                     "content": { "application/json": { "schema": error } }
                 })
             }

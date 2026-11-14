@@ -853,6 +853,76 @@ fn retraining_installs_a_learned_model_once_there_is_data() {
     assert_eq!(ai.content_backend_name(), "fasttext");
 }
 
+/// Each accepted retrain keeps the model it replaced, and a rollback swaps the
+/// two - live, and reversibly.
+#[test]
+fn a_retrain_keeps_one_model_to_roll_back_to() {
+    let dir = TempDir::new().unwrap();
+    let ai = engine(
+        &dir,
+        AiSettings {
+            block_threshold: 0.5,
+            ..settings(AiMode::Train)
+        },
+    );
+    let labels = ["news", "shopping", "gambling"];
+    for i in 0..240 {
+        let domain = format!("site{i}.example");
+        ai.store.observe(&domain).unwrap();
+        ai.store
+            .save_verdict(
+                Channel::Content,
+                &domain,
+                labels[i % labels.len()],
+                "info",
+                "classified",
+                0.95,
+                "fasttext",
+                "ev",
+                3600,
+            )
+            .unwrap();
+    }
+    ai.retrain_learned_model().unwrap();
+    assert!(
+        !ai.learned_model_previous(),
+        "nothing has been replaced yet"
+    );
+    assert_eq!(ai.learned_model_record().unwrap()["examples"], 240);
+
+    // Three more domains: a second retrain replaces the first model.
+    for i in 240..243 {
+        let domain = format!("site{i}.example");
+        ai.store.observe(&domain).unwrap();
+        ai.store
+            .save_verdict(
+                Channel::Content,
+                &domain,
+                labels[i % labels.len()],
+                "info",
+                "classified",
+                0.95,
+                "fasttext",
+                "ev",
+                3600,
+            )
+            .unwrap();
+    }
+    ai.retrain_learned_model().unwrap();
+    assert_eq!(ai.learned_model_record().unwrap()["examples"], 243);
+    assert!(ai.learned_model_previous());
+
+    ai.rollback_learned_model().unwrap();
+    assert_eq!(
+        ai.learned_model_record().unwrap()["examples"],
+        240,
+        "the record follows the restored model"
+    );
+    // Reversible: the model just replaced is now the previous one.
+    ai.rollback_learned_model().unwrap();
+    assert_eq!(ai.learned_model_record().unwrap()["examples"], 243);
+}
+
 /// Corrections are held back from training in fifths, and the candidate is
 /// accepted when it does as well on them as the model in use.
 #[test]
