@@ -41,6 +41,26 @@ fn engine(dir: &std::path::Path) -> Arc<AiEngine> {
     .unwrap()
 }
 
+/// Seed one confident content verdict, enough of them to retrain on.
+fn seed_content(ai: &AiEngine, i: usize) {
+    let labels = ["news", "shopping", "gambling"];
+    let domain = format!("site{i}.example");
+    ai.store.observe(&domain).unwrap();
+    ai.store
+        .save_verdict(
+            Channel::Content,
+            &domain,
+            labels[i % labels.len()],
+            "info",
+            "classified",
+            0.95,
+            "corpus",
+            "synthetic",
+            3_600,
+        )
+        .unwrap();
+}
+
 async fn call(
     state: AppState,
     method: &str,
@@ -155,6 +175,23 @@ async fn threat_export_and_corrections_are_served_as_csv() {
     ai.set_category_override("shopping.example", "shopping")
         .unwrap();
 
+    // A second verdict whose category starts with a formula character: the
+    // CSV must guard it, not hand a spreadsheet a formula.
+    ai.store.observe("formula.example").unwrap();
+    ai.store
+        .save_verdict(
+            Channel::Threat,
+            "formula.example",
+            "=cmd|' /C calc'!A0",
+            "threat",
+            "classified",
+            1.0,
+            "fasttext",
+            "synthetic",
+            3_600,
+        )
+        .unwrap();
+
     let state = AppState::for_tests(Some(ai));
     let (status, headers, body) = call(
         state.clone(),
@@ -168,8 +205,29 @@ async fn threat_export_and_corrections_are_served_as_csv() {
         headers.get(header::CONTENT_TYPE).unwrap(),
         "text/csv; charset=utf-8"
     );
-    assert!(body.starts_with("domain,"), "{body}");
-    assert!(body.contains("evil.example"), "{body}");
+    let lines: Vec<&str> = body.lines().collect();
+    assert_eq!(lines[0], "domain,category,confidence,expires_at", "{body}");
+    assert_eq!(lines.len(), 3, "header plus two rows: {body}");
+    let row = lines
+        .iter()
+        .find(|line| line.starts_with("evil.example,"))
+        .unwrap_or_else(|| panic!("evil.example missing: {body}"));
+    let fields: Vec<&str> = row.split(',').collect();
+    assert_eq!(fields.len(), 4, "{row}");
+    assert_eq!(fields[1], "phishing");
+    assert_eq!(fields[2], "1.000", "confidence keeps three decimals");
+    assert!(
+        fields[3].contains('T') && (fields[3].ends_with("+00:00") || fields[3].ends_with('Z')),
+        "expiry is an RFC 3339 timestamp: {}",
+        fields[3]
+    );
+    assert!(
+        !body
+            .lines()
+            .any(|line| line.starts_with("formula.example,=")),
+        "a formula-shaped category must not sit unguarded at the start of a field: {body}"
+    );
+    assert!(body.contains("'=cmd"), "{body}");
 
     let (status, _, body) = call(
         state.clone(),
@@ -179,7 +237,8 @@ async fn threat_export_and_corrections_are_served_as_csv() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(body.trim(), "evil.example");
+    let listed: Vec<&str> = body.lines().collect();
+    assert_eq!(listed, vec!["evil.example", "formula.example"]);
 
     let (status, headers, body) =
         call(state.clone(), "GET", "/api/ai/corrections?format=csv", None).await;
@@ -188,11 +247,21 @@ async fn threat_export_and_corrections_are_served_as_csv() {
         headers.get(header::CONTENT_TYPE).unwrap(),
         "text/csv; charset=utf-8"
     );
-    assert!(
-        body.starts_with("domain,action,category,reason,created_at"),
+    let lines: Vec<&str> = body.lines().collect();
+    assert_eq!(
+        lines[0], "domain,action,category,reason,created_at",
         "{body}"
     );
-    assert!(body.contains("shopping.example"), "{body}");
+    let row = lines
+        .iter()
+        .find(|line| line.starts_with("shopping.example,"))
+        .unwrap_or_else(|| panic!("shopping.example missing: {body}"));
+    let fields: Vec<&str> = row.split(',').collect();
+    assert_eq!(fields.len(), 5, "{row}");
+    assert_eq!(fields[1], "category");
+    assert_eq!(fields[2], "shopping");
+    assert_eq!(fields[3], "", "a relabel carries no reason");
+    assert!(fields[4].contains('T'), "{}", fields[4]);
 
     let explained = json(state, "/api/ai/explain?domain=evil.example").await;
     assert_eq!(explained["domain"], "evil.example");
@@ -217,6 +286,50 @@ async fn retrain_and_rollback_explain_what_they_cannot_do() {
     let (status, _, body) = call(state, "POST", "/api/ai/rollback", None).await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     assert!(body.contains("no previous model"), "{body}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn retrain_and_rollback_succeed_over_http() {
+    let dir = scratch_dir("retrain");
+    let ai = engine(&dir);
+    for i in 0..240 {
+        seed_content(&ai, i);
+    }
+    let state = AppState::for_tests(Some(ai));
+    let (status, _, body) = call(state.clone(), "POST", "/api/ai/retrain", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let retrained: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(retrained["examples"], 240, "{body}");
+    assert_eq!(retrained["active"], true);
+    // No corrections were held back, and the response says so.
+    assert_eq!(retrained["validation_examples"], 0, "{body}");
+    assert!(
+        retrained["message"]
+            .as_str()
+            .unwrap()
+            .contains("only checked"),
+        "{body}"
+    );
+
+    // A second retrain replaces the first, which is what a rollback restores.
+    for i in 240..243 {
+        seed_content(state.ai.as_ref().unwrap(), i);
+    }
+    let (status, _, body) = call(state.clone(), "POST", "/api/ai/retrain", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let status_body = json(state.clone(), "/api/ai/status").await;
+    assert_eq!(status_body["learned_model"]["previous"], true);
+    assert_eq!(status_body["learned_model"]["last"]["examples"], 243);
+
+    let (status, _, body) = call(state.clone(), "POST", "/api/ai/rollback", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.contains("previous model is in use"), "{body}");
+    let status_body = json(state, "/api/ai/status").await;
+    assert_eq!(
+        status_body["learned_model"]["last"]["examples"], 240,
+        "the restored model's record comes back with it"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
