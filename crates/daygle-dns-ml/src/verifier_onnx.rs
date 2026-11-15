@@ -29,7 +29,7 @@ use parking_lot::Mutex;
 use crate::backend::{ClassificationInput, DomainClassifier, Severity, Verdict};
 
 const TOKENIZER_FILE: &str = "minilm-tokenizer.json";
-const CENTROIDS_FILE: &str = "minilm-centroids.json";
+pub(crate) const CENTROIDS_FILE: &str = "minilm-centroids.json";
 /// The encoder inputs this verifier knows how to feed.
 const KNOWN_INPUTS: [&str; 3] = ["input_ids", "attention_mask", "token_type_ids"];
 
@@ -46,7 +46,7 @@ pub struct MiniLmVerifier {
 }
 
 /// Reference centroid set: category name -> unit-norm embedding.
-type CentroidMap = BTreeMap<String, Vec<f32>>;
+pub(crate) type CentroidMap = BTreeMap<String, Vec<f32>>;
 
 fn load_tokenizer(model_path: &Path) -> Result<tokenizers::Tokenizer> {
     let tokenizer_path = model_path
@@ -88,7 +88,7 @@ fn build_session(model_path: &Path) -> Result<ort::session::Session> {
         })
 }
 
-fn load_centroids(path: &Path) -> Result<CentroidMap> {
+pub(crate) fn load_centroids(path: &Path) -> Result<CentroidMap> {
     let raw = std::fs::read_to_string(path).map_err(|e| {
         DaygleError::Config(format!(
             "cannot read MiniLM centroid file {}: {e}",

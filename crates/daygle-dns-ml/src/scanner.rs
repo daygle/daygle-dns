@@ -87,9 +87,9 @@ pub struct Scanner {
     /// Set after the first snapshot is published: the blocks already in
     /// force at startup are not news.
     primed: std::sync::atomic::AtomicBool,
-    /// Model maintenance, set once by the engine: the scan loop asks it to
-    /// retrain when one is due.
-    retrainer: std::sync::OnceLock<Arc<crate::learn::Retrainer>>,
+    /// Model maintenance, set once by the engine: the scan loop runs it
+    /// after each successful cycle.
+    maintenance: std::sync::OnceLock<Arc<crate::maintain::Maintenance>>,
     /// Page reader override, set once: tests supply readings without a
     /// network. `None` fetches the live page with the settings' limits.
     page_reader: std::sync::OnceLock<Box<dyn crate::page::PageReader>>,
@@ -120,7 +120,7 @@ impl Scanner {
             last_expiry: AtomicI64::new(0),
             publishing: std::sync::Mutex::new(()),
             primed: std::sync::atomic::AtomicBool::new(false),
-            retrainer: std::sync::OnceLock::new(),
+            maintenance: std::sync::OnceLock::new(),
             page_reader: std::sync::OnceLock::new(),
         })
     }
@@ -131,10 +131,10 @@ impl Scanner {
         self.page_reader.set(reader).is_ok()
     }
 
-    /// Hand the scanner the model-maintenance job used for automatic
-    /// retraining (see [`crate::learn::Retrainer`]).
-    pub fn set_retrainer(&self, retrainer: Arc<crate::learn::Retrainer>) {
-        let _ = self.retrainer.set(retrainer);
+    /// Hand the scanner the model-maintenance step it runs after each cycle
+    /// (see [`crate::maintain`]).
+    pub fn set_maintenance(&self, maintenance: Arc<crate::maintain::Maintenance>) {
+        let _ = self.maintenance.set(maintenance);
     }
 
     fn log_info(&self, msg: String) {
@@ -669,9 +669,8 @@ impl Scanner {
                     // Model maintenance runs after a successful cycle, on a
                     // blocking thread. A due retrain delays the next cycle by
                     // its duration; one that is not due costs nothing.
-                    if let Some(retrainer) = self.retrainer.get().cloned() {
-                        let _ =
-                            tokio::task::spawn_blocking(move || retrainer.maybe_retrain()).await;
+                    if let Some(maintenance) = self.maintenance.get().cloned() {
+                        let _ = tokio::task::spawn_blocking(move || maintenance.run()).await;
                     }
                 }
                 // A failed cycle reads the same window again next time.

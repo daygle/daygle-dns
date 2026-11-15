@@ -190,6 +190,7 @@
     smtp_username: '', smtp_password: '', email_from: '', email_to: [],
     blocklist_failures: true, zone_transfer_failures: true, certificate_expiry: true,
     dnssec: true, update_available: true, update_failure: true, ai_blocks: false,
+    ai_model: true,
   };
   const ALERT_EVENTS = [
     ['blocklist_failures', 'A blocklist cannot be downloaded'],
@@ -199,6 +200,7 @@
     ['update_available', 'A new Daygle DNS release is available'],
     ['update_failure', 'An automatic stable-release installation fails'],
     ['ai_blocks', 'The AI starts blocking new domains (Enforce mode)'],
+    ['ai_model', 'The AI rejects a model it retrained (its shadow trial went badly)'],
   ];
   let alerts_ = $state({ ...ALERT_DEFAULTS });
   const RRL_DEFAULTS = {

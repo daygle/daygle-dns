@@ -24,6 +24,8 @@ pub enum AlertKind {
     UpdateAvailable,
     UpdateFailure,
     AiBlocks,
+    /// The AI set aside a model it retrained.
+    AiModel,
     /// Sent from the console to check the settings.
     Test,
     /// A scheduled report (Settings -> Alerts), not an alert.
@@ -39,7 +41,7 @@ impl AlertKind {
             Self::CertificateExpiry => 24 * HOUR,
             // Keyed by version/run: one alert per release or failed run.
             Self::UpdateAvailable | Self::UpdateFailure => u64::MAX / 4,
-            Self::AiBlocks | Self::Test | Self::Report => 0,
+            Self::AiBlocks | Self::AiModel | Self::Test | Self::Report => 0,
         })
     }
 }

@@ -906,25 +906,29 @@ impl AiStore {
         Ok(collected)
     }
 
-    /// Operator corrections ("not a threat" marks and category relabels)
-    /// filed in `[from, to)` against a verdict classified in the same window:
-    /// how often the model that made those verdicts had to be put right.
-    pub fn corrections_of_verdicts_between(&self, from: i64, to: i64) -> Result<usize> {
+    /// Threat verdicts the verifier model corroborated, by domain: a second,
+    /// independent model gave the same label, so the label is confirmed by
+    /// something other than the classifier that made it.
+    pub fn corroborated_threats(&self) -> Result<std::collections::HashMap<String, String>> {
         let conn = self.lock()?;
-        let count: i64 = conn.query_row(
-            "SELECT
-                (SELECT COUNT(*) FROM ai_overrides o
-                 WHERE o.action = 'not_threat' AND o.created_at >= ?1 AND o.created_at < ?2
-                   AND EXISTS (SELECT 1 FROM ai_verdicts v WHERE v.domain = o.domain
-                               AND v.classified_at >= ?1 AND v.classified_at < ?2))
-              + (SELECT COUNT(*) FROM ai_category_overrides c
-                 WHERE c.created_at >= ?1 AND c.created_at < ?2
-                   AND EXISTS (SELECT 1 FROM ai_verdicts v WHERE v.domain = c.domain
-                               AND v.classified_at >= ?1 AND v.classified_at < ?2))",
-            params![from, to],
-            |r| r.get(0),
+        let mut stmt = conn.prepare(
+            "SELECT domain, category FROM ai_verdicts
+             WHERE channel = 'threat' AND status = 'classified'
+               AND severity != 'disputed' AND category != ''
+               AND evidence LIKE '%corroborated by %'",
         )?;
-        Ok(count.max(0) as usize)
+        let collected = stmt
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+            .collect::<std::result::Result<_, _>>()?;
+        Ok(collected)
+    }
+
+    /// Independent confirmations of a label, by domain: the page reading
+    /// where there is one, else the verifier's corroboration.
+    pub fn independent_labels(&self) -> Result<std::collections::HashMap<String, String>> {
+        let mut labels = self.corroborated_threats()?;
+        labels.extend(self.current_page_labels()?);
+        Ok(labels)
     }
 
     /// What the page behind `domain` said on its current threat verdict, or

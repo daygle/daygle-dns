@@ -3548,9 +3548,15 @@ fn ai_operation(path: &str, method: &str) -> Option<Value> {
             }
         })),
         ("post", "/ai/retrain") => Some(json!({
+            "parameters": json!([{
+                "name": "model",
+                "in": "query",
+                "required": false,
+                "schema": { "type": "string", "enum": ["shared", "threat"] }
+            }]),
             "responses": {
                 "200": json!({
-                    "description": "Retrained from the scanner's confident verdicts, the operator's corrections and the starter corpus, and loaded into the running scanner."
+                    "description": "Retrained from the scanner's confirmed verdicts, the operator's corrections and the starter corpus, and loaded into the running scanner at once (no shadow trial; a candidate on trial is discarded)."
                 }),
                 "404": ai_unavailable,
                 "500": json!({
@@ -3560,6 +3566,12 @@ fn ai_operation(path: &str, method: &str) -> Option<Value> {
             }
         })),
         ("post", "/ai/rollback") => Some(json!({
+            "parameters": json!([{
+                "name": "model",
+                "in": "query",
+                "required": false,
+                "schema": { "type": "string", "enum": ["shared", "threat"] }
+            }]),
             "responses": {
                 "200": json!({
                     "description": "The classifier the last retrain replaced is loaded again."

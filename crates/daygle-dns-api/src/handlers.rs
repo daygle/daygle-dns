@@ -1306,6 +1306,24 @@ pub struct AiExportQuery {
     format: Option<String>,
 }
 
+/// `POST /api/ai/retrain` and `/api/ai/rollback` query params.
+#[derive(Debug, Default, serde::Deserialize)]
+pub struct AiModelQuery {
+    /// `shared` (the default) or `threat` (the dedicated threat model).
+    model: Option<String>,
+}
+
+impl AiModelQuery {
+    /// The model named, or `None` for an unknown name.
+    fn role(&self) -> Option<daygle_dns_ml::learn::Role> {
+        match self.model.as_deref().map(str::trim).unwrap_or("shared") {
+            "" | "shared" => Some(daygle_dns_ml::learn::Role::Shared),
+            "threat" => Some(daygle_dns_ml::learn::Role::Threat),
+            _ => None,
+        }
+    }
+}
+
 /// `GET /api/ai/explain` query params.
 #[derive(Debug, Default, serde::Deserialize)]
 pub struct AiExplainQuery {
@@ -1504,15 +1522,13 @@ pub async fn ai_status(State(state): State<AppState>) -> Response {
         "page_candidates_per_scan": settings.page_candidates_per_scan,
         "page_rule": settings.page_rule,
         "page_confidence_floor": settings.page_confidence_floor,
-        "learned_model": {
-            "path": ai.learned_model_path().display().to_string(),
-            "present": ai.learned_model_path().is_file(),
-            "active": ai.learned_model_active(),
-            "previous": ai.learned_model_previous(),
-            "last": ai.learned_model_record(),
-            "trial": ai.learned_model_trial().to_json(),
-        },
-        "auto_rollback": settings.auto_rollback,
+        // Each maintained model: its learned file, whether it is live, the
+        // candidate on trial and the trial history.
+        "learned_model": ai.maintained_status(daygle_dns_ml::learn::Role::Shared),
+        "learned_threat_model": settings
+            .dedicated_threat_model()
+            .then(|| ai.maintained_status(daygle_dns_ml::learn::Role::Threat)),
+        "trial_new_models": settings.trial_new_models,
         // Shipped model bundles installed automatically by the updater (the
         // `[updates]` section), shown here so the AI page can say whether the
         // reference model keeps itself current too.
@@ -2140,15 +2156,22 @@ pub async fn ai_corrections(
     .into_response()
 }
 
-/// `POST /api/ai/rollback` - restore the classifier the last retrain replaced,
+/// `POST /api/ai/rollback[?model=threat]` - restore the model the last
+/// promotion or retrain replaced,
 /// live. The model it replaces is kept, so a rollback can itself be undone.
-pub async fn ai_rollback(State(state): State<AppState>) -> Response {
+pub async fn ai_rollback(
+    State(state): State<AppState>,
+    Query(query): Query<AiModelQuery>,
+) -> Response {
     let Some(ai) = ai_engine(&state) else {
         return map_err(daygle_dns_ml::ai_disabled_error());
     };
+    let Some(role) = query.role() else {
+        return error_response(StatusCode::BAD_REQUEST, "model must be shared or threat");
+    };
     let outcome = run_blocking({
         let ai = ai.clone();
-        move || ai.rollback_learned_model()
+        move || ai.rollback_model(role)
     })
     .await;
     match outcome {
@@ -2168,18 +2191,25 @@ pub async fn ai_rollback(State(state): State<AppState>) -> Response {
     }
 }
 
-/// `POST /api/ai/retrain` - retrain the classifier from the scanner's own
-/// confident verdicts, the operator's corrections and the starter corpus. An
-/// accepted model is written beside `ai.db` as `learned.bin` and loaded into
-/// the running channels at once; a retrain with too little data, or one that
-/// fails any of its gates, leaves the current model in place.
-pub async fn ai_retrain(State(state): State<AppState>) -> Response {
+/// `POST /api/ai/retrain[?model=threat]` - retrain the shared classifier (or
+/// the dedicated threat model) from the scanner's confirmed verdicts, the
+/// operator's corrections and the starter corpus, and put it live at once:
+/// the operator's explicit choice, so no shadow trial (a candidate on trial
+/// is discarded). A retrain with too little data, or one that fails any of
+/// its gates, leaves the current model in place.
+pub async fn ai_retrain(
+    State(state): State<AppState>,
+    Query(query): Query<AiModelQuery>,
+) -> Response {
     let Some(ai) = ai_engine(&state) else {
         return map_err(daygle_dns_ml::ai_disabled_error());
     };
+    let Some(role) = query.role() else {
+        return error_response(StatusCode::BAD_REQUEST, "model must be shared or threat");
+    };
     let outcome = run_blocking({
         let ai = ai.clone();
-        move || ai.retrain_learned_model()
+        move || ai.retrain_model(role)
     })
     .await;
     match outcome {
@@ -2192,7 +2222,7 @@ pub async fn ai_retrain(State(state): State<AppState>) -> Response {
                     stats.examples, stats.labels
                 ),
             );
-            let record = ai.learned_model_record();
+            let record = ai.maintained_status(role).get("last").cloned();
             let validation = record
                 .as_ref()
                 .and_then(|r| r.get("validation_examples"))
@@ -6463,7 +6493,7 @@ pub struct AiUpdate {
     pub threat_ttl_secs: Option<u64>,
     /// Retrain the classifier from what the scanner has learned.
     pub auto_retrain: Option<bool>,
-    pub auto_rollback: Option<bool>,
+    pub trial_new_models: Option<bool>,
     pub retrain_interval_secs: Option<u64>,
     pub learn_negatives: Option<bool>,
     pub fetch_pages: Option<bool>,
@@ -7413,8 +7443,8 @@ pub async fn update_settings(
         if let Some(v) = a.auto_retrain {
             config.ai.auto_retrain = v;
         }
-        if let Some(v) = a.auto_rollback {
-            config.ai.auto_rollback = v;
+        if let Some(v) = a.trial_new_models {
+            config.ai.trial_new_models = v;
         }
         if let Some(v) = a.retrain_interval_secs {
             config.ai.retrain_interval_secs = v.max(3_600);

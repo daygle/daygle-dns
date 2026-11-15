@@ -177,13 +177,13 @@
     }
   }
 
-  async function setAutoRollback(value) {
+  async function setTrialNewModels(value) {
     try {
-      await api.updateSettings({ ai: { auto_rollback: value } });
-      status = { ...status, auto_rollback: value };
+      await api.updateSettings({ ai: { trial_new_models: value } });
+      status = { ...status, trial_new_models: value };
       notice = value
-        ? 'Each new model is now on trial and rolled back automatically if it does worse than the one it replaced.'
-        : 'New models are kept without a trial; restore the previous model by hand if needed.';
+        ? 'Scheduled retrains now run in the shadow of the live model and replace it only if they do at least as well.'
+        : 'Scheduled retrains now go live straight away; restore the previous model by hand if needed.';
     } catch (e) {
       error = formatApiError(e);
       await load(true);
@@ -248,12 +248,12 @@
     }
   }
 
-  async function rollbackModel() {
+  async function rollbackModel(model = 'shared') {
     rollingBack = true;
     error = null;
     notice = null;
     try {
-      const result = await api.aiRollback();
+      const result = await api.aiRollback(model);
       notice = result?.message || 'The previous model is in use again.';
       await load(true);
     } catch (e) {
@@ -263,12 +263,12 @@
     }
   }
 
-  async function retrain() {
+  async function retrain(model = 'shared') {
     retraining = true;
     error = null;
     notice = null;
     try {
-      const result = await api.aiRetrain();
+      const result = await api.aiRetrain(model);
       const negatives = result.negatives
         ? `, ${fmt(result.negatives)} from "not a threat" marks`
         : '';
@@ -507,10 +507,10 @@
           <input
             type="checkbox"
             style="width: auto"
-            checked={!!status.auto_rollback}
-            onchange={(event) => setAutoRollback(event.currentTarget.checked)}
+            checked={!!status.trial_new_models}
+            onchange={(event) => setTrialNewModels(event.currentTarget.checked)}
           />
-          <span>Roll Back Automatically</span>
+          <span>Trial New Models First</span>
         </label>
         <label class="row" style="gap: 6px; align-items: center; font-size: 0.85rem">
           <input
@@ -526,78 +526,92 @@
     <p class="muted help" style="margin: 0 0 10px">
       The scanner rebuilds its classifier from what it has learned: your
       category corrections and mislabelled marks on AI → Threats, plus its own
-      confident verdicts, on top of the starter corpus so labels this network
-      has not seen lately are never forgotten. A retrain needs at least 200
-      examples of this network's own, and a candidate must hold up on
-      corrections and threats it was not trained on, and still be able to
-      report every threat label, before it replaces the model in use.
-      Accepted models - scheduled or from Retrain Now - are loaded straight
-      away; delete the file to fall back to the configured model. With Learn "Not a Threat" on, your
-      not-a-threat marks become a benign label too - useful when the model
-      keeps mislabelling the same harmless domain, but a negative class can
-      over-generalise, so watch for missed threats and restore the previous
-      model if you see them.
+      verdicts - but only those the shipped reference model, the verifier
+      model or the page itself agrees with, so a mistake cannot feed on
+      itself - on top of the starter corpus, so labels this network has not
+      seen lately are never forgotten. A candidate must hold up on
+      corrections and threats it was not trained on and still report every
+      threat label. Then, with Trial New Models First on, it runs in the
+      shadow of the live model for half the retrain interval without
+      answering a single query, and replaces it only if it did at least as
+      well on held-out threats, on the threats each finds among the domains
+      looked up, on your corrections during the trial and on independently
+      confirmed labels. A rejected candidate changes nothing, pauses
+      retraining for a while and raises an alert. Retrain Now goes live at
+      once. A dedicated threat model is maintained the same way, and the
+      verifier's reference is refreshed from your corrections (never from
+      the AI's own verdicts, so it stays an independent second opinion).
+      With Install New Shipped Models on, new reference models arrive through
+      the updater, which checks them against held-out threats too. With Learn
+      "Not a Threat" on, your not-a-threat marks become a benign label - a
+      negative class can over-generalise, which the trial checks for.
     </p>
-    <p class="muted help" style="margin: 0 0 10px">
-      It keeps itself honest three ways. Its own verdicts only train when the
-      shipped reference model or the page itself agrees, so a mistake cannot
-      feed on itself. Each new model is on trial for half the retrain interval
-      and then compared with the one it replaced - on held-out threats, on the
-      threats each finds in live traffic, and on how often you corrected it -
-      and rolled back automatically if it did worse, with retraining paused
-      for a while. And with Install New Shipped Models on, new reference
-      models arrive through the updater, which checks them the same way.
-    </p>
-    {#if status.learned_model?.trial}
-      {@const trial = status.learned_model.trial}
-      <p class="muted" style="margin: 0 0 10px; font-size: 0.85rem">
-        {#if trial.ends_at}
-          <span class="pill">On Trial</span>
-          until {formatDateTime(trial.ends_at * 1000)}
-        {:else if trial.last_outcome}
-          Last trial: {trial.last_outcome}
-          {#if trial.retry_after && trial.retry_after * 1000 > Date.now()}
-            - retraining resumes {formatDateTime(trial.retry_after * 1000)}
-          {/if}
-        {/if}
-      </p>
-    {/if}
-    {#if status.learned_model}
-      <p class="muted" style="margin: 0 0 10px; font-size: 0.85rem">
-        {#if status.learned_model.present}
-          <code>{status.learned_model.path}</code>
-          {#if status.learned_model.last?.trained_at}
-            - retrained {formatDateTime(Date.parse(status.learned_model.last.trained_at))}
-          {/if}
-          {#if status.learned_model.last}
-            from {fmt(status.learned_model.last.examples)} examples across {fmt(status.learned_model.last.labels)} labels
-          {/if}
-          {#if status.learned_model.active}
-            <span class="pill ok">Active</span>
-          {:else}
-            <span class="pill">Not in Use</span>
-          {/if}
-        {:else}
-          No retrained model yet: the configured model is in use.
-        {/if}
-      </p>
+    {@render maintained('Shared Classifier', status.learned_model, 'shared')}
+    {#if status.learned_threat_model}
+      {@render maintained('Threat Model', status.learned_threat_model, 'threat')}
     {/if}
     {#if isAdmin}
-      <div class="row" style="gap: 8px; flex-wrap: wrap">
-        <button class="secondary" onclick={retrain} disabled={retraining}>
-          {retraining ? 'Retraining...' : 'Retrain Now'}
-        </button>
-        {#if status.learned_model?.previous}
-          <button class="secondary" onclick={rollbackModel} disabled={rollingBack} title="Restore the classifier the last retrain replaced">
-            {rollingBack ? 'Restoring...' : 'Restore Previous Model'}
-          </button>
-        {/if}
-        <span class="muted" style="font-size: 0.8rem">
-          Runs at most every {duration(status.retrain_interval_secs)} when automatic retraining is on.
-        </span>
-      </div>
+      <p class="muted" style="font-size: 0.8rem; margin: 6px 0 0">
+        Scheduled retrains run at most every {duration(status.retrain_interval_secs)} when automatic retraining is on.
+      </p>
     {/if}
   </div>
+
+  {#snippet maintained(title, m, model)}
+    {#if m}
+      <div style="border-top: 1px solid var(--border); padding-top: 8px; margin-top: 8px">
+        <p style="margin: 0 0 6px; font-size: 0.9rem"><strong>{title}</strong>
+          {#if m.active}
+            <span class="pill ok">Retrained Model Live</span>
+          {:else}
+            <span class="pill">Configured Model Live</span>
+          {/if}
+          {#if m.trial?.ends_at}
+            <span class="pill">Candidate on Trial until {formatDateTime(m.trial.ends_at * 1000)}</span>
+          {/if}
+        </p>
+        {#if m.present}
+          <p class="muted" style="margin: 0 0 6px; font-size: 0.85rem">
+            <code>{m.path}</code>
+            {#if m.last?.trained_at}
+              - retrained {formatDateTime(Date.parse(m.last.trained_at))}
+            {/if}
+            {#if m.last}
+              from {fmt(m.last.examples)} examples across {fmt(m.last.labels)} labels
+              {#if m.last.unconfirmed}({fmt(m.last.unconfirmed)} unconfirmed verdicts left out){/if}
+            {/if}
+          </p>
+        {/if}
+        {#if m.trial?.retry_after && m.trial.retry_after * 1000 > Date.now()}
+          <p class="muted" style="margin: 0 0 6px; font-size: 0.85rem">
+            Retraining paused after a rejected candidate; it resumes {formatDateTime(m.trial.retry_after * 1000)}.
+          </p>
+        {/if}
+        {#if m.trial?.history?.length}
+          <details style="margin: 0 0 6px; font-size: 0.85rem">
+            <summary class="muted">Trial history ({m.trial.history.length})</summary>
+            <ul style="margin: 4px 0 0 18px; padding: 0">
+              {#each m.trial.history as entry (entry.at + entry.outcome)}
+                <li><span class="muted">{formatDateTime(entry.at * 1000)}</span> - {entry.outcome}</li>
+              {/each}
+            </ul>
+          </details>
+        {/if}
+        {#if isAdmin}
+          <div class="row" style="gap: 8px; flex-wrap: wrap">
+            <button class="secondary" onclick={() => retrain(model)} disabled={retraining}>
+              {retraining ? 'Retraining...' : 'Retrain Now'}
+            </button>
+            {#if m.previous}
+              <button class="secondary" onclick={() => rollbackModel(model)} disabled={rollingBack} title="Restore the model the last retrain or promotion replaced">
+                {rollingBack ? 'Restoring...' : 'Restore Previous Model'}
+              </button>
+            {/if}
+          </div>
+        {/if}
+      </div>
+    {/if}
+  {/snippet}
 
   <div class="card" style="margin-top: 14px">
     <div class="spread" style="margin-bottom: 8px; gap: 10px; flex-wrap: wrap">

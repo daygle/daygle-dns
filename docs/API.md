@@ -1738,26 +1738,49 @@ Three things keep the self-maintained model honest without an operator:
 
 * **Anchored training.** When `ai.model_path` is a fastText model, the
   scanner's own verdicts only train if that fixed reference model gives the
-  same label (or another threat label for a threat), or the page reading
-  behind the domain does. Verdicts nothing independent backs are left out
+  same label (or another threat label for a threat), the verifier model
+  corroborated it, or the page reading behind the domain agrees. Verdicts nothing independent backs are left out
   and counted as `unconfirmed` in the retrain response and record, so a
   systematic mistake cannot reinforce itself. Operator corrections and the
   starter corpus always train.
-* **Trial and automatic rollback.** With `ai.auto_rollback` on (the default),
-  each accepted model is on trial for half `ai.retrain_interval_secs`
-  (between one hour and a day); no scheduled retrain replaces it meanwhile.
-  When the trial ends it is compared with the model it replaced on the
-  store's held-out threat families, on the threats each finds among the
-  domains classified during the trial, and on how many of its verdicts the
-  operator corrected against an equally long window before. Losing more
-  held-out threats, finding fewer than half or more than twice as many live
-  threats (with at least ten from the old model, or ten more), or drawing at
-  least three corrections and more than twice the earlier rate rolls it
-  back: the previous learned model, or the configured one for a first
-  retrain (the rejected file is kept as `learned.rejected.bin`). Retraining
-  then pauses for two intervals. `GET /api/ai/status` reports the state as
-  `learned_model.trial` (`started_at`, `ends_at`, `retry_after`,
-  `last_outcome`); a manual rollback ends a trial.
+* **Shadow trials.** With `ai.trial_new_models` on (the default), a
+  scheduled retrain's candidate does not go live. It waits as
+  `learned.candidate.bin` for half `ai.retrain_interval_secs` (between one
+  hour and a day) while the live model keeps answering, and no other
+  scheduled retrain runs meanwhile. When the trial ends both are scored on
+  what happened during it: held-out threat families; the threats each finds
+  among the domains classified during the trial (fewer than half, or more
+  than twice as many and ten more, rejects); the corrections the operator
+  filed during the trial; and labels an independent source - the page
+  reading or the verifier model - confirmed for those domains. The
+  candidate must also still report every threat label the live model can.
+  It is promoted only if it is no worse on every signal with enough
+  evidence; otherwise it is set aside as `learned.rejected.bin`, the live
+  model is untouched, retraining pauses for two intervals, and an
+  `ai_model` alert is raised (`[alerts] ai_model`, on by default). The live
+  model may change during a trial (a models bundle, a restore); the
+  candidate is judged against whatever is live when the trial ends.
+  `POST /api/ai/retrain` is the operator's choice and goes live at once,
+  discarding any candidate. `GET /api/ai/status` reports each model's
+  `trial` (`started_at`, `ends_at`, `retry_after`, `last_outcome`, and the
+  last 20 outcomes as `history`) and whether a `candidate` is waiting.
+* **Both models.** With a dedicated `ai.threat_model_path`, that model is
+  maintained the same way as `learned-threat.bin`, from threat verdicts and
+  "not a threat" corrections only, with the threat model as its reference;
+  the shared model then leaves threat verdicts out. Status reports it as
+  `learned_threat_model`, and `?model=threat` selects it for
+  `POST /api/ai/retrain` and `POST /api/ai/rollback`.
+* **Verifier reference.** With the MiniLM verifier on and no pinned
+  `ai.verifier_reference_path`, the verifier's category centroids are
+  rebuilt from the starter corpus and the operator's category corrections
+  whenever those change - never from the scanner's own verdicts, so the
+  verifier stays an independent second opinion. A rebuilt reference must do
+  at least as well as the one in use on held-out corrections, and no more
+  than two points worse on the starter corpus, before it is written as
+  `learned-centroids.json` beside `ai.db` and the threat channel reloads it.
+* **Independent confirmations.** Besides the reference model, a verdict of
+  the scanner's own trains when the verifier corroborated it or the page
+  reading agrees.
 * **Shipped models.** A models bundle carries `starter-training.txt` beside
   `daygle-starter.bin`; a retrain reads the corpus from the configured
   model's directory when present (else the copy built into the binary), so

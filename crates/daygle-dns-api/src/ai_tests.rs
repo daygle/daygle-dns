@@ -516,3 +516,29 @@ async fn ai_endpoints_say_so_when_the_engine_is_disabled() {
         assert!(body.contains("AI subsystem is disabled"), "{uri}: {body}");
     }
 }
+
+#[tokio::test]
+async fn status_reports_trials_and_retrain_takes_a_model() {
+    let dir = scratch_dir("trials");
+    let ai = engine(&dir);
+    let state = AppState::for_tests(Some(ai.clone()));
+    let status = json(state.clone(), "/api/ai/status").await;
+    assert_eq!(status["trial_new_models"], true, "{status}");
+    assert!(
+        status["learned_model"]["trial"]["history"].is_array(),
+        "{status}"
+    );
+    assert_eq!(status["learned_model"]["candidate"], false, "{status}");
+    assert!(
+        status["learned_threat_model"].is_null(),
+        "no dedicated threat model: {status}"
+    );
+
+    let (code, _, body) = call(state.clone(), "POST", "/api/ai/retrain?model=bogus", None).await;
+    assert_eq!(code, StatusCode::BAD_REQUEST, "{body}");
+    // Without a dedicated threat model there is nothing to retrain there.
+    let (code, _, body) = call(state, "POST", "/api/ai/retrain?model=threat", None).await;
+    assert_ne!(code, StatusCode::OK, "{body}");
+    assert!(body.contains("dedicated threat model"), "{body}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
