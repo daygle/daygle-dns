@@ -1610,8 +1610,9 @@ configured model file that is missing falls back to `heuristic`), workers,
 intervals, TTLs and thresholds (`confidence_floor` is the threat channel's,
 `category_confidence_floor` the categorizer's), per-status domain counts,
 `blockable_counts` (domains that qualify for auto-blocking, by category:
-blocked in enforce mode, what would be blocked in train mode) and the
-current block-snapshot size.
+blocked in enforce mode, what would be blocked in train mode), `threat_counts`
+(stored threat verdicts by label: what saving a label list that drops the
+label deletes) and the current block-snapshot size.
 
 A domain qualifies for auto-blocking when its *threat-channel* verdict is at
 or above `ai.block_threshold`, neither it nor a parent domain is exempt, and
@@ -1643,7 +1644,15 @@ and the domain starts over if it is queried again). `per_page` is capped at 500.
 to classified threats: verdicts with severity `threat` or `disputed`,
 highest confidence first, with optional category substring `category`, severity
 (`threat`/`disputed`), exemption (`exempt`/`not_exempt`) and domain substring
-`q` filters. Each row
+`q` filters. With the shared classifier the list holds only the labels
+currently in `ai.auto_block_categories`, read live: unticking a label
+deletes its stored threat verdicts, so its rows leave the list at once and a
+later re-tick does not bring them back - only a fresh classification (the
+domain is seen again and re-detected) reports it again. Declaring a label a
+threat re-queues the threat-channel verdicts of the domains whose
+categorization already carries it, so the next scan cycle reports them
+instead of waiting for their verdict TTL. A dedicated `ai.threat_model_path` lists every
+label its model produced. Each row
 also carries `blocked`, whether the domain is in the *current* block
 snapshot - actually auto-blocked in enforce mode (in train mode the snapshot
 is empty, so every row is `false`). The console's AI → Threats tab renders

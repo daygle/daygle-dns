@@ -625,6 +625,146 @@ fn expired_verdicts_are_reclassified_by_the_next_cycle() {
     assert!(rows[0].expires_at > chrono::Utc::now().timestamp());
 }
 
+/// A label newly declared a threat re-queues exactly the domains whose
+/// categorization carries it, so the next cycle judges them again instead of
+/// waiting for their threat verdict to expire.
+#[test]
+fn a_new_threat_label_requeues_the_domains_it_applies_to() {
+    let dir = TempDir::new().unwrap();
+    let ai = engine(&dir, settings(AiMode::Train));
+    for (domain, label) in [("ads.example", "ads"), ("news.example", "news")] {
+        ai.store.observe(domain).unwrap();
+        ai.store
+            .save_verdict(
+                Channel::Content,
+                domain,
+                label,
+                "info",
+                "classified",
+                0.9,
+                "fasttext",
+                "ev",
+                3600,
+            )
+            .unwrap();
+        // The threat channel found nothing: the label was not a threat.
+        ai.store
+            .save_verdict(
+                Channel::Threat,
+                domain,
+                "",
+                "",
+                "skipped",
+                0.0,
+                "fasttext",
+                "no signal",
+                3600,
+            )
+            .unwrap();
+    }
+
+    let mut declared = (*ai.settings.load_full()).clone();
+    declared.auto_block_categories.push("ads".to_string());
+    ai.apply_settings(&declared);
+
+    let pending = ai.store.pending_domains(16).unwrap();
+    assert!(
+        pending.contains(&("ads.example".to_string(), Channel::Threat)),
+        "the new label's domain is due a threat verdict: {pending:?}"
+    );
+    assert!(
+        !pending.contains(&("news.example".to_string(), Channel::Threat)),
+        "a domain without the label is left alone: {pending:?}"
+    );
+    assert!(
+        !pending.iter().any(|(_, channel)| *channel == Channel::Content),
+        "categorizations are not re-queued: {pending:?}"
+    );
+}
+
+/// Unticking a label deletes its stored threat verdicts: the detections do not
+/// come back on a later re-tick, only a fresh classification reports them.
+#[test]
+fn removing_a_threat_label_deletes_its_stored_verdicts() {
+    let dir = TempDir::new().unwrap();
+    let ai = engine(
+        &dir,
+        AiSettings {
+            auto_block_categories: vec!["malware".to_string(), "ads".to_string()],
+            ..settings(AiMode::Train)
+        },
+    );
+    for (domain, label) in [("ads.example", "ads"), ("bad.example", "malware")] {
+        ai.store.observe(domain).unwrap();
+        ai.store
+            .save_verdict(
+                Channel::Threat,
+                domain,
+                label,
+                "threat",
+                "classified",
+                0.99,
+                "fasttext",
+                "ev",
+                3600,
+            )
+            .unwrap();
+        ai.store
+            .save_verdict(
+                Channel::Content,
+                domain,
+                label,
+                "info",
+                "classified",
+                0.9,
+                "fasttext",
+                "ev",
+                3600,
+            )
+            .unwrap();
+    }
+
+    // The operator stops treating `ads` as a threat.
+    let mut declared = (*ai.settings.load_full()).clone();
+    declared.auto_block_categories = vec!["malware".to_string()];
+    ai.apply_settings(&declared);
+
+    let (rows, _) = ai.store.list_verdicts(None, None, 16, 0).unwrap();
+    assert!(
+        !rows
+            .iter()
+            .any(|r| r.domain == "ads.example" && r.channel == "threat"),
+        "the removed label's verdict is deleted: {rows:?}"
+    );
+    assert!(
+        rows.iter()
+            .any(|r| r.domain == "bad.example" && r.channel == "threat"),
+        "the remaining label's verdict stays: {rows:?}"
+    );
+    assert!(
+        rows.iter()
+            .any(|r| r.domain == "ads.example" && r.channel == "content"),
+        "categorizations are untouched: {rows:?}"
+    );
+
+    // Ticking `ads` again is a fresh start, not a resurrection.
+    let mut re_added = (*ai.settings.load_full()).clone();
+    re_added.auto_block_categories.push("ads".to_string());
+    ai.apply_settings(&re_added);
+    let (rows, _) = ai.store.list_verdicts(None, None, 16, 0).unwrap();
+    assert!(
+        !rows
+            .iter()
+            .any(|r| r.domain == "ads.example" && r.channel == "threat"),
+        "nothing comes back on a re-tick: {rows:?}"
+    );
+    let pending = ai.store.pending_domains(16).unwrap();
+    assert!(
+        !pending.iter().any(|(domain, _)| domain == "ads.example"),
+        "a deleted verdict is not re-queued either: {pending:?}"
+    );
+}
+
 #[test]
 fn expiry_runs_on_its_own_interval() {
     let dir = TempDir::new().unwrap();

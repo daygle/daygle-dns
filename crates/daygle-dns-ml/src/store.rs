@@ -30,7 +30,7 @@ use std::sync::{Arc, Mutex};
 
 use daygle_dns_core::config::PageRule;
 use daygle_dns_core::error::{DaygleError, Result};
-use rusqlite::{params, Connection};
+use rusqlite::{params, params_from_iter, types::Value, Connection};
 
 use crate::backend::Channel;
 use crate::page::TextVerdict;
@@ -51,6 +51,11 @@ pub struct VerdictFilter<'a> {
     /// verdict list shows the categorization channel, the threat list the
     /// threat channel.
     pub channel: Option<&'a str>,
+    /// The labels the threat list may show: those currently treated as
+    /// threats. `None` applies no label filter (a dedicated threat model
+    /// reports whatever it produces); an empty slice matches nothing (no
+    /// label is a threat). Only the threat channel reads it.
+    pub threat_labels: Option<&'a [String]>,
 }
 
 /// Page bounds for a paginated verdict or threat list.
@@ -575,6 +580,86 @@ impl AiStore {
         }
         tx.commit()?;
         Ok(requeued)
+    }
+
+    /// Drop the threat-channel verdicts carrying one of `labels`: the
+    /// operator stopped treating them as threats, so the stored detections go
+    /// with the decision. Unticking is a decision to forget, not to hide -
+    /// ticking the label again starts over from a fresh classification
+    /// instead of resurrecting old detections. Content verdicts are untouched
+    /// (categorization never was a threat decision), and page readings belong
+    /// to the threat verdict they describe, so rows for domains left without
+    /// one go too. Returns how many verdicts were deleted.
+    pub fn delete_threats_for_labels(&self, labels: &[String]) -> Result<usize> {
+        let labels: Vec<String> = labels
+            .iter()
+            .map(|label| label.trim().to_ascii_lowercase())
+            .filter(|label| !label.is_empty())
+            .collect();
+        if labels.is_empty() {
+            return Ok(0);
+        }
+        let marks = (0..labels.len())
+            .map(|i| format!("?{}", 1 + i))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let mut conn = self.lock()?;
+        let tx = conn.transaction()?;
+        let deleted = tx.execute(
+            &format!(
+                "DELETE FROM ai_verdicts WHERE channel = 'threat' AND lower(category) IN ({marks})"
+            ),
+            params_from_iter(labels.iter()),
+        )?;
+        for table in ["ai_page_readings", "ai_page_adjustments"] {
+            tx.execute(
+                &format!(
+                    "DELETE FROM {table} WHERE domain NOT IN
+                         (SELECT domain FROM ai_verdicts WHERE channel = 'threat')"
+                ),
+                [],
+            )?;
+        }
+        tx.commit()?;
+        Ok(deleted)
+    }
+
+    /// Re-queue the threat-channel verdicts of the domains whose *content*
+    /// verdict already carries one of `labels`: they were classified while
+    /// the label was not treated as a threat, so the threat channel reported
+    /// nothing for them and their rows are `skipped`. Clearing those rows
+    /// puts them back in front of the next scan cycle, where the label can now
+    /// be reported as a threat - no TTL wait, and no promotion of a content
+    /// verdict, which would bypass the threat channel's own floor and
+    /// verifier. Returns how many rows were re-queued.
+    pub fn requeue_threats_for_labels(&self, labels: &[String]) -> Result<usize> {
+        let labels: Vec<String> = labels
+            .iter()
+            .map(|label| label.trim().to_ascii_lowercase())
+            .filter(|label| !label.is_empty())
+            .collect();
+        if labels.is_empty() {
+            return Ok(0);
+        }
+        let marks = (0..labels.len())
+            .map(|i| format!("?{}", 1 + i))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let mut conn = self.lock()?;
+        let tx = conn.transaction()?;
+        let queued = tx.execute(
+            &format!(
+                "UPDATE ai_verdicts SET status = 'pending', category = '', severity = '',
+                     confidence = 0, evidence = ''
+                 WHERE channel = 'threat' AND status = 'skipped'
+                   AND domain IN (
+                       SELECT c.domain FROM ai_verdicts c
+                       WHERE c.channel = 'content' AND lower(c.category) IN ({marks}))"
+            ),
+            params_from_iter(labels.iter()),
+        )?;
+        tx.commit()?;
+        Ok(queued)
     }
 
     /// Whether verdicts expired by `until_epoch` are still waiting for
@@ -1157,6 +1242,30 @@ impl AiStore {
             .unwrap_or(if threats_only { "threat" } else { "content" })
             .trim()
             .to_ascii_lowercase();
+        // The threat list follows the labels that are threats *now*: a
+        // verdict stored for a label the operator has since unticked is
+        // historical, not a detected threat, so it drops out of the list at
+        // once (and comes back if the label is ticked again) instead of
+        // waiting for a rescan or lingering as a "not blocked" row.
+        let threat_labels: Vec<String> = filter
+            .threat_labels
+            .unwrap_or(&[])
+            .iter()
+            .map(|label| label.trim().to_ascii_lowercase())
+            .filter(|label| !label.is_empty())
+            .collect();
+        let label_filter = match filter.threat_labels {
+            None => String::new(),
+            // No label is a threat: nothing to report.
+            Some(_) if threat_labels.is_empty() => " AND 0".to_string(),
+            Some(_) => {
+                let marks = (0..threat_labels.len())
+                    .map(|i| format!("?{}", 9 + i))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!(" AND lower(v.category) IN ({marks})")
+            }
+        };
         let filter =
             "(?1 = 0 OR (v.status = 'classified' AND v.severity IN ('threat', 'disputed')))
             AND (?2 = '' OR v.status = ?2)
@@ -1174,19 +1283,22 @@ impl AiStore {
                 SELECT 1 FROM ai_category_overrides c WHERE c.domain = v.domain))
                 OR (?8 = 'scanner' AND NOT (v.channel = 'content' AND EXISTS (
                 SELECT 1 FROM ai_category_overrides c WHERE c.domain = v.domain))))";
-        let params = params![
-            threats_only,
-            status,
-            category,
-            severity,
-            exemption,
-            search,
-            channel,
-            label
+        // Numbered parameters built as values so the label list can add as
+        // many as it names, after the filter's own eight.
+        let mut params: Vec<Value> = vec![
+            Value::Integer(i64::from(threats_only)),
+            Value::Text(status),
+            Value::Text(category),
+            Value::Text(severity),
+            Value::Text(exemption),
+            Value::Text(search),
+            Value::Text(channel),
+            Value::Text(label),
         ];
+        params.extend(threat_labels.into_iter().map(Value::Text));
         let total: i64 = conn.query_row(
-            &format!("SELECT COUNT(*) FROM ai_verdicts v WHERE {filter}"),
-            params,
+            &format!("SELECT COUNT(*) FROM ai_verdicts v WHERE {filter}{label_filter}"),
+            params_from_iter(params.iter().cloned()),
             |r| r.get(0),
         )?;
         let order = if threats_only {
@@ -1196,13 +1308,32 @@ impl AiStore {
         };
         let mut stmt = conn.prepare(&format!(
             "SELECT {VERDICT_COLUMNS}
-             FROM ai_verdicts v WHERE {filter}
+             FROM ai_verdicts v WHERE {filter}{label_filter}
              ORDER BY {order} LIMIT {limit} OFFSET {offset}"
         ))?;
         let collected = stmt
-            .query_map(params, verdict_row)?
+            .query_map(params_from_iter(params.iter().cloned()), verdict_row)?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok((collected, total as u64))
+    }
+
+    /// Stored threat verdicts by label, lowercased and sorted: exactly what
+    /// deleting a label would remove ([`Self::delete_threats_for_labels`]).
+    /// The console warns with these counts before saving a label list that
+    /// drops one. Rows still pending carry no label and are not counted.
+    pub fn threat_verdict_counts(&self) -> Result<Vec<(String, usize)>> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(
+            "SELECT lower(category), COUNT(*) FROM ai_verdicts
+             WHERE channel = 'threat' AND category != ''
+             GROUP BY lower(category) ORDER BY lower(category)",
+        )?;
+        let collected = stmt
+            .query_map([], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? as usize))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(collected)
     }
 
     /// Per-status domain counts, for the status endpoint (missing statuses are

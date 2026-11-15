@@ -2749,6 +2749,12 @@ fn ai_schemas() -> Value {
                     "description": "Domains that qualify for auto-blocking, by category: \
                         blocked in enforce mode, what would be in train mode."
                 },
+                "threat_counts": {
+                    "type": "object",
+                    "additionalProperties": { "type": "integer" },
+                    "description": "Stored threat verdicts by label: what saving a label \
+                        list that drops the label deletes."
+                },
                 "snapshot_len": {
                     "type": "integer",
                     "description": "Domains in the current auto-block snapshot."

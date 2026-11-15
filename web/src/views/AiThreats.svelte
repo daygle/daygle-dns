@@ -49,6 +49,10 @@
   // The labels treated as threats (edited here) and the labels the loaded
   // model can emit, for the "not in the loaded model" hint.
   let threatLabels = $state([]);
+  // The list as last saved, and how many stored verdicts each label carries:
+  // together they say what a save would delete before it happens.
+  let savedLabels = $state([]);
+  let threatCounts = $state({});
   let modelLabels = $state([]);
   let savingLabels = $state(false);
   let labelsNotice = $state(null);
@@ -88,6 +92,8 @@
       const status = await api.aiStatus();
       modelLabels = [...new Set(status?.backend_categories || [])].sort();
       threatLabels = [...(status?.auto_block_categories || [])];
+      savedLabels = [...threatLabels];
+      threatCounts = status?.threat_counts || {};
       labelsText = threatLabels.join(', ');
       categories = modelLabels;
       threatModelPath = status?.threat_model_path || '';
@@ -97,10 +103,12 @@
     } catch {
       modelLabels = [];
       categories = [];
+      threatCounts = {};
       // 404: the scanner is off. The saved list still lives in the config.
       try {
         const config = await api.config();
         threatLabels = [...(config?.ai?.auto_block_categories || [])];
+        savedLabels = [...threatLabels];
         labelsText = threatLabels.join(', ');
         threatModelPath = config?.ai?.threat_model_path || '';
         sharedModelPath = config?.ai?.model_path || '';
@@ -108,9 +116,31 @@
           !!threatModelPath.trim() && threatModelPath.trim() !== sharedModelPath.trim();
       } catch {
         threatLabels = [];
+        savedLabels = [];
       }
     }
   }
+
+  // The labels unticked since the list was loaded. Saving deletes their stored
+  // threat verdicts, so the count is shown before Save Labels is used.
+  const removedLabels = $derived(
+    savedLabels.filter((label) => !threatLabels.includes(label)),
+  );
+  const removedVerdicts = $derived(
+    removedLabels.map((label) => ({
+      label,
+      verdicts: Number(threatCounts[label.toLowerCase()] || 0),
+    })),
+  );
+  const removedVerdictTotal = $derived(
+    removedVerdicts.reduce((sum, item) => sum + item.verdicts, 0),
+  );
+  const removedVerdictDetail = $derived(
+    removedVerdicts
+      .filter((item) => item.verdicts > 0)
+      .map((item) => `${titleCase(item.label)} (${fmt(item.verdicts)})`)
+      .join(', '),
+  );
 
   // The model's labels plus any already chosen that it no longer lists, so a
   // label set under another model can still be seen and unticked.
@@ -435,6 +465,21 @@
     {/if}
     {#if labelsNotice}<p class="muted" style="color: var(--ok); margin: 0 0 8px">{labelsNotice}</p>{/if}
     {#if labelsError}<p class="dialog-error">{labelsError}</p>{/if}
+    {#if !modelDedicated && removedLabels.length}
+      {#if removedVerdictTotal > 0}
+        <p class="warn" role="alert">
+          Saving deletes {fmt(removedVerdictTotal)} stored threat
+          verdict{removedVerdictTotal === 1 ? '' : 's'}: {removedVerdictDetail}.
+          They do not come back if you tick the label again.
+        </p>
+      {:else}
+        <p class="muted small" style="margin: 0 0 8px">
+          Saving removes {removedLabels.map((label) => titleCase(label)).join(', ')};
+          no stored threat verdicts carry
+          {removedLabels.length === 1 ? 'that label' : 'those labels'}, so nothing is deleted.
+        </p>
+      {/if}
+    {/if}
     {#if labelChoices.length}
       <div class="labels">
         {#each labelChoices as label (label)}
@@ -686,6 +731,7 @@
   .explain ul { margin: 8px 0; padding-left: 18px; font-size: 0.85rem; }
   .explain li { margin: 2px 0; }
   .explain .small { font-size: 0.78rem; }
+  .warn { color: var(--danger); font-size: 0.85rem; margin: 0 0 8px; }
   .labels { display: flex; flex-wrap: wrap; gap: 6px 18px; }
   .check { display: flex; align-items: center; gap: 6px; font-size: 0.85rem; }
   .check input { width: auto; }

@@ -555,3 +555,216 @@ async fn status_reports_trials_and_retrain_takes_a_model() {
     assert!(body.contains("dedicated threat model"), "{body}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// The console's threat list follows the labels treated as threats: a label
+/// the operator unticked leaves the list at once, without a rescan, and one
+/// they tick brings back the verdict rows already stored for it.
+#[tokio::test]
+async fn threat_list_follows_the_labels_treated_as_threats() {
+    let dir = scratch_dir("threat-labels");
+    let ai = engine(&dir);
+    let mut cfg = (*ai.settings.load_full()).clone();
+    cfg.auto_block_categories = vec!["malware".to_string()];
+    ai.settings.store(Arc::new(cfg));
+    for (domain, label) in [
+        ("bad.example", "malware"),
+        ("ads.example", "ads"),
+        ("phish.example", "phishing"),
+    ] {
+        ai.store.observe(domain).unwrap();
+        ai.store
+            .save_verdict(
+                Channel::Threat,
+                domain,
+                label,
+                "threat",
+                "classified",
+                0.99,
+                "fasttext",
+                "synthetic",
+                3_600,
+            )
+            .unwrap();
+    }
+    let state = AppState::for_tests(Some(ai.clone()));
+
+    // Only the ticked label is a detected threat.
+    let listed = json(state.clone(), "/api/ai/threats").await;
+    assert_eq!(listed["total"], 1, "{listed}");
+    assert_eq!(listed["entries"][0]["domain"], "bad.example", "{listed}");
+
+    // Ticking the other two labels through the console's settings update
+    // shows the rows already stored under them.
+    let (status, _, body) = call(
+        state.clone(),
+        "PUT",
+        "/api/config",
+        Some(serde_json::json!({
+            "ai": { "auto_block_categories": ["malware", "ads", "phishing"] }
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let listed = json(state.clone(), "/api/ai/threats").await;
+    assert_eq!(listed["total"], 3, "every ticked label is listed: {listed}");
+
+    // Untick them again: their rows and their stored verdicts go at once.
+    let (status, _, body) = call(
+        state.clone(),
+        "PUT",
+        "/api/config",
+        Some(serde_json::json!({
+            "ai": { "auto_block_categories": ["malware"] }
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let listed = json(state.clone(), "/api/ai/threats").await;
+    assert_eq!(listed["total"], 1, "{listed}");
+    assert_eq!(
+        listed["entries"][0]["domain"], "bad.example",
+        "the unticked labels' rows are gone: {listed}"
+    );
+
+    // Unticking is a decision to forget: the verdicts are deleted, so a later
+    // re-tick cannot resurrect them.
+    let verdicts = json(state.clone(), "/api/ai/verdicts?channel=threat").await;
+    let kept: Vec<&str> = verdicts["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|row| row["domain"].as_str())
+        .collect();
+    assert!(
+        !kept.contains(&"ads.example") && !kept.contains(&"phish.example"),
+        "the unticked labels' verdicts are deleted: {verdicts}"
+    );
+    assert!(kept.contains(&"bad.example"), "{verdicts}");
+
+    // No label is a threat at all: nothing is listed, and the last stored
+    // verdict goes with the label.
+    let (status, _, body) = call(
+        state.clone(),
+        "PUT",
+        "/api/config",
+        Some(serde_json::json!({ "ai": { "auto_block_categories": [] } })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let listed = json(state, "/api/ai/threats").await;
+    assert_eq!(listed["total"], 0, "{listed}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Declaring a label a threat re-queues the domains that already carry it, so
+/// the next scan reports them instead of leaving them out until their TTL.
+#[tokio::test]
+async fn declaring_a_threat_label_requeues_its_domains() {
+    let dir = scratch_dir("threat-requeue");
+    let ai = engine(&dir);
+    ai.store.observe("ads.example").unwrap();
+    ai.store
+        .save_verdict(
+            Channel::Content,
+            "ads.example",
+            "ads",
+            "info",
+            "classified",
+            0.9,
+            "fasttext",
+            "ad network",
+            3_600,
+        )
+        .unwrap();
+    // Classified while `ads` was an ordinary category: the threat channel had
+    // nothing to report, so the row says so and carries no label.
+    ai.store
+        .save_verdict(
+            Channel::Threat,
+            "ads.example",
+            "",
+            "",
+            "skipped",
+            0.0,
+            "fasttext",
+            "no signal",
+            3_600,
+        )
+        .unwrap();
+    let state = AppState::for_tests(Some(ai.clone()));
+
+    let (status, _, body) = call(
+        state.clone(),
+        "PUT",
+        "/api/config",
+        Some(serde_json::json!({
+            "ai": { "auto_block_categories": ["malware", "phishing", "scam", "ads"] }
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let verdicts = json(state, "/api/ai/verdicts?channel=threat").await;
+    let row = verdicts["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["domain"] == "ads.example")
+        .unwrap_or_else(|| panic!("the threat row is still stored: {verdicts}"));
+    assert_eq!(
+        row["status"], "pending",
+        "the domain is due a fresh threat verdict: {verdicts}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The console warns before saving a label list that drops one: the status it
+/// already loads carries the stored threat verdicts per label.
+#[tokio::test]
+async fn status_reports_stored_threat_verdicts_by_label() {
+    let dir = scratch_dir("threat-counts");
+    let ai = engine(&dir);
+    for (domain, label) in [
+        ("ads-one.example", "ads"),
+        ("ads-two.example", "ads"),
+        ("phish.example", "phishing"),
+    ] {
+        ai.store.observe(domain).unwrap();
+        ai.store
+            .save_verdict(
+                Channel::Threat,
+                domain,
+                label,
+                "threat",
+                "classified",
+                0.99,
+                "fasttext",
+                "ev",
+                3_600,
+            )
+            .unwrap();
+        // Categorizations are not threat verdicts and are not counted.
+        ai.store
+            .save_verdict(
+                Channel::Content,
+                domain,
+                "news",
+                "info",
+                "classified",
+                0.9,
+                "fasttext",
+                "ev",
+                3_600,
+            )
+            .unwrap();
+    }
+    let status = json(AppState::for_tests(Some(ai)), "/api/ai/status").await;
+    assert_eq!(status["threat_counts"]["ads"], 2, "{status}");
+    assert_eq!(status["threat_counts"]["phishing"], 1, "{status}");
+    assert_eq!(
+        status["threat_counts"]["news"],
+        serde_json::Value::Null,
+        "content labels are not threat verdicts: {status}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

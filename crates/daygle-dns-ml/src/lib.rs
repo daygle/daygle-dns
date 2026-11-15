@@ -543,6 +543,58 @@ impl AiEngine {
                 restart = true;
             }
         }
+        // The label list moving is a decision about what the stored threat
+        // verdicts mean, so the store follows it now: a label the operator
+        // stopped treating as a threat takes its detections with it (a later
+        // re-tick starts over from a fresh classification), and a label newly
+        // declared a threat re-queues the domains whose categorization
+        // already carries it, since while it was an ordinary category the
+        // threat channel stored a `skipped` row. Both are bounded to the
+        // domains in question and start the moment the list changes rather
+        // than at each verdict's TTL. A dedicated threat model reports every
+        // label it produces already, so nothing is withheld or stale there.
+        if !new.dedicated_threat_model() {
+            let removed: Vec<String> = old
+                .auto_block_categories
+                .iter()
+                .filter(|label| !new.is_auto_block_category(label))
+                .cloned()
+                .collect();
+            if !removed.is_empty() {
+                match self.store.delete_threats_for_labels(&removed) {
+                    Ok(deleted) if deleted > 0 => tracing::info!(
+                        labels = ?removed,
+                        deleted,
+                        "deleted threat verdicts for labels no longer treated as threats"
+                    ),
+                    Ok(_) => {}
+                    Err(e) => tracing::warn!(
+                        error = %e,
+                        "could not delete threat verdicts for removed labels"
+                    ),
+                }
+            }
+            let added: Vec<String> = new
+                .auto_block_categories
+                .iter()
+                .filter(|label| !old.is_auto_block_category(label))
+                .cloned()
+                .collect();
+            if !added.is_empty() {
+                match self.store.requeue_threats_for_labels(&added) {
+                    Ok(queued) if queued > 0 => tracing::info!(
+                        labels = ?added,
+                        queued,
+                        "re-queued threat verdicts for newly declared threat labels"
+                    ),
+                    Ok(_) => {}
+                    Err(e) => tracing::warn!(
+                        error = %e,
+                        "could not re-queue threat verdicts for newly declared labels"
+                    ),
+                }
+            }
+        }
         self.refresh_snapshot_now();
         self.trigger_rescan();
         restart

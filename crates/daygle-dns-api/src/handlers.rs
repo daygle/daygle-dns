@@ -1492,11 +1492,15 @@ pub async fn ai_status(State(state): State<AppState>) -> Response {
     let counts = run_blocking({
         let ai = ai.clone();
         move || -> daygle_dns_core::error::Result<_> {
-            Ok((ai.store.status_counts()?, ai.blockable_counts()?))
+            Ok((
+                ai.store.status_counts()?,
+                ai.blockable_counts()?,
+                ai.store.threat_verdict_counts()?,
+            ))
         }
     })
     .await;
-    let (statuses, blockable) = match counts {
+    let (statuses, blockable, threat_counts) = match counts {
         Ok(counts) => counts,
         Err(e) => return map_err(e),
     };
@@ -1564,6 +1568,13 @@ pub async fn ai_status(State(state): State<AppState>) -> Response {
         // Domains that qualify for auto-blocking, by category: blocked in
         // enforce mode, what would be blocked in train mode.
         "blockable_counts": blockable,
+        // Stored threat verdicts by label: the number the console warns with
+        // when a save would delete a label's detections.
+        "threat_counts": serde_json::Map::from_iter(
+            threat_counts
+                .into_iter()
+                .map(|(label, count)| (label, serde_json::Value::from(count))),
+        ),
         "snapshot_len": snapshot.len(),
     }))
     .into_response()
@@ -1594,6 +1605,9 @@ pub async fn ai_verdicts(
                 search: query.q.as_deref(),
                 label: query.label.as_deref(),
                 channel: query.channel.as_deref(),
+                // The raw verdict view shows every stored row, whatever label
+                // is ticked now; the threat list is the label-filtered one.
+                threat_labels: None,
             };
             ai.store.list_verdicts_filtered(&filter, page_bounds)
         }
@@ -1636,7 +1650,10 @@ pub async fn ai_verdicts(
 /// highest confidence first: what the threat channel reported, not merely what
 /// blocks. A dedicated `ai.threat_model_path` reports every label its model
 /// produces; with the shared model only the labels in
-/// `ai.auto_block_categories` are reported. Each row carries `blocked`:
+/// `ai.auto_block_categories` are reported, so the list follows that list
+/// live: unticking a label deletes its stored verdicts, so its rows go at
+/// once and a later re-tick does not bring them back - only a fresh
+/// detection reports the domain again. Each row carries `blocked`:
 /// whether the domain is in the *current* block snapshot - detected, in an
 /// auto-block label, at or above the block threshold, undisputed and not
 /// exempt, and only in enforce mode (an empty snapshot in train mode
@@ -1656,6 +1673,17 @@ pub async fn ai_threats(
         limit: per_page,
         offset: (page - 1).saturating_mul(per_page),
     };
+    // The list shows the labels treated as threats right now, read from the
+    // live settings: the operator's edit applies to the list immediately.
+    // A dedicated threat model is a detector in its own right and reports
+    // every label it produces, so its list is not label-filtered.
+    let settings = ai.settings.load();
+    let threat_labels = if settings.dedicated_threat_model() {
+        None
+    } else {
+        Some(settings.auto_block_categories.clone())
+    };
+    drop(settings);
     let listed = run_blocking({
         let ai = ai.clone();
         move || {
@@ -1664,6 +1692,7 @@ pub async fn ai_threats(
                 severity: query.severity.as_deref(),
                 exemption: query.exemption.as_deref(),
                 search: query.q.as_deref(),
+                threat_labels: threat_labels.as_deref(),
                 ..Default::default()
             };
             let listed = ai.store.list_threats_filtered(&filter, page_bounds)?;
