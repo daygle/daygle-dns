@@ -441,7 +441,7 @@
     <div class="spread" style="margin-bottom: 8px; gap: 10px; flex-wrap: wrap">
       <h3 style="margin: 0">Labels Treated as Threats</h3>
       {#if isAdmin && !modelDedicated}
-        <button onclick={saveThreatLabels} disabled={savingLabels}>
+        <button onclick={() => saveThreatLabels()} disabled={savingLabels}>
           {savingLabels ? 'Saving...' : 'Save Labels'}
         </button>
       {/if}
@@ -677,7 +677,7 @@
                   {:else}
                     <IconButton icon="allow" label="Exempt: never let the AI block this domain or its subdomains" onclick={() => setExempt(r.domain, true)} />
                   {/if}
-                  <button class="secondary" style="padding: 2px 8px; font-size: 0.75rem" title="Not a threat: record a correction that stops this detection blocking" onclick={() => (correctionDomain = r.domain)}>Mislabelled</button>
+                  <IconButton icon="tag" label="Mislabelled: not a threat, record a correction that stops this detection blocking" title="Not a threat: record a correction that stops this detection blocking" onclick={() => (correctionDomain = r.domain)} />
                 {/if}
               </td>
             {/if}
