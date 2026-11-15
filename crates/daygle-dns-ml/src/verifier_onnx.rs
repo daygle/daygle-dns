@@ -41,19 +41,38 @@ pub struct MiniLmVerifier {
     /// Which of [`KNOWN_INPUTS`] the model declares, read once at load time
     /// (exports differ on `token_type_ids`).
     inputs: [bool; 3],
-    tokenizer: tokenizers::Tokenizer,
+    tokenizer: tokenizers::pipeline::PipelineTokenizer,
     centroids: Vec<(String, Vec<f32>)>,
 }
 
 /// Reference centroid set: category name -> unit-norm embedding.
 pub(crate) type CentroidMap = BTreeMap<String, Vec<f32>>;
 
-fn load_tokenizer(model_path: &Path) -> Result<tokenizers::Tokenizer> {
+/// Load the BERT pipeline beside the ONNX model.
+///
+/// The shipped `minilm-tokenizer.json` predates the canonical 2.0 layout, and
+/// the 1.x reader accepts only that layout. `canonicalize_str` is idempotent
+/// (it returns canonical input unchanged), so converting in memory keeps the
+/// single shipped artifact readable by both writer versions at the cost of one
+/// extra parse per load.
+fn load_tokenizer(model_path: &Path) -> Result<tokenizers::pipeline::PipelineTokenizer> {
     let tokenizer_path = model_path
         .parent()
         .unwrap_or_else(|| Path::new("."))
         .join(TOKENIZER_FILE);
-    tokenizers::Tokenizer::from_file(&tokenizer_path).map_err(|e| {
+    let raw = std::fs::read_to_string(&tokenizer_path).map_err(|e| {
+        DaygleError::Config(format!(
+            "cannot read MiniLM tokenizer {}: {e}",
+            tokenizer_path.display()
+        ))
+    })?;
+    let canonical = tokenizers::canonicalize_str(&raw).map_err(|e| {
+        DaygleError::Config(format!(
+            "cannot convert MiniLM tokenizer {} to the canonical layout: {e}",
+            tokenizer_path.display()
+        ))
+    })?;
+    tokenizers::from_json(&canonical).map_err(|e| {
         DaygleError::Config(format!(
             "cannot load MiniLM tokenizer {}: {e}",
             tokenizer_path.display()
@@ -131,7 +150,7 @@ fn normalize(mut v: Vec<f32>) -> Option<Vec<f32>> {
 impl MiniLmVerifier {
     fn from_parts(
         session: ort::session::Session,
-        tokenizer: tokenizers::Tokenizer,
+        tokenizer: tokenizers::pipeline::PipelineTokenizer,
         centroids: Vec<(String, Vec<f32>)>,
     ) -> Self {
         let declared: Vec<String> = session
@@ -185,23 +204,42 @@ impl MiniLmVerifier {
     /// Unit-norm 384-d sentence embedding for one input string (also used
     /// by `gen-minilm-centroids`).
     pub fn embed_text(&self, text: &str) -> Result<Vec<f32>> {
-        let encoding = self
+        let handle = self
             .tokenizer
-            .encode(text, true)
+            .encode(text, &tokenizers::pipeline::EncodeOptions::default());
+        // `wait` is what applies the tokenizer's configured padding (128 in
+        // `minilm-tokenizer.json`); iterating the handle skips it. The
+        // padded, fixed-width input is the regime the centroids were built
+        // under, so keep it.
+        let mut encodings = handle
+            .wait()
             .map_err(|e| DaygleError::Internal(format!("MiniLM tokenization failed: {e}")))?;
+        if encodings.is_empty() {
+            return Err(DaygleError::Internal(
+                "MiniLM tokenization produced no encoding".into(),
+            ));
+        }
+        let encoding = encodings.remove(0);
 
-        let ids: Vec<i64> = encoding.get_ids().iter().map(|&v| v as i64).collect();
-        let mask: Vec<i64> = encoding
-            .get_attention_mask()
+        let ids: Vec<i64> = tokenizers::pipeline::PipelineToken::cast_slice(encoding.ids())
             .iter()
             .map(|&v| v as i64)
             .collect();
-        let type_ids: Vec<i64> = encoding.get_type_ids().iter().map(|&v| v as i64).collect();
-        let seq_len = ids.len() as i64;
+        // `None` means "uniform": the mask is all ones and every type id is 0,
+        // which is what the model needs for an unpadded input.
+        let seq_len = ids.len();
+        let mask: Vec<i64> = match encoding.attention_mask() {
+            Some(mask) => mask.iter().map(|&v| v as i64).collect(),
+            None => vec![1; seq_len],
+        };
+        let type_ids: Vec<i64> = match encoding.type_ids() {
+            Some(type_ids) => type_ids.iter().map(|&v| v as i64).collect(),
+            None => vec![0; seq_len],
+        };
         if seq_len == 0 {
             return Ok(Vec::new());
         }
-        let shape = vec![1, seq_len];
+        let shape = vec![1, seq_len as i64];
 
         // A `Tensor<i64>` *is* a `Value` in ort rc.14; sessions accept them
         // directly in the input map. Tensors are built before the session
