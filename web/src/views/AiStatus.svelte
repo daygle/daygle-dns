@@ -541,7 +541,7 @@
       once. A dedicated threat model is maintained the same way, and the
       verifier's reference is refreshed from your corrections (never from
       the AI's own verdicts, so it stays an independent second opinion).
-      With Install New Shipped Models on, new reference models arrive through
+      With Install New Shipped Models on (the default), new reference models arrive through
       the updater, which checks them against held-out threats too. With Learn
       "Not a Threat" on, your not-a-threat marks become a benign label - a
       negative class can over-generalise, which the trial checks for.

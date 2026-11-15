@@ -541,7 +541,7 @@ noc@example.com`),N(D),N(u);var k=V(u,4),A=R(k),j=B(A,!0),M=V(A,2),ee=e=>{var t=
       once. A dedicated threat model is maintained the same way, and the
       verifier's reference is refreshed from your corrections (never from
       the AI's own verdicts, so it stays an independent second opinion).
-      With Install New Shipped Models on, new reference models arrive through
+      With Install New Shipped Models on (the default), new reference models arrive through
       the updater, which checks them against held-out threats too. With Learn
       "Not a Threat" on, your not-a-threat marks become a benign label - a
       negative class can over-generalise, which the trial checks for.</p> <!> <!> <!></div> <div class="card" style="margin-top: 14px"><div class="spread" style="margin-bottom: 8px; gap: 10px; flex-wrap: wrap"><h3 style="margin: 0">Page Content</h3> <!></div> <p class="muted help" style="margin: 0 0 10px"> </p></div> <div class="card" style="margin-top: 14px"><h3 style="margin: 0 0 10px">AI Models</h3> <p class="muted help" style="margin: 0 0 10px">The bundled classifier and verifier files. Updating downloads the

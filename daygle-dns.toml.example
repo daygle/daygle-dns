@@ -630,8 +630,8 @@ auto_block_categories = ["malware", "phishing", "scam"]
 # traffic, your corrections and independently confirmed labels; a rejected
 # one pauses retraining and raises an alert ([alerts] ai_model). A dedicated
 # threat_model_path is maintained the same way, and the verifier's reference
-# is refreshed from your corrections. Pair it with
-# [updates] auto_refresh_models = true to receive new shipped models too.
+# is refreshed from your corrections. New shipped models arrive too:
+# [updates] auto_refresh_models is on by default.
 # trial_new_models = true
 
 # Learn from "not a threat" corrections: a retrain trains them as a `benign`

@@ -1785,8 +1785,9 @@ Three things keep the self-maintained model honest without an operator:
   `daygle-starter.bin`; a retrain reads the corpus from the configured
   model's directory when present (else the copy built into the binary), so
   it always matches the reference model. `[updates] auto_refresh_models`
-  (reported as `auto_refresh_models` in `GET /api/ai/status`) installs new
-  bundles automatically, behind the same held-out threat comparison.
+  (on by default, also when an `[updates]` section omits it; reported as
+  `auto_refresh_models` in `GET /api/ai/status`) installs new bundles
+  automatically, behind the same held-out threat comparison.
 
 Each accepted retrain keeps the model it replaced as `learned.prev.bin`
 (`learned.prev.json` for its stats), and `POST /api/ai/rollback` puts it back in

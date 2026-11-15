@@ -549,6 +549,8 @@ pub struct AlertSettings {
     pub ai_model: bool,
 }
 
+/// `true` for fields whose default is on: a field-level serde default
+/// otherwise reads a missing key as `false`, overriding the struct default.
 fn default_true_alert() -> bool {
     true
 }
@@ -1193,8 +1195,10 @@ pub struct UpdateCheckSettings {
     /// with the release that ships them, so a fix or retrained model reaches
     /// every install without an operator pressing the button. The comparison
     /// is by content hash, so a release that ships unchanged models causes
-    /// no run and no restart.
-    #[serde(default)]
+    /// no run and no restart. An `[updates]` section that does not name the
+    /// key (any config saved before it existed) gets the default too, not
+    /// "off".
+    #[serde(default = "default_true_alert")]
     pub auto_refresh_models: bool,
     /// Automatically install stable binary releases at `auto_install_hour`.
     /// Opt-in because installing a release restarts the DNS service.
@@ -6058,9 +6062,15 @@ mod tests {
         .unwrap();
         assert!(!cfg.updates.enabled);
         assert_eq!(cfg.updates.check_interval_secs, 86400);
+        assert!(
+            cfg.updates.auto_refresh_models,
+            "a section that does not name the key keeps the default: on"
+        );
         assert!(cfg.updates.auto_install);
         assert_eq!(cfg.updates.auto_install_hour, 4);
         assert!(DaygleConfig::parse("[updates]\nnope = 1\n").is_err());
+        let off = DaygleConfig::parse("[updates]\nauto_refresh_models = false\n").unwrap();
+        assert!(!off.updates.auto_refresh_models, "an explicit off is kept");
         // The interval floor applies only while checks are enabled.
         let mut cfg = DaygleConfig::parse("").unwrap();
         cfg.updates.check_interval_secs = 60;
