@@ -2203,6 +2203,7 @@ pub async fn ai_retrain(State(state): State<AppState>) -> Response {
                 "corrections": stats.corrections,
                 "verdicts": stats.verdicts,
                 "negatives": stats.negatives,
+                "starter": stats.starter,
                 "validation_examples": validation,
                 "threat_validation_examples": threat_validation,
                 "active": true,

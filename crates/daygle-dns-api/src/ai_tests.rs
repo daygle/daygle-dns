@@ -212,6 +212,13 @@ async fn threat_export_and_corrections_are_served_as_csv() {
         )
         .unwrap();
 
+    // The export is what blocks, so the hostile label has to be one the
+    // scanner treats as a threat for the row to reach the CSV at all.
+    let mut cfg = (*ai.settings.load_full()).clone();
+    cfg.auto_block_categories
+        .push("=cmd|' /C calc'!A0".to_string());
+    ai.settings.store(std::sync::Arc::new(cfg));
+
     let state = AppState::for_tests(Some(ai.clone()));
     let (status, headers, body) = call(
         state.clone(),
@@ -457,7 +464,11 @@ async fn retrain_and_rollback_succeed_over_http() {
     let (status, _, body) = call(state.clone(), "POST", "/api/ai/retrain", None).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     let retrained: serde_json::Value = serde_json::from_str(&body).unwrap();
-    assert_eq!(retrained["examples"], 240, "{body}");
+    assert_eq!(retrained["verdicts"], 240, "{body}");
+    assert!(
+        retrained["starter"].as_u64().unwrap() > 0,
+        "the starter corpus rides along: {body}"
+    );
     assert_eq!(retrained["active"], true);
     // No corrections were held back, and the response says so.
     assert_eq!(retrained["validation_examples"], 0, "{body}");
@@ -477,14 +488,14 @@ async fn retrain_and_rollback_succeed_over_http() {
     assert_eq!(status, StatusCode::OK, "{body}");
     let status_body = json(state.clone(), "/api/ai/status").await;
     assert_eq!(status_body["learned_model"]["previous"], true);
-    assert_eq!(status_body["learned_model"]["last"]["examples"], 243);
+    assert_eq!(status_body["learned_model"]["last"]["verdicts"], 243);
 
     let (status, _, body) = call(state.clone(), "POST", "/api/ai/rollback", None).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert!(body.contains("previous model is in use"), "{body}");
     let status_body = json(state, "/api/ai/status").await;
     assert_eq!(
-        status_body["learned_model"]["last"]["examples"], 240,
+        status_body["learned_model"]["last"]["verdicts"], 240,
         "the restored model's record comes back with it"
     );
     let _ = std::fs::remove_dir_all(&dir);
