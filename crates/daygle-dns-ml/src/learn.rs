@@ -18,10 +18,15 @@
 //! capped so it cannot come to dominate the corpus. `allow` corrections stay
 //! out: allowing a domain says "let it through", not "it is harmless".
 //!
-//! A candidate is judged before it can replace anything: every fifth correction
-//! is held back from training, and the candidate must not score worse on those
-//! held-out labels than the model currently in use. Once accepted, the engine
-//! loads it into the running channels - no restart.
+//! A retrain starts from the shipped starter corpus, so labels this network
+//! has not produced recently are not forgotten, and layers the network's own
+//! material on top. A candidate is judged before it can replace anything:
+//! about one correction in five (chosen by a hash of the domain, so the same
+//! ones stay held back from run to run) is kept out of training, the
+//! candidate must not score worse on those held-out labels than the model in
+//! use, and it must still be able to emit every threat label the model in use
+//! can. Once accepted - by a scheduled run or by hand - it is loaded into the
+//! running channels at once; no restart.
 //!
 //! The model is written beside `ai.db` as `learned.bin` and preferred over
 //! `ai.model_path` from then on, unless a channel names its own model or the
@@ -61,8 +66,17 @@ const MIN_ACCURACY: f32 = 0.5;
 /// before it is rejected: small differences are noise, a real regression is
 /// not.
 const VALIDATION_SLACK: f32 = 0.02;
-/// Every fifth correction is held back for validation, once there are enough.
+/// About one correction in this many is held back for validation, once there
+/// are enough.
 const HOLDOUT_EVERY: usize = 5;
+/// The labelled corpus the shipped starter model was trained from. Every
+/// retrain includes it, so a label this network has not produced lately is
+/// kept rather than silently dropped from the model.
+const STARTER_CORPUS: &str = include_str!("../../../models/starter-training.txt");
+/// A held-out threat family may take at most this share of the threat
+/// verdicts out of training, so one sprawling word family cannot starve the
+/// threat labels of examples.
+const MAX_HELD_SHARE: usize = 4;
 
 /// What one collection pass produced.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -76,6 +90,16 @@ pub struct TrainingStats {
     /// `not_threat` corrections trained as [`BENIGN_LABEL`] (0 unless
     /// `ai.learn_negatives` is on).
     pub negatives: usize,
+    /// Examples from the shipped starter corpus that keep known labels alive.
+    pub starter: usize,
+}
+
+impl TrainingStats {
+    /// Examples this install contributed: what decides whether a retrain is
+    /// worth running at all.
+    pub fn local(&self) -> usize {
+        self.corrections + self.verdicts + self.negatives
+    }
 }
 
 /// The training set plus the labels held back to judge the result.
@@ -111,14 +135,29 @@ fn previous_stats_path(learned: &Path) -> PathBuf {
 }
 
 /// The training set and its held-out slice: corrections first, then confident
-/// verdicts.
+/// verdicts, then the starter corpus. One domain contributes one label: the
+/// newest correction wins, then the strongest verdict, then the corpus.
 pub fn collect_dataset(store: &AiStore, settings: &AiSettings) -> Result<Dataset> {
+    collect_dataset_with(store, settings, None)
+}
+
+/// [`collect_dataset`], keeping only starter examples whose label is in
+/// `known` (the labels of the model in use) when that is given, so a custom
+/// model's label space is not widened by the starter's.
+pub fn collect_dataset_with(
+    store: &AiStore,
+    settings: &AiSettings,
+    known: Option<&HashSet<String>>,
+) -> Result<Dataset> {
     let now = chrono::Utc::now().timestamp();
     let mut pairs: Vec<(String, String)> = Vec::new();
     let mut validation: Vec<(String, String)> = Vec::new();
     let mut labels: BTreeMap<String, usize> = BTreeMap::new();
     let mut seen: HashSet<(String, String)> = HashSet::new();
     let mut corrected: HashSet<String> = HashSet::new();
+    // Domains that already carry a label: one domain, one label, so a
+    // single-label model is never trained on a contradiction.
+    let mut labelled: HashSet<String> = HashSet::new();
     let mut stats = TrainingStats::default();
 
     // Operator labels, oldest-filed last: deterministic enough, and the
@@ -134,10 +173,15 @@ pub fn collect_dataset(store: &AiStore, settings: &AiSettings) -> Result<Dataset
         if !looks_like_domain(&domain) {
             continue;
         }
+        // Newest first: a later correction for the same domain supersedes
+        // an older one (a relabel after a "not a threat", or the reverse).
+        let superseded = corrected.contains(&domain);
         match correction.action.as_str() {
             "category" if !label.is_empty() => {
                 corrected.insert(domain.clone());
-                corrections.push((label, domain));
+                if !superseded {
+                    corrections.push((label, domain));
+                }
             }
             // The operator denied the machine label, so it must not train the
             // model either - whether or not the negation itself is learned.
@@ -147,17 +191,21 @@ pub fn collect_dataset(store: &AiStore, settings: &AiSettings) -> Result<Dataset
             // pair trains `benign`.
             "not_threat" => {
                 corrected.insert(domain.clone());
-                if settings.learn_negatives {
+                if settings.learn_negatives && !superseded {
                     corrections.push((BENIGN_LABEL.to_string(), domain));
                 }
             }
             _ => {}
         }
     }
+    // Held out by a hash of the domain, not by position: a new correction
+    // must not reshuffle the held-out set, or the model in use - trained on
+    // most of the new set last time - would be judged on its own training data.
     let hold_out = corrections.len() >= HOLDOUT_EVERY;
     let mut negatives = 0usize;
-    for (index, (label, domain)) in corrections.into_iter().enumerate() {
-        if hold_out && index % HOLDOUT_EVERY == HOLDOUT_EVERY - 1 {
+    for (label, domain) in corrections {
+        labelled.insert(domain.clone());
+        if hold_out && hash_selected(&domain) {
             validation.push((label, domain));
             continue;
         }
@@ -187,6 +235,11 @@ pub fn collect_dataset(store: &AiStore, settings: &AiSettings) -> Result<Dataset
         // A corrected domain never contributes its machine label, whether the
         // correction is training data or held-out validation.
         if label.is_empty() || corrected.contains(&domain) || !looks_like_domain(&domain) {
+            continue;
+        }
+        // Strongest verdict first: a domain with verdicts on both channels
+        // trains the stronger label only.
+        if !labelled.insert(domain.clone()) {
             continue;
         }
         // With a benign class in the training set, whole word families stay
@@ -245,6 +298,22 @@ pub fn collect_dataset(store: &AiStore, settings: &AiSettings) -> Result<Dataset
         threat_validation = spread_by_family(held_pairs, MAX_PROBE);
     }
 
+    // The starter corpus last: it fills in labels the network has not
+    // produced, never outweighs or contradicts local material, and never
+    // re-teaches a label for a domain the operator corrected.
+    for (label, domain) in starter_pairs() {
+        if known.is_some_and(|known| !known.contains(&label)) {
+            continue;
+        }
+        if label == BENIGN_LABEL || labelled.contains(&domain) || corrected.contains(&domain) {
+            continue;
+        }
+        if push(&mut pairs, &mut labels, &mut seen, &label, &domain) {
+            labelled.insert(domain);
+            stats.starter += 1;
+        }
+    }
+
     stats.examples = pairs.len();
     stats.labels = labels.len();
     Ok(Dataset {
@@ -266,6 +335,66 @@ pub fn collect(
     pairs.extend(dataset.validation.iter().cloned());
     pairs.extend(dataset.threat_validation.iter().cloned());
     Ok((pairs, dataset.stats))
+}
+
+/// `(label, domain)` pairs from the shipped starter corpus.
+pub fn starter_pairs() -> Vec<(String, String)> {
+    STARTER_CORPUS
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            let rest = line.strip_prefix("__label__")?;
+            let (label, domain) = rest.split_once(char::is_whitespace)?;
+            let label = label.trim().to_ascii_lowercase();
+            let domain = domain.trim().trim_matches('.').to_ascii_lowercase();
+            (!label.is_empty() && looks_like_domain(&domain)).then_some((label, domain))
+        })
+        .collect()
+}
+
+/// The labels a fastText model at `model` can emit, or `None` when the file
+/// is not a loadable fastText model (no model, the heuristic backend).
+pub fn model_labels(model: &Path) -> Option<HashSet<String>> {
+    if !model.is_file() {
+        return None;
+    }
+    let loaded = fasttext::FastText::load_model(model).ok()?;
+    Some(
+        loaded
+            .get_labels()
+            .0
+            .iter()
+            .filter_map(|label| label.strip_prefix("__label__"))
+            .map(str::to_ascii_lowercase)
+            .filter(|label| !label.is_empty())
+            .collect(),
+    )
+}
+
+/// Refuse a candidate that cannot emit a threat label the model in use can:
+/// a detector that has forgotten `malware` will never report it again, and
+/// no held-out score notices a label that never comes up.
+fn refuse_forgotten_threats(
+    settings: &AiSettings,
+    current: Option<&HashSet<String>>,
+    candidate: &HashSet<String>,
+) -> Result<()> {
+    let Some(current) = current else {
+        return Ok(());
+    };
+    let mut missing: Vec<&str> = current
+        .iter()
+        .filter(|label| settings.is_auto_block_category(label) && !candidate.contains(*label))
+        .map(String::as_str)
+        .collect();
+    if missing.is_empty() {
+        return Ok(());
+    }
+    missing.sort_unstable();
+    Err(DaygleError::Config(format!(
+        "the retrained model can no longer report the threat label(s) {}, so the current model was kept",
+        missing.join(", ")
+    )))
 }
 
 fn push(
@@ -327,12 +456,18 @@ pub fn train(pairs: &[(String, String)], out: &Path) -> Result<()> {
     args.seed = 42;
     args.verbose = 0;
 
-    let model = fasttext::FastText::train(args)
-        .map_err(|e| DaygleError::Config(format!("model training failed: {e:?}")))?;
-    model
-        .save_model(out)
-        .map_err(|e| DaygleError::Config(format!("model save failed: {e:?}")))?;
+    let trained = fasttext::FastText::train(args)
+        .map_err(|e| DaygleError::Config(format!("model training failed: {e:?}")))
+        .and_then(|model| {
+            model
+                .save_model(out)
+                .map_err(|e| DaygleError::Config(format!("model save failed: {e:?}")))
+        });
     let _ = std::fs::remove_file(&corpus);
+    trained?;
+    // The file is renamed into place next; make sure its bytes reach the
+    // disk first, so a power cut cannot leave a truncated model behind.
+    std::fs::File::open(out).and_then(|file| file.sync_all())?;
     Ok(())
 }
 
@@ -477,15 +612,25 @@ fn token_components(domains: &[String]) -> Vec<(String, Vec<usize>)> {
 
 /// Pick whole components; force one when the hash lands nowhere, and keep at
 /// least one for training. A corpus with a single component has no disjoint
-/// split, so the caller falls back to individual names.
+/// split, so the caller falls back to individual names. Real names chain
+/// through common words ("login", "secure", "app") into one sprawling
+/// component, so no component larger than a quarter of the names is held
+/// out, and the held-out total stops at that share too: the threat labels
+/// always keep most of their examples.
 fn selected_components(components: &[(String, Vec<usize>)]) -> std::collections::BTreeSet<String> {
-    let mut selected: std::collections::BTreeSet<String> = components
-        .iter()
-        .filter(|(key, _)| hash_selected(key))
-        .map(|(key, _)| key.clone())
-        .collect();
+    let total: usize = components.iter().map(|(_, members)| members.len()).sum();
+    let budget = (total / MAX_HELD_SHARE).max(1);
+    let fits = |members: &Vec<usize>| members.len() <= budget;
+    let mut selected = std::collections::BTreeSet::new();
+    let mut held = 0usize;
+    for (key, members) in components {
+        if hash_selected(key) && fits(members) && held + members.len() <= budget {
+            held += members.len();
+            selected.insert(key.clone());
+        }
+    }
     if selected.is_empty() && components.len() > 1 {
-        if let Some((first, _)) = components.first() {
+        if let Some((first, _)) = components.iter().find(|(_, members)| fits(members)) {
             selected.insert(first.clone());
         }
     }
@@ -723,6 +868,11 @@ fn variants(domain: &str) -> Vec<String> {
     out.into_iter().collect()
 }
 
+/// Loads an accepted model file into the running channels. Set by the engine,
+/// so every way a model is accepted - a scheduled retrain, a manual one or a
+/// rollback - goes live the same way.
+pub type Installer = Box<dyn Fn(&Path) -> Result<()> + Send + Sync>;
+
 /// Retrains the classifier from the store, judged against the model in use so
 /// a bad run can never replace a working one.
 pub struct Retrainer {
@@ -734,6 +884,10 @@ pub struct Retrainer {
     /// has to match on held-out labels.
     current_model: Arc<ArcSwap<String>>,
     last_attempt: std::sync::Mutex<Option<i64>>,
+    /// One retrain or rollback at a time: they share the temp file and
+    /// rotate the same model files.
+    running: std::sync::Mutex<()>,
+    installer: std::sync::OnceLock<Installer>,
 }
 
 impl Retrainer {
@@ -751,7 +905,16 @@ impl Retrainer {
             learned,
             current_model,
             last_attempt: std::sync::Mutex::new(None),
+            running: std::sync::Mutex::new(()),
+            installer: std::sync::OnceLock::new(),
         }
+    }
+
+    /// Hand the retrainer the step that loads an accepted model into the
+    /// running channels. Without one (tests of the files alone) an accepted
+    /// model is only written to disk.
+    pub fn set_installer(&self, installer: Installer) {
+        let _ = self.installer.set(installer);
     }
 
     /// The model file this retrainer maintains.
@@ -759,20 +922,33 @@ impl Retrainer {
         &self.learned
     }
 
+    fn install(&self) -> Result<()> {
+        match self.installer.get() {
+            Some(install) => install(&self.learned),
+            None => Ok(()),
+        }
+    }
+
     /// Retrain now. A rejected or failed run leaves the model in use
-    /// untouched.
+    /// untouched; an accepted one is in use when this returns.
     pub fn retrain(&self) -> Result<TrainingStats> {
+        let _running = self.running.lock().unwrap_or_else(|e| e.into_inner());
         let settings = self.settings.load_full();
+        let current_path = self.current_model.load_full().to_string();
+        let current_model = (!current_path.trim().is_empty()).then(|| PathBuf::from(&current_path));
+        let current_labels = current_model.as_deref().and_then(model_labels);
         let Dataset {
             pairs,
             validation,
             threat_validation,
             stats,
-        } = collect_dataset(&self.store, &settings)?;
-        if pairs.len() < MIN_EXAMPLES || stats.labels < MIN_LABELS {
+        } = collect_dataset_with(&self.store, &settings, current_labels.as_ref())?;
+        // The starter corpus is always there, so what decides whether a
+        // retrain is worth running is what this network contributed.
+        if stats.local() < MIN_EXAMPLES || stats.labels < MIN_LABELS {
             return Err(DaygleError::Config(format!(
                 "not enough training data yet: {} examples across {} labels (a retrain needs {} and {})",
-                pairs.len(),
+                stats.local(),
                 stats.labels,
                 MIN_EXAMPLES,
                 MIN_LABELS
@@ -780,137 +956,46 @@ impl Retrainer {
         }
 
         let temp = self.learned.with_extension("tmp");
-        train(&pairs, &temp)?;
-        let train_accuracy = match probe_accuracy(&temp, &pairs) {
-            Ok(accuracy) => accuracy,
+        let outcome = self.judge(
+            &settings,
+            &temp,
+            &pairs,
+            &validation,
+            &threat_validation,
+            current_model.as_deref(),
+            current_labels.as_ref(),
+        );
+        let (train_accuracy, validation_accuracy) = match outcome {
+            Ok(scores) => scores,
             Err(e) => {
                 let _ = std::fs::remove_file(&temp);
                 return Err(e);
             }
         };
 
-        // The gate: judge the candidate on labels it never saw, against the
-        // model that is actually classifying right now.
-        let mut validation_accuracy = None;
-        if validation.is_empty() {
-            if train_accuracy < MIN_ACCURACY {
-                let _ = std::fs::remove_file(&temp);
-                return Err(DaygleError::Config(format!(
-                    "the retrained model reproduced only {:.0}% of its own training data, so the current model was kept",
-                    train_accuracy * 100.0
-                )));
-            }
-        } else {
-            let candidate = match probe_accuracy(&temp, &validation) {
-                Ok(accuracy) => accuracy,
-                Err(e) => {
-                    let _ = std::fs::remove_file(&temp);
-                    return Err(e);
-                }
-            };
-            let current_path = self.current_model.load_full().to_string();
-            let baseline = if current_path.trim().is_empty() {
-                None
-            } else {
-                probe_accuracy(Path::new(&current_path), &validation).ok()
-            };
-            if candidate < MIN_ACCURACY {
-                let _ = std::fs::remove_file(&temp);
-                return Err(DaygleError::Config(format!(
-                    "the retrained model scored {:.0}% on {} held-out corrections, so the current model was kept",
-                    candidate * 100.0,
-                    validation.len()
-                )));
-            }
-            if let Some(baseline) = baseline {
-                if candidate + VALIDATION_SLACK < baseline {
-                    let _ = std::fs::remove_file(&temp);
-                    return Err(DaygleError::Config(format!(
-                        "the retrained model scored {:.0}% on {} held-out corrections against {:.0}% for the model in use, so the current model was kept",
-                        candidate * 100.0,
-                        validation.len(),
-                        baseline * 100.0
-                    )));
-                }
-            }
-            validation_accuracy = Some(candidate);
-        }
-
-        // The negative class gets its own gate: however well the candidate
-        // scores overall, it may not stop reading a held-out threat as a
-        // threat. `benign` is one way; any non-blocking label is another.
-        if !threat_validation.is_empty() {
-            let probe: Vec<(String, String)> = threat_validation
-                .iter()
-                .map(|(label, domain)| (label.clone(), held_out_variant(domain)))
-                .collect();
-            let predicted = match predict_all(&temp, &probe) {
-                Ok(predicted) => predicted,
-                Err(e) => {
-                    let _ = std::fs::remove_file(&temp);
-                    return Err(e);
-                }
-            };
-            let is_threat_label = |label: &str| {
-                settings.dedicated_threat_model() || settings.is_auto_block_category(label)
-            };
-            let (mut benign, mut downgraded, mut checked) = (0usize, 0usize, 0usize);
-            for ((label, _), got) in probe.iter().zip(&predicted) {
-                // A verdict whose own label no longer blocks was not a threat
-                // to preserve; only the labels the channel would block count.
-                if !is_threat_label(label) {
-                    continue;
-                }
-                checked += 1;
-                if got == BENIGN_LABEL {
-                    benign += 1;
-                } else if !is_threat_label(got) {
-                    downgraded += 1;
-                }
-            }
-            // The current model is judged on the same novel names, so a
-            // candidate is refused only for losing detections it would have
-            // kept, not for a family it was never given.
-            let current_path = self.current_model.load_full().to_string();
-            let baseline_lost = if current_path.trim().is_empty() {
-                0
-            } else {
-                match predict_all(Path::new(&current_path), &probe) {
-                    Ok(baseline) => baseline
-                        .iter()
-                        .zip(&probe)
-                        .filter(|(got, (label, _))| {
-                            is_threat_label(label) && *got != BENIGN_LABEL && !is_threat_label(got)
-                        })
-                        .count(),
-                    Err(_) => 0,
-                }
-            };
-            if let Err(e) = refuse_lost_threats(checked, benign, downgraded, baseline_lost) {
-                let _ = std::fs::remove_file(&temp);
-                return Err(e);
-            }
-        }
         // Rotate first, so a rollback always has somewhere to go. A failure
         // here restores the previous model rather than leaving none.
         let previous = previous_model_path(&self.learned);
-        if self.learned.is_file() {
+        let had_learned = self.learned.is_file();
+        if had_learned {
             if let Err(e) = std::fs::rename(&self.learned, &previous) {
                 let _ = std::fs::remove_file(&temp);
                 return Err(DaygleError::Io(e));
             }
-            let current_stats = stats_path(&self.learned);
-            if current_stats.is_file() {
-                let _ = std::fs::rename(&current_stats, previous_stats_path(&self.learned));
-            }
+            swap_stats(&self.learned, StatsMove::CurrentToPrevious);
         }
         if let Err(e) = std::fs::rename(&temp, &self.learned) {
             // Put the old model back: a retrain must never leave the scanner
             // without the model it had.
-            if previous.is_file() {
-                let _ = std::fs::rename(&previous, &self.learned);
-            }
+            self.restore_after_failed_rotation(had_learned);
             return Err(DaygleError::Io(e));
+        }
+        if let Err(e) = self.install() {
+            let _ = std::fs::remove_file(&self.learned);
+            self.restore_after_failed_rotation(had_learned);
+            return Err(DaygleError::Config(format!(
+                "the retrained model could not be loaded, so the current model was kept: {e}"
+            )));
         }
 
         let record = serde_json::json!({
@@ -920,6 +1005,7 @@ impl Retrainer {
             "corrections": stats.corrections,
             "verdicts": stats.verdicts,
             "negatives": stats.negatives,
+            "starter": stats.starter,
             "train_accuracy": (train_accuracy * 100.0).round() / 100.0,
             "validation_examples": validation.len(),
             "validation_accuracy": validation_accuracy
@@ -954,11 +1040,118 @@ impl Retrainer {
             LogLevel::Info,
             "ai",
             format!(
-                "AI retrained its classifier from {} examples across {} labels ({} from your corrections{judged})",
-                stats.examples, stats.labels, stats.corrections
+                "AI retrained its classifier from {} examples across {} labels ({} from your corrections, {} from the starter corpus{judged}); it is in use now",
+                stats.examples, stats.labels, stats.corrections, stats.starter
             ),
         );
         Ok(stats)
+    }
+
+    /// Put the model files back the way they were before a rotation.
+    fn restore_after_failed_rotation(&self, had_learned: bool) {
+        let previous = previous_model_path(&self.learned);
+        if had_learned && previous.is_file() {
+            let _ = std::fs::rename(&previous, &self.learned);
+            swap_stats(&self.learned, StatsMove::PreviousToCurrent);
+        }
+    }
+
+    /// Train a candidate into `temp` and run every gate on it. Returns the
+    /// training accuracy and, when corrections were held back, the held-out
+    /// accuracy.
+    #[allow(clippy::too_many_arguments)]
+    fn judge(
+        &self,
+        settings: &AiSettings,
+        temp: &Path,
+        pairs: &[(String, String)],
+        validation: &[(String, String)],
+        threat_validation: &[(String, String)],
+        current_model: Option<&Path>,
+        current_labels: Option<&HashSet<String>>,
+    ) -> Result<(f32, Option<f32>)> {
+        train(pairs, temp)?;
+        let train_accuracy = probe_accuracy(temp, pairs)?;
+
+        // A candidate that forgot a threat label can never report it again.
+        let candidate_labels = model_labels(temp).unwrap_or_default();
+        refuse_forgotten_threats(settings, current_labels, &candidate_labels)?;
+
+        // The gate: judge the candidate on labels it never saw, against the
+        // model that is actually classifying right now.
+        let mut validation_accuracy = None;
+        if validation.is_empty() {
+            if train_accuracy < MIN_ACCURACY {
+                return Err(DaygleError::Config(format!(
+                    "the retrained model reproduced only {:.0}% of its own training data, so the current model was kept",
+                    train_accuracy * 100.0
+                )));
+            }
+        } else {
+            let candidate = probe_accuracy(temp, validation)?;
+            let baseline = current_model.and_then(|model| probe_accuracy(model, validation).ok());
+            if candidate < MIN_ACCURACY {
+                return Err(DaygleError::Config(format!(
+                    "the retrained model scored {:.0}% on {} held-out corrections, so the current model was kept",
+                    candidate * 100.0,
+                    validation.len()
+                )));
+            }
+            if let Some(baseline) = baseline {
+                if candidate + VALIDATION_SLACK < baseline {
+                    return Err(DaygleError::Config(format!(
+                        "the retrained model scored {:.0}% on {} held-out corrections against {:.0}% for the model in use, so the current model was kept",
+                        candidate * 100.0,
+                        validation.len(),
+                        baseline * 100.0
+                    )));
+                }
+            }
+            validation_accuracy = Some(candidate);
+        }
+
+        // The negative class gets its own gate: however well the candidate
+        // scores overall, it may not stop reading a held-out threat as a
+        // threat. `benign` is one way; any non-blocking label is another.
+        if !threat_validation.is_empty() {
+            let probe: Vec<(String, String)> = threat_validation
+                .iter()
+                .map(|(label, domain)| (label.clone(), held_out_variant(domain)))
+                .collect();
+            let predicted = predict_all(temp, &probe)?;
+            let is_threat_label = |label: &str| {
+                settings.dedicated_threat_model() || settings.is_auto_block_category(label)
+            };
+            let (mut benign, mut downgraded, mut checked) = (0usize, 0usize, 0usize);
+            for ((label, _), got) in probe.iter().zip(&predicted) {
+                // A verdict whose own label no longer blocks was not a threat
+                // to preserve; only the labels the channel would block count.
+                if !is_threat_label(label) {
+                    continue;
+                }
+                checked += 1;
+                if got == BENIGN_LABEL {
+                    benign += 1;
+                } else if !is_threat_label(got) {
+                    downgraded += 1;
+                }
+            }
+            // The current model is judged on the same novel names, so a
+            // candidate is refused only for losing detections it would have
+            // kept, not for a family it was never given.
+            let baseline_lost = match current_model.map(|model| predict_all(model, &probe)) {
+                Some(Ok(baseline)) => baseline
+                    .iter()
+                    .zip(&probe)
+                    .filter(|(got, (label, _))| {
+                        is_threat_label(label) && (*got == BENIGN_LABEL || !is_threat_label(got))
+                    })
+                    .count(),
+                _ => 0,
+            };
+            refuse_lost_threats(checked, benign, downgraded, baseline_lost)?;
+        }
+        Ok((train_accuracy, validation_accuracy))
     }
 
     /// Whether a previous model is kept and can be restored.
@@ -966,34 +1159,54 @@ impl Retrainer {
         previous_model_path(&self.learned).is_file()
     }
 
-    /// Swap the previous model back in for the current one. Both files are
-    /// kept, so this is itself reversible.
+    /// Swap the previous model back in for the current one and load it.
+    /// Both files are kept, so this is itself reversible.
     pub fn rollback(&self) -> Result<()> {
+        let _running = self.running.lock().unwrap_or_else(|e| e.into_inner());
         let previous = previous_model_path(&self.learned);
         if !previous.is_file() {
             return Err(DaygleError::Config(
                 "there is no previous model to restore".to_string(),
             ));
         }
-        let current = self.learned.with_extension("rolled-back.bin");
-        std::fs::rename(&self.learned, &current)?;
-        if let Err(e) = std::fs::rename(&previous, &self.learned) {
-            let _ = std::fs::rename(&current, &self.learned);
-            return Err(DaygleError::Io(e));
-        }
-        std::fs::rename(&current, &previous)?;
-        // Swap the stats with the model, so a second rollback restores the
-        // record that belongs to the model it restores.
-        let current_stats = stats_path(&self.learned);
-        let previous_stats = previous_stats_path(&self.learned);
-        if previous_stats.is_file() {
-            let staged = self.learned.with_extension("rolled-back.json");
-            let _ = std::fs::rename(&current_stats, &staged);
-            let _ = std::fs::rename(&previous_stats, &current_stats);
-            let _ = std::fs::rename(&staged, &previous_stats);
+        self.swap_with_previous()?;
+        if let Err(e) = self.install() {
+            // Leave the files as they were: the model in use stays in use.
+            if let Err(undo) = self.swap_with_previous() {
+                self.logs.push(
+                    LogLevel::Warn,
+                    "ai",
+                    format!("could not undo a failed model restore: {undo}"),
+                );
+            }
+            return Err(DaygleError::Config(format!(
+                "the previous model could not be loaded, so the current model was kept: {e}"
+            )));
         }
         self.logs
             .push(LogLevel::Info, "ai", "restored the previous classifier");
+        Ok(())
+    }
+
+    /// Exchange `learned.bin` and `learned.prev.bin`, and their records.
+    fn swap_with_previous(&self) -> Result<()> {
+        let previous = previous_model_path(&self.learned);
+        let staged = self.learned.with_extension("rolled-back.bin");
+        std::fs::rename(&self.learned, &staged)?;
+        if let Err(e) = std::fs::rename(&previous, &self.learned) {
+            let _ = std::fs::rename(&staged, &self.learned);
+            return Err(DaygleError::Io(e));
+        }
+        if let Err(e) = std::fs::rename(&staged, &previous) {
+            // The restored model is in place; the replaced one is still on
+            // disk under its staging name, so say where.
+            self.logs.push(
+                LogLevel::Warn,
+                "ai",
+                format!("the replaced model was left at {}: {e}", staged.display()),
+            );
+        }
+        swap_stats(&self.learned, StatsMove::Exchange);
         Ok(())
     }
 
@@ -1009,6 +1222,11 @@ impl Retrainer {
         let interval = settings.retrain_interval_secs.max(3_600) as i64;
         {
             let mut last = self.last_attempt.lock().unwrap_or_else(|e| e.into_inner());
+            // The first attempt after a start waits for the last recorded
+            // retrain's interval, so restarts do not each cost a retrain.
+            if last.is_none() {
+                *last = self.last_trained_at();
+            }
             if let Some(at) = *last {
                 if now - at < interval {
                     return None;
@@ -1024,6 +1242,50 @@ impl Retrainer {
                 .push(LogLevel::Info, "ai", format!("AI retrain skipped: {e}"));
         }
         Some(outcome)
+    }
+
+    /// When the model in place was trained, from its record.
+    fn last_trained_at(&self) -> Option<i64> {
+        let raw = std::fs::read(stats_path(&self.learned)).ok()?;
+        let record: serde_json::Value = serde_json::from_slice(&raw).ok()?;
+        let at = record.get("trained_at")?.as_str()?;
+        chrono::DateTime::parse_from_rfc3339(at)
+            .ok()
+            .map(|t| t.timestamp())
+    }
+}
+
+#[derive(Clone, Copy)]
+enum StatsMove {
+    CurrentToPrevious,
+    PreviousToCurrent,
+    Exchange,
+}
+
+/// Keep each model's record with the model: moved with it on a rotation,
+/// exchanged on a rollback, and dropped rather than left describing the
+/// wrong file when one side has none.
+fn swap_stats(learned: &Path, how: StatsMove) {
+    let current = stats_path(learned);
+    let previous = previous_stats_path(learned);
+    match how {
+        StatsMove::CurrentToPrevious => {
+            let _ = std::fs::remove_file(&previous);
+            let _ = std::fs::rename(&current, &previous);
+        }
+        StatsMove::PreviousToCurrent => {
+            let _ = std::fs::remove_file(&current);
+            let _ = std::fs::rename(&previous, &current);
+        }
+        StatsMove::Exchange => {
+            let staged = learned.with_extension("rolled-back.json");
+            let _ = std::fs::remove_file(&staged);
+            let had_current = std::fs::rename(&current, &staged).is_ok();
+            let _ = std::fs::rename(&previous, &current);
+            if had_current {
+                let _ = std::fs::rename(&staged, &previous);
+            }
+        }
     }
 }
 
@@ -1116,6 +1378,66 @@ mod tests {
         assert!(
             selected_components(&components).len() == 1,
             "one of two components is held out"
+        );
+    }
+
+    #[test]
+    fn a_candidate_that_forgets_a_threat_label_is_refused() {
+        let settings = AiSettings {
+            auto_block_categories: vec!["malware".to_string(), "phishing".to_string()],
+            ..AiSettings::default()
+        };
+        let set = |labels: &[&str]| -> HashSet<String> {
+            labels.iter().map(|label| label.to_string()).collect()
+        };
+        let current = set(&["malware", "phishing", "news"]);
+        assert!(
+            refuse_forgotten_threats(&settings, Some(&current), &set(&["malware", "phishing"]))
+                .is_ok(),
+            "an ordinary label may come and go"
+        );
+        let refused =
+            refuse_forgotten_threats(&settings, Some(&current), &set(&["phishing", "news"]))
+                .unwrap_err()
+                .to_string();
+        assert!(refused.contains("malware"), "{refused}");
+        assert!(
+            refuse_forgotten_threats(&settings, None, &set(&[])).is_ok(),
+            "no model in use (heuristic): nothing to forget"
+        );
+    }
+
+    #[test]
+    fn the_starter_corpus_covers_the_threat_labels() {
+        let labels: HashSet<String> = starter_pairs()
+            .into_iter()
+            .map(|(label, _)| label)
+            .collect();
+        for label in ["malware", "phishing", "scam"] {
+            assert!(labels.contains(label), "{label} missing from {labels:?}");
+        }
+    }
+
+    #[test]
+    fn one_sprawling_family_is_never_held_out_whole() {
+        // Forty names chained into one component by a shared word, plus a
+        // handful of small families: the big one must stay in training.
+        let mut domains: Vec<String> = (0..40).map(|i| format!("login-word{i}.example")).collect();
+        for word in ["alpha", "bravo", "charlie", "delta", "echo", "foxtrot"] {
+            domains.push(format!("{word}-site.example"));
+        }
+        let components = token_components(&domains);
+        let selected = selected_components(&components);
+        let held: usize = components
+            .iter()
+            .filter(|(key, _)| selected.contains(key))
+            .map(|(_, members)| members.len())
+            .sum();
+        assert!(held > 0, "something is held out");
+        assert!(
+            held <= domains.len() / MAX_HELD_SHARE,
+            "at most a quarter of the names: {held} of {}",
+            domains.len()
         );
     }
 }

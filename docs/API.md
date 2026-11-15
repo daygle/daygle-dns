@@ -1686,9 +1686,10 @@ domain}` names scored, with each name's word order changed so the store never
 recorded it. `lost` counts names the model reads as `benign` or as a label
 that would not block. The endpoint always answers `200`, including when AI is
 disabled; `available: false` with a `reason` means there was no model or no
-verdicts to probe. A loopback request may call it without a console session,
-which is how the root update service reaches it; remote requests still need
-one.
+verdicts to probe. The root update service calls it without a console
+session by sending `X-Daygle-Model-Probe` with the token the service writes to
+`<updates>/staging/model-probe.token` (mode 0600, renewed at every start);
+every other request needs a session, loopback ones included.
 
 `POST /api/ai/model-health` scores the loaded model on exactly the `sample`
 from an earlier GET, so a before/after comparison cannot drift as the scanner
@@ -1713,17 +1714,23 @@ retraining.
 The scanner maintains its own model too. With `ai.auto_retrain` on (the
 default) it rebuilds the classifier no more often than
 `ai.retrain_interval_secs` from the data it has produced: operator category
-corrections first, then its own confident, unexpired, unvetoed verdicts.
-`POST /api/ai/retrain` runs the same job now. A retrain needs at least 200
-examples across two labels, and a candidate model must reproduce at least half
-of its own training set, or the current model is kept. The result is written
+corrections first, then its own confident, unexpired, unvetoed verdicts, then
+the shipped starter corpus, which keeps labels this network has not produced
+lately in the model. Each domain contributes one label (the newest correction,
+else the strongest verdict). `POST /api/ai/retrain` runs the same job now; a
+scheduled retrain and a manual one never run at once. A retrain needs at least
+200 examples of this install's own across two labels, and a candidate model
+must reproduce at least half of its own training set, and must still be able
+to emit every label in `ai.auto_block_categories` that the model in use can,
+or the current model is kept. The result is written
 beside `ai.db` as `learned.bin` (with `learned.json` recording the run), and
 loaded into the running channels immediately. It is preferred over
 `ai.model_path` from then on while it is the newer file, unless a channel names
 its own model; delete it (or install a newer configured model) to fall back.
-Judging: every fifth correction is held back from training, and a candidate is
+Judging: about one correction in five, chosen by a hash of the domain so the
+same ones stay held back from run to run, is kept out of training, and a candidate is
 rejected when it scores below half of them or more than two points below the
-model in use on them. With fewer than five corrections nothing can be held
+model in use on them. With fewer than five corrections nothing is held
 back, so the older training-set check applies and the retrain response reports
 `validation_examples: 0` rather than claiming it was validated.
 

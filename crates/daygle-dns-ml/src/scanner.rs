@@ -36,6 +36,9 @@ pub struct ActiveBlock {
     pub expires_at: i64,
 }
 
+/// Longest the page stage may run in one scan cycle.
+const PAGE_STAGE_BUDGET: std::time::Duration = std::time::Duration::from_secs(90);
+
 /// Domain → active block; swapped atomically after each scan cycle and on
 /// every override change, so the policy plugin's hot path is one map lookup.
 pub type BlockSnapshot = HashMap<String, ActiveBlock>;
@@ -296,6 +299,11 @@ impl Scanner {
                 &live
             }
         };
+        // The stage shares the scan cycle, so it gets a wall-clock budget: a
+        // batch of slow sites (each trying HTTPS, HTTP and redirects) must
+        // not hold up classification. A candidate not reached stays unread
+        // and is picked up next cycle.
+        let deadline = std::time::Instant::now() + PAGE_STAGE_BUDGET;
         let workers = crate::page::workers().min(candidates.len());
         let chunk = candidates.len().div_ceil(workers);
         let readings: Vec<(String, f32, crate::page::Inspection)> = std::thread::scope(|scope| {
@@ -304,6 +312,7 @@ impl Scanner {
                 .map(|part| {
                     scope.spawn(move || {
                         part.iter()
+                            .take_while(|_| std::time::Instant::now() < deadline)
                             .map(|(domain, confidence)| {
                                 (domain.clone(), *confidence, reader.inspect(domain))
                             })
@@ -658,7 +667,8 @@ impl Scanner {
                 Ok(Ok(_)) => {
                     since_epoch = started;
                     // Model maintenance runs after a successful cycle, on a
-                    // blocking thread, and never delays the next cycle.
+                    // blocking thread. A due retrain delays the next cycle by
+                    // its duration; one that is not due costs nothing.
                     if let Some(retrainer) = self.retrainer.get().cloned() {
                         let _ =
                             tokio::task::spawn_blocking(move || retrainer.maybe_retrain()).await;

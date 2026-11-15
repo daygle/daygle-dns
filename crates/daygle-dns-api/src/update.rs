@@ -501,6 +501,53 @@ fn check_update_service() -> Option<PreflightCheck> {
     })
 }
 
+/// The file, in the updates staging directory, holding the token the root
+/// apply step presents to `/api/ai/model-health`. The directory belongs to the
+/// service account and the file is mode 0600, so only that account and root
+/// can read it.
+pub const MODEL_PROBE_TOKEN_FILE: &str = "model-probe.token";
+
+static MODEL_PROBE_TOKEN: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+
+/// The token that lets the root update step score models without a console
+/// login, created once per start. `None` where the update machinery is not
+/// installed: there is then nothing that needs it, and no request can use it.
+pub fn model_probe_token() -> Option<&'static str> {
+    MODEL_PROBE_TOKEN
+        .get_or_init(write_model_probe_token)
+        .as_deref()
+}
+
+#[cfg(unix)]
+fn write_model_probe_token() -> Option<String> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    if std::env::consts::OS != "linux" {
+        return None;
+    }
+    let staging = resolved_updates_dir()?.join("staging");
+    std::fs::create_dir_all(&staging).ok()?;
+    let token = crate::random_hex::<32>();
+    let target = staging.join(MODEL_PROBE_TOKEN_FILE);
+    let temp = staging.join(format!(".{MODEL_PROBE_TOKEN_FILE}.tmp"));
+    let _ = std::fs::remove_file(&temp);
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&temp)
+        .ok()?;
+    file.write_all(token.as_bytes()).ok()?;
+    file.sync_all().ok()?;
+    std::fs::rename(&temp, &target).ok()?;
+    Some(token)
+}
+
+#[cfg(not(unix))]
+fn write_model_probe_token() -> Option<String> {
+    None
+}
+
 /// The updates directory the `daygle-dns-update.path` watcher monitors,
 /// resolved from the installed path unit so custom `DATA_DIR` installs line
 /// up; falls back to the installer default.

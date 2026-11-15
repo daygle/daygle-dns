@@ -1447,10 +1447,11 @@ pub struct AiSettings {
     /// Minimum embedding cosine for the verifier to assert a category.
     pub verifier_threshold: f32,
     /// Let the scanner retrain its classifier from what it has learned: your
-    /// category corrections plus its own confident verdicts. A successful
-    /// retrain is written beside `ai.db` as `learned.bin` and used from the
-    /// next start; delete that file to fall back to `model_path`. A retrain is
-    /// skipped while there is not enough material for it.
+    /// category corrections, its own confident verdicts and the shipped
+    /// starter corpus. An accepted retrain is written beside `ai.db` as
+    /// `learned.bin` and loaded into the running scanner at once; delete that
+    /// file to fall back to `model_path`. A retrain is skipped while there is
+    /// not enough material for it.
     #[serde(default = "default_auto_retrain")]
     pub auto_retrain: bool,
     /// How often automatic maintenance may retrain, in seconds.
@@ -1476,7 +1477,9 @@ pub struct AiSettings {
     pub page_candidates_per_scan: u32,
     /// What a page reading may do to the threat verdict: `evidence` (note
     /// only, the default), `corroborate` (agreement can raise confidence) or
-    /// `decide` (agreement raises, disagreement caps it).
+    /// `decide` (agreement raises; a page with no threat cue that reads as an
+    /// ordinary category caps it - the site writes its own page, so this
+    /// direction can be gamed).
     pub page_rule: PageRule,
     /// Minimum text-classifier confidence for a page reading to count toward
     /// `page_rule` (0.05-0.99).

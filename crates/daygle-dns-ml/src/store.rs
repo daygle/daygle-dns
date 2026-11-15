@@ -786,10 +786,6 @@ impl AiStore {
         Ok(collected)
     }
 
-    /// The threat list blocking is built from, with the confidence that
-    /// qualified it: fresh, undisputed, at or above `threshold`, and vetoed by
-    /// no override. Strongest first. Served for export so another resolver can
-    /// use the result as a blocklist.
     /// Threat verdicts worth reading a page for, with the confidence the
     /// reading may adjust: classified, fresh, not disputed, at or above
     /// `floor`, not exempted, and not already read for this classification.
@@ -947,6 +943,10 @@ impl AiStore {
         }))
     }
 
+    /// Stored threats that may block, with the confidence that qualified
+    /// them: fresh, undisputed, at or above `threshold`, and vetoed by no
+    /// exact override. Strongest first. [`crate::AiEngine::export_threats`]
+    /// narrows this to the block snapshot's rules before it is served.
     pub fn export_threats(
         &self,
         now_epoch: i64,

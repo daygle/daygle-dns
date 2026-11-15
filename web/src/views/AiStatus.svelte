@@ -209,7 +209,7 @@
       status = { ...status, page_rule: value };
       notice =
         value === 'decide'
-          ? 'Page readings can now raise or cap a threat confidence, so a page that reads as ordinary can stop a name-only block.'
+          ? 'Page readings can now raise or cap a threat confidence, so a page that reads as ordinary can stop a name-only block. A site writes its own page, so this can be gamed.'
           : value === 'corroborate'
             ? 'Page readings can now raise a threat confidence, never lower it.'
             : 'Page readings are recorded as evidence only; verdicts are unchanged.';
@@ -476,11 +476,13 @@
     <p class="muted help" style="margin: 0 0 10px">
       The scanner rebuilds its classifier from what it has learned: your
       category corrections and mislabelled marks on AI → Threats, plus its own
-      confident verdicts, so the model keeps up with the sites this network
-      actually visits. A retrain needs at least 200 examples, and a candidate
-      must hold up on corrections it was not trained on before it replaces the
-      model in use. Accepted models are loaded straight away; delete the file
-      to fall back to the configured model. With Learn "Not a Threat" on, your
+      confident verdicts, on top of the starter corpus so labels this network
+      has not seen lately are never forgotten. A retrain needs at least 200
+      examples of this network's own, and a candidate must hold up on
+      corrections and threats it was not trained on, and still be able to
+      report every threat label, before it replaces the model in use.
+      Accepted models - scheduled or from Retrain Now - are loaded straight
+      away; delete the file to fall back to the configured model. With Learn "Not a Threat" on, your
       not-a-threat marks become a benign label too - useful when the model
       keeps mislabelling the same harmless domain, but a negative class can
       over-generalise, so watch for missed threats and restore the previous
@@ -556,7 +558,9 @@
       With the default rule it is a second opinion for you and nothing more.
       Evidence only records it; Corroborate lets an agreeing page raise the
       threat confidence; Decide also caps it when the page reads as an ordinary
-      category, which can stop a name-only block. A reading below
+      category with no threat cue on it, which can stop a name-only block. The
+      page is written by the site being judged, so a site can game Decide by
+      showing harmless text; choose it only if you accept that. A reading below
       {Math.round((status.page_confidence_floor ?? 0.6) * 100)}% confidence is
       ignored by the rule. Fetching leaves this server, so it is off
       unless you turn it on; only threat candidates are read, at most

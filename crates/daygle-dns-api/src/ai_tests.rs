@@ -308,6 +308,7 @@ async fn threat_export_and_corrections_are_served_as_csv() {
                 category: "shopping",
                 confidence: 0.8,
                 cues: vec!["add to cart"],
+                also: vec![],
             }),
         )
         .unwrap();

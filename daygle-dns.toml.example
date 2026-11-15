@@ -611,12 +611,15 @@ max_domains_per_scan = 5120
 auto_block_categories = ["malware", "phishing", "scam"]
 
 # The scanner maintains its own model. Every retrain_interval_secs it rebuilds
-# the classifier from your category corrections (AI -> Threats) plus its own
-# confident verdicts, and installs the result beside ai.db as learned.bin -
+# the classifier from your category corrections (AI -> Threats), its own
+# confident verdicts and the shipped starter corpus (so a label this network
+# has not seen lately is not forgotten), and installs the result beside ai.db
+# as learned.bin -
 # loaded into the running scanner immediately (and ahead of model_path from
 # then on, unless a channel names its own model). Delete learned.bin to fall
-# back. A retrain needs 200+ examples and must hold up on held-out
-# corrections.
+# back. A retrain needs 200+ examples of this install's own, must hold up on
+# held-out corrections and held-out threats, and must still be able to report
+# every auto_block_categories label the model in use can.
 # auto_retrain = true
 # retrain_interval_secs = 86400
 
@@ -641,8 +644,10 @@ auto_block_categories = ["malware", "phishing", "scam"]
 #   "evidence"    - record it with the verdict; never change the verdict (default)
 #   "corroborate" - an agreeing page may raise the threat confidence
 #   "decide"      - an agreeing page raises it; a page that reads as an ordinary
-#                   category caps it at 1 - the page's confidence, which can
-#                   stop a name-only block
+#                   category (with no threat cue anywhere on it) caps it at
+#                   1 - the page's confidence, which can stop a name-only
+#                   block. The page is the site's own text, so a site can game
+#                   this; use it only if you accept that.
 # page_rule = "evidence"
 # A reading below this confidence is ignored by the rule (0.05-0.99).
 # page_confidence_floor = 0.6

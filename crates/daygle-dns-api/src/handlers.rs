@@ -1494,7 +1494,7 @@ pub async fn ai_status(State(state): State<AppState>) -> Response {
         "threat_model_path": settings.threat_model_path,
         "threat_model_dedicated": settings.dedicated_threat_model(),
         // Self-maintained model: automatic retraining and what the last run
-        // achieved. The retrained file is used from the next start.
+        // achieved. An accepted retrain is loaded at once, without a restart.
         "auto_retrain": settings.auto_retrain,
         "retrain_interval_secs": settings.retrain_interval_secs,
         "learn_negatives": settings.learn_negatives,
@@ -1810,13 +1810,9 @@ pub async fn ai_threats_export(
         )
             .into_response();
     }
-    let threshold = ai.settings.load_full().block_threshold;
     let exported = run_blocking({
         let ai = ai.clone();
-        move || {
-            ai.store
-                .export_threats(chrono::Utc::now().timestamp(), threshold)
-        }
+        move || ai.export_threats()
     })
     .await;
     let rows = match exported {
@@ -1894,11 +1890,16 @@ pub async fn ai_explain(
         let domain = domain.clone();
         move || -> daygle_dns_core::error::Result<serde_json::Value> {
             let rows = ai.store.verdicts_for(&domain)?;
-            let override_row = ai
-                .store
-                .list_overrides()?
-                .into_iter()
-                .find(|o| o.domain == domain);
+            let overrides = ai.store.list_overrides()?;
+            let override_row = overrides.iter().find(|o| o.domain == domain).cloned();
+            // An allow on a parent exempts every name under it, so explain
+            // that too rather than leaving the domain unexplained.
+            let parent_allow = overrides
+                .iter()
+                .filter(|o| o.action == "allow" && o.domain != domain)
+                .filter(|o| domain.ends_with(&format!(".{}", o.domain)))
+                .max_by_key(|o| o.domain.len())
+                .cloned();
             let relabel = ai.store.category_overrides()?.remove(&domain);
             let page_reading = ai.store.page_reading(&domain)?;
             let page_adjustment = ai.store.page_adjustment(&domain)?;
@@ -1954,13 +1955,21 @@ pub async fn ai_explain(
                     "You relabelled it as '{relabel}', which is what category blocking matches."
                 ));
             }
+            if override_row.is_none() {
+                if let Some(parent) = parent_allow.as_ref() {
+                    reasons.push(format!(
+                        "Exempt through its parent '{}' ({}): the AI never blocks it.",
+                        parent.domain, parent.reason
+                    ));
+                }
+            }
             match threat {
                 Some(t) if t.severity == "disputed" => reasons.push(format!(
                     "The verifier disputed this detection at {:.0}%, so it never blocks.",
                     t.confidence * 100.0
                 )),
                 Some(t) => {
-                    if override_row.is_none() && blocked_category.is_none() {
+                    if override_row.is_none() && parent_allow.is_none() && blocked_category.is_none() {
                         if t.confidence < settings.block_threshold {
                             reasons.push(format!(
                                 "Its threat confidence, {:.0}%, is below the {:.0}% block threshold.",
@@ -2006,6 +2015,12 @@ pub async fn ai_explain(
                 "blocked_category": blocked_category,
                 "label": label,
                 "category_override": relabel,
+                "parent_override": parent_allow.as_ref().map(|o| serde_json::json!({
+                    "domain": o.domain,
+                    "action": o.action,
+                    "reason": o.reason,
+                    "created_at": stamp(o.created_at),
+                })),
                 "override": override_row.as_ref().map(|o| serde_json::json!({
                     "action": o.action,
                     "reason": o.reason,
@@ -2148,10 +2163,10 @@ pub async fn ai_rollback(State(state): State<AppState>) -> Response {
 }
 
 /// `POST /api/ai/retrain` - retrain the classifier from the scanner's own
-/// confident verdicts plus the operator's corrections. The result is written
-/// beside `ai.db` as `learned.bin` and used from the next start; a retrain
-/// with too little data, or one whose model does not reproduce its own
-/// training set, leaves the current model in place.
+/// confident verdicts, the operator's corrections and the starter corpus. An
+/// accepted model is written beside `ai.db` as `learned.bin` and loaded into
+/// the running channels at once; a retrain with too little data, or one that
+/// fails any of its gates, leaves the current model in place.
 pub async fn ai_retrain(State(state): State<AppState>) -> Response {
     let Some(ai) = ai_engine(&state) else {
         return map_err(daygle_dns_ml::ai_disabled_error());
