@@ -677,7 +677,9 @@ fn a_new_threat_label_requeues_the_domains_it_applies_to() {
         "a domain without the label is left alone: {pending:?}"
     );
     assert!(
-        !pending.iter().any(|(_, channel)| *channel == Channel::Content),
+        !pending
+            .iter()
+            .any(|(_, channel)| *channel == Channel::Content),
         "categorizations are not re-queued: {pending:?}"
     );
 }
