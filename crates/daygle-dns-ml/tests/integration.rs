@@ -2742,3 +2742,192 @@ fn the_threat_export_matches_what_blocks() {
         .collect();
     assert_eq!(exported, vec!["login.bad.example".to_string()]);
 }
+
+/// Anchored self-training: a verdict of the scanner's own trains only when
+/// the reference model or the page behind the domain agrees with it.
+#[test]
+fn unconfirmed_verdicts_do_not_train() {
+    let _train = training_guard();
+    let dir = TempDir::new().unwrap();
+    // A reference model that knows these names well.
+    let mut reference = Vec::new();
+    for i in 0..30 {
+        reference.push(("news".to_string(), format!("dailynews-paper{i}.example")));
+        reference.push(("shopping".to_string(), format!("bigshop-store{i}.example")));
+    }
+    let anchor_path = dir.path().join("anchor.bin");
+    daygle_dns_ml::learn::train(&reference, &anchor_path).unwrap();
+    let anchor = fasttext::FastText::load_model(&anchor_path).unwrap();
+
+    let store = tmp_store(&dir);
+    let verdict = |domain: &str, label: &str| {
+        store.observe(domain).unwrap();
+        store
+            .save_verdict(
+                Channel::Content,
+                domain,
+                label,
+                "info",
+                "classified",
+                0.95,
+                "fasttext",
+                "ev",
+                3600,
+            )
+            .unwrap();
+    };
+    verdict("dailynews-paper1.example", "news"); // the reference agrees
+    verdict("bigshop-store1.example", "news"); // the reference disagrees
+    verdict("bigshop-store2.example", "gambling"); // disagrees, page confirms
+    let mut pages = std::collections::HashMap::new();
+    pages.insert("bigshop-store2.example".to_string(), "gambling".to_string());
+
+    let cfg = settings(AiMode::Train);
+    let dataset = daygle_dns_ml::learn::collect_dataset_with(
+        &store,
+        &cfg,
+        &daygle_dns_ml::learn::Sources {
+            anchor: Some(&anchor),
+            page_labels: Some(&pages),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let has =
+        |label: &str, domain: &str| dataset.pairs.iter().any(|(l, d)| l == label && d == domain);
+    assert!(has("news", "dailynews-paper1.example"));
+    assert!(
+        !has("news", "bigshop-store1.example"),
+        "nothing independent backs this label"
+    );
+    assert!(
+        has("gambling", "bigshop-store2.example"),
+        "the page confirms it"
+    );
+    assert_eq!(dataset.stats.unconfirmed, 1);
+}
+
+/// A models bundle's corpus, beside the configured model, is the one a
+/// retrain uses.
+#[test]
+fn a_bundled_corpus_beside_the_model_is_preferred() {
+    let dir = TempDir::new().unwrap();
+    let model = dir.path().join("daygle-starter.bin");
+    std::fs::write(&model, b"model").unwrap();
+    assert!(daygle_dns_ml::learn::bundled_starter_corpus(&model.display().to_string()).is_none());
+    std::fs::write(
+        dir.path().join(daygle_dns_ml::learn::STARTER_CORPUS_FILE),
+        "# comment\n__label__phishing login-bundle.example\n",
+    )
+    .unwrap();
+    let corpus =
+        daygle_dns_ml::learn::bundled_starter_corpus(&model.display().to_string()).unwrap();
+    assert_eq!(
+        daygle_dns_ml::learn::starter_pairs_from(&corpus),
+        vec![("phishing".to_string(), "login-bundle.example".to_string())]
+    );
+}
+
+/// Put the model in place on a trial that ends a moment from now.
+fn end_trial_soon(ai: &AiEngine) {
+    let now = chrono::Utc::now().timestamp();
+    let mut trial = ai.learned_model_trial();
+    assert!(
+        trial.ends_at.is_some(),
+        "an accepted retrain starts a trial"
+    );
+    trial.started_at = Some(now - 600);
+    trial.ends_at = Some(now + 1);
+    std::fs::write(
+        daygle_dns_ml::learn::trial_path(ai.learned_model_path()),
+        serde_json::to_vec(&trial.to_json()).unwrap(),
+    )
+    .unwrap();
+}
+
+/// A model the operator kept correcting during its trial is rolled back on
+/// its own, and retraining pauses.
+#[test]
+fn a_model_that_needs_correcting_is_rolled_back_after_its_trial() {
+    let _train = training_guard();
+    let dir = TempDir::new().unwrap();
+    let ai = engine(
+        &dir,
+        AiSettings {
+            auto_retrain: true,
+            block_threshold: 0.5,
+            ..settings(AiMode::Train)
+        },
+    );
+    seed_content_verdicts(&ai, 0..240);
+    ai.retrain_learned_model().unwrap();
+    assert!(ai.learned_model_active());
+    assert!(
+        ai.run_due_maintenance().is_none(),
+        "nothing replaces a model on trial"
+    );
+
+    end_trial_soon(&ai);
+    // Verdicts made during the trial, and corrected.
+    for i in 0..4 {
+        let domain = format!("trial-site{i}.example");
+        ai.store.observe(&domain).unwrap();
+        ai.store
+            .save_verdict(
+                Channel::Content,
+                &domain,
+                "news",
+                "info",
+                "classified",
+                0.9,
+                "fasttext",
+                "ev",
+                3600,
+            )
+            .unwrap();
+        ai.set_category_override(&domain, "shopping").unwrap();
+    }
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    assert!(ai.run_due_maintenance().is_none());
+
+    let trial = ai.learned_model_trial();
+    let outcome = trial.last_outcome.clone().unwrap_or_default();
+    assert!(outcome.starts_with("rolled back"), "{trial:?}");
+    assert!(!ai.learned_model_active(), "the configured model is back");
+    assert_eq!(ai.content_backend_name(), "heuristic");
+    assert!(!ai.learned_model_path().exists());
+    assert!(
+        trial.retry_after.is_some(),
+        "retraining pauses after a rollback"
+    );
+    assert!(ai.run_due_maintenance().is_none(), "paused");
+}
+
+/// A model nobody had to correct keeps its place after the trial.
+#[test]
+fn a_model_that_holds_up_is_kept_after_its_trial() {
+    let _train = training_guard();
+    let dir = TempDir::new().unwrap();
+    let ai = engine(
+        &dir,
+        AiSettings {
+            auto_retrain: true,
+            block_threshold: 0.5,
+            ..settings(AiMode::Train)
+        },
+    );
+    seed_content_verdicts(&ai, 0..240);
+    ai.retrain_learned_model().unwrap();
+    end_trial_soon(&ai);
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    assert!(ai.run_due_maintenance().is_none());
+    let trial = ai.learned_model_trial();
+    assert!(
+        trial
+            .last_outcome
+            .as_deref()
+            .is_some_and(|o| o.starts_with("kept")),
+        "{trial:?}"
+    );
+    assert!(ai.learned_model_active());
+}

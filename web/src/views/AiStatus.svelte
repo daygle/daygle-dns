@@ -177,6 +177,35 @@
     }
   }
 
+  async function setAutoRollback(value) {
+    try {
+      await api.updateSettings({ ai: { auto_rollback: value } });
+      status = { ...status, auto_rollback: value };
+      notice = value
+        ? 'Each new model is now on trial and rolled back automatically if it does worse than the one it replaced.'
+        : 'New models are kept without a trial; restore the previous model by hand if needed.';
+    } catch (e) {
+      error = formatApiError(e);
+      await load(true);
+    }
+  }
+
+  // `[updates]` is replaced as a unit by the API, so the whole section is
+  // read and sent back with the one field changed.
+  async function setAutoRefreshModels(value) {
+    try {
+      const updates = (await api.config()).updates || {};
+      await api.updateSettings({ updates: { ...updates, auto_refresh_models: value } });
+      status = { ...status, auto_refresh_models: value };
+      notice = value
+        ? 'New shipped models will be installed automatically, checked against held-out threats and restored if they do worse.'
+        : 'Shipped models are updated only when you choose to.';
+    } catch (e) {
+      error = formatApiError(e);
+      await load(true);
+    }
+  }
+
   async function setLearnNegatives(value) {
     try {
       await api.updateSettings({ ai: { learn_negatives: value } });
@@ -243,7 +272,10 @@
       const negatives = result.negatives
         ? `, ${fmt(result.negatives)} from "not a threat" marks`
         : '';
-      notice = `Retrained from ${fmt(result.examples)} examples across ${fmt(result.labels)} labels (${fmt(result.corrections)} from your corrections${negatives}). ${result.message || 'The new model is in use now.'}`;
+      const unconfirmed = result.unconfirmed
+        ? ` ${fmt(result.unconfirmed)} of its own verdicts were left out because nothing independent confirmed them.`
+        : '';
+      notice = `Retrained from ${fmt(result.examples)} examples across ${fmt(result.labels)} labels (${fmt(result.corrections)} from your corrections${negatives}).${unconfirmed} ${result.message || 'The new model is in use now.'}`;
       await load(true);
     } catch (e) {
       error = formatApiError(e);
@@ -471,6 +503,24 @@
           />
           <span>Learn "Not a Threat"</span>
         </label>
+        <label class="row" style="gap: 6px; align-items: center; font-size: 0.85rem">
+          <input
+            type="checkbox"
+            style="width: auto"
+            checked={!!status.auto_rollback}
+            onchange={(event) => setAutoRollback(event.currentTarget.checked)}
+          />
+          <span>Roll Back Automatically</span>
+        </label>
+        <label class="row" style="gap: 6px; align-items: center; font-size: 0.85rem">
+          <input
+            type="checkbox"
+            style="width: auto"
+            checked={!!status.auto_refresh_models}
+            onchange={(event) => setAutoRefreshModels(event.currentTarget.checked)}
+          />
+          <span>Install New Shipped Models</span>
+        </label>
       {/if}
     </div>
     <p class="muted help" style="margin: 0 0 10px">
@@ -488,6 +538,30 @@
       over-generalise, so watch for missed threats and restore the previous
       model if you see them.
     </p>
+    <p class="muted help" style="margin: 0 0 10px">
+      It keeps itself honest three ways. Its own verdicts only train when the
+      shipped reference model or the page itself agrees, so a mistake cannot
+      feed on itself. Each new model is on trial for half the retrain interval
+      and then compared with the one it replaced - on held-out threats, on the
+      threats each finds in live traffic, and on how often you corrected it -
+      and rolled back automatically if it did worse, with retraining paused
+      for a while. And with Install New Shipped Models on, new reference
+      models arrive through the updater, which checks them the same way.
+    </p>
+    {#if status.learned_model?.trial}
+      {@const trial = status.learned_model.trial}
+      <p class="muted" style="margin: 0 0 10px; font-size: 0.85rem">
+        {#if trial.ends_at}
+          <span class="pill">On Trial</span>
+          until {formatDateTime(trial.ends_at * 1000)}
+        {:else if trial.last_outcome}
+          Last trial: {trial.last_outcome}
+          {#if trial.retry_after && trial.retry_after * 1000 > Date.now()}
+            - retraining resumes {formatDateTime(trial.retry_after * 1000)}
+          {/if}
+        {/if}
+      </p>
+    {/if}
     {#if status.learned_model}
       <p class="muted" style="margin: 0 0 10px; font-size: 0.85rem">
         {#if status.learned_model.present}

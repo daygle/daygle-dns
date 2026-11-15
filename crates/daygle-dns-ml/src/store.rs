@@ -867,6 +867,66 @@ impl AiStore {
         Ok(changed > 0)
     }
 
+    /// What each domain's page said on its current threat verdict, keyed by
+    /// domain: an independent reading a retrain may use to confirm one of
+    /// the scanner's own labels.
+    pub fn current_page_labels(&self) -> Result<std::collections::HashMap<String, String>> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(
+            "SELECT p.domain, p.category
+             FROM ai_page_readings p
+             JOIN ai_verdicts v ON v.domain = p.domain AND v.channel = 'threat'
+             WHERE p.read_at >= v.classified_at AND p.category != ''",
+        )?;
+        let collected = stmt
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+            .collect::<std::result::Result<_, _>>()?;
+        Ok(collected)
+    }
+
+    /// Distinct domains with a verdict classified in `[from, to)`, newest
+    /// first: the live traffic a model in trial is compared on.
+    pub fn domains_classified_between(
+        &self,
+        from: i64,
+        to: i64,
+        limit: u32,
+    ) -> Result<Vec<String>> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(
+            "SELECT domain FROM ai_verdicts
+             WHERE status = 'classified' AND classified_at >= ?1 AND classified_at < ?2
+             GROUP BY domain
+             ORDER BY MAX(classified_at) DESC
+             LIMIT ?3",
+        )?;
+        let collected = stmt
+            .query_map(params![from, to, limit as i64], |r| r.get::<_, String>(0))?
+            .collect::<std::result::Result<_, _>>()?;
+        Ok(collected)
+    }
+
+    /// Operator corrections ("not a threat" marks and category relabels)
+    /// filed in `[from, to)` against a verdict classified in the same window:
+    /// how often the model that made those verdicts had to be put right.
+    pub fn corrections_of_verdicts_between(&self, from: i64, to: i64) -> Result<usize> {
+        let conn = self.lock()?;
+        let count: i64 = conn.query_row(
+            "SELECT
+                (SELECT COUNT(*) FROM ai_overrides o
+                 WHERE o.action = 'not_threat' AND o.created_at >= ?1 AND o.created_at < ?2
+                   AND EXISTS (SELECT 1 FROM ai_verdicts v WHERE v.domain = o.domain
+                               AND v.classified_at >= ?1 AND v.classified_at < ?2))
+              + (SELECT COUNT(*) FROM ai_category_overrides c
+                 WHERE c.created_at >= ?1 AND c.created_at < ?2
+                   AND EXISTS (SELECT 1 FROM ai_verdicts v WHERE v.domain = c.domain
+                               AND v.classified_at >= ?1 AND v.classified_at < ?2))",
+            params![from, to],
+            |r| r.get(0),
+        )?;
+        Ok(count.max(0) as usize)
+    }
+
     /// What the page behind `domain` said on its current threat verdict, or
     /// `None` when it has not been read since that verdict was made.
     pub fn page_reading(&self, domain: &str) -> Result<Option<PageReading>> {

@@ -1510,7 +1510,13 @@ pub async fn ai_status(State(state): State<AppState>) -> Response {
             "active": ai.learned_model_active(),
             "previous": ai.learned_model_previous(),
             "last": ai.learned_model_record(),
+            "trial": ai.learned_model_trial().to_json(),
         },
+        "auto_rollback": settings.auto_rollback,
+        // Shipped model bundles installed automatically by the updater (the
+        // `[updates]` section), shown here so the AI page can say whether the
+        // reference model keeps itself current too.
+        "auto_refresh_models": state.config.load().updates.auto_refresh_models,
         "backend_categories": ai.backend_categories(),
         "status_counts": serde_json::Map::from_iter(
             statuses
@@ -2204,6 +2210,7 @@ pub async fn ai_retrain(State(state): State<AppState>) -> Response {
                 "verdicts": stats.verdicts,
                 "negatives": stats.negatives,
                 "starter": stats.starter,
+                "unconfirmed": stats.unconfirmed,
                 "validation_examples": validation,
                 "threat_validation_examples": threat_validation,
                 "active": true,
@@ -6456,6 +6463,7 @@ pub struct AiUpdate {
     pub threat_ttl_secs: Option<u64>,
     /// Retrain the classifier from what the scanner has learned.
     pub auto_retrain: Option<bool>,
+    pub auto_rollback: Option<bool>,
     pub retrain_interval_secs: Option<u64>,
     pub learn_negatives: Option<bool>,
     pub fetch_pages: Option<bool>,
@@ -7404,6 +7412,9 @@ pub async fn update_settings(
         }
         if let Some(v) = a.auto_retrain {
             config.ai.auto_retrain = v;
+        }
+        if let Some(v) = a.auto_rollback {
+            config.ai.auto_rollback = v;
         }
         if let Some(v) = a.retrain_interval_secs {
             config.ai.retrain_interval_secs = v.max(3_600);

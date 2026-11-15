@@ -1365,6 +1365,9 @@ fn is_stable_release(version: &str) -> bool {
 /// these names - the apply side re-validates.
 pub const MODEL_FILES: &[&str] = &[
     "daygle-starter.bin",
+    // The corpus the starter model was trained from: a retrain includes it,
+    // so it must travel with the model it matches.
+    "starter-training.txt",
     "all-MiniLM-L6-v2-int8.onnx",
     "minilm-tokenizer.json",
     "minilm-centroids.json",

@@ -1734,6 +1734,37 @@ model in use on them. With fewer than five corrections nothing is held
 back, so the older training-set check applies and the retrain response reports
 `validation_examples: 0` rather than claiming it was validated.
 
+Three things keep the self-maintained model honest without an operator:
+
+* **Anchored training.** When `ai.model_path` is a fastText model, the
+  scanner's own verdicts only train if that fixed reference model gives the
+  same label (or another threat label for a threat), or the page reading
+  behind the domain does. Verdicts nothing independent backs are left out
+  and counted as `unconfirmed` in the retrain response and record, so a
+  systematic mistake cannot reinforce itself. Operator corrections and the
+  starter corpus always train.
+* **Trial and automatic rollback.** With `ai.auto_rollback` on (the default),
+  each accepted model is on trial for half `ai.retrain_interval_secs`
+  (between one hour and a day); no scheduled retrain replaces it meanwhile.
+  When the trial ends it is compared with the model it replaced on the
+  store's held-out threat families, on the threats each finds among the
+  domains classified during the trial, and on how many of its verdicts the
+  operator corrected against an equally long window before. Losing more
+  held-out threats, finding fewer than half or more than twice as many live
+  threats (with at least ten from the old model, or ten more), or drawing at
+  least three corrections and more than twice the earlier rate rolls it
+  back: the previous learned model, or the configured one for a first
+  retrain (the rejected file is kept as `learned.rejected.bin`). Retraining
+  then pauses for two intervals. `GET /api/ai/status` reports the state as
+  `learned_model.trial` (`started_at`, `ends_at`, `retry_after`,
+  `last_outcome`); a manual rollback ends a trial.
+* **Shipped models.** A models bundle carries `starter-training.txt` beside
+  `daygle-starter.bin`; a retrain reads the corpus from the configured
+  model's directory when present (else the copy built into the binary), so
+  it always matches the reference model. `[updates] auto_refresh_models`
+  (reported as `auto_refresh_models` in `GET /api/ai/status`) installs new
+  bundles automatically, behind the same held-out threat comparison.
+
 Each accepted retrain keeps the model it replaced as `learned.prev.bin`
 (`learned.prev.json` for its stats), and `POST /api/ai/rollback` puts it back in
 front of the scanner immediately. The model it replaces becomes the previous

@@ -44,7 +44,7 @@ DIR="${DAYGLE_DNS_UPDATE_DIR:-/tmp/daygle-dns-update}"
 # The manifest may only install AI model files with these exact flat names
 # (mirrors update.rs MODEL_FILES). Nothing in a manifest or a bundle ever
 # selects another path.
-MODEL_WHITELIST="daygle-starter.bin all-MiniLM-L6-v2-int8.onnx minilm-tokenizer.json minilm-centroids.json"
+MODEL_WHITELIST="daygle-starter.bin starter-training.txt all-MiniLM-L6-v2-int8.onnx minilm-tokenizer.json minilm-centroids.json"
 # Flat marker recording which release the installed model files came from
 # (mirrors update.rs MODEL_VERSION_FILE); the console's AI page shows it.
 MODEL_VERSION_FILE="bundle-version"

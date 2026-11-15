@@ -622,6 +622,14 @@ auto_block_categories = ["malware", "phishing", "scam"]
 # every auto_block_categories label the model in use can.
 # auto_retrain = true
 # retrain_interval_secs = 86400
+# Its own verdicts only train when the shipped model (model_path) or the page
+# behind the domain agrees, so a mistake cannot feed on itself. Each new model
+# is on trial for half the retrain interval (1 h - 1 day), then compared with
+# the model it replaced on held-out threats, on live traffic and on how often
+# you corrected it, and rolled back automatically - pausing retraining - if it
+# did worse. Pair it with [updates] auto_refresh_models = true to receive new
+# shipped models automatically too.
+# auto_rollback = true
 
 # Learn from "not a threat" corrections: a retrain trains them as a `benign`
 # label, so the model stops repeating a mistake you corrected. Off by default,

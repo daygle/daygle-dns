@@ -184,8 +184,14 @@ Daygle DNS combines, in a single process:
   starter corpus (so labels this network has not seen lately are not
   forgotten), refuses a candidate that does worse on held-out corrections than
   the model in use or can no longer report a threat label the model in use
-  can, loads an accepted one without a restart - scheduled or manual, and keeps the model it replaced so
-  one rollback is always available. A domain marked "not a threat" never
+  can, loads an accepted one without a restart - scheduled or manual - and puts it
+  on trial: when the trial ends it is compared with the model it replaced on
+  held-out threats, live traffic and your corrections, and rolled back
+  automatically if it did worse (`ai.auto_rollback`). Its own verdicts only
+  train when the shipped reference model or the page agrees, so a mistake
+  cannot reinforce itself, and the starter corpus ships in the models bundle
+  so `[updates] auto_refresh_models` keeps the reference current. It keeps the model it replaced so one
+  rollback is always available. A domain marked "not a threat" never
   trains under the label it was denied, whatever `ai.learn_negatives` says.
   That flag (off by default) also trains those corrections as a `benign`
   label, so a correction can change the next model; the threat channel never reports that label as a

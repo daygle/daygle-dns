@@ -194,6 +194,7 @@ impl AiEngine {
             let threat_swap = threat_swap.clone();
             let active_model = active_model.clone();
             let learned_active = learned_active.clone();
+            let learned_model = learned_string.clone();
             Box::new(move |model: &Path| {
                 let current = settings.load_full();
                 let path = model.to_string_lossy().into_owned();
@@ -211,12 +212,17 @@ impl AiEngine {
                 if let Some(threat) = threat {
                     threat_swap.replace(threat);
                 }
-                active_model.store(Arc::new(path));
-                learned_active.store(true, std::sync::atomic::Ordering::Relaxed);
+                let is_learned = path == learned_model;
+                active_model.store(Arc::new(path.clone()));
+                learned_active.store(is_learned, std::sync::atomic::Ordering::Relaxed);
                 logs.push(
                     daygle_dns_core::LogLevel::Info,
                     "ai",
-                    "the retrained classifier is now in use",
+                    if is_learned {
+                        "the retrained classifier is now in use".to_string()
+                    } else {
+                        format!("the configured classifier is in use again: {path}")
+                    },
                 );
                 Ok(())
             })
@@ -279,6 +285,12 @@ impl AiEngine {
     pub fn learned_model_record(&self) -> Option<serde_json::Value> {
         let raw = std::fs::read(learn::stats_path(&self.learned)).ok()?;
         serde_json::from_slice(&raw).ok()
+    }
+
+    /// The trial of the model in place: in progress, or how the last one
+    /// ended (and when retraining resumes after a rollback).
+    pub fn learned_model_trial(&self) -> learn::Trial {
+        self.retrainer.trial()
     }
 
     /// Whether a retrain replaced a model that can still be restored.

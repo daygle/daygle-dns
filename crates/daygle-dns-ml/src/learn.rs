@@ -73,6 +73,9 @@ const HOLDOUT_EVERY: usize = 5;
 /// retrain includes it, so a label this network has not produced lately is
 /// kept rather than silently dropped from the model.
 const STARTER_CORPUS: &str = include_str!("../../../models/starter-training.txt");
+/// The corpus's file name in the models directory, where a models bundle
+/// installs the copy that matches its starter model.
+pub const STARTER_CORPUS_FILE: &str = "starter-training.txt";
 /// A held-out threat family may take at most this share of the threat
 /// verdicts out of training, so one sprawling word family cannot starve the
 /// threat labels of examples.
@@ -92,6 +95,9 @@ pub struct TrainingStats {
     pub negatives: usize,
     /// Examples from the shipped starter corpus that keep known labels alive.
     pub starter: usize,
+    /// Verdicts of the scanner's own left out because nothing independent
+    /// (the reference model, the page) agreed with them.
+    pub unconfirmed: usize,
 }
 
 impl TrainingStats {
@@ -138,17 +144,39 @@ fn previous_stats_path(learned: &Path) -> PathBuf {
 /// verdicts, then the starter corpus. One domain contributes one label: the
 /// newest correction wins, then the strongest verdict, then the corpus.
 pub fn collect_dataset(store: &AiStore, settings: &AiSettings) -> Result<Dataset> {
-    collect_dataset_with(store, settings, None)
+    collect_dataset_with(store, settings, &Sources::default())
 }
 
-/// [`collect_dataset`], keeping only starter examples whose label is in
-/// `known` (the labels of the model in use) when that is given, so a custom
-/// model's label space is not widened by the starter's.
+/// What a retrain draws on beyond the store itself.
+#[derive(Default)]
+pub struct Sources<'a> {
+    /// The labels of the model in use: starter examples outside them are left
+    /// out, so a custom model's label space is not widened by the starter's.
+    pub known: Option<&'a HashSet<String>>,
+    /// The starter corpus text; `None` uses the copy built into the binary.
+    pub starter: Option<&'a str>,
+    /// The fixed reference model (the configured, shipped one). When set, a
+    /// verdict of the scanner's own only trains if this model or the page
+    /// behind the domain agrees with it, so the scanner cannot teach itself
+    /// its own mistakes.
+    pub anchor: Option<&'a fasttext::FastText>,
+    /// Independent page readings, by domain.
+    pub page_labels: Option<&'a std::collections::HashMap<String, String>>,
+}
+
+/// [`collect_dataset`] with the extra [`Sources`] a live retrain uses.
 pub fn collect_dataset_with(
     store: &AiStore,
     settings: &AiSettings,
-    known: Option<&HashSet<String>>,
+    sources: &Sources<'_>,
 ) -> Result<Dataset> {
+    let known = sources.known;
+    // Two labels agree when they are the same, or both are threats: a
+    // phishing verdict confirmed as scam is still a confirmed threat.
+    let agrees = |left: &str, right: &str| {
+        left == right
+            || (settings.is_auto_block_category(left) && settings.is_auto_block_category(right))
+    };
     let now = chrono::Utc::now().timestamp();
     let mut pairs: Vec<(String, String)> = Vec::new();
     let mut validation: Vec<(String, String)> = Vec::new();
@@ -237,6 +265,20 @@ pub fn collect_dataset_with(
         if label.is_empty() || corrected.contains(&domain) || !looks_like_domain(&domain) {
             continue;
         }
+        // Anchored self-training: the scanner's own label trains only when
+        // something independent of it agrees - the fixed reference model or
+        // what the page itself says. A label nothing else backs stays out,
+        // so a systematic mistake cannot feed on itself.
+        if let Some(anchor) = sources.anchor {
+            let anchored = top_label(anchor, &domain);
+            let paged = sources.page_labels.and_then(|pages| pages.get(&domain));
+            let confirmed = anchored.as_deref().is_some_and(|a| agrees(a, &label))
+                || paged.is_some_and(|p| agrees(p, &label));
+            if !confirmed {
+                stats.unconfirmed += 1;
+                continue;
+            }
+        }
         // Strongest verdict first: a domain with verdicts on both channels
         // trains the stronger label only.
         if !labelled.insert(domain.clone()) {
@@ -301,7 +343,11 @@ pub fn collect_dataset_with(
     // The starter corpus last: it fills in labels the network has not
     // produced, never outweighs or contradicts local material, and never
     // re-teaches a label for a domain the operator corrected.
-    for (label, domain) in starter_pairs() {
+    let starter = match sources.starter {
+        Some(text) => starter_pairs_from(text),
+        None => starter_pairs(),
+    };
+    for (label, domain) in starter {
         if known.is_some_and(|known| !known.contains(&label)) {
             continue;
         }
@@ -339,8 +385,25 @@ pub fn collect(
 
 /// `(label, domain)` pairs from the shipped starter corpus.
 pub fn starter_pairs() -> Vec<(String, String)> {
-    STARTER_CORPUS
-        .lines()
+    starter_pairs_from(STARTER_CORPUS)
+}
+
+/// The starter corpus beside the configured model, when a models bundle
+/// shipped one: it then matches the model it came with. `None` falls back to
+/// the copy built into the binary.
+pub fn bundled_starter_corpus(model_path: &str) -> Option<String> {
+    let model = Path::new(model_path.trim());
+    let dir = model.parent()?;
+    if model.as_os_str().is_empty() {
+        return None;
+    }
+    let text = std::fs::read_to_string(dir.join(STARTER_CORPUS_FILE)).ok()?;
+    (!starter_pairs_from(&text).is_empty()).then_some(text)
+}
+
+/// `(label, domain)` pairs from corpus text in fastText supervised format.
+pub fn starter_pairs_from(text: &str) -> Vec<(String, String)> {
+    text.lines()
         .filter_map(|line| {
             let line = line.trim();
             let rest = line.strip_prefix("__label__")?;
@@ -350,6 +413,14 @@ pub fn starter_pairs() -> Vec<(String, String)> {
             (!label.is_empty() && looks_like_domain(&domain)).then_some((label, domain))
         })
         .collect()
+}
+
+/// The top label `model` gives `domain`, without the `__label__` prefix.
+fn top_label(model: &fasttext::FastText, domain: &str) -> Option<String> {
+    model
+        .predict(domain, 1, 0.0)
+        .first()
+        .map(|p| p.label.trim_start_matches("__label__").to_ascii_lowercase())
 }
 
 /// The labels a fastText model at `model` can emit, or `None` when the file
@@ -937,12 +1008,27 @@ impl Retrainer {
         let current_path = self.current_model.load_full().to_string();
         let current_model = (!current_path.trim().is_empty()).then(|| PathBuf::from(&current_path));
         let current_labels = current_model.as_deref().and_then(model_labels);
+        // The configured (shipped) model is the fixed reference the scanner's
+        // own verdicts are checked against, and the corpus beside it - when a
+        // models bundle shipped one - is the starter set that matches it.
+        let anchor = self.anchor_model(&settings);
+        let corpus = bundled_starter_corpus(&settings.model_path);
+        let page_labels = self.store.current_page_labels().unwrap_or_default();
         let Dataset {
             pairs,
             validation,
             threat_validation,
             stats,
-        } = collect_dataset_with(&self.store, &settings, current_labels.as_ref())?;
+        } = collect_dataset_with(
+            &self.store,
+            &settings,
+            &Sources {
+                known: current_labels.as_ref(),
+                starter: corpus.as_deref(),
+                anchor: anchor.as_ref(),
+                page_labels: Some(&page_labels),
+            },
+        )?;
         // The starter corpus is always there, so what decides whether a
         // retrain is worth running is what this network contributed.
         if stats.local() < MIN_EXAMPLES || stats.labels < MIN_LABELS {
@@ -998,6 +1084,23 @@ impl Retrainer {
             )));
         }
 
+        // The new model is on trial: when the window ends it is compared on
+        // live traffic with the model it replaced, and rolled back if worse.
+        let baseline = if had_learned {
+            previous_model_path(&self.learned)
+                .to_string_lossy()
+                .into_owned()
+        } else {
+            current_path.clone()
+        };
+        let now = chrono::Utc::now().timestamp();
+        self.write_trial(&Trial {
+            started_at: Some(now),
+            ends_at: Some(now + trial_secs(&settings)),
+            baseline: Some(baseline),
+            ..Trial::default()
+        });
+
         let record = serde_json::json!({
             "trained_at": chrono::Utc::now().to_rfc3339(),
             "examples": stats.examples,
@@ -1006,6 +1109,7 @@ impl Retrainer {
             "verdicts": stats.verdicts,
             "negatives": stats.negatives,
             "starter": stats.starter,
+            "unconfirmed": stats.unconfirmed,
             "train_accuracy": (train_accuracy * 100.0).round() / 100.0,
             "validation_examples": validation.len(),
             "validation_accuracy": validation_accuracy
@@ -1040,8 +1144,9 @@ impl Retrainer {
             LogLevel::Info,
             "ai",
             format!(
-                "AI retrained its classifier from {} examples across {} labels ({} from your corrections, {} from the starter corpus{judged}); it is in use now",
-                stats.examples, stats.labels, stats.corrections, stats.starter
+                "AI retrained its classifier from {} examples across {} labels ({} from your corrections, {} from the starter corpus, {} unconfirmed verdicts left out{judged}); it is in use now, on trial for {}h",
+                stats.examples, stats.labels, stats.corrections, stats.starter, stats.unconfirmed,
+                trial_secs(&settings) / 3600
             ),
         );
         Ok(stats)
@@ -1183,6 +1288,11 @@ impl Retrainer {
                 "the previous model could not be loaded, so the current model was kept: {e}"
             )));
         }
+        // The operator decided; any trial in progress is over.
+        self.write_trial(&Trial {
+            last_outcome: Some("ended by a manual restore".to_string()),
+            ..Trial::default()
+        });
         self.logs
             .push(LogLevel::Info, "ai", "restored the previous classifier");
         Ok(())
@@ -1215,10 +1325,38 @@ impl Retrainer {
     /// and returned; they never disturb the scan loop.
     pub fn maybe_retrain(&self) -> Option<Result<TrainingStats>> {
         let settings = self.settings.load_full();
-        if !settings.enabled || !settings.auto_retrain {
+        if !settings.enabled {
             return None;
         }
         let now = chrono::Utc::now().timestamp();
+        // A model on trial is judged when its window ends, and no scheduled
+        // retrain replaces it before then. A rejected one pauses retraining.
+        let trial = self.trial();
+        if let (Some(started), Some(ends)) = (trial.started_at, trial.ends_at) {
+            if now < ends {
+                return None;
+            }
+            if settings.auto_rollback {
+                self.conclude_trial(
+                    &settings,
+                    started,
+                    ends,
+                    trial.baseline.as_deref().unwrap_or(""),
+                );
+            } else {
+                self.write_trial(&Trial {
+                    last_outcome: Some("kept: automatic rollback is off".to_string()),
+                    ..Trial::default()
+                });
+            }
+            return None;
+        }
+        if trial.retry_after.is_some_and(|after| now < after) {
+            return None;
+        }
+        if !settings.auto_retrain {
+            return None;
+        }
         let interval = settings.retrain_interval_secs.max(3_600) as i64;
         {
             let mut last = self.last_attempt.lock().unwrap_or_else(|e| e.into_inner());
@@ -1244,6 +1382,111 @@ impl Retrainer {
         Some(outcome)
     }
 
+    /// The configured model as the fixed reference for anchored training:
+    /// only a loadable fastText file that is not the learned model itself.
+    fn anchor_model(&self, settings: &AiSettings) -> Option<fasttext::FastText> {
+        let path = Path::new(settings.model_path.trim());
+        if path.as_os_str().is_empty() || !path.is_file() || path == self.learned {
+            return None;
+        }
+        fasttext::FastText::load_model(path).ok()
+    }
+
+    /// The trial state beside the model, or none.
+    pub fn trial(&self) -> Trial {
+        std::fs::read(trial_path(&self.learned))
+            .ok()
+            .and_then(|raw| serde_json::from_slice::<serde_json::Value>(&raw).ok())
+            .map(|value| Trial::from_json(&value))
+            .unwrap_or_default()
+    }
+
+    fn write_trial(&self, trial: &Trial) {
+        let path = trial_path(&self.learned);
+        let written = serde_json::to_vec_pretty(&trial.to_json())
+            .map_err(std::io::Error::other)
+            .and_then(|bytes| std::fs::write(&path, bytes));
+        if let Err(e) = written {
+            self.logs.push(
+                LogLevel::Warn,
+                "ai",
+                format!("could not record the model trial: {e}"),
+            );
+        }
+    }
+
+    /// Judge the model on trial and keep it or roll it back.
+    fn conclude_trial(&self, settings: &AiSettings, started: i64, ends: i64, baseline: &str) {
+        let _running = self.running.lock().unwrap_or_else(|e| e.into_inner());
+        let outcome = judge_trial(
+            &self.store,
+            settings,
+            &self.learned,
+            baseline,
+            started,
+            ends,
+        );
+        let now = chrono::Utc::now().timestamp();
+        match outcome {
+            TrialOutcome::Keep(why) => {
+                self.logs.push(
+                    LogLevel::Info,
+                    "ai",
+                    format!("AI kept its retrained classifier after its trial: {why}"),
+                );
+                self.write_trial(&Trial {
+                    last_outcome: Some(format!("kept: {why}")),
+                    ..Trial::default()
+                });
+            }
+            TrialOutcome::Reject(why) => {
+                let restored = self.revert_to(baseline);
+                let pause = settings.retrain_interval_secs.max(3_600) as i64 * 2;
+                let what = match &restored {
+                    Ok(()) => "the model it replaced is back in use".to_string(),
+                    Err(e) => format!("the model it replaced could not be restored ({e})"),
+                };
+                self.logs.push(
+                    LogLevel::Warn,
+                    "ai",
+                    format!(
+                        "AI rolled back its retrained classifier after its trial: {why}; {what}. Retraining pauses for {}h.",
+                        pause / 3600
+                    ),
+                );
+                self.write_trial(&Trial {
+                    retry_after: Some(now + pause),
+                    last_outcome: Some(format!("rolled back: {why}")),
+                    ..Trial::default()
+                });
+            }
+        }
+    }
+
+    /// Put `baseline` back in front of the scanner: the previous learned
+    /// model by swapping it back, or the configured model by setting the
+    /// rejected one aside.
+    fn revert_to(&self, baseline: &str) -> Result<()> {
+        let previous = previous_model_path(&self.learned);
+        if Path::new(baseline) == previous && previous.is_file() {
+            self.swap_with_previous()?;
+            return self.install();
+        }
+        let rejected = self.learned.with_extension("rejected.bin");
+        std::fs::rename(&self.learned, &rejected)?;
+        let _ = std::fs::rename(
+            stats_path(&self.learned),
+            self.learned.with_extension("rejected.json"),
+        );
+        if let Some(install) = self.installer.get() {
+            if let Err(e) = install(Path::new(baseline)) {
+                let _ = std::fs::rename(&rejected, &self.learned);
+                return Err(e);
+            }
+        }
+        Ok(())
+    }
+
     /// When the model in place was trained, from its record.
     fn last_trained_at(&self) -> Option<i64> {
         let raw = std::fs::read(stats_path(&self.learned)).ok()?;
@@ -1253,6 +1496,173 @@ impl Retrainer {
             .ok()
             .map(|t| t.timestamp())
     }
+}
+
+/// Where the trial of the model in place is recorded.
+pub fn trial_path(learned: &Path) -> PathBuf {
+    learned.with_extension("trial.json")
+}
+
+/// How long a newly accepted model is on trial before it is judged on live
+/// traffic: half the retrain interval, between one hour and a day.
+pub fn trial_secs(settings: &AiSettings) -> i64 {
+    (settings.retrain_interval_secs / 2).clamp(3_600, 86_400) as i64
+}
+
+/// A model's trial: in progress (`started_at`/`ends_at`), or concluded, with
+/// a pause on retraining after a rollback.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Trial {
+    pub started_at: Option<i64>,
+    pub ends_at: Option<i64>,
+    /// The model the one on trial replaced, to return to.
+    pub baseline: Option<String>,
+    /// No scheduled retrain before this.
+    pub retry_after: Option<i64>,
+    pub last_outcome: Option<String>,
+}
+
+impl Trial {
+    fn from_json(value: &serde_json::Value) -> Self {
+        Self {
+            started_at: value.get("started_at").and_then(|v| v.as_i64()),
+            ends_at: value.get("ends_at").and_then(|v| v.as_i64()),
+            baseline: value
+                .get("baseline")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
+            retry_after: value.get("retry_after").and_then(|v| v.as_i64()),
+            last_outcome: value
+                .get("last_outcome")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
+        }
+    }
+
+    /// The record as JSON, also what the status API reports.
+    pub fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "started_at": self.started_at,
+            "ends_at": self.ends_at,
+            "baseline": self.baseline,
+            "retry_after": self.retry_after,
+            "last_outcome": self.last_outcome,
+        })
+    }
+}
+
+enum TrialOutcome {
+    Keep(String),
+    Reject(String),
+}
+
+/// Fewest threat labels the model replaced must find on the trial's traffic
+/// before a drop in detections counts as evidence.
+const TRIAL_MIN_THREATS: usize = 10;
+/// Fewest corrections in the trial window before their rate counts.
+const TRIAL_MIN_CORRECTIONS: usize = 3;
+/// Most recent domains a trial compares the two models on.
+const TRIAL_DOMAINS: u32 = 5_000;
+
+/// Compare the model on trial with the one it replaced, on what the network
+/// did during the trial. Three independent signals, any one of which rejects:
+///
+/// * held-out threat families: the trial model must not lose more of them;
+/// * live traffic: it must not find fewer than half the threats the old
+///   model finds on the same domains, nor more than twice as many (a flood
+///   of new detections is as suspect as a drought);
+/// * the operator: it must not need correcting more than twice as often as
+///   the old model did over an equally long window before the trial.
+fn judge_trial(
+    store: &AiStore,
+    settings: &AiSettings,
+    learned: &Path,
+    baseline: &str,
+    started: i64,
+    ends: i64,
+) -> TrialOutcome {
+    let mut notes: Vec<String> = Vec::new();
+    let baseline_path = Path::new(baseline.trim());
+    let comparable = !baseline.trim().is_empty() && baseline_path.is_file() && learned.is_file();
+
+    if comparable {
+        if let Ok(trial_probe) = probe_threat_model(store, settings, learned) {
+            if let Ok(base_probe) = probe_threat_names(settings, baseline_path, &trial_probe.sample)
+            {
+                if trial_probe.lost() > base_probe.lost() {
+                    return TrialOutcome::Reject(format!(
+                        "it lost {} of {} held-out threat names against {} for the model it replaced",
+                        trial_probe.lost(),
+                        trial_probe.checked,
+                        base_probe.lost()
+                    ));
+                }
+                notes.push(format!(
+                    "{} of {} held-out threats lost (was {})",
+                    trial_probe.lost(),
+                    trial_probe.checked,
+                    base_probe.lost()
+                ));
+            }
+        }
+
+        // With a dedicated threat model the learned one only categorizes,
+        // so its threat rate says nothing about detection.
+        if !settings.dedicated_threat_model() {
+            let domains = store
+                .domains_classified_between(started, ends, TRIAL_DOMAINS)
+                .unwrap_or_default();
+            if !domains.is_empty() {
+                let pairs: Vec<(String, String)> = domains
+                    .into_iter()
+                    .map(|domain| (String::new(), domain))
+                    .collect();
+                let threats = |model: &Path| {
+                    predict_all(model, &pairs).map(|labels| {
+                        labels
+                            .iter()
+                            .filter(|label| {
+                                *label != BENIGN_LABEL && settings.is_auto_block_category(label)
+                            })
+                            .count()
+                    })
+                };
+                if let (Ok(trial), Ok(base)) = (threats(learned), threats(baseline_path)) {
+                    if base >= TRIAL_MIN_THREATS && trial * 2 < base {
+                        return TrialOutcome::Reject(format!(
+                            "it found {trial} threats on {} live domains where the model it replaced finds {base}",
+                            pairs.len()
+                        ));
+                    }
+                    if trial > base * 2 + TRIAL_MIN_THREATS {
+                        return TrialOutcome::Reject(format!(
+                            "it flagged {trial} threats on {} live domains where the model it replaced flags {base}",
+                            pairs.len()
+                        ));
+                    }
+                    notes.push(format!(
+                        "{trial} threats on {} live domains (was {base})",
+                        pairs.len()
+                    ));
+                }
+            }
+        }
+    }
+
+    let window = (ends - started).max(1);
+    let during = store
+        .corrections_of_verdicts_between(started, ends)
+        .unwrap_or(0);
+    let before = store
+        .corrections_of_verdicts_between(started - window, started)
+        .unwrap_or(0);
+    if during >= TRIAL_MIN_CORRECTIONS && during > before * 2 + 1 {
+        return TrialOutcome::Reject(format!(
+            "you corrected {during} of its verdicts during the trial against {before} in the same time before it"
+        ));
+    }
+    notes.push(format!("{during} corrections (was {before})"));
+    TrialOutcome::Keep(notes.join("; "))
 }
 
 #[derive(Clone, Copy)]

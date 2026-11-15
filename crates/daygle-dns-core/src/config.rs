@@ -1456,6 +1456,12 @@ pub struct AiSettings {
     pub auto_retrain: bool,
     /// How often automatic maintenance may retrain, in seconds.
     pub retrain_interval_secs: u64,
+    /// Put each newly accepted model on trial (half the retrain interval,
+    /// one hour to a day), then compare it on live traffic, held-out threats
+    /// and your corrections with the model it replaced, and roll it back -
+    /// pausing retraining - if it did worse.
+    #[serde(default = "default_auto_retrain")]
+    pub auto_rollback: bool,
     /// Learn from "not a threat" corrections: a retrain adds them to the
     /// training set as a `benign` label, so the model can stop repeating the
     /// mistake the operator corrected. Off by default, because a small
@@ -1514,6 +1520,7 @@ impl Default for AiSettings {
             verifier_threshold: 0.35,
             auto_retrain: true,
             retrain_interval_secs: 86_400,
+            auto_rollback: true,
             learn_negatives: false,
             fetch_pages: false,
             page_fetch_timeout_secs: 5,

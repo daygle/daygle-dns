@@ -605,6 +605,15 @@ if [ "${DAYGLE_DNS_AI:-}" != "0" ]; then
             chown "$SERVICE_USER":"$SERVICE_USER" \
                 "$CONFIG_DIR/models/daygle-starter.bin" 2>/dev/null || true
             log "Installed bundled AI starter model to $CONFIG_DIR/models/daygle-starter.bin"
+            # The labelled corpus that model was trained from: retraining
+            # includes it so labels are not forgotten. Installed only with
+            # the model it matches; upgrades get it from a models bundle.
+            if [ -f "$SRC_DIR/models/starter-training.txt" ]; then
+                install -m 0644 "$SRC_DIR/models/starter-training.txt" \
+                    "$CONFIG_DIR/models/starter-training.txt"
+                chown "$SERVICE_USER":"$SERVICE_USER" \
+                    "$CONFIG_DIR/models/starter-training.txt" 2>/dev/null || true
+            fi
             # Record the release these files came from: fastText and ONNX
             # carry no version of their own and the console's AI page shows
             # this. An upgrade keeps any existing model files (and their
