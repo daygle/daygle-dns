@@ -102,7 +102,7 @@ fasttext = "0.8"
 # daygle-dns-ml/verifier-onnx, default on; a static musl build leaves it
 # out because the prebuilt ONNX Runtime binaries are glibc-based).
 ort = { version = "2.0.0-rc.15", default-features = false, features = ["std", "download-binaries", "copy-dylibs", "ndarray", "tls-rustls"] }
-tokenizers = { version = "0.23", default-features = false, features = ["fancy-regex"] }
+tokenizers = { version = "1.0.0-rc.4", default-features = false, features = ["regex", "normalizers", "wordpiece"] }
 
 [profile.release]
 lto = "thin"
