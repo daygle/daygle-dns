@@ -58,6 +58,9 @@ export function percent(value) {
 
 // 604800 -> "7 Days", 300 -> "5 Minutes".
 export function duration(secs) {
+  // A setting the server did not send (older server, scanner off) would
+  // otherwise read "undefined Seconds".
+  if (typeof secs !== 'number' || !Number.isFinite(secs)) return '-';
   const units = [
     [86400, 'Day'],
     [3600, 'Hour'],

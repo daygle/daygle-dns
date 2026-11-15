@@ -112,7 +112,13 @@ where
             .classify(input)
             .filter(|v| v.confidence >= self.threshold)
         {
-            Some(v) if v.category == base.category => Some(corroborated(v, base)),
+            // Labels compare case-insensitively: fastText labels are
+            // lowercased on load, but a centroid file (hand-written or
+            // refreshed) may spell the same label `Phishing`, which turned
+            // every agreement into a dispute.
+            Some(v) if v.category.eq_ignore_ascii_case(&base.category) => {
+                Some(corroborated(v, base))
+            }
             Some(v) => {
                 // A confident disagreement on the category destroys the
                 // threat's plausibility even if the verifier is itself just
@@ -180,6 +186,18 @@ mod tests {
         assert_eq!(v.severity, Severity::Threat);
         assert_eq!(v.confidence, 0.9);
         assert!(v.evidence.contains("corroborated"));
+    }
+
+    #[test]
+    fn agreement_ignores_label_case() {
+        let backend = VerifyingBackend::new(
+            Fixed(Some(verdict("phishing", 0.55, Severity::Threat))),
+            Fixed(Some(verdict("Phishing", 0.9, Severity::Info))),
+            0.35,
+        );
+        let v = backend.classify(&threat_input()).unwrap();
+        assert_eq!(v.severity, Severity::Threat);
+        assert!(v.evidence.contains("corroborated"), "{}", v.evidence);
     }
 
     #[test]
