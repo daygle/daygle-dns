@@ -2733,7 +2733,9 @@ pub async fn ai_model_health_probe(
             ),
         );
     }
-    let mut sample: Vec<(String, String)> = Vec::with_capacity(request.sample.len());
+    // Grown on push rather than pre-sized from the request: the length check
+    // above bounds it, but sizing from client input invites unbounded allocation.
+    let mut sample: Vec<(String, String)> = Vec::new();
     for row in request.sample {
         let label = row.label.trim().to_ascii_lowercase();
         let domain = row.domain.trim().trim_matches('.').to_ascii_lowercase();
