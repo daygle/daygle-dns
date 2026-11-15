@@ -263,6 +263,21 @@ fn verdict_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<VerdictRow> {
     })
 }
 
+/// Drop page readings and page-rule decisions whose domain no longer has a
+/// threat verdict: page history describes that verdict and goes with it.
+fn delete_orphaned_page_history(conn: &Connection) -> rusqlite::Result<()> {
+    for table in ["ai_page_readings", "ai_page_adjustments"] {
+        conn.execute(
+            &format!(
+                "DELETE FROM {table} WHERE domain NOT IN
+                     (SELECT domain FROM ai_verdicts WHERE channel = 'threat')"
+            ),
+            [],
+        )?;
+    }
+    Ok(())
+}
+
 /// SQLite-backed verdict + override store for the AI subsystem.
 pub struct AiStore {
     conn: Arc<Mutex<Connection>>,
@@ -549,35 +564,38 @@ impl AiStore {
                 .collect::<std::result::Result<Vec<_>, _>>()?;
             rows
         };
+        if expired.is_empty() {
+            // Nothing aged out: skip the page-history sweep below, which
+            // scans both page tables against the verdicts on every call.
+            return Ok(0);
+        }
         let mut requeued = 0usize;
+        let mut dropped_threat = false;
         // Expiry is per channel: a threat verdict and a content verdict for
         // the same domain age out on their own TTLs.
-        for (domain, channel, seen_since) in &expired {
-            if *seen_since {
-                requeued += tx.execute(
-                    "UPDATE ai_verdicts SET status = 'pending', category = '', severity = '',
-                         confidence = 0, evidence = ''
-                     WHERE domain = ?1 AND channel = ?2 AND status IN ('classified', 'skipped')",
-                    params![domain, channel],
-                )?;
-            } else {
-                tx.execute(
-                    "DELETE FROM ai_verdicts WHERE domain = ?1 AND channel = ?2",
-                    params![domain, channel],
-                )?;
+        {
+            let mut requeue = tx.prepare(
+                "UPDATE ai_verdicts SET status = 'pending', category = '', severity = '',
+                     confidence = 0, evidence = ''
+                 WHERE domain = ?1 AND channel = ?2 AND status IN ('classified', 'skipped')",
+            )?;
+            let mut remove =
+                tx.prepare("DELETE FROM ai_verdicts WHERE domain = ?1 AND channel = ?2")?;
+            for (domain, channel, seen_since) in &expired {
+                if *seen_since {
+                    requeued += requeue.execute(params![domain, channel])?;
+                } else {
+                    remove.execute(params![domain, channel])?;
+                    dropped_threat |= channel == Channel::Threat.as_str();
+                }
             }
         }
         // Page history belongs to the threat verdict it describes. Rows whose
         // verdict has been dropped would otherwise accumulate once per domain
-        // ever read, long after the verdict itself is gone.
-        for table in ["ai_page_readings", "ai_page_adjustments"] {
-            tx.execute(
-                &format!(
-                    "DELETE FROM {table} WHERE domain NOT IN
-                         (SELECT domain FROM ai_verdicts WHERE channel = 'threat')"
-                ),
-                [],
-            )?;
+        // ever read, long after the verdict itself is gone. Only a dropped
+        // threat row can orphan them.
+        if dropped_threat {
+            delete_orphaned_page_history(&tx)?;
         }
         tx.commit()?;
         Ok(requeued)
@@ -612,14 +630,8 @@ impl AiStore {
             ),
             params_from_iter(labels.iter()),
         )?;
-        for table in ["ai_page_readings", "ai_page_adjustments"] {
-            tx.execute(
-                &format!(
-                    "DELETE FROM {table} WHERE domain NOT IN
-                         (SELECT domain FROM ai_verdicts WHERE channel = 'threat')"
-                ),
-                [],
-            )?;
+        if deleted > 0 {
+            delete_orphaned_page_history(&tx)?;
         }
         tx.commit()?;
         Ok(deleted)

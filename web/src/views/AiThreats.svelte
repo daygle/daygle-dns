@@ -261,19 +261,32 @@
     }
   }
 
+  // Hand `text` to the browser as a download. The link is attached for the
+  // click (Firefox ignores clicks on detached links) and the object URL is
+  // revoked afterwards: revoking it in the same tick can cancel the download
+  // before it starts, as the other export views already allow for.
+  function saveText(text, type, filename) {
+    const url = URL.createObjectURL(new Blob([text], { type }));
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+
   async function exportThreats(format) {
     exporting = format;
     error = null;
     notice = null;
     try {
       const text = await api.aiThreatsExport(format);
-      const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = format === 'list' ? 'ai-threats.txt' : 'ai-threats.csv';
-      a.click();
-      URL.revokeObjectURL(url);
+      saveText(
+        text,
+        'text/plain;charset=utf-8',
+        format === 'list' ? 'ai-threats.txt' : 'ai-threats.csv',
+      );
       notice = `Exported ${format === 'list' ? 'the plain domain list' : 'the CSV'} of active threats.`;
     } catch (e) {
       error = formatApiError(e);
@@ -287,13 +300,7 @@
     error = null;
     try {
       const text = await api.aiCorrections('csv');
-      const blob = new Blob([text], { type: 'text/csv;charset=utf-8' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = 'ai-corrections.csv';
-      a.click();
-      URL.revokeObjectURL(url);
+      saveText(text, 'text/csv;charset=utf-8', 'ai-corrections.csv');
       notice = 'Exported every exemption, mislabelled mark and relabel as training data.';
     } catch (e) {
       error = formatApiError(e);

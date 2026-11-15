@@ -567,10 +567,22 @@ fn redirect_target(
     location: &str,
 ) -> Result<(String, String, String), String> {
     let location = location.trim();
-    let (next_scheme, rest) = if let Some(rest) = location.strip_prefix("https://") {
+    // Schemes are case-insensitive (`HTTPS://` is valid), and a
+    // protocol-relative `//host/path` keeps the current scheme but names a
+    // new host: it must be validated as one, not fetched as a path on this
+    // host.
+    let strip_scheme = |prefix: &str| {
+        location
+            .get(..prefix.len())
+            .filter(|head| head.eq_ignore_ascii_case(prefix))
+            .map(|_| &location[prefix.len()..])
+    };
+    let (next_scheme, rest) = if let Some(rest) = strip_scheme("https://") {
         ("https", rest)
-    } else if let Some(rest) = location.strip_prefix("http://") {
+    } else if let Some(rest) = strip_scheme("http://") {
         ("http", rest)
+    } else if let Some(rest) = location.strip_prefix("//") {
+        (if scheme == "https" { "https" } else { "http" }, rest)
     } else if location.starts_with('/') {
         return Ok((
             scheme.to_string(),
@@ -582,9 +594,13 @@ fn redirect_target(
     };
     let rest = without_fragment(rest);
     let rest = rest.as_str();
-    let (authority, path) = match rest.find('/') {
-        Some(index) => (&rest[..index], &rest[index..]),
-        None => (rest, "/"),
+    // The authority ends at the path or, with no path, at the query.
+    let (authority, path) = match rest.find(['/', '?']) {
+        Some(index) if rest[index..].starts_with('?') => {
+            (&rest[..index], format!("/{}", &rest[index..]))
+        }
+        Some(index) => (&rest[..index], rest[index..].to_string()),
+        None => (rest, "/".to_string()),
     };
     if authority.contains('@') {
         return Err("redirect with credentials not followed".to_string());
@@ -607,7 +623,7 @@ fn redirect_target(
         if path.is_empty() {
             "/".to_string()
         } else {
-            path.to_string()
+            path
         },
     ))
 }
@@ -640,10 +656,15 @@ pub fn extract(html: &str) -> (String, String) {
                     continue;
                 }
                 let mut skipped = false;
-                for tag in ["script", "style", "noscript"] {
-                    if lower[open..].starts_with(&format!("<{tag}")) {
-                        let close = format!("</{tag}>");
-                        match lower[open..].find(&close) {
+                // Static strings: building them per `<` allocated six times
+                // for every tag on the page.
+                for (opening, close) in [
+                    ("<script", "</script>"),
+                    ("<style", "</style>"),
+                    ("<noscript", "</noscript>"),
+                ] {
+                    if lower[open..].starts_with(opening) {
+                        match lower[open..].find(close) {
                             Some(end) => i = open + end + close.len(),
                             None => i = html.len(),
                         }
@@ -786,10 +807,20 @@ pub fn adjust_confidence(
 /// A one-line note for the threat verdict's evidence: what the page said, or
 /// why it could not be read. Bounded, since evidence is shown in a table.
 pub fn evidence_note(outcome: &Result<PageContent, String>) -> String {
+    let reading = outcome
+        .as_ref()
+        .ok()
+        .and_then(|page| classify_text(&page.title, &page.text));
+    note_for(outcome, reading.as_ref())
+}
+
+/// [`evidence_note`] for a page already classified, so a read classifies
+/// its text once rather than once for the note and again for the rule.
+fn note_for(outcome: &Result<PageContent, String>, reading: Option<&TextVerdict>) -> String {
     match outcome {
         Ok(page) => {
             let title = truncate(&page.title, 80);
-            match classify_text(&page.title, &page.text) {
+            match reading {
                 Some(verdict) => format!(
                     "page \"{title}\" reads {} ({:.0}%: {})",
                     verdict.category,
@@ -827,7 +858,7 @@ pub fn read_page(fetcher: &PageFetcher, domain: &str) -> Inspection {
         Err(_) => None,
     };
     Inspection {
-        note: evidence_note(&outcome),
+        note: note_for(&outcome, reading.as_ref()),
         reading,
     }
 }
@@ -928,6 +959,25 @@ mod tests {
         assert!(redirect_target("https", "example.com", "https://user:pw@example.com/").is_err());
         assert!(redirect_target("https", "example.com", "ftp://example.com/").is_err());
         assert!(redirect_target("https", "example.com", "other").is_err());
+        // Scheme case does not matter.
+        let upper = redirect_target("http", "example.com", "HTTPS://www.example.com/a").unwrap();
+        assert_eq!(
+            upper,
+            ("https".into(), "www.example.com".into(), "/a".into())
+        );
+        // Protocol-relative: a new host under the current scheme, validated.
+        let relative = redirect_target("https", "example.com", "//cdn.example.net/x").unwrap();
+        assert_eq!(
+            relative,
+            ("https".into(), "cdn.example.net".into(), "/x".into())
+        );
+        assert!(redirect_target("https", "example.com", "//127.0.0.1/").is_err());
+        // A query with no path still names a valid host.
+        let query = redirect_target("https", "example.com", "https://example.org?a=1").unwrap();
+        assert_eq!(
+            query,
+            ("https".into(), "example.org".into(), "/?a=1".into())
+        );
     }
 
     #[test]

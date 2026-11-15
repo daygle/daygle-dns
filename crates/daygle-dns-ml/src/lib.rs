@@ -867,20 +867,24 @@ fn wrap_verifier(
     logs: &Arc<LogStore>,
     learned_reference: &Path,
 ) -> Box<dyn DomainClassifier + Send + Sync> {
-    if settings.verifier_model_path.trim().is_empty() {
+    // Trimmed as the emptiness checks are: a path pasted with a trailing
+    // space was "configured" yet failed to load.
+    let model_path = settings.verifier_model_path.trim();
+    if model_path.is_empty() {
         return inner;
     }
     // A configured reference wins; else the one refreshed from your
     // corrections; else the one shipped beside the verifier model.
     let learned = learned_reference.to_string_lossy();
-    let reference = if !settings.verifier_reference_path.trim().is_empty() {
-        Some(settings.verifier_reference_path.as_str())
+    let configured_reference = settings.verifier_reference_path.trim();
+    let reference = if !configured_reference.is_empty() {
+        Some(configured_reference)
     } else if learned_reference.is_file() {
         Some(learned.as_ref())
     } else {
         None
     };
-    match verifier_onnx::MiniLmVerifier::load(&settings.verifier_model_path, reference) {
+    match verifier_onnx::MiniLmVerifier::load(model_path, reference) {
         Ok(verifier) => {
             logs.push(
                 daygle_dns_core::LogLevel::Info,

@@ -123,7 +123,17 @@ pub(crate) fn load_centroids(path: &Path) -> Result<CentroidMap> {
             path.display()
         )));
     }
+    // Every centroid must live in the same embedding space: a dot product
+    // over vectors of different lengths silently truncates to the shorter
+    // one, so a centroid from another model would still "score".
+    let dim = map.values().next().map_or(0, Vec::len);
     for (category, centroid) in &map {
+        if centroid.len() != dim {
+            return Err(DaygleError::Config(format!(
+                "MiniLM centroid for '{category}' has {} dimensions, expected {dim}",
+                centroid.len()
+            )));
+        }
         let norm: f32 = centroid.iter().map(|v| v * v).sum::<f32>().sqrt();
         if !norm.is_finite() || !(0.7..=1.3).contains(&norm) {
             return Err(DaygleError::Config(format!(
@@ -322,10 +332,13 @@ impl MiniLmVerifier {
 
     fn top_match(&self, embedding: &[f32]) -> Option<(String, f32)> {
         let dot = |a: &[f32], b: &[f32]| a.iter().zip(b).map(|(x, y)| x * y).sum::<f32>();
+        // Compare by reference and clone only the winner: this runs once per
+        // threat verdict on the scan workers.
         self.centroids
             .iter()
-            .map(|(category, centroid)| (category.clone(), dot(embedding, centroid)))
+            .map(|(category, centroid)| (category, dot(embedding, centroid)))
             .max_by(|a, b| a.1.total_cmp(&b.1))
+            .map(|(category, score)| (category.clone(), score))
     }
 }
 
