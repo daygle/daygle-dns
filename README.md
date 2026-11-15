@@ -180,18 +180,30 @@ Daygle DNS combines, in a single process:
   *not a threat* (its detection stops blocking but is kept for review), and
   every operator correction is downloadable as training data. The scanner also
   maintains its own model: with `ai.auto_retrain` on it periodically rebuilds
-  the classifier from your corrections and its confident verdicts, refuses a
-  candidate that does worse on held-out corrections than the model in use,
-  loads an accepted one without a restart, and keeps the model it replaced so
-  one rollback is always available. A domain marked "not a threat" never
+  the classifier from your corrections, its confident verdicts and the shipped
+  starter corpus (so labels this network has not seen lately are not
+  forgotten), refuses a candidate that does worse on held-out corrections than
+  the model in use or can no longer report a threat label the model in use
+  can, runs a scheduled retrain's candidate in the shadow of the live model
+  (`ai.trial_new_models`) and promotes it - without a restart - only if it did
+  at least as well on held-out threats, live traffic, your corrections during
+  the trial and independently confirmed labels; a rejected candidate never
+  answered a query, pauses retraining and raises an alert. Its own verdicts
+  only train when the shipped reference model, the verifier or the page
+  agrees, so a mistake cannot reinforce itself. A dedicated threat model is
+  maintained the same way, the verifier's reference is refreshed from your
+  corrections (never from its own verdicts), and the starter corpus ships in
+  the models bundle so `[updates] auto_refresh_models` keeps the reference
+  current. It keeps the model it replaced so one
+  rollback is always available. A domain marked "not a threat" never
   trains under the label it was denied, whatever `ai.learn_negatives` says.
   That flag (off by default) also trains those corrections as a `benign`
   label, so a correction can change the next model; the threat channel never reports that label as a
   threat, but a negative class can over-generalise, which is why it is opt-in.
   `cargo run -p daygle-dns-ml --example negatives_eval` measures it: on a
   synthetic corpus where the negatives are domains the model had flagged, half
-  the held-out threats read as benign; where they are harmless sites, none
-  do. A retrain that loses more held-out threats than the model in use is
+  the held-out threats read as benign; where they are harmless sites, 2 of
+  30 do. A retrain that loses more held-out threats than the model in use is
   refused even when its overall score is fine. Whole word families, grouped by
   shared words, are held back for that check, and each is probed under a word
   order the store never recorded, so a negative class that only swallows
@@ -205,7 +217,10 @@ Daygle DNS combines, in a single process:
   classifier, and records the result with the verdict. `ai.page_rule` decides
   what that reading may do: `evidence` (default) records it only,
   `corroborate` lets an agreeing page raise the confidence, and `decide` also
-  caps it when the page reads as an ordinary category. Private, loopback and
+  caps it when the page reads as an ordinary category and carries no threat
+  cue at all. The page is written by the site being judged, so `decide` can be
+  gamed by a site that shows a fetcher harmless text; it is opt-in for that
+  reason. A page stage gets at most 90 seconds per scan cycle. Private, loopback and
   link-local addresses are refused and redirects are checked the same way. On by
   default after an install in **train mode** (records verdicts, nothing
   blocks) - flip `ai.mode` to `enforce` in the config or GUI when you are

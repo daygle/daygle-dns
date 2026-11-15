@@ -36,6 +36,9 @@ pub struct ActiveBlock {
     pub expires_at: i64,
 }
 
+/// Longest the page stage may run in one scan cycle.
+const PAGE_STAGE_BUDGET: std::time::Duration = std::time::Duration::from_secs(90);
+
 /// Domain → active block; swapped atomically after each scan cycle and on
 /// every override change, so the policy plugin's hot path is one map lookup.
 pub type BlockSnapshot = HashMap<String, ActiveBlock>;
@@ -84,9 +87,9 @@ pub struct Scanner {
     /// Set after the first snapshot is published: the blocks already in
     /// force at startup are not news.
     primed: std::sync::atomic::AtomicBool,
-    /// Model maintenance, set once by the engine: the scan loop asks it to
-    /// retrain when one is due.
-    retrainer: std::sync::OnceLock<Arc<crate::learn::Retrainer>>,
+    /// Model maintenance, set once by the engine: the scan loop runs it
+    /// after each successful cycle.
+    maintenance: std::sync::OnceLock<Arc<crate::maintain::Maintenance>>,
     /// Page reader override, set once: tests supply readings without a
     /// network. `None` fetches the live page with the settings' limits.
     page_reader: std::sync::OnceLock<Box<dyn crate::page::PageReader>>,
@@ -117,7 +120,7 @@ impl Scanner {
             last_expiry: AtomicI64::new(0),
             publishing: std::sync::Mutex::new(()),
             primed: std::sync::atomic::AtomicBool::new(false),
-            retrainer: std::sync::OnceLock::new(),
+            maintenance: std::sync::OnceLock::new(),
             page_reader: std::sync::OnceLock::new(),
         })
     }
@@ -128,10 +131,10 @@ impl Scanner {
         self.page_reader.set(reader).is_ok()
     }
 
-    /// Hand the scanner the model-maintenance job used for automatic
-    /// retraining (see [`crate::learn::Retrainer`]).
-    pub fn set_retrainer(&self, retrainer: Arc<crate::learn::Retrainer>) {
-        let _ = self.retrainer.set(retrainer);
+    /// Hand the scanner the model-maintenance step it runs after each cycle
+    /// (see [`crate::maintain`]).
+    pub fn set_maintenance(&self, maintenance: Arc<crate::maintain::Maintenance>) {
+        let _ = self.maintenance.set(maintenance);
     }
 
     fn log_info(&self, msg: String) {
@@ -296,6 +299,11 @@ impl Scanner {
                 &live
             }
         };
+        // The stage shares the scan cycle, so it gets a wall-clock budget: a
+        // batch of slow sites (each trying HTTPS, HTTP and redirects) must
+        // not hold up classification. A candidate not reached stays unread
+        // and is picked up next cycle.
+        let deadline = std::time::Instant::now() + PAGE_STAGE_BUDGET;
         let workers = crate::page::workers().min(candidates.len());
         let chunk = candidates.len().div_ceil(workers);
         let readings: Vec<(String, f32, crate::page::Inspection)> = std::thread::scope(|scope| {
@@ -304,6 +312,7 @@ impl Scanner {
                 .map(|part| {
                     scope.spawn(move || {
                         part.iter()
+                            .take_while(|_| std::time::Instant::now() < deadline)
                             .map(|(domain, confidence)| {
                                 (domain.clone(), *confidence, reader.inspect(domain))
                             })
@@ -658,10 +667,10 @@ impl Scanner {
                 Ok(Ok(_)) => {
                     since_epoch = started;
                     // Model maintenance runs after a successful cycle, on a
-                    // blocking thread, and never delays the next cycle.
-                    if let Some(retrainer) = self.retrainer.get().cloned() {
-                        let _ =
-                            tokio::task::spawn_blocking(move || retrainer.maybe_retrain()).await;
+                    // blocking thread. A due retrain delays the next cycle by
+                    // its duration; one that is not due costs nothing.
+                    if let Some(maintenance) = self.maintenance.get().cloned() {
+                        let _ = tokio::task::spawn_blocking(move || maintenance.run()).await;
                     }
                 }
                 // A failed cycle reads the same window again next time.

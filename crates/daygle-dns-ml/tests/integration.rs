@@ -805,10 +805,22 @@ fn training_data_prefers_corrections_and_skips_vetoed_domains() {
         .unwrap();
 
     let (pairs, stats) = daygle_dns_ml::learn::collect(&store, &settings(AiMode::Train)).unwrap();
+    // The starter corpus rides along with every retrain; what this test is
+    // about is the store's own contribution.
+    let starter: std::collections::HashSet<(String, String)> =
+        daygle_dns_ml::learn::starter_pairs().into_iter().collect();
+    let local: Vec<(String, String)> = pairs
+        .into_iter()
+        .filter(|pair| !starter.contains(pair))
+        .collect();
     assert_eq!(
-        pairs,
+        local,
         vec![("shopping".to_string(), "a.example".to_string())],
         "the relabel wins and the vetoed domain is not training data"
+    );
+    assert!(
+        stats.starter > 0,
+        "the starter corpus keeps known labels alive"
     );
     assert_eq!(stats.corrections, 1);
     assert_eq!(stats.verdicts, 0);
@@ -851,12 +863,17 @@ fn retraining_installs_a_learned_model_once_there_is_data() {
     }
 
     let stats = ai.retrain_learned_model().unwrap();
-    assert_eq!(stats.examples, 240);
-    assert_eq!(stats.labels, 3);
+    assert_eq!(stats.local(), 240);
+    assert_eq!(stats.verdicts, 240);
+    assert_eq!(stats.examples, 240 + stats.starter);
+    assert!(
+        stats.labels > 3,
+        "the starter corpus keeps the labels this store never produced"
+    );
     assert!(ai.learned_model_path().is_file());
     let record = ai.learned_model_record().expect("the retrain is recorded");
-    assert_eq!(record["examples"], 240);
-    assert_eq!(record["labels"], 3);
+    assert_eq!(record["verdicts"], 240);
+    assert_eq!(record["starter"], stats.starter);
     // The new model is live: the content channel switched from the heuristic
     // fallback to the trained fastText file, without a restart.
     assert!(ai.learned_model_active());
@@ -899,7 +916,7 @@ fn a_retrain_keeps_one_model_to_roll_back_to() {
         !ai.learned_model_previous(),
         "nothing has been replaced yet"
     );
-    assert_eq!(ai.learned_model_record().unwrap()["examples"], 240);
+    assert_eq!(ai.learned_model_record().unwrap()["verdicts"], 240);
 
     // Three more domains: a second retrain replaces the first model.
     for i in 240..243 {
@@ -920,18 +937,18 @@ fn a_retrain_keeps_one_model_to_roll_back_to() {
             .unwrap();
     }
     ai.retrain_learned_model().unwrap();
-    assert_eq!(ai.learned_model_record().unwrap()["examples"], 243);
+    assert_eq!(ai.learned_model_record().unwrap()["verdicts"], 243);
     assert!(ai.learned_model_previous());
 
     ai.rollback_learned_model().unwrap();
     assert_eq!(
-        ai.learned_model_record().unwrap()["examples"],
+        ai.learned_model_record().unwrap()["verdicts"],
         240,
         "the record follows the restored model"
     );
     // Reversible: the model just replaced is now the previous one.
     ai.rollback_learned_model().unwrap();
-    assert_eq!(ai.learned_model_record().unwrap()["examples"], 243);
+    assert_eq!(ai.learned_model_record().unwrap()["verdicts"], 243);
 }
 
 /// A threat candidate is offered for a page read once, and what the page said
@@ -1085,7 +1102,20 @@ fn not_a_threat_corrections_are_learned_only_when_enabled() {
 
     cfg.learn_negatives = true;
     let dataset = daygle_dns_ml::learn::collect_dataset(&ai.store, &cfg).unwrap();
-    assert_eq!(dataset.stats.negatives, 10, "one in five is held back");
+    let held = dataset
+        .validation
+        .iter()
+        .filter(|(label, _)| label == daygle_dns_ml::learn::BENIGN_LABEL)
+        .count();
+    assert_eq!(
+        dataset.stats.negatives + held,
+        12,
+        "every negative either trains or is held back"
+    );
+    assert!(
+        held > 0 && held < 12,
+        "about one in five is held back: {held}"
+    );
     assert!(dataset
         .pairs
         .iter()
@@ -1111,6 +1141,7 @@ impl daygle_dns_ml::page::PageReader for FixedReader {
                 category: "shopping",
                 confidence: 0.8,
                 cues: vec!["add to cart"],
+                also: vec![],
             }),
         }
     }
@@ -1221,6 +1252,7 @@ impl daygle_dns_ml::page::PageReader for OneAgrees {
                 category,
                 confidence,
                 cues: vec![cue],
+                also: vec![],
             }),
         }
     }
@@ -1336,6 +1368,7 @@ impl daygle_dns_ml::page::PageReader for WeakReads {
                 category,
                 confidence,
                 cues: vec![],
+                also: vec![],
             }),
         }
     }
@@ -1474,6 +1507,7 @@ fn dropping_a_verdict_drops_its_page_history() {
                 category: "shopping",
                 confidence: 0.8,
                 cues: vec!["add to cart"],
+                also: vec![],
             }),
         )
         .unwrap();
@@ -1826,7 +1860,7 @@ fn probing_a_model_scores_held_out_threats() {
     assert!(missing.is_err(), "a missing model is not silently a pass");
 }
 
-/// Corrections are held back from training in fifths, and the candidate is
+/// About a fifth of corrections are held back from training, and the candidate is
 /// accepted when it does as well on them as the model in use.
 #[test]
 fn retraining_judges_itself_on_held_out_corrections() {
@@ -1839,9 +1873,12 @@ fn retraining_judges_itself_on_held_out_corrections() {
             ..settings(AiMode::Train)
         },
     );
+    // Names that carry their label, so a held-out correction is learnable
+    // from the names that trained.
     let labels = ["news", "shopping", "gambling"];
+    let name = |i: usize| format!("{}-site{i}.example", labels[i % labels.len()]);
     for i in 0..240 {
-        let domain = format!("site{i}.example");
+        let domain = name(i);
         ai.store.observe(&domain).unwrap();
         ai.store
             .save_verdict(
@@ -1859,14 +1896,19 @@ fn retraining_judges_itself_on_held_out_corrections() {
     }
     for i in 0..10 {
         ai.store
-            .set_category_override(&format!("site{i}.example"), labels[i % labels.len()])
+            .set_category_override(&name(i), labels[i % labels.len()])
             .unwrap();
     }
 
     let stats = ai.retrain_learned_model().unwrap();
-    assert_eq!(stats.corrections, 8, "two of ten corrections are held out");
     let record = ai.learned_model_record().unwrap();
-    assert_eq!(record["validation_examples"], 2);
+    let held = record["validation_examples"].as_u64().unwrap() as usize;
+    assert!(held > 0, "some corrections are held out: {record}");
+    assert_eq!(
+        stats.corrections + held,
+        10,
+        "every correction either trains or is held out"
+    );
     assert!(
         record["validation_accuracy"].as_f64().is_some(),
         "the held-out score is recorded: {record}"
@@ -2529,4 +2571,547 @@ async fn subdomain_exemption_reaches_the_policy_plugin() {
         .evaluate(&query("www.bad.example.com"))
         .await
         .is_some());
+}
+
+// ── Self-maintenance ────────────────────────────────────────────────────────
+
+fn seed_content_verdicts(ai: &AiEngine, range: std::ops::Range<usize>) {
+    let labels = ["news", "shopping", "gambling"];
+    for i in range {
+        let domain = format!("{}-site{i}.example", labels[i % labels.len()]);
+        ai.store.observe(&domain).unwrap();
+        ai.store
+            .save_verdict(
+                Channel::Content,
+                &domain,
+                labels[i % labels.len()],
+                "info",
+                "classified",
+                0.95,
+                "fasttext",
+                "ev",
+                3600,
+            )
+            .unwrap();
+    }
+}
+
+/// A scheduled retrain builds a candidate that runs in the shadow of the
+/// live model: nothing changes until its trial ends and it is promoted.
+#[test]
+fn a_scheduled_retrain_runs_in_the_shadow_until_promoted() {
+    let _train = training_guard();
+    let dir = TempDir::new().unwrap();
+    let ai = engine(
+        &dir,
+        AiSettings {
+            auto_retrain: true,
+            block_threshold: 0.5,
+            ..settings(AiMode::Train)
+        },
+    );
+    seed_content_verdicts(&ai, 0..240);
+    assert!(!ai.learned_model_active());
+
+    let stats = ai
+        .run_due_maintenance()
+        .expect("a first retrain is due")
+        .unwrap();
+    assert_eq!(stats.local(), 240);
+    assert!(
+        !ai.learned_model_active(),
+        "a candidate on trial does not answer queries"
+    );
+    assert_eq!(ai.content_backend_name(), "heuristic");
+    assert!(ai.learned_model_trial().in_progress());
+    assert!(
+        ai.run_due_maintenance().is_none(),
+        "nothing replaces a candidate on trial"
+    );
+
+    end_trial_soon(&ai);
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    assert!(ai.run_due_maintenance().is_none());
+    let trial = ai.learned_model_trial();
+    assert!(
+        trial
+            .last_outcome
+            .as_deref()
+            .is_some_and(|o| o.starts_with("promoted")),
+        "{trial:?}"
+    );
+    assert!(ai.learned_model_active(), "promoted without a restart");
+    assert_eq!(ai.content_backend_name(), "fasttext");
+    assert_eq!(trial.history.len(), 1, "the trial is in the history");
+}
+
+/// A damaged retrained model never stops the AI from starting: the engine
+/// says so and falls back to the configured model.
+#[test]
+fn a_damaged_learned_model_falls_back_to_the_configured_one() {
+    let dir = TempDir::new().unwrap();
+    std::fs::write(dir.path().join("learned.bin"), b"not a fastText model").unwrap();
+    let ai = engine(&dir, settings(AiMode::Train));
+    assert!(!ai.learned_model_active());
+    assert_eq!(ai.content_backend_name(), "heuristic");
+}
+
+/// A manual retrain and a scheduled one never interleave: both finish, and
+/// the current and previous models are both whole.
+#[test]
+fn concurrent_retrains_leave_whole_models() {
+    let _train = training_guard();
+    let dir = TempDir::new().unwrap();
+    let ai = engine(
+        &dir,
+        AiSettings {
+            block_threshold: 0.5,
+            ..settings(AiMode::Train)
+        },
+    );
+    seed_content_verdicts(&ai, 0..240);
+    let handles: Vec<_> = (0..2)
+        .map(|_| {
+            let ai = ai.clone();
+            std::thread::spawn(move || ai.retrain_learned_model())
+        })
+        .collect();
+    for handle in handles {
+        handle.join().unwrap().unwrap();
+    }
+    for model in [
+        ai.learned_model_path().to_path_buf(),
+        daygle_dns_ml::learn::previous_model_path(ai.learned_model_path()),
+    ] {
+        assert!(
+            daygle_dns_ml::learn::model_labels(&model).is_some(),
+            "{} loads",
+            model.display()
+        );
+    }
+    assert!(!ai.learned_model_path().with_extension("tmp").exists());
+}
+
+/// Held-out corrections are chosen by domain, so a new correction never
+/// moves an old one between training and validation: the model in use is
+/// not judged on what it was trained on.
+#[test]
+fn held_out_corrections_stay_held_out_as_more_arrive() {
+    let dir = TempDir::new().unwrap();
+    let store = tmp_store(&dir);
+    let cfg = settings(AiMode::Train);
+    for i in 0..30 {
+        store
+            .set_category_override(&format!("relabel{i}.example"), "news")
+            .unwrap();
+    }
+    let before = daygle_dns_ml::learn::collect_dataset(&store, &cfg).unwrap();
+    store
+        .set_category_override("latecomer.example", "news")
+        .unwrap();
+    let after = daygle_dns_ml::learn::collect_dataset(&store, &cfg).unwrap();
+    assert!(!before.validation.is_empty());
+    for pair in &before.validation {
+        assert!(after.validation.contains(pair), "{pair:?} moved");
+    }
+}
+
+/// The export is the block snapshot's list: a subdomain of an exempted
+/// parent and a label no longer treated as a threat are left out.
+#[test]
+fn the_threat_export_matches_what_blocks() {
+    let dir = TempDir::new().unwrap();
+    let ai = engine(
+        &dir,
+        AiSettings {
+            auto_block_categories: vec!["phishing".to_string()],
+            block_threshold: 0.5,
+            ..settings(AiMode::Enforce)
+        },
+    );
+    for (domain, label) in [
+        ("login.bad.example", "phishing"),
+        ("pay.trusted.example", "phishing"),
+        ("odd.example", "scam"),
+    ] {
+        ai.store.observe(domain).unwrap();
+        ai.store
+            .save_verdict(
+                Channel::Threat,
+                domain,
+                label,
+                "threat",
+                "classified",
+                0.9,
+                "fasttext",
+                "ev",
+                3600,
+            )
+            .unwrap();
+    }
+    ai.set_allow_override("trusted.example", "our payment provider")
+        .unwrap();
+    let exported: Vec<String> = ai
+        .export_threats()
+        .unwrap()
+        .into_iter()
+        .map(|(domain, ..)| domain)
+        .collect();
+    assert_eq!(exported, vec!["login.bad.example".to_string()]);
+}
+
+/// Anchored self-training: a verdict of the scanner's own trains only when
+/// the reference model or the page behind the domain agrees with it.
+#[test]
+fn unconfirmed_verdicts_do_not_train() {
+    let _train = training_guard();
+    let dir = TempDir::new().unwrap();
+    // A reference model that knows these names well.
+    let mut reference = Vec::new();
+    for i in 0..30 {
+        reference.push(("news".to_string(), format!("dailynews-paper{i}.example")));
+        reference.push(("shopping".to_string(), format!("bigshop-store{i}.example")));
+    }
+    let anchor_path = dir.path().join("anchor.bin");
+    daygle_dns_ml::learn::train(&reference, &anchor_path).unwrap();
+    let anchor = fasttext::FastText::load_model(&anchor_path).unwrap();
+
+    let store = tmp_store(&dir);
+    let verdict = |domain: &str, label: &str| {
+        store.observe(domain).unwrap();
+        store
+            .save_verdict(
+                Channel::Content,
+                domain,
+                label,
+                "info",
+                "classified",
+                0.95,
+                "fasttext",
+                "ev",
+                3600,
+            )
+            .unwrap();
+    };
+    verdict("dailynews-paper1.example", "news"); // the reference agrees
+    verdict("bigshop-store1.example", "news"); // the reference disagrees
+    verdict("bigshop-store2.example", "gambling"); // disagrees, page confirms
+    let mut pages = std::collections::HashMap::new();
+    pages.insert("bigshop-store2.example".to_string(), "gambling".to_string());
+
+    let cfg = settings(AiMode::Train);
+    let dataset = daygle_dns_ml::learn::collect_dataset_with(
+        &store,
+        &cfg,
+        &daygle_dns_ml::learn::Sources {
+            anchor: Some(&anchor),
+            confirmations: Some(&pages),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let has =
+        |label: &str, domain: &str| dataset.pairs.iter().any(|(l, d)| l == label && d == domain);
+    assert!(has("news", "dailynews-paper1.example"));
+    assert!(
+        !has("news", "bigshop-store1.example"),
+        "nothing independent backs this label"
+    );
+    assert!(
+        has("gambling", "bigshop-store2.example"),
+        "the page confirms it"
+    );
+    assert_eq!(dataset.stats.unconfirmed, 1);
+}
+
+/// A models bundle's corpus, beside the configured model, is the one a
+/// retrain uses.
+#[test]
+fn a_bundled_corpus_beside_the_model_is_preferred() {
+    let dir = TempDir::new().unwrap();
+    let model = dir.path().join("daygle-starter.bin");
+    std::fs::write(&model, b"model").unwrap();
+    assert!(daygle_dns_ml::learn::bundled_starter_corpus(&model.display().to_string()).is_none());
+    std::fs::write(
+        dir.path().join(daygle_dns_ml::learn::STARTER_CORPUS_FILE),
+        "# comment\n__label__phishing login-bundle.example\n",
+    )
+    .unwrap();
+    let corpus =
+        daygle_dns_ml::learn::bundled_starter_corpus(&model.display().to_string()).unwrap();
+    assert_eq!(
+        daygle_dns_ml::learn::starter_pairs_from(&corpus),
+        vec![("phishing".to_string(), "login-bundle.example".to_string())]
+    );
+}
+
+/// Move the trial in progress so it ends a moment from now, with a window
+/// that covers everything the test recorded.
+fn end_trial_soon(ai: &AiEngine) {
+    let now = chrono::Utc::now().timestamp();
+    let mut trial = ai.learned_model_trial();
+    assert!(trial.in_progress(), "a scheduled retrain starts a trial");
+    trial.started_at = Some(now - 600);
+    trial.ends_at = Some(now + 1);
+    std::fs::write(
+        daygle_dns_ml::learn::trial_path(ai.learned_model_path()),
+        serde_json::to_vec(&trial.to_json()).unwrap(),
+    )
+    .unwrap();
+}
+
+/// A candidate that would have been worse than the live model is set aside
+/// when its trial ends; the live model never changed, retraining pauses,
+/// and the outcome is in the history.
+#[test]
+fn a_worse_candidate_is_rejected_without_ever_going_live() {
+    let _train = training_guard();
+    let dir = TempDir::new().unwrap();
+    // "zebra" is a label only the candidate learns; treating it as a threat
+    // makes the candidate flag what the live (heuristic) model does not.
+    let ai = engine(
+        &dir,
+        AiSettings {
+            auto_retrain: true,
+            block_threshold: 0.5,
+            auto_block_categories: vec!["zebra".to_string()],
+            ..settings(AiMode::Train)
+        },
+    );
+    for i in 0..240 {
+        let label = ["zebra", "news", "shopping"][i % 3];
+        let domain = format!("{label}-site{i}.example");
+        ai.store.observe(&domain).unwrap();
+        ai.store
+            .save_verdict(
+                Channel::Content,
+                &domain,
+                label,
+                "info",
+                "classified",
+                0.95,
+                "fasttext",
+                "ev",
+                3600,
+            )
+            .unwrap();
+    }
+    ai.run_due_maintenance().unwrap().unwrap();
+    end_trial_soon(&ai);
+    // During the trial the operator says these are not threats.
+    for i in 0..4 {
+        ai.set_not_threat_override(&format!("zebra-trial{i}.example"), "harmless")
+            .unwrap();
+    }
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    assert!(ai.run_due_maintenance().is_none());
+
+    let trial = ai.learned_model_trial();
+    let outcome = trial.last_outcome.clone().unwrap_or_default();
+    assert!(outcome.starts_with("rejected"), "{trial:?}");
+    assert!(!ai.learned_model_active(), "the live model never changed");
+    assert_eq!(ai.content_backend_name(), "heuristic");
+    assert!(!ai.learned_model_path().exists());
+    assert!(trial.retry_after.is_some(), "retraining pauses");
+    assert!(ai.run_due_maintenance().is_none(), "paused");
+    assert_eq!(trial.history.len(), 1);
+}
+
+/// Each signal that rejects a candidate, scored directly: held-out threats
+/// and live traffic in the shadow judge.
+#[test]
+fn the_shadow_judge_rejects_on_lost_threats_and_on_floods() {
+    let _train = training_guard();
+    let dir = TempDir::new().unwrap();
+    let cfg = AiSettings {
+        block_threshold: 0.5,
+        ..settings(AiMode::Train)
+    };
+    let ai = engine(&dir, cfg.clone());
+    // Threat verdicts the live model (trained below) knows as phishing.
+    let mut live_pairs = Vec::new();
+    for i in 0..60 {
+        let domain = format!("secure-login-verify{i}.example");
+        ai.store.observe(&domain).unwrap();
+        ai.store
+            .save_verdict(
+                Channel::Threat,
+                &domain,
+                "phishing",
+                "threat",
+                "classified",
+                0.95,
+                "fasttext",
+                "ev",
+                3600,
+            )
+            .unwrap();
+        live_pairs.push(("phishing".to_string(), domain));
+        live_pairs.push(("news".to_string(), format!("daily-paper{i}.example")));
+    }
+    let live = dir.path().join("live.bin");
+    daygle_dns_ml::learn::train(&live_pairs, &live).unwrap();
+    // A candidate that reads every one of those names as news.
+    let forgetful: Vec<(String, String)> = live_pairs
+        .iter()
+        .map(|(_, domain)| ("news".to_string(), domain.clone()))
+        .chain(std::iter::once((
+            "phishing".to_string(),
+            "unrelated-word.example".to_string(),
+        )))
+        .collect();
+    let candidate = dir.path().join("candidate.bin");
+    daygle_dns_ml::learn::train(&forgetful, &candidate).unwrap();
+
+    let now = chrono::Utc::now().timestamp();
+    let rejected = daygle_dns_ml::maintain::judge_for_tests(
+        &ai.store,
+        &cfg,
+        &candidate,
+        &live.display().to_string(),
+        now - 600,
+        now + 1,
+    )
+    .unwrap_err();
+    assert!(
+        rejected.contains("held-out threat names") || rejected.contains("found"),
+        "{rejected}"
+    );
+
+    // The same model against itself is never worse.
+    assert!(daygle_dns_ml::maintain::judge_for_tests(
+        &ai.store,
+        &cfg,
+        &live,
+        &live.display().to_string(),
+        now - 600,
+        now + 1,
+    )
+    .is_ok());
+
+    // A candidate that calls everything phishing floods the live traffic,
+    // on a store where the domains looked up are ordinary.
+    let quiet = TempDir::new().unwrap();
+    let ordinary = engine(&quiet, cfg.clone());
+    for i in 0..60 {
+        let domain = format!("daily-paper{i}.example");
+        ordinary.store.observe(&domain).unwrap();
+        ordinary
+            .store
+            .save_verdict(
+                Channel::Content,
+                &domain,
+                "news",
+                "info",
+                "classified",
+                0.95,
+                "fasttext",
+                "ev",
+                3600,
+            )
+            .unwrap();
+    }
+    let flood: Vec<(String, String)> = live_pairs
+        .iter()
+        .map(|(_, domain)| ("phishing".to_string(), domain.clone()))
+        .chain(std::iter::once((
+            "news".to_string(),
+            "x-y.example".to_string(),
+        )))
+        .collect();
+    let flooding = dir.path().join("flood.bin");
+    daygle_dns_ml::learn::train(&flood, &flooding).unwrap();
+    let flooded = daygle_dns_ml::maintain::judge_for_tests(
+        &ordinary.store,
+        &cfg,
+        &flooding,
+        &live.display().to_string(),
+        now - 600,
+        now + 1,
+    )
+    .unwrap_err();
+    assert!(flooded.contains("flagged"), "{flooded}");
+}
+
+/// A dedicated threat model is maintained too: its own learned file, its
+/// own trial, and only threat verdicts as material.
+#[test]
+fn a_dedicated_threat_model_is_retrained_from_threat_verdicts() {
+    let _train = training_guard();
+    let dir = TempDir::new().unwrap();
+    let mut pairs = Vec::new();
+    for i in 0..40 {
+        pairs.push(("phishing".to_string(), format!("secure-login{i}.example")));
+        pairs.push(("benign".to_string(), format!("daily-paper{i}.example")));
+    }
+    let threat_model = dir.path().join("threat.bin");
+    daygle_dns_ml::learn::train(&pairs, &threat_model).unwrap();
+    let ai = engine(
+        &dir,
+        AiSettings {
+            block_threshold: 0.5,
+            threat_model_path: threat_model.display().to_string(),
+            ..settings(AiMode::Train)
+        },
+    );
+    for i in 0..240 {
+        let (label, domain) = if i % 2 == 0 {
+            ("phishing", format!("secure-login-x{i}.example"))
+        } else {
+            ("benign", format!("daily-paper-x{i}.example"))
+        };
+        ai.store.observe(&domain).unwrap();
+        ai.store
+            .save_verdict(
+                Channel::Threat,
+                &domain,
+                label,
+                "threat",
+                "classified",
+                0.95,
+                "fasttext",
+                "ev",
+                3600,
+            )
+            .unwrap();
+    }
+    let stats = ai
+        .retrain_model(daygle_dns_ml::learn::Role::Threat)
+        .unwrap();
+    assert!(stats.verdicts > 0, "{stats:?}");
+    let status = ai.maintained_status(daygle_dns_ml::learn::Role::Threat);
+    assert_eq!(status["active"], true, "{status}");
+    assert!(ai.threat_model_path().ends_with("learned-threat.bin"));
+    assert!(
+        !ai.learned_model_path().exists(),
+        "the shared model was not touched"
+    );
+    ai.rollback_model(daygle_dns_ml::learn::Role::Threat)
+        .unwrap_err();
+}
+
+/// Switching the verifier on or off reloads the threat channel in place: no
+/// restart, and the running pipeline says so.
+#[cfg(feature = "verifier-onnx")]
+#[test]
+fn the_verifier_switches_on_without_a_restart() {
+    let model = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../models/all-MiniLM-L6-v2-int8.onnx");
+    if !model.is_file() {
+        eprintln!("bundled MiniLM model missing; skipped");
+        return;
+    }
+    let dir = TempDir::new().unwrap();
+    let cfg = settings(AiMode::Train);
+    let ai = engine(&dir, cfg.clone());
+    let without = ai.threat_backend_name();
+    let on = AiSettings {
+        verifier_model_path: model.display().to_string(),
+        ..cfg.clone()
+    };
+    assert!(!ai.apply_settings(&on), "no restart needed");
+    let with = ai.threat_backend_name();
+    assert_ne!(with, without, "the verifier is in the pipeline now");
+    assert!(!ai.apply_settings(&cfg));
+    assert_eq!(ai.threat_backend_name(), without, "and out again");
 }

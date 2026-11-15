@@ -611,14 +611,28 @@ max_domains_per_scan = 5120
 auto_block_categories = ["malware", "phishing", "scam"]
 
 # The scanner maintains its own model. Every retrain_interval_secs it rebuilds
-# the classifier from your category corrections (AI -> Threats) plus its own
-# confident verdicts, and installs the result beside ai.db as learned.bin -
+# the classifier from your category corrections (AI -> Threats), its own
+# confident verdicts and the shipped starter corpus (so a label this network
+# has not seen lately is not forgotten), and installs the result beside ai.db
+# as learned.bin -
 # loaded into the running scanner immediately (and ahead of model_path from
 # then on, unless a channel names its own model). Delete learned.bin to fall
-# back. A retrain needs 200+ examples and must hold up on held-out
-# corrections.
+# back. A retrain needs 200+ examples of this install's own, must hold up on
+# held-out corrections and held-out threats, and must still be able to report
+# every auto_block_categories label the model in use can.
 # auto_retrain = true
 # retrain_interval_secs = 86400
+# Its own verdicts only train when the shipped model (model_path), the
+# verifier or the page behind the domain agrees, so a mistake cannot feed on
+# itself. A scheduled retrain's candidate then runs in the shadow of the live
+# model for half the retrain interval (1 h - 1 day) without answering queries,
+# and replaces it only if it did at least as well on held-out threats, live
+# traffic, your corrections and independently confirmed labels; a rejected
+# one pauses retraining and raises an alert ([alerts] ai_model). A dedicated
+# threat_model_path is maintained the same way, and the verifier's reference
+# is refreshed from your corrections. New shipped models arrive too:
+# [updates] auto_refresh_models is on by default.
+# trial_new_models = true
 
 # Learn from "not a threat" corrections: a retrain trains them as a `benign`
 # label, so the model stops repeating a mistake you corrected. Off by default,
@@ -641,8 +655,10 @@ auto_block_categories = ["malware", "phishing", "scam"]
 #   "evidence"    - record it with the verdict; never change the verdict (default)
 #   "corroborate" - an agreeing page may raise the threat confidence
 #   "decide"      - an agreeing page raises it; a page that reads as an ordinary
-#                   category caps it at 1 - the page's confidence, which can
-#                   stop a name-only block
+#                   category (with no threat cue anywhere on it) caps it at
+#                   1 - the page's confidence, which can stop a name-only
+#                   block. The page is the site's own text, so a site can game
+#                   this; use it only if you accept that.
 # page_rule = "evidence"
 # A reading below this confidence is ignored by the rule (0.05-0.99).
 # page_confidence_floor = 0.6
@@ -658,7 +674,9 @@ threat_ttl_secs = 604800
 # nothing. Empty disables the second pass. The tokenizer
 # (minilm-tokenizer.json) and centroid reference (minilm-centroids.json) are
 # looked up beside the .onnx file; verifier_threshold is the minimum
-# embedding cosine for the verifier to assert a category.
+# embedding cosine for the verifier to assert a category. The installer turns
+# it on; switch it on the AI page ("Second Opinion") without a restart. Its
+# agreement also confirms a verdict as training material and for model trials.
 verifier_model_path = "/etc/daygle-dns/models/all-MiniLM-L6-v2-int8.onnx"
 verifier_reference_path = ""
 verifier_threshold = 0.35

@@ -427,7 +427,7 @@ pub fn new_api_token() -> String {
 
 /// `N` random bytes (rand's thread-local CSPRNG, seeded from the OS) as
 /// lowercase hex.
-fn random_hex<const N: usize>() -> String {
+pub(crate) fn random_hex<const N: usize>() -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let bytes: [u8; N] = rand::random();
     let mut out = String::with_capacity(N * 2);
@@ -670,6 +670,8 @@ pub type WebApplyFn = Arc<
 
 /// Build the API router (REST endpoints plus the embedded GUI).
 pub fn router(state: AppState) -> Router {
+    // Written at start, so the update step can read it after a restart.
+    let _ = update::model_probe_token();
     let api = Router::new()
         .route("/status", get(handlers::status))
         // The published schema for this router; the table it is built from is
@@ -1118,18 +1120,22 @@ async fn require_auth(
     // Within the nested router axum strips the `/api` prefix, so match both
     // the full and stripped forms of the login paths.
     let path = req.uri().path();
-    let loopback_peer = req
-        .extensions()
-        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
-        .is_some_and(|info| info.0.ip().is_loopback());
-    // A request a proxy forwarded is never the local update service, even if
-    // the proxy itself runs on loopback.
-    let forwarded = ["x-forwarded-for", "x-real-ip", "forwarded"]
-        .iter()
-        .any(|header| req.headers().contains_key(*header));
-    let local_model_probe = loopback_peer
-        && !forwarded
-        && (path == "/api/ai/model-health" || path == "/ai/model-health");
+    // The root update step scores models before and after a bundle install
+    // without a console login: it presents the per-start token the service
+    // wrote to its updates staging directory, which only that account and
+    // root can read. Nothing else - not even a loopback peer - is let in.
+    let local_model_probe = (path == "/api/ai/model-health" || path == "/ai/model-health")
+        && req
+            .headers()
+            .get("x-daygle-model-probe")
+            .and_then(|value| value.to_str().ok())
+            .zip(update::model_probe_token())
+            .is_some_and(|(presented, token)| {
+                daygle_dns_core::auth::constant_time_eq(
+                    presented.trim().as_bytes(),
+                    token.as_bytes(),
+                )
+            });
     let is_auth_path = path == "/api/auth/login"
         || path == "/auth/login"
         || path == "/api/auth/setup"

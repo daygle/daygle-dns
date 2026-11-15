@@ -6,11 +6,22 @@
 //! console can show what the site actually says next to the name that got it
 //! flagged.
 //!
-//! It is **evidence, not a decision**: nothing here blocks, clears or raises a
-//! verdict. The text classifier is a cue table with fixed weights, not a
-//! trained model, and its confidence is capped below the default block
-//! threshold, so it cannot become the reason a domain is blocked. Its output
-//! is appended to the threat verdict's evidence once per classification.
+//! What the reading may do is `ai.page_rule`'s decision:
+//!
+//! * `evidence` (the default) only records it: nothing here blocks, clears or
+//!   raises a verdict;
+//! * `corroborate` lets a page that agrees raise the threat confidence, never
+//!   above the reading's own confidence (at most 0.9, below the default block
+//!   threshold);
+//! * `decide` also lets a page that reads as an ordinary category cap the
+//!   confidence - but only when no threat cue appears anywhere on the page.
+//!   The page is written by the site being judged, so this direction can be
+//!   gamed by a site that serves harmless-looking text to a fetcher; it is an
+//!   opt-in for networks that accept that trade.
+//!
+//! The text classifier is a cue table with fixed weights, not a trained
+//! model. Its output is appended to the threat verdict's evidence once per
+//! classification.
 //!
 //! Fetching is the risky part, so the rules are deliberately narrow:
 //!
@@ -59,13 +70,17 @@ pub struct PageContent {
 }
 
 /// A category the page text suggests, with the cues that suggested it.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct TextVerdict {
     pub category: &'static str,
     /// At most 0.9: below the default auto-block threshold, by construction.
     pub confidence: f32,
     /// The phrases that matched, strongest first.
     pub cues: Vec<&'static str>,
+    /// Every other category a cue matched, however weakly. A page that reads
+    /// as shopping but also says "verify your account" is not evidence that
+    /// a threat verdict was wrong.
+    pub also: Vec<&'static str>,
 }
 
 /// One weighted phrase. Matching is whole-phrase on normalised text, so
@@ -162,15 +177,47 @@ const CUES: &[Cue] = &[
         category: "adult",
         weight: 2.0,
     },
+    // Ordinary categories need two cues to clear `MIN_SCORE`: one shop
+    // phrase on a phishing page is not a reading.
     Cue {
         phrase: "add to cart",
         category: "shopping",
         weight: 1.5,
     },
     Cue {
+        phrase: "free shipping",
+        category: "shopping",
+        weight: 1.0,
+    },
+    Cue {
+        phrase: "shopping cart",
+        category: "shopping",
+        weight: 1.0,
+    },
+    Cue {
+        phrase: "returns policy",
+        category: "shopping",
+        weight: 1.0,
+    },
+    Cue {
         phrase: "breaking news",
         category: "news",
         weight: 1.5,
+    },
+    Cue {
+        phrase: "latest news",
+        category: "news",
+        weight: 1.0,
+    },
+    Cue {
+        phrase: "top stories",
+        category: "news",
+        weight: 1.0,
+    },
+    Cue {
+        phrase: "editorial",
+        category: "news",
+        weight: 1.0,
     },
 ];
 
@@ -201,9 +248,17 @@ pub fn classify_text(title: &str, text: &str) -> Option<TextVerdict> {
             None => scores.push((cue.category, cue.weight, vec![cue.phrase])),
         }
     }
-    let (category, mut score, mut cues) = scores
-        .into_iter()
-        .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))?;
+    let winner = scores
+        .iter()
+        .enumerate()
+        .max_by(|a, b| {
+            a.1 .1
+                .partial_cmp(&b.1 .1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .map(|(index, _)| index)?;
+    let (category, mut score, mut cues) = scores.swap_remove(winner);
+    let also: Vec<&'static str> = scores.iter().map(|(category, ..)| *category).collect();
     if score < MIN_SCORE {
         return None;
     }
@@ -224,6 +279,7 @@ pub fn classify_text(title: &str, text: &str) -> Option<TextVerdict> {
         category,
         confidence: (0.4 + 0.1 * score).min(0.9),
         cues,
+        also,
     })
 }
 
@@ -266,10 +322,41 @@ impl AddressPolicy {
                 if let Some(v4) = v6.to_ipv4_mapped() {
                     return is_global_v4(v4);
                 }
+                let s = v6.segments();
+                // Translation prefixes carry an IPv4 address: judge that.
+                // NAT64 (64:ff9b::/96) in the low 32 bits, 6to4 (2002::/16)
+                // in bits 16-48.
+                if s[0] == 0x0064 && s[1] == 0xff9b && s[2..6] == [0, 0, 0, 0] {
+                    let v4 = std::net::Ipv4Addr::new(
+                        (s[6] >> 8) as u8,
+                        s[6] as u8,
+                        (s[7] >> 8) as u8,
+                        s[7] as u8,
+                    );
+                    return is_global_v4(v4);
+                }
+                if s[0] == 0x2002 {
+                    let v4 = std::net::Ipv4Addr::new(
+                        (s[1] >> 8) as u8,
+                        s[1] as u8,
+                        (s[2] >> 8) as u8,
+                        s[2] as u8,
+                    );
+                    return is_global_v4(v4);
+                }
                 !(v6.is_unspecified()
                     || v6.is_multicast()
-                    || (v6.segments()[0] & 0xfe00) == 0xfc00
-                    || (v6.segments()[0] & 0xffc0) == 0xfe80)
+                    // IPv4-compatible (::a.b.c.d, deprecated) and the rest of ::/96.
+                    || s[..6] == [0, 0, 0, 0, 0, 0]
+                    // Unique local fc00::/7, link-local fe80::/10, the old
+                    // site-local fec0::/10.
+                    || (s[0] & 0xfe00) == 0xfc00
+                    || (s[0] & 0xffc0) == 0xfe80
+                    || (s[0] & 0xffc0) == 0xfec0
+                    // Documentation 2001:db8::/32, Teredo 2001::/32 and the
+                    // discard-only 100::/64.
+                    || (s[0] == 0x2001 && (s[1] == 0x0db8 || s[1] == 0))
+                    || (s[0] == 0x0100 && s[1..4] == [0, 0, 0]))
             }
         }
     }
@@ -286,7 +373,10 @@ fn is_global_v4(ip: std::net::Ipv4Addr) -> bool {
         || ip.is_multicast()
         || octets[0] == 0
         || octets[0] >= 240
-        || (octets[0] == 100 && (64..=127).contains(&octets[1])))
+        || (octets[0] == 100 && (64..=127).contains(&octets[1]))
+        // IETF protocol assignments 192.0.0.0/24 and benchmarking 198.18.0.0/15.
+        || (octets[0] == 192 && octets[1] == 0 && octets[2] == 0)
+        || (octets[0] == 198 && (octets[1] & 0xfe) == 18))
 }
 
 /// Fetches pages under the rules in the module documentation.
@@ -354,6 +444,9 @@ impl PageFetcher {
         let client = reqwest::blocking::Client::builder()
             .timeout(self.timeout)
             .redirect(RedirectPolicy::none())
+            // A proxy from the environment would resolve and connect for
+            // us, past the address check and the pin.
+            .no_proxy()
             .resolve(host, addr)
             .user_agent(USER_AGENT)
             .build()
@@ -662,7 +755,9 @@ impl PageReader for PageFetcher {
 /// The two directions are deliberately asymmetric: agreement can only raise a
 /// confidence (a corroborating page never makes a verdict more certain than
 /// the page itself), while disagreement caps it at `1 - confidence`, the
-/// page's own certainty that it is ordinary. Only `decide` may lower.
+/// page's own certainty that it is ordinary. Only `decide` may lower, and
+/// only for a page with no threat cue anywhere on it: a site cannot talk its
+/// way out of a verdict by adding a paragraph about casinos.
 pub fn adjust_confidence(
     rule: PageRule,
     base: f32,
@@ -680,7 +775,7 @@ pub fn adjust_confidence(
     if is_threat_label(reading.category) {
         let raised = base.max(reading.confidence).min(1.0);
         (raised > base + 0.001).then_some(raised)
-    } else if rule == PageRule::Decide {
+    } else if rule == PageRule::Decide && !reading.also.iter().any(|c| is_threat_label(c)) {
         let capped = base.min(1.0 - reading.confidence).max(0.0);
         (capped < base - 0.001).then_some(capped)
     } else {
@@ -867,6 +962,7 @@ mod tests {
             category,
             confidence,
             cues: vec![],
+            also: vec![],
         }
     }
 
@@ -1026,5 +1122,55 @@ mod tests {
         let error = fetcher.fetch("page.test").unwrap_err();
         server.join().unwrap();
         assert!(error.contains("no readable text"), "{error}");
+    }
+
+    #[test]
+    fn decide_never_lowers_a_page_that_also_reads_as_a_threat() {
+        let mixed = TextVerdict {
+            category: "gambling",
+            confidence: 0.8,
+            cues: vec!["casino", "deposit bonus"],
+            also: vec!["phishing"],
+        };
+        let is_threat = |label: &str| label == "phishing";
+        assert_eq!(
+            adjust_confidence(PageRule::Decide, 0.95, Some(&mixed), is_threat, 0.6),
+            None,
+            "a threat cue anywhere on the page keeps the verdict"
+        );
+        let plain = TextVerdict {
+            also: vec![],
+            ..mixed
+        };
+        assert!(adjust_confidence(PageRule::Decide, 0.95, Some(&plain), is_threat, 0.6).is_some());
+    }
+
+    #[test]
+    fn ordinary_categories_can_be_read() {
+        let shop = classify_text("Shop", "add to cart - free shipping on every order").unwrap();
+        assert_eq!(shop.category, "shopping");
+        let news = classify_text("Daily", "latest news and top stories from today").unwrap();
+        assert_eq!(news.category, "news");
+        let mixed =
+            classify_text("Shop", "add to cart, free shipping, verify your account").unwrap();
+        assert!(mixed.also.contains(&"shopping") || mixed.also.contains(&"phishing"));
+    }
+
+    #[test]
+    fn translated_and_special_ipv6_addresses_are_refused() {
+        for ip in [
+            "64:ff9b::a00:1",   // NAT64 of 10.0.0.1
+            "2002:c0a8:101::1", // 6to4 of 192.168.1.1
+            "fec0::1",          // site-local
+            "2001:db8::1",      // documentation
+            "::a00:1",          // IPv4-compatible
+        ] {
+            let ip: IpAddr = ip.parse().unwrap();
+            assert!(!public().allows(ip), "{ip} must be refused");
+        }
+        for ip in ["64:ff9b::808:808", "2606:4700::1111"] {
+            let ip: IpAddr = ip.parse().unwrap();
+            assert!(public().allows(ip), "{ip} is public");
+        }
     }
 }

@@ -786,10 +786,6 @@ impl AiStore {
         Ok(collected)
     }
 
-    /// The threat list blocking is built from, with the confidence that
-    /// qualified it: fresh, undisputed, at or above `threshold`, and vetoed by
-    /// no override. Strongest first. Served for export so another resolver can
-    /// use the result as a blocklist.
     /// Threat verdicts worth reading a page for, with the confidence the
     /// reading may adjust: classified, fresh, not disputed, at or above
     /// `floor`, not exempted, and not already read for this classification.
@@ -871,6 +867,70 @@ impl AiStore {
         Ok(changed > 0)
     }
 
+    /// What each domain's page said on its current threat verdict, keyed by
+    /// domain: an independent reading a retrain may use to confirm one of
+    /// the scanner's own labels.
+    pub fn current_page_labels(&self) -> Result<std::collections::HashMap<String, String>> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(
+            "SELECT p.domain, p.category
+             FROM ai_page_readings p
+             JOIN ai_verdicts v ON v.domain = p.domain AND v.channel = 'threat'
+             WHERE p.read_at >= v.classified_at AND p.category != ''",
+        )?;
+        let collected = stmt
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+            .collect::<std::result::Result<_, _>>()?;
+        Ok(collected)
+    }
+
+    /// Distinct domains with a verdict classified in `[from, to)`, newest
+    /// first: the live traffic a model in trial is compared on.
+    pub fn domains_classified_between(
+        &self,
+        from: i64,
+        to: i64,
+        limit: u32,
+    ) -> Result<Vec<String>> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(
+            "SELECT domain FROM ai_verdicts
+             WHERE status = 'classified' AND classified_at >= ?1 AND classified_at < ?2
+             GROUP BY domain
+             ORDER BY MAX(classified_at) DESC
+             LIMIT ?3",
+        )?;
+        let collected = stmt
+            .query_map(params![from, to, limit as i64], |r| r.get::<_, String>(0))?
+            .collect::<std::result::Result<_, _>>()?;
+        Ok(collected)
+    }
+
+    /// Threat verdicts the verifier model corroborated, by domain: a second,
+    /// independent model gave the same label, so the label is confirmed by
+    /// something other than the classifier that made it.
+    pub fn corroborated_threats(&self) -> Result<std::collections::HashMap<String, String>> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(
+            "SELECT domain, category FROM ai_verdicts
+             WHERE channel = 'threat' AND status = 'classified'
+               AND severity != 'disputed' AND category != ''
+               AND evidence LIKE '%corroborated by %'",
+        )?;
+        let collected = stmt
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+            .collect::<std::result::Result<_, _>>()?;
+        Ok(collected)
+    }
+
+    /// Independent confirmations of a label, by domain: the page reading
+    /// where there is one, else the verifier's corroboration.
+    pub fn independent_labels(&self) -> Result<std::collections::HashMap<String, String>> {
+        let mut labels = self.corroborated_threats()?;
+        labels.extend(self.current_page_labels()?);
+        Ok(labels)
+    }
+
     /// What the page behind `domain` said on its current threat verdict, or
     /// `None` when it has not been read since that verdict was made.
     pub fn page_reading(&self, domain: &str) -> Result<Option<PageReading>> {
@@ -947,6 +1007,10 @@ impl AiStore {
         }))
     }
 
+    /// Stored threats that may block, with the confidence that qualified
+    /// them: fresh, undisputed, at or above `threshold`, and vetoed by no
+    /// exact override. Strongest first. [`crate::AiEngine::export_threats`]
+    /// narrows this to the block snapshot's rules before it is served.
     pub fn export_threats(
         &self,
         now_epoch: i64,

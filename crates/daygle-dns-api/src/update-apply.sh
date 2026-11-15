@@ -44,7 +44,7 @@ DIR="${DAYGLE_DNS_UPDATE_DIR:-/tmp/daygle-dns-update}"
 # The manifest may only install AI model files with these exact flat names
 # (mirrors update.rs MODEL_FILES). Nothing in a manifest or a bundle ever
 # selects another path.
-MODEL_WHITELIST="daygle-starter.bin all-MiniLM-L6-v2-int8.onnx minilm-tokenizer.json minilm-centroids.json"
+MODEL_WHITELIST="daygle-starter.bin starter-training.txt all-MiniLM-L6-v2-int8.onnx minilm-tokenizer.json minilm-centroids.json"
 # Flat marker recording which release the installed model files came from
 # (mirrors update.rs MODEL_VERSION_FILE); the console's AI page shows it.
 MODEL_VERSION_FILE="bundle-version"
@@ -222,19 +222,58 @@ health_check() {
   return 1
 }
 
-MODEL_HEALTH_URL="http://$API_HOST:$API_PORT/api/ai/model-health"
+MODEL_HEALTH_PATH="/api/ai/model-health"
 MODEL_PROBE_FILE="$PRIV/model-probe.json"
 
-# The baseline probe is saved as the JSON the endpoint returned. Posting that
-# same body after the restart scores the new model on exactly the names the
-# old one saw, even if the scanner recorded more verdicts in between.
+# The service writes a fresh token here at every start; presenting it is
+# what lets this step score models without a console login. Read through the
+# service account (the directory is its own) and re-read after a restart.
+model_probe_token() {
+  as_service cat -- "$STAGING/model-probe.token" 2>/dev/null | tr -cd '0-9a-f' | head -c 128
+}
+
+# One probe request: plain HTTP first, then HTTPS for a console that only
+# listens with TLS (its certificate is often self-signed, and the request
+# never leaves this host).
+model_probe_request() { # method [body file]
+  token="$(model_probe_token)"
+  for scheme in http https; do
+    if [ "$1" = POST ]; then
+      out="$(curl -fsS -k --max-time 10 -X POST -H 'Content-Type: application/json' \
+        -H "X-Daygle-Model-Probe: $token" --data-binary @"$2" \
+        "$scheme://$API_HOST:$API_PORT$MODEL_HEALTH_PATH" 2>>"$PRIV/model-probe.err")" \
+        && { printf '%s' "$out"; return 0; }
+    else
+      out="$(curl -fsS -k --max-time 10 -H "X-Daygle-Model-Probe: $token" \
+        "$scheme://$API_HOST:$API_PORT$MODEL_HEALTH_PATH" 2>>"$PRIV/model-probe.err")" \
+        && { printf '%s' "$out"; return 0; }
+    fi
+  done
+  return 1
+}
+
+# The saved baseline body. Posting that same body after the restart scores
+# the new model on exactly the names the old one saw, even if the scanner
+# recorded more verdicts in between.
 model_probe_get() {
-  curl -fsS --max-time 10 "$MODEL_HEALTH_URL" 2>/dev/null
+  model_probe_request GET
 }
 
 model_probe_post() { # baseline json file
-  curl -fsS --max-time 10 -X POST -H 'Content-Type: application/json' \
-    --data-binary @"$1" "$MODEL_HEALTH_URL" 2>/dev/null
+  model_probe_request POST "$1"
+}
+
+# Why a probe gave nothing usable, for the log: the request error, or the
+# reason the endpoint gave.
+model_probe_why() { # response body
+  reason="$(printf '%s' "$1" | sed -n 's/.*"reason":"\([^"]*\)".*/\1/p' | head -n 1)"
+  if [ -n "$reason" ]; then
+    printf '%s' "$reason"
+  elif [ -s "$PRIV/model-probe.err" ]; then
+    tail -n 1 "$PRIV/model-probe.err"
+  else
+    printf 'no answer'
+  fi
 }
 
 # Held-out names the model reads as non-threats, or empty when the probe is
@@ -624,6 +663,10 @@ if [ "$KIND" = "models" ]; then
   # before this bundle replaces them. Empty when the probe is unavailable.
   BASELINE_BODY="$(model_probe_get)" || BASELINE_BODY=""
   BASELINE_LOST="$(model_probe_lost "$BASELINE_BODY")"
+  if [ -z "$BASELINE_LOST" ]; then
+    # Never silent: an install without the comparison says so.
+    log "model probe unavailable ($(model_probe_why "$BASELINE_BODY")); the bundle will install without the held-out threat comparison"
+  fi
   if [ -n "$BASELINE_LOST" ]; then
     if ! printf '%s\n' "$BASELINE_BODY" > "$MODEL_PROBE_FILE" 2>>"$LOG"; then
       log "cannot save the baseline model probe; the bundle will install without that comparison"
@@ -686,6 +729,9 @@ if [ "$KIND" = "models" ]; then
     NEW_BODY="$(model_probe_post "$MODEL_PROBE_FILE")" || NEW_BODY=""
   fi
   NEW_LOST="$(model_probe_lost "$NEW_BODY")"
+  if [ -n "$BASELINE_LOST" ] && [ -z "$NEW_LOST" ]; then
+    log "model probe after the install was unavailable ($(model_probe_why "$NEW_BODY")); the held-out threat comparison was skipped"
+  fi
   if [ -n "$BASELINE_LOST" ] && [ -n "$NEW_LOST" ] && [ "$NEW_LOST" -gt "$BASELINE_LOST" ]; then
     log "model probe regressed: ${BASELINE_LOST} held-out threat(s) lost before, ${NEW_LOST} after"
     as_service rm -f -- "$REQ.processing" "$MANIFEST" "$STAGED_BIN"

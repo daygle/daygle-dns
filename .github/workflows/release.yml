@@ -81,7 +81,7 @@ jobs:
         run: |
           set -eu
           mkdir -p stage
-          for f in daygle-starter.bin all-MiniLM-L6-v2-int8.onnx minilm-tokenizer.json minilm-centroids.json README.md; do
+          for f in daygle-starter.bin starter-training.txt all-MiniLM-L6-v2-int8.onnx minilm-tokenizer.json minilm-centroids.json README.md; do
             if [ ! -f "models/$f" ]; then echo "::error::models/$f missing"; exit 1; fi
             cp "models/$f" "stage/$f"
           done
@@ -94,7 +94,7 @@ jobs:
           {
             printf '{"version":"%s","files":[' "${GITHUB_REF_NAME#v}"
             first=1
-            for f in daygle-starter.bin all-MiniLM-L6-v2-int8.onnx minilm-tokenizer.json minilm-centroids.json; do
+            for f in daygle-starter.bin starter-training.txt all-MiniLM-L6-v2-int8.onnx minilm-tokenizer.json minilm-centroids.json; do
               sha="$(sha256sum "$f" | cut -d' ' -f1)"
               size="$(stat -c %s "$f")"
               if [ "$first" -eq 0 ]; then printf ','; fi
@@ -109,7 +109,7 @@ jobs:
         working-directory: stage
         run: |
           tar -czf daygle-dns-models.tar.gz \
-            manifest.json daygle-starter.bin all-MiniLM-L6-v2-int8.onnx \
+            manifest.json daygle-starter.bin starter-training.txt all-MiniLM-L6-v2-int8.onnx \
             minilm-tokenizer.json minilm-centroids.json
           sha256sum daygle-dns-models.tar.gz > daygle-dns-models.tar.gz.sha256
 

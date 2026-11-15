@@ -1306,6 +1306,42 @@ pub struct AiExportQuery {
     format: Option<String>,
 }
 
+/// The MiniLM verifier file a models bundle installs: beside the configured
+/// shared model, else in the models directory.
+fn bundled_verifier(model_path: &str) -> Option<String> {
+    const VERIFIER_FILE: &str = "all-MiniLM-L6-v2-int8.onnx";
+    let beside = std::path::Path::new(model_path.trim())
+        .parent()
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .map(|dir| dir.join(VERIFIER_FILE));
+    beside
+        .filter(|path| path.is_file())
+        .or_else(|| {
+            crate::update::models_dir(None)
+                .map(|dir| dir.join(VERIFIER_FILE))
+                .filter(|path| path.is_file())
+        })
+        .map(|path| path.display().to_string())
+}
+
+/// `POST /api/ai/retrain` and `/api/ai/rollback` query params.
+#[derive(Debug, Default, serde::Deserialize)]
+pub struct AiModelQuery {
+    /// `shared` (the default) or `threat` (the dedicated threat model).
+    model: Option<String>,
+}
+
+impl AiModelQuery {
+    /// The model named, or `None` for an unknown name.
+    fn role(&self) -> Option<daygle_dns_ml::learn::Role> {
+        match self.model.as_deref().map(str::trim).unwrap_or("shared") {
+            "" | "shared" => Some(daygle_dns_ml::learn::Role::Shared),
+            "threat" => Some(daygle_dns_ml::learn::Role::Threat),
+            _ => None,
+        }
+    }
+}
+
 /// `GET /api/ai/explain` query params.
 #[derive(Debug, Default, serde::Deserialize)]
 pub struct AiExplainQuery {
@@ -1494,7 +1530,7 @@ pub async fn ai_status(State(state): State<AppState>) -> Response {
         "threat_model_path": settings.threat_model_path,
         "threat_model_dedicated": settings.dedicated_threat_model(),
         // Self-maintained model: automatic retraining and what the last run
-        // achieved. The retrained file is used from the next start.
+        // achieved. An accepted retrain is loaded at once, without a restart.
         "auto_retrain": settings.auto_retrain,
         "retrain_interval_secs": settings.retrain_interval_secs,
         "learn_negatives": settings.learn_negatives,
@@ -1504,13 +1540,21 @@ pub async fn ai_status(State(state): State<AppState>) -> Response {
         "page_candidates_per_scan": settings.page_candidates_per_scan,
         "page_rule": settings.page_rule,
         "page_confidence_floor": settings.page_confidence_floor,
-        "learned_model": {
-            "path": ai.learned_model_path().display().to_string(),
-            "present": ai.learned_model_path().is_file(),
-            "active": ai.learned_model_active(),
-            "previous": ai.learned_model_previous(),
-            "last": ai.learned_model_record(),
-        },
+        // Each maintained model: its learned file, whether it is live, the
+        // candidate on trial and the trial history.
+        "learned_model": ai.maintained_status(daygle_dns_ml::learn::Role::Shared),
+        "learned_threat_model": settings
+            .dedicated_threat_model()
+            .then(|| ai.maintained_status(daygle_dns_ml::learn::Role::Threat)),
+        "trial_new_models": settings.trial_new_models,
+        // The MiniLM second opinion: whether it is configured, and whether
+        // its bundled file is there to switch on.
+        "verifier_enabled": !settings.verifier_model_path.trim().is_empty(),
+        "verifier_installed": bundled_verifier(&settings.model_path).is_some(),
+        // Shipped model bundles installed automatically by the updater (the
+        // `[updates]` section), shown here so the AI page can say whether the
+        // reference model keeps itself current too.
+        "auto_refresh_models": state.config.load().updates.auto_refresh_models,
         "backend_categories": ai.backend_categories(),
         "status_counts": serde_json::Map::from_iter(
             statuses
@@ -1810,13 +1854,9 @@ pub async fn ai_threats_export(
         )
             .into_response();
     }
-    let threshold = ai.settings.load_full().block_threshold;
     let exported = run_blocking({
         let ai = ai.clone();
-        move || {
-            ai.store
-                .export_threats(chrono::Utc::now().timestamp(), threshold)
-        }
+        move || ai.export_threats()
     })
     .await;
     let rows = match exported {
@@ -1894,11 +1934,16 @@ pub async fn ai_explain(
         let domain = domain.clone();
         move || -> daygle_dns_core::error::Result<serde_json::Value> {
             let rows = ai.store.verdicts_for(&domain)?;
-            let override_row = ai
-                .store
-                .list_overrides()?
-                .into_iter()
-                .find(|o| o.domain == domain);
+            let overrides = ai.store.list_overrides()?;
+            let override_row = overrides.iter().find(|o| o.domain == domain).cloned();
+            // An allow on a parent exempts every name under it, so explain
+            // that too rather than leaving the domain unexplained.
+            let parent_allow = overrides
+                .iter()
+                .filter(|o| o.action == "allow" && o.domain != domain)
+                .filter(|o| domain.ends_with(&format!(".{}", o.domain)))
+                .max_by_key(|o| o.domain.len())
+                .cloned();
             let relabel = ai.store.category_overrides()?.remove(&domain);
             let page_reading = ai.store.page_reading(&domain)?;
             let page_adjustment = ai.store.page_adjustment(&domain)?;
@@ -1954,13 +1999,21 @@ pub async fn ai_explain(
                     "You relabelled it as '{relabel}', which is what category blocking matches."
                 ));
             }
+            if override_row.is_none() {
+                if let Some(parent) = parent_allow.as_ref() {
+                    reasons.push(format!(
+                        "Exempt through its parent '{}' ({}): the AI never blocks it.",
+                        parent.domain, parent.reason
+                    ));
+                }
+            }
             match threat {
                 Some(t) if t.severity == "disputed" => reasons.push(format!(
                     "The verifier disputed this detection at {:.0}%, so it never blocks.",
                     t.confidence * 100.0
                 )),
                 Some(t) => {
-                    if override_row.is_none() && blocked_category.is_none() {
+                    if override_row.is_none() && parent_allow.is_none() && blocked_category.is_none() {
                         if t.confidence < settings.block_threshold {
                             reasons.push(format!(
                                 "Its threat confidence, {:.0}%, is below the {:.0}% block threshold.",
@@ -2006,6 +2059,12 @@ pub async fn ai_explain(
                 "blocked_category": blocked_category,
                 "label": label,
                 "category_override": relabel,
+                "parent_override": parent_allow.as_ref().map(|o| serde_json::json!({
+                    "domain": o.domain,
+                    "action": o.action,
+                    "reason": o.reason,
+                    "created_at": stamp(o.created_at),
+                })),
                 "override": override_row.as_ref().map(|o| serde_json::json!({
                     "action": o.action,
                     "reason": o.reason,
@@ -2119,15 +2178,22 @@ pub async fn ai_corrections(
     .into_response()
 }
 
-/// `POST /api/ai/rollback` - restore the classifier the last retrain replaced,
+/// `POST /api/ai/rollback[?model=threat]` - restore the model the last
+/// promotion or retrain replaced,
 /// live. The model it replaces is kept, so a rollback can itself be undone.
-pub async fn ai_rollback(State(state): State<AppState>) -> Response {
+pub async fn ai_rollback(
+    State(state): State<AppState>,
+    Query(query): Query<AiModelQuery>,
+) -> Response {
     let Some(ai) = ai_engine(&state) else {
         return map_err(daygle_dns_ml::ai_disabled_error());
     };
+    let Some(role) = query.role() else {
+        return error_response(StatusCode::BAD_REQUEST, "model must be shared or threat");
+    };
     let outcome = run_blocking({
         let ai = ai.clone();
-        move || ai.rollback_learned_model()
+        move || ai.rollback_model(role)
     })
     .await;
     match outcome {
@@ -2147,18 +2213,25 @@ pub async fn ai_rollback(State(state): State<AppState>) -> Response {
     }
 }
 
-/// `POST /api/ai/retrain` - retrain the classifier from the scanner's own
-/// confident verdicts plus the operator's corrections. The result is written
-/// beside `ai.db` as `learned.bin` and used from the next start; a retrain
-/// with too little data, or one whose model does not reproduce its own
-/// training set, leaves the current model in place.
-pub async fn ai_retrain(State(state): State<AppState>) -> Response {
+/// `POST /api/ai/retrain[?model=threat]` - retrain the shared classifier (or
+/// the dedicated threat model) from the scanner's confirmed verdicts, the
+/// operator's corrections and the starter corpus, and put it live at once:
+/// the operator's explicit choice, so no shadow trial (a candidate on trial
+/// is discarded). A retrain with too little data, or one that fails any of
+/// its gates, leaves the current model in place.
+pub async fn ai_retrain(
+    State(state): State<AppState>,
+    Query(query): Query<AiModelQuery>,
+) -> Response {
     let Some(ai) = ai_engine(&state) else {
         return map_err(daygle_dns_ml::ai_disabled_error());
     };
+    let Some(role) = query.role() else {
+        return error_response(StatusCode::BAD_REQUEST, "model must be shared or threat");
+    };
     let outcome = run_blocking({
         let ai = ai.clone();
-        move || ai.retrain_learned_model()
+        move || ai.retrain_model(role)
     })
     .await;
     match outcome {
@@ -2171,7 +2244,7 @@ pub async fn ai_retrain(State(state): State<AppState>) -> Response {
                     stats.examples, stats.labels
                 ),
             );
-            let record = ai.learned_model_record();
+            let record = ai.maintained_status(role).get("last").cloned();
             let validation = record
                 .as_ref()
                 .and_then(|r| r.get("validation_examples"))
@@ -2188,6 +2261,8 @@ pub async fn ai_retrain(State(state): State<AppState>) -> Response {
                 "corrections": stats.corrections,
                 "verdicts": stats.verdicts,
                 "negatives": stats.negatives,
+                "starter": stats.starter,
+                "unconfirmed": stats.unconfirmed,
                 "validation_examples": validation,
                 "threat_validation_examples": threat_validation,
                 "active": true,
@@ -6440,6 +6515,10 @@ pub struct AiUpdate {
     pub threat_ttl_secs: Option<u64>,
     /// Retrain the classifier from what the scanner has learned.
     pub auto_retrain: Option<bool>,
+    pub trial_new_models: Option<bool>,
+    /// Switch the bundled MiniLM verifier on (its file beside the shared
+    /// model, or in the models directory) or off. Applied without a restart.
+    pub verifier_enabled: Option<bool>,
     pub retrain_interval_secs: Option<u64>,
     pub learn_negatives: Option<bool>,
     pub fetch_pages: Option<bool>,
@@ -7388,6 +7467,24 @@ pub async fn update_settings(
         }
         if let Some(v) = a.auto_retrain {
             config.ai.auto_retrain = v;
+        }
+        if let Some(v) = a.trial_new_models {
+            config.ai.trial_new_models = v;
+        }
+        if let Some(on) = a.verifier_enabled {
+            if on {
+                match bundled_verifier(&config.ai.model_path) {
+                    Some(path) => config.ai.verifier_model_path = path,
+                    None => {
+                        return error_response(
+                            StatusCode::BAD_REQUEST,
+                            "the MiniLM verifier model is not installed beside the AI model",
+                        )
+                    }
+                }
+            } else {
+                config.ai.verifier_model_path = String::new();
+            }
         }
         if let Some(v) = a.retrain_interval_secs {
             config.ai.retrain_interval_secs = v.max(3_600);

@@ -3548,18 +3548,30 @@ fn ai_operation(path: &str, method: &str) -> Option<Value> {
             }
         })),
         ("post", "/ai/retrain") => Some(json!({
+            "parameters": json!([{
+                "name": "model",
+                "in": "query",
+                "required": false,
+                "schema": { "type": "string", "enum": ["shared", "threat"] }
+            }]),
             "responses": {
                 "200": json!({
-                    "description": "Retrained from the scanner's confident verdicts and the operator's corrections, and loaded into the running scanner."
+                    "description": "Retrained from the scanner's confirmed verdicts, the operator's corrections and the starter corpus, and loaded into the running scanner at once (no shadow trial; a candidate on trial is discarded)."
                 }),
                 "404": ai_unavailable,
                 "500": json!({
-                    "description": "Not enough training data, or the candidate did worse on held-out corrections than the model in use; the current model was kept.",
+                    "description": "Not enough training data, or the candidate failed a gate (held-out corrections, held-out threats, or a threat label it can no longer report); the current model was kept.",
                     "content": { "application/json": { "schema": error } }
                 })
             }
         })),
         ("post", "/ai/rollback") => Some(json!({
+            "parameters": json!([{
+                "name": "model",
+                "in": "query",
+                "required": false,
+                "schema": { "type": "string", "enum": ["shared", "threat"] }
+            }]),
             "responses": {
                 "200": json!({
                     "description": "The classifier the last retrain replaced is loaded again."
@@ -3585,7 +3597,8 @@ fn ai_operation(path: &str, method: &str) -> Option<Value> {
                     "The loaded threat model scored against names built from held-out \
                         threat families, plus the sample used. `available: false` means \
                         there was nothing to probe; the update step then installs \
-                        without gating.",
+                        without gating. Needs a console session, or the update \
+                        step's `X-Daygle-Model-Probe` token.",
                     schema_ref("AiModelHealth"),
                 )
             }

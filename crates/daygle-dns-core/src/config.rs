@@ -544,6 +544,15 @@ pub struct AlertSettings {
     pub update_failure: bool,
     /// The AI scanner (in Enforce mode) started blocking new domains.
     pub ai_blocks: bool,
+    /// The AI rejected a model it retrained (its shadow trial went badly).
+    #[serde(default = "default_true_alert")]
+    pub ai_model: bool,
+}
+
+/// `true` for fields whose default is on: a field-level serde default
+/// otherwise reads a missing key as `false`, overriding the struct default.
+fn default_true_alert() -> bool {
+    true
 }
 
 impl Default for AlertSettings {
@@ -565,6 +574,7 @@ impl Default for AlertSettings {
             update_available: true,
             update_failure: true,
             ai_blocks: false,
+            ai_model: true,
         }
     }
 }
@@ -586,6 +596,7 @@ impl AlertSettings {
             K::UpdateAvailable => self.update_available,
             K::UpdateFailure => self.update_failure,
             K::AiBlocks => self.ai_blocks,
+            K::AiModel => self.ai_model,
             K::Test | K::Report => true,
         }
     }
@@ -1184,8 +1195,10 @@ pub struct UpdateCheckSettings {
     /// with the release that ships them, so a fix or retrained model reaches
     /// every install without an operator pressing the button. The comparison
     /// is by content hash, so a release that ships unchanged models causes
-    /// no run and no restart.
-    #[serde(default)]
+    /// no run and no restart. An `[updates]` section that does not name the
+    /// key (any config saved before it existed) gets the default too, not
+    /// "off".
+    #[serde(default = "default_true_alert")]
     pub auto_refresh_models: bool,
     /// Automatically install stable binary releases at `auto_install_hour`.
     /// Opt-in because installing a release restarts the DNS service.
@@ -1447,14 +1460,24 @@ pub struct AiSettings {
     /// Minimum embedding cosine for the verifier to assert a category.
     pub verifier_threshold: f32,
     /// Let the scanner retrain its classifier from what it has learned: your
-    /// category corrections plus its own confident verdicts. A successful
-    /// retrain is written beside `ai.db` as `learned.bin` and used from the
-    /// next start; delete that file to fall back to `model_path`. A retrain is
-    /// skipped while there is not enough material for it.
+    /// category corrections, its own confident verdicts and the shipped
+    /// starter corpus. An accepted retrain is written beside `ai.db` as
+    /// `learned.bin` and loaded into the running scanner at once; delete that
+    /// file to fall back to `model_path`. A retrain is skipped while there is
+    /// not enough material for it.
     #[serde(default = "default_auto_retrain")]
     pub auto_retrain: bool,
     /// How often automatic maintenance may retrain, in seconds.
     pub retrain_interval_secs: u64,
+    /// Run each scheduled retrain's candidate in the shadow of the live model
+    /// for half the retrain interval (one hour to a day) before it can
+    /// replace it. When the trial ends it is compared with the live model on
+    /// held-out threats, live traffic, your corrections and independently
+    /// confirmed labels, and promoted only if it is no worse; a rejected
+    /// candidate never affected an answer. Off promotes a scheduled retrain
+    /// straight away. "Retrain Now" always goes live at once.
+    #[serde(default = "default_auto_retrain")]
+    pub trial_new_models: bool,
     /// Learn from "not a threat" corrections: a retrain adds them to the
     /// training set as a `benign` label, so the model can stop repeating the
     /// mistake the operator corrected. Off by default, because a small
@@ -1476,7 +1499,9 @@ pub struct AiSettings {
     pub page_candidates_per_scan: u32,
     /// What a page reading may do to the threat verdict: `evidence` (note
     /// only, the default), `corroborate` (agreement can raise confidence) or
-    /// `decide` (agreement raises, disagreement caps it).
+    /// `decide` (agreement raises; a page with no threat cue that reads as an
+    /// ordinary category caps it - the site writes its own page, so this
+    /// direction can be gamed).
     pub page_rule: PageRule,
     /// Minimum text-classifier confidence for a page reading to count toward
     /// `page_rule` (0.05-0.99).
@@ -1511,6 +1536,7 @@ impl Default for AiSettings {
             verifier_threshold: 0.35,
             auto_retrain: true,
             retrain_interval_secs: 86_400,
+            trial_new_models: true,
             learn_negatives: false,
             fetch_pages: false,
             page_fetch_timeout_secs: 5,
@@ -6036,9 +6062,15 @@ mod tests {
         .unwrap();
         assert!(!cfg.updates.enabled);
         assert_eq!(cfg.updates.check_interval_secs, 86400);
+        assert!(
+            cfg.updates.auto_refresh_models,
+            "a section that does not name the key keeps the default: on"
+        );
         assert!(cfg.updates.auto_install);
         assert_eq!(cfg.updates.auto_install_hour, 4);
         assert!(DaygleConfig::parse("[updates]\nnope = 1\n").is_err());
+        let off = DaygleConfig::parse("[updates]\nauto_refresh_models = false\n").unwrap();
+        assert!(!off.updates.auto_refresh_models, "an explicit off is kept");
         // The interval floor applies only while checks are enabled.
         let mut cfg = DaygleConfig::parse("").unwrap();
         cfg.updates.check_interval_secs = 60;

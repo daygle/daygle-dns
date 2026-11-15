@@ -605,6 +605,15 @@ if [ "${DAYGLE_DNS_AI:-}" != "0" ]; then
             chown "$SERVICE_USER":"$SERVICE_USER" \
                 "$CONFIG_DIR/models/daygle-starter.bin" 2>/dev/null || true
             log "Installed bundled AI starter model to $CONFIG_DIR/models/daygle-starter.bin"
+            # The labelled corpus that model was trained from: retraining
+            # includes it so labels are not forgotten. Installed only with
+            # the model it matches; upgrades get it from a models bundle.
+            if [ -f "$SRC_DIR/models/starter-training.txt" ]; then
+                install -m 0644 "$SRC_DIR/models/starter-training.txt" \
+                    "$CONFIG_DIR/models/starter-training.txt"
+                chown "$SERVICE_USER":"$SERVICE_USER" \
+                    "$CONFIG_DIR/models/starter-training.txt" 2>/dev/null || true
+            fi
             # Record the release these files came from: fastText and ONNX
             # carry no version of their own and the console's AI page shows
             # this. An upgrade keeps any existing model files (and their
@@ -623,6 +632,14 @@ if [ "${DAYGLE_DNS_AI:-}" != "0" ]; then
         # installer predates the AI section: seed it once, in train mode, so
         # the model the operator already has on disk is actually used.
         if ! has_ai_section && [ -f "$CONFIG_FILE" ]; then
+            # The MiniLM verifier is a second, independent opinion on every
+            # threat: it disputes confident disagreements (never blocks on
+            # its own) and its agreement lets the AI learn from its own
+            # verdicts safely. On whenever its files are installed.
+            VERIFIER_LINE=""
+            if [ -f "$CONFIG_DIR/models/all-MiniLM-L6-v2-int8.onnx" ]; then
+                VERIFIER_LINE="verifier_model_path = \"$CONFIG_DIR/models/all-MiniLM-L6-v2-int8.onnx\""
+            fi
             cat >> "$CONFIG_FILE" <<EOF
 
 # AI scanner (added by the installer): train mode records verdicts only;
@@ -632,6 +649,7 @@ enabled = true
 mode = "train"
 database = ""
 model_path = "$CONFIG_DIR/models/daygle-starter.bin"
+$VERIFIER_LINE
 EOF
             chown "$SERVICE_USER":"$SERVICE_USER" "$CONFIG_FILE" 2>/dev/null || true
             log "Added safe [ai] section (train mode) to $CONFIG_FILE."

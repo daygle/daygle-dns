@@ -1686,9 +1686,10 @@ domain}` names scored, with each name's word order changed so the store never
 recorded it. `lost` counts names the model reads as `benign` or as a label
 that would not block. The endpoint always answers `200`, including when AI is
 disabled; `available: false` with a `reason` means there was no model or no
-verdicts to probe. A loopback request may call it without a console session,
-which is how the root update service reaches it; remote requests still need
-one.
+verdicts to probe. The root update service calls it without a console
+session by sending `X-Daygle-Model-Probe` with the token the service writes to
+`<updates>/staging/model-probe.token` (mode 0600, renewed at every start);
+every other request needs a session, loopback ones included.
 
 `POST /api/ai/model-health` scores the loaded model on exactly the `sample`
 from an earlier GET, so a before/after comparison cannot drift as the scanner
@@ -1713,19 +1714,88 @@ retraining.
 The scanner maintains its own model too. With `ai.auto_retrain` on (the
 default) it rebuilds the classifier no more often than
 `ai.retrain_interval_secs` from the data it has produced: operator category
-corrections first, then its own confident, unexpired, unvetoed verdicts.
-`POST /api/ai/retrain` runs the same job now. A retrain needs at least 200
-examples across two labels, and a candidate model must reproduce at least half
-of its own training set, or the current model is kept. The result is written
+corrections first, then its own confident, unexpired, unvetoed verdicts, then
+the shipped starter corpus, which keeps labels this network has not produced
+lately in the model. Each domain contributes one label (the newest correction,
+else the strongest verdict). `POST /api/ai/retrain` runs the same job now; a
+scheduled retrain and a manual one never run at once. A retrain needs at least
+200 examples of this install's own across two labels, and a candidate model
+must reproduce at least half of its own training set, and must still be able
+to emit every label in `ai.auto_block_categories` that the model in use can,
+or the current model is kept. The result is written
 beside `ai.db` as `learned.bin` (with `learned.json` recording the run), and
 loaded into the running channels immediately. It is preferred over
 `ai.model_path` from then on while it is the newer file, unless a channel names
 its own model; delete it (or install a newer configured model) to fall back.
-Judging: every fifth correction is held back from training, and a candidate is
+Judging: about one correction in five, chosen by a hash of the domain so the
+same ones stay held back from run to run, is kept out of training, and a candidate is
 rejected when it scores below half of them or more than two points below the
-model in use on them. With fewer than five corrections nothing can be held
+model in use on them. With fewer than five corrections nothing is held
 back, so the older training-set check applies and the retrain response reports
 `validation_examples: 0` rather than claiming it was validated.
+
+Three things keep the self-maintained model honest without an operator:
+
+* **Anchored training.** When `ai.model_path` is a fastText model, the
+  scanner's own verdicts only train if that fixed reference model gives the
+  same label (or another threat label for a threat), the verifier model
+  corroborated it, or the page reading behind the domain agrees. Verdicts nothing independent backs are left out
+  and counted as `unconfirmed` in the retrain response and record, so a
+  systematic mistake cannot reinforce itself. Operator corrections and the
+  starter corpus always train.
+* **Shadow trials.** With `ai.trial_new_models` on (the default), a
+  scheduled retrain's candidate does not go live. It waits as
+  `learned.candidate.bin` for half `ai.retrain_interval_secs` (between one
+  hour and a day) while the live model keeps answering, and no other
+  scheduled retrain runs meanwhile. When the trial ends both are scored on
+  what happened during it: held-out threat families; the threats each finds
+  among the domains classified during the trial (fewer than half, or more
+  than twice as many and ten more, rejects); the corrections the operator
+  filed during the trial; and labels an independent source - the page
+  reading or the verifier model - confirmed for those domains. The
+  candidate must also still report every threat label the live model can.
+  It is promoted only if it is no worse on every signal with enough
+  evidence; otherwise it is set aside as `learned.rejected.bin`, the live
+  model is untouched, retraining pauses for two intervals, and an
+  `ai_model` alert is raised (`[alerts] ai_model`, on by default). The live
+  model may change during a trial (a models bundle, a restore); the
+  candidate is judged against whatever is live when the trial ends.
+  `POST /api/ai/retrain` is the operator's choice and goes live at once,
+  discarding any candidate. `GET /api/ai/status` reports each model's
+  `trial` (`started_at`, `ends_at`, `retry_after`, `last_outcome`, and the
+  last 20 outcomes as `history`) and whether a `candidate` is waiting.
+* **Both models.** With a dedicated `ai.threat_model_path`, that model is
+  maintained the same way as `learned-threat.bin`, from threat verdicts and
+  "not a threat" corrections only, with the threat model as its reference;
+  the shared model then leaves threat verdicts out. Status reports it as
+  `learned_threat_model`, and `?model=threat` selects it for
+  `POST /api/ai/retrain` and `POST /api/ai/rollback`.
+* **Verifier reference.** With the MiniLM verifier on and no pinned
+  `ai.verifier_reference_path`, the verifier's category centroids are
+  rebuilt from the starter corpus and the operator's category corrections
+  whenever those change - never from the scanner's own verdicts, so the
+  verifier stays an independent second opinion. A rebuilt reference must do
+  at least as well as the one in use on held-out corrections, and no more
+  than two points worse on the starter corpus, before it is written as
+  `learned-centroids.json` beside `ai.db` and the threat channel reloads it.
+* **Independent confirmations.** Besides the reference model, a verdict of
+  the scanner's own trains when the verifier corroborated it or the page
+  reading agrees.
+* **The verifier.** The installer turns the bundled MiniLM verifier on for a
+  new `[ai]` section (`ai.verifier_model_path` names its file); existing
+  configurations keep what they have. `PUT /api/config` with
+  `{"ai": {"verifier_enabled": true|false}}` switches it using the bundled
+  file (`400` when it is not installed), and `GET /api/ai/status` reports
+  `verifier_enabled` and `verifier_installed`. Verifier changes - on, off,
+  its threshold or reference - reload the threat channel in place; only a
+  model or database change needs a restart.
+* **Shipped models.** A models bundle carries `starter-training.txt` beside
+  `daygle-starter.bin`; a retrain reads the corpus from the configured
+  model's directory when present (else the copy built into the binary), so
+  it always matches the reference model. `[updates] auto_refresh_models`
+  (on by default, also when an `[updates]` section omits it; reported as
+  `auto_refresh_models` in `GET /api/ai/status`) installs new bundles
+  automatically, behind the same held-out threat comparison.
 
 Each accepted retrain keeps the model it replaced as `learned.prev.bin`
 (`learned.prev.json` for its stats), and `POST /api/ai/rollback` puts it back in
