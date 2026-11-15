@@ -504,7 +504,9 @@ fn check_update_service() -> Option<PreflightCheck> {
 /// The file, in the updates staging directory, holding the token the root
 /// apply step presents to `/api/ai/model-health`. The directory belongs to the
 /// service account and the file is mode 0600, so only that account and root
-/// can read it.
+/// can read it. Written only where the update machinery is installed (Unix),
+/// so the name is gated with the writer rather than left dead elsewhere.
+#[cfg(unix)]
 pub const MODEL_PROBE_TOKEN_FILE: &str = "model-probe.token";
 
 static MODEL_PROBE_TOKEN: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();

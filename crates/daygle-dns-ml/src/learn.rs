@@ -438,10 +438,12 @@ pub fn starter_pairs() -> Vec<(String, String)> {
 /// the copy built into the binary.
 pub fn bundled_starter_corpus(model_path: &str) -> Option<String> {
     let model = Path::new(model_path.trim());
-    let dir = model.parent()?;
+    // Nothing configured: there is no models directory to look beside, so the
+    // copy built into the binary applies.
     if model.as_os_str().is_empty() {
         return None;
     }
+    let dir = model.parent()?;
     let text = std::fs::read_to_string(dir.join(STARTER_CORPUS_FILE)).ok()?;
     (!starter_pairs_from(&text).is_empty()).then_some(text)
 }

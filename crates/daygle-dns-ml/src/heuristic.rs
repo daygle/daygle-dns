@@ -5,8 +5,9 @@
 //! heuristic verdicts carry confidences in the 0.3-0.6 band so that even in
 //! `enforce` mode they can never cross the 0.99 auto-block threshold on
 //! their own. They exist to (a) bootstrap verdict data, (b) make the
-//! console's AI page useful before a real model is trained, and (c) queue
-//! suspicious candidates for the (planned) expensive verifier stage.
+//! console's AI page useful before a real model is trained, and (c) give the
+//! verifier a cheap first pass - only the threat channel's verdicts are
+//! second-checked, and only when `ai.verifier_model_path` names a model.
 //!
 //! In `train` mode nothing is ever blocked regardless of backend, so these
 //! heuristics are purely informational there.

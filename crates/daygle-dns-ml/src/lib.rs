@@ -618,11 +618,6 @@ impl AiEngine {
             .await;
     }
 
-    /// Access the query-log source (the authoritative zone store).
-    pub fn query_store(&self) -> &Arc<daygle_dns_authoritative::ZoneStore> {
-        &self.query_store
-    }
-
     /// Snapshot accessor for the block test harness.
     pub fn snapshot(&self) -> Arc<ArcSwap<BlockSnapshot>> {
         self.snapshot.clone()

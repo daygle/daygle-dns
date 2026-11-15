@@ -118,8 +118,9 @@ impl ClassificationInput {
         }
     }
 }
-/// A pluggable classification backend. Cheap to share: implementations are
-/// interior-mutated (`Arc` every `Send + Sync`).
+/// A pluggable classification backend. Cheap to share: every implementation
+/// is `Send + Sync`, and one that can be swapped at runtime hides its interior
+/// mutability behind [`Reloadable`].
 pub trait DomainClassifier: Send + Sync {
     /// Backend name recorded on verdicts (e.g. `fasttext`, `heuristic`).
     /// Owned, not borrowed: a reloadable backend composes it from whichever

@@ -181,7 +181,7 @@ impl Scanner {
         // `max_domains_per_scan` bounds the expensive part, classification.
         // Names inside the zones this server hosts are its own: never
         // candidates for blocking.
-        let hosted: Vec<String> = source
+        let hosted: HashSet<String> = source
             .list_zones()?
             .into_iter()
             .map(|z| z.name.trim_end_matches('.').to_ascii_lowercase())
@@ -696,12 +696,14 @@ fn catchup_secs(cfg: &AiSettings) -> u64 {
     cfg.scan_interval_secs.min(3600) * 8
 }
 
-/// Whether an allow override exempts `domain`: on the domain itself or on
-/// any parent domain (an exemption covers subdomains).
-pub fn exempt(domain: &str, overrides: &HashSet<String>) -> bool {
-    let mut candidate = domain;
+/// Whether `domain` or one of its parent names (label-aligned suffixes, so
+/// `notbad.example.com` never matches `bad.example.com`) satisfies `matches`.
+/// One walk over the name's own suffixes, so the caller pays for the labels it
+/// has rather than for the size of the set it is checked against.
+pub(crate) fn any_suffix(name: &str, mut matches: impl FnMut(&str) -> bool) -> bool {
+    let mut candidate = name;
     loop {
-        if overrides.contains(candidate) {
+        if matches(candidate) {
             return true;
         }
         match candidate.split_once('.') {
@@ -709,6 +711,12 @@ pub fn exempt(domain: &str, overrides: &HashSet<String>) -> bool {
             None => return false,
         }
     }
+}
+
+/// Whether an allow override exempts `domain`: on the domain itself or on
+/// any parent domain (an exemption covers subdomains).
+pub fn exempt(domain: &str, overrides: &HashSet<String>) -> bool {
+    any_suffix(domain, |candidate| overrides.contains(candidate))
 }
 
 /// Special-use and local-only suffixes (RFC 6761/6762/8375, `.internal`,
@@ -732,17 +740,15 @@ const LOCAL_SUFFIXES: &[&str] = &[
 /// a zone this server hosts. Single-label names (`wpad`, `printer`) and
 /// reverse lookups were classified before, and a verdict on a hosted name
 /// could auto-block the operator's own records.
-fn is_candidate(name: &str, hosted: &[String]) -> bool {
-    let in_zone = |zone: &str| {
-        name == zone
-            || (name.len() > zone.len()
-                && name.ends_with(zone)
-                && name.as_bytes()[name.len() - zone.len() - 1] == b'.')
-    };
+///
+/// Both suffix sets are tested by walking the name's own parents: a harvest
+/// of tens of thousands of names costs one lookup per label instead of one
+/// comparison per hosted zone.
+fn is_candidate(name: &str, hosted: &HashSet<String>) -> bool {
     looks_like_domain(name)
         && name.contains('.')
-        && !LOCAL_SUFFIXES.iter().any(|s| in_zone(s))
-        && !hosted.iter().any(|z| in_zone(z))
+        && !any_suffix(name, |suffix| LOCAL_SUFFIXES.contains(&suffix))
+        && !any_suffix(name, |suffix| hosted.contains(suffix))
 }
 
 /// Basic sanity: a candidate is a DNS-ish name with valid labels (letters,

@@ -1758,7 +1758,9 @@ pub async fn ai_override(
         )
             .into_response();
     }
-    if body.reason.len() > 200 {
+    // Characters, not bytes: the message promises 200 characters, and a
+    // reason with non-ASCII text was rejected well before that.
+    if body.reason.chars().count() > 200 {
         return (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({"error": "the exemption reason must be 200 characters or fewer"})),
@@ -1930,6 +1932,27 @@ pub async fn ai_threats_export(
     (headers, csv).into_response()
 }
 
+/// The snapshot entry that decides for `domain`: its own, else the closest
+/// parent's, using the same label-aligned suffix walk and expiry check the AI
+/// policy plugin applies to a query. An expired entry is skipped and the walk
+/// continues upward, exactly as blocking does.
+fn suffix_entry<'a, T>(
+    domain: &str,
+    snapshot: &'a std::collections::HashMap<String, T>,
+    expires_at: impl Fn(&T) -> i64,
+    now: i64,
+) -> Option<(&'a str, &'a T)> {
+    let mut candidate = domain;
+    loop {
+        if let Some((name, found)) = snapshot.get_key_value(candidate) {
+            if expires_at(found) > now {
+                return Some((name.as_str(), found));
+            }
+        }
+        candidate = candidate.split_once('.')?.1;
+    }
+}
+
 /// `GET /api/ai/explain?domain=` - why a domain is blocked, or why it is not:
 /// both channels' verdicts, the operator's overrides, the category blocking
 /// applies to and the groups that block it, with plain-language reasons.
@@ -1979,13 +2002,24 @@ pub async fn ai_explain(
             let blocks = ai.snapshot().load();
             let categories = ai.category_snapshot();
             let categories = categories.load();
-            let blocked_category = blocks.get(&domain).map(|b| b.category.clone());
+            // The policy plugin blocks on a verdict for the queried name *or a
+            // parent of it*, so explain resolves the same suffix the plugin
+            // would. An exact-name lookup reported "not blocked" for a
+            // subdomain the plugin was blocking through its parent.
+            let now = chrono::Utc::now().timestamp();
+            let block_hit = suffix_entry(&domain, &blocks, |b| b.expires_at, now);
+            let blocked_category = block_hit.map(|(_, block)| block.category.clone());
+            let blocked_through = block_hit
+                .map(|(name, _)| name)
+                .filter(|name| *name != domain);
             let threat = rows.iter().find(|r| r.channel == "threat");
             let content = rows.iter().find(|r| r.channel == "content");
-            let label = categories
-                .get(&domain)
-                .map(|c| c.category.clone())
-                .or_else(|| relabel.clone())
+            let label = relabel
+                .clone()
+                .or_else(|| {
+                    suffix_entry(&domain, &categories, |c| c.expires_at, now)
+                        .map(|(_, category)| category.category.clone())
+                })
                 .or_else(|| content.map(|r| r.category.clone()));
             let blocking_groups: Vec<String> = label
                 .as_deref()
@@ -2006,9 +2040,14 @@ pub async fn ai_explain(
             };
             let mut reasons: Vec<String> = Vec::new();
             if let Some(category) = &blocked_category {
-                reasons.push(format!(
-                    "In the current AI block snapshot as '{category}' ({mode} mode): it is auto-blocked now."
-                ));
+                reasons.push(match blocked_through {
+                    Some(parent) => format!(
+                        "In the current AI block snapshot through its parent '{parent}' as '{category}' ({mode} mode): it is auto-blocked now."
+                    ),
+                    None => format!(
+                        "In the current AI block snapshot as '{category}' ({mode} mode): it is auto-blocked now."
+                    ),
+                });
             }
             if let Some(o) = override_row.as_ref() {
                 match o.action.as_str() {
@@ -2066,10 +2105,14 @@ pub async fn ai_explain(
                         }
                     }
                 }
-                None => reasons.push(
+                None if blocked_category.is_none() => reasons.push(
                     "No threat verdict yet: the scanner classifies a domain after it is first queried."
                         .to_string(),
                 ),
+                // Blocked through a parent's verdict: there is no row of its
+                // own, and saying "no threat verdict yet" would contradict the
+                // reason above.
+                None => {}
             }
             if !blocking_groups.is_empty() {
                 reasons.push(format!(

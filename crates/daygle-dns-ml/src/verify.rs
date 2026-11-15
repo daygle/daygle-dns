@@ -34,6 +34,10 @@ pub struct VerifyingBackend<B, V> {
     pub verifier: V,
     threshold: f32,
     name: String,
+    /// The verifier's name, read once: `classify` runs per domain on the
+    /// scan's worker threads, and asking the verifier for an owned name on
+    /// every unverified verdict was a needless allocation there.
+    verifier_name: String,
 }
 
 impl<B, V> VerifyingBackend<B, V>
@@ -42,12 +46,14 @@ where
     V: DomainClassifier,
 {
     pub fn new(base: B, verifier: V, threshold: f32) -> Self {
-        let name = format!("{}+{}", base.name(), verifier.name());
+        let verifier_name = verifier.name();
+        let name = format!("{}+{verifier_name}", base.name());
         Self {
             base,
             verifier,
             threshold,
             name,
+            verifier_name,
         }
     }
 }
@@ -114,7 +120,7 @@ where
                 // this stage feeds enforce mode.
                 Some(disputed(base, v))
             }
-            None => Some(annotated(base, &self.verifier.name())),
+            None => Some(annotated(base, &self.verifier_name)),
         }
     }
 }

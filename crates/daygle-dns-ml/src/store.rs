@@ -454,9 +454,10 @@ impl AiStore {
             .collect())
     }
 
-    /// Persist a classification. `expires_after_secs = 0` records a verdict
-    /// without an expiry (scanner verdicts always pass a TTL; only operator
-    /// pins use 0).
+    /// Persist a classification. `expires_after_secs` is the verdict's TTL:
+    /// callers pass the channel's configured TTL. `0` is not a "never
+    /// expires" pin - it stores `expires_at = 0`, which every freshness query
+    /// reads as already stale, so such a row neither blocks nor categorizes.
     #[allow(clippy::too_many_arguments)]
     pub fn save_verdict(
         &self,
