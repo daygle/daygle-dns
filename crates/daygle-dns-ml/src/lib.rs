@@ -69,6 +69,9 @@ use crate::scanner::{BlockSnapshot, CategorySnapshot, Scanner};
 use crate::store::AiStore;
 use std::path::Path;
 
+/// Rebuilds the threat channel in place.
+type ReloadThreat = dyn Fn() -> Result<()> + Send + Sync;
+
 /// One model the scanner maintains: the file it writes, what is live, and
 /// the retrainer that looks after it.
 struct Maintained {
@@ -119,6 +122,8 @@ pub struct AiEngine {
     /// The dedicated threat model it maintains, when one is configured.
     threat: Maintained,
     maintenance: Arc<maintain::Maintenance>,
+    /// Rebuilds the threat channel (live model, current verifier settings).
+    reload_threat: Arc<ReloadThreat>,
 }
 
 impl AiEngine {
@@ -314,26 +319,42 @@ impl AiEngine {
             })
         });
 
+        // Rebuild the threat channel from the live threat model and the
+        // current settings: a new verifier reference, or the verifier
+        // switched on or off, takes effect without a restart.
+        let reload_threat: Arc<ReloadThreat> = {
+            let settings = settings_swap.clone();
+            let logs = logs.clone();
+            let threat_swap = threat_swap.clone();
+            let reference = learned_reference.clone();
+            Arc::new(move || {
+                let current = settings.load_full();
+                let channel =
+                    threat_channel(&live_threat_model(), &current, &settings, &logs, &reference)?;
+                threat_swap.replace(channel);
+                Ok(())
+            })
+        };
+
         // The verifier's reference is refreshed from operator truth after
         // each maintenance step, and the threat channel reloaded with it.
         let refresh_reference: maintain::Step = {
             let store = store.clone();
             let settings = settings_swap.clone();
             let logs = logs.clone();
-            let threat_swap = threat_swap.clone();
             let reference = learned_reference.clone();
+            let reload = reload_threat.clone();
             Box::new(move || {
                 let current = settings.load_full();
                 if !refresh_verifier_reference(&store, &current, &reference, &logs) {
                     return;
                 }
-                match threat_channel(&live_threat_model(), &current, &settings, &logs, &reference) {
-                    Ok(channel) => threat_swap.replace(channel),
-                    Err(e) => logs.push(
+                if let Err(e) = reload() {
+                    logs.push(
                         daygle_dns_core::LogLevel::Warn,
                         "ai",
                         format!("could not reload the threat channel with the new verifier reference: {e}"),
-                    ),
+                    );
                 }
             })
         };
@@ -371,6 +392,7 @@ impl AiEngine {
             shared,
             threat,
             maintenance,
+            reload_threat,
         }))
     }
 
@@ -507,13 +529,20 @@ impl AiEngine {
 
     /// Apply edited settings to the running engine: the scanner, the plugin
     /// and the threat channel read them live, the snapshots are rebuilt
-    /// under the new rules and a scan is started. Returns whether the change
-    /// also needs a restart: the models, the verifier and the database are
-    /// loaded once, at startup.
+    /// under the new rules and a scan is started. A verifier change reloads
+    /// the threat channel in place. Returns whether the change also needs a
+    /// restart: the models and the database are loaded once, at startup.
     pub fn apply_settings(&self, new: &AiSettings) -> bool {
         let old = self.settings.load_full();
-        let restart = needs_restart(&old, new);
+        let mut restart = needs_restart(&old, new);
+        let verifier_changed = verifier_changed(&old, new);
         self.settings.store(Arc::new(new.clone()));
+        if verifier_changed && !restart {
+            if let Err(e) = (self.reload_threat)() {
+                tracing::warn!(error = %e, "could not reload the threat channel for the verifier");
+                restart = true;
+            }
+        }
         self.refresh_snapshot_now();
         self.trigger_rescan();
         restart
@@ -620,16 +649,21 @@ impl AiEngine {
     }
 }
 
-/// Whether going from `old` to `new` changes what is loaded at startup:
-/// a model, the verifier (its files and threshold) or the database.
+/// Whether going from `old` to `new` changes what is loaded at startup: a
+/// model or the database.
 fn needs_restart(old: &AiSettings, new: &AiSettings) -> bool {
     old.model_path != new.model_path
         || old.category_model_path != new.category_model_path
         || old.threat_model_path != new.threat_model_path
-        || old.verifier_model_path != new.verifier_model_path
+        || old.database != new.database
+}
+
+/// Whether the verifier (its files or threshold) changed: applied live by
+/// rebuilding the threat channel.
+fn verifier_changed(old: &AiSettings, new: &AiSettings) -> bool {
+    old.verifier_model_path != new.verifier_model_path
         || old.verifier_reference_path != new.verifier_reference_path
         || old.verifier_threshold != new.verifier_threshold
-        || old.database != new.database
 }
 
 /// Whether the content channel runs a model of its own. Naming the shared
@@ -884,13 +918,21 @@ mod tests {
         for change in [
             |s: &mut AiSettings| s.threat_model_path = "/m/threat.bin".to_string(),
             |s: &mut AiSettings| s.category_model_path = "/m/cat.bin".to_string(),
-            |s: &mut AiSettings| s.verifier_model_path = "/m/v.onnx".to_string(),
-            |s: &mut AiSettings| s.verifier_threshold += 0.1,
             |s: &mut AiSettings| s.database = "/d/ai.db".to_string(),
         ] {
             let mut new = old.clone();
             change(&mut new);
             assert!(needs_restart(&old, &new));
+        }
+        // The verifier is reloaded in place, not at a restart.
+        for change in [
+            |s: &mut AiSettings| s.verifier_model_path = "/m/v.onnx".to_string(),
+            |s: &mut AiSettings| s.verifier_threshold += 0.1,
+        ] {
+            let mut new = old.clone();
+            change(&mut new);
+            assert!(!needs_restart(&old, &new));
+            assert!(verifier_changed(&old, &new));
         }
     }
 }

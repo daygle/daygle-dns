@@ -1306,6 +1306,24 @@ pub struct AiExportQuery {
     format: Option<String>,
 }
 
+/// The MiniLM verifier file a models bundle installs: beside the configured
+/// shared model, else in the models directory.
+fn bundled_verifier(model_path: &str) -> Option<String> {
+    const VERIFIER_FILE: &str = "all-MiniLM-L6-v2-int8.onnx";
+    let beside = std::path::Path::new(model_path.trim())
+        .parent()
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .map(|dir| dir.join(VERIFIER_FILE));
+    beside
+        .filter(|path| path.is_file())
+        .or_else(|| {
+            crate::update::models_dir(None)
+                .map(|dir| dir.join(VERIFIER_FILE))
+                .filter(|path| path.is_file())
+        })
+        .map(|path| path.display().to_string())
+}
+
 /// `POST /api/ai/retrain` and `/api/ai/rollback` query params.
 #[derive(Debug, Default, serde::Deserialize)]
 pub struct AiModelQuery {
@@ -1529,6 +1547,10 @@ pub async fn ai_status(State(state): State<AppState>) -> Response {
             .dedicated_threat_model()
             .then(|| ai.maintained_status(daygle_dns_ml::learn::Role::Threat)),
         "trial_new_models": settings.trial_new_models,
+        // The MiniLM second opinion: whether it is configured, and whether
+        // its bundled file is there to switch on.
+        "verifier_enabled": !settings.verifier_model_path.trim().is_empty(),
+        "verifier_installed": bundled_verifier(&settings.model_path).is_some(),
         // Shipped model bundles installed automatically by the updater (the
         // `[updates]` section), shown here so the AI page can say whether the
         // reference model keeps itself current too.
@@ -6494,6 +6516,9 @@ pub struct AiUpdate {
     /// Retrain the classifier from what the scanner has learned.
     pub auto_retrain: Option<bool>,
     pub trial_new_models: Option<bool>,
+    /// Switch the bundled MiniLM verifier on (its file beside the shared
+    /// model, or in the models directory) or off. Applied without a restart.
+    pub verifier_enabled: Option<bool>,
     pub retrain_interval_secs: Option<u64>,
     pub learn_negatives: Option<bool>,
     pub fetch_pages: Option<bool>,
@@ -7445,6 +7470,21 @@ pub async fn update_settings(
         }
         if let Some(v) = a.trial_new_models {
             config.ai.trial_new_models = v;
+        }
+        if let Some(on) = a.verifier_enabled {
+            if on {
+                match bundled_verifier(&config.ai.model_path) {
+                    Some(path) => config.ai.verifier_model_path = path,
+                    None => {
+                        return error_response(
+                            StatusCode::BAD_REQUEST,
+                            "the MiniLM verifier model is not installed beside the AI model",
+                        )
+                    }
+                }
+            } else {
+                config.ai.verifier_model_path = String::new();
+            }
         }
         if let Some(v) = a.retrain_interval_secs {
             config.ai.retrain_interval_secs = v.max(3_600);

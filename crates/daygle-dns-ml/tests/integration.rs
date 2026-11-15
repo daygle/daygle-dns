@@ -3089,3 +3089,29 @@ fn a_dedicated_threat_model_is_retrained_from_threat_verdicts() {
     ai.rollback_model(daygle_dns_ml::learn::Role::Threat)
         .unwrap_err();
 }
+
+/// Switching the verifier on or off reloads the threat channel in place: no
+/// restart, and the running pipeline says so.
+#[cfg(feature = "verifier-onnx")]
+#[test]
+fn the_verifier_switches_on_without_a_restart() {
+    let model = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../models/all-MiniLM-L6-v2-int8.onnx");
+    if !model.is_file() {
+        eprintln!("bundled MiniLM model missing; skipped");
+        return;
+    }
+    let dir = TempDir::new().unwrap();
+    let cfg = settings(AiMode::Train);
+    let ai = engine(&dir, cfg.clone());
+    let without = ai.threat_backend_name();
+    let on = AiSettings {
+        verifier_model_path: model.display().to_string(),
+        ..cfg.clone()
+    };
+    assert!(!ai.apply_settings(&on), "no restart needed");
+    let with = ai.threat_backend_name();
+    assert_ne!(with, without, "the verifier is in the pipeline now");
+    assert!(!ai.apply_settings(&cfg));
+    assert_eq!(ai.threat_backend_name(), without, "and out again");
+}

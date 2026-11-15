@@ -674,7 +674,9 @@ threat_ttl_secs = 604800
 # nothing. Empty disables the second pass. The tokenizer
 # (minilm-tokenizer.json) and centroid reference (minilm-centroids.json) are
 # looked up beside the .onnx file; verifier_threshold is the minimum
-# embedding cosine for the verifier to assert a category.
+# embedding cosine for the verifier to assert a category. The installer turns
+# it on; switch it on the AI page ("Second Opinion") without a restart. Its
+# agreement also confirms a verdict as training material and for model trials.
 verifier_model_path = "/etc/daygle-dns/models/all-MiniLM-L6-v2-int8.onnx"
 verifier_reference_path = ""
 verifier_threshold = 0.35

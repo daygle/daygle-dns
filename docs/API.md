@@ -1781,6 +1781,14 @@ Three things keep the self-maintained model honest without an operator:
 * **Independent confirmations.** Besides the reference model, a verdict of
   the scanner's own trains when the verifier corroborated it or the page
   reading agrees.
+* **The verifier.** The installer turns the bundled MiniLM verifier on for a
+  new `[ai]` section (`ai.verifier_model_path` names its file); existing
+  configurations keep what they have. `PUT /api/config` with
+  `{"ai": {"verifier_enabled": true|false}}` switches it using the bundled
+  file (`400` when it is not installed), and `GET /api/ai/status` reports
+  `verifier_enabled` and `verifier_installed`. Verifier changes - on, off,
+  its threshold or reference - reload the threat channel in place; only a
+  model or database change needs a restart.
 * **Shipped models.** A models bundle carries `starter-training.txt` beside
   `daygle-starter.bin`; a retrain reads the corpus from the configured
   model's directory when present (else the copy built into the binary), so

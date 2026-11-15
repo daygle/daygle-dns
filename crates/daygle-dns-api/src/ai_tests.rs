@@ -533,6 +533,19 @@ async fn status_reports_trials_and_retrain_takes_a_model() {
         status["learned_threat_model"].is_null(),
         "no dedicated threat model: {status}"
     );
+    assert_eq!(status["verifier_enabled"], false, "{status}");
+    if status["verifier_installed"] == false {
+        // Nothing to switch on: refused, and nothing stored.
+        let (code, _, body) = call(
+            state.clone(),
+            "PUT",
+            "/api/config",
+            Some(serde_json::json!({ "ai": { "verifier_enabled": true } })),
+        )
+        .await;
+        assert_eq!(code, StatusCode::BAD_REQUEST, "{body}");
+        assert!(body.contains("not installed"), "{body}");
+    }
 
     let (code, _, body) = call(state.clone(), "POST", "/api/ai/retrain?model=bogus", None).await;
     assert_eq!(code, StatusCode::BAD_REQUEST, "{body}");

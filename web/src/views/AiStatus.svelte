@@ -177,6 +177,19 @@
     }
   }
 
+  async function setVerifier(value) {
+    try {
+      await api.updateSettings({ ai: { verifier_enabled: value } });
+      notice = value
+        ? 'The verifier now second-checks every threat: a confident disagreement disputes it, and its agreement lets the AI learn from that verdict.'
+        : 'The verifier is off; threats rely on the primary classifier alone.';
+      await load(true);
+    } catch (e) {
+      error = formatApiError(e);
+      await load(true);
+    }
+  }
+
   async function setTrialNewModels(value) {
     try {
       await api.updateSettings({ ai: { trial_new_models: value } });
@@ -512,6 +525,17 @@
           />
           <span>Trial New Models First</span>
         </label>
+        {#if status.verifier_installed || status.verifier_enabled}
+          <label class="row" style="gap: 6px; align-items: center; font-size: 0.85rem" title="The MiniLM model second-checks every threat and confirms labels the AI may learn from">
+            <input
+              type="checkbox"
+              style="width: auto"
+              checked={!!status.verifier_enabled}
+              onchange={(event) => setVerifier(event.currentTarget.checked)}
+            />
+            <span>Second Opinion (Verifier)</span>
+          </label>
+        {/if}
         <label class="row" style="gap: 6px; align-items: center; font-size: 0.85rem">
           <input
             type="checkbox"
