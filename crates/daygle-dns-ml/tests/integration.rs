@@ -3105,14 +3105,17 @@ fn the_shadow_judge_rejects_on_lost_threats_and_on_floods() {
     let candidate = dir.path().join("candidate.bin");
     daygle_dns_ml::learn::train(&forgetful, &candidate).unwrap();
 
+    // The trial window must cover verdicts saved further down (the flood
+    // store is filled after this point), so leave room past `now`.
     let now = chrono::Utc::now().timestamp();
+    let ends = now + 600;
     let rejected = daygle_dns_ml::maintain::judge_for_tests(
         &ai.store,
         &cfg,
         &candidate,
         &live.display().to_string(),
         now - 600,
-        now + 1,
+        ends,
     )
     .unwrap_err();
     assert!(
@@ -3127,7 +3130,7 @@ fn the_shadow_judge_rejects_on_lost_threats_and_on_floods() {
         &live,
         &live.display().to_string(),
         now - 600,
-        now + 1,
+        ends,
     )
     .is_ok());
 
@@ -3169,7 +3172,7 @@ fn the_shadow_judge_rejects_on_lost_threats_and_on_floods() {
         &flooding,
         &live.display().to_string(),
         now - 600,
-        now + 1,
+        ends,
     )
     .unwrap_err();
     assert!(flooded.contains("flagged"), "{flooded}");
