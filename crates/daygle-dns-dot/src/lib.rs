@@ -18,9 +18,9 @@ mod cert;
 
 pub use cert::{
     crypto_provider, describe_certificate, ensure_certificate, ensure_certificate_paths,
-    generate_self_signed, generate_self_signed_pem, load_tls_config, load_tls_config_alpns,
-    load_tls_config_versions, renewal_due_at, tls_config_from_pem, validate_pem_pair,
-    CertificateInfo,
+    generate_self_signed, generate_self_signed_pem, generate_self_signed_pem_with_addresses,
+    load_tls_config, load_tls_config_alpns, load_tls_config_versions, renewal_due_at,
+    tls_config_from_pem, validate_pem_pair, CertificateInfo,
 };
 
 use std::sync::Arc;

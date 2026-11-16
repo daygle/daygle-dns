@@ -7841,6 +7841,11 @@ pub struct CertificateInput {
     /// PEM private key. Must accompany `cert_pem`.
     #[serde(default)]
     pub key_pem: Option<String>,
+    /// IP addresses a generated self-signed certificate also names, so
+    /// Windows and Apple devices can upgrade to it through Automatic
+    /// Discovery (DDR). Ignored for an upload.
+    #[serde(default)]
+    pub addresses: Vec<String>,
 }
 
 fn validate_certificate_name(name: &str) -> Result<(), String> {
@@ -7983,7 +7988,23 @@ pub async fn create_certificate(
             } else {
                 server_name.clone()
             };
-            match daygle_dns_dot::generate_self_signed_pem(&sn) {
+            let mut addresses = Vec::new();
+            for raw in &input.addresses {
+                let raw = raw.trim();
+                if raw.is_empty() {
+                    continue;
+                }
+                match raw.parse::<std::net::IpAddr>() {
+                    Ok(address) => addresses.push(address),
+                    Err(_) => {
+                        return error_response(
+                            StatusCode::BAD_REQUEST,
+                            format!("'{raw}' is not an IP address"),
+                        )
+                    }
+                }
+            }
+            match daygle_dns_dot::generate_self_signed_pem_with_addresses(&sn, &addresses) {
                 Ok((c, k)) => (c, k, sn),
                 Err(e) => return map_err(e),
             }

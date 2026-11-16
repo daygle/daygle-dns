@@ -524,16 +524,23 @@ pub fn report_ddr_readiness(
         })
         .map(|(label, _, _)| *label)
         .collect();
-    if without_address.is_empty() {
-        return;
-    }
+    let (listeners, certificates, names) = match without_address.as_slice() {
+        [one] => (one.to_string(), "certificate", "names"),
+        [rest @ .., last] => (
+            format!("{} and {last}", rest.join(", ")),
+            "certificates",
+            "name",
+        ),
+        [] => return,
+    };
     emit(format!(
-        "Automatic Discovery (DDR): the {} certificate names no IP address, so Windows and \
-         Apple devices will not switch to encrypted DNS by themselves - they verify that the \
-         certificate also names the address they use for plain DNS (RFC 9462). Android can \
-         still switch on a private network. To cover the others, use a certificate that \
-         includes this server's IP address.",
-        without_address.join(", ")
+        "Automatic Discovery (DDR): the {listeners} {certificates} {names} no IP address, so \
+         Windows and Apple devices will not switch to encrypted DNS by themselves - they only \
+         switch when the certificate also names the address they already use for plain DNS \
+         (RFC 9462). Android can still switch on a private network. This is informational: \
+         encrypted DNS still works for devices you set up by hand. To cover Windows and Apple \
+         too, use a certificate that includes this server's IP address (the Certificates \
+         page can generate one that does; devices must then trust it)."
     ));
 }
 
@@ -1176,9 +1183,40 @@ mod tests {
         let lines = infos(&logs);
         assert_eq!(lines.len(), 1, "{lines:?}");
         assert!(
-            lines[0].contains("DoT certificate names no IP address"),
+            lines[0].contains("the DoT certificate names no IP address"),
             "{lines:?}"
         );
+
+        // Two listeners: named together, in the plural.
+        config.doq.enabled = true;
+        config.doq.cert_path = config.dot.cert_path.clone();
+        let logs = store();
+        report_ddr_readiness(&config, &db, &SessionLog::new(logs.clone()));
+        let lines = infos(&logs);
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("the DoT and DoQ certificates name no IP address")),
+            "{lines:?}"
+        );
+        config.doq.enabled = false;
+
+        // A certificate that names an address: nothing to say about it.
+        let (cert, _) = daygle_dns_dot::generate_self_signed_pem_with_addresses(
+            "dns.example.com",
+            &["192.0.2.53".parse().unwrap()],
+        )
+        .unwrap();
+        std::fs::write(&path, cert).unwrap();
+        let logs = store();
+        report_ddr_readiness(&config, &db, &SessionLog::new(logs.clone()));
+        assert!(
+            !infos(&logs).iter().any(|l| l.contains("no IP address")),
+            "{:?}",
+            infos(&logs)
+        );
+        let (cert, _) = daygle_dns_dot::generate_self_signed_pem("dns.example.com").unwrap();
+        std::fs::write(&path, cert).unwrap();
 
         // Accounts required: the one thing to say is that nothing is
         // advertised.

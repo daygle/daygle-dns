@@ -67,7 +67,25 @@ pub fn ensure_certificate_paths(
 /// Generate a self-signed ECDSA certificate for `server_name`, returning the
 /// PEM certificate and private key (no files are touched).
 pub fn generate_self_signed_pem(server_name: &str) -> Result<(String, String)> {
-    let subject_alt_names = vec![server_name.to_string(), "localhost".to_string()];
+    generate_self_signed_pem_with_addresses(server_name, &[])
+}
+
+/// Generate a self-signed ECDSA certificate for `server_name` that also
+/// names each of `addresses` (as IP-address subject alternative names), so
+/// clients that verify the address they connect to - Windows and Apple
+/// devices upgrading through Automatic Discovery (DDR, RFC 9462) - accept
+/// it once they trust it.
+pub fn generate_self_signed_pem_with_addresses(
+    server_name: &str,
+    addresses: &[std::net::IpAddr],
+) -> Result<(String, String)> {
+    let mut subject_alt_names = vec![server_name.to_string(), "localhost".to_string()];
+    for address in addresses {
+        let address = address.to_string();
+        if !subject_alt_names.contains(&address) {
+            subject_alt_names.push(address);
+        }
+    }
     let certified = rcgen::generate_simple_self_signed(subject_alt_names)
         .map_err(|e| DaygleError::Tls(format!("certificate generation failed: {e}")))?;
 
@@ -381,6 +399,18 @@ mod tests {
         assert!(info.names.contains(&"localhost".to_string()));
         assert!(info.not_before < info.not_after);
         assert!(describe_certificate("not a certificate").is_err());
+    }
+
+    #[test]
+    fn generated_certificate_names_given_addresses() {
+        let addresses: Vec<std::net::IpAddr> =
+            vec!["192.168.1.10".parse().unwrap(), "fd00::53".parse().unwrap()];
+        let (cert_pem, _) =
+            generate_self_signed_pem_with_addresses("dns.example.test", &addresses).unwrap();
+        let names = describe_certificate(&cert_pem).unwrap().names;
+        assert!(names.contains(&"dns.example.test".to_string()));
+        assert!(names.contains(&"192.168.1.10".to_string()));
+        assert!(names.contains(&"fd00::53".to_string()));
     }
     use super::*;
     use tempfile::tempdir;

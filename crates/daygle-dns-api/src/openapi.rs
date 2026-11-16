@@ -3751,6 +3751,13 @@ fn admin_schemas() -> Value {
                 "key_pem": {
                     "type": "string",
                     "description": "PEM private key; must accompany `cert_pem`."
+                },
+                "addresses": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "IP addresses a generated certificate also names, so \
+                        Windows and Apple devices can upgrade to it through Automatic \
+                        Discovery (DDR). Ignored for an upload."
                 }
             }
         },
