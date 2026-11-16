@@ -513,35 +513,96 @@ pub fn report_ddr_readiness(
             ));
         }
     }
-    let without_address: Vec<&str> = listeners
-        .iter()
-        .filter(|(_, enabled, _)| *enabled)
-        .filter(|(_, _, cert_path)| {
-            std::fs::read_to_string(cert_path)
+    // The certificate each listener presents: the managed one it names (an
+    // ACME certificate is stored the same way), else its certificate file.
+    let presented = |certificate: &str, cert_path: &str| {
+        let pem = if certificate.trim().is_empty() {
+            std::fs::read_to_string(cert_path).ok()
+        } else {
+            store
+                .get_tls_certificate(certificate.trim())
                 .ok()
-                .and_then(|pem| daygle_dns_dot::describe_certificate(&pem).ok())
-                .is_some_and(|info| !names_an_address(&info.names))
-        })
-        .map(|(label, _, _)| *label)
-        .collect();
-    let (listeners, certificates, names) = match without_address.as_slice() {
-        [one] => (one.to_string(), "certificate", "names"),
-        [rest @ .., last] => (
+                .flatten()
+                .map(|cert| cert.cert_pem)
+        };
+        pem.and_then(|pem| daygle_dns_dot::describe_certificate(&pem).ok())
+    };
+    let mut self_signed = Vec::new();
+    let mut ca_issued = Vec::new();
+    for (label, enabled, certificate, cert_path) in [
+        (
+            "DoH",
+            config.doh.enabled,
+            &config.doh.certificate,
+            &config.doh.cert_path,
+        ),
+        (
+            "DoT",
+            config.dot.enabled,
+            &config.dot.certificate,
+            &config.dot.cert_path,
+        ),
+        (
+            "DoQ",
+            config.doq.enabled,
+            &config.doq.certificate,
+            &config.doq.cert_path,
+        ),
+    ] {
+        if !enabled {
+            continue;
+        }
+        match presented(certificate, cert_path) {
+            Some(info) if !names_an_address(&info.names) => {
+                if info.self_signed {
+                    self_signed.push(label);
+                } else {
+                    ca_issued.push(label);
+                }
+            }
+            _ => {}
+        }
+    }
+    const WHY: &str = "so Windows and Apple devices will not switch to encrypted DNS by \
+         themselves - they only switch when the certificate also names the address they \
+         already use for plain DNS (RFC 9462). Android can still switch on a private network. \
+         This is informational: encrypted DNS still works for devices you set up by hand.";
+    if let Some((listeners, certificates, names)) = listing(&ca_issued) {
+        let host = config.ddr.name.trim();
+        let host = if host.is_empty() {
+            "this server's name".to_string()
+        } else {
+            host.to_string()
+        };
+        emit(format!(
+            "Automatic Discovery (DDR): the {listeners} {certificates} {names} no IP address, \
+             {WHY} A certificate from a public authority such as Let's Encrypt cannot name a \
+             private address, so on a private network keep it and set Windows and Apple \
+             devices up by hand to use {host}."
+        ));
+    }
+    if let Some((listeners, certificates, names)) = listing(&self_signed) {
+        emit(format!(
+            "Automatic Discovery (DDR): the {listeners} {certificates} {names} no IP address, \
+             {WHY} To cover Windows and Apple too, use a certificate that includes this \
+             server's IP address (the Certificates page can generate one that does; devices \
+             must then trust it)."
+        ));
+    }
+}
+
+/// `["DoT", "DoQ"]` as "DoT and DoQ" with the matching noun and verb, or
+/// `None` for no listeners.
+fn listing(labels: &[&str]) -> Option<(String, &'static str, &'static str)> {
+    match labels {
+        [] => None,
+        [one] => Some((one.to_string(), "certificate", "names")),
+        [rest @ .., last] => Some((
             format!("{} and {last}", rest.join(", ")),
             "certificates",
             "name",
-        ),
-        [] => return,
-    };
-    emit(format!(
-        "Automatic Discovery (DDR): the {listeners} {certificates} {names} no IP address, so \
-         Windows and Apple devices will not switch to encrypted DNS by themselves - they only \
-         switch when the certificate also names the address they already use for plain DNS \
-         (RFC 9462). Android can still switch on a private network. This is informational: \
-         encrypted DNS still works for devices you set up by hand. To cover Windows and Apple \
-         too, use a certificate that includes this server's IP address (the Certificates \
-         page can generate one that does; devices must then trust it)."
-    ));
+        )),
+    }
 }
 
 fn who(client: Option<IpAddr>) -> String {
@@ -1217,6 +1278,48 @@ mod tests {
         );
         let (cert, _) = daygle_dns_dot::generate_self_signed_pem("dns.example.com").unwrap();
         std::fs::write(&path, cert).unwrap();
+
+        // A CA-issued certificate chosen on the Certificates page (where an
+        // ACME one is kept) is the one judged, not the file left at
+        // cert_path; a public CA cannot name a private address, so the
+        // advice is to set devices up by hand, not to change certificates.
+        {
+            use rcgen::{CertificateParams, DistinguishedName, DnType, Issuer, KeyPair};
+            let ca_key = KeyPair::generate().unwrap();
+            let mut ca_params = CertificateParams::new(Vec::<String>::new()).unwrap();
+            let mut ca_name = DistinguishedName::new();
+            ca_name.push(DnType::CommonName, "Test CA");
+            ca_params.distinguished_name = ca_name;
+            ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+            let issuer = Issuer::new(ca_params, ca_key);
+            let leaf_key = KeyPair::generate().unwrap();
+            let leaf = CertificateParams::new(vec!["dns.example.com".to_string()])
+                .unwrap()
+                .signed_by(&leaf_key, &issuer)
+                .unwrap();
+            db.put_tls_certificate(&daygle_dns_authoritative::TlsCertificate {
+                name: "public".to_string(),
+                server_name: "dns.example.com".to_string(),
+                cert_pem: leaf.pem(),
+                key_pem: leaf_key.serialize_pem(),
+                created_at: String::new(),
+            })
+            .unwrap();
+            config.dot.certificate = "public".to_string();
+            config.ddr.name = "dns.example.com".to_string();
+            let logs = store();
+            report_ddr_readiness(&config, &db, &SessionLog::new(logs.clone()));
+            let lines = infos(&logs);
+            assert_eq!(lines.len(), 1, "{lines:?}");
+            assert!(
+                lines[0].contains("cannot name a private address")
+                    && lines[0].contains("by hand to use dns.example.com")
+                    && !lines[0].contains("Certificates page"),
+                "{lines:?}"
+            );
+            config.dot.certificate = String::new();
+            config.ddr.name = String::new();
+        }
 
         // Accounts required: the one thing to say is that nothing is
         // advertised.
