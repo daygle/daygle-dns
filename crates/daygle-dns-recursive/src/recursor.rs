@@ -394,6 +394,13 @@ pub fn build(
 /// How many CNAMEs [`follow_cnames`] follows before giving up.
 const MAX_CNAME_HOPS: usize = 16;
 
+/// The negative answer behind an unproven denial: NXDOMAIN or NODATA, and
+/// the SOA of the zone that gave it.
+struct Denial {
+    error: DaygleError,
+    soa: Record,
+}
+
 /// One query to the recursor, sorted by what the rest of the crate does
 /// with it.
 enum Resolved {
@@ -401,8 +408,9 @@ enum Resolved {
     Answer(Message),
     /// NXDOMAIN, NODATA or an upstream error code, with the SOA it came with.
     Negative(DaygleError, Option<Record>),
-    /// A negative answer whose DNSSEC denial did not validate.
-    Unproven(DaygleError),
+    /// A negative answer whose DNSSEC denial did not validate, with the
+    /// plain negative answer it stands for when the server sent an SOA.
+    Unproven(DaygleError, Option<Denial>),
     /// Transport failure, timeout or a resolution limit.
     Failed(DaygleError),
 }
@@ -445,23 +453,66 @@ pub async fn lookup(slot: &RecursorSlot, name: Name, record_type: RecordType) ->
             crate::note_negative_soa(soa);
             Err(e)
         }
-        // The recursor follows CNAMEs itself and, when the chain ends in a
-        // negative answer, validates the last zone's denial (its SOA and
-        // NSEC records) against the name that was asked. With the target in
-        // another, signed zone that never matches, so "no such record" for a
-        // name such as `www.shop.example -> shop.cdn.example` read as bogus
-        // and became SERVFAIL. Following the chain one name at a time has
-        // each denial validated against the name it is about.
-        Resolved::Unproven(e)
-            if !matches!(
-                record_type,
-                RecordType::CNAME | RecordType::ANY | RecordType::DS
-            ) =>
-        {
-            follow_cnames(resolve, name, record_type, e).await
+        Resolved::Unproven(e, denial) => {
+            settle_unproven(&resolve, name, record_type, e, denial).await
         }
-        Resolved::Unproven(e) | Resolved::Failed(e) => Err(e),
+        Resolved::Failed(e) => Err(e),
     }
+}
+
+/// Answer a query whose negative answer the validator could not prove.
+async fn settle_unproven<F, Fut>(
+    resolve: &F,
+    name: Name,
+    record_type: RecordType,
+    unproven: DaygleError,
+    denial: Option<Denial>,
+) -> Result<Lookup>
+where
+    F: Fn(Query) -> Fut,
+    Fut: Future<Output = Resolved>,
+{
+    // A denial from a zone the validator proves unsigned has nothing to be
+    // proven against: it is a plain negative answer. This is the negative
+    // side of `clear_false_bogus`: "no HTTPS record" for
+    // `cm.g.doubleclick.net`, in a zone delegated from its parent on the
+    // same servers, read as unproven and became SERVFAIL.
+    if let Some(Denial { error, soa }) = insecure_denial(resolve, &name, denial).await {
+        crate::note_negative_soa(Some(soa));
+        return Err(error);
+    }
+    // The recursor follows CNAMEs itself and, when the chain ends in a
+    // negative answer, validates the last zone's denial (its SOA and NSEC
+    // records) against the name that was asked. With the target in another,
+    // signed zone that never matches, so "no such record" for a name such
+    // as `www.shop.example -> shop.cdn.example` read as bogus and became
+    // SERVFAIL. Following the chain one name at a time has each denial
+    // validated against the name it is about.
+    if matches!(
+        record_type,
+        RecordType::CNAME | RecordType::ANY | RecordType::DS
+    ) {
+        return Err(unproven);
+    }
+    follow_cnames(resolve, name, record_type, unproven).await
+}
+
+/// `denial`, when it is about `name` and comes from a zone the validator
+/// proves unsigned. A denial whose SOA does not enclose `name` (the end of
+/// a CNAME chain into another zone) is left to [`follow_cnames`], so a
+/// signed zone's denial is never excused by an unsigned zone in front.
+async fn insecure_denial<F, Fut>(resolve: &F, name: &Name, denial: Option<Denial>) -> Option<Denial>
+where
+    F: Fn(Query) -> Fut,
+    Fut: Future<Output = Resolved>,
+{
+    let denial = denial?;
+    if !denial.soa.name.zone_of(name) {
+        return None;
+    }
+    in_unsigned_zone(resolve, &denial.soa.name)
+        .await
+        .then_some(denial)
 }
 
 async fn resolve_one(
@@ -510,8 +561,16 @@ async fn resolve_one(
             };
             if recursor_error_code(&e).is_some() {
                 Resolved::Negative(error, recursor_error_soa(&e))
-            } else if matches!(e, RecursorError::Net(NetError::Dns(DnsError::Nsec { .. }))) {
-                Resolved::Unproven(error)
+            } else if let RecursorError::Net(NetError::Dns(DnsError::Nsec { response, .. })) = &e {
+                let code = response.response_code;
+                let denial = matches!(code, ResponseCode::NoError | ResponseCode::NXDomain)
+                    .then(|| response.soa())
+                    .flatten()
+                    .map(|soa| Denial {
+                        error: negative(code, "negative response from an unsigned zone"),
+                        soa: soa.to_owned().into_record_of_rdata(),
+                    });
+                Resolved::Unproven(error, denial)
             } else {
                 Resolved::Failed(error)
             }
@@ -564,8 +623,17 @@ where
                 crate::note_negative_soa(soa);
                 return Err(e);
             }
-            // The target is itself a CNAME into yet another zone.
-            Resolved::Unproven(_) => continue,
+            Resolved::Unproven(_, denial) => {
+                if let Some(Denial { error, soa }) =
+                    insecure_denial(&resolve, &current, denial).await
+                {
+                    crate::note_negative_soa(Some(soa));
+                    return Err(error);
+                }
+                // The target is itself a CNAME into yet another zone, or
+                // its denial is unproven: carry on down the chain.
+                continue;
+            }
             Resolved::Failed(e) => return Err(e),
         }
     }
@@ -777,16 +845,29 @@ mod tests {
     /// `www.shop.test -> shop.host.test -> shop.cdn.test`, where a query
     /// through a CNAME into the next zone fails validation, as the
     /// recursor's own chain following does for a signed target zone.
+    ///
+    /// `www.hop.test -> cm.l.plain.test` ends in a denial from
+    /// `l.plain.test`, delegated from the unsigned `plain.test` on the same
+    /// servers, which the validator cannot prove (`g.doubleclick.net`).
     async fn zones(query: Query) -> Resolved {
+        if query.query_type() == RecordType::SOA {
+            return apexes(query).await;
+        }
         let owner = query.name().to_ascii();
         match (owner.as_str(), query.query_type()) {
+            ("www.hop.test.", RecordType::CNAME) => {
+                answer(vec![cname("www.hop.test.", "cm.l.plain.test.")])
+            }
+            ("www.hop.test.", _) | ("cm.l.plain.test.", RecordType::HTTPS) => {
+                Resolved::Unproven(failure("unproven", None), Some(denial("l.plain.test.")))
+            }
             ("www.shop.test.", RecordType::CNAME) => {
                 answer(vec![cname("www.shop.test.", "shop.host.test.")])
             }
             ("shop.host.test.", RecordType::CNAME) => {
                 answer(vec![cname("shop.host.test.", "shop.cdn.test.")])
             }
-            ("shop.host.test.", _) => Resolved::Unproven(failure("unproven", None)),
+            ("shop.host.test.", _) => Resolved::Unproven(failure("unproven", None), None),
             ("shop.cdn.test.", RecordType::A) => answer(vec![Record::from_rdata(
                 name("shop.cdn.test."),
                 60,
@@ -797,7 +878,7 @@ mod tests {
             }
             ("loop.test.", RecordType::CNAME) => answer(vec![cname("loop.test.", "pool.test.")]),
             ("pool.test.", RecordType::CNAME) => answer(vec![cname("pool.test.", "loop.test.")]),
-            ("pool.test.", _) => Resolved::Unproven(failure("unproven", None)),
+            ("pool.test.", _) => Resolved::Unproven(failure("unproven", None), None),
             ("down.test.", RecordType::CNAME) => answer(vec![cname("down.test.", "gone.test.")]),
             ("gone.test.", _) => Resolved::Failed(failure("timed out", None)),
             _ => Resolved::Negative(failure("no records", Some(ResponseCode::NoError)), None),
@@ -854,6 +935,61 @@ mod tests {
             Record::from_rdata(name(owner), 60, RData::A(A(Ipv4Addr::new(192, 0, 2, 7))));
         record.proof = Proof::Bogus;
         record
+    }
+
+    /// A NODATA denial carrying the SOA of `zone`.
+    fn denial(zone: &str) -> Denial {
+        let Resolved::Answer(message) = soa(zone, Proof::Bogus) else {
+            unreachable!()
+        };
+        Denial {
+            error: failure("no records", Some(ResponseCode::NoError)),
+            soa: message.answers[0].clone(),
+        }
+    }
+
+    async fn settle(owner: &str, record_type: RecordType, from: &str) -> Result<Lookup> {
+        settle_unproven(
+            &zones,
+            name(owner),
+            record_type,
+            failure("bogus", None),
+            Some(denial(from)),
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn an_unproven_denial_from_an_unsigned_zone_is_no_data() {
+        let result = settle("cm.l.plain.test.", RecordType::HTTPS, "l.plain.test.").await;
+        assert_eq!(
+            code(result),
+            ("no records".to_string(), Some(ResponseCode::NoError.into()))
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unproven_denial_from_a_signed_zone_stays_unproven() {
+        for zone in ["signed.test.", "forged.signed.test."] {
+            let owner = format!("www.{zone}");
+            let result = settle(&owner, RecordType::HTTPS, zone).await;
+            assert_eq!(code(result), ("bogus".to_string(), None), "{zone}");
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unsigned_soa_for_another_name_does_not_excuse_a_denial() {
+        let result = settle("www.signed.test.", RecordType::HTTPS, "plain.test.").await;
+        assert_eq!(code(result), ("bogus".to_string(), None));
+    }
+
+    #[tokio::test]
+    async fn a_chain_into_an_unsigned_zone_ending_in_no_data_is_no_data() {
+        let result = follow("www.hop.test.", RecordType::HTTPS).await;
+        assert_eq!(
+            code(result),
+            ("no records".to_string(), Some(ResponseCode::NoError.into()))
+        );
     }
 
     #[tokio::test]
