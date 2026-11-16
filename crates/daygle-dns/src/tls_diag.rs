@@ -539,8 +539,8 @@ pub fn report_ddr_readiness(
          switch when the certificate also names the address they already use for plain DNS \
          (RFC 9462). Android can still switch on a private network. This is informational: \
          encrypted DNS still works for devices you set up by hand. To cover Windows and Apple \
-         too, use a certificate that includes this server's IP address (a self-signed one \
-         from the Certificates page can, once devices trust it)."
+         too, use a certificate that includes this server's IP address (the Certificates \
+         page can generate one that does; devices must then trust it)."
     ));
 }
 
