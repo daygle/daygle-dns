@@ -408,9 +408,9 @@ mod tests {
         let (cert_pem, _) =
             generate_self_signed_pem_with_addresses("dns.example.test", &addresses).unwrap();
         let names = describe_certificate(&cert_pem).unwrap().names;
-        assert!(names.contains(&"dns.example.test".to_string()), "{names:?}");
-        assert!(names.contains(&"192.168.1.10".to_string()), "{names:?}");
-        assert!(names.contains(&"fd00::53".to_string()), "{names:?}");
+        assert!(names.contains(&"dns.example.test".to_string()));
+        assert!(names.contains(&"192.168.1.10".to_string()));
+        assert!(names.contains(&"fd00::53".to_string()));
     }
     use super::*;
     use tempfile::tempdir;
