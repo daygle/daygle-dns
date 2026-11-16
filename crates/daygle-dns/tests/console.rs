@@ -2336,6 +2336,44 @@ async fn certificates_report_their_details() {
         .expect("not_after is RFC 3339");
     assert!(not_after > chrono::Utc::now());
 
+    // A generated certificate can also name the server's addresses (for
+    // Automatic Discovery); something that is not an address is refused.
+    let resp = client
+        .post(format!("{base}/api/certificates"))
+        .bearer_auth(&admin)
+        .json(&json!({ "name": "lan-ip", "server_name": "dns.lan.test",
+                       "addresses": ["192.168.1.10", " fd00::53 ", ""] }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let certs = list().await;
+    let lan_ip = certs
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["name"] == json!("lan-ip"))
+        .unwrap();
+    let names = lan_ip["names"].as_array().unwrap();
+    assert!(names.contains(&json!("192.168.1.10")), "{names:?}");
+    assert!(names.contains(&json!("fd00::53")), "{names:?}");
+    let resp = client
+        .post(format!("{base}/api/certificates"))
+        .bearer_auth(&admin)
+        .json(&json!({ "name": "bad-ip", "server_name": "dns.lan.test",
+                       "addresses": ["not-an-ip"] }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+    let resp = client
+        .delete(format!("{base}/api/certificates/lan-ip"))
+        .bearer_auth(&admin)
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_success());
+
     // Uploading under the same name replaces it (how a renewal is applied).
     let (cert_pem, key_pem) = daygle_dns_dot::generate_self_signed_pem("dns2.lan.test").unwrap();
     let resp = client

@@ -121,7 +121,7 @@
     notice = warning = null;
     formError = null;
     form = {
-      replacing: null, mode: 'self', name: '', serverName: '', certPem: '', keyPem: '',
+      replacing: null, mode: 'self', name: '', serverName: '', addresses: '', certPem: '', keyPem: '',
       domains: '', challenge: 'http', email: acme?.settings?.email || '', agree: !!acme?.settings?.agree_terms,
       cloudflareToken: '',
     };
@@ -130,7 +130,7 @@
   function openReplace(cert) {
     notice = warning = null;
     formError = null;
-    form = { replacing: cert.name, mode: 'upload', name: cert.name, serverName: '', certPem: '', keyPem: '' };
+    form = { replacing: cert.name, mode: 'upload', name: cert.name, serverName: '', addresses: '', certPem: '', keyPem: '' };
   }
 
   function closeForm() {
@@ -185,7 +185,7 @@
     busy = true;
     try {
       const payload = form.mode === 'self'
-        ? { name, server_name: form.serverName.trim() }
+        ? { name, server_name: form.serverName.trim(), addresses: (form.addresses || '').split(/[\s,]+/).filter(Boolean) }
         : { name, cert_pem: form.certPem.trim() + '\n', key_pem: form.keyPem.trim() + '\n' };
       const saved = await api.createCertificate(payload);
       const used = saved?.in_use?.length ? ` The ${listJoin(saved.in_use)} listener${saved.in_use.length === 1 ? ' uses' : 's use'} it now.` : '';
@@ -533,6 +533,15 @@
             <input type="text" bind:value={form.serverName} placeholder="dns.example.com" autocomplete="off" spellcheck="false" />
           </label>
           <p class="muted help">The name clients use to reach this server; the certificate is issued for it (and for localhost).</p>
+          <label class="full">
+            <span>IP Addresses (Optional)</span>
+            <input type="text" bind:value={form.addresses} placeholder="192.168.1.10, fd00::53" autocomplete="off" spellcheck="false" />
+          </label>
+          <p class="muted help">
+            This server's addresses, separated by commas. Windows and Apple devices only switch to encrypted DNS
+            by themselves (Automatic Discovery) when the certificate names the address they use for plain DNS,
+            and they must also trust this certificate.
+          </p>
         {:else}
           <div class="grid2">
             <label>
