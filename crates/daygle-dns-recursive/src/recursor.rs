@@ -539,7 +539,15 @@ pub fn build(
         // PTR lookup under a short delegation such as `8.1.0.0.2.ip6.arpa`
         // (Telstra's 2001:8000::/20) failed with "maximum recursion limit
         // exceeded". The per-request query budget still bounds the work.
-        ns_recursion_limit: NS_RECURSION_LIMIT,
+        ns_recursion_limit: RECURSION_LIMIT,
+        // The same depth counter carries on through each CNAME in a chain:
+        // every hop adds the labels walked to find its zone, then the
+        // chain is checked against this limit. At the default of 24, a
+        // chain of a few deep names (`global.cainiao.com` through Alibaba's
+        // GDS, with names of ten labels) failed with "maximum recursion
+        // limit exceeded" though it was only four CNAMEs long. The CNAME
+        // and per-request query budgets still bound the work.
+        recursion_limit: RECURSION_LIMIT,
         opportunistic_encryption: if settings.opportunistic_encryption {
             // RFC 9539 defaults: remember a working encrypted transport for
             // 3 days and a failed probe for 1 day.
@@ -585,10 +593,13 @@ pub fn build(
         .map_err(|e| DaygleError::Config(format!("cannot build recursive resolver: {e}")))
 }
 
-/// How deep the recursor may walk the name tree looking for a zone's name
-/// servers: enough for the 34 labels of an IPv6 reverse name, with room
-/// for resolving name servers' addresses on the way.
-const NS_RECURSION_LIMIT: u8 = 64;
+/// How deep the recursor may go for one client query. The recursor counts
+/// one step for each label it walks looking for a zone's name servers, and
+/// keeps counting through each CNAME of a chain, so this needs room for the
+/// 34 labels of an IPv6 reverse name and for a chain of several deep names,
+/// with name servers' addresses resolved on the way. The recursor's own
+/// budgets (200 queries and 64 CNAMEs per request) bound the work.
+const RECURSION_LIMIT: u8 = 128;
 
 /// How many CNAMEs [`follow_cnames`] follows before giving up.
 const MAX_CNAME_HOPS: usize = 16;
