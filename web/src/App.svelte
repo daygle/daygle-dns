@@ -63,10 +63,18 @@
     };
   });
 
+  // A feature page's tab to open (its first tab unless another page asks).
+  let pageTab = $state(null);
   function openSettings(tab) {
     // Networks moved from Settings to the Clients page.
     if (tab === 'networks') {
       openClients('networks');
+      return;
+    }
+    // Feature settings live on their own page's Settings tab.
+    if (tab === 'ai' || tab === 'zones' || tab === 'cache') {
+      pageTab = 'settings';
+      view = tab;
       return;
     }
     settingsTab = tab;
@@ -274,6 +282,7 @@
               view = tab.id;
               settingsTab = 'general';
               clientsTab = 'devices';
+              pageTab = null;
               logsClient = null;
               if (isNarrow()) setSidebar(false);
             }}
@@ -311,7 +320,9 @@
       {:else if view === 'status' || (isViewer && !tabs.some((t) => t.id === view))}
         <Status onOpenUpdate={() => (view = 'update')} />
       {:else if view === 'zones'}
-        <ZonesPage {recordZoneId} onSelectZone={setRecordZone} onOpenSettings={isViewer ? null : openSettings} />
+        {#key pageTab}
+          <ZonesPage {recordZoneId} onSelectZone={setRecordZone} onOpenSettings={isViewer ? null : openSettings} initialTab={pageTab || 'zones'} canEdit={!isViewer} />
+        {/key}
       {:else if view === 'filtering'}
         <Filtering />
       {:else if view === 'clients'}
@@ -321,7 +332,9 @@
       {:else if view === 'dhcp'}
         <Dhcp />
       {:else if view === 'cache'}
-        <Cache onOpenSettings={isViewer ? null : openSettings} />
+        {#key pageTab}
+          <Cache initialTab={pageTab || 'overview'} canEdit={!isViewer} />
+        {/key}
       {:else if view === 'lookup'}
         <Lookup />
       {:else if view === 'users'}
@@ -329,7 +342,9 @@
       {:else if view === 'certificates'}
         <Certificates onOpenSettings={isViewer ? null : openSettings} />
       {:else if view === 'ai'}
-        <Ai onOpenSettings={isViewer ? null : openSettings} />
+        {#key pageTab}
+          <Ai initialTab={pageTab || 'scanner'} canEdit={!isViewer} />
+        {/key}
       {:else if view === 'about'}
         <About />
       {:else if view === 'donate'}

@@ -246,7 +246,7 @@
   <div class="card">
     <h3 style="margin: 0 0 10px">AI Scanner Is Off</h3>
     <p class="muted" style="margin: 0">
-      There are no classifications. Turn the scanner on in Settings → AI Scanner; it
+      There are no classifications. Turn the scanner on in the Settings tab; it
       starts after the next restart.
     </p>
   </div>

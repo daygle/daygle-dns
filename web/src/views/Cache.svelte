@@ -1,11 +1,31 @@
 <script>
+  import { untrack } from 'svelte';
   import { api, formatApiError } from '../api.js';
   import PageHeader from '../PageHeader.svelte';
   import { icons } from '../icons.svelte.js';
+  import CacheSettings from './CacheSettings.svelte';
 
-  // The cache is configured in Settings -> Cache; this page
-  // shows how it is doing and flushes it (whole or one name).
-  let { onOpenSettings = null } = $props();
+  // The Overview tab shows how the cache is doing and flushes it (whole or
+  // one name); the Settings tab (administrators only) configures it.
+  let { initialTab = 'overview', canEdit = false } = $props();
+  const TABS = [
+    {
+      id: 'overview',
+      label: 'Overview',
+      tagline:
+        'The resolver caches positive and negative DNS answers to reduce upstream traffic and improve response times. Cache entries are kept in memory and are cleared when the service restarts.',
+    },
+    {
+      id: 'settings',
+      label: 'Settings',
+      tagline:
+        'How long answers are kept, how many, and how popular names are refreshed before they expire. Changes apply immediately.',
+      edit: true,
+    },
+  ];
+  const tabs = $derived(TABS.filter((t) => canEdit || !t.edit));
+  let tab = $state(untrack(() => initialTab));
+  const current = $derived(tabs.find((t) => t.id === tab) || tabs[0]);
 
   let cache = $state(null);
   let busy = $state(false);
@@ -89,11 +109,19 @@
   }
 </script>
 
-<PageHeader
-  icon={icons.cache}
-  title="Cache"
-  tagline="The resolver caches positive and negative DNS answers to reduce upstream traffic and improve response times. Cache entries are kept in memory and are cleared when the service restarts."
-/>
+<PageHeader icon={icons.cache} title="Cache" tagline={current.tagline} />
+
+{#if tabs.length > 1}
+  <div class="tabs">
+    {#each tabs as t (t.id)}
+      <button class="tab" class:active={current.id === t.id} onclick={() => (tab = t.id)}>{t.label}</button>
+    {/each}
+  </div>
+{/if}
+
+{#if current.id === 'settings'}
+  <CacheSettings onSaved={load} />
+{:else}
 
 {#if notice}
   <div class="card" style="border-color: var(--ok); margin-bottom: 14px">{notice}</div>
@@ -114,8 +142,8 @@
     <div class="spread" style="margin-bottom: 10px">
       <h3 style="margin: 0">Cache Controls</h3>
       <div class="row" style="gap: 8px">
-        {#if onOpenSettings}
-          <button class="secondary" onclick={() => onOpenSettings('cache')}>Settings</button>
+        {#if canEdit}
+          <button class="secondary" onclick={() => (tab = 'settings')}>Settings</button>
         {/if}
         <button class="danger" onclick={flush} disabled={busy || !cache.enabled}>Flush Cache</button>
       </div>
@@ -138,8 +166,8 @@
         </div>
       </div>
       <p class="muted help">
-        Cache size, TTL limits, serve-stale and prefetch are configured in
-        Settings → Cache.
+        Cache size, TTL limits, serve-stale and prefetch are configured on
+        the Settings tab{canEdit ? '' : ' (administrators only)'}.
       </p>
     {/if}
   </div>
@@ -173,6 +201,7 @@
   <div class="card">
     <p class="muted">Loading...</p>
   </div>
+{/if}
 {/if}
 
 <style>

@@ -541,7 +541,7 @@
     }
   }
 
-  // DNS Server Domain (Settings -> Zones) pre-fills and
+  // DNS Server Domain (Zones -> Settings) pre-fills and
   // placeholders the SOA Primary Nameserver for new zones.
   let dnsServerDomain = $derived(zoneDefaults?.primary_ns || config?.authoritative?.default_primary_ns || '');
 
@@ -799,7 +799,7 @@
         <label>Minimum TTL (Seconds) <span class="hint">{hint(newZone.minimum)}</span><input type="number" min="1" bind:value={newZone.minimum} /></label>
       </div>
       <p class="muted help">
-        Pre-filled from Settings → Zones, or when those are
+        Pre-filled from the Settings tab, or when those are
         empty, this server's name and the first administrator's email. The
         timers tell secondary servers how often to check for changes; the
         defaults suit most zones.

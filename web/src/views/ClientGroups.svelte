@@ -562,8 +562,8 @@
         {/if}
         A window ending earlier than it starts runs past midnight (21:00
         until 07:00 on Friday covers Friday night into Saturday morning).
-        Times use the server's time zone under Settings → General → Date &amp;
-        Time Defaults.
+        Times use the server's time zone under Settings → General → Display
+        Defaults.
       </p>
 
       <div class="section-title">Security</div>

@@ -419,7 +419,7 @@
   <div class="spread foot">
     <p class="muted help" style="margin: 0">
       Choose the web console's certificate in Settings → General, and the
-      encrypted DNS listeners' in Settings → Encrypted DNS. Replacing a
+      encrypted DNS listeners' in Settings → DNS Listeners. Replacing a
       certificate in use applies at once. For the web console, upload one
       issued for the name you browse to, so browsers trust it.
     </p>

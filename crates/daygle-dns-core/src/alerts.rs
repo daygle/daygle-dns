@@ -28,7 +28,7 @@ pub enum AlertKind {
     AiModel,
     /// Sent from the console to check the settings.
     Test,
-    /// A scheduled report (Settings -> Alerts), not an alert.
+    /// A scheduled report (Settings -> Notifications), not an alert.
     Report,
 }
 

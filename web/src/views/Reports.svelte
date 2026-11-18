@@ -349,9 +349,9 @@
     Totals from the query log. A daily or weekly summary can also be sent
     by email or webhook under
     {#if onOpenSettings}
-      <button type="button" class="link" onclick={() => onOpenSettings('alerts')}>Settings → Alerts</button>.
+      <button type="button" class="link" onclick={() => onOpenSettings('alerts')}>Settings → Notifications</button>.
     {:else}
-      Settings → Alerts.
+      Settings → Notifications.
     {/if}
   </p>
 </div>

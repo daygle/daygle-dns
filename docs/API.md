@@ -2174,7 +2174,7 @@ zone for changes now (`202`). `POST /api/rpz/test` with `{"client",
 
 ### Encrypted DNS discovery (DDR)
 
-The `ddr` settings group (Settings → Encrypted DNS) answers Discovery of
+The `ddr` settings group (Settings → DNS Listeners) answers Discovery of
 Designated Resolvers (RFC 9462): an `SVCB` query for `_dns.resolver.arpa`,
 or for `_dns.<name>` where `<name>` is a name the encrypted listeners go by
 (and not a zone hosted here), gets one SVCB record per enabled DoH, DoT and
@@ -2284,7 +2284,7 @@ TCP responses, and responses to a request with a valid DNS server cookie
 POST   /api/alerts/test
 ```
 
-The `alerts` settings group (Settings -> Alerts, replaced as a whole by
+The `alerts` settings group (Settings -> Notifications, replaced as a whole by
 `PUT /api/config` with `{"alerts": {...}}`) sends an alert when something
 needs attention:
 
@@ -2365,7 +2365,7 @@ busiest first.
 - `zones`: queries answered from each hosted zone, with a zone's aliases
   counted towards it and each name going to the longest zone it is in.
 
-The `reports` settings group (Settings → Alerts, replaced as a whole by
+The `reports` settings group (Settings → Notifications, replaced as a whole by
 `PUT /api/config` with `{"reports": {...}}`) sends that summary as plain
 text on a schedule, to the alert destinations (`alerts.webhook_url` and/or
 email; alerts themselves need not be enabled), as an alert of `kind`

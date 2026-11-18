@@ -375,7 +375,9 @@
         <p class="muted help">
           The zone is transferred (AXFR) from the first server that answers,
           and again only when its SOA serial changes. Feeds that sign
-          transfers need their TSIG key, added under Settings → Zones.
+          transfers need their TSIG key, defined under
+          <code>[authoritative] tsig_keys</code> in <code>daygle-dns.toml</code>
+          (keys are not editable in the console).{#if !tsigKeys.length} No keys are defined yet.{/if}
         </p>
       {/if}
 

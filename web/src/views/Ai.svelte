@@ -1,13 +1,16 @@
 <script>
+  import { untrack } from 'svelte';
   import PageHeader from '../PageHeader.svelte';
   import { icons } from '../icons.svelte.js';
   import AiStatus from './AiStatus.svelte';
   import AiThreats from './AiThreats.svelte';
   import AiExemptions from './AiExemptions.svelte';
   import AiVerdicts from './AiVerdicts.svelte';
+  import AiSettings from './AiSettings.svelte';
 
-  // Opens Settings on a tab (null for viewers, who cannot).
-  let { onOpenSettings = null } = $props();
+  // `initialTab` lets another page open a tab directly; `canEdit` is false
+  // for read-only accounts, who get no Settings tab.
+  let { initialTab = 'scanner', canEdit = true } = $props();
 
   // The AI page groups the scanner overview and the per-domain verdicts as
   // tabs (same pattern as Settings and Logs).
@@ -36,25 +39,35 @@
       tagline:
         'Review domains exempted from AI blocking, including false positives, and remove exemptions when they are no longer needed.',
     },
+    {
+      id: 'settings',
+      label: 'Settings',
+      tagline:
+        'When the scanner runs, how many domains it classifies, and when a detected threat blocks. Train mode only records; Enforce mode blocks.',
+      edit: true,
+    },
   ];
+  const tabs = $derived(TABS.filter((t) => canEdit || !t.edit));
 
-  let tab = $state('scanner');
-  const current = $derived(TABS.find((t) => t.id === tab));
+  let tab = $state(untrack(() => initialTab));
+  const current = $derived(tabs.find((t) => t.id === tab) || tabs[0]);
 </script>
 
 <PageHeader icon={icons.ai} title="AI" tagline={current.tagline} />
 
 <div class="tabs">
-  {#each TABS as t (t.id)}
-    <button class="tab" class:active={tab === t.id} onclick={() => (tab = t.id)}>{t.label}</button>
+  {#each tabs as t (t.id)}
+    <button class="tab" class:active={current.id === t.id} onclick={() => (tab = t.id)}>{t.label}</button>
   {/each}
 </div>
 
-{#if tab === 'scanner'}
-  <AiStatus {onOpenSettings} onOpenThreats={() => (tab = 'threats')} />
-{:else if tab === 'threats'}
+{#if current.id === 'scanner'}
+  <AiStatus onOpenSettings={canEdit ? () => (tab = 'settings') : null} onOpenThreats={() => (tab = 'threats')} />
+{:else if current.id === 'settings'}
+  <AiSettings />
+{:else if current.id === 'threats'}
   <AiThreats />
-{:else if tab === 'exemptions'}
+{:else if current.id === 'exemptions'}
   <AiExemptions />
 {:else}
   <AiVerdicts />
