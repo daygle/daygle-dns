@@ -245,6 +245,7 @@ export const api = {
   flushCacheName: (name, type) => request('POST', '/cache/flush', type ? { name, type } : { name }),
   localRoot: () => request('GET', '/local-root'),
   resolver: () => request('GET', '/resolver'),
+  resolverLookup: (name, type, fresh) => request('POST', '/resolver/lookup', { name, type, fresh }),
   refreshLocalRoot: () => request('POST', '/local-root/refresh'),
   blocklistSources: () => request('GET', '/policy/blocklist/sources'),
   refreshBlocklistSources: () => request('POST', '/policy/blocklist/sources'),

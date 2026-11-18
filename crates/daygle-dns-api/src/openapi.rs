@@ -170,6 +170,7 @@ const PATHS: &[(&str, &[Operation])] = &[
     ("/cache/flush", &[("post", "Flush cache name")]),
     ("/local-root", &[("get", "Local root status")]),
     ("/resolver", &[("get", "Resolver stats")]),
+    ("/resolver/lookup", &[("post", "Diagnostic lookup")]),
     ("/local-root/refresh", &[("post", "Local root refresh")]),
     (
         "/networks",
@@ -3073,6 +3074,97 @@ fn resolver_schemas() -> Value {
                 }
             }
         },
+        "ResolverLookupInput": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name"],
+            "properties": {
+                "name": { "type": "string" },
+                "type": {
+                    "type": "string",
+                    "description": "The record type to ask for (`A`, `AAAA`, `PTR`, ...); `A` \
+                        when omitted."
+                },
+                "fresh": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "Start from empty caches, so every step from the root \
+                        servers is taken and traced. Forwarded names are flushed from the \
+                        cache first."
+                }
+            }
+        },
+        "ResolverLookup": {
+            "type": "object",
+            "description": "A diagnostic lookup. Filtering and client resolution policies \
+                do not apply.",
+            "required": [
+                "name", "type", "route", "fresh", "rcode", "answers", "negative_zone",
+                "error", "elapsed_ms", "dnssec_validation", "trace"
+            ],
+            "properties": {
+                "name": { "type": "string" },
+                "type": { "type": "string" },
+                "route": {
+                    "type": "string",
+                    "enum": ["recursive", "forwarding", "conditional", "stub", "local-root"]
+                },
+                "fresh": { "type": "boolean" },
+                "rcode": {
+                    "type": "string",
+                    "description": "The response code a client would get, e.g. `NOERROR`, \
+                        `NXDOMAIN`, `SERVFAIL`."
+                },
+                "answers": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "required": ["name", "type", "ttl", "data", "dnssec"],
+                        "properties": {
+                            "name": { "type": "string" },
+                            "type": { "type": "string" },
+                            "ttl": { "type": "integer" },
+                            "data": { "type": "string" },
+                            "dnssec": {
+                                "type": "string",
+                                "enum": ["secure", "insecure", "bogus", "indeterminate"]
+                            }
+                        }
+                    }
+                },
+                "negative_zone": {
+                    "type": ["string", "null"],
+                    "description": "The zone whose SOA came with a negative answer."
+                },
+                "error": {
+                    "type": ["string", "null"],
+                    "description": "Why the lookup failed (null for an answer, NXDOMAIN or \
+                        NODATA)."
+                },
+                "elapsed_ms": { "type": "number" },
+                "dnssec_validation": { "type": "boolean" },
+                "trace": {
+                    "type": "array",
+                    "description": "Every query sent upstream, in the order the answers came \
+                        back. Queries answered from a cache are not listed.",
+                    "items": {
+                        "type": "object",
+                        "required": ["server", "name", "type", "rcode", "outcome", "elapsed_ms"],
+                        "properties": {
+                            "server": { "type": "string" },
+                            "name": { "type": "string" },
+                            "type": { "type": "string" },
+                            "rcode": {
+                                "type": ["string", "null"],
+                                "description": "Null when the server did not answer."
+                            },
+                            "outcome": { "type": "string" },
+                            "elapsed_ms": { "type": "number" }
+                        }
+                    }
+                }
+            }
+        },
         "FlushNameResult": {
             "type": "object",
             "required": ["name", "complete"],
@@ -3691,6 +3783,28 @@ fn resolver_operation(path: &str, method: &str) -> Option<Value> {
                 }),
                 "409": json!({
                     "description": "Recursion is disabled, so there is no cache.",
+                    "content": { "application/json": { "schema": error } }
+                })
+            }
+        })),
+        ("post", "/resolver/lookup") => Some(json!({
+            "requestBody": request_body(
+                schema_ref("ResolverLookupInput"),
+                "The name and record type to resolve.",
+                true,
+            ),
+            "responses": {
+                "200": json_response(
+                    "How the lookup went: the route, the answer or why it failed, and \
+                        every query sent upstream.",
+                    schema_ref("ResolverLookup"),
+                ),
+                "400": json!({
+                    "description": "The name or record type is not valid.",
+                    "content": { "application/json": { "schema": error } }
+                }),
+                "409": json!({
+                    "description": "Recursion is disabled.",
                     "content": { "application/json": { "schema": error } }
                 })
             }

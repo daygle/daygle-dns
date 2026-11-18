@@ -4898,6 +4898,81 @@ pub struct FlushNameInput {
     pub record_type: Option<String>,
 }
 
+/// `POST /api/resolver/lookup` request body.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResolverLookupInput {
+    pub name: String,
+    /// The record type to ask for; `A` when omitted.
+    #[serde(default, rename = "type")]
+    pub record_type: Option<String>,
+    /// Start from empty caches (the default), so every step is taken and
+    /// traced as for a name never seen before.
+    #[serde(default = "default_true")]
+    pub fresh: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// `POST /api/resolver/lookup` - resolve one name the way client queries
+/// are resolved (without filtering) and report the route, the answer or
+/// the reason it failed, and every query sent upstream on the way.
+pub async fn resolver_lookup(
+    State(state): State<AppState>,
+    axum::Json(input): axum::Json<ResolverLookupInput>,
+) -> Response {
+    let Some(resolver) = state.resolver.load_full() else {
+        return error_response(
+            StatusCode::CONFLICT,
+            "recursion is disabled, so this server does not resolve other names",
+        );
+    };
+    let name = input.name.trim();
+    if name.is_empty() {
+        return error_response(StatusCode::BAD_REQUEST, "name is required");
+    }
+    let record_type = input
+        .record_type
+        .as_deref()
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .unwrap_or("A");
+    let diagnosis = match resolver.diagnose(name, record_type, input.fresh).await {
+        Ok(d) => d,
+        Err(e) => return error_response(StatusCode::BAD_REQUEST, e.to_string()),
+    };
+    let millis = |d: std::time::Duration| (d.as_secs_f64() * 1000.0 * 10.0).round() / 10.0;
+    Json(serde_json::json!({
+        "name": diagnosis.name,
+        "type": diagnosis.record_type,
+        "route": diagnosis.route,
+        "fresh": diagnosis.fresh,
+        "rcode": diagnosis.rcode,
+        "answers": diagnosis.answers.iter().map(|r| serde_json::json!({
+            "name": r.name,
+            "type": r.record_type,
+            "ttl": r.ttl,
+            "data": r.data,
+            "dnssec": r.dnssec,
+        })).collect::<Vec<_>>(),
+        "negative_zone": diagnosis.negative_zone,
+        "error": diagnosis.error,
+        "elapsed_ms": millis(diagnosis.elapsed),
+        "dnssec_validation": diagnosis.dnssec_validation,
+        "trace": diagnosis.trace.iter().map(|s| serde_json::json!({
+            "server": s.server.to_string(),
+            "name": s.name,
+            "type": s.record_type,
+            "rcode": s.rcode,
+            "outcome": s.outcome,
+            "elapsed_ms": millis(s.elapsed),
+        })).collect::<Vec<_>>(),
+    }))
+    .into_response()
+}
+
 /// `POST /api/cache/flush` - remove one name from the resolver caches.
 /// `complete` is false when recursive mode still holds its own copy (the
 /// recursor has no per-entry removal; flush the whole cache for that).

@@ -89,6 +89,10 @@ pub struct UpstreamConnections {
     /// Read a referral's glue as the answer to a query for it (see
     /// [`glue_as_answer`]). Recursive mode only.
     glue_answers: bool,
+    /// Turn REFUSED and SERVFAIL from a name server into a failure to
+    /// reach it, so the recursor asks the zone's next server (see
+    /// [`lame_as_unreachable`]). Recursive mode only.
+    skip_lame_servers: bool,
 }
 
 impl UpstreamConnections {
@@ -108,6 +112,144 @@ tokio::task_local! {
     /// The EDNS Client Subnet (RFC 7871) to send upstream for the lookup
     /// running in this task.
     static CLIENT_SUBNET: Option<EcsSubnet>;
+    /// Every query the lookup running in this task sends upstream, for
+    /// [`trace_queries`].
+    static QUERY_TRACE: std::cell::RefCell<Vec<TraceStep>>;
+}
+
+/// The most queries [`trace_queries`] records for one lookup.
+const MAX_TRACE_STEPS: usize = 256;
+
+/// One query sent upstream during a traced lookup.
+#[derive(Debug, Clone)]
+pub struct TraceStep {
+    /// The name server (or forwarding upstream) asked.
+    pub server: IpAddr,
+    /// The name asked about.
+    pub name: String,
+    /// The record type asked for.
+    pub record_type: String,
+    /// The response code, when the server answered.
+    pub rcode: Option<String>,
+    /// What came back: an answer, a referral, a denial, or the error.
+    pub outcome: String,
+    /// How long the server took.
+    pub elapsed: Duration,
+}
+
+/// Run a lookup and report every query it sent upstream, in the order the
+/// answers came back. Queries answered from a cache are not sent, so they
+/// do not appear.
+pub async fn trace_queries<F: Future>(lookup: F) -> (F::Output, Vec<TraceStep>) {
+    QUERY_TRACE
+        .scope(std::cell::RefCell::new(Vec::new()), async {
+            let output = lookup.await;
+            let steps = QUERY_TRACE.with(|steps| std::mem::take(&mut *steps.borrow_mut()));
+            (output, steps)
+        })
+        .await
+}
+
+/// Record one upstream exchange for [`trace_queries`] (nothing outside a
+/// traced lookup).
+fn record_trace(
+    server: IpAddr,
+    query: Option<&Query>,
+    response: &std::result::Result<DnsResponse, NetError>,
+    elapsed: Duration,
+) {
+    let _ = QUERY_TRACE.try_with(|steps| {
+        let mut steps = steps.borrow_mut();
+        if steps.len() >= MAX_TRACE_STEPS {
+            return;
+        }
+        let (rcode, outcome) = match response {
+            Ok(response) => (
+                Some(rcode_name(response.response_code)),
+                describe_response(response),
+            ),
+            Err(e) => (None, e.to_string()),
+        };
+        steps.push(TraceStep {
+            server,
+            name: query.map(|q| q.name().to_string()).unwrap_or_default(),
+            record_type: query
+                .map(|q| q.query_type().to_string())
+                .unwrap_or_default(),
+            rcode,
+            outcome,
+            elapsed,
+        });
+    });
+}
+
+/// A response code as it is written in DNS tools (`NXDOMAIN`, `REFUSED`).
+pub fn rcode_name(code: ResponseCode) -> String {
+    match code {
+        ResponseCode::NoError => "NOERROR".into(),
+        ResponseCode::FormErr => "FORMERR".into(),
+        ResponseCode::ServFail => "SERVFAIL".into(),
+        ResponseCode::NXDomain => "NXDOMAIN".into(),
+        ResponseCode::NotImp => "NOTIMP".into(),
+        ResponseCode::Refused => "REFUSED".into(),
+        ResponseCode::NotAuth => "NOTAUTH".into(),
+        other => format!("{other:?}").to_ascii_uppercase(),
+    }
+}
+
+/// What a name server's response says, in a few words.
+fn describe_response(response: &DnsResponse) -> String {
+    let truncated = if response.truncation {
+        " (truncated, retrying over TCP)"
+    } else {
+        ""
+    };
+    if response.response_code != ResponseCode::NoError {
+        let zone = response
+            .authorities
+            .iter()
+            .find(|r| r.record_type() == RecordType::SOA)
+            .map(|r| format!(" from zone {}", r.name))
+            .unwrap_or_default();
+        return format!("{}{zone}{truncated}", rcode_name(response.response_code));
+    }
+    if let Some(first) = response.answers.first() {
+        let more = match response.answers.len() {
+            1 => String::new(),
+            n => format!(" (+{} more)", n - 1),
+        };
+        return format!(
+            "answer: {} {}{more}{truncated}",
+            first.record_type(),
+            first.data
+        );
+    }
+    let referral = response
+        .authorities
+        .iter()
+        .filter(|r| r.record_type() == RecordType::NS)
+        .collect::<Vec<_>>();
+    if let (false, Some(first)) = (response.authoritative, referral.first()) {
+        let servers = referral
+            .iter()
+            .filter_map(|r| match &r.data {
+                RData::NS(ns) => Some(ns.0.to_string()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        return format!(
+            "referral to {} ({}){truncated}",
+            first.name,
+            servers.join(", ")
+        );
+    }
+    let zone = response
+        .authorities
+        .iter()
+        .find(|r| r.record_type() == RecordType::SOA)
+        .map(|r| format!(" in zone {}", r.name))
+        .unwrap_or_default();
+    format!("no records of this type{zone}{truncated}")
 }
 
 /// The EDNS Client Subnet a lookup sends to forwarding upstreams.
@@ -152,8 +294,10 @@ pub async fn track_upstream<F: Future>(lookup: F) -> (F::Output, bool) {
 #[derive(Clone)]
 pub struct TrackedConn<C> {
     conn: C,
+    server: IpAddr,
     client_subnet: bool,
     glue_answers: bool,
+    skip_lame_servers: bool,
 }
 
 impl<C: DnsHandle> DnsHandle for TrackedConn<C> {
@@ -185,18 +329,57 @@ impl<C: DnsHandle> DnsHandle for TrackedConn<C> {
                 }
             }
         }
-        if !self.glue_answers {
+        let traced = QUERY_TRACE.try_with(|_| ()).is_ok();
+        if !traced && !self.glue_answers && !self.skip_lame_servers {
             return self.conn.send(request).boxed();
         }
         let query = request.queries.first().cloned();
+        let (server, glue_answers, skip_lame) =
+            (self.server, self.glue_answers, self.skip_lame_servers);
+        let sent = Instant::now();
+        let traced_query = query.clone();
         self.conn
             .send(request)
+            .map(move |response| {
+                if traced {
+                    record_trace(server, traced_query.as_ref(), &response, sent.elapsed());
+                }
+                response
+            })
+            .map(move |response| match response {
+                Ok(response) if skip_lame => lame_as_unreachable(server, response),
+                response => response,
+            })
             .map(move |response| match (response, &query) {
-                (Ok(response), Some(query)) => Ok(glue_as_answer(query, response)),
+                (Ok(response), Some(query)) if glue_answers => Ok(glue_as_answer(query, response)),
                 (response, _) => response,
             })
             .boxed()
     }
+}
+
+/// A REFUSED or SERVFAIL answer from a name server, as a failure to reach
+/// that server.
+///
+/// The recursor's name server pool moves on to a zone's next server only
+/// when one cannot be reached; any other error ends the lookup. One lame
+/// server in a zone's NS set (one that refuses queries for it, or fails
+/// them) then failed every name it was asked about first - "Query Refused"
+/// for `tapi.telstra.com`, which the zone's other servers answer. Read as
+/// unreachable, it is skipped, ranked down for later queries, and the
+/// lookup still fails when every server answers that way.
+fn lame_as_unreachable(
+    server: IpAddr,
+    response: DnsResponse,
+) -> std::result::Result<DnsResponse, NetError> {
+    let code = response.response_code;
+    if !matches!(code, ResponseCode::Refused | ResponseCode::ServFail) {
+        return Ok(response);
+    }
+    debug!(%server, ?code, "name server failed the query, trying the zone's next server");
+    Err(NetError::from(std::io::Error::other(format!(
+        "name server {server} answered {code}"
+    ))))
 }
 
 /// A referral that carries the address asked for as glue, turned into an
@@ -279,11 +462,14 @@ impl ConnectionProvider for UpstreamConnections {
         };
         let client_subnet = self.client_subnet;
         let glue_answers = self.glue_answers;
+        let skip_lame_servers = self.skip_lame_servers;
         Ok(Box::pin(async move {
             connecting.await.map(|conn| TrackedConn {
                 conn,
+                server: ip,
                 client_subnet,
                 glue_answers,
+                skip_lame_servers,
             })
         }))
     }
@@ -347,6 +533,14 @@ pub fn build(
         // empty non-terminals, which strict RFC 8020 handling would turn into
         // false NXDOMAINs for the names below them.
         qname_minimization: QNameMinimization::Relaxed,
+        // The recursor spends one step of this limit on each label it adds
+        // while looking for the zone cut above a name, and relaxed
+        // minimisation (above) keeps adding them past NXDOMAIN. The default
+        // of 24 is fewer labels than an IPv6 reverse name has (34), so every
+        // PTR lookup under a short delegation such as `8.1.0.0.2.ip6.arpa`
+        // (Telstra's 2001:8000::/20) failed with "maximum recursion limit
+        // exceeded". The per-request query budget still bounds the work.
+        ns_recursion_limit: NS_RECURSION_LIMIT,
         opportunistic_encryption: if settings.opportunistic_encryption {
             // RFC 9539 defaults: remember a working encrypted transport for
             // 3 days and a failed probe for 1 day.
@@ -364,6 +558,7 @@ pub fn build(
         local_root,
         metrics: Some(metrics),
         glue_answers: true,
+        skip_lame_servers: true,
         ..UpstreamConnections::default()
     };
     if let Some(port) = settings.test_outbound_port {
@@ -390,6 +585,11 @@ pub fn build(
     Recursor::new(&hints, dnssec, None, options, connections)
         .map_err(|e| DaygleError::Config(format!("cannot build recursive resolver: {e}")))
 }
+
+/// How deep the recursor may walk the name tree looking for a zone's name
+/// servers: enough for the 34 labels of an IPv6 reverse name, with room
+/// for resolving name servers' addresses on the way.
+const NS_RECURSION_LIMIT: u8 = 64;
 
 /// How many CNAMEs [`follow_cnames`] follows before giving up.
 const MAX_CNAME_HOPS: usize = 16;

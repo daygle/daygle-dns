@@ -811,6 +811,7 @@ pub fn router(state: AppState) -> Router {
         .route("/cache/flush", post(handlers::flush_cache_name))
         .route("/local-root", get(handlers::local_root_status))
         .route("/resolver", get(handlers::resolver_stats))
+        .route("/resolver/lookup", post(handlers::resolver_lookup))
         .route("/local-root/refresh", post(handlers::local_root_refresh))
         .route(
             "/networks",

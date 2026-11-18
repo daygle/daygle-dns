@@ -12,6 +12,7 @@
   import Settings from './views/Settings.svelte';
   import Ai from './views/Ai.svelte';
   import Cache from './views/Cache.svelte';
+  import Lookup from './views/Lookup.svelte';
   import Users from './views/Users.svelte';
   import Certificates from './views/Certificates.svelte';
   import About from './views/About.svelte';
@@ -198,6 +199,7 @@
       { id: 'dhcp', label: 'DHCP', icon: icons.dhcp, section: 'dns' },
       { id: 'ai', label: 'AI', icon: icons.ai, viewer: true, section: 'dns' },
       { id: 'cache', label: 'Cache', icon: icons.cache, section: 'dns' },
+      { id: 'lookup', label: 'Lookup', icon: icons.lookup, viewer: true, section: 'dns' },
       { id: 'settings', label: 'Settings', icon: icons.settings, viewer: true, section: 'server' },
       { id: 'certificates', label: 'Certificates', icon: icons.certificates, section: 'server' },
       { id: 'users', label: 'Users', icon: icons.users, viewer: true, section: 'server' },
@@ -320,6 +322,8 @@
         <Dhcp />
       {:else if view === 'cache'}
         <Cache onOpenSettings={isViewer ? null : openSettings} />
+      {:else if view === 'lookup'}
+        <Lookup />
       {:else if view === 'users'}
         <Users />
       {:else if view === 'certificates'}
