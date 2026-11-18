@@ -23,7 +23,6 @@ use hickory_proto::rr::rdata::opt::{ClientSubnet, EdnsOption};
 use hickory_proto::rr::{Name, RData, Record, RecordType};
 use hickory_resolver::config::{
     ConnectionConfig, OpportunisticEncryption, OpportunisticEncryptionConfig, ProtocolConfig,
-    ResolverOpts,
 };
 use hickory_resolver::lookup::Lookup;
 use hickory_resolver::net::runtime::TokioRuntimeProvider;
@@ -35,7 +34,7 @@ use hickory_resolver::recursor::{
 };
 use hickory_resolver::{ConnectionProvider, PoolContext, TtlConfig};
 use ipnet::{IpNet, Ipv4Net, Ipv6Net};
-use tracing::debug;
+use tracing::{debug, warn};
 
 /// The IANA root servers (a.root-servers.net .. m.root-servers.net), IPv4
 /// and IPv6. The recursor primes the current list from these on start-up, so
@@ -970,14 +969,39 @@ fn recursor_error_code(e: &RecursorError) -> Option<u16> {
 /// Map the cache TTL bounds onto the recursor's cache policy (the same
 /// bounds the forwarding resolver applies).
 fn ttl_config(settings: &RecursiveSettings) -> TtlConfig {
-    let mut opts = ResolverOpts::default();
-    opts.positive_min_ttl = Some(Duration::from_secs(u64::from(settings.min_cache_ttl)));
-    opts.negative_max_ttl = Some(Duration::from_secs(u64::from(settings.negative_cache_ttl)));
-    if settings.max_cache_ttl > 0 {
-        opts.positive_max_ttl = Some(Duration::from_secs(u64::from(settings.max_cache_ttl)));
-    }
-    TtlConfig::from_opts(&opts)
+    let max = (settings.max_cache_ttl > 0).then_some(settings.max_cache_ttl);
+    let bounds = |min: u32| {
+        serde_json::json!({
+            "positive_min_ttl": min,
+            "positive_max_ttl": max,
+            "negative_max_ttl": settings.negative_cache_ttl,
+        })
+    };
+    // NS questions get a floor of their own. The recursor asks for the NS
+    // records of every name on the way down to the one it resolves, and the
+    // cache keeps an NS answer only as long as the NS records in it: one
+    // answered with a CNAME instead (every name in a CNAME chain) has none,
+    // so it fell to `min_cache_ttl` (0 by default) and was asked again on
+    // every pass. `www.aliexpress.com`, a chain bouncing between Alibaba's
+    // zones on servers 100-800 ms away, sent 98 queries and took 17 s, past
+    // the client's 5 s limit.
+    let ns_min = settings
+        .min_cache_ttl
+        .max(NS_MIN_CACHE_TTL)
+        .min(max.unwrap_or(u32::MAX));
+    serde_json::from_value(serde_json::json!({
+        "default": bounds(settings.min_cache_ttl),
+        "NS": bounds(ns_min),
+    }))
+    .unwrap_or_else(|e| {
+        warn!("cannot build the cache TTL limits ({e}); using the defaults");
+        TtlConfig::default()
+    })
 }
+
+/// The shortest time an answer to an NS question is cached (see
+/// [`ttl_config`]), unless `max_cache_ttl` is shorter.
+const NS_MIN_CACHE_TTL: u32 = 300;
 
 /// A recursor and the local root responder it was built for.
 pub struct RecursorSlot {
@@ -1239,6 +1263,35 @@ mod tests {
             owners,
             ["www.shop.test.", "shop.host.test.", "shop.cdn.test."]
         );
+    }
+
+    #[test]
+    fn ns_answers_are_cached_for_at_least_five_minutes() {
+        let secs = |d: Duration| d.as_secs();
+        let mut settings = RecursiveSettings {
+            min_cache_ttl: 0,
+            max_cache_ttl: 86400,
+            negative_cache_ttl: 3600,
+            ..RecursiveSettings::default()
+        };
+        let config = ttl_config(&settings);
+        let ns = config.positive_response_ttl_bounds(RecordType::NS);
+        assert_eq!((secs(*ns.start()), secs(*ns.end())), (300, 86400));
+        let a = config.positive_response_ttl_bounds(RecordType::A);
+        assert_eq!((secs(*a.start()), secs(*a.end())), (0, 86400));
+        // The NS bounds replace the defaults for NS questions, so they keep
+        // the negative limit too.
+        let negative = config.negative_response_ttl_bounds(RecordType::NS);
+        assert_eq!(secs(*negative.end()), 3600);
+
+        // A longer configured minimum wins, and a shorter maximum caps it.
+        settings.min_cache_ttl = 900;
+        let ns = ttl_config(&settings).positive_response_ttl_bounds(RecordType::NS);
+        assert_eq!(secs(*ns.start()), 900);
+        settings.min_cache_ttl = 0;
+        settings.max_cache_ttl = 120;
+        let ns = ttl_config(&settings).positive_response_ttl_bounds(RecordType::NS);
+        assert_eq!((secs(*ns.start()), secs(*ns.end())), (120, 120));
     }
 
     #[tokio::test]

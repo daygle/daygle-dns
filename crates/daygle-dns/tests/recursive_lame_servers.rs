@@ -16,7 +16,7 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 use common::*;
 use daygle_dns_core::config::ResolutionMode;
 use hickory_proto::op::{Message, MessageType, ResponseCode};
-use hickory_proto::rr::rdata::{NS, PTR, SOA};
+use hickory_proto::rr::rdata::{CNAME, NS, PTR, SOA};
 use hickory_proto::rr::{Name, RData, Record, RecordType};
 
 const ROOT: Ipv4Addr = Ipv4Addr::new(127, 0, 4, 1);
@@ -144,6 +144,12 @@ fn handle(server: Ipv4Addr, qname: &str, qtype: RecordType) -> Reply {
                     .map(|i| ns("lame.test.", &format!("ns{i}.lame.test.")))
                     .collect(),
             ),
+            // A CNAME is the answer for every type, NS included.
+            ("alias.lame.test.", _) => Reply::Answer(vec![Record::from_rdata(
+                name("alias.lame.test."),
+                300,
+                RData::CNAME(CNAME(name("www.lame.test."))),
+            )]),
             ("www.lame.test.", RecordType::A) => {
                 Reply::Answer(vec![a("www.lame.test.", Ipv4Addr::new(198, 51, 100, 9))])
             }
@@ -355,5 +361,35 @@ async fn the_lookup_page_reports_the_answer_and_every_query_sent() {
     // Bad input is refused.
     let resp = lookup("www.lame.test".into(), "NOPE").await.unwrap();
     assert_eq!(resp.status(), reqwest::StatusCode::BAD_REQUEST);
+    shutdown(server).await;
+}
+
+#[tokio::test]
+async fn an_ns_question_answered_with_a_cname_is_cached() {
+    let (server, _dir) = spawn_recursive().await;
+    let base = format!("http://{}/api", server.api_addr);
+    let client = reqwest::Client::new();
+    let lookup = |rtype: &str| {
+        client
+            .post(format!("{base}/resolver/lookup"))
+            .json(&serde_json::json!({ "name": "alias.lame.test", "type": rtype, "fresh": false }))
+            .send()
+    };
+    let asked_ns = |body: &serde_json::Value| {
+        body["trace"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|s| s["name"] == "alias.lame.test." && s["type"] == "NS")
+            .count()
+    };
+
+    let body: serde_json::Value = lookup("A").await.unwrap().json().await.unwrap();
+    assert_eq!(body["rcode"], "NOERROR", "{body}");
+    assert!(asked_ns(&body) > 0, "{body}");
+    // The recursor asks for the NS records of the name again on the next
+    // lookup through it unless the CNAME it got back is cached.
+    let body: serde_json::Value = lookup("TXT").await.unwrap().json().await.unwrap();
+    assert_eq!(asked_ns(&body), 0, "{body}");
     shutdown(server).await;
 }
