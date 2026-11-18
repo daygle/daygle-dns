@@ -4,7 +4,7 @@
   import { formatDateTime } from '../datetime.svelte.js';
   import { backendLabel, duration, percent, titleCase } from '../aiLabels.js';
 
-  // `onOpenSettings(tab)` opens Settings on a tab and `onOpenThreats()` the
+  // `onOpenSettings()` opens the AI page's Settings tab and `onOpenThreats()` the
   // AI page's Threats tab; both null for viewers.
   let { onOpenSettings = null, onOpenThreats = null } = $props();
 
@@ -334,14 +334,14 @@
     {#if enabledInSettings}
       <h3 style="margin: 0 0 10px">AI Scanner Starts After a Restart</h3>
       <p class="muted" style="margin: 0">
-        The scanner is turned on in Settings → AI Scanner but was off when the
+        The scanner is turned on in the Settings tab but was off when the
         service started. Restart the service to start it.
       </p>
     {:else}
       <h3 style="margin: 0 0 10px">AI Scanner Is Off</h3>
       <p class="muted" style="margin: 0">
-        No domains are being classified. Turn the scanner on in Settings → AI
-        Scanner; it starts after the next restart.
+        No domains are being classified. Turn the scanner on in the Settings
+        tab; it starts after the next restart.
       </p>
     {/if}
     {#if onOpenSettings}
@@ -353,14 +353,14 @@
     <div class="card warn" style="margin-bottom: 14px">
       <strong>The AI scanner is turned off.</strong>
       It is not classifying domains or blocking any. The classifications and
-      threats below are from before; turn it back on in Settings → AI Scanner.
+      threats below are from before; turn it back on in the Settings tab.
     </div>
   {:else if enforcing && heuristicOnly}
     <div class="card warn" style="margin-bottom: 14px">
       <strong>Nothing can be auto-blocked yet.</strong>
       Enforce mode is on, but the scanner is using its built-in heuristic
       rules, whose detections never reach the block threshold. Set a trained
-      model in Settings → AI Scanner (see AI Models below) to auto-block.
+      model (see AI Models below) to auto-block.
     </div>
   {/if}
 

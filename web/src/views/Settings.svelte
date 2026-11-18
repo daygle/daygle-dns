@@ -13,19 +13,17 @@
   let error = $state(null);
   let busy = $state(false);
 
-  // Settings is split into tabs (same pattern as the Logs page) so the page
-  // stays navigable as more options are added.
-  // `initialTab` lets another page open a tab directly (the Cache page's
-  // "Settings" button).
+  // Server-wide settings, split into tabs (same pattern as the Logs page).
+  // A feature's own settings live on its page instead (AI, Zones, Cache and
+  // DHCP each have a Settings tab), saved separately from this form.
+  // `initialTab` lets another page open a tab directly (the Certificates
+  // page's buttons, Reports' scheduled-report link).
   let { initialTab = 'general' } = $props();
   let tab = $state(untrack(() => initialTab));
   const TABS = [
     ['general', 'General'],
     ['listeners', 'DNS Listeners'],
     ['recursive', 'Resolver'],
-    ['cache', 'Cache'],
-    ['zones', 'Zones'],
-    ['ai', 'AI Scanner'],
     ['rate-limiting', 'Rate Limiting'],
     ['logging', 'Logging'],
     ['alerts', 'Notifications'],
@@ -35,10 +33,7 @@
     general: 'How the web console is reached (HTTP, HTTPS or both), and how dates, times and colours are shown by default.',
     listeners: 'Where clients reach this server: plain DNS over UDP and TCP, encrypted DNS over TLS, HTTPS and QUIC with the certificate each one presents, and advertising them to devices.',
     recursive: 'How the server answers names it does not host: resolving them itself from the root servers or forwarding to upstreams, how long it waits, and DNS64 and client subnet options. Who may use it is under Clients → Access.',
-    cache: 'How long answers are kept, how many, and how popular names are refreshed before they expire. Changes apply immediately.',
-    zones: 'Defaults for new zones and records, DNSSEC signing, and how other DNS servers may copy, update and be notified about your zones.',
     logging: 'How long the query log is kept, optional daily log files, and sending the server log and queries to a syslog server or a log collector over HTTP. The logs themselves are on the Logs page.',
-    ai: 'The background scanner that classifies the domains in your DNS traffic and can block unsafe ones.',
     'rate-limiting': 'Per-client and per-domain query limits, and response rate limiting (RRL), which stops this server being used to flood someone else with DNS answers sent to a forged address.',
     alerts: 'Where notifications go (webhook, email or both), the alerts sent when something needs attention, and a scheduled summary report.',
     backup: 'Download a backup of everything this server keeps, or restore one.',
@@ -47,21 +42,10 @@
   // Local editable copies (bound to the form inputs).
   let server = $state({});
   let recursive = $state({});
-  let authoritative = $state({});
   let dot = $state({});
   let doh = $state({});
   let doq = $state({});
   let api_ = $state({});
-  let ai_ = $state({});
-  // AI values in the units the form shows (minutes, days, percent); turned
-  // back into seconds and fractions on save.
-  let aiForm = $state({});
-  // Whether a scanner is running now (it is only built at startup).
-  let aiRunning = $state(false);
-  // Auto-block categories as a comma-separated text input.
-  let aiCategoriesText = $state('');
-  // The loaded backend's own category list (model labels / heuristic rules);
-  // empty when unavailable, in which case the text field is the only UI.
   let upstreamText = $state('');
   // Root server addresses, one per line (empty: the built-in IANA roots).
   let rootHintsText = $state('');
@@ -73,13 +57,6 @@
   let dotNetworks = $state([]);
   let dohNetworks = $state([]);
   let doqNetworks = $state([]);
-  // Multi-line textareas for the network allow-lists and NOTIFY targets.
-  let axfrNetworks = $state([]);
-  let updateNetworks = $state([]);
-  let notifyTargetsText = $state('');
-  // Consumed catalog zones, as edited: masters as one comma-separated line
-  // and the refresh in minutes.
-  let catalogConsumers = $state([]);
 
   // Console-managed certificates available for the DoT/DoH/DoQ listeners.
   let certs = $state([]);
@@ -278,14 +255,9 @@
     !!(display.mine && (display.mine.time_zone || display.mine.date_format || display.mine.time_format || display.mine.theme)),
   );
 
-  // What empty SOA defaults resolve to (this server's name, the first
-  // administrator's email), for the Zones tab placeholders.
-  let zoneDefaults = $state(null);
-
   $effect(() => {
     load();
     api.certificates().then((list) => { certs = list || []; }).catch(() => {});
-    api.zoneDefaults().then((d) => { zoneDefaults = d; }).catch(() => {});
   });
 
   // A managed certificate in the picker, flagged when it is not usable.
@@ -295,10 +267,6 @@
     if (cert.not_after && Date.parse(cert.not_after) <= Date.now()) label += ' (Expired)';
     return label;
   }
-
-  // The automatic values an empty SOA default falls back to.
-  const detectedName = $derived(zoneDefaults?.server_name || null);
-  const adminEmail = $derived(zoneDefaults?.first_admin_email || null);
 
   // Translate the config's certificate state into a picker value.
   function certModeOf(listener) {
@@ -331,23 +299,17 @@
       if (config == null) {
         server = {};
         recursive = {};
-        authoritative = {};
         dot = {};
         doh = {};
         doq = {};
         api_ = {};
-        ai_ = {};
         display_ = { time_zone: 'system', date_format: 'system', time_format: 'system', theme: 'light' };
-        aiCategoriesText = '';
         upstreamText = '';
         rootHintsText = '';
         rateLimit_ = {};
         dotNetworks = [];
         dohNetworks = [];
         doqNetworks = [];
-        axfrNetworks = [];
-        updateNetworks = [];
-        notifyTargetsText = '';
         return;
       }
       server = { ...config.server };
@@ -355,7 +317,6 @@
       // An unset mode means: forwarding when upstreams exist, else recursive.
       recursive.mode = config.recursive.mode || (config.recursive.upstreams?.length ? 'forwarding' : 'recursive');
       recursive.outbound_ip_versions = config.recursive.outbound_ip_versions || 'both';
-      authoritative = { ...config.authoritative };
       dot = { ...config.dot };
       doh = { ...config.doh };
       doq = { ...config.doq };
@@ -385,41 +346,11 @@
       dns64 = { enabled: !!config.dns64?.enabled, prefix: config.dns64?.prefix || '64:ff9b::/96' };
       dns64Clients = [...(config.dns64?.clients || [])];
       ecs = { enabled: false, subnet: '', ipv4_prefix: 24, ipv6_prefix: 56, ...config.ecs };
-      ai_ = { ...config.ai, mode: config.ai?.mode || 'train' };
-      aiForm = {
-        scanMinutes: round2(ai_.scan_interval_secs / 60),
-        expireMinutes: round2(ai_.expire_check_secs / 60),
-        threatDays: round2(ai_.threat_ttl_secs / 86400),
-        categoryDays: round2(ai_.category_ttl_secs / 86400),
-        thresholdPct: round2(ai_.block_threshold * 100),
-        floorPct: round2(ai_.confidence_floor * 100),
-      };
-      aiCategoriesText = (config.ai?.auto_block_categories || []).join(', ');
-      api
-        .aiStatus()
-        .then(() => {
-          aiRunning = true;
-        })
-        .catch(() => {
-          aiRunning = false;
-        })
-        .finally(() => {
-          savedBody = JSON.stringify(buildBody());
-        });
       dotCertMode = certModeOf(dot);
       dohCertMode = certModeOf(doh);
       doqCertMode = certModeOf(doq);
       upstreamText = (recursive.upstreams || []).join('\n');
       rootHintsText = (recursive.root_hints || []).join('\n');
-      axfrNetworks = [...(authoritative.axfr_networks || [])];
-      updateNetworks = [...(authoritative.update_networks || [])];
-      notifyTargetsText = (authoritative.notify_targets || []).join('\n');
-      catalogConsumers = (authoritative.catalog_consumers || []).map((c) => ({
-        name: c.name,
-        masters: (c.masters || []).join(', '),
-        refresh_minutes: Math.max(1, Math.round((c.refresh_secs || 3600) / 60)),
-        enabled: c.enabled !== false,
-      }));
       savedBody = JSON.stringify(buildBody());
     } catch (e) {
       error = formatApiError(e);
@@ -436,15 +367,10 @@
   // network (addresses, lists, names, credentials, certificates) rather
   // than tuning. The General tab's web access is left too, so a reset can
   // never move the console out from under the browser.
-  const DNSSEC_FIELDS = ['dnssec_enabled', 'dnssec_algorithm', 'dnssec_sig_validity_days', 'dnssec_rollover_days',
-    'dnssec_rollover_overlap_days', 'dnssec_rollover_retire_days', 'dnssec_maintenance_secs'];
   const RESET_KEEPS = {
     general: 'Web console access is kept.',
     recursive: 'Upstream servers, DNS64 clients and the ECS subnet are kept.',
-    cache: '',
     listeners: 'Certificates, server names, allowed networks and the DDR name are kept. Listen addresses are set in the config file.',
-    zones: 'Allowed networks, NOTIFY targets and catalog zones are kept.',
-    ai: '',
     logging: 'The syslog server is kept.',
     'rate-limiting': 'The never-limited list is kept.',
     alerts: 'The webhook, email server, sender and recipients are kept.',
@@ -482,43 +408,12 @@
       server = { ...server, client_timeout_ms: d.server.client_timeout_ms };
       dns64 = { ...dns64, enabled: !!d.dns64?.enabled, prefix: d.dns64?.prefix || '64:ff9b::/96' };
       ecs = { ...ecs, ...pick(d.ecs, ['enabled', 'ipv4_prefix', 'ipv6_prefix']) };
-    } else if (tab === 'cache') {
-      recursive = {
-        ...recursive,
-        ...pick(r, ['min_cache_ttl', 'negative_cache_ttl', 'max_cache_ttl', 'failure_cache_ttl',
-          'cache_size', 'prefetch_enabled', 'prefetch_ttl_fraction_pct',
-          'prefetch_min_queries', 'prefetch_window_secs', 'serve_stale_secs']),
-      };
     } else if (tab === 'listeners') {
       server = { ...server, ...pick(d.server, ['tcp_timeout_ms', 'tcp_max_connections', 'dns_cookies']) };
       ddr_ = { ...ddr_, enabled: d.ddr.enabled };
       dot = { ...dot, ...pick(d.dot, ['enabled', 'port', 'handshake_timeout_secs', 'idle_timeout_secs', 'max_connections']) };
       doh = { ...doh, ...pick(d.doh, ['enabled', 'port', 'handshake_timeout_secs', 'max_connections', 'endpoint', 'http3']) };
       doq = { ...doq, ...pick(d.doq, ['enabled', 'port', 'max_connections', 'max_concurrent_streams', 'idle_timeout_secs']) };
-    } else if (tab === 'zones') {
-      authoritative = {
-        ...authoritative,
-        ...pick(d.authoritative, ['default_record_ttl', 'default_primary_ns', 'default_admin_mailbox',
-          'axfr_enabled', 'allow_dynamic_updates', 'notify_enabled', 'notify_listen_enabled',
-          ...DNSSEC_FIELDS]),
-      };
-    } else if (tab === 'ai') {
-      const a = d.ai;
-      ai_ = {
-        ...ai_,
-        ...pick(a, ['enabled', 'workers', 'max_domains_per_scan', 'scan_interval_secs', 'expire_check_secs',
-          'block_threshold', 'confidence_floor', 'category_ttl_secs', 'threat_ttl_secs']),
-        mode: a.mode || 'train',
-      };
-      aiForm = {
-        scanMinutes: round2(a.scan_interval_secs / 60),
-        expireMinutes: round2(a.expire_check_secs / 60),
-        threatDays: round2(a.threat_ttl_secs / 86400),
-        categoryDays: round2(a.category_ttl_secs / 86400),
-        thresholdPct: round2(a.block_threshold * 100),
-        floorPct: round2(a.confidence_floor * 100),
-      };
-      aiCategoriesText = (a.auto_block_categories || []).join(', ');
     } else if (tab === 'logging') {
       syslog_ = { ...syslog_, ...pick(d.syslog, ['enabled', 'facility', 'level', 'queries']) };
       logging_ = { ...logging_, ...pick(d.logging, Object.keys(LOGGING_DEFAULTS)) };
@@ -563,13 +458,6 @@
     return text.charAt(0).toUpperCase() + text.slice(1);
   }
 
-  // Trim each line and drop empties (shared by the network allow-lists and
-  // NOTIFY targets, which are all newline-separated textareas).
-  function parseLines(text) {
-    return text.split('\n').map((l) => l.trim()).filter(Boolean);
-  }
-
-
   // Everything the page edits, in the shape PUT /api/config takes. The
   // DNS Listeners tab's addresses and the console switch are config-file owned
   // (a broken listener can always be fixed by editing the file), so they
@@ -585,20 +473,10 @@
         outbound_ip_versions: recursive.outbound_ip_versions,
         upstreams: parseUpstreams(upstreamText),
         use_system_config: !!recursive.use_system_config,
-        cache_size: Number(recursive.cache_size),
-        min_cache_ttl: Number(recursive.min_cache_ttl),
-        negative_cache_ttl: Number(recursive.negative_cache_ttl),
         dnssec_validate: !!recursive.dnssec_validate,
         dnssec_reject_bogus: !!recursive.dnssec_reject_bogus,
-        prefetch_enabled: !!recursive.prefetch_enabled,
-        prefetch_ttl_fraction_pct: Number(recursive.prefetch_ttl_fraction_pct),
-        prefetch_min_queries: Number(recursive.prefetch_min_queries),
-        serve_stale_secs: Number(recursive.serve_stale_secs),
-        max_cache_ttl: Number(recursive.max_cache_ttl),
-        failure_cache_ttl: Number(recursive.failure_cache_ttl),
         max_concurrent_lookups: Number(recursive.max_concurrent_lookups),
         timeout_secs: Number(recursive.timeout_secs),
-        prefetch_window_secs: Number(recursive.prefetch_window_secs),
         root_hints: parseUpstreams(rootHintsText),
       },
       server: {
@@ -708,50 +586,6 @@
         query_log_dir: (logging_.query_log_dir || '').trim(),
         query_log_retention_days: Number(logging_.query_log_retention_days) || 0,
       },
-      authoritative: {
-        default_record_ttl: Number(authoritative.default_record_ttl),
-        default_primary_ns: authoritative.default_primary_ns || '',
-        default_admin_mailbox: (authoritative.default_admin_mailbox || '').trim(),
-        axfr_enabled: !!authoritative.axfr_enabled,
-        axfr_networks: [...axfrNetworks],
-        allow_dynamic_updates: !!authoritative.allow_dynamic_updates,
-        update_networks: [...updateNetworks],
-        notify_enabled: !!authoritative.notify_enabled,
-        notify_targets: parseLines(notifyTargetsText),
-        notify_listen_enabled: !!authoritative.notify_listen_enabled,
-        catalog_zone: (authoritative.catalog_zone || '').trim(),
-        dnssec_enabled: !!authoritative.dnssec_enabled,
-        dnssec_algorithm: authoritative.dnssec_algorithm || 'ECDSAP256SHA256',
-        dnssec_sig_validity_days: Number(authoritative.dnssec_sig_validity_days),
-        dnssec_rollover_days: Number(authoritative.dnssec_rollover_days),
-        dnssec_rollover_overlap_days: Number(authoritative.dnssec_rollover_overlap_days),
-        dnssec_rollover_retire_days: Number(authoritative.dnssec_rollover_retire_days),
-        dnssec_maintenance_secs: Number(authoritative.dnssec_maintenance_secs),
-        catalog_consumers: catalogConsumers
-          .filter((c) => c.name.trim())
-          .map((c) => ({
-            name: c.name.trim(),
-            masters: c.masters.split(/[\s,]+/).filter(Boolean),
-            refresh_secs: Math.round(Number(c.refresh_minutes) * 60),
-            enabled: !!c.enabled,
-          })),
-      },
-      ai: {
-        enabled: !!ai_.enabled,
-        mode: ai_.mode || 'train',
-        database: ai_.database || '',
-        model_path: ai_.model_path || '',
-        workers: Number(ai_.workers),
-        scan_interval_secs: Math.round(Number(aiForm.scanMinutes) * 60),
-        expire_check_secs: Math.round(Number(aiForm.expireMinutes) * 60),
-        max_domains_per_scan: Number(ai_.max_domains_per_scan),
-        auto_block_categories:
-          aiSelectedCategories(),
-        block_threshold: Number(aiForm.thresholdPct) / 100,
-        confidence_floor: Number(aiForm.floorPct) / 100,
-        category_ttl_secs: Math.round(Number(aiForm.categoryDays) * 86400),
-        threat_ttl_secs: Math.round(Number(aiForm.threatDays) * 86400),
-      },
     };
   }
 
@@ -798,19 +632,6 @@
     return url('http', web.http_port);
   }
 
-  // The labels treated as threats are edited on AI -> Threats; this form
-  // only carries the current value through so saving Settings never drops it.
-  function aiSelectedCategories() {
-    return (aiCategoriesText || '')
-      .split(',')
-      .map((c) => c.trim().toLowerCase())
-      .filter(Boolean);
-  }
-
-  // 4.999999 -> 5 (unit conversions in the AI form).
-  function round2(n) {
-    return Math.round(Number(n || 0) * 100) / 100;
-  }
 </script>
 
 <PageHeader icon={icons.settings} title="Settings" tagline={TAGLINES[tab]} />
@@ -1000,7 +821,7 @@
         {recursive.mode === 'recursive' ? 'name server' : 'upstream server'}
         before trying the next. Client Timeout is how long a client waits for
         a lookup (1000-10000 ms): when it runs out the client gets the expired
-        answer if there is one (Serve-Stale, on the Cache tab), else SERVFAIL,
+        answer if there is one (Serve-Stale, Cache → Settings), else SERVFAIL,
         and the lookup carries on to fill the cache. Raise it if slow sites
         fail on first visit. Maximum Concurrent Lookups caps the outbound
         lookups in flight at once.
@@ -1066,165 +887,6 @@
       another: those lookups skip this server's cache and go to the upstream
       each time (it keeps its own per-network cache), while clients on private
       addresses, and a fixed network, are cached as usual.
-    </p>
-  </div>
-  {:else if tab === 'cache'}
-  <div class="card" style="margin-bottom: 14px">
-    <h3 style="margin: 0 0 10px">Cache Lifetimes</h3>
-    <div class="recursive-cache-grid">
-      <label><span>Minimum Cache TTL (Seconds)</span><input type="number" min="0" bind:value={recursive.min_cache_ttl} /></label>
-      <label><span>Negative Cache TTL (Seconds)</span><input type="number" min="0" bind:value={recursive.negative_cache_ttl} /></label>
-      <label><span>Maximum Cache TTL (Seconds)</span><input type="number" min="0" bind:value={recursive.max_cache_ttl} /></label>
-      <label><span>Failure Cache TTL (Seconds)</span><input type="number" min="0" bind:value={recursive.failure_cache_ttl} /></label>
-      <label><span>Cache Size (Entries)</span><input type="number" min="0" bind:value={recursive.cache_size} /></label>
-    </div>
-    <p class="muted help">
-      Minimum and negative TTLs bound how long records stay in cache. Maximum TTL
-      clamps positive answers at insert time so tracking-heavy domains cannot pin
-      themselves in cache for weeks. Failure Cache TTL caches SERVFAIL and other
-      upstream errors briefly so a broken upstream is not hammered on every query;
-      set it to 0 to disable.
-    </p>
-  </div>
-  <div class="card" style="margin-bottom: 14px">
-    <h3 style="margin: 0 0 10px">Refreshing and Stale Answers</h3>
-    <div class="recursive-cache-grid">
-      <label class="check"><input type="checkbox" bind:checked={recursive.prefetch_enabled} /> <span>Refresh Popular Names Early</span></label>
-      <label><span>Refresh When TTL Left Is Below (%)</span><input type="number" min="1" max="99" bind:value={recursive.prefetch_ttl_fraction_pct} disabled={!recursive.prefetch_enabled} /></label>
-      <label><span>Refresh Names Queried At Least (Times)</span><input type="number" min="1" bind:value={recursive.prefetch_min_queries} disabled={!recursive.prefetch_enabled} /></label>
-      <label><span>Counted Over (Seconds)</span><input type="number" min="1" bind:value={recursive.prefetch_window_secs} disabled={!recursive.prefetch_enabled} /></label>
-      <label><span>Serve-Stale Window (Seconds)</span><input type="number" min="0" bind:value={recursive.serve_stale_secs} /></label>
-    </div>
-    <p class="muted help">
-      Refreshing popular names early re-fetches a name before it expires once
-      it has been asked for often enough within the counting window, so
-      clients rarely wait. Serve-stale
-      answers from an expired entry for this long when the upstream cannot be
-      reached, or when a lookup outlasts the Client Timeout (Resolver tab).
-      The Cache page shows hit rates and can flush the cache.
-    </p>
-  </div>
-  {:else if tab === 'zones'}
-  <div class="card" style="margin-bottom: 14px">
-    <h3 style="margin: 0 0 10px">Zone Defaults</h3>
-    <div class="form-grid top">
-      <label><span>Default Record TTL (Seconds)</span><input type="number" min="1" bind:value={authoritative.default_record_ttl} /></label>
-      <label><span>DNS Server Domain</span><input placeholder={detectedName ? `This server: ${detectedName}` : 'ns1.example.com.'} bind:value={authoritative.default_primary_ns} /></label>
-      <label><span>Default Administrator Email</span><input placeholder={adminEmail ? `First administrator: ${adminEmail}` : 'hostmaster@example.com'} bind:value={authoritative.default_admin_mailbox} /></label>
-    </div>
-    <p class="muted help">
-      The TTL is pre-filled when adding records; existing records keep their
-      own. New zones use the DNS Server Domain as their primary nameserver
-      and the email as their contact; leave either empty to use this
-      server's own name and the first administrator's email.
-    </p>
-  </div>
-
-  <div class="card" style="margin-bottom: 14px">
-    <h3 style="margin: 0 0 10px">DNSSEC Signing</h3>
-    <label class="check"><input type="checkbox" bind:checked={authoritative.dnssec_enabled} /> <span>Sign Zones That Have Signing Keys</span></label>
-    <div class="form-grid" style="margin-top: 10px">
-      <label><span>Signing Algorithm</span><select bind:value={authoritative.dnssec_algorithm} disabled={!authoritative.dnssec_enabled}><option value="ECDSAP256SHA256">ECDSA P-256 / SHA-256 (13)</option><option value="ECDSAP384SHA384">ECDSA P-384 / SHA-384 (14)</option><option value="ED25519">Ed25519 (15)</option></select></label>
-      <label><span>Signature Validity (Days)</span><input type="number" min="1" bind:value={authoritative.dnssec_sig_validity_days} disabled={!authoritative.dnssec_enabled} /></label>
-      <label><span>Roll Keys After (Days, 0 = Never)</span><input type="number" min="0" bind:value={authoritative.dnssec_rollover_days} disabled={!authoritative.dnssec_enabled} /></label>
-      <label><span>Old and New Key Overlap (Days)</span><input type="number" min="1" bind:value={authoritative.dnssec_rollover_overlap_days} disabled={!authoritative.dnssec_enabled} /></label>
-      <label><span>Keep Retired Key Published (Days)</span><input type="number" min="1" bind:value={authoritative.dnssec_rollover_retire_days} disabled={!authoritative.dnssec_enabled} /></label>
-      <label><span>Check Every (Seconds)</span><input type="number" min="60" bind:value={authoritative.dnssec_maintenance_secs} disabled={!authoritative.dnssec_enabled} /></label>
-    </div>
-    <p class="muted help">
-      Signatures last for the validity period and are renewed automatically at
-      half of it. When key rollover is on, a key older than the rollover age
-      is replaced: both keys sign for the overlap period (submit the new DS
-      record to your registrar then), and the old key stays published for the
-      retire period so cached signatures still verify. Turning signing on or
-      off, or changing the validity, re-signs the zones at once; the other
-      settings apply at the next check. A changed algorithm is used for the
-      next key: rolling a key publishes both keys while you update the DS
-      record. Keys are managed per zone on the Zones page.
-    </p>
-  </div>
-
-  <div class="card" style="margin-bottom: 14px">
-    <h3 style="margin: 0 0 10px">Zone Transfers (AXFR/IXFR)</h3>
-    <div class="form-grid">
-      <label class="check"><input type="checkbox" bind:checked={authoritative.axfr_enabled} /> <span>Allow Zone Transfers</span></label>
-    </div>
-    <div class="stacked">
-      <span>Allowed Networks</span>
-      <NetworkPicker {networks} bind:value={axfrNetworks} />
-    </div>
-    <p class="muted help">
-      Only these networks may request a copy of your zones. An empty list allows
-      every client when transfers are enabled - restrict this to trusted hosts.
-      Applies immediately, no restart needed.
-    </p>
-  </div>
-
-  <div class="card" style="margin-bottom: 14px">
-    <h3 style="margin: 0 0 10px">Dynamic Updates (RFC 2136)</h3>
-    <div class="form-grid">
-      <label class="check"><input type="checkbox" bind:checked={authoritative.allow_dynamic_updates} /> <span>Accept Dynamic Updates</span></label>
-    </div>
-    <div class="stacked">
-      <span>Allowed Networks</span>
-      <NetworkPicker {networks} bind:value={updateNetworks} />
-    </div>
-    <p class="muted help">
-      Clients on these networks may add, change, or delete records in primary
-      zones with UPDATE messages. With an empty list, only zones bound to a
-      TSIG key accept updates, and only signed ones. Applies immediately, no
-      restart needed.
-    </p>
-  </div>
-
-  <div class="card" style="margin-bottom: 14px">
-    <h3 style="margin: 0 0 10px">NOTIFY (RFC 1996)</h3>
-    <div class="form-grid">
-      <label class="check"><input type="checkbox" bind:checked={authoritative.notify_enabled} /> <span>Send NOTIFY to Secondaries</span></label>
-      <label class="check"><input type="checkbox" bind:checked={authoritative.notify_listen_enabled} /> <span>Accept NOTIFY from Masters</span></label>
-    </div>
-    <label class="stacked">
-      <span>NOTIFY Targets (one per line: IP, IP:port, or [IPv6]:port)</span>
-      <textarea rows="3" placeholder={"198.51.100.10\n198.51.100.11:5353"} bind:value={notifyTargetsText}></textarea>
-    </label>
-    <p class="muted help">
-      When a primary zone changes, the server notifies these targets so their
-      secondary copies refresh immediately. Enabling or disabling NOTIFY takes
-      effect after a restart; the target list is saved right away.
-    </p>
-  </div>
-
-  <div class="card" style="margin-bottom: 14px">
-    <h3 style="margin: 0 0 10px">Catalog Zones (RFC 9432)</h3>
-    <div class="form-grid">
-      <label><span>Publish a Catalog Named</span><input placeholder="catalog.example.com" bind:value={authoritative.catalog_zone} /></label>
-    </div>
-    <p class="muted help">
-      Lists every primary zone on this server in a catalog zone, so secondaries
-      that follow it (BIND, Knot, PowerDNS or another Daygle DNS server) add and
-      remove zones on their own. They transfer it like any zone, so allow them
-      under Zone Transfers; with NOTIFY on, they are told when the list changes.
-      Leave empty to publish no catalog.
-    </p>
-    <h4 style="margin: 14px 0 8px">Follow Catalogs</h4>
-    {#each catalogConsumers as consumer, i}
-      <div class="form-grid" style="align-items: end; margin-bottom: 8px">
-        <label><span>Catalog Zone</span><input placeholder="catalog.example.com" bind:value={consumer.name} /></label>
-        <label><span>Masters (IP, IP:port; comma-separated)</span><input placeholder="198.51.100.10" bind:value={consumer.masters} /></label>
-        <label><span>Check Every (Minutes)</span><input type="number" min="1" bind:value={consumer.refresh_minutes} /></label>
-        <div class="row" style="gap: 10px">
-          <label class="check"><input type="checkbox" bind:checked={consumer.enabled} /> <span>Enabled</span></label>
-          <button class="danger" onclick={() => (catalogConsumers = catalogConsumers.filter((_, j) => j !== i))} aria-label="Stop following {consumer.name || 'this catalog'}">✕</button>
-        </div>
-      </div>
-    {/each}
-    <button class="secondary" onclick={() => (catalogConsumers = [...catalogConsumers, { name: '', masters: '', refresh_minutes: 60, enabled: true }])}>Add Catalog</button>
-    <p class="muted help">
-      Every zone a followed catalog lists is served here as a secondary zone,
-      transferred from the catalog's masters; zones it drops are removed. A
-      disabled catalog keeps its zones but stops changing them; removing it
-      removes them. With Accept NOTIFY on, a NOTIFY from a master checks the
-      catalog at once. Applies immediately, no restart needed.
     </p>
   </div>
   {:else if tab === 'listeners'}
@@ -1403,75 +1065,6 @@
       device that switched by itself would carry no account and be refused.
       The server name is the name devices connect to; leave it empty to use
       each listener's own certificate name.
-    </p>
-  </div>
-  {:else if tab === 'ai'}
-  <div class="card" style="margin-bottom: 14px">
-    <h3 style="margin: 0 0 10px">AI Safety Scanner</h3>
-    <div class="form-grid">
-      <label class="check"><input type="checkbox" bind:checked={ai_.enabled} /> <span>Enable AI Scanner</span></label>
-      <label>
-        <span>Mode</span>
-        <select bind:value={ai_.mode}>
-          <option value="train">Train - Record Only</option>
-          <option value="enforce">Enforce - Auto-Block Qualifying Domains</option>
-        </select>
-      </label>
-    </div>
-    {#if ai_.enabled && !aiRunning}
-      <p class="help restart">The scanner starts after the next restart.</p>
-    {/if}
-    <p class="muted help">
-      Classifies the domains seen in your DNS traffic in the background, never
-      on the query path. Start in Train mode and review the classifications
-      and threats on the AI page before switching to Enforce. Custom Allow
-      entries and domains exempted on the AI page are never blocked.
-    </p>
-
-    <h4>Scanning</h4>
-    <div class="form-grid">
-      <label><span>Scan Every (Minutes)</span><input type="number" min="0.17" step="any" bind:value={aiForm.scanMinutes} /></label>
-      <label><span>Domains Classified Per Scan</span><input type="number" min="1" bind:value={ai_.max_domains_per_scan} /></label>
-      <label><span>Classification Workers</span><input type="number" min="1" max="32" bind:value={ai_.workers} /></label>
-    </div>
-    <p class="muted help">
-      Each scan picks up the domains queried since the previous one and
-      classifies up to the per-scan limit (the rest wait for the next scan),
-      on this many background threads.
-    </p>
-
-    <h4>Enforcement</h4>
-    <div class="form-grid">
-      <label><span>Block Threshold (%)</span><input type="number" min="50" max="100" step="any" bind:value={aiForm.thresholdPct} /></label>
-      <label><span>Confidence Floor (%)</span><input type="number" min="0" max="99" step="any" bind:value={aiForm.floorPct} /></label>
-    </div>
-    <p class="muted help">
-      Which labels count as threats is chosen on AI → Threats, next to the
-      list it produces. This page keeps the thresholds and lifetimes that
-      decide when a detected threat blocks.
-    </p>
-    <p class="muted help">
-      In Enforce mode a domain is blocked when a detected threat reaches the
-      block threshold (50 to 100%) and the verifier does not dispute it. With
-      the shared classifier it must also carry a label treated as a threat (set
-      on AI → Threats); a dedicated threat model reports its own threats, so
-      every label it produces blocks. Detections below the confidence floor are
-      recorded as skipped.
-      Content classifications never auto-block on their own: blocking a
-      category is a filtering-group rule.
-    </p>
-
-    <h4>Lifetime</h4>
-    <div class="form-grid">
-      <label><span>Re-Check Threats After (Days)</span><input type="number" min="0.01" step="any" bind:value={aiForm.threatDays} /></label>
-      <label><span>Re-Check Classifications After (Days)</span><input type="number" min="0.01" step="any" bind:value={aiForm.categoryDays} /></label>
-      <label><span>Look for Expired Entries Every (Minutes)</span><input type="number" min="0.17" step="any" bind:value={aiForm.expireMinutes} /></label>
-    </div>
-    <p class="muted help">
-      Each channel keeps its own lifetime: an expired threat stops blocking,
-      and an expired classification stops matching blocked categories, until
-      the domain is scanned again. Threats (malware, phishing) age out faster
-      than classifications, which rarely change.
     </p>
   </div>
   {:else if tab === 'logging'}
@@ -1844,16 +1437,6 @@
     gap: 12px;
     align-items: end;
   }
-  .recursive-cache-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
-    gap: 12px;
-    align-items: start;
-  }
-  /* Two lines for every label, so the inputs line up whether or not a
-     label wraps. */
-  .recursive-cache-grid label:not(.check) > span:first-child { min-height: 2.6em; display: flex; align-items: flex-end; }
-  .recursive-cache-grid label.check { padding-top: 2.6em; }
   label { display: flex; flex-direction: column; gap: 4px; font-size: 0.85rem; }
   label span { color: var(--muted); }
   label.check {
@@ -1864,13 +1447,6 @@
   }
   label.check span { color: var(--text); }
   h4 { margin: 14px 0 8px; }
-  .field-label { font-size: 0.85rem; color: var(--muted); }
-  .category-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
-    gap: 4px 12px;
-    margin-top: 6px;
-  }
   .help.restart { color: var(--warn); margin-top: 8px; }
   /* Save bar: stays in view while scrolling a long tab. */
   .actions {
@@ -1882,7 +1458,6 @@
     background: var(--bg);
   }
   .unsaved { color: var(--warn); font-size: 0.85rem; }
-  .form-grid.top { align-items: start; }
   .access { display: flex; flex-direction: column; gap: 10px; }
   .access-row { display: grid; grid-template-columns: 110px 140px minmax(0, 1fr); gap: 12px; align-items: end; }
   .access-row label.check { padding-bottom: 8px; }
