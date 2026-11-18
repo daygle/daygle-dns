@@ -8,6 +8,9 @@
 //! - IPv6 reverse names under a short delegation (`8.1.0.0.2.ip6.arpa`):
 //!   finding the zone cut above a 34-label name ran past the recursor's
 //!   name server recursion limit of 24.
+//! - A chain of CNAMEs between deeply nested names (`global.cainiao.com`,
+//!   through Alibaba's GDS): the recursor counts each label of each name in
+//!   the chain against one depth limit, and the chain ran past 24.
 
 mod common;
 
@@ -76,6 +79,20 @@ fn soa(zone: &str) -> Record {
 
 fn under(qname: &str, zone: &str) -> bool {
     qname == zone || qname.ends_with(&format!(".{zone}"))
+}
+
+/// How many names the CNAME chain under `lame.test.` has.
+const CHAIN_HOPS: usize = 6;
+
+/// The `hop`th name of the CNAME chain: six labels below `lame.test.`,
+/// none shared with another hop, as in the Alibaba GDS chain.
+fn chain_name(hop: usize) -> String {
+    format!("host.ovs.sg{hop}.tengine{hop}.ingress{hop}.chain{hop}.lame.test.")
+}
+
+/// Which hop of the CNAME chain `qname` is, if it is one.
+fn chain_hop(qname: &str) -> Option<usize> {
+    (0..CHAIN_HOPS).find(|&hop| chain_name(hop) == qname)
 }
 
 /// `addr` as its `ip6.arpa.` name.
@@ -150,6 +167,21 @@ fn handle(server: Ipv4Addr, qname: &str, qtype: RecordType) -> Reply {
                 300,
                 RData::CNAME(CNAME(name("www.lame.test."))),
             )]),
+            // A chain of CNAMEs between deep names, the last with an address.
+            (q, qtype) if chain_hop(q).is_some() => {
+                let hop = chain_hop(q).unwrap();
+                if hop + 1 < CHAIN_HOPS {
+                    Reply::Answer(vec![Record::from_rdata(
+                        name(q),
+                        300,
+                        RData::CNAME(CNAME(name(&chain_name(hop + 1)))),
+                    )])
+                } else if qtype == RecordType::A {
+                    Reply::Answer(vec![a(q, Ipv4Addr::new(198, 51, 100, 7))])
+                } else {
+                    Reply::NoData(soa("lame.test."))
+                }
+            }
             ("www.lame.test.", RecordType::A) => {
                 Reply::Answer(vec![a("www.lame.test.", Ipv4Addr::new(198, 51, 100, 9))])
             }
@@ -291,6 +323,21 @@ async fn a_zone_with_lame_servers_resolves_from_its_working_one() {
         assert_eq!(msg.response_code, ResponseCode::NoError, "{msg:?}");
         assert_eq!(first_answer(&msg).as_deref(), Some("198.51.100.9"));
     }
+    shutdown(server).await;
+}
+
+#[tokio::test]
+async fn a_long_cname_chain_between_deep_names_resolves() {
+    let (server, _dir) = spawn_recursive().await;
+    let udp = server.udp_addr.unwrap();
+    let msg = udp_query(udp, &chain_name(0), RecordType::A).await;
+    assert_eq!(msg.response_code, ResponseCode::NoError, "{msg:?}");
+    assert_eq!(msg.answers.len(), CHAIN_HOPS, "{msg:?}");
+    assert_eq!(
+        msg.answers.last().map(|r| r.data.to_string()).as_deref(),
+        Some("198.51.100.7"),
+        "{msg:?}"
+    );
     shutdown(server).await;
 }
 
