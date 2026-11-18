@@ -808,7 +808,7 @@ pub async fn bind_with(
             })
         })
     };
-    // Alerts (Settings -> Alerts): deliver what the rest of the server raises.
+    // Alerts (Settings -> Notifications): deliver what the rest of the server raises.
     daygle_dns_api::alerts::install(shared.config.clone(), logs.clone());
     let app_state = AppState {
         catalog: catalog.clone(),
@@ -859,7 +859,7 @@ pub async fn bind_with(
         log_export: shared.log_export.clone(),
         accounts: accounts.clone(),
     };
-    // Scheduled reports (Settings -> Alerts).
+    // Scheduled reports (Settings -> Notifications).
     tokio::spawn(daygle_dns_api::reports::run_reports(
         app_state.clone(),
         shutdown.clone(),
@@ -870,7 +870,7 @@ pub async fn bind_with(
         shutdown.clone(),
     ));
     // Check for a newer release in the background at the [updates] interval
-    // (Settings -> General: "Update Checks"), so /api/status - polled by the
+    // (Update page: "Update Checks"), so /api/status - polled by the
     // dashboard every 10 s - can report availability off a warm cache
     // without ever waiting on GitHub. No-op on hosts that cannot
     // self-update, and skipped while checks are disabled.

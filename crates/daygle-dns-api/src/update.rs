@@ -1094,7 +1094,7 @@ fn config_dir_hint() -> Option<&'static Path> {
 }
 
 /// Check for a newer release in the background at the cadence configured
-/// under `[updates]` (Settings -> General: "Update Checks").
+/// under `[updates]` (Update page: "Update Checks").
 ///
 /// Every console page polls `/api/status` every few seconds, and the
 /// dashboard flags an available release off that endpoint - so all of its

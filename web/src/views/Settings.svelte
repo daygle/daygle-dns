@@ -21,26 +21,26 @@
   let tab = $state(untrack(() => initialTab));
   const TABS = [
     ['general', 'General'],
+    ['listeners', 'DNS Listeners'],
     ['recursive', 'Resolver'],
     ['cache', 'Cache'],
-    ['listeners', 'Encrypted DNS'],
     ['zones', 'Zones'],
     ['ai', 'AI Scanner'],
-    ['logging', 'Logging'],
     ['rate-limiting', 'Rate Limiting'],
-    ['alerts', 'Alerts'],
+    ['logging', 'Logging'],
+    ['alerts', 'Notifications'],
     ['backup', 'Backup'],
   ];
   const TAGLINES = {
-    general: 'How the web console is reached (HTTP, HTTPS or both), the DNS listeners this server was started with, and how dates and times are shown by default.',
-    recursive: 'How the server answers names it does not host: resolving them itself from the root servers or forwarding to upstreams, and who may use it.',
+    general: 'How the web console is reached (HTTP, HTTPS or both), and how dates, times and colours are shown by default.',
+    listeners: 'Where clients reach this server: plain DNS over UDP and TCP, encrypted DNS over TLS, HTTPS and QUIC with the certificate each one presents, and advertising them to devices.',
+    recursive: 'How the server answers names it does not host: resolving them itself from the root servers or forwarding to upstreams, how long it waits, and DNS64 and client subnet options. Who may use it is under Clients → Access.',
     cache: 'How long answers are kept, how many, and how popular names are refreshed before they expire. Changes apply immediately.',
-    listeners: 'Encrypted DNS: DNS over TLS, HTTPS and QUIC, and the certificate each one presents. Changes apply immediately.',
-    zones: 'Defaults for new zones and records, and how other DNS servers may copy, update and be notified about your zones.',
+    zones: 'Defaults for new zones and records, DNSSEC signing, and how other DNS servers may copy, update and be notified about your zones.',
     logging: 'How long the query log is kept, optional daily log files, and sending the server log and queries to a syslog server or a log collector over HTTP. The logs themselves are on the Logs page.',
     ai: 'The background scanner that classifies the domains in your DNS traffic and can block unsafe ones.',
-    'rate-limiting': 'Response rate limiting (RRL): stop this server being used to flood someone else with DNS answers sent to a forged address.',
-    alerts: 'Email and webhook alerts when something needs attention: failing blocklists or zone transfers, expiring certificates, DNSSEC, updates and AI blocks.',
+    'rate-limiting': 'Per-client and per-domain query limits, and response rate limiting (RRL), which stops this server being used to flood someone else with DNS answers sent to a forged address.',
+    alerts: 'Where notifications go (webhook, email or both), the alerts sent when something needs attention, and a scheduled summary report.',
     backup: 'Download a backup of everything this server keeps, or restore one.',
   };
 
@@ -69,7 +69,7 @@
   let rateLimit_ = $state({});
   // Named networks (Clients -> Networks) for the pickers below.
   let networks = $state([]);
-  // Encrypted-listener client networks (Settings -> Listeners).
+  // Encrypted-listener client networks (Settings -> DNS Listeners).
   let dotNetworks = $state([]);
   let dohNetworks = $state([]);
   let doqNetworks = $state([]);
@@ -442,7 +442,7 @@
     general: 'Web console access is kept.',
     recursive: 'Upstream servers, DNS64 clients and the ECS subnet are kept.',
     cache: '',
-    listeners: 'Certificates, server names, allowed networks and the DDR name are kept.',
+    listeners: 'Certificates, server names, allowed networks and the DDR name are kept. Listen addresses are set in the config file.',
     zones: 'Allowed networks, NOTIFY targets and catalog zones are kept.',
     ai: '',
     logging: 'The syslog server is kept.',
@@ -469,28 +469,28 @@
     const r = d.recursive;
     if (tab === 'general') {
       display_ = { time_zone: 'system', date_format: 'system', time_format: 'system', ...d.display };
-      server = { ...server, ...pick(d.server, ['tcp_timeout_ms', 'tcp_max_connections', 'dns_cookies']) };
     } else if (tab === 'recursive') {
       rootHintsText = (r.root_hints || []).join('\n');
       recursive = {
         ...recursive,
         ...pick(r, ['enabled', 'dnssec_validate', 'dnssec_reject_bogus', 'case_randomization', 'rebinding_protection',
-          'opportunistic_encryption', 'use_system_config', 'timeout_secs']),
+          'opportunistic_encryption', 'use_system_config', 'timeout_secs', 'max_concurrent_lookups']),
         // An unset mode means: forwarding when upstreams exist, else recursive.
         mode: r.mode || (parseUpstreams(upstreamText).length ? 'forwarding' : 'recursive'),
         outbound_ip_versions: r.outbound_ip_versions || 'both',
       };
+      server = { ...server, client_timeout_ms: d.server.client_timeout_ms };
       dns64 = { ...dns64, enabled: !!d.dns64?.enabled, prefix: d.dns64?.prefix || '64:ff9b::/96' };
       ecs = { ...ecs, ...pick(d.ecs, ['enabled', 'ipv4_prefix', 'ipv6_prefix']) };
     } else if (tab === 'cache') {
       recursive = {
         ...recursive,
         ...pick(r, ['min_cache_ttl', 'negative_cache_ttl', 'max_cache_ttl', 'failure_cache_ttl',
-          'cache_size', 'max_concurrent_lookups', 'prefetch_enabled', 'prefetch_ttl_fraction_pct',
+          'cache_size', 'prefetch_enabled', 'prefetch_ttl_fraction_pct',
           'prefetch_min_queries', 'prefetch_window_secs', 'serve_stale_secs']),
       };
-      server = { ...server, client_timeout_ms: d.server.client_timeout_ms };
     } else if (tab === 'listeners') {
+      server = { ...server, ...pick(d.server, ['tcp_timeout_ms', 'tcp_max_connections', 'dns_cookies']) };
       ddr_ = { ...ddr_, enabled: d.ddr.enabled };
       dot = { ...dot, ...pick(d.dot, ['enabled', 'port', 'handshake_timeout_secs', 'idle_timeout_secs', 'max_connections']) };
       doh = { ...doh, ...pick(d.doh, ['enabled', 'port', 'handshake_timeout_secs', 'max_connections', 'endpoint', 'http3']) };
@@ -571,7 +571,7 @@
 
 
   // Everything the page edits, in the shape PUT /api/config takes. The
-  // General tab's listeners and the console switch are config-file owned
+  // DNS Listeners tab's addresses and the console switch are config-file owned
   // (a broken listener can always be fixed by editing the file), so they
   // are shown but not sent.
   function buildBody() {
@@ -880,46 +880,6 @@
     </p>
   </div>
   <div class="card" style="margin-bottom: 14px">
-    <h3 style="margin: 0 0 10px">DNS Listeners</h3>
-    <table class="facts">
-      <tbody>
-        <tr><th>Listen Address</th><td>{listenMeaning(server.listen, server.ipv6_only)} <span class="muted">({server.listen})</span></td></tr>
-        <tr><th>Port</th><td>{server.port}</td></tr>
-        <tr><th>PROXY Protocol From</th><td>{(server.proxy_protocol || []).length ? server.proxy_protocol.join(', ') : 'Off'}</td></tr>
-        <tr><th>UDP</th><td><span class="pill" class:ok={server.udp_enabled}>{server.udp_enabled ? 'On' : 'Off'}</span></td></tr>
-        <tr><th>TCP</th><td><span class="pill" class:ok={server.tcp_enabled}>{server.tcp_enabled ? 'On' : 'Off'}</span></td></tr>
-        <tr><th>Reload Config File on Change</th><td><span class="pill" class:ok={server.reload_enabled}>{server.reload_enabled ? 'On' : 'Off'}</span></td></tr>
-      </tbody>
-    </table>
-    <p class="muted help">
-      To change these, edit the <code>[server]</code> section of
-      <code>daygle-dns.toml</code> and restart (or let Reload Config File
-      pick it up). Use <code>0.0.0.0</code> for IPv4 only, <code>::</code>
-      for IPv4 and IPv6, or <code>::</code> with <code>ipv6_only = true</code>
-      for IPv6 only. To listen on particular addresses, list them separated
-      by commas, for example <code>192.168.1.2, fd00::53</code>. They live in the file rather than here so a listener that
-      stops working can always be fixed without the console. The web console
-      listens on {config?.api?.listen}. DNS over TLS, HTTPS and QUIC are on
-      the Encrypted DNS tab.
-    </p>
-    <div class="form-grid" style="margin-top: 12px">
-      <label><span>TCP Idle Timeout (Milliseconds)</span><input type="number" min="100" max="3600000" step="100" bind:value={server.tcp_timeout_ms} /></label>
-      <label><span>TCP Maximum Connections</span><input type="number" min="1" max="65536" bind:value={server.tcp_max_connections} /></label>
-      <label class="check"><input type="checkbox" bind:checked={server.dns_cookies} /> <span>DNS Cookies (RFC 7873)</span></label>
-    </div>
-    <p class="muted help">
-      TCP Idle Timeout is how long a plain DNS-over-TCP connection may sit
-      unused before it is closed. TCP Maximum Connections caps the plain TCP
-      connections served at once; one public client may hold an eighth of
-      them (private and loopback clients are not capped individually), and
-      the queries of one connection are answered concurrently. DNS cookies let clients prove they really
-      own their address, which protects against spoofed queries; clients that
-      send a valid cookie are never response-rate-limited and get ten times
-      the per-client query limit (Rate Limiting tab). Changing any of these
-      restarts the DNS listeners for a moment.
-    </p>
-  </div>
-  <div class="card" style="margin-bottom: 14px">
     <h3 style="margin: 0 0 10px">Display Defaults</h3>
     <div class="form-grid">
       <label><span>Time Zone</span>
@@ -1029,14 +989,21 @@
       </p>
     {/if}
     {#if recursive.enabled}
-      <h4>Query Timeout</h4>
+      <h4>Timeouts and Limits</h4>
       <div class="form-grid">
         <label><span>Per-Server Timeout (Seconds)</span><input type="number" min="1" max="300" bind:value={recursive.timeout_secs} /></label>
+        <label><span>Client Timeout (Milliseconds)</span><input type="number" min="1000" max="10000" step="100" bind:value={server.client_timeout_ms} /></label>
+        <label><span>Maximum Concurrent Lookups</span><input type="number" min="1" max="65536" bind:value={recursive.max_concurrent_lookups} /></label>
       </div>
       <p class="muted help">
-        How long to wait for one {recursive.mode === 'recursive' ? 'name server' : 'upstream server'}
-        before trying the next. The client's own wait is the Client Timeout on
-        the Cache tab.
+        Per-Server Timeout is how long to wait for one
+        {recursive.mode === 'recursive' ? 'name server' : 'upstream server'}
+        before trying the next. Client Timeout is how long a client waits for
+        a lookup (1000-10000 ms): when it runs out the client gets the expired
+        answer if there is one (Serve-Stale, on the Cache tab), else SERVFAIL,
+        and the lookup carries on to fill the cache. Raise it if slow sites
+        fail on first visit. Maximum Concurrent Lookups caps the outbound
+        lookups in flight at once.
       </p>
       <h4>Outbound IP Versions</h4>
       <div class="form-grid">
@@ -1110,7 +1077,6 @@
       <label><span>Maximum Cache TTL (Seconds)</span><input type="number" min="0" bind:value={recursive.max_cache_ttl} /></label>
       <label><span>Failure Cache TTL (Seconds)</span><input type="number" min="0" bind:value={recursive.failure_cache_ttl} /></label>
       <label><span>Cache Size (Entries)</span><input type="number" min="0" bind:value={recursive.cache_size} /></label>
-      <label><span>Maximum Concurrent Lookups</span><input type="number" min="1" max="65536" bind:value={recursive.max_concurrent_lookups} /></label>
     </div>
     <p class="muted help">
       Minimum and negative TTLs bound how long records stay in cache. Maximum TTL
@@ -1128,18 +1094,14 @@
       <label><span>Refresh Names Queried At Least (Times)</span><input type="number" min="1" bind:value={recursive.prefetch_min_queries} disabled={!recursive.prefetch_enabled} /></label>
       <label><span>Counted Over (Seconds)</span><input type="number" min="1" bind:value={recursive.prefetch_window_secs} disabled={!recursive.prefetch_enabled} /></label>
       <label><span>Serve-Stale Window (Seconds)</span><input type="number" min="0" bind:value={recursive.serve_stale_secs} /></label>
-      <label><span>Client Timeout (Milliseconds)</span><input type="number" min="1000" max="10000" step="100" bind:value={server.client_timeout_ms} /></label>
     </div>
     <p class="muted help">
       Refreshing popular names early re-fetches a name before it expires once
       it has been asked for often enough within the counting window, so
       clients rarely wait. Serve-stale
       answers from an expired entry for this long when the upstream cannot be
-      reached. Client Timeout is how long a client waits for a lookup
-      (1000-10000 ms): when it runs out the client gets the expired answer if
-      there is one, else SERVFAIL, and the lookup carries on to fill the
-      cache. Raise it if slow sites fail on first visit. The Cache page shows
-      hit rates and can flush the cache.
+      reached, or when a lookup outlasts the Client Timeout (Resolver tab).
+      The Cache page shows hit rates and can flush the cache.
     </p>
   </div>
   {:else if tab === 'zones'}
@@ -1267,23 +1229,42 @@
   </div>
   {:else if tab === 'listeners'}
   <div class="card" style="margin-bottom: 14px">
-    <h3 style="margin: 0 0 10px">Automatic Discovery (DDR)</h3>
-    <div class="form-grid">
-      <label class="check"><input type="checkbox" bind:checked={ddr_.enabled} /> <span>Advertise Encrypted DNS to Devices</span></label>
-      <label><span>Server Name (Optional)</span><input bind:value={ddr_.name} placeholder="dns.example.com" disabled={!ddr_.enabled} spellcheck="false" /></label>
+    <h3 style="margin: 0 0 10px">Plain DNS (UDP and TCP)</h3>
+    <table class="facts">
+      <tbody>
+        <tr><th>Listen Address</th><td>{listenMeaning(server.listen, server.ipv6_only)} <span class="muted">({server.listen})</span></td></tr>
+        <tr><th>Port</th><td>{server.port}</td></tr>
+        <tr><th>PROXY Protocol From</th><td>{(server.proxy_protocol || []).length ? server.proxy_protocol.join(', ') : 'Off'}</td></tr>
+        <tr><th>UDP</th><td><span class="pill" class:ok={server.udp_enabled}>{server.udp_enabled ? 'On' : 'Off'}</span></td></tr>
+        <tr><th>TCP</th><td><span class="pill" class:ok={server.tcp_enabled}>{server.tcp_enabled ? 'On' : 'Off'}</span></td></tr>
+        <tr><th>Reload Config File on Change</th><td><span class="pill" class:ok={server.reload_enabled}>{server.reload_enabled ? 'On' : 'Off'}</span></td></tr>
+      </tbody>
+    </table>
+    <p class="muted help">
+      To change these, edit the <code>[server]</code> section of
+      <code>daygle-dns.toml</code> and restart (or let Reload Config File
+      pick it up). Use <code>0.0.0.0</code> for IPv4 only, <code>::</code>
+      for IPv4 and IPv6, or <code>::</code> with <code>ipv6_only = true</code>
+      for IPv6 only. To listen on particular addresses, list them separated
+      by commas, for example <code>192.168.1.2, fd00::53</code>. They live in the file rather than here so a listener that
+      stops working can always be fixed without the console. The web console
+      listens on {config?.api?.listen}; its ports are on the General tab.
+    </p>
+    <div class="form-grid" style="margin-top: 12px">
+      <label><span>TCP Idle Timeout (Milliseconds)</span><input type="number" min="100" max="3600000" step="100" bind:value={server.tcp_timeout_ms} /></label>
+      <label><span>TCP Maximum Connections</span><input type="number" min="1" max="65536" bind:value={server.tcp_max_connections} /></label>
+      <label class="check"><input type="checkbox" bind:checked={server.dns_cookies} /> <span>DNS Cookies (RFC 7873)</span></label>
     </div>
     <p class="muted help">
-      Devices that support Discovery of Designated Resolvers (RFC 9462) -
-      Windows 11, iOS and macOS, Android - ask this server whether it also
-      offers encrypted DNS, and switch to the DNS over HTTPS, TLS or QUIC
-      listeners below by themselves; each device is only told about the
-      listeners it is allowed on. Most devices only switch when the
-      listener's certificate is one they trust and it covers the address
-      they use for this server, so a self-signed certificate is usually
-      ignored. Nothing is advertised while DNS accounts are required, since a
-      device that switched by itself would carry no account and be refused.
-      The server name is the name devices connect to; leave it empty to use
-      each listener's own certificate name.
+      TCP Idle Timeout is how long a plain DNS-over-TCP connection may sit
+      unused before it is closed. TCP Maximum Connections caps the plain TCP
+      connections served at once; one public client may hold an eighth of
+      them (private and loopback clients are not capped individually), and
+      the queries of one connection are answered concurrently. DNS cookies let clients prove they really
+      own their address, which protects against spoofed queries; clients that
+      send a valid cookie are never response-rate-limited and get ten times
+      the per-client query limit (Rate Limiting tab). Changing any of these
+      restarts the DNS listeners for a moment.
     </p>
   </div>
   <div class="card" style="margin-bottom: 14px">
@@ -1361,7 +1342,7 @@
       (open it in your firewall as well as TCP), with the same certificate,
       path and client networks. Clients set up for HTTP/3 DoH (for example
       AdGuard's or dnsproxy's <code>h3://</code> addresses) and devices using
-      Automatic Discovery above can use it; browsers keep using HTTP/2. It
+      Automatic Discovery below can use it; browsers keep using HTTP/2. It
       cannot share its UDP port with DNS over QUIC.
     </p>
   </div>
@@ -1402,6 +1383,26 @@
       inside it may use recursion here even when Recursion Access (Clients →
       Access) is set to Private Networks Only.
       Manage certificates, and see when they expire, on the Certificates page.
+    </p>
+  </div>
+  <div class="card" style="margin-bottom: 14px">
+    <h3 style="margin: 0 0 10px">Automatic Discovery (DDR)</h3>
+    <div class="form-grid">
+      <label class="check"><input type="checkbox" bind:checked={ddr_.enabled} /> <span>Advertise Encrypted DNS to Devices</span></label>
+      <label><span>Server Name (Optional)</span><input bind:value={ddr_.name} placeholder="dns.example.com" disabled={!ddr_.enabled} spellcheck="false" /></label>
+    </div>
+    <p class="muted help">
+      Devices that support Discovery of Designated Resolvers (RFC 9462) -
+      Windows 11, iOS and macOS, Android - ask this server whether it also
+      offers encrypted DNS, and switch to the DNS over HTTPS, TLS or QUIC
+      listeners above by themselves; each device is only told about the
+      listeners it is allowed on. Most devices only switch when the
+      listener's certificate is one they trust and it covers the address
+      they use for this server, so a self-signed certificate is usually
+      ignored. Nothing is advertised while DNS accounts are required, since a
+      device that switched by itself would carry no account and be refused.
+      The server name is the name devices connect to; leave it empty to use
+      each listener's own certificate name.
     </p>
   </div>
   {:else if tab === 'ai'}
@@ -1669,10 +1670,7 @@
       internet (authoritative zones, public DNS); on a private network it can
       stay off.
     </p>
-  </div>
-  <div class="card" style="margin-bottom: 14px">
-    <h3 style="margin: 0 0 10px">Limits</h3>
-    <div class="form-grid">
+    <div class="form-grid" style="margin-top: 12px">
       <label><span>Identical Answers per Second</span><input type="number" min="0" max="10000" bind:value={rrl_.responses_per_second} disabled={!rrl_.enabled} /></label>
       <label><span>NXDOMAIN Answers per Second</span><input type="number" min="0" max="10000" bind:value={rrl_.nxdomains_per_second} disabled={!rrl_.enabled} /></label>
       <label><span>Error Answers per Second</span><input type="number" min="0" max="10000" bind:value={rrl_.errors_per_second} disabled={!rrl_.enabled} /></label>
@@ -1706,25 +1704,14 @@
         <strong>{Number(rrlCounts.rrl_would_limit || 0).toLocaleString()}</strong> would have been limited (Log Only).
       </p>
     {/if}
-  </div>
-  <div class="card" style="margin-bottom: 14px">
-    <h3 style="margin: 0 0 10px">Never Limited</h3>
+    <h4>Never Limited</h4>
     <NetworkPicker {networks} bind:value={rrlExempt} />
     <p class="muted help">
-      Networks whose answers are never limited, such as your own networks
-      and monitoring systems.
+      Networks whose answers are never response-rate-limited, such as your
+      own networks and monitoring systems.
     </p>
   </div>
   {:else if tab === 'alerts'}
-  <div class="card" style="margin-bottom: 14px">
-    <h3 style="margin: 0 0 10px">Alerts</h3>
-    <label class="check"><input type="checkbox" bind:checked={alerts_.enabled} /> <span>Send Alerts</span></label>
-    <p class="muted help">
-      Alerts go to a webhook, by email, or both. A problem that persists is
-      reported again after 6 hours at most (a day for certificates), not on
-      every check, and an update is reported once per release.
-    </p>
-  </div>
   <div class="card" style="margin-bottom: 14px">
     <h3 style="margin: 0 0 10px">Webhook</h3>
     <div class="form-grid">
@@ -1738,7 +1725,8 @@
       <code>title</code>, <code>message</code>, <code>host</code> and
       <code>time</code>, plus <code>text</code> and <code>content</code> so
       Slack, Mattermost, Discord and Teams workflow webhooks show it as is.
-      Leave empty for no webhook.
+      Alerts and the scheduled report below both use this webhook and the
+      email settings. Leave empty for no webhook.
     </p>
   </div>
   <div class="card" style="margin-bottom: 14px">
@@ -1774,7 +1762,14 @@
     </p>
   </div>
   <div class="card" style="margin-bottom: 14px">
-    <h3 style="margin: 0 0 10px">Events</h3>
+    <h3 style="margin: 0 0 10px">Alerts</h3>
+    <label class="check"><input type="checkbox" bind:checked={alerts_.enabled} /> <span>Send Alerts</span></label>
+    <p class="muted help">
+      Alerts go to the webhook, the email recipients, or both. A problem
+      that persists is reported again after 6 hours at most (a day for certificates), not on
+      every check, and an update is reported once per release.
+    </p>
+    <h4>Alert On</h4>
     <div class="events">
       {#each ALERT_EVENTS as [key, label] (key)}
         <label class="check"><input type="checkbox" bind:checked={alerts_[key]} /> <span>{label}</span></label>
@@ -1820,7 +1815,7 @@
       A summary of the query log - queries, blocks, the most asked and most
       blocked domains and the most active devices - sent to the webhook and
       email above (alerts do not need to be switched on). Times use the time
-      zone under General → Date &amp; Time Defaults. Send Report Now sends
+      zone under General → Display Defaults. Send Report Now sends
       one with the destinations as saved. The same figures, for any period
       and per device, are on the Reports page.
     </p>

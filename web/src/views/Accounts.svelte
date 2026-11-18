@@ -137,11 +137,11 @@
     The listeners' certificate must cover both <code>{domain || 'dns.example.com'}</code>
     and <code>*.{domain || 'dns.example.com'}</code>: request one on the
     Certificates page with the DNS challenge, then pick it for DoT, DoH and DoQ
-    in Settings → Encrypted DNS. Names are read from the TLS handshake, so
+    in Settings → DNS Listeners. Names are read from the TLS handshake, so
     plain DNS (port 53) and DNS over HTTP/3 cannot carry an account.
   </p>
   {#if loaded && !dotEnabled && !dohEnabled}
-    <p class="warn">DoT and DoH are both off (Settings → Encrypted DNS): devices have nothing to connect to yet.</p>
+    <p class="warn">DoT and DoH are both off (Settings → DNS Listeners): devices have nothing to connect to yet.</p>
   {/if}
 
   <form onsubmit={saveSettings}>

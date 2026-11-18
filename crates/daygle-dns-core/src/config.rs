@@ -80,7 +80,7 @@ pub struct DaygleConfig {
 
 /// A scheduled report: a summary of the query log (queries, blocks, top
 /// domains and devices) sent daily or weekly to the alert destinations
-/// (Settings -> Alerts). Stored in the database.
+/// (Settings -> Notifications). Stored in the database.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct ReportSettings {
@@ -147,7 +147,7 @@ impl ReportSettings {
 /// `_dns.resolver.arpa` SVCB query with this server's encrypted listeners
 /// (DoH, DoT, DoQ), so devices that support it (Windows 11, Apple, Android)
 /// switch from plain DNS to encrypted DNS by themselves. Edited in
-/// Settings -> Encrypted DNS and stored in the database.
+/// Settings -> DNS Listeners and stored in the database.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct DdrSettings {
@@ -183,7 +183,7 @@ impl DdrSettings {
 /// `/dns-query/<client id>`, is recognised as that account wherever it
 /// connects from. Filtering groups can then target accounts as well as
 /// addresses, and the query log names them. The accounts themselves live in
-/// the database (Accounts page); this is Settings -> Encrypted DNS.
+/// the database (Accounts page); this is Settings -> DNS Listeners.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct AccountSettings {
@@ -508,7 +508,7 @@ impl RrlSettings {
 }
 
 /// Alerts: tell the operator by email (SMTP) and/or a webhook when
-/// something needs attention. Edited in Settings -> Alerts and stored in
+/// something needs attention. Edited in Settings -> Notifications and stored in
 /// the database.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
@@ -755,7 +755,7 @@ fn is_global_v6(ip: Ipv6Addr) -> bool {
 /// DNS64 (RFC 6147): when a recursive AAAA query finds no IPv6 address, the
 /// name's IPv4 addresses are returned as AAAA records inside a NAT64 prefix
 /// (RFC 6052), so IPv6-only clients can reach IPv4-only hosts through a
-/// NAT64 gateway. Edited in Settings -> Recursive and stored in the database.
+/// NAT64 gateway. Edited in Settings -> Resolver and stored in the database.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct Dns64Settings {
@@ -1176,7 +1176,7 @@ pub const WEB_SELF_SIGNED_CERT: &str = "web-console";
 /// traffic; GitHub's unauthenticated API allows only 60 requests per hour
 /// per client IP, shared with everything else using that address, so the
 /// interval has a floor (see [`MIN_UPDATE_CHECK_INTERVAL_SECS`]) and can be
-/// switched off entirely. Edited in Settings -> General as "Update Checks".
+/// switched off entirely. Edited on the Update page under "Update Checks".
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct UpdateCheckSettings {
