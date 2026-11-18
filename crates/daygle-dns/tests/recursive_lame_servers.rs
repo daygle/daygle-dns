@@ -301,3 +301,59 @@ async fn ipv6_reverse_names_under_a_short_delegation_resolve() {
     assert_eq!(msg.response_code, ResponseCode::NXDomain, "{msg:?}");
     shutdown(server).await;
 }
+
+#[tokio::test]
+async fn the_lookup_page_reports_the_answer_and_every_query_sent() {
+    let (server, _dir) = spawn_recursive().await;
+    let base = format!("http://{}/api", server.api_addr);
+    let client = reqwest::Client::new();
+    let lookup = |name: String, rtype: &str| {
+        client
+            .post(format!("{base}/resolver/lookup"))
+            .json(&serde_json::json!({ "name": name, "type": rtype }))
+            .send()
+    };
+
+    let body: serde_json::Value = lookup("www.lame.test".into(), "A")
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(body["rcode"], "NOERROR", "{body}");
+    assert_eq!(body["route"], "recursive");
+    assert_eq!(body["answers"][0]["data"], "198.51.100.9");
+    let trace = body["trace"].as_array().unwrap();
+    // The walk starts at the root, and the lame servers' refusals are
+    // listed alongside the working server's answer.
+    assert_eq!(trace[0]["server"], ROOT.to_string(), "{body}");
+    assert!(
+        trace
+            .iter()
+            .any(|s| s["rcode"] == "REFUSED" || s["rcode"] == "SERVFAIL"),
+        "{body}"
+    );
+    assert!(
+        trace
+            .iter()
+            .any(|s| s["name"] == "www.lame.test." && s["rcode"] == "NOERROR"),
+        "{body}"
+    );
+
+    // A name that does not exist is NXDOMAIN with its zone, not a failure.
+    let missing = Ipv6Addr::new(0x2001, 0x8004, 0x2c42, 0x4300, 0, 0, 0, 0);
+    let body: serde_json::Value = lookup(reverse_name(missing), "PTR")
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(body["rcode"], "NXDOMAIN", "{body}");
+    assert_eq!(body["negative_zone"], "8.1.0.0.2.ip6.arpa.");
+    assert!(body["error"].is_null());
+
+    // Bad input is refused.
+    let resp = lookup("www.lame.test".into(), "NOPE").await.unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::BAD_REQUEST);
+    shutdown(server).await;
+}

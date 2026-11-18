@@ -112,6 +112,144 @@ tokio::task_local! {
     /// The EDNS Client Subnet (RFC 7871) to send upstream for the lookup
     /// running in this task.
     static CLIENT_SUBNET: Option<EcsSubnet>;
+    /// Every query the lookup running in this task sends upstream, for
+    /// [`trace_queries`].
+    static QUERY_TRACE: std::cell::RefCell<Vec<TraceStep>>;
+}
+
+/// The most queries [`trace_queries`] records for one lookup.
+const MAX_TRACE_STEPS: usize = 256;
+
+/// One query sent upstream during a traced lookup.
+#[derive(Debug, Clone)]
+pub struct TraceStep {
+    /// The name server (or forwarding upstream) asked.
+    pub server: IpAddr,
+    /// The name asked about.
+    pub name: String,
+    /// The record type asked for.
+    pub record_type: String,
+    /// The response code, when the server answered.
+    pub rcode: Option<String>,
+    /// What came back: an answer, a referral, a denial, or the error.
+    pub outcome: String,
+    /// How long the server took.
+    pub elapsed: Duration,
+}
+
+/// Run a lookup and report every query it sent upstream, in the order the
+/// answers came back. Queries answered from a cache are not sent, so they
+/// do not appear.
+pub async fn trace_queries<F: Future>(lookup: F) -> (F::Output, Vec<TraceStep>) {
+    QUERY_TRACE
+        .scope(std::cell::RefCell::new(Vec::new()), async {
+            let output = lookup.await;
+            let steps = QUERY_TRACE.with(|steps| std::mem::take(&mut *steps.borrow_mut()));
+            (output, steps)
+        })
+        .await
+}
+
+/// Record one upstream exchange for [`trace_queries`] (nothing outside a
+/// traced lookup).
+fn record_trace(
+    server: IpAddr,
+    query: Option<&Query>,
+    response: &std::result::Result<DnsResponse, NetError>,
+    elapsed: Duration,
+) {
+    let _ = QUERY_TRACE.try_with(|steps| {
+        let mut steps = steps.borrow_mut();
+        if steps.len() >= MAX_TRACE_STEPS {
+            return;
+        }
+        let (rcode, outcome) = match response {
+            Ok(response) => (
+                Some(rcode_name(response.response_code)),
+                describe_response(response),
+            ),
+            Err(e) => (None, e.to_string()),
+        };
+        steps.push(TraceStep {
+            server,
+            name: query.map(|q| q.name().to_string()).unwrap_or_default(),
+            record_type: query
+                .map(|q| q.query_type().to_string())
+                .unwrap_or_default(),
+            rcode,
+            outcome,
+            elapsed,
+        });
+    });
+}
+
+/// A response code as it is written in DNS tools (`NXDOMAIN`, `REFUSED`).
+pub fn rcode_name(code: ResponseCode) -> String {
+    match code {
+        ResponseCode::NoError => "NOERROR".into(),
+        ResponseCode::FormErr => "FORMERR".into(),
+        ResponseCode::ServFail => "SERVFAIL".into(),
+        ResponseCode::NXDomain => "NXDOMAIN".into(),
+        ResponseCode::NotImp => "NOTIMP".into(),
+        ResponseCode::Refused => "REFUSED".into(),
+        ResponseCode::NotAuth => "NOTAUTH".into(),
+        other => format!("{other:?}").to_ascii_uppercase(),
+    }
+}
+
+/// What a name server's response says, in a few words.
+fn describe_response(response: &DnsResponse) -> String {
+    let truncated = if response.truncation {
+        " (truncated, retrying over TCP)"
+    } else {
+        ""
+    };
+    if response.response_code != ResponseCode::NoError {
+        let zone = response
+            .authorities
+            .iter()
+            .find(|r| r.record_type() == RecordType::SOA)
+            .map(|r| format!(" from zone {}", r.name))
+            .unwrap_or_default();
+        return format!("{}{zone}{truncated}", rcode_name(response.response_code));
+    }
+    if let Some(first) = response.answers.first() {
+        let more = match response.answers.len() {
+            1 => String::new(),
+            n => format!(" (+{} more)", n - 1),
+        };
+        return format!(
+            "answer: {} {}{more}{truncated}",
+            first.record_type(),
+            first.data
+        );
+    }
+    let referral = response
+        .authorities
+        .iter()
+        .filter(|r| r.record_type() == RecordType::NS)
+        .collect::<Vec<_>>();
+    if let (false, Some(first)) = (response.authoritative, referral.first()) {
+        let servers = referral
+            .iter()
+            .filter_map(|r| match &r.data {
+                RData::NS(ns) => Some(ns.0.to_string()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        return format!(
+            "referral to {} ({}){truncated}",
+            first.name,
+            servers.join(", ")
+        );
+    }
+    let zone = response
+        .authorities
+        .iter()
+        .find(|r| r.record_type() == RecordType::SOA)
+        .map(|r| format!(" in zone {}", r.name))
+        .unwrap_or_default();
+    format!("no records of this type{zone}{truncated}")
 }
 
 /// The EDNS Client Subnet a lookup sends to forwarding upstreams.
@@ -191,14 +329,23 @@ impl<C: DnsHandle> DnsHandle for TrackedConn<C> {
                 }
             }
         }
-        if !self.glue_answers && !self.skip_lame_servers {
+        let traced = QUERY_TRACE.try_with(|_| ()).is_ok();
+        if !traced && !self.glue_answers && !self.skip_lame_servers {
             return self.conn.send(request).boxed();
         }
         let query = request.queries.first().cloned();
         let (server, glue_answers, skip_lame) =
             (self.server, self.glue_answers, self.skip_lame_servers);
+        let sent = Instant::now();
+        let traced_query = query.clone();
         self.conn
             .send(request)
+            .map(move |response| {
+                if traced {
+                    record_trace(server, traced_query.as_ref(), &response, sent.elapsed());
+                }
+                response
+            })
             .map(move |response| match response {
                 Ok(response) if skip_lame => lame_as_unreachable(server, response),
                 response => response,

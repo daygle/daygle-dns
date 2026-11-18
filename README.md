@@ -63,6 +63,10 @@ Daygle DNS combines, in a single process:
   with reservations and custom options, and DHCPv6 addresses or DNS
   settings only (stateless); devices are registered by name (A/AAAA and
   PTR) in a zone you host. Linux only.
+- **Lookup page**: resolve any name (or IP address, for its PTR record)
+  from the console and see why it works or fails: the answer, the reason
+  for a failure in plain words, and every query sent to other name servers
+  on the way, with each server's response and timing.
 - **Why was it blocked?** Every blocked query in the Query Log says what
   blocked it (which blocklist, list entry, filtering group, blocked service,
   AI category or response policy zone), with a filter by it, and Filtering

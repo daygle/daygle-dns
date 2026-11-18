@@ -26,6 +26,7 @@
 mod aggressive;
 mod cache_assist;
 mod cache_persist;
+pub mod diagnose;
 pub mod recursor;
 mod upstream;
 
