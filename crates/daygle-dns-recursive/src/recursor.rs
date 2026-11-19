@@ -97,6 +97,11 @@ pub struct UpstreamConnections {
     /// NS questions name servers sent a broken reply to (see
     /// [`BrokenNsReplies`]). Recursive mode only.
     broken_ns: Option<Arc<BrokenNsReplies>>,
+    /// How long one upstream query is waited for (`recursive.timeout_secs`).
+    /// The recursor's own connections are built with a fixed 5s timeout, so
+    /// the setting is applied here, on every reply stream, to make the
+    /// lookup give up when it says it does.
+    timeout: Option<Duration>,
 }
 
 /// How long a broken reply to an NS question is remembered.
@@ -210,12 +215,14 @@ pub struct TraceStep {
 /// The outcome shown for a query that has been sent but not answered yet.
 const AWAITING_REPLY: &str = "waiting for a reply";
 
-/// The queries one traced lookup sent upstream, with when each was sent.
+/// The queries one traced lookup sent upstream, with when each was sent and
+/// how long it was given to answer.
 #[derive(Default)]
 struct TraceLog {
     steps: Vec<TraceStep>,
-    /// When each step's query was sent, alongside `steps`.
-    sent: Vec<Instant>,
+    /// When each step's query was sent and the timeout it was sent with,
+    /// alongside `steps`.
+    sent: Vec<(Instant, Option<Duration>)>,
 }
 
 impl TraceLog {
@@ -225,11 +232,16 @@ impl TraceLog {
     /// the list with no response code instead of reading as still waiting.
     fn finish(self) -> Vec<TraceStep> {
         let mut steps = self.steps;
-        for (step, sent) in steps.iter_mut().zip(self.sent) {
+        for (step, (sent, timeout)) in steps.iter_mut().zip(self.sent) {
             if step.outcome != AWAITING_REPLY {
                 continue;
             }
-            let waited = sent.elapsed();
+            // How long the query was waited for: its own timeout at most,
+            // whatever the rest of the lookup went on to do.
+            let mut waited = sent.elapsed();
+            if let Some(timeout) = timeout {
+                waited = waited.min(timeout);
+            }
             step.elapsed = waited;
             step.outcome = format!(
                 "no reply after {:.1}s, the resolver gave up on it",
@@ -264,7 +276,7 @@ pub async fn trace_queries<F: Future>(lookup: F) -> (F::Output, Vec<TraceStep>) 
 /// resolver's timeout leaves no reply to record. Written at send time, the
 /// query stays in the list with no answer rather than vanishing; rows still
 /// waiting when the trace is collected are marked there.
-fn begin_trace(server: IpAddr, query: Option<&Query>) -> Option<usize> {
+fn begin_trace(server: IpAddr, query: Option<&Query>, timeout: Option<Duration>) -> Option<usize> {
     QUERY_TRACE
         .try_with(|log| {
             let mut log = log.borrow_mut();
@@ -281,7 +293,7 @@ fn begin_trace(server: IpAddr, query: Option<&Query>) -> Option<usize> {
                 outcome: AWAITING_REPLY.to_string(),
                 elapsed: Duration::ZERO,
             });
-            log.sent.push(Instant::now());
+            log.sent.push((Instant::now(), timeout));
             Some(log.steps.len() - 1)
         })
         .ok()
@@ -431,6 +443,9 @@ pub struct TrackedConn<C> {
     glue_answers: bool,
     skip_lame_servers: bool,
     broken_ns: Option<Arc<BrokenNsReplies>>,
+    /// How long this connection's replies are waited for (see
+    /// [`UpstreamConnections::timeout`]).
+    timeout: Option<Duration>,
 }
 
 impl<C: DnsHandle> DnsHandle for TrackedConn<C> {
@@ -476,10 +491,12 @@ impl<C: DnsHandle> DnsHandle for TrackedConn<C> {
         let (server, glue_answers, skip_lame) =
             (self.server, self.glue_answers, self.skip_lame_servers);
         let broken_ns = self.broken_ns.clone();
+        let timeout = self.timeout;
         let sent = Instant::now();
         let traced_query = query.clone();
-        let slot = begin_trace(server, traced_query.as_ref());
-        self.conn
+        let slot = begin_trace(server, traced_query.as_ref(), timeout);
+        let replies = self
+            .conn
             .send(request)
             .map(move |response| {
                 finish_trace(slot, &response, sent.elapsed());
@@ -498,7 +515,15 @@ impl<C: DnsHandle> DnsHandle for TrackedConn<C> {
                 (Ok(response), Some(query)) if glue_answers => Ok(glue_as_answer(query, response)),
                 (response, _) => response,
             })
-            .boxed()
+            .boxed();
+        // The recursor builds its name server connections with a fixed 5s
+        // timeout, so a configured timeout is enforced here: the reply
+        // stream ends and the query is treated as unanswered, with the
+        // trace row reporting the timeout it was given.
+        match timeout {
+            Some(timeout) => replies.take_until(tokio::time::sleep(timeout)).boxed(),
+            None => replies,
+        }
     }
 }
 
@@ -608,6 +633,7 @@ impl ConnectionProvider for UpstreamConnections {
         let glue_answers = self.glue_answers;
         let skip_lame_servers = self.skip_lame_servers;
         let broken_ns = self.broken_ns.clone();
+        let timeout = self.timeout;
         Ok(Box::pin(async move {
             connecting.await.map(|conn| TrackedConn {
                 conn,
@@ -616,6 +642,7 @@ impl ConnectionProvider for UpstreamConnections {
                 glue_answers,
                 skip_lame_servers,
                 broken_ns,
+                timeout,
             })
         }))
     }
@@ -714,6 +741,10 @@ pub fn build(
         glue_answers: true,
         skip_lame_servers: true,
         broken_ns: Some(Arc::default()),
+        // The recursor's own name server connections are built with a fixed
+        // 5s timeout whatever the settings say, so the configured one is
+        // applied to each reply stream instead (see [`TrackedConn::send`]).
+        timeout: Some(Duration::from_secs(settings.timeout_secs.max(1))),
         ..UpstreamConnections::default()
     };
     if let Some(port) = settings.test_outbound_port {
@@ -1252,7 +1283,7 @@ mod tests {
             let query = Query::query(name("ns1.example.test."), RecordType::A);
             // No reply ever fills the row in, as when the resolver's timeout
             // fires while a name server stays silent.
-            begin_trace(IpAddr::from([192, 0, 2, 1]), Some(&query))
+            begin_trace(IpAddr::from([192, 0, 2, 1]), Some(&query), None)
                 .expect("a traced query gets a row");
         })
         .await;
@@ -1273,7 +1304,7 @@ mod tests {
     async fn an_answered_query_keeps_its_reply() {
         let (_, trace) = trace_queries(async {
             let query = Query::query(name("www.example.test."), RecordType::A);
-            let slot = begin_trace(IpAddr::from([192, 0, 2, 2]), Some(&query))
+            let slot = begin_trace(IpAddr::from([192, 0, 2, 2]), Some(&query), None)
                 .expect("a traced query gets a row");
             let message = Message::response(0, hickory_proto::op::OpCode::Query);
             let response = DnsResponse::from_message(message).expect("a response");
@@ -1290,6 +1321,10 @@ mod tests {
     /// with its server and how long it was waited for - the case where a
     /// lookup fails on such a timeout and the trace used to stop at the last
     /// reply.
+    ///
+    /// The wait reported is `recursive.timeout_secs`, not the 5s the
+    /// recursor gives one of its name server connections of its own accord:
+    /// 2s here is short enough to be the setting that ends the query.
     #[tokio::test]
     async fn a_glueless_nameserver_query_that_times_out_is_traced() {
         use hickory_proto::op::MessageType;
@@ -1335,10 +1370,12 @@ mod tests {
             dnssec_validate: false,
             root_hints: vec!["127.0.0.2".to_string()],
             test_outbound_port: Some(port),
+            timeout_secs: 2,
             ..RecursiveSettings::default()
         };
         let recursor = build(&settings, None, Arc::new(Metrics::default())).expect("a recursor");
         let slot = RecursorSlot::new(recursor, None, &settings);
+        let started = Instant::now();
         let (result, trace) = trace_queries(lookup(&slot, name("www.test."), RecordType::A)).await;
 
         assert!(
@@ -1352,11 +1389,15 @@ mod tests {
         assert_eq!(asked.len(), 1, "{trace:#?}");
         assert!(asked[0].rcode.is_none());
         assert!(
-            asked[0].outcome.contains("no reply"),
+            asked[0].outcome.contains("no reply after 2.0s"),
             "{}",
             asked[0].outcome
         );
-        assert!(asked[0].elapsed >= Duration::from_secs(1));
+        assert_eq!(asked[0].elapsed, Duration::from_secs(2), "{:#?}", asked[0]);
+        assert!(
+            started.elapsed() < Duration::from_secs(4),
+            "the lookup gave up at the 2s setting, not the recursor's built-in 5s"
+        );
     }
 
     /// `www.shop.test -> shop.host.test -> shop.cdn.test`, where a query
