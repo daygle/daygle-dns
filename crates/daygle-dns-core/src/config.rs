@@ -2642,6 +2642,8 @@ impl RuntimeSettings {
                     RecursiveUpdate::normalize_conditional_zones(v);
             }
             r.apply_resolution(&mut config.recursive);
+            // Stored before recursive mode was capped, for instance.
+            config.clamp_recursor_timeout();
         }
         if let Some(d) = &self.dot {
             if let Some(v) = d.enabled {
@@ -3344,6 +3346,7 @@ impl DaygleConfig {
         let mut cfg: DaygleConfig =
             toml::from_str(text).map_err(|e| DaygleError::Config(format!("invalid TOML: {e}")))?;
         cfg.authoritative.clear_legacy_placeholders();
+        cfg.clamp_recursor_timeout();
         cfg.validate()?;
         Ok(cfg)
     }
@@ -3354,6 +3357,27 @@ impl DaygleConfig {
         let text = std::fs::read_to_string(path)
             .map_err(|e| DaygleError::Config(format!("cannot read {}: {e}", path.display())))?;
         Self::parse(&text)
+    }
+
+    /// Reduce `recursive.timeout_secs` to what recursive mode can honour.
+    ///
+    /// See [`RECURSOR_MAX_TIMEOUT_SECS`]: the recursor never waits longer
+    /// than that for one name server, so a stored or hand-written value
+    /// above it is clamped here, with a warning, rather than silently
+    /// disagreeing with the Lookup trace. Forwarding mode keeps the whole
+    /// 1-300s range.
+    fn clamp_recursor_timeout(&mut self) {
+        if self.recursive.effective_mode() != ResolutionMode::Recursive {
+            return;
+        }
+        let max = RECURSOR_MAX_TIMEOUT_SECS;
+        if self.recursive.timeout_secs > max {
+            tracing::warn!(
+                "recursive.timeout_secs {} is longer than the recursor waits for one name server ({max}s): using {max}s",
+                self.recursive.timeout_secs
+            );
+            self.recursive.timeout_secs = max;
+        }
     }
 
     /// Serialize this configuration to a TOML document.
@@ -3500,6 +3524,15 @@ impl DaygleConfig {
             return Err(DaygleError::Config(
                 "recursive.timeout_secs must be in 1..=300".to_string(),
             ));
+        }
+        if self.recursive.effective_mode() == ResolutionMode::Recursive
+            && self.recursive.timeout_secs > RECURSOR_MAX_TIMEOUT_SECS
+        {
+            return Err(DaygleError::Config(format!(
+                "recursive.timeout_secs must be in 1..={RECURSOR_MAX_TIMEOUT_SECS} in recursive \
+                 mode: the recursor gives up on an upstream query after \
+                 {RECURSOR_MAX_TIMEOUT_SECS} seconds"
+            )));
         }
         if !(8..=65_536).contains(&self.server.udp_recv_buffer_kb) {
             return Err(DaygleError::Config(
@@ -4681,6 +4714,18 @@ pub const PRIVATE_NETWORKS: &[&str] = &[
     "fc00::/7",
     "fe80::/10",
 ];
+
+/// The longest time the recursor waits for one upstream query, whatever
+/// `recursive.timeout_secs` asks for.
+///
+/// hickory's recursor builds its name server pool from
+/// `ResolverOpts::default()`, whose 5s timeout it does not expose, and the
+/// pool gives up on a query at that deadline. A longer setting could only be
+/// honoured by patching hickory, so recursive mode is capped here: the
+/// console offers no more, validation refuses more, and configurations that
+/// ask for more are clamped to it, so the setting and the Lookup trace
+/// cannot report different timeouts. Forwarding mode uses the whole range.
+pub const RECURSOR_MAX_TIMEOUT_SECS: u64 = 5;
 
 impl RecursiveSettings {
     /// The local root zone settings with the outbound IP versions applied.
@@ -7126,6 +7171,49 @@ upstreams = ["192.0.2.20:5353"]
             captured.recursive.unwrap().mode,
             Some(ResolutionMode::Recursive)
         );
+    }
+
+    /// The recursor cannot wait longer than 5s for one name server (hickory
+    /// builds its pool from `ResolverOpts::default()`), so recursive mode
+    /// clamps the setting there and refuses to save more: the setting and
+    /// the Lookup trace then always name the same timeout. Forwarding keeps
+    /// the whole range, which its resolver honours.
+    #[test]
+    fn recursor_timeout_is_capped_at_what_the_recursor_can_wait() {
+        let forwarding = DaygleConfig::parse(
+            "[recursive]\nmode = \"forwarding\"\nupstreams = [\"1.1.1.1\"]\ntimeout_secs = 30\n",
+        )
+        .unwrap();
+        assert_eq!(forwarding.recursive.timeout_secs, 30);
+
+        // A file that asks for more in recursive mode is clamped, so it
+        // keeps starting and reports what the recursor will do.
+        let recursive =
+            DaygleConfig::parse("[recursive]\nmode = \"recursive\"\ntimeout_secs = 30\n").unwrap();
+        assert_eq!(
+            recursive.recursive.timeout_secs, RECURSOR_MAX_TIMEOUT_SECS,
+            "a recursive-mode file is clamped to the recursor's limit"
+        );
+
+        // The console cannot save more either.
+        let mut cfg = DaygleConfig::default();
+        cfg.recursive.mode = Some(ResolutionMode::Recursive);
+        cfg.recursive.timeout_secs = RECURSOR_MAX_TIMEOUT_SECS + 1;
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(err.contains("recursive.timeout_secs"), "{err}");
+
+        // A stored console setting from before the cap is clamped as well.
+        let overlay = RuntimeSettings {
+            recursive: Some(RecursiveUpdate {
+                mode: Some(ResolutionMode::Recursive),
+                timeout_secs: Some(30),
+                ..RecursiveUpdate::default()
+            }),
+            ..RuntimeSettings::default()
+        };
+        let mut cfg = DaygleConfig::default();
+        overlay.apply_to(&mut cfg);
+        assert_eq!(cfg.recursive.timeout_secs, RECURSOR_MAX_TIMEOUT_SECS);
     }
 
     #[test]

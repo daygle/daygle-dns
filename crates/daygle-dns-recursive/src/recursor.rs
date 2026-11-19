@@ -14,7 +14,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use daygle_dns_core::config::{IpVersions, RecursiveSettings};
+use daygle_dns_core::config::{IpVersions, RecursiveSettings, RECURSOR_MAX_TIMEOUT_SECS};
 use daygle_dns_core::error::{DaygleError, Result};
 use daygle_dns_core::Metrics;
 use futures_util::stream::{BoxStream, StreamExt};
@@ -744,7 +744,12 @@ pub fn build(
         // The recursor's own name server connections are built with a fixed
         // 5s timeout whatever the settings say, so the configured one is
         // applied to each reply stream instead (see [`TrackedConn::send`]).
-        timeout: Some(Duration::from_secs(settings.timeout_secs.max(1))),
+        // Validation refuses more than that in recursive mode and stored
+        // settings are clamped to it; the clamp here guards settings built
+        // in code from claiming a wait the recursor cannot give.
+        timeout: Some(Duration::from_secs(
+            settings.timeout_secs.clamp(1, RECURSOR_MAX_TIMEOUT_SECS),
+        )),
         ..UpstreamConnections::default()
     };
     if let Some(port) = settings.test_outbound_port {

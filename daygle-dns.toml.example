@@ -98,6 +98,9 @@ recursion_access = "private_networks"
 upstreams = []
 use_system_config = true
 cache_size = 8192
+# Per-nameserver timeout in seconds. Recursive mode caps this at 5: the
+# recursor gives up on one name server after that, and the Lookup trace
+# reports no longer a wait. Forwarding uses the whole 1-300 range.
 timeout_secs = 5
 attempts = 3
 dnssec_validate = true

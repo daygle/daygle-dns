@@ -38,6 +38,10 @@
     alerts: 'Where notifications go (webhook, email or both), the alerts sent when something needs attention, and a scheduled summary report.',
     backup: 'Download a backup of everything this server keeps, or restore one.',
   };
+  // The recursor gives up on one name server after 5s whatever the setting
+  // says (hickory builds its name server pool from ResolverOpts::default()),
+  // so recursive mode offers no more. Forwarding honours the whole range.
+  const RECURSOR_TIMEOUT_MAX = 5;
 
   // Local editable copies (bound to the form inputs).
   let server = $state({});
@@ -742,7 +746,14 @@
     <div class="form-grid">
       <label>
         <span>Resolution Mode</span>
-        <select bind:value={recursive.mode}>
+        <select
+          bind:value={recursive.mode}
+          onchange={(e) => {
+            // A longer forwarding timeout cannot carry over to recursive mode.
+            if (e.currentTarget.value === 'recursive')
+              recursive.timeout_secs = Math.min(Number(recursive.timeout_secs) || RECURSOR_TIMEOUT_MAX, RECURSOR_TIMEOUT_MAX);
+          }}
+        >
           <option value="recursive">Recursive (from the root servers)</option>
           <option value="forwarding">Forwarding (to upstream servers)</option>
         </select>
@@ -812,14 +823,16 @@
     {#if recursive.enabled}
       <h4>Timeouts and Limits</h4>
       <div class="form-grid">
-        <label><span>Per-Server Timeout (Seconds)</span><input type="number" min="1" max="300" bind:value={recursive.timeout_secs} /></label>
+        <label><span>Per-Server Timeout (Seconds)</span><input type="number" min="1" max={recursive.mode === 'recursive' ? RECURSOR_TIMEOUT_MAX : 300} bind:value={recursive.timeout_secs} /></label>
         <label><span>Client Timeout (Milliseconds)</span><input type="number" min="1000" max="10000" step="100" bind:value={server.client_timeout_ms} /></label>
         <label><span>Maximum Concurrent Lookups</span><input type="number" min="1" max="65536" bind:value={recursive.max_concurrent_lookups} /></label>
       </div>
       <p class="muted help">
         Per-Server Timeout is how long to wait for one
         {recursive.mode === 'recursive' ? 'name server' : 'upstream server'}
-        before trying the next. Client Timeout is how long a client waits for
+        before trying the next{#if recursive.mode === 'recursive'} (at most
+        {RECURSOR_TIMEOUT_MAX} seconds: the recursor gives up after that, and
+        its trace rows never report more){/if}. Client Timeout is how long a client waits for
         a lookup (1000-10000 ms): when it runs out the client gets the expired
         answer if there is one (Serve-Stale, Cache → Settings), else SERVFAIL,
         and the lookup carries on to fill the cache. Raise it if slow sites

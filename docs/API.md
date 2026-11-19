@@ -498,7 +498,7 @@ and the stored, console-edited `client_timeout_ms` (1000-10000, applied live),
 (enabled/mode/upstreams/use_system_config/dnssec_validate/dnssec_reject_bogus/aggressive_nsec/cache_size/
 min_cache_ttl/max_cache_ttl/negative_cache_ttl/failure_cache_ttl/
 prefetch_* (including prefetch_window_secs)/serve_stale_secs/max_concurrent_lookups/
-timeout_secs (per nameserver, 1-300)/conditional_zones/recursion_access/recursion_networks/root_hints/
+timeout_secs (per nameserver, 1-300; recursive mode caps it at 5)/conditional_zones/recursion_access/recursion_networks/root_hints/
 case_randomization/rebinding_protection/local_root/opportunistic_encryption/
 outbound_ip_versions/client_policies), `dot`,
 `doh`, `doq` (enabled/port/self_signed/server_name/cert_path/key_path/
