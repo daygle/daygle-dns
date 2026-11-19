@@ -7,6 +7,7 @@
 //! Results are converted to [`Lookup`] so the rest of the crate (failure
 //! cache, serve-stale, prefetch) treats both modes alike.
 
+use std::collections::HashMap;
 use std::future::Future;
 use std::net::{IpAddr, SocketAddr};
 use std::pin::Pin;
@@ -34,6 +35,7 @@ use hickory_resolver::recursor::{
 };
 use hickory_resolver::{ConnectionProvider, PoolContext, TtlConfig};
 use ipnet::{IpNet, Ipv4Net, Ipv6Net};
+use parking_lot::Mutex;
 use tracing::{debug, warn};
 
 /// The IANA root servers (a.root-servers.net .. m.root-servers.net), IPv4
@@ -92,6 +94,74 @@ pub struct UpstreamConnections {
     /// reach it, so the recursor asks the zone's next server (see
     /// [`lame_as_unreachable`]). Recursive mode only.
     skip_lame_servers: bool,
+    /// NS questions name servers sent a broken reply to (see
+    /// [`BrokenNsReplies`]). Recursive mode only.
+    broken_ns: Option<Arc<BrokenNsReplies>>,
+}
+
+/// How long a broken reply to an NS question is remembered.
+const BROKEN_NS_TTL: Duration = Duration::from_secs(300);
+
+/// The most broken NS replies remembered at once.
+const MAX_BROKEN_NS: usize = 4096;
+
+/// NS questions that a name server answered with a reply that could not be
+/// read, each with the error it gave, so the question is not sent to that
+/// server again for a while.
+///
+/// Walking down to a name, the recursor asks for the NS records of each
+/// name on the way (QNAME minimisation) and moves on when a question fails,
+/// but it caches nothing for a failure, so it asks again every time it
+/// walks down to the name. The load balancer answering for `wip.accv.es`
+/// sends a reply cut short to every NS question, and its non-authoritative
+/// answers are not served from the recursor's cache without walking down to
+/// the name again, so one lookup of `www.accv.es` asked it the same NS
+/// question five times, at a quarter of a second each. Asked again, the
+/// remembered error comes back at once and the recursor moves on as it did
+/// the first time.
+#[derive(Default)]
+struct BrokenNsReplies {
+    replies: Mutex<HashMap<(IpAddr, Name), (Instant, NetError)>>,
+}
+
+impl BrokenNsReplies {
+    fn key(server: IpAddr, query: &Query) -> Option<(IpAddr, Name)> {
+        (query.query_type() == RecordType::NS).then(|| (server, query.name().to_lowercase()))
+    }
+
+    /// The error `server` gave to `query`, when it is remembered.
+    fn get(&self, server: IpAddr, query: &Query) -> Option<NetError> {
+        let key = Self::key(server, query)?;
+        let mut replies = self.replies.lock();
+        match replies.get(&key) {
+            Some((until, error)) if *until > Instant::now() => Some(error.clone()),
+            Some(_) => {
+                replies.remove(&key);
+                None
+            }
+            None => None,
+        }
+    }
+
+    /// Remember `error` as `server`'s reply to `query`, when it is an NS
+    /// question and the reply could not be read.
+    fn note(&self, server: IpAddr, query: &Query, error: &NetError) {
+        if !matches!(error, NetError::Proto(_)) {
+            return;
+        }
+        let Some(key) = Self::key(server, query) else {
+            return;
+        };
+        let now = Instant::now();
+        let mut replies = self.replies.lock();
+        if replies.len() >= MAX_BROKEN_NS {
+            replies.retain(|_, (until, _)| *until > now);
+            if replies.len() >= MAX_BROKEN_NS {
+                replies.clear();
+            }
+        }
+        replies.insert(key, (now + BROKEN_NS_TTL, error.clone()));
+    }
 }
 
 impl UpstreamConnections {
@@ -297,6 +367,7 @@ pub struct TrackedConn<C> {
     client_subnet: bool,
     glue_answers: bool,
     skip_lame_servers: bool,
+    broken_ns: Option<Arc<BrokenNsReplies>>,
 }
 
 impl<C: DnsHandle> DnsHandle for TrackedConn<C> {
@@ -312,6 +383,12 @@ impl<C: DnsHandle> DnsHandle for TrackedConn<C> {
     }
 
     fn send(&self, mut request: DnsRequest) -> Self::Response {
+        if let (Some(broken), Some(query)) = (&self.broken_ns, request.queries.first()) {
+            if let Some(error) = broken.get(self.server, query) {
+                debug!(server = %self.server, query = %query.name(), "not asking again: the reply was broken");
+                return futures_util::stream::once(async move { Err(error) }).boxed();
+            }
+        }
         // Outside a tracked lookup (prefetch refreshes, probes) there is
         // nothing to flag.
         let _ = SENT_UPSTREAM.try_with(|sent| sent.set(true));
@@ -329,12 +406,13 @@ impl<C: DnsHandle> DnsHandle for TrackedConn<C> {
             }
         }
         let traced = QUERY_TRACE.try_with(|_| ()).is_ok();
-        if !traced && !self.glue_answers && !self.skip_lame_servers {
+        if !traced && !self.glue_answers && !self.skip_lame_servers && self.broken_ns.is_none() {
             return self.conn.send(request).boxed();
         }
         let query = request.queries.first().cloned();
         let (server, glue_answers, skip_lame) =
             (self.server, self.glue_answers, self.skip_lame_servers);
+        let broken_ns = self.broken_ns.clone();
         let sent = Instant::now();
         let traced_query = query.clone();
         self.conn
@@ -342,6 +420,11 @@ impl<C: DnsHandle> DnsHandle for TrackedConn<C> {
             .map(move |response| {
                 if traced {
                     record_trace(server, traced_query.as_ref(), &response, sent.elapsed());
+                }
+                if let (Some(broken), Some(query), Err(error)) =
+                    (&broken_ns, traced_query.as_ref(), &response)
+                {
+                    broken.note(server, query, error);
                 }
                 response
             })
@@ -462,6 +545,7 @@ impl ConnectionProvider for UpstreamConnections {
         let client_subnet = self.client_subnet;
         let glue_answers = self.glue_answers;
         let skip_lame_servers = self.skip_lame_servers;
+        let broken_ns = self.broken_ns.clone();
         Ok(Box::pin(async move {
             connecting.await.map(|conn| TrackedConn {
                 conn,
@@ -469,6 +553,7 @@ impl ConnectionProvider for UpstreamConnections {
                 client_subnet,
                 glue_answers,
                 skip_lame_servers,
+                broken_ns,
             })
         }))
     }
@@ -566,6 +651,7 @@ pub fn build(
         metrics: Some(metrics),
         glue_answers: true,
         skip_lame_servers: true,
+        broken_ns: Some(Arc::default()),
         ..UpstreamConnections::default()
     };
     if let Some(port) = settings.test_outbound_port {
