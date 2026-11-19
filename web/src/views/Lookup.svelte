@@ -45,7 +45,7 @@
     if (m.includes('recursion limit') || m.includes('query budget'))
       return 'The resolver gave up after too many steps. The trace shows where the walk went.';
     if (m.includes('timed out') || m.includes('timeout'))
-      return 'No name server answered in time. They may be down or unreachable from this server (check its IPv6 route, or set Outbound IP Versions to IPv4).';
+      return 'No name server answered in time. Usually the zone\'s own name servers are the problem: they are down, no longer host the zone, or drop its queries (the trace names them; if they ignore the zone over IPv4 too, nothing on this server can fix it). Only if those servers do answer other tools, check this server\'s IPv6 route, or set Outbound IP Versions to IPv4.';
     if (m.includes('dnssec') || m.includes('bogus') || m.includes('rrsig') || m.includes('nsec'))
       return 'The answer failed DNSSEC validation: the signatures are missing, expired or do not match.';
     if (m.includes('no glue') || m.includes('no nameserver found'))
