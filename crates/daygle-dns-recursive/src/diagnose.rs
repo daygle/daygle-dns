@@ -47,7 +47,8 @@ pub struct Diagnosis {
     pub elapsed: Duration,
     /// Whether DNSSEC validation is on.
     pub dnssec_validation: bool,
-    /// Every query sent upstream, in the order the answers came back.
+    /// Every query sent upstream, in the order the queries were sent. A
+    /// query that got no reply is listed with the reason it was given up on.
     pub trace: Vec<TraceStep>,
 }
 

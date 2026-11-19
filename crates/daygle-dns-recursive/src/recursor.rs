@@ -181,9 +181,9 @@ tokio::task_local! {
     /// The EDNS Client Subnet (RFC 7871) to send upstream for the lookup
     /// running in this task.
     static CLIENT_SUBNET: Option<EcsSubnet>;
-    /// Every query the lookup running in this task sends upstream, for
+    /// The queries the lookup running in this task sent upstream, for
     /// [`trace_queries`].
-    static QUERY_TRACE: std::cell::RefCell<Vec<TraceStep>>;
+    static QUERY_TRACE: std::cell::RefCell<TraceLog>;
 }
 
 /// The most queries [`trace_queries`] records for one lookup.
@@ -202,36 +202,106 @@ pub struct TraceStep {
     pub rcode: Option<String>,
     /// What came back: an answer, a referral, a denial, or the error.
     pub outcome: String,
-    /// How long the server took.
+    /// How long the server took, or how long the query was waited for when
+    /// no reply came.
     pub elapsed: Duration,
 }
 
+/// The outcome shown for a query that has been sent but not answered yet.
+const AWAITING_REPLY: &str = "waiting for a reply";
+
+/// The queries one traced lookup sent upstream, with when each was sent.
+#[derive(Default)]
+struct TraceLog {
+    steps: Vec<TraceStep>,
+    /// When each step's query was sent, alongside `steps`.
+    sent: Vec<Instant>,
+}
+
+impl TraceLog {
+    /// The trace as reported. A query that was never answered - the
+    /// resolver's timeout elapsed, or the lookup ended while it was still
+    /// out - is marked here, when the lookup is done, so its row stays in
+    /// the list with no response code instead of reading as still waiting.
+    fn finish(self) -> Vec<TraceStep> {
+        let mut steps = self.steps;
+        for (step, sent) in steps.iter_mut().zip(self.sent) {
+            if step.outcome != AWAITING_REPLY {
+                continue;
+            }
+            let waited = sent.elapsed();
+            step.elapsed = waited;
+            step.outcome = format!(
+                "no reply after {:.1}s, the resolver gave up on it",
+                waited.as_secs_f64()
+            );
+        }
+        steps
+    }
+}
+
 /// Run a lookup and report every query it sent upstream, in the order the
-/// answers came back. Queries answered from a cache are not sent, so they
-/// do not appear.
+/// queries were sent. Queries answered from a cache are not sent, so they
+/// do not appear. A query the resolver never got an answer to is listed
+/// with no response code and how long it went unanswered.
 pub async fn trace_queries<F: Future>(lookup: F) -> (F::Output, Vec<TraceStep>) {
     QUERY_TRACE
-        .scope(std::cell::RefCell::new(Vec::new()), async {
+        .scope(std::cell::RefCell::new(TraceLog::default()), async {
             let output = lookup.await;
-            let steps = QUERY_TRACE.with(|steps| std::mem::take(&mut *steps.borrow_mut()));
-            (output, steps)
+            let log = QUERY_TRACE.with(|log| std::mem::take(&mut *log.borrow_mut()));
+            (output, log.finish())
         })
         .await
 }
 
-/// Record one upstream exchange for [`trace_queries`] (nothing outside a
-/// traced lookup).
-fn record_trace(
-    server: IpAddr,
-    query: Option<&Query>,
+/// Record a query as sent for [`trace_queries`], and return its row so the
+/// reply can fill it in with [`finish_trace`] (nothing outside a traced
+/// lookup).
+///
+/// The row is written when the query leaves, not when it is answered: the
+/// recursor resolves the addresses of a zone's glueless name servers before
+/// it can ask them anything, and when one of those lookups hangs the
+/// resolver's timeout leaves no reply to record. Written at send time, the
+/// query stays in the list with no answer rather than vanishing; rows still
+/// waiting when the trace is collected are marked there.
+fn begin_trace(server: IpAddr, query: Option<&Query>) -> Option<usize> {
+    QUERY_TRACE
+        .try_with(|log| {
+            let mut log = log.borrow_mut();
+            if log.steps.len() >= MAX_TRACE_STEPS {
+                return None;
+            }
+            log.steps.push(TraceStep {
+                server,
+                name: query.map(|q| q.name().to_string()).unwrap_or_default(),
+                record_type: query
+                    .map(|q| q.query_type().to_string())
+                    .unwrap_or_default(),
+                rcode: None,
+                outcome: AWAITING_REPLY.to_string(),
+                elapsed: Duration::ZERO,
+            });
+            log.sent.push(Instant::now());
+            Some(log.steps.len() - 1)
+        })
+        .ok()
+        .flatten()
+}
+
+/// Fill in the row [`begin_trace`] wrote for a query with what came back.
+fn finish_trace(
+    slot: Option<usize>,
     response: &std::result::Result<DnsResponse, NetError>,
     elapsed: Duration,
 ) {
-    let _ = QUERY_TRACE.try_with(|steps| {
-        let mut steps = steps.borrow_mut();
-        if steps.len() >= MAX_TRACE_STEPS {
+    let Some(slot) = slot else {
+        return;
+    };
+    let _ = QUERY_TRACE.try_with(|log| {
+        let mut log = log.borrow_mut();
+        let Some(step) = log.steps.get_mut(slot) else {
             return;
-        }
+        };
         let (rcode, outcome) = match response {
             Ok(response) => (
                 Some(rcode_name(response.response_code)),
@@ -239,16 +309,9 @@ fn record_trace(
             ),
             Err(e) => (None, e.to_string()),
         };
-        steps.push(TraceStep {
-            server,
-            name: query.map(|q| q.name().to_string()).unwrap_or_default(),
-            record_type: query
-                .map(|q| q.query_type().to_string())
-                .unwrap_or_default(),
-            rcode,
-            outcome,
-            elapsed,
-        });
+        step.rcode = rcode;
+        step.outcome = outcome;
+        step.elapsed = elapsed;
     });
 }
 
@@ -415,12 +478,11 @@ impl<C: DnsHandle> DnsHandle for TrackedConn<C> {
         let broken_ns = self.broken_ns.clone();
         let sent = Instant::now();
         let traced_query = query.clone();
+        let slot = begin_trace(server, traced_query.as_ref());
         self.conn
             .send(request)
             .map(move |response| {
-                if traced {
-                    record_trace(server, traced_query.as_ref(), &response, sent.elapsed());
-                }
+                finish_trace(slot, &response, sent.elapsed());
                 if let (Some(broken), Some(query), Err(error)) =
                     (&broken_ns, traced_query.as_ref(), &response)
                 {
@@ -1178,6 +1240,123 @@ mod tests {
             message: message.to_string(),
             response_code: code.map(Into::into),
         }
+    }
+
+    /// A query the resolver gave up on stays in the trace with no response
+    /// code, instead of the trace ending at the last reply: resolving a
+    /// zone's glueless name server addresses sends queries whose timeout
+    /// left no reply to record.
+    #[tokio::test]
+    async fn a_query_that_gets_no_reply_stays_in_the_trace() {
+        let (_, trace) = trace_queries(async {
+            let query = Query::query(name("ns1.example.test."), RecordType::A);
+            // No reply ever fills the row in, as when the resolver's timeout
+            // fires while a name server stays silent.
+            begin_trace(IpAddr::from([192, 0, 2, 1]), Some(&query))
+                .expect("a traced query gets a row");
+        })
+        .await;
+        assert_eq!(trace.len(), 1);
+        assert_eq!(trace[0].name, "ns1.example.test.");
+        assert_eq!(trace[0].record_type, "A");
+        assert!(trace[0].rcode.is_none());
+        assert!(
+            trace[0].outcome.contains("no reply"),
+            "{}",
+            trace[0].outcome
+        );
+    }
+
+    /// A reply fills its row in, and collecting the trace afterwards does
+    /// not overwrite it with "no reply".
+    #[tokio::test]
+    async fn an_answered_query_keeps_its_reply() {
+        let (_, trace) = trace_queries(async {
+            let query = Query::query(name("www.example.test."), RecordType::A);
+            let slot = begin_trace(IpAddr::from([192, 0, 2, 2]), Some(&query))
+                .expect("a traced query gets a row");
+            let message = Message::response(0, hickory_proto::op::OpCode::Query);
+            let response = DnsResponse::from_message(message).expect("a response");
+            finish_trace(Some(slot), &Ok(response), Duration::from_millis(7));
+        })
+        .await;
+        assert_eq!(trace.len(), 1);
+        assert_eq!(trace[0].rcode.as_deref(), Some("NOERROR"));
+        assert_eq!(trace[0].elapsed, Duration::from_millis(7));
+    }
+
+    /// The address queries the recursor sends for a zone's glueless name
+    /// servers are traced, and one that is never answered stays in the list
+    /// with its server and how long it was waited for - the case where a
+    /// lookup fails on such a timeout and the trace used to stop at the last
+    /// reply.
+    #[tokio::test]
+    async fn a_glueless_nameserver_query_that_times_out_is_traced() {
+        use hickory_proto::op::MessageType;
+        use hickory_proto::rr::rdata::NS;
+
+        // A root server on loopback that delegates `test.` to `ns.test.`
+        // without glue, and drops the address question for that name server
+        // as an unreachable server does.
+        let socket = tokio::net::UdpSocket::bind("127.0.0.2:0").await.unwrap();
+        let port = socket.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let mut buf = vec![0u8; 4096];
+            loop {
+                let Ok((len, peer)) = socket.recv_from(&mut buf).await else {
+                    return;
+                };
+                let Ok(query) = Message::from_vec(&buf[..len]) else {
+                    continue;
+                };
+                let Some(question) = query.queries.first() else {
+                    continue;
+                };
+                if question.name().to_ascii() != "test." || question.query_type() != RecordType::NS
+                {
+                    continue;
+                }
+                let mut response = Message::new(
+                    query.metadata.id,
+                    MessageType::Response,
+                    query.metadata.op_code,
+                );
+                response.queries.push(question.clone());
+                response.add_authority(Record::from_rdata(
+                    name("test."),
+                    300,
+                    RData::NS(NS(name("ns.test."))),
+                ));
+                let _ = socket.send_to(&response.to_vec().unwrap(), peer).await;
+            }
+        });
+
+        let settings = RecursiveSettings {
+            dnssec_validate: false,
+            root_hints: vec!["127.0.0.2".to_string()],
+            test_outbound_port: Some(port),
+            ..RecursiveSettings::default()
+        };
+        let recursor = build(&settings, None, Arc::new(Metrics::default())).expect("a recursor");
+        let slot = RecursorSlot::new(recursor, None, &settings);
+        let (result, trace) = trace_queries(lookup(&slot, name("www.test."), RecordType::A)).await;
+
+        assert!(
+            result.is_err(),
+            "the lookup cannot finish without reaching a name server"
+        );
+        let asked: Vec<&TraceStep> = trace
+            .iter()
+            .filter(|s| s.name == "ns.test." && s.record_type == "A")
+            .collect();
+        assert_eq!(asked.len(), 1, "{trace:#?}");
+        assert!(asked[0].rcode.is_none());
+        assert!(
+            asked[0].outcome.contains("no reply"),
+            "{}",
+            asked[0].outcome
+        );
+        assert!(asked[0].elapsed >= Duration::from_secs(1));
     }
 
     /// `www.shop.test -> shop.host.test -> shop.cdn.test`, where a query

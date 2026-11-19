@@ -3145,8 +3145,9 @@ fn resolver_schemas() -> Value {
                 "dnssec_validation": { "type": "boolean" },
                 "trace": {
                     "type": "array",
-                    "description": "Every query sent upstream, in the order the answers came \
-                        back. Queries answered from a cache are not listed.",
+                    "description": "Every query sent upstream, in the order the queries were \
+                        sent. Queries answered from a cache are not listed. A query that got \
+                        no reply is listed with a null `rcode` and the reason.",
                     "items": {
                         "type": "object",
                         "required": ["server", "name", "type", "rcode", "outcome", "elapsed_ms"],

@@ -183,9 +183,10 @@
         </table>
       </div>
       <p class="muted help">
-        Listed in the order the answers came back. A failed row with a later
-        answer for the same question means the resolver moved on to another
-        server.
+        Listed in the order the queries were sent. A row with no response code
+        means the server never replied: the resolver's timeout elapsed or it
+        moved on to another server. A failed row with a later answer for the
+        same question means the walk continued elsewhere.
       </p>
     {/if}
   </div>
