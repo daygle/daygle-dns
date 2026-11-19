@@ -11,6 +11,11 @@
 //! - A chain of CNAMEs between deeply nested names (`global.cainiao.com`,
 //!   through Alibaba's GDS): the recursor counts each label of each name in
 //!   the chain against one depth limit, and the chain ran past 24.
+//! - A load balancer answering for a zone (`wip.accv.es`) that sends a
+//!   reply cut short to every NS question: the recursor asks the NS records
+//!   of the name each time it walks down to it, and caches nothing when the
+//!   reply cannot be read, so it asked the same broken question again on
+//!   every pass, each one a round trip.
 
 mod common;
 
@@ -35,14 +40,22 @@ const LAME: [Ipv4Addr; 4] = [
 const IP6: Ipv4Addr = Ipv4Addr::new(127, 0, 4, 20);
 /// Serves `8.1.0.0.2.ip6.arpa.`.
 const REVERSE: Ipv4Addr = Ipv4Addr::new(127, 0, 4, 21);
+/// Serves `broken.test.`, cutting short every reply to an NS question.
+const BROKEN: Ipv4Addr = Ipv4Addr::new(127, 0, 4, 30);
 
-const SERVERS: [Ipv4Addr; 8] = [ROOT, TLD, LAME[0], LAME[1], LAME[2], LAME[3], IP6, REVERSE];
+const SERVERS: [Ipv4Addr; 9] = [
+    ROOT, TLD, LAME[0], LAME[1], LAME[2], LAME[3], IP6, REVERSE, BROKEN,
+];
 
 /// The address with a PTR record in the reverse zone.
 const HOST: Ipv6Addr = Ipv6Addr::new(0x2001, 0x8004, 0x2c42, 0x4300, 0, 0, 0, 1);
 
 enum Reply {
     Answer(Vec<Record>),
+    /// An answer without the authoritative flag, as a load balancer sends.
+    NonAuthAnswer(Vec<Record>),
+    /// A reply cut off before its end.
+    CutShort,
     Referral(Vec<Record>, Vec<Record>),
     NoData(Record),
     NxDomain(Record),
@@ -136,6 +149,12 @@ fn handle(server: Ipv4Addr, qname: &str, qtype: RecordType) -> Reply {
                 }
                 _ => {}
             }
+            if under(qname, "broken.test.") {
+                return Reply::Referral(
+                    vec![ns("broken.test.", "ns.broken.test.")],
+                    vec![a("ns.broken.test.", BROKEN)],
+                );
+            }
             if under(qname, "lame.test.") {
                 let hosts: Vec<String> = (0..LAME.len())
                     .map(|i| format!("ns{i}.lame.test."))
@@ -227,6 +246,13 @@ fn handle(server: Ipv4Addr, qname: &str, qtype: RecordType) -> Reply {
             }
             Reply::NxDomain(soa(zone))
         }
+        s if s == BROKEN => match (qname, qtype) {
+            (_, RecordType::NS) => Reply::CutShort,
+            ("www.broken.test.", RecordType::A) => {
+                Reply::NonAuthAnswer(vec![a(qname, Ipv4Addr::new(198, 51, 100, 30))])
+            }
+            _ => Reply::NoData(soa("broken.test.")),
+        },
         _ => unreachable!(),
     }
 }
@@ -246,6 +272,7 @@ fn spawn_fake(socket: tokio::net::UdpSocket, server: Ipv4Addr) {
                 MessageType::Response,
                 query.metadata.op_code,
             );
+            let mut cut_short = false;
             for q in query.queries.iter() {
                 response.queries.push(q.clone());
                 let qname = q.name().to_ascii().to_ascii_lowercase();
@@ -254,6 +281,8 @@ fn spawn_fake(socket: tokio::net::UdpSocket, server: Ipv4Addr) {
                         response.metadata.authoritative = true;
                         response.answers.extend(records);
                     }
+                    Reply::NonAuthAnswer(records) => response.answers.extend(records),
+                    Reply::CutShort => cut_short = true,
                     Reply::Referral(authority, glue) => {
                         response.authorities.extend(authority);
                         response.additionals.extend(glue);
@@ -270,11 +299,11 @@ fn spawn_fake(socket: tokio::net::UdpSocket, server: Ipv4Addr) {
                     Reply::Code(code) => response.metadata.response_code = code,
                 }
             }
-            if socket
-                .send_to(&response.to_vec().unwrap(), peer)
-                .await
-                .is_err()
-            {
+            let mut bytes = response.to_vec().unwrap();
+            if cut_short {
+                bytes.truncate(bytes.len() - 2);
+            }
+            if socket.send_to(&bytes, peer).await.is_err() {
                 return;
             }
         }
@@ -408,6 +437,41 @@ async fn the_lookup_page_reports_the_answer_and_every_query_sent() {
     // Bad input is refused.
     let resp = lookup("www.lame.test".into(), "NOPE").await.unwrap();
     assert_eq!(resp.status(), reqwest::StatusCode::BAD_REQUEST);
+    shutdown(server).await;
+}
+
+#[tokio::test]
+async fn a_broken_reply_to_an_ns_question_is_not_asked_for_again() {
+    let (server, _dir) = spawn_recursive().await;
+    let base = format!("http://{}/api", server.api_addr);
+    let client = reqwest::Client::new();
+    let lookup = || {
+        client
+            .post(format!("{base}/resolver/lookup"))
+            .json(&serde_json::json!({ "name": "www.broken.test", "type": "A", "fresh": false }))
+            .send()
+    };
+    let asked_ns = |body: &serde_json::Value| {
+        body["trace"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|s| s["name"] == "www.broken.test." && s["type"] == "NS")
+            .count()
+    };
+
+    let body: serde_json::Value = lookup().await.unwrap().json().await.unwrap();
+    assert_eq!(body["rcode"], "NOERROR", "{body}");
+    assert_eq!(body["answers"][0]["data"], "198.51.100.30", "{body}");
+    assert_eq!(asked_ns(&body), 1, "{body}");
+    // The answer is not authoritative, so the recursor walks down to the
+    // name again on the next lookup; the broken server is not asked the
+    // same NS question again while its failure is remembered.
+    for _ in 0..3 {
+        let body: serde_json::Value = lookup().await.unwrap().json().await.unwrap();
+        assert_eq!(body["rcode"], "NOERROR", "{body}");
+        assert_eq!(asked_ns(&body), 0, "{body}");
+    }
     shutdown(server).await;
 }
 
