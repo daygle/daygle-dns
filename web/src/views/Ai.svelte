@@ -62,7 +62,7 @@
 </div>
 
 {#if current.id === 'scanner'}
-  <AiStatus onOpenSettings={canEdit ? () => (tab = 'settings') : null} onOpenThreats={() => (tab = 'threats')} />
+  <AiStatus onOpenThreats={() => (tab = 'threats')} />
 {:else if current.id === 'settings'}
   <AiSettings />
 {:else if current.id === 'threats'}

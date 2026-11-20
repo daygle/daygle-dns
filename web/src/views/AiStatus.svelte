@@ -4,9 +4,8 @@
   import { formatDateTime } from '../datetime.svelte.js';
   import { backendLabel, duration, percent, titleCase } from '../aiLabels.js';
 
-  // `onOpenSettings()` opens the AI page's Settings tab and `onOpenThreats()` the
-  // AI page's Threats tab; both null for viewers.
-  let { onOpenSettings = null, onOpenThreats = null } = $props();
+  // `onOpenThreats()` opens the AI page's Threats tab; null for viewers.
+  let { onOpenThreats = null } = $props();
 
   let status = $state(null);
   // When the scanner is not running: whether Settings has it turned on
@@ -343,9 +342,6 @@
         No domains are being classified. Turn the scanner on in the Settings
         tab; it starts after the next restart.
       </p>
-    {/if}
-    {#if onOpenSettings}
-      <button class="secondary" style="margin-top: 12px" onclick={() => onOpenSettings('ai')}>Open AI Settings</button>
     {/if}
   </div>
 {:else}
