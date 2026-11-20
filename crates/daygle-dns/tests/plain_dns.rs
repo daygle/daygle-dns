@@ -13,6 +13,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
 /// Send `query` from `socket` to `to`; the reply and where it came from.
+#[cfg(target_os = "linux")]
 async fn exchange(
     socket: &tokio::net::UdpSocket,
     to: SocketAddr,
