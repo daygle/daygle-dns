@@ -1,4 +1,5 @@
 <script>
+  import { untrack } from 'svelte';
   import { api } from '../api.js';
 
   // Resolver dashboard (GET /api/resolver): how lookups were routed and how
@@ -6,19 +7,28 @@
   // since the server started.
   let { refreshKey = 0 } = $props();
   let data = $state(null);
-  let hover = $state(null); // latency bucket under the cursor
+  let loaded = $state(false);
+  let error = $state(null);
+  let hover = $state(null); // latency bucket under the pointer or keyboard focus
+  let inFlight = $state(false);
 
   async function load() {
+    if (inFlight) return;
+    inFlight = true;
+    error = null;
     try {
       data = await api.resolver();
-    } catch {
-      data = null;
+    } catch (e) {
+      error = e?.message || String(e);
+    } finally {
+      loaded = true;
+      inFlight = false;
     }
   }
 
   $effect(() => {
     refreshKey;
-    load();
+    untrack(load);
   });
 
   const fmt = (n) => (n ?? 0).toLocaleString();
@@ -64,8 +74,12 @@
           const hi = stats.latency.bounds_ms[i];
           const lo = i === 0 ? 0 : stats.latency.bounds_ms[i - 1];
           // Columns are labelled by their upper bound; the last has none.
-          const label = hi == null ? 'more' : hi >= 1000 ? `${hi / 1000} s` : `${hi}`;
-          const range = hi == null ? `${lo} ms or more` : `${lo}-${hi} ms`;
+          const label = hi == null ? `${lo / 1000} s+` : i === 0 ? `<${hi}` : hi >= 1000 ? `${hi / 1000} s` : `${hi}`;
+          const range = hi == null
+            ? `${lo.toLocaleString()} ms or more`
+            : i === 0
+              ? `Less than ${hi} ms`
+              : `${lo.toLocaleString()} to less than ${hi.toLocaleString()} ms`;
           return { count, label, range };
         })
       : [],
@@ -80,6 +94,9 @@
 
 {#if data?.stats && data.local_root}
   <div class="card" style="margin-top: 14px">
+    {#if error}
+      <p class="notice" role="status">Could not refresh resolver statistics: {error}. Showing the last available data.</p>
+    {/if}
     <div class="spread" style="margin-bottom: 12px; flex-wrap: wrap; gap: 8px">
       <h3 style="margin: 0">Resolver <span class="muted since">Since Start</span></h3>
       <div class="row" style="gap: 6px; flex-wrap: wrap">
@@ -144,6 +161,7 @@
               <div
                 class="col"
                 role="presentation"
+                title="{b.range}: {fmt(b.count)} lookups, {pct(b.count, latencyTotal)}"
                 onpointerenter={() => (hover = { ...b, i })}
               >
                 <span class="colbar" class:hot={hover?.i === i} style="height: {b.count ? Math.max(2, (b.count / latencyMax) * 100) : 0}%"></span>
@@ -156,17 +174,42 @@
               </div>
             {/if}
           </div>
-          <div class="hist-axis">
+          <div class="hist-axis" aria-hidden="true">
             {#each buckets as b, i (i)}<span>{b.label}</span>{/each}
           </div>
+          <details class="latency-details">
+            <summary>View latency bucket data</summary>
+            <div class="table-wrap">
+              <table>
+                <thead><tr><th>Latency Range</th><th class="num">Lookups</th><th class="num">Share</th></tr></thead>
+                <tbody>
+                  {#each buckets as b, i (i)}
+                    <tr><td>{b.range}</td><td class="num">{fmt(b.count)}</td><td class="num">{pct(b.count, latencyTotal)}</td></tr>
+                  {/each}
+                </tbody>
+              </table>
+            </div>
+          </details>
           <p class="muted small" style="margin: 6px 0 0">Lookups answered from cache land in the first column.</p>
         </div>
       </div>
     {/if}
   </div>
+{:else if error}
+  <div class="card resolver-error" role="alert" style="margin-top: 14px">
+    <h3 style="margin: 0 0 6px">Resolver Statistics Unavailable</h3>
+    <p class="muted" style="margin: 0 0 10px">{error}</p>
+    <button class="secondary" onclick={load} disabled={inFlight}>Retry</button>
+  </div>
+{:else if !loaded}
+  <div class="card" role="status" aria-live="polite" style="margin-top: 14px">
+    <p class="muted" style="margin: 0">Loading resolver statistics...</p>
+  </div>
 {/if}
 
 <style>
+  .notice { margin: 0 0 12px; color: var(--warn); }
+  .resolver-error { border-color: var(--danger); }
   .tiles {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
@@ -207,6 +250,9 @@
   .colbar.hot { background: color-mix(in srgb, var(--accent) 75%, white); }
   .hist-axis { display: flex; gap: 2px; margin-top: 4px; }
   .hist-axis span { flex: 1; text-align: center; font-size: 0.62rem; color: var(--muted); white-space: nowrap; }
+  .latency-details { margin-top: 8px; font-size: 0.8rem; }
+  .latency-details summary { cursor: pointer; color: var(--muted); }
+  .latency-details .table-wrap { margin-top: 6px; }
   .tip {
     position: absolute;
     top: 0;

@@ -197,9 +197,13 @@
       </p>
     </div>
   {/if}
+{:else if !error}
+  <div class="card" role="status" aria-live="polite">
+    <p class="muted">Loading...</p>
+  </div>
 {:else}
   <div class="card">
-    <p class="muted">Loading...</p>
+    <p class="muted">Cache statistics are unavailable until the server responds.</p>
   </div>
 {/if}
 {/if}

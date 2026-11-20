@@ -169,6 +169,12 @@
   });
 </script>
 
+<svelte:window
+  onkeydown={(event) => {
+    if (event.key === 'Escape' && form && !saving) close();
+  }}
+/>
+
 <div class="card" style="margin-bottom: 14px">
   <div class="spread" style="margin-bottom: 10px">
     <h3 style="margin: 0">Resolution Policies ({policies.length})</h3>
