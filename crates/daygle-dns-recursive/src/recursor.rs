@@ -770,12 +770,12 @@ pub fn build(
         // Validation refuses more than that in recursive mode and stored
         // settings are clamped to it; the clamp here guards settings built
         // in code from claiming a wait the recursor cannot give. The wait is
-        // then held to half of the pool's budget for the walk (see
+        // then held to a third of the pool's budget for the walk (see
         // [`POOL_BUDGET`]), so a server that never answers cannot spend all
-        // of it and the zone's next server still gets asked.
+        // of it and the zone's next servers still get asked.
         timeout: Some(
             Duration::from_secs(settings.timeout_secs.clamp(1, RECURSOR_MAX_TIMEOUT_SECS))
-                .min(POOL_BUDGET / 2),
+                .min(POOL_BUDGET / SERVERS_TRIED),
         ),
         ..UpstreamConnections::default()
     };
@@ -811,8 +811,16 @@ pub fn build(
 /// everything it is given: given the whole budget, the zone's second server
 /// was never asked and a name it serves failed with SERVFAIL (a delegation
 /// listed with a dead server first, `tracker.openbittorrent.com` among
-/// them). One server is therefore given at most half of it.
+/// them). One server is therefore given at most a third of it: a zone can
+/// list two dead servers before a working one, as `yoyo.org` does from the
+/// `.org` parent (its glue points at two hosts that no longer answer, with
+/// the working one listed third), and reaching only two of its three
+/// servers leaves the lookup failing exactly as before.
 const POOL_BUDGET: Duration = Duration::from_secs(5);
+
+/// How many of a zone's name servers one walk should reach within
+/// [`POOL_BUDGET`] (see [`POOL_BUDGET`] for why more than two).
+const SERVERS_TRIED: u32 = 3;
 
 /// How deep the recursor may go for one client query. The recursor counts
 /// one step for each label it walks looking for a zone's name servers, and
@@ -1428,7 +1436,7 @@ mod tests {
             dnssec_validate: false,
             root_hints: vec!["127.0.0.2".to_string()],
             test_outbound_port: Some(port),
-            timeout_secs: 2,
+            timeout_secs: 1,
             ..RecursiveSettings::default()
         };
         let recursor = build(&settings, None, Arc::new(Metrics::default())).expect("a recursor");
@@ -1447,14 +1455,195 @@ mod tests {
         assert_eq!(asked.len(), 1, "{trace:#?}");
         assert!(asked[0].rcode.is_none());
         assert!(
-            asked[0].outcome.contains("no reply after 2.0s"),
+            asked[0].outcome.contains("no reply after 1.0s"),
             "{}",
             asked[0].outcome
         );
-        assert_eq!(asked[0].elapsed, Duration::from_secs(2), "{:#?}", asked[0]);
+        assert_eq!(asked[0].elapsed, Duration::from_secs(1), "{:#?}", asked[0]);
         assert!(
             started.elapsed() < Duration::from_secs(4),
-            "the lookup gave up at the 2s setting, not the recursor's built-in 5s"
+            "the lookup gave up at the 1s setting, not the recursor's built-in 5s"
+        );
+    }
+
+    // The fake hierarchy the dead-name-server test walks.
+    const FAKE_ROOT: Ipv4Addr = Ipv4Addr::new(127, 0, 0, 2);
+    const FAKE_TLD: Ipv4Addr = Ipv4Addr::new(127, 0, 0, 3);
+    const FAKE_SILENT_NS1: Ipv4Addr = Ipv4Addr::new(127, 0, 0, 4);
+    const FAKE_ALIVE_NS: Ipv4Addr = Ipv4Addr::new(127, 0, 0, 5);
+    const FAKE_SILENT_NS2: Ipv4Addr = Ipv4Addr::new(127, 0, 0, 6);
+
+    /// One server of the fake hierarchy: the root refers `test.` to the TLD,
+    /// the TLD refers `fallback.test.` to three name servers (the first two
+    /// silent), and the zone's working server answers the name.
+    fn spawn_fake(socket: tokio::net::UdpSocket, server: Ipv4Addr) {
+        use hickory_proto::op::MessageType;
+        use hickory_proto::rr::rdata::NS;
+
+        // Bound and never answered, as a name server on stale glue is.
+        if server == FAKE_SILENT_NS1 || server == FAKE_SILENT_NS2 {
+            tokio::spawn(async move {
+                let _socket = socket;
+                std::future::pending::<()>().await;
+            });
+            return;
+        }
+        tokio::spawn(async move {
+            let mut buf = vec![0u8; 4096];
+            loop {
+                let Ok((len, peer)) = socket.recv_from(&mut buf).await else {
+                    return;
+                };
+                let Ok(query) = Message::from_vec(&buf[..len]) else {
+                    continue;
+                };
+                let Some(question) = query.queries.first() else {
+                    continue;
+                };
+                let mut response = Message::new(
+                    query.metadata.id,
+                    MessageType::Response,
+                    query.metadata.op_code,
+                );
+                response.queries.push(question.clone());
+                let owner = question.name().to_ascii().to_ascii_lowercase();
+                if server == FAKE_TLD {
+                    response.add_authority(Record::from_rdata(
+                        name("fallback.test."),
+                        300,
+                        RData::NS(NS(name("ns1.fallback.test."))),
+                    ));
+                    response.add_authority(Record::from_rdata(
+                        name("fallback.test."),
+                        300,
+                        RData::NS(NS(name("ns2.fallback.test."))),
+                    ));
+                    response.add_authority(Record::from_rdata(
+                        name("fallback.test."),
+                        300,
+                        RData::NS(NS(name("ns3.fallback.test."))),
+                    ));
+                    response.add_additional(Record::from_rdata(
+                        name("ns1.fallback.test."),
+                        300,
+                        RData::A(A(FAKE_SILENT_NS1)),
+                    ));
+                    response.add_additional(Record::from_rdata(
+                        name("ns2.fallback.test."),
+                        300,
+                        RData::A(A(FAKE_SILENT_NS2)),
+                    ));
+                    response.add_additional(Record::from_rdata(
+                        name("ns3.fallback.test."),
+                        300,
+                        RData::A(A(FAKE_ALIVE_NS)),
+                    ));
+                } else if server == FAKE_ROOT {
+                    response.add_authority(Record::from_rdata(
+                        name("test."),
+                        300,
+                        RData::NS(NS(name("ns.test."))),
+                    ));
+                    response.add_additional(Record::from_rdata(
+                        name("ns.test."),
+                        300,
+                        RData::A(A(FAKE_TLD)),
+                    ));
+                } else if owner == "www.fallback.test." && question.query_type() == RecordType::A {
+                    response.metadata.authoritative = true;
+                    response.add_answer(Record::from_rdata(
+                        name("www.fallback.test."),
+                        300,
+                        RData::A(A(Ipv4Addr::new(198, 51, 100, 77))),
+                    ));
+                } else {
+                    // The zone's working server, for its other questions.
+                    response.metadata.authoritative = true;
+                }
+                if let Ok(bytes) = response.to_vec() {
+                    if socket.send_to(&bytes, peer).await.is_err() {
+                        return;
+                    }
+                }
+            }
+        });
+    }
+
+    /// A zone whose first two name servers never answer resolves from its
+    /// third one anyway.
+    ///
+    /// The recursor's name server pool gives a query one 5s budget for all
+    /// of a zone's servers and asks them one at a time, so a wait for one
+    /// silent server that fills most of the budget leaves no room for the
+    /// servers after it: `yoyo.org` is delegated with two dead servers listed
+    /// before the working one, and reaching only the first two still failed
+    /// with SERVFAIL. The default 5s setting is used, as shipped.
+    #[tokio::test]
+    async fn a_zone_with_two_silent_nameservers_resolves_from_its_third() {
+        // One port for the whole fake hierarchy, which outbound queries are
+        // redirected to (see `test_outbound_port`).
+        let port = 'retry: loop {
+            let root = tokio::net::UdpSocket::bind((FAKE_ROOT, 0)).await.unwrap();
+            let port = root.local_addr().unwrap().port();
+            let mut sockets = vec![(root, FAKE_ROOT)];
+            for server in [FAKE_TLD, FAKE_SILENT_NS1, FAKE_ALIVE_NS, FAKE_SILENT_NS2] {
+                match tokio::net::UdpSocket::bind((server, port)).await {
+                    Ok(socket) => sockets.push((socket, server)),
+                    Err(_) => continue 'retry,
+                }
+            }
+            for (socket, server) in sockets {
+                spawn_fake(socket, server);
+            }
+            break port;
+        };
+
+        let settings = RecursiveSettings {
+            dnssec_validate: false,
+            root_hints: vec![FAKE_ROOT.to_string()],
+            test_outbound_port: Some(port),
+            timeout_secs: 5,
+            ..RecursiveSettings::default()
+        };
+        let recursor = build(&settings, None, Arc::new(Metrics::default())).expect("a recursor");
+        let slot = RecursorSlot::new(recursor, None, &settings);
+        let started = Instant::now();
+        let (result, trace) =
+            trace_queries(lookup(&slot, name("www.fallback.test."), RecordType::A)).await;
+        let took = started.elapsed();
+
+        assert!(result.is_ok(), "{result:?}\n{trace:#?}");
+        assert!(
+            took < Duration::from_secs(4),
+            "two silent servers must leave room for the third ({took:?})\n{trace:#?}"
+        );
+
+        for silent_ns in [FAKE_SILENT_NS1, FAKE_SILENT_NS2] {
+            let asked: Vec<&TraceStep> = trace
+                .iter()
+                .filter(|step| step.server == IpAddr::V4(silent_ns))
+                .collect();
+            assert!(!asked.is_empty(), "{silent_ns} was asked\n{trace:#?}");
+            for step in asked {
+                assert!(step.rcode.is_none(), "{step:#?}");
+                assert!(step.outcome.contains("no reply"), "{step:#?}");
+                assert!(
+                    step.elapsed < Duration::from_secs(2),
+                    "one server's wait leaves the pool room for the next ({:?})",
+                    step.elapsed
+                );
+            }
+        }
+
+        let answered: Vec<&TraceStep> = trace
+            .iter()
+            .filter(|step| {
+                step.server == IpAddr::V4(FAKE_ALIVE_NS) && step.rcode.as_deref() == Some("NOERROR")
+            })
+            .collect();
+        assert!(
+            !answered.is_empty(),
+            "the zone's third name server answered\n{trace:#?}"
         );
     }
 
