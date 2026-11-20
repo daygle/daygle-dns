@@ -6,9 +6,6 @@
   import { icons } from '../icons.svelte.js';
   import { formatDate, formatDateTime } from '../datetime.svelte.js';
 
-  // Opens Settings on a tab (null for viewers, who cannot).
-  let { onOpenSettings = null } = $props();
-
   let certs = $state([]);
   let loading = $state(true);
   let busy = $state(false);
@@ -423,12 +420,6 @@
       certificate in use applies at once. For the web console, upload one
       issued for the name you browse to, so browsers trust it.
     </p>
-    {#if onOpenSettings}
-      <div class="row" style="gap: 8px">
-        <button class="secondary" onclick={() => onOpenSettings('general')}>Web Console Settings</button>
-        <button class="secondary" onclick={() => onOpenSettings('listeners')}>Encrypted DNS Settings</button>
-      </div>
-    {/if}
   </div>
 </div>
 

@@ -362,7 +362,7 @@
       {:else if view === 'users'}
         <Users />
       {:else if view === 'certificates'}
-        <Certificates onOpenSettings={isViewer ? null : openSettings} />
+        <Certificates />
       {:else if view === 'ai'}
         {#key pageTab}
           <Ai initialTab={pageTab || 'scanner'} canEdit={!isViewer} />
