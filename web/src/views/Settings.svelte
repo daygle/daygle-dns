@@ -831,10 +831,11 @@
         Per-Server Timeout is how long to wait for one
         {recursive.mode === 'recursive' ? 'name server' : 'upstream server'}
         before trying the next{#if recursive.mode === 'recursive'} (at most
-        {RECURSOR_TIMEOUT_MAX} seconds; in recursive mode each name server
-        gets a third of the recursor's 5 second budget at most, so a silent
-        one still leaves time for the zone's next servers, and the trace
-        shows the wait actually given){/if}. Client Timeout is how long a client waits for
+        {RECURSOR_TIMEOUT_MAX} seconds; in recursive mode a name server is
+        waited for no longer than a third of the recursor's 5 second budget
+        and no more than half the Client Timeout, so a silent one still
+        leaves time to try the zone's next servers inside the client's wait,
+        and the trace shows the wait actually given){/if}. Client Timeout is how long a client waits for
         a lookup (1000-10000 ms): when it runs out the client gets the expired
         answer if there is one (Serve-Stale, Cache → Settings), else SERVFAIL,
         and the lookup carries on to fill the cache. Raise it if slow sites
