@@ -5621,7 +5621,8 @@ pub(crate) async fn build_resolver(
     state: &AppState,
     resolved: &daygle_dns_core::config::DaygleConfig,
 ) -> daygle_dns_core::error::Result<daygle_dns_recursive::RecursiveResolver> {
-    let settings = resolved.recursive.clone();
+    let mut settings = resolved.recursive.clone();
+    settings.client_timeout_ms = resolved.server.client_timeout_ms;
     let stub_zones = resolved.authoritative.stub_zones.clone();
     let metrics = state.metrics.clone();
     let local_root = state.local_root.clone();

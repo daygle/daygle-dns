@@ -4352,7 +4352,25 @@ pub struct RecursiveSettings {
     /// Number of entries in the response cache (positive caching).
     pub cache_size: usize,
     /// Per-nameserver timeout in seconds.
+    ///
+    /// In recursive mode this is the longest one name server is waited for,
+    /// not the wait every server gets: the recursor gives a server at most a
+    /// third of its pool budget for the walk, and no more than half the
+    /// client's answer budget, so a zone's next server is tried before the
+    /// client's wait is over (see `per_server_wait` in the recursive crate).
+    /// Forwarding waits the whole value per attempt.
     pub timeout_secs: u64,
+    /// The client answer budget (`server.client_timeout_ms`), in milliseconds.
+    ///
+    /// Not a setting of its own: the server layer copies it in when it builds
+    /// the resolver, so a name server that has stopped answering can be given
+    /// up on and the zone's next one tried inside the time the client is
+    /// answered in (see `per_server_wait` in the recursive crate). 0 when no
+    /// client budget is known - a resolver built directly, as in the
+    /// recursor's unit tests - which leaves the share of the pool's budget
+    /// (`timeout_secs`, capped) as the whole wait.
+    #[serde(skip)]
+    pub client_timeout_ms: u64,
     /// Number of attempts per nameserver (retry logic).
     pub attempts: usize,
     /// Validate DNSSEC responses (sets AD and rejects bogus chains).
@@ -4760,6 +4778,7 @@ impl Default for RecursiveSettings {
             use_system_config: true,
             cache_size: 8192,
             timeout_secs: 5,
+            client_timeout_ms: 0,
             attempts: 3,
             dnssec_validate: true,
             dnssec_reject_bogus: false,

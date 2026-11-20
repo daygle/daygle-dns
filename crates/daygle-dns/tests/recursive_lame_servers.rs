@@ -20,6 +20,7 @@
 mod common;
 
 use std::net::{Ipv4Addr, Ipv6Addr};
+use std::time::{Duration, Instant};
 
 use common::*;
 use daygle_dns_core::config::ResolutionMode;
@@ -42,9 +43,14 @@ const IP6: Ipv4Addr = Ipv4Addr::new(127, 0, 4, 20);
 const REVERSE: Ipv4Addr = Ipv4Addr::new(127, 0, 4, 21);
 /// Serves `broken.test.`, cutting short every reply to an NS question.
 const BROKEN: Ipv4Addr = Ipv4Addr::new(127, 0, 4, 30);
+/// Delegated first for `silent.test.` and never answers: it reads the query
+/// and drops it, as a decommissioned address does (no reply, no refusal).
+const SILENT: Ipv4Addr = Ipv4Addr::new(127, 0, 4, 40);
+/// Serves `silent.test.`, delegated second.
+const LIVE: Ipv4Addr = Ipv4Addr::new(127, 0, 4, 41);
 
-const SERVERS: [Ipv4Addr; 9] = [
-    ROOT, TLD, LAME[0], LAME[1], LAME[2], LAME[3], IP6, REVERSE, BROKEN,
+const SERVERS: [Ipv4Addr; 11] = [
+    ROOT, TLD, LAME[0], LAME[1], LAME[2], LAME[3], IP6, REVERSE, BROKEN, SILENT, LIVE,
 ];
 
 /// The address with a PTR record in the reverse zone.
@@ -56,6 +62,8 @@ enum Reply {
     NonAuthAnswer(Vec<Record>),
     /// A reply cut off before its end.
     CutShort,
+    /// No reply at all, as a server that has stopped answering sends none.
+    Silent,
     Referral(Vec<Record>, Vec<Record>),
     NoData(Record),
     NxDomain(Record),
@@ -155,6 +163,17 @@ fn handle(server: Ipv4Addr, qname: &str, qtype: RecordType) -> Reply {
                     vec![a("ns.broken.test.", BROKEN)],
                 );
             }
+            if under(qname, "silent.test.") {
+                // The silent server is listed first, as the stale address of
+                // a zone's decommissioned server often is.
+                return Reply::Referral(
+                    vec![
+                        ns("silent.test.", "ns1.silent.test."),
+                        ns("silent.test.", "ns2.silent.test."),
+                    ],
+                    vec![a("ns1.silent.test.", SILENT), a("ns2.silent.test.", LIVE)],
+                );
+            }
             if under(qname, "lame.test.") {
                 let hosts: Vec<String> = (0..LAME.len())
                     .map(|i| format!("ns{i}.lame.test."))
@@ -246,6 +265,21 @@ fn handle(server: Ipv4Addr, qname: &str, qtype: RecordType) -> Reply {
             }
             Reply::NxDomain(soa(zone))
         }
+        s if s == SILENT => Reply::Silent,
+        s if s == LIVE => match (qname, qtype) {
+            ("silent.test.", RecordType::NS) => Reply::Answer(vec![
+                ns("silent.test.", "ns1.silent.test."),
+                ns("silent.test.", "ns2.silent.test."),
+            ]),
+            ("www.silent.test.", RecordType::A) => {
+                Reply::Answer(vec![a("www.silent.test.", Ipv4Addr::new(198, 51, 100, 41))])
+            }
+            ("ns1.silent.test.", RecordType::A) => {
+                Reply::Answer(vec![a("ns1.silent.test.", SILENT)])
+            }
+            ("ns2.silent.test.", RecordType::A) => Reply::Answer(vec![a("ns2.silent.test.", LIVE)]),
+            _ => Reply::NoData(soa("silent.test.")),
+        },
         s if s == BROKEN => match (qname, qtype) {
             (_, RecordType::NS) => Reply::CutShort,
             ("www.broken.test.", RecordType::A) => {
@@ -273,6 +307,7 @@ fn spawn_fake(socket: tokio::net::UdpSocket, server: Ipv4Addr) {
                 query.metadata.op_code,
             );
             let mut cut_short = false;
+            let mut silent = false;
             for q in query.queries.iter() {
                 response.queries.push(q.clone());
                 let qname = q.name().to_ascii().to_ascii_lowercase();
@@ -283,6 +318,7 @@ fn spawn_fake(socket: tokio::net::UdpSocket, server: Ipv4Addr) {
                     }
                     Reply::NonAuthAnswer(records) => response.answers.extend(records),
                     Reply::CutShort => cut_short = true,
+                    Reply::Silent => silent = true,
                     Reply::Referral(authority, glue) => {
                         response.authorities.extend(authority);
                         response.additionals.extend(glue);
@@ -298,6 +334,10 @@ fn spawn_fake(socket: tokio::net::UdpSocket, server: Ipv4Addr) {
                     }
                     Reply::Code(code) => response.metadata.response_code = code,
                 }
+            }
+            if silent {
+                // Read and dropped: no reply, and so no ICMP either.
+                continue;
             }
             let mut bytes = response.to_vec().unwrap();
             if cut_short {
@@ -352,6 +392,70 @@ async fn a_zone_with_lame_servers_resolves_from_its_working_one() {
         assert_eq!(msg.response_code, ResponseCode::NoError, "{msg:?}");
         assert_eq!(first_answer(&msg).as_deref(), Some("198.51.100.9"));
     }
+    shutdown(server).await;
+}
+
+/// A zone whose first name server swallows every query used to fail the
+/// whole lookup with SERVFAIL: the recursor waited the full
+/// `recursive.timeout_secs` on it, past the 2s the client is answered in,
+/// and the zone's working second server was never asked. The wait for one
+/// server is now half the client's budget, so the zone's next one is tried
+/// inside it. This is the `update.videolan.org` case, whose delegation still
+/// lists the dead address of `ns2.videolan.org` while `ns1` answers.
+#[tokio::test]
+async fn a_silent_nameserver_falls_back_to_the_zones_working_one_in_time() {
+    let (server, _dir) = spawn_recursive().await;
+    // The silent server is in the trace as the one that got no reply, and
+    // the live one answered.
+    let base = format!("http://{}/api", server.api_addr);
+    let body: serde_json::Value = reqwest::Client::new()
+        .post(format!("{base}/resolver/lookup"))
+        .json(&serde_json::json!({ "name": "www.silent.test", "type": "A", "fresh": true }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(body["rcode"], "NOERROR", "{body}");
+    let trace = body["trace"].as_array().unwrap();
+    let silent = trace
+        .iter()
+        .find(|s| s["server"] == SILENT.to_string())
+        .unwrap_or_else(|| panic!("the silent server was never asked: {body}"));
+    assert!(silent["rcode"].is_null(), "{body}");
+    assert!(
+        silent["outcome"]
+            .as_str()
+            .unwrap()
+            .contains("no reply after 1.0s"),
+        "{body}"
+    );
+    assert!(
+        trace.iter().any(|s| {
+            s["server"] == LIVE.to_string()
+                && s["name"] == "www.silent.test."
+                && s["rcode"] == "NOERROR"
+        }),
+        "the zone's working server was not asked for the name: {body}"
+    );
+
+    let udp = server.udp_addr.unwrap();
+    let started = Instant::now();
+    let msg = udp_query(udp, "www.silent.test.", RecordType::A).await;
+    let elapsed = started.elapsed();
+    assert_eq!(
+        msg.response_code,
+        ResponseCode::NoError,
+        "{msg:?} trace: {body}"
+    );
+    assert_eq!(first_answer(&msg).as_deref(), Some("198.51.100.41"));
+    // `server.client_timeout_ms` is 2s: the retry has to happen inside it,
+    // not after `recursive.timeout_secs` (the connection's own wait).
+    assert!(
+        elapsed < Duration::from_millis(2000),
+        "the client waited {elapsed:?} for the zone's working server; trace: {body}"
+    );
     shutdown(server).await;
 }
 

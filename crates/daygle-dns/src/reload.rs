@@ -229,8 +229,10 @@ pub fn apply_config(shared: &Shared, new: Arc<DaygleConfig>) -> bool {
                     }
                 }
             }
+            let mut recursive = new_r.recursive.clone();
+            recursive.client_timeout_ms = new_r.server.client_timeout_ms;
             match RecursiveResolver::build(
-                &new_r.recursive,
+                &recursive,
                 shared.metrics.clone(),
                 &new_r.authoritative.stub_zones,
                 Some(shared.local_root.clone()),

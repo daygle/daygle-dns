@@ -100,9 +100,10 @@ use_system_config = true
 cache_size = 8192
 # Per-nameserver timeout in seconds. Recursive mode caps this at 5, and the
 # recursor's name server pool gives one server at most a third of that budget
-# so the zone's next servers are still asked before the lookup gives up; the
-# Lookup trace reports the wait it gave. Forwarding uses the whole 1-300
-# range.
+# so the zone's next servers are still asked before the lookup gives up. It
+# also waits no longer than half the Client Timeout, so the retry fits inside
+# the client's answer; the Lookup trace reports the wait it gave. Forwarding
+# uses the whole 1-300 range.
 timeout_secs = 5
 attempts = 3
 dnssec_validate = true

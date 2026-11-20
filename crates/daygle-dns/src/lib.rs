@@ -533,8 +533,12 @@ pub async fn bind_with(
 
     // Recursive.
     let resolver = if config.recursive.enabled {
+        // The recursor decides how long to wait for one name server before
+        // trying the zone's next one from the client's answer budget.
+        let mut recursive = resolved.recursive.clone();
+        recursive.client_timeout_ms = resolved.server.client_timeout_ms;
         let resolver = RecursiveResolver::build(
-            &resolved.recursive,
+            &recursive,
             metrics.clone(),
             &resolved.authoritative.stub_zones,
             Some(local_root.clone()),

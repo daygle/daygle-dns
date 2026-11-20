@@ -531,23 +531,67 @@ impl<C: DnsHandle> DnsHandle for TrackedConn<C> {
             })
             .boxed();
         // The recursor builds its name server connections with a fixed 5s
-        // timeout, so a configured timeout is enforced here: the reply
-        // stream ends and the query is treated as unanswered, with the
-        // trace row reporting the timeout it was given. The server is then
-        // remembered as silent for the rest of this lookup, so its next
-        // question goes to the zone's other servers instead of waiting on it
-        // all over again.
+        // timeout, so the wait is enforced here. A server that does not
+        // answer is reported as unreachable, as a lame reply already is, and
+        // is remembered as silent for the rest of this lookup: a stream that
+        // merely ends leaves the pool nothing to act on, and the walk asks
+        // the zone's servers again for the name, so a dead one would cost a
+        // second full wait (see [`unreachable_after`]).
         match timeout {
-            Some(timeout) => {
-                let expiring = async move {
-                    tokio::time::sleep(timeout).await;
-                    let _ = SILENT_SERVERS.try_with(|silent| silent.borrow_mut().insert(server));
-                };
-                replies.take_until(expiring).boxed()
-            }
+            Some(timeout) => unreachable_after(replies, server, timeout),
             None => replies,
         }
     }
+}
+
+/// `replies`, with a server that stops answering reported as unreachable.
+///
+/// The recursor's name server pool asks a zone's servers in turn and moves
+/// on only when one cannot be reached; a reply stream that merely ends
+/// leaves the query unanswered, and the lookup fails at the first server of
+/// a delegation that no longer answers however well the rest of the zone
+/// does. `update.videolan.org` was SERVFAIL for that reason: the `org`
+/// delegation still publishes the address of a decommissioned
+/// `ns2.videolan.org`, while `ns1` answered the name in milliseconds.
+fn unreachable_after(
+    mut replies: BoxStream<'static, std::result::Result<DnsResponse, NetError>>,
+    server: IpAddr,
+    timeout: Duration,
+) -> BoxStream<'static, std::result::Result<DnsResponse, NetError>> {
+    let mut sleep = Box::pin(tokio::time::sleep(timeout));
+    let mut done = false;
+    let mut reported = false;
+    futures_util::stream::poll_fn(move |cx| {
+        if done {
+            return std::task::Poll::Ready(None);
+        }
+        if reported {
+            // The timeout was reported; the stream is over.
+            done = true;
+            return std::task::Poll::Ready(None);
+        }
+        match replies.poll_next_unpin(cx) {
+            std::task::Poll::Ready(Some(reply)) => std::task::Poll::Ready(Some(reply)),
+            std::task::Poll::Ready(None) => {
+                done = true;
+                std::task::Poll::Ready(None)
+            }
+            std::task::Poll::Pending => {
+                if sleep.as_mut().poll(cx).is_ready() {
+                    reported = true;
+                    let _ = SILENT_SERVERS.try_with(|silent| silent.borrow_mut().insert(server));
+                    debug!(%server, ?timeout, "no reply, trying the zone's next server");
+                    std::task::Poll::Ready(Some(Err(NetError::from(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        format!("name server {server} did not answer within {timeout:?}"),
+                    )))))
+                } else {
+                    std::task::Poll::Pending
+                }
+            }
+        }
+    })
+    .boxed()
 }
 
 /// A REFUSED or SERVFAIL answer from a name server, as a failure to reach
@@ -765,18 +809,14 @@ pub fn build(
         skip_lame_servers: true,
         broken_ns: Some(Arc::default()),
         // The recursor's own name server connections are built with a fixed
-        // 5s timeout whatever the settings say, so the configured one is
-        // applied to each reply stream instead (see [`TrackedConn::send`]).
-        // Validation refuses more than that in recursive mode and stored
-        // settings are clamped to it; the clamp here guards settings built
-        // in code from claiming a wait the recursor cannot give. The wait is
-        // then held to a third of the pool's budget for the walk (see
-        // [`POOL_BUDGET`]), so a server that never answers cannot spend all
-        // of it and the zone's next servers still get asked.
-        timeout: Some(
-            Duration::from_secs(settings.timeout_secs.clamp(1, RECURSOR_MAX_TIMEOUT_SECS))
-                .min(POOL_BUDGET / SERVERS_TRIED),
-        ),
+        // 5s timeout whatever the settings say, so the wait is applied to
+        // each reply stream instead (see [`TrackedConn::send`]), short enough
+        // that the zone's next servers are asked inside the pool's budget for
+        // the walk and inside the client's answer (see [`per_server_wait`]).
+        // Validation refuses a setting above what the recursor can wait, and
+        // stored settings are clamped to it; the clamp here guards settings
+        // built in code from claiming a wait the recursor cannot give.
+        timeout: Some(per_server_wait(settings)),
         ..UpstreamConnections::default()
     };
     if let Some(port) = settings.test_outbound_port {
@@ -821,6 +861,28 @@ const POOL_BUDGET: Duration = Duration::from_secs(5);
 /// How many of a zone's name servers one walk should reach within
 /// [`POOL_BUDGET`] (see [`POOL_BUDGET`] for why more than two).
 const SERVERS_TRIED: u32 = 3;
+
+/// How long one name server is waited for before the zone's next one is
+/// tried.
+///
+/// Two limits apply. One server may have no more than its share of the
+/// pool's budget for the walk ([`POOL_BUDGET`] over [`SERVERS_TRIED`]), or
+/// a zone whose dead servers are listed first never reaches the working one.
+/// The client, though, is answered within `server.client_timeout_ms` - 2s by
+/// default, less than that share - so half of that budget is the real limit:
+/// the retry to the zone's next server has to happen inside the client's
+/// wait, not after `recursive.timeout_secs`. `update.videolan.org` failed
+/// exactly so: the wait outlasted the client's answer while `ns1` replied at
+/// once. Settings built without a client budget (the recursor's unit tests)
+/// keep the share of the pool's budget.
+fn per_server_wait(settings: &RecursiveSettings) -> Duration {
+    let configured = Duration::from_secs(settings.timeout_secs.clamp(1, RECURSOR_MAX_TIMEOUT_SECS))
+        .min(POOL_BUDGET / SERVERS_TRIED);
+    match settings.client_timeout_ms {
+        0 => configured,
+        budget => configured.min(Duration::from_millis((budget / 2).max(1))),
+    }
+}
 
 /// How deep the recursor may go for one client query. The recursor counts
 /// one step for each label it walks looking for a zone's name servers, and
