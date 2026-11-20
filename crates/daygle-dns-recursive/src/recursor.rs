@@ -189,6 +189,13 @@ tokio::task_local! {
     /// The queries the lookup running in this task sent upstream, for
     /// [`trace_queries`].
     static QUERY_TRACE: std::cell::RefCell<TraceLog>;
+    /// Servers that did not answer a query during the lookup running in
+    /// this task. The lookup asks such a server once: waiting on it again
+    /// for its next question would spend a second full wait, and a lookup
+    /// that walked the zone twice (the NS question for the name, then the
+    /// answer itself) then ran past the pool's budget for the walk and
+    /// failed even though the zone's other server was answering.
+    static SILENT_SERVERS: std::cell::RefCell<std::collections::HashSet<IpAddr>>;
 }
 
 /// The most queries [`trace_queries`] records for one lookup.
@@ -467,6 +474,13 @@ impl<C: DnsHandle> DnsHandle for TrackedConn<C> {
                 return futures_util::stream::once(async move { Err(error) }).boxed();
             }
         }
+        if SILENT_SERVERS
+            .try_with(|silent| silent.borrow().contains(&self.server))
+            .unwrap_or(false)
+        {
+            debug!(server = %self.server, "not asking again: the server did not answer this lookup");
+            return futures_util::stream::once(async move { Err(NetError::Timeout) }).boxed();
+        }
         // Outside a tracked lookup (prefetch refreshes, probes) there is
         // nothing to flag.
         let _ = SENT_UPSTREAM.try_with(|sent| sent.set(true));
@@ -519,9 +533,18 @@ impl<C: DnsHandle> DnsHandle for TrackedConn<C> {
         // The recursor builds its name server connections with a fixed 5s
         // timeout, so a configured timeout is enforced here: the reply
         // stream ends and the query is treated as unanswered, with the
-        // trace row reporting the timeout it was given.
+        // trace row reporting the timeout it was given. The server is then
+        // remembered as silent for the rest of this lookup, so its next
+        // question goes to the zone's other servers instead of waiting on it
+        // all over again.
         match timeout {
-            Some(timeout) => replies.take_until(tokio::time::sleep(timeout)).boxed(),
+            Some(timeout) => {
+                let expiring = async move {
+                    tokio::time::sleep(timeout).await;
+                    let _ = SILENT_SERVERS.try_with(|silent| silent.borrow_mut().insert(server));
+                };
+                replies.take_until(expiring).boxed()
+            }
             None => replies,
         }
     }
@@ -746,10 +769,14 @@ pub fn build(
         // applied to each reply stream instead (see [`TrackedConn::send`]).
         // Validation refuses more than that in recursive mode and stored
         // settings are clamped to it; the clamp here guards settings built
-        // in code from claiming a wait the recursor cannot give.
-        timeout: Some(Duration::from_secs(
-            settings.timeout_secs.clamp(1, RECURSOR_MAX_TIMEOUT_SECS),
-        )),
+        // in code from claiming a wait the recursor cannot give. The wait is
+        // then held to half of the pool's budget for the walk (see
+        // [`POOL_BUDGET`]), so a server that never answers cannot spend all
+        // of it and the zone's next server still gets asked.
+        timeout: Some(
+            Duration::from_secs(settings.timeout_secs.clamp(1, RECURSOR_MAX_TIMEOUT_SECS))
+                .min(POOL_BUDGET / 2),
+        ),
         ..UpstreamConnections::default()
     };
     if let Some(port) = settings.test_outbound_port {
@@ -776,6 +803,16 @@ pub fn build(
     Recursor::new(&hints, dnssec, None, options, connections)
         .map_err(|e| DaygleError::Config(format!("cannot build recursive resolver: {e}")))
 }
+
+/// The time the recursor's name server pool gives one query's walk to a
+/// zone's servers (Hickory's `ResolverOpts::timeout` default, which the
+/// recursor sets for itself and does not expose). The pool asks the servers
+/// one at a time within it, and a server that never answers waits out
+/// everything it is given: given the whole budget, the zone's second server
+/// was never asked and a name it serves failed with SERVFAIL (a delegation
+/// listed with a dead server first, `tracker.openbittorrent.com` among
+/// them). One server is therefore given at most half of it.
+const POOL_BUDGET: Duration = Duration::from_secs(5);
 
 /// How deep the recursor may go for one client query. The recursor counts
 /// one step for each label it walks looking for a zone's name servers, and
@@ -817,6 +854,22 @@ enum Resolved {
 /// `NoError`), matching the forwarding path; transport failures carry no
 /// code so serve-stale can cover them.
 pub async fn lookup(slot: &RecursorSlot, name: Name, record_type: RecordType) -> Result<Lookup> {
+    // A silent name server is asked once per lookup, not once per question
+    // it is asked (see [`SILENT_SERVERS`]).
+    SILENT_SERVERS
+        .scope(
+            Default::default(),
+            lookup_asking_once(slot, name, record_type),
+        )
+        .await
+}
+
+/// The body of [`lookup`], inside the scope of its per-lookup memories.
+async fn lookup_asking_once(
+    slot: &RecursorSlot,
+    name: Name,
+    record_type: RecordType,
+) -> Result<Lookup> {
     let mut name = name;
     name.set_fqdn(true);
     let query = Query::query(name.clone(), record_type);

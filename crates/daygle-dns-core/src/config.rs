@@ -4724,7 +4724,10 @@ pub const PRIVATE_NETWORKS: &[&str] = &[
 /// honoured by patching hickory, so recursive mode is capped here: the
 /// console offers no more, validation refuses more, and configurations that
 /// ask for more are clamped to it, so the setting and the Lookup trace
-/// cannot report different timeouts. Forwarding mode uses the whole range.
+/// cannot report different timeouts. Within that budget the pool asks a
+/// zone's name servers one at a time, so one server is given at most half of
+/// it and the rest is left for the zone's next server. Forwarding mode uses
+/// the whole range.
 pub const RECURSOR_MAX_TIMEOUT_SECS: u64 = 5;
 
 impl RecursiveSettings {
