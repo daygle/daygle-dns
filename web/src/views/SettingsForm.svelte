@@ -69,7 +69,8 @@
      label wraps. */
   .settings-form :global(.recursive-cache-grid label:not(.check) > span:first-child) { min-height: 2.6em; display: flex; align-items: flex-end; }
   .settings-form :global(.recursive-cache-grid label.check) { padding-top: 2.6em; }
-  .settings-form :global(label) { display: flex; flex-direction: column; gap: 4px; font-size: 0.85rem; }
+  /* Chips (NetworkPicker) style their own labels; leave them alone. */
+  .settings-form :global(label:not(.chip)) { display: flex; flex-direction: column; gap: 4px; font-size: 0.85rem; }
   .settings-form :global(label span) { color: var(--muted); }
   .settings-form :global(label.check) { flex-direction: row; align-items: center; gap: 8px; padding-bottom: 8px; }
   .settings-form :global(label.check span) { color: var(--text); }

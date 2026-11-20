@@ -391,9 +391,6 @@
           {#if isAdmin}
             <button onclick={rescan} disabled={scanBusy || switchedOff} title={switchedOff ? 'Turn the scanner on first' : 'Run a scan cycle now instead of waiting for the next one'}>Scan Now</button>
           {/if}
-          {#if onOpenSettings}
-            <button class="secondary" onclick={() => onOpenSettings('ai')}>Settings</button>
-          {/if}
         </div>
       </div>
       <table>

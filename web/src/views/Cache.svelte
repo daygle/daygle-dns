@@ -142,9 +142,6 @@
     <div class="spread" style="margin-bottom: 10px">
       <h3 style="margin: 0">Cache Controls</h3>
       <div class="row" style="gap: 8px">
-        {#if canEdit}
-          <button class="secondary" onclick={() => (tab = 'settings')}>Settings</button>
-        {/if}
         <button class="danger" onclick={flush} disabled={busy || !cache.enabled}>Flush Cache</button>
       </div>
     </div>
