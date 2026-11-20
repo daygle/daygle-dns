@@ -51,6 +51,12 @@ input, select, textarea {
   color: var(--text);
 }
 
+/* Keep field captions and choice labels consistent without changing values. */
+label { text-transform: capitalize; }
+input, textarea { text-transform: none; }
+select,
+select option { text-transform: capitalize; }
+
 textarea {
   font: inherit;
   resize: vertical;
@@ -81,6 +87,22 @@ button.danger:hover {
 }
 
 button:disabled { opacity: 0.5; cursor: default; }
+
+:where(a, button, input, select, textarea, [tabindex]):focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
 
 table {
   width: 100%;
@@ -128,6 +150,7 @@ tr.disabled td:not(:last-child) { opacity: 0.55; }
   font-size: 0.75rem;
   background: var(--panel-2);
   border: 1px solid var(--border);
+  text-transform: capitalize;
 }
 .pill.ok { color: var(--ok); border-color: var(--ok); }
 .pill.bad { color: var(--danger); border-color: var(--danger); }

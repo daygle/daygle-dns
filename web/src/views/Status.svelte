@@ -287,9 +287,13 @@
     Could not refresh ({error.replace(/\.$/, '')}).{#if loadedAt}{' '}Showing the data from {formatDateTime(loadedAt)}.{/if}
   </div>
 {/if}
-{#if !status}
+{#if !status && !error}
   <div class="card">
     <p class="muted">Loading...</p>
+  </div>
+{:else if !status}
+  <div class="card">
+    <p class="muted">Server status is unavailable until the server responds.</p>
   </div>
 {:else}
   <p class="muted since">Since the server started {formatUptime(status.uptime_secs)} ago:</p>

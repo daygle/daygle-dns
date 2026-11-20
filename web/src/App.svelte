@@ -175,9 +175,23 @@
     if (authed) loadDisplayPreferences();
   });
 
+  let menuButton = $state(null);
+
+  function closeNavigation() {
+    setSidebar(false);
+    menuButton?.focus();
+  }
+
+  function onWindowKeydown(event) {
+    if (event.key === 'Escape' && isNarrow() && sidebar.open) {
+      event.preventDefault();
+      closeNavigation();
+    }
+  }
+
   function openAccount() {
     view = 'account';
-    if (isNarrow()) setSidebar(false);
+    if (isNarrow()) closeNavigation();
   }
 
   // Remember the zone chosen on the Records tab so it is restored next visit.
@@ -223,6 +237,8 @@
   );
 </script>
 
+<svelte:window onkeydown={onWindowKeydown} />
+
 {#if !authed}
   {#if needsSetup}
     <Setup />
@@ -239,13 +255,16 @@
       <button onclick={() => location.reload()}>Reload Console</button>
     </div>
   {/if}
+  <a class="skip-link" href="#main-content">Skip to content</a>
   <div class="shell">
     <button
       type="button"
       class="backdrop"
       class:show={sidebar.open}
       aria-label="Close navigation"
-      onclick={() => setSidebar(false)}
+      aria-hidden={!sidebar.open}
+      inert={!sidebar.open}
+      onclick={closeNavigation}
     ></button>
     <aside class:open={sidebar.open} class:closed={!sidebar.open}>
       <div class="side-head">
@@ -261,6 +280,8 @@
           class="menu-btn"
           aria-label="Toggle navigation"
           aria-expanded={sidebar.open}
+          aria-controls="primary-navigation"
+          bind:this={menuButton}
           onclick={toggleSidebar}
         >
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -268,7 +289,7 @@
           </svg>
         </button>
       </div>
-      <nav>
+      <nav id="primary-navigation" aria-label="Primary navigation">
         {#each navSections as section (section.id)}
         <div class="nav-section" class:info={section.id === 'info'}>
           {#if section.label}<div class="nav-heading">{section.label}</div>{/if}
@@ -278,13 +299,14 @@
             class:active={view === tab.id}
             title={!sidebar.open ? tab.label : undefined}
             aria-label={tab.label}
+            aria-current={view === tab.id ? 'page' : undefined}
             onclick={() => {
               view = tab.id;
               settingsTab = 'general';
               clientsTab = 'devices';
               pageTab = null;
               logsClient = null;
-              if (isNarrow()) setSidebar(false);
+              if (isNarrow()) closeNavigation();
             }}
           >
             <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -314,7 +336,7 @@
       {/if}
     </aside>
 
-    <main>
+    <main id="main-content" tabindex="-1">
       {#if view === 'account'}
         <Account {user} />
       {:else if view === 'status' || (isViewer && !tabs.some((t) => t.id === view))}
@@ -390,6 +412,19 @@
   }
 
   .shell { display: flex; min-height: 100vh; }
+
+  .skip-link {
+    position: fixed;
+    top: 8px;
+    left: 8px;
+    z-index: 100;
+    padding: 8px 12px;
+    border-radius: 6px;
+    background: var(--panel);
+    color: var(--text);
+    transform: translateY(-150%);
+  }
+  .skip-link:focus { transform: translateY(0); }
 
   aside {
     width: 220px;
@@ -526,6 +561,10 @@
   .user-actions .current { border-color: var(--accent); color: var(--accent); }
 
   .backdrop { display: none; }
+
+  @media (prefers-reduced-motion: no-preference) {
+    .skip-link { transition: transform 0.15s ease; }
+  }
 
   main { flex: 1; min-width: 0; padding: 24px 28px; }
 

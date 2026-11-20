@@ -414,17 +414,17 @@
         Threat Model Path
         <input bind:value={threatModelPath} placeholder="Empty: use the shared model" spellcheck="false" disabled={!isAdmin} />
       </label>
-      <label>
-        Threat Channel
+      <div class="model-detail">
+        <span class="detail-label">Threat Channel</span>
         <span class="muted">
           {backendLabel(threatBackendName)}
           <span class="pill">{modelDedicated ? 'Own Model' : 'Shared Model'}</span>
         </span>
-      </label>
-      <label>
-        Shared Model
+      </div>
+      <div class="model-detail">
+        <span class="detail-label">Shared Model</span>
         <span class="muted"><code>{sharedModelPath || 'Built-in heuristic rules'}</code></span>
-      </label>
+      </div>
     </div>
     {#if modelNotice}<p class="muted" style="color: var(--ok); margin: 8px 0 0">{modelNotice}</p>{/if}
     {#if modelError}<p class="dialog-error" style="margin: 8px 0 0">{modelError}</p>{/if}
@@ -733,7 +733,9 @@
 
 <style>
   .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
-  .grid2 label { display: flex; flex-direction: column; gap: 4px; font-size: 0.85rem; color: var(--muted); }
+  .grid2 label,
+  .grid2 .model-detail { display: flex; flex-direction: column; gap: 4px; font-size: 0.85rem; color: var(--muted); }
+  .detail-label { font-weight: 600; }
   .explain { margin-top: 12px; }
   .explain ul { margin: 8px 0; padding-left: 18px; font-size: 0.85rem; }
   .explain li { margin: 2px 0; }
