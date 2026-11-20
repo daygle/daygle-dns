@@ -1,5 +1,4 @@
 <script>
-  import { untrack } from 'svelte';
   import { api, formatApiError } from '../api.js';
   import PageHeader from '../PageHeader.svelte';
   import { icons } from '../icons.svelte.js';
@@ -7,7 +6,7 @@
 
   // The Overview tab shows how the cache is doing and flushes it (whole or
   // one name); the Settings tab (administrators only) configures it.
-  let { initialTab = 'overview', canEdit = false } = $props();
+  let { canEdit = false } = $props();
   const TABS = [
     {
       id: 'overview',
@@ -24,7 +23,7 @@
     },
   ];
   const tabs = $derived(TABS.filter((t) => canEdit || !t.edit));
-  let tab = $state(untrack(() => initialTab));
+  let tab = $state('overview');
   const current = $derived(tabs.find((t) => t.id === tab) || tabs[0]);
 
   let cache = $state(null);

@@ -1,5 +1,4 @@
 <script>
-  import { untrack } from 'svelte';
   import PageHeader from '../PageHeader.svelte';
   import { icons } from '../icons.svelte.js';
   import AiStatus from './AiStatus.svelte';
@@ -8,9 +7,8 @@
   import AiVerdicts from './AiVerdicts.svelte';
   import AiSettings from './AiSettings.svelte';
 
-  // `initialTab` lets another page open a tab directly; `canEdit` is false
-  // for read-only accounts, who get no Settings tab.
-  let { initialTab = 'scanner', canEdit = true } = $props();
+  // `canEdit` is false for read-only accounts, who get no Settings tab.
+  let { canEdit = true } = $props();
 
   // The AI page groups the scanner overview and the per-domain verdicts as
   // tabs (same pattern as Settings and Logs).
@@ -49,7 +47,7 @@
   ];
   const tabs = $derived(TABS.filter((t) => canEdit || !t.edit));
 
-  let tab = $state(untrack(() => initialTab));
+  let tab = $state('scanner');
   const current = $derived(tabs.find((t) => t.id === tab) || tabs[0]);
 </script>
 

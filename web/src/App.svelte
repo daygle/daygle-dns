@@ -25,8 +25,6 @@
   import { loadDisplayPreferences } from './datetime.svelte.js';
 
   let view = $state('status');
-  // Settings tab to open on the next visit (set by cross-page links).
-  let settingsTab = $state('general');
 
   // A page left open across a server update keeps running the console bundle
   // it loaded, so new features never appear until a reload. The public health
@@ -63,34 +61,11 @@
     };
   });
 
-  // A feature page's tab to open (its first tab unless another page asks).
-  let pageTab = $state(null);
-  function openSettings(tab) {
-    // Networks moved from Settings to the Clients page.
-    if (tab === 'networks') {
-      openClients('networks');
-      return;
-    }
-    // Feature settings live on their own page's Settings tab.
-    if (tab === 'ai' || tab === 'zones' || tab === 'cache') {
-      pageTab = 'settings';
-      view = tab;
-      return;
-    }
-    settingsTab = tab;
-    view = 'settings';
-  }
   // A device the Logs page opens its Query Log filtered to (set by Reports).
   let logsClient = $state(null);
   function openLogs(client) {
     logsClient = client;
     view = 'logs';
-  }
-  // The Clients page's tab to open (Devices unless another page asks).
-  let clientsTab = $state('devices');
-  function openClients(tab) {
-    clientsTab = tab;
-    view = 'clients';
   }
   // Zone preselected on the Zones page's Records tab (remembered across visits).
   let recordZoneId = $state(null);
@@ -302,9 +277,6 @@
             aria-current={view === tab.id ? 'page' : undefined}
             onclick={() => {
               view = tab.id;
-              settingsTab = 'general';
-              clientsTab = 'devices';
-              pageTab = null;
               logsClient = null;
               if (isNarrow()) closeNavigation();
             }}
@@ -342,21 +314,15 @@
       {:else if view === 'status' || (isViewer && !tabs.some((t) => t.id === view))}
         <Status onOpenUpdate={() => (view = 'update')} />
       {:else if view === 'zones'}
-        {#key pageTab}
-          <ZonesPage {recordZoneId} onSelectZone={setRecordZone} onOpenSettings={isViewer ? null : openSettings} initialTab={pageTab || 'zones'} canEdit={!isViewer} />
-        {/key}
+        <ZonesPage {recordZoneId} onSelectZone={setRecordZone} canEdit={!isViewer} />
       {:else if view === 'filtering'}
         <Filtering />
       {:else if view === 'clients'}
-        {#key clientsTab}
-          <Clients initialTab={clientsTab} />
-        {/key}
+        <Clients />
       {:else if view === 'dhcp'}
         <Dhcp />
       {:else if view === 'cache'}
-        {#key pageTab}
-          <Cache initialTab={pageTab || 'overview'} canEdit={!isViewer} />
-        {/key}
+        <Cache canEdit={!isViewer} />
       {:else if view === 'lookup'}
         <Lookup />
       {:else if view === 'users'}
@@ -364,9 +330,7 @@
       {:else if view === 'certificates'}
         <Certificates />
       {:else if view === 'ai'}
-        {#key pageTab}
-          <Ai initialTab={pageTab || 'scanner'} canEdit={!isViewer} />
-        {/key}
+        <Ai canEdit={!isViewer} />
       {:else if view === 'about'}
         <About />
       {:else if view === 'donate'}
@@ -374,13 +338,13 @@
       {:else if view === 'update'}
         <Update />
       {:else if view === 'reports'}
-        <Reports onShowQueries={openLogs} onOpenSettings={isViewer ? null : openSettings} />
+        <Reports onShowQueries={openLogs} />
       {:else if view === 'logs'}
         {#key logsClient}
           <Logs initialClient={logsClient} />
         {/key}
       {:else}
-        <Settings initialTab={settingsTab} />
+        <Settings />
       {/if}
     </main>
   </div>

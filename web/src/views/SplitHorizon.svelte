@@ -6,9 +6,6 @@
   import { formatDateTime } from '../datetime.svelte.js';
   import NetworkPicker from '../NetworkPicker.svelte';
 
-  // Opens Settings on a tab (absent for read-only accounts).
-  let { onOpenSettings = null } = $props();
-
   let networks = $state([]);
   let entries = $state([]);
   // `error` shows in red, `notice` (success) in green; failures while the
@@ -180,9 +177,6 @@
     <div class="spread" style="margin-bottom: 10px">
       <h3 style="margin: 0">Domain Entries ({entries.length})</h3>
       <div class="row" style="gap: 8px">
-        {#if onOpenSettings}
-          <button class="secondary" onclick={() => onOpenSettings('networks')}>Manage Networks</button>
-        {/if}
         <button onclick={() => startEdit(null)}>Add Entry</button>
       </div>
     </div>

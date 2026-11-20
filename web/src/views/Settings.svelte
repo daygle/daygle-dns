@@ -1,5 +1,4 @@
 <script>
-  import { untrack } from 'svelte';
   import { api, formatApiError } from '../api.js';
   import PageHeader from '../PageHeader.svelte';
   import BackupRestore from './BackupRestore.svelte';
@@ -16,10 +15,7 @@
   // Server-wide settings, split into tabs (same pattern as the Logs page).
   // A feature's own settings live on its page instead (AI, Zones, Cache and
   // DHCP each have a Settings tab), saved separately from this form.
-  // `initialTab` lets another page open a tab directly (the Certificates
-  // page's buttons, Reports' scheduled-report link).
-  let { initialTab = 'general' } = $props();
-  let tab = $state(untrack(() => initialTab));
+  let tab = $state('general');
   const TABS = [
     ['general', 'General'],
     ['listeners', 'DNS Listeners'],

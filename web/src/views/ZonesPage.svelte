@@ -1,5 +1,4 @@
 <script>
-  import { untrack } from 'svelte';
   import PageHeader from '../PageHeader.svelte';
   import { icons } from '../icons.svelte.js';
   import Zones from './Zones.svelte';
@@ -9,9 +8,8 @@
 
   // `recordZoneId` lives in the shell so the zone picked on the Records tab
   // is remembered across visits.
-  // `initialTab` lets another page open a tab directly; `canEdit` is false
-  // for read-only accounts, who get no Settings tab.
-  let { recordZoneId = null, onSelectZone = () => {}, onOpenSettings = null, initialTab = 'zones', canEdit = true } = $props();
+  // `canEdit` is false for read-only accounts, who get no Settings tab.
+  let { recordZoneId = null, onSelectZone = () => {}, canEdit = true } = $props();
 
   // The Zones page groups authoritative zone management as tabs (same
   // pattern as Settings, Logs, AI and Filtering).
@@ -44,7 +42,7 @@
   ];
   const tabs = $derived(TABS.filter((t) => canEdit || !t.edit));
 
-  let tab = $state(untrack(() => initialTab));
+  let tab = $state('zones');
   const current = $derived(tabs.find((t) => t.id === tab) || tabs[0]);
 
   // A zone's Records button opens the Records tab with that zone selected.
@@ -69,5 +67,5 @@
 {:else if current.id === 'settings'}
   <ZoneSettings />
 {:else}
-  <SplitHorizon {onOpenSettings} />
+  <SplitHorizon />
 {/if}

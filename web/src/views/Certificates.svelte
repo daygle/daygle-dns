@@ -413,7 +413,7 @@
       </table>
     </div>
   {/if}
-  <div class="spread foot">
+  <div class="spread">
     <p class="muted help" style="margin: 0">
       Choose the web console's certificate in Settings → General, and the
       encrypted DNS listeners' in Settings → DNS Listeners. Replacing a
@@ -638,7 +638,6 @@
   .pill.warn { color: var(--warn); border-color: var(--warn); }
   .warn-card { border-color: var(--warn); }
   .warn-card.expired { border-color: var(--danger); }
-  .foot { margin-top: 12px; gap: 12px; flex-wrap: wrap; }
   .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 12px; }
   textarea { font: 0.8rem/1.4 ui-monospace, 'Cascadia Code', Consolas, monospace; width: 100%; }
   input[type='file'] { font-size: 0.8rem; }

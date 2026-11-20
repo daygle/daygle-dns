@@ -1,5 +1,4 @@
 <script>
-  import { untrack } from 'svelte';
   import PageHeader from '../PageHeader.svelte';
   import { icons } from '../icons.svelte.js';
   import Devices from './Devices.svelte';
@@ -11,8 +10,7 @@
 
   // Everything that treats some clients differently, in one place: the
   // named networks that say who they are, and the two kinds of per-client
-  // rules that refer to them. `initialTab` lets another page open a tab.
-  let { initialTab = 'devices' } = $props();
+  // rules that refer to them.
 
   const TABS = [
     {
@@ -53,8 +51,7 @@
     },
   ];
 
-  // The tab opened with (the page is re-created when another is asked for).
-  let tab = $state(untrack(() => (TABS.some((t) => t.id === initialTab) ? initialTab : 'devices')));
+  let tab = $state('devices');
   const current = $derived(TABS.find((t) => t.id === tab));
 </script>
 

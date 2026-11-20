@@ -21,8 +21,7 @@
   const show = (key) => !isHidden('report-devices', key);
 
   // `onShowQueries(client)` opens the Query Log filtered to one device;
-  // `onOpenSettings(tab)` opens a Settings tab (null for read-only accounts).
-  let { onShowQueries = null, onOpenSettings = null } = $props();
+  let { onShowQueries = null } = $props();
 
   const PERIODS = [
     [24, 'Last 24 Hours'],
@@ -347,12 +346,7 @@
   {/if}
   <p class="muted help">
     Totals from the query log. A daily or weekly summary can also be sent
-    by email or webhook under
-    {#if onOpenSettings}
-      <button type="button" class="link" onclick={() => onOpenSettings('alerts')}>Settings → Notifications</button>.
-    {:else}
-      Settings → Notifications.
-    {/if}
+    by email or webhook under Settings → Notifications.
   </p>
 </div>
 
@@ -808,8 +802,6 @@
      breaking every name a letter at a time. */
   code { overflow-wrap: break-word; }
   /* An inline link to another page, in running text. */
-  .link { background: none; border: none; padding: 0; font: inherit; color: var(--accent); cursor: pointer; }
-  .link:hover { text-decoration: underline; }
 
   /* Activity: one bar per hour or day, the blocked part drawn inside it. */
   .bars { display: flex; align-items: flex-end; gap: 2px; height: 170px; border-bottom: 1px solid var(--border); }
