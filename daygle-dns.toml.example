@@ -30,7 +30,11 @@ listen = "0.0.0.0"
 port = 53
 udp_enabled = true
 tcp_enabled = true
-tcp_timeout_ms = 5000
+# TCP idle timeout (milliseconds): an open plain-TCP connection is closed
+# after this long without a query, and the value is advertised to clients in
+# EDNS TCP Keepalive (RFC 7828). 30 s matches BIND and lets clients reuse a
+# connection between bursts of queries (RFC 7766) instead of reconnecting.
+tcp_timeout_ms = 30000
 # Plain-TCP connections served at once; one public client (an IPv4 address
 # or an IPv6 /64) may hold an eighth of them. Queries on one connection are
 # answered concurrently.
@@ -121,6 +125,11 @@ dnssec_validate = true
 # aggressive_nsec = false
 min_cache_ttl = 0
 negative_cache_ttl = 3600
+# Maximum Cache TTL (seconds): positive answers are clamped to this age when
+# cached, so tracking-heavy domains cannot pin themselves in the cache for
+# weeks. 86400 = 24 hours (the default); 0 removes the cap. Also in
+# Settings -> Cache, which wins over this file once saved.
+# max_cache_ttl = 86400
 # Cache: positive and negative answers are retained in memory up to this many entries.
 # The cache can also be viewed and flushed from the GUI's Cache page.
 # cache_size = 8192

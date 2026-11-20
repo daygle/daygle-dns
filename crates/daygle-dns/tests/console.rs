@@ -1062,6 +1062,11 @@ async fn config_defaults_endpoint_returns_built_in_defaults() {
         defaults["recursive"]["serve_stale_secs"],
         json!(expected.serve_stale_secs)
     );
+    // Clean-install defaults: a 24h positive-cache cap, queries sent over
+    // both IP families, and an 8s client answer budget.
+    assert_eq!(defaults["recursive"]["max_cache_ttl"], json!(86400));
+    assert_eq!(defaults["recursive"]["outbound_ip_versions"], json!("both"));
+    assert_eq!(defaults["server"]["client_timeout_ms"], json!(8000));
     assert_eq!(defaults["api"]["users"], json!([]));
 
     shutdown(server).await;

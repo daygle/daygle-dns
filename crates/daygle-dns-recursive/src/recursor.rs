@@ -868,13 +868,13 @@ const SERVERS_TRIED: u32 = 3;
 /// Two limits apply. One server may have no more than its share of the
 /// pool's budget for the walk ([`POOL_BUDGET`] over [`SERVERS_TRIED`]), or
 /// a zone whose dead servers are listed first never reaches the working one.
-/// The client, though, is answered within `server.client_timeout_ms` - 2s by
-/// default, less than that share - so half of that budget is the real limit:
-/// the retry to the zone's next server has to happen inside the client's
-/// wait, not after `recursive.timeout_secs`. `update.videolan.org` failed
-/// exactly so: the wait outlasted the client's answer while `ns1` replied at
-/// once. Settings built without a client budget (the recursor's unit tests)
-/// keep the share of the pool's budget.
+/// Half the client's answer budget (`server.client_timeout_ms`, 8s by
+/// default) is the other limit: with a short Client Timeout it is the smaller
+/// of the two, so the retry to the zone's next server happens inside the
+/// client's wait, not after `recursive.timeout_secs`. `update.videolan.org`
+/// failed exactly so: the wait outlasted the client's answer while `ns1`
+/// replied at once. Settings built without a client budget (the recursor's
+/// unit tests) keep the share of the pool's budget.
 fn per_server_wait(settings: &RecursiveSettings) -> Duration {
     let configured = Duration::from_secs(settings.timeout_secs.clamp(1, RECURSOR_MAX_TIMEOUT_SECS))
         .min(POOL_BUDGET / SERVERS_TRIED);

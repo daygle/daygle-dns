@@ -378,6 +378,9 @@ async fn spawn_recursive() -> (daygle_dns::BoundServer, tempfile::TempDir) {
     config.recursive.test_outbound_port = Some(port);
     config.recursive.dnssec_validate = false;
     config.recursive.timeout_secs = 2;
+    // Pin the client budget: these tests are about a retry fitting inside it,
+    // not about the clean-install default.
+    config.server.client_timeout_ms = 2000;
     (spawn(config).await, dir)
 }
 
@@ -450,8 +453,8 @@ async fn a_silent_nameserver_falls_back_to_the_zones_working_one_in_time() {
         "{msg:?} trace: {body}"
     );
     assert_eq!(first_answer(&msg).as_deref(), Some("198.51.100.41"));
-    // `server.client_timeout_ms` is 2s: the retry has to happen inside it,
-    // not after `recursive.timeout_secs` (the connection's own wait).
+    // `server.client_timeout_ms` is 2s here: the retry has to happen inside
+    // it, not after `recursive.timeout_secs` (the connection's own wait).
     assert!(
         elapsed < Duration::from_millis(2000),
         "the client waited {elapsed:?} for the zone's working server; trace: {body}"

@@ -4277,7 +4277,9 @@ pub struct ServerSettings {
     pub tcp_enabled: bool,
     /// TCP idle timeout in milliseconds: an open plain-TCP connection is
     /// closed once this long passes without a query (advertised to clients
-    /// in EDNS TCP Keepalive, RFC 7828).
+    /// in EDNS TCP Keepalive, RFC 7828). Default 30000: long enough for a
+    /// client to reuse its connection between bursts of queries (RFC 7766),
+    /// as BIND's `tcp-idle-timeout` does.
     pub tcp_timeout_ms: u64,
     /// Plain-TCP connections served at once (1..=65536, default 1024). One
     /// client (an IPv4 address or an IPv6 /64) may hold an eighth of them,
@@ -4289,7 +4291,7 @@ pub struct ServerSettings {
     pub response_buffer_size: usize,
     /// Client Timeout (milliseconds): how long the server waits for an answer
     /// before replying SERVFAIL. Applied to the recursive path; valid range
-    /// 1000-10000 (Technitium-style Client Timeout, default 2000).
+    /// 1000-10000 (Technitium-style Client Timeout, default 8000).
     pub client_timeout_ms: u64,
     /// Plaintext UDP listener socket send buffer size, in KiB. The kernel may
     /// round or double the requested value. Valid range 8-65536 (default
@@ -4318,10 +4320,10 @@ impl Default for ServerSettings {
             port: 53,
             udp_enabled: true,
             tcp_enabled: true,
-            tcp_timeout_ms: 5000,
+            tcp_timeout_ms: 30_000,
             tcp_max_connections: 1024,
             response_buffer_size: 4096,
-            client_timeout_ms: 2000,
+            client_timeout_ms: 8000,
             udp_send_buffer_kb: 2048,
             udp_recv_buffer_kb: 2048,
             reload_enabled: true,
@@ -4400,7 +4402,8 @@ pub struct RecursiveSettings {
     pub negative_cache_ttl: u32,
     /// Upper bound, in seconds, applied to cached *positive* TTLs at insert
     /// time. Records whose TTL exceeds this are clamped down so tracking-heavy
-    /// domains cannot pin themselves in cache for weeks.
+    /// domains cannot pin themselves in cache for weeks. Default 86400 (24
+    /// hours); 0 removes the cap.
     pub max_cache_ttl: u32,
     /// TTL, in seconds, for caching *failure responses* (SERVFAIL and, when the
     /// upstream returns an explicit code, NXDOMAIN/NODATA that arrives as an
@@ -4785,7 +4788,7 @@ impl Default for RecursiveSettings {
             aggressive_nsec: false,
             min_cache_ttl: 0,
             negative_cache_ttl: 3600,
-            max_cache_ttl: 0,
+            max_cache_ttl: 86400,
             failure_cache_ttl: 10,
             persist_cache: true,
             conditional_zones: vec![],
@@ -6070,6 +6073,57 @@ mod tests {
         assert!(cfg.policy.allowlist.is_empty());
         assert_eq!(cfg.dot.port, 853);
         assert!(cfg.recursive.dnssec_validate);
+    }
+
+    /// The built-in defaults are what a fresh install starts with: they must
+    /// stay conservative (no open resolver, no unauthenticated console, no
+    /// transfers or updates, no opt-in exporters) and tuned for real traffic.
+    #[test]
+    fn defaults_are_conservative_and_performant() {
+        let cfg = DaygleConfig::default();
+        // Not an open resolver; validation and anti-spoofing stay on.
+        assert_eq!(
+            cfg.recursive.recursion_access,
+            RecursionAccess::PrivateNetworks
+        );
+        assert!(cfg.recursive.enabled);
+        assert!(cfg.recursive.dnssec_validate);
+        assert_eq!(cfg.recursive.outbound_ip_versions, IpVersions::Both);
+        assert!(cfg.recursive.client_policies.is_empty());
+        assert!(cfg.recursive.root_hints.is_empty());
+        // Cache bounds: 24 h positive cap, 1 h negative cap, short failures.
+        assert_eq!(cfg.recursive.max_cache_ttl, 86_400);
+        assert_eq!(cfg.recursive.negative_cache_ttl, 3_600);
+        assert_eq!(cfg.recursive.failure_cache_ttl, 10);
+        assert_eq!(cfg.recursive.serve_stale_secs, 86_400);
+        // Zone transfers, updates and NOTIFY are opt-in.
+        assert!(!cfg.authoritative.axfr_enabled);
+        assert!(!cfg.authoritative.allow_dynamic_updates);
+        assert!(!cfg.authoritative.notify_enabled);
+        assert!(!cfg.authoritative.notify_listen_enabled);
+        assert!(cfg.authoritative.tsig_require_request_mac);
+        assert!(cfg.authoritative.dnssec_enabled);
+        // The console is loopback-only with login required.
+        assert_eq!(cfg.api.listen, "127.0.0.1");
+        assert!(cfg.api.enabled && cfg.api.auth_required);
+        assert!(cfg.api.users.is_empty() && cfg.api.api_token.is_empty());
+        assert!(cfg.api.trusted_proxies.is_empty() && cfg.api.cors_origins.is_empty());
+        // Listeners and services that reach out or expose ports are opt-in.
+        assert!(!cfg.dot.enabled && !cfg.doh.enabled && !cfg.doq.enabled);
+        assert!(!cfg.dhcp.enabled);
+        assert!(!cfg.syslog.enabled && !cfg.log_export.enabled && !cfg.dnstap.enabled);
+        assert!(!cfg.ai.enabled && !cfg.ai.fetch_pages);
+        assert!(!cfg.ecs.enabled && !cfg.dns64.enabled);
+        // Filtering is inert until entries are added; abuse limits are opt-in.
+        assert!(cfg.policy.allowlist.is_empty() && cfg.policy.blocklist.is_empty());
+        assert!(!cfg.policy.filter_aaaa);
+        assert!(!cfg.rate_limit.enabled && !cfg.rrl.enabled);
+        // Tuned for real traffic: a client budget that leaves room for a
+        // retry, and TCP connections kept open long enough to be reused.
+        assert_eq!(cfg.server.client_timeout_ms, 8_000);
+        assert_eq!(cfg.server.tcp_timeout_ms, 30_000);
+        assert!(cfg.server.dns_cookies);
+        assert!(cfg.validate().is_ok());
     }
 
     #[test]
