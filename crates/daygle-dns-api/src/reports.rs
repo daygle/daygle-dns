@@ -234,7 +234,7 @@ pub fn render(
     if lat.queries > 0 {
         text.push_str(&format!(
             "\nResponse times (resolved queries): average {} ms, median {} ms, \
-             95% under {} ms, slowest {} ms\n",
+             95% within {} ms, slowest {} ms\n",
             lat.average_ms, lat.median_ms, lat.p95_ms, lat.max_ms
         ));
     }
@@ -503,7 +503,7 @@ mod tests {
         assert!(text.contains("1. Blocklists  1,234 (100.0%)"), "{text}");
         assert!(text.contains("1. gone.example  42 NXDOMAIN"), "{text}");
         assert!(
-            text.contains("average 21 ms, median 2 ms, 95% under 90 ms, slowest 1500 ms"),
+            text.contains("average 21 ms, median 2 ms, 95% within 90 ms, slowest 1500 ms"),
             "{text}"
         );
         assert!(
