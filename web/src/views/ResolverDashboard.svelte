@@ -73,13 +73,14 @@
       ? stats.latency.counts.map((count, i) => {
           const hi = stats.latency.bounds_ms[i];
           const lo = i === 0 ? 0 : stats.latency.bounds_ms[i - 1];
-          // Columns are labelled by their upper bound; the last has none.
-          const label = hi == null ? `${lo / 1000} s+` : i === 0 ? `<${hi}` : hi >= 1000 ? `${hi / 1000} s` : `${hi}`;
+          // Buckets count durations up to and including their upper bound, so
+          // the labels say "or less"/"up to" rather than "less than".
+          const label = hi == null ? `>${lo / 1000} s` : i === 0 ? `≤${hi}` : hi >= 1000 ? `${hi / 1000} s` : `${hi}`;
           const range = hi == null
-            ? `${lo.toLocaleString()} ms or more`
+            ? `More than ${lo.toLocaleString()} ms`
             : i === 0
-              ? `Less than ${hi} ms`
-              : `${lo.toLocaleString()} to less than ${hi.toLocaleString()} ms`;
+              ? `${hi} ms or less`
+              : `More than ${lo.toLocaleString()} ms, up to ${hi.toLocaleString()} ms`;
           return { count, label, range };
         })
       : [],
