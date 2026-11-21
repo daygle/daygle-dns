@@ -351,12 +351,18 @@ fn with_ttl(record: &Record, ttl: u32) -> Record {
 
 /// Whether `proof`'s owner-to-next range contains `name`, in canonical
 /// ordering (RFC 4034 section 6.1).
+///
+/// The keys are compared as slices: `covers` runs once per cached NSEC of a
+/// zone (up to [`MAX_NSECS_PER_ZONE`]) on every synthesized negative answer,
+/// and cloning the label vector on each comparison allocated thousands of
+/// times per query.
 fn covers(proof: &ProofRecord, name: &[Vec<u8>]) -> bool {
-    if proof.next_key > proof.owner_key {
-        proof.owner_key < name.to_vec() && name.to_vec() < proof.next_key
+    let (owner, next) = (proof.owner_key.as_slice(), proof.next_key.as_slice());
+    if next > owner {
+        owner < name && name < next
     } else {
         // The last NSEC of a zone wraps around to the apex.
-        name.to_vec() > proof.owner_key || name.to_vec() < proof.next_key
+        name > owner || name < next
     }
 }
 
