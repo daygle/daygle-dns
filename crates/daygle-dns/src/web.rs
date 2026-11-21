@@ -357,11 +357,19 @@ fn is_plain_host(host: &str) -> bool {
 }
 
 /// `example.com:5380` -> `example.com`, `[::1]:5380` -> `[::1]`.
+///
+/// Only a name or an IPv4 address may carry a `:port`. A value with more
+/// than one colon is an unbracketed IPv6 address (not a valid `Host`
+/// header): it is kept whole so [`is_plain_host`] refuses it, instead of
+/// the redirect keeping just its first group (`2001:db8::1` -> `2001`).
 fn host_without_port(host: &str) -> &str {
     if host.starts_with('[') {
         return host.split_inclusive(']').next().unwrap_or(host);
     }
-    host.split(':').next().unwrap_or(host)
+    match host.split_once(':') {
+        Some((name, port)) if !port.contains(':') => name,
+        _ => host,
+    }
 }
 
 #[cfg(test)]
@@ -386,5 +394,15 @@ mod tests {
         assert_eq!(host_without_port("[::1]:5380"), "[::1]");
         assert_eq!(host_without_port("[::1]"), "[::1]");
         assert_eq!(host_without_port("192.168.1.2:80"), "192.168.1.2");
+    }
+
+    /// An unbracketed IPv6 address is not `name:port`: stripping at the
+    /// first colon left `2001`, which `is_plain_host` accepted, so the
+    /// redirect pointed at a host that was never asked for.
+    #[test]
+    fn an_unbracketed_ipv6_host_is_not_stripped() {
+        assert_eq!(host_without_port("2001:db8::1"), "2001:db8::1");
+        assert!(!is_plain_host(host_without_port("2001:db8::1")));
+        assert!(!is_plain_host(host_without_port("::1")));
     }
 }
