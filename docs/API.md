@@ -1451,9 +1451,11 @@ Counters since the server started, behind the Status page's Resolver card:
 `routes` counts lookups by the way they were resolved (`local_root` is
 NXDOMAIN answered from the local root zone without a lookup). `latency.counts`
 has one entry per bound plus a final one for slower lookups; the percentiles
-are bucket upper bounds. `connections` counts outbound connections to
-nameservers and upstreams by transport (`tls` and `quic` come from
-opportunistic encryption and from `tls://`/`quic://` upstreams).
+are bucket upper bounds. A lookup exactly on a bound counts in that bound's
+bucket, so a bound is inclusive (`le` semantics) and a reported p50 of 50 ms
+means the median took at most 50 ms. `connections` counts outbound
+connections to nameservers and upstreams by transport (`tls` and `quic` come
+from opportunistic encryption and from `tls://`/`quic://` upstreams).
 
 ### Local root zone
 
@@ -2357,7 +2359,9 @@ busiest first.
 - `latency`: response times of resolved (`recursive`) queries, cache hits
   included; the server's own answers are left out. `latency_buckets`
   counts them as `under_10`, `10_50`, `50_200`, `200_1000` and
-  `over_1000` milliseconds, in that order. `slowest`: the names asked at
+  `over_1000` milliseconds, in that order: a boundary belongs to the
+  higher bucket (so `10_50` is 10 ms up to but not including 50 ms) and
+  `over_1000` is 1 s and over. `slowest`: the names asked at
   least 3 times with the highest average, slowest first.
 - `new_names_total`: how many names (for `client`, when given) were asked
   for the first time in the period, as far back as the query log is kept;

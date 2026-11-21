@@ -248,7 +248,7 @@
     '10_50': '10 - 50 ms',
     '50_200': '50 - 200 ms',
     '200_1000': '200 ms - 1 s',
-    over_1000: 'Over 1 s',
+    over_1000: '1 s and over',
   };
   const latencyLabel = (b) => LATENCY[b] || b;
   function ms(n) {
