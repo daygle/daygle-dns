@@ -1,5 +1,6 @@
 //! The combined DNS dispatcher: policy → authoritative → recursive.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::net::IpAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -638,37 +639,45 @@ impl DnsDispatcher {
         );
     }
 
-    /// Whether `key` is used for the first time this clock minute (and so
-    /// needs a "last used" database write). Past [`RECORD_USE_CACHE_CAP`]
-    /// keys seen within the last two minutes - a flood of unique names under
-    /// a wildcard - further writes are skipped: each would cost a blocking
-    /// task and a database write, and the cache itself would grow without
-    /// bound for as long as the flood lasts.
-    fn first_use_this_minute(&self, key: (String, String)) -> bool {
+    /// Whether `name`/`rtype` is used for the first time this clock minute
+    /// (and so needs a "last used" database write). Past
+    /// [`RECORD_USE_CACHE_CAP`] pairs seen within the last two minutes - a
+    /// flood of unique names under a wildcard - further writes are skipped:
+    /// each would cost a blocking task and a database write, and the cache
+    /// itself would grow without bound for as long as the flood lasts.
+    ///
+    /// The key is looked up as given and copied only when it is added, so a
+    /// repeat query allocates nothing; callers pass the canonical forms.
+    fn first_use_this_minute(&self, name: &str, rtype: &str) -> bool {
         let current_minute = chrono::Utc::now().timestamp().div_euclid(60);
         let Ok(mut cache) = self.record_use_cache.lock() else {
             return false;
         };
         if cache
             .last_use
-            .get(&key)
+            .get(name)
+            .and_then(|types| types.get(rtype))
             .is_some_and(|last_minute| *last_minute >= current_minute)
         {
             return false;
         }
         // Sweep at most once a minute: sweeping on every call once the map
         // was large rescanned it in full per query while the lock was held.
-        if cache.last_use.len() >= RECORD_USE_CACHE_SWEEP_AT && cache.swept_minute != current_minute
-        {
-            cache
-                .last_use
-                .retain(|_, minute| *minute >= current_minute - 1);
+        if cache.len >= RECORD_USE_CACHE_SWEEP_AT && cache.swept_minute != current_minute {
+            cache.last_use.retain(|_, types| {
+                types.retain(|_, minute| *minute >= current_minute - 1);
+                !types.is_empty()
+            });
+            cache.len = cache.last_use.values().map(HashMap::len).sum();
             cache.swept_minute = current_minute;
         }
-        if cache.last_use.len() >= RECORD_USE_CACHE_CAP {
+        if cache.len >= RECORD_USE_CACHE_CAP {
             return false;
         }
-        cache.last_use.insert(key, current_minute);
+        let types = cache.last_use.entry(name.to_owned()).or_default();
+        if types.insert(rtype.to_owned(), current_minute).is_none() {
+            cache.len += 1;
+        }
         true
     }
 
@@ -678,7 +687,9 @@ impl DnsDispatcher {
         if tokio::runtime::Handle::try_current().is_err() {
             return;
         }
-        if !self.first_use_this_minute((qname.to_ascii_lowercase(), qtype.to_ascii_uppercase())) {
+        // The cache key is the canonical (lowercase name, uppercase type)
+        // pair; both halves are borrowed unless the query used another case.
+        if !self.first_use_this_minute(&ascii_lowercase(qname), &ascii_uppercase(qtype)) {
             return;
         }
         let store = self.catalog.store_handle();
@@ -695,7 +706,7 @@ impl DnsDispatcher {
         if tokio::runtime::Handle::try_current().is_err() {
             return;
         }
-        if !self.first_use_this_minute(("@split-horizon".to_string(), entry_id.to_string())) {
+        if !self.first_use_this_minute(SPLIT_HORIZON_USE_NAME, entry_id) {
             return;
         }
         let store = self.catalog.store_handle();
@@ -2326,13 +2337,44 @@ const RECORD_USE_CACHE_SWEEP_AT: usize = 4096;
 /// Hard bound on the record-use cache (see
 /// [`DnsDispatcher::first_use_this_minute`]).
 const RECORD_USE_CACHE_CAP: usize = 16_384;
+/// Name under which split-horizon entries share the record-use cache: each
+/// entry's id is the type half of its key. "@" cannot start a host name, so
+/// it never collides with a queried name.
+const SPLIT_HORIZON_USE_NAME: &str = "@split-horizon";
 
 /// When each (name, type) - or split-horizon entry - was last recorded as
 /// used, by clock minute, and when the map was last swept.
+///
+/// The two halves of a key are nested rather than kept as a pair, so a query
+/// can look one up by reference: authoritative answers hit this cache on
+/// every answer, and an owned `(String, String)` per query allocated twice
+/// per query.
 #[derive(Default)]
 struct RecordUseCache {
-    last_use: HashMap<(String, String), i64>,
+    last_use: HashMap<String, HashMap<String, i64>>,
+    /// (name, type) pairs held, for the sweep threshold and the hard cap.
+    len: usize,
     swept_minute: i64,
+}
+
+/// `name` in the record-use cache's canonical form (ASCII lowercase),
+/// borrowed when it already is: the per-query lookup must not allocate.
+fn ascii_lowercase(name: &str) -> Cow<'_, str> {
+    if name.bytes().any(|b| b.is_ascii_uppercase()) {
+        Cow::Owned(name.to_ascii_lowercase())
+    } else {
+        Cow::Borrowed(name)
+    }
+}
+
+/// `name` in the record-use cache's canonical form (ASCII uppercase),
+/// borrowed when it already is.
+fn ascii_uppercase(name: &str) -> Cow<'_, str> {
+    if name.bytes().any(|b| b.is_ascii_lowercase()) {
+        Cow::Owned(name.to_ascii_uppercase())
+    } else {
+        Cow::Borrowed(name)
+    }
 }
 
 /// The OPT record for a response: only when the client sent one (RFC 6891),
