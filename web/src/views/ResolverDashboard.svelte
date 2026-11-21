@@ -33,7 +33,9 @@
 
   const fmt = (n) => (n ?? 0).toLocaleString();
   const pct = (part, whole) => (whole > 0 ? `${((part / whole) * 100).toFixed(part === whole || part === 0 ? 0 : 1)}%` : '-');
-  const ms = (v) => (v == null ? '-' : v >= 1000 ? `< ${v / 1000} s` : `< ${v} ms`);
+  // Percentiles are bucket upper bounds and a bound is inclusive, so the
+  // tiles read "at most" rather than "less than".
+  const ms = (v) => (v == null ? '-' : v >= 1000 ? `≤ ${v / 1000} s` : `≤ ${v} ms`);
 
   const stats = $derived(data?.stats);
   const routes = $derived(
@@ -67,7 +69,7 @@
   const connTotal = $derived(conns ? conns.udp + conns.tcp + conns.tls + conns.quic : 0);
   const encrypted = $derived(conns ? conns.tls + conns.quic : 0);
 
-  // Latency histogram: one column per bucket ("< 1 ms" ... "2.5 s+").
+  // Latency histogram: one column per bucket ("≤1" ... ">2.5 s").
   const buckets = $derived(
     stats
       ? stats.latency.counts.map((count, i) => {
@@ -87,6 +89,21 @@
   );
   const latencyTotal = $derived(buckets.reduce((sum, b) => sum + b.count, 0));
   const latencyMax = $derived(Math.max(1, ...buckets.map((b) => b.count)));
+  // Measured widths, so the tooltip can stay inside the histogram: it is
+  // centred on its column, then nudged back in at either end.
+  let histWidth = $state(0);
+  let tipWidth = $state(0);
+  const tipLeft = $derived.by(() => {
+    if (!hover || !histWidth) return 0;
+    const half = Math.min(tipWidth, histWidth) / 2;
+    const centre = ((hover.i + 0.5) / buckets.length) * histWidth;
+    return Math.min(Math.max(centre, half), histWidth - half);
+  });
+  // Eleven labels crowd a phone-width axis ("2.5 s"/">2.5 s" touch first),
+  // so below roughly 21px per bucket label every other one and keep the ends.
+  const axisLabels = $derived(
+    buckets.map((b, i) => (histWidth && histWidth / buckets.length < 21 && i % 2 ? '' : b.label)),
+  );
 
   const modeLabel = $derived(
     !data?.enabled ? 'Disabled' : data.mode === 'recursive' ? 'Recursive' : 'Forwarding',
@@ -157,7 +174,7 @@
         </div>
         <div>
           <h4>Latency (ms)</h4>
-          <div class="hist" role="img" aria-label="Lookup latency histogram" onpointerleave={() => (hover = null)}>
+          <div class="hist" role="img" aria-label="Lookup latency histogram" bind:clientWidth={histWidth} onpointerleave={() => (hover = null)}>
             {#each buckets as b, i (i)}
               <div
                 class="col"
@@ -169,14 +186,14 @@
               </div>
             {/each}
             {#if hover}
-              <div class="tip" style="left: {((hover.i + 0.5) / buckets.length) * 100}%">
+              <div class="tip" bind:offsetWidth={tipWidth} style="left: {tipLeft}px">
                 <div class="muted">{hover.range}</div>
                 <b>{fmt(hover.count)}</b> lookups · {pct(hover.count, latencyTotal)}
               </div>
             {/if}
           </div>
           <div class="hist-axis" aria-hidden="true">
-            {#each buckets as b, i (i)}<span>{b.label}</span>{/each}
+            {#each axisLabels as label, i (i)}<span>{label}</span>{/each}
           </div>
           <details class="latency-details">
             <summary>View latency bucket data</summary>
@@ -221,7 +238,7 @@
   .small { font-size: 0.78rem; font-weight: 400; }
   .panels {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(min(260px, 100%), 1fr));
     gap: 18px;
     margin-top: 14px;
   }
@@ -251,9 +268,21 @@
   .colbar.hot { background: color-mix(in srgb, var(--accent) 75%, white); }
   .hist-axis { display: flex; gap: 2px; margin-top: 4px; }
   .hist-axis span { flex: 1; text-align: center; font-size: 0.62rem; color: var(--muted); white-space: nowrap; }
-  .latency-details { margin-top: 8px; font-size: 0.8rem; }
+  .latency-details { margin-top: 8px; font-size: 0.8rem; container-type: inline-size; }
   .latency-details summary { cursor: pointer; color: var(--muted); }
   .latency-details .table-wrap { margin-top: 6px; }
+  /* The three columns and their cell padding, not the text, decide the
+     table's minimum width: at the normal 10px side padding it never goes
+     below ~228px. Once the panel is narrower than that, trim the side
+     padding so the Share column fits without a horizontal swipe; wider
+     panels keep the normal spacing. */
+  @container (max-width: 230px) {
+    .latency-details th,
+    .latency-details td {
+      padding-left: 4px;
+      padding-right: 4px;
+    }
+  }
   .tip {
     position: absolute;
     top: 0;
@@ -263,7 +292,11 @@
     border-radius: 8px;
     padding: 5px 8px;
     font-size: 0.72rem;
-    white-space: nowrap;
+    /* Stay inside the histogram: clamp the position, wrap if it cannot fit. */
+    box-sizing: border-box;
+    width: max-content;
+    max-width: 100%;
+    white-space: normal;
     pointer-events: none;
     box-shadow: 0 6px 20px rgba(0, 0, 0, 0.32);
   }
