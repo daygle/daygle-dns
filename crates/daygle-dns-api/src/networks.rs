@@ -88,6 +88,12 @@ pub async fn save_network(
     let original = input.original_name.as_deref().map(str::trim);
     match original {
         Some(original) => {
+            if let Some(taken) = rename_conflict(&config, original, &network.name) {
+                return error_response(
+                    StatusCode::CONFLICT,
+                    format!("a network named '{taken}' already exists: pick another name"),
+                );
+            }
             let Some(slot) = config
                 .networks
                 .iter_mut()
@@ -130,6 +136,20 @@ pub async fn save_network(
         return map_err(e);
     }
     Json(network).into_response()
+}
+
+/// The name of the network that renaming `original` to `name` would collide
+/// with, if any.
+///
+/// Renaming onto a name another network (or a built-in one) already has left
+/// two entries the console cannot tell apart: `find_network` returns the
+/// first, and the rename rewrote the other network's references too. Keeping
+/// the current name, whatever its case, never collides with itself.
+fn rename_conflict(config: &DaygleConfig, original: &str, name: &str) -> Option<String> {
+    if original.eq_ignore_ascii_case(name) {
+        return None;
+    }
+    config.find_network(name).map(|taken| taken.name)
 }
 
 /// `DELETE /api/networks/{name}`: remove a network nothing uses (`409`
@@ -244,5 +264,42 @@ async fn apply_resolved_changes(state: &AppState, old: &DaygleConfig, new: &Dayg
         if let Some(rebuild) = &state.request_dns_rebuild {
             rebuild();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn config_with(names: &[&str]) -> DaygleConfig {
+        let mut config = DaygleConfig::default();
+        for name in names {
+            config.networks.push(NamedNetwork {
+                name: (*name).to_string(),
+                cidrs: vec!["192.168.50.0/24".to_string()],
+                description: String::new(),
+            });
+        }
+        config
+    }
+
+    #[test]
+    fn renaming_onto_another_networks_name_is_refused() {
+        let config = config_with(&["LAN", "Guest"]);
+        assert_eq!(
+            rename_conflict(&config, "LAN", "Guest").as_deref(),
+            Some("Guest")
+        );
+        // Case does not make a name a different one.
+        assert!(rename_conflict(&config, "LAN", "guest").is_some());
+        // Keeping the current name (whatever its case) is not a rename.
+        assert!(rename_conflict(&config, "LAN", "lan").is_none());
+        // A built-in network's name is taken as well.
+        assert_eq!(
+            rename_conflict(&config, "LAN", "Private").as_deref(),
+            Some("Private")
+        );
+        // A name nothing uses is fine.
+        assert!(rename_conflict(&config, "LAN", "Office").is_none());
     }
 }
