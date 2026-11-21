@@ -44,8 +44,11 @@ pub struct Metrics {
     pub resolver: ResolverMetrics,
 }
 
-/// Upper bounds (milliseconds) of the resolution latency histogram buckets;
-/// the last bucket is everything slower.
+/// Upper bounds (milliseconds) of the resolution latency histogram buckets.
+///
+/// A duration lands in the first bucket whose bound it does not exceed, so a
+/// bound is inclusive (Prometheus `le` semantics); the last bucket is
+/// everything slower.
 pub const LATENCY_BUCKETS_MS: [u64; 10] = [1, 5, 10, 25, 50, 100, 250, 500, 1000, 2500];
 
 /// Counters describing how the resolver answered: which route each lookup
@@ -92,11 +95,16 @@ pub struct ResolverMetrics {
 
 impl ResolverMetrics {
     /// Record one lookup's duration.
+    ///
+    /// A duration exactly on a bound counts in that bound's bucket, as the
+    /// Prometheus `le` label promises: a 1 ms lookup is counted in
+    /// `le="0.001"`, not in the next bucket. Durations are compared in
+    /// nanoseconds, so the whole-millisecond bounds stay exact.
     pub fn observe_latency(&self, elapsed: std::time::Duration) {
-        let ms = elapsed.as_millis() as u64;
+        let nanos = elapsed.as_nanos();
         let bucket = LATENCY_BUCKETS_MS
             .iter()
-            .position(|&bound| ms < bound)
+            .position(|&bound| nanos <= u128::from(bound) * 1_000_000)
             .unwrap_or(LATENCY_BUCKETS_MS.len());
         self.latency[bucket].fetch_add(1, Ordering::Relaxed);
         self.latency_sum_us
@@ -598,10 +606,10 @@ mod tests {
         }
         let snap = m.snapshot().latency;
         assert_eq!(snap.counts.len(), LATENCY_BUCKETS_MS.len() + 1);
-        assert_eq!(snap.counts[0], 3); // < 1 ms
-        assert_eq!(snap.counts[1], 1); // < 5 ms
-        assert_eq!(snap.counts[4], 4); // < 50 ms
-        assert_eq!(snap.counts[10], 1); // >= 2.5 s
+        assert_eq!(snap.counts[0], 3); // 1 ms or less
+        assert_eq!(snap.counts[1], 1); // 5 ms or less
+        assert_eq!(snap.counts[4], 4); // 50 ms or less
+        assert_eq!(snap.counts[10], 1); // slower than 2.5 s
         assert_eq!(snap.p50_ms, Some(50));
         assert_eq!(snap.p90_ms, Some(500));
         assert_eq!(snap.p99_ms, Some(2500));
@@ -614,5 +622,20 @@ mod tests {
             (outcomes.nodata, outcomes.nxdomain, outcomes.failures),
             (1, 1, 1)
         );
+    }
+
+    #[test]
+    fn a_duration_on_a_bucket_bound_counts_in_that_bucket() {
+        let m = ResolverMetrics::default();
+        m.observe_latency(std::time::Duration::from_millis(1));
+        m.observe_latency(std::time::Duration::from_micros(1_001));
+        m.observe_latency(std::time::Duration::from_millis(2500));
+        m.observe_latency(std::time::Duration::from_millis(2501));
+        let counts = m.snapshot().latency.counts;
+        // Exactly on a bound is that bound's bucket (`le` is inclusive).
+        assert_eq!(counts[0], 1, "exactly 1 ms belongs in le=0.001");
+        assert_eq!(counts[1], 1, "1.001 ms belongs in le=0.005");
+        assert_eq!(counts[9], 1, "exactly 2.5 s belongs in le=2.5");
+        assert_eq!(counts[10], 1, "2.501 s belongs in the overflow bucket");
     }
 }
