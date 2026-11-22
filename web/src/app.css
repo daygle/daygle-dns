@@ -54,6 +54,8 @@ input, select, textarea {
 /* Keep field captions and choice labels consistent without changing values. */
 label { text-transform: capitalize; }
 input, textarea { text-transform: none; }
+/* Names, addresses and paths shown as code are data: never re-case them. */
+code, kbd, samp, pre { text-transform: none; }
 select,
 select option { text-transform: capitalize; }
 

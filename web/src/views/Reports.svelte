@@ -801,7 +801,6 @@
   /* Long names wrap only when they must; narrow tables scroll instead of
      breaking every name a letter at a time. */
   code { overflow-wrap: break-word; }
-  /* An inline link to another page, in running text. */
 
   /* Activity: one bar per hour or day, the blocked part drawn inside it. */
   .bars { display: flex; align-items: flex-end; gap: 2px; height: 170px; border-bottom: 1px solid var(--border); }
