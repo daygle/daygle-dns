@@ -54,10 +54,11 @@ input, select, textarea {
 /* Keep field captions and choice labels consistent without changing values. */
 label { text-transform: capitalize; }
 input, textarea { text-transform: none; }
-/* Names, addresses and paths shown as code are data: never re-case them. */
+/* Names, addresses and paths shown as code are data: never re-case them.
+   Selects and pills are not re-cased either: their options and contents are
+   often data (account, certificate and network names, CIDRs, syslog
+   facilities), so their text is written in the case it should show in. */
 code, kbd, samp, pre { text-transform: none; }
-select,
-select option { text-transform: capitalize; }
 
 textarea {
   font: inherit;
@@ -152,7 +153,6 @@ tr.disabled td:not(:last-child) { opacity: 0.55; }
   font-size: 0.75rem;
   background: var(--panel-2);
   border: 1px solid var(--border);
-  text-transform: capitalize;
 }
 .pill.ok { color: var(--ok); border-color: var(--ok); }
 .pill.bad { color: var(--danger); border-color: var(--danger); }

@@ -143,7 +143,7 @@
                 <td>{r.type}</td>
                 <td>{r.ttl}</td>
                 <td class="mono wrap">{r.data}</td>
-                <td><span class="pill {r.dnssec === 'secure' ? 'ok' : r.dnssec === 'bogus' ? 'bad' : ''}">{r.dnssec}</span></td>
+                <td><span class="pill {r.dnssec === 'secure' ? 'ok' : r.dnssec === 'bogus' ? 'bad' : ''}">{r.dnssec ? r.dnssec[0].toUpperCase() + r.dnssec.slice(1) : ''}</span></td>
               </tr>
             {/each}
           </tbody>
@@ -155,7 +155,7 @@
   <div class="card" style="margin-top: 14px">
     <div class="spread" style="margin-bottom: 10px">
       <h3 style="margin: 0">Queries Sent</h3>
-      {#if failedSteps}<span class="pill bad">{failedSteps} failed</span>{/if}
+      {#if failedSteps}<span class="pill bad">{failedSteps} Failed</span>{/if}
     </div>
     {#if result.trace.length === 0}
       <p class="muted help">

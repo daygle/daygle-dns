@@ -11,9 +11,15 @@
   let error = $state(null);
   let hover = $state(null); // latency bucket under the pointer or keyboard focus
   let inFlight = $state(false);
+  // A refresh asked for while a load is running: load once more after it, so
+  // the dashboard ends on the latest data instead of dropping the request.
+  let reloadPending = false;
 
   async function load() {
-    if (inFlight) return;
+    if (inFlight) {
+      reloadPending = true;
+      return;
+    }
     inFlight = true;
     error = null;
     try {
@@ -23,6 +29,10 @@
     } finally {
       loaded = true;
       inFlight = false;
+    }
+    if (reloadPending) {
+      reloadPending = false;
+      load();
     }
   }
 
@@ -36,6 +46,18 @@
   // Percentiles are bucket upper bounds and a bound is inclusive, so the
   // tiles read "at most" rather than "less than".
   const ms = (v) => (v == null ? '-' : v >= 1000 ? `≤ ${v / 1000} s` : `≤ ${v} ms`);
+  // A percentile that falls in the last, unbounded bucket is reported as the
+  // last bound, which it exceeds: find that case from the counts (the same
+  // rank rule the server uses) and say "more than" instead of "at most".
+  function quantile(q, v) {
+    const counts = stats?.latency?.counts;
+    if (v == null || !counts?.length) return ms(v);
+    const total = counts.reduce((sum, c) => sum + c, 0);
+    const target = Math.max(1, Math.ceil(total * q));
+    const bounded = counts.slice(0, -1).reduce((sum, c) => sum + c, 0);
+    if (bounded >= target) return ms(v);
+    return v >= 1000 ? `> ${v / 1000} s` : `> ${v} ms`;
+  }
 
   const stats = $derived(data?.stats);
   const routes = $derived(
@@ -131,9 +153,9 @@
     </div>
 
     <div class="tiles">
-      <div class="tile"><div class="muted">Median Latency</div><div class="big">{ms(stats.latency.p50_ms)}</div></div>
-      <div class="tile"><div class="muted">90th Percentile</div><div class="big">{ms(stats.latency.p90_ms)}</div></div>
-      <div class="tile"><div class="muted">99th Percentile</div><div class="big">{ms(stats.latency.p99_ms)}</div></div>
+      <div class="tile"><div class="muted">Median Latency</div><div class="big">{quantile(0.5, stats.latency.p50_ms)}</div></div>
+      <div class="tile"><div class="muted">90th Percentile</div><div class="big">{quantile(0.9, stats.latency.p90_ms)}</div></div>
+      <div class="tile"><div class="muted">99th Percentile</div><div class="big">{quantile(0.99, stats.latency.p99_ms)}</div></div>
       <div class="tile"><div class="muted">DNSSEC Validated</div><div class="big">{pct(data.dnssec_validated, data.queries)}</div></div>
       {#if connTotal > 0}
         <div class="tile" title="{fmt(encrypted)} of {fmt(connTotal)} outbound connections used TLS or QUIC">
