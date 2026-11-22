@@ -156,3 +156,22 @@ async fn names_legal_on_the_wire_but_not_as_idna_reach_the_upstream() {
         assert_eq!(first_ip(&lookup), "198.51.100.10", "{name}");
     }
 }
+
+#[tokio::test]
+async fn the_console_lookup_accepts_names_legal_on_the_wire() {
+    let stub = spawn_stub("zonea.test", "198.51.100.10").await;
+    let resolver = RecursiveResolver::build(
+        &settings(stub, Vec::new()),
+        Arc::new(Metrics::default()),
+        &[],
+        None,
+    )
+    .unwrap();
+
+    let diagnosis = resolver
+        .diagnose("\\-keyid-45ce-v2.zonea.test", "A", false)
+        .await
+        .expect("the name parses");
+    assert_eq!(diagnosis.rcode, "NOERROR", "{:?}", diagnosis.error);
+    assert_eq!(diagnosis.answers.len(), 1);
+}
