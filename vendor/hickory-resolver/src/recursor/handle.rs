@@ -603,8 +603,17 @@ impl<P: ConnectionProvider> RecursorDnsHandle<P> {
         let mut nameserver_pool = self.roots.clone().with_zone(Name::root());
         let mut zone = Name::root();
 
-        for i in 1..=num_labels {
-            let candidate_zone = query_name.trim_to(i as usize);
+        // QNAME minimisation limits (RFC 9156 section 2.3): the first MINIMISE_ONE_LAB probes
+        // each add one label; after that, labels are added so that the walk sends at most
+        // MAX_MINIMISE_COUNT probes. `next_probe` is the label count of the next name probed;
+        // labels before it are passed over unless a cached zone cut is found at them.
+        let mut probes = 0_usize;
+        let mut next_probe = 1_usize;
+        let mut i = 0_usize;
+
+        while i < num_labels as usize {
+            i += 1;
+            let candidate_zone = query_name.trim_to(i);
             let _in_flight = limits.try_enter_zone(&candidate_zone).inspect_err(|_| {
                 debug!(
                     ?candidate_zone,
@@ -625,11 +634,18 @@ impl<P: ConnectionProvider> RecursorDnsHandle<P> {
                 }
             };
 
+            if i < next_probe {
+                trace!(?candidate_zone, "passing over label (RFC 9156 section 2.3)");
+                continue;
+            }
+
             trace!(
                 depth,
                 ?candidate_zone,
                 "ns_pool_for_name: depth {depth} for {candidate_zone}"
             );
+            probes += 1;
+            next_probe = next_probe_labels(i, num_labels as usize, probes);
             depth += 1;
             RecursorError::recursion_exceeded(self.ns_recursion_limit, depth, &candidate_zone)?;
 
@@ -657,25 +673,71 @@ impl<P: ConnectionProvider> RecursorDnsHandle<P> {
                 {
                     return Err(e);
                 }
+                // Relaxed mode: a server that wrongly answers NXDOMAIN for an empty non-terminal
+                // would answer it for each name down to the query name. Probe the full name next
+                // instead (RFC 9156 section 3, as other resolvers do), whose answer, or referral to
+                // a zone cut further down, comes from the same servers.
+                Err(e) if e.is_nx_domain() => {
+                    trace!(
+                        ?candidate_zone,
+                        "NXDOMAIN below a zone cut; probing the full name"
+                    );
+                    next_probe = num_labels as usize;
+                    continue;
+                }
                 // Short-circuit on timeouts. Requesting a longer name from the same pool would likely
                 // encounter them again.
                 Err(e) if e.is_timeout() => return Err(e),
                 // The name `candidate_zone` is not a zone cut. Try again with one more label added
                 // to the iterative query name.
+                // A referral to a zone cut above the name probed, which labels passed over leave
+                // room for, arrives as an error (only NS records owned by the name asked count as
+                // an answer). Take it as the referral it is; its NS records are checked below and
+                // its glue is kept only inside the current zone, as `lookup` filters answers.
+                Err(RecursorError::ForwardNS(referral)) => {
+                    let mut message = Message::query();
+                    for data in referral.iter() {
+                        message.add_authority(data.ns.clone());
+                        message.add_additionals(
+                            data.glue
+                                .iter()
+                                .filter(|glue| is_subzone(&zone, &glue.name))
+                                .cloned(),
+                        );
+                    }
+                    message
+                }
                 Err(_) => {
                     trace!(?candidate_zone, "no zone cut at name");
                     continue;
                 }
             };
 
-            let any_ns = response.all_sections().any(|record| {
-                record.record_type() == RecordType::NS && record.name == candidate_zone
-            });
-            if !any_ns {
+            // The zone cut is the candidate name, or (when labels were passed over) a referral to
+            // a name between the current zone and the candidate: the deepest owner of NS records
+            // that is below the current zone and at or above the candidate.
+            let Some(candidate_zone) = response
+                .all_sections()
+                .filter(|record| {
+                    record.record_type() == RecordType::NS
+                        && record.name != zone
+                        && is_subzone(&zone, &record.name)
+                        && is_subzone(&record.name, &candidate_zone)
+                })
+                .map(|record| record.name.clone())
+                .max_by_key(|cut| cut.num_labels())
+            else {
                 // Not a zone cut, but there is a CNAME or other record at this name. Try again with
                 // a longer name.
                 trace!(?candidate_zone, "no zone cut at name");
                 continue;
+            };
+            if candidate_zone.num_labels() as usize != i {
+                // A referral to a name passed over: carry on below it, where the walk would have
+                // been had that name been probed.
+                debug!(%candidate_zone, "referral to a zone cut that was passed over");
+                i = candidate_zone.num_labels() as usize;
+                next_probe = i + 1;
             }
 
             // get all the NS records and glue
@@ -701,11 +763,11 @@ impl<P: ConnectionProvider> RecursorDnsHandle<P> {
                     continue;
                 };
 
-                if !is_subzone(&candidate_zone.base_name(), &zns.name) {
+                if zns.name != candidate_zone {
                     debug!(
                         name = ?zns.name,
-                        parent = ?candidate_zone.base_name(),
-                        "dropping out of bailiwick record",
+                        zone = ?candidate_zone,
+                        "dropping NS record for another zone",
                     );
                     continue;
                 }
@@ -1162,6 +1224,28 @@ const MAX_GLUELESS_FOLLOW: usize = 5;
 /// Below this many name servers with addresses from glue, a zone's other (glueless) name
 /// servers are looked up too, so that one server that does not answer cannot fail the zone.
 const MIN_ADDRESSED_NAME_SERVERS: usize = 2;
+
+/// QNAME minimisation probes that add one label each (RFC 9156 section 2.3).
+const MINIMISE_ONE_LAB: usize = 4;
+
+/// The most QNAME minimisation probes one walk sends (RFC 9156 section 2.3).
+const MAX_MINIMISE_COUNT: usize = 10;
+
+/// The label count of the name to probe after probing one of `labels` labels, the `probes`th
+/// probe of a walk to a name of `total` labels: one label further for the first
+/// [`MINIMISE_ONE_LAB`] probes, then the remaining labels spread over the probes left of
+/// [`MAX_MINIMISE_COUNT`], the last of which asks the full name.
+fn next_probe_labels(labels: usize, total: usize, probes: usize) -> usize {
+    if probes < MINIMISE_ONE_LAB {
+        return labels + 1;
+    }
+    let remaining = total.saturating_sub(labels);
+    let probes_left = MAX_MINIMISE_COUNT.saturating_sub(probes);
+    if probes_left <= 1 {
+        return total;
+    }
+    labels + remaining.div_ceil(probes_left).max(1)
+}
 
 /// Maximum number of upstream queries the recursor will issue for a single client query.
 const MAX_QUERIES_PER_REQUEST: u8 = 200;
