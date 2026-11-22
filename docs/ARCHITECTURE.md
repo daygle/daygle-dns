@@ -423,8 +423,9 @@ see [AI.md](AI.md).
   `[redacted]`, so secrets never round-trip to a browser.
 - **Settings forms.** `PUT /api/config` applies a validated partial update
   (recursive, DoT/DoH/DoQ, policy, authoritative, AI, the console-edited
-  parts of `server` and `api`, and the rest; listen addresses, ports and the
-  API token stay in the config file),
+  parts of `server` and `api`, and the rest; the listen addresses, the
+  plain-DNS port and transports, and the API listener and token stay in the
+  config file),
   persists it to the **SQLite database** as the runtime overlay (the config
   file is only the bootstrap seed), and triggers a listener rebuild through
   `request_dns_rebuild` when listeners were touched - the same mechanism
