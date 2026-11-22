@@ -1,9 +1,10 @@
 # Dependabot update configuration.
 #
-# - cargo:  the Rust workspace (Cargo.toml / Cargo.lock at the repository root)
-# - npm:    the web GUI (web/package.json / web/package-lock.json)
+# - cargo:          the Rust workspace (Cargo.toml / Cargo.lock at the root)
+# - npm:            the web GUI (web/package.json / web/package-lock.json)
+# - github-actions: the actions the workflows use
 #
-# Both run weekly; individual PRs can be rebased/merged from the Dependabot
+# All run weekly; individual PRs can be rebased/merged from the Dependabot
 # tab on GitHub.
 version: 2
 updates:
@@ -17,6 +18,11 @@ updates:
     open-pull-requests-limit: 10
     labels:
       - "dependencies"
+    ignore:
+      # hickory-resolver and hickory-net are patched copies in vendor/, and
+      # the other hickory crates must stay on the same release. Upgrading
+      # them is a manual job: see vendor/README.md.
+      - dependency-name: "hickory-*"
 
   - package-ecosystem: "npm"
     directory: "/web"
@@ -29,3 +35,13 @@ updates:
     labels:
       - "dependencies"
       - "javascript"
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "UTC"
+    labels:
+      - "dependencies"
