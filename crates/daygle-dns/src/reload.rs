@@ -18,7 +18,7 @@ use std::time::Duration;
 
 use arc_swap::{ArcSwap, ArcSwapOption};
 use daygle_dns_authoritative::AuthorityCatalog;
-use daygle_dns_core::config::{DaygleConfig, ResolutionMode};
+use daygle_dns_core::config::DaygleConfig;
 use daygle_dns_core::error::Result;
 use daygle_dns_core::{LogStore, Metrics, RateLimiter};
 use daygle_dns_policy::{AdvancedBlocking, BlocklistSourceManager, PolicyEngine};
@@ -216,10 +216,11 @@ pub fn apply_config(shared: &Shared, new: Arc<DaygleConfig>) -> bool {
         .local_root
         .set_settings(new.recursive.local_root_in_effect());
     // The recursor sizes its per-name-server wait from the Client Timeout
-    // when it is built, so a change to it in recursive mode rebuilds it too.
+    // when it is built, so a change to it rebuilds it too whenever the
+    // recursor runs (recursive mode, or a recursive client policy).
     if old_r.recursive != new_r.recursive
         || old_r.authoritative.stub_zones != new_r.authoritative.stub_zones
-        || (new_r.recursive.effective_mode() == ResolutionMode::Recursive
+        || (new_r.recursive.runs_recursor()
             && old_r.server.client_timeout_ms != new_r.server.client_timeout_ms)
     {
         if new_r.recursive.enabled {

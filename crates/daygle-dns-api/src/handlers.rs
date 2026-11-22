@@ -7748,10 +7748,10 @@ pub async fn update_settings(
     let resolved = config.with_networks_resolved();
     // The recursor sizes its per-name-server wait from the Client Timeout
     // when it is built (see `per_server_wait` in the recursive crate), so a
-    // change to it in recursive mode needs a rebuild too.
+    // change to it needs a rebuild too whenever the recursor runs.
     let recursive_changed = old_config.recursive != config.recursive
         || old_config.authoritative.stub_zones != config.authoritative.stub_zones
-        || (config.recursive.effective_mode() == daygle_dns_core::config::ResolutionMode::Recursive
+        || (config.recursive.runs_recursor()
             && old_config.server.client_timeout_ms != config.server.client_timeout_ms);
     let new_resolver = if recursive_changed && config.recursive.enabled {
         Some(match build_resolver(&state, &resolved).await {
