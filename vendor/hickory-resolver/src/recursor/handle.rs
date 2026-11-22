@@ -687,6 +687,8 @@ impl<P: ConnectionProvider> RecursorDnsHandle<P> {
                 .positive_response_ttl_bounds(RecordType::NS)
                 .into_inner();
             let mut ns_pool_ttl = u32::MAX;
+            // Name servers whose addresses came with the referral (or from the cache).
+            let mut addressed_names = 0_usize;
 
             let ttl = self.add_glue_to_map(&mut glue_ips, response.all_sections());
 
@@ -726,6 +728,7 @@ impl<P: ConnectionProvider> RecursorDnsHandle<P> {
 
                 match glue_ips.get(&ns_data.0) {
                     Some(glue) if !glue.is_empty() => {
+                        addressed_names += 1;
                         config_group.extend(glue.iter().copied().map(|ip| {
                             name_server_config(ip, &self.pool_context.opportunistic_encryption)
                         }));
@@ -759,6 +762,38 @@ impl<P: ConnectionProvider> RecursorDnsHandle<P> {
 
                 if ttl < ns_pool_ttl {
                     ns_pool_ttl = ttl;
+                }
+            } else if addressed_names < MIN_ADDRESSED_NAME_SERVERS && !need_ips_for_names.is_empty()
+            {
+                // Glue came for only one of the zone's name servers (the others are named in
+                // other zones, which the parent gives no addresses for): with just that one in the
+                // pool, a single server that does not answer fails every query for the zone,
+                // though the zone has others. Find some of the others' addresses as well. A
+                // failure here leaves the pool as it is.
+                debug!(?candidate_zone, "one name server has glue; finding others");
+                match self
+                    .append_ips_from_lookup(
+                        &candidate_zone,
+                        depth,
+                        request_time,
+                        nameserver_pool.clone(),
+                        need_ips_for_names
+                            .iter()
+                            .take(MIN_ADDRESSED_NAME_SERVERS + 1 - addressed_names),
+                        &mut config_group,
+                        limits,
+                    )
+                    .await
+                {
+                    Ok((ttl, new_depth)) => {
+                        depth = new_depth;
+                        if ttl < ns_pool_ttl {
+                            ns_pool_ttl = ttl;
+                        }
+                    }
+                    Err(error) => {
+                        debug!(?candidate_zone, %error, "could not find more name servers");
+                    }
                 }
             }
 
@@ -1123,6 +1158,10 @@ const MAX_CNAME_LOOKUPS: u8 = 64;
 
 /// Maximum number of glueless NS targets to chase per delegation point.
 const MAX_GLUELESS_FOLLOW: usize = 5;
+
+/// Below this many name servers with addresses from glue, a zone's other (glueless) name
+/// servers are looked up too, so that one server that does not answer cannot fail the zone.
+const MIN_ADDRESSED_NAME_SERVERS: usize = 2;
 
 /// Maximum number of upstream queries the recursor will issue for a single client query.
 const MAX_QUERIES_PER_REQUEST: u8 = 200;
