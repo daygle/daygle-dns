@@ -27,6 +27,7 @@ mod aggressive;
 mod cache_assist;
 mod cache_persist;
 pub mod diagnose;
+mod name_text;
 pub mod recursor;
 mod upstream;
 
@@ -54,6 +55,7 @@ use hickory_proto::rr::{Name, RecordType};
 use hickory_resolver::config::{ResolverConfig, ResolverOpts};
 use hickory_resolver::lookup::Lookup;
 use hickory_resolver::Resolver;
+use name_text::parse_name;
 use tracing::{debug, info, warn};
 
 pub use recursor::{with_client_subnet, EcsSubnet};
@@ -572,7 +574,7 @@ impl RecursiveResolver {
     /// (the operator's own infrastructure, whose private addresses are
     /// expected) rather than by the default upstreams or the recursor.
     pub fn is_zone_routed(&self, name: &str) -> bool {
-        Name::from_utf8(name).is_ok_and(|name| {
+        parse_name(name).is_ok_and(|name| {
             zone_resolver(&self.inner.conditional, &self.inner.stubs, &name).is_some()
         })
     }
@@ -588,7 +590,7 @@ impl RecursiveResolver {
         name: &str,
         record_type: RecordType,
     ) -> Option<Lookup> {
-        let name = Name::from_utf8(name).ok()?;
+        let name = parse_name(name).ok()?;
         let policy = self.inner.policy_for(client);
         let (_, _, scope) = self.inner.route(&name, policy, false);
         let key = cache_key(&name, record_type).scoped(scope);
@@ -633,7 +635,7 @@ impl RecursiveResolver {
     /// (default upstreams, conditional and stub zones, client policies) and
     /// the serve-stale/failure caches are always flushed.
     pub fn flush_name(&self, name: &str, record_type: Option<&str>) -> Result<bool> {
-        let mut name = Name::from_utf8(name.trim())
+        let mut name = parse_name(name.trim())
             .map_err(|e| DaygleError::InvalidRecord(format!("invalid name '{name}': {e}")))?;
         name.set_fqdn(true);
         let record_type = record_type
@@ -924,7 +926,7 @@ impl Inner {
         policy: Option<usize>,
     ) -> Result<Lookup> {
         let inner = self;
-        let name = Name::from_utf8(name).map_err(|e| DaygleError::Resolution {
+        let name = parse_name(name).map_err(|e| DaygleError::Resolution {
             message: format!("invalid name '{name}': {e}"),
             response_code: None,
         })?;
@@ -1020,7 +1022,7 @@ impl Inner {
                         let until = Instant::now()
                             + Duration::from_secs(inner.cache_assist.failure_cache_ttl() as u64);
                         let query = Query::query(
-                            Name::from_utf8(key.name.clone()).unwrap_or_default(),
+                            parse_name(&key.name).unwrap_or_default(),
                             RecordType::from(key.rtype),
                         );
                         inner.cache_assist.record_failure(&key, &query, code, until);
@@ -1039,7 +1041,7 @@ impl Inner {
     /// next client query is answered from cache. Never spawns another task
     /// (no recursion), and failures are swallowed.
     pub async fn refresh(self: Arc<Self>, key: cache_assist::CacheKey, record_type: RecordType) {
-        let name = match Name::from_utf8(&key.name) {
+        let name = match parse_name(&key.name) {
             Ok(n) => n,
             Err(_) => {
                 self.cache_assist.end_prefetch(&key);

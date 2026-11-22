@@ -130,3 +130,29 @@ async fn conditional_subdomain_routes_to_dedicated_upstream() {
         .unwrap();
     assert_eq!(first_ip(&outside), "198.51.100.10");
 }
+
+#[tokio::test]
+async fn names_legal_on_the_wire_but_not_as_idna_reach_the_upstream() {
+    // The dispatcher passes the query name in its escaped ASCII form. A label
+    // starting with a hyphen (Windows TPM attestation asks one) or holding a
+    // zero byte used to fail parsing and was answered SERVFAIL at once.
+    let stub = spawn_stub("zonea.test", "198.51.100.10").await;
+    let resolver = RecursiveResolver::build(
+        &settings(stub, Vec::new()),
+        Arc::new(Metrics::default()),
+        &[],
+        None,
+    )
+    .unwrap();
+
+    for name in [
+        "\\-keyid-45ce-v2.zonea.test",
+        "3o\\0004az-dnsotls-ds.zonea.test",
+    ] {
+        let lookup = resolver
+            .lookup(name, RecordType::A)
+            .await
+            .unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert_eq!(first_ip(&lookup), "198.51.100.10", "{name}");
+    }
+}

@@ -76,7 +76,7 @@ fn encode_entry(buf: &mut Vec<u8>, entry: &PersistedEntry) {
 }
 
 fn encode_name(buf: &mut Vec<u8>, name: &str) {
-    let Ok(name) = Name::from_utf8(name) else {
+    let Ok(name) = crate::name_text::parse_name(name) else {
         return;
     };
     let mut wire = Vec::with_capacity(name.len() + 1);
