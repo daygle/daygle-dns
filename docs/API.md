@@ -339,6 +339,31 @@ scrape_configs:
       - targets: ["dns.example.com:5380"]
 ```
 
+### Host statistics
+
+```
+GET /api/host-stats
+```
+
+CPU, load, memory and root-disk usage of the machine the server runs on
+(admin only). Linux only; elsewhere the response is
+`{"supported": false, "reason": "..."}`. A value that cannot be read is
+`null`.
+
+```json
+{
+  "supported": true,
+  "hostname": "dns1",
+  "uptime_secs": 864000,
+  "cpu": { "cores": 4, "usage_percent": 3.2 },
+  "load": { "one": 0.12, "five": 0.08, "fifteen": 0.05 },
+  "memory": { "total_kb": 4026532, "available_kb": 3012345, "used_percent": 25.2,
+              "swap_total_kb": 0, "swap_used_kb": 0, "swap_percent": null },
+  "disks": [ { "mount": "/", "total_kb": 30832548, "used_kb": 6123456,
+               "available_kb": 23123456, "used_percent": 19.9 } ]
+}
+```
+
 ### Dashboard statistics
 
 ```
@@ -1460,6 +1485,47 @@ took longer: compare the count of slower lookups with the rank to tell.
 transport (`tls` and `quic` come from opportunistic encryption and from
 `tls://`/`quic://` upstreams).
 
+### Name lookup
+
+```
+POST /api/resolver/lookup
+```
+
+Resolves one name the way client queries are resolved (without filtering)
+and reports the route taken, the answer or the reason it failed, and every
+query sent to other name servers on the way. This is the console's Lookup
+page.
+
+```json
+{ "name": "example.com", "type": "A", "fresh": true }
+```
+
+`type` defaults to `A`. `fresh` (default `true`) starts from empty caches so
+every step is taken and traced. The response:
+
+```json
+{
+  "name": "example.com.", "type": "A", "route": "recursive", "fresh": true,
+  "rcode": "NOERROR",
+  "answers": [ { "name": "example.com.", "type": "A", "ttl": 300,
+                 "data": "93.184.215.14", "dnssec": "secure" } ],
+  "negative_zone": null, "error": null, "elapsed_ms": 84.2,
+  "dnssec_validation": true,
+  "trace": [ { "server": "198.41.0.4", "name": "com.", "type": "NS",
+               "rcode": "NOERROR", "outcome": "referral to com. (a.gtld-servers.net., b.gtld-servers.net., ...)",
+               "elapsed_ms": 12.1 } ]
+}
+```
+
+`route` is `recursive`, `forwarding`, `conditional`, `stub` or `local-root`.
+Each answer's `dnssec` is `secure`, `insecure`, `bogus` or `indeterminate`.
+`error` explains a failure (it is `null` for NXDOMAIN and NODATA, where
+`negative_zone` names the zone whose SOA came back). Each `trace` step's
+`outcome` is a short description of what came back, and its `rcode` is
+`null` when the server did not answer.
+
+An empty name or an invalid type is `400`; `409` when recursion is disabled.
+
 ### Local root zone
 
 ```
@@ -2533,6 +2599,7 @@ backups carry them.
 GET    /api/update
 GET    /api/update/status
 POST   /api/update/start
+POST   /api/update/check
 POST   /api/update/dismiss
 GET    /api/update/preflight
 ```
@@ -2546,7 +2613,11 @@ to the root systemd update service, and restarts the server; poll
 `GET /api/update/status` for progress and to detect the restart (the status
 is read from a shared state file, so it still reports the outcome of the
 run that restarted the server). `POST /api/update/dismiss` (admin only)
-clears the last result. `GET /api/update/preflight` (admin only - it probes
+clears the last result. `POST /api/update/check` (admin only) fetches the
+latest release from GitHub now instead of waiting for the background check;
+it is throttled to once a minute, and a request inside that window is
+answered from the cache with `retry_after_secs`. It returns `409` when this
+host cannot update itself. `GET /api/update/preflight` (admin only - it probes
 GitHub and the staging directory) checks readiness beforehand.
 
 ## Errors
