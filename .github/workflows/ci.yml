@@ -96,6 +96,36 @@ jobs:
       - name: Lint
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
 
+  # Cargo.toml's rust-version promises the workspace builds on that
+  # toolchain; every other job uses the latest stable, so check it here.
+  # The version is read from Cargo.toml so the two cannot drift.
+  msrv:
+    name: Minimum Rust version
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install the declared toolchain
+        run: |
+          set -eu
+          msrv="$(sed -n 's/^rust-version *= *"\([^"]*\)".*/\1/p' Cargo.toml)"
+          if [ -z "$msrv" ]; then
+            echo "::error::no rust-version in Cargo.toml"
+            exit 1
+          fi
+          echo "rust-version: $msrv"
+          rustup toolchain install "$msrv" --profile minimal --no-self-update
+          rustup override set "$msrv"
+
+      - name: Cache cargo builds
+        uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Check
+        run: cargo check --locked --workspace --all-targets
+
   # The apply helpers run as root on real hosts, so a shell regression is a
   # privilege-boundary bug, not just a failed update. ShellCheck and a POSIX
   # parse check run here; the two harnesses that execute the scripts with
