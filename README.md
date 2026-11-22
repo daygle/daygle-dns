@@ -1,267 +1,101 @@
 # Daygle DNS
 
-A modern, combined DNS server written entirely in Rust and built on
-[Hickory DNS](https://github.com/hickory-dns/hickory-dns) (the actively
-maintained continuation of the `trust-dns` crates - `trust-dns-proto`,
-`trust-dns-server`, and `trust-dns-resolver` were rebranded to `hickory-*` and
-the old names are deprecated per RUSTSEC-2025-0017).
+A modern DNS server written in Rust on
+[Hickory DNS](https://github.com/hickory-dns/hickory-dns) (the successor to
+`trust-dns`). One process combines an authoritative server, a recursive
+resolver, encrypted DNS, filtering, DHCP and a web console.
 
-Daygle DNS combines, in a single process:
+## Features
 
-- **Authoritative DNS** with zone storage backed by **SQLite**, BIND zone-file
-  import, and **DNSSEC zone signing** (NSEC or **NSEC3**) with **automatic key rollover** and
-  **background RRSIG renewal**, so signed zones never go bogus after the
-  signature window passes.
-- **Health-checked failover**: A/AAAA records checked over TCP, HTTP or
-  HTTPS are left out of answers while down, with backups by priority.
-- **ALIAS (ANAME) records**: point a zone apex at another host name (a CDN or
-  load balancer) and answer A/AAAA with that host's current addresses.
-- **Weighted load balancing**: give A/AAAA records weights and each answer
-  holds one address, picked in proportion to them (alongside failover).
-- **Automatic PTR records**: an AUTOPTR record in a reverse zone answers every
-  address without a PTR record with a name made from it
-  (`ip-192-168-1-47.home.arpa`), so reverse lookups never come back empty.
-- **Zone aliases**: serve a zone under other names too (`example.net` and
-  `example.org` answering like `example.com`).
-- **Zone transfers**: serve **AXFR** and real **IXFR** (RFC 5936, RFC 1995,
-  with per-network ACLs) - a change journal lets an up-to-date secondary pull
-  only the records that changed - and replicate **secondary zones** from
-  remote masters on a refresh interval, optionally over TLS (**XoT**,
-  RFC 9103).
-- **Catalog zones (RFC 9432)**: publish a catalog of your zones so
-  secondaries provision themselves, and follow other servers' catalogs to
-  add and remove secondary zones automatically.
-- **NOTIFY (RFC 1996)**: primary zones send NOTIFY to configured secondaries
-  when they change (e.g. after a dynamic update), and secondary zones accept
-  NOTIFYs from their masters to pull immediately instead of waiting out the
-  refresh interval.
-- **Dynamic updates**: RFC 2136 UPDATE messages with write-through to SQLite,
-  prerequisite checking, and atomic apply - records added over the wire
-  persist and go live immediately (gated by `allow_dynamic_updates`).
-- **TSIG authentication** (RFC 8945): protect zone transfers and dynamic
-  updates with HMAC-signed requests (HMAC-SHA256, HMAC-SHA384,
-  HMAC-SHA512). Per-zone key binding, signed responses, and request-MAC
-  chaining.
-- **Named networks**: name a set of addresses once (`LAN`, `VPN`, `IoT`...)
-  in Clients -> Networks and pick it wherever a setting takes client
-  networks; changing it changes them all, renaming it keeps them pointing at
-  it, and a network in use cannot be deleted.
-- **Encrypted DNS discovery (DDR, RFC 9462)**: devices that support it
-  (Windows 11, Apple, Android) learn of the DoH, DoT and DoQ listeners and
-  switch to them by themselves. Windows and Apple devices only do so when
-  the listener's certificate also names the server's IP address; the server
-  says at start-up what stops discovery from working.
-- **Block page**: blocked sites can point at a page on this server that
-  says what was blocked and why, instead of "site not found".
-- **Reports**: queries, blocks, the busiest devices and the most asked and
-  most blocked domains for any period (overall or per device) on the
-  Reports page, and a daily or weekly summary by email or webhook.
-- **Device names**: logs, reports and the dashboard show "Kids-iPad"
-  instead of 192.168.1.47. Name devices under Clients → Devices, or let
-  names come from DHCP leases and reverse DNS.
-- **DHCP (IPv4 and IPv6)**: hand out addresses, gateway and DNS settings
-  with reservations and custom options, and DHCPv6 addresses or DNS
-  settings only (stateless); devices are registered by name (A/AAAA and
-  PTR) in a zone you host. Linux only.
-- **Lookup page**: resolve any name (or IP address, for its PTR record)
-  from the console and see why it works or fails: the answer, the reason
-  for a failure in plain words, and every query sent to other name servers
-  on the way, with each server's response and timing.
-- **Why was it blocked?** Every blocked query in the Query Log says what
-  blocked it (which blocklist, list entry, filtering group, blocked service,
-  AI category or response policy zone), with a filter by it, and Filtering
-  → Domain Check walks a domain through every check for a device and shows
-  which one decides.
-- **Blocked services**: block TikTok, YouTube, Roblox, Discord, ChatGPT and
-  30-odd other apps for a filtering group with one tick each, or block a
-  whole AI content category (gambling, adult, ads, ...) for that group.
-- **Security and privacy protections** for a filtering group, as NextDNS
-  offers them, each backed by a maintained public list the server keeps
-  up to date (dynamic DNS hostnames, IPFS gateways, cryptocurrency mining,
-  high-risk TLDs, disguised CNAME trackers, and native tracking for Apple,
-  Samsung, Xiaomi, Huawei, Windows, Amazon, Roku, LG, Vivo, OPPO and
-  TikTok) or by an exact check: domains registered in the last 30 days
-  (RDAP) and Google Safe Browsing (with your own API key; the lists are
-  kept locally, so Google never sees your queries or address). Any TLD
-  can be blocked by name, and answers that give a public name a local
-  network address (DNS rebinding) or carry an oversized payload are
-  blocked.
-- **Per-client rules** on the console's Clients page: **filtering groups**
-  (extra allow/block rules, blocklists and AI auto-blocking for a set of
-  clients) and **resolution policies** (forward some clients to their own
-  upstreams, resolve them from the root servers, or refuse them).
-- **Split horizon**: serve different answers for the same domain depending
-  on the client's network (named networks like `LAN`/`VPN`/`IoT` or
-  literal CIDRs), managed from the GUI - internal clients see internal
-  answers (A, AAAA, MX, TXT, CNAME, SRV), everyone else gets the public view.
-- **Recursive resolution** (root → TLD → authoritative) with **caching**,
-  **negative caching**, **retries**, **timeouts**, and **DNSSEC validation**,
-  plus **aggressive NSEC caching (RFC 8198)**: validated NSEC proofs answer
-  NXDOMAIN/NODATA for whole ranges of names locally, without another trip
-  to the authoritative servers.
-- **DNS64 (RFC 6147)** for IPv6-only networks behind NAT64: IPv4-only names
-  get AAAA answers inside the gateway's prefix.
-- **EDNS Client Subnet (RFC 7871)** to forwarding upstreams, so CDNs answer
-  with servers near your clients.
-- **PROXY protocol** (v1/v2) on TCP, DoT and DoH, so clients behind a load
-  balancer keep their real address.
-- **Conditional forwarding** so specific zones resolve via dedicated
-  upstreams, plus **stub zones** that send queries straight to a zone's own
-  nameservers (no root→TLD walk) - both matched by longest suffix.
-- **DNS over TLS (DoT)**, **DNS over HTTPS (DoH, RFC 8484)** over HTTP/2
-  and optionally **HTTP/3**, and **DNS over QUIC (DoQ, RFC 9250)** using
-  **rustls**.
-- **Encrypted-DNS diagnostics**: every DoT/DoH/DoQ listener start or reload
-  reports its certificate's subject and expiry, warning when it is already
-  expired or inside the ACME renewal window, and failed handshakes, dropped
-  connections and rejected DoH requests (wrong endpoint path or content
-  type) reach the console's Server Log and syslog as coalesced warnings
-  with the client address and reason - tagged `tls`/`https`/`quic` like the
-  query log, and counted per client so a loop of failures cannot flood the
-  log.
-- **DNS cookies** (RFC 7873, with RFC 9018 server cookies): clients that
-  send a cookie get a server cookie back, and ones that prove their address
-  with it get ten times the per-client rate limit, so spoofed floods cannot
-  lock real clients out.
-- **Extended DNS Errors** (RFC 8914): blocked, filtered, refused, stale and
-  failed answers say why (`dig` shows it as `EDE: 15 (Blocked)` and so on),
-  and every response to an EDNS client carries an OPT record.
-- **Let's Encrypt certificates** (ACME): issued from the Certificates page
-  and renewed automatically, proving control over HTTP (the web console) or
-  DNS (a TXT record in a zone hosted here - directly, or through a one-time
-  CNAME from a domain whose DNS is elsewhere - so wildcards work too). A
-  private ACME CA such as step-ca works as well.
-- **DNS accounts**, as NextDNS does them: each device or person gets a
-  client ID and connects to DoT/DoQ as `<client id>.dns.example.com`
-  (Android Private DNS, Apple profiles) or to DoH at `/dns-query/<client id>`,
-  and is recognised from any network: filtering groups can target the
-  account, the query log names it, and the server can refuse encrypted
-  queries that name no account.
-- **Backup and restore** of everything the server keeps (zones, keys,
-  settings, users, certificates) as one file, from the console or
-  `daygle-dns backup` / `daygle-dns restore`.
-- **Cache prefetch & serve-stale**: popular names are refreshed in the
-  background as their TTLs near expiry, and the last-known-good answers keep
-  being served during upstream outages (bounded staleness, e.g. 1 h).
-  With `recursive.persist_cache` the cache is snapshotted on shutdown and
-  reloaded on startup (remaining TTLs kept; expired and stale-past-window
-  entries pruned), so a restart or reboot does not start with a cold cache.
-- A **dashboard with charts & top-N tables**: per-minute query time-series
-  (1 h / 6 h / 24 h windows), top clients, top domains, and top blocked
-  domains - all bounded in memory.
-- **Remote logging** to a syslog server (RFC 5424, UDP or TCP): the
-  server log, and optionally a line per query.
-- **Query export** over HTTP(S): every query as JSON (NDJSON or an array),
-  batched to a log collector such as Vector, Fluent Bit, Logstash or Splunk
-  HEC, with an optional Authorization header.
-- **dnstap**: every client query and the exact response bytes it produced,
-  streamed as dnstap events over Frame Streams to a collector (TCP or a
-  Unix socket), through a bounded queue that drops rather than ever
-  slowing a query.
-- An **audit log** of every change and sign-in, with who, how and from where.
-- **Prometheus metrics** at `/api/metrics/prometheus`.
-- A **searchable query log**: every served query is recorded into SQLite
-  (client, name, type, transport, outcome, rcode, duration) with retention,
-  and the console's **Logs → Query Log** tab filters, paginates, live-updates
-  and CSV-exports the history.
-- An **AI scanner** (`daygle-dns-ml`): a small CPU-only classifier
-  ships with the install (a bundled fastText starter model under
-  [`models/`](models/)) and runs in the background over domains observed in
-  the query log. It works in two independent channels, each with its own
-  model, confidence floor and verdict TTL: **categorization** labels sites
-  (news, shopping, adult, ...) and never blocks, while **threat detection**
-  is the only channel that can auto-block fresh high-confidence verdicts.
-  With the shared model it reports only the labels you list in
-  `ai.auto_block_categories`; with a dedicated `ai.threat_model_path` it
-  reports every label that model produces and blocks it above the threshold,
-  so that list only applies to the shared classifier. The
-  two lists are separate on purpose: the AI → Classifications tab is the
-  categorizer's growing list of visited domains (relabel any of them
-  yourself), the AI → Threats tab is what the AI blocks, and blocking an
-  ordinary category (gambling, ads, ...) is a per-filtering-group setting
-  rather than a scanner decision. The threat list exports as a plain domain
-  list or CSV for use as a blocklist elsewhere, a domain can be marked
-  *not a threat* (its detection stops blocking but is kept for review), and
-  every operator correction is downloadable as training data. The scanner also
-  maintains its own model: with `ai.auto_retrain` on it periodically rebuilds
-  the classifier from your corrections, its confident verdicts and the shipped
-  starter corpus (so labels this network has not seen lately are not
-  forgotten), refuses a candidate that does worse on held-out corrections than
-  the model in use or can no longer report a threat label the model in use
-  can, runs a scheduled retrain's candidate in the shadow of the live model
-  (`ai.trial_new_models`) and promotes it - without a restart - only if it did
-  at least as well on held-out threats, live traffic, your corrections during
-  the trial and independently confirmed labels; a rejected candidate never
-  answered a query, pauses retraining and raises an alert. Its own verdicts
-  only train when the shipped reference model, the verifier or the page
-  agrees, so a mistake cannot reinforce itself. A dedicated threat model is
-  maintained the same way, the verifier's reference is refreshed from your
-  corrections (never from its own verdicts), and the starter corpus ships in
-  the models bundle so `[updates] auto_refresh_models` keeps the reference
-  current. It keeps the model it replaced so one
-  rollback is always available. A domain marked "not a threat" never
-  trains under the label it was denied, whatever `ai.learn_negatives` says.
-  That flag (off by default) also trains those corrections as a `benign`
-  label, so a correction can change the next model; the threat channel never reports that label as a
-  threat, but a negative class can over-generalise, which is why it is opt-in.
-  `cargo run -p daygle-dns-ml --example negatives_eval` measures it: on a
-  synthetic corpus where the negatives are domains the model had flagged, half
-  the held-out threats read as benign; where they are harmless sites, 2 of
-  30 do. A retrain that loses more held-out threats than the model in use is
-  refused even when its overall score is fine. Whole word families, grouped by
-  shared words, are held back for that check, and each is probed under a word
-  order the store never recorded, so a negative class that only swallows
-  novel names is caught. The same command runs the gate on a model trained the
-  way the retrainer trains one, prints whether it would refuse, and fails if a
-  swallowing candidate is accepted. It refuses both candidates, 12 of 12 and
-  8 of 8 held-out names lost, including the scenario where 15 of 30 unseen
-  threats are swallowed.
-  `ai.fetch_pages` (also off by default) fetches the home page of each new
-  threat candidate from the server, reads its title and text with a small cue
-  classifier, and records the result with the verdict. `ai.page_rule` decides
-  what that reading may do: `evidence` (default) records it only,
-  `corroborate` lets an agreeing page raise the confidence, and `decide` also
-  caps it when the page reads as an ordinary category and carries no threat
-  cue at all. The page is written by the site being judged, so `decide` can be
-  gamed by a site that shows a fetcher harmless text; it is opt-in for that
-  reason. A page stage gets at most 90 seconds per scan cycle. Private, loopback and
-  link-local addresses are refused and redirects are checked the same way. On by
-  default after an install in **train mode** (records verdicts, nothing
-  blocks) - flip `ai.mode` to `enforce` in the config or GUI when you are
-  happy with the verdict log. Operator allowlist always wins, and expired
-  verdicts re-enter the scan queue. Point `ai.model_path` at your own
-  supervised fastText `.bin` (or empty it for the zero-model heuristic
-  backend) to replace the starter model, and `ai.category_model_path` /
-  `ai.threat_model_path` to give a channel its own model. A release model
-  bundle is probed on one pinned sample of held-out threat names before it is
-  installed and again after the restart; if it loses more of them than the
-  files it replaces, those files are restored and the update fails with both
-  counts. Verdicts are visible via the REST API (`/api/ai/*`).
-- A **REST API** (tower/axum) for configuration, zone management, logs, and
-  metrics.
-- An embedded **Svelte** web GUI with **username/password login and roles**
-  (`admin` = full access, `viewer` = read-only), optional **two-factor
-  login** (authenticator app codes, recovery codes), sessions that survive
-  restarts, **personal API tokens** for scripts, editable settings forms for
-  server/recursive/DoT/DoH/DoQ/API, zones, records, split horizon, status,
-  logs, and settings.
-- A **plugin-style policy engine** for blocklists, ACLs, and per-client rules,
-  including **remote blocklist sources** (hosts files, AdGuard lists, plain
-  and wildcard domain lists, response policy zones) fetched over HTTP(S) and
-  refreshed on a schedule. A source blocks for everyone or only for the
-  filtering groups that select it.
-- **Response policy zones (RPZ)**: DNS firewall feeds loaded by zone
-  transfer (AXFR, with TSIG) or URL, or rules typed in the console, with
-  every RPZ action (NXDOMAIN, NODATA, passthru, drop, TCP-only, local data
-  and walled gardens), QNAME, client-IP, answer-IP, NSDNAME and NSIP triggers, per-zone
-  policy overrides, a log-only mode and a tester.
-- **Response rate limiting (RRL)**: identical UDP answers to one network
-  are capped per second, with slip (truncated answers that send real
-  clients to TCP), against reflection and amplification attacks.
-- **Rate limiting** per client (source IP) and per domain (query name) with
-  configurable fixed windows, loopback exemption, and live reload - queries
-  over the limit get SERVFAIL and are counted in the `rate_limited` metric.
+**Authoritative DNS**
 
+- Zones stored in **SQLite**, with BIND zone-file import.
+- **DNSSEC signing** (NSEC or NSEC3) with automatic key rollover and
+  background RRSIG renewal, so signed zones never go bogus.
+- **Zone transfers**: AXFR and real IXFR (RFC 5936, RFC 1995) with
+  per-network ACLs, secondary zones pulled from masters, optionally over TLS
+  (XoT, RFC 9103), **NOTIFY** (RFC 1996) and **catalog zones** (RFC 9432).
+- **Dynamic updates** (RFC 2136), written through to SQLite, and **TSIG**
+  (RFC 8945, HMAC-SHA256/384/512) for transfers and updates.
+- **Health-checked failover** (TCP, HTTP or HTTPS checks) and **weighted
+  load balancing** for A/AAAA records.
+- **ALIAS (ANAME)** records at a zone apex, **AUTOPTR** records that answer
+  every reverse lookup in a zone, and **zone aliases** (one zone served
+  under several names).
+- **Split horizon**: different answers per client network.
+
+**Resolver**
+
+- **Recursive resolution** from the root servers, or **forwarding** to
+  upstreams, with **DNSSEC validation**, aggressive NSEC caching (RFC 8198)
+  and an optional local root zone (RFC 8806).
+- **Conditional forwarding** and **stub zones** for chosen domains.
+- **Prefetch** of popular names, **serve-stale** during upstream outages,
+  and an optional cache snapshot that survives restarts.
+- **DNS64** (RFC 6147) and **EDNS Client Subnet** (RFC 7871) to forwarding
+  upstreams.
+- A **Lookup page** that resolves any name and shows every query sent on
+  the way, with timings and the reason for a failure.
+
+**Encrypted DNS**
+
+- **DoT**, **DoH** (RFC 8484, HTTP/2 and optionally HTTP/3) and **DoQ**
+  (RFC 9250), on rustls.
+- **Let's Encrypt certificates** (ACME, HTTP or DNS challenge, wildcards
+  included), or a private ACME CA such as step-ca.
+- **DDR** (RFC 9462), so Windows 11, Apple and Android devices discover the
+  encrypted listeners by themselves.
+- **DNS accounts**: each device or person gets a client ID
+  (`<id>.dns.example.com` for DoT/DoQ, `/dns-query/<id>` for DoH) and is
+  recognised from any network.
+- Certificate and handshake diagnostics in the Server Log.
+
+**Filtering**
+
+- **Blocklists** fetched over HTTP(S) on a schedule (hosts files, AdGuard
+  lists, domain lists, RPZ), for everyone or for chosen filtering groups.
+- **Response policy zones (RPZ)** with every action and trigger type, loaded
+  by zone transfer, URL or typed in the console.
+- **Filtering groups** and **resolution policies** per client: extra rules,
+  **blocked services** (TikTok, YouTube, Roblox and 30-odd more), blocked
+  categories, and security and privacy protections (newly registered
+  domains, Google Safe Browsing, DNS rebinding, native trackers, and more).
+- An **AI scanner** that categorizes visited domains and can block threats.
+  It ships in safe train mode; see [`docs/AI.md`](docs/AI.md).
+- **Why was it blocked?**: every blocked query names what blocked it, and
+  Filtering → Domain Check walks a domain through every check.
+- A **block page** that explains what was blocked and why.
+
+**Protection**
+
+- **Rate limiting** per client and per domain, **response rate limiting**
+  (RRL) with slip, and **DNS cookies** (RFC 7873, RFC 9018).
+- **Extended DNS Errors** (RFC 8914) that say why an answer was blocked,
+  refused or stale.
+- **PROXY protocol** (v1/v2) on TCP, DoT and DoH.
+
+**Network services**
+
+- **DHCP** (IPv4 and IPv6, Linux only) with reservations and custom
+  options; leases are registered by name in a zone you host.
+- **Device names** from the console, DHCP leases or reverse DNS, shown in
+  logs and reports instead of IP addresses.
+- **Named networks** (`LAN`, `VPN`, `IoT`...) defined once and used by every
+  setting that takes client networks.
+
+**Console and operations**
+
+- A **web console** (Svelte) with admin and read-only viewer roles,
+  two-factor login and personal API tokens, plus a **REST API** with an
+  OpenAPI description.
+- A **dashboard**, a searchable **query log** in SQLite, and **reports** by
+  period or device, with a daily or weekly summary by email or webhook.
+- **Prometheus metrics**, **syslog** (RFC 5424), **query export** over
+  HTTP(S) (NDJSON or JSON) and **dnstap**.
+- An **audit log** of every change and sign-in.
+- **Backup and restore** of everything as one file, from the console or the
+  command line.
+- **Updates from the console** on systemd installs, with automatic rollback.
 
 ## Quick start
 
@@ -276,51 +110,43 @@ sudo cargo run --release -p daygle-dns -- --config daygle-dns.toml.example
 
 On Linux the installer sets the server up as a systemd service. Without
 systemd (macOS, for example) it builds and installs the binary and prints the
-command to start it yourself.
+command to start it. It finishes by checking that the service is running and
+printing the web console address (open it to create the admin account) and
+the DNS server address to give your router or devices.
 
-The installer also drops the bundled AI starter model into
-`/etc/daygle-dns/models/` (or your `CONFIG_DIR/models`) and enables the AI
-scanner in safe train mode; set `DAYGLE_DNS_AI=0` to keep the scanner off.
+What the installer does:
 
-The installer provisions missing prerequisites itself: Rust via rustup; a C
-compiler, git, and curl via your package manager (apt, dnf/yum, apk, pacman,
-zypper, or Xcode Command Line Tools on macOS); DNS test tools (dig) where
-available. Set `DAYGLE_DNS_NO_DEPS=1` to skip the automatic installs and get
-manual instructions instead.
+- **Prerequisites**: installs Rust (rustup), a C compiler, git and curl
+  (apt, dnf/yum, apk, pacman, zypper, or Xcode Command Line Tools on macOS),
+  and `dig` where available.
+- **Fresh install or upgrade**: an existing config, binary or systemd unit
+  means an upgrade. The config and data are kept and the service is
+  restarted; a fresh install writes the default config and starts it.
+- **Web console on the LAN**: the API listener is bound to `0.0.0.0:5380` so
+  the first-run page can create the admin account. On upgrades it is rebound
+  from `127.0.0.1`; existing accounts and passwords are never replaced.
+- **AI scanner**: installs the bundled starter model into
+  `/etc/daygle-dns/models/` and turns the scanner on in train mode (nothing
+  is blocked).
+- **Port 53**: turns off systemd-resolved's stub listener
+  (`/etc/systemd/resolved.conf.d/daygle-dns.conf`) and points
+  `/etc/resolv.conf` at `/run/systemd/resolve/resolv.conf`, so the host keeps
+  resolving. Any other program on port 53 (dnsmasq, bind9, unbound) is named
+  in a warning.
+- **Firewall**: when ufw or firewalld is active, opens ports 53, 853 and 5380
+  to private networks only (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16,
+  100.64.0.0/10, 169.254.0.0/16, fc00::/7, fe80::/10). Other firewalls are
+  left to you.
 
-The installer automatically detects whether it is performing a fresh install
-or upgrading an existing installation. It treats an existing configuration,
-binary, or systemd unit as an upgrade, preserves the configuration and data,
-and restarts an existing service (or enables it if an interrupted installation
-left it stopped). Fresh installs create the default configuration and start the
-service.
+Environment variables that change this:
 
-The web GUI is exposed on the LAN by default (the API listener is rebound to
-0.0.0.0:5380) so the first-run setup page can create the admin account in the
-browser; opt out with `DAYGLE_DNS_LAN_GUI=0`. For scripted installs pass
-`DAYGLE_DNS_ADMIN_USER` and `DAYGLE_DNS_ADMIN_PASSWORD` to create the admin
-account immediately. On upgrades the installer rebinds the API listener to
-0.0.0.0:5380 when it is still on 127.0.0.1 and preserves any existing console
-account (its password is never replaced).
-
-Port 53 must be free. On Ubuntu, Fedora and other systemd distributions,
-systemd-resolved runs a stub resolver on 127.0.0.53:53 that would stop the
-server starting, so the installer turns it off with
-`/etc/systemd/resolved.conf.d/daygle-dns.conf` (`DNSStubListener=no`) and links
-`/etc/resolv.conf` to `/run/systemd/resolve/resolv.conf`, the upstream servers
-systemd-resolved already knows, so the host itself keeps resolving. Set
-`DAYGLE_DNS_KEEP_RESOLVED=1` to leave systemd-resolved alone. Any other program
-still on port 53 (dnsmasq, bind9, unbound) is named in a warning.
-
-When ufw or firewalld is active, the installer opens ports 53, 853 (TCP and
-UDP) and 5380 to private networks only: 10.0.0.0/8, 172.16.0.0/12,
-192.168.0.0/16, 100.64.0.0/10 (CGNAT, also used by Tailscale), 169.254.0.0/16
-and the IPv6 local ranges fc00::/7 and fe80::/10. These are the same networks
-Recursion Access → Private Networks Only trusts. Other firewalls are left to you.
-
-The installer finishes by checking that the service is running and printing
-the web console address (open it to create the admin account) and the DNS
-server address to give your router or devices.
+| Variable | Effect |
+|---|---|
+| `DAYGLE_DNS_ADMIN_USER`, `DAYGLE_DNS_ADMIN_PASSWORD` | Create the admin account now (for scripted installs). |
+| `DAYGLE_DNS_LAN_GUI=0` | Keep the web console on `127.0.0.1` (this also skips creating the admin account). |
+| `DAYGLE_DNS_AI=0` | Leave the AI scanner off. |
+| `DAYGLE_DNS_KEEP_RESOLVED=1` | Leave systemd-resolved alone. |
+| `DAYGLE_DNS_NO_DEPS=1` | Do not install prerequisites; print instructions instead. |
 
 Test a query:
 
@@ -329,27 +155,49 @@ dig @127.0.0.1 example.com A
 dig @127.0.0.1 -p 853 example.com A +tls   # DNS over TLS, once [dot] is enabled
 ```
 
+## Command line
+
+```bash
+daygle-dns --config /etc/daygle-dns/daygle-dns.toml   # run the server (this path is the default)
+daygle-dns backup <file> [--query-logs]   # back up zones, keys, settings, users, certificates
+daygle-dns restore <file>                 # stage a backup for the next start
+daygle-dns hash-password 'password'       # hash for an [[api.users]] entry
+daygle-dns reset-web-access               # put the console back on plain HTTP on api.port
+daygle-dns --version
+```
+
+Restart the service after `restore` or `reset-web-access`. The backup file
+holds private keys and password hashes, so keep it safe.
+
 ## Workspace layout
 
-| Crate                   | Purpose |
-|-------------------------|---------|
-| `daygle-dns-core`           | Configuration model, shared error type, metrics, log store |
-| `daygle-dns-policy`         | Plugin-style policy engine (blocklists, ACLs, per-client rules) |
-| `daygle-dns-authoritative`  | SQLite zone storage, zone-file parser, Hickory catalog + DNSSEC signing |
-| `daygle-dns-recursive`      | Recursive resolver (caching, negative caching, retries, timeouts, DNSSEC) |
-| `daygle-dns-dot`            | TLS certificates and configuration for DoT (RFC 7858), DoH (RFC 8484) and DoQ (RFC 9250) |
-| `daygle-dns-ml`            | AI domain scanner: verdict store, fastText/heuristic backends, AI policy plugin |
-| [`models/`](models/)                       | Bundled AI starter model + training data (used out of the box) |
-| `daygle-dns-api`           | REST API (axum) + embedded GUI serving |
-| `daygle-dns-gui`            | Embedded web GUI assets (Svelte build output) |
-| `daygle-dns-dhcp`           | DHCPv4 and DHCPv6 server with DNS registration of leases (Linux) |
-| `daygle-dns`             | The server binary: the UDP, TCP, DoT, DoH and DoQ listeners, the combined dispatcher, and the web console listeners |
+| Crate | Purpose |
+|---|---|
+| `daygle-dns` | The server binary: UDP, TCP, DoT, DoH and DoQ listeners, the query dispatcher and the web console listeners |
+| `daygle-dns-core` | Configuration model, shared error type, metrics, log store |
+| `daygle-dns-policy` | Policy engine (blocklists, ACLs, per-client rules) |
+| `daygle-dns-authoritative` | SQLite zone storage, zone-file parser, Hickory catalog and DNSSEC signing |
+| `daygle-dns-recursive` | Recursive resolver (caching, retries, timeouts, DNSSEC validation) |
+| `daygle-dns-dot` | TLS certificates and configuration for DoT, DoH and DoQ |
+| `daygle-dns-api` | REST API (axum) and console serving |
+| `daygle-dns-gui` | Embedded web console assets (Svelte build output) |
+| `daygle-dns-ml` | AI scanner: verdict store, fastText/heuristic backends, AI policy plugin |
+| `daygle-dns-dhcp` | DHCPv4 and DHCPv6 server with DNS registration of leases (Linux) |
 
-See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for how the pieces fit
-together and [`docs/API.md`](docs/API.md) for the REST API reference. The
-API also publishes an OpenAPI 3 description at `GET /api/openapi.json`,
-built from a route table the test suite holds against the router so it
-cannot drift from the endpoints actually served.
+[`models/`](models/README.md) holds the bundled AI starter model and its
+training data, and [`vendor/`](vendor/README.md) holds patched copies of two
+Hickory crates.
+
+## Documentation
+
+| Document | Contents |
+|---|---|
+| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | How the crates fit together, query flow, concurrency, DNSSEC |
+| [`docs/API.md`](docs/API.md) | REST API reference (also served as OpenAPI 3 at `GET /api/openapi.json`) |
+| [`docs/AI.md`](docs/AI.md) | The AI scanner: channels, models, retraining, page fetching |
+| [`docs/UPDATE_ROLLBACK.md`](docs/UPDATE_ROLLBACK.md) | Rehearsing a console update and its rollback on a test VM |
+| [`daygle-dns.toml.example`](daygle-dns.toml.example) | Every configuration option, commented |
+| [`SECURITY.md`](SECURITY.md) | Reporting a vulnerability |
 
 ## Configuration
 
@@ -502,37 +350,14 @@ cargo build --release -p daygle-dns
 cargo test --workspace
 ```
 
-This runs unit tests for configuration, policy, zone storage/parsing, upstream
-parsing, TLS certificates, and the GUI, plus integration tests that spin up a
-real server on ephemeral ports and exercise:
-
-- authoritative answers over **UDP** and **TCP**, and plain DNS behaviour on
-  both (replies from the address queried, truncation, pipelined TCP queries,
-  the TCP connection cap),
-- **split-horizon** synthetic answers per client network,
-- **policy** blocking and **remote blocklist sources**,
-- full **recursive** resolution through a local stub upstream (no internet
-  required) and **conditional forwarding**,
-- **zone transfers** (AXFR/IXFR) and secondary-zone replication,
-- **RFC 2136 dynamic updates** and **NOTIFY** propagation,
-- **query logging** into SQLite and the console's query-log filters,
-- **rate limiting** per client and per domain, and **response rate
-  limiting** (RRL) with slip,
-- **response policy zones**: every action and trigger type, and zones
-  loaded by zone transfer,
-- **live config reload** of policy, upstreams and listeners, both via the
-  reload API and the file watcher,
-- **console login, roles and settings**: login flow, read-only `viewer`
-  accounts (403 on mutations), secret redaction in `GET /api/config`,
-  settings updates persisted to the database (the config file seeds the
-  first boot), and the dashboard stats endpoint,
-- **DNS over TLS** and **DNS over HTTPS** against a self-signed certificate,
-- **DNS over QUIC** (RFC 9250) against the generated self-signed certificate,
-- **TSIG** covering HMAC-SHA256 request/response round-trips with
-  request-MAC chaining,
-- **encrypted DNS discovery** (DDR) records,
-- **ACME certificates** against Pebble, Let's Encrypt's test CA (run when
-  `PEBBLE` and `PEBBLE_DIR` are set; skipped otherwise).
+This runs the unit tests and integration tests that start a real server on
+ephemeral ports and test it over the wire: authoritative and recursive
+answers (with a local stub upstream, so no internet is needed), zone
+transfers, dynamic updates and NOTIFY, filtering and RPZ, rate limiting,
+live reload, console login and roles, DoT, DoH and DoQ, TSIG, DDR and more
+(see `crates/daygle-dns/tests/`). The ACME tests run against Pebble, Let's
+Encrypt's test CA, when `PEBBLE` and `PEBBLE_DIR` are set, and are skipped
+otherwise.
 
 ## Upgrading
 
@@ -573,14 +398,14 @@ post-rollback checks.
 
 ### Source builds
 
-If you cloned the repository, pull, rebuild, and restart:
+If you cloned the repository, pull, rebuild, install the binary over the old
+one, and restart:
 
 ```bash
 git pull
 cargo build --release -p daygle-dns
-sudo systemctl restart daygle-dns   # systemd installs
-# ...or copy the binary over your existing one:
 sudo install -m 0755 target/release/daygle-dns /usr/local/bin/daygle-dns
+sudo systemctl restart daygle-dns   # systemd installs
 ```
 
 ### After upgrading

@@ -278,7 +278,7 @@ same path for per-source status.
 ## AI scanner (`daygle-dns-ml`)
 
 A CPU-only background classifier over domains observed in the query log.
-Opt-in via `[ai] enabled = true`; the DNS hot path nevers runs a model.
+Opt-in via `[ai] enabled = true`; the DNS hot path never runs a model.
 
 - **Two channels.** The subsystem does two different jobs, and they are
   separate passes rather than one label that has to serve both:
