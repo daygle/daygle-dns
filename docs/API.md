@@ -1453,9 +1453,12 @@ NXDOMAIN answered from the local root zone without a lookup). `latency.counts`
 has one entry per bound plus a final one for slower lookups; the percentiles
 are bucket upper bounds. A lookup exactly on a bound counts in that bound's
 bucket, so a bound is inclusive (`le` semantics) and a reported p50 of 50 ms
-means the median took at most 50 ms. `connections` counts outbound
-connections to nameservers and upstreams by transport (`tls` and `quic` come
-from opportunistic encryption and from `tls://`/`quic://` upstreams).
+means the median took at most 50 ms. A percentile that falls in the final,
+unbounded bucket is reported as the last bound (2500) although those lookups
+took longer: compare the count of slower lookups with the rank to tell.
+`connections` counts outbound connections to nameservers and upstreams by
+transport (`tls` and `quic` come from opportunistic encryption and from
+`tls://`/`quic://` upstreams).
 
 ### Local root zone
 

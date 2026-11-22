@@ -4770,6 +4770,17 @@ impl RecursiveSettings {
             ResolutionMode::Forwarding
         })
     }
+
+    /// Whether the resolver built from these settings runs the recursor:
+    /// in recursive mode, or in forwarding mode when an enabled client
+    /// policy routes its clients recursively.
+    pub fn runs_recursor(&self) -> bool {
+        self.effective_mode() == ResolutionMode::Recursive
+            || self
+                .client_policies
+                .iter()
+                .any(|p| p.enabled && p.action == ClientPolicyAction::Recursive)
+    }
 }
 
 impl Default for RecursiveSettings {
@@ -7255,6 +7266,38 @@ upstreams = ["192.0.2.20:5353"]
     /// clamps the setting there and refuses to save more: the setting and
     /// the Lookup trace then always name the same timeout. Forwarding keeps
     /// the whole range, which its resolver honours.
+    /// The recursor runs in recursive mode, and in forwarding mode only for
+    /// an enabled client policy that resolves recursively.
+    #[test]
+    fn runs_recursor_follows_mode_and_recursive_client_policies() {
+        let mut settings = RecursiveSettings {
+            mode: Some(ResolutionMode::Recursive),
+            ..RecursiveSettings::default()
+        };
+        assert!(settings.runs_recursor());
+
+        settings.mode = Some(ResolutionMode::Forwarding);
+        assert!(!settings.runs_recursor());
+
+        let policy = |enabled, action| ClientPolicyConfig {
+            name: "kids".to_string(),
+            enabled,
+            clients: vec!["192.168.50.0/24".to_string()],
+            action,
+            upstreams: vec![],
+            modified_at: None,
+        };
+        settings.client_policies = vec![policy(true, ClientPolicyAction::Forward)];
+        assert!(!settings.runs_recursor());
+        settings.client_policies = vec![policy(false, ClientPolicyAction::Recursive)];
+        assert!(
+            !settings.runs_recursor(),
+            "a disabled policy builds nothing"
+        );
+        settings.client_policies = vec![policy(true, ClientPolicyAction::Recursive)];
+        assert!(settings.runs_recursor());
+    }
+
     #[test]
     fn recursor_timeout_is_capped_at_what_the_recursor_can_wait() {
         let forwarding = DaygleConfig::parse(

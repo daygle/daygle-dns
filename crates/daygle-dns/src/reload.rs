@@ -215,8 +215,13 @@ pub fn apply_config(shared: &Shared, new: Arc<DaygleConfig>) -> bool {
     shared
         .local_root
         .set_settings(new.recursive.local_root_in_effect());
+    // The recursor sizes its per-name-server wait from the Client Timeout
+    // when it is built, so a change to it rebuilds it too whenever the
+    // recursor runs (recursive mode, or a recursive client policy).
     if old_r.recursive != new_r.recursive
         || old_r.authoritative.stub_zones != new_r.authoritative.stub_zones
+        || (new_r.recursive.runs_recursor()
+            && old_r.server.client_timeout_ms != new_r.server.client_timeout_ms)
     {
         if new_r.recursive.enabled {
             // Snapshot the current cache before it is replaced so the new
