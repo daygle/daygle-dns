@@ -1,5 +1,6 @@
 [workspace]
 resolver = "2"
+exclude = ["vendor"]
 members = [
     "crates/daygle-dns-core",
     "crates/daygle-dns-policy",
@@ -110,3 +111,9 @@ strip = true
 
 [profile.dev]
 opt-level = 1
+
+# Patched copies of hickory's recursor and DNSSEC validator; vendor/README.md
+# lists the changes made to the upstream 0.26.3 sources and why.
+[patch.crates-io]
+hickory-resolver = { path = "vendor/hickory-resolver" }
+hickory-net = { path = "vendor/hickory-net" }
