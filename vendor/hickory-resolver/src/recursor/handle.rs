@@ -168,6 +168,29 @@ impl<P: ConnectionProvider> RecursorDnsHandle<P> {
         depth: u8,
         limits: &RequestLimits,
     ) -> Result<Message, RecursorError> {
+        self.resolve_following(
+            query,
+            request_time,
+            query_has_dnssec_ok,
+            depth,
+            limits,
+            true,
+        )
+        .await
+    }
+
+    /// [`Self::resolve`], following a CNAME at the query name only when `follow_cnames` is set.
+    /// The DNSSEC validator's zone cut probes leave it unset: the alias itself shows that the
+    /// name is not a zone cut, and its target is no help in finding one.
+    async fn resolve_following(
+        &self,
+        query: Query,
+        request_time: Instant,
+        query_has_dnssec_ok: bool,
+        depth: u8,
+        limits: &RequestLimits,
+        follow_cnames: bool,
+    ) -> Result<Message, RecursorError> {
         #[cfg(feature = "metrics")]
         let _guard = self.metrics.new_inflight_query();
 
@@ -182,8 +205,8 @@ impl<P: ConnectionProvider> RecursorDnsHandle<P> {
                         .set(self.response_cache.entry_count() as f64);
                 }
 
-                let response = self
-                    .resolve_cnames(
+                let response = if follow_cnames {
+                    self.resolve_cnames(
                         response,
                         query.clone(),
                         request_time,
@@ -191,7 +214,10 @@ impl<P: ConnectionProvider> RecursorDnsHandle<P> {
                         depth,
                         limits,
                     )
-                    .await?;
+                    .await?
+                } else {
+                    response
+                };
 
                 let result = response.maybe_strip_dnssec_records(query_has_dnssec_ok);
                 #[cfg(feature = "metrics")]
@@ -274,8 +300,8 @@ impl<P: ConnectionProvider> RecursorDnsHandle<P> {
             }
         };
 
-        let response = self
-            .resolve_cnames(
+        let response = if follow_cnames {
+            self.resolve_cnames(
                 response,
                 query.clone(),
                 request_time,
@@ -283,7 +309,10 @@ impl<P: ConnectionProvider> RecursorDnsHandle<P> {
                 depth,
                 limits,
             )
-            .await?;
+            .await?
+        } else {
+            response
+        };
 
         // RFC 4035 section 3.2.1 if DO bit not set, strip DNSSEC records unless
         // explicitly requested
@@ -982,7 +1011,7 @@ mod for_dnssec {
     use super::*;
     use crate::{
         net::{DnsHandle, NetError},
-        proto::op::{DnsRequest, DnsResponse, OpCode},
+        proto::op::{DnsRequest, DnsRequestOptions, DnsResponse, OpCode},
     };
 
     impl<P: ConnectionProvider> DnsHandle for RecursorDnsHandle<P> {
@@ -990,6 +1019,20 @@ mod for_dnssec {
         type Runtime = P::RuntimeProvider;
 
         fn send(&self, request: DnsRequest) -> Self::Response {
+            self.send_following(request, true)
+        }
+
+        fn lookup_zone_cut(&self, query: Query, options: DnsRequestOptions) -> Self::Response {
+            self.send_following(DnsRequest::from_query(query, options), false)
+        }
+    }
+
+    impl<P: ConnectionProvider> RecursorDnsHandle<P> {
+        fn send_following(
+            &self,
+            request: DnsRequest,
+            follow_cnames: bool,
+        ) -> BoxStream<'static, Result<DnsResponse, NetError>> {
             let query = if let OpCode::Query = request.op_code {
                 if let Some(query) = request.queries.first().cloned() {
                     query
@@ -1010,7 +1053,14 @@ mod for_dnssec {
                 let do_bit = true;
 
                 let limits = RequestLimits::new();
-                let future = this.resolve(query, Instant::now(), do_bit, 0, &limits);
+                let future = this.resolve_following(
+                    query,
+                    Instant::now(),
+                    do_bit,
+                    0,
+                    &limits,
+                    follow_cnames,
+                );
                 let response = match future.await {
                     Ok(response) => response,
                     Err(e) => return Err(NetError::from(e)),

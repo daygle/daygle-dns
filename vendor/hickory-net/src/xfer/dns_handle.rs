@@ -63,4 +63,17 @@ pub trait DnsHandle: 'static + Clone + Send + Sync + Unpin {
         debug!("querying: {} {:?}", query.name(), query.query_type());
         self.send(DnsRequest::from_query(query, options))
     }
+
+    /// Look up `query` (an NS query) only to find out whether its name is a
+    /// zone cut, as the DNSSEC validator does while looking for the zone
+    /// whose DS records prove a name secure or insecure.
+    ///
+    /// A name with a CNAME cannot also hold NS records (RFC 1034 section
+    /// 3.6.2, RFC 2181 section 10.1), so it is not a zone cut, and the alias's
+    /// target is no help in finding one. Handles that would otherwise follow
+    /// the CNAME (a recursor) override this to return it as it is; by
+    /// default this is [`Self::lookup`].
+    fn lookup_zone_cut(&self, query: Query, options: DnsRequestOptions) -> Self::Response {
+        self.lookup(query, options)
+    }
 }

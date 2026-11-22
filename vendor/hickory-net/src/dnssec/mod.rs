@@ -755,11 +755,13 @@ impl<H: DnsHandle> DnssecDnsHandle<H> {
                 return Err(ProofError::ds_should_exist(name));
             }
 
-            // Make an un-verified request for the NS RRset at this ancestor name.
+            // Make an un-verified request for the NS RRset at this ancestor name. Only whether
+            // the name is a zone cut matters: an alias (CNAME) at it is not one, and following
+            // the alias would resolve an unrelated chain for nothing.
             let query = Query::query(ancestor.clone(), RecordType::NS);
             let result = self
                 .handle
-                .lookup(query.clone(), options)
+                .lookup_zone_cut(query.clone(), options)
                 .first_answer()
                 .await;
             match result {
