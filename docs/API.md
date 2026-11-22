@@ -1396,15 +1396,15 @@ no opt-out (NSEC3PARAM is published at the apex). Calling `sign` on a signed
 zone with `nsec3` switches between the two without changing keys; without a
 body it keeps the zone's current choice. `GET /api/zones` reports `dnssec`
 and `nsec3` for each zone, and `ds`: the DS records (SHA-256) the parent
-zone must publish, one per active key (two during a key rollover).`sign` fails while `authoritative.dnssec_enabled` is off.
+zone must publish, one per active key (two during a key rollover). `sign` fails while `authoritative.dnssec_enabled` is off.
 
 A signed zone also publishes RFC 8078 CDS and CDNSKEY RRsets at its apex,
 one record per active key with a SHA-256 digest and the same TTL the zone
 uses for its DNSSEC records: a parent that supports the automated DS
 exchange (a CDS-scanning registrar or `dnssec-monitor` tooling) can fetch
 them and publish the matching DS without the DS being copied by hand.
-During a rollover the records of both the active and retired keys appear,
-just like the DS report.
+During a rollover both keys are active, so records for both appear, just
+like the DS report.
 
 Once signed, a zone is maintained automatically: RRSIGs are renewed before
 they expire (with a serial bump, so secondaries pick up the new signatures)

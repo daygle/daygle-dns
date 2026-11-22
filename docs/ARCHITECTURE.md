@@ -7,29 +7,32 @@ DNS over HTTPS, DNS over QUIC, and an HTTP API/GUI.
 ## Crate responsibilities
 
 ```
-                          ┌──────────────────────────────┐
-                          │           daygle-dns (bin)       │
-                          │  DnsDispatcher + listeners   │
-                          └──────┬──────┬──────┬─────────┘
-                                 │      │      │
-              ┌──────────────────┘      │      └──────────────────┐
-              ▼                         ▼                         ▼
-   ┌───────────────────┐    ┌────────────────────┐    ┌──────────────────┐
-   │ daygle-dns-policy     │    │ daygle-dns-authoritative│    │ daygle-dns-recursive │
-   │ ACLs, blocklists, │    │ SQLite store,       │    │ hickory-resolver │
-   │ per-client rules  │    │ zone catalog,       │    │ caching, DNSSEC  │
-   └─────────┬─────────┘    │ DNSSEC signing      │    └────────┬─────────┘
-             │              └─────────┬───────────┘             │
-             ▼                        ▼                         ▼
-        daygle-dns-core             daygle-dns-dot (rustls DoT)     hickory-proto
-   (config/error/metrics/logs)  daygle-dns-api (axum)          hickory-server
-                                 daygle-dns-gui (assets)
+                        ┌───────────────────────────────┐
+                        │        daygle-dns (bin)       │
+                        │   DnsDispatcher + listeners   │
+                        └───┬─────────┬─────────┬───────┘
+                            │         │         │
+           ┌────────────────┘         │         └────────────────┐
+           ▼                          ▼                          ▼
+┌──────────────────────┐ ┌──────────────────────────┐ ┌──────────────────────┐
+│ daygle-dns-policy    │ │ daygle-dns-authoritative │ │ daygle-dns-recursive │
+│ ACLs, blocklists,    │ │ SQLite store, catalog,   │ │ recursor, forwarders,│
+│ filtering groups     │ │ DNSSEC, transfers, RPZ   │ │ caching, DNSSEC      │
+└──────────────────────┘ └──────────────────────────┘ └──────────────────────┘
+
+Also composed by the binary:
+  daygle-dns-api   REST API (axum) and console     daygle-dns-gui  console assets
+  daygle-dns-dot   TLS for DoT/DoH/DoQ (rustls)    daygle-dns-ml   AI scanner
+  daygle-dns-dhcp  DHCPv4/DHCPv6 (Linux)           daygle-dns-core config, errors,
+                                                                  metrics, logs
 ```
 
 - **`daygle-dns-core`** is dependency-free of the DNS stack: the TOML configuration
   model, the shared `DaygleError`, atomic `Metrics`, and a bounded `LogStore`.
-- **`daygle-dns-policy`** evaluates a query in order: ACLs → blocklists →
-  ordered per-client rules → user plugins. A `PolicyPlugin` is a boxed async
+- **`daygle-dns-policy`** evaluates a query in order: ACLs → allowlist →
+  blocklists (static and remote sources) → ordered per-client rules → AAAA
+  filter → plugins. It also holds the filtering groups (`advanced.rs`),
+  which the dispatcher applies after it. A `PolicyPlugin` is a boxed async
   callback; the first plugin returning `Some(Decision)` wins.
 - **`daygle-dns-authoritative`** persists zones/records/DNSSEC keys in SQLite and
   rebuilds an in-memory Hickory `Catalog` (`InMemoryZoneHandler` per zone). The
@@ -37,8 +40,11 @@ DNS over HTTPS, DNS over QUIC, and an HTTP API/GUI.
   (`SplitHorizonIndex`): stored client networks + domain entries are
   pre-resolved into a per-query lookup structure that maps `(client IP,
   qname, query type)` to the synthetic records to serve.
-- **`daygle-dns-recursive`** wraps `hickory_resolver::TokioResolver`, configuring
-  cache size, per-server timeouts, attempts, and DNSSEC validation. Negative
+- **`daygle-dns-recursive`** resolves names in one of two modes: recursive
+  (from the root servers, through Hickory's recursor, patched in
+  [`vendor/`](../vendor/README.md)) or forwarding (a Hickory `Resolver` over
+  the configured upstreams). It configures cache size, per-server timeouts,
+  attempts, and DNSSEC validation. Negative
   caching is Hickory's built-in behavior, bounded by `negative_cache_ttl`.
   With `aggressive_nsec` on (and validation), validated NSEC records are
   also kept in a bounded proof cache (`aggressive.rs`): a name a cached NSEC
@@ -47,11 +53,11 @@ DNS over HTTPS, DNS over QUIC, and an HTTP API/GUI.
   (RFC 8198). Only `Proof::Secure` records are used, each proof expires
   with the earliest of the negative TTL, its own TTL and its signature's
   expiration, and NSEC3 zones are left to normal resolution.
-  Conditional forwarding zones each get their own resolver built from the
-  zone's dedicated upstreams; routing happens at lookup time by longest
-  label-aligned suffix match.
+  Conditional forwarding zones and stub zones each get their own resolver;
+  routing happens at lookup time (see step 3 of the query flow).
 - **`daygle-dns-dot`** produces rustls TLS configurations for the encrypted
-  DNS protocols - the `dot` ALPN for DoT (RFC 7858), `h2` for DoH (RFC 8484)
+  DNS protocols - the `dot` ALPN for DoT (RFC 7858, plus `xot` for zone
+  transfers), `h2` for DoH (RFC 8484)
   and a TLS 1.3 + `doq`-ALPN setup for DoQ (RFC 9250) - and generates
   self-signed certificates when configured.
 - **`daygle-dns-api`** serves the REST API and the embedded GUI, including
@@ -80,87 +86,114 @@ DNS over HTTPS, DNS over QUIC, and an HTTP API/GUI.
 ## Query flow
 
 `DnsDispatcher` implements Hickory's `RequestHandler` and is used by every
-listener:
+listener. A query passes these stages in order (`dispatcher.rs`, `dispatch`);
+the first that answers ends it.
 
-0. **Rate limiting.** Before anything else, the request counts against two
-   fixed-window budgets: one per client (source IP) and one per query name.
-   Requests over either limit get SERVFAIL and increment the `rate_limited`
-   metric. The client check also covers RFC 2136 UPDATEs and zone transfers,
-   which never reach `request_info`. Loopback is exempt when
-   `rate_limit.exempt_loopback` is set (the default). Limits live in a shared
-   [`RateLimiter`](crates/daygle-dns-core/src/rate_limit.rs) that reload swaps in
-   place, so tightening/relaxing them never drops in-flight windows.
-1. **Policy.** The query name/type and the client IP are passed to the policy
-   engine. `Block` → NXDOMAIN, `Refused` → REFUSED, `Redirect(ip)` → a
-   synthesized A/AAAA answer.
-2. **Split horizon.** For A/AAAA/MX/TXT/CNAME/SRV (and ANY) queries, the
-   client IP is looked up in the split-horizon index. The first entry whose
-   domain matches and whose networks contain the client wins; a matching
-   entry synthesizes records of the queried type (TTL from the entry) instead
-   of the normal ones. A CNAME   answers every query type (RFC 1034 §3.6.2),
-   and an entry with nothing for the queried type falls through - so an
-   internal `10.x` view can sit behind a public fallback, and a TXT-only
-   entry never swallows A queries.
-3. **Authoritative.** If the query name falls inside a hosted zone
-   (`Catalog::find`), the Hickory catalog answers. Signed zones carry DNSSEC
-   signatures and NSEC proofs. A few answers are made by the dispatcher
-   first, from indexes the catalog rebuilds with the zones: ALIAS records
-   (A/AAAA from the target), weighted A/AAAA RRsets (one record picked in
-   proportion to the weights, after failover; unsigned zones only) and
-   AUTOPTR records (a PTR made from the address when the name has none).
-   Zone aliases are served as zones of their own, built from the aliased
-   zone's records with the owner names moved into the alias.
-4. **RFC 6303 empty zones.** When the query name falls in one of
-   `authoritative.empty_zones` (by default the RFC 6303 reverse zones for
-   private, loopback, ULA, link-local and documentation address space) and
-   no hosted zone covers it, the dispatcher answers authoritatively
-   without recursing: the apex serves its SOA and NS, interior names get
-   NXDOMAIN carrying the empty zone's SOA (RFC 2308), and every answer
-   carries the AA bit. This keeps reverse lookups for never-routable
-   address space from leaking to public upstreams.
-5. **Zone transfers.** AXFR/IXFR queries are intercepted before the normal
-   lookup path (`DnsDispatcher::handle_transfer`). Transfers are gated by
-   `authoritative.axfr_enabled` and the `axfr_networks` client allow-list.
-   AXFR is answered with the full zone record set (`SOA, records..., SOA` per
-   RFC 5936). IXFR is answered incrementally: every write that bumps a zone's
-   serial also records the served records it added and removed in that zone's
-   change journal (`zone_changes`, the newest 64 changes), and a client whose
-   serial the journal still reaches gets RFC 1995 difference sequences -
-   `SOA(current)`, then `SOA(old) deletions SOA(new) additions` per step, then
-   the current SOA again. A client already at the current serial gets the lone
-   SOA; when the journal cannot reach the client's serial, or the answer would
-   carry more than 10 000 changed records, the full zone is sent instead
-   (always valid per RFC 1995 §4-5). Zones served verbatim from a transfer
-   (signed zones and secondaries) keep no journal and answer in full. The zone
-   only goes out over a connection: a UDP source address is not proven, so
-   AXFR over UDP is refused and IXFR over UDP gets the current SOA alone, which
-   sends the client to TCP. Transfers also run over TLS (XoT, RFC 9103): the
-   DoT listener advertises both the `dot` and `xot` ALPN protocols and serves
-   transfers on either, behind the same ACL and TSIG gates. A secondary names
-   a TLS master as `tls://IP[:port][#name]` (port 853) and the client verifies
-   the master's certificate against `name` - or the address when no name is
-   given - against the public roots plus the PEM trust anchors listed in
-   `authoritative.xot_ca_certs` (for a private CA; loaded when the setting is
-   saved and swapped into the running transfer client, so no restart is
-   needed).
-6. **Recursive.** Otherwise the query goes to `daygle-dns-recursive`; the
-   `RecursiveResolver` routes by name - the most specific configured
-   conditional zone (longest label-aligned suffix) is resolved by its own
-   dedicated resolver/upstreams, everything else by the default ones. The
-   resulting `Lookup` is converted into a `MessageResponse` with the
-   upstream's RCODE and the AD bit when DNSSEC validation succeeded.
-   Negative answers (NXDOMAIN/NODATA) carry their response code through the
-   error type so they are returned as-is instead of SERVFAIL.
-7. **Dynamic updates.** RFC 2136 `UPDATE` messages are handled by
-   `daygle-dns-authoritative`'s update handler (`handle_update`), not the
-   catalog. It validates the zone section, checks prerequisites (NXDOMAIN /
-   NXRRSet / YXDomain / YXRRSet), builds an atomic add/delete plan, writes it
-   through to SQLite (bumping the SOA serial unless the update rewrites the
-   SOA), and reloads the catalog so the change is served immediately. Gated
-   by `authoritative.allow_dynamic_updates` and the `update_networks` client
-   allow-list; secondary zones are always refused. When outbound NOTIFY is
-   configured, a successful update also sends an RFC 1996 NOTIFY to every
-   configured target so secondaries pull immediately.
+0. **Admission.**
+   - **Per-client rate limit**: a fixed-window budget per source IP.
+     Requests over it get SERVFAIL and increment the `rate_limited` metric.
+     Loopback is exempt when `rate_limit.exempt_loopback` is set (the
+     default). Limits live in a shared
+     [`RateLimiter`](../crates/daygle-dns-core/src/rate_limit.rs) that reload
+     swaps in place, so changing them never drops in-flight windows.
+   - **Listener ACL**: a client outside `dot`/`doh`/`doq.allowed_networks`
+     gets REFUSED on that listener.
+   - **DNS accounts**: with `accounts.require`, an encrypted query must name
+     a known, enabled account.
+   - **DNS cookies** (RFC 7873): a client whose server cookie checks out gets
+     a larger per-client allowance. **RRL** counts every UDP response from
+     here on.
+   - **Opcode**: RFC 2136 UPDATEs (step 5) and RFC 1996 NOTIFYs (see
+     Concurrency model) branch off here, so they never reach the policy
+     stages.
+   - **Per-domain rate limit** (SERVFAIL, like the per-client one), then
+     **DDR** (RFC 9462): `_dns.resolver.arpa` is answered locally with SVCB
+     records for the encrypted listeners.
+1. **Filtering.**
+   - **Policy engine** (`daygle-dns-policy`): allowlist, blocklists and
+     remote blocklist sources, then plugins (the AI scanner's among them).
+     `Block` → NXDOMAIN (or the block page's address, when the block page is
+     on), `Refused` → REFUSED, `Redirect(ip)` → a synthesized A/AAAA answer,
+     `NoData` → an empty answer (the AAAA filter).
+   - **Filtering groups** (`advanced.rs`): per-client-group allow/block
+     rules, blocked services and categories, and the security and privacy
+     protections.
+   - **Response policy zones**: client-IP and QNAME triggers, in zone order.
+     An allowlisted name is exempt.
+   - **Safe Search** and YouTube Restricted Mode: a search engine's name is
+     answered with a CNAME to its "safe" address.
+2. **Local answers.**
+   - **Split horizon**: for A/AAAA/MX/TXT/CNAME/SRV (and ANY), the first
+     entry whose domain matches and whose networks contain the client
+     answers with records of the queried type. A CNAME answers every type
+     (RFC 1034 §3.6.2), and an entry with nothing for the queried type falls
+     through, so a TXT-only entry never swallows A queries. It runs before
+     the authoritative zones, so internal clients see internal answers even
+     for hosted zones.
+   - **Zone transfers** (AXFR/IXFR, `handle_transfer`) - see below.
+   - **Dispatcher-made answers** from indexes the catalog rebuilds with the
+     zones: ALIAS records (A/AAAA from the target), weighted A/AAAA RRsets
+     (one record picked in proportion to the weights, after failover;
+     unsigned zones only) and AUTOPTR records (a PTR made from the address
+     when the name has none).
+   - **Authoritative zones**: if the name falls inside a hosted zone
+     (`Catalog::find`), the Hickory catalog answers. Signed zones carry
+     DNSSEC signatures and NSEC/NSEC3 proofs. Zone aliases are served as
+     zones of their own, built from the aliased zone's records with the
+     owner names moved into the alias.
+   - **RFC 6303 empty zones**: a name in one of `authoritative.empty_zones`
+     (by default the reverse zones for private, loopback, ULA, link-local
+     and documentation address space) that no hosted zone covers is answered
+     authoritatively without recursing: the apex serves its SOA and NS,
+     other names get NXDOMAIN with the SOA (RFC 2308). Reverse lookups for
+     never-routable addresses therefore never leak to public upstreams.
+3. **Recursive.** Clients the recursion gate refuses get REFUSED. Otherwise
+   `RecursiveResolver` picks a route: the most specific conditional or stub
+   zone (longest label-aligned suffix) first, then the client's resolution
+   policy, then the default mode (recursive or forwarding). With a local root
+   zone (RFC 8806), a forwarded name under a TLD the root does not have is
+   answered NXDOMAIN without a lookup. The answer keeps the upstream's RCODE
+   and gets the AD bit when DNSSEC validation succeeded; negative answers
+   (NXDOMAIN/NODATA) are returned as-is instead of SERVFAIL. Before it goes
+   out, the answer is checked by the response filters (DNS rebinding,
+   blocked CNAME targets, oversized payloads), and DNS64 (RFC 6147) may
+   synthesize AAAA records.
+
+**Zone transfers.** Transfers are gated by `authoritative.axfr_enabled` and
+the `axfr_networks` client allow-list (and TSIG, where a key is bound to the
+zone). AXFR is answered with the full zone (`SOA, records..., SOA` per
+RFC 5936). IXFR is answered incrementally: every write that bumps a zone's
+serial also records the records it added and removed in that zone's change
+journal (`zone_changes`, the newest `authoritative.ixfr_journal_depth`
+changes, 64 by default), and a client whose serial the journal still reaches
+gets RFC 1995 difference sequences - `SOA(current)`, then `SOA(old) deletions
+SOA(new) additions` per step, then the current SOA again. A client already
+at the current serial gets the lone SOA. When the journal cannot reach the
+client's serial, or the answer would carry more than
+`authoritative.ixfr_max_records` changed records (10 000 by default), the
+full zone is sent instead (always valid per RFC 1995 §4-5). Zones served
+verbatim from a transfer (signed zones and secondaries) keep no journal and
+answer in full. The zone only goes out over a connection: a UDP source
+address is not proven, so AXFR over UDP is refused and IXFR over UDP gets the
+current SOA alone, which sends the client to TCP.
+
+Transfers also run over TLS (XoT, RFC 9103): the DoT listener advertises both
+the `dot` and `xot` ALPN protocols and serves transfers on either, behind the
+same ACL and TSIG gates. A secondary names a TLS master as
+`tls://IP[:port][#name]` (port 853) and verifies the master's certificate
+against `name` (or the address when no name is given), using the public
+roots plus the PEM trust anchors in `authoritative.xot_ca_certs` (for a
+private CA; applied without a restart).
+
+**Dynamic updates.** RFC 2136 `UPDATE` messages are handled by
+`daygle-dns-authoritative`'s update handler (`handle_update`), not the
+catalog. It validates the zone section, checks prerequisites (NXDOMAIN /
+NXRRSet / YXDomain / YXRRSet), builds an atomic add/delete plan, writes it
+through to SQLite (bumping the SOA serial unless the update rewrites the
+SOA), and reloads the catalog so the change is served immediately. Gated by
+`authoritative.allow_dynamic_updates` and the `update_networks` client
+allow-list; secondary zones are always refused. A successful update sends
+NOTIFY to the configured secondaries like any other zone change.
 
 ## Concurrency model
 
@@ -204,7 +237,7 @@ listener:
 without a restart. The policy engine, the recursive resolver and the effective
 config are each published through `arc_swap::ArcSwap` containers shared by the
 dispatcher and the REST API, so every query observes one consistent snapshot.
-When the `server`/`dot`/`doh` sections change, a listener supervisor gracefully
+When the `server`/`dot`/`doh`/`doq` sections change, a listener supervisor gracefully
 stops the current sockets and rebinds new ones, self-healing back to the last
 good configuration if a bind fails. Reload can also be triggered on demand via
 `POST /api/config` or `BoundServer::reload()`.
@@ -212,7 +245,8 @@ good configuration if a bind fails. Reload can also be triggered on demand via
 The DoH listener (`doh.rs`, built on `h2` directly) serves both RFC 8484
 methods at the configured `endpoint` (default `/dns-query`): POST requests
 carrying an `application/dns-message` body, and GET requests carrying the
-message as a base64url `dns` parameter.
+message as a base64url `dns` parameter. DoH over HTTP/3 is served by the
+Hickory `Server` alongside the UDP and TCP listeners.
 
 ### Remote blocklist sources
 
@@ -242,8 +276,11 @@ same path for per-source status.
   unsigned is taken off first: servers holding both a zone and a zone
   delegated from it answer the validator's DS question from the wrong side.
 - **Signing** (authoritative path) is per-zone: `POST /api/zones/:id/sign`
-  generates an ECDSA P-256 key (stored as PKCS#8 in SQLite) and signs the zone
-  with NSEC non-existence proofs on the next catalog reload. Signatures are
+  generates a key with `authoritative.dnssec_algorithm` (ECDSA P-256 by
+  default; ECDSA P-384 or Ed25519 also work), stores it as PKCS#8 in SQLite,
+  and signs the zone on the next catalog reload, with NSEC non-existence
+  proofs or, when asked, NSEC3 (RFC 9276 parameters: no extra iterations, no
+  salt). Signatures are
   valid for `dnssec_sig_validity_days` (default 14) from their inception,
   which is backdated one hour to absorb validator clock skew. A signed zone
   is served with its stored serial, and transferred (AXFR/IXFR) exactly as
@@ -267,18 +304,20 @@ same path for per-source status.
   further `dnssec_rollover_retire_days` (default 14) from its retirement so validators holding cached
   RRSIGs can still build a chain (RFC 6781 pre-publish rollover), then the
   key is deleted and its DNSKEY disappears. A rollover never removes the
-  only active key, does not stack a third key while one is in flight, and   skips secondary zones. CDS/CDNSKEY (RFC 8078) is published on the signed
-   zone's apex for every active key, so a parent that supports the
-   automated DS exchange can fetch it. Caveat: automatic rollover still
-   cannot update the parent's DS record by itself - submit the new DS (or
-   make sure the parent reads CDS/CDNSKEY) to the registrar during the
-   overlap window; Daygle DNS keeps the old key published long enough
-   for that exchange.
+  only active key, does not stack a third key while one is in flight, and skips secondary
+  zones. CDS/CDNSKEY (RFC 8078) is published at the signed zone's apex for
+  every active key, so a parent that supports the automated DS exchange can
+  fetch it. Automatic rollover still cannot update the parent's DS record by
+  itself: submit the new DS to the registrar (or make sure the parent reads
+  CDS/CDNSKEY) during the overlap window. Daygle DNS keeps the old key
+  published long enough for that exchange.
 
 ## AI scanner (`daygle-dns-ml`)
 
 A CPU-only background classifier over domains observed in the query log.
-Opt-in via `[ai] enabled = true`; the DNS hot path never runs a model.
+Off by default (`[ai] enabled = true` turns it on; the installer does so in
+train mode); the DNS hot path never runs a model. For the operator's view,
+see [AI.md](AI.md).
 
 - **Two channels.** The subsystem does two different jobs, and they are
   separate passes rather than one label that has to serve both:
@@ -343,7 +382,7 @@ Opt-in via `[ai] enabled = true`; the DNS hot path never runs a model.
 - **Category blocking (operator policy).** The same plugin also consults a
   second, independently-published snapshot mapping each domain to its
   current *content* category. A client group's `blocked_categories` list
-  (console: Filtering → Client Groups) names the categories that group
+  (console: Clients → Filtering Groups) names the categories that group
   blocks, so the same label can block for a kids' network and be ignored
   everywhere else. This is an operator rule over a label, not a verdict the
   AI acted on: it applies in **both** train and enforce mode, and `ai.mode`
@@ -363,7 +402,8 @@ Opt-in via `[ai] enabled = true`; the DNS hot path never runs a model.
 
 ## Console, roles and dashboard
 
-- **Login.** `api.users` accounts are verified with PBKDF2-HMAC-SHA256
+- **Login.** Console accounts live in the database (seeded once from
+  `[[api.users]]`) and are verified with PBKDF2-HMAC-SHA256
   (`daygle-dns-core/src/auth.rs`); generate hashes with
   `daygle-dns hash-password`. Successful logins mint a 256-bit random session
   token with a TTL (`api.session_ttl_secs`), kept in memory and saved to the
@@ -382,7 +422,9 @@ Opt-in via `[ai] enabled = true`; the DNS hot path never runs a model.
   `PUT /api/config`) masks `api.api_token` and every password hash as
   `[redacted]`, so secrets never round-trip to a browser.
 - **Settings forms.** `PUT /api/config` applies a validated partial update
-  (server/recursive/DoT/DoH/DoQ/API, policy, and authoritative groups),
+  (recursive, DoT/DoH/DoQ, policy, authoritative, AI, the console-edited
+  parts of `server` and `api`, and the rest; listen addresses, ports and the
+  API token stay in the config file),
   persists it to the **SQLite database** as the runtime overlay (the config
   file is only the bootstrap seed), and triggers a listener rebuild through
   `request_dns_rebuild` when listeners were touched - the same mechanism
@@ -397,9 +439,9 @@ Opt-in via `[ai] enabled = true`; the DNS hot path never runs a model.
 
 ## Extensibility points
 
-- Add policy behavior by implementing `daygle_policy::PolicyPlugin` and
+- Add policy behavior by implementing `daygle_dns_policy::PolicyPlugin` and
   registering it in the engine.
-- Add record types by extending `model::KNOWN_RECORD_TYPES` (parsing is
+- Add record types by extending `daygle_dns_authoritative::model::KNOWN_RECORD_TYPES` (parsing is
   delegated to Hickory's `RData::try_from_str`).
 - Swap SQLite for PostgreSQL by implementing the `ZoneStore`-equivalent
   interface against a Postgres connection; the catalog builder only depends on
