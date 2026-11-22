@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use daygle_dns_core::error::{DaygleError, Result};
 use hickory_proto::dnssec::Proof;
 use hickory_proto::op::ResponseCode;
-use hickory_proto::rr::{Name, RecordType};
+use hickory_proto::rr::RecordType;
 
 use crate::recursor::{self, rcode_name, RecursorSlot, TraceStep};
 use crate::{reject_bogus, track_negative_soa, RecursiveResolver, Route, RouteKind};
@@ -83,7 +83,7 @@ impl RecursiveResolver {
     /// used as for a client query, but the separate failure cache is not,
     /// so a failure is retried and its reason reported.
     pub async fn diagnose(&self, name: &str, record_type: &str, fresh: bool) -> Result<Diagnosis> {
-        let mut qname = Name::from_utf8(name.trim())
+        let mut qname = crate::name_text::parse_name(name.trim())
             .map_err(|e| DaygleError::InvalidRecord(format!("invalid name '{name}': {e}")))?;
         qname.set_fqdn(true);
         let rtype: RecordType = record_type
