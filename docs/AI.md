@@ -37,6 +37,18 @@ and verdict TTL.
     is a threat and blocks above `ai.block_threshold`, so
     `ai.auto_block_categories` applies only to the shared classifier.
 
+The model reads only the domain name. When it flags a subdomain, the
+scanner also scores the registered domain above it (by the Public Suffix
+List). If that reads as an ordinary site, the threat came only from the added
+labels (`secure.`, `login.`, `verify.` and the like), so the verdict is
+recorded as *disputed*: listed for review, never blocked and never used for
+retraining. For example, `secure.employmenthero.com` is disputed because
+`employmenthero.com` reads as `business`. Phishing names whose registered
+domain is itself suspicious (`login.secure-paypal-verify.info`) still block,
+and so do user sites on free hosts listed as public suffixes
+(`*.github.io`, `*.web.app`). Phishing on a hacked subdomain of an ordinary
+site is out of reach for a name-only model; use a threat feed for that.
+
 The threat list exports as a plain domain list or CSV, for use as a
 blocklist elsewhere. A domain can be marked *not a threat*: its detection
 stops blocking but is kept for review. *Not a threat* applies to that exact
