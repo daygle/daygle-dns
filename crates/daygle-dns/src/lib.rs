@@ -591,6 +591,7 @@ pub async fn bind_with(
         logs.clone(),
     );
     if let Some(ai) = &ai_engine {
+        ai.set_rdap_bootstrap(&config.policy.rdap_bootstrap);
         policy.add_plugin(ai.block_plugin());
         tokio::spawn({
             let ai = ai.clone();

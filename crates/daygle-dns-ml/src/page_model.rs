@@ -202,11 +202,7 @@ impl PageModel {
                 Some(ORDINARY)
             } else if let Some(label) = intel.label_for(&domain) {
                 Some(label)
-            } else if self
-                .evidence
-                .sighting(&domain)
-                .is_some_and(|s| s.established())
-            {
+            } else if self.evidence.is_known_ordinary(&domain) {
                 Some(ORDINARY)
             } else {
                 None

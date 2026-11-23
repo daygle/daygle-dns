@@ -38,6 +38,7 @@
 //!    expired verdicts re-enter the scan queue and drop out of the block
 //!    snapshot until a fresh classification exists.
 
+pub mod age;
 pub mod backend;
 pub mod channel;
 pub mod evidence;
@@ -111,6 +112,11 @@ impl Maintained {
             "candidate": self.retrainer.has_candidate(),
             "last": self.record(),
             "trial": self.retrainer.trial().to_json(),
+            // The watch on a model that went live on its own: undone
+            // automatically if it misbehaves before `until`.
+            "watch": self.retrainer.watching().map(|(promoted_at, until)| {
+                serde_json::json!({ "promoted_at": promoted_at, "until": until })
+            }),
         })
     }
 }
@@ -135,6 +141,8 @@ pub struct AiEngine {
     intel: Arc<intel::Intel>,
     /// The page-text model the maintenance step keeps trained.
     page_model: Arc<page_model::PageModel>,
+    /// Registration-date lookups for new threats.
+    domain_age: Arc<age::DomainAge>,
 }
 
 impl AiEngine {
@@ -415,6 +423,9 @@ impl AiEngine {
         );
         scanner.set_maintenance(maintenance.clone());
         scanner.set_page_model(page_model.clone());
+        let domain_age =
+            age::DomainAge::new(store.clone(), daygle_dns_policy::rdap::IANA_BOOTSTRAP);
+        scanner.set_domain_age(domain_age.clone());
 
         let plugin = plugin::AiBlockPlugin::new(
             snapshot.clone(),
@@ -436,6 +447,7 @@ impl AiEngine {
             reload_threat,
             intel,
             page_model,
+            domain_age,
         }))
     }
 
@@ -447,6 +459,11 @@ impl AiEngine {
         shutdown: CancellationToken,
     ) {
         self.intel.clone().run(mirror, shutdown).await;
+    }
+
+    /// Look registration dates up through `url` (`policy.rdap_bootstrap`).
+    pub fn set_rdap_bootstrap(&self, url: &str) {
+        self.domain_age.set_bootstrap(url);
     }
 
     /// The threat feed listing `domain` (as the AI uses the feeds now).
@@ -612,7 +629,10 @@ impl AiEngine {
         self.settings.store(Arc::new(new.clone()));
         // The outside evidence was switched: the threat verdicts it touches
         // are re-checked on the next scan rather than at their expiry.
-        if old.threat_feeds != new.threat_feeds || old.network_evidence != new.network_evidence {
+        if old.threat_feeds != new.threat_feeds
+            || old.network_evidence != new.network_evidence
+            || old.domain_age != new.domain_age
+        {
             self.intel.recheck_evidence();
         }
         if verifier_changed && !restart {

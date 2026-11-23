@@ -177,7 +177,7 @@
     ['update_available', 'A new Daygle DNS release is available'],
     ['update_failure', 'An automatic stable-release installation fails'],
     ['ai_blocks', 'The AI starts blocking new domains (Enforce mode)'],
-    ['ai_model', 'The AI rejects a model it retrained (its shadow trial went badly)'],
+    ['ai_model', 'The AI rejects or rolls back a model, or one of its lists stops updating'],
   ];
   let alerts_ = $state({ ...ALERT_DEFAULTS });
   const RRL_DEFAULTS = {

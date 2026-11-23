@@ -89,6 +89,25 @@ const TRIAL_MIN_THREATS: usize = 10;
 /// Fewest corrections, or independently confirmed labels, in the trial window
 /// before scoring on them counts.
 const TRIAL_MIN_TRUTHS: usize = 3;
+/// How long a model promoted without the operator is watched after it goes
+/// live (see [`Retrainer::check_watch`]).
+pub const WATCH_SECS: i64 = 3 * 86_400;
+/// "Not a threat" marks on a watched model's own detections that undo it.
+const WATCH_MARKS: u64 = 3;
+/// A watched model is undone when the share of scanned domains it blocks
+/// grows past this multiple of the week before...
+const WATCH_RATE_FACTOR: f64 = 2.0;
+/// ...by at least this many domains (a handful is noise)...
+const WATCH_RATE_MIN_EXTRA: f64 = 10.0;
+/// ...judged once each side has classified this many domains.
+const WATCH_MIN_CLASSIFIED: u64 = 200;
+/// The week before a promotion, as the watch's baseline.
+const WATCH_BASELINE_SECS: i64 = 7 * 86_400;
+/// Rejected trials in a row after which retraining backs off further.
+const REJECTION_STREAK: usize = 3;
+/// The longest retraining pauses after repeated rejections.
+const MAX_PAUSE_SECS: i64 = 7 * 86_400;
+
 /// Most recent domains a trial compares the two models on.
 const TRIAL_DOMAINS: u32 = 5_000;
 
@@ -644,6 +663,8 @@ impl Retrainer {
             let _ = std::fs::remove_file(&built.temp);
             return Err(e);
         }
+        // The operator put this model live: it is not watched.
+        let _ = std::fs::remove_file(self.watch_path());
         self.log(
             LogLevel::Info,
             format!(
@@ -667,6 +688,8 @@ impl Retrainer {
     /// Both files are kept, so this is itself reversible.
     pub fn rollback(&self) -> Result<()> {
         let _running = self.running.lock().unwrap_or_else(|e| e.into_inner());
+        // The operator chose the model now: nothing is left to watch.
+        let _ = std::fs::remove_file(self.watch_path());
         let previous = previous_model_path(&self.learned);
         if !previous.is_file() {
             return Err(DaygleError::Config(
@@ -766,6 +789,9 @@ impl Retrainer {
             return None;
         }
         let now = chrono::Utc::now().timestamp();
+        if self.check_watch(&settings, now) {
+            return None;
+        }
         let trial = self.trial();
         if trial.in_progress() {
             if trial.ends_at.is_some_and(|ends| now >= ends) {
@@ -813,11 +839,12 @@ impl Retrainer {
                 let _ = std::fs::remove_file(&built.temp);
                 return Err(e);
             }
+            self.start_watch(chrono::Utc::now().timestamp());
             self.log(
                 LogLevel::Info,
                 format!(
-                    "AI retrained its classifier from {} examples across {} labels; it is in use now (trials are off)",
-                    built.stats.examples, built.stats.labels
+                    "AI retrained its classifier from {} examples across {} labels; it is in use now (trials are off) and watched for {} days",
+                    built.stats.examples, built.stats.labels, WATCH_SECS / 86_400
                 ),
             );
             return Ok(built.stats);
@@ -904,10 +931,12 @@ impl Retrainer {
                 let _ = std::fs::remove_file(candidate.with_extension("json"));
                 match self.promote(&candidate, &record) {
                     Ok(()) => {
+                        self.start_watch(chrono::Utc::now().timestamp());
                         self.log(
                             LogLevel::Info,
                             format!(
-                                "AI promoted its candidate classifier after a shadow trial: {why}"
+                                "AI promoted its candidate classifier after a shadow trial: {why}. It is watched for {} days and undone if it misbehaves",
+                                WATCH_SECS / 86_400
                             ),
                         );
                         self.write_trial(&trial.concluded(format!("promoted: {why}"), None));
@@ -932,7 +961,15 @@ impl Retrainer {
         let candidate = candidate_path(&self.learned);
         let _ = std::fs::rename(&candidate, self.learned.with_extension("rejected.bin"));
         let _ = std::fs::remove_file(candidate.with_extension("json"));
-        let pause = settings.retrain_interval_secs.max(3_600) as i64 * 2;
+        // Rejections in a row (this one included): each one past the streak
+        // doubles the pause, so a retrain that keeps failing stops costing
+        // CPU every day while the live model carries on.
+        let streak = 1 + trial
+            .history
+            .iter()
+            .take_while(|entry| entry.outcome.starts_with("rejected"))
+            .count();
+        let pause = rejection_pause(settings.retrain_interval_secs, streak);
         self.log(
             LogLevel::Warn,
             format!(
@@ -940,17 +977,180 @@ impl Retrainer {
                 pause / 3600
             ),
         );
+        let (title, detail) = if streak >= REJECTION_STREAK {
+            (
+                "AI keeps rejecting its retrained models",
+                format!(
+                    " This is rejection {streak} in a row, so retraining now waits {}h between tries. The live model is fine; if this goes on, look at your recent \"not a threat\" marks or turn Learn \"Not a Threat\" off.",
+                    pause / 3600
+                ),
+            )
+        } else {
+            (
+                "AI rejected a retrained model",
+                format!(" Retraining resumes in {}h.", pause / 3600),
+            )
+        };
         daygle_dns_core::alerts::raise(
             daygle_dns_core::alerts::AlertKind::AiModel,
             format!("ai-model:{}:{now}", self.role.as_str()),
-            "AI rejected a retrained model",
+            title,
             format!(
-                "The {} model the AI retrained did worse than the live model during its shadow trial ({why}), so it was set aside. Nothing changed for your clients; retraining resumes in {}h.",
+                "The {} model the AI retrained did worse than the live model during its shadow trial ({why}), so it was set aside. Nothing changed for your clients.{detail}",
+                self.role.as_str(),
+            ),
+        );
+        self.write_trial(&trial.concluded(format!("rejected: {why}"), Some(now + pause)));
+    }
+
+    // ── The watch after an automatic promotion ──────────────────────────
+
+    fn watch_path(&self) -> PathBuf {
+        self.learned.with_extension("watch.json")
+    }
+
+    /// Start watching the model that just went live on its own (a trial
+    /// promotion, or a scheduled retrain with trials off).
+    fn start_watch(&self, now: i64) {
+        let watch = serde_json::json!({ "promoted_at": now, "until": now + WATCH_SECS });
+        if let Err(e) = std::fs::write(
+            self.watch_path(),
+            serde_json::to_vec_pretty(&watch).unwrap_or_default(),
+        ) {
+            self.log(
+                LogLevel::Warn,
+                format!("could not start watching the new model: {e}"),
+            );
+        }
+    }
+
+    /// The watch in progress: `(promoted_at, until)`.
+    pub fn watching(&self) -> Option<(i64, i64)> {
+        let raw = std::fs::read(self.watch_path()).ok()?;
+        let watch: serde_json::Value = serde_json::from_slice(&raw).ok()?;
+        Some((
+            watch.get("promoted_at")?.as_i64()?,
+            watch.get("until")?.as_i64()?,
+        ))
+    }
+
+    /// Judge a model that went live without the operator, for
+    /// [`WATCH_SECS`] after it did: when it blocks a much larger share of the
+    /// domains it scans than the live model did the week before, or the
+    /// operator marks [`WATCH_MARKS`] of its new detections "not a threat",
+    /// it is undone - the model before it goes back live - and the operator
+    /// is told. The trial judged it on a few hours of traffic; this catches
+    /// what only shows on days of it. Returns whether it undid the model.
+    pub fn check_watch(&self, settings: &AiSettings, now: i64) -> bool {
+        let Some((promoted_at, until)) = self.watching() else {
+            return false;
+        };
+        if now >= until {
+            let _ = std::fs::remove_file(self.watch_path());
+            self.log(
+                LogLevel::Info,
+                format!(
+                    "AI's new classifier passed its {}-day watch",
+                    WATCH_SECS / 86_400
+                ),
+            );
+            return false;
+        }
+        if !detects_threats(self.role, settings) {
+            return false;
+        }
+        match self.watch_verdict(promoted_at, now) {
+            Some(why) => {
+                self.undo_promotion(settings, &why, now);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Why the watched model should be undone, if it should.
+    fn watch_verdict(&self, promoted_at: i64, now: i64) -> Option<String> {
+        let marks = self.store.not_threat_marks_since(promoted_at).unwrap_or(0);
+        if marks >= WATCH_MARKS {
+            return Some(format!(
+                "you marked {marks} of its new detections \"not a threat\""
+            ));
+        }
+        let (before_classified, before_threats) = self
+            .store
+            .threat_rate(promoted_at - WATCH_BASELINE_SECS, promoted_at)
+            .ok()?;
+        let (after_classified, after_threats) =
+            self.store.threat_rate(promoted_at, now + 1).ok()?;
+        if before_classified < WATCH_MIN_CLASSIFIED || after_classified < WATCH_MIN_CLASSIFIED {
+            return None;
+        }
+        let expected = before_threats as f64 / before_classified as f64 * after_classified as f64;
+        let after = after_threats as f64;
+        (after > expected * WATCH_RATE_FACTOR && after - expected >= WATCH_RATE_MIN_EXTRA).then(
+            || {
+                format!(
+                    "it blocked {after_threats} of {after_classified} domains it scanned, where the model before it would have blocked about {:.0}",
+                    expected
+                )
+            },
+        )
+    }
+
+    /// Put back the model the watched one replaced (the previous learned
+    /// model, or the configured one after a first promotion), pause
+    /// retraining and tell the operator.
+    fn undo_promotion(&self, settings: &AiSettings, why: &str, now: i64) {
+        let undone = {
+            let _running = self.running.lock().unwrap_or_else(|e| e.into_inner());
+            if previous_model_path(&self.learned).is_file() {
+                self.swap_with_previous().and_then(|()| {
+                    self.install().inspect_err(|_| {
+                        let _ = self.swap_with_previous();
+                    })
+                })
+            } else {
+                // The first model it learned: back to the configured one.
+                let set_aside = self.learned.with_extension("rolled-back.bin");
+                std::fs::rename(&self.learned, &set_aside)
+                    .map_err(DaygleError::Io)
+                    .and_then(|()| match self.installer.get() {
+                        Some(install) => install(Path::new(&self.configured_model(settings)))
+                            .inspect_err(|_| {
+                                let _ = std::fs::rename(&set_aside, &self.learned);
+                            }),
+                        None => Ok(()),
+                    })
+            }
+        };
+        let _ = std::fs::remove_file(self.watch_path());
+        if let Err(e) = undone {
+            self.log(
+                LogLevel::Warn,
+                format!("AI could not undo its new classifier ({why}): {e}"),
+            );
+            return;
+        }
+        let pause = settings.retrain_interval_secs.max(3_600) as i64 * 2;
+        let outcome = format!("rolled back after going live: {why}");
+        self.log(
+            LogLevel::Warn,
+            format!(
+                "AI rolled back its new classifier: {why}. The model before it is in use again; retraining pauses for {}h.",
+                pause / 3600
+            ),
+        );
+        daygle_dns_core::alerts::raise(
+            daygle_dns_core::alerts::AlertKind::AiModel,
+            format!("ai-model-rollback:{}:{now}", self.role.as_str()),
+            "AI rolled back a new model",
+            format!(
+                "The {} model the AI put live misbehaved within its first days ({why}), so the model before it is back in use. Nothing else is needed; retraining resumes in {}h.",
                 self.role.as_str(),
                 pause / 3600
             ),
         );
-        self.write_trial(&trial.concluded(format!("rejected: {why}"), Some(now + pause)));
+        self.write_trial(&self.trial().concluded(outcome, Some(now + pause)));
     }
 
     fn last_trained_at(&self) -> Option<i64> {
@@ -1006,6 +1206,18 @@ pub fn judge_with_evidence_for_tests(
         ends,
         Some(evidence),
     )
+}
+
+/// How long retraining pauses after the `streak`-th rejection in a row:
+/// twice the retrain interval, doubling from the [`REJECTION_STREAK`]-th
+/// on, at most [`MAX_PAUSE_SECS`].
+fn rejection_pause(interval_secs: u64, streak: usize) -> i64 {
+    let base = interval_secs.max(3_600) as i64 * 2;
+    if streak < REJECTION_STREAK {
+        return base;
+    }
+    let doublings = (streak + 1 - REJECTION_STREAK).min(8) as u32;
+    base.saturating_mul(1 << doublings).min(MAX_PAUSE_SECS)
 }
 
 /// Whether `role`'s model is the one that detects threats.
@@ -1268,16 +1480,11 @@ fn judge_shadow(
         if let Some(evidence) = evidence {
             let established: Vec<(String, Truth)> = domains
                 .iter()
-                .filter(|domain| {
-                    intel
-                        .as_deref()
-                        .is_none_or(|i| i.label_for(domain).is_none())
-                })
-                .filter(|domain| evidence.sighting(domain).is_some_and(|s| s.established()))
+                .filter(|domain| evidence.is_known_ordinary(domain))
                 .map(|domain| (domain.clone(), Truth::NotThreat))
                 .collect();
             score_with_slack(
-                "established domains looked up during the trial",
+                "ordinary domains (established or popular) looked up during the trial",
                 &established,
                 &candidate_model,
                 &live_model,
@@ -1385,5 +1592,24 @@ fn swap_stats(learned: &Path, how: StatsMove) {
                 let _ = std::fs::rename(&staged, &previous);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn repeated_rejections_back_off() {
+        let day = 86_400;
+        assert_eq!(rejection_pause(day as u64, 1), 2 * day);
+        assert_eq!(rejection_pause(day as u64, 2), 2 * day);
+        assert_eq!(rejection_pause(day as u64, 3), 4 * day, "the third doubles");
+        assert_eq!(
+            rejection_pause(day as u64, 4),
+            MAX_PAUSE_SECS,
+            "capped at a week"
+        );
+        assert_eq!(rejection_pause(3_600, 3), 4 * 3_600);
     }
 }

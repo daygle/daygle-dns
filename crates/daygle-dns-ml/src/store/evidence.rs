@@ -32,7 +32,8 @@ CREATE TABLE IF NOT EXISTS ai_intel_feeds (
     entries      INTEGER NOT NULL DEFAULT 0,
     updated_at   INTEGER NOT NULL DEFAULT 0,
     attempted_at INTEGER NOT NULL DEFAULT 0,
-    error        TEXT NOT NULL DEFAULT ''
+    error        TEXT NOT NULL DEFAULT '',
+    failing_since INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS ai_seen (
     domain     TEXT PRIMARY KEY,
@@ -49,7 +50,26 @@ CREATE TABLE IF NOT EXISTS ai_page_texts (
     read_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_ai_page_texts_read ON ai_page_texts (read_at);
+CREATE TABLE IF NOT EXISTS ai_age_attempts (
+    domain       TEXT PRIMARY KEY,
+    attempted_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS ai_threat_rate (
+    at         INTEGER NOT NULL,
+    classified INTEGER NOT NULL,
+    threats    INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_ai_threat_rate_at ON ai_threat_rate (at);
 ";
+
+/// How long a domain whose registration date could not be found waits
+/// before it is looked up again: the RDAP cache's own retry time, so the
+/// next try is a real lookup, and other candidates get their turn meanwhile.
+pub const AGE_RETRY_SECS: i64 = 6 * 3600;
+
+/// How long the per-scan threat counts are kept: the watch on a new model
+/// compares against the week before it went live.
+const RATE_RETENTION_SECS: i64 = 30 * 86_400;
 
 /// Distinct clients remembered per domain. Enough to tell "one device" from
 /// "the whole network" without keeping a growing list.
@@ -75,6 +95,8 @@ pub struct FeedState {
     pub attempted_at: i64,
     /// Why the last attempt failed; empty when it succeeded.
     pub error: String,
+    /// When the current run of failed attempts began (0: not failing).
+    pub failing_since: i64,
 }
 
 /// How long and how widely this network has used one domain.
@@ -121,10 +143,34 @@ fn sighting(r: &rusqlite::Row<'_>) -> rusqlite::Result<Sighting> {
     })
 }
 
+/// Bring evidence tables from older releases up to date.
+pub(super) fn upgrade(conn: &Connection) -> rusqlite::Result<()> {
+    let has: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('ai_intel_feeds') WHERE name = 'failing_since')",
+        [],
+        |r| r.get(0),
+    )?;
+    if !has {
+        conn.execute(
+            "ALTER TABLE ai_intel_feeds ADD COLUMN failing_since INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+    }
+    Ok(())
+}
+
 pub(super) fn prune(conn: &Connection, now: i64) -> rusqlite::Result<()> {
     conn.execute(
         "DELETE FROM ai_seen WHERE last_seen < ?1",
         params![now - SEEN_RETENTION_SECS],
+    )?;
+    conn.execute(
+        "DELETE FROM ai_threat_rate WHERE at < ?1",
+        params![now - RATE_RETENTION_SECS],
+    )?;
+    conn.execute(
+        "DELETE FROM ai_age_attempts WHERE attempted_at < ?1",
+        params![now - 30 * 86_400],
     )?;
     conn.execute(
         "DELETE FROM ai_page_texts WHERE domain NOT IN
@@ -169,7 +215,7 @@ impl AiStore {
             "INSERT INTO ai_intel_feeds (feed, entries, updated_at, attempted_at, error)
              VALUES (?1, ?2, ?3, ?3, '')
              ON CONFLICT(feed) DO UPDATE SET entries = ?2, updated_at = ?3,
-                 attempted_at = ?3, error = ''",
+                 attempted_at = ?3, error = '', failing_since = 0",
             params![feed, stored as i64, now],
         )?;
         tx.commit()?;
@@ -180,8 +226,10 @@ impl AiStore {
     pub fn intel_failed(&self, feed: &str, error: &str) -> Result<()> {
         let conn = self.lock()?;
         conn.execute(
-            "INSERT INTO ai_intel_feeds (feed, attempted_at, error) VALUES (?1, ?2, ?3)
-             ON CONFLICT(feed) DO UPDATE SET attempted_at = ?2, error = ?3",
+            "INSERT INTO ai_intel_feeds (feed, attempted_at, error, failing_since)
+             VALUES (?1, ?2, ?3, ?2)
+             ON CONFLICT(feed) DO UPDATE SET attempted_at = ?2, error = ?3,
+                 failing_since = CASE WHEN failing_since = 0 THEN ?2 ELSE failing_since END",
             params![feed, now_epoch(), error],
         )?;
         Ok(())
@@ -191,7 +239,7 @@ impl AiStore {
     pub fn intel_feeds(&self) -> Result<HashMap<String, FeedState>> {
         let conn = self.lock()?;
         let mut stmt = conn
-            .prepare("SELECT feed, entries, updated_at, attempted_at, error FROM ai_intel_feeds")?;
+            .prepare("SELECT feed, entries, updated_at, attempted_at, error, failing_since FROM ai_intel_feeds")?;
         let rows = stmt
             .query_map([], |r| {
                 Ok((
@@ -201,6 +249,7 @@ impl AiStore {
                         updated_at: r.get(2)?,
                         attempted_at: r.get(3)?,
                         error: r.get(4)?,
+                        failing_since: r.get(5)?,
                     },
                 ))
             })?
@@ -251,6 +300,112 @@ impl AiStore {
         }
         tx.commit()?;
         Ok(queued)
+    }
+
+    // ── Domain age ──────────────────────────────────────────────────────
+
+    /// Threat verdicts whose domain age has not been looked up yet, newest
+    /// first: `(domain, confidence, evidence)`.
+    pub fn age_candidates(&self, limit: u32) -> Result<Vec<(String, f32, String)>> {
+        self.age_candidates_at(limit, now_epoch())
+    }
+
+    /// [`Self::age_candidates`] at a given time (tests). A domain whose date
+    /// could not be found is skipped for [`AGE_RETRY_SECS`], so domains that
+    /// never resolve (a TLD without RDAP) cannot hold the queue.
+    pub fn age_candidates_at(&self, limit: u32, now: i64) -> Result<Vec<(String, f32, String)>> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(
+            "SELECT v.domain, v.confidence, v.evidence FROM ai_verdicts v
+             LEFT JOIN ai_age_attempts a ON a.domain = v.domain
+             WHERE v.channel = 'threat' AND v.status = 'classified' AND v.severity = 'threat'
+               AND instr(v.evidence, ', registered ') = 0
+               AND (a.attempted_at IS NULL OR a.attempted_at <= ?2)
+               AND NOT EXISTS (SELECT 1 FROM ai_overrides o WHERE o.domain = v.domain)
+             ORDER BY COALESCE(a.attempted_at, 0), v.classified_at DESC, v.domain
+             LIMIT ?1",
+        )?;
+        let rows = stmt
+            .query_map(params![limit as i64, now - AGE_RETRY_SECS], |r| {
+                Ok((r.get(0)?, r.get::<_, f64>(1)? as f32, r.get(2)?))
+            })?
+            .collect::<std::result::Result<_, _>>()?;
+        Ok(rows)
+    }
+
+    /// Record that `domain`'s registration date could not be found now.
+    pub fn age_lookup_failed(&self, domain: &str) -> Result<()> {
+        self.age_lookup_failed_at(domain, now_epoch())
+    }
+
+    /// [`Self::age_lookup_failed`] at a given time (tests).
+    pub fn age_lookup_failed_at(&self, domain: &str, at: i64) -> Result<()> {
+        let conn = self.lock()?;
+        conn.execute(
+            "INSERT INTO ai_age_attempts (domain, attempted_at) VALUES (?1, ?2)
+             ON CONFLICT(domain) DO UPDATE SET attempted_at = ?2",
+            params![domain, at],
+        )?;
+        Ok(())
+    }
+
+    /// Record a domain-age decision on a threat verdict: its new confidence
+    /// and the note that says why. Whether a row was updated.
+    pub fn apply_age(&self, domain: &str, confidence: f32, note: &str) -> Result<bool> {
+        let conn = self.lock()?;
+        let updated = conn.execute(
+            "UPDATE ai_verdicts SET confidence = ?2, evidence = evidence || ?3
+             WHERE domain = ?1 AND channel = 'threat' AND instr(evidence, ', registered ') = 0",
+            params![domain, f64::from(confidence), note],
+        )?;
+        Ok(updated > 0)
+    }
+
+    // ── How the live model behaves ──────────────────────────────────────
+
+    /// Record one scan's threat-channel output: how many domains it
+    /// classified and how many of them qualified to block.
+    pub fn record_threat_rate(&self, classified: usize, threats: usize) -> Result<()> {
+        self.record_threat_rate_at(classified, threats, now_epoch())
+    }
+
+    /// [`Self::record_threat_rate`] at a given time (tests).
+    pub fn record_threat_rate_at(&self, classified: usize, threats: usize, at: i64) -> Result<()> {
+        if classified == 0 {
+            return Ok(());
+        }
+        let conn = self.lock()?;
+        conn.execute(
+            "INSERT INTO ai_threat_rate (at, classified, threats) VALUES (?1, ?2, ?3)",
+            params![at, classified as i64, threats as i64],
+        )?;
+        Ok(())
+    }
+
+    /// Domains classified and threats qualifying to block in `[from, to)`.
+    pub fn threat_rate(&self, from: i64, to: i64) -> Result<(u64, u64)> {
+        let conn = self.lock()?;
+        let (classified, threats): (i64, i64) = conn.query_row(
+            "SELECT COALESCE(SUM(classified), 0), COALESCE(SUM(threats), 0)
+             FROM ai_threat_rate WHERE at >= ?1 AND at < ?2",
+            params![from, to],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        Ok((classified.max(0) as u64, threats.max(0) as u64))
+    }
+
+    /// "Not a threat" marks filed since `since` on threat detections made
+    /// since then: the operator correcting what a new model flagged.
+    pub fn not_threat_marks_since(&self, since: i64) -> Result<u64> {
+        let conn = self.lock()?;
+        let marks: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM ai_overrides o
+             JOIN ai_verdicts v ON v.domain = o.domain AND v.channel = 'threat'
+             WHERE o.action = 'not_threat' AND o.created_at >= ?1 AND v.classified_at >= ?1",
+            params![since],
+            |r| r.get(0),
+        )?;
+        Ok(marks.max(0) as u64)
     }
 
     // ── How this network uses a domain ──────────────────────────────────

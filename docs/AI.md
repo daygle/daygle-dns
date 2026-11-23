@@ -106,6 +106,21 @@ the trial. The automatic signals mean a trial on an install nobody corrects
 still has evidence to judge; before them, a quiet trial promoted its
 candidate for lack of evidence. A rejected candidate never answered a query;
 the rejection pauses retraining and raises an alert.
+From the third rejection in a row, the pause doubles each time, up to a week,
+and the alert says so.
+
+A model that goes live on its own (a trial promotion, or a scheduled retrain
+with trials off) is then watched for 3 days. It is rolled back to the model
+before it, with an alert, when:
+
+- it blocks more than twice the share of scanned domains the live model
+  blocked in the week before, and at least 10 domains more (judged once
+  both sides have scanned 200 domains), or
+- you mark 3 of its new detections *not a threat*.
+
+Retrain Now and Restore Previous Model are your own choices and are not
+watched. A threat feed or the popular-sites list that has failed to update
+for 2 days raises an alert too.
 
 A dedicated threat model is maintained the same way. The verifier's
 reference is refreshed from your corrections, never from its own verdicts.
@@ -153,6 +168,33 @@ retrain. A feed listing also confirms a threat verdict for training. Only the
 labels the model treats as threats are used: `ai.auto_block_categories` for
 the shared model, or every label of a dedicated threat model. Your
 corrections win over a feed.
+
+### Popular sites
+
+`ai.threat_feeds` also downloads Tranco's ranking of the most popular sites
+(top 100,000), every 12 hours. A name-only threat detection on a popular
+registered domain is disputed and never blocks. The match is on the
+registered domain only: `pages.dev` is popular, but `evil.pages.dev` is a
+registered domain of its own under the Public Suffix List and is not. A
+threat feed listing still wins. Popular sites are also part of the ordinary
+probe every candidate model is tested on, so a new install has one from its
+first download.
+
+### Domain age (`ai.domain_age`)
+
+On by default. After each scan, up to 16 new threat verdicts have their
+registered domain's creation date looked up over RDAP (through
+`policy.rdap_bootstrap`):
+
+| Registered | Effect |
+|---|---|
+| In the last 14 days, flagged at 90% or more | Raised to 99% (blocks at the default threshold) |
+| In the last 14 days, flagged below 90% | +10%, never above 95% |
+| Over 2 years ago | -5%, unless a threat feed confirmed it |
+| In between | Noted only |
+
+Each lookup tells the TLD's registry which domain was asked about, never who
+asked.
 
 ### Established domains
 

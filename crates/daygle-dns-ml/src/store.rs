@@ -37,7 +37,8 @@ use crate::backend::Channel;
 mod evidence;
 use crate::page::TextVerdict;
 pub use evidence::{
-    client_tag, FeedState, Sighting, ESTABLISHED_CLIENTS, ESTABLISHED_DAYS, PAGE_TEXT_CHARS,
+    client_tag, FeedState, Sighting, AGE_RETRY_SECS, ESTABLISHED_CLIENTS, ESTABLISHED_DAYS,
+    PAGE_TEXT_CHARS,
 };
 
 /// Filters shared by the paginated verdict and threat lists.
@@ -310,6 +311,7 @@ impl AiStore {
              {PAGE_ADJUSTMENTS_TABLE};\n{PAGE_READINGS_TABLE};\n{}",
             evidence::TABLES
         ))?;
+        evidence::upgrade(&conn)?;
         let has_column = |name: &str| -> Result<bool> {
             Ok(conn.query_row(
                 "SELECT EXISTS(SELECT 1 FROM pragma_table_info('ai_verdicts') WHERE name = ?1)",

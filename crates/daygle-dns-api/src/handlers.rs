@@ -1550,6 +1550,7 @@ pub async fn ai_status(State(state): State<AppState>) -> Response {
         "threat_feeds": settings.threat_feeds,
         "threat_feed_status": ai.intel_status(),
         "network_evidence": settings.network_evidence,
+        "domain_age": settings.domain_age,
         "established_days": daygle_dns_ml::store::ESTABLISHED_DAYS,
         "established_clients": daygle_dns_ml::store::ESTABLISHED_CLIENTS,
         "page_model": ai.page_model_status(),
@@ -6772,6 +6773,8 @@ pub struct AiUpdate {
     /// Check threat verdicts against threat feeds and how this network uses
     /// the domain.
     pub network_evidence: Option<bool>,
+    /// Use when a flagged domain was registered as evidence.
+    pub domain_age: Option<bool>,
 }
 
 /// listener-relevant `[server]` fields apply live; the rest are restarts.
@@ -7766,6 +7769,9 @@ pub async fn update_settings(
         }
         if let Some(v) = a.network_evidence {
             config.ai.network_evidence = v;
+        }
+        if let Some(v) = a.domain_age {
+            config.ai.domain_age = v;
         }
     }
 
