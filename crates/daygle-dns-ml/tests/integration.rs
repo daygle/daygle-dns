@@ -3330,3 +3330,46 @@ fn parent_overrides_keep_subdomains_out_of_training() {
     // `notvendor.example` shares a suffix string, not a parent label.
     assert_eq!(kept, ["notvendor.example", "real-phish.example"]);
 }
+
+/// The `limit` counts verdicts kept, not rows read: subdomains of an
+/// overridden parent ranked above everything else must not use up the cap and
+/// leave the eligible verdicts below them out.
+#[test]
+fn confident_verdicts_limit_counts_rows_kept() {
+    let dir = TempDir::new().unwrap();
+    let store = tmp_store(&dir);
+    for (domain, confidence) in [
+        ("a.vendor.example", 0.99),
+        ("b.vendor.example", 0.98),
+        ("c.vendor.example", 0.97),
+        ("first-phish.example", 0.90),
+        ("second-phish.example", 0.80),
+        ("third-phish.example", 0.70),
+    ] {
+        store.observe(domain).unwrap();
+        store
+            .save_verdict(
+                Channel::Threat,
+                domain,
+                "phishing",
+                "threat",
+                "classified",
+                confidence,
+                "test",
+                "ev",
+                3600,
+            )
+            .unwrap();
+    }
+    store.set_override("vendor.example", "allow", "").unwrap();
+
+    let now = chrono::Utc::now().timestamp();
+    let kept: Vec<String> = store
+        .confident_verdicts(0.5, 0.5, now, 2)
+        .unwrap()
+        .into_iter()
+        .map(|(_, _, domain)| domain)
+        .collect();
+    // Strongest first, two kept, none from under the allowed parent.
+    assert_eq!(kept, ["first-phish.example", "second-phish.example"]);
+}
