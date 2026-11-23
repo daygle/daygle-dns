@@ -570,7 +570,23 @@ async fn status_reports_trials_and_retrain_takes_a_model() {
         "no dedicated threat model: {status}"
     );
     assert_eq!(status["verifier_enabled"], false, "{status}");
-    if status["verifier_installed"] == false {
+    assert_eq!(
+        status["verifier_supported"],
+        daygle_dns_ml::VERIFIER_SUPPORTED,
+        "{status}"
+    );
+    assert_eq!(status["verifier_running"], false, "switched off: {status}");
+    if !daygle_dns_ml::VERIFIER_SUPPORTED {
+        let (code, _, body) = call(
+            state.clone(),
+            "PUT",
+            "/api/config",
+            Some(serde_json::json!({ "ai": { "verifier_enabled": true } })),
+        )
+        .await;
+        assert_eq!(code, StatusCode::BAD_REQUEST, "{body}");
+        assert!(body.contains("no ONNX support"), "{body}");
+    } else if status["verifier_installed"] == false {
         // Nothing to switch on: refused, and nothing stored.
         let (code, _, body) = call(
             state.clone(),

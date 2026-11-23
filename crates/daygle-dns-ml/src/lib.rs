@@ -58,6 +58,10 @@ pub mod verify;
 #[cfg(feature = "verifier-onnx")]
 pub mod verifier_onnx;
 
+/// Whether this build can run the MiniLM/ONNX verifier. Static and musl
+/// builds leave ONNX Runtime out, and a configured verifier then never loads.
+pub const VERIFIER_SUPPORTED: bool = cfg!(feature = "verifier-onnx");
+
 use std::path::PathBuf;
 use std::sync::Arc;
 
