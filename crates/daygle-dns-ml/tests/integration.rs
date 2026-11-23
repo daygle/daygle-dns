@@ -3260,3 +3260,51 @@ fn the_verifier_switches_on_without_a_restart() {
     assert!(!ai.apply_settings(&cfg));
     assert_eq!(ai.threat_backend_name(), without, "and out again");
 }
+
+/// An override on a parent covers the names under it for training too: an
+/// allow on `vendor.example` already stops `tps.vendor.example` blocking, and
+/// its phishing verdict kept training the next model (and filling the update
+/// gate's threat sample) as a confirmed threat. A `not_threat` correction on a
+/// parent keeps its subdomains out the same way; unrelated names stay in.
+#[test]
+fn parent_overrides_keep_subdomains_out_of_training() {
+    let dir = TempDir::new().unwrap();
+    let store = tmp_store(&dir);
+    for domain in [
+        "tps.vendor.example",
+        "cdn.vendor.example",
+        "secure-dcr.meter.example",
+        "notvendor.example",
+        "real-phish.example",
+    ] {
+        store.observe(domain).unwrap();
+        store
+            .save_verdict(
+                Channel::Threat,
+                domain,
+                "phishing",
+                "threat",
+                "classified",
+                0.99,
+                "test",
+                "ev",
+                3600,
+            )
+            .unwrap();
+    }
+    store.set_override("vendor.example", "allow", "").unwrap();
+    store
+        .set_override("meter.example", "not_threat", "")
+        .unwrap();
+
+    let now = chrono::Utc::now().timestamp();
+    let mut kept: Vec<String> = store
+        .confident_verdicts(0.5, 0.5, now, 100)
+        .unwrap()
+        .into_iter()
+        .map(|(_, _, domain)| domain)
+        .collect();
+    kept.sort();
+    // `notvendor.example` shares a suffix string, not a parent label.
+    assert_eq!(kept, ["notvendor.example", "real-phish.example"]);
+}
