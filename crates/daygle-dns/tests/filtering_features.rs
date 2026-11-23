@@ -273,8 +273,12 @@ async fn group_input_is_normalized_and_kept_editable() {
     let reply = udp_query(udp, "WWW.Google.com.", RecordType::A).await;
     assert_eq!(reply.response_code, ResponseCode::NXDomain);
 
-    // Patterns that only fail together are refused up front.
-    let big: Vec<String> = (0..4096)
+    // Patterns that only fail together are refused up front. Each compiles
+    // alone (Unicode `\w`, repeated) but two already exceed the set's size
+    // limit; 16 leaves room should the regex crate grow more compact. Every
+    // pattern is also compiled on its own (about 35 ms each), so a few
+    // thousand of them made this test take over two minutes.
+    let big: Vec<String> = (0..16)
         .map(|i| format!("^p{i}\\w{{40}}\\w{{40}}\\w{{40}}$"))
         .collect();
     let resp = save(serde_json::json!({ "name": "big", "allow_regex": big }))
