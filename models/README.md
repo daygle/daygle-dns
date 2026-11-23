@@ -25,7 +25,10 @@ only applies to the shared classifier.
   train-starter-model` from the curated dataset in
   [`starter-training.txt`](starter-training.txt). Self-supplied data: mostly
   well-known everyday domains plus pattern-based threat examples. No external
-  corpora were downloaded.
+  corpora were downloaded. A hard-negative section lists real services whose
+  names use the threat examples' words (`secure-`, `verify`, `check`,
+  `download`), and the tool checks held-out names of that kind never come out
+  as harm while the phishing and malware probes still do.
 - **Size budget**: dim 24, 50k character-n-gram buckets ⇒ a few MB. Real
   deployments are free to point `ai.model_path` at any larger `.bin`; this is
   a starter, not a finished model.

@@ -39,8 +39,12 @@ and verdict TTL.
 
 The threat list exports as a plain domain list or CSV, for use as a
 blocklist elsewhere. A domain can be marked *not a threat*: its detection
-stops blocking but is kept for review. Every operator correction can be
-downloaded as training data.
+stops blocking but is kept for review. *Not a threat* applies to that exact
+name; an **allow** on a parent (for example `doubleverify.com`) also stops
+every name under it from blocking, so use it when one vendor shows up under
+many subdomains. Either kind of override, on the name or on any parent, keeps
+the name out of retraining. Every operator correction can be downloaded as
+training data.
 
 ## Models
 
