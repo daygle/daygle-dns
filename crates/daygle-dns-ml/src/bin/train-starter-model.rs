@@ -146,6 +146,69 @@ fn main() {
             }
         );
     }
+    // Held-out names that must not read as a threat, whatever ordinary
+    // category they land in. None is in the dataset: they check that the
+    // hard negatives generalise past the exact hosts listed there, the way
+    // the scanner meets them (new subdomains of known vendors).
+    const HARM: &[&str] = &["malware", "phishing", "scam"];
+    let not_threats = [
+        "pixel.doubleverify.com",
+        "tpsc-video-ue.doubleverify.com",
+        "secure-us.imrworldwide.com",
+        "secure.rubiconproject.com",
+        "secure-eu.livechatinc.com",
+        "en.gravatar.com",
+        "checkout3-api.iherb.biz",
+        "yandex.com.tr",
+        "downloads.arduino.org",
+        "secure.employmenthero.com.au",
+    ];
+    for probe in not_threats {
+        let got = reload
+            .predict(probe, 1, 0.0)
+            .first()
+            .map(|p| p.label.trim_start_matches("__label__").to_string())
+            .unwrap_or_default();
+        let ok = !HARM.contains(&got.as_str());
+        if !ok {
+            failures += 1;
+        }
+        println!(
+            "  not a threat: {probe} → {got}{}",
+            if ok {
+                ""
+            } else {
+                " (wanted any non-harm label)"
+            }
+        );
+    }
+    // The hard negatives must not cost real detections: these share the
+    // same words and must still come out as harm.
+    let threats = [
+        ("secure-paypal-account-verify.info", "phishing"),
+        ("appleid-verify-signin-secure.com", "phishing"),
+        ("microsoft-365-secure-login-check.xyz", "phishing"),
+        ("free-crack-trojan-download.click", "malware"),
+    ];
+    for (probe, want) in threats {
+        let got = reload
+            .predict(probe, 1, 0.0)
+            .first()
+            .map(|p| p.label.trim_start_matches("__label__").to_string())
+            .unwrap_or_default();
+        let ok = got == want;
+        if !ok {
+            failures += 1;
+        }
+        println!(
+            "  threat: {probe} → {got}{}",
+            if ok {
+                String::new()
+            } else {
+                format!(" (wanted {want})")
+            }
+        );
+    }
     panic_if_bad(failures);
 
     let size = std::fs::metadata(&output_path)

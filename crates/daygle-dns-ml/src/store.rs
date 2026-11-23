@@ -834,7 +834,10 @@ impl AiStore {
 
     /// Classified, unexpired verdicts confident enough to train on:
     /// `(channel, category, domain)`, strongest first. Overrides are excluded -
-    /// an exempted or corrected domain is not evidence for the model.
+    /// an exempted or corrected domain is not evidence for the model - and so
+    /// is every name under one: an allow on `vendor.com` exempts
+    /// `tps.vendor.com` from blocking, and the same name kept training (and
+    /// sitting in the update gate's threat sample) as a confirmed threat.
     pub fn confident_verdicts(
         &self,
         content_floor: f32,
@@ -868,7 +871,22 @@ impl AiStore {
                 },
             )?
             .collect::<std::result::Result<Vec<_>, _>>()?;
-        Ok(collected)
+        // Parent overrides, after the query: the exact-name case is the SQL
+        // above, and walking each name's parents is one set lookup per label.
+        let mut stmt = conn
+            .prepare("SELECT domain FROM ai_overrides WHERE action IN ('allow', 'not_threat')")?;
+        let overridden: std::collections::HashSet<String> = stmt
+            .query_map([], |r| r.get::<_, String>(0))?
+            .collect::<std::result::Result<_, _>>()?;
+        if overridden.is_empty() {
+            return Ok(collected);
+        }
+        Ok(collected
+            .into_iter()
+            .filter(|(_, _, domain)| {
+                !crate::scanner::any_suffix(domain, |name| overridden.contains(name))
+            })
+            .collect())
     }
 
     /// The domains the operator marked "not a threat": a correction, not an
