@@ -2232,6 +2232,28 @@ fn filtered_verdict_and_threat_lists_apply_filters_before_pagination() {
         )
         .unwrap();
     assert_eq!(total, 1);
+
+    // A relabelled threat row shows both labels, so the category filter
+    // finds it under either.
+    store
+        .set_category_override("bad-malware.example", "ads")
+        .unwrap();
+    for category in ["ads", "malware"] {
+        let (rows, total) = store
+            .list_threats_filtered(
+                &daygle_dns_ml::store::VerdictFilter {
+                    category: Some(category),
+                    ..Default::default()
+                },
+                daygle_dns_ml::store::VerdictPage {
+                    limit: 10,
+                    offset: 0,
+                },
+            )
+            .unwrap();
+        assert_eq!(total, 1, "filter {category}");
+        assert_eq!(rows[0].domain, "bad-malware.example");
+    }
 }
 
 #[test]

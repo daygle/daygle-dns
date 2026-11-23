@@ -647,7 +647,12 @@
               <code>{r.domain}</code>
             </td>
             {#if show('category')}
-            <td>{#if r.category}{titleCase(r.category)}{:else}<span class="muted">-</span>{/if}</td>
+            <td>
+              {#if r.category_override}
+                <span title={r.category ? `You relabelled it; the AI detected ${titleCase(r.category)}` : 'You relabelled it'}>{titleCase(r.category_override)}</span>
+                {#if r.category && r.category !== r.category_override}<div class="muted" style="font-size: 0.75rem">Detected: {titleCase(r.category)}</div>{/if}
+              {:else if r.category}{titleCase(r.category)}{:else}<span class="muted">-</span>{/if}
+            </td>
             {/if}
             {#if show('state')}
             <td>

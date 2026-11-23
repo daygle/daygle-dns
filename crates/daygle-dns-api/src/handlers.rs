@@ -1659,7 +1659,9 @@ pub async fn ai_verdicts(
 /// exempt, and only in enforce mode (an empty snapshot in train mode
 /// therefore reports every row as not blocked). `category_blocked`: whether a
 /// filtering group blocks the category the domain carries, so it is blocked
-/// for that group's clients in either mode.
+/// for that group's clients in either mode. `category_override`: the
+/// operator's relabel of the domain, if any, which the console shows in
+/// place of the detected label.
 pub async fn ai_threats(
     State(state): State<AppState>,
     Query(query): Query<AiThreatsQuery>,
@@ -1697,13 +1699,18 @@ pub async fn ai_threats(
             };
             let listed = ai.store.list_threats_filtered(&filter, page_bounds)?;
             // Rows the operator marked "not a threat" stay in the list for
-            // audit, so the console needs the marks to label them.
-            Ok::<_, daygle_dns_core::error::DaygleError>((listed, ai.store.not_threat_overrides()?))
+            // audit, so the console needs the marks to label them, and the
+            // operator's relabels so a row shows the corrected category.
+            Ok::<_, daygle_dns_core::error::DaygleError>((
+                listed,
+                ai.store.not_threat_overrides()?,
+                ai.store.category_overrides()?,
+            ))
         }
     })
     .await;
     match listed {
-        Ok(((rows, total), not_threat)) => {
+        Ok(((rows, total), not_threat, relabels)) => {
             let snapshot = ai.snapshot().load();
             let categories = ai.category_snapshot();
             let categories = categories.load();
@@ -1714,6 +1721,7 @@ pub async fn ai_threats(
                         "domain": r.domain,
                         "channel": r.channel,
                         "category": r.category,
+                        "category_override": relabels.get(&r.domain),
                         "severity": r.severity,
                         "status": r.status,
                         "confidence": r.confidence,
