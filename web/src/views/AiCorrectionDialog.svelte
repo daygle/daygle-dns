@@ -23,9 +23,7 @@
       <button class="secondary" style="padding: 2px 10px" onclick={onCancel} aria-label="Close">✕</button>
     </div>
     <p class="muted">
-      {domain} stops blocking and leaves the exported threat list. The detection
-      stays visible so the mistake can be reviewed, and you can restore it
-      later. Pick a category to relabel the domain as well.
+      {domain} will stop being blocked. You can restore it later.
     </p>
     <label class="field">
       <span>Reason</span>

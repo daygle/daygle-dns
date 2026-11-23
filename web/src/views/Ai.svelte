@@ -17,31 +17,31 @@
       id: 'scanner',
       label: 'Scanner',
       tagline:
-        'Labels the domains in your DNS traffic in the background, never on the query path. Train mode only records what it finds; Enforce mode also blocks the threats it detects. Blocking a content category is a filtering-group rule, not a scanner decision.',
+        'Sorts the domains your network looks up into categories and spots threats, in the background. Train mode only records; Enforce mode also blocks threats.',
     },
     {
       id: 'classifications',
       label: 'Classifications',
       tagline:
-        'Every domain the scanner has categorized from your DNS traffic, most recently classified first. Pick a different category to relabel a domain yourself: your label survives re-scans and is what category blocking matches, and it is a content label only - threats are the scanner\'s own detections on the Threats tab. The undo button beside a label you set gives the domain back to the scanner.',
+        'Every domain the scanner has categorized, newest first. Pick a different category to relabel one; your label sticks and is what category blocking uses.',
     },
     {
       id: 'threats',
       label: 'Threats',
       tagline:
-        "Domains the threat detector flagged, highest confidence first, each with its current block state. With the shared classifier, which labels count as threats is chosen here; a dedicated threat model reports its own threats and blocks them above the threshold. Disputed threats are shown but never block.",
+        'Domains flagged as threats, most confident first. Choose which labels count as threats, check why a domain is or is not blocked, and correct mistakes.',
     },
     {
       id: 'exemptions',
       label: 'Exemptions',
       tagline:
-        'Review domains exempted from AI blocking, including false positives, and remove exemptions when they are no longer needed.',
+        'Domains the AI will never block. Remove one when it is no longer needed.',
     },
     {
       id: 'settings',
       label: 'Settings',
       tagline:
-        'When the scanner runs, how many domains it classifies, and when a detected threat blocks. Train mode only records; Enforce mode blocks.',
+        'How often the scanner runs, and how confident it must be before it blocks.',
       edit: true,
     },
   ];

@@ -151,10 +151,8 @@
       <p class="help restart">The scanner starts after the next restart.</p>
     {/if}
     <p class="muted help">
-      Classifies the domains seen in your DNS traffic in the background, never
-      on the query path. Start in Train mode and review the Classifications
-      and Threats tabs before switching to Enforce. Custom Allow
-      entries and domains on the Exemptions tab are never blocked.
+      Start in Train mode and check the Threats tab before switching to
+      Enforce. Exempt domains are never blocked.
     </p>
 
     <h4>Scanning</h4>
@@ -164,9 +162,7 @@
       <label><span>Classification Workers</span><input type="number" min="1" max="32" bind:value={ai_.workers} /></label>
     </div>
     <p class="muted help">
-      Each scan picks up the domains queried since the previous one and
-      classifies up to the per-scan limit (the rest wait for the next scan),
-      on this many background threads.
+      Domains over the per-scan limit wait for the next scan.
     </p>
 
     <h4>Enforcement</h4>
@@ -175,20 +171,9 @@
       <label><span>Confidence Floor (%)</span><input type="number" min="0" max="99" step="any" bind:value={aiForm.floorPct} /></label>
     </div>
     <p class="muted help">
-      Which labels count as threats is chosen on the Threats tab, next to
-      the list it produces. This tab keeps the thresholds and lifetimes that
-      decide when a detected threat blocks.
-    </p>
-    <p class="muted help">
-      In Enforce mode a domain is blocked when a detected threat reaches the
-      block threshold (50 to 100%) and nothing disputes it (the verifier, or
-      a domain this network has used for weeks). With
-      the shared classifier it must also carry a label treated as a threat (set
-      on the Threats tab); a dedicated threat model reports its own threats, so
-      every label it produces blocks. Detections below the confidence floor are
-      recorded as skipped.
-      Content classifications never auto-block on their own: blocking a
-      category is a filtering-group rule.
+      In Enforce mode a threat blocks once its confidence reaches the block
+      threshold, unless it is disputed. Detections below the confidence floor
+      are ignored. Which labels count as threats is set on the Threats tab.
     </p>
 
     <h4>Lifetime</h4>
@@ -198,10 +183,8 @@
       <label><span>Look for Expired Entries Every (Minutes)</span><input type="number" min="0.17" step="any" bind:value={aiForm.expireMinutes} /></label>
     </div>
     <p class="muted help">
-      Each channel keeps its own lifetime: an expired threat stops blocking,
-      and an expired classification stops matching blocked categories, until
-      the domain is scanned again. Threats (malware, phishing) age out faster
-      than classifications, which rarely change.
+      Domains are re-checked after this long. An expired threat stops
+      blocking until it is checked again.
     </p>
   </div>
 </SettingsForm>

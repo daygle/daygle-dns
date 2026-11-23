@@ -282,9 +282,8 @@
       </div>
     </div>
     <p class="muted" style="margin: 0 0 10px">
-      Relabelling sets the domain's content category, which is what category
-      blocking matches. It does not make the domain a threat: threats are the
-      scanner's own detections, listed on the Threats tab.
+      Relabelling changes a domain's category (used by category blocking).
+      It never makes a domain a threat.
     </p>
     <div class="table-wrap">
     <table>
@@ -368,8 +367,7 @@
         {#if search.trim() || categoryFilter.trim() || statusFilter || exemptionFilter || labelFilter}
           No classifications match these filters.
         {:else}
-          No classifications yet - they appear as the scanner categorizes
-          domains from your DNS traffic.
+          No classifications yet. They appear as your network looks up domains.
         {/if}
       </p>
     {/if}

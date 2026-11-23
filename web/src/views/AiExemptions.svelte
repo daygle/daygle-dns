@@ -40,12 +40,12 @@
   }
 
   async function removeExemption(domain) {
-    if (!confirm(`Remove the AI exemption for ${domain}? The AI may block it and its subdomains again if a future threat qualifies.`)) return;
+    if (!confirm(`Remove the exemption for ${domain}? The AI may block it again.`)) return;
     notice = null;
     error = null;
     try {
       await api.aiOverride(domain, 'clear');
-      notice = `${domain} is no longer exempt; blocking applies again once a fresh threat qualifies.`;
+      notice = `${domain} is no longer exempt.`;
       await load();
     } catch (e) {
       error = formatApiError(e);
@@ -81,7 +81,7 @@
     </div>
   </div>
   <p class="muted" style="margin: 0 0 12px">
-    Exemptions prevent AI blocking for the listed domain and its subdomains. Remove one to let future qualifying threats block again.
+    The AI never blocks these domains or their subdomains.
   </p>
   {#if loading}
     <p class="muted">Loading...</p>

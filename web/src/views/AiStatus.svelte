@@ -190,28 +190,28 @@
   // The switches that are plain `ai` settings, with what each one now does.
   const SWITCHES = {
     auto_retrain: [
-      'Automatic retraining is on: the scanner will rebuild its model from its own confirmed verdicts, the threat feeds and your corrections.',
-      'Automatic retraining is off; the current model stays as it is.',
+      'Automatic retraining is on.',
+      'Automatic retraining is off. The current model stays as it is.',
     ],
     trial_new_models: [
-      'Scheduled retrains now run in the shadow of the live model and replace it only if they do at least as well.',
-      'Scheduled retrains now go live straight away; restore the previous model by hand if needed.',
+      'New models are now trialled before they replace the current one.',
+      'New models now go live straight away. Use Restore Previous Model if needed.',
     ],
     threat_feeds: [
-      'The threat feeds will be downloaded and used to confirm what the AI learns, test every new model and corroborate threats.',
-      'The threat feeds are no longer used; the AI relies on its own models, your corrections and the page.',
+      'Threat feeds are on. They download within a minute.',
+      'Threat feeds are off.',
     ],
     network_evidence: [
-      'Threat verdicts are now checked against the threat feeds and how this network uses each domain.',
-      'Threat verdicts rely on the classifiers (and the verifier, if on) alone.',
+      'Threats are now checked against the feeds and your network\'s usage.',
+      'Evidence checks are off.',
     ],
     learn_negatives: [
-      '"Not a threat" corrections will train a benign label. If the model starts missing threats, turn this off and restore the previous model.',
-      '"Not a threat" corrections are no longer used as training data; they still stop a block.',
+      'Your "not a threat" marks will now train the model. Turn this off if it starts missing threats.',
+      'Your "not a threat" marks no longer train the model. They still stop blocks.',
     ],
     fetch_pages: [
-      'Page reading is on: new threat candidates will have their home page fetched from this server and its text recorded with the verdict.',
-      'Page reading is off; threat verdicts keep the name-only evidence they already have.',
+      'Page reading is on.',
+      'Page reading is off.',
     ],
   };
 
@@ -227,8 +227,8 @@
       { ai: { verifier_enabled: value } },
       null,
       value
-        ? 'The verifier now second-checks every threat: a confident disagreement disputes it, and its agreement lets the AI learn from that verdict.'
-        : 'The verifier is off; threats rely on the primary classifier and the network evidence.',
+        ? 'The verifier now double-checks every threat.'
+        : 'The verifier is off.',
     );
   }
 
@@ -246,8 +246,8 @@
       { updates: { ...updates, auto_refresh_models: value } },
       { auto_refresh_models: value },
       value
-        ? 'New shipped models will be installed automatically, checked against held-out threats and restored if they do worse.'
-        : 'Shipped models are updated only when you choose to.',
+        ? 'New shipped models will install automatically.'
+        : 'Shipped models now update only when you choose.',
     );
   }
 
@@ -256,10 +256,10 @@
       { ai: { page_rule: value } },
       { page_rule: value },
       value === 'decide'
-        ? 'Page readings can now raise or cap a threat confidence, so a page that reads as ordinary can stop a name-only block. A site writes its own page, so this can be gamed.'
+        ? 'Reading rule: Decide. Pages can raise or lower confidence (sites can fool this).'
         : value === 'corroborate'
-          ? 'Page readings can now raise a threat confidence, never lower it.'
-          : 'Page readings are recorded as evidence only; verdicts are unchanged.',
+          ? 'Reading rule: Corroborate. Pages can only raise confidence.'
+          : 'Reading rule: Evidence only. Pages are recorded, nothing else changes.',
     );
   }
 
@@ -284,14 +284,7 @@
     notice = null;
     try {
       const result = await api.aiRetrain(model);
-      const negatives = result.negatives
-        ? `, ${fmt(result.negatives)} from "not a threat" marks`
-        : '';
-      const intel = result.intel ? `, ${fmt(result.intel)} from the threat feeds` : '';
-      const unconfirmed = result.unconfirmed
-        ? ` ${fmt(result.unconfirmed)} of its own verdicts were left out because nothing independent confirmed them.`
-        : '';
-      notice = `Retrained from ${fmt(result.examples)} examples across ${fmt(result.labels)} labels (${fmt(result.corrections)} from your corrections${negatives}${intel}).${unconfirmed} ${result.message || 'The new model is in use now.'}`;
+      notice = `Retrained from ${fmt(result.examples)} examples. The new model is in use now.`;
       await load(true);
     } catch (e) {
       error = formatApiError(e);
@@ -366,18 +359,15 @@
   {:else if enforcing && heuristicOnly && !feedsCanBlock}
     <div class="card warn" style="margin-bottom: 14px">
       <strong>Nothing can be auto-blocked yet.</strong>
-      Enforce mode is on, but the scanner is using its built-in heuristic
-      rules, whose detections never reach the block threshold on their own.
-      Install a trained model (see AI Models below), or turn on the threat
-      feeds and evidence checks (Outside Evidence below) so a detection a
-      feed confirms can block.
+      No trained model is installed, and the built-in rules are never
+      confident enough to block. Install a model (AI Models, below) or turn
+      on both Outside Evidence switches.
     </div>
   {:else if enforcing && heuristicOnly}
     <div class="card warn" style="margin-bottom: 14px">
       <strong>Only feed-confirmed threats can be auto-blocked.</strong>
-      The scanner is using its built-in heuristic rules, so a detection blocks
-      only when a threat feed lists the domain. Install a trained model (see
-      AI Models below) to block more.
+      No trained model is installed, so only threats a feed lists can block.
+      Install a model (AI Models, below) to block more.
     </div>
   {/if}
 
@@ -478,11 +468,7 @@
         {/if}
       </div>
       <p class="muted small" style="margin: 0 0 10px">
-        {#if status.threat_model_dedicated}
-          Detected threats at or above the block threshold, minus exempt and
-          disputed domains{:else}Detected threats whose label is treated as a
-          threat and whose confidence is at or above the block threshold, minus
-          exempt and disputed domains{/if}{enforcing && !switchedOff ? '.' : ': what Enforce mode would block.'}
+        Threats at or above the block threshold, not exempt or disputed{enforcing && !switchedOff ? '.' : ' - what Enforce mode would block.'}
       </p>
       {#if blockable.length}
         <table>
@@ -539,7 +525,7 @@
           <span>Trial New Models First</span>
         </label>
         {#if status.verifier_installed || status.verifier_enabled}
-          <label class="row" style="gap: 6px; align-items: center; font-size: 0.85rem" title="The MiniLM model second-checks every threat and confirms labels the AI may learn from">
+          <label class="row" style="gap: 6px; align-items: center; font-size: 0.85rem" title="A second AI model double-checks every threat">
             <input
               type="checkbox"
               style="width: auto"
@@ -563,40 +549,26 @@
       {/if}
     </div>
     <p class="muted help" style="margin: 0 0 6px">
-      The scanner keeps its own model current: it retrains from your
-      corrections, the threat feeds and the verdicts something independent
-      confirmed, and a new model replaces the live one only after it proves
-      at least as good.
+      The AI retrains itself on a schedule. A new model replaces the current
+      one only if it proves at least as good.
     </p>
     <details class="how" style="margin: 0 0 10px">
       <summary class="muted">How retraining stays safe</summary>
-      <p class="muted help" style="margin: 6px 0 0">
-      The scanner rebuilds its classifier from what it has learned: your
-      category corrections and mislabelled marks on AI → Threats, plus its own
-      verdicts - but only those the shipped reference model (or, with no
-      model file, the built-in rules), the verifier model, a threat feed or
-      the page itself agrees with, so a mistake cannot feed on itself - plus
-      current threat-feed names, on top of the starter corpus, so labels this
-      network has not seen lately are never forgotten. A candidate must hold
-      up on corrections, threats and threat-feed names it was not trained on,
-      flag no more of your established domains, and still report every
-      threat label. Then, with Trial New Models First on, it runs in the
-      shadow of the live model for half the retrain interval without
-      answering a single query, and replaces it only if it did at least as
-      well on held-out threats, on the threats each finds among the domains
-      looked up, on your corrections during the trial, on independently
-      confirmed labels, on held-out threat-feed names and on the established
-      domains looked up - so a trial has evidence to judge even when nobody
-      filed a correction. A rejected candidate changes nothing, pauses
-      retraining for a while and raises an alert. Retrain Now goes live at
-      once. A dedicated threat model is maintained the same way, and the
-      verifier's reference is refreshed from your corrections (never from
-      the AI's own verdicts, so it stays an independent second opinion).
-      With Install New Shipped Models on (the default), new reference models arrive through
-      the updater, which checks them against held-out threats too. With Learn
-      "Not a Threat" on, your not-a-threat marks become a benign label - a
-      negative class can over-generalise, which the trial checks for.
-      </p>
+      <ul class="how-list muted">
+        <li><strong>Learns from:</strong> your corrections, the threat feeds, and
+          its own verdicts only when something independent agrees.</li>
+        <li><strong>Tested first:</strong> a new model must still catch held-out
+          threats and must not flag domains your network uses every day.</li>
+        <li><strong>Trial New Models First:</strong> the new model shadows the
+          current one for a while and is only switched in if it did as well.
+          A failed model changes nothing and raises an alert.</li>
+        <li><strong>Learn "Not a Threat":</strong> your "not a threat" marks also
+          train the model. Turn off if it starts missing threats.</li>
+        <li><strong>Install New Shipped Models:</strong> updated models from new
+          releases install automatically, after the same checks.</li>
+        <li><strong>Retrain Now</strong> skips the trial and goes live at once;
+          <strong>Restore Previous Model</strong> undoes it.</li>
+      </ul>
     </details>
     {@render maintained('Shared Classifier', status.learned_model, 'shared')}
     {#if status.learned_threat_model}
@@ -692,24 +664,26 @@
       {/if}
     </div>
     <p class="muted help" style="margin: 0 0 6px">
-      Evidence about a domain beyond its name, so the AI does not only check
-      itself against a copy of itself. Works without the ONNX verifier.
+      Checks threats against more than the domain name. Works without the
+      ONNX verifier.
     </p>
     <details class="how" style="margin: 0 0 10px">
       <summary class="muted">What these switches do</summary>
-      <p class="muted help" style="margin: 6px 0 0">
-      What the AI knows about a domain beyond its name, so it does not only
-      check itself against a copy of itself - this works without the ONNX
-      verifier. Use Threat Feeds downloads maintained public lists of malware,
-      phishing and scam domains (they name domains, never your traffic): their
-      names confirm what retraining may learn, are held out to test every new
-      model and trial, and train the threat labels. Check Threats Against
-      Evidence applies it to each threat verdict: a feed listing corroborates
-      it at blocking confidence, a domain {fmt(status.established_clients ?? 3)}+
-      clients have used on {fmt(status.established_days ?? 14)}+ days is
-      disputed and never blocks on its name, and a machine-generated name
-      first seen today is noted. Your exemptions and corrections still win.
-      </p>
+      <ul class="how-list muted">
+        <li><strong>Use Threat Feeds:</strong> downloads public lists of known
+          malware, phishing and scam domains (your traffic is never sent).
+          They help the AI learn and test new models.</li>
+        <li><strong>Check Threats Against Evidence:</strong>
+          <ul>
+            <li>A domain on a threat feed is confirmed and can block.</li>
+            <li>A domain {fmt(status.established_clients ?? 3)}+ devices have
+              used on {fmt(status.established_days ?? 14)}+ days is marked
+              disputed and is never blocked on its name alone.</li>
+            <li>A random-looking name first seen today is noted.</li>
+          </ul>
+        </li>
+        <li>Your exemptions and corrections always win.</li>
+      </ul>
     </details>
     {#if status.threat_feed_status?.length}
       <table>
@@ -762,33 +736,25 @@
       {/if}
     </div>
     <p class="muted help" style="margin: 0 0 6px">
-      When a domain is flagged as a threat, read its home page and record what
-      it says with the verdict (visible in Check a Domain). Off unless you
-      turn it on, because the fetch leaves this server.
+      Reads the home page of each flagged domain and records what it says
+      (see Check a Domain). Off by default, because it contacts the site.
     </p>
     <details class="how" style="margin: 0 0 10px">
       <summary class="muted">How the reading rule works</summary>
-      <p class="muted help" style="margin: 6px 0 0">
-      When a domain is flagged as a threat, ask the site itself what it says:
-      its home page is fetched from this server, its title and text read, and a
-      one-line note added to the verdict's evidence (visible in Check a Domain).
-      With the default rule it is a second opinion for you and nothing more.
-      Evidence only records it; Corroborate lets an agreeing page raise the
-      threat confidence; Decide also caps it when the page reads as an ordinary
-      category with no threat cue on it, which can stop a name-only block. The
-      page is written by the site being judged, so a site can game Decide by
-      showing harmless text; choose it only if you accept that. A reading below
-      {Math.round((status.page_confidence_floor ?? 0.6) * 100)}% confidence is
-      ignored by the rule. Fetching leaves this server, so it is off
-      unless you turn it on; only threat candidates are read, at most
-      {fmt(status.page_candidates_per_scan || 0)} per scan, {fmt(status.page_fetch_timeout_secs || 0)}s
-      timeout each. Requests to private, loopback and link-local addresses are
-      refused, including through redirects. The text of each page read is
-      kept to train a page-text model on this server, from pages a threat
-      feed lists and pages of domains known to be ordinary; it is used only
-      while it beats the built-in phrase list on pages held out of its
-      training, and it can add or strengthen a threat reading, never hide one.
-      </p>
+      <ul class="how-list muted">
+        <li><strong>Evidence only</strong> (default): records what the page says.
+          Nothing else changes.</li>
+        <li><strong>Corroborate:</strong> a page that looks like a threat raises
+          the confidence. It never lowers it.</li>
+        <li><strong>Decide:</strong> also lowers the confidence when the page
+          looks ordinary. The site writes its own page, so it can fool this.</li>
+        <li>Readings below {Math.round((status.page_confidence_floor ?? 0.6) * 100)}%
+          confidence are ignored. Up to {fmt(status.page_candidates_per_scan || 0)}
+          pages per scan, {fmt(status.page_fetch_timeout_secs || 0)}s each;
+          private and local addresses are never fetched.</li>
+        <li>Page text is kept to train a page model that learns what threat
+          pages look like. It can only strengthen a threat reading, never hide one.</li>
+      </ul>
     </details>
     {#if status.page_model?.last}
       <p class="muted" style="margin: 0; font-size: 0.85rem">
@@ -804,11 +770,9 @@
   <div class="card" style="margin-top: 14px">
     <h3 style="margin: 0 0 10px">AI Models</h3>
     <p class="muted help" style="margin: 0 0 10px">
-      The bundled classifier and verifier files. Updating downloads the
-      models bundle from the latest GitHub release, verifies it, installs the
-      files and restarts the service (a brief DNS pause) with automatic
-      rollback on failure. New model bundles install automatically while
-      Keep AI Models up to Date is on (the default) on the Update page.
+      The model files the AI uses. Updating downloads the latest release,
+      checks it and restarts the service (a brief DNS pause); a failed update
+      is rolled back automatically.
     </p>
     {#if models?.bundle}
       <p class="muted" style="margin: 0 0 10px">
@@ -875,4 +839,7 @@
   .warn { border-color: var(--warn); }
   .small { font-size: 0.85rem; }
   .how summary { cursor: pointer; font-size: 0.85rem; }
+  .how-list { margin: 6px 0 0; padding-left: 18px; font-size: 0.85rem; line-height: 1.45; }
+  .how-list li { margin: 3px 0; }
+  .how-list ul { margin: 3px 0 0; padding-left: 18px; }
 </style>

@@ -19,7 +19,7 @@
       <h3 id="exemption-title" style="margin: 0">Exempt Domain</h3>
       <button class="secondary" style="padding: 2px 10px" onclick={onCancel} aria-label="Close">✕</button>
     </div>
-    <p class="muted">{domain} and its subdomains will never be blocked by the AI. Choose a reason to record with this exemption.</p>
+    <p class="muted">The AI will never block {domain} or its subdomains.</p>
     <label class="reason-label">
       <span>Reason</span>
       <select bind:value={reason} required>
