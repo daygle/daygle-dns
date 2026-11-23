@@ -2516,6 +2516,42 @@ pub struct AiUpdate {
     pub category_ttl_secs: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub threat_ttl_secs: Option<u64>,
+    // The fields below were added after the first release of this overlay.
+    // Without them every AI toggle except the original thirteen reverted
+    // to the config file's value at the next restart (the model updater's
+    // restart included). An overlay stored before then leaves them `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub category_model_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub threat_model_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub category_confidence_floor: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verifier_model_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verifier_reference_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verifier_threshold: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_retrain: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retrain_interval_secs: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trial_new_models: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub learn_negatives: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fetch_pages: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page_fetch_timeout_secs: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page_fetch_max_bytes: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page_candidates_per_scan: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page_rule: Option<PageRule>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page_confidence_floor: Option<f32>,
 }
 
 impl AiUpdate {
@@ -2537,6 +2573,124 @@ impl AiUpdate {
             confidence_floor: Some(settings.confidence_floor),
             category_ttl_secs: Some(settings.category_ttl_secs),
             threat_ttl_secs: Some(settings.threat_ttl_secs),
+            category_model_path: Some(settings.category_model_path.clone()),
+            threat_model_path: Some(settings.threat_model_path.clone()),
+            category_confidence_floor: Some(settings.category_confidence_floor),
+            verifier_model_path: Some(settings.verifier_model_path.clone()),
+            verifier_reference_path: Some(settings.verifier_reference_path.clone()),
+            verifier_threshold: Some(settings.verifier_threshold),
+            auto_retrain: Some(settings.auto_retrain),
+            retrain_interval_secs: Some(settings.retrain_interval_secs),
+            trial_new_models: Some(settings.trial_new_models),
+            learn_negatives: Some(settings.learn_negatives),
+            fetch_pages: Some(settings.fetch_pages),
+            page_fetch_timeout_secs: Some(settings.page_fetch_timeout_secs),
+            page_fetch_max_bytes: Some(settings.page_fetch_max_bytes),
+            page_candidates_per_scan: Some(settings.page_candidates_per_scan),
+            page_rule: Some(settings.page_rule),
+            page_confidence_floor: Some(settings.page_confidence_floor),
+        }
+    }
+
+    /// Whether this overlay leaves every AI setting at its default, i.e. the
+    /// console never changed one. Fields an older overlay did not store count
+    /// as default, so an untouched overlay written before they existed still
+    /// reads as untouched.
+    pub fn is_untouched(&self) -> bool {
+        let mut settings = AiSettings::default();
+        self.apply_to(&mut settings);
+        settings == AiSettings::default()
+    }
+
+    /// Apply the stored fields to `ai`, leaving the rest as they are. Bounds
+    /// match the settings API's.
+    pub fn apply_to(&self, ai: &mut AiSettings) {
+        if let Some(v) = self.enabled {
+            ai.enabled = v;
+        }
+        if let Some(v) = self.mode {
+            ai.mode = v;
+        }
+        if let Some(v) = &self.database {
+            ai.database = v.trim().to_string();
+        }
+        if let Some(v) = &self.model_path {
+            ai.model_path = v.trim().to_string();
+        }
+        if let Some(v) = &self.category_model_path {
+            ai.category_model_path = v.trim().to_string();
+        }
+        if let Some(v) = &self.threat_model_path {
+            ai.threat_model_path = v.trim().to_string();
+        }
+        if let Some(v) = self.workers {
+            ai.workers = v;
+        }
+        if let Some(v) = self.scan_interval_secs {
+            ai.scan_interval_secs = v;
+        }
+        if let Some(v) = self.expire_check_secs {
+            ai.expire_check_secs = v;
+        }
+        if let Some(v) = self.max_domains_per_scan {
+            ai.max_domains_per_scan = v;
+        }
+        if let Some(v) = &self.auto_block_categories {
+            ai.auto_block_categories = Self::normalize_categories(v.clone());
+        }
+        if let Some(v) = self.block_threshold {
+            ai.block_threshold = v;
+        }
+        if let Some(v) = self.confidence_floor {
+            ai.confidence_floor = v;
+        }
+        if let Some(v) = self.category_confidence_floor {
+            ai.category_confidence_floor = v;
+        }
+        if let Some(v) = self.category_ttl_secs {
+            ai.category_ttl_secs = v;
+        }
+        if let Some(v) = self.threat_ttl_secs {
+            ai.threat_ttl_secs = v;
+        }
+        if let Some(v) = &self.verifier_model_path {
+            ai.verifier_model_path = v.trim().to_string();
+        }
+        if let Some(v) = &self.verifier_reference_path {
+            ai.verifier_reference_path = v.trim().to_string();
+        }
+        if let Some(v) = self.verifier_threshold {
+            ai.verifier_threshold = v;
+        }
+        if let Some(v) = self.auto_retrain {
+            ai.auto_retrain = v;
+        }
+        if let Some(v) = self.retrain_interval_secs {
+            ai.retrain_interval_secs = v.max(3_600);
+        }
+        if let Some(v) = self.trial_new_models {
+            ai.trial_new_models = v;
+        }
+        if let Some(v) = self.learn_negatives {
+            ai.learn_negatives = v;
+        }
+        if let Some(v) = self.fetch_pages {
+            ai.fetch_pages = v;
+        }
+        if let Some(v) = self.page_fetch_timeout_secs {
+            ai.page_fetch_timeout_secs = v.clamp(1, 30);
+        }
+        if let Some(v) = self.page_fetch_max_bytes {
+            ai.page_fetch_max_bytes = v.clamp(16 * 1024, 2 * 1024 * 1024);
+        }
+        if let Some(v) = self.page_candidates_per_scan {
+            ai.page_candidates_per_scan = v.clamp(1, 64);
+        }
+        if let Some(v) = self.page_rule {
+            ai.page_rule = v;
+        }
+        if let Some(v) = self.page_confidence_floor {
+            ai.page_confidence_floor = v.clamp(0.05, 0.99);
         }
     }
 
@@ -2871,45 +3025,7 @@ impl RuntimeSettings {
             config.updates = u.clone();
         }
         if let Some(a) = &self.ai {
-            if let Some(v) = a.enabled {
-                config.ai.enabled = v;
-            }
-            if let Some(v) = a.mode {
-                config.ai.mode = v;
-            }
-            if let Some(v) = &a.database {
-                config.ai.database = v.trim().to_string();
-            }
-            if let Some(v) = &a.model_path {
-                config.ai.model_path = v.trim().to_string();
-            }
-            if let Some(v) = a.workers {
-                config.ai.workers = v;
-            }
-            if let Some(v) = a.scan_interval_secs {
-                config.ai.scan_interval_secs = v;
-            }
-            if let Some(v) = a.expire_check_secs {
-                config.ai.expire_check_secs = v;
-            }
-            if let Some(v) = a.max_domains_per_scan {
-                config.ai.max_domains_per_scan = v;
-            }
-            if let Some(v) = &a.auto_block_categories {
-                config.ai.auto_block_categories = AiUpdate::normalize_categories(v.clone());
-            }
-            if let Some(v) = a.block_threshold {
-                config.ai.block_threshold = v;
-            }
-            if let Some(v) = a.confidence_floor {
-                config.ai.confidence_floor = v;
-            }
-            if let Some(v) = a.category_ttl_secs {
-                config.ai.category_ttl_secs = v;
-            }
-            if let Some(v) = a.threat_ttl_secs {
-                config.ai.threat_ttl_secs = v;
-            }
+            a.apply_to(&mut config.ai);
         }
         if let Some(a) = &self.authoritative {
             if let Some(v) = a.default_record_ttl {
@@ -5938,6 +6054,22 @@ mod tests {
         ai.confidence_floor = 0.21;
         ai.category_ttl_secs += 1;
         ai.threat_ttl_secs += 1;
+        ai.category_model_path = s("/srv/category.bin");
+        ai.threat_model_path = s("/srv/threat.bin");
+        ai.category_confidence_floor = 0.33;
+        ai.verifier_model_path = s("/srv/verifier.onnx");
+        ai.verifier_reference_path = s("/srv/centroids.json");
+        ai.verifier_threshold = 0.44;
+        ai.auto_retrain = !ai.auto_retrain;
+        ai.retrain_interval_secs = 7_200;
+        ai.trial_new_models = !ai.trial_new_models;
+        ai.learn_negatives = !ai.learn_negatives;
+        ai.fetch_pages = !ai.fetch_pages;
+        ai.page_fetch_timeout_secs = 9;
+        ai.page_fetch_max_bytes = 64 * 1024;
+        ai.page_candidates_per_scan = 7;
+        ai.page_rule = PageRule::Decide;
+        ai.page_confidence_floor = 0.7;
 
         c.display = DisplaySettings {
             time_zone: s("UTC"),
@@ -7162,6 +7294,54 @@ scope = "groups"
             cfg.policy.blocklist_sources[2].scope,
             BlocklistScope::Groups
         );
+    }
+
+    #[test]
+    fn ai_page_reading_survives_a_restart() {
+        // The console's Read Pages for Threats and Reading rule lived only in
+        // memory: the stored overlay dropped them, so the next restart put
+        // the config file's values (off, evidence) back.
+        let mut c = DaygleConfig::default();
+        c.ai.fetch_pages = true;
+        c.ai.page_rule = PageRule::Corroborate;
+        c.ai.learn_negatives = true;
+        let stored = serde_json::to_string(&RuntimeSettings::capture(&c)).unwrap();
+        let overlay: RuntimeSettings = serde_json::from_str(&stored).unwrap();
+        let mut restarted = DaygleConfig::default();
+        overlay.apply_to(&mut restarted);
+        assert!(restarted.ai.fetch_pages);
+        assert_eq!(restarted.ai.page_rule, PageRule::Corroborate);
+        assert!(restarted.ai.learn_negatives);
+    }
+
+    #[test]
+    fn an_older_untouched_ai_overlay_still_reads_as_untouched() {
+        // Stored before the overlay carried the later fields: only the
+        // original thirteen, all at their defaults.
+        let d = AiSettings::default();
+        let legacy = AiUpdate {
+            enabled: Some(d.enabled),
+            mode: Some(d.mode),
+            database: Some(d.database.clone()),
+            model_path: Some(d.model_path.clone()),
+            workers: Some(d.workers),
+            scan_interval_secs: Some(d.scan_interval_secs),
+            expire_check_secs: Some(d.expire_check_secs),
+            max_domains_per_scan: Some(d.max_domains_per_scan),
+            auto_block_categories: Some(d.auto_block_categories.clone()),
+            block_threshold: Some(d.block_threshold),
+            confidence_floor: Some(d.confidence_floor),
+            category_ttl_secs: Some(d.category_ttl_secs),
+            threat_ttl_secs: Some(d.threat_ttl_secs),
+            ..AiUpdate::default()
+        };
+        assert!(legacy.is_untouched());
+        assert!(AiUpdate::capture_ai(&d).is_untouched());
+        let edited = AiSettings {
+            fetch_pages: true,
+            ..AiSettings::default()
+        };
+        assert!(!AiUpdate::capture_ai(&edited).is_untouched());
     }
 
     #[test]
