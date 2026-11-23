@@ -218,6 +218,41 @@ impl AiStore {
         Ok(rows)
     }
 
+    /// Threat verdicts already decided (classified or skipped), with their
+    /// evidence: what a change in the outside evidence may have to revisit.
+    pub fn decided_threats(&self) -> Result<Vec<(String, String)>> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(
+            "SELECT domain, evidence FROM ai_verdicts
+             WHERE channel = 'threat' AND status IN ('classified', 'skipped')",
+        )?;
+        let rows = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<std::result::Result<_, _>>()?;
+        Ok(rows)
+    }
+
+    /// Send these domains' threat verdicts back to the scan queue, so the
+    /// next cycle classifies them again with the evidence as it is now. The
+    /// verdict's fields stay until then.
+    pub fn requeue_threat_domains(&self, domains: &[String]) -> Result<usize> {
+        let mut conn = self.lock()?;
+        let tx = conn.transaction()?;
+        let mut queued = 0usize;
+        {
+            let mut update = tx.prepare(
+                "UPDATE ai_verdicts SET status = 'pending'
+                 WHERE channel = 'threat' AND domain = ?1
+                   AND status IN ('classified', 'skipped')",
+            )?;
+            for domain in domains {
+                queued += update.execute(params![domain])?;
+            }
+        }
+        tx.commit()?;
+        Ok(queued)
+    }
+
     // ── How this network uses a domain ──────────────────────────────────
 
     /// Record one harvest: each domain with the clients that looked it up.

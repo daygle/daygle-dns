@@ -75,6 +75,15 @@ pub const INTEL_FEEDS: &[IntelFeed] = &[
     },
 ];
 
+/// What the evidence stage writes into a verdict's evidence
+/// ([`crate::evidence`]): a verdict carrying one depends on the evidence
+/// settings.
+const EVIDENCE_NOTES: &[&str] = &[
+    ", listed by ",
+    "established on this network",
+    "machine-generated-looking name",
+];
+
 /// How often a downloaded feed is refreshed.
 const REFRESH_SECS: i64 = 12 * 3600;
 /// How long a failed download waits before it is tried again.
@@ -237,6 +246,73 @@ impl Intel {
         }
     }
 
+    /// Reload after a download and re-check every threat verdict whose
+    /// listing changed: a name a feed added gets its corroboration now, and
+    /// one a feed dropped loses it, instead of both waiting for the verdict
+    /// to expire.
+    pub fn refresh(&self) {
+        let before = self.index.load_full();
+        self.reload();
+        let after = self.index.load_full();
+        let listing = |index: &IntelIndex, domain: &str| index.feed_for(domain).map(|f| f.id);
+        let changed: Vec<String> = match self.store.decided_threats() {
+            Ok(rows) => rows
+                .into_iter()
+                .map(|(domain, _)| domain)
+                .filter(|domain| listing(&before, domain) != listing(&after, domain))
+                .collect(),
+            Err(e) => {
+                tracing::warn!(error = %e, "could not read threat verdicts after a feed update");
+                return;
+            }
+        };
+        self.requeue(&changed, "the threat feeds changed");
+    }
+
+    /// Re-check the threat verdicts the outside evidence touches now or
+    /// touched before: after `ai.threat_feeds` or `ai.network_evidence` is
+    /// switched, so the change applies within a scan instead of at expiry.
+    pub fn recheck_evidence(&self) {
+        let index = self.index.load_full();
+        let established: std::collections::HashSet<String> = self
+            .store
+            .established_domains(u32::MAX)
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
+        let affected: Vec<String> = match self.store.decided_threats() {
+            Ok(rows) => rows
+                .into_iter()
+                .filter(|(domain, evidence)| {
+                    index.feed_for(domain).is_some()
+                        || established.contains(domain)
+                        || EVIDENCE_NOTES.iter().any(|note| evidence.contains(note))
+                })
+                .map(|(domain, _)| domain)
+                .collect(),
+            Err(e) => {
+                tracing::warn!(error = %e, "could not read threat verdicts after a settings change");
+                return;
+            }
+        };
+        self.requeue(&affected, "the evidence settings changed");
+    }
+
+    fn requeue(&self, domains: &[String], why: &str) {
+        if domains.is_empty() {
+            return;
+        }
+        match self.store.requeue_threat_domains(domains) {
+            Ok(0) => {}
+            Ok(queued) => self.logs.push(
+                LogLevel::Info,
+                "ai",
+                format!("AI re-checks {queued} threat verdict(s) because {why}"),
+            ),
+            Err(e) => tracing::warn!(error = %e, "could not re-queue threat verdicts"),
+        }
+    }
+
     /// The feeds as the AI should use them now: empty while `ai.threat_feeds`
     /// is off, so turning it off stops their use at once.
     pub fn index(&self) -> Arc<IntelIndex> {
@@ -300,7 +376,7 @@ impl Intel {
                 }
                 if changed {
                     let intel = self.clone();
-                    let _ = tokio::task::spawn_blocking(move || intel.reload()).await;
+                    let _ = tokio::task::spawn_blocking(move || intel.refresh()).await;
                 }
             }
             tokio::select! {

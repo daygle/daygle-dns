@@ -3675,3 +3675,68 @@ fn the_trial_rejects_on_feed_names_and_established_domains() {
     let why = judge(&train("jumpy.bin", jumpy)).unwrap_err();
     assert!(why.contains("established domains"), "{why}");
 }
+
+/// A feed update re-checks the threat verdicts whose listing changed, and
+/// switching the evidence settings re-checks those the evidence touched,
+/// instead of both waiting for the verdicts to expire.
+#[test]
+fn evidence_changes_requeue_the_threat_verdicts_they_affect() {
+    let dir = TempDir::new().unwrap();
+    let store = tmp_store(&dir);
+    let verdict = |domain: &str, evidence: &str| {
+        store.observe(domain).unwrap();
+        store
+            .save_verdict(
+                Channel::Threat,
+                domain,
+                "phishing",
+                "threat",
+                "classified",
+                0.6,
+                "fasttext",
+                evidence,
+                3600,
+            )
+            .unwrap();
+    };
+    verdict("newly-listed.example", "model");
+    verdict("unrelated.example", "model");
+    verdict(
+        "was-listed.example",
+        "model, listed by Phishing Army as phishing",
+    );
+    let status = |domain: &str| {
+        store
+            .verdicts_for(domain)
+            .unwrap()
+            .into_iter()
+            .find(|r| r.channel == "threat")
+            .unwrap()
+            .status
+    };
+
+    let swap = Arc::new(arc_swap::ArcSwap::from_pointee(settings(AiMode::Train)));
+    let intel = daygle_dns_ml::intel::Intel::new(store.clone(), swap, Arc::new(LogStore::new(16)));
+    store
+        .replace_intel(
+            "phishing_army",
+            &["newly-listed.example".to_string()].into_iter().collect(),
+        )
+        .unwrap();
+    intel.refresh();
+    assert_eq!(
+        status("newly-listed.example"),
+        "pending",
+        "a new listing re-checks"
+    );
+    assert_eq!(
+        status("unrelated.example"),
+        "classified",
+        "nothing else moves"
+    );
+
+    // The evidence settings switched: what the evidence touched is re-checked.
+    intel.recheck_evidence();
+    assert_eq!(status("was-listed.example"), "pending");
+    assert_eq!(status("unrelated.example"), "classified");
+}

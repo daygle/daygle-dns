@@ -601,6 +601,11 @@ impl AiEngine {
         let mut restart = needs_restart(&old, new);
         let verifier_changed = verifier_changed(&old, new);
         self.settings.store(Arc::new(new.clone()));
+        // The outside evidence was switched: the threat verdicts it touches
+        // are re-checked on the next scan rather than at their expiry.
+        if old.threat_feeds != new.threat_feeds || old.network_evidence != new.network_evidence {
+            self.intel.recheck_evidence();
+        }
         if verifier_changed && !restart {
             if let Err(e) = (self.reload_threat)() {
                 tracing::warn!(error = %e, "could not reload the threat channel for the verifier");
