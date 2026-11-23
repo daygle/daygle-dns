@@ -1866,7 +1866,10 @@ Three things keep the self-maintained model honest without an operator:
   configurations keep what they have. `PUT /api/config` with
   `{"ai": {"verifier_enabled": true|false}}` switches it using the bundled
   file (`400` when it is not installed), and `GET /api/ai/status` reports
-  `verifier_enabled` and `verifier_installed`. Verifier changes - on, off,
+  `verifier_supported` (the build includes ONNX Runtime; `false` on static
+  and musl builds, where switching the verifier on is a `400`),
+  `verifier_enabled`, `verifier_installed` and `verifier_running` (the
+  threat channel actually runs it). Verifier changes - on, off,
   its threshold or reference - reload the threat channel in place; only a
   model or database change needs a restart.
 * **Shipped models.** A models bundle carries `starter-training.txt` beside
