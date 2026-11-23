@@ -846,6 +846,14 @@ impl AiStore {
         limit: u32,
     ) -> Result<Vec<(String, String, String)>> {
         let conn = self.lock()?;
+        // Parent overrides are matched in Rust: the exact-name case is the
+        // SQL below, and walking each name's parents is one set lookup per
+        // label.
+        let mut stmt = conn
+            .prepare("SELECT domain FROM ai_overrides WHERE action IN ('allow', 'not_threat')")?;
+        let overridden: std::collections::HashSet<String> = stmt
+            .query_map([], |r| r.get::<_, String>(0))?
+            .collect::<std::result::Result<_, _>>()?;
         let mut stmt = conn.prepare(
             "SELECT channel, category, domain FROM ai_verdicts v
              WHERE status = 'classified' AND severity != 'disputed' AND category != ''
@@ -856,37 +864,31 @@ impl AiStore {
                    WHERE o.domain = v.domain
                      AND o.action IN ('allow', 'not_threat')
                )
-             ORDER BY confidence DESC
-             LIMIT ?4",
+             ORDER BY confidence DESC",
         )?;
-        let collected = stmt
-            .query_map(
-                params![content_floor, threat_floor, now_epoch, limit],
-                |r| {
-                    Ok((
-                        r.get::<_, String>(0)?,
-                        r.get::<_, String>(1)?,
-                        r.get::<_, String>(2)?,
-                    ))
-                },
-            )?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        // Parent overrides, after the query: the exact-name case is the SQL
-        // above, and walking each name's parents is one set lookup per label.
-        let mut stmt = conn
-            .prepare("SELECT domain FROM ai_overrides WHERE action IN ('allow', 'not_threat')")?;
-        let overridden: std::collections::HashSet<String> = stmt
-            .query_map([], |r| r.get::<_, String>(0))?
-            .collect::<std::result::Result<_, _>>()?;
-        if overridden.is_empty() {
-            return Ok(collected);
+        // The cap counts kept rows, not rows read: with `LIMIT` in the SQL,
+        // subdomains of an overridden parent near the top took slots and were
+        // then dropped, so eligible rows below them never came back. Rows
+        // stream strongest first, so reading stops once `limit` are kept.
+        let rows = stmt.query_map(params![content_floor, threat_floor, now_epoch], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        })?;
+        let limit = limit as usize;
+        let mut kept = Vec::new();
+        for row in rows {
+            if kept.len() >= limit {
+                break;
+            }
+            let row = row?;
+            if !crate::scanner::any_suffix(&row.2, |name| overridden.contains(name)) {
+                kept.push(row);
+            }
         }
-        Ok(collected
-            .into_iter()
-            .filter(|(_, _, domain)| {
-                !crate::scanner::any_suffix(domain, |name| overridden.contains(name))
-            })
-            .collect())
+        Ok(kept)
     }
 
     /// The domains the operator marked "not a threat": a correction, not an
