@@ -766,7 +766,7 @@
           {feedsBusy ? 'Updating...' : 'Update Now'}
         </button>
         <span class="muted" style="font-size: 12px">
-          Feeds refresh every 12 hours by themselves, and a failed download is retried hourly.
+          Feeds refresh every 12 hours by themselves. A failed download is retried after 5 minutes if the site could not be reached, otherwise hourly.
         </span>
       </div>
     {/if}

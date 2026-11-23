@@ -24,6 +24,9 @@
 # DAYGLE_DNS_KEEP_RESOLVED=1 leaves the systemd-resolved stub listener on
 # (by default it is turned off so the server can bind port 53).
 #
+# DAYGLE_DNS_KEEP_RESOLV_CONF=1 only warns when /etc/resolv.conf names no DNS
+# server (by default the installer fills it in; see check_host_resolver).
+#
 # DAYGLE_DNS_ONNX=0 builds without the MiniLM/ONNX AI verifier, =1 with it.
 # By default it is left out on x86 CPUs without AVX2, which its prebuilt
 # ONNX Runtime needs (the binary would stop with "Illegal instruction").
@@ -350,6 +353,71 @@ port_53_holders() {
             print $5 " (" prog ")"
         }
     ' | sort -u
+}
+
+# Give this host a DNS server of its own when it has none. With no
+# `nameserver` line the C library quietly asks 127.0.0.1 - this server - so
+# the host's own lookups (feed and model downloads among them) fail whenever
+# Daygle DNS is starting or restarting. Seen with a static address in
+# /etc/network/interfaces whose `dns-nameservers` needs the resolvconf
+# package, while dhcpcd writes an empty /etc/resolv.conf.
+#
+# Only a plain file with no nameserver at all is rewritten (a symlink belongs
+# to systemd-resolved, resolvconf or similar and is left alone): this server
+# first when it answers on loopback, then the `dns-nameservers` of
+# /etc/network/interfaces, else the default gateway. dhcpcd is told to stop
+# rewriting the file. The old file is kept as /etc/resolv.conf.daygle-bak.
+# DAYGLE_DNS_KEEP_RESOLV_CONF=1, or a console-driven update, only warns.
+check_host_resolver() {
+    [ -e /etc/resolv.conf ] || return 0
+    grep -qE '^[[:space:]]*nameserver[[:space:]]+[^[:space:]]' /etc/resolv.conf 2>/dev/null && return 0
+
+    servers=""
+    port="$(config_setting server port)"
+    listen="$(config_setting server listen)"
+    if [ -z "$port" ] || [ "$port" = "53" ]; then
+        case ",${listen:-0.0.0.0}," in
+            *0.0.0.0*|*127.0.0.1*) servers="127.0.0.1" ;;
+        esac
+    fi
+    upstream="$(cat /etc/network/interfaces /etc/network/interfaces.d/* 2>/dev/null \
+        | awk '$1 == "dns-nameservers" { for (i = 2; i <= NF; i++) print $i }' \
+        | grep -vE '^(127\.|::1$)' | awk '!seen[$0]++' | head -n 2 | tr '\n' ' ')"
+    if [ -z "$upstream" ] && have_cmd ip; then
+        upstream="$(ip -4 route show default 2>/dev/null | awk '{ for (i = 1; i < NF; i++) if ($i == "via") { print $(i + 1); exit } }')"
+    fi
+    servers="$(printf '%s %s' "$servers" "$upstream" | sed 's/^ *//; s/ *$//')"
+
+    fix=1
+    if [ "${DAYGLE_DNS_KEEP_RESOLV_CONF:-}" = "1" ] || [ "${DAYGLE_DNS_GUI_UPDATE:-}" = "1" ]; then
+        fix=0
+    elif [ -L /etc/resolv.conf ] || [ -z "$upstream" ]; then
+        fix=0
+    fi
+    if [ "$fix" = "0" ]; then
+        log "WARNING: /etc/resolv.conf names no DNS server, so this host's own lookups go to"
+        log "         127.0.0.1 (this server) and fail while Daygle DNS restarts. Add one, e.g.:"
+        log "           nameserver 127.0.0.1"
+        log "           nameserver <your router or another resolver>"
+        log "         and stop whatever rewrites the file from emptying it (for dhcpcd: add"
+        log "         'nohook resolv.conf' to /etc/dhcpcd.conf)."
+        return 0
+    fi
+
+    run_as_root cp -p /etc/resolv.conf /etc/resolv.conf.daygle-bak
+    {
+        echo "# Written by the Daygle DNS installer: this file named no DNS server."
+        echo "# The previous file is /etc/resolv.conf.daygle-bak."
+        for server in $servers; do
+            echo "nameserver $server"
+        done
+    } | run_as_root tee /etc/resolv.conf >/dev/null
+    log "Set this host's DNS servers in /etc/resolv.conf: $servers"
+    if [ -f /etc/dhcpcd.conf ] && ! grep -qE '^[[:space:]]*nohook[[:space:]].*resolv\.conf' /etc/dhcpcd.conf; then
+        printf '\n# Added by the Daygle DNS installer: keep /etc/resolv.conf as set.\nnohook resolv.conf\n' \
+            | run_as_root tee -a /etc/dhcpcd.conf >/dev/null
+        log "Told dhcpcd to leave /etc/resolv.conf alone (nohook resolv.conf in /etc/dhcpcd.conf)."
+    fi
 }
 
 # Free port 53 for the DNS server. systemd-resolved (Ubuntu, Fedora and
@@ -726,6 +794,7 @@ EOF
     if [ "${DAYGLE_DNS_GUI_UPDATE:-}" != "1" ]; then
         free_dns_port || true
     fi
+    check_host_resolver || true
     systemctl daemon-reload
     if [ "$INSTALL_MODE" = "upgrade" ]; then
         WAS_ACTIVE=0

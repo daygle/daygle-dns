@@ -119,6 +119,13 @@ const EVIDENCE_NOTES: &[&str] = &[
 const REFRESH_SECS: i64 = 12 * 3600;
 /// How long a failed download waits before it is tried again.
 const RETRY_SECS: i64 = 3600;
+/// How long a download that never reached its server (a failed lookup, a
+/// refused or timed-out connection) waits: such failures are usually brief,
+/// e.g. while this server's own resolver is starting, so waiting the full
+/// [`RETRY_SECS`] would leave a feed missing for an hour over a blip.
+const NETWORK_RETRY_SECS: i64 = 300;
+/// Starts the stored error of a download that never reached its server.
+const UNREACHABLE: &str = "could not reach ";
 /// How often the loop looks for feeds that are due.
 const TICK: Duration = Duration::from_secs(60);
 /// Largest feed body accepted.
@@ -664,7 +671,12 @@ impl Intel {
 fn due(state: Option<&FeedState>, now: i64) -> bool {
     let Some(state) = state else { return true };
     if !state.error.is_empty() && state.attempted_at > state.updated_at {
-        return now - state.attempted_at >= RETRY_SECS;
+        let wait = if state.error.starts_with(UNREACHABLE) {
+            NETWORK_RETRY_SECS
+        } else {
+            RETRY_SECS
+        };
+        return now - state.attempted_at >= wait;
     }
     now - state.updated_at >= REFRESH_SECS
 }
@@ -674,7 +686,7 @@ async fn fetch(client: &reqwest::Client, url: &str) -> std::result::Result<Strin
         .get(url)
         .send()
         .await
-        .map_err(|e| format!("{url}: {}", describe(&e)))?;
+        .map_err(|e| format!("{UNREACHABLE}{url}: {}", describe(&e)))?;
     let status = response.status();
     if !status.is_success() {
         return Err(format!("{url} answered {status}"));
@@ -690,7 +702,7 @@ async fn fetch(client: &reqwest::Client, url: &str) -> std::result::Result<Strin
     while let Some(chunk) = response
         .chunk()
         .await
-        .map_err(|e| format!("{url}: {}", describe(&e)))?
+        .map_err(|e| format!("{UNREACHABLE}{url}: {}", describe(&e)))?
     {
         if body.len() + chunk.len() > MAX_BYTES {
             return Err(too_large());
@@ -857,5 +869,19 @@ mod tests {
             ..failed
         };
         assert!(due(Some(&failed_long_ago), now));
+        let unreachable = FeedState {
+            attempted_at: now - 60,
+            error: format!("{UNREACHABLE}https://feed.example/: dns error"),
+            ..stale.clone()
+        };
+        assert!(!due(Some(&unreachable), now), "a short wait first");
+        let unreachable_a_while_ago = FeedState {
+            attempted_at: now - NETWORK_RETRY_SECS,
+            ..unreachable
+        };
+        assert!(
+            due(Some(&unreachable_a_while_ago), now),
+            "a network failure is retried well before the hour"
+        );
     }
 }

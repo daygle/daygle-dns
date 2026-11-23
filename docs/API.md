@@ -1985,8 +1985,9 @@ established domain, and `page_model` (`active`, plus `last`: `trained_at`,
 record adds `intel` (feed names trained), `intel_validation_examples` and
 `established_probe_examples`.
 `POST /api/ai/threat-feeds/update` downloads every feed now, in the
-background, instead of waiting for its 12-hour refresh or hourly retry
-(`409` while `threat_feeds` is off).
+background, instead of waiting for its 12-hour refresh or its retry (5 minutes
+after a download that could not reach its site, otherwise hourly).
+It answers `409` while `threat_feeds` is off.
 
 All of these return `404` when the AI subsystem is disabled.
 
