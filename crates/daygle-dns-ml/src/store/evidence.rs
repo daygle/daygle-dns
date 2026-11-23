@@ -50,6 +50,10 @@ CREATE TABLE IF NOT EXISTS ai_page_texts (
     read_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_ai_page_texts_read ON ai_page_texts (read_at);
+CREATE TABLE IF NOT EXISTS ai_age_attempts (
+    domain       TEXT PRIMARY KEY,
+    attempted_at INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS ai_threat_rate (
     at         INTEGER NOT NULL,
     classified INTEGER NOT NULL,
@@ -57,6 +61,11 @@ CREATE TABLE IF NOT EXISTS ai_threat_rate (
 );
 CREATE INDEX IF NOT EXISTS idx_ai_threat_rate_at ON ai_threat_rate (at);
 ";
+
+/// How long a domain whose registration date could not be found waits
+/// before it is looked up again: the RDAP cache's own retry time, so the
+/// next try is a real lookup, and other candidates get their turn meanwhile.
+pub const AGE_RETRY_SECS: i64 = 6 * 3600;
 
 /// How long the per-scan threat counts are kept: the watch on a new model
 /// compares against the week before it went live.
@@ -158,6 +167,10 @@ pub(super) fn prune(conn: &Connection, now: i64) -> rusqlite::Result<()> {
     conn.execute(
         "DELETE FROM ai_threat_rate WHERE at < ?1",
         params![now - RATE_RETENTION_SECS],
+    )?;
+    conn.execute(
+        "DELETE FROM ai_age_attempts WHERE attempted_at < ?1",
+        params![now - 30 * 86_400],
     )?;
     conn.execute(
         "DELETE FROM ai_page_texts WHERE domain NOT IN
@@ -294,22 +307,46 @@ impl AiStore {
     /// Threat verdicts whose domain age has not been looked up yet, newest
     /// first: `(domain, confidence, evidence)`.
     pub fn age_candidates(&self, limit: u32) -> Result<Vec<(String, f32, String)>> {
+        self.age_candidates_at(limit, now_epoch())
+    }
+
+    /// [`Self::age_candidates`] at a given time (tests). A domain whose date
+    /// could not be found is skipped for [`AGE_RETRY_SECS`], so domains that
+    /// never resolve (a TLD without RDAP) cannot hold the queue.
+    pub fn age_candidates_at(&self, limit: u32, now: i64) -> Result<Vec<(String, f32, String)>> {
         let conn = self.lock()?;
         let mut stmt = conn.prepare(
-            "SELECT domain, confidence, evidence FROM ai_verdicts
-             WHERE channel = 'threat' AND status = 'classified' AND severity = 'threat'
-               AND instr(evidence, ', registered ') = 0
-               AND NOT EXISTS (SELECT 1 FROM ai_overrides o
-                               WHERE o.domain = ai_verdicts.domain)
-             ORDER BY classified_at DESC, domain
+            "SELECT v.domain, v.confidence, v.evidence FROM ai_verdicts v
+             LEFT JOIN ai_age_attempts a ON a.domain = v.domain
+             WHERE v.channel = 'threat' AND v.status = 'classified' AND v.severity = 'threat'
+               AND instr(v.evidence, ', registered ') = 0
+               AND (a.attempted_at IS NULL OR a.attempted_at <= ?2)
+               AND NOT EXISTS (SELECT 1 FROM ai_overrides o WHERE o.domain = v.domain)
+             ORDER BY COALESCE(a.attempted_at, 0), v.classified_at DESC, v.domain
              LIMIT ?1",
         )?;
         let rows = stmt
-            .query_map(params![limit as i64], |r| {
+            .query_map(params![limit as i64, now - AGE_RETRY_SECS], |r| {
                 Ok((r.get(0)?, r.get::<_, f64>(1)? as f32, r.get(2)?))
             })?
             .collect::<std::result::Result<_, _>>()?;
         Ok(rows)
+    }
+
+    /// Record that `domain`'s registration date could not be found now.
+    pub fn age_lookup_failed(&self, domain: &str) -> Result<()> {
+        self.age_lookup_failed_at(domain, now_epoch())
+    }
+
+    /// [`Self::age_lookup_failed`] at a given time (tests).
+    pub fn age_lookup_failed_at(&self, domain: &str, at: i64) -> Result<()> {
+        let conn = self.lock()?;
+        conn.execute(
+            "INSERT INTO ai_age_attempts (domain, attempted_at) VALUES (?1, ?2)
+             ON CONFLICT(domain) DO UPDATE SET attempted_at = ?2",
+            params![domain, at],
+        )?;
+        Ok(())
     }
 
     /// Record a domain-age decision on a threat verdict: its new confidence

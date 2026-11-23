@@ -3922,3 +3922,55 @@ fn domain_age_is_applied_once_per_verdict() {
         row.evidence
     );
 }
+
+/// Domains whose registration date cannot be found step aside for a while,
+/// so they never starve the older candidates behind them.
+#[test]
+fn unresolved_age_lookups_do_not_hold_the_queue() {
+    let dir = TempDir::new().unwrap();
+    let store = tmp_store(&dir);
+    for i in 0..3 {
+        let domain = format!("flagged{i}.example");
+        store.observe(&domain).unwrap();
+        store
+            .save_verdict(
+                Channel::Threat,
+                &domain,
+                "phishing",
+                "threat",
+                "classified",
+                0.9,
+                "fasttext",
+                "model",
+                3600,
+            )
+            .unwrap();
+    }
+    let now = chrono::Utc::now().timestamp();
+    let first: Vec<String> = store
+        .age_candidates_at(2, now)
+        .unwrap()
+        .into_iter()
+        .map(|(d, ..)| d)
+        .collect();
+    for domain in &first {
+        store.age_lookup_failed_at(domain, now).unwrap();
+    }
+    let next: Vec<String> = store
+        .age_candidates_at(2, now)
+        .unwrap()
+        .into_iter()
+        .map(|(d, ..)| d)
+        .collect();
+    assert_eq!(next.len(), 1, "only the one not yet tried");
+    assert!(!first.contains(&next[0]));
+    let later = store
+        .age_candidates_at(3, now + daygle_dns_ml::store::AGE_RETRY_SECS)
+        .unwrap();
+    assert_eq!(
+        later.len(),
+        3,
+        "retried once the wait is over, untried first"
+    );
+    assert_eq!(later[0].0, next[0]);
+}

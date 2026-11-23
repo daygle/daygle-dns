@@ -110,8 +110,9 @@ impl DomainAge {
         let mut changed = 0usize;
         for (domain, confidence, evidence, registered) in looked_up {
             let Some(registered) = registered else {
-                // No date yet (no RDAP server, busy, slow): left for a later
-                // scan, which looks again once the lookup is remembered.
+                // No date (no RDAP server, busy, slow): set aside for a few
+                // hours so the next candidates get their turn.
+                self.store.age_lookup_failed(&domain)?;
                 continue;
             };
             let (new_confidence, note) = adjust(confidence, &evidence, registered, now);

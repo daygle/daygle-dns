@@ -37,7 +37,8 @@ use crate::backend::Channel;
 mod evidence;
 use crate::page::TextVerdict;
 pub use evidence::{
-    client_tag, FeedState, Sighting, ESTABLISHED_CLIENTS, ESTABLISHED_DAYS, PAGE_TEXT_CHARS,
+    client_tag, FeedState, Sighting, AGE_RETRY_SECS, ESTABLISHED_CLIENTS, ESTABLISHED_DAYS,
+    PAGE_TEXT_CHARS,
 };
 
 /// Filters shared by the paginated verdict and threat lists.
