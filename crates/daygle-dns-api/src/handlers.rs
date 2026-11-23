@@ -1551,10 +1551,14 @@ pub async fn ai_status(State(state): State<AppState>) -> Response {
             .dedicated_threat_model()
             .then(|| ai.maintained_status(daygle_dns_ml::learn::Role::Threat)),
         "trial_new_models": settings.trial_new_models,
-        // The MiniLM second opinion: whether it is configured, and whether
-        // its bundled file is there to switch on.
+        // The MiniLM second opinion: whether this build can run it, whether
+        // it is configured, whether its bundled file is there to switch on,
+        // and whether the threat channel actually runs it (a configured
+        // verifier that failed to load, or a build without ONNX, does not).
+        "verifier_supported": daygle_dns_ml::VERIFIER_SUPPORTED,
         "verifier_enabled": !settings.verifier_model_path.trim().is_empty(),
         "verifier_installed": bundled_verifier(&settings.model_path).is_some(),
+        "verifier_running": ai.threat_backend_name().contains("minilm"),
         // Shipped model bundles installed automatically by the updater (the
         // `[updates]` section), shown here so the AI page can say whether the
         // reference model keeps itself current too.
@@ -7630,6 +7634,12 @@ pub async fn update_settings(
             config.ai.trial_new_models = v;
         }
         if let Some(on) = a.verifier_enabled {
+            if on && !daygle_dns_ml::VERIFIER_SUPPORTED {
+                return error_response(
+                    StatusCode::BAD_REQUEST,
+                    "this build has no ONNX support, so the MiniLM verifier cannot run",
+                );
+            }
             if on {
                 match bundled_verifier(&config.ai.model_path) {
                     Some(path) => config.ai.verifier_model_path = path,

@@ -118,13 +118,86 @@ impl DomainClassifier for ChannelBackend {
                 {
                     return None;
                 }
-                Some(Verdict {
+                let verdict = Verdict {
                     severity: Severity::Threat,
                     ..verdict
+                };
+                Some(match self.cleared_parent(input, &settings) {
+                    Some(parent) => parent_disputes(verdict, &parent),
+                    None => verdict,
                 })
             }
         }
     }
+}
+
+/// How sure the model must be that a subdomain's registered domain is an
+/// ordinary site before that reading disputes the subdomain's threat.
+const PARENT_CLEAR_FLOOR: f32 = 0.5;
+
+/// A flagged subdomain's registered domain, as the model reads it.
+struct ParentReading {
+    domain: String,
+    category: String,
+    confidence: f32,
+}
+
+impl ChannelBackend {
+    /// When `input` is a subdomain, classify the registered domain it sits
+    /// under (`employmenthero.com` for `secure.employmenthero.com`, per the
+    /// Public Suffix List) and return that reading if it is an ordinary site.
+    ///
+    /// The model sees only the name. On a subdomain of an ordinary site the
+    /// threat can only come from the added labels, and words like `secure`,
+    /// `login`, `verify` or `download` are as common on real services as on
+    /// phishing. A phishing name is chosen by whoever registered it, so its
+    /// registered domain reads as a threat on its own
+    /// (`secure-paypal-verify.info`). Free hosting under a PSL private
+    /// suffix (`*.github.io`, `*.web.app`) counts the user's label as the
+    /// registered domain, so those names are judged on their own.
+    fn cleared_parent(
+        &self,
+        input: &ClassificationInput,
+        settings: &AiSettings,
+    ) -> Option<ParentReading> {
+        let name = input
+            .domain
+            .trim()
+            .trim_end_matches('.')
+            .to_ascii_lowercase();
+        let parent = psl::domain_str(&name)?;
+        if parent == name {
+            return None;
+        }
+        let reading = self
+            .inner
+            .classify(&ClassificationInput::domain_only(parent.to_string()))?;
+        // With the shared classifier any label outside the block list is an
+        // ordinary site. A dedicated threat model reports only threats, so
+        // there only the learned `benign` label clears the parent.
+        let ordinary = reading.category == BENIGN_LABEL
+            || (!settings.dedicated_threat_model()
+                && !settings.is_auto_block_category(&reading.category));
+        (ordinary && reading.confidence >= PARENT_CLEAR_FLOOR).then(|| ParentReading {
+            domain: parent.to_string(),
+            category: reading.category,
+            confidence: reading.confidence,
+        })
+    }
+}
+
+/// The threat stays on record for review, but `Disputed` never blocks and
+/// never trains the next model.
+fn parent_disputes(mut verdict: Verdict, parent: &ParentReading) -> Verdict {
+    verdict.severity = Severity::Disputed;
+    verdict.evidence = format!(
+        "{}, but its registered domain {} reads as '{}' ({:.0}%): disputed",
+        verdict.evidence,
+        parent.domain,
+        parent.category,
+        parent.confidence * 100.0
+    );
+    verdict
 }
 
 #[cfg(test)]
@@ -303,6 +376,103 @@ mod tests {
             settings,
         );
         assert!(backend.classify(&input()).is_none());
+    }
+
+    /// Answers by name: the registered domain and the subdomain can read
+    /// differently, as they do with a name-only model.
+    struct ByName(&'static [(&'static str, &'static str, f32)]);
+
+    impl DomainClassifier for ByName {
+        fn name(&self) -> String {
+            "by-name".to_string()
+        }
+        fn classify(&self, input: &ClassificationInput) -> Option<Verdict> {
+            self.0
+                .iter()
+                .find(|(name, _, _)| *name == input.domain)
+                .map(|(_, category, confidence)| verdict(category, *confidence, Severity::Info))
+        }
+    }
+
+    #[test]
+    fn an_ordinary_registered_domain_disputes_its_subdomains_threat() {
+        // The reported false positive: `secure.` on a payroll vendor.
+        let backend = ChannelBackend::threat(
+            Box::new(ByName(&[
+                ("secure.employmenthero.com", "phishing", 0.995),
+                ("employmenthero.com", "business", 0.99),
+            ])),
+            settings_with(&["phishing"]),
+        );
+        let v = backend
+            .classify(&ClassificationInput::domain_only(
+                "secure.employmenthero.com",
+            ))
+            .unwrap();
+        assert_eq!(v.category, "phishing", "the finding stays on record");
+        assert_eq!(v.severity, Severity::Disputed, "but never blocks");
+        assert!(v
+            .evidence
+            .contains("employmenthero.com reads as 'business'"));
+    }
+
+    #[test]
+    fn a_threatening_registered_domain_keeps_the_threat() {
+        let backend = ChannelBackend::threat(
+            Box::new(ByName(&[
+                ("login.secure-paypal-verify.info", "phishing", 0.99),
+                ("secure-paypal-verify.info", "phishing", 0.99),
+            ])),
+            settings_with(&["phishing"]),
+        );
+        let v = backend
+            .classify(&ClassificationInput::domain_only(
+                "login.secure-paypal-verify.info",
+            ))
+            .unwrap();
+        assert_eq!(v.severity, Severity::Threat);
+    }
+
+    #[test]
+    fn registered_domains_and_unsure_parents_are_judged_alone() {
+        let model: &[(&str, &str, f32)] = &[
+            ("secure-paypal-verify.info", "phishing", 0.99),
+            ("x.unsure.com", "phishing", 0.99),
+            ("unsure.com", "business", 0.3),
+            // A PSL private suffix: the user's label is the registered domain.
+            ("paypal-login.github.io", "phishing", 0.99),
+            ("github.io", "developer", 0.99),
+        ];
+        let backend = ChannelBackend::threat(Box::new(ByName(model)), settings_with(&["phishing"]));
+        for name in [
+            "secure-paypal-verify.info",
+            "x.unsure.com",
+            "paypal-login.github.io",
+        ] {
+            let v = backend
+                .classify(&ClassificationInput::domain_only(name))
+                .unwrap();
+            assert_eq!(v.severity, Severity::Threat, "{name}");
+        }
+    }
+
+    #[test]
+    fn a_dedicated_model_clears_a_parent_only_as_benign() {
+        // A dedicated detector's labels are all threats, so `scam` on the
+        // parent does not clear it; its learned `benign` does.
+        let backend = ChannelBackend::threat(
+            Box::new(ByName(&[
+                ("a.one.com", "phishing", 0.99),
+                ("one.com", "scam", 0.9),
+                ("a.two.com", "phishing", 0.99),
+                ("two.com", "benign", 0.9),
+            ])),
+            dedicated_settings(&["phishing"]),
+        );
+        let one = backend.classify(&ClassificationInput::domain_only("a.one.com"));
+        assert_eq!(one.unwrap().severity, Severity::Threat);
+        let two = backend.classify(&ClassificationInput::domain_only("a.two.com"));
+        assert_eq!(two.unwrap().severity, Severity::Disputed);
     }
 
     #[test]

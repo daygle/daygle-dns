@@ -518,7 +518,12 @@
           />
           <span>Trial New Models First</span>
         </label>
-        {#if status.verifier_installed || status.verifier_enabled}
+        {#if status.verifier_supported === false}
+          <label class="row muted" style="gap: 6px; align-items: center; font-size: 0.85rem" title="This build has no ONNX support (static and musl builds leave it out), so threats rely on the fastText model, the page reading and the registered-domain check">
+            <input type="checkbox" style="width: auto" checked={false} disabled />
+            <span>Second Opinion (Verifier) - not available in this build</span>
+          </label>
+        {:else if status.verifier_installed || status.verifier_enabled}
           <label class="row" style="gap: 6px; align-items: center; font-size: 0.85rem" title="The MiniLM model second-checks every threat and confirms labels the AI may learn from">
             <input
               type="checkbox"
@@ -527,6 +532,9 @@
               onchange={(event) => setVerifier(event.currentTarget.checked)}
             />
             <span>Second Opinion (Verifier)</span>
+            {#if status.verifier_enabled && status.verifier_running === false}
+              <span class="pill" title="Configured, but the threat channel is not running it: check the server log for why the model did not load">Not Running</span>
+            {/if}
           </label>
         {/if}
         <label class="row" style="gap: 6px; align-items: center; font-size: 0.85rem">
