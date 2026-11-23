@@ -2461,6 +2461,25 @@ pub async fn ai_rescan(State(state): State<AppState>) -> Response {
     Json(serde_json::json!({"requested": true})).into_response()
 }
 
+/// `POST /api/ai/threat-feeds/update` - download every threat feed now
+/// instead of waiting for its refresh or retry. `409` while `ai.threat_feeds`
+/// is off.
+pub async fn ai_update_threat_feeds(State(state): State<AppState>) -> Response {
+    let Some(ai) = ai_engine(&state) else {
+        return map_err(daygle_dns_ml::ai_disabled_error());
+    };
+    if !ai.settings.load().threat_feeds {
+        return error_response(StatusCode::CONFLICT, "threat feeds are turned off");
+    }
+    ai.update_threat_feeds();
+    state.logs.push(
+        daygle_dns_core::LogLevel::Info,
+        "api",
+        "AI threat feed update requested".to_string(),
+    );
+    Json(serde_json::json!({"requested": true})).into_response()
+}
+
 pub async fn config(State(state): State<AppState>) -> Response {
     config_response(&state.config.load_full())
 }

@@ -25,6 +25,7 @@
 //! `policy.feed_mirror` and are on unless `ai.threat_feeds` is turned off.
 
 use std::collections::{BTreeSet, HashMap};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -217,6 +218,10 @@ pub struct Intel {
     settings: Arc<ArcSwap<AiSettings>>,
     index: ArcSwap<IntelIndex>,
     logs: Arc<LogStore>,
+    /// Set by [`Intel::update_now`]: download every feed on the next pass,
+    /// due or not.
+    forced: AtomicBool,
+    wake: tokio::sync::Notify,
 }
 
 impl Intel {
@@ -231,6 +236,8 @@ impl Intel {
             settings,
             index: ArcSwap::from_pointee(IntelIndex::default()),
             logs,
+            forced: AtomicBool::new(false),
+            wake: tokio::sync::Notify::new(),
         });
         intel.reload();
         intel
@@ -342,6 +349,13 @@ impl Intel {
             .collect()
     }
 
+    /// Download every feed now instead of waiting for its refresh or retry
+    /// (the console's Update Now). Does nothing while `ai.threat_feeds` is off.
+    pub fn update_now(&self) {
+        self.forced.store(true, Ordering::SeqCst);
+        self.wake.notify_one();
+    }
+
     /// Keep the feeds downloaded and fresh until `shutdown`. `mirror` gives
     /// `policy.feed_mirror` (a base URL, or empty).
     pub async fn run(
@@ -355,12 +369,13 @@ impl Intel {
             .build()
             .unwrap_or_default();
         loop {
+            let forced = self.forced.swap(false, Ordering::SeqCst);
             if self.settings.load().threat_feeds {
                 let states = self.store.intel_feeds().unwrap_or_default();
                 let now = chrono::Utc::now().timestamp();
                 let mut changed = false;
                 for feed in INTEL_FEEDS {
-                    if !due(states.get(feed.id), now) {
+                    if !forced && !due(states.get(feed.id), now) {
                         continue;
                     }
                     let url = daygle_dns_policy::feeds::mirrored(feed.url, &mirror());
@@ -381,6 +396,7 @@ impl Intel {
             }
             tokio::select! {
                 _ = shutdown.cancelled() => return,
+                _ = self.wake.notified() => {}
                 _ = tokio::time::sleep(TICK) => {}
             }
         }

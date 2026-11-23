@@ -836,6 +836,10 @@ async fn outside_evidence_settings_round_trip_over_http() {
     );
     assert_eq!(status["page_model"]["active"], false);
 
+    let (code, _, body) = call(state.clone(), "POST", "/api/ai/threat-feeds/update", None).await;
+    assert_eq!(code, StatusCode::OK, "{body}");
+    assert!(body.contains("\"requested\":true"), "{body}");
+
     let (code, _, body) = call(
         state.clone(),
         "PUT",
@@ -848,9 +852,15 @@ async fn outside_evidence_settings_round_trip_over_http() {
     assert_eq!(code, StatusCode::OK, "{body}");
     let applied = ai.settings.load_full();
     assert!(!applied.threat_feeds && !applied.network_evidence);
-    let reported = json(state, "/api/ai/status").await;
+    let reported = json(state.clone(), "/api/ai/status").await;
     assert_eq!(reported["threat_feeds"], false);
     assert_eq!(reported["network_evidence"], false);
+    let (code, _, body) = call(state, "POST", "/api/ai/threat-feeds/update", None).await;
+    assert_eq!(
+        code,
+        StatusCode::CONFLICT,
+        "nothing to update while off: {body}"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 

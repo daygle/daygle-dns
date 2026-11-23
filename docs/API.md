@@ -1657,6 +1657,7 @@ POST /api/ai/rollback
 GET  /api/ai/overrides
 POST /api/ai/override          {"domain": "x.example", "action": "allow|not_threat|clear|category|clear_category", "category": "gambling", "reason": "..."}
 POST /api/ai/rescan
+POST /api/ai/threat-feeds/update
 GET  /api/ai/model-status
 GET  /api/ai/model-health
 POST /api/ai/update-models
@@ -1979,6 +1980,9 @@ established domain, and `page_model` (`active`, plus `last`: `trained_at`,
 `phrase_table_right`, or `null` before the first training). A retrain's
 record adds `intel` (feed names trained), `intel_validation_examples` and
 `established_probe_examples`.
+`POST /api/ai/threat-feeds/update` downloads every feed now, in the
+background, instead of waiting for its 12-hour refresh or hourly retry
+(`409` while `threat_feeds` is off).
 
 All of these return `404` when the AI subsystem is disabled.
 

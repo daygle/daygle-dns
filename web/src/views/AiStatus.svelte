@@ -105,6 +105,7 @@
     destroyed = true;
     clearTimeout(pollTimer);
     clearTimeout(rescanTimer);
+    feedTimers.forEach(clearTimeout);
   });
 
   // `quiet` refreshes the figures in place (after Scan Now) instead of
@@ -156,6 +157,26 @@
     } finally {
       // Debounce repeated clicks; the scan itself runs in the background.
       setTimeout(() => (scanBusy = false), 3000);
+    }
+  }
+
+  // The download runs in the background: re-read the status a few times so
+  // the table shows each feed's result as it lands.
+  let feedsBusy = $state(false);
+  let feedTimers = [];
+  async function updateFeeds() {
+    notice = null;
+    error = null;
+    feedsBusy = true;
+    try {
+      await api.aiUpdateThreatFeeds();
+      notice = 'Downloading the threat feeds. The table below updates as each one finishes.';
+      feedTimers.forEach(clearTimeout);
+      feedTimers = [5000, 15000, 40000].map((ms) => setTimeout(() => load(true), ms));
+      setTimeout(() => (feedsBusy = false), 15000);
+    } catch (e) {
+      error = formatApiError(e);
+      feedsBusy = false;
     }
   }
 
@@ -713,6 +734,16 @@
           {/each}
         </tbody>
       </table>
+    {/if}
+    {#if isAdmin}
+      <div class="row" style="margin-top: 10px; gap: 10px; align-items: center; flex-wrap: wrap">
+        <button class="secondary" onclick={updateFeeds} disabled={feedsBusy || !status.threat_feeds}>
+          {feedsBusy ? 'Updating...' : 'Update Now'}
+        </button>
+        <span class="muted" style="font-size: 12px">
+          Feeds refresh every 12 hours by themselves, and a failed download is retried hourly.
+        </span>
+      </div>
     {/if}
   </div>
 
