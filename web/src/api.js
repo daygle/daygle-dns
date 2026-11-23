@@ -327,6 +327,7 @@ export const api = {
       format === 'csv' ? { text: true } : undefined,
     ),
   aiRescan: () => request('POST', '/ai/rescan'),
+  aiUpdateThreatFeeds: () => request('POST', '/ai/threat-feeds/update'),
   aiRetrain: (model = 'shared') => request('POST', `/ai/retrain?model=${encodeURIComponent(model)}`),
   aiRollback: (model = 'shared') => request('POST', `/ai/rollback?model=${encodeURIComponent(model)}`),
   aiModelStatus: () => request('GET', '/ai/model-status'),

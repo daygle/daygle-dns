@@ -56,6 +56,10 @@ const PATHS: &[(&str, &[Operation])] = &[
     ("/ai/override", &[("post", "Ai override")]),
     ("/ai/overrides", &[("get", "Ai overrides")]),
     ("/ai/rescan", &[("post", "Ai rescan")]),
+    (
+        "/ai/threat-feeds/update",
+        &[("post", "Ai update threat feeds")],
+    ),
     ("/ai/model-status", &[("get", "Ai model status")]),
     (
         "/ai/model-health",
@@ -3590,6 +3594,19 @@ fn ai_operation(path: &str, method: &str) -> Option<Value> {
                     schema_ref("AiRescan"),
                 ),
                 "404": ai_unavailable
+            }
+        })),
+        ("post", "/ai/threat-feeds/update") => Some(json!({
+            "responses": {
+                "200": json_response(
+                    "Every threat feed is downloaded now, in the background.",
+                    schema_ref("AiRescan"),
+                ),
+                "404": ai_unavailable,
+                "409": json!({
+                    "description": "The threat feeds are turned off.",
+                    "content": { "application/json": { "schema": schema_ref("Error") } }
+                })
             }
         })),
         ("get", "/ai/threats/export") => Some(json!({

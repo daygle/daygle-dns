@@ -454,6 +454,11 @@ impl AiEngine {
         self.intel.index().feed_for(domain)
     }
 
+    /// Download every threat feed now (the update-feeds API).
+    pub fn update_threat_feeds(&self) {
+        self.intel.update_now();
+    }
+
     /// Each threat feed with its download state, for the status API.
     pub fn intel_status(&self) -> Vec<serde_json::Value> {
         self.intel.status()

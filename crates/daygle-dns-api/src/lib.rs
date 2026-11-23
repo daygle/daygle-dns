@@ -66,6 +66,7 @@
 //! | `POST`   | `/api/ai/rollback`                | restore the classifier the last retrain replaced |
 //! | `POST`   | `/api/ai/override`                | allow-exempt or clear overrides for a domain |
 //! | `POST`   | `/api/ai/rescan`                  | wake the scanner for an immediate cycle |
+//! | `POST`   | `/api/ai/threat-feeds/update`     | download every AI threat feed now |
 //! | `GET`    | `/api/ai/model-status`            | installed AI model files (size, sha256) + update-run state |
 //! | `GET`    | `/api/ai/model-health`            | loaded threat model scored on held-out threat names |
 //! | `POST`   | `/api/ai/model-health`            | score the same pinned sample after a model change |
@@ -699,6 +700,10 @@ pub fn router(state: AppState) -> Router {
         .route("/ai/override", post(handlers::ai_override))
         .route("/ai/overrides", get(handlers::ai_overrides))
         .route("/ai/rescan", post(handlers::ai_rescan))
+        .route(
+            "/ai/threat-feeds/update",
+            post(handlers::ai_update_threat_feeds),
+        )
         .route("/ai/model-status", get(handlers::ai_model_status))
         .route(
             "/ai/model-health",

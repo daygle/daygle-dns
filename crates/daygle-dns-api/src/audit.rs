@@ -70,6 +70,7 @@ pub fn action_for(method: &Method, path: &str) -> String {
         ("POST", ["split-horizon", "entries", _, "move"]) => "Reordered split-horizon entries",
         ("POST", ["ai", "override"]) => "Changed an AI override",
         ("POST", ["ai", "rescan"]) => "Started an AI rescan",
+        ("POST", ["ai", "threat-feeds", "update"]) => "Updated the AI threat feeds",
         ("POST", ["ai", "update-models"]) => "Updated the AI models",
         ("POST", ["local-root", "refresh"]) => "Refreshed the local root zone",
         ("POST", ["update", "start"]) => "Started a server update",
