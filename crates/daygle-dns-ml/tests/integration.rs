@@ -32,6 +32,42 @@ fn settings(mode: AiMode) -> AiSettings {
     }
 }
 
+/// A configured reference model, as a real install has (the shipped starter
+/// model). Retraining only learns the scanner's own verdicts that a fixed
+/// reference (or another independent source) agrees with, so tests that seed
+/// verdicts give it one that knows the shape of the names they seed: each
+/// `(label, word)` teaches `label` for names containing `word`.
+fn with_reference(dir: &TempDir, shapes: &[(&str, &str)], settings: AiSettings) -> AiSettings {
+    let mut pairs = Vec::new();
+    for i in 0..60 {
+        for (label, word) in shapes {
+            pairs.push((label.to_string(), format!("{word}-ref{i}.example")));
+        }
+    }
+    let path = dir.path().join("reference.bin");
+    daygle_dns_ml::learn::train(&pairs, &path).unwrap();
+    // Older than anything a retrain writes, so a learned model is preferred.
+    let past = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+    std::fs::File::options()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_modified(past)
+        .unwrap();
+    AiSettings {
+        model_path: path.to_string_lossy().into_owned(),
+        ..settings
+    }
+}
+
+/// The content labels most self-maintenance tests seed, named after their
+/// label (`news-site3.example`).
+const SITE_SHAPES: &[(&str, &str)] = &[
+    ("news", "news-site"),
+    ("shopping", "shopping-site"),
+    ("gambling", "gambling-site"),
+];
+
 // ── Store semantics ─────────────────────────────────────────────────────────
 
 /// A database from before the channel split stored one verdict per domain.
@@ -976,10 +1012,14 @@ fn retraining_installs_a_learned_model_once_there_is_data() {
     let dir = TempDir::new().unwrap();
     let ai = engine(
         &dir,
-        AiSettings {
-            block_threshold: 0.5,
-            ..settings(AiMode::Train)
-        },
+        with_reference(
+            &dir,
+            SITE_SHAPES,
+            AiSettings {
+                block_threshold: 0.5,
+                ..settings(AiMode::Train)
+            },
+        ),
     );
     let refused = ai.retrain_learned_model().unwrap_err().to_string();
     assert!(refused.contains("not enough training data"), "{refused}");
@@ -987,7 +1027,7 @@ fn retraining_installs_a_learned_model_once_there_is_data() {
 
     let labels = ["news", "shopping", "gambling"];
     for i in 0..240 {
-        let domain = format!("site{i}.example");
+        let domain = format!("{}-site{i}.example", labels[i % labels.len()]);
         ai.store.observe(&domain).unwrap();
         ai.store
             .save_verdict(
@@ -1008,16 +1048,19 @@ fn retraining_installs_a_learned_model_once_there_is_data() {
     assert_eq!(stats.local(), 240);
     assert_eq!(stats.verdicts, 240);
     assert_eq!(stats.examples, 240 + stats.starter);
+    // The starter corpus fills in the configured model's labels; labels that
+    // model cannot emit are left out, so its label space is not widened.
     assert!(
-        stats.labels > 3,
-        "the starter corpus keeps the labels this store never produced"
+        stats.starter > 0,
+        "the starter corpus keeps known labels alive"
     );
+    assert_eq!(stats.labels, 3);
     assert!(ai.learned_model_path().is_file());
     let record = ai.learned_model_record().expect("the retrain is recorded");
     assert_eq!(record["verdicts"], 240);
     assert_eq!(record["starter"], stats.starter);
-    // The new model is live: the content channel switched from the heuristic
-    // fallback to the trained fastText file, without a restart.
+    // The new model is live: the content channel switched from the
+    // configured model to the trained file, without a restart.
     assert!(ai.learned_model_active());
     assert_eq!(ai.content_backend_name(), "fasttext");
 }
@@ -1030,14 +1073,18 @@ fn a_retrain_keeps_one_model_to_roll_back_to() {
     let dir = TempDir::new().unwrap();
     let ai = engine(
         &dir,
-        AiSettings {
-            block_threshold: 0.5,
-            ..settings(AiMode::Train)
-        },
+        with_reference(
+            &dir,
+            SITE_SHAPES,
+            AiSettings {
+                block_threshold: 0.5,
+                ..settings(AiMode::Train)
+            },
+        ),
     );
     let labels = ["news", "shopping", "gambling"];
     for i in 0..240 {
-        let domain = format!("site{i}.example");
+        let domain = format!("{}-site{i}.example", labels[i % labels.len()]);
         ai.store.observe(&domain).unwrap();
         ai.store
             .save_verdict(
@@ -1062,7 +1109,7 @@ fn a_retrain_keeps_one_model_to_roll_back_to() {
 
     // Three more domains: a second retrain replaces the first model.
     for i in 240..243 {
-        let domain = format!("site{i}.example");
+        let domain = format!("{}-site{i}.example", labels[i % labels.len()]);
         ai.store.observe(&domain).unwrap();
         ai.store
             .save_verdict(
@@ -1285,6 +1332,7 @@ impl daygle_dns_ml::page::PageReader for FixedReader {
                 cues: vec!["add to cart"],
                 also: vec![],
             }),
+            page: None,
         }
     }
 }
@@ -1396,6 +1444,7 @@ impl daygle_dns_ml::page::PageReader for OneAgrees {
                 cues: vec![cue],
                 also: vec![],
             }),
+            page: None,
         }
     }
 }
@@ -1512,6 +1561,7 @@ impl daygle_dns_ml::page::PageReader for WeakReads {
                 cues: vec![],
                 also: vec![],
             }),
+            page: None,
         }
     }
 }
@@ -1799,10 +1849,23 @@ fn the_retrain_gate_refuses_a_model_that_swallows_threats_as_benign() {
     let dir = TempDir::new().unwrap();
     let ai = engine(
         &dir,
-        AiSettings {
-            learn_negatives: true,
-            ..settings(AiMode::Train)
-        },
+        with_reference(
+            &dir,
+            &[
+                ("malware", "sneaky"),
+                ("news", "daily-news"),
+                ("shopping", "gift-guide"),
+                ("docs", "wallet-guide"),
+                ("travel", "travel-guide"),
+                ("bank", "secure-mail"),
+                ("forum", "support-thread"),
+                ("software", "download-guide"),
+            ],
+            AiSettings {
+                learn_negatives: true,
+                ..settings(AiMode::Train)
+            },
+        ),
     );
     // All threat names share one token on purpose: the benign class is trained
     // on the same shape, so a candidate that has learned "benign" from these
@@ -2010,10 +2073,14 @@ fn retraining_judges_itself_on_held_out_corrections() {
     let dir = TempDir::new().unwrap();
     let ai = engine(
         &dir,
-        AiSettings {
-            block_threshold: 0.5,
-            ..settings(AiMode::Train)
-        },
+        with_reference(
+            &dir,
+            SITE_SHAPES,
+            AiSettings {
+                block_threshold: 0.5,
+                ..settings(AiMode::Train)
+            },
+        ),
     );
     // Names that carry their label, so a held-out correction is learnable
     // from the names that trained.
@@ -2768,11 +2835,15 @@ fn a_scheduled_retrain_runs_in_the_shadow_until_promoted() {
     let dir = TempDir::new().unwrap();
     let ai = engine(
         &dir,
-        AiSettings {
-            auto_retrain: true,
-            block_threshold: 0.5,
-            ..settings(AiMode::Train)
-        },
+        with_reference(
+            &dir,
+            SITE_SHAPES,
+            AiSettings {
+                auto_retrain: true,
+                block_threshold: 0.5,
+                ..settings(AiMode::Train)
+            },
+        ),
     );
     seed_content_verdicts(&ai, 0..240);
     assert!(!ai.learned_model_active());
@@ -2786,7 +2857,6 @@ fn a_scheduled_retrain_runs_in_the_shadow_until_promoted() {
         !ai.learned_model_active(),
         "a candidate on trial does not answer queries"
     );
-    assert_eq!(ai.content_backend_name(), "heuristic");
     assert!(ai.learned_model_trial().in_progress());
     assert!(
         ai.run_due_maintenance().is_none(),
@@ -2828,10 +2898,14 @@ fn concurrent_retrains_leave_whole_models() {
     let dir = TempDir::new().unwrap();
     let ai = engine(
         &dir,
-        AiSettings {
-            block_threshold: 0.5,
-            ..settings(AiMode::Train)
-        },
+        with_reference(
+            &dir,
+            SITE_SHAPES,
+            AiSettings {
+                block_threshold: 0.5,
+                ..settings(AiMode::Train)
+            },
+        ),
     );
     seed_content_verdicts(&ai, 0..240);
     let handles: Vec<_> = (0..2)
@@ -2924,6 +2998,48 @@ fn the_threat_export_matches_what_blocks() {
     assert_eq!(exported, vec!["login.bad.example".to_string()]);
 }
 
+/// With no model file configured the keyword rules are the reference: a
+/// learned model's own verdicts no longer train unchecked.
+#[test]
+fn without_a_model_the_rules_anchor_self_training() {
+    let dir = TempDir::new().unwrap();
+    let store = tmp_store(&dir);
+    let verdict = |domain: &str, label: &str| {
+        store.observe(domain).unwrap();
+        store
+            .save_verdict(
+                Channel::Content,
+                domain,
+                label,
+                "info",
+                "classified",
+                0.95,
+                "fasttext",
+                "ev",
+                3600,
+            )
+            .unwrap();
+    };
+    verdict("casino-royale.example", "gambling"); // the rules agree
+    verdict("bigshop-store1.example", "news"); // no rule backs it
+
+    let cfg = settings(AiMode::Train);
+    let dataset = daygle_dns_ml::learn::collect_dataset_with(
+        &store,
+        &cfg,
+        &daygle_dns_ml::learn::Sources {
+            anchor: Some(daygle_dns_ml::learn::Anchor::Rules),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let has =
+        |label: &str, domain: &str| dataset.pairs.iter().any(|(l, d)| l == label && d == domain);
+    assert!(has("gambling", "casino-royale.example"));
+    assert!(!has("news", "bigshop-store1.example"));
+    assert_eq!(dataset.stats.unconfirmed, 1);
+}
+
 /// Anchored self-training: a verdict of the scanner's own trains only when
 /// the reference model or the page behind the domain agrees with it.
 #[test]
@@ -2968,7 +3084,7 @@ fn unconfirmed_verdicts_do_not_train() {
         &store,
         &cfg,
         &daygle_dns_ml::learn::Sources {
-            anchor: Some(&anchor),
+            anchor: Some(daygle_dns_ml::learn::Anchor::Model(&anchor)),
             confirmations: Some(&pages),
             ..Default::default()
         },
@@ -3042,9 +3158,13 @@ fn a_worse_candidate_is_rejected_without_ever_going_live() {
             ..settings(AiMode::Train)
         },
     );
-    for i in 0..240 {
+    // No model is configured, so the scanner's own verdicts have no fixed
+    // reference to agree with them and train nothing: the operator's labels
+    // teach the candidate instead.
+    for i in 0..300 {
         let label = ["zebra", "news", "shopping"][i % 3];
         let domain = format!("{label}-site{i}.example");
+        ai.store.set_category_override(&domain, label).unwrap();
         ai.store.observe(&domain).unwrap();
         ai.store
             .save_verdict(
@@ -3372,4 +3492,186 @@ fn confident_verdicts_limit_counts_rows_kept() {
         .collect();
     // Strongest first, two kept, none from under the allowed parent.
     assert_eq!(kept, ["first-phish.example", "second-phish.example"]);
+}
+
+// ── Outside evidence: threat feeds and established domains ─────────────────
+
+fn feed_names(prefix: &str, n: usize) -> std::collections::BTreeSet<String> {
+    (0..n).map(|i| format!("{prefix}-{i}.example")).collect()
+}
+
+/// A threat feed is an independent source: a threat verdict it lists trains
+/// even when the fixed reference has no opinion, and one nothing backs does
+/// not.
+#[test]
+fn a_feed_listing_confirms_a_threat_verdict_for_training() {
+    let dir = TempDir::new().unwrap();
+    let store = tmp_store(&dir);
+    store
+        .replace_intel("phishing_army", &feed_names("verify-account", 50))
+        .unwrap();
+    let index = daygle_dns_ml::intel::IntelIndex::from_entries(store.intel_entries().unwrap());
+    let listed = (0..50)
+        .map(|i| format!("verify-account-{i}.example"))
+        .find(|d| !daygle_dns_ml::learn::hash_selected(d))
+        .unwrap();
+    for (domain, label) in [
+        (listed.as_str(), "phishing"),
+        ("odd-thing.example", "phishing"),
+    ] {
+        store.observe(domain).unwrap();
+        store
+            .save_verdict(
+                Channel::Threat,
+                domain,
+                label,
+                "threat",
+                "classified",
+                1.0,
+                "fasttext",
+                "ev",
+                3600,
+            )
+            .unwrap();
+    }
+    let cfg = settings(AiMode::Train);
+    let dataset = daygle_dns_ml::learn::collect_dataset_with(
+        &store,
+        &cfg,
+        &daygle_dns_ml::learn::Sources {
+            anchor: Some(daygle_dns_ml::learn::Anchor::Rules),
+            intel: Some(&index),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(dataset.stats.verdicts, 1, "only the listed verdict trains");
+    assert_eq!(dataset.stats.unconfirmed, 1);
+    assert!(dataset.stats.intel > 0, "feed names train the label");
+    assert!(
+        !dataset.intel_validation.is_empty(),
+        "and some are held out"
+    );
+    let held: std::collections::HashSet<_> =
+        dataset.intel_validation.iter().map(|(_, d)| d).collect();
+    assert!(
+        dataset.pairs.iter().all(|(_, d)| !held.contains(d)),
+        "a held-out feed name never trains"
+    );
+}
+
+/// A live retrain learns from the feeds and records the held-out probe.
+#[test]
+fn a_retrain_learns_from_the_threat_feeds() {
+    let _train = training_guard();
+    let dir = TempDir::new().unwrap();
+    {
+        let store = tmp_store(&dir);
+        store
+            .replace_intel("phishing_army", &feed_names("verify-account", 400))
+            .unwrap();
+    }
+    let mut shapes = SITE_SHAPES.to_vec();
+    shapes.push(("phishing", "bank-alert"));
+    let ai = engine(
+        &dir,
+        with_reference(
+            &dir,
+            &shapes,
+            AiSettings {
+                block_threshold: 0.5,
+                ..settings(AiMode::Train)
+            },
+        ),
+    );
+    seed_content_verdicts(&ai, 0..60);
+    let stats = ai.retrain_learned_model().unwrap();
+    assert!(stats.intel > 0, "{stats:?}");
+    let record = ai.learned_model_record().unwrap();
+    assert!(
+        record["intel_validation_examples"].as_u64().unwrap() > 0,
+        "{record}"
+    );
+    assert_eq!(record["intel"], stats.intel);
+}
+
+/// The trial scores a candidate on feed names and established domains, so
+/// a quiet install without corrections still rejects a worse model.
+#[test]
+fn the_trial_rejects_on_feed_names_and_established_domains() {
+    let _train = training_guard();
+    let dir = TempDir::new().unwrap();
+    let store = tmp_store(&dir);
+    let cfg = AiSettings {
+        block_threshold: 0.5,
+        ..settings(AiMode::Train)
+    };
+    let swap = Arc::new(arc_swap::ArcSwap::from_pointee(cfg.clone()));
+    store
+        .replace_intel("phishing_army", &feed_names("verify-account", 400))
+        .unwrap();
+    // Domains this network has relied on for weeks.
+    let start = chrono::Utc::now().timestamp() - 30 * 86_400;
+    let clients: Vec<String> = (0..5).map(|i| format!("10.0.0.{i}")).collect();
+    for day in 0..20 {
+        let seen: Vec<(String, Vec<String>)> = (0..40)
+            .map(|i| (format!("cdn-assets{i}.example"), clients.clone()))
+            .collect();
+        store
+            .record_sightings_at(&seen, start + day * 86_400)
+            .unwrap();
+    }
+    let logs = Arc::new(LogStore::new(16));
+    let intel = daygle_dns_ml::intel::Intel::new(store.clone(), swap.clone(), logs);
+    let evidence = daygle_dns_ml::evidence::NetworkEvidence::new(store.clone(), intel, swap);
+
+    let train = |name: &str, pairs: Vec<(String, String)>| {
+        let path = dir.path().join(name);
+        daygle_dns_ml::learn::train(&pairs, &path).unwrap();
+        path
+    };
+    let mut good = Vec::new();
+    for i in 0..400 {
+        good.push((
+            "phishing".to_string(),
+            format!("verify-account-{i}.example"),
+        ));
+        good.push(("news".to_string(), format!("cdn-assets{}.example", i % 40)));
+    }
+    let live = train("live.bin", good.clone());
+    let now = chrono::Utc::now().timestamp();
+    let judge = |candidate: &std::path::Path| {
+        daygle_dns_ml::maintain::judge_with_evidence_for_tests(
+            &store,
+            &cfg,
+            candidate,
+            &live.to_string_lossy(),
+            now - 600,
+            now,
+            &evidence,
+        )
+    };
+
+    // As good as the live model: promoted, and the probes are in the note.
+    let same = train("same.bin", good.clone());
+    let why = judge(&same).unwrap();
+    assert!(why.contains("threat-feed names"), "{why}");
+
+    // Forgets the feed's phishing names.
+    let forgetful: Vec<(String, String)> = good
+        .iter()
+        .map(|(_, d)| ("news".to_string(), d.clone()))
+        .chain(std::iter::once(("phishing".into(), "zzz.example".into())))
+        .collect();
+    let why = judge(&train("forgetful.bin", forgetful)).unwrap_err();
+    assert!(why.contains("threat-feed names"), "{why}");
+
+    // Flags the network's everyday domains.
+    let jumpy: Vec<(String, String)> = good
+        .iter()
+        .map(|(_, d)| ("phishing".to_string(), d.clone()))
+        .chain(std::iter::once(("news".into(), "zzz.example".into())))
+        .collect();
+    let why = judge(&train("jumpy.bin", jumpy)).unwrap_err();
+    assert!(why.contains("established domains"), "{why}");
 }

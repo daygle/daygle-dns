@@ -93,6 +93,8 @@ pub struct Scanner {
     /// Page reader override, set once: tests supply readings without a
     /// network. `None` fetches the live page with the settings' limits.
     page_reader: std::sync::OnceLock<Box<dyn crate::page::PageReader>>,
+    /// The page-text model, set once by the engine.
+    page_model: std::sync::OnceLock<Arc<crate::page_model::PageModel>>,
 }
 
 impl Scanner {
@@ -122,6 +124,7 @@ impl Scanner {
             primed: std::sync::atomic::AtomicBool::new(false),
             maintenance: std::sync::OnceLock::new(),
             page_reader: std::sync::OnceLock::new(),
+            page_model: std::sync::OnceLock::new(),
         })
     }
 
@@ -135,6 +138,12 @@ impl Scanner {
     /// (see [`crate::maintain`]).
     pub fn set_maintenance(&self, maintenance: Arc<crate::maintain::Maintenance>) {
         let _ = self.maintenance.set(maintenance);
+    }
+
+    /// Hand the scanner the page-text model the page stage refines readings
+    /// with (see [`crate::page_model`]).
+    pub fn set_page_model(&self, model: Arc<crate::page_model::PageModel>) {
+        let _ = self.page_model.set(model);
     }
 
     fn log_info(&self, msg: String) {
@@ -164,6 +173,11 @@ impl Scanner {
         let last_expiry = self.last_expiry.load(Ordering::Relaxed);
         if now - last_expiry >= cfg.expire_check_secs as i64 {
             let expired = self.store.expire_old(now, cfg.max_domains_per_scan)?;
+            // Sighting histories and page texts past their retention go on
+            // the same schedule.
+            if let Err(e) = self.store.prune_evidence() {
+                self.log_warn(format!("AI could not prune its evidence tables: {e}"));
+            }
             if expired > 0 {
                 self.log_info(format!("AI re-queued {expired} expired verdict(s)"));
             }
@@ -186,13 +200,20 @@ impl Scanner {
             .into_iter()
             .map(|z| z.name.trim_end_matches('.').to_ascii_lowercase())
             .collect();
-        let names: Vec<String> = source
-            .distinct_recent_query_names(since_epoch, HARVEST_LIMIT)?
+        // Each name comes with the clients that looked it up: how widely and
+        // for how long the network uses a domain is evidence the name alone
+        // does not carry (see `crate::evidence`).
+        let sightings: Vec<(String, Vec<String>)> = source
+            .recent_query_name_clients(since_epoch, HARVEST_LIMIT)?
             .into_iter()
-            .map(|name| name.trim_end_matches('.').to_ascii_lowercase())
-            .filter(|name| is_candidate(name, &hosted))
+            .map(|(name, clients)| (name.trim_end_matches('.').to_ascii_lowercase(), clients))
+            .filter(|(name, _)| is_candidate(name, &hosted))
             .collect();
+        let names: Vec<String> = sightings.iter().map(|(name, _)| name.clone()).collect();
         self.store.observe_all(&names)?;
+        if let Err(e) = self.store.record_sightings(&sightings) {
+            self.log_warn(format!("AI could not record domain sightings: {e}"));
+        }
 
         // 3. Classify everything pending, `workers` at a time.
         let pending = self.store.pending_domains(cfg.max_domains_per_scan)?;
@@ -328,6 +349,27 @@ impl Scanner {
         let mut recorded = 0usize;
         let mut adjusted = 0usize;
         for (domain, confidence, inspection) in &readings {
+            // Keep what the page said for the page-text model, and let the
+            // model refine the phrase table's reading (it can only add or
+            // strengthen a threat reading).
+            let mut reading = inspection.reading.clone();
+            let mut model_note = None;
+            if let Some((title, text)) = &inspection.page {
+                if let Err(e) = self.store.save_page_text(domain, title, text) {
+                    self.log_warn(format!("AI could not keep the text of {domain}: {e}"));
+                }
+                if let Some(model) = self.page_model.get() {
+                    (reading, model_note) = model.refine(reading, title, text);
+                }
+            }
+            let inspection = &crate::page::Inspection {
+                note: match model_note {
+                    Some(note) => format!("{} ({note})", inspection.note),
+                    None => inspection.note.clone(),
+                },
+                reading,
+                page: None,
+            };
             let changed = crate::page::adjust_confidence(
                 cfg.page_rule,
                 *confidence,

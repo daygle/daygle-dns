@@ -1965,6 +1965,18 @@ re-scans, and is what category blocking matches; the row also carries
 `category_overridden` so the console can mark it.
 `POST /api/ai/rescan` wakes the scanner for one immediate cycle.
 
+Outside evidence (see [AI.md](AI.md#outside-evidence)): `GET /api/ai/status`
+reports `threat_feeds` and `network_evidence` (both accepted by the settings
+update) and `threat_feed_status`, one entry per feed with `id`, `label`,
+`source`, `entries`, `updated_at` (Unix seconds or `null` before the first
+download) and `error` (the last failed attempt, or `null`). It also reports
+`established_days` and `established_clients`, the thresholds for an
+established domain, and `page_model` (`active`, plus `last`: `trained_at`,
+`pages`, `ordinary`, `threats`, `held_out`, `held_out_right` and
+`phrase_table_right`, or `null` before the first training). A retrain's
+record adds `intel` (feed names trained), `intel_validation_examples` and
+`established_probe_examples`.
+
 All of these return `404` when the AI subsystem is disabled.
 
 ### Advanced blocking

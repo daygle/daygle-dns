@@ -599,6 +599,17 @@ pub async fn bind_with(
                 ai.run_forever(shutdown).await;
             }
         });
+        // The maintained threat feeds the AI uses as outside labels
+        // (`ai.threat_feeds`), through `policy.feed_mirror` when one is set.
+        tokio::spawn({
+            let ai = ai.clone();
+            let shutdown = shutdown.clone();
+            let config = config_swap.clone();
+            async move {
+                ai.run_threat_feeds(move || config.load().policy.feed_mirror.clone(), shutdown)
+                    .await;
+            }
+        });
         info!(
             mode = ?config.ai.mode,
             "AI scanner enabled"

@@ -41,10 +41,46 @@ fn engine(dir: &std::path::Path) -> Arc<AiEngine> {
     .unwrap()
 }
 
+/// [`engine`] with a configured reference model, as a real install has: a
+/// retrain only learns the scanner's own verdicts that a fixed reference
+/// agrees with, and this one knows the names [`seed_content`] writes.
+fn engine_with_reference(dir: &std::path::Path) -> Arc<AiEngine> {
+    let mut pairs = Vec::new();
+    for i in 0..60 {
+        for label in ["news", "shopping", "gambling"] {
+            pairs.push((label.to_string(), format!("{label}-ref{i}.example")));
+        }
+    }
+    let reference = dir.join("reference.bin");
+    daygle_dns_ml::learn::train(&pairs, &reference).unwrap();
+    let past = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+    std::fs::File::options()
+        .write(true)
+        .open(&reference)
+        .unwrap()
+        .set_modified(past)
+        .unwrap();
+    let settings = AiSettings {
+        enabled: true,
+        mode: AiMode::Train,
+        database: dir.join("ai.db").to_string_lossy().into_owned(),
+        model_path: reference.to_string_lossy().into_owned(),
+        ..Default::default()
+    };
+    AiEngine::new(
+        &settings,
+        &dir.join("zones.db").to_string_lossy(),
+        Arc::new(ZoneStore::open(":memory:").unwrap()),
+        Arc::new(LogStore::new(200)),
+    )
+    .unwrap()
+}
+
 /// Seed one confident content verdict, enough of them to retrain on.
 fn seed_content(ai: &AiEngine, i: usize) {
     let labels = ["news", "shopping", "gambling"];
-    let domain = format!("site{i}.example");
+    let label = labels[i % labels.len()];
+    let domain = format!("{label}-site{i}.example");
     ai.store.observe(&domain).unwrap();
     ai.store
         .save_verdict(
@@ -456,7 +492,7 @@ async fn retrain_and_rollback_explain_what_they_cannot_do() {
 #[tokio::test]
 async fn retrain_and_rollback_succeed_over_http() {
     let dir = scratch_dir("retrain");
-    let ai = engine(&dir);
+    let ai = engine_with_reference(&dir);
     for i in 0..240 {
         seed_content(&ai, i);
     }
@@ -766,5 +802,38 @@ async fn status_reports_stored_threat_verdicts_by_label() {
         serde_json::Value::Null,
         "content labels are not threat verdicts: {status}"
     );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn outside_evidence_settings_round_trip_over_http() {
+    let dir = scratch_dir("evidence");
+    let ai = engine(&dir);
+    let state = AppState::for_tests(Some(ai.clone()));
+    let status = json(state.clone(), "/api/ai/status").await;
+    assert_eq!(status["threat_feeds"], true, "on by default");
+    assert_eq!(status["network_evidence"], true, "on by default");
+    let feeds = status["threat_feed_status"].as_array().unwrap();
+    assert!(
+        feeds.iter().any(|f| f["label"] == "phishing"),
+        "every feed is listed before its first download: {feeds:?}"
+    );
+    assert_eq!(status["page_model"]["active"], false);
+
+    let (code, _, body) = call(
+        state.clone(),
+        "PUT",
+        "/api/config",
+        Some(serde_json::json!({
+            "ai": { "threat_feeds": false, "network_evidence": false }
+        })),
+    )
+    .await;
+    assert_eq!(code, StatusCode::OK, "{body}");
+    let applied = ai.settings.load_full();
+    assert!(!applied.threat_feeds && !applied.network_evidence);
+    let reported = json(state, "/api/ai/status").await;
+    assert_eq!(reported["threat_feeds"], false);
+    assert_eq!(reported["network_evidence"], false);
     let _ = std::fs::remove_dir_all(&dir);
 }

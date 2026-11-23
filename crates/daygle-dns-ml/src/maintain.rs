@@ -33,11 +33,14 @@ use daygle_dns_core::error::{DaygleError, Result};
 use daygle_dns_core::{LogLevel, LogStore};
 
 use crate::backend::{ClassificationInput, DomainClassifier};
+use crate::evidence::NetworkEvidence;
+use crate::intel::wanted_label;
 use crate::learn::{
     bundled_starter_corpus, collect_dataset_with, held_out_variant, model_labels, predict_all,
     previous_model_path, previous_stats_path, probe_accuracy, probe_threat_model,
-    refuse_forgotten_threats, refuse_lost_threats, stats_path, top_label, train, Dataset, Role,
-    Sources, TrainingStats, BENIGN_LABEL, MIN_ACCURACY, MIN_EXAMPLES, MIN_LABELS, VALIDATION_SLACK,
+    refuse_forgotten_threats, refuse_lost_threats, stats_path, top_label, train, Anchor, Dataset,
+    Role, Sources, TrainingStats, BENIGN_LABEL, MIN_ACCURACY, MIN_EXAMPLES, MIN_LABELS,
+    VALIDATION_SLACK,
 };
 use crate::store::AiStore;
 
@@ -233,6 +236,8 @@ struct Built {
     validation_examples: usize,
     validation_accuracy: Option<f32>,
     threat_validation_examples: usize,
+    intel_validation_examples: usize,
+    established_probe_examples: usize,
 }
 
 impl Built {
@@ -251,6 +256,9 @@ impl Built {
             "validation_accuracy": self.validation_accuracy
                 .map(|a| (a * 100.0).round() / 100.0),
             "threat_validation_examples": self.threat_validation_examples,
+            "intel": self.stats.intel,
+            "intel_validation_examples": self.intel_validation_examples,
+            "established_probe_examples": self.established_probe_examples,
         })
     }
 }
@@ -272,6 +280,9 @@ pub struct Retrainer {
     running: Mutex<()>,
     installer: OnceLock<Installer>,
     after_promotion: OnceLock<AfterPromotion>,
+    /// Threat feeds and this network's usage: confirmation, probes and trial
+    /// truths that do not depend on the operator.
+    evidence: OnceLock<Arc<NetworkEvidence>>,
 }
 
 impl Retrainer {
@@ -294,7 +305,15 @@ impl Retrainer {
             running: Mutex::new(()),
             installer: OnceLock::new(),
             after_promotion: OnceLock::new(),
+            evidence: OnceLock::new(),
         }
+    }
+
+    /// Hand the retrainer the network evidence (threat feeds, established
+    /// domains). Without it only the operator's corrections and the page
+    /// confirm, probe and judge.
+    pub fn set_evidence(&self, evidence: Arc<NetworkEvidence>) {
+        let _ = self.evidence.set(evidence);
     }
 
     /// Hand the retrainer the step that loads a model into the running
@@ -365,10 +384,17 @@ impl Retrainer {
         let anchor = self.anchor_model(settings);
         let corpus = bundled_starter_corpus(&self.configured_model(settings));
         let confirmations = self.store.independent_labels().unwrap_or_default();
+        let evidence = self.evidence.get().cloned();
+        let intel = evidence.as_ref().map(|e| e.intel());
+        let established = evidence
+            .as_ref()
+            .map(|e| e.established_sample())
+            .unwrap_or_default();
         let Dataset {
             pairs,
             validation,
             threat_validation,
+            intel_validation,
             stats,
         } = collect_dataset_with(
             &self.store,
@@ -377,16 +403,22 @@ impl Retrainer {
                 role: self.role,
                 known: current_labels.as_ref(),
                 starter: corpus.as_deref(),
-                anchor: anchor.as_ref(),
+                // No configured model: the keyword rules are the fixed
+                // reference, never nothing.
+                anchor: Some(anchor.as_ref().map_or(Anchor::Rules, Anchor::Model)),
                 confirmations: Some(&confirmations),
+                intel: intel.as_deref(),
             },
         )?;
         // The starter corpus is always there, so what decides whether a
         // retrain is worth running is what this network contributed.
-        if stats.local() < MIN_EXAMPLES || stats.labels < MIN_LABELS {
+        // Threat-feed names count: they are current material the shipped
+        // model has not seen, so an install with few corrections still keeps
+        // its threat labels up to date.
+        if stats.local() + stats.intel < MIN_EXAMPLES || stats.labels < MIN_LABELS {
             return Err(DaygleError::Config(format!(
                 "not enough training data yet: {} examples across {} labels (a retrain needs {} and {})",
-                stats.local(),
+                stats.local() + stats.intel,
                 stats.labels,
                 MIN_EXAMPLES,
                 MIN_LABELS
@@ -400,6 +432,10 @@ impl Retrainer {
             &pairs,
             &validation,
             &threat_validation,
+            &Probes {
+                intel: &intel_validation,
+                established: &established,
+            },
             current_model.as_deref(),
             current_labels.as_ref(),
         );
@@ -411,6 +447,8 @@ impl Retrainer {
                 validation_examples: validation.len(),
                 validation_accuracy,
                 threat_validation_examples: threat_validation.len(),
+                intel_validation_examples: intel_validation.len(),
+                established_probe_examples: established.len(),
             }),
             Err(e) => {
                 let _ = std::fs::remove_file(&temp);
@@ -429,6 +467,7 @@ impl Retrainer {
         pairs: &[(String, String)],
         validation: &[(String, String)],
         threat_validation: &[(String, String)],
+        probes: &Probes<'_>,
         current_model: Option<&Path>,
         current_labels: Option<&HashSet<String>>,
     ) -> Result<(f32, Option<f32>)> {
@@ -503,6 +542,23 @@ impl Retrainer {
                 _ => 0,
             };
             refuse_lost_threats(checked, benign, downgraded, baseline_lost)?;
+        }
+
+        // Evidence the operator did not have to provide: threat-feed names
+        // held out of training, and domains this network has relied on for
+        // weeks. The candidate may not detect fewer of the first or flag more
+        // of the second than the model in use.
+        if detects_threats(self.role, settings) && !probes.is_empty() {
+            let candidate = Predictor::load(&temp.to_string_lossy())?;
+            let live = Predictor::load(
+                &current_model
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+            )?;
+            let is_threat = |label: &str| self.role.is_threat_label(settings, label);
+            probes.judge(&candidate, &live, &is_threat).map_err(|why| {
+                DaygleError::Config(format!("{why}, so the current model was kept"))
+            })?;
         }
         Ok((train_accuracy, validation_accuracy))
     }
@@ -835,6 +891,7 @@ impl Retrainer {
                 &live,
                 started,
                 ends,
+                self.evidence.get().map(Arc::as_ref),
             )
         });
         let now = chrono::Utc::now().timestamp();
@@ -924,7 +981,111 @@ pub fn judge_for_tests(
         live,
         started,
         ends,
+        None,
     )
+}
+
+/// [`judge_shadow`] with network evidence, for integration tests.
+#[doc(hidden)]
+pub fn judge_with_evidence_for_tests(
+    store: &AiStore,
+    settings: &AiSettings,
+    candidate: &Path,
+    live: &str,
+    started: i64,
+    ends: i64,
+    evidence: &NetworkEvidence,
+) -> std::result::Result<String, String> {
+    judge_shadow(
+        store,
+        settings,
+        Role::Shared,
+        candidate,
+        live,
+        started,
+        ends,
+        Some(evidence),
+    )
+}
+
+/// Whether `role`'s model is the one that detects threats.
+fn detects_threats(role: Role, settings: &AiSettings) -> bool {
+    role == Role::Threat || !settings.dedicated_threat_model()
+}
+
+/// Allowed shortfall on an automatic probe of `n` names: noise, not a
+/// regression (2%, at least one).
+fn slack(n: usize) -> usize {
+    (n / 50).max(1)
+}
+
+/// The automatic probes every candidate is checked against.
+pub(crate) struct Probes<'a> {
+    /// Threat-feed names held out of training, with their labels.
+    pub intel: &'a [(String, String)],
+    /// Domains this network has relied on for weeks.
+    pub established: &'a [String],
+}
+
+impl Probes<'_> {
+    fn is_empty(&self) -> bool {
+        self.intel.is_empty() && self.established.is_empty()
+    }
+
+    /// Compare `candidate` with `live` on both probes. `Ok` carries notes for
+    /// the trial record; `Err` says why the candidate is worse.
+    fn judge(
+        &self,
+        candidate: &Predictor,
+        live: &Predictor,
+        is_threat: &dyn Fn(&str) -> bool,
+    ) -> std::result::Result<Vec<String>, String> {
+        let mut notes = Vec::new();
+        let feed: Vec<&String> = self
+            .intel
+            .iter()
+            .filter(|(label, _)| is_threat(label))
+            .map(|(_, domain)| domain)
+            .collect();
+        if !feed.is_empty() {
+            let found = |model: &Predictor| {
+                feed.iter()
+                    .filter(|domain| is_threat(&model.label(domain)))
+                    .count()
+            };
+            let (with_candidate, with_live) = (found(candidate), found(live));
+            if with_candidate + slack(feed.len()) < with_live {
+                return Err(format!(
+                    "it detected {with_candidate} of {} held-out threat-feed names against {with_live} for the model in use",
+                    feed.len()
+                ));
+            }
+            notes.push(format!(
+                "{with_candidate} of {} held-out threat-feed names detected (live {with_live})",
+                feed.len()
+            ));
+        }
+        if !self.established.is_empty() {
+            let flagged = |model: &Predictor| {
+                self.established
+                    .iter()
+                    .filter(|domain| is_threat(&model.label(domain)))
+                    .count()
+            };
+            let (with_candidate, with_live) = (flagged(candidate), flagged(live));
+            if with_candidate > with_live + slack(self.established.len()) {
+                return Err(format!(
+                    "it flagged {with_candidate} of {} established domains as threats against {with_live} for the model in use",
+                    self.established.len()
+                ));
+            }
+            notes.push(format!(
+                "{with_candidate} of {} established domains flagged (live {with_live})",
+                self.established.len()
+            ));
+        }
+        Ok(notes)
+    }
 }
 
 /// Score a candidate against the live model on what happened during its
@@ -935,8 +1096,16 @@ pub fn judge_for_tests(
 /// * the threats each finds among the domains looked up during the trial:
 ///   fewer than half, or more than twice as many (and ten more), rejects;
 /// * the corrections the operator filed during the trial;
-/// * labels an independent source - the page, the verifier model -
-///   confirmed for domains seen during the trial.
+/// * labels an independent source - the page, the verifier model, a threat
+///   feed - confirmed for domains seen during the trial;
+/// * with network evidence: held-out threat-feed names and established
+///   domains (see [`Probes`]), and the established domains looked up during
+///   the trial, which neither model may flag more often than the other.
+///
+/// The automatic signals are what keep a trial meaningful on an install
+/// nobody corrects: without them a quiet trial ended "no evidence against
+/// it" and promoted the candidate.
+#[allow(clippy::too_many_arguments)]
 fn judge_shadow(
     store: &AiStore,
     settings: &AiSettings,
@@ -945,13 +1114,32 @@ fn judge_shadow(
     live: &str,
     started: i64,
     ends: i64,
+    evidence: Option<&NetworkEvidence>,
 ) -> std::result::Result<String, String> {
     let candidate_model =
         Predictor::load(&candidate.to_string_lossy()).map_err(|e| e.to_string())?;
     let live_model = Predictor::load(live).map_err(|e| e.to_string())?;
-    let detects_threats = role == Role::Threat || !settings.dedicated_threat_model();
+    let detects_threats = detects_threats(role, settings);
     let is_threat = |label: &str| role.is_threat_label(settings, label);
     let mut notes: Vec<String> = Vec::new();
+    let intel = evidence.map(|e| e.intel());
+
+    if detects_threats {
+        if let Some(evidence) = evidence {
+            let (_, intel_probe) = intel
+                .as_deref()
+                .map(|index| index.sample(|label| wanted_label(role, settings, None, label)))
+                .unwrap_or_default();
+            let established = evidence.established_sample();
+            notes.extend(
+                Probes {
+                    intel: &intel_probe,
+                    established: &established,
+                }
+                .judge(&candidate_model, &live_model, &is_threat)?,
+            );
+        }
+    }
 
     if detects_threats {
         if let Ok(probe) = probe_threat_model(store, settings, candidate) {
@@ -1039,15 +1227,32 @@ fn judge_shadow(
         &mut notes,
     )?;
 
-    // Independent confirmations for the domains seen during the trial.
+    // Independent confirmations for the domains seen during the trial: the
+    // page or the verifier, and (for a model that detects threats) the
+    // threat feeds.
     let seen: HashSet<&String> = domains.iter().collect();
-    let confirmed: Vec<(String, Truth)> = store
+    let mut confirmed: std::collections::HashMap<String, String> = store
         .independent_labels()
         .unwrap_or_default()
         .into_iter()
         .filter(|(domain, _)| seen.contains(domain))
+        .collect();
+    if detects_threats {
+        if let Some(index) = intel.as_deref() {
+            for domain in &domains {
+                if let Some(label) = index.label_for(domain).filter(|l| is_threat(l)) {
+                    confirmed
+                        .entry(domain.clone())
+                        .or_insert_with(|| label.to_string());
+                }
+            }
+        }
+    }
+    let mut confirmed: Vec<(String, Truth)> = confirmed
+        .into_iter()
         .map(|(domain, label)| (domain, Truth::Label(label)))
         .collect();
+    confirmed.sort_by(|a, b| a.0.cmp(&b.0));
     score(
         "independently confirmed labels",
         &confirmed,
@@ -1056,6 +1261,32 @@ fn judge_shadow(
         &is_threat,
         &mut notes,
     )?;
+
+    // Established domains looked up during the trial: plentiful on any
+    // network, so there is always something to judge a threat detector on.
+    if detects_threats {
+        if let Some(evidence) = evidence {
+            let established: Vec<(String, Truth)> = domains
+                .iter()
+                .filter(|domain| {
+                    intel
+                        .as_deref()
+                        .is_none_or(|i| i.label_for(domain).is_none())
+                })
+                .filter(|domain| evidence.sighting(domain).is_some_and(|s| s.established()))
+                .map(|domain| (domain.clone(), Truth::NotThreat))
+                .collect();
+            score_with_slack(
+                "established domains looked up during the trial",
+                &established,
+                &candidate_model,
+                &live_model,
+                &is_threat,
+                slack(established.len()),
+                &mut notes,
+            )?;
+        }
+    }
 
     if notes.is_empty() {
         notes.push("no evidence against it".to_string());
@@ -1080,6 +1311,20 @@ fn score(
     is_threat: &dyn Fn(&str) -> bool,
     notes: &mut Vec<String>,
 ) -> std::result::Result<(), String> {
+    score_with_slack(what, truths, candidate, live, is_threat, 0, notes)
+}
+
+/// [`score`], allowing the candidate `slack` fewer right: for automatic
+/// truths, plentiful and slightly noisy, where one name is not a regression.
+fn score_with_slack(
+    what: &str,
+    truths: &[(String, Truth)],
+    candidate: &Predictor,
+    live: &Predictor,
+    is_threat: &dyn Fn(&str) -> bool,
+    slack: usize,
+    notes: &mut Vec<String>,
+) -> std::result::Result<(), String> {
     if truths.len() < TRIAL_MIN_TRUTHS {
         return Ok(());
     }
@@ -1096,7 +1341,7 @@ fn score(
             .count()
     };
     let (with_candidate, with_live) = (right(candidate), right(live));
-    if with_candidate < with_live {
+    if with_candidate + slack < with_live {
         return Err(format!(
             "it got {with_candidate} of {} {what} right against {with_live} for the live model",
             truths.len()

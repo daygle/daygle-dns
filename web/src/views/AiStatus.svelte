@@ -218,6 +218,32 @@
     }
   }
 
+  async function setThreatFeeds(value) {
+    try {
+      await api.updateSettings({ ai: { threat_feeds: value } });
+      status = { ...status, threat_feeds: value };
+      notice = value
+        ? 'The threat feeds will be downloaded and used to confirm what the AI learns, test every new model and corroborate threats.'
+        : 'The threat feeds are no longer used; the AI relies on its own models, your corrections and the page.';
+    } catch (e) {
+      error = formatApiError(e);
+      await load(true);
+    }
+  }
+
+  async function setNetworkEvidence(value) {
+    try {
+      await api.updateSettings({ ai: { network_evidence: value } });
+      status = { ...status, network_evidence: value };
+      notice = value
+        ? 'Threat verdicts are now checked against the threat feeds and how this network uses each domain.'
+        : 'Threat verdicts rely on the classifiers (and the verifier, if on) alone.';
+    } catch (e) {
+      error = formatApiError(e);
+      await load(true);
+    }
+  }
+
   async function setLearnNegatives(value) {
     try {
       await api.updateSettings({ ai: { learn_negatives: value } });
@@ -543,17 +569,21 @@
     <p class="muted help" style="margin: 0 0 10px">
       The scanner rebuilds its classifier from what it has learned: your
       category corrections and mislabelled marks on AI → Threats, plus its own
-      verdicts - but only those the shipped reference model, the verifier
-      model or the page itself agrees with, so a mistake cannot feed on
-      itself - on top of the starter corpus, so labels this network has not
-      seen lately are never forgotten. A candidate must hold up on
-      corrections and threats it was not trained on and still report every
+      verdicts - but only those the shipped reference model (or, with no
+      model file, the built-in rules), the verifier model, a threat feed or
+      the page itself agrees with, so a mistake cannot feed on itself - plus
+      current threat-feed names, on top of the starter corpus, so labels this
+      network has not seen lately are never forgotten. A candidate must hold
+      up on corrections, threats and threat-feed names it was not trained on,
+      flag no more of your established domains, and still report every
       threat label. Then, with Trial New Models First on, it runs in the
       shadow of the live model for half the retrain interval without
       answering a single query, and replaces it only if it did at least as
       well on held-out threats, on the threats each finds among the domains
-      looked up, on your corrections during the trial and on independently
-      confirmed labels. A rejected candidate changes nothing, pauses
+      looked up, on your corrections during the trial, on independently
+      confirmed labels, on held-out threat-feed names and on the established
+      domains looked up - so a trial has evidence to judge even when nobody
+      filed a correction. A rejected candidate changes nothing, pauses
       retraining for a while and raises an alert. Retrain Now goes live at
       once. A dedicated threat model is maintained the same way, and the
       verifier's reference is refreshed from your corrections (never from
@@ -632,6 +662,65 @@
 
   <div class="card" style="margin-top: 14px">
     <div class="spread" style="margin-bottom: 8px; gap: 10px; flex-wrap: wrap">
+      <h3 style="margin: 0">Outside Evidence</h3>
+      {#if isAdmin}
+        <label class="row" style="gap: 6px; align-items: center; font-size: 0.85rem">
+          <input
+            type="checkbox"
+            style="width: auto"
+            checked={!!status.threat_feeds}
+            onchange={(event) => setThreatFeeds(event.currentTarget.checked)}
+          />
+          <span>Use Threat Feeds</span>
+        </label>
+        <label class="row" style="gap: 6px; align-items: center; font-size: 0.85rem">
+          <input
+            type="checkbox"
+            style="width: auto"
+            checked={!!status.network_evidence}
+            onchange={(event) => setNetworkEvidence(event.currentTarget.checked)}
+          />
+          <span>Check Threats Against Evidence</span>
+        </label>
+      {/if}
+    </div>
+    <p class="muted help" style="margin: 0 0 10px">
+      What the AI knows about a domain beyond its name, so it does not only
+      check itself against a copy of itself - this works without the ONNX
+      verifier. Use Threat Feeds downloads maintained public lists of malware,
+      phishing and scam domains (they name domains, never your traffic): their
+      names confirm what retraining may learn, are held out to test every new
+      model and trial, and train the threat labels. Check Threats Against
+      Evidence applies it to each threat verdict: a feed listing corroborates
+      it at blocking confidence, a domain {fmt(status.established_clients ?? 3)}+
+      clients have used on {fmt(status.established_days ?? 14)}+ days is
+      disputed and never blocks on its name, and a machine-generated name
+      first seen today is noted. Your exemptions and corrections still win.
+    </p>
+    {#if status.threat_feed_status?.length}
+      <table>
+        <thead>
+          <tr><th>Feed</th><th>Label</th><th class="num">Names</th><th>Updated</th></tr>
+        </thead>
+        <tbody>
+          {#each status.threat_feed_status as feed (feed.id)}
+            <tr>
+              <td>{feed.source}</td>
+              <td>{titleCase(feed.label)}</td>
+              <td class="num">{feed.entries ? fmt(feed.entries) : '-'}</td>
+              <td>
+                {#if feed.updated_at}{formatDateTime(feed.updated_at * 1000)}{:else}<span class="muted">Not yet</span>{/if}
+                {#if feed.error}<span style="color: var(--danger)" title={feed.error}> (last attempt failed)</span>{/if}
+              </td>
+            </tr>
+          {/each}
+        </tbody>
+      </table>
+    {/if}
+  </div>
+
+  <div class="card" style="margin-top: 14px">
+    <div class="spread" style="margin-bottom: 8px; gap: 10px; flex-wrap: wrap">
       <h3 style="margin: 0">Page Content</h3>
       {#if isAdmin}
         <label class="row" style="gap: 6px; align-items: center; font-size: 0.85rem">
@@ -671,8 +760,21 @@
       unless you turn it on; only threat candidates are read, at most
       {fmt(status.page_candidates_per_scan || 0)} per scan, {fmt(status.page_fetch_timeout_secs || 0)}s
       timeout each. Requests to private, loopback and link-local addresses are
-      refused, including through redirects.
+      refused, including through redirects. The text of each page read is
+      kept to train a page-text model on this server, from pages a threat
+      feed lists and pages of domains known to be ordinary; it is used only
+      while it beats the built-in phrase list on pages held out of its
+      training, and it can add or strengthen a threat reading, never hide one.
     </p>
+    {#if status.page_model?.last}
+      <p class="muted" style="margin: 0; font-size: 0.85rem">
+        Page-text model {status.page_model.active ? 'in use' : 'not in use'}:
+        trained {formatDateTime(status.page_model.last.trained_at * 1000)} on
+        {fmt(status.page_model.last.pages)} pages, {fmt(status.page_model.last.held_out_right)} of
+        {fmt(status.page_model.last.held_out)} held-out pages right (phrase list
+        {fmt(status.page_model.last.phrase_table_right)}).
+      </p>
+    {/if}
   </div>
 
   <div class="card" style="margin-top: 14px">

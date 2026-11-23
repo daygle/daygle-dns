@@ -1544,6 +1544,15 @@ pub async fn ai_status(State(state): State<AppState>) -> Response {
         "page_candidates_per_scan": settings.page_candidates_per_scan,
         "page_rule": settings.page_rule,
         "page_confidence_floor": settings.page_confidence_floor,
+        // Outside evidence: the threat feeds (and each one's download state)
+        // and whether verdicts are checked against them and this network's
+        // own usage.
+        "threat_feeds": settings.threat_feeds,
+        "threat_feed_status": ai.intel_status(),
+        "network_evidence": settings.network_evidence,
+        "established_days": daygle_dns_ml::store::ESTABLISHED_DAYS,
+        "established_clients": daygle_dns_ml::store::ESTABLISHED_CLIENTS,
+        "page_model": ai.page_model_status(),
         // Each maintained model: its learned file, whether it is live, the
         // candidate on trial and the trial history.
         "learned_model": ai.maintained_status(daygle_dns_ml::learn::Role::Shared),
@@ -6685,6 +6694,11 @@ pub struct AiUpdate {
     pub page_candidates_per_scan: Option<u32>,
     pub page_rule: Option<daygle_dns_core::config::PageRule>,
     pub page_confidence_floor: Option<f32>,
+    /// Download the maintained threat feeds and use them as labels.
+    pub threat_feeds: Option<bool>,
+    /// Check threat verdicts against threat feeds and how this network uses
+    /// the domain.
+    pub network_evidence: Option<bool>,
 }
 
 /// listener-relevant `[server]` fields apply live; the rest are restarts.
@@ -7667,6 +7681,12 @@ pub async fn update_settings(
         }
         if let Some(v) = a.page_confidence_floor {
             config.ai.page_confidence_floor = v.clamp(0.05, 0.99);
+        }
+        if let Some(v) = a.threat_feeds {
+            config.ai.threat_feeds = v;
+        }
+        if let Some(v) = a.network_evidence {
+            config.ai.network_evidence = v;
         }
     }
 
