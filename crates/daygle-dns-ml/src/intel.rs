@@ -406,12 +406,26 @@ impl Intel {
                     true
                 }
                 Err(e) => {
-                    let _ = intel.store.intel_failed(feed.id, &e.to_string());
+                    let e = format!("could not store the names: {e}");
+                    intel.logs.push(
+                        LogLevel::Warn,
+                        "ai",
+                        format!("AI threat feed {}: {e}", feed.source),
+                    );
+                    let _ = intel.store.intel_failed(feed.id, &e);
                     false
                 }
             },
             Err(e) => {
                 tracing::warn!(feed = feed.id, error = %e, "AI threat feed download failed");
+                intel.logs.push(
+                    LogLevel::Warn,
+                    "ai",
+                    format!(
+                        "AI threat feed {} could not be downloaded: {e}",
+                        feed.source
+                    ),
+                );
                 let _ = intel.store.intel_failed(feed.id, &e);
                 false
             }
@@ -431,7 +445,11 @@ fn due(state: Option<&FeedState>, now: i64) -> bool {
 }
 
 async fn fetch(client: &reqwest::Client, url: &str) -> std::result::Result<String, String> {
-    let mut response = client.get(url).send().await.map_err(|e| e.to_string())?;
+    let mut response = client
+        .get(url)
+        .send()
+        .await
+        .map_err(|e| format!("{url}: {}", describe(&e)))?;
     let status = response.status();
     if !status.is_success() {
         return Err(format!("{url} answered {status}"));
@@ -444,13 +462,33 @@ async fn fetch(client: &reqwest::Client, url: &str) -> std::result::Result<Strin
         return Err(too_large());
     }
     let mut body: Vec<u8> = Vec::new();
-    while let Some(chunk) = response.chunk().await.map_err(|e| e.to_string())? {
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|e| format!("{url}: {}", describe(&e)))?
+    {
         if body.len() + chunk.len() > MAX_BYTES {
             return Err(too_large());
         }
         body.extend_from_slice(&chunk);
     }
     Ok(String::from_utf8_lossy(&body).into_owned())
+}
+
+/// An error with its causes: reqwest's own text ("error sending request for
+/// url") says nothing about why (DNS, TLS, refused, timed out) without them.
+fn describe(error: &dyn std::error::Error) -> String {
+    let mut text = error.to_string();
+    let mut source = error.source();
+    while let Some(cause) = source {
+        let cause_text = cause.to_string();
+        if !text.contains(&cause_text) {
+            text.push_str(": ");
+            text.push_str(&cause_text);
+        }
+        source = cause.source();
+    }
+    text
 }
 
 #[cfg(test)]

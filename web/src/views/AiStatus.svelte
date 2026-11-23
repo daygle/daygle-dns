@@ -706,7 +706,8 @@
               <td class="num">{feed.entries ? fmt(feed.entries) : '-'}</td>
               <td>
                 {#if feed.updated_at}{formatDateTime(feed.updated_at * 1000)}{:else}<span class="muted">Not yet</span>{/if}
-                {#if feed.error}<span style="color: var(--danger)" title={feed.error}> (last attempt failed)</span>{/if}
+                {#if feed.error}<span style="color: var(--danger)"> (last attempt failed)</span>
+                  <div class="muted" style="font-size: 12px; overflow-wrap: anywhere">{feed.error}</div>{/if}
               </td>
             </tr>
           {/each}
