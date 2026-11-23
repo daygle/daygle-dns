@@ -32,6 +32,7 @@
 //! `policy.feed_mirror` and are on unless `ai.threat_feeds` is turned off.
 
 use std::collections::{BTreeSet, HashMap};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -279,6 +280,10 @@ pub struct Intel {
     logs: Arc<LogStore>,
     /// Lists already alerted on for their current stale spell.
     stale_alerted: std::sync::Mutex<std::collections::HashSet<String>>,
+    /// Set by [`Intel::update_now`]: download every feed on the next pass,
+    /// due or not.
+    forced: AtomicBool,
+    wake: tokio::sync::Notify,
 }
 
 impl Intel {
@@ -294,6 +299,8 @@ impl Intel {
             index: ArcSwap::from_pointee(IntelIndex::default()),
             stale_alerted: std::sync::Mutex::new(std::collections::HashSet::new()),
             logs,
+            forced: AtomicBool::new(false),
+            wake: tokio::sync::Notify::new(),
         });
         intel.reload();
         intel
@@ -415,6 +422,13 @@ impl Intel {
             .collect()
     }
 
+    /// Download every feed now instead of waiting for its refresh or retry
+    /// (the console's Update Now). Does nothing while `ai.threat_feeds` is off.
+    pub fn update_now(&self) {
+        self.forced.store(true, Ordering::SeqCst);
+        self.wake.notify_one();
+    }
+
     /// Keep the feeds downloaded and fresh until `shutdown`. `mirror` gives
     /// `policy.feed_mirror` (a base URL, or empty).
     pub async fn run(
@@ -428,12 +442,13 @@ impl Intel {
             .build()
             .unwrap_or_default();
         loop {
+            let forced = self.forced.swap(false, Ordering::SeqCst);
             if self.settings.load().threat_feeds {
                 let states = self.store.intel_feeds().unwrap_or_default();
                 let now = chrono::Utc::now().timestamp();
                 let mut changed = false;
                 for feed in INTEL_FEEDS {
-                    if !due(states.get(feed.id), now) {
+                    if !forced && !due(states.get(feed.id), now) {
                         continue;
                     }
                     let url = daygle_dns_policy::feeds::mirrored(feed.url, &mirror());
@@ -447,7 +462,7 @@ impl Intel {
                     });
                     changed |= self.store_outcome(feed, outcome).await;
                 }
-                if due(states.get(POPULAR.id), now) {
+                if forced || due(states.get(POPULAR.id), now) {
                     let outcome = fetch_popular(&client, &mirror()).await;
                     changed |= self.store_popular(outcome).await;
                 }
@@ -459,6 +474,7 @@ impl Intel {
             }
             tokio::select! {
                 _ = shutdown.cancelled() => return,
+                _ = self.wake.notified() => {}
                 _ = tokio::time::sleep(TICK) => {}
             }
         }
@@ -484,12 +500,26 @@ impl Intel {
                     true
                 }
                 Err(e) => {
-                    let _ = intel.store.intel_failed(feed.id, &e.to_string());
+                    let e = format!("could not store the names: {e}");
+                    intel.logs.push(
+                        LogLevel::Warn,
+                        "ai",
+                        format!("AI threat feed {}: {e}", feed.source),
+                    );
+                    let _ = intel.store.intel_failed(feed.id, &e);
                     false
                 }
             },
             Err(e) => {
                 tracing::warn!(feed = feed.id, error = %e, "AI threat feed download failed");
+                intel.logs.push(
+                    LogLevel::Warn,
+                    "ai",
+                    format!(
+                        "AI threat feed {} could not be downloaded: {e}",
+                        feed.source
+                    ),
+                );
                 let _ = intel.store.intel_failed(feed.id, &e);
                 false
             }
@@ -640,7 +670,11 @@ fn due(state: Option<&FeedState>, now: i64) -> bool {
 }
 
 async fn fetch(client: &reqwest::Client, url: &str) -> std::result::Result<String, String> {
-    let mut response = client.get(url).send().await.map_err(|e| e.to_string())?;
+    let mut response = client
+        .get(url)
+        .send()
+        .await
+        .map_err(|e| format!("{url}: {}", describe(&e)))?;
     let status = response.status();
     if !status.is_success() {
         return Err(format!("{url} answered {status}"));
@@ -653,13 +687,33 @@ async fn fetch(client: &reqwest::Client, url: &str) -> std::result::Result<Strin
         return Err(too_large());
     }
     let mut body: Vec<u8> = Vec::new();
-    while let Some(chunk) = response.chunk().await.map_err(|e| e.to_string())? {
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|e| format!("{url}: {}", describe(&e)))?
+    {
         if body.len() + chunk.len() > MAX_BYTES {
             return Err(too_large());
         }
         body.extend_from_slice(&chunk);
     }
     Ok(String::from_utf8_lossy(&body).into_owned())
+}
+
+/// An error with its causes: reqwest's own text ("error sending request for
+/// url") says nothing about why (DNS, TLS, refused, timed out) without them.
+fn describe(error: &dyn std::error::Error) -> String {
+    let mut text = error.to_string();
+    let mut source = error.source();
+    while let Some(cause) = source {
+        let cause_text = cause.to_string();
+        if !text.contains(&cause_text) {
+            text.push_str(": ");
+            text.push_str(&cause_text);
+        }
+        source = cause.source();
+    }
+    text
 }
 
 #[cfg(test)]
