@@ -352,6 +352,24 @@ port_53_holders() {
     ' | sort -u
 }
 
+# Warn when this host has no DNS server of its own. With no `nameserver`
+# line the C library quietly asks 127.0.0.1 - this server - so the host's own
+# lookups (feed and model downloads among them) fail whenever Daygle DNS is
+# starting or restarting. Seen with a static address in
+# /etc/network/interfaces whose `dns-nameservers` needs the resolvconf
+# package, while dhcpcd writes an empty /etc/resolv.conf.
+check_host_resolver() {
+    [ -e /etc/resolv.conf ] || return 0
+    if ! grep -qE '^[[:space:]]*nameserver[[:space:]]+[^[:space:]]' /etc/resolv.conf 2>/dev/null; then
+        log "WARNING: /etc/resolv.conf names no DNS server, so this host's own lookups go to"
+        log "         127.0.0.1 (this server) and fail while Daygle DNS restarts. Add one, e.g.:"
+        log "           nameserver 127.0.0.1"
+        log "           nameserver <your router or another resolver>"
+        log "         and stop whatever rewrites the file from emptying it (for dhcpcd: add"
+        log "         'nohook resolv.conf' to /etc/dhcpcd.conf)."
+    fi
+}
+
 # Free port 53 for the DNS server. systemd-resolved (Ubuntu, Fedora and
 # other systemd distributions) runs a stub resolver on 127.0.0.53:53 and
 # 127.0.0.54:53, and Linux will not let a wildcard listener share the port
@@ -726,6 +744,7 @@ EOF
     if [ "${DAYGLE_DNS_GUI_UPDATE:-}" != "1" ]; then
         free_dns_port || true
     fi
+    check_host_resolver || true
     systemctl daemon-reload
     if [ "$INSTALL_MODE" = "upgrade" ]; then
         WAS_ACTIVE=0
