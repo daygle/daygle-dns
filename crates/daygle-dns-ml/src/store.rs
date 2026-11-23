@@ -1279,12 +1279,17 @@ impl AiStore {
                 format!(" AND lower(v.category) IN ({marks})")
             }
         };
+        // The category filter matches the operator's relabel in place of a
+        // content row's label; a threat row shows both its detected label
+        // and the relabel, so it matches either.
         let filter =
             "(?1 = 0 OR (v.status = 'classified' AND v.severity IN ('threat', 'disputed')))
             AND (?2 = '' OR v.status = ?2)
             AND (?3 = '%%' OR lower(COALESCE((SELECT c.category FROM ai_category_overrides c
                 WHERE c.domain = v.domain AND v.channel = 'content'), v.category))
-                LIKE ?3 ESCAPE '\\')
+                LIKE ?3 ESCAPE '\\'
+                OR (v.channel = 'threat' AND EXISTS (SELECT 1 FROM ai_category_overrides c
+                WHERE c.domain = v.domain AND lower(c.category) LIKE ?3 ESCAPE '\\')))
             AND (?4 = '' OR v.severity = ?4)
             AND (?5 = '' OR (?5 = 'exempt' AND EXISTS (
                 SELECT 1 FROM ai_overrides o WHERE o.domain = v.domain AND o.action = 'allow'))
