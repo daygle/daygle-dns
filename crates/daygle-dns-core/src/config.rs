@@ -1518,6 +1518,12 @@ pub struct AiSettings {
     /// name first seen today is noted. Works without the ONNX verifier, and
     /// beside it. On by default.
     pub network_evidence: bool,
+    /// Look up when each domain the threat channel flags was registered
+    /// (RDAP, through `policy.rdap_bootstrap`) and use it as evidence: a
+    /// freshly registered domain flagged with high confidence blocks, an
+    /// old one is lowered a little. Each lookup tells the TLD's registry
+    /// which domain was asked about, never who asked. On by default.
+    pub domain_age: bool,
 }
 
 impl Default for AiSettings {
@@ -1558,6 +1564,7 @@ impl Default for AiSettings {
             page_confidence_floor: 0.6,
             threat_feeds: true,
             network_evidence: true,
+            domain_age: true,
         }
     }
 }
@@ -2570,6 +2577,8 @@ pub struct AiUpdate {
     pub threat_feeds: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub network_evidence: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub domain_age: Option<bool>,
 }
 
 impl AiUpdate {
@@ -2609,6 +2618,7 @@ impl AiUpdate {
             page_confidence_floor: Some(settings.page_confidence_floor),
             threat_feeds: Some(settings.threat_feeds),
             network_evidence: Some(settings.network_evidence),
+            domain_age: Some(settings.domain_age),
         }
     }
 
@@ -2717,6 +2727,9 @@ impl AiUpdate {
         }
         if let Some(v) = self.network_evidence {
             ai.network_evidence = v;
+        }
+        if let Some(v) = self.domain_age {
+            ai.domain_age = v;
         }
     }
 
@@ -6098,6 +6111,7 @@ mod tests {
         ai.page_confidence_floor = 0.7;
         ai.threat_feeds = !ai.threat_feeds;
         ai.network_evidence = !ai.network_evidence;
+        ai.domain_age = !ai.domain_age;
 
         c.display = DisplaySettings {
             time_zone: s("UTC"),

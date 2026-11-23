@@ -310,6 +310,7 @@ impl AiStore {
              {PAGE_ADJUSTMENTS_TABLE};\n{PAGE_READINGS_TABLE};\n{}",
             evidence::TABLES
         ))?;
+        evidence::upgrade(&conn)?;
         let has_column = |name: &str| -> Result<bool> {
             Ok(conn.query_row(
                 "SELECT EXISTS(SELECT 1 FROM pragma_table_info('ai_verdicts') WHERE name = ?1)",

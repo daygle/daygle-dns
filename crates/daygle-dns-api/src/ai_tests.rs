@@ -829,6 +829,16 @@ async fn outside_evidence_settings_round_trip_over_http() {
     let status = json(state.clone(), "/api/ai/status").await;
     assert_eq!(status["threat_feeds"], true, "on by default");
     assert_eq!(status["network_evidence"], true, "on by default");
+    assert_eq!(status["domain_age"], true, "on by default");
+    assert!(
+        status["threat_feed_status"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f["label"] == "popular"),
+        "the popular-sites list is listed too"
+    );
+    assert!(status["learned_model"]["watch"].is_null());
     let feeds = status["threat_feed_status"].as_array().unwrap();
     assert!(
         feeds.iter().any(|f| f["label"] == "phishing"),
@@ -841,13 +851,13 @@ async fn outside_evidence_settings_round_trip_over_http() {
         "PUT",
         "/api/config",
         Some(serde_json::json!({
-            "ai": { "threat_feeds": false, "network_evidence": false }
+            "ai": { "threat_feeds": false, "network_evidence": false, "domain_age": false }
         })),
     )
     .await;
     assert_eq!(code, StatusCode::OK, "{body}");
     let applied = ai.settings.load_full();
-    assert!(!applied.threat_feeds && !applied.network_evidence);
+    assert!(!applied.threat_feeds && !applied.network_evidence && !applied.domain_age);
     let reported = json(state, "/api/ai/status").await;
     assert_eq!(reported["threat_feeds"], false);
     assert_eq!(reported["network_evidence"], false);

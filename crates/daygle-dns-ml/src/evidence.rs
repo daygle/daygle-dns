@@ -14,6 +14,7 @@
 //! | Evidence                                   | Effect                                |
 //! |--------------------------------------------|---------------------------------------|
 //! | a feed lists it under a threat label       | corroborated at blocking confidence   |
+//! | its registered domain is a popular site    | disputed - never blocks on its name   |
 //! | established: many clients, for weeks       | disputed - never blocks on its name   |
 //! | a machine-generated name first seen today  | noted, small raise, never to blocking |
 //! | none of these                              | unchanged                             |
@@ -82,16 +83,36 @@ impl NetworkEvidence {
         self.store.sighting(domain).ok().flatten()
     }
 
-    /// Established domains no feed lists, for probing candidate models.
+    /// Ordinary domains no feed lists, for probing candidate models: this
+    /// network's established domains, then popular sites. With both, a new
+    /// install has an ordinary probe from its first download, before weeks
+    /// of traffic make any domain established.
     pub fn established_sample(&self) -> Vec<String> {
         let intel = self.intel();
-        self.store
+        let mut sample: Vec<String> = self
+            .store
             .established_domains(MAX_ESTABLISHED_PROBE * 2)
             .unwrap_or_default()
             .into_iter()
             .filter(|domain| intel.label_for(domain).is_none())
             .take(MAX_ESTABLISHED_PROBE as usize)
-            .collect()
+            .collect();
+        let seen: std::collections::HashSet<String> = sample.iter().cloned().collect();
+        sample.extend(
+            intel
+                .popular_sample()
+                .into_iter()
+                .filter(|domain| intel.label_for(domain).is_none() && !seen.contains(domain)),
+        );
+        sample
+    }
+
+    /// Whether `domain` is known ordinary: established on this network, or a
+    /// popular site, and listed by no threat feed.
+    pub fn is_known_ordinary(&self, domain: &str) -> bool {
+        let intel = self.intel();
+        intel.label_for(domain).is_none()
+            && (intel.is_popular(domain) || self.sighting(domain).is_some_and(|s| s.established()))
     }
 
     /// Whether a threat label from a feed means "threat" on this install.
@@ -123,6 +144,17 @@ impl NetworkEvidence {
         }
         if base.severity != Severity::Threat {
             return base;
+        }
+        if self.intel().is_popular(domain) {
+            return Verdict {
+                severity: Severity::Disputed,
+                evidence: format!(
+                    "{}, but it is a popular site ({}): disputed",
+                    base.evidence,
+                    crate::intel::POPULAR.source
+                ),
+                ..base
+            };
         }
         let seen = self.sighting(domain);
         if let Some(seen) = seen.as_ref().filter(|s| s.established()) {
@@ -297,6 +329,34 @@ mod tests {
         assert_eq!(got.severity, Severity::Disputed);
         assert!(got.evidence.contains("established on this network"));
         assert_eq!(evidence.established_sample(), vec!["update.vendor.example"]);
+    }
+
+    #[test]
+    fn popular_sites_are_disputed_but_feeds_win() {
+        let (_dir, store, evidence) = evidence(AiSettings::default());
+        store
+            .replace_intel(
+                crate::intel::POPULAR.id,
+                &[
+                    "bigbank.example".to_string(),
+                    "paypa1-login.example".to_string(),
+                ]
+                .into_iter()
+                .collect(),
+            )
+            .unwrap();
+        evidence.intel.reload();
+        let got = evidence.judge("secure.bigbank.example", threat("phishing", 0.995));
+        assert_eq!(got.severity, Severity::Disputed);
+        assert!(got.evidence.contains("popular site"), "{}", got.evidence);
+        assert!(evidence.is_known_ordinary("bigbank.example"));
+        // A feed listing still confirms a popular name.
+        let listed = evidence.judge("paypa1-login.example", threat("phishing", 0.6));
+        assert_eq!(listed.severity, Severity::Threat);
+        assert!(!evidence.is_known_ordinary("paypa1-login.example"));
+        assert!(evidence
+            .established_sample()
+            .contains(&"bigbank.example".to_string()));
     }
 
     #[test]

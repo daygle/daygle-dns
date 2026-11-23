@@ -683,8 +683,13 @@ auto_block_categories = ["malware", "phishing", "scam"]
 # corroborate threats. network_evidence checks each threat verdict against
 # them and against how this network uses the domain: a listed domain is
 # corroborated, one many clients have used for weeks is disputed.
+# threat_feeds also downloads Tranco's top 100,000 sites: a name-only
+# detection on a popular site is disputed. domain_age looks up when a flagged
+# domain was registered (RDAP, via policy.rdap_bootstrap): new and strongly
+# flagged can block, years old is lowered slightly.
 # threat_feeds = true
 # network_evidence = true
+# domain_age = true
 block_threshold = 0.99
 confidence_floor = 0.2
 category_confidence_floor = 0.2

@@ -1969,10 +1969,14 @@ re-scans, and is what category blocking matches; the row also carries
 `POST /api/ai/rescan` wakes the scanner for one immediate cycle.
 
 Outside evidence (see [AI.md](AI.md#outside-evidence)): `GET /api/ai/status`
-reports `threat_feeds` and `network_evidence` (both accepted by the settings
-update) and `threat_feed_status`, one entry per feed with `id`, `label`,
+reports `threat_feeds`, `network_evidence` and `domain_age` (all accepted by
+the settings update) and `threat_feed_status`, one entry per list (the threat
+feeds, then the popular-sites list with label `popular`) with `id`, `label`,
 `source`, `entries`, `updated_at` (Unix seconds or `null` before the first
-download) and `error` (the last failed attempt, or `null`). It also reports
+download), `error` (the last failed attempt, or `null`) and `stale` (failing
+and without fresh data for 2 days). Each maintained model reports `watch`
+(`promoted_at`, `until`) while a model that went live on its own is watched,
+or `null`. It also reports
 `established_days` and `established_clients`, the thresholds for an
 established domain, and `page_model` (`active`, plus `last`: `trained_at`,
 `pages`, `ordinary`, `threats`, `held_out`, `held_out_right` and

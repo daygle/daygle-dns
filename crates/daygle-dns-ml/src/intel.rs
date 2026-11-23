@@ -20,7 +20,14 @@
 //! * **corroboration** - a threat verdict on a listed domain is corroborated
 //!   at blocking confidence ([`crate::evidence`]).
 //!
-//! The feeds name domains, never this network's traffic: downloading them
+//! Beside them sits the opposite kind of list: Tranco's ranking of the most
+//! popular sites ([`POPULAR`]). A popular registered domain is almost never
+//! a threat on its name alone, so a name-only detection on one is disputed,
+//! and popular sites are part of the "ordinary" probe every candidate model
+//! is tested on. That protects a site from day one, where the established-
+//! domain check needs weeks of this network's traffic.
+//!
+//! The lists name domains, never this network's traffic: downloading them
 //! reveals nothing about what clients look up. Downloads honour
 //! `policy.feed_mirror` and are on unless `ai.threat_feeds` is turned off.
 
@@ -75,13 +82,36 @@ pub const INTEL_FEEDS: &[IntelFeed] = &[
     },
 ];
 
+/// The popular-sites list: Tranco's research ranking, combined from several
+/// providers and hard to manipulate. Only its top [`POPULAR_SIZE`] are kept.
+pub struct PopularList {
+    /// Stable id stored with each name.
+    pub id: &'static str,
+    pub source: &'static str,
+    /// Answers with the latest list's download URL (`"download"`).
+    pub latest_url: &'static str,
+}
+
+pub const POPULAR: PopularList = PopularList {
+    id: "tranco",
+    source: "Tranco top 100,000",
+    latest_url: "https://tranco-list.eu/api/lists/date/latest",
+};
+
+/// Ranks kept from the popular list.
+pub const POPULAR_SIZE: usize = 100_000;
+/// Popular sites in the ordinary probe every candidate is tested on.
+pub const MAX_POPULAR_PROBE: usize = 300;
+
 /// What the evidence stage writes into a verdict's evidence
 /// ([`crate::evidence`]): a verdict carrying one depends on the evidence
 /// settings.
 const EVIDENCE_NOTES: &[&str] = &[
     ", listed by ",
+    "a popular site",
     "established on this network",
     "machine-generated-looking name",
+    crate::age::AGE_NOTE,
 ];
 
 /// How often a downloaded feed is refreshed.
@@ -109,6 +139,9 @@ pub struct IntelIndex {
     /// Each feed's names (wildcard suffixes as plain names), sorted, so
     /// samples are the same from run to run.
     by_feed: Vec<Vec<String>>,
+    /// Popular registered domains ([`POPULAR`]), sorted.
+    popular: std::collections::HashSet<String>,
+    popular_sorted: Vec<String>,
 }
 
 impl IntelIndex {
@@ -120,6 +153,10 @@ impl IntelIndex {
             ..Default::default()
         };
         for (domain, wildcard, feed_id) in entries {
+            if feed_id == POPULAR.id {
+                index.popular.insert(domain);
+                continue;
+            }
             let Some(at) = INTEL_FEEDS.iter().position(|f| f.id == feed_id) else {
                 continue;
             };
@@ -135,11 +172,34 @@ impl IntelIndex {
             names.sort_unstable();
             names.dedup();
         }
+        index.popular_sorted = index.popular.iter().cloned().collect();
+        index.popular_sorted.sort_unstable();
         index
     }
 
+    /// Whether `domain`'s registered domain is a popular site. Matching the
+    /// registered domain, never a parent, matters: `pages.dev` is popular,
+    /// but `evil.pages.dev` is someone's own site, and the Public Suffix
+    /// List makes it a registered domain of its own.
+    pub fn is_popular(&self, domain: &str) -> bool {
+        if self.popular.is_empty() {
+            return false;
+        }
+        let name = domain.trim().trim_end_matches('.').to_ascii_lowercase();
+        psl::domain_str(&name).is_some_and(|registered| self.popular.contains(registered))
+    }
+
+    /// Popular sites for the ordinary probe, spread evenly over the list.
+    pub fn popular_sample(&self) -> Vec<String> {
+        let all: Vec<&String> = self.popular_sorted.iter().collect();
+        spread(&all, MAX_POPULAR_PROBE)
+            .into_iter()
+            .cloned()
+            .collect()
+    }
+
     pub fn is_empty(&self) -> bool {
-        self.exact.is_empty() && self.wildcard.is_empty()
+        self.exact.is_empty() && self.wildcard.is_empty() && self.popular.is_empty()
     }
 
     pub fn len(&self) -> usize {
@@ -217,6 +277,8 @@ pub struct Intel {
     settings: Arc<ArcSwap<AiSettings>>,
     index: ArcSwap<IntelIndex>,
     logs: Arc<LogStore>,
+    /// Lists already alerted on for their current stale spell.
+    stale_alerted: std::sync::Mutex<std::collections::HashSet<String>>,
 }
 
 impl Intel {
@@ -230,6 +292,7 @@ impl Intel {
             store,
             settings,
             index: ArcSwap::from_pointee(IntelIndex::default()),
+            stale_alerted: std::sync::Mutex::new(std::collections::HashSet::new()),
             logs,
         });
         intel.reload();
@@ -254,7 +317,12 @@ impl Intel {
         let before = self.index.load_full();
         self.reload();
         let after = self.index.load_full();
-        let listing = |index: &IntelIndex, domain: &str| index.feed_for(domain).map(|f| f.id);
+        let listing = |index: &IntelIndex, domain: &str| {
+            (
+                index.feed_for(domain).map(|f| f.id),
+                index.is_popular(domain),
+            )
+        };
         let changed: Vec<String> = match self.store.decided_threats() {
             Ok(rows) => rows
                 .into_iter()
@@ -285,6 +353,7 @@ impl Intel {
                 .into_iter()
                 .filter(|(domain, evidence)| {
                     index.feed_for(domain).is_some()
+                        || index.is_popular(domain)
                         || established.contains(domain)
                         || EVIDENCE_NOTES.iter().any(|note| evidence.contains(note))
                 })
@@ -328,15 +397,19 @@ impl Intel {
         let states = self.store.intel_feeds().unwrap_or_default();
         INTEL_FEEDS
             .iter()
-            .map(|f| {
-                let state = states.get(f.id).cloned().unwrap_or_default();
+            .map(|f| (f.id, f.label, f.source))
+            .chain(std::iter::once((POPULAR.id, "popular", POPULAR.source)))
+            .map(|(id, label, source)| {
+                let state = states.get(id).cloned().unwrap_or_default();
+                let is_stale = stale(&state, chrono::Utc::now().timestamp());
                 serde_json::json!({
-                    "id": f.id,
-                    "label": f.label,
-                    "source": f.source,
+                    "id": id,
+                    "label": label,
+                    "source": source,
                     "entries": state.entries,
                     "updated_at": (state.updated_at > 0).then_some(state.updated_at),
                     "error": (!state.error.is_empty()).then_some(state.error),
+                    "stale": is_stale,
                 })
             })
             .collect()
@@ -374,10 +447,15 @@ impl Intel {
                     });
                     changed |= self.store_outcome(feed, outcome).await;
                 }
+                if due(states.get(POPULAR.id), now) {
+                    let outcome = fetch_popular(&client, &mirror()).await;
+                    changed |= self.store_popular(outcome).await;
+                }
                 if changed {
                     let intel = self.clone();
                     let _ = tokio::task::spawn_blocking(move || intel.refresh()).await;
                 }
+                self.alert_stale(&self.store.intel_feeds().unwrap_or_default(), now);
             }
             tokio::select! {
                 _ = shutdown.cancelled() => return,
@@ -418,6 +496,137 @@ impl Intel {
         })
         .await
         .unwrap_or(false)
+    }
+}
+
+impl Intel {
+    async fn store_popular(
+        self: &Arc<Self>,
+        outcome: std::result::Result<BTreeSet<String>, String>,
+    ) -> bool {
+        let intel = self.clone();
+        tokio::task::spawn_blocking(move || match outcome {
+            Ok(entries) => match intel.store.replace_intel(POPULAR.id, &entries) {
+                Ok(stored) => {
+                    intel.logs.push(
+                        LogLevel::Info,
+                        "ai",
+                        format!("AI popular-sites list updated: {stored} sites"),
+                    );
+                    true
+                }
+                Err(e) => {
+                    let _ = intel.store.intel_failed(POPULAR.id, &e.to_string());
+                    false
+                }
+            },
+            Err(e) => {
+                tracing::warn!(error = %e, "AI popular-sites list download failed");
+                let _ = intel.store.intel_failed(POPULAR.id, &e);
+                false
+            }
+        })
+        .await
+        .unwrap_or(false)
+    }
+}
+
+/// Download the latest popular-sites list: ask for its URL, then fetch the
+/// top [`POPULAR_SIZE`] as `rank,domain` lines.
+async fn fetch_popular(
+    client: &reqwest::Client,
+    mirror: &str,
+) -> std::result::Result<BTreeSet<String>, String> {
+    let latest = fetch(
+        client,
+        &daygle_dns_policy::feeds::mirrored(POPULAR.latest_url, mirror),
+    )
+    .await?;
+    let latest: serde_json::Value =
+        serde_json::from_str(&latest).map_err(|e| format!("the list index was not JSON: {e}"))?;
+    let download = latest
+        .get("download")
+        .and_then(|v| v.as_str())
+        .ok_or("the list index named no download")?;
+    // The index links the full million; the same path takes the size.
+    let base = download.rsplit_once('/').map_or(download, |(base, _)| base);
+    let url = format!("{base}/{POPULAR_SIZE}");
+    let body = fetch(client, &daygle_dns_policy::feeds::mirrored(&url, mirror)).await?;
+    let entries = parse_popular(&body);
+    if entries.len() < 1_000 {
+        return Err(format!("{url} held only {} sites", entries.len()));
+    }
+    Ok(entries)
+}
+
+/// `rank,domain` lines as registered domains.
+pub fn parse_popular(body: &str) -> BTreeSet<String> {
+    body.lines()
+        .filter_map(|line| line.trim().split_once(','))
+        .map(|(_, domain)| domain.trim().trim_end_matches('.').to_ascii_lowercase())
+        .filter(|domain| looks_like_domain(domain))
+        .take(POPULAR_SIZE)
+        .collect()
+}
+
+/// A list not updated for this long is stale: the AI is working from old
+/// threat names (or old popularity) and the operator should know.
+pub const STALE_SECS: i64 = 48 * 3600;
+
+/// Whether a list in `state` is stale at `now`: its last success (or, never
+/// having succeeded, its first attempts) lies more than [`STALE_SECS`] back
+/// and the latest attempt failed.
+fn stale(state: &FeedState, now: i64) -> bool {
+    stale_since(state).is_some_and(|since| now - since >= STALE_SECS)
+}
+
+/// Since when a failing list has been without fresh data: its last success,
+/// or the start of its failures when it never had one.
+fn stale_since(state: &FeedState) -> Option<i64> {
+    if state.error.is_empty() {
+        return None;
+    }
+    let since = if state.updated_at > 0 {
+        state.updated_at
+    } else {
+        state.failing_since
+    };
+    (since > 0).then_some(since)
+}
+
+impl Intel {
+    /// Raise one alert per list per stale spell (a list that recovers and
+    /// goes stale again alerts again). Held in memory: a restart alerts once
+    /// more for a list still stale, which is better than never.
+    fn alert_stale(&self, states: &HashMap<String, FeedState>, now: i64) {
+        let mut alerted = self.stale_alerted.lock().unwrap_or_else(|e| e.into_inner());
+        let lists = INTEL_FEEDS
+            .iter()
+            .map(|f| (f.id, f.source))
+            .chain(std::iter::once((POPULAR.id, POPULAR.source)));
+        for (id, source) in lists {
+            let Some(state) = states.get(id) else {
+                continue;
+            };
+            if !stale(state, now) {
+                alerted.remove(id);
+                continue;
+            }
+            if !alerted.insert(id.to_string()) {
+                continue;
+            }
+            let days = stale_since(state).map_or(2, |since| (now - since) / 86_400);
+            daygle_dns_core::alerts::raise(
+                daygle_dns_core::alerts::AlertKind::AiModel,
+                format!("ai-feed-stale:{id}:{now}"),
+                format!("AI list {source} is not updating"),
+                format!(
+                    "The AI could not download {source} for {} or more ({}). It keeps using the last copy it has, so new threats it lists are missed. Check the server's internet access or policy.feed_mirror.",
+                    if days >= 2 { format!("{days} days") } else { "two days".to_string() },
+                    state.error
+                ),
+            );
+        }
     }
 }
 
@@ -513,6 +722,59 @@ mod tests {
         let held: std::collections::HashSet<_> = probe.iter().map(|(_, d)| d).collect();
         assert!(training.iter().all(|(_, d)| !held.contains(d)));
         assert_eq!(index.sample(|label| label == "phishing"), (training, probe));
+    }
+
+    #[test]
+    fn popular_sites_match_by_registered_domain_only() {
+        let entries = parse_popular("1,google.com\n2,pages.dev\n3,Example.CO.UK.\nbad line\n");
+        assert!(entries.contains("google.com") && entries.contains("example.co.uk"));
+        let index = IntelIndex::from_entries(
+            entries
+                .into_iter()
+                .map(|d| (d, false, POPULAR.id.to_string())),
+        );
+        assert!(index.is_popular("mail.google.com"));
+        assert!(index.is_popular("shop.example.co.uk"));
+        // A site on a hosting platform is someone's own registered domain.
+        assert!(!index.is_popular("evil.pages.dev"));
+        assert!(!index.is_popular("google.com.evil.example"));
+        assert_eq!(
+            index.label_for("google.com"),
+            None,
+            "popular is not a threat label"
+        );
+        assert_eq!(index.popular_sample().len(), 3);
+    }
+
+    #[test]
+    fn failing_lists_go_stale_after_two_days() {
+        let now = 10_000_000;
+        let ok = FeedState {
+            updated_at: now - STALE_SECS * 3,
+            ..Default::default()
+        };
+        assert!(!stale(&ok, now), "an old copy with no failure is not stale");
+        let failing = FeedState {
+            error: "timed out".into(),
+            failing_since: now - 3600,
+            ..ok.clone()
+        };
+        assert!(stale(&failing, now), "measured from the last success");
+        let never = FeedState {
+            error: "timed out".into(),
+            attempted_at: now - 60,
+            failing_since: now - STALE_SECS,
+            ..Default::default()
+        };
+        assert!(
+            stale(&never, now),
+            "never downloaded: measured from the first failure"
+        );
+        let fresh_failure = FeedState {
+            failing_since: now - 3600,
+            ..never
+        };
+        assert!(!stale(&fresh_failure, now));
     }
 
     #[test]

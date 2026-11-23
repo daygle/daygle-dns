@@ -3740,3 +3740,185 @@ fn evidence_changes_requeue_the_threat_verdicts_they_affect() {
     assert_eq!(status("was-listed.example"), "pending");
     assert_eq!(status("unrelated.example"), "classified");
 }
+
+/// A model that went live on its own is watched: when it blocks a much
+/// larger share of what it scans than the week before, it is undone and
+/// the model before it is back.
+#[test]
+fn a_promoted_model_that_blocks_far_more_is_rolled_back() {
+    let _train = training_guard();
+    let dir = TempDir::new().unwrap();
+    let ai = engine(
+        &dir,
+        with_reference(
+            &dir,
+            SITE_SHAPES,
+            AiSettings {
+                auto_retrain: true,
+                trial_new_models: false,
+                block_threshold: 0.5,
+                ..settings(AiMode::Train)
+            },
+        ),
+    );
+    seed_content_verdicts(&ai, 0..240);
+    ai.run_due_maintenance().unwrap().unwrap();
+    assert!(ai.learned_model_active(), "trials are off: it went live");
+    let status = ai.maintained_status(daygle_dns_ml::learn::Role::Shared);
+    let promoted_at = status["watch"]["promoted_at"].as_i64().expect("watched");
+
+    // The week before: 1% of scanned domains blocked. Since: 20%.
+    ai.store
+        .record_threat_rate_at(1_000, 10, promoted_at - 3_600)
+        .unwrap();
+    ai.store
+        .record_threat_rate_at(1_000, 200, promoted_at)
+        .unwrap();
+    ai.run_due_maintenance();
+
+    assert!(!ai.learned_model_active(), "the configured model is back");
+    let trial = ai.learned_model_trial();
+    assert!(
+        trial
+            .last_outcome
+            .as_deref()
+            .is_some_and(|o| o.starts_with("rolled back")),
+        "{trial:?}"
+    );
+    assert!(trial.retry_after.is_some(), "retraining pauses");
+    assert!(ai.maintained_status(daygle_dns_ml::learn::Role::Shared)["watch"].is_null());
+}
+
+/// Three "not a threat" marks on a watched model's own detections undo it.
+#[test]
+fn not_a_threat_marks_on_new_detections_roll_a_model_back() {
+    let _train = training_guard();
+    let dir = TempDir::new().unwrap();
+    let ai = engine(
+        &dir,
+        with_reference(
+            &dir,
+            SITE_SHAPES,
+            AiSettings {
+                auto_retrain: true,
+                trial_new_models: false,
+                block_threshold: 0.5,
+                ..settings(AiMode::Train)
+            },
+        ),
+    );
+    seed_content_verdicts(&ai, 0..240);
+    ai.run_due_maintenance().unwrap().unwrap();
+    assert!(ai.learned_model_active());
+    for i in 0..3 {
+        let domain = format!("flagged{i}.example");
+        ai.store.observe(&domain).unwrap();
+        ai.store
+            .save_verdict(
+                Channel::Threat,
+                &domain,
+                "phishing",
+                "threat",
+                "classified",
+                0.9,
+                "fasttext",
+                "ev",
+                3600,
+            )
+            .unwrap();
+        ai.set_not_threat_override(&domain, "Misclassified")
+            .unwrap();
+    }
+    ai.run_due_maintenance();
+    assert!(!ai.learned_model_active());
+    let outcome = ai.learned_model_trial().last_outcome.unwrap_or_default();
+    assert!(outcome.contains("not a threat"), "{outcome}");
+}
+
+/// A model that behaves stays live and keeps being watched.
+#[test]
+fn a_well_behaved_promoted_model_stays_live() {
+    let _train = training_guard();
+    let dir = TempDir::new().unwrap();
+    let ai = engine(
+        &dir,
+        with_reference(
+            &dir,
+            SITE_SHAPES,
+            AiSettings {
+                auto_retrain: true,
+                trial_new_models: false,
+                block_threshold: 0.5,
+                ..settings(AiMode::Train)
+            },
+        ),
+    );
+    seed_content_verdicts(&ai, 0..240);
+    ai.run_due_maintenance().unwrap().unwrap();
+    let promoted_at = ai.maintained_status(daygle_dns_ml::learn::Role::Shared)["watch"]
+        ["promoted_at"]
+        .as_i64()
+        .unwrap();
+    ai.store
+        .record_threat_rate_at(1_000, 10, promoted_at - 3_600)
+        .unwrap();
+    ai.store
+        .record_threat_rate_at(1_000, 14, promoted_at)
+        .unwrap();
+    ai.run_due_maintenance();
+    assert!(ai.learned_model_active());
+    assert!(!ai.maintained_status(daygle_dns_ml::learn::Role::Shared)["watch"].is_null());
+}
+
+/// Each threat verdict is looked up once: the age note marks it done, and a
+/// re-classification (which rewrites the evidence) makes it a candidate again.
+#[test]
+fn domain_age_is_applied_once_per_verdict() {
+    let dir = TempDir::new().unwrap();
+    let store = tmp_store(&dir);
+    for (domain, severity) in [
+        ("new-phish.example", "threat"),
+        ("disputed.example", "disputed"),
+    ] {
+        store.observe(domain).unwrap();
+        store
+            .save_verdict(
+                Channel::Threat,
+                domain,
+                "phishing",
+                severity,
+                "classified",
+                0.92,
+                "fasttext",
+                "model",
+                3600,
+            )
+            .unwrap();
+    }
+    let candidates = store.age_candidates(16).unwrap();
+    assert_eq!(candidates.len(), 1, "disputed verdicts are not looked up");
+    assert_eq!(candidates[0].0, "new-phish.example");
+    let now = chrono::Utc::now().timestamp();
+    let (confidence, note) =
+        daygle_dns_ml::age::adjust(candidates[0].1, &candidates[0].2, now - 2 * 86_400, now);
+    assert!(store
+        .apply_age("new-phish.example", confidence, &note)
+        .unwrap());
+    assert!(store.age_candidates(16).unwrap().is_empty());
+    assert!(
+        !store.apply_age("new-phish.example", 0.1, &note).unwrap(),
+        "never applied twice"
+    );
+    let row = store
+        .verdicts_for("new-phish.example")
+        .unwrap()
+        .into_iter()
+        .find(|r| r.channel == "threat")
+        .unwrap();
+    assert!((row.confidence - 0.99).abs() < 1e-6);
+    assert!(
+        row.evidence.contains("newly registered"),
+        "{}",
+        row.evidence
+    );
+}

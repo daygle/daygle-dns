@@ -95,6 +95,8 @@ pub struct Scanner {
     page_reader: std::sync::OnceLock<Box<dyn crate::page::PageReader>>,
     /// The page-text model, set once by the engine.
     page_model: std::sync::OnceLock<Arc<crate::page_model::PageModel>>,
+    /// Registration-date lookups, set once by the engine.
+    domain_age: std::sync::OnceLock<Arc<crate::age::DomainAge>>,
 }
 
 impl Scanner {
@@ -125,6 +127,7 @@ impl Scanner {
             maintenance: std::sync::OnceLock::new(),
             page_reader: std::sync::OnceLock::new(),
             page_model: std::sync::OnceLock::new(),
+            domain_age: std::sync::OnceLock::new(),
         })
     }
 
@@ -144,6 +147,12 @@ impl Scanner {
     /// with (see [`crate::page_model`]).
     pub fn set_page_model(&self, model: Arc<crate::page_model::PageModel>) {
         let _ = self.page_model.set(model);
+    }
+
+    /// Hand the scanner the registration-date lookups for new threats (see
+    /// [`crate::age`]).
+    pub fn set_domain_age(&self, age: Arc<crate::age::DomainAge>) {
+        let _ = self.domain_age.set(age);
     }
 
     fn log_info(&self, msg: String) {
@@ -272,12 +281,43 @@ impl Scanner {
             })
             .collect();
         self.store.save_verdicts(&rows)?;
+        // What the threat channel produced this scan: the watch on a newly
+        // promoted model compares it with the week before (see
+        // `crate::maintain`).
+        let threat_rows = rows.iter().filter(|r| r.channel == Channel::Threat);
+        let threat_classified = threat_rows.clone().count();
+        let threat_blocking = threat_rows
+            .filter(|r| {
+                r.status == "classified"
+                    && r.severity == "threat"
+                    && r.confidence >= cfg.block_threshold
+            })
+            .count();
+        if let Err(e) = self
+            .store
+            .record_threat_rate(threat_classified, threat_blocking)
+        {
+            self.log_warn(format!("AI could not record its threat rate: {e}"));
+        }
         if !pending.is_empty() {
             let domains: HashSet<&str> = pending.iter().map(|(d, _)| d.as_str()).collect();
             self.log_info(format!(
                 "AI scanned {} domain(s) on both channels: {classified} classified, {skipped} skipped",
                 domains.len()
             ));
+        }
+
+        // 3b. Domain age: when the new threats' domains were registered,
+        //     before the snapshot so a freshly registered threat blocks in
+        //     this cycle. A failure never fails the cycle.
+        if let Some(age) = self.domain_age.get() {
+            match age.stage(&cfg, Utc::now().timestamp()) {
+                Ok(0) => {}
+                Ok(n) => self.log_info(format!(
+                    "AI adjusted {n} threat verdict(s) by when their domain was registered"
+                )),
+                Err(e) => self.log_warn(format!("AI domain-age stage failed: {e}")),
+            }
         }
 
         // 4. Refresh the block snapshot.

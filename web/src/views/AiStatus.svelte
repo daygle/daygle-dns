@@ -201,6 +201,10 @@
       'Threat feeds are on. They download within a minute.',
       'Threat feeds are off.',
     ],
+    domain_age: [
+      'Domain age checks are on.',
+      'Domain age checks are off.',
+    ],
     network_evidence: [
       'Threats are now checked against the feeds and your network\'s usage.',
       'Evidence checks are off.',
@@ -570,6 +574,9 @@
         <li><strong>Trial New Models First:</strong> the new model shadows the
           current one for a while and is only switched in if it did as well.
           A failed model changes nothing and raises an alert.</li>
+        <li><strong>Watched after going live:</strong> for 3 days, a new model
+          that starts blocking far more, or gets 3 "not a threat" marks, is
+          rolled back automatically and you are alerted.</li>
         <li><strong>Learn "Not a Threat":</strong> your "not a threat" marks also
           train the model. Turn off if it starts missing threats.</li>
         <li><strong>Install New Shipped Models:</strong> updated models from new
@@ -600,6 +607,9 @@
           {/if}
           {#if m.trial?.ends_at}
             <span class="pill">Candidate on Trial until {formatDateTime(m.trial.ends_at * 1000)}</span>
+          {/if}
+          {#if m.watch?.until}
+            <span class="pill" title="This model went live on its own. If it blocks far more than before, or you mark 3 of its new detections 'not a threat', the previous model comes back automatically.">Watched until {formatDateTime(m.watch.until * 1000)}</span>
           {/if}
         </p>
         {#if m.present}
@@ -669,6 +679,16 @@
           />
           <span>Check Threats Against Evidence</span>
         </label>
+        <label class="row" style="gap: 6px; align-items: center; font-size: 0.85rem">
+          <input
+            type="checkbox"
+            style="width: auto"
+            checked={!!status.domain_age}
+            onchange={(event) => setSwitch('domain_age', event.currentTarget.checked)}
+            disabled={switching}
+          />
+          <span>Check Domain Age</span>
+        </label>
       {/if}
     </div>
     <p class="muted help" style="margin: 0 0 6px">
@@ -679,24 +699,29 @@
       <summary class="muted">What these switches do</summary>
       <ul class="how-list muted">
         <li><strong>Use Threat Feeds:</strong> downloads public lists of known
-          malware, phishing and scam domains (your traffic is never sent).
-          They help the AI learn and test new models.</li>
+          malware, phishing and scam domains, and of the most popular sites
+          (your traffic is never sent). They help the AI learn and test new
+          models.</li>
         <li><strong>Check Threats Against Evidence:</strong>
           <ul>
             <li>A domain on a threat feed is confirmed and can block.</li>
-            <li>A domain {fmt(status.established_clients ?? 3)}+ devices have
-              used on {fmt(status.established_days ?? 14)}+ days is marked
-              disputed and is never blocked on its name alone.</li>
+            <li>A popular site, or a domain {fmt(status.established_clients ?? 3)}+
+              devices have used on {fmt(status.established_days ?? 14)}+ days,
+              is marked disputed and is never blocked on its name alone.</li>
             <li>A random-looking name first seen today is noted.</li>
           </ul>
         </li>
+        <li><strong>Check Domain Age:</strong> looks up when a flagged domain
+          was registered. One registered in the last 2 weeks and strongly
+          flagged can block; one registered years ago is trusted a little
+          more. The registry sees which domain was asked about, not who asked.</li>
         <li>Your exemptions and corrections always win.</li>
       </ul>
     </details>
     {#if status.threat_feed_status?.length}
       <table>
         <thead>
-          <tr><th>Feed</th><th>Label</th><th class="num">Names</th><th>Updated</th></tr>
+          <tr><th>List</th><th>Label</th><th class="num">Names</th><th>Updated</th></tr>
         </thead>
         <tbody>
           {#each status.threat_feed_status as feed (feed.id)}
@@ -706,7 +731,7 @@
               <td class="num">{feed.entries ? fmt(feed.entries) : '-'}</td>
               <td>
                 {#if feed.updated_at}{formatDateTime(feed.updated_at * 1000)}{:else}<span class="muted">Not yet</span>{/if}
-                {#if feed.error}<span style="color: var(--danger)" title={feed.error}> (last attempt failed)</span>{/if}
+                {#if feed.stale}<span style="color: var(--danger)" title={feed.error}> (not updating - check internet access)</span>{:else if feed.error}<span class="muted" title={feed.error}> (last attempt failed, retrying)</span>{/if}
               </td>
             </tr>
           {/each}
