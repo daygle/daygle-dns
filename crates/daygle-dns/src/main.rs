@@ -17,7 +17,7 @@ use std::sync::Arc;
 use clap::{Parser, Subcommand};
 use daygle_dns::bind_with;
 use daygle_dns_authoritative::ZoneStore;
-use daygle_dns_core::config::{AiSettings, AiUpdate, DaygleConfig, RuntimeSettings};
+use daygle_dns_core::config::{AiUpdate, DaygleConfig, RuntimeSettings};
 use daygle_dns_core::DEFAULT_CONFIG_PATH;
 use tracing::{info, Level};
 use tracing_subscriber::layer::Layer as _;
@@ -141,7 +141,6 @@ fn main() {
                 std::process::exit(1);
             }
         };
-        let untouched = AiUpdate::capture_ai(&AiSettings::default());
         let store = match ZoneStore::open(&config.authoritative.database) {
             Ok(s) => s,
             Err(e) => {
@@ -159,7 +158,7 @@ fn main() {
                 println!("ai settings seeded from {} (first boot)", args.config);
             }
             Ok(Some(mut overlay)) => {
-                if overlay.ai.as_ref() == Some(&untouched) {
+                if overlay.ai.as_ref().is_some_and(AiUpdate::is_untouched) {
                     overlay.ai = Some(AiUpdate::capture_ai(&config.ai));
                     match store.put_runtime_settings(&overlay) {
                         Ok(()) => println!("ai settings synchronized from {}", args.config),
