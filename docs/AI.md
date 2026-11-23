@@ -77,26 +77,35 @@ fails, reporting both counts.
 With `ai.auto_retrain` on, the scanner periodically rebuilds its model from:
 
 - your corrections,
-- its own confident verdicts, but only those the shipped reference model,
-  the verifier or the page agrees with, so a mistake cannot reinforce
-  itself, and
+- its own confident verdicts, but only those a fixed reference or an
+  independent source agrees with, so a mistake cannot reinforce itself. The
+  fixed reference is the configured model, or the built-in keyword rules
+  when no model file is configured (never the model being retrained); the
+  independent sources are the verifier, the page and the threat feeds,
+- current threat-feed names (see below), and
 - the shipped starter corpus, so labels this network has not seen lately
   are not forgotten.
 
 A candidate model is refused when it:
 
 - scores worse on held-out corrections than the model in use,
-- can no longer report a threat label the model in use can report, or
+- can no longer report a threat label the model in use can report,
 - misses more held-out threats than the model in use, even when its overall
   score is fine. Whole word families (grouped by shared words) are held back
   for this check, and each is probed under a word order the store never
-  recorded, so a candidate that only misses new names is still caught.
+  recorded, so a candidate that only misses new names is still caught,
+- detects fewer held-out threat-feed names than the model in use (2% slack), or
+- flags more of the network's established domains as threats (2% slack).
 
 With `ai.trial_new_models`, a scheduled retrain's candidate first runs in the
 shadow of the live model. It is promoted, without a restart, only if it did
 at least as well on held-out threats, on live traffic, on your corrections
-during the trial and on independently confirmed labels. A rejected candidate
-never answered a query; the rejection pauses retraining and raises an alert.
+during the trial, on independently confirmed labels (threat feeds included),
+on held-out threat-feed names and on the established domains looked up during
+the trial. The automatic signals mean a trial on an install nobody corrects
+still has evidence to judge; before them, a quiet trial promoted its
+candidate for lack of evidence. A rejected candidate never answered a query;
+the rejection pauses retraining and raises an alert.
 
 A dedicated threat model is maintained the same way. The verifier's
 reference is refreshed from your corrections, never from its own verdicts.
@@ -119,6 +128,51 @@ candidate that swallows threats is accepted. In the current run it refuses
 both candidates (12 of 12 and 8 of 8 held-out names lost), including the
 scenario where 15 of 30 unseen threats are swallowed.
 
+## Outside evidence
+
+The classifiers only see a domain's spelling. Two things the server knows
+that the spelling does not show give the AI a second opinion that works
+without the ONNX verifier, and beside it.
+
+### Threat feeds (`ai.threat_feeds`)
+
+On by default. The server downloads maintained public lists every 12 hours,
+through `policy.feed_mirror` when one is set, and keeps the last good copy in
+`ai.db`:
+
+| Feed | Label |
+|---|---|
+| URLhaus (abuse.ch), via malware-filter | `malware` |
+| Phishing Army | `phishing` |
+| HaGeZi Fake | `scam` |
+
+The downloads name domains and reveal nothing about this network's traffic.
+A stable one in five names is held out of training to test every candidate
+model and trial. The rest train the threat labels, up to 1,000 per label per
+retrain. A feed listing also confirms a threat verdict for training. Only the
+labels the model treats as threats are used: `ai.auto_block_categories` for
+the shared model, or every label of a dedicated threat model. Your
+corrections win over a feed.
+
+### Established domains
+
+Each scan records the days a domain was looked up on and the clients that
+looked it up. Clients are stored as short hashes, at most 16 per domain, and
+a history unused for 90 days is forgotten. A domain at least 3 clients have
+looked up on at least 14 days is *established*.
+
+### Checking threat verdicts (`ai.network_evidence`)
+
+On by default. Every threat verdict is checked against that evidence:
+
+| Evidence | Effect |
+|---|---|
+| A feed lists it under a threat label | Corroborated at 99% (blocks in enforce mode at the default threshold), even over a verifier dispute |
+| Established on this network | Disputed: kept and shown, never auto-blocks |
+| A machine-generated name first seen today | Noted, +5%, never above 95% |
+
+Your exemptions and corrections still win over all of it.
+
 ## Page fetching (`ai.fetch_pages`)
 
 Off by default. When on, the server fetches the home page of each new threat
@@ -133,6 +187,26 @@ the result with the verdict. `ai.page_rule` decides what that reading may do:
 
 The page is written by the site being judged, so a site that shows a fetcher
 harmless text can game `decide`. That is why it is opt-in.
+
+Disputed threat candidates are read too, after the undisputed ones. Their
+pages are the ordinary examples the page-text model learns from.
+
+### Page-text model
+
+The text of each page read (the title and the first 4,000 characters) is kept
+in `ai.db`, at most 5,000 pages. When automatic retraining is on, a fastText
+model is trained on that text at most once per retrain interval. Only pages
+with a known label are used:
+
+- *threat*: a threat feed lists the domain;
+- *ordinary*: you marked the domain *not a threat*, or it is established.
+
+Training needs at least 20 pages of each kind. The new model is used only if
+it gets at least 70% of held-out pages right, does no worse than the phrase
+list and does no worse than the model in use. It can add a threat reading or
+raise one. It never makes a page read as ordinary and never hides a threat
+phrase, because a learned "looks harmless" would be the easiest thing for a
+site to game.
 
 The page stage gets at most 90 seconds per scan cycle. Private, loopback and
 link-local addresses are refused, and redirects are checked the same way.

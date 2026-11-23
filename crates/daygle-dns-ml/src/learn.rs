@@ -94,8 +94,10 @@ pub struct TrainingStats {
     /// Examples from the shipped starter corpus that keep known labels alive.
     pub starter: usize,
     /// Verdicts of the scanner's own left out because nothing independent
-    /// (the reference model, the page) agreed with them.
+    /// (the reference model, the page, a threat feed) agreed with them.
     pub unconfirmed: usize,
+    /// Names from the maintained threat feeds that trained a threat label.
+    pub intel: usize,
 }
 
 impl TrainingStats {
@@ -114,6 +116,9 @@ pub struct Dataset {
     /// gate refuses a candidate that reads any of them as `benign`: a
     /// negative class must not buy its accuracy with detections.
     pub threat_validation: Vec<(String, String)>,
+    /// Threat-feed names held back from training: every candidate must still
+    /// detect at least as many of them as the model in use does.
+    pub intel_validation: Vec<(String, String)>,
     pub stats: TrainingStats,
 }
 
@@ -175,6 +180,36 @@ impl Role {
     }
 }
 
+/// The fixed reference a live retrain checks the scanner's own verdicts
+/// against. It must never be the model being retrained: a reference that
+/// drifts with the model cannot stop the model's mistakes from feeding on
+/// themselves.
+#[derive(Clone, Copy)]
+pub enum Anchor<'a> {
+    /// The configured (shipped) model.
+    Model(&'a fasttext::FastText),
+    /// The built-in keyword rules: the reference when no model file is
+    /// configured. They cover fewer labels than a model, so less of the
+    /// scanner's own output trains - deliberately: a learned model that went
+    /// live on such an install used to train on its own verdicts unchecked.
+    Rules,
+}
+
+impl Anchor<'_> {
+    /// The label this reference gives `domain`, if any.
+    pub fn label(&self, domain: &str) -> Option<String> {
+        match self {
+            Anchor::Model(model) => top_label(model, domain),
+            Anchor::Rules => {
+                use crate::backend::{ClassificationInput, DomainClassifier};
+                crate::heuristic::HeuristicBackend
+                    .classify(&ClassificationInput::domain_only(domain))
+                    .map(|v| v.category)
+            }
+        }
+    }
+}
+
 /// What a retrain draws on beyond the store itself.
 #[derive(Default)]
 pub struct Sources<'a> {
@@ -186,14 +221,20 @@ pub struct Sources<'a> {
     pub known: Option<&'a HashSet<String>>,
     /// The starter corpus text; `None` uses the copy built into the binary.
     pub starter: Option<&'a str>,
-    /// The fixed reference model (the configured, shipped one). When set, a
-    /// verdict of the scanner's own only trains if this model or the page
-    /// behind the domain agrees with it, so the scanner cannot teach itself
-    /// its own mistakes.
-    pub anchor: Option<&'a fasttext::FastText>,
+    /// The fixed reference (the configured, shipped model, or the built-in
+    /// keyword rules when no model file is configured). When set, a verdict
+    /// of the scanner's own only trains if this reference or an independent
+    /// source agrees with it, so the scanner cannot teach itself its own
+    /// mistakes. `None` trains every confident verdict: for offline tools and
+    /// tests only - a live retrain always passes one.
+    pub anchor: Option<Anchor<'a>>,
     /// Independent confirmations of a label, by domain: what the page said,
     /// or the label the verifier model corroborated.
     pub confirmations: Option<&'a std::collections::HashMap<String, String>>,
+    /// The maintained threat feeds: a confirmation for the scanner's own
+    /// threat verdicts, a held-out probe for the gate and training material
+    /// for the threat labels.
+    pub intel: Option<&'a crate::intel::IntelIndex>,
 }
 
 /// [`collect_dataset`] with the extra [`Sources`] a live retrain uses.
@@ -292,6 +333,31 @@ pub fn collect_dataset_with(
     }
     stats.negatives = negatives;
 
+    // Threat-feed names: a stable one in five is held out to judge the
+    // result, the rest train. A name the operator corrected is theirs to
+    // decide, whatever a feed says.
+    // Only a model that detects threats learns threat names: the shared
+    // model leaves them to a dedicated threat model when there is one.
+    let learns_threats = match role {
+        Role::Threat => true,
+        Role::Shared => !settings.dedicated_threat_model(),
+    };
+    let (intel_training, intel_validation) = match sources.intel.filter(|_| learns_threats) {
+        Some(index) => {
+            let (training, probe) =
+                index.sample(|label| crate::intel::wanted_label(role, settings, known, label));
+            let keep = |pairs: Vec<(String, String)>| -> Vec<(String, String)> {
+                pairs
+                    .into_iter()
+                    .filter(|(_, domain)| !corrected.contains(domain))
+                    .collect()
+            };
+            (keep(training), keep(probe))
+        }
+        None => (Vec::new(), Vec::new()),
+    };
+    let intel_held: HashSet<&str> = intel_validation.iter().map(|(_, d)| d.as_str()).collect();
+
     let mut threat_validation: Vec<(String, String)> = Vec::new();
     let mut deferred_threats: Vec<(String, String)> = Vec::new();
     for (channel, label, domain) in store.confident_verdicts(
@@ -307,7 +373,11 @@ pub fn collect_dataset_with(
         let domain = domain.trim().trim_matches('.').to_ascii_lowercase();
         // A corrected domain never contributes its machine label, whether the
         // correction is training data or held-out validation.
-        if label.is_empty() || corrected.contains(&domain) || !looks_like_domain(&domain) {
+        if label.is_empty()
+            || corrected.contains(&domain)
+            || intel_held.contains(domain.as_str())
+            || !looks_like_domain(&domain)
+        {
             continue;
         }
         // Anchored self-training: the scanner's own label trains only when
@@ -315,10 +385,12 @@ pub fn collect_dataset_with(
         // what the page itself says. A label nothing else backs stays out,
         // so a systematic mistake cannot feed on itself.
         if let Some(anchor) = sources.anchor {
-            let anchored = top_label(anchor, &domain);
+            let anchored = anchor.label(&domain);
             let paged = sources.confirmations.and_then(|pages| pages.get(&domain));
+            let listed = sources.intel.and_then(|index| index.label_for(&domain));
             let confirmed = anchored.as_deref().is_some_and(|a| agrees(a, &label))
-                || paged.is_some_and(|p| agrees(p, &label));
+                || paged.is_some_and(|p| agrees(p, &label))
+                || listed.is_some_and(|l| agrees(l, &label));
             if !confirmed {
                 stats.unconfirmed += 1;
                 continue;
@@ -385,6 +457,19 @@ pub fn collect_dataset_with(
         threat_validation = spread_by_family(held_pairs, MAX_PROBE);
     }
 
+    // Threat-feed names next: after everything local, so a domain this
+    // network labelled keeps that label, and before the starter corpus, so
+    // current threat names outweigh the shipped examples.
+    for (label, domain) in intel_training {
+        if labelled.contains(&domain) {
+            continue;
+        }
+        if push(&mut pairs, &mut labels, &mut seen, &label, &domain) {
+            labelled.insert(domain);
+            stats.intel += 1;
+        }
+    }
+
     // The starter corpus last: it fills in labels the network has not
     // produced, never outweighs or contradicts local material, and never
     // re-teaches a label for a domain the operator corrected.
@@ -396,7 +481,11 @@ pub fn collect_dataset_with(
         if known.is_some_and(|known| !known.contains(&label)) {
             continue;
         }
-        if label == BENIGN_LABEL || labelled.contains(&domain) || corrected.contains(&domain) {
+        if label == BENIGN_LABEL
+            || labelled.contains(&domain)
+            || corrected.contains(&domain)
+            || intel_held.contains(domain.as_str())
+        {
             continue;
         }
         if push(&mut pairs, &mut labels, &mut seen, &label, &domain) {
@@ -411,6 +500,7 @@ pub fn collect_dataset_with(
         pairs,
         validation,
         threat_validation,
+        intel_validation,
         stats,
     })
 }
@@ -425,6 +515,7 @@ pub fn collect(
     let mut pairs = std::mem::take(&mut dataset.pairs);
     pairs.extend(dataset.validation.iter().cloned());
     pairs.extend(dataset.threat_validation.iter().cloned());
+    pairs.extend(dataset.intel_validation.iter().cloned());
     Ok((pairs, dataset.stats))
 }
 

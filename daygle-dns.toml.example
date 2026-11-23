@@ -677,6 +677,14 @@ auto_block_categories = ["malware", "phishing", "scam"]
 # page_rule = "evidence"
 # A reading below this confidence is ignored by the rule (0.05-0.99).
 # page_confidence_floor = 0.6
+# Outside evidence (docs/AI.md). threat_feeds downloads maintained malware,
+# phishing and scam domain lists (they name domains, never your traffic) and
+# uses them to confirm what retraining learns, test every candidate model and
+# corroborate threats. network_evidence checks each threat verdict against
+# them and against how this network uses the domain: a listed domain is
+# corroborated, one many clients have used for weeks is disputed.
+# threat_feeds = true
+# network_evidence = true
 block_threshold = 0.99
 confidence_floor = 0.2
 category_confidence_floor = 0.2

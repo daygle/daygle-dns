@@ -751,10 +751,13 @@ fn collapse(text: &str) -> String {
 
 /// What one page read produced: the evidence line, and the reading the
 /// configured rule may act on.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct Inspection {
     pub note: String,
     pub reading: Option<TextVerdict>,
+    /// The page's title and text, when it was read: kept for the page-text
+    /// model ([`crate::page_model`]).
+    pub page: Option<(String, String)>,
 }
 
 /// What the scanner needs from a page read: the evidence line and the reading
@@ -860,6 +863,7 @@ pub fn read_page(fetcher: &PageFetcher, domain: &str) -> Inspection {
     Inspection {
         note: note_for(&outcome, reading.as_ref()),
         reading,
+        page: outcome.ok().map(|page| (page.title, page.text)),
     }
 }
 

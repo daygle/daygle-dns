@@ -1506,6 +1506,18 @@ pub struct AiSettings {
     /// Minimum text-classifier confidence for a page reading to count toward
     /// `page_rule` (0.05-0.99).
     pub page_confidence_floor: f32,
+    /// Download the maintained public threat feeds (malware, phishing, scam
+    /// domains) and use them as labels the AI did not produce itself: to
+    /// confirm what retraining learns, to test every candidate model, and to
+    /// corroborate threat verdicts. On by default: the downloads name
+    /// domains, never this network's traffic. Honours `policy.feed_mirror`.
+    pub threat_feeds: bool,
+    /// Check threat verdicts against what is known about the domain beyond
+    /// its name: a threat feed listing it corroborates the verdict, a domain
+    /// many clients have used for weeks disputes it, and a machine-generated
+    /// name first seen today is noted. Works without the ONNX verifier, and
+    /// beside it. On by default.
+    pub network_evidence: bool,
 }
 
 impl Default for AiSettings {
@@ -1544,6 +1556,8 @@ impl Default for AiSettings {
             page_candidates_per_scan: 16,
             page_rule: PageRule::Evidence,
             page_confidence_floor: 0.6,
+            threat_feeds: true,
+            network_evidence: true,
         }
     }
 }
@@ -2552,6 +2566,10 @@ pub struct AiUpdate {
     pub page_rule: Option<PageRule>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub page_confidence_floor: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub threat_feeds: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network_evidence: Option<bool>,
 }
 
 impl AiUpdate {
@@ -2589,6 +2607,8 @@ impl AiUpdate {
             page_candidates_per_scan: Some(settings.page_candidates_per_scan),
             page_rule: Some(settings.page_rule),
             page_confidence_floor: Some(settings.page_confidence_floor),
+            threat_feeds: Some(settings.threat_feeds),
+            network_evidence: Some(settings.network_evidence),
         }
     }
 
@@ -2691,6 +2711,12 @@ impl AiUpdate {
         }
         if let Some(v) = self.page_confidence_floor {
             ai.page_confidence_floor = v.clamp(0.05, 0.99);
+        }
+        if let Some(v) = self.threat_feeds {
+            ai.threat_feeds = v;
+        }
+        if let Some(v) = self.network_evidence {
+            ai.network_evidence = v;
         }
     }
 
@@ -6070,6 +6096,8 @@ mod tests {
         ai.page_candidates_per_scan = 7;
         ai.page_rule = PageRule::Decide;
         ai.page_confidence_floor = 0.7;
+        ai.threat_feeds = !ai.threat_feeds;
+        ai.network_evidence = !ai.network_evidence;
 
         c.display = DisplaySettings {
             time_zone: s("UTC"),

@@ -3,6 +3,10 @@
   import { api, formatApiError, getStoredUser } from '../api.js';
   import { formatDate } from '../datetime.svelte.js';
   import { backendLabel, percent, titleCase } from '../aiLabels.js';
+  import ColumnPicker from '../ColumnPicker.svelte';
+  import { isHidden } from '../columns.svelte.js';
+  import AiExemptionDialog from './AiExemptionDialog.svelte';
+  import AiCorrectionDialog from './AiCorrectionDialog.svelte';
 
   const PAGE_RULE_LABELS = {
     evidence: 'Evidence only',
@@ -12,10 +16,6 @@
   function pageRuleLabel(rule) {
     return PAGE_RULE_LABELS[rule] || rule;
   }
-  import ColumnPicker from '../ColumnPicker.svelte';
-  import { isHidden } from '../columns.svelte.js';
-  import AiExemptionDialog from './AiExemptionDialog.svelte';
-  import AiCorrectionDialog from './AiCorrectionDialog.svelte';
 
   const COLUMNS = [
     { key: 'domain', label: 'Domain', locked: true },
@@ -254,7 +254,7 @@
       await api.aiOverride(domain, exempt ? 'allow' : 'clear', reason);
       notice = exempt
         ? `${domain} and its subdomains are now exempt from AI blocking.`
-        : `${domain} is no longer exempt; blocking applies again once a fresh threat qualifies.`;
+        : `${domain} is no longer exempt.`;
       await load();
     } catch (e) {
       error = formatApiError(e);
@@ -301,7 +301,7 @@
     try {
       const text = await api.aiCorrections('csv');
       saveText(text, 'text/csv;charset=utf-8', 'ai-corrections.csv');
-      notice = 'Exported every exemption, mislabelled mark and relabel as training data.';
+      notice = 'Exported your corrections.';
     } catch (e) {
       error = formatApiError(e);
     }
@@ -329,7 +329,7 @@
     try {
       await api.aiOverride(domain, 'not_threat', reason);
       if (category) await api.aiOverride(domain, 'category', '', category);
-      notice = `${domain} is marked not a threat${category ? ` and relabelled as '${titleCase(category)}'` : ''}. It no longer blocks or appears in the exported list; the detection stays visible until you restore it.`;
+      notice = `${domain} is marked not a threat${category ? ` and relabelled as ${titleCase(category)}` : ''}. It no longer blocks.`;
       await load();
     } catch (e) {
       error = formatApiError(e);
@@ -403,11 +403,9 @@
       {/if}
     </div>
     <p class="muted help" style="margin: 0 0 10px">
-      Leave the path empty to use the shared classifier, where the labels
-      below define what counts as a threat. Name a model here and the threat
-      channel detects on its own: every label it reports is a threat and blocks
-      in Enforce mode at or above the block threshold. A model change is loaded
-      at the next restart.
+      Leave empty to use the shared model with the labels you tick below.
+      Advanced: name a separate threat model, and every label it reports
+      counts as a threat. Applies after a restart.
     </p>
     <div class="grid2">
       <label>
@@ -443,6 +441,24 @@
       starts after the next restart.
     </p>
   </div>
+
+  {#if isAdmin}
+    <div class="card" style="margin-top: 14px">
+      <h3 style="margin: 0 0 8px">Labels Treated as Threats</h3>
+      <p class="muted help" style="margin: 0 0 8px">
+        The scanner is off, so type the labels instead, separated by commas.
+        They apply when it runs again.
+      </p>
+      <div class="row" style="gap: 8px; flex-wrap: wrap">
+        <input bind:value={labelsText} placeholder="malware, phishing, scam" style="flex: 1; min-width: 200px" />
+        <button onclick={() => saveThreatLabels(labelsText.split(',').map((l) => l.trim().toLowerCase()).filter(Boolean))} disabled={savingLabels}>
+          {savingLabels ? 'Saving...' : 'Save Labels'}
+        </button>
+      </div>
+      {#if labelsNotice}<p class="muted" style="color: var(--ok); margin: 8px 0 0">{labelsNotice}</p>{/if}
+      {#if labelsError}<p class="dialog-error" style="margin: 8px 0 0">{labelsError}</p>{/if}
+    </div>
+  {/if}
 {:else}
   <div class="card" style="margin-bottom: 14px">
     <div class="spread" style="margin-bottom: 8px; gap: 10px; flex-wrap: wrap">
@@ -455,19 +471,13 @@
     </div>
     {#if modelDedicated}
       <p class="muted help" style="margin: 0 0 10px">
-        A dedicated threat model is in use, so it decides what a threat is:
-        every label it reports blocks in Enforce mode once its confidence
-        reaches the block threshold and the verifier does not dispute it. The
-        list below only applies when the threat channel goes back to the shared
-        model.
+        A separate threat model is in use, so it decides what a threat is.
+        This list only applies if you go back to the shared model.
       </p>
     {:else}
       <p class="muted help" style="margin: 0 0 10px">
-        The threat channel reports a domain only when its label is ticked here.
-        In Enforce mode a reported threat is auto-blocked when its confidence is
-        at or above the block threshold and the verifier does not dispute it; a
-        label that is not ticked never blocks. Name a threat model above to let
-        that model decide instead.
+        Only ticked labels count as threats. In Enforce mode they block once
+        confident enough; unticked labels never block.
       </p>
     {/if}
     {#if labelsNotice}<p class="muted" style="color: var(--ok); margin: 0 0 8px">{labelsNotice}</p>{/if}
@@ -506,30 +516,11 @@
     {/if}
   </div>
 
-  {#if isAdmin && disabled && !modelLabels.length}
-    <div class="card" style="margin-bottom: 14px">
-      <h3 style="margin: 0 0 8px">Labels Treated as Threats</h3>
-      <p class="muted help" style="margin: 0 0 8px">
-        No model is loaded, so there are no labels to tick. Type the labels
-        the threat channel should report, separated by commas; they take
-        effect when the scanner has a model again.
-      </p>
-      <div class="row" style="gap: 8px; flex-wrap: wrap">
-        <input bind:value={labelsText} placeholder="malware, phishing, scam" style="flex: 1; min-width: 200px" />
-        <button onclick={() => saveThreatLabels(labelsText.split(',').map((l) => l.trim().toLowerCase()).filter(Boolean))} disabled={savingLabels}>
-          {savingLabels ? 'Saving...' : 'Save Labels'}
-        </button>
-      </div>
-      {#if labelsNotice}<p class="muted" style="color: var(--ok); margin: 8px 0 0">{labelsNotice}</p>{/if}
-      {#if labelsError}<p class="dialog-error" style="margin: 8px 0 0">{labelsError}</p>{/if}
-    </div>
-  {/if}
 
   <div class="card" style="margin-bottom: 14px">
     <h3 style="margin: 0 0 8px">Check a Domain</h3>
     <p class="muted help" style="margin: 0 0 10px">
-      Why is this domain blocked - or not? Both channels' verdicts, your
-      overrides, and which filtering groups block its category.
+      Enter a domain to see whether it is blocked, and why.
     </p>
     <div class="row" style="gap: 8px; flex-wrap: wrap">
       <input
@@ -558,13 +549,16 @@
           </span>
         </div>
         <ul>
-          {#each explainResult.reasons as reason (reason)}
+          {#each explainResult.reasons as reason, i (i)}
             <li>{reason}</li>
           {/each}
         </ul>
         <p class="muted small" style="margin: 0">
           {#if explainResult.threat}
-            Threat label {titleCase(explainResult.threat.category)} at {percent(explainResult.threat.confidence)}{#if explainResult.threat.over_threshold}, at or above the threshold{:else}, below the threshold{/if}{#if explainResult.threat.severity === 'disputed'}, disputed by the verifier{/if}.
+            Threat label {titleCase(explainResult.threat.category)} at {percent(explainResult.threat.confidence)}{#if explainResult.threat.over_threshold}, at or above the threshold{:else}, below the threshold{/if}{#if explainResult.threat.severity === 'disputed'}, disputed{/if}.
+            {#if explainResult.threat.evidence}
+              <span class="evidence-line">Evidence: {explainResult.threat.evidence}.</span>
+            {/if}
             {#if explainResult.page_reading}
               The page read as <strong>{titleCase(explainResult.page_reading.category)}</strong>
               at {percent(explainResult.page_reading.confidence)}{#if explainResult.page_reading.cues.length}
@@ -586,6 +580,13 @@
           {/if}
           {#if explainResult.category}
             Category {titleCase(explainResult.category.category)} at {percent(explainResult.category.confidence)}.
+          {/if}
+          {#if explainResult.sighting}
+            Looked up on {fmt(explainResult.sighting.days)} day{explainResult.sighting.days === 1 ? '' : 's'}
+            by {fmt(explainResult.sighting.clients)}{explainResult.sighting.clients >= 16 ? '+' : ''} client{explainResult.sighting.clients === 1 ? '' : 's'}{#if explainResult.sighting.established}{' '}(established on this network){/if}.
+          {/if}
+          {#if explainResult.threat_feed}
+            Listed by {explainResult.threat_feed.source} as {titleCase(explainResult.threat_feed.label)}.
           {/if}
         </p>
       </div>
@@ -659,7 +660,7 @@
               {#if r.not_threat}
                 <span class="pill ok tag" title="You marked this domain as not a threat: the detection is kept for audit but never blocks">Mislabelled</span>
               {:else if r.severity === 'disputed'}
-                <span class="pill" title="The verifier disagreed with this threat detection: the domain is never auto-blocked">Disputed</span>
+                <span class="pill" title="Disputed by the verifier or by this network's own evidence (see Evidence): the domain is never auto-blocked">Disputed</span>
               {:else if r.blocked}
                 <span class="pill err" title="In the current block snapshot: auto-blocked in enforce mode">Auto-Blocked</span>
               {:else if r.category_blocked}
@@ -703,8 +704,7 @@
         {#if search.trim() || categoryFilter.trim() || severityFilter || exemptionFilter}
           No threats match these filters.
         {:else}
-          No threats yet - benign lookups never appear here; entries
-          show up when the scanner classifies a domain badly enough to matter.
+          No threats found yet. Ordinary sites never appear here.
         {/if}
       </p>
     {/if}
@@ -745,6 +745,7 @@
   .explain ul { margin: 8px 0; padding-left: 18px; font-size: 0.85rem; }
   .explain li { margin: 2px 0; }
   .explain .small { font-size: 0.78rem; }
+  .evidence-line { display: block; margin: 2px 0; word-break: break-word; }
   .warn { color: var(--danger); font-size: 0.85rem; margin: 0 0 8px; }
   .labels { display: flex; flex-wrap: wrap; gap: 6px 18px; }
   .check { display: flex; align-items: center; gap: 6px; font-size: 0.85rem; }

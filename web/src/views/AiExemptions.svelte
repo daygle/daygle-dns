@@ -9,6 +9,7 @@
   let notice = $state(null);
   let search = $state('');
   let reasonFilter = $state('');
+  let disabled = $state(false); // true when the scanner is off (404)
 
   const isAdmin = getStoredUser()?.role !== 'viewer';
   const filtered = $derived.by(() => {
@@ -27,21 +28,24 @@
     error = null;
     try {
       rows = (await api.aiOverrides())?.overrides || [];
+      disabled = false;
     } catch (e) {
       rows = [];
-      if (e.status !== 404) error = formatApiError(e);
+      // 404 means the scanner is off: an empty state, not a failure.
+      disabled = e.status === 404;
+      if (!disabled) error = formatApiError(e);
     } finally {
       loading = false;
     }
   }
 
   async function removeExemption(domain) {
-    if (!confirm(`Remove the AI exemption for ${domain}? The AI may block it and its subdomains again if a future threat qualifies.`)) return;
+    if (!confirm(`Remove the exemption for ${domain}? The AI may block it again.`)) return;
     notice = null;
     error = null;
     try {
       await api.aiOverride(domain, 'clear');
-      notice = `${domain} is no longer exempt; blocking applies again once a fresh threat qualifies.`;
+      notice = `${domain} is no longer exempt.`;
       await load();
     } catch (e) {
       error = formatApiError(e);
@@ -77,10 +81,15 @@
     </div>
   </div>
   <p class="muted" style="margin: 0 0 12px">
-    Exemptions prevent AI blocking for the listed domain and its subdomains. Remove one to let future qualifying threats block again.
+    The AI never blocks these domains or their subdomains.
   </p>
   {#if loading}
     <p class="muted">Loading...</p>
+  {:else if disabled}
+    <p class="muted" style="margin-bottom: 0">
+      The AI scanner is off, so there are no exemptions to show. Turn it on in
+      the Settings tab; it starts after the next restart.
+    </p>
   {:else if rows.length === 0}
     <p class="muted" style="margin-bottom: 0">No domains are exempt from AI blocking.</p>
   {:else if filtered.length === 0}

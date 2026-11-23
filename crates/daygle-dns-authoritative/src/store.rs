@@ -4277,6 +4277,44 @@ impl ZoneStore {
         Ok(names)
     }
 
+    /// [`Self::distinct_recent_query_names`] with the distinct clients that
+    /// looked each name up (at most `MAX_CLIENTS` each): the AI keeps how
+    /// widely a domain is used as evidence beside its name.
+    pub fn recent_query_name_clients(
+        &self,
+        since_epoch: i64,
+        limit: u32,
+    ) -> Result<Vec<(String, Vec<String>)>> {
+        const MAX_CLIENTS: usize = 16;
+        let cutoff = chrono::DateTime::<Utc>::from_timestamp(since_epoch, 0)
+            .unwrap_or(chrono::DateTime::<Utc>::UNIX_EPOCH)
+            .to_rfc3339();
+        let conn = self.lock_conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT qname, GROUP_CONCAT(DISTINCT client) FROM query_logs
+             WHERE ts >= ?1
+             GROUP BY qname
+             ORDER BY MAX(ts) DESC
+             LIMIT ?2",
+        )?;
+        let names = stmt
+            .query_map(params![cutoff, limit as i64], |r| {
+                let clients: Option<String> = r.get(1)?;
+                Ok((
+                    r.get::<_, String>(0)?,
+                    clients
+                        .unwrap_or_default()
+                        .split(',')
+                        .filter(|c| !c.is_empty())
+                        .take(MAX_CLIENTS)
+                        .map(str::to_string)
+                        .collect(),
+                ))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(names)
+    }
+
     /// Enforce the retention cap by deleting rows beyond the newest `max`
     /// (0 disables the cap). Called opportunistically by the log writer.
     pub fn trim_query_logs(&self, max: usize) -> Result<usize> {

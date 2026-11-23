@@ -40,11 +40,14 @@
 
 pub mod backend;
 pub mod channel;
+pub mod evidence;
 pub mod fasttext_backend;
 pub mod heuristic;
+pub mod intel;
 pub mod learn;
 pub mod maintain;
 pub mod page;
+pub mod page_model;
 pub mod plugin;
 #[cfg(feature = "verifier-onnx")]
 pub mod reference;
@@ -128,6 +131,10 @@ pub struct AiEngine {
     maintenance: Arc<maintain::Maintenance>,
     /// Rebuilds the threat channel (live model, current verifier settings).
     reload_threat: Arc<ReloadThreat>,
+    /// The maintained threat feeds.
+    intel: Arc<intel::Intel>,
+    /// The page-text model the maintenance step keeps trained.
+    page_model: Arc<page_model::PageModel>,
 }
 
 impl AiEngine {
@@ -147,6 +154,18 @@ impl AiEngine {
         // channel's category list, so editing `auto_block_categories` takes
         // effect without a restart.
         let settings_swap = Arc::new(ArcSwap::from_pointee(settings.clone()));
+        // Outside evidence: the threat feeds (the last good download, until
+        // the refresh loop fetches newer) and how this network uses each
+        // domain.
+        let intel = intel::Intel::new(store.clone(), settings_swap.clone(), logs.clone());
+        let network =
+            evidence::NetworkEvidence::new(store.clone(), intel.clone(), settings_swap.clone());
+        let page_model = page_model::PageModel::new(
+            database_path.with_file_name(page_model::PAGE_MODEL_FILE),
+            store.clone(),
+            network.clone(),
+            logs.clone(),
+        );
 
         // A model the scanner retrained for itself wins over the configured
         // one while it is the newer artifact and loads; a model the operator
@@ -212,6 +231,7 @@ impl AiEngine {
             &settings_swap,
             &logs,
             &learned_reference,
+            &network,
         )?;
 
         // The channels sit behind reloadable handles, so a new model goes
@@ -253,6 +273,8 @@ impl AiEngine {
             },
             threat_learned,
         );
+        shared.retrainer.set_evidence(network.clone());
+        threat.retrainer.set_evidence(network.clone());
 
         // The live threat model, whichever role holds it: what a reload of
         // the threat channel (a new verifier reference) loads again.
@@ -280,6 +302,7 @@ impl AiEngine {
             let active = shared.active.clone();
             let learned = learned_shared.clone();
             let reference = learned_reference.clone();
+            let network = network.clone();
             Box::new(move |path: &Path| {
                 let current = settings.load_full();
                 let file = path.to_string_lossy().into_owned();
@@ -289,7 +312,9 @@ impl AiEngine {
                     .then(|| content_channel(&file, &logs))
                     .transpose()?;
                 let threat = (!current.dedicated_threat_model())
-                    .then(|| threat_channel(&file, &current, &settings, &logs, &reference))
+                    .then(|| {
+                        threat_channel(&file, &current, &settings, &logs, &reference, &network)
+                    })
                     .transpose()?;
                 if let Some(content) = content {
                     content_swap.replace(content);
@@ -311,10 +336,12 @@ impl AiEngine {
             let active = threat.active.clone();
             let learned = learned_threat.clone();
             let reference = learned_reference.clone();
+            let network = network.clone();
             Box::new(move |path: &Path| {
                 let current = settings.load_full();
                 let file = path.to_string_lossy().into_owned();
-                let channel = threat_channel(&file, &current, &settings, &logs, &reference)?;
+                let channel =
+                    threat_channel(&file, &current, &settings, &logs, &reference, &network)?;
                 threat_swap.replace(channel);
                 announce(&logs, path == learned, "threat model", &file);
                 model.store(Arc::new(file));
@@ -331,10 +358,17 @@ impl AiEngine {
             let logs = logs.clone();
             let threat_swap = threat_swap.clone();
             let reference = learned_reference.clone();
+            let network = network.clone();
             Arc::new(move || {
                 let current = settings.load_full();
-                let channel =
-                    threat_channel(&live_threat_model(), &current, &settings, &logs, &reference)?;
+                let channel = threat_channel(
+                    &live_threat_model(),
+                    &current,
+                    &settings,
+                    &logs,
+                    &reference,
+                    &network,
+                )?;
                 threat_swap.replace(channel);
                 Ok(())
             })
@@ -348,8 +382,10 @@ impl AiEngine {
             let logs = logs.clone();
             let reference = learned_reference.clone();
             let reload = reload_threat.clone();
+            let page_model = page_model.clone();
             Box::new(move || {
                 let current = settings.load_full();
+                page_model.maybe_retrain(&current);
                 if !refresh_verifier_reference(&store, &current, &reference, &logs) {
                     return;
                 }
@@ -378,6 +414,7 @@ impl AiEngine {
             logs,
         );
         scanner.set_maintenance(maintenance.clone());
+        scanner.set_page_model(page_model.clone());
 
         let plugin = plugin::AiBlockPlugin::new(
             snapshot.clone(),
@@ -397,7 +434,34 @@ impl AiEngine {
             threat,
             maintenance,
             reload_threat,
+            intel,
+            page_model,
         }))
+    }
+
+    /// Keep the threat feeds downloaded and fresh until `shutdown`. `mirror`
+    /// gives `policy.feed_mirror` (a base URL, or empty).
+    pub async fn run_threat_feeds(
+        &self,
+        mirror: impl Fn() -> String + Send + 'static,
+        shutdown: CancellationToken,
+    ) {
+        self.intel.clone().run(mirror, shutdown).await;
+    }
+
+    /// The threat feed listing `domain` (as the AI uses the feeds now).
+    pub fn threat_feed_for(&self, domain: &str) -> Option<&'static intel::IntelFeed> {
+        self.intel.index().feed_for(domain)
+    }
+
+    /// Each threat feed with its download state, for the status API.
+    pub fn intel_status(&self) -> Vec<serde_json::Value> {
+        self.intel.status()
+    }
+
+    /// The page-text model's state, for the status API.
+    pub fn page_model_status(&self) -> serde_json::Value {
+        self.page_model.status()
     }
 
     /// The plugin to install into the policy engine.
@@ -541,6 +605,11 @@ impl AiEngine {
         let mut restart = needs_restart(&old, new);
         let verifier_changed = verifier_changed(&old, new);
         self.settings.store(Arc::new(new.clone()));
+        // The outside evidence was switched: the threat verdicts it touches
+        // are re-checked on the next scan rather than at their expiry.
+        if old.threat_feeds != new.threat_feeds || old.network_evidence != new.network_evidence {
+            self.intel.recheck_evidence();
+        }
         if verifier_changed && !restart {
             if let Err(e) = (self.reload_threat)() {
                 tracing::warn!(error = %e, "could not reload the threat channel for the verifier");
@@ -743,6 +812,7 @@ fn threat_channel(
     settings_swap: &Arc<ArcSwap<AiSettings>>,
     logs: &Arc<LogStore>,
     learned_reference: &Path,
+    network: &Arc<evidence::NetworkEvidence>,
 ) -> Result<Box<dyn DomainClassifier + Send + Sync>> {
     let threat: Box<dyn DomainClassifier + Send + Sync> =
         Box::new(channel::ChannelBackend::threat(
@@ -755,7 +825,13 @@ fn threat_channel(
     // AI subsystem.
     #[cfg(feature = "verifier-onnx")]
     let threat = wrap_verifier(threat, settings, logs, learned_reference);
-    Ok(threat)
+    // Network evidence sits outside the verifier: a feed listing outranks a
+    // MiniLM dispute, and it is the second opinion an install without ONNX
+    // has. It reads `ai.network_evidence` live, so it is always in place.
+    Ok(Box::new(evidence::EvidenceBackend::new(
+        threat,
+        network.clone(),
+    )))
 }
 
 /// Whether a learned model should be preferred over the configured one: it

@@ -1544,6 +1544,15 @@ pub async fn ai_status(State(state): State<AppState>) -> Response {
         "page_candidates_per_scan": settings.page_candidates_per_scan,
         "page_rule": settings.page_rule,
         "page_confidence_floor": settings.page_confidence_floor,
+        // Outside evidence: the threat feeds (and each one's download state)
+        // and whether verdicts are checked against them and this network's
+        // own usage.
+        "threat_feeds": settings.threat_feeds,
+        "threat_feed_status": ai.intel_status(),
+        "network_evidence": settings.network_evidence,
+        "established_days": daygle_dns_ml::store::ESTABLISHED_DAYS,
+        "established_clients": daygle_dns_ml::store::ESTABLISHED_CLIENTS,
+        "page_model": ai.page_model_status(),
         // Each maintained model: its learned file, whether it is live, the
         // candidate on trial and the trial history.
         "learned_model": ai.maintained_status(daygle_dns_ml::learn::Role::Shared),
@@ -1968,6 +1977,18 @@ fn suffix_entry<'a, T>(
 /// `GET /api/ai/explain?domain=` - why a domain is blocked, or why it is not:
 /// both channels' verdicts, the operator's overrides, the category blocking
 /// applies to and the groups that block it, with plain-language reasons.
+/// A confidence as the console shows it: one decimal only when it has one
+/// (0.995 -> "99.5", 0.99 -> "99"), so an explanation never rounds a 99.5%
+/// detection up to "100%" beside a table that says 99.5%.
+fn explain_pct(value: f32) -> String {
+    let pct = (f64::from(value) * 1000.0).round() / 10.0;
+    if pct.fract() == 0.0 {
+        format!("{pct:.0}")
+    } else {
+        format!("{pct:.1}")
+    }
+}
+
 pub async fn ai_explain(
     State(state): State<AppState>,
     Query(query): Query<AiExplainQuery>,
@@ -2011,6 +2032,10 @@ pub async fn ai_explain(
             let relabel = ai.store.category_overrides()?.remove(&domain);
             let page_reading = ai.store.page_reading(&domain)?;
             let page_adjustment = ai.store.page_adjustment(&domain)?;
+            // What the AI knows beyond the name: how this network uses the
+            // domain, and whether a threat feed lists it.
+            let sighting = ai.store.sighting(&domain)?;
+            let threat_feed = ai.threat_feed_for(&domain);
             let blocks = ai.snapshot().load();
             let categories = ai.category_snapshot();
             let categories = categories.load();
@@ -2088,17 +2113,31 @@ pub async fn ai_explain(
                 }
             }
             match threat {
-                Some(t) if t.severity == "disputed" => reasons.push(format!(
-                    "The verifier disputed this detection at {:.0}%, so it never blocks.",
-                    t.confidence * 100.0
-                )),
+                Some(t) if t.severity == "disputed" => reasons.push(
+                    if t.evidence.contains("established on this network") {
+                        format!(
+                            "This network has used it for weeks, so the detection at {}% was disputed and never blocks.",
+                            explain_pct(t.confidence)
+                        )
+                    } else if t.evidence.contains("but its registered domain") {
+                        format!(
+                            "Its registered domain reads as an ordinary site, so the name-only detection at {}% was disputed and never blocks.",
+                            explain_pct(t.confidence)
+                        )
+                    } else {
+                        format!(
+                            "The verifier disputed this detection at {}%, so it never blocks.",
+                            explain_pct(t.confidence)
+                        )
+                    },
+                ),
                 Some(t) => {
                     if override_row.is_none() && parent_allow.is_none() && blocked_category.is_none() {
                         if t.confidence < settings.block_threshold {
                             reasons.push(format!(
-                                "Its threat confidence, {:.0}%, is below the {:.0}% block threshold.",
-                                t.confidence * 100.0,
-                                settings.block_threshold * 100.0
+                                "Its threat confidence, {}%, is below the {}% block threshold.",
+                                explain_pct(t.confidence),
+                                explain_pct(settings.block_threshold)
                             ));
                         }
                         if !settings.dedicated_threat_model()
@@ -2125,6 +2164,14 @@ pub async fn ai_explain(
                 // own, and saying "no threat verdict yet" would contradict the
                 // reason above.
                 None => {}
+            }
+            if let (Some(feed), Some(t)) = (threat_feed, threat) {
+                if t.evidence.contains("listed by") {
+                    reasons.push(format!(
+                        "{} lists it as {}, which confirmed the detection.",
+                        feed.source, feed.label
+                    ));
+                }
             }
             if !blocking_groups.is_empty() {
                 reasons.push(format!(
@@ -2190,6 +2237,18 @@ pub async fn ai_explain(
                     "expires_at": stamp(c.expires_at),
                 })),
                 "category_blocking_groups": blocking_groups,
+                "sighting": sighting.as_ref().map(|s| serde_json::json!({
+                    "days": s.days,
+                    "clients": s.clients,
+                    "established": s.established(),
+                    "first_seen": stamp(s.first_seen),
+                    "last_seen": stamp(s.last_seen),
+                })),
+                "threat_feed": threat_feed.map(|f| serde_json::json!({
+                    "id": f.id,
+                    "label": f.label,
+                    "source": f.source,
+                })),
                 "reasons": reasons,
             }))
         }
@@ -6689,6 +6748,11 @@ pub struct AiUpdate {
     pub page_candidates_per_scan: Option<u32>,
     pub page_rule: Option<daygle_dns_core::config::PageRule>,
     pub page_confidence_floor: Option<f32>,
+    /// Download the maintained threat feeds and use them as labels.
+    pub threat_feeds: Option<bool>,
+    /// Check threat verdicts against threat feeds and how this network uses
+    /// the domain.
+    pub network_evidence: Option<bool>,
 }
 
 /// listener-relevant `[server]` fields apply live; the rest are restarts.
@@ -7677,6 +7741,12 @@ pub async fn update_settings(
         }
         if let Some(v) = a.page_confidence_floor {
             config.ai.page_confidence_floor = v.clamp(0.05, 0.99);
+        }
+        if let Some(v) = a.threat_feeds {
+            config.ai.threat_feeds = v;
+        }
+        if let Some(v) = a.network_evidence {
+            config.ai.network_evidence = v;
         }
     }
 
