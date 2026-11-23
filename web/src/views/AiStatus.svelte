@@ -163,127 +163,104 @@
     return status?.status_counts?.[key] ?? 0;
   }
 
-  async function setAutoRetrain(value) {
+  // One switch saves at a time: a second click while a save is in flight
+  // would race it (and the last response would not necessarily win).
+  let switching = $state(false);
+
+  // Save one switch, say what it now does, and put the page back the way
+  // the server has it if the save fails.
+  async function saveSwitch(body, apply, message) {
+    if (switching) return;
+    switching = true;
+    notice = null;
+    error = null;
     try {
-      await api.updateSettings({ ai: { auto_retrain: value } });
-      status = { ...status, auto_retrain: value };
-      notice = value
-        ? 'Automatic retraining is on: the scanner will rebuild its model from its own verdicts and your corrections.'
-        : 'Automatic retraining is off; the current model stays as it is.';
+      await api.updateSettings(body);
+      if (apply) status = { ...status, ...apply };
+      notice = message;
+      if (!apply) await load(true);
     } catch (e) {
       error = formatApiError(e);
       await load(true);
+    } finally {
+      switching = false;
     }
   }
 
-  async function setVerifier(value) {
-    try {
-      await api.updateSettings({ ai: { verifier_enabled: value } });
-      notice = value
+  // The switches that are plain `ai` settings, with what each one now does.
+  const SWITCHES = {
+    auto_retrain: [
+      'Automatic retraining is on: the scanner will rebuild its model from its own confirmed verdicts, the threat feeds and your corrections.',
+      'Automatic retraining is off; the current model stays as it is.',
+    ],
+    trial_new_models: [
+      'Scheduled retrains now run in the shadow of the live model and replace it only if they do at least as well.',
+      'Scheduled retrains now go live straight away; restore the previous model by hand if needed.',
+    ],
+    threat_feeds: [
+      'The threat feeds will be downloaded and used to confirm what the AI learns, test every new model and corroborate threats.',
+      'The threat feeds are no longer used; the AI relies on its own models, your corrections and the page.',
+    ],
+    network_evidence: [
+      'Threat verdicts are now checked against the threat feeds and how this network uses each domain.',
+      'Threat verdicts rely on the classifiers (and the verifier, if on) alone.',
+    ],
+    learn_negatives: [
+      '"Not a threat" corrections will train a benign label. If the model starts missing threats, turn this off and restore the previous model.',
+      '"Not a threat" corrections are no longer used as training data; they still stop a block.',
+    ],
+    fetch_pages: [
+      'Page reading is on: new threat candidates will have their home page fetched from this server and its text recorded with the verdict.',
+      'Page reading is off; threat verdicts keep the name-only evidence they already have.',
+    ],
+  };
+
+  function setSwitch(key, value) {
+    const [on, off] = SWITCHES[key];
+    return saveSwitch({ ai: { [key]: value } }, { [key]: value }, value ? on : off);
+  }
+
+  function setVerifier(value) {
+    // The verifier's file and the threat channel change on the server, so
+    // the page reloads what it reports instead of guessing.
+    return saveSwitch(
+      { ai: { verifier_enabled: value } },
+      null,
+      value
         ? 'The verifier now second-checks every threat: a confident disagreement disputes it, and its agreement lets the AI learn from that verdict.'
-        : 'The verifier is off; threats rely on the primary classifier alone.';
-      await load(true);
-    } catch (e) {
-      error = formatApiError(e);
-      await load(true);
-    }
-  }
-
-  async function setTrialNewModels(value) {
-    try {
-      await api.updateSettings({ ai: { trial_new_models: value } });
-      status = { ...status, trial_new_models: value };
-      notice = value
-        ? 'Scheduled retrains now run in the shadow of the live model and replace it only if they do at least as well.'
-        : 'Scheduled retrains now go live straight away; restore the previous model by hand if needed.';
-    } catch (e) {
-      error = formatApiError(e);
-      await load(true);
-    }
+        : 'The verifier is off; threats rely on the primary classifier and the network evidence.',
+    );
   }
 
   // `[updates]` is replaced as a unit by the API, so the whole section is
   // read and sent back with the one field changed.
   async function setAutoRefreshModels(value) {
+    let updates;
     try {
-      const updates = (await api.config()).updates || {};
-      await api.updateSettings({ updates: { ...updates, auto_refresh_models: value } });
-      status = { ...status, auto_refresh_models: value };
-      notice = value
+      updates = (await api.config()).updates || {};
+    } catch (e) {
+      error = formatApiError(e);
+      return;
+    }
+    return saveSwitch(
+      { updates: { ...updates, auto_refresh_models: value } },
+      { auto_refresh_models: value },
+      value
         ? 'New shipped models will be installed automatically, checked against held-out threats and restored if they do worse.'
-        : 'Shipped models are updated only when you choose to.';
-    } catch (e) {
-      error = formatApiError(e);
-      await load(true);
-    }
+        : 'Shipped models are updated only when you choose to.',
+    );
   }
 
-  async function setThreatFeeds(value) {
-    try {
-      await api.updateSettings({ ai: { threat_feeds: value } });
-      status = { ...status, threat_feeds: value };
-      notice = value
-        ? 'The threat feeds will be downloaded and used to confirm what the AI learns, test every new model and corroborate threats.'
-        : 'The threat feeds are no longer used; the AI relies on its own models, your corrections and the page.';
-    } catch (e) {
-      error = formatApiError(e);
-      await load(true);
-    }
-  }
-
-  async function setNetworkEvidence(value) {
-    try {
-      await api.updateSettings({ ai: { network_evidence: value } });
-      status = { ...status, network_evidence: value };
-      notice = value
-        ? 'Threat verdicts are now checked against the threat feeds and how this network uses each domain.'
-        : 'Threat verdicts rely on the classifiers (and the verifier, if on) alone.';
-    } catch (e) {
-      error = formatApiError(e);
-      await load(true);
-    }
-  }
-
-  async function setLearnNegatives(value) {
-    try {
-      await api.updateSettings({ ai: { learn_negatives: value } });
-      status = { ...status, learn_negatives: value };
-      notice = value
-        ? '\"Not a threat\" corrections will train a benign label. If the model starts missing threats, turn this off and restore the previous model.'
-        : '\"Not a threat\" corrections are no longer used as training data; they still stop a block.';
-    } catch (e) {
-      error = formatApiError(e);
-      await load(true);
-    }
-  }
-
-  async function setFetchPages(value) {
-    try {
-      await api.updateSettings({ ai: { fetch_pages: value } });
-      status = { ...status, fetch_pages: value };
-      notice = value
-        ? 'Page reading is on: new threat candidates will have their home page fetched from this server and its text recorded with the verdict.'
-        : 'Page reading is off; threat verdicts keep the name-only evidence they already have.';
-    } catch (e) {
-      error = formatApiError(e);
-      await load(true);
-    }
-  }
-
-  async function setPageRule(value) {
-    try {
-      await api.updateSettings({ ai: { page_rule: value } });
-      status = { ...status, page_rule: value };
-      notice =
-        value === 'decide'
-          ? 'Page readings can now raise or cap a threat confidence, so a page that reads as ordinary can stop a name-only block. A site writes its own page, so this can be gamed.'
-          : value === 'corroborate'
-            ? 'Page readings can now raise a threat confidence, never lower it.'
-            : 'Page readings are recorded as evidence only; verdicts are unchanged.';
-    } catch (e) {
-      error = formatApiError(e);
-      await load(true);
-    }
+  function setPageRule(value) {
+    return saveSwitch(
+      { ai: { page_rule: value } },
+      { page_rule: value },
+      value === 'decide'
+        ? 'Page readings can now raise or cap a threat confidence, so a page that reads as ordinary can stop a name-only block. A site writes its own page, so this can be gamed.'
+        : value === 'corroborate'
+          ? 'Page readings can now raise a threat confidence, never lower it.'
+          : 'Page readings are recorded as evidence only; verdicts are unchanged.',
+    );
   }
 
   async function rollbackModel(model = 'shared') {
@@ -310,10 +287,11 @@
       const negatives = result.negatives
         ? `, ${fmt(result.negatives)} from "not a threat" marks`
         : '';
+      const intel = result.intel ? `, ${fmt(result.intel)} from the threat feeds` : '';
       const unconfirmed = result.unconfirmed
         ? ` ${fmt(result.unconfirmed)} of its own verdicts were left out because nothing independent confirmed them.`
         : '';
-      notice = `Retrained from ${fmt(result.examples)} examples across ${fmt(result.labels)} labels (${fmt(result.corrections)} from your corrections${negatives}).${unconfirmed} ${result.message || 'The new model is in use now.'}`;
+      notice = `Retrained from ${fmt(result.examples)} examples across ${fmt(result.labels)} labels (${fmt(result.corrections)} from your corrections${negatives}${intel}).${unconfirmed} ${result.message || 'The new model is in use now.'}`;
       await load(true);
     } catch (e) {
       error = formatApiError(e);
@@ -338,6 +316,14 @@
   );
   // Turned off in Settings while running: nothing is classified or blocked.
   const switchedOff = $derived(status?.enabled === false);
+  // A threat feed listing corroborates a verdict at blocking confidence, so
+  // with feeds downloaded and evidence on, even the heuristic rules can block
+  // a listed domain they flagged.
+  const feedsCanBlock = $derived(
+    !!status?.network_evidence &&
+      !!status?.threat_feeds &&
+      (status?.threat_feed_status || []).some((f) => f.entries > 0),
+  );
 
   load();
   loadModels();
@@ -377,12 +363,21 @@
       It is not classifying domains or blocking any. The classifications and
       threats below are from before; turn it back on in the Settings tab.
     </div>
-  {:else if enforcing && heuristicOnly}
+  {:else if enforcing && heuristicOnly && !feedsCanBlock}
     <div class="card warn" style="margin-bottom: 14px">
       <strong>Nothing can be auto-blocked yet.</strong>
       Enforce mode is on, but the scanner is using its built-in heuristic
-      rules, whose detections never reach the block threshold. Set a trained
-      model (see AI Models below) to auto-block.
+      rules, whose detections never reach the block threshold on their own.
+      Install a trained model (see AI Models below), or turn on the threat
+      feeds and evidence checks (Outside Evidence below) so a detection a
+      feed confirms can block.
+    </div>
+  {:else if enforcing && heuristicOnly}
+    <div class="card warn" style="margin-bottom: 14px">
+      <strong>Only feed-confirmed threats can be auto-blocked.</strong>
+      The scanner is using its built-in heuristic rules, so a detection blocks
+      only when a threat feed lists the domain. Install a trained model (see
+      AI Models below) to block more.
     </div>
   {/if}
 
@@ -484,14 +479,10 @@
       </div>
       <p class="muted small" style="margin: 0 0 10px">
         {#if status.threat_model_dedicated}
-          Detected threats at or above the block threshold, minus exempt
-          domains and threats the verifier disputed
-        {:else}
-          Detected threats whose label is treated as a threat and whose
-          confidence is at or above the block threshold, minus exempt domains
-          and threats the verifier disputed
-        {/if}
-        {enforcing && !switchedOff ? '.' : ': what Enforce mode would block.'}
+          Detected threats at or above the block threshold, minus exempt and
+          disputed domains{:else}Detected threats whose label is treated as a
+          threat and whose confidence is at or above the block threshold, minus
+          exempt and disputed domains{/if}{enforcing && !switchedOff ? '.' : ': what Enforce mode would block.'}
       </p>
       {#if blockable.length}
         <table>
@@ -522,7 +513,8 @@
             type="checkbox"
             style="width: auto"
             checked={!!status.auto_retrain}
-            onchange={(event) => setAutoRetrain(event.currentTarget.checked)}
+            onchange={(event) => setSwitch('auto_retrain', event.currentTarget.checked)}
+            disabled={switching}
           />
           <span>Retrain Automatically</span>
         </label>
@@ -531,7 +523,8 @@
             type="checkbox"
             style="width: auto"
             checked={!!status.learn_negatives}
-            onchange={(event) => setLearnNegatives(event.currentTarget.checked)}
+            onchange={(event) => setSwitch('learn_negatives', event.currentTarget.checked)}
+            disabled={switching}
           />
           <span>Learn "Not a Threat"</span>
         </label>
@@ -540,7 +533,8 @@
             type="checkbox"
             style="width: auto"
             checked={!!status.trial_new_models}
-            onchange={(event) => setTrialNewModels(event.currentTarget.checked)}
+            onchange={(event) => setSwitch('trial_new_models', event.currentTarget.checked)}
+            disabled={switching}
           />
           <span>Trial New Models First</span>
         </label>
@@ -551,6 +545,7 @@
               style="width: auto"
               checked={!!status.verifier_enabled}
               onchange={(event) => setVerifier(event.currentTarget.checked)}
+              disabled={switching}
             />
             <span>Second Opinion (Verifier)</span>
           </label>
@@ -561,12 +556,21 @@
             style="width: auto"
             checked={!!status.auto_refresh_models}
             onchange={(event) => setAutoRefreshModels(event.currentTarget.checked)}
+            disabled={switching}
           />
           <span>Install New Shipped Models</span>
         </label>
       {/if}
     </div>
-    <p class="muted help" style="margin: 0 0 10px">
+    <p class="muted help" style="margin: 0 0 6px">
+      The scanner keeps its own model current: it retrains from your
+      corrections, the threat feeds and the verdicts something independent
+      confirmed, and a new model replaces the live one only after it proves
+      at least as good.
+    </p>
+    <details class="how" style="margin: 0 0 10px">
+      <summary class="muted">How retraining stays safe</summary>
+      <p class="muted help" style="margin: 6px 0 0">
       The scanner rebuilds its classifier from what it has learned: your
       category corrections and mislabelled marks on AI → Threats, plus its own
       verdicts - but only those the shipped reference model (or, with no
@@ -592,7 +596,8 @@
       the updater, which checks them against held-out threats too. With Learn
       "Not a Threat" on, your not-a-threat marks become a benign label - a
       negative class can over-generalise, which the trial checks for.
-    </p>
+      </p>
+    </details>
     {@render maintained('Shared Classifier', status.learned_model, 'shared')}
     {#if status.learned_threat_model}
       {@render maintained('Threat Model', status.learned_threat_model, 'threat')}
@@ -669,7 +674,8 @@
             type="checkbox"
             style="width: auto"
             checked={!!status.threat_feeds}
-            onchange={(event) => setThreatFeeds(event.currentTarget.checked)}
+            onchange={(event) => setSwitch('threat_feeds', event.currentTarget.checked)}
+            disabled={switching}
           />
           <span>Use Threat Feeds</span>
         </label>
@@ -678,13 +684,20 @@
             type="checkbox"
             style="width: auto"
             checked={!!status.network_evidence}
-            onchange={(event) => setNetworkEvidence(event.currentTarget.checked)}
+            onchange={(event) => setSwitch('network_evidence', event.currentTarget.checked)}
+            disabled={switching}
           />
           <span>Check Threats Against Evidence</span>
         </label>
       {/if}
     </div>
-    <p class="muted help" style="margin: 0 0 10px">
+    <p class="muted help" style="margin: 0 0 6px">
+      Evidence about a domain beyond its name, so the AI does not only check
+      itself against a copy of itself. Works without the ONNX verifier.
+    </p>
+    <details class="how" style="margin: 0 0 10px">
+      <summary class="muted">What these switches do</summary>
+      <p class="muted help" style="margin: 6px 0 0">
       What the AI knows about a domain beyond its name, so it does not only
       check itself against a copy of itself - this works without the ONNX
       verifier. Use Threat Feeds downloads maintained public lists of malware,
@@ -696,7 +709,8 @@
       clients have used on {fmt(status.established_days ?? 14)}+ days is
       disputed and never blocks on its name, and a machine-generated name
       first seen today is noted. Your exemptions and corrections still win.
-    </p>
+      </p>
+    </details>
     {#if status.threat_feed_status?.length}
       <table>
         <thead>
@@ -728,7 +742,8 @@
             type="checkbox"
             style="width: auto"
             checked={!!status.fetch_pages}
-            onchange={(event) => setFetchPages(event.currentTarget.checked)}
+            onchange={(event) => setSwitch('fetch_pages', event.currentTarget.checked)}
+            disabled={switching}
           />
           <span>Read Pages for Threats</span>
         </label>
@@ -737,6 +752,7 @@
           <select
             value={status.page_rule || 'evidence'}
             onchange={(event) => setPageRule(event.currentTarget.value)}
+            disabled={switching}
           >
             <option value="evidence">Evidence only</option>
             <option value="corroborate">Corroborate</option>
@@ -745,7 +761,14 @@
         </label>
       {/if}
     </div>
-    <p class="muted help" style="margin: 0 0 10px">
+    <p class="muted help" style="margin: 0 0 6px">
+      When a domain is flagged as a threat, read its home page and record what
+      it says with the verdict (visible in Check a Domain). Off unless you
+      turn it on, because the fetch leaves this server.
+    </p>
+    <details class="how" style="margin: 0 0 10px">
+      <summary class="muted">How the reading rule works</summary>
+      <p class="muted help" style="margin: 6px 0 0">
       When a domain is flagged as a threat, ask the site itself what it says:
       its home page is fetched from this server, its title and text read, and a
       one-line note added to the verdict's evidence (visible in Check a Domain).
@@ -765,7 +788,8 @@
       feed lists and pages of domains known to be ordinary; it is used only
       while it beats the built-in phrase list on pages held out of its
       training, and it can add or strengthen a threat reading, never hide one.
-    </p>
+      </p>
+    </details>
     {#if status.page_model?.last}
       <p class="muted" style="margin: 0; font-size: 0.85rem">
         Page-text model {status.page_model.active ? 'in use' : 'not in use'}:
@@ -850,4 +874,5 @@
   }
   .warn { border-color: var(--warn); }
   .small { font-size: 0.85rem; }
+  .how summary { cursor: pointer; font-size: 0.85rem; }
 </style>

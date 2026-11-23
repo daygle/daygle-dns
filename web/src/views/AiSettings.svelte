@@ -73,10 +73,36 @@
     load();
   }
 
+  // What the server would refuse, said in the form's own units before the
+  // round trip (an empty box reads as 0 and failed with a server message
+  // about seconds and fractions).
+  function problem(body) {
+    const blank = Object.entries(aiForm).some(([, v]) => v === '' || v == null)
+      || ai_.workers === '' || ai_.workers == null
+      || ai_.max_domains_per_scan === '' || ai_.max_domains_per_scan == null;
+    if (blank) return 'Fill in every field before saving.';
+    if (!(body.block_threshold >= 0.5 && body.block_threshold <= 1)) {
+      return 'Block Threshold must be between 50 and 100%.';
+    }
+    if (!(body.confidence_floor >= 0 && body.confidence_floor < body.block_threshold)) {
+      return 'Confidence Floor must be at least 0% and below the Block Threshold.';
+    }
+    if (!(body.workers >= 1 && body.workers <= 32)) return 'Classification Workers must be between 1 and 32.';
+    if (!(body.max_domains_per_scan >= 1)) return 'Domains Classified Per Scan must be at least 1.';
+    if (body.enabled && (body.scan_interval_secs < 10 || body.expire_check_secs < 10)) {
+      return 'Scan and expiry intervals must be at least 10 seconds (0.17 minutes).';
+    }
+    if (body.threat_ttl_secs < 60 || body.category_ttl_secs < 60) {
+      return 'Re-check periods must be at least a minute (0.01 days is about 14 minutes).';
+    }
+    return null;
+  }
+
   async function save() {
-    busy = true;
     notice = null;
-    error = null;
+    error = problem(buildBody());
+    if (error) return;
+    busy = true;
     try {
       await api.updateSettings({ ai: buildBody() });
       notice = 'AI settings saved and applied.';
@@ -117,7 +143,7 @@
         <span>Mode</span>
         <select bind:value={ai_.mode}>
           <option value="train">Train - Record Only</option>
-          <option value="enforce">Enforce - Auto-Block Qualifying Domains</option>
+          <option value="enforce">Enforce - Auto-Block Threats</option>
         </select>
       </label>
     </div>
@@ -155,7 +181,8 @@
     </p>
     <p class="muted help">
       In Enforce mode a domain is blocked when a detected threat reaches the
-      block threshold (50 to 100%) and the verifier does not dispute it. With
+      block threshold (50 to 100%) and nothing disputes it (the verifier, or
+      a domain this network has used for weeks). With
       the shared classifier it must also carry a label treated as a threat (set
       on the Threats tab); a dedicated threat model reports its own threats, so
       every label it produces blocks. Detections below the confidence floor are

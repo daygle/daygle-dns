@@ -445,6 +445,11 @@ impl AiEngine {
         self.intel.clone().run(mirror, shutdown).await;
     }
 
+    /// The threat feed listing `domain` (as the AI uses the feeds now).
+    pub fn threat_feed_for(&self, domain: &str) -> Option<&'static intel::IntelFeed> {
+        self.intel.index().feed_for(domain)
+    }
+
     /// Each threat feed with its download state, for the status API.
     pub fn intel_status(&self) -> Vec<serde_json::Value> {
         self.intel.status()

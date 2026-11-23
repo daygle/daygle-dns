@@ -162,10 +162,7 @@ impl IntelIndex {
     /// Feed names for the labels `wanted` accepts, split into training names
     /// and a held-out probe (a stable one-in-five, by name), each spread
     /// evenly over the feed and capped per label.
-    pub fn sample(
-        &self,
-        wanted: impl Fn(&str) -> bool,
-    ) -> (Labelled, Labelled) {
+    pub fn sample(&self, wanted: impl Fn(&str) -> bool) -> (Labelled, Labelled) {
         let mut training = Vec::new();
         let mut probe = Vec::new();
         for (at, names) in self.by_feed.iter().enumerate() {

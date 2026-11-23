@@ -9,6 +9,7 @@
   let notice = $state(null);
   let search = $state('');
   let reasonFilter = $state('');
+  let disabled = $state(false); // true when the scanner is off (404)
 
   const isAdmin = getStoredUser()?.role !== 'viewer';
   const filtered = $derived.by(() => {
@@ -27,9 +28,12 @@
     error = null;
     try {
       rows = (await api.aiOverrides())?.overrides || [];
+      disabled = false;
     } catch (e) {
       rows = [];
-      if (e.status !== 404) error = formatApiError(e);
+      // 404 means the scanner is off: an empty state, not a failure.
+      disabled = e.status === 404;
+      if (!disabled) error = formatApiError(e);
     } finally {
       loading = false;
     }
@@ -81,6 +85,11 @@
   </p>
   {#if loading}
     <p class="muted">Loading...</p>
+  {:else if disabled}
+    <p class="muted" style="margin-bottom: 0">
+      The AI scanner is off, so there are no exemptions to show. Turn it on in
+      the Settings tab; it starts after the next restart.
+    </p>
   {:else if rows.length === 0}
     <p class="muted" style="margin-bottom: 0">No domains are exempt from AI blocking.</p>
   {:else if filtered.length === 0}

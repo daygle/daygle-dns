@@ -365,7 +365,7 @@
     </div>
     {#if !rows.length}
       <p class="muted">
-        {#if search.trim() || categoryFilter.trim() || statusFilter || exemptionFilter}
+        {#if search.trim() || categoryFilter.trim() || statusFilter || exemptionFilter || labelFilter}
           No classifications match these filters.
         {:else}
           No classifications yet - they appear as the scanner categorizes

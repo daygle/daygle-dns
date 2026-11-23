@@ -837,3 +837,53 @@ async fn outside_evidence_settings_round_trip_over_http() {
     assert_eq!(reported["network_evidence"], false);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[tokio::test]
+async fn explain_reports_outside_evidence() {
+    let dir = scratch_dir("explain-evidence");
+    let ai = engine(&dir);
+    let start = chrono::Utc::now().timestamp() - 30 * 86_400;
+    let clients: Vec<String> = (0..4).map(|i| format!("10.0.0.{i}")).collect();
+    for day in 0..15 {
+        ai.store
+            .record_sightings_at(
+                &[("update.vendor.example".to_string(), clients.clone())],
+                start + day * 86_400,
+            )
+            .unwrap();
+    }
+    ai.store.observe("update.vendor.example").unwrap();
+    ai.store
+        .save_verdict(
+            Channel::Threat,
+            "update.vendor.example",
+            "malware",
+            "disputed",
+            "classified",
+            0.995,
+            "fasttext",
+            "keyword, established on this network (looked up on 15 days by 4+ clients): disputed",
+            3_600,
+        )
+        .unwrap();
+    let state = AppState::for_tests(Some(ai));
+    let explained = json(
+        state.clone(),
+        "/api/ai/explain?domain=update.vendor.example",
+    )
+    .await;
+    assert_eq!(explained["sighting"]["days"], 15, "{explained}");
+    assert_eq!(explained["sighting"]["clients"], 4);
+    assert_eq!(explained["sighting"]["established"], true);
+    assert!(explained["threat_feed"].is_null());
+    let reasons = explained["reasons"].to_string();
+    assert!(reasons.contains("used it for weeks"), "{reasons}");
+    assert!(
+        reasons.contains("at 99.5%"),
+        "never rounded up to 100%: {reasons}"
+    );
+
+    let unseen = json(state, "/api/ai/explain?domain=never.example").await;
+    assert!(unseen["sighting"].is_null());
+    let _ = std::fs::remove_dir_all(&dir);
+}

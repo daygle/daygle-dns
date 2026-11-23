@@ -1,4 +1,6 @@
 <script>
+  import { titleCase } from '../aiLabels.js';
+
   const REASONS = [
     'Misclassified',
     'Wrong Domain',
@@ -39,7 +41,7 @@
       <select bind:value={category}>
         <option value="">Keep the scanner's label</option>
         {#each categories as option (option)}
-          <option value={option}>{option}</option>
+          <option value={option}>{titleCase(option)}</option>
         {/each}
       </select>
     </label>
