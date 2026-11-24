@@ -1405,13 +1405,8 @@ pub struct AiSettings {
     /// authoritative zone database.
     pub database: String,
     /// fastText supervised model (.bin) used for classification; empty uses
-    /// the built-in heuristic keyword backend. The model for both channels;
-    /// `category_model_path` can give categorization a model of its own.
+    /// the built-in heuristic keyword backend. The model for both channels.
     pub model_path: String,
-    /// Content-categorization model (`.bin`). Empty uses `model_path`, and
-    /// the heuristic keyword rules when that is empty too. This channel only
-    /// labels sites (`news`, `shopping`, ...): it never auto-blocks.
-    pub category_model_path: String,
     /// Background classification workers (off the DNS path).
     pub workers: u32,
     /// How often the scanner harvests unseen query-log domains, in seconds.
@@ -1524,7 +1519,6 @@ impl Default for AiSettings {
             mode: AiMode::Train,
             database: String::new(),
             model_path: String::new(),
-            category_model_path: String::new(),
             workers: 2,
             scan_interval_secs: 300,
             expire_check_secs: 3600,
@@ -2522,8 +2516,6 @@ pub struct AiUpdate {
     // to the config file's value at the next restart (the model updater's
     // restart included). An overlay stored before then leaves them `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub category_model_path: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub category_confidence_floor: Option<f32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verifier_model_path: Option<String>,
@@ -2578,7 +2570,6 @@ impl AiUpdate {
             confidence_floor: Some(settings.confidence_floor),
             category_ttl_secs: Some(settings.category_ttl_secs),
             threat_ttl_secs: Some(settings.threat_ttl_secs),
-            category_model_path: Some(settings.category_model_path.clone()),
             category_confidence_floor: Some(settings.category_confidence_floor),
             verifier_model_path: Some(settings.verifier_model_path.clone()),
             verifier_reference_path: Some(settings.verifier_reference_path.clone()),
@@ -2623,9 +2614,6 @@ impl AiUpdate {
         }
         if let Some(v) = &self.model_path {
             ai.model_path = v.trim().to_string();
-        }
-        if let Some(v) = &self.category_model_path {
-            ai.category_model_path = v.trim().to_string();
         }
         if let Some(v) = self.workers {
             ai.workers = v;
@@ -3471,9 +3459,11 @@ fn resolv_conf_domain(text: &str) -> Option<String> {
 
 /// Settings a release removed, as `(section, key)`. A config file written
 /// for an older release may still carry them (the shipped example set
-/// `ai.threat_model_path = ""`), and the sections refuse unknown keys, so
+/// `ai.threat_model_path = ""` and `ai.category_model_path = ""`), and the
+/// sections refuse unknown keys, so
 /// they are dropped before parsing instead of stopping the server.
-const REMOVED_SETTINGS: &[(&str, &str)] = &[("ai", "threat_model_path")];
+const REMOVED_SETTINGS: &[(&str, &str)] =
+    &[("ai", "threat_model_path"), ("ai", "category_model_path")];
 
 fn drop_removed_settings(table: &mut toml::Table) {
     for (section, key) in REMOVED_SETTINGS {
@@ -6090,7 +6080,6 @@ mod tests {
         ai.confidence_floor = 0.21;
         ai.category_ttl_secs += 1;
         ai.threat_ttl_secs += 1;
-        ai.category_model_path = s("/srv/category.bin");
         ai.category_confidence_floor = 0.33;
         ai.verifier_model_path = s("/srv/verifier.onnx");
         ai.verifier_reference_path = s("/srv/centroids.json");
@@ -7337,7 +7326,7 @@ scope = "groups"
     #[test]
     fn a_removed_setting_in_an_old_config_file_is_ignored() {
         let cfg = DaygleConfig::parse(
-            "[ai]\nenabled = false\nthreat_model_path = \"\"\nmodel_path = \"/m/a.bin\"\n",
+            "[ai]\nenabled = false\nthreat_model_path = \"\"\ncategory_model_path = \"\"\nmodel_path = \"/m/a.bin\"\n",
         )
         .expect("an old config file still loads");
         assert_eq!(cfg.ai.model_path, "/m/a.bin");

@@ -60,7 +60,6 @@ training data.
 | Setting | What it does |
 |---|---|
 | `ai.model_path` | The shared model (a supervised fastText `.bin`). Empty uses the zero-model heuristic backend. |
-| `ai.category_model_path` | A model for the categorization channel only. |
 | `[updates] auto_refresh_models` | Keep the release model bundle, including the starter corpus, up to date. |
 
 A release model bundle is tested on a pinned sample of held-out threat names

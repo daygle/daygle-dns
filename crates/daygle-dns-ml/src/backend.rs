@@ -99,22 +99,17 @@ pub struct Verdict {
 /// Input delivered to a backend for one domain.
 #[derive(Debug, Clone, Default)]
 pub struct ClassificationInput {
-    /// Observed query name (lowercase, no trailing dot).
+    /// Observed query name (lowercase, no trailing dot). Classifiers see
+    /// only the name; what a page says is read separately by the page stage
+    /// ([`crate::page`]).
     pub domain: String,
-    /// Page `<title>` when a page fetch ran. The page-content stage classifies
-    /// text separately and records it as evidence, so classifiers still see
-    /// only the name.
-    pub title: String,
-    /// Extracted page text when a page fetch ran; unused by the fallbacks.
-    pub text: String,
 }
 
 impl ClassificationInput {
-    /// Input for a domain-only classification.
+    /// Input for one domain.
     pub fn domain_only(domain: impl Into<String>) -> Self {
         Self {
             domain: domain.into(),
-            ..Default::default()
         }
     }
 }

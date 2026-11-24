@@ -1509,10 +1509,8 @@ pub async fn ai_status(State(state): State<AppState>) -> Response {
         "threat_ttl_secs": settings.threat_ttl_secs,
         "block_threshold": settings.block_threshold,
         "auto_block_categories": settings.auto_block_categories,
-        // The configured model paths (empty falls back to `model_path`) and
-        // whether the threat channel runs a model of its own.
+        // The configured model (empty: the built-in rules).
         "model_path": settings.model_path,
-        "category_model_path": settings.category_model_path,
         // Self-maintained model: automatic retraining and what the last run
         // achieved. An accepted retrain is loaded at once, without a restart.
         "auto_retrain": settings.auto_retrain,
@@ -6691,8 +6689,6 @@ pub struct AiUpdate {
     pub database: Option<String>,
     /// fastText model path; empty uses the built-in heuristic backend.
     pub model_path: Option<String>,
-    /// fastText model for content categorisation; empty uses `model_path`.
-    pub category_model_path: Option<String>,
     pub workers: Option<u32>,
     pub scan_interval_secs: Option<u64>,
     pub expire_check_secs: Option<u64>,
@@ -7626,9 +7622,6 @@ pub async fn update_settings(
         }
         if let Some(v) = &a.model_path {
             config.ai.model_path = v.trim().to_string();
-        }
-        if let Some(v) = &a.category_model_path {
-            config.ai.category_model_path = v.trim().to_string();
         }
         if let Some(v) = a.workers {
             config.ai.workers = v;

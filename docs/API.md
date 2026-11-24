@@ -1667,8 +1667,7 @@ Available when `[ai] enabled = true`. The scanner runs two independent
 channels: `content` categorizes sites (`news`, `shopping`, ...) and stores a
 label only, `threat` reports detected threats and is the only channel that
 can block on its own. `threat` reports only the labels in
-`ai.auto_block_categories`. Both channels run `ai.model_path` (the content
-channel can have its own `ai.category_model_path`); each has its own
+`ai.auto_block_categories`. Both channels run `ai.model_path`; each has its own
 confidence floor and verdict TTL. Blocking a *content* category is an
 operator rule on a client group (`blocked_categories`, see Advanced
 blocking) - the label comes from the scanner, the decision does not.
