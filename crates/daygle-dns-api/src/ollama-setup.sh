@@ -77,8 +77,9 @@ ollama_bin() {
   command -v ollama 2>/dev/null || return 1
 }
 
-# Loopback only, one model and one request at a time, and below the DNS
-# server for CPU and disk: a page read must never slow DNS answers.
+# Loopback only, one model and one request at a time, below the DNS server
+# for CPU and disk, and first in line for the out-of-memory killer: a page
+# read must never slow or stop DNS.
 configure() {
   install -d -m 0755 "$DROP_DIR"
   cat > "$DROP_DIR/daygle-dns.conf" <<EOF
@@ -91,6 +92,9 @@ Environment="OLLAMA_KEEP_ALIVE=10m"
 Nice=10
 CPUWeight=20
 IOSchedulingClass=idle
+# When memory runs out, the kernel ends Ollama, never the DNS server: a
+# model that does not fit must not take DNS down with it.
+OOMScoreAdjust=900
 EOF
   systemctl daemon-reload
   systemctl enable --quiet ollama 2>/dev/null || true

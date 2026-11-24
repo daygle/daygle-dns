@@ -336,4 +336,8 @@ The first answer after Ollama starts (or after the model has been idle for
 CPU. Test allows 5 minutes for it; scans use the answer time limit. If Test
 reports no answer in time, run it again once the model is loaded, raise the
 limit, or pick a smaller model. If it reports the server dropped the
-request, check `journalctl -u ollama` (often too little memory).
+request, check `journalctl -u ollama` (often too little memory). The
+console installs Ollama as the first process the kernel ends when memory
+runs out, so a model that does not fit never takes the DNS server down;
+re-run Update on the Language Model tab to apply that to an existing
+install.
